@@ -10,6 +10,168 @@ fn rigid(local: u32, sort: Sort) -> Term {
     }
 }
 
+#[test]
+fn full_nominal_instances_preserve_metadata_and_specialize_contracts() {
+    use nir::program::{TraitRequirement, TypePredicate};
+    let parameter = rigid(1, Sort::Type);
+    let normal = Term::NormalForm {
+        head: id(90),
+        sort: Sort::Type,
+        arguments: vec![parameter.clone()],
+    };
+    let declaration = Struct {
+        declaration: id(2),
+        name: "Container".into(),
+        type_parameters: vec![id(1)],
+        parameter_types: vec![Term::Primitive(P::Type)],
+        fields: vec![("value".into(), normal)],
+        requirements: vec![TypePredicate::Equal(parameter.clone(), parameter.clone())],
+        capabilities: vec![TraitRequirement {
+            interface: id(3),
+            subject: parameter.clone(),
+            interface_arguments: vec![parameter],
+        }],
+    };
+    let original = declaration.clone();
+    let argument = Term::Primitive(P::Bool);
+    let instance = declaration
+        .instantiate_definition_bounded(&[argument.clone()], &[], &mut 10_000)
+        .unwrap();
+    assert!(instance.type_parameters.is_empty() && instance.parameter_types.is_empty());
+    assert_eq!(
+        instance.fields,
+        vec![(
+            "value".into(),
+            Term::NormalForm {
+                head: id(90),
+                sort: Sort::Type,
+                arguments: vec![argument.clone()]
+            }
+        )]
+    );
+    assert_eq!(
+        instance.requirements,
+        vec![TypePredicate::Equal(argument.clone(), argument.clone())]
+    );
+    assert_eq!(instance.capabilities[0].subject, argument);
+    assert_eq!(
+        instance.capabilities[0].interface_arguments,
+        vec![argument.clone()]
+    );
+    assert_eq!(declaration, original);
+    let enumeration = Enum {
+        declaration: id(4),
+        name: "Choices".into(),
+        type_parameters: declaration.type_parameters.clone(),
+        parameter_types: declaration.parameter_types.clone(),
+        requirements: declaration.requirements.clone(),
+        capabilities: declaration.capabilities.clone(),
+        groups: vec!["nested".into()],
+        encoding: None,
+        symbol_encoding: None,
+        is_intrinsic: true,
+        variants: vec![
+            Variant {
+                name: "empty".into(),
+                shape: VariantShape::Unit,
+                fields: vec![],
+            },
+            Variant {
+                name: "nested.value".into(),
+                shape: VariantShape::Named(vec!["value".into()]),
+                fields: vec![rigid(1, Sort::Type)],
+            },
+        ],
+    };
+    let specialized = enumeration
+        .instantiate_definition_bounded(&[argument.clone()], &[], &mut 10_000)
+        .unwrap();
+    assert_eq!(specialized.groups, enumeration.groups);
+    assert_eq!(specialized.variants[1].shape, enumeration.variants[1].shape);
+    assert!(specialized.variants[0].fields.is_empty());
+    assert_eq!(specialized.variants[1].fields, vec![argument.clone()]);
+    assert_eq!(specialized.requirements, instance.requirements);
+    assert_eq!(specialized.capabilities, instance.capabilities);
+    assert!(specialized.is_intrinsic);
+    assert!(
+        enumeration
+            .instantiate_definition_bounded(&[Term::Bool(true)], &[], &mut 10_000)
+            .is_err()
+    );
+    enumeration
+        .instantiate_definition_bounded(&[argument], &[], &mut 10_000)
+        .unwrap();
+}
+
+#[test]
+fn full_enum_instances_charge_encoding_payloads_before_copying() {
+    use comptime_runtime::{Budget, bitvec::BitVec};
+    use nir::enum_encoding::{Layout, Representation, SymbolRepresentation, SymbolVariant};
+    use nir::type_computations::Error;
+    let mut declaration = Enum {
+        declaration: id(2),
+        name: "Encoded".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        groups: vec![],
+        encoding: None,
+        symbol_encoding: None,
+        is_intrinsic: false,
+        variants: vec![Variant {
+            name: "only".into(),
+            shape: VariantShape::Unit,
+            fields: vec![],
+        }],
+    };
+    for symbols in [false, true] {
+        if symbols {
+            declaration.encoding = None;
+            declaration.symbol_encoding = Some(
+                SymbolRepresentation::new(
+                    vec![SymbolVariant {
+                        name: "only".into(),
+                        value: "s".repeat(8192),
+                    }],
+                    &mut Budget::default(),
+                )
+                .unwrap(),
+            );
+        } else {
+            let mut budget = Budget::default();
+            let value = BitVec::from_words(8192, &[0; 256], &mut budget).unwrap();
+            let variant = nir::enum_encoding::Variant::new(
+                "only".into(),
+                value.not(&mut budget).unwrap(),
+                value,
+                vec![],
+                &mut budget,
+            )
+            .unwrap();
+            declaration.encoding = Some(Representation {
+                base_type: None,
+                layout: Layout::new(8192, vec![variant], &mut budget).unwrap(),
+            });
+        }
+        assert!(matches!(
+            declaration.instantiate_definition_bounded(&[], &[], &mut 500),
+            Err(Error::Budget)
+        ));
+        // Payload-only observation has no reason to copy the encoding plan.
+        assert_eq!(
+            declaration
+                .instantiate_variant_fields(&[], &[], &mut 10)
+                .unwrap(),
+            vec![Vec::<Term>::new()]
+        );
+        let copy = declaration
+            .instantiate_definition_bounded(&[], &[], &mut 100_000)
+            .unwrap();
+        assert_eq!(copy, declaration);
+    }
+}
+
 fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
     nir::Term::NominalValue {
         ty: Box::new(nir::Term::NormalForm {

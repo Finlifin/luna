@@ -2,7 +2,7 @@
 //! admission stay with the caller; this operation never unfolds an NF head.
 use crate::{
     DeclarationId, Sort, Term,
-    program::{Enum, Struct},
+    program::{Enum, Struct, Variant, VariantShape},
     type_computations::Error,
 };
 
@@ -44,6 +44,44 @@ fn prepare<'a>(
 }
 
 impl Struct {
+    /// Specialize a complete declaration without copying discarded generic
+    /// fields or contracts. Formation and normalization remain with the caller.
+    pub fn instantiate_definition_bounded(
+        &self,
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Self, Error> {
+        let substitution = prepare(
+            &self.type_parameters,
+            &self.parameter_types,
+            arguments,
+            frames,
+            self.fields.len(),
+            fuel,
+        )?;
+        charge_text(&self.name, fuel)?;
+        let fields = self
+            .fields
+            .iter()
+            .map(|(name, ty)| {
+                charge_text(name, fuel)?;
+                Ok((name.clone(), substitution.instantiate_bounded(ty, fuel)?))
+            })
+            .collect::<Result<_, Error>>()?;
+        let (requirements, capabilities) =
+            contracts(&substitution, &self.requirements, &self.capabilities, fuel)?;
+        Ok(Self {
+            declaration: self.declaration,
+            name: self.name.clone(),
+            fields,
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements,
+            capabilities,
+        })
+    }
+
     /// Stored payload types only; names are not part of storage-phase inspection.
     pub fn instantiate_stored_fields(
         &self,
@@ -63,6 +101,80 @@ impl Struct {
 }
 
 impl Enum {
+    /// Preserve representation metadata and logical branch positions while
+    /// specializing payloads and contracts under the caller's shared budget.
+    pub fn instantiate_definition_bounded(
+        &self,
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Self, Error> {
+        let substitution = self.prepare_stored_fields(arguments, frames, fuel)?;
+        charge_text(&self.name, fuel)?;
+        charge_names(&self.groups, fuel)?;
+        if let Some(encoding) = &self.encoding {
+            reserve(encoding.variants().len(), fuel)?;
+            for variant in encoding.variants() {
+                charge_text(variant.name(), fuel)?;
+                // Each fixed bit plan owns a mask and value word buffer.
+                reserve(
+                    variant
+                        .fixed_mask()
+                        .words()
+                        .len()
+                        .saturating_add(variant.fixed_value().words().len())
+                        .saturating_mul(std::mem::size_of::<u32>()),
+                    fuel,
+                )?;
+                reserve(variant.fields().len(), fuel)?;
+                for field in variant.fields() {
+                    charge_text(&field.name, fuel)?;
+                }
+            }
+        }
+        if let Some(encoding) = &self.symbol_encoding {
+            reserve(encoding.variants().len(), fuel)?;
+            for variant in encoding.variants() {
+                charge_text(&variant.name, fuel)?;
+                charge_text(&variant.value, fuel)?;
+            }
+        }
+        let variants = self
+            .variants
+            .iter()
+            .map(|variant| {
+                charge_text(&variant.name, fuel)?;
+                if let VariantShape::Named(names) = &variant.shape {
+                    charge_names(names, fuel)?;
+                }
+                Ok(Variant {
+                    name: variant.name.clone(),
+                    shape: variant.shape.clone(),
+                    fields: variant
+                        .fields
+                        .iter()
+                        .map(|ty| substitution.instantiate_bounded(ty, fuel))
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect::<Result<_, Error>>()?;
+        let (requirements, capabilities) =
+            contracts(&substitution, &self.requirements, &self.capabilities, fuel)?;
+        Ok(Self {
+            declaration: self.declaration,
+            name: self.name.clone(),
+            variants,
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements,
+            capabilities,
+            is_intrinsic: self.is_intrinsic,
+            groups: self.groups.clone(),
+            encoding: self.encoding.clone(),
+            symbol_encoding: self.symbol_encoding.clone(),
+        })
+    }
+
     // Reserve traversal and output slots before collecting either view. The
     // complete parameter frame is validated once, including payload-free enums.
     fn prepare_stored_fields<'a>(
@@ -120,4 +232,45 @@ impl Enum {
             })
             .collect()
     }
+}
+
+fn reserve(work: usize, fuel: &mut usize) -> Result<(), Error> {
+    *fuel = fuel.checked_sub(work).ok_or(Error::Budget)?;
+    Ok(())
+}
+
+fn charge_text(text: &str, fuel: &mut usize) -> Result<(), Error> {
+    reserve(text.len().saturating_add(1), fuel)
+}
+
+fn charge_names(names: &[String], fuel: &mut usize) -> Result<(), Error> {
+    reserve(names.len(), fuel)?;
+    for name in names {
+        charge_text(name, fuel)?;
+    }
+    Ok(())
+}
+
+fn contracts(
+    substitution: &crate::DeclarationSubstitution<'_>,
+    requirements: &[crate::program::TypePredicate],
+    capabilities: &[crate::program::TraitRequirement],
+    fuel: &mut usize,
+) -> Result<
+    (
+        Vec<crate::program::TypePredicate>,
+        Vec<crate::program::TraitRequirement>,
+    ),
+    Error,
+> {
+    reserve(requirements.len().saturating_add(capabilities.len()), fuel)?;
+    let requirements = requirements
+        .iter()
+        .map(|r| substitution.instantiate_predicate_bounded(r, fuel))
+        .collect::<Result<_, _>>()?;
+    let capabilities = capabilities
+        .iter()
+        .map(|r| substitution.instantiate_requirement_bounded(r, fuel))
+        .collect::<Result<_, _>>()?;
+    Ok((requirements, capabilities))
 }

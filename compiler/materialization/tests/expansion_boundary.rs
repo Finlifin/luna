@@ -6,6 +6,75 @@ use type_resolution::ptc::Budget;
 fn id(local: u32) -> Id {
     Id { package: 1, local }
 }
+
+#[test]
+fn nominal_publication_charges_metadata_and_recovers_after_failure() {
+    for is_enum in [false, true] {
+        let mut package = n::Package::default();
+        let name = "x".repeat(100_000);
+        if is_enum {
+            package.enums.push(n::Enum {
+                declaration: id(10),
+                name: "Choice".into(),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                groups: vec![],
+                encoding: None,
+                symbol_encoding: None,
+                is_intrinsic: false,
+                variants: vec![n::Variant {
+                    name,
+                    shape: n::VariantShape::Unit,
+                    fields: vec![],
+                }],
+            });
+        } else {
+            package.structs.push(n::Struct {
+                declaration: id(10),
+                name,
+                type_parameters: vec![],
+                parameter_types: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                fields: vec![],
+            });
+        }
+        let ty = Term::Nominal {
+            declaration: id(10),
+            arguments: vec![],
+        };
+        let materialize = |steps| {
+            let mut budget = Budget::default();
+            budget.steps = steps;
+            materialization::instantiate_with_types(
+                &package,
+                &[],
+                std::slice::from_ref(&ty),
+                BTreeSet::new(),
+                budget,
+                &Provider::default(),
+            )
+        };
+        let failure = materialize(5000)
+            .err()
+            .expect("nominal metadata copies must consume budget");
+        assert!(failure.contains("budget"), "{failure}");
+        let graph = materialize(1_000_000).unwrap();
+        assert_eq!(graph.nominals.len(), 1);
+        assert_eq!(graph.nominals[0].ty, ty);
+        match &graph.nominals[0].definition {
+            iir::NominalDefinition::Struct(definition) => {
+                assert_eq!(definition.name, package.structs[0].name)
+            }
+            iir::NominalDefinition::Enum(definition) => {
+                assert_eq!(definition.variants, package.enums[0].variants)
+            }
+            _ => panic!("nominal kind changed"),
+        }
+    }
+}
 fn fixture() -> (n::Package, iir::InstanceKey) {
     let boolean = Term::Primitive(Primitive::Bool);
     let function = n::Function {

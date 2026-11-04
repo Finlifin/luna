@@ -1474,3 +1474,48 @@ pointer contract。ownership shape 的预算仍由现有分析入口单独供应
 
 未运行全 workspace、native 或性能基准。格式检查通过；已有工作区修改的摘要
 保持不变，提交范围限于 moves 生产迁移、行为回归和本开发记录。
+
+
+## 28. 具体名义实例按所需元数据构造
+
+materialization 的 struct／enum 先前使用完整字段实例化，随后 clone 整个源声明、
+覆盖字段和契约并清空参数。dispatch 探索也复制名称和 shape，尽管只使用字段类型。
+现在两条路径明确分开：dispatch 使用已有 payload-only 视图；具体 IIR 使用
+`instantiate_definition_bounded` 直接构造专门化声明，原始泛型字段与契约不再
+先复制后丢弃。这一通用接口仍不执行 NF 头，也不建立类型形成、Copy 或目标 ABI 证明。
+
+完整实例保留声明身份、名称、字段顺序、enum groups／shape／intrinsic 标记及既有
+位／Symbol 表示。参数 telescope 在代入后清空；字段、requirements、capabilities
+通过同一个受限 DeclarationSubstitution 代入。字符串、集合槽位、位表示的两个
+word buffer 及 Symbol 值在复制前计费。字段视图不顺带观察这些元数据，因此仍能
+用较小预算查询一个编码很大的 enum 的空载荷。
+
+materialization 随后执行原有 normalization 和形成检查；准备依赖队列的字段副本
+另外预先计费。形成要求的代入也在复制前检查展开成本，struct／enum 的 capability
+依赖通过 bounded requirement 代入供应。发布仍属于现有 Builder 事务：错误返回
+不交付部分 IIR，后续调用重新构造私有 candidate。
+
+基线 `ff4a77dc` 在预算 5000 下仍复制十万字符的 struct 名称并成功发布：
+`/tmp/luna-tools-2n68dnl9/result.json` 退出 101。修复后的同一集成测试同时覆盖
+struct 名称及 enum 变体名称，低预算拒绝后以足额预算成功、元数据保持一致；
+`/tmp/luna-tools-w6dk52e1/result.json` 退出 0。
+
+NIR 回归覆盖契约代入、参数清空、NF 头保留、空分支与 named shape、非法参数后的
+恢复、位编码及长 Symbol 的复制预算。首次构造宽 BitVec 测试时错误传入空 words，
+`/tmp/luna-tools-lk7wuisn/result.json` 退出 101；修正测试为宽度要求的完整 256 个
+word，没有放宽 BitVec 的 exact representation 检查。
+
+验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --test nominal_parameters --test enum_encoding --no-fail-fast`：38 通过，
+  退出 0；`/tmp/luna-tools-ell4lhue/result.json`。
+- `-p materialization --lib --tests --no-fail-fast`：22 通过，退出 0；
+  `/tmp/luna-tools-dv80d0yy/result.json`。
+- `-p luna --test nominal_value_parameters --test nominal_staging --test newtypes
+  --test enum_groups --test enum_configurations --test encoded_enums --test integer_formation
+  --test invocation_value_templates --no-fail-fast`：567 通过，退出 0；
+  `/tmp/luna-tools-oeoz2xmq/result.json`。包含真实 sysroot 调用、形成拒绝与编码保持。
+
+未运行全 workspace、native 或性能基准。newtype 完整定义的构造及 elaboration 中的
+旧命名元数据消费者仍待清理；其原有表示检查未被绕过。本次不是完整 LayoutPlan、
+全阶段统一预算或所有发布协议已完成的声明。正式 docs 与既有修改未纳入提交。

@@ -1247,6 +1247,13 @@ impl Builder<'_> {
     ) -> Result<(), String> {
         if self.instances.is_none() {
             for requirement in requirements {
+                nir::copy_budget::charge_predicate_substitution(
+                    requirement,
+                    parameters,
+                    arguments,
+                    &mut self.fuel,
+                )
+                .map_err(|e| format!("formation substitution budget: {e:?}"))?;
                 self.predicate_dependencies(
                     &requirement
                         .instantiate_parameters(parameters, arguments)
@@ -1258,6 +1265,13 @@ impl Builder<'_> {
         }
         for requirement in requirements {
             self.tick(0)?;
+            nir::copy_budget::charge_predicate_substitution(
+                requirement,
+                parameters,
+                arguments,
+                &mut self.fuel,
+            )
+            .map_err(|e| format!("formation substitution budget: {e:?}"))?;
             let requirement = requirement
                 .instantiate_parameters(parameters, arguments)
                 .map_err(|e| e.to_string())?;
@@ -2443,47 +2457,53 @@ impl Builder<'_> {
                         &parameters,
                         arguments,
                     )?;
-                    let mut fields = s.instantiate_fields(arguments).map_err(|e| e.to_string())?;
-                    if self.instances.is_some() {
-                        for (_, field) in &mut fields {
+                    let fields = if self.instances.is_some() {
+                        let mut definition = s
+                            .instantiate_definition_bounded(arguments, &[], &mut self.fuel)
+                            .map_err(|e| e.to_string())?;
+                        for (_, field) in &mut definition.fields {
                             *field = self.normalized_type(field)?;
                         }
-                        let mut definition = s.clone();
-                        definition.fields = fields.clone();
-                        definition.requirements = s
-                            .requirements
-                            .iter()
-                            .map(|r| r.instantiate_parameters(&parameters, arguments))
-                            .collect::<Result<_, _>>()
-                            .map_err(|e| e.to_string())?;
-                        definition.capabilities = s
-                            .capabilities
-                            .iter()
-                            .map(|c| c.instantiate_parameters(&parameters, arguments))
-                            .collect::<Result<_, _>>()
-                            .map_err(|e| e.to_string())?;
                         for capability in &mut definition.capabilities {
                             *capability = self.normalized_capability(capability)?;
                         }
                         for requirement in &mut definition.requirements {
                             *requirement = self.normalized_predicate(requirement, 0)?;
                         }
-                        definition.type_parameters.clear();
-                        definition.parameter_types.clear();
+                        let fields = definition
+                            .fields
+                            .iter()
+                            .map(|(_, field)| {
+                                nir::copy_budget::clone_term(field, &mut self.fuel)
+                                    .map_err(|e| format!("nominal dependency copy budget: {e:?}"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
                         self.nominals.push(iir::NominalInstance {
                             ty: ty.clone(),
                             definition: iir::NominalDefinition::Struct(definition),
                         });
-                    }
+                        fields
+                    } else {
+                        s.instantiate_stored_fields(arguments, &[], &mut self.fuel)
+                            .map_err(|e| e.to_string())?
+                    };
 
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        &s.type_parameters,
+                        &s.parameter_types,
+                        arguments,
+                        &[],
+                        &mut self.fuel,
+                    )
+                    .map_err(|e| e.to_string())?;
                     for cap in &s.capabilities {
-                        let cap = cap
-                            .instantiate_parameters(&parameters, arguments)
+                        let cap = substitution
+                            .instantiate_requirement_bounded(cap, &mut self.fuel)
                             .map_err(|e| e.to_string())?;
                         self.queue
                             .push_back(Task::Interface(cap.interface_instance(), cap.subject));
                     }
-                    children.extend(fields.into_iter().map(|(_, ty)| ty));
+                    children.extend(fields);
                 } else if let Some(e) = self
                     .package
                     .enums
@@ -2517,51 +2537,56 @@ impl Builder<'_> {
                         &parameters,
                         arguments,
                     )?;
-                    let mut variants = e
-                        .instantiate_variants(arguments)
-                        .map_err(|e| e.to_string())?;
-                    if self.instances.is_some() {
-                        for variant in &mut variants {
+                    let fields = if self.instances.is_some() {
+                        let mut definition = e
+                            .instantiate_definition_bounded(arguments, &[], &mut self.fuel)
+                            .map_err(|e| e.to_string())?;
+                        for variant in &mut definition.variants {
                             for field in &mut variant.fields {
                                 *field = self.normalized_type(field)?;
                             }
                         }
-                        let mut definition = e.clone();
-                        definition.variants = variants.clone();
-                        definition.requirements = e
-                            .requirements
-                            .iter()
-                            .map(|r| r.instantiate_parameters(&parameters, arguments))
-                            .collect::<Result<_, _>>()
-                            .map_err(|e| e.to_string())?;
-                        definition.capabilities = e
-                            .capabilities
-                            .iter()
-                            .map(|c| c.instantiate_parameters(&parameters, arguments))
-                            .collect::<Result<_, _>>()
-                            .map_err(|e| e.to_string())?;
                         for capability in &mut definition.capabilities {
                             *capability = self.normalized_capability(capability)?;
                         }
                         for requirement in &mut definition.requirements {
                             *requirement = self.normalized_predicate(requirement, 0)?;
                         }
-                        definition.type_parameters.clear();
-                        definition.parameter_types.clear();
+                        let fields = definition
+                            .variants
+                            .iter()
+                            .flat_map(|variant| &variant.fields)
+                            .map(|field| {
+                                nir::copy_budget::clone_term(field, &mut self.fuel)
+                                    .map_err(|e| format!("nominal dependency copy budget: {e:?}"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
                         self.nominals.push(iir::NominalInstance {
                             ty: ty.clone(),
                             definition: iir::NominalDefinition::Enum(definition),
                         });
-                    }
+                        fields
+                    } else {
+                        e.instantiate_stored_fields(arguments, &[], &mut self.fuel)
+                            .map_err(|e| e.to_string())?
+                    };
 
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        &e.type_parameters,
+                        &e.parameter_types,
+                        arguments,
+                        &[],
+                        &mut self.fuel,
+                    )
+                    .map_err(|e| e.to_string())?;
                     for cap in &e.capabilities {
-                        let cap = cap
-                            .instantiate_parameters(&parameters, arguments)
+                        let cap = substitution
+                            .instantiate_requirement_bounded(cap, &mut self.fuel)
                             .map_err(|e| e.to_string())?;
                         self.queue
                             .push_back(Task::Interface(cap.interface_instance(), cap.subject));
                     }
-                    children.extend(variants.into_iter().flat_map(|v| v.fields));
+                    children.extend(fields);
                 } else if let Some(n) = self
                     .package
                     .newtypes
