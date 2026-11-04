@@ -84,6 +84,89 @@ binder 提升由静态检查、观察与两种 VM 共用。动态 contextual 参
 证明义务，不能把这项有限接线称为开放定义的整体行为检查已完成。证据与边界见
 [已知输入域的标注区域](comptime-value-admission.md#已知输入域的签名标注保留完整行为)。
 
+### 已接通：纯 Type 与混合子句共用准备路径
+
+`prepared_type_inputs` 的独立循环已删除。普通 callable、名义类型和成员实例的
+输入准备都经过 `prepared_clause_inputs_in_domains`，不再因接收域全为 Type 就
+绕过普通准备。传递给下游的仍是按源码位置保留的生产者和独立的身份观察，不能
+从静态 Type 观察推导出生产者可以省略。
+
+固定宽度展开包的布局与元素域分开取得；已观察的前置输入用于专门化各元素域，
+域全部可用时才形成普通 Tuple 上下文并检查包表达式。这保留了 Type 包的返回类型
+上下文，也用于 `Tuple<u8, bool>` 等普通混合包。上下文不能覆盖生产者的 requires，
+不能把待定 rigid 当成具体元素域；带 collector 的尾部仍按列表收集协议处理，不用
+固定 Tuple 布局猜测其长度。运行一次的空包、提前退出和默认值顺序继续由共同路径
+保留。required Type 的立即求值入口仍保留，共享包布局查询；没有把实际 required
+求值与保存 invocation 代码混成一个阶段。
+
+真实 sysroot 回归见 `compiler/luna/tests/clause_packet_preparation.rs`：两种 VM
+核对完整用户函数调用序列，覆盖普通混合包、纯 Type 名义包、空包／默认值及提前
+return，并拒绝越界字面量、错误字段、宽度和不成立的生产者要求。这项准备合流
+不解除下面的 invocation-time 域缺口。
+
+工作目录 `/home/fin/luna` 的验证记录：
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test clause_packet_preparation --test type_spreads --test ordinary_clause_collectors
+  --no-fail-fast`：`/tmp/luna-tools-px361ii4/result.json`，退出 0，125 项通过、
+  1 项 ignored。随后补充提前退出并加强调用序列断言。
+- 最终 `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test clause_packet_preparation --test nominal_value_parameters --test nominal_staging
+  --test default_calls --test normal_input_plans --test open_normal_input_plans
+  --test comptime_clause_inputs --test dependent_list_collectors --test library_protocols
+  --no-fail-fast`：`/tmp/luna-tools-h5halzp7/result.json`，退出 0，461 项通过。
+- 五个修改 Rust 文件的 rustfmt 检查：`/tmp/luna-tools-9ph1yr7i/result.json`，退出 0。
+  未运行全 workspace、native 或性能基准；两组测试有重叠，不相加作为独立用例数。
+
+### Invocation 才能取得的域：必须同时接通检查与执行
+
+普通调用的现有正例 `pending_clause_domains_can_wait_for_a_type_producer`
+仍未接通：`count<.values = [1, 255], Byte()>()` 中，Byte 是返回 Type 的普通
+comptime 函数，列表的域由其实际结果决定。2026-11-05 在当前工作区显式运行该
+ignored 用例，仍报 `191..201: list literal requires an element type context`；
+证据 `/tmp/luna-tools-u3d0ape7/result.json`，退出 101。这不是要求新增语法的反例，
+也不能改成预期拒绝来消除失败。
+
+源码定位显示至少有以下独立边界，不能只修掉最先出现的诊断：
+
+| 当前入口 | 已有能力 | 尚缺接线 |
+| --- | --- | --- |
+| `clause_inputs::prepared_clause_inputs_in_domains` | 保存 HIR 输入；静态域就绪后重排检查，最终仍按源码位置准备输入 | 无可用域时仍进入普通 `expr(None)`，没有可恢复的上下文检查请求 |
+| `dynamic_instances::prepare_callable_clause_packet` | 保存普通值 local 与静态身份，分别用于执行和实例描述 | Type 输入仍要求 `TypeValue`；直接放行 Type local 不能保证 callable 签名已完成 |
+| `input_collection::Frame` | NF／名义输入的源码顺序、已执行值、域唤醒、终止与清理 | 消费的仍是 `NormalFormArgument`，不持有普通前端区域或其检查义务 |
+| `invocation::run_executions` | 同一 VM 内部的字节码／输入计划栈 | 栈由同步调用拥有，不能交回宿主后继续普通前端检查 |
+| `PreparedRequired::invoke_in_world` | 独立准备世界、限定的类型前提、同步 builder 服务 | builder 的 `prepare` 回调不是通用的前端暂停／恢复协议 |
+
+其中 Type local 的限制来自源码审计，尚未绕过首个错误单独复现。字节码已有的
+`Suspended` 只表示内部驱动继续推进，不等于第 5 节的对外 `HostRequest`。
+
+目标接口需要分别记录三个事实：表达式的检查进度、源码求值位置、接收域的观察。
+检查完成不代表已经执行，值已经产生也不代表已获准进入接收域。区域拥有源码身份、
+词法绑定、待决义务和执行许可；VM activation 拥有已经执行的前缀、存储及控制进度；
+域观察拥有值的来源、world 和输入依赖。稳定代码缓存只保存已检查代码，不拥有这些
+活动区域、捕获帧或本次域检查结论。所有权与响应提交沿用
+[状态协议](elaboration-state-and-publication.md)，不能额外建立以源码地址为键的全局等待表。
+
+列表字面量可以保留尚未转换的整数及结构，待域成为 `meta.List<u8>` 后才检查范围
+并完成准入。这里允许推迟的是接收域相关的检查／组装，不能据此推迟任意表达式的
+副作用。如果较早表达式的操作选择本身需要域，必须保留该执行依赖；不能越过它执行
+后面的生产者，再声称仍保持源码顺序。域无关且已获执行许可的前缀只运行一次，之后
+恢复检查必须复用其实际结果。分支条件、return、清理、捕获和局部写入仍属于原控制
+位置，不能被参数调度器拆成互不关联的回调。
+
+等待关系应明确区分“域由哪个实际值产生”和“执行为什么不能越过前一个位置”。
+只有真实生产者与这些依赖形成闭环，才报告循环；缺少宿主接口、预算耗尽或某节点
+尚无实现都不是循环证据。具体哪些表达式可以只延后组装，必须由共同表达式规则给出，
+不能靠增补 Integer／List／Block 白名单决定。类型命题仍归 PTC；这里的执行顺序、
+值存储、资源及程序状态义务不转交 PTC。
+
+落地顺序是：共同前端区域保留待定上下文与检查义务；VM 栈取得可恢复的 session
+所有权；宿主请求携带域观察和受检响应；普通 callable 消费同一输入计划并在签名
+真正完成后发布实例。已有静态域路径和稳定代码缓存可以继续使用，不必为等待新接口
+复制第二份 AST 或伪造 Any／Type。退役旧参数树前，须同时验证普通 callable 与 NF／
+名义输入、依赖域闭包、失败恢复、提前退出、生产者次数与顺序；前面的列表用例只是
+其中最小的接线入口。
+
 
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
 

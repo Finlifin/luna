@@ -674,11 +674,6 @@ impl Checker<'_, '_> {
         let result = (|| {
             // Explicit member arguments belong to the caller's environment;
             // only defaults and the member body see the selected container.
-            let count = self
-                .type_clause_params(owner)
-                .iter()
-                .filter(|clause| !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
-                .count();
             let binders = self.input_binders(&parameters);
             // Prepared parent values live in locals. Recover only structural
             // evidence from their initializers, without invoking input code.
@@ -740,7 +735,6 @@ impl Checker<'_, '_> {
                 self.prepared_nominal_inputs_in_domains(
                     owner,
                     supplied,
-                    count,
                     &mut member_statements,
                     expr.span,
                     &domains,

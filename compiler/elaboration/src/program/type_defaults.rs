@@ -3,12 +3,14 @@ use super::*;
 use comptime_interpretor::Value;
 
 impl<'h> Checker<'_, 'h> {
-    fn type_packet_contexts(
+    /// Packet layout is independent of its element domains. Keep unresolved
+    /// domains outside typed NIR until the caller can provide their context.
+    pub(super) fn clause_packet_layout(
         &mut self,
         args: &[Arg<'_>],
-        count: usize,
+        domains: &[Term],
         span: Span,
-    ) -> Result<Vec<Option<Term>>, Error> {
+    ) -> Result<Vec<Option<Vec<Term>>>, Error> {
         if !args.iter().any(|arg| matches!(arg, Arg::Expand(_))) {
             return Ok(vec![None; args.len()]);
         }
@@ -20,14 +22,7 @@ impl<'h> Checker<'_, 'h> {
                     .then_some((index, 0))
             })
             .collect();
-        self.spread_packet_layout_with_widths(args, &vec![p(P::Type); count], span, &empty)?
-            .into_iter()
-            .map(|fields| {
-                fields
-                    .map(|fields| self.tuple_value_type(fields, span))
-                    .transpose()
-            })
-            .collect()
+        self.spread_packet_layout_with_widths(args, domains, span, &empty)
     }
 
     pub(super) fn type_input_slot(
@@ -77,7 +72,15 @@ impl<'h> Checker<'_, 'h> {
         span: Span,
     ) -> Result<Vec<(Option<hir::common::Ident>, Term)>, Error> {
         let mut inputs = Vec::new();
-        let contexts = self.type_packet_contexts(args, count, span)?;
+        let contexts = self
+            .clause_packet_layout(args, &vec![p(P::Type); count], span)?
+            .into_iter()
+            .map(|fields| {
+                fields
+                    .map(|fields| self.tuple_value_type(fields, span))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         for (index, arg) in args.iter().enumerate() {
             match arg {
                 Arg::Positional(value) => inputs.push((None, self.type_expr(value)?)),
@@ -132,94 +135,11 @@ impl<'h> Checker<'_, 'h> {
         Ok(inputs)
     }
 
-    /// Invocation-time Type computations retain packet preparation in NIR.
-    /// Unpacking once also preserves empty producers and early control exits.
-    pub(super) fn prepared_type_inputs(
-        &mut self,
-        args: &[Arg<'_>],
-        count: usize,
-        statements: &mut Vec<n::Expr>,
-        span: Span,
-    ) -> Result<Vec<(Option<hir::common::Ident>, n::Expr)>, Error> {
-        let mut inputs = Vec::new();
-        let contexts = self.type_packet_contexts(args, count, span)?;
-        for (index, arg) in args.iter().enumerate() {
-            match arg {
-                Arg::Positional(value) | Arg::Named(_, value) => {
-                    let name = match arg {
-                        Arg::Named(name, _) => Some(*name),
-                        _ => None,
-                    };
-                    let value = self.expr(value, Some(&p(P::Type)))?;
-                    inputs.push((name, self.bind_type_input(value, statements, span)?));
-                }
-                Arg::Expand(value) => {
-                    if matches!(value.kind, H::Unit) {
-                        continue;
-                    }
-                    if let H::Tuple(fields) = value.kind {
-                        for field in fields {
-                            let value = self.expr(field, Some(&p(P::Type)))?;
-                            inputs.push((None, self.bind_type_input(value, statements, span)?));
-                        }
-                        continue;
-                    }
-                    let value = self.expr(value, contexts[index].as_ref())?;
-                    let fields = self.prepared_packet_fields(
-                        &value,
-                        args,
-                        index,
-                        &vec![p(P::Type); count],
-                        span,
-                    )?;
-                    let mut pattern = Vec::new();
-                    for field in fields {
-                        self.require(&field, &p(P::Type), span)?;
-                        let binding = self.spread_binding(span)?;
-                        self.locals.insert(binding, p(P::Type));
-                        pattern.push(n::Pattern::Binding {
-                            binding,
-                            inner: Box::new(n::Pattern::Wild),
-                        });
-                        inputs.push((
-                            None,
-                            n::Expr {
-                                source: value.source,
-                                ty: p(P::Type),
-                                kind: K::Local(binding),
-                            },
-                        ));
-                    }
-                    statements.push(n::Expr {
-                        source: n::SourceRange {
-                            start: value.source.end,
-                            end: value.source.end,
-                        },
-                        ty: if is_never(&value.ty) {
-                            p(P::Never)
-                        } else {
-                            p(P::Void)
-                        },
-                        kind: K::LetPattern {
-                            pattern: n::Pattern::Tuple(pattern),
-                            value: Box::new(value),
-                            guard: None,
-                            otherwise: None,
-                        },
-                    });
-                }
-                _ => return Err(error(span, "unsupported type argument routing protocol")),
-            }
-        }
-        Ok(inputs)
-    }
-
     /// Prepare mixed nominal inputs in source order, retaining each value once.
     pub(super) fn prepared_nominal_inputs(
         &mut self,
         owner: OwnerId,
         args: &[Arg<'_>],
-        count: usize,
         statements: &mut Vec<n::Expr>,
         span: Span,
     ) -> Result<Vec<(Option<hir::common::Ident>, n::Expr)>, Error> {
@@ -236,29 +156,20 @@ impl<'h> Checker<'_, 'h> {
             .map(|domain| self.substituted_trait_domain(domain, span))
             .collect::<Result<Vec<_>, _>>();
         self.alias_substitution = saved;
-        self.prepared_nominal_inputs_in_domains(owner, args, count, statements, span, &domains?)
+        self.prepared_nominal_inputs_in_domains(owner, args, statements, span, &domains?)
     }
 
     pub(super) fn prepared_nominal_inputs_in_domains(
         &mut self,
         owner: OwnerId,
         args: &[Arg<'_>],
-        count: usize,
         statements: &mut Vec<n::Expr>,
         span: Span,
         domains: &[Term],
     ) -> Result<Vec<(Option<hir::common::Ident>, n::Expr)>, Error> {
         let parameters = self.type_parameters[&owner].clone();
-        self.prepared_clause_inputs_in_domains(
-            owner,
-            args,
-            count,
-            statements,
-            span,
-            domains,
-            &parameters,
-        )
-        .map(|prepared| prepared.inputs)
+        self.prepared_clause_inputs_in_domains(owner, args, statements, span, domains, &parameters)
+            .map(|prepared| prepared.inputs)
     }
 
     pub(super) fn prepared_packet_fields(
@@ -439,15 +350,11 @@ impl<'h> Checker<'_, 'h> {
             let mut values: Vec<Option<n::Expr>> = vec![None; clauses.len()];
             let mut statements = Vec::new();
             let mut positional = 0;
-            let count = clauses
-                .iter()
-                .filter(|clause| !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
-                .count();
             let inputs = if let Some((inputs, prepared_statements)) = prepared {
                 statements = prepared_statements;
                 inputs
             } else {
-                self.prepared_nominal_inputs(owner, args, count, &mut statements, span)?
+                self.prepared_nominal_inputs(owner, args, &mut statements, span)?
             };
             for (name, value) in inputs {
                 let slot = Self::type_input_slot(&clauses, name, &mut positional, span)?;

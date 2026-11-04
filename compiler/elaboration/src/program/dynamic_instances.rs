@@ -168,15 +168,10 @@ impl Checker<'_, '_> {
         let saved_mode = self.in_required_comptime;
         let prepared = (|| {
             let clauses = self.type_clause_params(owner);
-            let count = clauses
-                .iter()
-                .filter(|clause| !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
-                .count();
             let mut statements = Vec::new();
             let prepared = self.prepared_clause_inputs_in_domains(
                 owner,
                 args,
-                count,
                 &mut statements,
                 expr.span,
                 &domains[prefix.len()..],

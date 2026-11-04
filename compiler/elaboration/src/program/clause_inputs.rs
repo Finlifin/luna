@@ -389,20 +389,11 @@ impl Checker<'_, '_> {
         &mut self,
         owner: OwnerId,
         args: &[Arg<'_>],
-        count: usize,
         statements: &mut Vec<n::Expr>,
         span: Span,
         domains: &[Term],
         parameters: &[DeclarationId],
     ) -> Result<PreparedClauseInputs, Error> {
-        if domains.iter().all(|domain| *domain == p(P::Type)) {
-            return self
-                .prepared_type_inputs(args, count, statements, span)
-                .map(|inputs| PreparedClauseInputs {
-                    inputs,
-                    identities: BTreeMap::new(),
-                });
-        }
         let collector_slot = self
             .clause_has_collector(owner)
             .then(|| self.type_clause_params(owner).len() - 1);
@@ -413,10 +404,25 @@ impl Checker<'_, '_> {
         };
         if let Some(expanded) = expanded {
             return self.prepared_clause_inputs_in_domains(
-                owner, &expanded, count, statements, span, domains, parameters,
+                owner, &expanded, statements, span, domains, parameters,
             );
         }
         let clauses = self.type_clause_params(owner);
+        let positional_domains = clauses
+            .iter()
+            .zip(domains)
+            .filter_map(|(clause, domain)| {
+                (!matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
+                    .then_some(domain.clone())
+            })
+            .collect::<Vec<_>>();
+        // A list tail does not have a fixed packet width. Its existing element
+        // and spread paths provide their own contexts after slot routing.
+        let packet_layout = if collector_slot.is_none() {
+            self.clause_packet_layout(args, &positional_domains, span)?
+        } else {
+            vec![None; args.len()]
+        };
         let mut positional = 0;
         let mut prepared: Vec<Vec<PreparedClauseInput>> =
             (0..args.len()).map(|_| Vec::new()).collect();
@@ -483,15 +489,27 @@ impl Checker<'_, '_> {
                     positional = next;
                     continue;
                 }
-                let packet = self.expr(input, None)?;
-                let positional_domains = clauses
-                    .iter()
-                    .zip(domains)
-                    .filter_map(|(clause, domain)| {
-                        (!matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
-                            .then_some(domain.clone())
+                let fields = packet_layout[argument_index]
+                    .as_ref()
+                    .map(|fields| {
+                        fields
+                            .iter()
+                            .map(|field| {
+                                self.instantiate_trait_domain(
+                                    field,
+                                    &evidence.binders,
+                                    &evidence.values,
+                                    input.span,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()
                     })
-                    .collect::<Vec<_>>();
+                    .transpose()?;
+                let context = fields
+                    .filter(|fields| fields.iter().all(|field| !evidence.blocks(field)))
+                    .map(|fields| self.tuple_value_type(fields, input.span))
+                    .transpose()?;
+                let packet = self.expr(input, context.as_ref())?;
                 let fields = self.prepared_packet_fields(
                     &packet,
                     args,
