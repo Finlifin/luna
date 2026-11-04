@@ -211,26 +211,11 @@ impl Checker<'_, '_> {
         }
     }
     pub(super) fn normal_type_inputs_need_plan(&self, owner: OwnerId, inputs: &[Arg<'_>]) -> bool {
-        if !self.clause_has_collector(owner) {
-            return false;
-        }
-        if inputs.iter().any(|input| matches!(input, Arg::Named(..)))
-            && inputs.iter().any(|input| {
-                matches!(input, Arg::Expand(value)
-                if !matches!(value.kind, H::Tuple(_) | H::Unit))
-            })
-        {
-            return true;
-        }
-        let mut remaining = self.clause_fixed_prefix_count(owner);
-        for input in inputs {
-            match input {
-                Arg::Positional(_) => remaining = remaining.saturating_sub(1),
-                Arg::Expand(_) if remaining > 0 => return true,
-                _ => {}
-            }
-        }
-        false
+        !self.clause_has_collector(owner)
+            || self.has_optional_type_clauses(owner)
+            || inputs
+                .iter()
+                .any(|input| !matches!(input, Arg::Positional(_)))
     }
 
     pub(super) fn normal_type_list_route<'hir>(
@@ -822,37 +807,31 @@ impl Checker<'_, '_> {
         self.ensure_signature(owner, expr.span)?;
         self.ensure_contract(owner, expr.span)?;
         if self.normal_type_inputs_need_plan(owner, inputs) {
-            if let Some(expanded) = self.clause_prefix_literal_spreads(owner, inputs) {
+            let expanded = if self.clause_has_collector(owner) {
+                self.clause_prefix_literal_spreads(owner, inputs)
+            } else {
+                literal_spreads(inputs)
+            };
+            if let Some(expanded) = expanded {
                 return self.normal_type_expression(expr, owner, &expanded, expected);
             }
-            return self.defaulted_normal_expression(owner, inputs, expr.span, expected);
+            return self.planned_normal_expression(owner, inputs, expr.span, expected);
         }
-        if !self.clause_has_collector(owner) {
-            if let Some(inputs) = literal_spreads(inputs) {
-                return self.normal_type_expression(expr, owner, &inputs, expected);
-            }
-        }
-        if self.has_optional_type_clauses(owner)
-            || (!self.clause_has_collector(owner)
-                && inputs.iter().any(|arg| matches!(arg, Arg::Expand(_))))
-        {
-            if self.normal_parameters[&owner]
-                .iter()
-                .any(|(_, _, ty)| *ty != p(P::Type))
-            {
-                return self.defaulted_normal_expression(owner, inputs, expr.span, expected);
-            }
-            return self.defaulted_type_expression(owner, inputs, expr.span, expected);
-        }
+        self.collected_normal_expression(expr, owner, inputs, expected)
+    }
+
+    // Positional collection still retains contextual argument nodes when an
+    // invoked element domain is unavailable. Migrate this residual path only
+    // when the shared plan can preserve each element's evaluation position.
+    fn collected_normal_expression(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        inputs: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
         let parameters = self.normal_parameters[&owner].clone();
-        let variadic = self.clause_has_collector(owner);
-        let (routed, order) = self.normal_type_list_route(owner, inputs, expr.span)?;
-        let inputs = routed.as_slice();
-        if if variadic {
-            inputs.len() < parameters.len() - 1
-        } else {
-            parameters.len() != inputs.len()
-        } {
+        if inputs.len() < parameters.len() - 1 {
             return Err(error(expr.span, "normal-form argument count mismatch"));
         }
         let mut arguments = vec![None; parameters.len()];
@@ -862,9 +841,9 @@ impl Checker<'_, '_> {
         let mut formation_arguments = vec![None; parameters.len()];
         let mut pending_inputs = BTreeSet::new();
         let count = parameters.len();
-        for &slot in &order {
+        for slot in 0..count {
             let (parameter, _, declared) = parameters[slot].clone();
-            if variadic && slot + 1 == count {
+            if slot + 1 == count {
                 let dependent = pending_parameters
                     .iter()
                     .any(|parameter| declared.mentions_rigid(*parameter));
@@ -874,62 +853,20 @@ impl Checker<'_, '_> {
                     &known_types,
                     expr.span,
                 )?;
-                if let Some(input) =
-                    self.normal_type_list_supply(owner, &inputs[slot..], expr.span)?
-                {
-                    if dependent {
-                        arguments[slot] = Some(self.dependent_normal_argument(input, 0)?);
-                        pending_inputs.insert(parameter);
-                        formation_arguments[slot] = Some(Term::Rigid {
-                            declaration: parameter,
-                            sort: Sort::ComptimeValue,
-                        });
-                        continue;
-                    }
-                    let value = self.expr(input, Some(&declared))?;
-                    let mut budget = comptime_runtime::Budget {
-                        steps: self.required_steps as usize,
-                        max_limbs: 4096,
-                    };
-                    let before = budget.steps;
-                    let known = self.known_normal_input(&value, 0, &mut budget);
-                    self.required_steps -= (before - budget.steps) as u64;
-                    formation_arguments[slot] = Some(known.unwrap_or_else(|| {
-                        pending_inputs.insert(parameter);
-                        Term::Rigid {
-                            declaration: parameter,
-                            sort: Sort::ComptimeValue,
-                        }
-                    }));
-                    arguments[slot] = Some(n::NormalFormArgument::Value(value));
-                    continue;
-                }
                 let mut items = Vec::new();
                 for input in &inputs[slot..] {
-                    let (input, spread) = match input {
-                        Arg::Positional(input) => (*input, false),
-                        Arg::Expand(input) => (*input, true),
-                        _ => {
-                            return Err(error(expr.span, "unsupported type-list collection input"));
-                        }
+                    let Arg::Positional(input) = input else {
+                        unreachable!("only positional collection uses the residual path")
                     };
-                    let element_type = if spread {
-                        declared.clone()
-                    } else {
-                        self.list_element_type(&declared).cloned().ok_or_else(|| {
-                            error(expr.span, "variadic input requires a bound meta.List<T>")
-                        })?
-                    };
-                    if dependent && !spread {
+                    if dependent {
                         items.push(self.dependent_normal_argument(input, 0)?);
                         continue;
                     }
-                    let value = self.expr(input, (!dependent).then_some(&element_type))?;
-                    items.push(if spread {
-                        n::NormalFormArgument::ListSpread(value)
-                    } else {
-                        n::NormalFormArgument::Value(value)
-                    });
+                    let element_type = self.list_element_type(&declared).ok_or_else(|| {
+                        error(expr.span, "variadic input requires a bound meta.List<T>")
+                    })?;
+                    let value = self.expr(input, Some(element_type))?;
+                    items.push(n::NormalFormArgument::Value(value));
                 }
                 formation_arguments[slot] = Some(
                     self.known_collected_list_in(&items, &declared, &BTreeMap::new())
@@ -979,8 +916,13 @@ impl Checker<'_, '_> {
                 }
                 failure
             })?;
-            let mut budget = comptime_runtime::Budget::default();
+            let mut budget = comptime_runtime::Budget {
+                steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+                max_limbs: 4096,
+            };
+            let before = budget.steps;
             let known = self.known_normal_input(&value, 0, &mut budget);
+            self.required_steps -= (before - budget.steps) as u64;
             let known = known.filter(|value| declared != p(P::Type) || value.sort() == Sort::Type);
             if let Some(value) = &known {
                 known_parameters.push(parameter);
@@ -1009,17 +951,6 @@ impl Checker<'_, '_> {
             .into_iter()
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| error(expr.span, "incomplete normal-form formation inputs"))?;
-        let plan = if order.iter().copied().eq(0..count) {
-            None
-        } else {
-            Some(n::NormalFormInputPlan {
-                preparations: vec![],
-                order,
-                bindings: (0..count)
-                    .map(|_| self.spread_binding(expr.span))
-                    .collect::<Result<_, _>>()?,
-            })
-        };
         self.check_formation_application(
             owner,
             FormationInputs {
@@ -1041,7 +972,7 @@ impl Checker<'_, '_> {
             source: source(expr.span),
             ty,
             kind: K::NormalFormType {
-                plan,
+                plan: None,
                 head: declaration(self.package, &self.package_identities, owner),
                 arguments,
             },
@@ -3085,11 +3016,10 @@ impl Checker<'_, '_> {
         })
     }
 
-    // Observe already-routed inputs without invoking them. A collector can need
-    // a preceding Type before the completed argument plan is assembled. Keep
-    // the checked expression in its original slot so evaluation still happens
-    // once, in the plan's original order.
-    fn normal_collection_domain(
+    // Observe routed declaration dependencies without invoking input code.
+    // Checking may visit a later source input to obtain a static domain; the
+    // checked expression stays in its original slot and executes there once.
+    fn normal_input_domain(
         &mut self,
         slot: usize,
         parameters: &[(DeclarationId, n::LocalId, Term)],
@@ -3100,14 +3030,14 @@ impl Checker<'_, '_> {
         let domain = &parameters[slot].2;
         let mut needed = domain
             .rigid_parameters()
-            .map_err(|_| error(span, "invalid collection domain"))?;
+            .map_err(|_| error(span, "invalid normal-form input domain"))?;
         for previous in (0..slot).rev() {
             if needed.contains_key(&parameters[previous].0) {
                 needed.extend(
                     parameters[previous]
                         .2
                         .rigid_parameters()
-                        .map_err(|_| error(span, "invalid collection dependency"))?,
+                        .map_err(|_| error(span, "invalid normal-form input dependency"))?,
                 );
             }
         }
@@ -3153,7 +3083,7 @@ impl Checker<'_, '_> {
 
     /// Prepare explicit inputs in source order, then omitted inputs in their
     /// declaration telescope. All reuse goes through fresh local bindings.
-    fn defaulted_normal_expression(
+    fn planned_normal_expression(
         &mut self,
         owner: OwnerId,
         inputs: &[Arg<'_>],
@@ -3242,7 +3172,7 @@ impl Checker<'_, '_> {
                         expanded.push(input.clone());
                     }
                 }
-                return self.defaulted_normal_expression(owner, &expanded, span, expected);
+                return self.planned_normal_expression(owner, &expanded, span, expected);
             }
             let packet_contexts = if inputs.iter().any(|input| matches!(input, Arg::Expand(_))) {
                 self.spread_packet_layout(&layout_inputs, &positional_types, span)?
@@ -3259,7 +3189,7 @@ impl Checker<'_, '_> {
                 if let Arg::Expand(packet) = input {
                     if list_spreads.contains(&input_index) {
                         let slot = collector.expect("list spread has a collector");
-                        let domain = self.normal_collection_domain(
+                        let domain = self.normal_input_domain(
                             slot,
                             &parameters,
                             &mut routed,
@@ -3412,7 +3342,7 @@ impl Checker<'_, '_> {
                                     "cannot combine a complete type-list argument with collected inputs",
                                 ));
                             }
-                            let domain = self.normal_collection_domain(
+                            let domain = self.normal_input_domain(
                                 positional,
                                 &parameters,
                                 &mut routed,
@@ -3550,6 +3480,29 @@ impl Checker<'_, '_> {
                     evaluation_order.push(slot);
                     continue;
                 }
+                let mut ty = self.instantiate_input_types(
+                    &parameters[slot].2,
+                    &known_parameters,
+                    &known_types,
+                    span,
+                )?;
+                if matches!(&routed[slot], Some(RoutedNormalInput::Source(_)))
+                    && parameters.iter().any(|(id, _, _)| ty.mentions_rigid(*id))
+                {
+                    let domain = self.normal_input_domain(
+                        slot,
+                        &parameters,
+                        &mut routed,
+                        &prepared_bindings,
+                        span,
+                    )?;
+                    ty = self.instantiate_input_types(
+                        &domain,
+                        &known_parameters,
+                        &known_types,
+                        span,
+                    )?;
+                }
                 let explicit = routed[slot].as_ref();
                 let input = match explicit {
                     Some(RoutedNormalInput::Source(input)) => Some(*input),
@@ -3609,12 +3562,6 @@ impl Checker<'_, '_> {
                         Some(default)
                     }
                 };
-                let ty = self.instantiate_input_types(
-                    &parameters[slot].2,
-                    &known_parameters,
-                    &known_types,
-                    span,
-                )?;
                 if explicit.is_none()
                     && (self.active_type_defaults.len() >= 64
                         || !self.active_type_defaults.insert((owner, slot)))
@@ -3644,7 +3591,16 @@ impl Checker<'_, '_> {
                 if explicit.is_none() {
                     self.active_type_defaults.remove(&(owner, slot));
                 }
-                let value = checked?;
+                let value = checked.map_err(|mut failure| {
+                    if parameters[slot].2 != p(P::Type) && failure.message.contains("type mismatch")
+                    {
+                        failure.message = format!(
+                            "normal-form value argument type mismatch: {}",
+                            failure.message
+                        );
+                    }
+                    failure
+                })?;
                 let mut budget = comptime_runtime::Budget {
                     steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
                     max_limbs: 4096,

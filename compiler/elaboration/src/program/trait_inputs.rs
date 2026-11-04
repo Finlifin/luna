@@ -94,8 +94,9 @@ impl Checker<'_, '_> {
                     .and_then(|index| types.get(index).cloned())
             })
             .or_else(|| {
-                self.normal_parameters
+                self.normal_input_prefixes
                     .values()
+                    .chain(self.normal_parameters.values())
                     .flatten()
                     .find(|(parameter, _, _)| *parameter == id)
                     .map(|(_, _, domain)| domain.clone())

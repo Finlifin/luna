@@ -228,6 +228,29 @@ impl Checker<'_, '_> {
                 }
                 return Ok(Some(value));
             }
+            // A signature prefix supplies abstract declaration values, not
+            // invocation locals. Preserve the actual domain while later
+            // parameter annotations use the ordinary expression checker.
+            if let Some(domain) = self
+                .normal_input_prefixes
+                .values()
+                .flatten()
+                .find(|(id, _, ty)| *id == declaration && *ty != p(P::Type))
+                .map(|(_, _, ty)| ty.clone())
+            {
+                let ty = self.substituted_trait_domain(&domain, expr.span)?;
+                if let Some(expected) = expected {
+                    self.require_expression(&ty, expected, expr.span)?;
+                }
+                return Ok(Some(n::Expr {
+                    source: source(expr.span),
+                    ty,
+                    kind: K::ComptimeValue(Term::Rigid {
+                        declaration,
+                        sort: Sort::ComptimeValue,
+                    }),
+                }));
+            }
             if let Some((_, binding, ty)) = self
                 .normal_parameters
                 .values()

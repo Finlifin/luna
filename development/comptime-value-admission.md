@@ -545,3 +545,64 @@ contextual 参数树或动态 Type 生产者问题算作已退役。
 `/tmp/luna-tools-f75ga0fu/result.json`。修改文件 rustfmt check 退出 0，证据
 `/tmp/luna-tools-f028_ogy/result.json`；`git diff --check` 通过。未运行全 workspace、
 native 或性能基准，正式 docs 与原有工作区改动保持不变。
+
+## 17. NF 接收域检查与实参求值位置分离
+
+固定参数、具名整包收集参数及展开输入现在进入 `planned_normal_expression`。
+删除原简化路径中的整包输入检查、展开处理与独立的重排计划构造；计划同时处理
+显式输入、默认输入和新鲜绑定。保留的 `collected_normal_expression` 只接收无默认
+参数的逐项 positional 收集，边界直接体现在入口分派中。
+
+域检查可以查看声明上较早、源码中较晚的已路由实参。`normal_input_domain` 沿声明
+依赖取得可观察的静态证据，将已检查表达式留在原槽中；真正执行仍使用原 `order`。
+因此 `Packet<.values = if true { [1, 255] } else { [] }, u8>` 的列表和分支能够取得
+u8 上下文，进入普通表达式检查，NIR 不再为这个已就绪输入另造 NF If／List 树。
+这里没有执行 Type 产生器，也没有删除已观察表达式。动态 `Byte()` 仍交给原计划
+状态机：先执行当前输入可执行部分，再等待域接纳；失败是终止态，下一次 invocation
+可以重新开始，不在失败帧中重放已执行输入。
+
+统一入口暴露了此前由另一条 annotation 路径掩盖的问题：检查后续签名域时，前缀
+中的普通 comptime 值尚未进入完整 `normal_parameters`，曾被表达式入口视为 Type。
+现在参数域查询包含已检查的 `normal_input_prefixes`，表达式保留该值的实际域及
+声明身份，使用抽象 ComptimeValue，而不是伪造当前 invocation 的 Local。前缀仍不
+发布为完整 callable 元数据。缺少 invocation 值的签名读取由共同的不可用绑定诊断
+说明阶段原因；不为迁移放行 runtime 参数读取。
+
+残留逐项收集路径的静态观察也改用外层 `required_steps`，不再为每个固定前缀输入
+新建默认观察预算。NF 头仍 opaque，meta.List 与 Tuple 仍按公开绑定和普通输入值
+工作；这次未新增库名、特定实参组合或 PTC 程序状态特判。
+
+剩余边界：普通函数子句与 NF 尚未共用一个完整 ArgumentPlan；纯 Type annotation
+等既有消费者仍有独立准备入口。动态域下的 NF contextual 树仍存在，逐项收集与
+交错具名输入的 preparation 尚不能普遍承载待定结构化输入。不能将这些结构简单
+改名为 ContextualExpr，也不能先全部组装到末尾再宣称保留了求值顺序。上层观察
+Option 适配器及失败原因按需求传播的后续迁移同样尚未完成。
+
+验证均在 `/home/fin/luna`，通过 `development/check.py --timeout 900 -- test` 执行。
+最终 `-p luna` 的 ordinary_clause_collectors、comptime_clause_inputs、
+nominal_value_parameters、function_template_local_definitions、dynamic_trait_clauses、
+dependent_list_collectors、normal_form_domains、normal_form_methods、normal_input_plans、
+inline_pattern_observation 十组共 426 项通过，退出 0，证据
+`/tmp/luna-tools-3lpr580b/result.json`。其中新增四项使用真实 sysroot，检查普通 NIR
+输入、两种 invocation 引擎的结果一致、动态产生器的顺序与失败恢复，并拒绝溢出、
+错误元素以及不可选分支中的非法输入。2 项既有 ignored 与 1 项显式 skip 保持不变，
+分别是抽象 Copy 默认值、普通子句的动态 Type 等待，以及 memoized value-indexed key
+的 staging 缺口，均不计为本次完成。
+
+`-p elaboration --lib program::normal::` 19 项通过，退出 0，证据
+`/tmp/luna-tools-f0l769bi/result.json`。`-p luna --test elaboration normal_form`
+26 项通过、5 项失败，退出 101，证据 `/tmp/luna-tools-ura2tr71/result.json`。这五项
+分别为 associated_values_do_not_unfold_normal_form_heads、
+mixed_normal_form_inputs_reject_wrong_types_stages_and_ranges、
+normal_form_integer_arguments_reject_wrong_stage_and_preserve_opacity、
+normal_form_source_checks_arguments_body_and_opaque_identity、
+normal_form_text_inputs_reject_wrong_kinds_and_different_names：旧预期要求
+`unresolved type equality`，当前诊断为 `type mismatch`。
+
+临时以 HEAD `5600092d` 的三份生产源码运行同一过滤组，得到相同的五项失败，
+证据 `/tmp/luna-tools-yesftgrp/result.json`；逐项比较触发源码及诊断完全相同。
+备份与恢复脚本位于 `/tmp/luna-nf-input-plans-wymi4st0`，恢复后再完成最终验证。
+初轮迁移曾暴露抽象签名前缀缺失，并曾弱化 runtime 参数的阶段诊断；两者均已修复，
+没有修改既有测试预期。rustfmt check 退出 0，证据
+`/tmp/luna-tools-f73rurd8/result.json`；`git diff --check` 通过。没有运行全 workspace、
+native 或性能基准；不以这些针对性检查宣称整个参数计划重构完成。

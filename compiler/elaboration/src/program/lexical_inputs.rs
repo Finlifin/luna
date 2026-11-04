@@ -260,6 +260,24 @@ impl Checker<'_, '_> {
         let Some(mut owner) = self.signature_owner else {
             return fallback;
         };
+        // Signature checking has no invocation values. Report the phase
+        // boundary after staged inputs and ordinary locals have been tried,
+        // including when a normal-form input uses the shared expression path.
+        if owner == binding.owner
+            && (self.active_signatures.contains(&owner) || self.checking_contract)
+            && let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
+                self.package.item(owner).map(|item| &item.kind)
+            && signature
+                .params
+                .iter()
+                .any(|parameter| parameter.hir_id == binding && !parameter.ty.is_comptime())
+        {
+            return if signature.modifiers.is_comptime {
+                "type annotation depending on an ordinary comptime-function input requires invocation-time type elaboration, which is not yet implemented; local binding is unavailable in this scope"
+            } else {
+                "normal-form annotation cannot read an ordinary runtime input; its value must be available at comptime; local binding is unavailable in this scope"
+            };
+        }
         let mut seen = BTreeSet::new();
         while let Some(parent) = self.package.lexical_parents.get(&owner).copied() {
             if !seen.insert(parent) {
