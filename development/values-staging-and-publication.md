@@ -328,6 +328,32 @@ Request 和 Activation 都有 S-expression Display，Session dump 包含待处�
 两者只属于当前 VM 的执行现场，不进入 CodeSession。已有 resolver 的禁止补充预算、
 阶段限制、响应域拒绝、初始化循环与错误恢复检查继续生效。
 
+主动 Type 观察的权限由 comptime 阶段及源世界边界决定，不再把“安装了 resolver”
+作为前提。具体关联访问统一经 Preparation 判断：快照已经保留初始化器时直接准入，
+只有缺少选定主体才需要 resolver。此前即使完整实现、dispatch 和初始化器已通过
+源世界检查，未安装回调的 VM 仍将它误报为 `UnmaterializedDispatch`。runtime VM
+仍不执行这些初始化器，IIR VM 仍不能借挂载源 resolver 回到源码选择；缺少主体且
+没有 resolver 也继续报告未取得选择。主体可用性、执行权限与宿主服务能力分别检查。
+
+回归使用完整的 trait、impl 和 dispatch 初始化器，经初次及复用 CodeSession 的
+源 VM 构造进入，两种解释模式均覆盖独立重复观察、嵌套程序读取、耗尽后恢复和真正
+缺失的选择。另验 runtime 与 runtime/comptime IIR 即使挂载 resolver 也不调用它。
+工作目录 `/home/fin/luna` 的
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+--lib selected_types::observation_tests -- --nocapture` 在生产修复前
+`/tmp/luna-tools-6x1cel49/result.json` 退出 101，仅无 resolver 的完整初始化器用例失败；
+修复后 `/tmp/luna-tools-sp4v3g3c/result.json` 退出 0，5 项通过。
+
+扩大检查运行 `python3 -B development/check.py --timeout 900 -- test
+-p comptime_interpretor -p luna --lib --test deferred_associated_values
+--test associated_signatures --test associated_purity --test comptime_bytecode_traits
+--test library_protocols --test comptime_bytecode_observations --test comptime_bytecode_types
+--no-fail-fast`：`/tmp/luna-tools-pzfa2prn/result.json` 退出 101，654 项通过、1 项失败。
+失败仍是本节先前已对照确认的 `deferred_normal_inputs_run_bytecode_before_their_domains_arrive`
+在第 551 行要求上下文输入计数 2、实际 3；返回值断言已通过，未修改该预期。
+VM 全部 497 项、真实 sysroot 协议与其余关联／类型路径通过。两份 Rust 文件 scoped
+rustfmt 检查 `/tmp/luna-tools-kq3dzqic/result.json` 退出 0；未运行全 workspace。
+
 这仍是内部驱动边界：resolver 本身同步执行，subject／参数／结果域的观察仍可同步
 执行关联 Type 程序。尚未提供公共 HostRequest/response API、跨请求身份验证或前端
 region 的可恢复检查，不能把此处 Pending 宣称为完整宿主等待协议。它也不回滚已发生

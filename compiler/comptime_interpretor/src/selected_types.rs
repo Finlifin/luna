@@ -76,9 +76,11 @@ impl Interpreter<'_> {
             let selected = normalize(ty, &tracked, &mut fuel, 0);
             let missing = tracked.missing.into_inner();
             self.budget.steps -= (before - fuel) as u64;
-            let Some(key) = missing.filter(|_| {
-                self.comptime_only && self.graph.is_none() && self.associated_resolver.is_some()
-            }) else {
+            // Phase and world authorize an active observation. The common
+            // associated admission path decides whether a body is already
+            // selected or a resolver is needed; a host callback is not execution
+            // permission and its absence does not hide retained initializers.
+            let Some(key) = missing.filter(|_| self.comptime_only && self.graph.is_none()) else {
                 return selected.map_err(|kind| self.failure(kind, source));
             };
             let source = source.unwrap_or(SourceRange { start: 0, end: 0 });

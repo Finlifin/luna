@@ -283,3 +283,142 @@ fn type_observation_runs_deep_initializers_on_the_driver_stack() {
         ty(Primitive::Bool)
     );
 }
+
+fn selected_package() -> Package {
+    let mut package = package();
+    package.traits[0]
+        .associated
+        .retain(|member| member.declaration.local == 3 || member.declaration.local == 4);
+    let initializers: Vec<_> = [(3, 9), (4, 10)]
+        .into_iter()
+        .map(|(member, function)| {
+            (
+                id(member),
+                nir::associated_initializers::AssociatedInitializer::new(call(function), &mut 1000)
+                    .unwrap(),
+            )
+        })
+        .collect();
+    package.implementations.push(nir::program::Implementation {
+        declaration: id(20),
+        phases: nir::program::ImplementationPhases {
+            runtime: false,
+            comptime: true,
+        },
+        type_parameters: vec![],
+        parameter_types: vec![],
+        associated: vec![],
+        associated_initializers: initializers.clone(),
+        interface: Some(id(1)),
+        interface_arguments: vec![],
+        capabilities: vec![],
+        requirements: vec![],
+        subject: ty(Primitive::Bool),
+        methods: vec![],
+    });
+    package
+        .dispatch_instances
+        .push(nir::program::DispatchInstance {
+            interface: id(1),
+            interface_arguments: vec![],
+            subject: ty(Primitive::Bool),
+            implementation: id(20),
+            arguments: vec![],
+            methods: vec![],
+            associated: vec![],
+            associated_initializers: initializers,
+        });
+    package
+}
+
+#[test]
+fn selected_initializers_need_execution_permission_not_a_host_resolver() {
+    let package = Arc::new(selected_package());
+    let input = Term::Tuple(vec![projection(3), projection(4), projection(3)]);
+    let expected = Term::Tuple(vec![
+        ty(Primitive::Bool),
+        ty(Primitive::Char),
+        ty(Primitive::Bool),
+    ]);
+    for compiled in [false, true] {
+        let mut session = CodeSession::new(package.clone());
+        for _ in 0..2 {
+            let mut vm = Interpreter::for_comptime_in_session(
+                &package,
+                &mut session,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            vm.bytecode_enabled = compiled;
+            assert!(vm.associated_resolver.is_none());
+            for _ in 0..2 {
+                let start = vm.events.len();
+                assert_eq!(
+                    vm.selected_type_view(&input, Some(SOURCE)).unwrap(),
+                    expected
+                );
+                assert_eq!(entries(&vm, start), [id(9), id(10), id(9)]);
+                assert!(vm.associated_values.is_empty());
+                assert!(vm.active_associated_initializers.is_empty());
+            }
+            vm.budget.steps = 0;
+            assert_eq!(
+                vm.selected_type_view(&input, Some(SOURCE))
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::StepsExhausted
+            );
+            vm.budget.steps = Budget::default().steps;
+            assert_eq!(
+                vm.selected_type_view(&projection(5), Some(SOURCE))
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::UnmaterializedDispatch
+            );
+            assert_eq!(
+                vm.selected_type_view(&projection(3), Some(SOURCE)).unwrap(),
+                ty(Primitive::Bool)
+            );
+        }
+    }
+}
+
+#[test]
+fn observation_cannot_use_a_resolver_to_escape_runtime_or_graph_authority() {
+    use std::cell::Cell;
+    let package = selected_package();
+    let calls = Cell::new(0);
+    let resolver = |access: &Expr, fuel: &mut u64| {
+        calls.set(calls.get() + 1);
+        select(access, fuel)
+    };
+    let mut runtime = Interpreter::new(&package, Budget::default())
+        .unwrap()
+        .with_associated_resolver(&resolver);
+    assert_eq!(
+        runtime
+            .selected_type_view(&projection(3), Some(SOURCE))
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnmaterializedDispatch
+    );
+    assert!(runtime.events.is_empty());
+    assert!(runtime.active_associated_initializers.is_empty());
+    let graph = iir::Package::default();
+    for comptime in [false, true] {
+        let mut vm = if comptime {
+            Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap()
+        } else {
+            Interpreter::from_iir(&graph, Budget::default()).unwrap()
+        }
+        .with_associated_resolver(&resolver);
+        assert_eq!(
+            vm.selected_type_view(&projection(3), Some(SOURCE))
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnmaterializedDispatch
+        );
+        assert!(vm.events.is_empty());
+    }
+    assert_eq!(calls.get(), 0);
+}
