@@ -117,6 +117,89 @@ fn borrowed_value_layouts_require_matching_declarations_and_domains() {
 }
 
 #[test]
+fn typed_layout_queries_preserve_lookup_errors_and_failed_reservations() {
+    use nir::NominalAdmissionError as Error;
+    use nir::normal_forms::{
+        NominalValueDeclaration as D, query_nominal_value_fields_with as fields,
+    };
+    let definition = record(vec![Term::Primitive(P::Type), Term::Primitive(P::Bool)]);
+    let ty = Term::Nominal {
+        declaration: id(0),
+        arguments: vec![Term::Primitive(P::U8), Term::Bool(true)],
+    };
+    let lookup = |requested, fuel: &mut usize| {
+        *fuel = fuel.checked_sub(3).ok_or(Error::Budget)?;
+        Ok((requested == definition.declaration).then_some(D::Struct(&definition)))
+    };
+    let check =
+        |ty: &Term, fuel: &mut usize| fields(ty, None, fuel, &lookup, &|_, _| Ok(None), None);
+    let mut fuel = 2;
+    assert_eq!(check(&ty, &mut fuel), Err(Error::Budget));
+    assert_eq!(fuel, 2, "failed lookup reservation retains unspent fuel");
+    let mut completed = false;
+    for allowance in 0..1000 {
+        let mut fuel = allowance;
+        match check(&ty, &mut fuel) {
+            Err(Error::Budget) => {}
+            Ok(layout) => {
+                assert_eq!(layout[0], Term::Primitive(P::U8));
+                completed = true;
+                break;
+            }
+            other => panic!("valid layout lost its outcome: {other:?}"),
+        }
+    }
+    assert!(completed);
+    let foreign = Term::Nominal {
+        declaration: id(99),
+        arguments: vec![],
+    };
+    assert!(matches!(check(&foreign, &mut 1000), Err(Error::Invalid(_))));
+    let wrong = Term::Nominal {
+        declaration: id(0),
+        arguments: vec![Term::Primitive(P::U8), Term::Char('x')],
+    };
+    assert!(matches!(check(&wrong, &mut 1000), Err(Error::Invalid(_))));
+    let invalid = Error::Invalid("lookup evidence belongs to a retired world".into());
+    assert_eq!(
+        fields(
+            &ty,
+            None,
+            &mut 1000,
+            &|_, _| Err(invalid.clone()),
+            &|_, _| Ok(None),
+            None
+        ),
+        Err(invalid)
+    );
+    assert!(check(&ty, &mut 1000).is_ok());
+}
+
+#[test]
+fn selected_field_instantiation_keeps_budget_and_domain_failures_distinct() {
+    use nir::NominalAdmissionError as Error;
+    use nir::normal_forms::instantiate_value_fields_checked as fields;
+    let parameters = [id(1)];
+    let domains = [Term::Primitive(P::Type)];
+    let arguments = [Term::Primitive(P::Bool)];
+    let layout = [rigid(1, Sort::Type)];
+    let mut fuel = 2;
+    assert_eq!(
+        fields(&parameters, &domains, &arguments, layout.iter(), &mut fuel),
+        Err(Error::Budget)
+    );
+    assert_eq!(fuel, 2);
+    assert!(matches!(
+        fields(&parameters, &domains, &[], layout.iter(), &mut 1000),
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(
+        fields(&parameters, &domains, &arguments, layout.iter(), &mut 1000),
+        Ok(vec![Term::Primitive(P::Bool)])
+    );
+}
+
+#[test]
 fn nominal_layout_substitution_preserves_value_indices_and_opaque_heads() {
     let record = record(vec![Term::Primitive(P::Type), Term::Primitive(P::Bool)]);
     let fields = record

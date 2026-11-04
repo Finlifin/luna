@@ -363,14 +363,7 @@ impl<'a> DeclarationWorld<'a> {
                         return Ok(fields.to_vec());
                     }
                 }
-                nir::normal_forms::nominal_value_fields_budgeted(self.package, ty, variant, fuel)
-                    .ok_or_else(|| {
-                        if *fuel == 0 {
-                            Error::Budget
-                        } else {
-                            "nominal representation evidence unavailable".into()
-                        }
-                    })
+                nir::normal_forms::query_nominal_value_fields(self.package, ty, variant, fuel)
             },
             declared: &mut |_, _, _| false,
             collection: &mut |domain, fuel| {

@@ -1053,8 +1053,8 @@ ArgumentPlan，这次迁移不改变输入求值顺序或授予新的结果缓�
 查询接口保留显式 `Error::Budget`，即使宿主查询返回时调用者仍有剩余 fuel，也按
 预算失败处理，不转成类型不匹配。VM 已有的 typed callable 查询直接进入 NF 检查，
 不再先压成 Option 再靠零 fuel 猜测；声明世界的 callable 查询也已按下节迁移。
-名义布局及部分旧描述观察服务仍在各自提供者内适配 Option 结果，这部分不能称为
-已完成的统一 typed 查询协议。
+名义布局核心及源世界／VM 准入已改为显式失败结果，见第 23 节；IIR、elaboration
+及部分旧描述观察服务仍保留 Option 适配，不能称为全部查询协议已统一。
 
 原 `clause_list_inputs_share_domain_scope_and_budget_validation` 在改动前再次以
 `FunctionInputRejected { stage: Value, .. }` 与旧 `Type` 断言不符而失败，证据
@@ -1120,3 +1120,48 @@ DomainQueries 直接传递该结果；materialization 的 callable identity 路�
 
 未运行全 workspace、native 或性能基准。仍未统一所有布局／描述查询的失败协议，
 也未完成普通参数与 NF 参数的可恢复计划；正式 docs 与原有工作区修改保持不变。
+
+
+## 23. 名义布局的失败贯穿准入与代入
+
+`query_nominal_value_fields` 与索引世界入口 `query_nominal_value_fields_with`
+统一返回 `Result<Vec<Term>, NominalAdmissionError>`。声明查找、名义实参准入、
+递归布局和 newtype 表示代入直接保留 Budget／Invalid；不再将错误压成 None 后
+由调用方猜测。缺失声明、错误变体和不合域的实参属于 Invalid，预算或递归限制
+属于 Budget。失败的预算预留保留原有余额，正余额不代表查询尚有能力完成。
+
+`instantiate_value_fields_checked` 是唯一的选中字段代入核心，按字段及参数帧
+预留成本，仍验证空载荷的完整参数帧。旧 Option 接口仅向这个核心单向适配，
+在兼容边界把 Budget 转为零 fuel；没有保留另一套检查或布局算法。
+
+源世界的普通函数参数、trait 参数、DeclarationWorld 查询和 materialization
+准入已直接消费显式结果。VM 的普通／名义参数及 effect 参数也直接传播结果，
+最终错误分类按错误枚举匹配，不能再次根据 fuel 是否为零分类。VM 仍从自身的
+源声明、生成声明或保留的具体 IIR 实例取得字段，再调用同一字段代入核心；
+不能把它替换为仅能看到原 package 的扫描器，丢失所属世界的声明证据。
+
+IIR TypeLinks、elaboration 的借用元数据入口，以及 VM 的旧描述／解码观察接口
+仍有 Option 边界。它们是后续迁移对象；本阶段没有实现统一 ArgumentPlan，
+没有改变形成 predicate、类型身份、调用顺序或缓存准入政策。
+
+验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --test nominal_parameters --test trait_parameters --no-fail-fast`：
+  47 通过，退出 0；`/tmp/luna-tools-zw3u7ah9/result.json`。新增检查覆盖有余额的
+  预留失败、未知声明、错误实参、查找错误原样传递及后续成功。
+- `-p comptime_interpretor --lib`：450 通过，退出 0；
+  `/tmp/luna-tools-e5fa_wmo/result.json`。随后仅新增 VM 边界用例，使用同一入口
+  加 `normal_input_data_tests::nominal_layout_admission_keeps_failed_reservations_typed
+  -- --exact`，1 通过，退出 0；`/tmp/luna-tools-0v1q0obe/result.json`。
+- `-p luna --test nominal_value_parameters --test nominal_staging --test newtypes
+  --test library_list_hash --test library_type_equality --test invocation_value_templates
+  --no-fail-fast`：548 通过、1 失败，整体退出 101；
+  `/tmp/luna-tools-wx4i84o_/result.json`。唯一失败为
+  `mixed_trait_arguments_expand_literal_and_computed_packets` 的旧诊断文字断言。
+  使用本阶段保存且逐个核对 HEAD `9b65039a` 的 Rust 基线执行该项，仍以相同位置和
+  原因失败，退出 101；`/tmp/luna-tools-jbdefcnq/result.json`。基线检查后逐字节恢复
+  本阶段源码并核对，不把混合命令记作全通过，也没有修改该测试预期。
+
+初次 NIR 检查漏写 newtype ConversionError 的显式转换，编译失败于
+`/tmp/luna-tools-mz57ov6y`；补齐 Budget／Invalid 映射后执行上述检查。
+未运行全 workspace、native 或性能基准。正式 docs 和原有工作区修改均未纳入。

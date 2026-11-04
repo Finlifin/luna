@@ -85,13 +85,7 @@ impl Interpreter<'_> {
                 return Ok(elements.to_vec());
             }
         }
-        self.normal_value_fields(ty, variant, fuel).ok_or_else(|| {
-            if *fuel == 0 {
-                nir::NominalAdmissionError::Budget
-            } else {
-                nir::NominalAdmissionError::Invalid("nominal value layout unavailable".into())
-            }
-        })
+        self.query_normal_value_fields(ty, variant, fuel)
     }
 
     /// Validate immutable data against a closed domain, including nominal
@@ -533,24 +527,17 @@ impl Interpreter<'_> {
                         &declaration.parameter_types,
                         &operation.arguments,
                         &mut fuel,
-                        |ty, variant, fuel| {
-                            self.normal_value_fields(ty, variant, fuel).ok_or_else(|| {
-                                nir::NominalAdmissionError::from(
-                                    "effect value layout is unavailable",
-                                )
-                            })
-                        },
+                        |ty, variant, fuel| self.query_normal_value_fields(ty, variant, fuel),
                         |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
                         |domain, fuel| self.admitted_collection_domain(domain, fuel),
                         self.target,
                     );
                     self.budget.steps -= (before - fuel) as u64;
-                    checked.map_err(|_| {
+                    checked.map_err(|error| {
                         self.failure(
-                            if fuel == 0 {
-                                ErrorKind::StepsExhausted
-                            } else {
-                                ErrorKind::Type
+                            match error {
+                                nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+                                nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
                             },
                             None,
                         )

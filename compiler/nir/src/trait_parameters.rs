@@ -642,16 +642,7 @@ impl Trait {
                                 "nominal value admission requires declaration layout evidence",
                             )
                         })?;
-                        crate::normal_forms::nominal_value_fields_budgeted(
-                            package, ty, variant, fuel,
-                        )
-                        .ok_or_else(|| {
-                            if *fuel == 0 {
-                                crate::NominalAdmissionError::Budget
-                            } else {
-                                crate::NominalAdmissionError::from("invalid nominal value layout")
-                            }
-                        })
+                        crate::normal_forms::query_nominal_value_fields(package, ty, variant, fuel)
                     },
                     |value, expected, fuel| {
                         let Term::Rigid {
@@ -689,18 +680,9 @@ impl Trait {
                                             "nominal record index requires declaration layouts",
                                         )
                                     })?;
-                                    crate::normal_forms::nominal_value_fields_budgeted(
+                                    crate::normal_forms::query_nominal_value_fields(
                                         package, ty, variant, fuel,
                                     )
-                                    .ok_or_else(|| {
-                                        if *fuel == 0 {
-                                            crate::NominalAdmissionError::Budget
-                                        } else {
-                                            crate::NominalAdmissionError::from(
-                                                "invalid nominal record index layout",
-                                            )
-                                        }
-                                    })
                                 },
                                 |value, expected, fuel| {
                                     let Term::Rigid {

@@ -31,14 +31,7 @@ pub fn validate_arguments(
         arguments,
         fuel,
         |ty, variant, fuel| {
-            crate::normal_forms::nominal_value_fields_budgeted(package, ty, variant, fuel)
-                .ok_or_else(|| {
-                    if *fuel == 0 {
-                        crate::NominalAdmissionError::Budget
-                    } else {
-                        "callable input lacks validated layout evidence".into()
-                    }
-                })
+            crate::normal_forms::query_nominal_value_fields(package, ty, variant, fuel)
         },
         |_, _, _| false,
         |domain, fuel| crate::normal_forms::list_element_budgeted(package, domain, fuel),

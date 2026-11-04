@@ -849,36 +849,56 @@ pub enum NominalValueDeclaration<'a> {
     Newtype(&'a crate::newtypes::Newtype),
 }
 
+/// Compatibility for optional layout observers. Typed admission callers use
+/// `query_nominal_value_fields` so resource failure cannot become missing data.
 pub fn nominal_value_fields_budgeted(
     package: &Package,
     ty: &Term,
     variant: Option<u32>,
     fuel: &mut usize,
 ) -> Option<Vec<Term>> {
+    let result = query_nominal_value_fields(package, ty, variant, fuel);
+    layout_admission(result, fuel)
+}
+
+/// Inspect a nominal layout without evaluating its declaration. Receiving-world
+/// lookup, argument admission, recursion limits and substitution retain errors.
+pub fn query_nominal_value_fields(
+    package: &Package,
+    ty: &Term,
+    variant: Option<u32>,
+    fuel: &mut usize,
+) -> Result<Vec<Term>, crate::NominalAdmissionError> {
     nominal_value_fields_at(
         ty,
         variant,
         fuel,
         &|id, fuel| {
             for definition in &package.enums {
-                spend_layout(fuel, 1)?;
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or(crate::NominalAdmissionError::Budget)?;
                 if definition.declaration == id {
-                    return Some(NominalValueDeclaration::Enum(definition));
+                    return Ok(Some(NominalValueDeclaration::Enum(definition)));
                 }
             }
             for definition in &package.newtypes {
-                spend_layout(fuel, 1)?;
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or(crate::NominalAdmissionError::Budget)?;
                 if definition.declaration == id {
-                    return Some(NominalValueDeclaration::Newtype(definition));
+                    return Ok(Some(NominalValueDeclaration::Newtype(definition)));
                 }
             }
             for definition in &package.structs {
-                spend_layout(fuel, 1)?;
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or(crate::NominalAdmissionError::Budget)?;
                 if definition.declaration == id {
-                    return Some(NominalValueDeclaration::Struct(definition));
+                    return Ok(Some(NominalValueDeclaration::Struct(definition)));
                 }
             }
-            None
+            Ok(None)
         },
         &|domain, fuel| list_element_budgeted(package, domain, fuel),
         0,
@@ -903,7 +923,7 @@ pub fn nominal_value_fields_with_lookup_in<'a>(
     lookup: &impl Fn(DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'a>>,
     target: Option<crate::target::TargetData>,
 ) -> Option<Vec<Term>> {
-    nominal_value_fields_at(ty, variant, fuel, lookup, &|_, _| Ok(None), 0, target)
+    nominal_value_fields_with_collections_in(ty, variant, fuel, lookup, &|_, _| Ok(None), target)
 }
 /// Query nominal layouts with separately supplied collection representation
 /// evidence. Both callbacks charge their work to the shared budget.
@@ -915,6 +935,34 @@ pub fn nominal_value_fields_with_collections_in<'a>(
     collection: &impl Fn(&Term, &mut usize) -> Result<Option<Term>, crate::NominalAdmissionError>,
     target: Option<crate::target::TargetData>,
 ) -> Option<Vec<Term>> {
+    let result = query_nominal_value_fields_with(
+        ty,
+        variant,
+        fuel,
+        &|id, fuel| match lookup(id, fuel) {
+            Some(declaration) => Ok(Some(declaration)),
+            None if *fuel == 0 => Err(crate::NominalAdmissionError::Budget),
+            None => Ok(None),
+        },
+        collection,
+        target,
+    );
+    layout_admission(result, fuel)
+}
+
+/// Query an indexed receiving world. The lookup owns its accounting and must
+/// report exhaustion explicitly even when a failed reservation leaves fuel.
+pub fn query_nominal_value_fields_with<'a>(
+    ty: &Term,
+    variant: Option<u32>,
+    fuel: &mut usize,
+    lookup: &impl Fn(
+        DeclarationId,
+        &mut usize,
+    ) -> Result<Option<NominalValueDeclaration<'a>>, crate::NominalAdmissionError>,
+    collection: &impl Fn(&Term, &mut usize) -> Result<Option<Term>, crate::NominalAdmissionError>,
+    target: Option<crate::target::TargetData>,
+) -> Result<Vec<Term>, crate::NominalAdmissionError> {
     nominal_value_fields_at(ty, variant, fuel, lookup, collection, 0, target)
 }
 
@@ -922,34 +970,33 @@ fn nominal_value_fields_at<'a>(
     ty: &Term,
     variant: Option<u32>,
     fuel: &mut usize,
-    lookup: &impl Fn(DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'a>>,
+    lookup: &impl Fn(
+        DeclarationId,
+        &mut usize,
+    ) -> Result<Option<NominalValueDeclaration<'a>>, crate::NominalAdmissionError>,
     collection: &impl Fn(&Term, &mut usize) -> Result<Option<Term>, crate::NominalAdmissionError>,
     depth: usize,
     target: Option<crate::target::TargetData>,
-) -> Option<Vec<Term>> {
+) -> Result<Vec<Term>, crate::NominalAdmissionError> {
     if depth >= 128 {
-        return None;
+        return Err(crate::NominalAdmissionError::Budget);
     }
     let layout = |ty: &Term, variant, fuel: &mut usize| {
         nominal_value_fields_at(ty, variant, fuel, lookup, collection, depth + 1, target)
-            .ok_or_else(|| {
-                if *fuel == 0 {
-                    crate::NominalAdmissionError::Budget
-                } else {
-                    crate::NominalAdmissionError::Invalid(
-                        "nominal payload layout unavailable".into(),
-                    )
-                }
-            })
     };
     let Term::Nominal {
         declaration,
         arguments,
     } = ty
     else {
-        return None;
+        return Err("layout requires a nominal type".into());
     };
-    match (lookup(*declaration, fuel)?, variant) {
+    match (
+        lookup(*declaration, fuel)?.ok_or_else(|| {
+            crate::NominalAdmissionError::from("nominal declaration is unavailable")
+        })?,
+        variant,
+    ) {
         (NominalValueDeclaration::Enum(definition), Some(index))
             if definition.declaration == *declaration =>
         {
@@ -963,12 +1010,19 @@ fn nominal_value_fields_at<'a>(
                 collection,
                 target,
             );
-            layout_admission(admitted, fuel)?;
-            instantiate_value_fields(
+            admitted?;
+            instantiate_value_fields_checked(
                 &definition.type_parameters,
                 &definition.parameter_types,
                 arguments,
-                definition.variants.get(index as usize)?.fields.iter(),
+                definition
+                    .variants
+                    .get(index as usize)
+                    .ok_or_else(|| {
+                        crate::NominalAdmissionError::from("enum variant index is unavailable")
+                    })?
+                    .fields
+                    .iter(),
                 fuel,
             )
         }
@@ -983,11 +1037,16 @@ fn nominal_value_fields_at<'a>(
                 collection,
                 target,
             );
-            layout_admission(admitted, fuel)?;
-            Some(vec![
+            admitted?;
+            Ok(vec![
                 definition
                     .representation_budgeted(arguments, &[], fuel)
-                    .ok()?,
+                    .map_err(|error| match error {
+                        crate::newtypes::ConversionError::Budget => {
+                            crate::NominalAdmissionError::Budget
+                        }
+                        error => crate::NominalAdmissionError::Invalid(error.to_string()),
+                    })?,
             ])
         }
         (NominalValueDeclaration::Struct(definition), None)
@@ -1003,8 +1062,8 @@ fn nominal_value_fields_at<'a>(
                 collection,
                 target,
             );
-            layout_admission(admitted, fuel)?;
-            instantiate_value_fields(
+            admitted?;
+            instantiate_value_fields_checked(
                 &definition.type_parameters,
                 &definition.parameter_types,
                 arguments,
@@ -1012,7 +1071,7 @@ fn nominal_value_fields_at<'a>(
                 fuel,
             )
         }
-        _ => None,
+        _ => Err("nominal declaration identity or variant kind mismatch".into()),
     }
 }
 // Legacy layout callers use None plus exhausted fuel to distinguish resource
@@ -1031,20 +1090,7 @@ fn layout_admission<T>(
         Err(crate::NominalAdmissionError::Invalid(_)) => None,
     }
 }
-fn spend_layout(fuel: &mut usize, work: usize) -> Option<()> {
-    match fuel.checked_sub(work) {
-        Some(left) => {
-            *fuel = left;
-            Some(())
-        }
-        None => {
-            *fuel = 0;
-            None
-        }
-    }
-}
-/// Instantiate only the selected layout, bounding substitution before copying.
-/// An empty payload still validates the complete declaration argument frame.
+/// Compatibility for optional representation observers.
 pub fn instantiate_value_fields<'a>(
     parameters: &[DeclarationId],
     domains: &[Term],
@@ -1052,38 +1098,39 @@ pub fn instantiate_value_fields<'a>(
     fields: impl ExactSizeIterator<Item = &'a Term>,
     fuel: &mut usize,
 ) -> Option<Vec<Term>> {
-    spend_layout(
-        fuel,
-        fields
-            .len()
-            .saturating_add(parameters.len())
-            .saturating_add(arguments.len()),
-    )?;
-    for domain in domains {
-        charge_layout_term(domain, fuel)?;
-    }
-    let result = (|| {
-        let substitution =
-            crate::DeclarationSubstitution::bounded(parameters, domains, arguments, &[], fuel)?;
-        fields
-            .map(|field| substitution.instantiate_bounded(field, fuel))
-            .collect::<Result<Vec<_>, crate::type_computations::Error>>()
-    })();
-    let output = match result {
-        Ok(output) => output,
-        Err(crate::type_computations::Error::Budget) => {
-            *fuel = 0;
-            return None;
-        }
-        Err(_) => return None,
-    };
-    Some(output)
+    let result = instantiate_value_fields_checked(parameters, domains, arguments, fields, fuel);
+    layout_admission(result, fuel)
 }
 
-fn charge_layout_term(term: &Term, fuel: &mut usize) -> Option<()> {
-    let charged = crate::type_computations::charge_term(term, fuel)
-        .map_err(crate::NominalAdmissionError::from);
-    layout_admission(charged, fuel)
+/// Instantiate only the selected layout, bounding substitution before copying.
+/// An empty payload still validates the complete declaration argument frame.
+pub fn instantiate_value_fields_checked<'a>(
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &[Term],
+    fields: impl ExactSizeIterator<Item = &'a Term>,
+    fuel: &mut usize,
+) -> Result<Vec<Term>, crate::NominalAdmissionError> {
+    *fuel = fuel
+        .checked_sub(
+            fields
+                .len()
+                .saturating_add(parameters.len())
+                .saturating_add(arguments.len()),
+        )
+        .ok_or(crate::NominalAdmissionError::Budget)?;
+    for domain in domains {
+        crate::type_computations::charge_term(domain, fuel)?;
+    }
+    let substitution =
+        crate::DeclarationSubstitution::bounded(parameters, domains, arguments, &[], fuel)?;
+    fields
+        .map(|field| {
+            substitution
+                .instantiate_bounded(field, fuel)
+                .map_err(Into::into)
+        })
+        .collect()
 }
 
 fn nominal_domain_scope(

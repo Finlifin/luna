@@ -2229,14 +2229,7 @@ impl Builder<'_> {
             std::slice::from_ref(input),
             &mut self.fuel,
             |ty, variant, fuel| {
-                nir::normal_forms::nominal_value_fields_budgeted(self.package, ty, variant, fuel)
-                    .ok_or_else(|| {
-                        if *fuel == 0 {
-                            nir::NominalAdmissionError::Budget
-                        } else {
-                            nir::NominalAdmissionError::from("invalid nominal value layout")
-                        }
-                    })
+                nir::normal_forms::query_nominal_value_fields(self.package, ty, variant, fuel)
             },
             |_, _, _| false,
             |domain, fuel| nir::normal_forms::list_element_budgeted(self.package, domain, fuel),
@@ -2430,21 +2423,12 @@ impl Builder<'_> {
                             arguments,
                             &mut self.fuel,
                             |ty, variant, fuel| {
-                                nir::normal_forms::nominal_value_fields_budgeted(
+                                nir::normal_forms::query_nominal_value_fields(
                                     self.package,
                                     ty,
                                     variant,
                                     fuel,
                                 )
-                                .ok_or_else(|| {
-                                    if *fuel == 0 {
-                                        nir::NominalAdmissionError::Budget
-                                    } else {
-                                        nir::NominalAdmissionError::Invalid(
-                                            "nominal value layout unavailable".into(),
-                                        )
-                                    }
-                                })
                             },
                             |_, _, _| false,
                             |domain, fuel| {
@@ -2513,21 +2497,12 @@ impl Builder<'_> {
                             arguments,
                             &mut self.fuel,
                             |ty, variant, fuel| {
-                                nir::normal_forms::nominal_value_fields_budgeted(
+                                nir::normal_forms::query_nominal_value_fields(
                                     self.package,
                                     ty,
                                     variant,
                                     fuel,
                                 )
-                                .ok_or_else(|| {
-                                    if *fuel == 0 {
-                                        nir::NominalAdmissionError::Budget
-                                    } else {
-                                        nir::NominalAdmissionError::Invalid(
-                                            "nominal value layout unavailable".into(),
-                                        )
-                                    }
-                                })
                             },
                             |_, _, _| false,
                             |domain, fuel| {
@@ -2601,21 +2576,12 @@ impl Builder<'_> {
                             arguments,
                             &mut self.fuel,
                             |ty, variant, fuel| {
-                                nir::normal_forms::nominal_value_fields_budgeted(
+                                nir::normal_forms::query_nominal_value_fields(
                                     self.package,
                                     ty,
                                     variant,
                                     fuel,
                                 )
-                                .ok_or_else(|| {
-                                    if *fuel == 0 {
-                                        nir::NominalAdmissionError::Budget
-                                    } else {
-                                        nir::NominalAdmissionError::Invalid(
-                                            "nominal value layout unavailable".into(),
-                                        )
-                                    }
-                                })
                             },
                             |_, _, _| false,
                             |domain, fuel| {

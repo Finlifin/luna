@@ -2204,28 +2204,55 @@ impl<'a> Interpreter<'a> {
             self.target,
         )
     }
+    // Optional observers retain their historical exhausted-fuel convention.
+    // Admission consumes the typed query directly and never infers its error.
     fn normal_value_fields(
         &self,
         ty: &Term,
         variant: Option<u32>,
         fuel: &mut usize,
     ) -> Option<Vec<Term>> {
-        use nir::normal_forms::instantiate_value_fields;
-        nir::type_computations::charge_term(ty, fuel).ok()?;
+        match self.query_normal_value_fields(ty, variant, fuel) {
+            Ok(fields) => Some(fields),
+            Err(nir::NominalAdmissionError::Budget) => {
+                *fuel = 0;
+                None
+            }
+            Err(nir::NominalAdmissionError::Invalid(_)) => None,
+        }
+    }
+    fn query_normal_value_fields(
+        &self,
+        ty: &Term,
+        variant: Option<u32>,
+        fuel: &mut usize,
+    ) -> Result<Vec<Term>, nir::NominalAdmissionError> {
+        use nir::NominalAdmissionError as AdmissionError;
+        use nir::normal_forms::instantiate_value_fields_checked as instantiate_value_fields;
+        nir::type_computations::charge_term(ty, fuel)?;
         let Term::Nominal {
             declaration,
             arguments,
         } = ty
         else {
-            return None;
+            return Err("layout requires a nominal type".into());
         };
         if self.graph.is_some() {
-            return match (self.concrete_nominal(ty)?, variant) {
+            return match (
+                self.concrete_nominal(ty)
+                    .ok_or_else(|| AdmissionError::from("concrete nominal layout unavailable"))?,
+                variant,
+            ) {
                 (ConcreteNominal::Enum(definition), Some(index)) => instantiate_value_fields(
                     &[],
                     &[],
                     &[],
-                    definition.variants.get(index as usize)?.fields.iter(),
+                    definition
+                        .variants
+                        .get(index as usize)
+                        .ok_or_else(|| AdmissionError::from("enum variant index is unavailable"))?
+                        .fields
+                        .iter(),
                     fuel,
                 ),
                 (ConcreteNominal::Newtype(definition), None) => instantiate_value_fields(
@@ -2242,26 +2269,40 @@ impl<'a> Interpreter<'a> {
                     definition.fields.iter().map(|(_, ty)| ty),
                     fuel,
                 ),
-                _ => None,
+                _ => Err("concrete nominal variant kind mismatch".into()),
             };
         }
         if let Some(index) = variant {
-            let definition = self.enums.get(declaration)?;
+            let definition = self
+                .enums
+                .get(declaration)
+                .ok_or_else(|| AdmissionError::from("enum layout unavailable"))?;
             instantiate_value_fields(
                 &definition.type_parameters,
                 &definition.parameter_types,
                 arguments,
-                definition.variants.get(index as usize)?.fields.iter(),
+                definition
+                    .variants
+                    .get(index as usize)
+                    .ok_or_else(|| AdmissionError::from("enum variant index is unavailable"))?
+                    .fields
+                    .iter(),
                 fuel,
             )
         } else if let Some(definition) = self.newtypes.get(declaration) {
-            Some(vec![
+            Ok(vec![
                 definition
                     .representation_budgeted(arguments, &[], fuel)
-                    .ok()?,
+                    .map_err(|error| match error {
+                        nir::newtypes::ConversionError::Budget => AdmissionError::Budget,
+                        error => AdmissionError::Invalid(error.to_string()),
+                    })?,
             ])
         } else {
-            let definition = self.structs.get(declaration)?;
+            let definition = self
+                .structs
+                .get(declaration)
+                .ok_or_else(|| AdmissionError::from("struct layout unavailable"))?;
             instantiate_value_fields(
                 &definition.type_parameters,
                 &definition.parameter_types,
@@ -7333,6 +7374,59 @@ mod computation_type_tests {
 #[cfg(test)]
 mod normal_input_data_tests {
     use super::*;
+
+    #[test]
+    fn nominal_layout_admission_keeps_failed_reservations_typed() {
+        let declaration = DeclarationId {
+            package: 2,
+            local: 10,
+        };
+        let fields = vec![
+            ("a".into(), Term::Primitive(Primitive::Bool)),
+            ("b".into(), Term::Primitive(Primitive::Bool)),
+            ("c".into(), Term::Primitive(Primitive::Bool)),
+        ];
+        let package = Package {
+            structs: vec![nir::program::Struct {
+                declaration,
+                name: "Fields".into(),
+                fields,
+                type_parameters: vec![],
+                parameter_types: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            }],
+            ..Default::default()
+        };
+        let vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let ty = Term::Nominal {
+            declaration,
+            arguments: vec![],
+        };
+        let mut fuel = 2;
+        assert_eq!(
+            vm.admitted_nominal_layout(&ty, None, &mut fuel),
+            Err(nir::NominalAdmissionError::Budget)
+        );
+        assert!(
+            fuel > 0,
+            "the typed query must not depend on a zero sentinel"
+        );
+        assert!(matches!(
+            vm.admitted_nominal_layout(&ty, Some(0), &mut 1000),
+            Err(nir::NominalAdmissionError::Invalid(_))
+        ));
+        assert_eq!(
+            vm.admitted_nominal_layout(&ty, None, &mut 1000).unwrap(),
+            vec![Term::Primitive(Primitive::Bool); 3]
+        );
+        let mut legacy_fuel = 2;
+        assert!(
+            vm.normal_value_fields(&ty, None, &mut legacy_fuel)
+                .is_none()
+        );
+        assert_eq!(legacy_fuel, 0);
+    }
 
     #[test]
     fn clause_list_inputs_share_domain_scope_and_budget_validation() {

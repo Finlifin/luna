@@ -249,15 +249,7 @@ impl Contract<'_> {
                 &types,
                 &mut remaining,
                 |ty, variant, fuel| {
-                    vm.normal_value_fields(ty, variant, fuel).ok_or_else(|| {
-                        if *fuel == 0 {
-                            nir::NominalAdmissionError::Budget
-                        } else {
-                            nir::NominalAdmissionError::Invalid(
-                                "nominal value layout unavailable".into(),
-                            )
-                        }
-                    })
+                    vm.query_normal_value_fields(ty, variant, fuel)
                 },
                 |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if vm.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| vm.admitted_collection_domain(domain, fuel), vm.target)
         } else {
@@ -270,15 +262,7 @@ impl Contract<'_> {
                 &types,
                 &mut remaining,
                 |ty, variant, fuel| {
-                    vm.normal_value_fields(ty, variant, fuel).ok_or_else(|| {
-                        if *fuel == 0 {
-                            nir::NominalAdmissionError::Budget
-                        } else {
-                            nir::NominalAdmissionError::Invalid(
-                                "nominal value layout unavailable".into(),
-                            )
-                        }
-                    })
+                    vm.query_normal_value_fields(ty, variant, fuel)
                 },
                 |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if vm.abstract_value_parameters.get(declaration)==Some(domain)),
                 |domain, fuel| vm.admitted_collection_domain(domain, fuel),
