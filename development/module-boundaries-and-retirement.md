@@ -1,18 +1,18 @@
 # 模块边界与源码退役依据
 
 状态：已按审计删除四个停用 crate 的 11 个文件及根 manifest 停用条目。
-旧 middle 类型子系统待单独退役；下文的现状表记录清理前审计依据。
+middle 的旧类型子系统及关联包装也已退役；下文的现状表保留清理前审计依据。
 本文件把[逻辑架构](architecture.md)落实到现有入口；不要求每个职责独立建 crate，
 也不以文件体积、命名陈旧或测试暂时未覆盖作为删除依据。
 
 ## 1. 实际依赖与注释中的架构不同
 
 根 [Cargo.toml](../Cargo.toml)当前启用 26 个 workspace member。
-compiler 下另有 codegen、mir、mir_build、typeck 四个未启用的 manifest，
+清理前 compiler 下另有 codegen、mir、mir_build、typeck 四个未启用的 manifest，
 它们仍引用不存在的 compiler/ty 路径。注释中的旧阶段图及被注释掉的 luna 条目
 不代表生产依赖；luna 已在活动成员中。这里仅核对 manifest，没有尝试构建停用 crate。
 
-| 当前边界 | 实际证据 | 对迁移的含义 |
+| 清理前边界 | 实际证据 | 对迁移的含义 |
 | --- | --- | --- |
 | ast_lowering → middle | [providers.rs](../compiler/ast_lowering/src/providers.rs)使用 Db、Providers、HirPackageBox | 当前依赖主要在查询适配层；lowering 算法不因此需要旧 TyCtxt |
 | middle → HIR/query 与旧 ty | [queries.rs](../compiler/middle/src/queries.rs)同时拥有 HIR 输入、缓存及 TyCtxt | 不能删除 middle 整包来清理旧类型系统；先分离实际职责 |
@@ -105,24 +105,25 @@ fixture、tests 或 examples，源码也未声明 `#[test]`。26 个活动成员
 `codegen/src/lib.rs::{codegen_test_main,codegen_llvm}`。未尝试修复缺失的 compiler/ty
 依赖或启动旧后端；上述算法阅读也不构成新旧后端行为等价证明。
 
-据此，后续允许修改源码时可将四个目录及根 manifest 的对应停用注释作为一个独立
-退役单元，不必等待新 TypeRef、VM 或全后端重构完成。删除前保存基线提交及文件清单，
-删除后核对路径依赖闭包与活动入口检查；历史由 Git 恢复，不另建一份平行可构建实现。
+据此已将四个目录及根 manifest 的对应停用注释作为独立单元删除，提交 `c5f4481d`。
+删除前保留基线与文件清单，删除后核对 26 个活动成员的本地依赖闭包，并通过
+`check -p luna`（`/tmp/luna-tools-dxcnvqmt/result.json`）。历史由 Git 恢复，不另建平行实现。
 根 COMPILER_PROGRESS_REPORT.md 的旧后端断层描述是历史快照，不能用来判断当前
 luna/host 不存在。本阶段仍只修改 development，未改写该报告或正式 docs。
 
 ### 4.1 middle 的旧类型子系统须另作一个完整退役单元
 
-活动 manifest 中，ast_lowering、interface、intrinsic、luna 四者依赖 middle。
+清理前活动 manifest 中，ast_lowering、interface、intrinsic、luna 四者依赖 middle。
 进一步核对源码：旧类型侧表的可见调用链是 interface 的 `adt_def/def_ty_exists`
 包装 → LunaDatabase 的同名方法 → TyCtxt；未找到活动生产消费者向这些侧表注册类型。
 intrinsic 的 `_ty_ctxt` 形参未被函数体读取。不能因此连同 Db/HIR 一起删掉。
 
-该退役单元须一起处理：middle::ty 及其重导出、Db::ty_ctxt 的构造与字段、
+该退役单元已一起处理：middle::ty 及其重导出、Db::ty_ctxt 的构造与字段、
 LunaDatabase 的两个旧类型查询、interface 对应包装与导入、intrinsic 的无用形参及其
-middle 依赖；同时修正声称仍有旧类型 pass 的模块说明。不能保留空实现或将旧 NFId
-转换成新类型身份来维持表面兼容。HIR 查询、provider 注册、失效、所有者和 session
-生命周期继续由现有机制承担；本项不要求先改名或拆出新 crate。
+middle 依赖；同步删除 middle 对旧 arena/集合库的两条直接依赖，更新 Cargo.lock，
+并修正声称仍有旧类型 pass 的模块说明。未保留空实现，也未将旧 NFId
+转换成新类型身份。HIR 查询、provider 注册、失效、所有者和 session 生命周期保持
+现有实现；未改名或拆出新 crate，也未增加 unsafe Send/Sync。
 
 已针对必须保留的行为运行现有测试：
 
@@ -145,4 +146,15 @@ python3 -B development/check.py --timeout 180 -- test -p middle --test query_inp
 以及失败、重新发布和输入变化是否仍保持相同契约。
 
 四个停用 crate 已删除，活动 workspace 成员保持原有集合；旧源码可从 `20af1c41`
-恢复。middle 类型侧表及通用机制的迁移尚未完成，HIR 查询保留能力仍须在接线变更后验证。
+恢复。middle 旧类型侧表已退役；通用参数、世界存储和 TypeRef 等语义迁移尚未完成。
+
+接线变更后的检查均在 `/home/fin/luna` 通过，使用 development/check.py 调用受控 Cargo：
+
+- `test -p middle -p interface -p intrinsic`：HIR 输入失效/所有权、intrinsic 注册测试及
+  四项生命周期/线程 compile-fail 用例通过；报告 `/tmp/luna-tools-1wj2_9j4/result.json`。
+- `test -p luna --test function_template_local_definitions clause_defaults_rebind_their_local_definitions -- --exact`：
+  真实 sysroot 的模板默认值路径通过；报告 `/tmp/luna-tools-k450175d/result.json`。
+- `test -p luna --test packages imported_generic_function_executes_from_its_provider_package -- --exact`：
+  多包入口与提供者泛型调用通过；报告 `/tmp/luna-tools-q7ys3_j9/result.json`。
+
+这些检查验证本次退役的消费者闭包；不代表全部架构迁移或历史已知失败已修复。

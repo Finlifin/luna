@@ -1,38 +1,8 @@
-//! Compiler interface – the coordination layer of the Luna compiler.
+//! Source compilation sessions and HIR query coordination for luna.
 //!
-//! This crate defines the central types that **every compiler pass** needs:
-//! [`Session`], [`CompilerInstance`], and the lightweight [`Compiler`]
-//! handle.  It sits between the foundational crates and the analysis passes.
-//!
-//! # Crate Dependency Graph
-//!
-//! ```text
-//!   symbol, ast, lex, diagnostic, vfs, query, middle   ← foundational
-//!                          ↑
-//!                      interface                        ← THIS CRATE
-//!                          ↑
-//!              typeck, mir_build, codegen, …            ← analysis passes
-//!                          ↑
-//!                        luna                           ← binary driver
-//! ```
-//!
-//! # Key types
-//!
-//! ```text
-//!   Session                   (config, source_map, sysroot)
-//!       │
-//!       ▼
-//!   CompilerInstance<'sess>   (db, hir_arena, vfs, diag_ctx, …)
-//!       │  db: middle::Db     ← query engine + TyCtxt arena
-//!       │
-//!       ▼
-//!   Compiler<'c, 'sess>       (thin Copy handle, Deref → CompilerInstance)
-//! ```
-//!
-//! The [`middle::Db`] owns both the query engine (memoisation,
-//! change tracking) and the [`middle::TyCtxt`] arena (type interning).
-//! All previously separate [`QueryEngine`] / [`Queries`] / [`TyCtxt`]
-//! fields are now unified in `db`.
+//! [`CompilerInstance`] owns source inputs, diagnostics and the query database.
+//! [`Compiler`] borrows that instance to expose provider-backed HIR queries.
+//! Semantic types and their checks belong to the NIR/elaboration pipeline.
 
 mod session;
 
@@ -51,33 +21,18 @@ use std::sync::Arc;
 
 use diagnostic::DiagnosticContext;
 use hir::HirArena;
-use hir::hir_id::LocalDefId;
 use intrinsic::IntrinsicContext;
 use intrinsic::sysroot::PackageId;
 use middle::queries::LunaDatabase as _; // bring query methods into scope
-use middle::{AdtDef, Db, HirPackageBox, NFId};
+use middle::{Db, HirPackageBox};
 use vfs::Vfs;
 
 // ── CompilerInstance ─────────────────────────────────────────────────────────
 
-/// Global compiler context – owns all compilation-wide data.
+/// Source state for one compilation, bounded by its session lifetime.
 ///
-/// Analogous to rustc's `GlobalCtxt`.  Created once per compilation and
-/// lives for the entire duration of the session it borrows.
-///
-/// # Central store: `db`
-///
-/// [`middle::Db`] unifies:
-/// - the query engine (memoisation, cycle detection, dep-graph)
-/// - the [`TyCtxt`](middle::TyCtxt) type-interning arena
-///
-/// Both are accessed through `self.db` or `self.db.ty_ctxt`.
-///
-/// # HIR arena
-///
-/// The [`HirArena`] is owned here so that `'hir = 'c` (the borrow
-/// lifetime of [`Compiler`]).  Every `&'hir` HIR reference can be
-/// obtained by borrowing `CompilerInstance`.
+/// The database owns HIR query inputs and caches. Query results own their HIR
+/// arenas; the separate helper arena is borrowed through this instance.
 pub struct CompilerInstance<'sess> {
     /// The long-lived compiler session.
     pub sess: &'sess Session,
@@ -89,9 +44,7 @@ pub struct CompilerInstance<'sess> {
     pub sysroot_vfs: Vec<Vfs>,
     /// The central query database.
     ///
-    /// Provides:
-    /// - memoised query results (call `self.db.hir_package(())`, …)
-    /// - the type-interning arena (`self.db.ty_ctxt`)
+    /// Stores inputs and memoised HIR results with dependency invalidation.
     pub db: Db<'sess>,
     /// HIR arena – backing memory for all `&'hir` HIR nodes.
     ///
@@ -106,7 +59,7 @@ impl<'sess> CompilerInstance<'sess> {
     /// Create a new compiler instance tied to the given session.
     pub fn new(sess: &'sess Session) -> Self {
         let db = Db::new();
-        let intrinsic_ctx = intrinsic::initialize(&db.ty_ctxt);
+        let intrinsic_ctx = intrinsic::initialize();
         let sysroot_vfs = Self::load_sysroot(sess);
 
         CompilerInstance {
@@ -181,41 +134,16 @@ impl<'sess> CompilerInstance<'sess> {
 
 // ── Compiler handle ──────────────────────────────────────────────────────────
 
-/// Thin, `Copy` handle into the compiler – passed to every compiler pass.
+/// Borrowed access to the compilation's source state and HIR queries.
 ///
-/// Analogous to rustc's `TyCtxt<'tcx>`.  Provides **read-only** access to
-/// all compilation-wide data through the underlying [`CompilerInstance`].
-///
-/// The lifetime `'c` also serves as `'hir`: since `CompilerInstance` owns
-/// the [`HirArena`], any `&'c CompilerInstance` borrow can be used to
-/// obtain `&'c T` (= `&'hir T`) HIR references.
-///
-/// ```ignore
-/// fn some_pass(cx: Compiler<'_, '_>) {
-///     let adt = cx.adt_def(id);        // TyCtxt side-table lookup
-///     let ty  = cx.db.ty_ctxt.def_ty(def_id);  // TyCtxt arena lookup
-///     let e   = cx.hir_arena.alloc_expr(…);    // HIR allocation
-/// }
-/// ```
+/// References obtained from the helper arena remain bounded by the instance
+/// borrow; owned HIR query results retain their own allocation owner.
 #[derive(Clone, Copy)]
 pub struct Compiler<'c, 'sess> {
     instance: &'c CompilerInstance<'sess>,
 }
 
 impl<'c, 'sess> Compiler<'c, 'sess> {
-    // ── Query methods ─────────────────────────────────────────────────────
-
-    /// Look up an ADT definition by id (TyCtxt side table).
-    ///
-    /// Returns `None` if no ADT has been registered for `id`.
-    pub fn adt_def(self, id: NFId) -> Option<Arc<AdtDef>> {
-        self.db.adt_def(id)
-    }
-
-    /// Check whether a semantic type has been recorded for `id`.
-    pub fn def_ty_exists(self, id: LocalDefId) -> bool {
-        self.db.def_ty_exists(id)
-    }
     // ── HIR queries ────────────────────────────────────────────────────────────
 
     /// Lower the package's AST to HIR (memoised via the query engine).

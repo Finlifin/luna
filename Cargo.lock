@@ -354,7 +354,6 @@ name = "intrinsic"
 version = "0.1.0"
 dependencies = [
  "hir",
- "middle",
  "nir",
  "rustc_data_structures",
 ]
@@ -485,8 +484,6 @@ dependencies = [
  "hir",
  "query",
  "resolve",
- "rustc-arena-modified",
- "rustc_data_structures",
  "rustc_span",
  "vfs",
 ]

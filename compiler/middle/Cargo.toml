@@ -6,8 +6,6 @@ edition = "2024"
 [dependencies]
 hir = { path = "../hir" }
 query = { path = "../query" }
-rustc_data_structures = { workspace = true }
-rustc-arena-modified = { workspace = true }
 ast = { path = "../ast" }
 vfs = { path = "../vfs" }
 resolve = { path = "../resolve" }

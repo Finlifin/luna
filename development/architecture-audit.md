@@ -3,7 +3,8 @@
 基线：`70214cdd08f71c4980b5e80a9b288cd573710cc5`，dev，2026-11-03。
 架构结论以静态源码核对为主；第 6 节单独记录 2026-11-04 的有限运行基线，
 不以历史结果或少量正例冒充新架构验收。
-作者要求先完成设计，本文件不是已经实施的重构报告。
+本文件保留初始审计；随后已实施的源码退役与检查见[模块边界](module-boundaries-and-retirement.md)。
+完整架构迁移尚未完成。
 
 ## 1. 体量与结构事实
 
@@ -50,8 +51,8 @@ R09 的接线还需区分三个已有层次：`ptc/src/type_inputs.rs` 已有选
 绑定的证明。裸模型遇 trait 返回 Unknown 不表示这些能力不存在；缺口是联合模型和
 跨理论证据的完整交付。迁移细节见[Type 模型与理论证据](type-models-and-theory-evidence.md)。
 
-R16 需要按边界分别核验：HirPackageBox 已有高阶生命周期构造和 owner 借用期访问，
-CodeSession 已精确保活世界；TyCtxt 侧表的输入 owner、arena 载荷析构和 Symbol 指针位编码
+R16 的旧 middle::ty 已在清理中整体退役。其余边界仍分别核验：HirPackageBox 已有高阶生命周期构造和 owner 借用期访问，
+CodeSession 已精确保活世界；HIR arena 载荷析构和 Symbol 指针位编码
 仍须具体审计，不能只凭 lifetime 名称或地址稳定认定安全。目标存储与迁移条件见
 [世界存储与生命周期](world-storage-and-lifetimes.md)；本次没有执行内存安全动态验证。
 

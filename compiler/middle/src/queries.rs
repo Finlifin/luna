@@ -5,7 +5,6 @@
 //! ```text
 //!   ┌──────────────────────────────────────┐
 //!   │  Db                                  │
-//!   │  ├ ty_ctxt      – type arena         │
 //!   │  ├ providers    – fn-ptr dispatch    │
 //!   │  ├ query_engine – stack + hooks      │
 //!   │  ├ hir_input    – query inputs       │
@@ -31,12 +30,10 @@
 
 use std::sync::Arc;
 
-use hir::hir_id::LocalDefId;
 use query::{QueryCache, QueryDesc, QueryEngine, force_get_with};
 
 use crate::hir_package::HirPackageBox;
 use crate::hir_query::HirQueryInput;
-use crate::ty::{AdtDef, NFId, TyCtxt};
 
 // ── Query descriptors ─────────────────────────────────────────────────────────
 
@@ -112,18 +109,6 @@ pub trait LunaDatabase<'session> {
     /// Downcast to the concrete [`Db`].
     fn as_db(&self) -> &Db<'session>;
 
-    // ── ADT lookups (TyCtxt side tables, not demand queries) ──────────────
-
-    fn adt_def(&self, id: NFId) -> Option<Arc<AdtDef>> {
-        self.as_db().ty_ctxt.adt_def(id).map(Arc::new)
-    }
-
-    // ── Type lookups ──────────────────────────────────────────────────────
-
-    fn def_ty_exists(&self, id: LocalDefId) -> bool {
-        self.as_db().ty_ctxt.def_ty(id).is_some()
-    }
-
     // ── HIR queries ───────────────────────────────────────────────────────
 
     /// Lower the package's AST to HIR, returning an owned [`HirPackageBox`].
@@ -165,9 +150,6 @@ pub trait LunaDatabase<'session> {
 /// ```
 #[derive(Clone)]
 pub struct Db<'session> {
-    /// Type-interning arena (wrapped in `Arc` for cheap `Clone`).
-    pub ty_ctxt: Arc<TyCtxt>,
-
     /// Registered query providers (function pointers, trivially `Sync`).
     pub providers: Providers,
 
@@ -192,7 +174,6 @@ impl<'session> Db<'session> {
     /// Construct an empty compiler database with default (panicking) providers.
     pub fn new() -> Self {
         Db {
-            ty_ctxt: Arc::new(TyCtxt::new()),
             providers: Providers::default(),
             query_engine: Arc::new(QueryEngine::new()),
             hir_input: Arc::new(std::sync::Mutex::new(None)),

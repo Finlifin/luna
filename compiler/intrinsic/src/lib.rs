@@ -1,46 +1,14 @@
-//! # Intrinsic crate – built-in content for the Luna/Flurry compiler.
+//! Builtin symbol bindings, language items and sysroot discovery.
 //!
-//! This crate defines and registers everything the compiler "just knows"
-//! without needing a source definition: primitive types, built-in
-//! functions, well-known symbols, and language items.
-//!
-//! ## Crate Dependency Graph
-//!
-//! ```text
-//!   hir, ty                       ← foundational type crates
-//!       ↑
-//!   intrinsic                     ← THIS CRATE
-//!       ↑
-//!   interface                     ← CompilerInstance calls initialize()
-//! ```
-//!
-//! ## Architecture
-//!
-//! ```text
-//!   IntrinsicContext
-//!   ├── lang_items : LangItems          ← concept → DefId mapping
-//!   ├── builtin_fns: Vec<BuiltinFnId>   ← registered built-in functions
-//!   └── initialized: bool
-//!
-//!   symbols   (module)   ← pre-interned well-known Symbol values
-//!   builtins  (module)   ← BuiltinFn catalogue + lookup
-//!   lang_item (module)   ← LangItem enum + LangItems table
-//! ```
-//!
-//! The public entry point is [`initialize`], which is called by
-//! `CompilerInstance::new()` to populate the type context and lang-item
-//! table with compiler-provided definitions.
+//! [`initialize`] creates the bootstrap language-item table. Source protocol
+//! bindings are resolved separately through their declaration identities.
 
-// pub mod builtins;
 pub mod lang_item;
 pub mod symbols;
 pub mod sysroot;
 
-// pub use builtins::{ALL_BUILTINS, BuiltinFn, BuiltinFnId, BuiltinTy};
 pub use lang_item::{LangItem, LangItemDef, LangItems, SourceBindingError};
 pub use sysroot::{PackageId, Sysroot, SysrootPackage};
-
-use middle::TyCtxt;
 
 /// Owns all intrinsic / built-in state for a single compilation.
 ///
@@ -50,18 +18,8 @@ pub struct IntrinsicContext {
     pub lang_items: LangItems,
 }
 
-/// Initialise all compiler-provided built-in content.
-///
-/// This is the **single entry point** called by `CompilerInstance::new()`
-/// to bootstrap the intrinsic environment. It:
-///
-/// 1. Pre-interns well-known symbols so later lookups are O(1).
-/// 2. Registers primitive types as lang items.
-/// 3. Registers built-in function type signatures into the [`TyCtxt`].
-///
-/// Returns an [`IntrinsicContext`] that should be stored in the compiler
-/// instance for later queries.
-pub fn initialize(_ty_ctxt: &TyCtxt) -> IntrinsicContext {
+/// Create the bootstrap table of compiler-provided primitive language items.
+pub fn initialize() -> IntrinsicContext {
     // Register primitive types as lang items.
     let mut lang_items = LangItems::new();
     use LangItem::*;

@@ -8,7 +8,8 @@
 
 ## 1. 已有所有权保护不能因重构而丢失
 
-下列路径均以 `compiler/` 为根。本轮只做静态审计，未运行 Miri、并发或内存压力验证。
+下列路径均以 `compiler/` 为根，记录初始静态审计。旧 middle::ty 已在源码清理中删除，
+其余世界存储迁移尚未实施；未运行 Miri、并发或内存压力验证。
 
 | 入口 | 已存在的约束 | 需要进一步处理的问题 |
 | --- | --- | --- |
@@ -16,7 +17,7 @@
 | `middle/src/hir_package.rs::HirPackageBox` | 高阶生命周期构造回调、owner 借用期 accessor、包先于 arena 析构 | 不能直接将可变 arena 作为并发稳定世界；现有 compile-fail 约束应保留 |
 | `hir/src/lib.rs::Package` | 节点借用与 owner/body/来源/解析表分离 | 克隆 Package 仍复制多张表，不等于全部按需增量存储 |
 | `hir/src/definitions.rs::fork_package/PreparedPublication` | 复制预算、私有候选、无后续用户回调的安装 | 小批发布的全表复制、草稿 arena 残留与旧版本保活成本 |
-| `middle/src/ty/interner.rs`、`ty/context.rs` | arena intern 和定义/节点侧表 | lifetime 擦除后再次查询的输入所有者约束，旧 ty 与新语义内核职责分离 |
+| 已退役的 `middle/src/ty`（可从 `20af1c41` 恢复） | 原 arena intern 和定义/节点侧表 | 无生产消费者的旧体系已整体移除，未迁入新语义内核 |
 | `symbol/src/lib.rs::Symbol` | 全局 intern 及同进程指针身份 | AST 将指针拆为两个 u32；不得进入持久协议，也不能假定其布局普适 |
 | `comptime_interpretor/src/code_session.rs` | 强持有精确 source/IIR 世界，fresh VM，匹配后交换代码缓存 | 更细粒度复用需新的依赖证据，不能先移除精确快照检查 |
 | `middle/src/queries.rs` | HIR 输入更换时失效查询；活动 provider 中拒绝输入替换 | 仍是包级产物，活动世界与稳定结果尚未全面分离 |
