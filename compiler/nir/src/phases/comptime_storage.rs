@@ -1,6 +1,7 @@
 //! Stored comptime payloads cannot contain runtime pointers. Type arguments,
 //! code ports and runtime callable signatures describe values rather than store
 //! them; inspecting those as payloads would reject legal metaprogramming.
+use super::StorageError;
 use crate::{Sort, Term, program::Package};
 use std::collections::HashSet;
 
@@ -9,7 +10,7 @@ pub(super) fn validate(
     package: &Package,
     frames: &[Vec<Sort>],
 ) -> Result<(), &'static str> {
-    validate_resolved(ty, package, frames, None, &mut 100_000)
+    validate_resolved(ty, package, frames, None, &mut 100_000).map_err(StorageError::message)
 }
 
 pub(super) fn validate_resolved(
@@ -18,7 +19,7 @@ pub(super) fn validate_resolved(
     frames: &[Vec<Sort>],
     resolve: super::NominalStorageResolver<'_>,
     fuel: &mut usize,
-) -> Result<(), &'static str> {
+) -> Result<(), StorageError> {
     match contains_pointer(
         ty,
         Some(package),
@@ -29,8 +30,10 @@ pub(super) fn validate_resolved(
         resolve,
     ) {
         Ok(false) => Ok(()),
-        Ok(true) => Err("runtime pointer values cannot inhabit comptime storage"),
-        Err(()) => Err("comptime storage inspection limit or invalid payload layout"),
+        Ok(true) => Err(StorageError::Invalid(
+            "runtime pointer values cannot inhabit comptime storage",
+        )),
+        Err(error) => Err(error),
     }
 }
 
@@ -38,9 +41,9 @@ pub(super) fn validate_resolved(
 pub(super) fn validate_layouts(
     ty: &Term,
     frames: &[Vec<Sort>],
-    resolve: &dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>,
+    resolve: &dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, StorageError>,
     fuel: &mut usize,
-) -> Result<(), &'static str> {
+) -> Result<(), StorageError> {
     match contains_pointer(
         ty,
         None,
@@ -51,8 +54,10 @@ pub(super) fn validate_layouts(
         Some(resolve),
     ) {
         Ok(false) => Ok(()),
-        Ok(true) => Err("runtime pointer values cannot inhabit comptime storage"),
-        Err(()) => Err("comptime storage inspection limit or invalid payload layout"),
+        Ok(true) => Err(StorageError::Invalid(
+            "runtime pointer values cannot inhabit comptime storage",
+        )),
+        Err(error) => Err(error),
     }
 }
 
@@ -64,14 +69,10 @@ fn contains_pointer(
     fuel: &mut usize,
     depth: usize,
     resolve: super::NominalStorageResolver<'_>,
-) -> Result<bool, ()> {
-    crate::type_computations::charge_term(ty, fuel).map_err(|error| {
-        if matches!(error, crate::type_computations::Error::Budget) {
-            *fuel = 0;
-        }
-    })?;
+) -> Result<bool, StorageError> {
+    crate::type_computations::charge_term(ty, fuel)?;
     if depth > 128 {
-        return Err(());
+        return Err(StorageError::Budget);
     }
     if !seen.insert(ty.clone()) {
         return Ok(false);
@@ -94,17 +95,13 @@ fn contains_pointer(
         },
         Term::NormalForm { .. } => {
             if package.is_none() {
-                resolve.ok_or(())?(ty, fuel).ok_or(())?
+                resolve.ok_or(StorageError::Invalid("storage layout resolver unavailable"))?(
+                    ty, fuel,
+                )?
             } else if let Some(fields) = crate::normal_forms::tuple_fields(package, ty) {
                 fields.to_vec()
             } else if let Some(element) =
-                crate::normal_forms::list_element_budgeted(package.unwrap(), ty, fuel).map_err(
-                    |error| {
-                        if matches!(error, crate::NominalAdmissionError::Budget) {
-                            *fuel = 0;
-                        }
-                    },
-                )?
+                crate::normal_forms::list_element_budgeted(package.unwrap(), ty, fuel)?
             {
                 vec![element]
             } else {
@@ -117,7 +114,7 @@ fn contains_pointer(
             arguments,
         } => {
             if let Some(resolve) = resolve {
-                resolve(ty, fuel).ok_or(())?
+                resolve(ty, fuel)?
             } else if let Some(definition) = package.and_then(|package| {
                 package
                     .structs
@@ -126,7 +123,7 @@ fn contains_pointer(
             }) {
                 definition
                     .instantiate_fields_in_scope(arguments, frames)
-                    .map_err(|_| ())?
+                    .map_err(|_| StorageError::Invalid("invalid nominal storage instantiation"))?
                     .into_iter()
                     .map(|(_, field)| field)
                     .collect()
@@ -135,7 +132,7 @@ fn contains_pointer(
             {
                 definition
                     .instantiate_variants_in_scope(arguments, frames)
-                    .map_err(|_| ())?
+                    .map_err(|_| StorageError::Invalid("invalid nominal storage instantiation"))?
                     .into_iter()
                     .flat_map(|variant| variant.fields)
                     .collect()
@@ -145,11 +142,7 @@ fn contains_pointer(
                     .iter()
                     .find(|d| d.declaration == *declaration)
             }) {
-                vec![
-                    definition
-                        .representation_budgeted(arguments, frames, fuel)
-                        .map_err(|_| ())?,
-                ]
+                vec![definition.representation_budgeted(arguments, frames, fuel)?]
             } else {
                 vec![]
             }

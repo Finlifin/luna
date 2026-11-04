@@ -1434,15 +1434,15 @@ fn concrete_storage_layout_inspection_spends_shared_budget_and_recovers() {
         arguments: vec![],
     };
     let metadata = Package::default();
-    let resolve = |ty: &Term, fuel: &mut usize| -> Option<Vec<Term>> {
+    let resolve = |ty: &Term, fuel: &mut usize| -> Result<Vec<Term>, nir::phases::StorageError> {
         if ty != &nominal {
-            return None;
+            return Err(nir::phases::StorageError::Invalid("missing test layout"));
         }
         (0..256)
             .map(|_| {
                 let field = Term::Primitive(Primitive::Bool);
-                nir::type_computations::charge_term(&field, fuel).ok()?;
-                Some(field)
+                nir::type_computations::charge_term(&field, fuel)?;
+                Ok(field)
             })
             .collect()
     };
@@ -1492,7 +1492,7 @@ fn concrete_storage_layout_inspection_spends_shared_budget_and_recovers() {
             &nominal,
             &metadata,
             &[],
-            &|_, _| None,
+            &|_, _| Err(nir::phases::StorageError::Invalid("missing test layout")),
             &mut enough
         )
         .is_err()
@@ -1812,4 +1812,67 @@ fn staged_value_phase_validation_keeps_frozen_and_invocation_scopes_distinct() {
     };
     parameters[0].sort = Sort::Runtime;
     assert!(nir::phases::validate(&package).is_err());
+}
+
+#[test]
+fn storage_queries_preserve_errors_independently_of_remaining_budget() {
+    use nir::phases::{self, StorageError};
+    let ty = Term::Nominal {
+        declaration: DeclarationId {
+            package: 9,
+            local: 1,
+        },
+        arguments: vec![],
+    };
+    let package = Package::default();
+    for mode in 0..3 {
+        let check = |resolve: &dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, StorageError>,
+                     fuel: &mut usize| {
+            match mode {
+                0 => phases::validate_runtime_storage_with_nominals(
+                    &ty,
+                    &package,
+                    &[],
+                    resolve,
+                    fuel,
+                ),
+                1 => phases::validate_comptime_storage_with_nominals(
+                    &ty,
+                    &package,
+                    &[],
+                    resolve,
+                    fuel,
+                ),
+                _ => phases::validate_comptime_storage_with_layouts(&ty, &[], resolve, fuel),
+            }
+        };
+        let mut fuel = 100;
+        assert_eq!(
+            check(&|_, _| Err(StorageError::Budget), &mut fuel),
+            Err(StorageError::Budget)
+        );
+        assert!(fuel > 0);
+        let invalid = StorageError::Invalid("receiving world has no layout");
+        assert_eq!(
+            check(
+                &|_, fuel| {
+                    *fuel = 0;
+                    Err(invalid)
+                },
+                &mut 100
+            ),
+            Err(invalid)
+        );
+        check(&|_, _| Ok(vec![Term::Primitive(Primitive::Bool)]), &mut 100).unwrap();
+        let forbidden = if mode == 0 {
+            Term::Primitive(Primitive::Integer)
+        } else {
+            Term::Pointer(Box::new(Term::Primitive(Primitive::Bool)))
+        };
+        assert!(matches!(
+            check(&|_, _| Ok(vec![forbidden.clone()]), &mut 100),
+            Err(StorageError::Invalid(_))
+        ));
+        check(&|_, _| Ok(vec![]), &mut 100).unwrap();
+    }
 }

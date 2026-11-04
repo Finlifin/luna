@@ -276,11 +276,17 @@ impl Package {
             normal_forms: self.normal_forms.clone(),
             ..Default::default()
         };
-        let resolve_storage = |ty: &Term, fuel: &mut usize| -> Option<Vec<Term>> {
-            let definition = links.nominal(ty, fuel).ok()??;
+        let resolve_storage = |ty: &Term,
+                               fuel: &mut usize|
+         -> Result<Vec<Term>, nir::phases::StorageError> {
+            let definition = links
+                .nominal(ty, fuel)?
+                .ok_or(nir::phases::StorageError::Invalid(
+                    "IIR nominal storage layout unavailable",
+                ))?;
             let mut copy_field = |field: &Term| {
-                nir::type_computations::charge_term(field, fuel).ok()?;
-                Some(field.clone())
+                nir::type_computations::charge_term(field, fuel)?;
+                Ok(field.clone())
             };
             match definition {
                 NominalDefinition::Struct(definition) => definition
@@ -295,7 +301,7 @@ impl Package {
                     .map(copy_field)
                     .collect(),
                 NominalDefinition::Newtype(definition) => {
-                    Some(vec![copy_field(&definition.representation)?])
+                    Ok(vec![copy_field(&definition.representation)?])
                 }
             }
         };

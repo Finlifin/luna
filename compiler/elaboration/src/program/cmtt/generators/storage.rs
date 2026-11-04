@@ -1,21 +1,22 @@
 //! Reuse comptime storage admission for generator data without inspecting code
 //! ports or unfolding opaque heads. Nominal layouts come from the current world.
 use super::*;
+use nir::phases::StorageError;
 
 impl Checker<'_, '_> {
     pub(super) fn generator_comptime_storage(&self, ty: &Term, fuel: &mut usize) -> bool {
         let frames = vec![self.call_inference_scope().iter().map(|p| p.sort).collect()];
-        let resolve = |ty: &Term, fuel: &mut usize| -> Option<Vec<Term>> {
+        let resolve = |ty: &Term, fuel: &mut usize| -> Result<Vec<Term>, StorageError> {
             if let Some(element) = self.list_element_type(ty) {
-                nir::type_computations::charge_term(element, fuel).ok()?;
-                return Some(vec![element.clone()]);
+                nir::type_computations::charge_term(element, fuel)?;
+                return Ok(vec![element.clone()]);
             }
             if let Some(fields) = self.bound_tuple_elements(ty) {
                 return fields
                     .iter()
                     .map(|field| {
-                        nir::type_computations::charge_term(field, fuel).ok()?;
-                        Some(field.clone())
+                        nir::type_computations::charge_term(field, fuel)?;
+                        Ok(field.clone())
                     })
                     .collect();
             }
@@ -25,18 +26,18 @@ impl Checker<'_, '_> {
             } = ty
             else {
                 // An opaque NF head carries no storage view to unfold here.
-                return Some(vec![]);
+                return Ok(vec![]);
             };
             if let Some(definition) = self.newtypes.get(declaration) {
-                return Some(vec![
-                    definition
-                        .representation_budgeted(arguments, &frames, fuel)
-                        .ok()?,
+                return Ok(vec![
+                    definition.representation_budgeted(arguments, &frames, fuel)?,
                 ]);
             }
             let (parameters, domains, fields): (_, _, Vec<_>) =
                 if let Some(definition) = self.structs.get(declaration) {
-                    *fuel = fuel.checked_sub(definition.fields.len())?;
+                    *fuel = fuel
+                        .checked_sub(definition.fields.len())
+                        .ok_or(StorageError::Budget)?;
                     (
                         &definition.type_parameters,
                         &definition.parameter_types,
@@ -44,7 +45,9 @@ impl Checker<'_, '_> {
                     )
                 } else if let Some(definition) = self.enums.get(declaration) {
                     for variant in &definition.variants {
-                        *fuel = fuel.checked_sub(variant.fields.len().checked_add(1)?)?;
+                        *fuel = fuel
+                            .checked_sub(variant.fields.len().saturating_add(1))
+                            .ok_or(StorageError::Budget)?;
                     }
                     (
                         &definition.type_parameters,
@@ -58,15 +61,18 @@ impl Checker<'_, '_> {
                 } else {
                     // Abstract or not-yet-published descriptors are rechecked
                     // when concrete generator arguments are admitted.
-                    return Some(vec![]);
+                    return Ok(vec![]);
                 };
             let substitution = nir::DeclarationSubstitution::bounded(
                 parameters, domains, arguments, &frames, fuel,
-            )
-            .ok()?;
+            )?;
             fields
                 .into_iter()
-                .map(|field| substitution.instantiate_bounded(field, fuel).ok())
+                .map(|field| {
+                    substitution
+                        .instantiate_bounded(field, fuel)
+                        .map_err(Into::into)
+                })
                 .collect()
         };
         nir::phases::validate_comptime_storage_with_layouts(ty, &frames, &resolve, fuel).is_ok()

@@ -1,17 +1,10 @@
 //! Recheck dependent storage domains after invocation inputs are substituted.
 use super::*;
+use nir::phases::StorageError;
 
-fn charge_layout_work(fuel: &mut usize, count: usize) -> Option<()> {
-    match fuel.checked_sub(count) {
-        Some(left) => {
-            *fuel = left;
-            Some(())
-        }
-        None => {
-            *fuel = 0;
-            None
-        }
-    }
+fn charge_layout_work(fuel: &mut usize, count: usize) -> Result<(), StorageError> {
+    *fuel = fuel.checked_sub(count).ok_or(StorageError::Budget)?;
+    Ok(())
 }
 
 impl Interpreter<'_> {
@@ -34,10 +27,10 @@ impl Interpreter<'_> {
                     let fields: Vec<&Term> = match ty {
                         Term::Nominal { .. } => {
                             charge_layout_work(fuel, 1)?;
-                            nir::type_computations::charge_term(ty, fuel)
-                                .map_err(|_| *fuel = 0)
-                                .ok()?;
-                            nominal = self.concrete_nominal(ty)?;
+                            nir::type_computations::charge_term(ty, fuel)?;
+                            nominal = self.concrete_nominal(ty).ok_or(StorageError::Invalid(
+                                "concrete nominal storage layout unavailable",
+                            ))?;
                             let definition = &nominal;
                             let count = match definition {
                                 ConcreteNominal::Struct(def) => def.fields.len(),
@@ -61,8 +54,10 @@ impl Interpreter<'_> {
                             }
                         }
                         Term::NormalForm { head, .. } => {
-                            *fuel = fuel.checked_sub(1)?;
-                            let metadata = self.normal_forms.get(head)?;
+                            charge_layout_work(fuel, 1)?;
+                            let metadata = self.normal_forms.get(head).ok_or(
+                                StorageError::Invalid("normal-form storage metadata unavailable"),
+                            )?;
                             if let Some(fields) = metadata.tuple_elements(ty) {
                                 charge_layout_work(fuel, fields.len())?;
                                 fields.iter().collect()
@@ -73,24 +68,21 @@ impl Interpreter<'_> {
                                 vec![]
                             }
                         }
-                        _ => return None,
+                        _ => return Err(StorageError::Invalid("unsupported storage layout query")),
                     };
                     for field in &fields {
-                        nir::type_computations::charge_term(field, fuel)
-                            .map_err(|_| *fuel = 0)
-                            .ok()?;
+                        nir::type_computations::charge_term(field, fuel)?;
                     }
-                    Some(fields.into_iter().cloned().collect())
+                    Ok(fields.into_iter().cloned().collect())
                 },
                 &mut fuel,
             );
             self.budget.steps -= (before - fuel) as u64;
-            return checked.map_err(|_| {
+            return checked.map_err(|error| {
                 self.failure(
-                    if fuel == 0 {
-                        ErrorKind::StepsExhausted
-                    } else {
-                        ErrorKind::PhaseMismatch
+                    match error {
+                        StorageError::Budget => ErrorKind::StepsExhausted,
+                        StorageError::Invalid(_) => ErrorKind::PhaseMismatch,
                     },
                     Some(source),
                 )
@@ -111,46 +103,47 @@ impl Interpreter<'_> {
                     arguments,
                 } = ty
                 else {
-                    return None;
+                    return Err(StorageError::Invalid(
+                        "storage layout requires a nominal type",
+                    ));
                 };
-                *fuel = fuel.checked_sub(1)?;
+                charge_layout_work(fuel, 1)?;
                 if let Some(definition) = self.structs.get(declaration) {
-                    Some(
-                        definition
-                            .instantiate_fields_in_scope(arguments, &[])
-                            .ok()?
-                            .into_iter()
-                            .map(|(_, field)| field)
-                            .collect(),
-                    )
+                    Ok(definition
+                        .instantiate_fields_in_scope(arguments, &[])
+                        .map_err(|_| {
+                            StorageError::Invalid("invalid nominal storage instantiation")
+                        })?
+                        .into_iter()
+                        .map(|(_, field)| field)
+                        .collect())
                 } else if let Some(definition) = self.enums.get(declaration) {
-                    Some(
-                        definition
-                            .instantiate_variants_in_scope(arguments, &[])
-                            .ok()?
-                            .into_iter()
-                            .flat_map(|variant| variant.fields)
-                            .collect(),
-                    )
+                    Ok(definition
+                        .instantiate_variants_in_scope(arguments, &[])
+                        .map_err(|_| {
+                            StorageError::Invalid("invalid nominal storage instantiation")
+                        })?
+                        .into_iter()
+                        .flat_map(|variant| variant.fields)
+                        .collect())
                 } else if let Some(definition) = self.newtypes.get(declaration) {
-                    Some(vec![
-                        definition
-                            .representation_budgeted(arguments, &[], fuel)
-                            .ok()?,
-                    ])
+                    Ok(vec![definition.representation_budgeted(
+                        arguments,
+                        &[],
+                        fuel,
+                    )?])
                 } else {
-                    None
+                    Err(StorageError::Invalid("nominal storage layout unavailable"))
                 }
             },
             &mut fuel,
         );
         self.budget.steps -= (before - fuel) as u64;
-        checked.map_err(|_| {
+        checked.map_err(|error| {
             self.failure(
-                if fuel == 0 {
-                    ErrorKind::StepsExhausted
-                } else {
-                    ErrorKind::PhaseMismatch
+                match error {
+                    StorageError::Budget => ErrorKind::StepsExhausted,
+                    StorageError::Invalid(_) => ErrorKind::PhaseMismatch,
                 },
                 Some(source),
             )
@@ -424,6 +417,19 @@ mod tests {
         for count in [1, 128] {
             let graph = make(count);
             let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+            if count == 128 {
+                let available = vm.budget.steps;
+                vm.budget.steps = 16;
+                let error = vm
+                    .check_comptime_domain(&ty, SourceRange { start: 1, end: 2 })
+                    .unwrap_err();
+                assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                assert!(
+                    vm.remaining_steps() > 0,
+                    "a failed reservation keeps its unused fuel"
+                );
+                vm.budget.steps = available;
+            }
             let before = vm.remaining_steps();
             vm.check_comptime_domain(&ty, SourceRange { start: 1, end: 2 })
                 .unwrap();

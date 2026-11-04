@@ -1054,8 +1054,8 @@ ArgumentPlan，这次迁移不改变输入求值顺序或授予新的结果缓�
 预算失败处理，不转成类型不匹配。VM 已有的 typed callable 查询直接进入 NF 检查，
 不再先压成 Option 再靠零 fuel 猜测；声明世界的 callable 查询也已按下节迁移。
 名义布局核心及源世界／VM 准入已改为显式失败结果，见第 23 节；IIR 的 NF 参数
-准入也已迁移，见第 24 节。存储观察、elaboration 及部分旧描述服务仍有 Option
-适配，不能称为全部查询协议已统一。
+准入也已迁移，见第 24 节。存储阶段查询已按第 25 节迁移；
+elaboration 的其他观察入口及部分旧描述服务仍有 Option 适配，不能称为全部查询协议已统一。
 
 原 `clause_list_inputs_share_domain_scope_and_budget_validation` 在改动前再次以
 `FunctionInputRejected { stage: Value, .. }` 与旧 `Type` 断言不符而失败，证据
@@ -1143,7 +1143,7 @@ DomainQueries 直接传递该结果；materialization 的 callable identity 路�
 不能把它替换为仅能看到原 package 的扫描器，丢失所属世界的声明证据。
 
 IIR TypeLinks 的 NF 参数准入现已按第 24 节迁移；elaboration 的借用元数据入口、
-IIR 存储观察及 VM 的旧描述／解码观察接口仍有 Option 边界。本阶段没有实现统一 ArgumentPlan，
+VM 的旧描述／解码观察接口仍有 Option 边界；IIR 存储查询已按第 25 节迁移。本阶段没有实现统一 ArgumentPlan，
 没有改变形成 predicate、类型身份、调用顺序或缓存准入政策。
 
 验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`：
@@ -1212,8 +1212,8 @@ method dispatch 的独立检查。
 修复后检查每一档预算直到首次成功，之前只允许预算失败；另检验缺失世界、错误
 变体／字段、方法的完整实例键及随后成功。没有通过增加预算或更换合法载荷避开问题。
 
-IIR 的 runtime storage 观察仍使用 Option 布局回调；elaboration 和 VM 描述观察
-也尚未全部迁移。本阶段不宣称所有布局接口或可恢复参数计划完成。
+IIR 的 runtime storage 观察已按第 25 节迁入带错误类别的查询；elaboration 和
+VM 的其他描述观察尚未全部迁移。所有布局接口或可恢复参数计划仍未完成。
 
 验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`，
 最终检查均退出 0：
@@ -1227,3 +1227,49 @@ IIR 的 runtime storage 观察仍使用 Option 布局回调；elaboration 和 VM
   列表协议／Type 相等及 source/IIR 调用。
 
 未运行全 workspace、native 或性能基准；正式 docs 和原有修改保持不变。
+
+
+## 25. 存储阶段查询与资源失败分开交付
+
+存储阶段检查回答 runtime 能否保存该类型的值、comptime 能否保存该载荷，不是
+PTC 类型命题求解。`phases::StorageError` 明确区分 Budget 和 Invalid，提供稳定的
+Display；递归深度、描述计费、布局解析与字段代入的失败传到调用者，不再统一压成
+`() / None`。Invalid 保留存储阶段的静态诊断，来自底层类型／布局服务的细节仍
+归纳为对应的描述或名义布局错误，不宣称它已是完整来源链诊断。
+
+runtime／comptime 的三个可供应布局入口统一接收
+`Result<Vec<Term>, StorageError>`。IIR 的具体存储检查、VM 的源世界及 IIR 世界
+检查、生成器的数据布局供应全部接入。返回空字段仍表示成功取得无载荷视图，
+缺失具体实例必须明确报错；没有把 Option 缺失默认接受为空布局。
+
+VM 按错误类别选择 StepsExhausted 或 PhaseMismatch，不能根据 fuel==0 分类。
+失败预留保留剩余预算；最终失败路径只扣除实际已消耗工作。NIR 的 runtime 递归
+观察中，closure context 的声明域查询和 newtype 表示代入也复用本次预算，删除
+内部重新供应 100000 的做法。没有增加结果或失败缓存。
+
+存储检查仍遍历所有可能的载荷，包括未激活的 enum/error 分支；它与值准入只观察
+选中变体的布局请求不同。phantom 参数、Type 值所描述的指针、runtime callable
+签名不等于保存指针载荷，opaque NF 头仍不展开。既有这些准入边界保持不变。
+
+旧 source convenience 入口仍将最终错误渲染成静态文本，生成器候选预检仍返回
+bool；它们是外层诊断／选择边界，没有第二套存储算法。本阶段也没有完成源声明
+struct/enum 代入的统一受限布局计划，或更一般的观察依赖和可恢复请求协议。
+
+验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --test phases --test closure_contexts --test unsafe_callable_types --no-fail-fast`：
+  53 通过，退出 0；`/tmp/luna-tools-iaw9bsza/result.json`。新增检查覆盖三个查询
+  入口的正余额 Budget、零余额 Invalid、非法阶段及失败后恢复。
+- `-p comptime_interpretor -p iir --lib --no-fail-fast`：VM 451、IIR 61 项通过，
+  退出 0；`/tmp/luna-tools-71u1_o3q/result.json`。VM 的具体 enum 查询还验证
+  空变体扫描需计费，预留失败保留余额并报告 StepsExhausted，随后合法检查恢复。
+- `-p luna --test comptime_storage_domains --test comptime_pointer_phase
+  --test cmtt_phase_boundaries --test cmtt_type_inputs --test closure_environment_parameters
+  --test comptime_iir_bytecode --test invocation_value_templates --no-fail-fast`：
+  76 通过，退出 0；`/tmp/luna-tools-_a0xoi2d/result.json`。包括未激活载荷拒绝、
+  phantom／代码描述正例、闭包环境、source/IIR 执行和真实 sysroot 调用模板。
+
+初次编译仍调用返回 String 的声明域入口，失败于 `/tmp/luna-tools-04r8uwk6`；
+改用已有的 `declaration_parameter_domains_checked` 后完成上述检查，没有按字符串
+内容猜测预算错误。未运行全 workspace、native 或性能基准；正式 docs 与原有改动
+保持不变。

@@ -5,6 +5,8 @@ use crate::{Primitive, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod comptime_storage;
+mod storage_error;
+pub use storage_error::StorageError;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
@@ -309,7 +311,7 @@ pub fn machine_arithmetic_functions(
                 source,
                 message: "comptime-only value cannot inhabit runtime storage; Splice is required",
             }),
-            Err(()) => Err(Error {
+            Err(_) => Err(Error {
                 source,
                 message: "runtime storage phase could not be established within the type inspection limit",
             }),
@@ -1772,18 +1774,19 @@ pub fn validate_runtime_storage(
     frames: &[Vec<crate::Sort>],
 ) -> Result<(), &'static str> {
     validate_runtime_storage_inner(ty, package, frames, None, &mut 100_000)
+        .map_err(StorageError::message)
 }
 
 /// Validate storage against already instantiated nominal fields. The resolver
-/// must return the exact layout for the requested type, or None if unavailable.
+/// must return the exact layout or an explicit missing/invalid/budget error.
 /// It never receives opaque normal-form heads for body reduction.
 pub fn validate_runtime_storage_with_nominals(
     ty: &Term,
     package: &Package,
     frames: &[Vec<crate::Sort>],
-    resolve: &dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>,
+    resolve: &dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, StorageError>,
     fuel: &mut usize,
-) -> Result<(), &'static str> {
+) -> Result<(), StorageError> {
     validate_runtime_storage_inner(ty, package, frames, Some(resolve), fuel)
 }
 
@@ -1794,9 +1797,9 @@ pub fn validate_comptime_storage_with_nominals(
     ty: &Term,
     package: &Package,
     frames: &[Vec<Sort>],
-    resolve: &dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>,
+    resolve: &dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, StorageError>,
     fuel: &mut usize,
-) -> Result<(), &'static str> {
+) -> Result<(), StorageError> {
     comptime_storage::validate_resolved(ty, package, frames, Some(resolve), fuel)
 }
 
@@ -1806,24 +1809,26 @@ pub fn validate_comptime_storage_with_nominals(
 pub fn validate_comptime_storage_with_layouts(
     ty: &Term,
     frames: &[Vec<Sort>],
-    resolve: &dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>,
+    resolve: &dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, StorageError>,
     fuel: &mut usize,
-) -> Result<(), &'static str> {
+) -> Result<(), StorageError> {
     comptime_storage::validate_layouts(ty, frames, resolve, fuel)
 }
 
-type NominalStorageResolver<'a> = Option<&'a dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>>;
+type NominalStorageResolver<'a> =
+    Option<&'a dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, StorageError>>;
 fn validate_runtime_storage_inner(
     ty: &Term,
     package: &Package,
     frames: &[Vec<crate::Sort>],
     resolve: NominalStorageResolver<'_>,
     fuel: &mut usize,
-) -> Result<(), &'static str> {
-    crate::type_computations::charge_term(ty, fuel)
-        .map_err(|_| "runtime storage inspection budget exhausted")?;
+) -> Result<(), StorageError> {
+    crate::type_computations::charge_term(ty, fuel)?;
     if ty.sort() != crate::Sort::Type || ty.check_scope(frames).is_err() {
-        return Err("runtime storage requires a Type in the declared input scope");
+        return Err(StorageError::Invalid(
+            "runtime storage requires a Type in the declared input scope",
+        ));
     }
     match comptime_storage_resolved(
         ty,
@@ -1835,10 +1840,10 @@ fn validate_runtime_storage_inner(
         fuel,
     ) {
         Ok(false) => Ok(()),
-        Ok(true) => Err("comptime-only value cannot inhabit runtime storage; Splice is required"),
-        Err(()) => {
-            Err("runtime storage phase could not be established within the type inspection limit")
-        }
+        Ok(true) => Err(StorageError::Invalid(
+            "comptime-only value cannot inhabit runtime storage; Splice is required",
+        )),
+        Err(error) => Err(error),
     }
 }
 
@@ -1848,7 +1853,7 @@ fn comptime_storage(
     frames: &[Vec<crate::Sort>],
     seen: &mut std::collections::HashSet<(crate::Term, Vec<Vec<crate::Sort>>)>,
     depth: usize,
-) -> Result<bool, ()> {
+) -> Result<bool, StorageError> {
     comptime_storage_resolved(ty, package, frames, seen, depth, None, &mut 100_000)
 }
 
@@ -1860,11 +1865,11 @@ fn comptime_storage_resolved(
     depth: usize,
     resolve: NominalStorageResolver<'_>,
     fuel: &mut usize,
-) -> Result<bool, ()> {
+) -> Result<bool, StorageError> {
     use crate::{Primitive as P, Term as T};
-    crate::type_computations::charge_term(ty, fuel).map_err(|_| ())?;
+    crate::type_computations::charge_term(ty, fuel)?;
     if depth > 128 {
-        return Err(());
+        return Err(StorageError::Budget);
     }
     // Closed recursive storage types do not depend on intervening function
     // frames. Canonicalize their cache scope so a recursive callback signature
@@ -1893,15 +1898,16 @@ fn comptime_storage_resolved(
                     sort: crate::Sort::ComptimeValue,
                 } => {
                     package
-                        .declaration_parameter_domains(&mut 100_000)
-                        .map_err(|_| ())?
+                        .declaration_parameter_domains_checked(fuel)?
                         .get(declaration)
                         == Some(&T::ClosureContextType)
                 }
                 _ => false,
             };
             if !scoped {
-                return Err(());
+                return Err(StorageError::Invalid(
+                    "closure storage context lacks scoped evidence",
+                ));
             }
             vec![(**signature).clone()]
         }
@@ -1977,20 +1983,20 @@ fn comptime_storage_resolved(
             arguments,
         } => {
             if let Some(resolve) = resolve {
-                resolve(ty, fuel).ok_or(())?
+                resolve(ty, fuel)?
             } else if let Some(def) = package
                 .structs
                 .iter()
                 .find(|d| d.declaration == *declaration)
             {
                 def.instantiate_fields_in_scope(arguments, frames)
-                    .map_err(|_| ())?
+                    .map_err(|_| StorageError::Invalid("invalid nominal storage instantiation"))?
                     .into_iter()
                     .map(|(_, ty)| ty)
                     .collect()
             } else if let Some(def) = package.enums.iter().find(|d| d.declaration == *declaration) {
                 def.instantiate_variants_in_scope(arguments, frames)
-                    .map_err(|_| ())?
+                    .map_err(|_| StorageError::Invalid("invalid nominal storage instantiation"))?
                     .into_iter()
                     .flat_map(|v| v.fields)
                     .collect()
@@ -1999,10 +2005,7 @@ fn comptime_storage_resolved(
                 .iter()
                 .find(|d| d.declaration == *declaration)
             {
-                vec![
-                    def.representation_budgeted(arguments, frames, &mut 100_000)
-                        .map_err(|_| ())?,
-                ]
+                vec![def.representation_budgeted(arguments, frames, fuel)?]
             } else {
                 vec![]
             }

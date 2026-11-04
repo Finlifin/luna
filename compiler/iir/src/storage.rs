@@ -5,7 +5,7 @@ use nir::{Sort, Term};
 pub(super) fn validate(
     function: &Function,
     metadata: &Package,
-    resolve: &dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>,
+    resolve: &dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, nir::phases::StorageError>,
     fuel: &mut usize,
 ) -> Result<(), String> {
     if function.phase != FunctionPhase::Runtime {
