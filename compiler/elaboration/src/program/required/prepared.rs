@@ -4,6 +4,7 @@ use super::restore::{restore_required_packet, restore_required_type_input};
 use super::*;
 use comptime_interpretor::InvocationValue;
 use std::sync::Arc;
+mod inputs;
 
 /// Own the declarations and their derived index together. Once published into
 /// a preparation, this world is immutable; invocation state lives elsewhere.
@@ -123,23 +124,9 @@ impl PreparedRequired {
         values: Vec<(n::LocalId, Term)>,
         span: Span,
     ) -> Result<(), Error> {
-        let mut assigned = BTreeSet::new();
-        for (binding, _) in &values {
-            if !assigned.insert(*binding) {
-                return Err(error(span, "duplicate deferred comptime input"));
-            }
-            match self.inputs.iter().find(|(id, _, _)| id == binding) {
-                Some((_, _, None)) => {}
-                Some(_) => return Err(error(span, "deferred comptime input is already supplied")),
-                None => return Err(error(span, "unknown deferred comptime input")),
-            }
-        }
-        for (binding, value) in values {
-            self.inputs
-                .iter_mut()
-                .find(|(id, _, _)| *id == binding)
-                .unwrap()
-                .2 = Some(value);
+        let routes = inputs::routes(&self.inputs, &values, span)?;
+        for (position, (_, value)) in routes.into_iter().zip(values) {
+            self.inputs[position].2 = Some(value);
         }
         Ok(())
     }
@@ -155,13 +142,20 @@ impl PreparedRequired {
     }
 
     pub(in crate::program) fn invoke_with_inputs(
-        mut self,
+        self,
         values: Vec<(n::LocalId, Term)>,
         steps: &mut u64,
         span: Span,
     ) -> Result<(Value, Term), Error> {
-        self.bind_inputs(values, span)?;
-        self.invoke_with_live_inputs(Vec::new(), steps, span)
+        self.invoke_in_world(
+            values
+                .into_iter()
+                .map(|(binding, value)| (binding, InvocationValue::Normal(value)))
+                .collect(),
+            steps,
+            span,
+            None,
+        )
     }
 
     /// Supply invocation-local values without exporting or rebuilding their
@@ -173,7 +167,15 @@ impl PreparedRequired {
         steps: &mut u64,
         span: Span,
     ) -> Result<(Value, Term), Error> {
-        self.invoke_in_world(values, steps, span, None)
+        self.invoke_in_world(
+            values
+                .into_iter()
+                .map(|(binding, value)| (binding, InvocationValue::Live(value)))
+                .collect(),
+            steps,
+            span,
+            None,
+        )
     }
 
     pub(in crate::program) fn invoke_publishing(
@@ -191,7 +193,15 @@ impl PreparedRequired {
             *next_identity,
             usize::MAX,
         );
-        let result = self.invoke_in_world(values, steps, span, Some(&publisher));
+        let result = self.invoke_in_world(
+            values
+                .into_iter()
+                .map(|(binding, value)| (binding, InvocationValue::Live(value)))
+                .collect(),
+            steps,
+            span,
+            Some(&publisher),
+        );
         let diagnostic = publisher.last_diagnostic();
         let (definitions, next) = publisher.finish();
         *next_identity = next;
@@ -204,7 +214,7 @@ impl PreparedRequired {
 
     fn invoke_in_world(
         self,
-        values: Vec<(n::LocalId, Value)>,
+        values: Vec<(n::LocalId, InvocationValue)>,
         steps: &mut u64,
         span: Span,
         builder: Option<&dyn crate::definitions::StructBuildService>,
@@ -227,17 +237,6 @@ impl PreparedRequired {
                 .expect("configured builder service")
                 .prepare_enum(request, fuel)
         };
-        let mut live = BTreeMap::new();
-        for (binding, value) in values {
-            match self.inputs.iter().find(|(id, _, _)| *id == binding) {
-                Some((_, _, None)) => {}
-                Some(_) => return Err(error(span, "deferred comptime input is already supplied")),
-                None => return Err(error(span, "unknown deferred comptime input")),
-            }
-            if live.insert(binding, value).is_some() {
-                return Err(error(span, "duplicate deferred comptime input"));
-            }
-        }
         let PreparedRequired {
             world: _,
             entry,
@@ -253,16 +252,7 @@ impl PreparedRequired {
             in_signature,
             copy_authority,
         } = self;
-        // Pending source captures are not values. Reject before constructing an
-        // interpreter, so an incomplete invocation cannot perform effects.
-        let inputs = inputs.into_iter().map(|(binding, ty, value)| {
-            let value = match value {
-                Some(term) => Some(InvocationValue::Normal(term)),
-                None => live.remove(&binding).map(InvocationValue::Live),
-            };
-            value.map(|value| (ty, value)).ok_or_else(|| error(span,
-                "type computation depends on an unavailable function input; invocation-time type elaboration is not yet implemented"))
-        }).collect::<Result<Vec<_>, _>>()?;
+        let inputs = inputs::complete(inputs, values, span)?;
         let invocation_type_context = &context;
         let scoped_context = if scoped_parameters.is_empty() {
             None
@@ -1382,6 +1372,117 @@ mod tests {
             pending.invoke(&mut 1000, span).is_err(),
             "binding a value does not bypass input domain checking"
         );
+    }
+
+    #[test]
+    fn frozen_and_live_routing_reject_the_same_invalid_packets_before_execution() {
+        let span = Span::default();
+        for case in 0..5 {
+            let (mut prepared, binding) = pending_boolean_preparation();
+            let foreign = n::LocalId {
+                owner: binding.owner + 1,
+                ..binding
+            };
+            let supplied = match case {
+                0 => vec![],
+                1 => vec![(binding, true), (binding, false)],
+                2 => vec![(binding, true), (foreign, false)],
+                3 => {
+                    prepared
+                        .bind_inputs(vec![(binding, Term::Bool(false))], span)
+                        .unwrap();
+                    vec![(binding, true)]
+                }
+                _ => {
+                    prepared.inputs.push(prepared.inputs[0].clone());
+                    vec![(binding, true)]
+                }
+            };
+            let before = prepared.to_string();
+            let mut frozen_steps = 1000;
+            let frozen = prepared
+                .fork()
+                .invoke_with_inputs(
+                    supplied
+                        .iter()
+                        .map(|(id, value)| (*id, Term::Bool(*value)))
+                        .collect(),
+                    &mut frozen_steps,
+                    span,
+                )
+                .unwrap_err();
+            let mut live_steps = 1000;
+            let live = prepared
+                .fork()
+                .invoke_with_live_inputs(
+                    supplied
+                        .into_iter()
+                        .map(|(id, value)| (id, Value::Bool(value)))
+                        .collect(),
+                    &mut live_steps,
+                    span,
+                )
+                .unwrap_err();
+            assert_eq!(frozen.message, live.message, "case {case}");
+            assert_eq!((frozen_steps, live_steps), (1000, 1000));
+            assert_eq!(prepared.to_string(), before);
+        }
+    }
+
+    #[test]
+    fn mixed_supplies_follow_capture_order_in_a_type_invocation() {
+        let span = Span::default();
+        let mut prepared = literal_preparation(true);
+        let choice = n::LocalId {
+            owner: 11,
+            index: 4,
+        };
+        let ty = n::LocalId {
+            owner: 11,
+            index: 1,
+        };
+        let expr = |ty, kind| n::Expr {
+            ty,
+            kind,
+            source: n::SourceRange { start: 0, end: 1 },
+        };
+        let function = &mut prepared.package_mut().functions[0];
+        function.parameters = vec![choice, ty];
+        function.signature = Term::Function {
+            parameters: vec![
+                Parameter {
+                    sort: Sort::ComptimeValue,
+                    ty: p(P::Bool),
+                },
+                Parameter {
+                    sort: Sort::Type,
+                    ty: p(P::Type),
+                },
+            ],
+            result: Box::new(p(P::Type)),
+        };
+        function.body = expr(
+            p(P::Type),
+            K::If {
+                condition: Box::new(expr(p(P::Bool), K::Local(choice))),
+                then_branch: Box::new(expr(p(P::Type), K::Local(ty))),
+                else_branch: Some(Box::new(expr(p(P::Type), K::TypeValue(p(P::Char))))),
+            },
+        );
+        prepared.inputs = vec![(choice, p(P::Bool), None), (ty, p(P::Type), None)];
+        for (flag, expected) in [(true, P::U8), (false, P::Char)] {
+            let values = vec![
+                (ty, InvocationValue::Normal(p(P::U8))),
+                (choice, InvocationValue::Live(Value::Bool(flag))),
+            ];
+            assert_eq!(
+                prepared
+                    .fork()
+                    .invoke_in_world(values, &mut 100_000, span, None)
+                    .unwrap(),
+                (Value::Type(p(expected)), p(P::Type))
+            );
+        }
     }
 
     #[test]

@@ -372,6 +372,45 @@ runtime 函数。动态 trait 的一次性求值测试原先使用 comptime 指�
 workspace、性能基准或 native 验收。
 
 
+### 准备结果的 capture 供应
+
+`required/prepared/inputs.rs` 是 frozen 赋值、live invocation 与 builder invocation
+共用的绑定路由。它按完整 LocalId 检查身份，拒绝重复 capture、重复供应、未知绑定
+及覆盖已有值。先完成整份路由检查，再提交 frozen 赋值；不再针对每个 supplied input
+反复线性扫描 capture 列表。只供应一部分 frozen 输入仍合法，完整性在 invocation
+入口统一检查。
+
+普通 invocation 的 frozen 供应直接成为 InvocationValue::Normal，live 供应成为
+InvocationValue::Live；二者与已保存的 frozen captures 在同一个入口组成完整参数包。
+供应顺序可以不同于 capture 顺序，交付仍遵循准备结果对应的参数顺序，保留每个
+capture 的原始域。没有补齐的输入在创建 VM 和运行源码前拒绝；身份检查不会读取、
+导出、重建或克隆 live 载荷，准备结果本身仍不保存 live graph。
+
+路由成功不授予值域或执行权限。混合 Type／普通值供应继续进入原来的调用准入，
+已绑定但域错误的值仍拒绝。共同路由覆盖了准备完成后的 capture 供应，不等于前述
+ContextualExpr／ArgumentPlan、源码求值顺序及所有调用形式已经全面合流。
+
+回归检查 capture 顺序与供应顺序不同、不同 owner 下相同 local index、混合传送种类、
+frozen/live 的同类错误及零执行、损坏的重复 capture 布局、部分赋值失败的原子性，
+并实际运行混合输入的 Type invocation。既有闭包状态连续调用、值引用写回与重试
+检查继续通过共同入口。
+
+本次证据（工作目录 `/home/fin/luna`）：
+
+- `development/check.py --timeout 900 -- test -p elaboration --lib prepared
+  --no-fail-fast`：20 项通过，退出 0；
+  `/tmp/luna-tools-u6s7wa7x/result.json`。
+- 同一入口运行 luna 的 `prepared_invocations`、`prepared_input_dependencies`、
+  `staged_invocation_reuse`、`invocation_value_templates`、`builder_invocations`、
+  `sysroot_preludes`、`normal_input_plans`：128 项通过、1 项失败，退出 101；
+  `/tmp/luna-tools-hu4hvz0p/result.json`。唯一失败仍是
+  `enum_builder_edits_payloads_groups_and_runtime_patterns` 在 HIR lowering
+  找不到 `Symbol`；此前已在改动前源码复现
+  （`/tmp/luna-tools-tnid5emr/result.json`），本次未修改其 fixture 或预期。
+- 两个改动 Rust 文件的 `rustfmt --check` 退出 0；
+  `/tmp/luna-tools-0gw_a2sj/result.json`。
+
+
 ## 13. 域检查顺序与源码求值顺序分离
 
 普通子句准备现在为每个源码输入保留独立 preparation 位置。接收域仍引用未提供的
