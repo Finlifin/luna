@@ -25,9 +25,20 @@ enum Node<'a, 'h> {
 /// The expression being observed is not its enclosing declaration. In
 /// particular, a recursive reference must not bind the expression's inputs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum LocalScope {
+enum SourceScope {
     Expression,
     Declaration(OwnerId),
+}
+
+/// One query purpose selects the result and delivered-scope requirements.
+/// Declaration formation observes its own telescope; expression queries retain
+/// that telescope as external inputs instead of binding it away.
+#[derive(Clone, Copy)]
+enum Query<'a> {
+    Declaration,
+    FreeLocals,
+    FreeDeclarations,
+    MayUse(&'a BTreeSet<n::LocalId>),
 }
 
 /// Only immutable source and formed declaration context are observable here.
@@ -56,17 +67,16 @@ impl<'a, 'h> Source<'a, 'h> {
 
 struct Reads<'a, 'h> {
     source: Source<'a, 'h>,
-    pending: Vec<(OwnerId, LocalScope, Node<'a, 'h>)>,
+    pending: Vec<(OwnerId, SourceScope, Node<'a, 'h>)>,
     current: OwnerId,
-    local_scope: LocalScope,
-    expressions: BTreeSet<(LocalScope, OwnerId, n::LocalId)>,
-    patterns: BTreeSet<(LocalScope, OwnerId, n::LocalId)>,
+    scope: SourceScope,
+    expressions: BTreeSet<(SourceScope, OwnerId, n::LocalId)>,
+    patterns: BTreeSet<(SourceScope, OwnerId, n::LocalId)>,
     owners: BTreeSet<OwnerId>,
-    graph: BTreeMap<OwnerId, ScopeReads<OwnerId, DeclarationId>>,
-    local_inputs: Option<&'a BTreeSet<n::LocalId>>,
+    graph: BTreeMap<SourceScope, ScopeReads<SourceScope, DeclarationId>>,
+    query: Query<'a>,
     reads_local_input: bool,
-    collect_locals: bool,
-    local_graph: BTreeMap<LocalScope, ScopeReads<LocalScope, n::LocalId>>,
+    local_graph: BTreeMap<SourceScope, ScopeReads<SourceScope, n::LocalId>>,
     staged_locals: BTreeMap<DeclarationId, n::LocalId>,
     fuel: usize,
     span: Span,
@@ -82,7 +92,35 @@ pub(super) fn collect(
     let result = (|| {
         reads.push(Node::Owner(owner))?;
         reads.drain()?;
-        close(&reads.graph, owner, &mut reads.fuel, span)
+        close(
+            &reads.graph,
+            SourceScope::Declaration(owner),
+            &mut reads.fuel,
+            span,
+        )
+    })();
+    *fuel = reads.fuel;
+    result
+}
+
+/// Observe free declaration inputs of an expression. This shares declaration
+/// closure with formation, but must not bind the enclosing function's inputs.
+pub(super) fn expression_declaration_dependencies(
+    checker: &Checker<'_, '_>,
+    owner: OwnerId,
+    value: &Expr<'_>,
+    fuel: &mut usize,
+    span: Span,
+) -> Result<BTreeSet<DeclarationId>, Error> {
+    let mut reads = Reads::new(Source::from_checker(checker), owner, fuel, span);
+    reads.query = Query::FreeDeclarations;
+    reads.graph.entry(SourceScope::Expression).or_default();
+    let result = (|| {
+        reads.inherited(owner)?;
+        reads.protocols(owner)?;
+        reads.expression(value)?;
+        reads.drain()?;
+        close(&reads.graph, SourceScope::Expression, &mut reads.fuel, span)
     })();
     *fuel = reads.fuel;
     result
@@ -100,7 +138,7 @@ pub(super) fn expression_may_use_inputs(
     span: Span,
 ) -> Result<bool, Error> {
     let mut reads = Reads::new(Source::from_checker(checker), owner, fuel, span);
-    reads.local_inputs = Some(inputs);
+    reads.query = Query::MayUse(inputs);
     let result = (|| {
         reads.inherited(owner)?;
         reads.protocols(owner)?;
@@ -122,8 +160,11 @@ pub(super) fn expression_local_dependencies(
     span: Span,
 ) -> Result<BTreeSet<n::LocalId>, Error> {
     let mut reads = Reads::new(Source::from_checker(checker), owner, fuel, span);
-    reads.collect_locals = true;
-    reads.local_graph.entry(LocalScope::Expression).or_default();
+    reads.query = Query::FreeLocals;
+    reads
+        .local_graph
+        .entry(SourceScope::Expression)
+        .or_default();
     let result = (|| {
         let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
             checker.package.item(owner).map(|item| &item.kind)
@@ -153,7 +194,7 @@ pub(super) fn expression_local_dependencies(
         reads.drain()?;
         close(
             &reads.local_graph,
-            LocalScope::Expression,
+            SourceScope::Expression,
             &mut reads.fuel,
             span,
         )
@@ -169,13 +210,12 @@ impl<'a, 'h> Reads<'a, 'h> {
             pending: Vec::new(),
             owners: BTreeSet::new(),
             current: owner,
-            local_scope: LocalScope::Expression,
+            scope: SourceScope::Expression,
             expressions: BTreeSet::new(),
             patterns: BTreeSet::new(),
             graph: BTreeMap::new(),
-            local_inputs: None,
+            query: Query::Declaration,
             reads_local_input: false,
-            collect_locals: false,
             local_graph: BTreeMap::new(),
             staged_locals: BTreeMap::new(),
             fuel: *fuel,
@@ -184,8 +224,8 @@ impl<'a, 'h> Reads<'a, 'h> {
     }
     fn drain(&mut self) -> Result<(), Error> {
         while let Some((context, scope, node)) = self.pending.pop() {
-            self.local_scope = match &node {
-                Node::Owner(owner) => LocalScope::Declaration(*owner),
+            self.scope = match &node {
+                Node::Owner(owner) => SourceScope::Declaration(*owner),
                 _ => scope,
             };
             self.current = match &node {
@@ -205,7 +245,7 @@ impl<'a, 'h> Reads<'a, 'h> {
     }
     fn push(&mut self, node: Node<'a, 'h>) -> Result<(), Error> {
         self.charge()?;
-        self.pending.push((self.current, self.local_scope, node));
+        self.pending.push((self.current, self.scope, node));
         Ok(())
     }
     fn expression(&mut self, expr: &'a Expr<'h>) -> Result<(), Error> {
@@ -221,14 +261,10 @@ impl<'a, 'h> Reads<'a, 'h> {
         if let Some(binding) = self.staged_locals.get(&id) {
             self.read_local(*binding);
         }
-        self.graph
-            .entry(self.current)
-            .or_default()
-            .direct
-            .insert(id);
+        self.graph.entry(self.scope).or_default().direct.insert(id);
     }
     fn term(&mut self, term: &Term) -> Result<(), Error> {
-        if self.local_inputs.is_some() || self.collect_locals {
+        if !matches!(self.query, Query::Declaration) {
             // A delivered term may carry a scope that is not the source local
             // frame. Without its mapping, absence of a Local read is no proof
             // that the pending inputs are irrelevant.
@@ -239,7 +275,7 @@ impl<'a, 'h> Reads<'a, 'h> {
                 .map_err(|failure| error(self.span, failure.to_string()))?
                 .is_empty()
             {
-                if self.collect_locals {
+                if matches!(self.query, Query::FreeLocals | Query::FreeDeclarations) {
                     return Err(error(
                         self.span,
                         "source dependency requires a delivered scope mapping",
@@ -249,10 +285,10 @@ impl<'a, 'h> Reads<'a, 'h> {
             }
         }
         let mut symbolic = BTreeSet::new();
-        let direct = if self.local_inputs.is_some() || self.collect_locals {
+        let direct = if !matches!(self.query, Query::Declaration) {
             &mut symbolic
         } else {
-            &mut self.graph.entry(self.current).or_default().direct
+            &mut self.graph.entry(self.scope).or_default().direct
         };
         nir::type_computations::rigid_declarations_bounded(term, &mut self.fuel, direct)
             .map_err(|e| error(self.span, e.to_string()))?;
@@ -267,33 +303,33 @@ impl<'a, 'h> Reads<'a, 'h> {
         Ok(())
     }
     fn reference(&mut self, owner: OwnerId) -> Result<(), Error> {
-        if self.collect_locals {
+        if matches!(self.query, Query::FreeLocals) {
             self.local_graph
-                .entry(self.local_scope)
+                .entry(self.scope)
                 .or_default()
                 .callees
-                .insert(LocalScope::Declaration(owner));
+                .insert(SourceScope::Declaration(owner));
         }
         self.graph
-            .entry(self.current)
+            .entry(self.scope)
             .or_default()
             .callees
-            .insert(owner);
+            .insert(SourceScope::Declaration(owner));
         self.push(Node::Owner(owner))
     }
     fn read_local(&mut self, binding: n::LocalId) {
-        if self.collect_locals {
+        if matches!(self.query, Query::FreeLocals) {
             self.local_graph
-                .entry(self.local_scope)
+                .entry(self.scope)
                 .or_default()
                 .direct
                 .insert(binding);
         }
     }
     fn bind_local(&mut self, binding: hir::HirId) {
-        if self.collect_locals {
+        if matches!(self.query, Query::FreeLocals) {
             self.local_graph
-                .entry(self.local_scope)
+                .entry(self.scope)
                 .or_default()
                 .bindings
                 .insert(local(binding));
@@ -521,9 +557,9 @@ impl<'a, 'h> Reads<'a, 'h> {
         if !self.owners.insert(owner) {
             return Ok(());
         }
-        if self.collect_locals {
+        if matches!(self.query, Query::FreeLocals) {
             self.local_graph
-                .entry(LocalScope::Declaration(owner))
+                .entry(SourceScope::Declaration(owner))
                 .or_default();
         }
         self.inherited(owner)?;
@@ -541,7 +577,11 @@ impl<'a, 'h> Reads<'a, 'h> {
             self.charge()?;
             if let Some(id) = parameter.definition {
                 let id = self.identity(id);
-                self.graph.entry(owner).or_default().bindings.insert(id);
+                self.graph
+                    .entry(SourceScope::Declaration(owner))
+                    .or_default()
+                    .bindings
+                    .insert(id);
             }
         }
         if let ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) = &item.kind {
@@ -549,11 +589,17 @@ impl<'a, 'h> Reads<'a, 'h> {
                 self.charge()?;
                 if let Some(id) = package.staged_parameter_definitions.get(&parameter.hir_id) {
                     let id = self.identity(*id);
-                    self.graph.entry(owner).or_default().bindings.insert(id);
+                    self.graph
+                        .entry(SourceScope::Declaration(owner))
+                        .or_default()
+                        .bindings
+                        .insert(id);
                 }
             }
         }
-        self.graph.entry(owner).or_default();
+        self.graph
+            .entry(SourceScope::Declaration(owner))
+            .or_default();
         for attribute in &package.definition_attributes {
             self.charge()?;
             if matches!(attribute.target, hir::AttributeTarget::Definition(id) if id == owner)
@@ -660,7 +706,7 @@ impl<'a, 'h> Reads<'a, 'h> {
     fn expr(&mut self, expr: &'a Expr<'h>) -> Result<(), Error> {
         if !self
             .expressions
-            .insert((self.local_scope, self.current, local(expr.hir_id)))
+            .insert((self.scope, self.current, local(expr.hir_id)))
         {
             return Ok(());
         }
@@ -704,7 +750,7 @@ impl<'a, 'h> Reads<'a, 'h> {
                 // The query's candidate IDs belong to source local frames.
                 // A clause identity can be a transported staged input; without
                 // that mapping it cannot establish independence from them.
-                if self.local_inputs.is_some() {
+                if matches!(self.query, Query::MayUse(_)) {
                     self.reads_local_input = true;
                 }
                 self.input(self.identity(*id));
@@ -712,9 +758,8 @@ impl<'a, 'h> Reads<'a, 'h> {
             H::ResolvedDef { def_id, .. } => self.definition(*def_id)?,
             H::ResolvedFnParam(_, binding) | H::ResolvedLocal(_, binding) => {
                 self.read_local(local(*binding));
-                if self
-                    .local_inputs
-                    .is_some_and(|inputs| inputs.contains(&local(*binding)))
+                if let Query::MayUse(inputs) = self.query
+                    && inputs.contains(&local(*binding))
                 {
                     self.reads_local_input = true;
                 }
@@ -975,7 +1020,7 @@ impl<'a, 'h> Reads<'a, 'h> {
     fn pattern(&mut self, pattern: &'a hir::Pattern<'h>) -> Result<(), Error> {
         if !self
             .patterns
-            .insert((self.local_scope, self.current, local(pattern.hir_id)))
+            .insert((self.scope, self.current, local(pattern.hir_id)))
         {
             return Ok(());
         }

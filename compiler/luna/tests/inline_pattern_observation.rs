@@ -185,3 +185,17 @@ fn callable_binder_observation_exhaustion_preserves_recovery() {
         4096,
     );
 }
+
+#[test]
+fn clause_default_dependency_closure_reports_exhaustion_and_recovers() {
+    check_source_observation(
+        "typealias Type = .Type'builtin;
+        comptime fn choose(value: T) -> bool
+        where T, .flag: bool = do { let capture = || T == bool; capture() }
+        { flag }
+        const answer = choose(true);
+        fn run() -> bool { true }",
+        "lexical dependency closure budget exhausted",
+        4096,
+    );
+}

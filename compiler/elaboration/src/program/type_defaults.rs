@@ -774,24 +774,15 @@ impl<'h> Checker<'_, 'h> {
                 // expression. In particular, index:T can become a Type input
                 // only after T is supplied; substituting index alone loses that
                 // domain evidence.
-                let dependencies = std::cell::RefCell::new(
+                let mut dependencies = self.expression_declaration_dependencies(owner, value)?;
+                let inferred_set = inferred.iter().copied().collect::<BTreeSet<_>>();
+                dependencies.retain(|id| inferred_set.contains(id));
+                dependencies.extend(
                     inferred
                         .iter()
                         .copied()
-                        .filter(|id| domain.mentions_rigid(*id))
-                        .collect::<BTreeSet<_>>(),
+                        .filter(|id| domain.mentions_rigid(*id)),
                 );
-                super::required::signature_inputs_ready_with_clauses(value, 0, &|_| true, &|id| {
-                    let id = DeclarationId {
-                        package: semantic_package(&self.package_identities, id.pkg),
-                        local: id.index,
-                    };
-                    if inferred.contains(&id) {
-                        dependencies.borrow_mut().insert(id);
-                    }
-                    true
-                })?;
-                let dependencies = dependencies.into_inner();
                 if !dependencies.is_empty() {
                     return Ok(dependencies.into_iter().collect());
                 }

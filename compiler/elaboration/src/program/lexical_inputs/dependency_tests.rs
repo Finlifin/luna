@@ -22,26 +22,53 @@ fn reference<'h>(arena: &'h HirArena, owner: OwnerId, index: u32, binding: HirId
     expr(arena, owner, index, H::ResolvedLocal(name(), binding))
 }
 
+struct Fixture<'a, 'h> {
+    package: &'a hir::Package<'h>,
+    protocols: SourceProtocolIndex<'a, 'h>,
+    identities: BTreeMap<u32, u64>,
+    types: BTreeMap<OwnerId, Term>,
+    containers: BTreeMap<OwnerId, OwnerId>,
+}
+
+impl<'a, 'h> Fixture<'a, 'h> {
+    fn new(package: &'a hir::Package<'h>) -> Self {
+        Self {
+            package,
+            protocols: SourceProtocolIndex::new(package),
+            identities: BTreeMap::new(),
+            types: BTreeMap::new(),
+            containers: BTreeMap::new(),
+        }
+    }
+    fn reads(&self, owner: OwnerId) -> Reads<'_, 'h> {
+        Reads::new(
+            Source {
+                package: self.package,
+                identities: &self.identities,
+                self_types: &self.types,
+                containers: &self.containers,
+                protocols: &self.protocols,
+            },
+            owner,
+            &10_000,
+            DUMMY_SP,
+        )
+    }
+}
+
 fn observe(package: &hir::Package<'_>, owner: OwnerId, value: &Expr<'_>) -> BTreeSet<n::LocalId> {
-    let identities = BTreeMap::new();
-    let types = BTreeMap::new();
-    let containers = BTreeMap::new();
-    let protocols = SourceProtocolIndex::new(package);
-    let source = Source {
-        package,
-        identities: &identities,
-        self_types: &types,
-        containers: &containers,
-        protocols: &protocols,
-    };
-    let mut reads = Reads::new(source, owner, &10_000, DUMMY_SP);
-    reads.collect_locals = true;
-    reads.local_graph.entry(LocalScope::Expression).or_default();
+    let fixture = Fixture::new(package);
+    let mut reads = fixture.reads(owner);
+    reads.query = Query::FreeLocals;
+    reads
+        .local_graph
+        .entry(SourceScope::Expression)
+        .or_default();
     reads.expression(value).unwrap();
     reads.drain().unwrap();
     close(
         &reads.local_graph,
-        LocalScope::Expression,
+        SourceScope::Expression,
         &mut reads.fuel,
         DUMMY_SP,
     )
@@ -275,4 +302,155 @@ fn bindings_created_in_a_region_are_not_inputs_of_its_returned_closure() {
         observe(&package, owner, value),
         BTreeSet::from([local(outside)])
     );
+}
+
+#[test]
+fn declaration_queries_keep_enclosing_inputs_and_exclude_callee_binders() {
+    let arena = HirArena::new();
+    let mut package = hir::Package::new();
+    let owner = package.alloc_owner_id();
+    let child = package.alloc_owner_id();
+    let outer = hir::common::DefId { pkg: 0, index: 10 };
+    let inner = hir::common::DefId { pkg: 0, index: 11 };
+    let definition = hir::common::DefId { pkg: 0, index: 12 };
+    let capture = expr(&arena, child, 2, H::ResolvedClauseParam(name(), outer));
+    let own = expr(&arena, child, 3, H::ResolvedClauseParam(name(), inner));
+    let body_value = expr(&arena, child, 4, H::Binary(hir::BinOp::Eq, capture, own));
+    let body = BodyId::new(id(child, 5));
+    package.insert_body(
+        body,
+        Body {
+            params: &[],
+            value: body_value,
+        },
+    );
+    for (current, input, body) in [(owner, outer, None), (child, inner, Some(body))] {
+        let ident = Ident::new(name(), DUMMY_SP);
+        let params = arena.alloc_clause_param_slice(vec![hir::ClauseParam {
+            hir_id: id(current, 1),
+            definition: Some(input),
+            name: ident,
+            kind: Clause::Type(ident),
+            span: DUMMY_SP,
+        }]);
+        let sig = hir::FnSig {
+            params: &[],
+            return_ty: None,
+            return_bind: None,
+            return_binding: None,
+            modifiers: Default::default(),
+            clause_params: params,
+            clause_constraints: &[],
+            span: DUMMY_SP,
+        };
+        let item = arena.alloc_item(hir::Item {
+            owner_id: current,
+            ident,
+            span: DUMMY_SP,
+            kind: if let Some(body) = body {
+                ItemKind::Fn(sig, body)
+            } else {
+                ItemKind::FnDeclaration(sig)
+            },
+        });
+        package.insert_owner(
+            current,
+            hir::OwnerInfo {
+                node: hir::OwnerNode::Item(item),
+                nodes: hir::OwnerNodes::new(),
+            },
+        );
+    }
+    package.bind_definition(definition, child);
+    package.lexical_parents.insert(child, owner);
+    let target = expr(
+        &arena,
+        owner,
+        2,
+        H::ResolvedDef {
+            name: name(),
+            has_clause_param: true,
+            def_id: definition,
+        },
+    );
+    {
+        let fixture = Fixture::new(&package);
+        let mut reads = fixture.reads(owner);
+        reads.query = Query::FreeDeclarations;
+        reads.graph.entry(SourceScope::Expression).or_default();
+        reads.expression(target).unwrap();
+        reads.drain().unwrap();
+        let expected = BTreeSet::from([reads.identity(outer)]);
+        assert_eq!(
+            close(
+                &reads.graph,
+                SourceScope::Expression,
+                &mut reads.fuel,
+                DUMMY_SP
+            )
+            .unwrap(),
+            expected
+        );
+        // Ordinary declaration formation binds its own telescope. The same
+        // query over an expression must keep the enclosing telescope external.
+        assert_eq!(
+            close(
+                &reads.graph,
+                SourceScope::Declaration(child),
+                &mut reads.fuel,
+                DUMMY_SP
+            )
+            .unwrap(),
+            expected
+        );
+    }
+    let own_input = expr(&arena, owner, 3, H::ResolvedClauseParam(name(), outer));
+    {
+        let fixture = Fixture::new(&package);
+        let mut reads = fixture.reads(owner);
+        reads.query = Query::FreeDeclarations;
+        reads.graph.entry(SourceScope::Expression).or_default();
+        reads.expression(own_input).unwrap();
+        reads.drain().unwrap();
+        assert_eq!(
+            close(
+                &reads.graph,
+                SourceScope::Expression,
+                &mut reads.fuel,
+                DUMMY_SP
+            )
+            .unwrap(),
+            BTreeSet::from([reads.identity(outer)])
+        );
+    }
+}
+
+#[test]
+fn exact_declaration_queries_reject_unmapped_delivered_scopes() {
+    let arena = HirArena::new();
+    let mut package = hir::Package::new();
+    let owner = package.alloc_owner_id();
+    let value = expr(
+        &arena,
+        owner,
+        1,
+        H::DeliveredType(std::sync::Arc::new(Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        })),
+    );
+    {
+        let fixture = Fixture::new(&package);
+        let mut reads = fixture.reads(owner);
+        reads.query = Query::FreeDeclarations;
+        reads.expression(value).unwrap();
+        assert!(
+            reads
+                .drain()
+                .unwrap_err()
+                .to_string()
+                .contains("requires a delivered scope mapping")
+        );
+    }
 }

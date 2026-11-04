@@ -227,14 +227,10 @@ impl Checker<'_, '_> {
                         true,
                         |this, expression, domain| {
                             if *domain != p(P::Type)
-                                && !super::super::super::required::signature_inputs_ready_with_clauses(
-                                    expression, 0, &|_| true, &|id| {
-                                        !unknown.contains(&DeclarationId {
-                                            package: semantic_package(&this.package_identities, id.pkg),
-                                            local: id.index,
-                                        })
-                                    },
-                                )? {
+                                && !this
+                                    .expression_declaration_dependencies(owner, expression)?
+                                    .is_disjoint(&unknown)
+                            {
                                 return Ok(false);
                             }
                             let mut checked = this.expr(expression, Some(domain))?;
@@ -316,17 +312,9 @@ impl Checker<'_, '_> {
         for (index, (clause, domain)) in clauses.iter().zip(&domains).enumerate() {
             if let hir::clause::ClauseParamKind::Optional(_, _, default) = clause.kind {
                 let value_dependency = *domain != p(P::Type)
-                    && !super::super::super::required::signature_inputs_ready_with_clauses(
-                        default,
-                        0,
-                        &|_| true,
-                        &|id| {
-                            !waiting.contains(&DeclarationId {
-                                package: semantic_package(&self.package_identities, id.pkg),
-                                local: id.index,
-                            })
-                        },
-                    )?;
+                    && !self
+                        .expression_declaration_dependencies(owner, default)?
+                        .is_disjoint(&waiting);
                 let must_wait = value_dependency
                     || !deferred.is_empty()
                     || (!waiting.is_empty()

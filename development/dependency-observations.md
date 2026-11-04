@@ -188,6 +188,24 @@ staging 工作设计，刻意不进入闭包、quote 和后置 lambda 的主体�
 某个 callee 的内部参数泄漏为 caller 要供应的槽。原声明身份分析与新的局部绑定
 分析共用 `dependency_closure`，没有另写一份递归闭包求解器。
 
+同一观察范围现在也用于声明身份图。`function_default_dependencies` 不再丢弃
+readiness 返回值并靠 RefCell 回调收集子句读取；它使用完整的自由声明集合，
+再选取当前推断尚需供应的输入，并保留默认值接收域的依赖。CMTT 的初始默认值
+计划和候选恢复也查询同一集合。闭包主体、后置 lambda、局部 helper 与 helper
+自己的类型子句不再因语法白名单而漏读或混入 caller。Query 枚举明确区分声明
+形成、自由局部输入、自由声明输入及保守 may-use，替代彼此独立的查询开关。
+
+这不是把全部默认值都延期到具体值阶段。域为 Type 的默认值仍使用原有符号
+形成路径；需要实际值的默认值在依赖具备后按既有顺序准备。后续默认值读取前面
+的结果，显式覆盖不执行对应默认计算，但不跳过定义端的域和行为检查。观察本身
+不执行默认生产者，也不把执行失败改成“尚未就绪”。
+
+查询父级 staged 形参时，源码声明若没有显式 staged 形参，空 telescope 已有
+确定依据，无需取得普通 callable 签名；这使只捕获类型子句的局部 helper 不会
+被 CMTT 父级没有普通 runtime 签名这一无关事实阻塞。只要存在 staged 形参，
+仍须取得形成后的域并进行 binder 提升；缺失签名、未形成域及不可取得的 runtime
+依赖继续报错。此规则按所请求的输入类别判断，不识别 generator 或某个库名称。
+
 遍历器只借用不可变源码、包身份、已形成的 self 类型／容器关系及源码协议索引，
 不再持有整个 Checker。它不能访问 VM、调用缓存、活动 locals 或生产者执行入口。
 结果仍只属于本次查询，不缓存活动依赖。遍历、闭包传播及后续参数映射逐项收费；
@@ -206,34 +224,31 @@ staging 工作设计，刻意不进入闭包、quote 和后置 lambda 的主体�
 捕获闭包的 runtime staged 实参准备仍需独立接通，不能用这批源码分析测试冒充其端到端支持；复现保留在
 `source_input_dependencies::staged_closure_arguments_keep_captured_invocation_inputs`。
 
-本轮验证均在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test`：
-`-p elaboration --lib lexical_inputs` 13 项通过，退出 0，证据
-`/tmp/luna-tools-jujjt9w3/result.json`。luna 的局部模板、测试模板、标注行为、
-观察预算、开放函数、动态 trait 子句及 trait 阶段七组 628 项通过；同轮扩大到
-整个 `cmtt` 时为 588 项通过、6 项失败，整轮退出 101，证据
-`/tmp/luna-tools-e0_5m9wd/result.json`。随后恢复本轮三个生产文件的 HEAD 内容，
-在同一受保护工作区重跑 `-p luna --test cmtt`，仍是相同 6 项失败，退出 101，
-证据 `/tmp/luna-tools-_3qhralm/result.json`；五项 BitVec 写回和一项 producer
-默认值的错误文本及 span 全部一致，未改这些测试或预期。对比后恢复本轮实现。
+验证在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test`：
 
-最终 `source_input_dependencies`、`function_type_parameters`、
-`function_type_dependencies`、`cmtt_type_inputs`、`cmtt_phase_boundaries`
-五组共 126 项通过，退出 0，证据 `/tmp/luna-tools-amytaj6_/result.json`。
-既有局部模板 1 项 ignored 保留；新增加的 staged 捕获闭包复现保持成功预期，
-但标注未接通。基线显式执行时，
-直接闭包、局部闭包别名及局部 comptime helper 三种形式均失败，证据
-`/tmp/luna-tools-rwmhhe3s/result.json`；本轮显式执行后，仅两种闭包形式仍失败，
-局部 helper 已编译并执行成功，证据 `/tmp/luna-tools-c6mm1iha/result.json`。
-因此把局部 helper 提升为正常正例，只为未接通的两种闭包保留 ignored；没有
-把后者计作通过。局部 helper 移入正常正例后再次运行该测试组，
-2 项通过、1 项 ignored，退出 0，证据 `/tmp/luna-tools-sefv1fyw/result.json`；
-其中 helper 同时通过 reference 和 IIR 执行。局部 helper 捕获 runtime 值时
-目前先报作用域不可用，所以未把这个路径的失败冒充阶段检查已经完整接通；
-活动拒绝用例只验证有对应路径依据的块和闭包输入。
-五个独立 Rust 文件的 rustfmt check 退出 0，证据
-`/tmp/luna-tools-xveytv0n/result.json`；旧 open_functions.rs 仅排版本轮修改块。
-`git diff --check` 通过，原有受保护文件哈希未变，正式 docs 未动。
-未运行全 workspace、native 或性能基准；精确提交清单、对比结果和源码哈希在
+| 范围 | 结果及证据 |
+| --- | --- |
+| 共同观察器及闭包算法 | `-p elaboration --lib lexical_inputs` 15 项通过，退出 0；`/tmp/luna-tools-weurmlyl/result.json`。包含表达式根保留外部子句、扣除 callee 自身子句及未映射 delivered scope 拒绝。 |
+| 新默认值、观察预算、局部模板与 staged 输入 | 35 项通过、2 项 ignored，退出 0；`/tmp/luna-tools-i3ihesy0/result.json`。普通默认值由两种 comptime VM 验证；CMTT 默认值经真实 sysroot 形成代码并执行 IIR。 |
+| 普通子句、默认调用与列表收集 | 分别 46、43、26 项通过，保留 1 项既有 ignored；`/tmp/luna-tools-0go2rwdu/result.json`。该次整轮退出 101，另有下述既有 CMTT 失败及随后已修复的局部 helper 前置条件问题，不能称整轮通过。 |
+| 开放函数、callable 类型、CMTT 类型／阶段边界、模板及 trait | 七组 699 项通过；同轮 CMTT 全组 588 项通过、6 项既有失败，因此整轮退出 101；`/tmp/luna-tools-djs25wva/result.json`。6 项错误文本及 span 与原基线逐字匹配。 |
+| runtime staged helper 与捕获闭包的区别 | helper 已通过 reference 和 IIR；`/tmp/luna-tools-sefv1fyw/result.json`。直接／别名捕获闭包仍是保留成功预期的 ignored，显式执行失败见 `/tmp/luna-tools-c6mm1iha/result.json`；这与 comptime 上下文中已接通的子句默认值不同。 |
+
+新 CMTT 默认值用例的改动前复现为 `code generator clause defaults remain unresolved`，
+证据 `/tmp/luna-tools-5l45nndo/result.json`。活动正例覆盖闭包、带参数闭包、
+捕获外层 T 的 helper、同时具有自身 U 子句的 helper、连续默认值与显式覆盖。
+非法闭包默认值即使被覆盖仍拒绝；同一 HIR 上的依赖预算失败不授权空集合，
+充足预算的新尝试可以完成准备。局部 helper 捕获 runtime 值的路径目前会先报
+作用域不可用，不把这种失败冒充完整的阶段诊断。
+
+整个 CMTT 组的既有失败是五项 BitVec 写回和一项 producer 默认值；此前用原
+生产文件作过同工作区对照，6 项的错误文本及 span 全部相同，证据
+`/tmp/luna-tools-_3qhralm/result.json`。这些预期没有修改，也没有将失败改成 ignored。
+七个修改的 Rust 文件通过 rustfmt check，退出 0，证据
+`/tmp/luna-tools-d36bg303/result.json`；`git diff --check` 通过。
+正式 docs 与原有受保护修改均保持不动；未运行全 workspace、native 或性能基准。
+当前提交清单、精确命令、源码哈希及基线对比保存在
+`/tmp/luna-clause-source-inputs-1bwjh39w`；上一轮局部输入接线证据仍在
 `/tmp/luna-free-source-inputs-7l1s22ht`。
 
 ## 5. 四个判断精确性是否正确的例子

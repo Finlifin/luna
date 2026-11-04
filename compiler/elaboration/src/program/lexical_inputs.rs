@@ -132,6 +132,22 @@ impl Checker<'_, '_> {
         result
     }
 
+    /// Defaults may read clause inputs through closures or local declarations.
+    /// Observe the source graph before attempting to prepare their values.
+    pub(super) fn expression_declaration_dependencies(
+        &mut self,
+        owner: OwnerId,
+        value: &Expr<'_>,
+    ) -> Result<BTreeSet<DeclarationId>, Error> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = dependencies::expression_declaration_dependencies(
+            self, owner, value, &mut fuel, value.span,
+        );
+        self.required_steps -= (before - fuel) as u64;
+        result
+    }
+
     /// Observe free source bindings, including closure captures, without
     /// executing code or importing a referenced declaration's own parameters.
     pub(super) fn expression_free_local_dependencies(
@@ -437,6 +453,16 @@ impl Checker<'_, '_> {
         else {
             return Ok(Vec::new());
         };
+        // An empty staged telescope is already established by the source
+        // declaration. No callable-domain observation is needed in that case;
+        // a nonempty telescope still requires every domain to have formed.
+        if !sig
+            .params
+            .iter()
+            .any(|parameter| parameter.ty.is_comptime())
+        {
+            return Ok(Vec::new());
+        }
         let domains = if let Some(signature) = self
             .signatures
             .get(&parent)
