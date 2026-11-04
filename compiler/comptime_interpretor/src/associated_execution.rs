@@ -173,13 +173,9 @@ impl<'a> Interpreter<'a> {
             .associated_resolver
             .filter(|_| self.comptime_only && self.graph.is_none())
             .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
-        let before = self.budget.steps;
-        let selected = resolver(&access, &mut self.budget.steps);
-        if self.budget.steps > before {
-            self.budget.steps = 0;
-            return Err(self.failure(ErrorKind::StepsExhausted, Some(source)));
-        }
-        let selected = selected?;
+        let selected = host_budget::checked(&mut self.budget.steps, Some(source), |remaining| {
+            resolver(&access, remaining)
+        })?;
         let expression = selected.initializer.into_expression();
         nir::copy_budget::charge_expression(&expression, &mut self.budget.steps)
             .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;

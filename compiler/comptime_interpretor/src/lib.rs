@@ -35,6 +35,7 @@ mod function_instances;
 pub use function_inputs::{FunctionInputRejection, InputAdmissionStage};
 mod iir_execution;
 use iir_execution::ConcreteNominal;
+mod host_budget;
 mod immutable_storage;
 mod input_bodies;
 mod input_collection;
@@ -2033,10 +2034,9 @@ impl<'a> Interpreter<'a> {
                 if self.budget.steps == 0 {
                     return ContractOutcome::Unknown;
                 }
-                let mut remaining = self.budget.steps;
-                let result = solver(predicate, &mut remaining);
-                self.budget.steps = self.budget.steps.min(remaining);
-                result
+                host_budget::clamped(&mut self.budget.steps, |remaining| {
+                    solver(predicate, remaining)
+                })
             }
             None => self.retained_type_contract(predicate, 0),
         }

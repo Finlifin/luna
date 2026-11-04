@@ -2,6 +2,9 @@
 use super::*;
 use comptime_compiler::methods::View;
 
+#[cfg(test)]
+mod budget_tests;
+
 pub(super) enum Selection {
     Value(Value),
     Function {
@@ -177,13 +180,10 @@ impl Interpreter<'_> {
                     method_arguments: method_arguments.to_vec(),
                 },
             };
-            let before = self.budget.steps;
-            let selected = resolver(&expression, &mut self.budget.steps);
-            if self.budget.steps > before {
-                self.budget.steps = 0;
-                return Err(self.failure(ErrorKind::StepsExhausted, Some(source)));
-            }
-            let selected = selected?;
+            let selected =
+                host_budget::checked(&mut self.budget.steps, Some(source), |remaining| {
+                    resolver(&expression, remaining)
+                })?;
             self.charge_copy_work(Some(source), |fuel| {
                 for argument in selected.arguments.iter().chain(&selected.method_arguments) {
                     nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;

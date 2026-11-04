@@ -286,6 +286,54 @@ fn owned_associated_cycles_and_budget_failures_release_active_keys() {
 }
 
 #[test]
+fn associated_host_unwind_exhausts_allowance_without_publishing_a_selection() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let package = Package::default();
+    for compiled in [false, true] {
+        let calls = std::cell::Cell::new(0);
+        let resolver = |_: &Expr, fuel: &mut u64| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                *fuel = u64::MAX;
+                panic!("associated host interrupted");
+            }
+            *fuel -= 1;
+            Ok(AssociatedSelection {
+                initializer: nir::associated_initializers::AssociatedInitializer::new(
+                    expr(K::Literal(Literal::Bool(true))),
+                    &mut 1000,
+                )
+                .unwrap(),
+                requires_invocation: true,
+            })
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_associated_resolver(&resolver);
+        let mut env = Environment::default();
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| run(
+                &mut vm,
+                &read(2),
+                &mut env,
+                compiled
+            )))
+            .is_err()
+        );
+        assert_eq!(vm.remaining_steps(), 0);
+        assert!(!vm.associated_initializers.contains_key(&key(2)));
+        assert!(vm.active_associated_initializers.is_empty());
+        assert_eq!(calls.get(), 1);
+        vm.budget.steps = Budget::default().steps;
+        assert!(matches!(
+            run(&mut vm, &read(2), &mut env, compiled).unwrap(),
+            Flow::Value(Value::Bool(true))
+        ));
+        assert_eq!(calls.get(), 2);
+    }
+}
+
+#[test]
 fn initialized_type_views_are_query_local_and_preserve_nested_projection_structure() {
     let package = Package::default();
     let resolver = |_: &Expr, fuel: &mut u64| {

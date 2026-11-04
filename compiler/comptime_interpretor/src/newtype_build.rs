@@ -76,12 +76,9 @@ impl<'a> Interpreter<'a> {
             source,
         };
         let builder = self.newtype_builder.ok_or_else(fail)?;
-        let before = self.budget.steps;
-        self.budget.steps = 0;
-        let mut remaining = before;
-        let prepared = builder(&request, &mut remaining);
-        self.budget.steps = before.min(remaining);
-        let prepared = prepared?;
+        let prepared = host_budget::clamped(&mut self.budget.steps, |remaining| {
+            builder(&request, remaining)
+        })?;
         self.integer_operation(Some(source), |budget| {
             budget.consume(prepared.definitions.len())
         })?;

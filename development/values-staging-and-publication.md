@@ -257,6 +257,28 @@ frame 保存 PC、局部槽、结果目的地、控制和清理进度；异常�
 同一会话恢复不重放，不承诺崩溃后自动 exactly-once；崩溃重启或取消后重跑的外部任务
 须由 build 任务契约定义。内存事务不能回滚外部文件或进程。
 
+### 已接通：宿主调用的执行额度交接
+
+关联选择、方法选择、struct／enum／newtype builder 和带预算的 Type solver
+通过同一个 `host_budget` 边界交接额度：进入宿主前取走 VM 的剩余额度，宿主只操作
+独立的 allowance；正常返回后再结算，包括返回错误的情况。宿主 unwind 时 VM 的
+剩余额度保持为零，不能继续使用未经结算的工作额度，也不能借 panic 绕过补额检查。
+
+各服务保留原有响应规则：选择 resolver 试图补额时清零并报告 `StepsExhausted`，
+响应不进入选择目录；builder 和带预算 solver 将剩余额度限制在原授予量以内。
+无预算 solver 的接口未改变。该机制只处理额度所有权，不赋予宿主新的证明权限，
+不承诺任意 panic 后整个 VM 都可恢复，也不回滚宿主已经发生的外部副作用。
+
+验证在 `/home/fin/luna` 执行，统一前缀为
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p comptime_interpretor --lib host_ --no-fail-fast`：退出 0，
+  `/tmp/luna-tools-_qzdbdmc/result.json`。覆盖正常／错误结算、两种补额策略、
+  unwind 及真实关联、方法和 solver 入口的显式新额度重试。
+- `-p comptime_interpretor -p luna --lib --test builder_invocations --test comptime_bytecode_traits --test associated_purity --test associated_signatures --test deferred_associated_values --test library_meta_objects --test library_type_equality --no-fail-fast`：
+  退出 0，`/tmp/luna-tools-0maue7b9/result.json`。覆盖 VM 与 luna 库测试、
+  builder／trait／关联值和真实 sysroot 的公开 meta 对象及 Type 相等接口。
+
 ### 已接通：驱动现场归执行会话所有
 
 原 `run_executions` 的局部调用栈、待启动计算和待交付结果已经迁入
