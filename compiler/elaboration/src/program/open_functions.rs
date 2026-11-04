@@ -1881,16 +1881,20 @@ impl Checker<'_, '_> {
                     .ok_or_else(|| {
                         error(expr.span, "signature input observation budget exhausted")
                     })?;
-                let describe_values = sig.modifiers.is_comptime && describable_open_type(value, 0);
                 let pending_inputs = sig
                     .params
                     .iter()
                     .enumerate()
                     .filter_map(|(slot, parameter)| {
                         let (sort, domain) = self.signature_domains.get(&owner)?.get(slot)?;
-                        let missing = ((*sort != Sort::Runtime || sig.modifiers.is_comptime)
-                            && domain.is_none())
-                            || (describe_values && *sort == Sort::Runtime && domain.is_some());
+                        // Ordinary inputs of a comptime function remain value
+                        // dependencies even when their domains are established.
+                        // Source shape does not decide whether they are supplied.
+                        let missing = if *sort == Sort::Runtime {
+                            sig.modifiers.is_comptime
+                        } else {
+                            domain.is_none()
+                        };
                         missing.then_some(local(parameter.hir_id))
                     })
                     .collect();
@@ -6978,6 +6982,7 @@ impl Checker<'_, '_> {
         // inference never invokes the same supplier twice.
         if description.is_none() {
             let mut needed = BTreeSet::new();
+            let mut source_dependencies = BTreeMap::new();
             for annotation in definition
                 .parameters
                 .iter()
@@ -7014,19 +7019,14 @@ impl Checker<'_, '_> {
                         continue;
                     }
                     if let Some(source) = annotation_source(sig, slot) {
-                        let dependencies = std::cell::RefCell::new(BTreeSet::new());
                         let value = if let H::Defer(value) = source.kind {
                             value
                         } else {
                             source
                         };
-                        required::signature_inputs_ready(value, 0, &|id| {
-                            if let Some(index) = sig.params.iter().position(|p| p.hir_id == id) {
-                                dependencies.borrow_mut().insert(index);
-                            }
-                            true
-                        })?;
-                        needed.extend(dependencies.into_inner());
+                        let dependencies = self.expression_parameter_dependencies(owner, value)?;
+                        needed.extend(dependencies.iter().copied());
+                        source_dependencies.insert(slot, dependencies);
                     }
                 }
             }
@@ -7091,21 +7091,15 @@ impl Checker<'_, '_> {
                                 })
                         }
                         Annotation::InputType { slot } => checked.symbols[*slot].is_some(),
-                        Annotation::Suspended { .. } => {
-                            let source = annotation_source(sig, slot).unwrap();
-                            let H::Defer(value) = source.kind else {
-                                unreachable!()
-                            };
-                            describable_open_type(value, 0)
-                                && required::signature_inputs_ready(value, 0, &|id| {
-                                    sig.params.iter().position(|p| p.hir_id == id).is_some_and(
-                                        |index| {
-                                            checked.symbols[index].is_some()
-                                                || checked.live[index].is_some()
-                                        },
-                                    )
-                                })?
-                        }
+                        Annotation::Suspended { .. } => source_dependencies
+                            .get(&slot)
+                            .ok_or_else(|| {
+                                error(expr.span, "missing annotation dependency observation")
+                            })?
+                            .iter()
+                            .all(|index| {
+                                checked.symbols[*index].is_some() || checked.live[*index].is_some()
+                            }),
                         Annotation::Known(_) => false,
                     };
                     if ready {
@@ -8007,14 +8001,9 @@ impl Checker<'_, '_> {
             for slot in 0..=sig.params.len() {
                 if let Some(source) = annotation_source(sig, slot) {
                     if let H::Defer(value) = source.kind {
-                        let dependencies = std::cell::RefCell::new(BTreeSet::new());
-                        required::signature_inputs_ready(value, 0, &|id| {
-                            if let Some(slot) = sig.params.iter().position(|p| p.hir_id == id) {
-                                dependencies.borrow_mut().insert(slot);
-                            }
-                            true
-                        })?;
-                        ordinary_dependencies.extend(dependencies.into_inner());
+                        ordinary_dependencies.extend(
+                            self.expression_parameter_dependencies(owner, value)?,
+                        );
                     }
                 }
             }
@@ -8051,14 +8040,7 @@ impl Checker<'_, '_> {
                 let TyParamKind::Optional(_, _, default) = sig.params[slot].ty.kind else {
                     continue;
                 };
-                let dependencies = std::cell::RefCell::new(BTreeSet::new());
-                required::signature_inputs_ready(default, 0, &|id| {
-                    if let Some(input) = sig.params.iter().position(|p| p.hir_id == id) {
-                        dependencies.borrow_mut().insert(input);
-                    }
-                    true
-                })?;
-                for input in dependencies.into_inner() {
+                for input in self.expression_parameter_dependencies(owner, default)? {
                     if ordinary_dependencies.insert(input) {
                         pending.push(input);
                     }

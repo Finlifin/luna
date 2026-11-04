@@ -40,6 +40,9 @@ struct Reads<'a, 'c, 'h> {
     protocol_owners: BTreeMap<OwnerId, Vec<OwnerId>>,
     local_inputs: Option<&'a BTreeSet<n::LocalId>>,
     reads_local_input: bool,
+    collect_locals: bool,
+    local_reads: BTreeSet<n::LocalId>,
+    staged_locals: BTreeMap<DeclarationId, n::LocalId>,
     fuel: usize,
     span: Span,
 }
@@ -86,6 +89,51 @@ pub(super) fn expression_may_use_inputs(
     result
 }
 
+/// Collect source-frame inputs for invocation preparation. Scoped delivered
+/// terms need an explicit binder mapping; they cannot be treated as no reads.
+pub(super) fn expression_local_dependencies(
+    checker: &Checker<'_, '_>,
+    owner: OwnerId,
+    value: &Expr<'_>,
+    fuel: &mut usize,
+    span: Span,
+) -> Result<BTreeSet<n::LocalId>, Error> {
+    let mut reads = Reads::new(checker, owner, fuel, span);
+    reads.collect_locals = true;
+    let result = (|| {
+        let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+            checker.package.item(owner).map(|item| &item.kind)
+        else {
+            return Err(error(
+                span,
+                "parameter dependencies require a function owner",
+            ));
+        };
+        // Only this source telescope can contribute invocation slots. Do not
+        // rebuild a reverse index for every staged parameter in the package.
+        for parameter in sig.params {
+            reads.charge()?;
+            if let Some(declaration) = checker
+                .package
+                .staged_parameter_definitions
+                .get(&parameter.hir_id)
+            {
+                reads
+                    .staged_locals
+                    .insert(reads.identity(*declaration), local(parameter.hir_id));
+            }
+        }
+        reads.prepare_protocols()?;
+        reads.inherited(owner)?;
+        reads.protocols(owner)?;
+        reads.expression(value)?;
+        reads.drain()?;
+        Ok(std::mem::take(&mut reads.local_reads))
+    })();
+    *fuel = reads.fuel;
+    result
+}
+
 impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
     fn new(checker: &'a Checker<'c, 'h>, owner: OwnerId, fuel: &usize, span: Span) -> Self {
         Self {
@@ -99,6 +147,9 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             protocol_owners: BTreeMap::new(),
             local_inputs: None,
             reads_local_input: false,
+            collect_locals: false,
+            local_reads: BTreeSet::new(),
+            staged_locals: BTreeMap::new(),
             fuel: *fuel,
             span,
         }
@@ -151,6 +202,9 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
         Ok(())
     }
     fn input(&mut self, id: DeclarationId) {
+        if let Some(binding) = self.staged_locals.get(&id) {
+            self.local_reads.insert(*binding);
+        }
         self.graph
             .entry(self.current)
             .or_default()
@@ -158,7 +212,7 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             .insert(id);
     }
     fn term(&mut self, term: &Term) -> Result<(), Error> {
-        if self.local_inputs.is_some() {
+        if self.local_inputs.is_some() || self.collect_locals {
             // A delivered term may carry a scope that is not the source local
             // frame. Without its mapping, absence of a Local read is no proof
             // that the pending inputs are irrelevant.
@@ -169,11 +223,17 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
                 .map_err(|failure| error(self.span, failure.to_string()))?
                 .is_empty()
             {
+                if self.collect_locals {
+                    return Err(error(
+                        self.span,
+                        "source dependency requires a delivered scope mapping",
+                    ));
+                }
                 self.reads_local_input = true;
             }
         }
         let mut symbolic = BTreeSet::new();
-        let direct = if self.local_inputs.is_some() {
+        let direct = if self.local_inputs.is_some() || self.collect_locals {
             &mut symbolic
         } else {
             &mut self.graph.entry(self.current).or_default().direct
@@ -184,11 +244,9 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             // Rigid declarations also require a declaration-to-local mapping.
             // Until that evidence is available, retain the pending context.
             self.reads_local_input = true;
-            self.graph
-                .entry(self.current)
-                .or_default()
-                .direct
-                .extend(symbolic);
+            for declaration in symbolic {
+                self.input(declaration);
+            }
         }
         Ok(())
     }
@@ -647,6 +705,9 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             }
             H::ResolvedDef { def_id, .. } => self.definition(*def_id)?,
             H::ResolvedFnParam(_, binding) | H::ResolvedLocal(_, binding) => {
+                if self.collect_locals {
+                    self.local_reads.insert(local(*binding));
+                }
                 if self
                     .local_inputs
                     .is_some_and(|inputs| inputs.contains(&local(*binding)))

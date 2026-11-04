@@ -1,0 +1,14 @@
+{-
+    Intended positive example: a named callable parameter can receive a Type
+    computed by a local closure. The current static callable telescope tries
+    to invoke choose before its local binding has been prepared.
+-}
+fn identity(value: bool) -> bool { value }
+
+comptime fn accept(T: Type,
+    callback: defer do { let choose = || T; fn(value: choose()) -> choose() }) -> bool
+{
+    true
+}
+
+comptime fn run() -> bool { accept(bool, identity) }

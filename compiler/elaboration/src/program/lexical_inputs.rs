@@ -118,6 +118,43 @@ impl Checker<'_, '_> {
         result
     }
 
+    /// Select invocation slots by source binding identity, including captures
+    /// and referenced local declarations. Observation never executes a supplier.
+    pub(super) fn expression_parameter_dependencies(
+        &mut self,
+        owner: OwnerId,
+        value: &Expr<'_>,
+    ) -> Result<BTreeSet<usize>, Error> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result =
+            dependencies::expression_local_dependencies(self, owner, value, &mut fuel, value.span);
+        self.required_steps -= (before - fuel) as u64;
+        let references = result?;
+        let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+            self.package.item(owner).map(|item| &item.kind)
+        else {
+            return Err(error(
+                value.span,
+                "parameter dependencies require a function owner",
+            ));
+        };
+        self.required_steps = self
+            .required_steps
+            .checked_sub(sig.params.len() as u64)
+            .ok_or_else(|| error(value.span, "parameter dependency mapping budget exhausted"))?;
+        Ok(sig
+            .params
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, parameter)| {
+                references
+                    .contains(&local(parameter.hir_id))
+                    .then_some(slot)
+            })
+            .collect())
+    }
+
     /// Form the prefix once from a completed parent signature. Both signature
     /// construction and all ordinary local-function call paths consume it.
     /// A missing parent signature is an error, never an empty capture list.

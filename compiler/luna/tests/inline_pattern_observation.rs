@@ -159,3 +159,16 @@ fn signature_dependency_classification_reports_exhaustion_and_recovers() {
         4096,
     );
 }
+
+#[test]
+fn invocation_dependency_selection_exhaustion_preserves_fresh_attempts() {
+    check_source_observation(
+        "typealias Type = .Type'builtin;
+        comptime fn accept(T: Type,
+            .U: Type = do { let choose = || T; choose() }, .value: defer U = true) -> bool { true }
+        const answer = accept(bool);
+        fn run() -> bool { true }",
+        "parameter dependency mapping budget exhausted",
+        4096,
+    );
+}

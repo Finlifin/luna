@@ -798,32 +798,63 @@ key 的 1 项显式 skip 未解除。四个已格式化 Rust 文件的 rustfmt c
 native 或性能基准，未把闭包待定 Type 的既有失败计入通过项。
 
 
-### 签名分类共享待定输入依赖观察
+### 签名分类与调用供应共享输入依赖观察
 
-`signature_annotation` 也已接入 `annotation_may_use_pending_inputs`。旧路径调用
-`signature_inputs_ready` 却丢弃其返回的 readiness，只读取回调设置的 Cell；遍历
-遇到尚未支持的节点时返回 false，却不一定访问内部捕获，于是可能错误地开始
-required preparation。现先按既有参数域规则形成候选输入，再由与定义检查共用
-的完整源码依赖查询决定是否保留 Suspended。函数声明、参数身份和原标注槽保持
-不变，不提前调用生产者，也不引入按库名称决定的路径。
+`signature_annotation` 使用 `annotation_may_use_pending_inputs` 分类。普通 comptime
+参数即使已有确定域，其值仍须由调用提供；分类不再用 `describable_open_type`
+白名单决定是否保留这项依赖。源码显式闭包、嵌套闭包及控制流与其他表达式遵循
+同一输入规则。域已经明确的标注仍由完整 typed region 检查，未知域的结构描述
+限制没有因此消失。
 
-候选扫描记入共享 preparation 预算；扫描或依赖观察失败直接传播，不得当作
-无依赖或自动改走另一个求值入口。新的预算用例在同一份解析后的 HIR 上触发
-分类耗尽，再以充分预算重新检查并实际执行含待定签名的调用。
+依赖发现还必须接到实际供应。此前 `infer_open_clause_arguments` 和
+`open_function_call` 使用 `signature_inputs_ready` 的回调副作用收集索引，丢弃
+返回值；它在闭包等节点上停止，导致调用者没有提供标注恢复所需的 T。现在这两个
+调用入口及被选中默认值的依赖闭包使用 `expression_parameter_dependencies`，沿
+共同 lexical_inputs 遍历发现源码引用，再按实际 owner/binder 身份映射到本次
+参数槽。默认值被显式覆盖时不观察它的供应依赖，也不执行它。既有默认值顺序、
+共享 live graph 和已准备实参仍由原 ArgumentPlan 迁移中的供应机制保持。
 
-这仍是分类依据的清理：`signature_inputs_ready` 的其他消费者尚在，普通 comptime
-已知域值的候选规则仍使用 `describable_open_type`。待定闭包域、动态 callee 和
-完整行为区域没有因这一接线而完成；后续表示与迁移边界见
+推断入口只对 pending 标注建立本次局部依赖表，供应选择和 readiness 复用同一份
+观察；不再为了判定“是否齐备”重复扫描源码，也不以另一个语法白名单拒绝闭包。
+普通子句的刚性身份仍走原子句/词法输入机制，不能当成本次普通参数槽。被搬运的
+staged 参数身份通过源码 telescope 的映射恢复；索引只为目标函数的参数构建，
+不遍历全包的 staged 参数。delivered term 若仍有自由 scoped 参数而没有映射，
+查询明确报告 `source dependency requires a delivered scope mapping`，不把它
+当作空依赖。这个限制需要后续显式 binder 环境接线，不是新增的源语言限制。
+
+观察及槽位映射消耗共享 preparation 预算，失败保留为失败；不调用生产者，不
+把活动 locals、候选或等待者存进冻结签名缓存。两个源码查询共用表达式/模式、
+局部声明、协议及继承前提的边表，但目的不同：定义检查中的 may-use 对未映射
+符号保守保留上下文，调用供应必须交付实际源码参数槽，不能拿一个 bool 代替它。
+当前协议索引仍有按包扫描的成本，未宣称完成依赖观察的规模优化。
+
+真实 sysroot 正例覆盖 Type 输入被直接及嵌套闭包捕获、直接调用与带类型子句的
+推断调用、默认 Type 计算中的闭包捕获，以及带范围守卫的闭包在 9/255 输入下
+执行；两种 VM 均验证结果。未调用定义中的闭包算术错误仍须拒绝。预算用例在同一
+HIR 上触发调用依赖映射耗尽，再给足预算完成编译及调用准备，不以旧失败授权空
+依赖或另一条求值路径。
+
+仍须保持以下未完成项：
+
+- [待定 Type 捕获](repros/pending-type-closure-annotation.fl)需要共同上下文表达式
+  保存待定域、捕获和主体义务，不能伪造完整 Type。
+- [具名函数类型的动态域](repros/computed-named-callable-annotation.fl)仍走静态
+  telescope 检查，会过早取得局部闭包结果；不能把参数名删掉作为实现。
+- [NF 参数中的局部闭包](repros/closure-nf-annotation-arithmetic.fl)在当前准备
+  路径先报不可用局部输入，尚未走到完整范围证明；期望仍是定义侧算术拒绝。
+
+`signature_inputs_ready` 的其他 readiness 消费者，以及描述器中其他
+`describable_open_type` 用途尚未退役。完整 ContextualExpr/ArgumentPlan、动态
+callable telescope 和 scoped delivered term 的映射仍需后续接通。具体表示边界见
 [待定闭包设计](values-staging-and-publication.md#待定闭包需要保留可调用证据与主体不能伪造完整函数类型)。
 
 
-在 `/home/fin/luna` 用 `development/check.py --timeout 900 -- test -p luna`
-检查：开放函数、标注行为、开放 NF 计划和观察预算四组 405 项通过，证据
-`/tmp/luna-tools-5gpte9eo/result.json`。补充预算恢复用例后，观察预算及六组相邻
-检查共 468 项通过，证据 `/tmp/luna-tools-3octmdco/result.json`；其中预算组从
-4 项增为 5 项。两轮均退出 0，重复覆盖不累计为独立测试数。2 项既有 ignored
-和 memoized value-indexed key 的 1 项显式 skip 保持未完成状态。
-修改的测试经 rustfmt 排版，旧大文件只整理本次代码块；`git diff --check` 通过。
-原有受保护修改的哈希未变，正式 docs 未动。提交清单及本机证据放在
-`/tmp/luna-signature-dependency-routing-q9imdni1`；未运行全 workspace、native
-或性能基准，不能据此宣称依赖查询的规模成本已经评估。
+当前接线在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test
+-p luna` 验证：开放函数、标注行为、观察预算、comptime 子句、局部模板和普通收集器
+六组 500 项通过，证据 `/tmp/luna-tools-zxmjpoy8/result.json`；名义输入、CMTT
+类型输入、函数类型依赖、两类 NF 输入计划及展开六组 481 项通过，证据
+`/tmp/luna-tools-0c8k_mfz/result.json`。两轮均退出 0；2 项既有 ignored 和
+memoized value-indexed key 的 1 项显式 skip 未解除。四个修改的独立 Rust 文件
+rustfmt check 通过，旧大文件保持局部排版；`git diff --check` 通过。
+未运行全 workspace、native 或性能基准。正式 docs 与原有受保护修改未动；提交
+范围、原始来源和本机检查记录在 `/tmp/luna-signature-structure-0lp1k08n`。
