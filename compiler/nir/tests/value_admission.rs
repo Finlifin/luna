@@ -73,6 +73,53 @@ fn with_queries<R>(registered: bool, check: impl FnOnce(&mut DomainQueries<'_, '
 }
 
 #[test]
+fn normal_input_queries_preserve_unresolved_prerequisites_and_recover() {
+    use nir::normal_forms::{ApplicationError, Head, Kind, Parameter};
+    let descriptor = Head {
+        declaration: id(30),
+        role: Default::default(),
+        collector: None,
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: id(31),
+            binding: nir::program::LocalId {
+                owner: 30,
+                index: 0,
+            },
+            kind: Kind::Value,
+            ty: signature(),
+        }],
+    };
+    let input = Term::FunctionValue {
+        declaration: id(20),
+        arguments: vec![],
+    };
+    let mut fuel = 10_000;
+    let result = with_queries(true, |queries| {
+        let mut local = DomainQueries {
+            layout: &mut *queries.layout,
+            declared: &mut *queries.declared,
+            collection: &mut *queries.collection,
+            callable: &mut |_, _, _| Err(Error::Unresolved("callable contract pending".into())),
+            target: queries.target,
+        };
+        descriptor.check_arguments(std::slice::from_ref(&input), &[], &mut fuel, &mut local)
+    });
+    assert_eq!(
+        result,
+        Err(ApplicationError::Unresolved {
+            index: 0,
+            reason: "callable contract pending".into(),
+        })
+    );
+    assert!(fuel > 0 && fuel < 10_000);
+    with_queries(true, |queries| {
+        descriptor.check_arguments(&[input], &[], &mut fuel, queries)
+    })
+    .unwrap();
+}
+
+#[test]
 fn nested_collection_callables_require_receiving_world_evidence() {
     let domain = list(signature());
     let callable = Term::FunctionValue {

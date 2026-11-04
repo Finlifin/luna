@@ -7,6 +7,9 @@ use std::borrow::Cow;
 fn input_failure(error: ErrorKind) -> AdmissionError {
     match error {
         ErrorKind::StepsExhausted | ErrorKind::DepthExhausted => AdmissionError::Budget,
+        ErrorKind::TypeContractUnresolved => {
+            AdmissionError::Unresolved("callable input contract".into())
+        }
         ErrorKind::FunctionInputRejected(reason) => AdmissionError::Invalid(reason.to_string()),
         error => AdmissionError::Invalid(format!("{error:?}")),
     }
@@ -21,7 +24,7 @@ fn optional_view<T>(result: Result<Option<T>, AdmissionError>, fuel: &mut usize)
             *fuel = 0;
             None
         }
-        Err(AdmissionError::Invalid(_)) => None,
+        Err(AdmissionError::Invalid(_) | AdmissionError::Unresolved(_)) => None,
     }
 }
 

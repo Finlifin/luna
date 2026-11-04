@@ -124,6 +124,7 @@ impl Interpreter<'_> {
             self.failure(
                 match error {
                     nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+                    nir::NominalAdmissionError::Unresolved(_) => ErrorKind::TypeContractUnresolved,
                     nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
                 },
                 None,

@@ -76,32 +76,40 @@ fn eligible_alternatives(context: &Context, subject: &Term, formula: &Formula) -
             if original == subject && eligible_shape(context, shape))))
 }
 
-/// Equality is queried only for Type domains, with the caller's shared budget.
+/// Discharge a required Type-domain equality with shared fuel. A validated
+/// counterexample denies this admission, not a proof of the negated equality.
+/// Unknown keeps its reason and must not eliminate a still-pending candidate.
 pub(crate) fn equivalent_domains(
     context: &Context,
     left: &Term,
     right: &Term,
     max_depth: usize,
     fuel: &mut usize,
-) -> bool {
+) -> Result<bool, nir::NominalAdmissionError> {
+    use nir::NominalAdmissionError as Error;
     if left.sort() != nir::Sort::Type || right.sort() != nir::Sort::Type {
-        return false;
+        return Err("domain equality requires Type operands".into());
     }
-    if nir::type_computations::charge_term(left, fuel).is_err()
-        || nir::type_computations::charge_term(right, fuel).is_err()
-    {
-        return false;
-    }
+    nir::type_computations::charge_term(left, fuel)?;
+    nir::type_computations::charge_term(right, fuel)?;
     let mut budget = Budget {
         steps: *fuel,
         max_depth,
     };
-    let result = context.prove_metered(
-        crate::ptc::Formula::equal(left.clone(), right.clone()),
-        &mut budget,
-    );
+    let result = context.prove_metered(Formula::equal(left.clone(), right.clone()), &mut budget);
     *fuel = budget.steps;
-    matches!(result, Outcome::Entailed(_))
+    match result {
+        Outcome::Entailed(_) => Ok(true),
+        Outcome::NotEntailed(_) => Ok(false),
+        Outcome::Unknown {
+            reason: crate::ptc::UnknownReason::BudgetExhausted,
+            ..
+        } => Err(Error::Budget),
+        Outcome::Unknown { reason, .. } => Err(Error::Unresolved(format!(
+            "Type domain equality: {reason:?}"
+        ))),
+        Outcome::IllFormed(reason) => Err(Error::Invalid(reason)),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1267,7 +1275,9 @@ impl ImplementationHead {
             &mut domain_fuel,
         )
         .map_err(|error| match error {
-            nir::NominalAdmissionError::Budget => TypeAssessment::Pending(error.to_string()),
+            nir::NominalAdmissionError::Budget | nir::NominalAdmissionError::Unresolved(_) => {
+                TypeAssessment::Pending(error.to_string())
+            }
             nir::NominalAdmissionError::Invalid(message) => TypeAssessment::Invalid(message),
         })?;
         let substitution = nir::DeclarationSubstitution::bounded(
@@ -1920,55 +1930,65 @@ fn validate_head_arguments_with_domains(
                 nir::type_computations::charge_term(actual, fuel)?;
                 if binder.sort == Sort::ComptimeValue
                     && (actual == &domain
-                        || context.is_some_and(|(context, max_depth)| {
-                            equivalent_domains(context, actual, &domain, max_depth, fuel)
-                        }))
+                        || match context {
+                            Some((context, max_depth)) => {
+                                equivalent_domains(context, actual, &domain, max_depth, fuel)?
+                            }
+                            None => false,
+                        })
                 {
                     continue;
                 }
                 return Err("implementation rigid argument domain mismatch".into());
             }
         }
-        let symbolic = |value: &Term, expected: &Term, fuel: &mut usize| {
+        let mut symbolic = |value: &Term, expected: &Term, fuel: &mut usize| {
             let Term::Rigid {
                 declaration,
                 sort: Sort::ComptimeValue,
             } = value
             else {
-                return false;
+                return Ok(false);
             };
             let Some(actual) = evidence.get(declaration) else {
-                return false;
+                return Ok(false);
             };
-            if nir::type_computations::charge_term(actual, fuel).is_err() {
-                return false;
-            }
-            actual == expected
-                || context.is_some_and(|(context, depth)| {
-                    equivalent_domains(context, actual, expected, depth, fuel)
+            nir::type_computations::charge_term(actual, fuel)?;
+            Ok(actual == expected
+                || match context {
+                    Some((context, depth)) => {
+                        equivalent_domains(context, actual, expected, depth, fuel)?
+                    }
+                    None => false,
                 })
         };
-        nir::validate_declaration_arguments_with_collections_in(
-            &[binder.declaration],
-            &[domain],
-            std::slice::from_ref(argument),
+        // The declaration substitution above has already established binder
+        // scopes and sorts. Check its value directly with the shared kernel;
+        // a legacy boolean declaration wrapper would erase query failures.
+        nir::value_admission::validate(
+            argument,
+            &domain,
+            frames,
             fuel,
-            |ty, variant, fuel| {
-                let package = layouts.ok_or_else(|| {
-                    nir::NominalAdmissionError::from(
-                        "nominal value admission requires declaration layout evidence",
-                    )
-                })?;
-                nir::normal_forms::query_nominal_value_fields(package, ty, variant, fuel)
+            &mut nir::value_admission::DomainQueries {
+                layout: &mut |ty, variant, fuel| {
+                    let package = layouts.ok_or_else(|| {
+                        nir::NominalAdmissionError::from(
+                            "nominal value admission requires declaration layout evidence",
+                        )
+                    })?;
+                    nir::normal_forms::query_nominal_value_fields(package, ty, variant, fuel)
+                },
+                declared: &mut symbolic,
+                collection: &mut |domain, fuel| {
+                    let Some(package) = layouts else {
+                        return Ok(None);
+                    };
+                    nir::normal_forms::list_element_budgeted(package, domain, fuel)
+                },
+                callable: &mut |_, _, _| Ok(None),
+                target: layouts.and_then(|package| package.target),
             },
-            symbolic,
-            |domain, fuel| {
-                let Some(package) = layouts else {
-                    return Ok(None);
-                };
-                nir::normal_forms::list_element_budgeted(package, domain, fuel)
-            },
-            layouts.and_then(|package| package.target),
         )?;
     }
     Ok(())
@@ -1977,6 +1997,139 @@ fn validate_head_arguments_with_domains(
 #[cfg(test)]
 mod captured_head_domains {
     use super::*;
+
+    #[test]
+    fn domain_relations_preserve_resource_unknown_and_counterexample_outcomes() {
+        use nir::NominalAdmissionError as Error;
+        let id = |local| DeclarationId { package: 92, local };
+        let var = |local| Term::Rigid {
+            declaration: id(local),
+            sort: Sort::Type,
+        };
+        let nf = |input| Term::NormalForm {
+            head: id(10),
+            sort: Sort::Type,
+            arguments: vec![input],
+        };
+        let (a, b) = (var(1), var(2));
+        let (left, right) = (nf(a.clone()), nf(b.clone()));
+        let mut context = Context::default();
+        context.assume(Formula::equal(a, b));
+        let mut fuel = 100_000;
+        assert!(
+            matches!(equivalent_domains(&context, &left, &right, 128, &mut fuel),
+            Err(Error::Unresolved(reason)) if reason.contains("UnvalidatedModel"))
+        );
+        assert!(fuel > 0);
+        context.admit_congruence(id(10));
+        let mut fuel = 100_000;
+        assert_eq!(
+            equivalent_domains(&context, &left, &right, 128, &mut fuel),
+            Ok(true)
+        );
+        let cost = 100_000 - fuel;
+        // PTC reserves a fraction of the current allowance for propagation
+        // and learning. Smaller budgets can therefore take a cheaper proof
+        // path; a generous run's cost is not a minimum-success threshold.
+        let mut exhausted = 0;
+        for steps in 0..cost {
+            let mut remaining = steps;
+            match equivalent_domains(&context, &left, &right, 128, &mut remaining) {
+                Err(Error::Budget) => exhausted += 1,
+                Ok(true) => {}
+                result => panic!("unexpected result at {steps}: {result:?}"),
+            }
+            assert!(remaining <= steps);
+        }
+        assert!(exhausted > 0);
+        assert_eq!(
+            equivalent_domains(&context, &left, &right, 128, &mut { cost }),
+            Ok(true)
+        );
+        assert_eq!(
+            equivalent_domains(
+                &Context::default(),
+                &Term::Primitive(nir::Primitive::Bool),
+                &Term::Primitive(nir::Primitive::Char),
+                128,
+                &mut 10_000
+            ),
+            Ok(false)
+        );
+        assert!(matches!(
+            equivalent_domains(&context, &Term::Bool(true), &right, 128, &mut 10_000),
+            Err(Error::Invalid(_))
+        ));
+        let escaped = Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        };
+        assert!(matches!(
+            equivalent_domains(&Context::default(), &escaped, &right, 128, &mut 10_000),
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn nested_head_domain_queries_do_not_collapse_unknown_to_mismatch() {
+        use nir::NominalAdmissionError as Error;
+        let id = |local| DeclarationId { package: 93, local };
+        let var = |local| Term::Rigid {
+            declaration: id(local),
+            sort: Sort::Type,
+        };
+        let nf = |input| Term::NormalForm {
+            head: id(10),
+            sort: Sort::Type,
+            arguments: vec![input],
+        };
+        let expected = nf(var(1));
+        let actual = nf(var(2));
+        let value = Term::Rigid {
+            declaration: id(3),
+            sort: Sort::ComptimeValue,
+        };
+        let domain = Term::Record(vec![("entry".into(), expected)]);
+        let argument = Term::RecordValue(vec![("entry".into(), value)]);
+        let domains = [domain];
+        let arguments = [argument];
+        let binders = nir::declaration_parameters(&[id(4)], &domains).unwrap();
+        let evidence = BTreeMap::from([(id(3), actual)]);
+        let mut context = Context::default();
+        context.assume(Formula::equal(var(1), var(2)));
+        let check = |context: &Context, fuel: &mut usize| {
+            validate_head_arguments_with_domains(
+                &binders,
+                &domains,
+                &arguments,
+                &evidence,
+                Some((context, 128)),
+                None,
+                fuel,
+            )
+        };
+        assert!(matches!(
+            check(&context, &mut 100_000),
+            Err(Error::Unresolved(_))
+        ));
+        context.admit_congruence(id(10));
+        let mut fuel = 100_000;
+        check(&context, &mut fuel).unwrap();
+        let cost = 100_000 - fuel;
+        let mut exhausted = 0;
+        for steps in 0..cost {
+            let mut remaining = steps;
+            match check(&context, &mut remaining) {
+                Err(Error::Budget) => exhausted += 1,
+                Ok(()) => {}
+                result => panic!("unexpected result at {steps}: {result:?}"),
+            }
+            assert!(remaining <= steps);
+        }
+        assert!(exhausted > 0);
+        check(&context, &mut { cost }).unwrap();
+    }
 
     #[test]
     fn collection_arguments_share_recursive_value_admission_and_layout_evidence() {

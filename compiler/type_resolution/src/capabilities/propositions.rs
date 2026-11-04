@@ -280,13 +280,7 @@ impl<'w> World<'w> {
                 &self.index.parameter_domains,
                 &mut fuel,
                 |left, right, fuel| {
-                    Ok(super::equivalent_domains(
-                        self.context,
-                        left,
-                        right,
-                        budget.max_depth,
-                        fuel,
-                    ))
+                    super::equivalent_domains(self.context, left, right, budget.max_depth, fuel)
                 },
                 Some(&self.index.nominal_layouts),
             )?;

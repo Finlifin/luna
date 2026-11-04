@@ -548,13 +548,7 @@ impl Solver<'_, '_> {
                 &self.world.index.parameter_domains,
                 &mut self.remaining,
                 |left, right, fuel| {
-                    Ok(equivalent_domains(
-                        self.world.context,
-                        left,
-                        right,
-                        budget.max_depth,
-                        fuel,
-                    ))
+                    equivalent_domains(self.world.context, left, right, budget.max_depth, fuel)
                 },
                 Some(&self.world.index.nominal_layouts),
             )?;
@@ -760,13 +754,7 @@ impl Solver<'_, '_> {
                         &world.index.parameter_domains,
                         fuel,
                         |left, right, fuel| {
-                            Ok(equivalent_domains(
-                                world.context,
-                                left,
-                                right,
-                                budget.max_depth,
-                                fuel,
-                            ))
+                            equivalent_domains(world.context, left, right, budget.max_depth, fuel)
                         },
                         Some(&world.index.nominal_layouts),
                     )

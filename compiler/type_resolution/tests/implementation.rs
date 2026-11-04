@@ -32,6 +32,48 @@ fn head(n: u32, subject: Term) -> ImplementationHead {
         subject,
     }
 }
+
+#[test]
+fn unresolved_parameter_domain_keeps_the_implementation_candidate_pending() {
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::{Context, Formula};
+    let nf = |input| Term::NormalForm {
+        head: id(80),
+        sort: Sort::Type,
+        arguments: vec![input],
+    };
+    let value = |n| Term::Rigid {
+        declaration: id(n),
+        sort: Sort::ComptimeValue,
+    };
+    let mut h = head(90, ty(P::Bool));
+    h.type_parameters = vec![id(3)];
+    h.parameter_types = vec![nf(var(1))];
+    h.interface_arguments = vec![value(3)];
+    let domains = std::collections::BTreeMap::from([(id(4), nf(var(2)))]);
+    let mut context = Context::default();
+    context.assume(Formula::equal(var(1), var(2)));
+    let result = h.match_types_with_domains(
+        &ty(P::Bool),
+        &[value(4)],
+        &context,
+        Budget::default(),
+        &domains,
+    );
+    assert!(
+        matches!(result, Err(TypeAssessment::Pending(ref reason)) if reason.contains("UnvalidatedModel")),
+        "{result:?}"
+    );
+    context.admit_congruence(id(80));
+    h.match_types_with_domains(
+        &ty(P::Bool),
+        &[value(4)],
+        &context,
+        Budget::default(),
+        &domains,
+    )
+    .unwrap();
+}
 fn add(index: &mut Index, n: u32, subject: Term) {
     index.insert(head(n, subject), Budget::default()).unwrap();
 }

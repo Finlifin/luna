@@ -2491,7 +2491,8 @@ Trait::input_substitution 及 DeclarationSubstitution 的 bounded 接口展开�
 其声明域使用。这项结构检查不替代 scalar range、requirements 或方法可用性。
 
 **trait 值域准入。** Trait 的 validate_arguments 系列现在直接返回共享的
-NominalAdmissionError（value_admission::Error），保留 Budget 与 Invalid。
+NominalAdmissionError（value_admission::Error），保留 Budget、Unresolved 与 Invalid。
+Unresolved 表示接收世界尚未完成某个前提检查，既不是域反例，也不授权接纳。
 参数 binder、Term 预检、声明替换和布局查询不再先转换成 String。
 声明域查找仍按声明身份取得独立证据，不以待验证的参数槽反推实际域；冲突、
 缺失与不匹配证据继续拒绝。VM 的具体 implementation 检查消费这个分类，资源
@@ -2503,34 +2504,64 @@ nominal 的声明查询和关系检查都传播错误；Ok(false) 仅表示没�
 不是预算失败。Type 关系不建立值索引相等，也不展开 NF 头。已经无调用者的
 validate_symbolic_value 与 validate_record_index 私有包装已删除。
 
+**Type 域证明。** equivalent_domains 仅对 Type 操作数查询 PTC：Entailed 返回
+Ok(true)，NotEntailed 返回 Ok(false)，表示当前前提不足以保证必检域要求，不能
+据此添加否定等式。BudgetExhausted 保持 Budget，其他 Unknown 保留原因为
+Unresolved，IllFormed 为 Invalid。调用使用同一余额并在每种结果后同步；失败的
+预检仍可能留下正余额。未注册 NF congruence 的 UnvalidatedModel 不被当作域反例，
+也不以展开 NF 主体求解。
+
+implementation 头的直接值输入及嵌套 symbolic 字段均使用这一可失败查询。
+其参数作用域和 sort 已由 DeclarationSubstitution 检查，值本身直接进入共享
+value_admission 内核，退役该路径重复构造单参数声明并经过布尔 evidence 包装的
+做法。Budget／Unresolved 在候选形成处保持 TypeAssessment::Pending；不能从
+一次失败查询永久排除候选。实际回归覆盖缺少 congruence 时 Pending，补齐同一
+世界中的证据后重新匹配成功。
+
+NF 的 ApplicationError::Unresolved 保留失败的参数位置和原因；dispatch 转回
+共享准入错误时不丢失该分类。执行侧 typed admission 消费者将其映射为
+TypeContractUnresolved，区别于 StepsExhausted 和类型错误。NF 未完成检查不会
+人为清空尚余预算，后续有证据的独立检查可以成功。
+
 回归检验不同 inherited premises 的替换、重复循环终止、叶节点、非法接口与
 参数、宽输入和重复替换载荷；fresh 构造及具体 implementation 准入在每个不足
 额度上返回资源错误，精确额度成功，失败后重试保持原世界且无执行事件。
 嵌套值准入还逐级扫描不足额度，并在有正余额时注入查询资源错误和语义错误，
 验证原分类传播；关系不成立仍拒绝，独立关系证据成立才接受。
+PTC 会按当前预算为传播与学习分配额度，较小预算可能走更便宜的证明路径；因此
+大预算运行的消耗不是最小成功阈值。域证明回归逐预算检查只能成功或返回 Budget，
+不能误报 Invalid／Unresolved，也不能增长余额，而非要求所有较小预算必须失败。
 
 当前尚未完成的边界：
 
 - fresh phase pass 仍使用自己的默认额度，VM 随后再做结构检查；构造失败的
   for_comptime_in_budget 仍保守保留全部 reservation，尚非精确失败扣款。
 - 后续关联项／方法签名与 world capability 的部分实例化尚未有界。
-- PTC 的 equivalent_domains 仍是布尔证明接口，其适配器仅包装已有返回值；
-  solver 内部 Unknown／资源失败的完整迁移不由本节的 typed admission 解决。
-  PTC 外层仍有 String 与可选结果边界，不能据此宣称完整求解链已保留错误分类。
+- PTC 的域关系查询已保留 Unknown，但 capability 外层仍有 String、is_ok 与
+  可选结果边界；proof replay 也仍有合并 admission 错误的路径。完整求解链的
+  Pending／资源／反例传播尚未完成。
+- 旧 layout／callable 可选观察器把 Unresolved 表示为 unavailable view，仍不能
+  保留具体原因；typed admission 直接消费完整错误。后续须迁移这些观察器及其
+  消费者，不能把本次新增分类说成所有描述观察都已无损。
 - nominal 的既有公开 evidence 包装仍接收总布尔关系，再适配到共享内核；
   需要可失败域查询的消费者必须直接走 fallible DomainQueries。各公开包装的
   后续迁移以及旧 index shape 布尔观察仍待处理。
 
 验证证据见下；历史中间版本的逐轮日志由 git 保留，不作为当前实现状态。
 
-最终源码于 `/home/fin/luna` 使用
-`python3 -B development/check.py --timeout 900 -- test` 检查：
+最终源码的验证范围与输出锚点如下（工作目录 `/home/fin/luna`）：
 
-| 范围与参数 | 结果 | 输出锚点 |
-| --- | --- | --- |
-| `-p nir -p comptime_interpretor -p type_resolution -p iir --lib --test trait_parameters --test value_admission --test normal_inputs --test normal_callable_inputs --test capabilities --test implementation --test implementation_phases --no-fail-fast` | 778 通过，退出 0 | `/tmp/luna-tools-ut52yw59/result.json` |
-| `-p luna --test trait_phases --test trait_domain_substitution --test dynamic_trait_clauses --test comptime_bytecode_traits --test sysroot_preludes --test library_list_equality --test normal_input_plans --test cmtt_type_inputs --test nominal_staging --test newtypes --no-fail-fast` | 371 通过，退出 0 | `/tmp/luna-tools-1fsy9ddt/result.json` |
-| 修改文件的 rustfmt check | 退出 0 | `/tmp/luna-tools-i1m80uby/result.json` |
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p nir
+  -p comptime_interpretor -p iir --lib --test implementation --test capabilities
+  --test trait_parameters --test value_admission --test normal_inputs
+  --test normal_callable_inputs --test callable_world --no-fail-fast`：769 通过，
+  退出 0；`/tmp/luna-tools-1rr5l0my/result.json`。
+- 修改文件的 rustfmt check：退出 0；`/tmp/luna-tools-x0qkiza3/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases
+  --test trait_domain_substitution --test dynamic_trait_clauses --test comptime_bytecode_traits
+  --test sysroot_preludes --test library_list_equality --test normal_input_plans
+  --test cmtt_type_inputs --test nominal_staging --test newtypes --no-fail-fast`：371 通过，
+  退出 0；`/tmp/luna-tools-j7zkw6a9/result.json`。
 
 未跑全 workspace 或性能基准，其他已记录基线问题不在这批宣称解决。
 正式 docs、program verification 与 library 的既有工作区修改保持原字节内容。

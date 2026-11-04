@@ -274,6 +274,7 @@ impl Contract<'_> {
             vm.failure(
                 match error {
                     nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+                    nir::NominalAdmissionError::Unresolved(_) => ErrorKind::TypeContractUnresolved,
                     nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
                 },
                 Some(expr.source),

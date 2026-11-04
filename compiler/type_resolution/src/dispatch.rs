@@ -332,6 +332,9 @@ impl<'a> DeclarationWorld<'a> {
         })
         .map_err(|error| match error {
             nir::normal_forms::ApplicationError::Budget { .. } => AdmissionError::Budget,
+            nir::normal_forms::ApplicationError::Unresolved { reason, .. } => {
+                AdmissionError::Unresolved(reason)
+            }
             error => AdmissionError::Invalid(error.to_string()),
         })?;
         let signature =

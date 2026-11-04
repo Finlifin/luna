@@ -8,12 +8,16 @@ use std::{borrow::Cow, collections::BTreeSet};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Budget,
+    /// A prerequisite could not be decided in the receiving world. This is
+    /// neither disproved membership nor permission to admit the value.
+    Unresolved(String),
     Invalid(String),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Budget => f.write_str("value admission resource budget exhausted"),
+            Self::Unresolved(message) => write!(f, "value admission unresolved: {message}"),
             Self::Invalid(message) => f.write_str(message),
         }
     }

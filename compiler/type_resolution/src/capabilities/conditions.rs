@@ -203,13 +203,7 @@ impl Solver<'_, '_> {
             &self.world.index.parameter_domains,
             &mut self.remaining,
             |left, right, fuel| {
-                Ok(super::equivalent_domains(
-                    self.world.context,
-                    left,
-                    right,
-                    budget.max_depth,
-                    fuel,
-                ))
+                super::equivalent_domains(self.world.context, left, right, budget.max_depth, fuel)
             },
             Some(&self.world.index.nominal_layouts),
         )?;

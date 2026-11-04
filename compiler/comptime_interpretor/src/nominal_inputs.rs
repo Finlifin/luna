@@ -168,10 +168,10 @@ impl<'e> Frame<'e> {
         vm.budget.steps -= (before - remaining) as u64;
         result.map_err(|error| {
             vm.failure(
-                if matches!(error, nir::NominalAdmissionError::Budget) {
-                    ErrorKind::StepsExhausted
-                } else {
-                    ErrorKind::Type
+                match error {
+                    nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+                    nir::NominalAdmissionError::Unresolved(_) => ErrorKind::TypeContractUnresolved,
+                    nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
                 },
                 Some(source),
             )

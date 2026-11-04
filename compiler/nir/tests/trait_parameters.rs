@@ -98,6 +98,7 @@ fn trait_admission_preserves_nested_lookup_and_relation_failures() {
         let domains = BTreeMap::from([(id(1), declared_type.clone())]);
         for relation in [
             Err(Error::Budget),
+            Err(Error::Unresolved("unvalidated Type relation".into())),
             Err(Error::Invalid("unavailable evidence".into())),
             Ok(false),
             Ok(true),

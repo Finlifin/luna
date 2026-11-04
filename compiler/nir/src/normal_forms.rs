@@ -370,6 +370,7 @@ pub fn list_element_budgeted(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApplicationError {
     Budget { index: usize },
+    Unresolved { index: usize, reason: String },
     Arity { expected: usize, actual: usize },
     InputType { index: usize },
     InputDependency { index: usize },
@@ -379,6 +380,12 @@ impl fmt::Display for ApplicationError {
         match self {
             Self::Budget { index } => {
                 write!(f, "normal-form input {index} validation budget exhausted")
+            }
+            Self::Unresolved { index, reason } => {
+                write!(
+                    f,
+                    "normal-form input {index} validation unresolved: {reason}"
+                )
             }
             Self::Arity { expected, actual } => write!(
                 f,
@@ -587,6 +594,7 @@ impl Head {
                             ApplicationError::Budget { index }
                         }
                         Error::Invalid(_) => ApplicationError::InputType { index },
+                        Error::Unresolved(reason) => ApplicationError::Unresolved { index, reason },
                     })?;
                 prior.insert(parameter.declaration, index);
             }
@@ -886,7 +894,9 @@ fn layout_admission<T>(
             *fuel = 0;
             None
         }
-        Err(crate::NominalAdmissionError::Invalid(_)) => None,
+        Err(
+            crate::NominalAdmissionError::Invalid(_) | crate::NominalAdmissionError::Unresolved(_),
+        ) => None,
     }
 }
 /// Compatibility for optional representation observers.

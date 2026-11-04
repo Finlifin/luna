@@ -1301,6 +1301,10 @@ impl<'a> Interpreter<'a> {
                             kind: ErrorKind::StepsExhausted,
                             source: None,
                         },
+                        nir::NominalAdmissionError::Unresolved(_) => Error {
+                            kind: ErrorKind::TypeContractUnresolved,
+                            source: None,
+                        },
                         nir::NominalAdmissionError::Invalid(_) => invalid(),
                     })?;
             }
@@ -1459,15 +1463,16 @@ impl<'a> Interpreter<'a> {
                 |domain, fuel| nir::normal_forms::list_element_budgeted(package, domain, fuel),
                 package.target,
             )
-            .map_err(|error| {
-                if error == nir::NominalAdmissionError::Budget {
-                    Error {
-                        kind: ErrorKind::StepsExhausted,
-                        source: None,
-                    }
-                } else {
-                    invalid()
-                }
+            .map_err(|error| match error {
+                nir::NominalAdmissionError::Budget => Error {
+                    kind: ErrorKind::StepsExhausted,
+                    source: None,
+                },
+                nir::NominalAdmissionError::Unresolved(_) => Error {
+                    kind: ErrorKind::TypeContractUnresolved,
+                    source: None,
+                },
+                nir::NominalAdmissionError::Invalid(_) => invalid(),
             })?;
             if implementation
                 .interface_instance()
@@ -2148,7 +2153,9 @@ impl<'a> Interpreter<'a> {
                 *fuel = 0;
                 None
             }
-            Err(nir::NominalAdmissionError::Invalid(_)) => None,
+            Err(
+                nir::NominalAdmissionError::Invalid(_) | nir::NominalAdmissionError::Unresolved(_),
+            ) => None,
         }
     }
     fn query_normal_value_fields(
