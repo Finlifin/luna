@@ -232,112 +232,6 @@ impl Checker<'_, '_> {
             _ => None,
         }
     }
-    pub(super) fn normal_type_list_route<'hir>(
-        &self,
-        owner: OwnerId,
-        inputs: &[Arg<'hir>],
-        span: Span,
-    ) -> Result<(Vec<Arg<'hir>>, Vec<usize>), Error> {
-        let clauses = self.type_clause_params(owner);
-        let count = clauses.len();
-        // A named whole collector leaves positional inputs exclusively for
-        // the fixed prefix. Expand literal packets before assigning dependent
-        // contexts, without confusing a trailing List<Type> spread with a tuple.
-        if self.clause_has_collector(owner)
-            && inputs.iter().any(|input| matches!(input, Arg::Named(..)))
-        {
-            if let Some(expanded) = literal_spreads(inputs) {
-                return self.normal_type_list_route(owner, &expanded, span);
-            }
-        }
-        if self.clause_has_collector(owner)
-            && inputs.len() == count
-            && inputs[..count - 1]
-                .iter()
-                .all(|input| matches!(input, Arg::Positional(_)))
-        {
-            if let Arg::Expand(value) = &inputs[count - 1] {
-                let mut routed = inputs.to_vec();
-                routed[count - 1] = Arg::Named(clauses.last().unwrap().name, value);
-                return self.normal_type_list_route(owner, &routed, span);
-            }
-        }
-        if !self.clause_has_collector(owner) || !inputs.iter().any(|a| matches!(a, Arg::Named(..)))
-        {
-            return Ok((inputs.to_vec(), (0..count).collect()));
-        }
-        let name = clauses.last().unwrap().name.name;
-        let mut positional = Vec::new();
-        let mut whole = None;
-        let mut order = Vec::new();
-        for input in inputs {
-            match input {
-                Arg::Named(label, _) => {
-                    if label.name != name {
-                        return Err(error(span, "unknown named normal-form argument"));
-                    }
-                    if whole.replace(input.clone()).is_some() {
-                        return Err(error(span, "duplicate type-list argument"));
-                    }
-                    order.push(count - 1);
-                }
-                Arg::Positional(_) => {
-                    order.push(positional.len());
-                    positional.push(input.clone());
-                }
-                _ => {
-                    return Err(error(
-                        span,
-                        "normal-form input expansion is not yet implemented",
-                    ));
-                }
-            }
-        }
-        if positional.len() > count - 1 {
-            return Err(error(
-                span,
-                "cannot combine a complete type-list argument with collected inputs",
-            ));
-        }
-        if positional.len() < count - 1 {
-            return Err(error(span, "normal-form argument count mismatch"));
-        }
-        positional.push(whole.unwrap());
-        Ok((positional, order))
-    }
-
-    pub(super) fn normal_type_list_supply<'hir>(
-        &self,
-        owner: OwnerId,
-        inputs: &[Arg<'hir>],
-        span: Span,
-    ) -> Result<Option<&'hir Expr<'hir>>, Error> {
-        let clauses = self.type_clause_params(owner);
-        let name = clauses
-            .last()
-            .ok_or_else(|| error(span, "missing type-list collector"))?
-            .name
-            .name;
-        let mut supplied = None;
-        for input in inputs {
-            if let Arg::Named(label, value) = input {
-                if label.name != name {
-                    return Err(error(span, "unknown named normal-form argument"));
-                }
-                if supplied.replace(*value).is_some() {
-                    return Err(error(span, "duplicate type-list argument"));
-                }
-            }
-        }
-        if supplied.is_some() && inputs.len() != 1 {
-            return Err(error(
-                span,
-                "cannot combine a complete type-list argument with collected inputs",
-            ));
-        }
-        Ok(supplied)
-    }
-
     /// Lexically visible declaration parameters used by both invocation and
     /// reification. A member's outer value parameters remain invocation-scoped.
     pub(super) fn visible_comptime_parameters(
@@ -3156,12 +3050,13 @@ impl Checker<'_, '_> {
             let mut routed = vec![None; parameters.len()];
             let mut preparations = vec![Vec::new(); inputs.len()];
             let mut order = Vec::new();
-            let mut positional = 0;
+            let mut routing = clause_inputs::ClauseInputRouting::new(&clauses, inputs);
             let mut pending_collection = Vec::new();
             let mut prepared_bindings = BTreeMap::new();
             for (input_index, input) in inputs.iter().enumerate() {
                 if let Arg::Expand(packet) = input {
                     if list_spreads.contains(&input_index) {
+                        routing.slot(None, packet.span)?;
                         pending_collection.push(PendingNormalCollection {
                             source_index: input_index,
                             before: order.len(),
@@ -3230,17 +3125,7 @@ impl Checker<'_, '_> {
                     let before = order.len();
                     let mut pattern = Vec::new();
                     for ty in fields {
-                        while positional < clauses.len()
-                            && matches!(
-                                clauses[positional].kind,
-                                hir::clause::ClauseParamKind::Optional(..)
-                                    | hir::clause::ClauseParamKind::Varadic(..)
-                            )
-                        {
-                            positional += 1;
-                        }
-                        let slot = positional;
-                        positional += 1;
+                        let slot = routing.packet_slot(packet.span)?;
                         let binding = self.spread_binding(packet.span)?;
                         if let Some(known) = observed_fields.as_mut().and_then(Iterator::next) {
                             prepared_bindings.insert(binding, std::sync::Arc::new(known));
@@ -3287,21 +3172,8 @@ impl Checker<'_, '_> {
                 }
                 let (slot, value) = match input {
                     Arg::Positional(value) => {
-                        while positional < clauses.len()
-                            && matches!(
-                                clauses[positional].kind,
-                                hir::clause::ClauseParamKind::Optional(..)
-                            )
-                        {
-                            positional += 1;
-                        }
-                        if collector == Some(positional) {
-                            if whole_collector {
-                                return Err(error(
-                                    span,
-                                    "cannot combine a complete type-list argument with collected inputs",
-                                ));
-                            }
+                        let slot = routing.slot(None, span)?;
+                        if collector == Some(slot) {
                             pending_collection.push(PendingNormalCollection {
                                 source_index: input_index,
                                 before: order.len(),
@@ -3310,24 +3182,9 @@ impl Checker<'_, '_> {
                             });
                             continue;
                         }
-                        let slot = positional;
-                        positional += 1;
                         (slot, *value)
                     }
-                    Arg::Named(name, value) => (
-                        clauses
-                            .iter()
-                            .position(|clause| {
-                                clause.name.name == name.name
-                                    && matches!(
-                                        clause.kind,
-                                        hir::clause::ClauseParamKind::Optional(..)
-                                            | hir::clause::ClauseParamKind::Varadic(..)
-                                    )
-                            })
-                            .ok_or_else(|| error(span, "unknown named normal-form argument"))?,
-                        *value,
-                    ),
+                    Arg::Named(name, value) => (routing.slot(Some(*name), span)?, *value),
                     _ => {
                         return Err(error(
                             span,

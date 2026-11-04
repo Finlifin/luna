@@ -555,7 +555,8 @@ native 或性能基准，正式 docs 与原有工作区改动保持不变。
 comptime 求值。原标注中的纯 Type／可选子句分流、独立 positional 循环及专用
 `normal_collection_value_arguments` 已删除；默认值、整包参数与展开不再因出现在
 类型位置而改用另一套绑定规则。重复具名输入统一报告 duplicate normal-form argument。
-开放代码描述及其他消费者仍待迁移，不扩称为所有 NF 消费者已经统一。
+开放函数的签名／表达式描述现在与具体准备共用槽位路由；这不等于所有 NF
+消费者或完整 ArgumentPlan 已统一。
 
 计划先完成路由。收集元素和列表展开保留解析后的 HIR 引用、源码序号、前置固定
 输入数量及 spread 标记，随后在同一个检查环境中处理。它们不是另一棵可执行表达式
@@ -617,41 +618,47 @@ Let 前缀并读取已建立的值绑定；遇到未知产生器就结束前缀�
 invocation 时检查。不能只补名义身份观察却跳过其形成义务，也不能根据是否出现
 某个库类型名称选择路径。
 
+开放函数描述不再依据“固定前缀是否全为 Type”选择另一套收集器检查。
+`ClauseInputRouting` 由开放描述与具体 NF 准备共同消费，底层槽位选择复用普通
+子句的 `type_input_slot`；它区分固定参数、可选具名参数、整包供应及逐项收集，
+检查重复／混合供应和 tuple packet 的固定前缀边界。旧的
+`normal_type_list_route`、`normal_type_list_supply` 已删除，路由过程不重排输入。
+
+收集元素按声明列表的元素域描述，整包和 tail spread 按完整列表域描述。混合值
+前缀、可选参数及后置 Type 实参不再退回旧检查器。已知的 Type 输入可以替换后续
+域；仍依赖 invocation 输入的域保留开放描述，不制造刚性 Type 值，不提前调用
+生产者。具体化时原始源码继续完成值域、形成义务与效果检查。共享路由结构提供
+S-expression Display，但它本身既不是可执行 IR，也不保存候选事务。
+
 剩余退役边界：普通子句与 NF 尚未共用完整 ArgumentPlan；动态域的 NF If／Block／
 Match／Integer 等参数树及其解释器仍存在。交错 contextual 输入需要保留产生器进度
 和待定域的共同表达式协议，而不是改名或新增第二套解释器。上层观察 Option 适配器
 及失败原因按需求传播也尚未完成。以上是当前实现限制，不是新的 Flurry 语言限制。
 
-验证在 `/home/fin/luna`，统一使用 `development/check.py --timeout 900 -- test`。
+验证在 `/home/fin/luna`，使用 `development/check.py --timeout 900 -- test`。
 普通子句、comptime 子句、名义参数、模板局部定义、动态 trait、依赖列表、NF 域、
-NF 方法、NF 输入计划、inline 观察及两组函数类型检查共 533 项通过，退出 0，证据
-`/tmp/luna-tools-s97_hrb8/result.json`（包含完整参数列表）。2 项既有 ignored 和
+NF 方法、NF 输入计划、inline 观察及开放 NF 输入计划共 441 项通过，退出 0，证据
+`/tmp/luna-tools-90cb_nw9/result.json`（包含完整参数列表）。2 项既有 ignored 和
 memoized value-indexed key 的 1 项显式 skip 没有解除，不计为本阶段完成。
 
-`-p nir --lib callable_types::` 3 项通过，证据 `/tmp/luna-tools-_o5hlml8/result.json`；
-`-p elaboration --lib program::normal::` 20 项通过，证据
-`/tmp/luna-tools-frlq6wls/result.json`；`-p comptime_interpretor --lib type_constructor`
-3 项通过，证据 `/tmp/luna-tools-lcrs0gvo/result.json`。三条命令均退出 0。覆盖嵌套
-binder、Type 与普通值索引、closure/phase/unsafe 身份、构造资源失败与恢复，以及
-Type 产生器的求值顺序和提前返回。
+新增真实 sysroot 的 open_normal_input_plans 共 5 项，覆盖 13 种成功的开放应用：
+实际 u8 元素域、混合值前缀、可选参数、整包供应、逐项收集、列表／固定 packet
+展开、空收集和后置可选 Type 输入。各例具体化 runtime 回调并比较两种 comptime
+引擎返回的完整函数类型。拒绝例检查重复／混合供应、错误元素及列表域、未知标签、
+缺失固定输入，以及未知域在 Type 实参到达后仍被检查。原 normal_input_plans
+14 项也继续通过，保持求值轨迹、提前返回与 opaque 头身份。
 
-真实 sysroot 的 normal_input_plans 共 14 项，包含标注与值位置的具名参数、默认值、
-packet／列表展开及整包值的一致性；具名 callable 参数、嵌套函数类型和两种引擎结果；
-抽象名义值索引及其形成义务。既有集合用例仍覆盖读取快照、空展开、提前返回、
-192 次 inline 展开、精确调用轨迹和失败后恢复。
+`-p luna --test open_functions --test type_spreads --no-fail-fast` 479 项通过、3 项
+失败，退出 101，证据 `/tmp/luna-tools-zv3lbekk/result.json`。三项分别为
+suspended_index_computations_keep_short_circuit_and_arithmetic_checks、
+computed_prefix_packets_share_the_named_type_list_input_plan 和
+returning_type_list_inputs_keep_preparation_nodes_diverging。它们在改动前已复现于
+`/tmp/luna-tools-47tozw_6/result.json` 与 `/tmp/luna-tools-hfba0xl_/result.json`；
+除线程位置外的完整失败内容逐项一致，仍未解决。本次仅把重复供应、未知标签和数量
+错误的测试文本与共享路由诊断对齐，没有放宽拒绝例或改写上述三个失败的预期。
 
-本次迁移中实际暴露的作用域回归与值索引回归均已修复，不改写其语义预期。
-重复具名 NF 参数现在统一诊断；一个原先等到 invocation 才发现的静态错误 trait
-约束改为定义时拒绝，同时新增真正依赖 Type 生产函数的 invocation 拒绝验证。
-这两处测试更新分别对应统一绑定规则与恢复静态形成证据，不放宽非法输入。
-
-`-p luna --test elaboration normal_form` 26 项通过、5 项失败，退出 101，证据
-`/tmp/luna-tools-7jinpo0b/result.json`。五项均为旧预期 unresolved type equality 与实际
-type mismatch 的诊断文本差异；与基线 2b903d1e 的
-`/tmp/luna-tools-iyx5oljt/result.json` 逐项比较，触发源码及实际诊断完全一致。
-这五项旧预期未修改。
-局部 rustfmt check 退出 0，证据 `/tmp/luna-tools-77qk7d2j/result.json`；
-`git diff --check` 通过。正式 docs 及原有工作区修改均未动；未运行全 workspace、
-native 或性能基准。提交范围、源码哈希与原有改动哈希保存在
-`/tmp/luna-nf-annotations-zay7fmdh`，不以这些检查声称完整 ArgumentPlan／ContextualExpr
-已经完成。
+局部 rustfmt check 退出 0，证据 `/tmp/luna-tools-s59wtbhs/result.json`；
+`git diff --check` 通过。旧路由两函数已无源码引用。提交范围、源码哈希、基线比较与
+原有改动哈希保存在 `/tmp/luna-open-routing-ivho07zy`。正式 docs 及原有工作区修改
+均未动；未运行全 workspace、native 或性能基准，不以这些检查声称完整
+ArgumentPlan／ContextualExpr 已经完成。

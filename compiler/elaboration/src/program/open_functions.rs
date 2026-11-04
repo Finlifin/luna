@@ -3048,55 +3048,26 @@ impl Checker<'_, '_> {
                     normal::literal_spreads(arguments)
                 };
                 let arguments = expanded.as_deref().unwrap_or(arguments);
-                if self.clause_has_collector(owner)
-                    && parameters[..parameters.len() - 1]
-                        .iter()
-                        .all(|(_, _, ty)| *ty == p(P::Type))
-                {
-                    let (routed, _) = self.normal_type_list_route(owner, arguments, expr.span)?;
-                    let fixed = parameters.len() - 1;
-                    if routed.len() < fixed {
-                        return Err(error(expr.span, "normal-form argument count mismatch"));
-                    }
-                    let whole = self.normal_type_list_supply(owner, &routed[fixed..], expr.span)?;
-                    for (index, argument) in routed.iter().enumerate() {
-                        let (value, domain) = match argument {
-                            Arg::Positional(value) => (*value, p(P::Type)),
-                            Arg::Expand(value) if index >= fixed => {
-                                (*value, parameters[fixed].2.clone())
-                            }
-                            Arg::Named(_, value) if index >= fixed && whole.is_some() => {
-                                (*value, parameters[fixed].2.clone())
-                            }
-                            _ => return self.describe_known_region(expr, expected),
-                        };
-                        self.describe_open_expression(
-                            value,
-                            locals,
-                            returns,
-                            Some(&D::Known(domain)),
-                            depth + 1,
-                        )?;
-                    }
-                    let result = D::Known(p(P::Type));
-                    self.require_description(&result, expected, expr.span)?;
-                    return Ok(result);
-                }
-                if self.clause_has_collector(owner) {
-                    return self.describe_known_region(expr, expected);
-                }
                 let clauses = self.type_clause_params(owner);
-                let mut supplied = vec![false; clauses.len()];
-                let mut positional = 0;
+                let collector = self.clause_has_collector(owner).then(|| clauses.len() - 1);
+                let mut routing = clause_inputs::ClauseInputRouting::new(&clauses, arguments);
+                // Retain source order. The final marker distinguishes a single
+                // collected element from a whole input or collection spread.
                 let mut routed = Vec::new();
-                // Use the same slot routing as concrete type applications.
-                // Default values remain declaration-scoped and are evaluated
-                // only after invocation supplies the preceding Type inputs.
                 for argument in arguments {
-                    let (span, fields) = match argument {
-                        Arg::Positional(value) => (value.span, vec![(None, Some(*value), None)]),
-                        Arg::Named(name, value) => {
-                            (value.span, vec![(Some(*name), Some(*value), None)])
+                    match argument {
+                        Arg::Positional(value) | Arg::Named(_, value) => {
+                            let name = match argument {
+                                Arg::Named(name, _) => Some(*name),
+                                _ => None,
+                            };
+                            let slot = routing.slot(name, value.span)?;
+                            let element = name.is_none() && collector == Some(slot);
+                            routed.push((slot, Some(*value), None, value.span, element));
+                        }
+                        Arg::Expand(value) if routing.at_collector() => {
+                            let slot = routing.slot(None, value.span)?;
+                            routed.push((slot, Some(*value), None, value.span, false));
                         }
                         Arg::Expand(value) => {
                             let packet = self.describe_open_expression(
@@ -3118,25 +3089,14 @@ impl Checker<'_, '_> {
                                     "type argument spread requires a tuple",
                                 ));
                             };
-                            (
-                                value.span,
-                                fields
-                                    .into_iter()
-                                    .map(|ty| (None, None, Some(ty)))
-                                    .collect(),
-                            )
+                            for domain in fields {
+                                let slot = routing.packet_slot(value.span)?;
+                                routed.push((slot, None, Some(domain), value.span, false));
+                            }
                         }
-                        _ => return Err(error(expr.span, "unsupported normal-form input marker")),
-                    };
-                    for (name, value, domain) in fields {
-                        let slot = Self::type_input_slot(&clauses, name, &mut positional, span)?;
-                        let cell = supplied
-                            .get_mut(slot)
-                            .ok_or_else(|| error(span, "type argument count mismatch"))?;
-                        if std::mem::replace(cell, true) {
-                            return Err(error(span, "duplicate type argument"));
+                        _ => {
+                            return Err(error(expr.span, "unsupported normal-form input marker"));
                         }
-                        routed.push((slot, value, domain, span));
                     }
                 }
                 // A Type-valued head input can substitute a later domain only
@@ -3145,7 +3105,7 @@ impl Checker<'_, '_> {
                 // rigid Type value for an ordinary comptime parameter.
                 let mut known_parameters = Vec::new();
                 let mut known_arguments = Vec::new();
-                for (slot, value, _, _) in &routed {
+                for (slot, value, _, _, _) in &routed {
                     let Some(value) = value else { continue };
                     if parameters[*slot].2 == p(P::Type)
                         && required::signature_inputs_ready(value, 0, &|_| false)?
@@ -3154,9 +3114,14 @@ impl Checker<'_, '_> {
                         known_arguments.push(self.type_expr(value)?);
                     }
                 }
-                for (slot, value, packet_domain, span) in routed {
-                    let domain = parameters[slot]
-                        .2
+                for (slot, value, packet_domain, span, element) in routed {
+                    let declared = if element {
+                        self.list_element_type(&parameters[slot].2)
+                            .ok_or_else(|| error(span, "variadic input requires a bound meta.List<T>"))?
+                    } else {
+                        &parameters[slot].2
+                    };
+                    let domain = declared
                         .instantiate_types(&known_parameters, &known_arguments)
                         .map_err(|failure| error(span, failure.to_string()))?;
                     let description = if parameters
@@ -3183,12 +3148,8 @@ impl Checker<'_, '_> {
                         )?;
                     }
                 }
-                for (clause, supplied) in clauses.iter().zip(supplied) {
-                    if !supplied
-                        && !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..))
-                    {
-                        return Err(error(expr.span, "missing required type argument"));
-                    }
+                if routing.missing_required() {
+                    return Err(error(expr.span, "missing required type argument"));
                 }
                 D::Known(p(P::Type))
             }

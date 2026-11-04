@@ -1609,7 +1609,7 @@ fn named_type_list_prefix_packets_preserve_exits_and_reject_conflicting_supply()
         ("...(bool,),.Es=tail()", "argument count mismatch"),
         (
             "...(bool,true),.Es=tail(),.Es=tail()",
-            "duplicate type-list",
+            "duplicate normal-form argument",
         ),
         ("...(bool,true),.other=tail()", "unknown named normal-form"),
     ] {

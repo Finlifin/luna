@@ -1,6 +1,110 @@
 //! Source-order preparation of ordinary clause inputs and collection values.
 use super::*;
 
+/// Routing state is independent of expression checking and execution. Open
+/// descriptions and concrete NF preparation consume the same clause slots.
+/// A tuple packet supplies fixed inputs; a tail spread supplies the collector.
+pub(super) struct ClauseInputRouting<'a, 'h> {
+    clauses: &'a [hir::clause::ClauseParam<'h>],
+    supplied: Vec<bool>,
+    positional: usize,
+    collector: Option<usize>,
+    whole_collector: bool,
+}
+
+impl<'a, 'h> ClauseInputRouting<'a, 'h> {
+    pub(super) fn new(clauses: &'a [hir::clause::ClauseParam<'h>], inputs: &[Arg<'_>]) -> Self {
+        let collector = clauses
+            .last()
+            .filter(|clause| matches!(clause.kind, hir::clause::ClauseParamKind::Varadic(..)))
+            .map(|_| clauses.len() - 1);
+        let whole_collector = collector.is_some_and(|slot| {
+            inputs.iter().any(|input|
+            matches!(input, Arg::Named(name, _) if name.name == clauses[slot].name.name))
+        });
+        Self {
+            clauses,
+            supplied: vec![false; clauses.len()],
+            positional: 0,
+            collector,
+            whole_collector,
+        }
+    }
+
+    pub(super) fn at_collector(&self) -> bool {
+        let next = (self.positional..self.clauses.len()).find(|slot| {
+            !matches!(
+                self.clauses[*slot].kind,
+                hir::clause::ClauseParamKind::Optional(..)
+            )
+        });
+        next.is_some() && next == self.collector
+    }
+
+    pub(super) fn slot(
+        &mut self,
+        name: Option<hir::common::Ident>,
+        span: Span,
+    ) -> Result<usize, Error> {
+        let slot = Checker::type_input_slot(self.clauses, name, &mut self.positional, span)
+            .map_err(|_| error(span, "unknown named normal-form argument"))?;
+        let supplied = self
+            .supplied
+            .get_mut(slot)
+            .ok_or_else(|| error(span, "normal-form argument count mismatch"))?;
+        if Some(slot) == self.collector && name.is_none() {
+            if self.whole_collector {
+                return Err(error(
+                    span,
+                    "cannot combine a complete type-list argument with collected inputs",
+                ));
+            }
+        } else if std::mem::replace(supplied, true) {
+            return Err(error(span, "duplicate normal-form argument"));
+        }
+        Ok(slot)
+    }
+
+    pub(super) fn packet_slot(&mut self, span: Span) -> Result<usize, Error> {
+        // Packet arity belongs to the fixed prefix. Do not silently turn an
+        // excess tuple field into a list element with a different protocol.
+        if self.at_collector() {
+            return Err(error(span, "normal-form argument count mismatch"));
+        }
+        self.slot(None, span)
+    }
+
+    pub(super) fn missing_required(&self) -> bool {
+        self.clauses
+            .iter()
+            .zip(&self.supplied)
+            .any(|(clause, supplied)| {
+                !supplied
+                    && !matches!(
+                        clause.kind,
+                        hir::clause::ClauseParamKind::Optional(..)
+                            | hir::clause::ClauseParamKind::Varadic(..)
+                    )
+            })
+    }
+}
+
+impl std::fmt::Display for ClauseInputRouting<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(clause-input-routing (positional {}) (whole-collector {}) (supplied",
+            self.positional, self.whole_collector
+        )?;
+        for (slot, supplied) in self.supplied.iter().enumerate() {
+            if *supplied {
+                write!(f, " {slot}")?;
+            }
+        }
+        f.write_str("))")
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ClauseCollection {
     whole: Option<n::Expr>,

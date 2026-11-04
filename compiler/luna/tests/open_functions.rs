@@ -5773,10 +5773,10 @@ fn suspended_normal_applications_route_named_types_and_defaults() {
 #[test]
 fn suspended_normal_type_routes_reject_invalid_labels_and_missing_inputs() {
     for (application, diagnostic) in [
-        ("Pair<T,.U=T,.U=T>", "duplicate type argument"),
-        ("Pair<.unknown=T,T>", "unknown named type argument"),
+        ("Pair<T,.U=T,.U=T>", "duplicate normal-form argument"),
+        ("Pair<.unknown=T,T>", "unknown named normal-form argument"),
         ("Pair<.U=T>", "missing required type argument"),
-        ("Pair<T,T>", "type argument count mismatch"),
+        ("Pair<T,T>", "normal-form argument count mismatch"),
     ] {
         let failure=compile_with_protocols(&format!("typealias Type=.Type'builtin;
             pure comptime fn Pair<A,.U:Type=A>->Type {{A}}
@@ -5869,7 +5869,7 @@ fn suspended_whole_type_lists_reject_mixed_supplies_and_wrong_domains() {
         ),
         (
             "Pack<T,.Es=types,.Es=types>",
-            "duplicate type-list argument",
+            "duplicate normal-form argument",
         ),
         (
             "Pack<T,.Unknown=types>",
@@ -6105,7 +6105,7 @@ fn suspended_fixed_head_packets_check_shape_and_field_domains() {
         ),
         (
             "comptime fn packet(T:Type)->Tuple<Type,Type,Type> {(T,T,T)}",
-            "type argument count mismatch",
+            "normal-form argument count mismatch",
         ),
         (
             "comptime fn packet(T:Type)->bool {true}",
