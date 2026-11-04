@@ -1668,13 +1668,31 @@ fn source_session_constructor_rejects_duplicate_ids_in_another_snapshot() {
     Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default()).unwrap();
     let mut invalid = source.as_ref().clone();
     invalid.functions.push(invalid.functions[0].clone());
-    let mut budget = Budget::default();
-    let error = Interpreter::for_comptime_in_session(&invalid, &mut session, &mut budget)
-        .err()
-        .expect("duplicate declarations must not reuse a prior index");
-    // Phase validation rejects duplicate declarations before index construction.
-    assert_eq!(error.kind, ErrorKind::PhaseMismatch);
-    assert_eq!(budget.steps, 0);
+    let invalid = Arc::new(invalid);
+    let mut rejected_session = CodeSession::new(invalid.clone());
+    // Neither a different snapshot's valid index nor a failed attempt in this
+    // snapshot may certify duplicate declarations. Retry both routes.
+    for _ in 0..2 {
+        for target in [&mut session, &mut rejected_session] {
+            let mut budget = Budget {
+                steps: 100_000,
+                depth: 42,
+            };
+            let error = Interpreter::for_comptime_in_session(&invalid, target, &mut budget)
+                .err()
+                .expect("duplicate declarations must not reuse or publish an index");
+            let ErrorKind::InvalidPhase(reason) = &error.kind else {
+                panic!("construction lost its phase diagnostic: {error}");
+            };
+            assert_eq!(reason.message, "duplicate function declaration");
+            assert_eq!(error.source, Some(reason.source));
+            assert!(error.to_string().contains(reason.message));
+            // Construction reserves its allowance on failure; this protocol is
+            // distinct from exact failed-work accounting during invocation.
+            assert_eq!(budget.steps, 0);
+            assert_eq!(budget.depth, 42);
+        }
+    }
     let mut vm =
         Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
             .unwrap();

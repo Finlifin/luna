@@ -372,6 +372,22 @@ PhaseMismatch，导致“方法值会擦除接口契约”等形成错误失去�
 使用原 PhaseMismatch；构造期验证与调用期权限错误分别报告。同一不可变 source 的
 验证成功证据仍由 code session 持有，失败不会安装索引，也不复用同号但不同世界的证据。
 
+重复声明的 VM 集成检查也按此协议验收：必须拒绝构造，保留
+`duplicate function declaration` 的具体原因，并在外层错误与内部 phase 原因之间
+保留一致的源码位置；Display 不能再次丢失原因。同一个非法 snapshot 重试、用合法
+snapshot 的既有 session 尝试非法 snapshot，都不能获得成功索引，合法原世界随后
+仍可使用。构造入口目前采用保守预留：失败时 caller budget.steps 保持 0、depth
+配置不变；它不同于 invocation 内部已迁移的实际消耗回传，不能据此声称构造失败
+已经精确计费。
+
+`instance_budget` 和 `runtime_function_identities` 中残留的两项 PhaseMismatch
+断言已更新到上述更具体的拒绝契约，重复声明仍然拒绝，调用期的 PhaseMismatch
+断言仍按其原有权限边界检查。两份完整集成组共 53 项通过，目录 `/home/fin/luna`，
+命令 `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+--test instance_budget --test runtime_function_identities --no-fail-fast`，退出 0；
+`/tmp/luna-tools-wlh0bw22/result.json`。本次修正的是过期断言及覆盖范围，生产实现
+没有放宽。此前失败证据保留在[字段与代码准入](comptime-value-admission.md#34-iir-callable-查询与代码复制视图)。
+
 这一步首先迁移普通显式 invocation；当时保留的 `memoization::staging` Type 输入
 IIR 专门化现已在下述后续迁移中删除。运行时 IIR、后端交付以及引用执行器继续使用
 各自协议。完整通用参数计划、动态 Type producer、调用中的世界发布和树 fallback

@@ -350,13 +350,15 @@ fn declaration_tables_are_bounded_before_world_indexing_and_phase_validation() {
         .kind,
         ErrorKind::StepsExhausted
     );
-    assert_eq!(
-        Interpreter::for_comptime(&world, Budget::default())
-            .err()
-            .unwrap()
-            .kind,
-        ErrorKind::PhaseMismatch
-    );
+    let error = Interpreter::for_comptime(&world, Budget::default())
+        .err()
+        .unwrap();
+    let ErrorKind::InvalidPhase(reason) = &error.kind else {
+        panic!("construction lost its phase diagnostic: {error}");
+    };
+    assert_eq!(reason.message, "duplicate function declaration");
+    assert_eq!(error.source, Some(reason.source));
+    assert!(error.to_string().contains(reason.message));
     assert_eq!(
         Interpreter::new(&world, Budget::default())
             .err()

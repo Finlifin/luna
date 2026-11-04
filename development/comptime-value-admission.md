@@ -1824,8 +1824,10 @@ lookup、CodeSession 生命周期或整个预算系统已经统一。
 PhaseMismatch，实际重复声明被拒绝并返回携带 `duplicate function declaration`
 诊断的 InvalidPhase。恢复本阶段修改前的两份实现文件，在 `ff7194b2` 基线上重跑
 这两个完整测试目标，仍为 51 通过、2 个相同失败；
-`/tmp/luna-tools-cn10fng6/result.json`，退出 101。随后恢复当前实现，未修改这两项
-测试或屏蔽诊断；其预期与现行错误协议仍需单独审查。
+`/tmp/luna-tools-cn10fng6/result.json`，退出 101。随后恢复当前实现，当时未修改这两项
+测试或屏蔽诊断。后续审查确认它们残留旧的 PhaseMismatch 断言，现已依照
+[构造期诊断与 session 验收协议](values-staging-and-publication.md)修正为具体原因、
+源码传播、重复拒绝与恢复检查，两份完整集成组 53 项通过；生产拒绝规则未放宽。
 
 格式检查通过；未运行全 workspace、native 或性能基准。正式 docs 与原有工作区
 修改保持不变。
