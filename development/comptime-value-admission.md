@@ -1831,3 +1831,49 @@ PhaseMismatch，实际重复声明被拒绝并返回携带 `duplicate function d
 
 格式检查通过；未运行全 workspace、native 或性能基准。正式 docs 与原有工作区
 修改保持不变。
+
+
+## 35. Phase 存储缓存与构造预算的后续边界
+
+phase validator 原来先 clone 类型和 frames 组成缓存键，再调用带内部固定额度的
+bool 存储观察；错误都折叠成 inspection limit。现已删除这条 bool 包装入口，生产
+遍历使用绑定到一个不可变 Package 借用的 `RuntimeStorageQueries`，复用
+`validate_runtime_storage_inner` 的 Type／scope 和载荷规则。
+
+每次查询先计入 frame 宽度、类型结构与键成本，然后借用键查询。仅成功或确定的
+Invalid 入缓存，Budget 不入缓存；不同 frames 不共享结果，不同世界使用各自
+查询对象。同一次查询的键检查、存储观察与字段展开消费同一 fuel。内核保留
+StorageError，phase 适配器保留原位置与具体诊断；它的公共 Error 仍没有单独的
+预算 variant，不能说 VM 构造错误分类已全部迁移。
+
+生产回归发现旧 phase validation 会接受没有输入 frame 的 Bound 表达式类型。
+在 `baa71adb` 基线上，新拒绝例得到 Ok，
+`/tmp/luna-tools-hn9_h12u/result.json` 退出 101；恢复当前实现后拒绝并报告原表达式
+位置，修复为合法类型后可通过。缓存用例另外检查展开超预算后不发布条目、足额
+重试、热命中仍计费、正余额 frame 预留失败，以及同号名义声明在不同世界的不同
+存储结论。NF 头仍不因这个查询被展开，内存规格不进入 PTC。
+
+本次没有把各个固定额度简单包进一个名义上的总预算。当前 phase validator 还有
+parameter-domain 目录、默认值 free-binding 分析、trait membership、调用准备、
+comptime 值准入和 call-safety 的独立额度；当前存储适配器也仍按单次查询供给
+100,000。这些是尚未完成的构造期预算所有权迁移，不是语言承诺。
+
+后续迁移应让一次 phase-validation context 共同拥有调用者额度与本世界缓存：
+参数目录先以 typed error 准入；默认绑定、成员、表达式、存储和值准入等子查询
+消费同一额度；拒绝保留原诊断，资源不足单独返回，禁止依靠错误文本推断耗尽。
+只有整个验证成功才可随 SourceIndexes 发布验证证据。构造预算的保守失败预留
+应在所有失败路径能回传实际消耗后再撤销，不能只在某个成功分支返还额度。
+现有 runtime/IIR 资源检查依旧由各自阶段负责，不由此 context 替代。
+
+验证目录 `/home/fin/luna`，统一入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --lib --test phases --no-fail-fast`：53 通过，退出 0；
+  `/tmp/luna-tools-0cmywcj4/result.json`。
+- `-p comptime_interpretor --lib --no-fail-fast`：455 通过，退出 0；
+  `/tmp/luna-tools-75btbzza/result.json`。
+- `-p luna --test comptime_storage_domains --test comptime_pointer_phase --test trait_phases
+  --test quote_functions --test nominal_value_parameters --test newtypes
+  --test cmtt_phase_boundaries --no-fail-fast`：712 通过，退出 0；
+  `/tmp/luna-tools-lc782jus/result.json`。
+
+格式检查通过；未运行全 workspace 或性能基准。正式 docs 与原有工作区修改未动。

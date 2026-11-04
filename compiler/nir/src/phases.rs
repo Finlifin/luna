@@ -5,6 +5,7 @@ use crate::{Primitive, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod comptime_storage;
+mod storage_cache;
 mod storage_error;
 pub use storage_error::StorageError;
 
@@ -289,33 +290,14 @@ pub fn machine_arithmetic_functions(
         .chain(&package.quote_templates)
         .map(|function| (function.declaration, function.parameters.as_slice()))
         .collect();
-    let mut storage_cache = std::collections::HashMap::new();
-    let mut runtime_storage = |ty: &crate::Term,
-                               source,
-                               frames: &[Vec<crate::Sort>]|
-     -> Result<(), Error> {
-        let result = *storage_cache
-            .entry((ty.clone(), frames.to_vec()))
-            .or_insert_with(|| {
-                comptime_storage(
-                    ty,
-                    package,
-                    frames,
-                    &mut std::collections::HashSet::new(),
-                    0,
-                )
-            });
-        match result {
-            Ok(false) => Ok(()),
-            Ok(true) => Err(Error {
+    let mut storage_queries = storage_cache::RuntimeStorageQueries::new(package);
+    let mut runtime_storage = |ty: &Term, source, frames: &[Vec<Sort>]| {
+        storage_queries
+            .check(ty, frames, &mut 100_000)
+            .map_err(|failure| Error {
                 source,
-                message: "comptime-only value cannot inhabit runtime storage; Splice is required",
-            }),
-            Err(_) => Err(Error {
-                source,
-                message: "runtime storage phase could not be established within the type inspection limit",
-            }),
-        }
+                message: failure.message(),
+            })
     };
     let interface_summaries = package
         .traits
@@ -1845,16 +1827,6 @@ fn validate_runtime_storage_inner(
         )),
         Err(error) => Err(error),
     }
-}
-
-fn comptime_storage(
-    ty: &crate::Term,
-    package: &Package,
-    frames: &[Vec<crate::Sort>],
-    seen: &mut std::collections::HashSet<(crate::Term, Vec<Vec<crate::Sort>>)>,
-    depth: usize,
-) -> Result<bool, StorageError> {
-    comptime_storage_resolved(ty, package, frames, seen, depth, None, &mut 100_000)
 }
 
 fn comptime_storage_resolved(

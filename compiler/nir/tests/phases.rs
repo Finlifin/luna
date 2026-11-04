@@ -1876,3 +1876,24 @@ fn storage_queries_preserve_errors_independently_of_remaining_budget() {
         check(&|_, _| Ok(vec![]), &mut 100).unwrap();
     }
 }
+
+#[test]
+fn phase_storage_rejects_undeclared_expression_frames_and_recovers() {
+    let mut package = Package {
+        functions: vec![function(1, Phase::Runtime, &[])],
+        ..Default::default()
+    };
+    package.functions[0].body.ty = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let failure = nir::phases::validate(&package).unwrap_err();
+    assert_eq!(failure.source, package.functions[0].body.source);
+    assert_eq!(
+        failure.message,
+        "runtime storage requires a Type in the declared input scope"
+    );
+    package.functions[0].body.ty = Term::Primitive(Primitive::Bool);
+    nir::phases::validate(&package).unwrap();
+}
