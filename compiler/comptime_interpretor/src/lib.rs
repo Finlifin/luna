@@ -37,6 +37,7 @@ mod iir_execution;
 use iir_execution::ConcreteNominal;
 mod immutable_storage;
 mod input_bodies;
+mod input_collection;
 mod input_dependencies;
 mod input_domains;
 mod invocation;
@@ -3744,7 +3745,7 @@ impl<'a> Interpreter<'a> {
         let mut frame =
             nominal_plan::Frame::new(self, nominal_plan::Expression::Borrowed(expr), environment)?;
         let result = self.run_type_plan(&mut frame, environment);
-        normal_plan::InputPlan::cleanup(&frame, environment);
+        input_collection::InputPlan::cleanup(&frame, environment);
         result
     }
 

@@ -1,39 +1,7 @@
-//! Resumable normal-form input scheduling. A request never executes user code;
-//! the driver supplies exactly one completion before the plan can advance.
+//! NF input contracts use the shared invocation input scheduler.
 use super::*;
+use input_collection::Progress;
 use nir::program::{NormalFormArgument as Argument, NormalFormInputPlan, NormalFormPreparation};
-use normal_inputs::StagedNormalInput;
-
-struct Pending {
-    argument: Box<Argument>,
-    staged: StagedNormalInput,
-}
-
-enum Waiting {
-    Preparation(usize),
-    Ready {
-        slot: usize,
-        argument: Box<Argument>,
-        expected: Term,
-    },
-    Stage {
-        slot: usize,
-        argument: Box<Argument>,
-    },
-}
-
-enum Request<'a> {
-    Preparation(&'a NormalFormPreparation),
-    Ready(&'a Argument, &'a Term),
-    Stage(&'a Argument),
-    Complete,
-}
-
-enum Completion {
-    Prepared,
-    Value(Value),
-    Staged(StagedNormalInput),
-}
 
 enum Inputs<'a> {
     Borrowed(&'a [Argument], &'a NormalFormInputPlan),
@@ -55,82 +23,23 @@ impl Inputs<'_> {
     }
 }
 
-pub(super) struct Frame<'a> {
+pub(super) struct Source<'a> {
     head: DeclarationId,
     source: SourceRange,
     inputs: Inputs<'a>,
-    position: usize,
-    preparation: usize,
-    waiting: Option<Waiting>,
-    pending: BTreeMap<usize, Pending>,
+    specialized: BTreeMap<usize, Box<Argument>>,
     bindings: input_bindings::Bindings,
-    drain: bool,
-    terminal: bool,
 }
 
-impl fmt::Display for Frame<'_> {
+pub(super) type Frame<'a> = input_collection::Frame<Source<'a>>;
+
+impl fmt::Display for Source<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(normal-plan-frame (head {}) (position {}) (preparation {}) (terminal {}) (drain {}) {} (waiting",
-            self.head, self.position, self.preparation, self.terminal, self.drain, self.bindings
-        )?;
-        match &self.waiting {
-            Some(Waiting::Preparation(index)) => write!(f, " (preparation {index})")?,
-            Some(Waiting::Ready {
-                slot,
-                argument,
-                expected,
-            }) => write!(f, " (ready {slot} {expected} {argument})")?,
-            Some(Waiting::Stage { slot, argument }) => write!(f, " (stage {slot} {argument})")?,
-            None => {}
-        }
-        write!(f, ") (pending")?;
-        for (slot, pending) in &self.pending {
-            write!(f, " (input {slot} {})", pending.argument)?;
-        }
-        write!(f, "))")
-    }
-}
-
-pub(super) enum Progress {
-    InputsComplete,
-    Input(bytecode::InputFrame),
-    Complete(Flow),
-}
-
-pub(super) trait InputPlan {
-    fn cleanup(&self, environment: &mut Environment);
-    fn next_input(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-    ) -> Result<Progress, Error>;
-    fn accept_input(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-        result: bytecode::InputResult,
-    ) -> Result<Option<Flow>, Error>;
-}
-impl InputPlan for Frame<'_> {
-    fn cleanup(&self, environment: &mut Environment) {
-        Frame::cleanup(self, environment);
-    }
-    fn next_input(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-    ) -> Result<Progress, Error> {
-        Frame::next_input(self, vm, environment)
-    }
-    fn accept_input(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-        result: bytecode::InputResult,
-    ) -> Result<Option<Flow>, Error> {
-        Frame::accept_input(self, vm, environment, result)
+            "(normal-input-source (head {}) {})",
+            self.head, self.bindings
+        )
     }
 }
 
@@ -141,18 +50,13 @@ impl<'a> Frame<'a> {
         arguments: &'a [Argument],
         plan: &'a NormalFormInputPlan,
     ) -> Self {
-        Self {
+        Self::from_source(Source {
             head,
             source,
             inputs: Inputs::Borrowed(arguments, plan),
-            position: 0,
-            preparation: 0,
-            waiting: None,
-            pending: BTreeMap::new(),
+            specialized: BTreeMap::new(),
             bindings: input_bindings::Bindings::new(arguments.len()),
-            drain: false,
-            terminal: false,
-        }
+        })
     }
 
     pub(super) fn owned(
@@ -200,127 +104,50 @@ impl<'a> Frame<'a> {
                 )
             },
         )?;
-        Ok(Frame {
+        Ok(Frame::from_source(Source {
             head: *head,
             source: expression.source,
             bindings: input_bindings::Bindings::new(arguments.len()),
             inputs: Inputs::Owned(expression),
-            position: 0,
-            preparation: 0,
-            waiting: None,
-            pending: BTreeMap::new(),
-            drain: false,
-            terminal: false,
-        })
+            specialized: BTreeMap::new(),
+        }))
     }
+}
 
-    pub(super) fn cleanup(&self, environment: &mut Environment) {
-        for binding in self
-            .inputs
-            .parts()
-            .1
-            .local_bindings()
-            .expect("validated plan")
-        {
-            environment.remove(&binding);
-        }
+impl input_collection::Source for Source<'_> {
+    fn source(&self) -> SourceRange {
+        self.source
     }
-
-    pub(super) fn next_input(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-    ) -> Result<Progress, Error> {
-        let result = self.next_input_inner(vm, environment);
-        if matches!(&result, Err(_) | Ok(Progress::Complete(_))) {
-            self.terminal = true;
-        }
+    fn preparation(&self, index: usize) -> Option<&NormalFormPreparation> {
+        self.inputs.parts().1.preparations.get(index)
+    }
+    fn slot(&self, position: usize) -> Option<usize> {
+        self.inputs.parts().1.order.get(position).copied()
+    }
+    fn input(&self, slot: usize) -> &Argument {
+        self.specialized
+            .get(&slot)
+            .map_or(&self.inputs.parts().0[slot], |input| input)
+    }
+    fn specialize(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error> {
+        // Entry admission has charged the input copies. Retain each specialized
+        // argument while suspended; completing its domain never copies producers.
+        let mut argument = self
+            .specialized
+            .remove(&slot)
+            .unwrap_or_else(|| Box::new(self.inputs.parts().0[slot].clone()));
+        let result = self.bindings.specialize(vm, &mut argument);
+        self.specialized.insert(slot, argument);
         result
     }
-
-    fn next_input_inner(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-    ) -> Result<Progress, Error> {
-        loop {
-            let completion = match self.advance(vm, environment)? {
-                Request::Preparation(preparation) => {
-                    if let Some(frame) = vm.start_input_preparation(preparation, environment)? {
-                        return Ok(Progress::Input(frame));
-                    }
-                    match vm.eval(&preparation.expression, environment)? {
-                        Flow::Value(_) => Completion::Prepared,
-                        flow => return Ok(Progress::Complete(flow)),
-                    }
-                }
-                Request::Ready(argument, expected) => {
-                    if let Some(frame) =
-                        vm.start_contextual_input(argument, expected, environment)?
-                    {
-                        return Ok(Progress::Input(frame));
-                    }
-                    match vm.interpret_contextual_input(argument, expected, environment)? {
-                        Flow::Value(value) => Completion::Value(value),
-                        flow => return Ok(Progress::Complete(flow)),
-                    }
-                }
-                Request::Stage(argument) => {
-                    if let Some(frame) = vm.start_staged_input(argument, environment, 0)? {
-                        return Ok(Progress::Input(frame));
-                    }
-                    match vm.interpret_staged_argument(argument, environment, 0)? {
-                        std::ops::ControlFlow::Continue(value) => Completion::Staged(value),
-                        std::ops::ControlFlow::Break(flow) => return Ok(Progress::Complete(flow)),
-                    }
-                }
-                Request::Complete => {
-                    let bindings =
-                        std::mem::replace(&mut self.bindings, input_bindings::Bindings::new(0));
-                    let arguments = bindings
-                        .finish()
-                        .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.source)))?;
-                    return Ok(Progress::Complete(Flow::Value(vm.complete_normal_type(
-                        self.head,
-                        arguments,
-                        self.source,
-                    )?)));
-                }
-            };
-            self.receive(vm, environment, completion)?;
-        }
+    fn check_input(
+        &self,
+        _vm: &Interpreter<'_>,
+        _slot: usize,
+        _expected: Option<&Term>,
+    ) -> Result<(), Error> {
+        Ok(())
     }
-
-    pub(super) fn accept_input(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-        result: bytecode::InputResult,
-    ) -> Result<Option<Flow>, Error> {
-        if self.terminal || self.waiting.is_none() {
-            return Err(vm.failure(ErrorKind::InvalidControlFlow, Some(self.source)));
-        }
-        *environment = result.environment;
-        self.terminal = true;
-        let completion = match result.flow? {
-            Flow::Value(value) => match &self.waiting {
-                Some(Waiting::Preparation(_)) => Completion::Prepared,
-                Some(Waiting::Ready { .. }) => Completion::Value(value),
-                Some(Waiting::Stage { .. }) => {
-                    let (shape, mut value) = result.staged.ok_or_else(|| {
-                        vm.failure(ErrorKind::InvalidControlFlow, Some(self.source))
-                    })?;
-                    vm.rekey_staged_input(&shape, &mut value)?;
-                    Completion::Staged(value)
-                }
-                None => return Err(vm.failure(ErrorKind::InvalidControlFlow, Some(self.source))),
-            },
-            flow => return Ok(Some(flow)),
-        };
-        self.receive(vm, environment, completion)?;
-        Ok(None)
-    }
-
     fn domain(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(Term, bool), Error> {
         let metadata = vm
             .normal_forms
@@ -346,107 +173,36 @@ impl<'a> Frame<'a> {
         env: &mut Environment,
         slot: usize,
         value: Value,
-        source: SourceRange,
     ) -> Result<(), Error> {
+        let source = self.input(slot).source();
         let copy = vm.checkpoint_representation(&value, source)?;
         vm.bind_normal_input(self.head, &mut self.bindings, slot, value, source)?;
         env.insert(self.inputs.parts().1.bindings[slot], copy);
+        self.specialized.remove(&slot);
         Ok(())
     }
 
-    fn advance(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        env: &mut Environment,
-    ) -> Result<Request<'_>, Error> {
-        if self.waiting.is_some() || self.terminal {
-            return Err(vm.failure(ErrorKind::InvalidControlFlow, Some(self.source)));
-        }
-        // Semantic failures are terminal: resuming must never replay an operand.
-        self.terminal = true;
-        if self.drain {
-            self.drain = false;
-            for slot in self.pending.keys().copied().collect::<Vec<_>>() {
-                vm.tick(Some(self.source))?;
-                let (expected, unresolved) = self.domain(vm, slot)?;
-                if unresolved {
-                    continue;
-                }
-                let Pending {
-                    mut argument,
-                    staged,
-                } = self.pending.remove(&slot).unwrap();
-                self.bindings.specialize(vm, &mut argument)?;
-                let mut literals = BTreeMap::new();
-                vm.prepare_normal_argument(&argument, &expected, &mut literals, 0)?;
-                let value =
-                    vm.finish_staged_normal_argument(staged, &mut literals, argument.source(), 0)?;
-                self.bind(vm, env, slot, value, argument.source())?;
-            }
-        }
-        if let Some(preparation) = self.inputs.parts().1.preparations.get(self.preparation)
-            && preparation.before == self.position
+    fn complete(&mut self, vm: &mut Interpreter<'_>) -> Result<Progress, Error> {
+        let bindings = std::mem::replace(&mut self.bindings, input_bindings::Bindings::new(0));
+        let arguments = bindings
+            .finish()
+            .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.source)))?;
+        Ok(Progress::Complete(Flow::Value(vm.complete_normal_type(
+            self.head,
+            arguments,
+            self.source,
+        )?)))
+    }
+    fn cleanup(&self, environment: &mut Environment) {
+        for binding in self
+            .inputs
+            .parts()
+            .1
+            .local_bindings()
+            .expect("validated plan")
         {
-            self.waiting = Some(Waiting::Preparation(self.preparation));
-        } else if let Some(&slot) = self.inputs.parts().1.order.get(self.position) {
-            let mut argument = Box::new(self.inputs.parts().0[slot].clone());
-            self.bindings.specialize(vm, &mut argument)?;
-            let (expected, unresolved) = self.domain(vm, slot)?;
-            self.waiting = Some(if unresolved {
-                Waiting::Stage { slot, argument }
-            } else {
-                Waiting::Ready {
-                    slot,
-                    argument,
-                    expected,
-                }
-            });
-        } else {
-            self.terminal = true;
-            return Ok(Request::Complete);
+            environment.remove(&binding);
         }
-        self.terminal = false;
-        Ok(match self.waiting.as_ref().unwrap() {
-            Waiting::Preparation(index) => {
-                Request::Preparation(&self.inputs.parts().1.preparations[*index])
-            }
-            Waiting::Ready {
-                argument, expected, ..
-            } => Request::Ready(argument, expected),
-            Waiting::Stage { argument, .. } => Request::Stage(argument),
-        })
-    }
-
-    fn receive(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        env: &mut Environment,
-        completion: Completion,
-    ) -> Result<(), Error> {
-        if !matches!(
-            (&self.waiting, &completion),
-            (Some(Waiting::Preparation(_)), Completion::Prepared)
-                | (Some(Waiting::Ready { .. }), Completion::Value(_))
-                | (Some(Waiting::Stage { .. }), Completion::Staged(_))
-        ) {
-            return Err(vm.failure(ErrorKind::InvalidControlFlow, Some(self.source)));
-        }
-        self.terminal = true;
-        match (self.waiting.take().unwrap(), completion) {
-            (Waiting::Preparation(_), Completion::Prepared) => self.preparation += 1,
-            (Waiting::Ready { slot, argument, .. }, Completion::Value(value)) => {
-                self.bind(vm, env, slot, value, argument.source())?;
-                self.position += 1;
-                self.drain = true;
-            }
-            (Waiting::Stage { slot, argument }, Completion::Staged(staged)) => {
-                self.pending.insert(slot, Pending { argument, staged });
-                self.position += 1;
-            }
-            _ => unreachable!(),
-        }
-        self.terminal = false;
-        Ok(())
     }
 }
 
@@ -481,6 +237,7 @@ impl Interpreter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use input_collection::{Completion, InputPlan, Request};
     use nir::normal_forms::{Head, Kind, Parameter, Role};
     const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
     fn id(local: u32) -> DeclarationId {
@@ -565,7 +322,7 @@ mod tests {
             ErrorKind::StepsExhausted
         );
         assert!(env.is_empty());
-        assert!(!failed.bindings.contains(0));
+        assert!(!failed.source.bindings.contains(0));
         assert_eq!(
             failed.advance(&mut vm, &mut env).err().unwrap().kind,
             ErrorKind::InvalidControlFlow
@@ -656,7 +413,7 @@ mod tests {
             frame.advance(&mut vm, &mut env).err().unwrap().kind,
             ErrorKind::InvalidControlFlow
         );
-        let values = frame.bindings.finish().unwrap();
+        let values = frame.source.bindings.finish().unwrap();
         assert_eq!(values[0], Term::Primitive(Primitive::U8));
         assert!(
             matches!(vm.complete_normal_type(id(0), values, SOURCE).unwrap(), Value::Type(Term::NormalForm { head, .. }) if head == id(0))

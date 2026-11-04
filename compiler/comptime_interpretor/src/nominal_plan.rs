@@ -1,6 +1,6 @@
 //! Owned nominal/alias plans separate input collection, admission and body execution.
 use super::*;
-use normal_plan::{InputPlan, Progress};
+use input_collection::{InputPlan, Progress};
 
 #[derive(Clone)]
 pub(super) enum Expression<'e> {

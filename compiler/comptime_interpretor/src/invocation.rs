@@ -105,7 +105,7 @@ enum StackContext<'a> {
 }
 
 struct PlanActivation<'a> {
-    frame: Box<dyn normal_plan::InputPlan + 'a>,
+    frame: Box<dyn input_collection::InputPlan + 'a>,
     environment: Environment,
 }
 impl PlanActivation<'_> {
@@ -168,7 +168,7 @@ impl<'a> Interpreter<'a> {
 
     pub(super) fn run_type_plan(
         &mut self,
-        frame: &mut dyn normal_plan::InputPlan,
+        frame: &mut dyn input_collection::InputPlan,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
         self.run_executions(None, None, Some((frame, environment)))?
@@ -178,7 +178,7 @@ impl<'a> Interpreter<'a> {
         &mut self,
         expression: Arc<Expr>,
         environment: &Environment,
-    ) -> Result<Box<dyn normal_plan::InputPlan + 'a>, Error> {
+    ) -> Result<Box<dyn input_collection::InputPlan + 'a>, Error> {
         match &expression.kind {
             K::NormalFormType { .. } => Ok(Box::new(normal_plan::Frame::owned(
                 self,
@@ -213,7 +213,7 @@ impl<'a> Interpreter<'a> {
         &mut self,
         mut execution: Option<Execution<'a>>,
         mut root: Option<&mut bytecode::Frame>,
-        mut plan: Option<(&mut dyn normal_plan::InputPlan, &mut Environment)>,
+        mut plan: Option<(&mut dyn input_collection::InputPlan, &mut Environment)>,
     ) -> Result<Option<Flow>, Error> {
         let mut stack: Vec<StackEntry<'a>> = Vec::new();
         let mut result = None;
@@ -324,7 +324,10 @@ impl<'a> Interpreter<'a> {
             }
             if let Some(StackEntry::Plan(active)) = stack.last_mut() {
                 match active.frame.next_input(self, &mut active.environment) {
-                    Ok(normal_plan::Progress::Input(bytecode::InputFrame { code, finish })) => {
+                    Ok(input_collection::Progress::Input(bytecode::InputFrame {
+                        code,
+                        finish,
+                    })) => {
                         stack.push(StackEntry::Code(StackContext::Input(finish), code));
                     }
                     outcome => {
@@ -332,7 +335,7 @@ impl<'a> Interpreter<'a> {
                             unreachable!()
                         };
                         let flow = outcome.map(|progress| match progress {
-                            normal_plan::Progress::Complete(flow) => flow,
+                            input_collection::Progress::Complete(flow) => flow,
                             _ => unreachable!(),
                         });
                         result = Some(active.complete(flow));
@@ -343,11 +346,14 @@ impl<'a> Interpreter<'a> {
             if stack.is_empty() {
                 if let Some((frame, environment)) = plan.as_mut() {
                     match frame.next_input(self, environment)? {
-                        normal_plan::Progress::Input(bytecode::InputFrame { code, finish }) => {
+                        input_collection::Progress::Input(bytecode::InputFrame {
+                            code,
+                            finish,
+                        }) => {
                             stack.push(StackEntry::Code(StackContext::Input(finish), code));
                         }
-                        normal_plan::Progress::Complete(flow) => return Ok(Some(flow)),
-                        normal_plan::Progress::InputsComplete => return Ok(None),
+                        input_collection::Progress::Complete(flow) => return Ok(Some(flow)),
+                        input_collection::Progress::InputsComplete => return Ok(None),
                     }
                     continue;
                 }

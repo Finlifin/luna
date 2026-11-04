@@ -947,55 +947,77 @@ rustfmt check 退出 0，证据 `/tmp/luna-tools-9dyomqdw/result.json`；
 
 ## 18. invocation 已完成输入共用槽位存储
 
-NF 与名义类型／typealias 的输入帧现在共用 `input_bindings::Bindings`。它只存放
-实际完成的 declaration、声明域与 comptime Term，槽位保存完成序号；未完成槽位
-明确为空。名义类型不再预填与声明同名的 rigid，并另靠 ready 集合判断它是否是真实
-输入。完成先后与最终声明参数顺序分别保留，最终收集缺少任何槽位都会失败。
-S-expression dump 显示 pending 槽位及真实完成值，不把待定输入伪装成实参。
+NF 与名义类型／typealias 的输入帧共用 `input_bindings::Bindings`。它只存放实际完成
+的 declaration、声明域与 comptime Term，槽位保存完成序号；未完成槽位明确为空。
+名义类型不预填与声明同名的 rigid，再另靠 ready 集合判断它是否是真实输入。完成
+先后与最终声明参数顺序分别保留，最终收集缺少任何槽位都会失败。
 
-域的受预算复制和值的 residual transport 都成功后，才一次发布绑定；重复或越界槽位
-拒绝发布。名义帧仍先取得局部值快照，再完成绑定，最后更新调用环境。资源耗尽或
-未获授权的抽象值不能留下可被后续替换读取的半完成槽位。
+域的受预算复制和值的 residual transport 都成功后，才一次发布绑定；重复或越界
+槽位拒绝发布。名义帧先取得局部值快照，再完成绑定，最后更新调用环境。资源耗尽
+或未获授权的抽象值不能留下可被后续替换读取的半完成槽位。
 
-共享的是输入所有权和完成状态，不是取消各消费者的接纳边界。NF 继续使用自己的
-域替换规则；名义类型在动态域导致实际 sort 与声明 sort 不同时，仍按声明顺序调用
-带 layout 与抽象值证据的 admission，再形成替换。已完成的 Type 参数可使后续数据
-参数实际接收 Type；不能因此放行其他参数中不符合域的值。未完成参数不进入替换
-实参表，仍由原计划等待后续供应并恢复。
+### 已接通的共同执行调度
 
-这只是通用 invocation 参数计划的基础。普通 comptime callable 的参数包目前要求
-Type 子句在准备时已知；`count<.values = [1, 255], Byte()>()` 一类调用同时受列表域
-准备和 callable 签名准备阻塞。不能提前执行 Byte() 越过源码位置来修补。原
-`pending_clause_domains_can_wait_for_a_type_producer` 仍保留 ignored；本轮显式执行
-在列表元素域缺失处失败，退出 101，证据 `/tmp/luna-tools-47jlkw01/result.json`。
-完整可恢复 callable 参数包、ContextualExpr 以及旧 NF 参数树退役都尚未完成。
+`input_collection::Frame<Source>` 现在实际承担 planned NF、名义类型与 typealias
+输入的 preparation、源码求值位置、暂停请求、完成接收、待定值唤醒及终止。原
+`normal_plan` 和 `nominal_inputs` 中重复的调度循环已删除；invocation driver 直接
+使用共同 InputPlan/Progress 协议，不再从 normal_plan 借出另一种类型构造的接口。
 
+共同帧只安排输入工作，各 Source 仍承担不同的语义责任：
 
-验证在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test`：
+| 消费者 | 保留的独立责任 |
+| --- | --- |
+| planned NF | 校验 head/计划，按 NF 输入规则替换与准入，最终构造不透明 head application |
+| 名义类型 | 保留捕获域、实际 sort 与声明 sort 不同时的证据准入，完成输入后检查形成契约 |
+| typealias | 在名义输入规则之上保留 alias 的输入类型检查，契约成功后才执行已专门化的透明主体 |
 
-- `-p comptime_interpretor --lib --no-fail-fast -- --skip
-  normal_input_data_tests::clause_list_inputs_share_domain_scope_and_budget_validation`
-  443 项通过、1 项显式跳过，退出 0，证据 `/tmp/luna-tools-v44ctzs5/result.json`。
-  新增检查覆盖完成预算的逐边界失败／重试、未授权传输不破坏已有槽位，以及乱序
-  完成后的动态 sort admission 和抽象值证据。原有树解释／字节码检查继续通过。
-- 首次未跳过的 VM 检查为 440 通过、1 失败，退出 101，证据
-  `/tmp/luna-tools-t65ep9ap/result.json`。该项期望 Type 错误，实际为带参数与 Value
-  阶段原因的 FunctionInputRejected；用改动前 HEAD 源码单独执行仍为相同失败，
-  退出 101，证据 `/tmp/luna-tools-wwaxjwl3/result.json`。未改动其预期。
-  后续在本文件第 21 节核对并修正错误类别断言；该用例已恢复到不跳过的 VM 检查中。
-- `-p luna --test normal_input_plans --test open_normal_input_plans --test nominal_staging
-  --test nominal_value_parameters --test normal_form_domains --test comptime_clause_inputs
-  --test ordinary_clause_collectors --no-fail-fast` 共 412 项通过、1 项失败、1 项 ignored，
-  整条命令退出 101，证据 `/tmp/luna-tools-gxt9_tqw/result.json`。失败仍为既有
-  `memoized_value_indexed_keys_keep_declaration_and_value_arguments`：dispatch 函数
-  仍需 ordinary invocation input staging。ignored 为上文的动态 Type 供应用例。
+输入先依源码位置执行。域未就绪时，帧保存已经产生的 staged 值和结构位置；后面的
+输入完成后，只补做域准备与值接纳，不重跑 producer。待定集合按需反复处理，直到
+没有新的完成项，因此完成一个输入可以继续唤醒另一层依赖。每轮扫描和域观察都
+消耗调用预算；这不是对全局调度线性复杂度的承诺。
 
-未运行全 workspace、native 或性能基准。正式 docs、既有资源检查修改与 library
-README 的原有工作区内容保持不变。
+请求尚未接收完成时不能前进；语义失败或控制转移后帧终止，不接受再次执行。
+调用者清理只移除本计划拥有的绑定，保留外部环境。待定表达式及值不能跨 invocation
+发布；NF 的已完成输入释放临时专门化表达式，避免积累不再需要的副本。共同帧与
+各 Source 均提供 S-expression Display，显示等待位置、pending 槽和真实完成值。
 
-修改 Rust 文件的格式检查退出 0，证据 `/tmp/luna-tools-jz03jkgm/result.json`；
-本次范围的 `git diff --check` 通过。
+### 剩余迁移边界
 
+共享输入所有权和调度不取消消费者的接纳边界。已完成的 Type 参数可使后续数据
+参数实际接收 Type；名义输入仍执行带 layout 与抽象值证据的 admission，不能据此
+放行其他参数中不符合域的值。普通 callable 的域观察尚未接到可恢复执行帧；
+`count<.values = [1, 255], Byte()>()` 仍是期望成功而未接通的 ignored 用例，不能
+提前执行 Byte() 越过源码位置来修补。
+
+NF 的无计划直接执行路径、旧 `NormalFormArgument` contextual 表示仍存在。
+本节没有把共享调度器等同于完整 ArgumentPlan/ContextualExpr，也没有新增语法
+白名单、把普通函数伪装为 NF，或赋予任何生产者隐式重算权限。
+
+### 当前验证与历史状态
+
+当前调度迁移的证据见下方检查记录；旧的成功/失败流水由 git 历史保存。此前跳过的
+list 域诊断已在 §21 修正，并在 §38 单独复核；memoized value-indexed key 已在
+§19 修复。二者不再作为当前失败基线，也不应继续从检查中过滤。
+
+工作目录 `/home/fin/luna` 的调度迁移检查：
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  -p luna --lib --test normal_input_plans --test nominal_value_parameters
+  --test nominal_staging --test normal_form_domains --test dependent_list_collectors
+  --test ordinary_clause_collectors --test comptime_nominal_capabilities
+  --test comptime_clause_inputs --test inline_pattern_observation
+  --test library_protocols --no-fail-fast`：
+  `/tmp/luna-tools-m5m263oh/result.json`，退出 0，1,032 项通过，1 项上述动态 Type
+  producer 用例 ignored。没有按旧基线跳过 list 诊断或 memoized key 检查。
+- 新的 `transitive_pending_domains_drain_in_both_engines_and_fail_terminally`
+  包含 Type 最后到达、实际 sort 变化、两轮唤醒、u8 越界后的终止与清理，以及同 VM
+  新帧恢复；树解释器和字节码引擎都执行。原暂停帧移动、重复完成拒绝、预算失败、
+  源码顺序、控制出口和形成契约检查仍保留。新用例也已包含在上面的 482 项 VM 检查中。
+- 六个修改 Rust 文件的 rustfmt 检查：`/tmp/luna-tools-c3uw7c9k/result.json`，退出 0。
+  最后仅将测试使用的 trait 导入移入测试模块，随后
+  `python3 -B development/check.py --timeout 900 -- check -p comptime_interpretor`
+  通过：`/tmp/luna-tools-_me5ibar/result.json`，退出 0。
+  未运行全 workspace、native 或性能基准；不能据此声称 ContextualExpr 已统一。
 
 ## 19. 可复用 invocation 保留普通 comptime 值参数
 

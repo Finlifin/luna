@@ -1,9 +1,8 @@
-//! Resumable nominal/alias input collection. Admission and alias expansion run
-//! only after every input has completed; capture domains use fixed-point wakeup.
+//! Nominal/alias input policies over the shared invocation scheduler.
 use super::*;
 use nir::program::{NormalFormArgument as A, NormalFormPreparation};
 
-pub(super) struct Frame<'e> {
+pub(super) struct Source<'e> {
     expression: nominal_plan::Expression<'e>,
     specialized: Option<Vec<A>>,
     parameters: Vec<nir::DeclarationParameter>,
@@ -11,41 +10,39 @@ pub(super) struct Frame<'e> {
     alias: bool,
     source: SourceRange,
     completed: input_bindings::Bindings,
-    pending: BTreeMap<usize, normal_inputs::StagedNormalInput>,
-    position: usize,
-    preparation: usize,
-    waiting: Option<Waiting>,
-    drain: bool,
-    terminal: bool,
-}
-enum Waiting {
-    Preparation,
-    Ready(usize),
-    Stage(usize),
 }
 
-impl fmt::Display for Frame<'_> {
+pub(super) type Frame<'e> = input_collection::Frame<Source<'e>>;
+
+impl fmt::Display for Source<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(nominal-input-frame (position {}) (preparation {}) (alias {}) (terminal {}) (waiting",
-            self.position, self.preparation, self.alias, self.terminal
-        )?;
-        match &self.waiting {
-            Some(Waiting::Preparation) => write!(f, " preparation")?,
-            Some(Waiting::Ready(slot)) => write!(f, " (ready {slot})")?,
-            Some(Waiting::Stage(slot)) => write!(f, " (stage {slot})")?,
-            None => {}
-        }
-        write!(f, ") {} (pending", self.completed)?;
-        for slot in self.pending.keys() {
-            write!(f, " (slot {slot})")?;
-        }
-        write!(f, "))")
+            "(nominal-input-source (alias {}) {})",
+            self.alias, self.completed
+        )
     }
 }
 
 impl<'e> Frame<'e> {
+    pub fn new(
+        expression: nominal_plan::Expression<'e>,
+        parameters: Vec<nir::DeclarationParameter>,
+        domains: Vec<Term>,
+        specialize: bool,
+    ) -> Self {
+        Self::from_source(Source::new(expression, parameters, domains, specialize))
+    }
+    pub fn finish_parts(self) -> Option<(Vec<nir::DeclarationParameter>, Vec<Term>)> {
+        Some((self.source.parameters, self.source.completed.finish()?))
+    }
+    #[cfg(test)]
+    pub fn finish(self) -> Option<Vec<Term>> {
+        self.source.completed.finish()
+    }
+}
+
+impl<'e> Source<'e> {
     pub fn new(
         expression: nominal_plan::Expression<'e>,
         parameters: Vec<nir::DeclarationParameter>,
@@ -61,12 +58,6 @@ impl<'e> Frame<'e> {
             expression,
             parameters,
             domains,
-            pending: BTreeMap::new(),
-            position: 0,
-            preparation: 0,
-            waiting: None,
-            drain: false,
-            terminal: false,
         }
     }
     fn arguments_of(expression: &Expr) -> &[A] {
@@ -99,13 +90,6 @@ impl<'e> Frame<'e> {
             }
             _ => unreachable!(),
         }
-    }
-    pub fn finish_parts(self) -> Option<(Vec<nir::DeclarationParameter>, Vec<Term>)> {
-        Some((self.parameters, self.completed.finish()?))
-    }
-    #[cfg(test)]
-    pub fn finish(self) -> Option<Vec<Term>> {
-        self.completed.finish()
     }
     fn input(&self, slot: usize) -> &A {
         self.specialized
@@ -181,8 +165,8 @@ impl<'e> Frame<'e> {
         let Some(mut inputs) = self.specialized.take() else {
             return Ok(());
         };
-        // Moving the vector does not move its heap storage: pending staged keys
-        // continue to refer to the same argument nodes during specialization.
+        // Staged keys use structural paths and remain valid when argument types
+        // are specialized after another input completes.
         let source = inputs[slot].source();
         let result = (|| {
             let mut rewrite = |ty: &Term| self.instantiate(vm, ty, source);
@@ -255,122 +239,63 @@ impl<'e> Frame<'e> {
         }
         Ok(())
     }
-    fn drain(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-    ) -> Result<(), Error> {
-        loop {
-            let mut progress = false;
-            vm.integer_operation(Some(self.source), |budget| {
-                budget.consume(self.pending.len())
-            })?;
-            for slot in self.pending.keys().copied().collect::<Vec<_>>() {
-                let (expected, unresolved) = self.domain(vm, slot)?;
-                if unresolved {
-                    continue;
-                }
-                self.specialize(vm, slot)?;
-                self.check_alias_input(vm, slot, &expected)?;
-                let mut literals = BTreeMap::new();
-                vm.prepare_normal_argument(self.input(slot), &expected, &mut literals, 0)?;
-                let staged = self.pending.remove(&slot).unwrap();
-                let value = vm.finish_staged_normal_argument(
-                    staged,
-                    &mut literals,
-                    self.arguments()[slot].source(),
-                    0,
-                )?;
-                self.bind(vm, environment, slot, value)?;
-                progress = true;
-            }
-            if !progress {
-                return Ok(());
-            }
-        }
-    }
-    fn next(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-    ) -> Result<normal_plan::Progress, Error> {
-        if self.terminal || self.waiting.is_some() {
-            return Err(vm.failure(ErrorKind::InvalidControlFlow, Some(self.source)));
-        }
-        loop {
-            if self.drain {
-                self.drain = false;
-                self.drain(vm, environment)?;
-            }
-            if let Some(preparation) = self.preparations().get(self.preparation)
-                && preparation.before == self.position
-            {
-                if let Some(frame) = vm.start_input_preparation(preparation, environment)? {
-                    self.waiting = Some(Waiting::Preparation);
-                    return Ok(normal_plan::Progress::Input(frame));
-                }
-                match vm.eval(&preparation.expression, environment)? {
-                    Flow::Value(_) => {
-                        self.waiting = None;
-                        self.preparation += 1;
-                        continue;
-                    }
-                    flow => return Ok(normal_plan::Progress::Complete(flow)),
-                }
-            }
-            if self.position == self.arguments().len() {
-                if self.completed.len() != self.arguments().len() {
-                    return Err(vm.failure(ErrorKind::Type, Some(self.source)));
-                }
-                return Ok(normal_plan::Progress::InputsComplete);
-            }
-            let slot = self
-                .order()
-                .map_or(self.position, |order| order[self.position]);
-            self.specialize(vm, slot)?;
-            if self.parameters[slot].sort == nir::Sort::Type
-                && let A::Value(value) = self.input(slot)
-                && !matches!(
-                    value.ty,
-                    Term::Primitive(Primitive::Type | Primitive::Never)
-                )
-            {
-                return Err(vm.failure(ErrorKind::Type, Some(value.source)));
-            }
-            let (expected, unresolved) = self.domain(vm, slot)?;
-            if unresolved {
-                self.waiting = Some(Waiting::Stage(slot));
-                if let Some(frame) = vm.start_staged_input(self.input(slot), environment, 0)? {
-                    return Ok(normal_plan::Progress::Input(frame));
-                }
-                match vm.interpret_staged_argument(self.input(slot), environment, 0)? {
-                    std::ops::ControlFlow::Continue(value) => {
-                        self.pending.insert(slot, value);
-                    }
-                    std::ops::ControlFlow::Break(flow) => {
-                        return Ok(normal_plan::Progress::Complete(flow));
-                    }
-                }
-            } else {
-                self.check_alias_input(vm, slot, &expected)?;
-                self.waiting = Some(Waiting::Ready(slot));
-                if let Some(frame) =
-                    vm.start_contextual_input(self.input(slot), &expected, environment)?
-                {
-                    return Ok(normal_plan::Progress::Input(frame));
-                }
-                match vm.interpret_contextual_input(self.input(slot), &expected, environment)? {
-                    Flow::Value(value) => self.bind(vm, environment, slot, value)?,
-                    flow => return Ok(normal_plan::Progress::Complete(flow)),
-                }
-            }
-            self.waiting = None;
-            self.position += 1;
-            self.drain = true;
-        }
-    }
 }
-impl normal_plan::InputPlan for Frame<'_> {
+
+impl input_collection::Source for Source<'_> {
+    fn source(&self) -> SourceRange {
+        self.source
+    }
+    fn preparation(&self, index: usize) -> Option<&NormalFormPreparation> {
+        self.preparations().get(index)
+    }
+    fn slot(&self, position: usize) -> Option<usize> {
+        (position < self.arguments().len())
+            .then(|| self.order().map_or(position, |order| order[position]))
+    }
+    fn input(&self, slot: usize) -> &A {
+        Source::input(self, slot)
+    }
+    fn specialize(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error> {
+        Source::specialize(self, vm, slot)
+    }
+    fn domain(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(Term, bool), Error> {
+        Source::domain(self, vm, slot)
+    }
+    fn check_input(
+        &self,
+        vm: &Interpreter<'_>,
+        slot: usize,
+        expected: Option<&Term>,
+    ) -> Result<(), Error> {
+        if self.parameters[slot].sort == nir::Sort::Type
+            && let A::Value(value) = self.input(slot)
+            && !matches!(
+                value.ty,
+                Term::Primitive(Primitive::Type | Primitive::Never)
+            )
+        {
+            return Err(vm.failure(ErrorKind::Type, Some(value.source)));
+        }
+        if let Some(expected) = expected {
+            self.check_alias_input(vm, slot, expected)?;
+        }
+        Ok(())
+    }
+    fn bind(
+        &mut self,
+        vm: &mut Interpreter<'_>,
+        environment: &mut Environment,
+        slot: usize,
+        value: Value,
+    ) -> Result<(), Error> {
+        Source::bind(self, vm, environment, slot, value)
+    }
+    fn complete(&mut self, vm: &mut Interpreter<'_>) -> Result<input_collection::Progress, Error> {
+        if self.completed.len() != self.arguments().len() {
+            return Err(vm.failure(ErrorKind::Type, Some(self.source)));
+        }
+        Ok(input_collection::Progress::InputsComplete)
+    }
     fn cleanup(&self, environment: &mut Environment) {
         for binding in self
             .expression
@@ -381,58 +306,123 @@ impl normal_plan::InputPlan for Frame<'_> {
             environment.remove(&binding);
         }
     }
-    fn next_input(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-    ) -> Result<normal_plan::Progress, Error> {
-        let result = self.next(vm, environment);
-        if !matches!(&result, Ok(normal_plan::Progress::Input(_))) {
-            self.terminal = true;
-        }
-        result
-    }
-    fn accept_input(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-        result: bytecode::InputResult,
-    ) -> Result<Option<Flow>, Error> {
-        if self.terminal || self.waiting.is_none() {
-            return Err(vm.failure(ErrorKind::InvalidControlFlow, Some(self.source)));
-        }
-        *environment = result.environment;
-        self.terminal = true;
-        let value = match result.flow? {
-            Flow::Value(value) => value,
-            flow => return Ok(Some(flow)),
-        };
-        match self.waiting.take().unwrap() {
-            Waiting::Preparation => self.preparation += 1,
-            Waiting::Ready(slot) => {
-                self.bind(vm, environment, slot, value)?;
-                self.position += 1;
-                self.drain = true;
-            }
-            Waiting::Stage(slot) => {
-                let (shape, mut staged) = result
-                    .staged
-                    .ok_or_else(|| vm.failure(ErrorKind::InvalidControlFlow, Some(self.source)))?;
-                vm.rekey_staged_input(&shape, &mut staged)?;
-                self.pending.insert(slot, staged);
-                self.position += 1;
-                self.drain = true;
-            }
-        }
-        self.terminal = false;
-        Ok(None)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use normal_plan::InputPlan;
+    use input_collection::InputPlan;
+
+    #[test]
+    fn transitive_pending_domains_drain_in_both_engines_and_fail_terminally() {
+        let source = SourceRange { start: 1, end: 2 };
+        let id = |local| DeclarationId { package: 93, local };
+        let local = |index| LocalId { owner: 93, index };
+        let rigid = |index, sort| Term::Rigid {
+            declaration: id(index),
+            sort,
+        };
+        let ty = Term::Primitive(Primitive::Type);
+        let parameters = vec![
+            nir::DeclarationParameter {
+                declaration: id(0),
+                sort: nir::Sort::ComptimeValue,
+            },
+            nir::DeclarationParameter {
+                declaration: id(1),
+                sort: nir::Sort::ComptimeValue,
+            },
+            nir::DeclarationParameter {
+                declaration: id(2),
+                sort: nir::Sort::Type,
+            },
+        ];
+        let domains = vec![
+            rigid(1, nir::Sort::ComptimeValue),
+            rigid(2, nir::Sort::Type),
+            ty.clone(),
+        ];
+        let package = Package::default();
+        for compiled in [false, true] {
+            let mut vm = if compiled {
+                Interpreter::for_comptime(&package, Budget::default()).unwrap()
+            } else {
+                Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+            };
+            for spelling in ["256", "17"] {
+                let expression = Arc::new(Expr {
+                    source,
+                    ty: ty.clone(),
+                    kind: K::NominalType {
+                        declaration: id(3),
+                        preparations: vec![],
+                        bindings: Some(vec![local(0), local(1), local(2)]),
+                        order: None,
+                        arguments: vec![
+                            A::Integer {
+                                source,
+                                spelling: spelling.into(),
+                                negative: false,
+                            },
+                            A::Value(Expr {
+                                source,
+                                ty: ty.clone(),
+                                kind: K::TypeValue(Term::Primitive(Primitive::U8)),
+                            }),
+                            A::Value(Expr {
+                                source,
+                                ty: ty.clone(),
+                                kind: K::TypeValue(ty.clone()),
+                            }),
+                        ],
+                    },
+                });
+                let mut frame = Frame::new(
+                    nominal_plan::Expression::Owned(expression),
+                    parameters.clone(),
+                    domains.clone(),
+                    true,
+                );
+                let mut environment = Environment::from([(local(99), Value::Bool(true))]);
+                let result = vm.run_nominal_inputs(&mut frame, &mut environment);
+                if spelling == "256" {
+                    assert!(
+                        result.is_err(),
+                        "out-of-range input admitted in engine {compiled}"
+                    );
+                } else {
+                    assert!(result.unwrap().is_none());
+                    assert_eq!(
+                        environment.get(&local(0)),
+                        Some(&Value::UnsignedInteger(17))
+                    );
+                }
+                assert_eq!(
+                    frame
+                        .next_input(&mut vm, &mut environment)
+                        .err()
+                        .unwrap()
+                        .kind,
+                    ErrorKind::InvalidControlFlow,
+                );
+                frame.cleanup(&mut environment);
+                assert_eq!(
+                    environment,
+                    Environment::from([(local(99), Value::Bool(true))])
+                );
+                if spelling == "17" {
+                    assert_eq!(
+                        frame.finish().unwrap(),
+                        vec![
+                            Term::Integer(comptime_runtime::Integer::from_u128(17)),
+                            Term::Primitive(Primitive::U8),
+                            ty.clone(),
+                        ]
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn captured_type_arriving_last_completes_earlier_staged_input() {
@@ -487,7 +477,7 @@ mod tests {
             true,
         );
         let mut environment = Environment::new();
-        let normal_plan::Progress::Input(bytecode::InputFrame { mut code, finish }) =
+        let input_collection::Progress::Input(bytecode::InputFrame { mut code, finish }) =
             frame.next_input(&mut vm, &mut environment).unwrap()
         else {
             panic!("expected staged input");
@@ -501,7 +491,7 @@ mod tests {
                 .is_none()
         );
         assert!(environment.is_empty());
-        assert!(frame.to_string().contains("(pending (slot 0))"));
+        assert!(frame.to_string().contains("(pending (input 0))"));
         let mut frame = Box::new(frame);
         assert!(
             vm.run_nominal_inputs(&mut frame, &mut environment)
@@ -596,14 +586,19 @@ mod tests {
             } else {
                 Value::UnsignedInteger(7)
             };
-            frame.bind(&mut vm, &mut environment, 2, value).unwrap();
-            let (domain, unresolved) = frame.domain(&mut vm, 1).unwrap();
+            frame
+                .source
+                .bind(&mut vm, &mut environment, 2, value)
+                .unwrap();
+            let (domain, unresolved) = frame.source.domain(&mut vm, 1).unwrap();
             assert_eq!(domain, rigid(1, nir::Sort::Type));
             assert!(unresolved);
             frame
+                .source
                 .bind(&mut vm, &mut environment, 0, Value::Type(ty.clone()))
                 .unwrap();
             frame
+                .source
                 .bind(
                     &mut vm,
                     &mut environment,
@@ -611,7 +606,10 @@ mod tests {
                     Value::Type(Term::Primitive(Primitive::U8)),
                 )
                 .unwrap();
-            let result = frame.instantiate(&mut vm, &rigid(2, nir::Sort::ComptimeValue), source);
+            let result =
+                frame
+                    .source
+                    .instantiate(&mut vm, &rigid(2, nir::Sort::ComptimeValue), source);
             if valid {
                 assert_eq!(result.unwrap(), Term::Primitive(Primitive::U8));
                 assert_eq!(
