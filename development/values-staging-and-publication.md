@@ -303,6 +303,56 @@ pattern 接入产生新绑定；expr 接入消费已有上下文，不能共用�
 quote fn 的普通实参先建立新鲜绑定，主体重复引用也不重算实参。
 生成自动机的验收应观察真正组装后的分支/状态代码，而非用解释 regex 字符串绕开生成。
 
+生产侧的 contextual-code 分类现集中在 cmtt/generators/classification：expr 与 pattern
+共用携带类别的 HIR 遍历，保留各自输入／输出接口及局部绑定判别；数据消费者沿同一
+可失败的方法观察路径取得入口。分类只决定后续检查路径，不授权执行选中方法；实际
+调用仍重放 implementation 证据、检查访问权、建立接收者及实参帧。
+
+code_producer、pattern_code_producer、data_consumer_call 及其方法／owner 观察返回
+Result。遍历深度／工作量失败、静态类型观察失败与固有方法查询失败向上传递，不能
+通过 `.ok()`、布尔 false 或 Option::None 转入普通数据求值。已开始的固有方法查询
+遇到 Deferred 等未决选择时报告未完成；只有确定无候选、非 contextual 方法或尚不
+适用该观察的语法才返回没有分类。computed-container 观察仍要求所有可能容器的类别
+一致，不执行分支条件、生成器、默认值或实参来猜测类别。
+
+这是既有 checker 的诊断边界迁移，还不是可暂停的分类查询：未决分类尚未注册活动
+Region 的 waiter；静态类型 hint 内部用于表达“此观察不支持”的可选边界，以及固有
+方法查询的独立 PTC 额度仍待统一。不能据此宣称通用 ArgumentPlan、可恢复 invocation
+或整个 CMTT 生命周期迁移已完成。
+
+分类迁移验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- check -p elaboration -p luna
+  --tests`：退出 0；`/tmp/luna-tools-3as58ssk/result.json`。
+- 最终执行同一入口 `test -p luna --test cmtt --test cmtt_methods
+  --test cmtt_phase_boundaries --test cmtt_type_inputs --test inline_pattern_observation
+  --test quote_functions --test library_protocols --test library_meta_math
+  --test sysroot_preludes --no-fail-fast -- --skip
+  code_method_parent_value_clauses_form_indexed_code_signatures --skip
+  generator_bit_compound_writeback_ --skip
+  generator_bit_update_frame_preserves_selector_and_rhs_objects --skip
+  inferred_producer_value_defaults_preserve_prior_inference_variables`：938 项通过，
+  明确筛去下述 7 个已复现的基线失败，退出 0；`/tmp/luna-tools-e9un_k2j/result.json`。
+- 17 个修改／新增 Rust 文件通过 scoped rustfmt check，退出 0；
+  `/tmp/luna-tools-8dydxfpy/result.json`。git diff --check 通过。
+
+未筛选的修改后运行 `/tmp/luna-tools-incssk35/result.json` 退出 101：cmtt 为
+588 通过／6 失败，cmtt_methods 为 151 通过／1 失败，其余两组 27 项通过。
+cmtt_methods 的 indexed-code-signature 用例在修改前即于 139..143 报未实现表达式，
+对照 `/tmp/luna-tools-beoh2yks/result.json` 同样退出 101。为核对其余六项，将本次
+13 个已修改生产文件临时替换为 `7441aa97` 内容（新增分类模块此时未被引用），
+保留其他工作区，执行 `test -p luna --test cmtt --no-fail-fast`：
+`/tmp/luna-tools-kdkooysw/result.json` 退出 101，同样 588 通过／6 失败。
+其中四个 generator_bit_compound_writeback_*、一个 generator_bit_update_frame 用例
+及 inferred_producer_value_defaults_preserve_prior_inference_variables 均在相同源码
+位置报 interpretation Type。对照结束后逐字节恢复本次源码并核对哈希；这些基线
+不计为已修复，也未修改其预期。
+
+新增源码回归逐预算寻找 expr／pattern／data 分类的资源边界，随后在同一 HIR 上以
+新预算完成 elaboration 和执行；深嵌套 quote 检查必须报告分类深度失败。真实 sysroot
+还验证递归未决的固有代码方法不会进入普通数据路径，补充独立实现后成功。既有方法
+组覆盖接收者、默认值、实参求值次数及写回，未为取得通过提高生产额度。
+
 ## 9. DefinitionTransaction
 
 目标让 struct/enum/newtype/fn/trait/impl 等走共同发布协议：

@@ -74,7 +74,7 @@ impl Checker<'_, '_> {
                         || self.signature_owner.and_then(|owner|self.package.item(owner)).is_some_and(|item|
                             matches!(&item.kind,ItemKind::Fn(sig,_) if sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head)));
                 if decl.comptime && (!in_comptime_body
-                    || decl.init.is_some_and(|value|self.code_producer(value))
+                    || decl.init.map(|value|self.code_producer(value)).transpose()?.unwrap_or(false)
                     || decl.ty.is_some_and(|ty|matches!(ty.kind,H::ContextualExprType(..)))) {
                     return self.code_declaration(decl, expected);
                 }

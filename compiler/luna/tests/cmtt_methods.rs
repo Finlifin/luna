@@ -2,8 +2,44 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+#[path = "support/sysroot_execution.rs"]
+#[allow(dead_code)]
+mod sysroot;
 use comptime_interpretor::Value;
 use support::run_iir as run;
+
+#[test]
+fn unresolved_contextual_method_classification_cannot_fall_back_to_data() {
+    let source = "trait Need {}
+        impl Need for T where T :- Need {}
+        struct Holder where T {}
+        impl Holder<T> where T :- Need {
+            comptime fn code() -> <|- bool> { '(true) }
+        }
+        fn run() -> bool { const generated = Holder<bool>.code(); ~<generated> }";
+    let failure = sysroot::compile(source).unwrap_err();
+    assert!(
+        failure.contains("contextual method classification is unsettled"),
+        "{failure}"
+    );
+    assert_eq!(
+        sysroot::run(&source.replace("struct Holder", "impl Need for bool {} struct Holder")),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn contextual_classification_depth_is_a_failure_not_an_ordinary_value() {
+    for quote in ["'(true)", "'<value>"] {
+        let nested = format!("{}{}{}", "do { ".repeat(40), quote, " }".repeat(40));
+        let source = format!("fn run() -> bool {{ const code = {nested}; true }}");
+        let failure = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            failure.contains("contextual code classification depth budget exhausted"),
+            "{failure}"
+        );
+    }
+}
 
 #[test]
 fn trait_pattern_method_results_use_success_output_context() {

@@ -446,7 +446,7 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         context: Option<&crate::calls::InputContext>,
     ) -> Result<(comptime_interpretor::Value, Term), Error> {
-        if self.data_consumer_call(value).is_some() {
+        if self.data_consumer_call(value)?.is_some() {
             // This argument has reached its source-ordered construction boundary.
             // Retain partial result evidence without sending the call through
             // ordinary expression checking, which must not execute consumers.

@@ -443,13 +443,13 @@ impl Checker<'_, '_> {
                 value.span,
                 "code generator return requires a code value",
             )),
-            _ if self.pattern_code_producer(value, None) => {
+            _ if self.pattern_code_producer(value, None)? => {
                 // Discarding code erases only the resulting evidence. The
                 // construction program still executes once in source order.
                 self.pattern_generator_value_inferred(value, None, None, None, depth + 1)?;
                 Ok(Control::Next)
             }
-            _ if self.code_producer(value) => {
+            _ if self.code_producer(value)? => {
                 self.code_value(value, None, depth + 1)?;
                 Ok(Control::Next)
             }
@@ -1006,8 +1006,8 @@ impl Checker<'_, '_> {
         let initializer = decl
             .init
             .ok_or_else(|| error(decl.span, "generator binding needs an initializer"))?;
-        if self.pattern_code_producer(initializer, decl.ty)
-            || self.code_producer(initializer)
+        if self.pattern_code_producer(initializer, decl.ty)?
+            || self.code_producer(initializer)?
             || decl
                 .ty
                 .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
@@ -1116,7 +1116,7 @@ impl Checker<'_, '_> {
             let mut plain = decl.clone();
             plain.guard = None;
             plain.otherwise = None;
-            let pattern = this.pattern_code_producer(plain.init.unwrap(), plain.ty);
+            let pattern = this.pattern_code_producer(plain.init.unwrap(), plain.ty)?;
             if pattern {
                 this.pattern_code_binding_mode(&plain, None, true)?;
             } else {

@@ -74,7 +74,7 @@ impl Checker<'_, '_> {
         if depth >= 64 {
             return Ok(None);
         }
-        if let Some(owner) = self.data_consumer_call(value) {
+        if let Some(owner) = self.data_consumer_call(value)? {
             self.ensure_data_consumer(owner, value.span)?;
             let definition = &self.data_consumers[&owner];
             let output = &definition.output;

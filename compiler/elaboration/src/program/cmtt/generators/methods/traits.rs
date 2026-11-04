@@ -1,5 +1,6 @@
 //! Trait calls prepare the public interface before entering the selected body.
 use super::*;
+use crate::ptc::Budget;
 
 impl Checker<'_, '_> {
     pub(super) fn with_trait_code_method_callee<R>(

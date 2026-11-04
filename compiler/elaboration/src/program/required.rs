@@ -1194,7 +1194,7 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         expected: Option<&Term>,
     ) -> Result<(Value, Term), Error> {
-        if self.data_consumer_call(expr).is_some() {
+        if self.data_consumer_call(expr)?.is_some() {
             return self.required_data_consumer(expr, expected);
         }
         self.required_expression_with_inputs(expr, expected, None, Vec::new())

@@ -67,96 +67,6 @@ impl Checker<'_, '_> {
         )
     }
 
-    fn pattern_generator_callee(&mut self, callee: &Expr<'_>) -> bool {
-        let head = match callee.kind {
-            H::NFApplication(head, _) => head,
-            _ => callee,
-        };
-        matches!(head.kind,H::ResolvedDef {def_id,..} if self.package.definition_owner(def_id).is_some_and(|owner|self.is_pattern_generator(owner)))
-            || self
-                .generic_code_method_hint(head)
-                .is_some_and(|owner| self.is_pattern_generator(owner))
-    }
-
-    pub(super) fn pattern_code_producer(
-        &mut self,
-        value: &Expr<'_>,
-        annotation: Option<&Expr<'_>>,
-    ) -> bool {
-        annotation.is_some_and(|ty| matches!(ty.kind, H::ContextualPatternType(..)))
-            || self.pattern_producer_in(value, &mut BTreeSet::new(), 0)
-    }
-
-    fn pattern_producer_in(
-        &mut self,
-        value: &Expr<'_>,
-        bindings: &mut BTreeSet<n::LocalId>,
-        depth: usize,
-    ) -> bool {
-        if depth >= 64 {
-            return false;
-        }
-        match &value.kind {
-            H::CodePatternQuote(..) => true,
-            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
-                bindings.contains(&local(*id)) || self.pattern_codes.contains_key(&local(*id))
-            }
-            H::Application(callee, _) | H::ExtendedApplication(callee, _) => {
-                self.pattern_generator_callee(callee)
-            }
-            H::Let(decl) => {
-                if decl
-                    .init
-                    .is_some_and(|value| self.pattern_producer_in(value, bindings, depth + 1))
-                    || decl
-                        .ty
-                        .is_some_and(|ty| matches!(ty.kind, H::ContextualPatternType(..)))
-                {
-                    bindings.extend(pattern_binding_ids(&decl.pattern));
-                }
-                false
-            }
-            H::Return(Some(value)) | H::Semi(value) | H::InlineControl(value) => {
-                self.pattern_producer_in(value, bindings, depth + 1)
-            }
-            H::If(_, yes, no) => {
-                let yes = self.pattern_block_producer(yes, bindings, depth + 1);
-                let no =
-                    no.is_some_and(|value| self.pattern_producer_in(value, bindings, depth + 1));
-                yes || no
-            }
-            H::Block(body) | H::Loop(body) | H::For { body, .. } => {
-                self.pattern_block_producer(body, bindings, depth + 1)
-            }
-            H::When(arms) => arms
-                .iter()
-                .any(|arm| self.pattern_producer_in(arm.body, bindings, depth + 1)),
-            H::Match(_, arms) => arms
-                .iter()
-                .any(|arm| self.pattern_producer_in(arm.body, bindings, depth + 1)),
-            _ => false,
-        }
-    }
-
-    fn pattern_block_producer(
-        &mut self,
-        body: &hir::Block<'_>,
-        bindings: &mut BTreeSet<n::LocalId>,
-        depth: usize,
-    ) -> bool {
-        if depth >= 64 {
-            return false;
-        }
-        let mut returned = false;
-        for statement in body.stmts {
-            returned |= self.pattern_producer_in(statement, bindings, depth + 1);
-        }
-        returned
-            || body
-                .expr
-                .is_some_and(|value| self.pattern_producer_in(value, bindings, depth + 1))
-    }
-
     pub(super) fn code_declaration(
         &mut self,
         decl: &hir::decl::LetDecl<'_>,
@@ -165,10 +75,10 @@ impl Checker<'_, '_> {
         let initializer = decl
             .init
             .ok_or_else(|| error(decl.span, "local const requires an initializer"))?;
-        if self.pattern_code_producer(initializer, decl.ty) {
+        if self.pattern_code_producer(initializer, decl.ty)? {
             return self.pattern_code_binding(decl, expected);
         }
-        if self.code_producer(initializer)
+        if self.code_producer(initializer)?
             || decl
                 .ty
                 .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))

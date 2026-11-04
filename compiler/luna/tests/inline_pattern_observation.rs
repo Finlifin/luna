@@ -249,3 +249,27 @@ fn open_default_scoped_input_observation_exhaustion_preserves_recovery() {
         4096,
     );
 }
+
+#[test]
+fn contextual_classification_exhaustion_preserves_all_three_call_categories() {
+    for source in [
+        "struct Builder {} impl Builder {
+            comptime fn code() -> <|- bool> { '(true) }
+        }
+        fn run() -> bool { const code = Builder.code(); ~<code> }",
+        "struct Builder {} impl Builder {
+            comptime fn pattern() -> <bool -| value: bool> { '<value> }
+        }
+        fn run() -> bool { const pattern = Builder.pattern(); let ~[value = selected]<pattern> = true; selected }",
+        "struct Builder {} impl Builder {
+            comptime fn accept(code: <|- bool>) -> bool { true }
+        }
+        fn run() -> bool { const answer = Builder.accept('(true)); answer }",
+    ] {
+        check_source_observation(
+            source,
+            "contextual code classification budget exhausted",
+            4096,
+        );
+    }
+}

@@ -119,9 +119,12 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    pub(in crate::program) fn data_consumer_call(&mut self, value: &Expr<'_>) -> Option<OwnerId> {
+    pub(in crate::program) fn data_consumer_call(
+        &mut self,
+        value: &Expr<'_>,
+    ) -> Result<Option<OwnerId>, Error> {
         let (H::Application(callee, _) | H::ExtendedApplication(callee, _)) = value.kind else {
-            return None;
+            return Ok(None);
         };
         let callee = match callee.kind {
             H::NFApplication(head, _) => head,
@@ -132,17 +135,21 @@ impl Checker<'_, '_> {
             H::Projection(..) => self.package.member_projections.get(&callee.hir_id).copied(),
             _ => None,
         };
-        definition
+        let direct = definition
             .and_then(|id| self.package.definition_owner(id))
-            .filter(|owner| self.is_data_consumer(*owner))
-            .or_else(|| {
-                self.generic_code_method_hint(callee)
-                    .filter(|owner| self.is_data_consumer(*owner))
-            })
-            .or_else(|| {
-                self.static_code_method_hint(callee)
-                    .filter(|owner| self.is_data_consumer(*owner))
-            })
+            .filter(|owner| self.is_data_consumer(*owner));
+        if direct.is_some() {
+            return Ok(direct);
+        }
+        let generic = self
+            .generic_code_method_hint(callee)?
+            .filter(|owner| self.is_data_consumer(*owner));
+        if generic.is_some() {
+            return Ok(generic);
+        }
+        Ok(self
+            .static_code_method_hint(callee)?
+            .filter(|owner| self.is_data_consumer(*owner)))
     }
 
     #[inline(never)]
@@ -210,7 +217,7 @@ impl Checker<'_, '_> {
             .checked_sub(1)
             .ok_or_else(|| error(site.span, "contextual data invocation budget exhausted"))?;
         let owner = self
-            .data_consumer_call(site)
+            .data_consumer_call(site)?
             .ok_or_else(|| error(site.span, "expected contextual data call"))?;
         self.ensure_data_consumer(owner, site.span)?;
         let template = self.copy_data_consumer(owner, site.span)?;

@@ -3845,7 +3845,7 @@ impl Checker<'_, '_> {
                 // remaining projections are ordinary computations. Evaluate
                 // the complete receiver and projection at the required stage;
                 // a Type field's declared domain alone is not its identity.
-                if !self.generator_data.is_empty() && self.data_consumer_call(expr).is_none() {
+                if !self.generator_data.is_empty() && self.data_consumer_call(expr)?.is_none() {
                     return self.generator_required_type(expr);
                 }
                 let value = self.required_value(expr, P::Type)?;
@@ -8370,7 +8370,7 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
-        if self.data_consumer_call(expr).is_some() {
+        if self.data_consumer_call(expr)?.is_some() {
             return self.check_data_consumer_expression(expr, expected);
         }
         if let H::Application(callee, arguments) = &expr.kind

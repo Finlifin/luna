@@ -73,7 +73,7 @@ impl Checker<'_, '_> {
         type_plan: Option<GeneratorTypePlan>,
     ) -> Result<Arc<ExpressionCode>, Error> {
         let owner = self
-            .generator_owner(callee)
+            .generator_owner(callee)?
             .ok_or_else(|| error(site.span, "expected a code generator"))?;
         self.ensure_code_generator(owner, site.span)?;
         self.with_generator_spreads(owner, site.span, arguments, |this, inputs, plan| {

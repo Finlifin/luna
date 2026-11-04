@@ -2,6 +2,7 @@
 //! evidence without inventing a runnable program; invocation supplies actual
 //! code witnesses before anything can enter the runtime package.
 use super::*;
+mod classification;
 pub(in crate::program::cmtt) mod clauses;
 mod consumers;
 mod defaults;
@@ -809,7 +810,7 @@ impl Checker<'_, '_> {
         Ok(definition)
     }
 
-    fn generator_owner(&self, callee: &Expr<'_>) -> Option<OwnerId> {
+    fn generator_owner(&self, callee: &Expr<'_>) -> Result<Option<OwnerId>, Error> {
         let callee = if let H::NFApplication(head, _) = callee.kind {
             head
         } else {
@@ -820,16 +821,17 @@ impl Checker<'_, '_> {
             H::Projection(..) => match self.package.member_projections.get(&callee.hir_id) {
                 Some(definition) => *definition,
                 None => {
-                    return self
-                        .static_code_method_hint(callee)
-                        .filter(|owner| self.is_code_generator(*owner));
+                    return Ok(self
+                        .static_code_method_hint(callee)?
+                        .filter(|owner| self.is_code_generator(*owner)));
                 }
             },
-            _ => return None,
+            _ => return Ok(None),
         };
-        self.package
+        Ok(self
+            .package
             .definition_owner(definition)
-            .filter(|owner| self.is_code_generator(*owner))
+            .filter(|owner| self.is_code_generator(*owner)))
     }
 
     fn generator_inference_view<O: nir::code_interfaces::SignatureOutput + Clone>(
@@ -917,7 +919,7 @@ impl Checker<'_, '_> {
             );
         }
         let owner = self
-            .generator_owner(callee)
+            .generator_owner(callee)?
             .ok_or_else(|| error(callee.span, "property code call requires a code generator"))?;
         self.ensure_code_generator(owner, site.span)?;
         let template = self.copy_code_generator(owner, site.span)?;
@@ -1046,7 +1048,7 @@ impl Checker<'_, '_> {
             H::NFApplication(head, _) => head,
             _ => callee,
         };
-        let owner = self.generator_owner(head).ok_or_else(|| {
+        let owner = self.generator_owner(head)?.ok_or_else(|| {
             error(
                 callee.span,
                 "code position requires a typed comptime code generator",
@@ -1687,82 +1689,6 @@ impl Checker<'_, '_> {
         }))
     }
 
-    pub(in crate::program) fn code_producer(&mut self, value: &Expr<'_>) -> bool {
-        self.code_producer_in(value, &mut BTreeSet::new(), 0)
-    }
-
-    fn code_producer_in(
-        &mut self,
-        value: &Expr<'_>,
-        bindings: &mut BTreeSet<n::LocalId>,
-        depth: usize,
-    ) -> bool {
-        if depth >= 64 {
-            return false;
-        }
-        match &value.kind {
-            H::CodeQuote(..) => true,
-            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
-                bindings.contains(&local(*id)) || self.code_values.contains_key(&local(*id))
-            }
-            H::Application(callee, _) | H::ExtendedApplication(callee, _) => {
-                self.generator_owner(callee).is_some()
-                    || self
-                        .generic_code_method_hint(callee)
-                        .is_some_and(|owner| self.is_code_generator(owner))
-            }
-            H::Let(decl) => {
-                if decl
-                    .init
-                    .is_some_and(|value| self.code_producer_in(value, bindings, depth + 1))
-                    || decl
-                        .ty
-                        .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
-                {
-                    bindings.extend(pattern_binding_ids(&decl.pattern));
-                }
-                false
-            }
-            H::Return(Some(value)) | H::Semi(value) | H::InlineControl(value) => {
-                self.code_producer_in(value, bindings, depth + 1)
-            }
-            H::If(_, yes, no) => {
-                let yes = self.code_block_producer(yes, bindings, depth + 1);
-                let no = no.is_some_and(|value| self.code_producer_in(value, bindings, depth + 1));
-                yes || no
-            }
-            H::Block(body) | H::Loop(body) | H::For { body, .. } => {
-                self.code_block_producer(body, bindings, depth + 1)
-            }
-            H::When(arms) => arms
-                .iter()
-                .any(|arm| self.code_producer_in(arm.body, bindings, depth + 1)),
-            H::Match(_, arms) => arms
-                .iter()
-                .any(|arm| self.code_producer_in(arm.body, bindings, depth + 1)),
-            _ => false,
-        }
-    }
-
-    fn code_block_producer(
-        &mut self,
-        body: &hir::Block<'_>,
-        bindings: &mut BTreeSet<n::LocalId>,
-        depth: usize,
-    ) -> bool {
-        if depth >= 64 {
-            return false;
-        }
-        let mut returned = false;
-        for statement in body.stmts {
-            returned |= self.code_producer_in(statement, bindings, depth + 1);
-        }
-        returned
-            || body
-                .expr
-                .is_some_and(|value| self.code_producer_in(value, bindings, depth + 1))
-    }
-
     pub(super) fn code_block(
         &mut self,
         block: &hir::Block<'_>,
@@ -1809,7 +1735,7 @@ impl Checker<'_, '_> {
                         | H::ContinueTo(_)
                 ) || matches!(control_expr.kind, H::For {..})
                     || matches!(control_expr.kind, H::When(arms) if !arms.iter().any(|arm| arm.cond.is_none()))
-                    || matches!(control_expr.kind, H::Match(..) | H::When(..)) && !this.code_producer(value)
+                    || matches!(control_expr.kind, H::Match(..) | H::When(..)) && !this.code_producer(value)?
                 {
                     this.generator_statement(value, interface, result_context, depth + 1, &mut loops)?
                 } else {
@@ -2119,9 +2045,9 @@ impl Checker<'_, '_> {
         let value = decl
             .init
             .ok_or_else(|| error(decl.span, "generator binding needs an initializer"))?;
-        if self.pattern_code_producer(value, decl.ty) {
+        if self.pattern_code_producer(value, decl.ty)? {
             self.pattern_code_binding_mode(decl, None, !local_const)?;
-        } else if self.code_producer(value)
+        } else if self.code_producer(value)?
             || decl
                 .ty
                 .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))

@@ -2938,9 +2938,10 @@ qualification 的封闭输入检查复用世界命题的 closed_inputs_metered�
 固有方法选择采用同一失败检查。World::resolve_inherent 与 elaboration 的查询适配器
 直接保留 QueryError：索引资源失败转为 Budget，未确定的关系保持 Unresolved，非法
 查询保持 Invalid；不再先格式化成字符串。递归资格仍通过 Deferred／Pending 保存，
-不能解释成成员不存在。该入口与头匹配仍有独立额度，尚未完成统一预算所有权；CMTT
-分类 hint 的可选观察入口也尚未迁移为可失败查询，不能据本次公开错误迁移声称所有
-方法消费者已经完整保留查询失败。
+不能解释成成员不存在。该入口与头匹配仍有独立额度，尚未完成统一预算所有权。
+CMTT 的方法分类、expr/pattern producer 与数据消费者入口已改为可失败观察，查询
+错误及未决选择不能再退化为普通数据类别；其静态类型 hint 内部尚有可选观察边界，
+且分类未决尚未接入 waiter。具体接线见[staging 分类](values-staging-and-publication.md#8-cmtt-的值与操作)。
 
 固有查询与缓存视图边界验证（工作目录 `/home/fin/luna`）：
 
@@ -3024,7 +3025,8 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
 - 后续关联项／方法签名与 world capability 的部分实例化尚未有界。
 - 直接／projected trait resolution、世界命题、条件事实、Type 投影及普通关联值的
   payload／initializer 校验、qualification 及 inherent 查询公开入口已保留 typed
-  失败。TypeAssessment 的部分内部原因和 CMTT 分类 hint 仍有 String 或可选结果边界。
+  失败。TypeAssessment 的部分内部原因和 CMTT 静态类型 hint 内部仍有 String 或
+  可选结果边界；分类查询的等待／恢复协议尚未接通。
   DeclarationWorld 的构建与完成类型查询已共用各自调用者的余额，构建失败不发布
   半成品，归约结果按外层事务发布；其他便利入口自行建立的预算仍待迁移。
   不能据 metered Type/value view 的

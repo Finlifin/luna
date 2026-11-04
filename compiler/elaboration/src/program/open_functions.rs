@@ -952,13 +952,19 @@ impl Checker<'_, '_> {
         // results or Any descriptions. Keep their witnesses in the same code
         // binding path used by a direct splice in this definition.
         if binding.comptime
-            && binding.init.is_some_and(|init| {
-                self.code_producer(init)
-                    || self.pattern_code_producer(init, binding.ty)
-                    || binding
-                        .ty
-                        .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
-            })
+            && binding
+                .init
+                .map(|init| {
+                    Ok::<_, Error>(
+                        self.code_producer(init)?
+                            || self.pattern_code_producer(init, binding.ty)?
+                            || binding
+                                .ty
+                                .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..))),
+                    )
+                })
+                .transpose()?
+                .unwrap_or(false)
         {
             return self.describe_known_region(expr, expected);
         }

@@ -7,7 +7,7 @@ impl Checker<'_, '_> {
         value: &Expr<'_>,
     ) -> Result<Term, Error> {
         if !self.checking_code_generator
-            && (self.generator_data.is_empty() || self.data_consumer_call(value).is_some())
+            && (self.generator_data.is_empty() || self.data_consumer_call(value)?.is_some())
         {
             let (completed, _) = self.generator_data_expression(value, Some(&p(P::Type)))?;
             let comptime_interpretor::Value::Type(ty) = completed else {
