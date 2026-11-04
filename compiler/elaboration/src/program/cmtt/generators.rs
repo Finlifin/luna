@@ -224,19 +224,7 @@ impl Checker<'_, '_> {
                         ));
                     }
                 };
-                if !nir::normal_forms::supported_input_type_with_collections_in(
-                    &domain,
-                    &self.input_binders(&visible_parameters),
-                    |head| Some(head) == self.protocols.tuple,
-                    |head| Some(head) == self.protocols.meta_list,
-                    |id| {
-                        self.structs.contains_key(&id)
-                            || self.enums.contains_key(&id)
-                            || self.newtypes.contains_key(&id)
-                            || self.context.is_nominal_constructor(id)
-                    },
-                    self.target,
-                ) {
+                if !self.generator_clause_domain(&domain, &visible_parameters, parameter.span)? {
                     return Err(error(
                         parameter.span,
                         "code generator clause requires an immutable value domain",
@@ -320,7 +308,7 @@ impl Checker<'_, '_> {
                             }
                         }
                     };
-                    if !self.generator_data_domain(&ty, &visible_parameters) {
+                    if !self.generator_data_domain(&ty, &visible_parameters, parameter.span)? {
                         return Err(error(
                             parameter.span,
                             "code generator data parameter requires a supported immutable value domain without runtime pointer storage",
@@ -2333,14 +2321,28 @@ impl Checker<'_, '_> {
         &mut self,
         ty: &Term,
         parameters: &[DeclarationId],
-    ) -> bool {
+        span: Span,
+    ) -> Result<bool, Error> {
+        self.with_input_domain_fuel(span, |this, fuel| {
+            this.generator_data_domain_in(ty, parameters, fuel)
+        })
+    }
+
+    fn generator_data_domain_in(
+        &self,
+        ty: &Term,
+        parameters: &[DeclarationId],
+        fuel: &mut usize,
+    ) -> Result<bool, nir::type_computations::Error> {
+        use nir::type_computations::Error as QueryError;
+        nir::type_computations::charge_term(ty, fuel)?;
+        let prior = self.input_binders_in(parameters, fuel)?;
         let mut pending = vec![(ty, 0usize)];
-        let mut remaining = 100_000usize;
         while let Some((ty, depth)) = pending.pop() {
-            if depth >= 128 || remaining == 0 {
-                return false;
+            if depth >= 128 {
+                return Err(QueryError::Budget);
             }
-            remaining -= 1;
+            *fuel = fuel.checked_sub(1).ok_or(QueryError::Budget)?;
             match ty {
                 Term::ErrorResult { errors, result } => {
                     pending.extend(errors.iter().map(|ty| (ty, depth + 1)));
@@ -2367,36 +2369,19 @@ impl Checker<'_, '_> {
                     ..
                 } if Some(*head) == self.protocols.tuple => {
                     let Some(fields) = self.bound_tuple_elements(ty) else {
-                        return false;
+                        return Ok(false);
                     };
                     pending.extend(fields.iter().map(|ty| (ty, depth + 1)));
                 }
-                _ if nir::normal_forms::supported_input_type_with_collections_in(
-                    ty,
-                    &self.input_binders(parameters),
-                    |head| Some(head) == self.protocols.tuple,
-                    |head| Some(head) == self.protocols.meta_list,
-                    |declaration| {
-                        self.structs.contains_key(&declaration)
-                            || self.enums.contains_key(&declaration)
-                            || self.newtypes.contains_key(&declaration)
-                            || self.context.is_nominal_constructor(declaration)
-                    },
-                    self.target,
-                ) => {}
-                _ => return false,
-            }
-            if pending.len() > remaining {
-                return false;
+                _ if self.input_domain_in(ty, &prior, fuel)? => {}
+                _ => return Ok(false),
             }
         }
-        let mut fuel = usize::try_from(self.required_steps)
-            .unwrap_or(usize::MAX)
-            .min(100_000);
-        let before = fuel;
-        let valid = self.generator_comptime_storage(ty, &mut fuel);
-        self.required_steps -= (before - fuel) as u64;
-        valid
+        match self.generator_comptime_storage(ty, fuel) {
+            Ok(()) => Ok(true),
+            Err(nir::phases::StorageError::Budget) => Err(QueryError::Budget),
+            Err(nir::phases::StorageError::Invalid(_)) => Ok(false),
+        }
     }
 
     pub(super) fn validate_generator_data(

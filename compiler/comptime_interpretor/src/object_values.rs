@@ -294,10 +294,18 @@ fn forged_entry_tags_and_runtime_object_signatures_are_rejected() {
     runtime.functions[0].phase = nir::program::FunctionPhase::Runtime;
     assert!(nir::phases::validate(&runtime).is_err());
     // Frozen Object inputs do not grant runtime transport.
-    assert!(nir::normal_forms::supported_input_type(
-        &Term::Primitive(Primitive::Object),
-        &[]
-    ));
+    assert!(
+        nir::normal_forms::supported_input_type_with_collections_budgeted(
+            &Term::Primitive(Primitive::Object),
+            &[],
+            |_| false,
+            |_| false,
+            |_| false,
+            None,
+            &mut 100_000,
+        )
+        .unwrap()
+    );
 }
 
 #[test]

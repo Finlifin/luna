@@ -439,7 +439,7 @@ impl Checker<'_, '_> {
                 };
                 let domain = self.type_expr(annotation)?;
                 let type_inputs = self.alias_substitution.keys().copied().collect::<Vec<_>>();
-                if !self.generator_data_domain(&domain, &type_inputs) {
+                if !self.generator_data_domain(&domain, &type_inputs, clause.span)? {
                     return Err(error(
                         clause.span,
                         "test template default requires an immutable value domain",

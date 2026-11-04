@@ -262,6 +262,12 @@ impl Definition {
     pub(super) fn input_sorts(&self) -> Vec<Sort> {
         self.parameters.iter().map(|(sort, _)| *sort).collect()
     }
+    pub(super) fn known_prefix_sorts(&self) -> impl Iterator<Item = Sort> + '_ {
+        self.parameters.iter().map_while(|(sort, annotation)| {
+            matches!(annotation, Annotation::Known(_)).then_some(*sort)
+        })
+    }
+
     pub(super) fn known_prefix(&self) -> Vec<Parameter> {
         self.parameters
             .iter()
@@ -1703,9 +1709,8 @@ impl Checker<'_, '_> {
                             .filter(|route| target_sig.params[route.parameter].ty.is_comptime())
                         {
                             for (_, value) in route.source_inputs() {
-                                inputs.extend(
-                                    self.expression_free_local_dependencies(owner, value)?,
-                                );
+                                inputs
+                                    .extend(self.expression_free_local_dependencies(owner, value)?);
                             }
                         }
                     }
@@ -2204,9 +2209,8 @@ impl Checker<'_, '_> {
                             // The behavior view abstracts inline selectors; the
                             // original source still determines which earlier
                             // inputs must be available for actual selection.
-                            references.extend(
-                                this.expression_free_local_dependencies(owner, default)?,
-                            );
+                            references
+                                .extend(this.expression_free_local_dependencies(owner, default)?);
                             let mut dependencies: BTreeSet<_> = sig
                                 .params
                                 .iter()
@@ -3104,8 +3108,9 @@ impl Checker<'_, '_> {
                 }
                 for (slot, value, packet_domain, span, element) in routed {
                     let declared = if element {
-                        self.list_element_type(&parameters[slot].2)
-                            .ok_or_else(|| error(span, "variadic input requires a bound meta.List<T>"))?
+                        self.list_element_type(&parameters[slot].2).ok_or_else(|| {
+                            error(span, "variadic input requires a bound meta.List<T>")
+                        })?
                     } else {
                         &parameters[slot].2
                     };
@@ -3113,10 +3118,7 @@ impl Checker<'_, '_> {
                         .instantiate_types(&known_parameters, &known_arguments)
                         .map_err(|failure| error(span, failure.to_string()))?;
                     let inputs = self.term_declaration_inputs(&domain, span)?;
-                    let description = if parameters
-                        .iter()
-                        .any(|(id, _, _)| inputs.contains(id))
-                    {
+                    let description = if parameters.iter().any(|(id, _, _)| inputs.contains(id)) {
                         D::Any
                     } else {
                         D::Known(domain)
@@ -3733,7 +3735,9 @@ impl Checker<'_, '_> {
                 };
                 if matches!(expr.kind, H::Deref(_))
                     && let Term::Pointer(pointee) = &ty
-                    && !self.term_substitution_inputs(pointee, expr.span)?.is_empty()
+                    && !self
+                        .term_substitution_inputs(pointee, expr.span)?
+                        .is_empty()
                 {
                     // Only the result domain is known here. Concrete read
                     // formation and Copy/origin checks belong to the instance;
@@ -5504,14 +5508,12 @@ impl Checker<'_, '_> {
             // Private inference signature only, as in open clause inference.
             _ => (p(P::Void), None, false),
         };
-        let (result, target, known_result) = if self
-            .term_substitution_inputs(&result, span)?
-            .is_empty()
-        {
-            (result, target, known_result)
-        } else {
-            (p(P::Void), None, false)
-        };
+        let (result, target, known_result) =
+            if self.term_substitution_inputs(&result, span)?.is_empty() {
+                (result, target, known_result)
+            } else {
+                (p(P::Void), None, false)
+            };
         let scheme = crate::calls::Scheme {
             parameter_sorts: self
                 .input_binders(&generic)
@@ -6265,9 +6267,7 @@ impl Checker<'_, '_> {
             let mut unknown_inputs = BTreeSet::new();
             for (parameter, unknown) in parameters.iter().zip(&unknown) {
                 if *unknown {
-                    unknown_inputs.extend(
-                        self.term_declaration_inputs(&parameter.ty, expr.span)?,
-                    );
+                    unknown_inputs.extend(self.term_declaration_inputs(&parameter.ty, expr.span)?);
                 }
             }
             let mut suspended = false;
@@ -6848,7 +6848,10 @@ impl Checker<'_, '_> {
                 // declaration argument. Ordinary input facts can be discharged
                 // once their actual immutable symbols have arrived.
                 let inputs = self.observed_term_inputs(ty, span)?;
-                if clauses.iter().any(|id| inputs.declarations.contains_key(id)) {
+                if clauses
+                    .iter()
+                    .any(|id| inputs.declarations.contains_key(id))
+                {
                     return Ok(false);
                 }
                 if inputs
@@ -7076,7 +7079,9 @@ impl Checker<'_, '_> {
                 };
                 let domain = self.instantiate_input_types(&domain, &all, &template, expr.span)?;
                 let inputs = self.observed_term_inputs(&domain, expr.span)?;
-                if generic.iter().any(|id| inputs.declarations.contains_key(id))
+                if generic
+                    .iter()
+                    .any(|id| inputs.declarations.contains_key(id))
                     || !inputs.parameters.is_empty()
                 {
                     continue;
@@ -7326,7 +7331,9 @@ impl Checker<'_, '_> {
             // slots or divergence usable as a concrete default domain.
             if !is_never(&ty) {
                 let inputs = self.observed_term_inputs(&ty, expr.span)?;
-                if !generic.iter().any(|id| inputs.declarations.contains_key(id))
+                if !generic
+                    .iter()
+                    .any(|id| inputs.declarations.contains_key(id))
                     && inputs.parameters.is_empty()
                 {
                     actual[index] = Some(ty);
@@ -7575,9 +7582,8 @@ impl Checker<'_, '_> {
                 {
                     let mut unknown_inputs = BTreeSet::new();
                     for slot in &unknown {
-                        unknown_inputs.extend(
-                            self.term_declaration_inputs(&domains[*slot], expr.span)?,
-                        );
+                        unknown_inputs
+                            .extend(self.term_declaration_inputs(&domains[*slot], expr.span)?);
                     }
                     let mut supported = BTreeSet::new();
                     for (index, id) in generic.iter().enumerate() {
@@ -7916,9 +7922,8 @@ impl Checker<'_, '_> {
             for slot in 0..=sig.params.len() {
                 if let Some(source) = annotation_source(sig, slot) {
                     if let H::Defer(value) = source.kind {
-                        ordinary_dependencies.extend(
-                            self.expression_parameter_dependencies(owner, value)?,
-                        );
+                        ordinary_dependencies
+                            .extend(self.expression_parameter_dependencies(owner, value)?);
                     }
                 }
             }
@@ -8777,9 +8782,8 @@ impl Checker<'_, '_> {
                 .chain(symbols.iter().flatten())
                 .chain(std::iter::once(signature))
             {
-                pending.extend(
-                    input_observation::term_inputs(value, &mut steps, span)?.declarations,
-                );
+                pending
+                    .extend(input_observation::term_inputs(value, &mut steps, span)?.declarations);
             }
             let mut captures = BTreeMap::new();
             while let Some((declaration, sort)) = pending.pop() {

@@ -17,6 +17,7 @@ mod function_types;
 mod inline_control;
 mod inline_loops;
 pub mod inlining;
+mod input_domains;
 mod input_observation;
 mod intrinsics;
 mod nominal_fields;
@@ -2018,34 +2019,12 @@ impl Checker<'_, '_> {
                 }
                 if let hir::clause::ClauseParamKind::Positional(_, ty) = parameter.kind {
                     let ty = self.type_expr(ty)?;
-                    if !nir::normal_forms::supported_input_type_with_collections_in(
+                    if !self.normal_input_domain_supported(
                         &ty,
-                        &type_parameters
-                            .iter()
-                            .map(|declaration| nir::DeclarationParameter {
-                                declaration: *declaration,
-                                sort: Sort::Type,
-                            })
-                            .chain(
-                                normal_parameters
-                                    .iter()
-                                    .filter(|(_, _, ty)| *ty != p(P::Type))
-                                    .map(|(declaration, _, _)| nir::DeclarationParameter {
-                                        declaration: *declaration,
-                                        sort: Sort::ComptimeValue,
-                                    }),
-                            )
-                            .collect::<Vec<_>>(),
-                        |head| Some(head) == self.protocols.tuple,
-                        |head| Some(head) == self.protocols.meta_list,
-                        |id| {
-                            self.structs.contains_key(&id)
-                                || self.enums.contains_key(&id)
-                                || self.newtypes.contains_key(&id)
-                                || self.context.is_nominal_constructor(id)
-                        },
-                        self.target,
-                    ) {
+                        &type_parameters,
+                        &normal_parameters,
+                        parameter.span,
+                    )? {
                         return Err(error(
                             parameter.span,
                             "normal-form parameter type is not yet supported",
@@ -2074,34 +2053,12 @@ impl Checker<'_, '_> {
                 } else if let hir::clause::ClauseParamKind::Optional(_, ty, _) = parameter.kind {
                     let ty = self.type_expr(ty)?;
                     if ty != p(P::Type) {
-                        if !nir::normal_forms::supported_input_type_with_collections_in(
+                        if !self.normal_input_domain_supported(
                             &ty,
-                            &type_parameters
-                                .iter()
-                                .map(|declaration| nir::DeclarationParameter {
-                                    declaration: *declaration,
-                                    sort: Sort::Type,
-                                })
-                                .chain(
-                                    normal_parameters
-                                        .iter()
-                                        .filter(|(_, _, ty)| *ty != p(P::Type))
-                                        .map(|(declaration, _, _)| nir::DeclarationParameter {
-                                            declaration: *declaration,
-                                            sort: Sort::ComptimeValue,
-                                        }),
-                                )
-                                .collect::<Vec<_>>(),
-                            |head| Some(head) == self.protocols.tuple,
-                            |head| Some(head) == self.protocols.meta_list,
-                            |id| {
-                                self.structs.contains_key(&id)
-                                    || self.enums.contains_key(&id)
-                                    || self.newtypes.contains_key(&id)
-                                    || self.context.is_nominal_constructor(id)
-                            },
-                            self.target,
-                        ) {
+                            &type_parameters,
+                            &normal_parameters,
+                            parameter.span,
+                        )? {
                             return Err(error(
                                 parameter.span,
                                 "normal-form parameter type is not yet supported",

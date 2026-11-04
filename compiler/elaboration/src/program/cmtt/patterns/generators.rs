@@ -350,19 +350,7 @@ impl Checker<'_, '_> {
                         ));
                     }
                 };
-                if !nir::normal_forms::supported_input_type_with_collections_in(
-                    &domain,
-                    &this.input_binders(&visible_parameters),
-                    |head| Some(head) == this.protocols.tuple,
-                    |head| Some(head) == this.protocols.meta_list,
-                    |id| {
-                        this.structs.contains_key(&id)
-                            || this.enums.contains_key(&id)
-                            || this.newtypes.contains_key(&id)
-                            || this.context.is_nominal_constructor(id)
-                    },
-                    this.target,
-                ) {
+                if !this.generator_clause_domain(&domain, &visible_parameters, parameter.span)? {
                     return Err(error(
                         parameter.span,
                         "code generator clause requires an immutable value domain",
@@ -494,7 +482,7 @@ impl Checker<'_, '_> {
                         "generator lambda parameter requires a comptime callable type",
                     ));
                 }
-                if !this.generator_data_domain(&ty, &visible_parameters) {
+                if !this.generator_data_domain(&ty, &visible_parameters, parameter.span)? {
                     return Err(error(
                         parameter.span,
                         "pattern generator data domain is not supported; runtime pointer storage is not permitted",

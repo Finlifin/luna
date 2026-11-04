@@ -2397,7 +2397,73 @@ newtype 各个耗尽点、失败后重试、跨 head 共享额度、捕获 sort 
 逐字节恢复已经测试的新实现，格式检查 `/tmp/luna-tools-j27x2e7w/result.json` 退出 0。
 没有运行全 workspace 或性能基准；正式 docs 和原有工作区修改保持不变。
 
-后续边界仍明确存在：elaboration／CMTT 的五处域观察尚用兼容 bool 入口，需随其
-调用方额度和诊断一起迁移，不能据此宣称所有“unsupported”误报已消除。PTC／VM
-独立 metadata 构造仍用兼容入口，完整 phase／constructor 的精确扣款、错误分类与
-稳定世界证据复用仍未闭合。其他声明观察和临时集合亦须继续审计。
+本批结束时，elaboration／CMTT 的五处域观察仍用兼容 bool 入口；下节已完成这些
+调用方的迁移与旧域检查 API 退役。PTC／VM 独立 metadata 构造仍用兼容入口，完整
+phase／constructor 的精确扣款、错误分类与稳定世界证据复用仍未闭合。其他声明
+观察和临时集合亦须继续审计。
+
+
+### Elaboration／CMTT 域观察接线与布尔 API 退役
+
+普通／可选 NF 子句、表达式代码 generator 子句、pattern generator 子句和 generator
+数据域已统一调用带显式预算的形状检查。`input_domains.rs` 把前缀准备、声明域观察
+与类型遍历接到现有 `required_steps`，成功和失败均扣除实际消耗。资源失败携带原始
+参数 span 并报告 `comptime input domain inspection budget exhausted`；普通 false
+继续由对应语境报告不支持的域。这里不执行 NF 主体，也不代替类型形成证明。
+
+generator 数据域不再有独立 100,000 遍历额度；其后的 comptime storage 检查也不再
+截取另一份最多 100,000 的额度。两个步骤及 sort frame 准备消费同一次调用余额。
+storage 的 Budget 向外传播为资源失败，Invalid 仍是数据域不被接纳，保持 runtime
+指针存储的拒绝。runtime callable 的签名只是描述，不因 frame 准备变成存储载荷。
+
+binder 准备现在借用输入域来判断 sort，不再克隆完整 Term。共享的观察路径保留
+lexical input、nominal prefix、trait telescope、normal prefix／完成参数表的原有
+查询优先级；新 bounded 消费者支付 map 查询、owner 和参数扫描成本。旧 owned
+观察消费者复用同一查找逻辑并在返回时克隆，它们尚未整体迁移到有预算的接口。
+该路径没有创建跨语义修订复用的缓存，也没有把未知域固化为新的语言规则。
+
+storage frame 按原 `call_inference_scope` 的优先级取得已知参数前缀，逐项支付后
+收集 sort。signature 包装层迭代观察，open function 在第一个未完成 annotation
+处停止；不为取得 sort 克隆参数类型或 closure 环境。此处的停止语义与原路径一致。
+
+全部生产调用方迁移后，删除 NIR 的六个无调用方预算、返回 bool 的兼容域检查 API。
+生产仅保留 `supported_input_type_with_collections_budgeted`。小型旧测试使用
+`tests/support/domain_shapes.rs` 的显式 fixture 额度，资源失败立即令测试失败，
+不再 `.unwrap_or(false)`。这暴露了超长 record label 测试先前把资源耗尽当成语义
+拒绝的问题：现断言小额度返回 Budget，并验证同一域在充足额度下可接受；重复字段名
+仍明确拒绝。未增大生产默认预算，也未将超长名称排除为永久语言限制。
+
+发布回归通过真实 DefinitionBatch 检查普通 NF／expr code／pattern code 的必要和
+可选子句。CMTT 在域检查前会准备 generator checkpoint，因此测试逐步找到域检查
+自身的耗尽点，而不硬编码其前置成本。每次失败都核对 batch 未变化、没有发布定义；
+之后在充足额度下重试成功。这些测试不以更早的 checkpoint 失败代替域检查接线。
+
+工作目录 `/home/fin/luna`，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p elaboration --lib --test invocation_budget --test generated_normal_forms
+  --test default_strategies --no-fail-fast`：184 通过，退出 0；
+  `/tmp/luna-tools-io4pnvfm/result.json`，旧 NIR API 删除之前。
+- `-p luna --test cmtt_type_inputs --test cmtt_phase_boundaries --test test_templates
+  --test normal_form_domains --test normal_input_plans --test open_normal_input_plans
+  --test sysroot_preludes --test library_list_equality --no-fail-fast`：182 通过，退出 0；
+  `/tmp/luna-tools-gkggyfxu/result.json`，生产迁移完成、旧 API 删除之前。
+- 删除旧 API 后，`-p nir -p elaboration -p comptime_interpretor --lib
+  --test normal_inputs --test normal_callable_inputs --test float_formation
+  --test declaration_metadata --test invocation_budget --test generated_normal_forms
+  --no-fail-fast`：705 通过，退出 0；`/tmp/luna-tools-mfkfqw7k/result.json`。
+- 最终源码的 `-p luna --test cmtt_type_inputs --test cmtt_phase_boundaries
+  --test sysroot_preludes --no-fail-fast`：42 通过，退出 0；
+  `/tmp/luna-tools-sann13b5/result.json`。
+
+过程中 `/tmp/luna-tools-eh41lklm/result.json` 的新 helper 与既有实例化 helper 重名
+导致编译失败，已改为 `normal_input_domain_supported`；
+`/tmp/luna-tools-_2cy2yzo/result.json` 暴露 CMTT 零额度先停在 checkpoint 的测试假设，
+已按实际发布顺序验证域检查边界；`/tmp/luna-tools-40osdowc/result.json` 暴露上述
+record label 测试的资源／语义混淆。最终检查已覆盖相应修正，不把这些中间失败计为
+通过。格式检查 `/tmp/luna-tools-v3d65b9l/result.json` 退出 0。
+
+未跑全 workspace 或性能基准；已有 VM 错误分类、tuple example 和 closure handler
+基线问题本批未处理，也未声明解决。required_steps 仍不是整个 elaborator 的完整
+成本模型；signature／generator 元数据准备、其他 owned 域观察、PTC／VM 构造中的
+预算与稳定世界证据仍须继续迁移。正式 docs 和原有工作区修改保持不变。

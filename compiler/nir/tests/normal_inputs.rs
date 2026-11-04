@@ -1,4 +1,7 @@
-use nir::normal_forms::{ApplicationError, Head, Kind, Parameter, supported_input_type};
+#[path = "support/domain_shapes.rs"]
+mod domain_shapes;
+use domain_shapes::supported_input_type;
+use nir::normal_forms::{ApplicationError, Head, Kind, Parameter};
 use nir::program::LocalId;
 use nir::value_admission::DomainQueries;
 use nir::{DeclarationId, Primitive as P, Sort, Term};
@@ -377,7 +380,7 @@ fn symbol_normal_inputs_do_not_accept_strings_or_types() {
 
 #[test]
 fn nominal_domains_require_metadata_and_prior_type_inputs() {
-    use nir::normal_forms::supported_input_type_with_layouts;
+    use domain_shapes::supported_input_type_with_layouts;
     let domain = Term::Nominal {
         declaration: id(7),
         arguments: vec![Term::Rigid {
@@ -625,10 +628,23 @@ fn duplicate_and_oversized_record_labels_are_rejected_before_comparison() {
             .is_err()
     );
     let label = "x".repeat(100_001);
-    assert!(!supported_input_type(
-        &record(&label, primitive(P::Bool)),
-        &[]
+    let domain = record(&label, primitive(P::Bool));
+    let inspect = |fuel: &mut usize| {
+        nir::normal_forms::supported_input_type_with_collections_budgeted(
+            &domain,
+            &[],
+            |_| false,
+            |_| false,
+            |_| false,
+            None,
+            fuel,
+        )
+    };
+    assert!(matches!(
+        inspect(&mut 100_000),
+        Err(nir::type_computations::Error::Budget)
     ));
+    assert!(inspect(&mut 1_000_000).unwrap());
     assert!(
         head(record(&label, primitive(P::Bool)))
             .check_arguments(
@@ -654,7 +670,7 @@ fn duplicate_and_oversized_record_labels_are_rejected_before_comparison() {
 #[test]
 fn bound_tuple_value_domains_require_identity_and_check_nested_elements() {
     let supported = |ty: &Term, prior: &[DeclarationId], trusted| {
-        nir::normal_forms::supported_input_type_with_collections_in(
+        domain_shapes::supported_input_type_with_collections_in(
             ty,
             &prior
                 .iter()
@@ -836,12 +852,7 @@ fn nominal_domains_preserve_value_prefix_sorts_and_instances() {
         }],
     };
     let scoped = |prior: &[nir::DeclarationParameter]| {
-        nir::normal_forms::supported_input_type_in_scope(
-            &domain,
-            prior,
-            |_| false,
-            |id_| id_ == id(7),
-        )
+        domain_shapes::supported_input_type_in_scope(&domain, prior, |_| false, |id_| id_ == id(7))
     };
     assert!(!scoped(&[]));
     assert!(!scoped(&[nir::DeclarationParameter {
@@ -1070,7 +1081,7 @@ fn associated_input_domains_preserve_type_and_value_binder_scope() {
         }],
     };
     let supported = |prior: &[nir::DeclarationParameter]| {
-        nir::normal_forms::supported_input_type_in_scope(&domain, prior, |_| false, |_| false)
+        domain_shapes::supported_input_type_in_scope(&domain, prior, |_| false, |_| false)
     };
     let subject = nir::DeclarationParameter {
         declaration: id(1),
@@ -1447,7 +1458,8 @@ fn collection_admission_never_supplies_a_missing_value_domain() {
 
 #[test]
 fn opaque_normal_domains_preserve_scope_without_granting_value_layouts() {
-    use nir::{DeclarationParameter, normal_forms::supported_input_type_with_collections_in};
+    use domain_shapes::supported_input_type_with_collections_in;
+    use nir::DeclarationParameter;
     let prior = [DeclarationParameter {
         declaration: id(41),
         sort: Sort::ComptimeValue,

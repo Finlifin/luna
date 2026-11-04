@@ -110,7 +110,18 @@ fn half_literals_keep_distinct_domains_and_exact_rounding() {
     .unwrap();
     for domain in [P::F16, P::Bf16] {
         let ty = nir::Term::Primitive(domain);
-        assert!(nir::normal_forms::supported_input_type(&ty, &[]));
+        assert!(
+            nir::normal_forms::supported_input_type_with_collections_budgeted(
+                &ty,
+                &[],
+                |_| false,
+                |_| false,
+                |_| false,
+                None,
+                &mut 100_000,
+            )
+            .unwrap()
+        );
         assert!(nir::program::intrinsic_pointer_value(&ty));
     }
     let half = formation.form(P::F16, &mut Budget::default()).unwrap();

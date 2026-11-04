@@ -79,28 +79,80 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn trait_input_domain(&self, id: DeclarationId) -> Option<Term> {
+        self.observe_input_domain(id, || Ok(()))
+            .expect("unmetered domain observation cannot exhaust fuel")
+            .cloned()
+    }
+
+    // One lookup order for both existing owned consumers and bounded borrowed
+    // observers. Inspecting a sort does not require copying the domain payload.
+    pub(super) fn observe_input_domain(
+        &self,
+        id: DeclarationId,
+        mut charge: impl FnMut() -> Result<(), nir::type_computations::Error>,
+    ) -> Result<Option<&Term>, nir::type_computations::Error> {
+        charge()?;
         if let Some(domain) = self.lexical_input_domains.get(&id) {
-            return Some(domain.clone());
+            return Ok(Some(domain));
         }
+        charge()?;
         if let Some(domain) = self.nominal_input_prefixes.get(&id) {
-            return Some(domain.clone());
+            return Ok(Some(domain));
         }
-        self.trait_parameter_types
+        for (owner, domains) in &self.trait_parameter_types {
+            charge()?;
+            for (index, input) in self.type_parameters[owner].iter().enumerate() {
+                charge()?;
+                if *input == id {
+                    if let Some(domain) = domains.get(index) {
+                        return Ok(Some(domain));
+                    }
+                    break;
+                }
+            }
+        }
+        for prefix in self
+            .normal_input_prefixes
+            .values()
+            .chain(self.normal_parameters.values())
+        {
+            charge()?;
+            for (parameter, _, domain) in prefix {
+                charge()?;
+                if *parameter == id {
+                    return Ok(Some(domain));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub(super) fn input_binders_in(
+        &self,
+        parameters: &[DeclarationId],
+        fuel: &mut usize,
+    ) -> Result<Vec<nir::DeclarationParameter>, nir::type_computations::Error> {
+        use nir::type_computations::Error as QueryError;
+        *fuel = fuel
+            .checked_sub(parameters.len())
+            .ok_or(QueryError::Budget)?;
+        parameters
             .iter()
-            .find_map(|(owner, types)| {
-                self.type_parameters[owner]
-                    .iter()
-                    .position(|input| *input == id)
-                    .and_then(|index| types.get(index).cloned())
+            .map(|id| {
+                let domain = self.observe_input_domain(*id, || {
+                    *fuel = fuel.checked_sub(1).ok_or(QueryError::Budget)?;
+                    Ok(())
+                })?;
+                Ok(nir::DeclarationParameter {
+                    declaration: *id,
+                    sort: if domain.is_some_and(|ty| !matches!(ty, Term::Primitive(P::Type))) {
+                        Sort::ComptimeValue
+                    } else {
+                        Sort::Type
+                    },
+                })
             })
-            .or_else(|| {
-                self.normal_input_prefixes
-                    .values()
-                    .chain(self.normal_parameters.values())
-                    .flatten()
-                    .find(|(parameter, _, _)| *parameter == id)
-                    .map(|(_, _, domain)| domain.clone())
-            })
+            .collect()
     }
 
     pub(super) fn substituted_trait_domain(

@@ -1,5 +1,8 @@
 //! Frozen callable inputs require signature evidence from a declaration world.
-use nir::normal_forms::{ApplicationError, Head, Kind, Parameter, Role, supported_input_type};
+#[path = "support/domain_shapes.rs"]
+mod domain_shapes;
+use domain_shapes::supported_input_type;
+use nir::normal_forms::{ApplicationError, Head, Kind, Parameter, Role};
 use nir::program::LocalId;
 use nir::value_admission::{DomainQueries, Error};
 use nir::{DeclarationId, DeclarationSubstitution, Primitive as P, Sort, Term};
