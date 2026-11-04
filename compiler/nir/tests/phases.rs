@@ -1984,3 +1984,64 @@ fn parameter_domain_resource_failure_is_not_reported_as_invalid_metadata() {
     fields[0].0 = "field".into();
     nir::phases::validate(&package).unwrap();
 }
+
+#[test]
+fn associated_contract_inputs_are_bounded_before_copying_even_when_unused() {
+    let declaration = DeclarationId {
+        package: 90,
+        local: 0,
+    };
+    let member = DeclarationId {
+        package: 90,
+        local: 1,
+    };
+    let mut root = function(800, Phase::Comptime, &[]);
+    root.body = flag(K::AssociatedValue {
+        interface: nir::program::InterfaceInstance {
+            declaration,
+            arguments: vec![Term::Symbol("x".repeat(1_000_001).into())],
+        },
+        member,
+        subject: Term::Primitive(Primitive::Bool),
+    });
+    let mut package = Package {
+        functions: vec![root],
+        traits: vec![nir::program::Trait {
+            declaration,
+            self_parameter: DeclarationId {
+                package: 90,
+                local: 2,
+            },
+            type_parameters: vec![DeclarationId {
+                package: 90,
+                local: 3,
+            }],
+            parameter_types: vec![Term::Primitive(Primitive::Symbol)],
+            associated: vec![nir::program::AssociatedContract {
+                phase: nir::program::TraitPhase::Comptime,
+                declaration: member,
+                name: "enabled".into(),
+                ty: Term::Primitive(Primitive::Bool),
+                default: None,
+            }],
+            comptime_only: false,
+            requirements: vec![],
+            capabilities: vec![],
+            parents: vec![],
+            name: "Feature".into(),
+            methods: vec![],
+        }],
+        ..Default::default()
+    };
+    let error = nir::phases::validate(&package).unwrap_err();
+    assert_eq!(error.source, package.functions[0].body.source);
+    assert_eq!(
+        error.message,
+        "associated value contract inspection budget exhausted"
+    );
+    let K::AssociatedValue { interface, .. } = &mut package.functions[0].body.kind else {
+        unreachable!()
+    };
+    interface.arguments[0] = Term::Symbol("small".into());
+    nir::phases::validate(&package).unwrap();
+}

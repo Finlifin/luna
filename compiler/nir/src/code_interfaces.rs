@@ -503,6 +503,28 @@ impl PartialEq<Term> for MethodSignature {
     }
 }
 impl MethodSignature {
+    /// Bound both retained contextual metadata and expanded type payloads before
+    /// copying. Category, ports and defaults survive ordinary declaration input
+    /// substitution; it is not an invocation or a phase conversion.
+    pub fn instantiate_declaration_inputs_bounded(
+        &self,
+        parameters: &[crate::DeclarationId],
+        domains: &[Term],
+        arguments: &[Term],
+        frames: &[Vec<crate::Sort>],
+        fuel: &mut usize,
+    ) -> Result<Self, type_computations::Error> {
+        match self {
+            Self::Callable(ty) => type_computations::charge_term(ty, fuel)?,
+            Self::Generator(signature) => signature.charge(fuel)?,
+            Self::PatternGenerator(signature) => signature.charge(fuel)?,
+            Self::DataConsumer(signature) => signature.charge(fuel)?,
+        }
+        let substitution =
+            crate::DeclarationSubstitution::bounded(parameters, domains, arguments, frames, fuel)?;
+        self.try_map_types(|ty| substitution.instantiate_bounded(ty, fuel))
+    }
+
     pub fn clause_domains(&self) -> Option<&[Term]> {
         match self {
             Self::Callable(_) => None,

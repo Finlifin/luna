@@ -5,6 +5,7 @@ use crate::{Primitive, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod comptime_storage;
+mod member_types;
 mod parameters;
 mod storage_cache;
 mod storage_error;
@@ -647,21 +648,22 @@ fn machine_arithmetic_functions_with_parameter_budget(
                                     "associated value interface argument count mismatch",
                                 ));
                             }
-                            let arguments: Vec<_> = std::iter::once(subject.clone())
-                                .chain(interface.arguments.iter().cloned())
-                                .collect();
-                            let ty = member
-                                .ty
-                                .instantiate_parameters_in_scope(
-                                    &contract.binders_with_self(&mut 100_000).map_err(|_| {
-                                        error("invalid associated value parameter domains")
-                                    })?,
-                                    &arguments,
-                                    &caller_frames,
-                                )
-                                .map_err(|_| {
-                                    error("associated value contract substitution failed")
-                                })?;
+                            let ty = member_types::associated(
+                                contract,
+                                member,
+                                subject,
+                                &interface.arguments,
+                                &caller_frames,
+                                &mut preparation_fuel,
+                            )
+                            .map_err(|failure| {
+                                error(match failure {
+                                    crate::type_computations::Error::Budget => {
+                                        "associated value contract inspection budget exhausted"
+                                    }
+                                    _ => "associated value contract substitution failed",
+                                })
+                            })?;
                             if ty != expr.ty {
                                 return Err(error(
                                     "associated value type does not preserve its contract",
@@ -714,35 +716,24 @@ fn machine_arithmetic_functions_with_parameter_budget(
                             {
                                 return Err(error("trait method type argument count mismatch"));
                             }
-                            let parameters: Vec<_> = contract
-                                .parameters_with_self()
-                                .into_iter()
-                                .chain(method.type_parameters.iter().copied())
-                                .collect();
-                            let domains: Vec<_> = parameters
-                                .iter()
-                                .map(|id| {
-                                    parameter_domains
-                                        .get(id)
-                                        .cloned()
-                                        .unwrap_or(Term::Primitive(Primitive::Type))
-                                })
-                                .collect();
-                            let arguments: Vec<_> = std::iter::once(subject.clone())
-                                .chain(interface_arguments.iter().cloned())
-                                .chain(method_arguments.iter().cloned())
-                                .collect();
-                            let substitution = crate::DeclarationSubstitution::new(
-                                &parameters,
-                                &domains,
-                                &arguments,
+                            let signature = member_types::method(
+                                contract,
+                                method,
+                                subject,
+                                interface_arguments,
+                                method_arguments,
+                                &parameter_domains,
                                 &caller_frames,
+                                &mut preparation_fuel,
                             )
-                            .map_err(|_| error("trait method domain substitution failed"))?;
-                            let signature = method
-                                .signature
-                                .try_map_types(|ty| substitution.instantiate(ty))
-                                .map_err(|_| error("trait method contract substitution failed"))?;
+                            .map_err(|failure| {
+                                error(match failure {
+                                    crate::type_computations::Error::Budget => {
+                                        "trait method contract inspection budget exhausted"
+                                    }
+                                    _ => "trait method contract substitution failed",
+                                })
+                            })?;
                             if signature != expr.ty {
                                 return Err(error(
                                     "trait method value type does not preserve its contract",

@@ -963,3 +963,96 @@ fn simultaneous_binder_permutations_remain_valid() {
     assert_eq!(aligned.as_ref(), &swapped);
     assert_eq!(original.output, make(a, b).output);
 }
+
+#[test]
+fn bounded_method_substitution_checks_expansion_scope_and_recovery() {
+    use nir::code_interfaces::MethodSignature;
+    let id = DeclarationId {
+        package: 70,
+        local: 1,
+    };
+    let variable = Term::Rigid {
+        declaration: id,
+        sort: Sort::Type,
+    };
+    let signature = MethodSignature::Callable(Term::Tuple(vec![variable; 64]));
+    let domain = Term::Primitive(Primitive::Type);
+    let argument = Term::Tuple(vec![Term::Primitive(Primitive::Bool); 32]);
+    let substitute = |value: &Term, frames: &[Vec<Sort>], fuel: &mut usize| {
+        signature.instantiate_declaration_inputs_bounded(
+            &[id],
+            std::slice::from_ref(&domain),
+            std::slice::from_ref(value),
+            frames,
+            fuel,
+        )
+    };
+    assert_eq!(substitute(&argument, &[], &mut 1000), Err(Error::Budget));
+    assert_eq!(
+        substitute(&argument, &[], &mut 100_000).unwrap(),
+        MethodSignature::Callable(Term::Tuple(vec![argument.clone(); 64]))
+    );
+    let open = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    assert!(matches!(
+        substitute(&open, &[], &mut 100_000),
+        Err(Error::Scope(_))
+    ));
+    substitute(&open, &[vec![Sort::Type]], &mut 100_000).unwrap();
+}
+
+#[test]
+fn bounded_contextual_method_substitution_charges_ports_and_keeps_code_category() {
+    use nir::code_interfaces::MethodSignature;
+    let mut code = signature();
+    let binding = *code.output.ports.values().next().unwrap();
+    code.output.ports = BTreeMap::from([("p".repeat(5000), binding)]);
+    let original = MethodSignature::Generator(code);
+    let id = DeclarationId {
+        package: 1,
+        local: 3,
+    };
+    let domain = Term::Primitive(Primitive::Type);
+    let argument = Term::Primitive(Primitive::U8);
+    assert_eq!(
+        original.instantiate_declaration_inputs_bounded(
+            &[id],
+            &[domain.clone()],
+            &[argument.clone()],
+            &[],
+            &mut 1000
+        ),
+        Err(Error::Budget)
+    );
+    let specialized = original
+        .instantiate_declaration_inputs_bounded(&[id], &[domain], &[argument], &[], &mut 100_000)
+        .unwrap();
+    let (MethodSignature::Generator(before), MethodSignature::Generator(after)) =
+        (&original, specialized)
+    else {
+        panic!("code category was erased")
+    };
+    assert_eq!(before.output.ports, after.output.ports);
+    assert_eq!(before.output.defaults, after.output.defaults);
+    assert_eq!(
+        after.output.context[&binding],
+        Term::Primitive(Primitive::U8)
+    );
+    let Term::NormalForm {
+        head, arguments, ..
+    } = after.output.result
+    else {
+        panic!("NF head unfolded")
+    };
+    assert_eq!(
+        head,
+        DeclarationId {
+            package: 1,
+            local: 4
+        }
+    );
+    assert_eq!(arguments, vec![Term::Primitive(Primitive::U8)]);
+}

@@ -1993,3 +1993,45 @@ P4 拒绝。这证明仅缓存冷查询结果没有消除不必要的观察。
 
 格式检查 `/tmp/luna-tools-nj8ep5ng/result.json` 退出 0。未执行全 workspace 或
 性能基准。正式 docs、用户已有的资源源码修改及 library 修改保持不变。
+
+
+### Phase 成员类型观察的有界替换
+
+associated value 与 trait method 的 phase 路径现在使用同一次 preparation fuel
+支付实参复制、声明域复制和结果展开；不再为 associated value 的 binders 单独
+重置 100,000，也不再调用无预算的成员类型替换。实参即使没有出现在结果类型中，
+其结构也在复制前计费。associated value 复用 trait 的普通域检查 substitution，
+method 复用 `DeclarationSubstitution::bounded`，不展开 NF 头、不执行 Type 函数，
+也不改变 trait/implementation 选择与程序契约责任。
+
+`MethodSignature::instantiate_declaration_inputs_bounded` 为 Callable、Generator、
+PatternGenerator 和 DataConsumer 提供同一入口。先检查签名携带的上下文、port
+名称、默认连接和普通输入 binder，再按通用规则预留每个替换后类型的成本；失败
+丢弃私有结果。不能只计算 type term，而让 port 名称或 input binder 元数据绕过
+复制预算。contextual signature 的类别与固定依赖保持不变。
+
+生产回归以合法 Symbol 域的大实参验证未使用输入也受限。在 `6e264e14` 的 phase
+实现上，该调用返回 Ok，`/tmp/luna-tools-hxz7lcbu/result.json` 退出 101；恢复当前
+实现后返回带原位置的资源诊断，缩小输入后可重试成功。签名测试另外覆盖重复
+参数导致的展开膨胀、开放 scope 拒绝／接受，以及 contextual port、默认连接和
+opaque NF 身份的保留。
+
+这次没有把 trait/member 的线性查找、trait membership 的独立额度或生成 summary
+的复制路径宣称为已统一；它们仍是后续 phase context 的接线工作。成员替换现在
+复用 preparation allowance，该额度本身仍由旧 phase 入口提供，未接到 VM 总预算。
+
+
+本批验证目录 `/home/fin/luna`，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --test phases --test code_interfaces --test trait_parameters --no-fail-fast`：
+  90 通过，退出 0；`/tmp/luna-tools-v_7_3kuj/result.json`。
+- `-p nir -p comptime_interpretor --lib --no-fail-fast`：471 通过，退出 0；
+  `/tmp/luna-tools-evrbjxrj/result.json`。
+- `-p luna --test trait_phases --test quote_functions --test associated_signatures
+  --test associated_purity --test deferred_associated_values --test cmtt_type_inputs
+  --test sysroot_preludes --no-fail-fast`：237 通过，退出 0；
+  `/tmp/luna-tools-ppddqbzr/result.json`。
+
+格式检查 `/tmp/luna-tools-rk_jxo2m/result.json` 退出 0。未运行全 workspace 或性能
+基准。正式 docs 与已有工作区修改保持不变。
