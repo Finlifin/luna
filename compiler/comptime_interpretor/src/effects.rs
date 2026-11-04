@@ -368,30 +368,29 @@ impl Interpreter<'_> {
         selected: Vec<Entry>,
     ) -> Result<Flow, Error> {
         self.tick(Some(expr.source))?;
-        self.depth += 1;
-        let result = (|| match &expr.kind {
-            K::Call { .. } => self.eval_call_with_effects(expr, environment, Some(selected)),
+        let result = self.with_native_depth(|vm| match &expr.kind {
+            K::Call { .. } => vm.eval_call_with_effects(expr, environment, Some(selected)),
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
                 let existing = environment.snapshot();
                 let result = (|| {
                     for statement in statements {
-                        value!(self.eval(statement, environment));
+                        value!(vm.eval(statement, environment));
                     }
                     let result = result
                         .as_ref()
-                        .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-                    self.eval_mapped_computation(result, environment, selected)
+                        .ok_or_else(|| vm.failure(ErrorKind::Type, Some(expr.source)))?;
+                    vm.eval_mapped_computation(result, environment, selected)
                 })();
                 let result = match result {
                     Ok(Flow::Value(value)) => {
                         if matches!(expr.kind, K::CallPreparation { .. }) {
-                            self.cleanup_site(
+                            vm.cleanup_site(
                                 expr.source,
                                 iir::cleanup::Boundary::ScopeEnd,
                                 environment,
                             )?;
                         } else {
-                            self.cleanup_block(expr.source, environment)?;
+                            vm.cleanup_block(expr.source, environment)?;
                         }
                         Ok(Flow::Value(value))
                     }
@@ -405,25 +404,25 @@ impl Interpreter<'_> {
                 then_branch,
                 else_branch,
             } => {
-                let Value::Bool(condition) = value!(self.eval(condition, environment)) else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                let Value::Bool(condition) = value!(vm.eval(condition, environment)) else {
+                    return Err(vm.failure(ErrorKind::Type, Some(expr.source)));
                 };
                 let branch = if condition {
                     then_branch.as_ref()
                 } else {
                     else_branch
                         .as_deref()
-                        .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?
+                        .ok_or_else(|| vm.failure(ErrorKind::Type, Some(expr.source)))?
                 };
-                self.eval_mapped_computation(branch, environment, selected)
+                vm.eval_mapped_computation(branch, environment, selected)
             }
             K::Match { value, arms } => {
-                let value = value!(self.eval(value, environment));
+                let value = value!(vm.eval(value, environment));
                 let existing = environment.snapshot();
                 let result = (|| {
                     for arm in arms {
                         environment.retain(|id, _| existing.contains(id));
-                        let (matched, bindings) = self.match_arm_guard_with_bindings(
+                        let (matched, bindings) = vm.match_arm_guard_with_bindings(
                             &arm.pattern,
                             arm.guard.as_ref(),
                             &value,
@@ -432,16 +431,16 @@ impl Interpreter<'_> {
                         match matched {
                             Flow::Value(Value::Bool(false)) => continue,
                             Flow::Value(Value::Bool(true)) => {
-                                self.retain_pattern_residual(arm.body.source, &value, &bindings)?;
+                                vm.retain_pattern_residual(arm.body.source, &value, &bindings)?;
                                 let result =
-                                    self.eval_mapped_computation(&arm.body, environment, selected)?;
+                                    vm.eval_mapped_computation(&arm.body, environment, selected)?;
                                 if matches!(result, Flow::Value(_))
                                     && !matches!(
                                         arm.body.kind,
                                         K::Block { .. } | K::CallPreparation { .. }
                                     )
                                 {
-                                    self.cleanup_site(
+                                    vm.cleanup_site(
                                         arm.body.source,
                                         iir::cleanup::Boundary::ScopeEnd,
                                         environment,
@@ -452,20 +451,19 @@ impl Interpreter<'_> {
                             flow => return Ok(flow),
                         }
                     }
-                    Err(self.failure(ErrorKind::NonExhaustiveMatch, Some(expr.source)))
+                    Err(vm.failure(ErrorKind::NonExhaustiveMatch, Some(expr.source)))
                 })();
                 environment.retain(|id, _| existing.contains(id));
                 result
             }
             K::EffectComputation { .. } => {
-                let previous = std::mem::replace(&mut self.effect_state.environment, selected);
-                let result = self.eval_effect(expr, environment);
-                self.effect_state.environment = previous;
+                let previous = std::mem::replace(&mut vm.effect_state.environment, selected);
+                let result = vm.eval_effect(expr, environment);
+                vm.effect_state.environment = previous;
                 result
             }
-            _ => Err(self.failure(ErrorKind::Unsupported, Some(expr.source))),
-        })();
-        self.depth -= 1;
+            _ => Err(vm.failure(ErrorKind::Unsupported, Some(expr.source))),
+        });
         self.finish_evaluation(expr, environment, result)
     }
 

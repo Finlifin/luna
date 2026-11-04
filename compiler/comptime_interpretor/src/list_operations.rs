@@ -47,27 +47,25 @@ impl Interpreter<'_> {
         {
             return None;
         }
-        let depth = self.depth;
-        let result = (|| {
-            self.tick(Some(value.source))?;
-            self.depth += 1;
-            self.tick(Some(left.source))?;
-            self.depth += 1;
-            let ty = self.check_list_append(&environment[&place.root], &left.ty, left.source)?;
-            self.depth -= 1;
-            let suffix = match self.eval(right, environment)? {
+        let result = self.with_depth_checkpoint(|vm| {
+            vm.tick(Some(value.source))?;
+            vm.depth += 1;
+            vm.tick(Some(left.source))?;
+            vm.depth += 1;
+            let ty = vm.check_list_append(&environment[&place.root], &left.ty, left.source)?;
+            vm.depth -= 1;
+            let suffix = match vm.eval(right, environment)? {
                 Flow::Value(value) => value,
                 flow => return Ok(flow),
             };
-            self.complete_list_append(
+            vm.complete_list_append(
                 environment.get_mut(&place.root).unwrap(),
                 suffix,
                 &ty,
                 value.source,
             )?;
             Ok(Flow::Value(Value::Unit))
-        })();
-        self.depth = depth;
+        });
         Some(result)
     }
 

@@ -281,6 +281,25 @@ frame 保存 PC、局部槽、结果目的地、控制和清理进度；异常�
 
 ### 已接通：驱动现场归执行会话所有
 
+native 递归深度与显式 invocation 深度由不同所有者管理。临时树求值、输入解释、
+模式、效应映射和编译后方法观察，以及复用存储的列表／对象快速路径，统一通过
+`native_depth` 作用域恢复进入前的计数；正常返回、错误与 unwind 共用同一恢复点。
+`tick` 仍在原位置执行，深度／步数失败不会新进入结果交付或清理钩子。临时深度恢复
+不退还执行预算，不清零其他调用者的深度，也不替代 activation 自己的退出协议。
+
+此前直接方法准备在调用 resolver 前增加 native depth，宿主 panic 后跳过递减；
+即使 Session 恢复了调用栈，外层深度仍从 3 留在 4。新增嵌套调用回归在修改前
+于 `/tmp/luna-tools-ate_ceh9/result.json` 退出 101，明确复现此残留。修复还覆盖树解释、
+已检查输入与待定输入的同类异常路径；宿主中断后额度保持为零，显式给予新额度后
+才能重试。这里只保证深度作用域的恢复，不宣称任意 panic 后所有词法、效应或外部
+状态都可恢复。
+
+最终在 `/home/fin/luna` 执行
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --lib --test effect_contracts --test effect_memory_transfers --test normal_input_plans --test open_normal_input_plans --test comptime_bytecode_traits --test comptime_bytecode_patterns --test comptime_bytecode_lists --test comptime_object_storage --test library_meta_objects --test library_list_hash --test builder_invocations --no-fail-fast`：
+退出 0，886 项通过，`/tmp/luna-tools-89nhqypy/result.json`。覆盖深度／预算边界、
+异常重试、调用与参数顺序、效应内存转移以及真实 sysroot 的 builder、对象和列表接口。
+本批九个 Rust 文件的 rustfmt 检查退出 0，`/tmp/luna-tools-qd8n8tkr/result.json`。
+
 原 `run_executions` 的局部调用栈、待启动计算和待交付结果已经迁入
 `invocation::session::Session`。生产中的字节码 invocation、借入 fragment、借入输入
 计划都由该会话驱动，默认值、关联值、契约与嵌套类型计划仍使用同一调用栈。

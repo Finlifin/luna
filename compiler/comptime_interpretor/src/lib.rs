@@ -47,6 +47,7 @@ mod list_append;
 mod list_index;
 mod list_operations;
 mod memory;
+mod native_depth;
 mod nominal_inputs;
 mod nominal_plan;
 mod normal_inputs;
@@ -2857,19 +2858,20 @@ impl<'a> Interpreter<'a> {
         direct_callee: bool,
     ) -> Result<Flow, Error> {
         self.tick(Some(expr.source))?;
-        self.depth += 1;
-        let result = if self.graph.is_some()
-            && matches!(
-                expr.kind,
-                K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
-            ) {
-            self.eval_iir_callable(expr)
-        } else if direct_callee && matches!(expr.kind, K::TraitMethod { .. }) {
-            self.eval_trait_method(expr, environment, true)
-        } else {
-            self.eval_inner(expr, environment)
-        };
-        self.depth -= 1;
+        let result = self.with_native_depth(|vm| {
+            if vm.graph.is_some()
+                && matches!(
+                    expr.kind,
+                    K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
+                )
+            {
+                vm.eval_iir_callable(expr)
+            } else if direct_callee && matches!(expr.kind, K::TraitMethod { .. }) {
+                vm.eval_trait_method(expr, environment, true)
+            } else {
+                vm.eval_inner(expr, environment)
+            }
+        });
         self.finish_evaluation(expr, environment, result)
     }
     // Mapped computation evaluation must use the same delivery/control hooks
@@ -3435,16 +3437,15 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Flow, Error> {
         use nir::program::NormalFormArgument as A;
         self.tick(Some(input.source()))?;
-        self.depth += 1;
-        let result = (|| match input {
-            A::ListSpread(value) | A::Value(value) => self.eval(value, environment),
+        let result = self.with_native_depth(|vm| match input {
+            A::ListSpread(value) | A::Value(value) => vm.eval(value, environment),
             A::Integer { .. } | A::Unit { .. } | A::Null { .. } => literals
                 .remove(key)
                 .and_then(|prepared| match prepared {
                     PreparedNormalInput::Value(value) => Some(Flow::Value(value)),
                     PreparedNormalInput::ListType(_) => None,
                 })
-                .ok_or_else(|| self.failure(ErrorKind::Type, Some(input.source()))),
+                .ok_or_else(|| vm.failure(ErrorKind::Type, Some(input.source()))),
             A::If {
                 condition,
                 then_input,
@@ -3452,13 +3453,13 @@ impl<'a> Interpreter<'a> {
                 ..
             } => {
                 let Value::Bool(condition) = Self::concrete_value(
-                    value!(self.eval(condition, environment)),
+                    value!(vm.eval(condition, environment)),
                     condition.source,
                 )?
                 else {
-                    return Err(self.failure(ErrorKind::Type, Some(condition.source)));
+                    return Err(vm.failure(ErrorKind::Type, Some(condition.source)));
                 };
-                self.eval_normal_argument_at(
+                vm.eval_normal_argument_at(
                     if condition { then_input } else { else_input },
                     literals,
                     environment,
@@ -3467,17 +3468,17 @@ impl<'a> Interpreter<'a> {
             }
             A::List { items, .. } => {
                 let Some(PreparedNormalInput::ListType(ty)) = literals.remove(key) else {
-                    return Err(self.failure(ErrorKind::Type, Some(input.source())));
+                    return Err(vm.failure(ErrorKind::Type, Some(input.source())));
                 };
                 let mut values = Vec::new();
                 for (index, item) in items.iter().enumerate() {
-                    let value = value!(self.eval_normal_argument_at(
+                    let value = value!(vm.eval_normal_argument_at(
                         item,
                         literals,
                         environment,
                         &key.child(index)
                     ));
-                    self.append_normal_list_item(
+                    vm.append_normal_list_item(
                         &ty,
                         &mut values,
                         matches!(item, A::ListSpread(_)),
@@ -3485,12 +3486,12 @@ impl<'a> Interpreter<'a> {
                         item.source(),
                     )?;
                 }
-                self.finish_normal_list(ty, values).map(Flow::Value)
+                vm.finish_normal_list(ty, values).map(Flow::Value)
             }
             A::Tuple { items, .. } => {
                 let mut values = Vec::new();
                 for (index, item) in items.iter().enumerate() {
-                    values.push(value!(self.eval_normal_argument_at(
+                    values.push(value!(vm.eval_normal_argument_at(
                         item,
                         literals,
                         environment,
@@ -3504,12 +3505,12 @@ impl<'a> Interpreter<'a> {
                 value,
                 arms,
             } => {
-                let value = value!(self.eval(value, environment));
+                let value = value!(vm.eval(value, environment));
                 let existing = environment.snapshot();
                 for (index, arm) in arms.iter().enumerate() {
                     let flow = (|| {
-                        self.tick(Some(*source))?;
-                        match self.match_arm_guard(
+                        vm.tick(Some(*source))?;
+                        match vm.match_arm_guard(
                             &arm.pattern,
                             arm.guard.as_ref(),
                             &value,
@@ -3519,7 +3520,7 @@ impl<'a> Interpreter<'a> {
                             Flow::Value(Value::Bool(true)) => {}
                             flow => return Ok(Some(flow)),
                         }
-                        self.eval_normal_argument_at(
+                        vm.eval_normal_argument_at(
                             &arm.body,
                             literals,
                             environment,
@@ -3532,7 +3533,7 @@ impl<'a> Interpreter<'a> {
                         return Ok(flow);
                     }
                 }
-                Err(self.failure(ErrorKind::NonExhaustiveMatch, Some(*source)))
+                Err(vm.failure(ErrorKind::NonExhaustiveMatch, Some(*source)))
             }
             A::Block {
                 statements, result, ..
@@ -3540,10 +3541,10 @@ impl<'a> Interpreter<'a> {
                 let existing = environment.snapshot();
                 let flow = (|| {
                     for statement in statements {
-                        value!(self.eval(statement, environment));
+                        value!(vm.eval(statement, environment));
                     }
                     if let Some(result) = result {
-                        self.eval_normal_argument_at(result, literals, environment, &key.child(0))
+                        vm.eval_normal_argument_at(result, literals, environment, &key.child(0))
                     } else {
                         Ok(Flow::Value(Value::Unit))
                     }
@@ -3551,8 +3552,7 @@ impl<'a> Interpreter<'a> {
                 environment.retain(|id, _| existing.contains(id));
                 flow
             }
-        })();
-        self.depth -= 1;
+        });
         if input.is_diverging() && matches!(&result, Ok(Flow::Value(_))) {
             return Err(self.failure(ErrorKind::Type, Some(input.source())));
         }
@@ -5374,9 +5374,8 @@ impl Interpreter<'_> {
     ) -> Result<Flow, Error> {
         self.tick(None)?;
         let mark = undo.len();
-        self.depth += 1;
-        let result = self.match_pattern_inner(pattern, value, environment, undo);
-        self.depth -= 1;
+        let result =
+            self.with_native_depth(|vm| vm.match_pattern_inner(pattern, value, environment, undo));
         if !matches!(result, Ok(Flow::Value(Value::Bool(true)))) {
             undo.rollback(mark, environment);
         }

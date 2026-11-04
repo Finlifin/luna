@@ -117,10 +117,7 @@ impl Interpreter<'_> {
         };
         let callee = if let Some(method) = method {
             self.tick(Some(method.source))?;
-            self.depth += 1;
-            let value = self.bytecode_trait_method(method.view(), true);
-            self.depth -= 1;
-            value?
+            self.with_native_depth(|vm| vm.bytecode_trait_method(method.view(), true))?
         } else {
             frame.slots[*callee].take().ok_or_else(missing)?
         };

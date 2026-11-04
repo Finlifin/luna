@@ -298,19 +298,18 @@ impl Interpreter<'_> {
             } => {
                 // Account for the selected callable observation, without tree execution.
                 self.tick(Some(method.source))?;
-                self.depth += 1;
-                let result = if instantiate {
-                    self.function_instance_value(declaration, &arguments, &ty, method.source)
-                } else if self.runtime_function_identities.contains_key(&declaration) {
-                    Ok(Value::FunctionInstance {
-                        declaration,
-                        arguments: vec![],
-                    })
-                } else {
-                    Ok(Value::Function(declaration))
-                };
-                self.depth -= 1;
-                result
+                self.with_native_depth(|vm| {
+                    if instantiate {
+                        vm.function_instance_value(declaration, &arguments, &ty, method.source)
+                    } else if vm.runtime_function_identities.contains_key(&declaration) {
+                        Ok(Value::FunctionInstance {
+                            declaration,
+                            arguments: vec![],
+                        })
+                    } else {
+                        Ok(Value::Function(declaration))
+                    }
+                })
             }
         }
     }

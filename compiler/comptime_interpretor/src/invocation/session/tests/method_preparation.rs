@@ -2,6 +2,115 @@ use super::*;
 use nir::program::{Function, FunctionPhase, MethodContract, MethodInstance, Trait, TraitPhase};
 use std::cell::Cell;
 
+#[test]
+fn panicking_method_host_restores_native_depth_before_caller_reuse() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    for direct in [false, true] {
+        let (package, _) = fixture(direct);
+        let calls = Cell::new(0);
+        let resolver = |_: &Expr, fuel: &mut u64| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                *fuel = u64::MAX;
+                panic!("method resolution interrupted");
+            }
+            *fuel -= 1;
+            Ok(MethodInstance {
+                member: id(3),
+                body: id(10),
+                arguments: vec![],
+                method_arguments: vec![],
+            })
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_method_resolver(&resolver);
+        vm.depth = 3;
+        vm.effect_state.invocation = 41;
+        vm.effect_state.resume = Some(17);
+        assert!(catch_unwind(AssertUnwindSafe(|| vm.invoke(id(9), vec![]))).is_err());
+        assert_eq!(vm.remaining_steps(), 0);
+        assert_eq!(
+            vm.depth, 3,
+            "restore the enclosing native scope, not an assumed zero"
+        );
+        assert_eq!(vm.invocation_depth, 0);
+        assert_eq!(vm.effect_state.invocation, 41);
+        assert_eq!(vm.effect_state.resume, Some(17));
+        assert!(vm.resolved_method_bodies.is_empty());
+        vm.budget.steps = Budget::default().steps;
+        let result = vm.invoke(id(9), vec![]).unwrap();
+        assert_eq!(
+            result,
+            if direct {
+                Value::Bool(true)
+            } else {
+                Value::Function(id(10))
+            }
+        );
+        assert_eq!(vm.depth, 3);
+        assert_eq!(vm.invocation_depth, 0);
+        assert_eq!(calls.get(), 2);
+    }
+}
+
+#[test]
+fn tree_and_staged_input_scopes_restore_depth_after_method_host_unwind() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let (package, _) = fixture(false);
+    let expression = &package.functions[0].body;
+    let input = NormalFormArgument::Value(expression.clone());
+    for mode in 0..3 {
+        let calls = Cell::new(0);
+        let resolver = |_: &Expr, fuel: &mut u64| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                *fuel -= 1;
+                panic!("method host interrupted within a native scope");
+            }
+            Ok(MethodInstance {
+                member: id(3),
+                body: id(10),
+                arguments: vec![],
+                method_arguments: vec![],
+            })
+        };
+        let mut vm = Interpreter::for_comptime_tree(&package, Budget::default())
+            .unwrap()
+            .with_method_resolver(&resolver);
+        vm.depth = 3;
+        let mut env = Environment::default();
+        let execute = |vm: &mut Interpreter<'_>, env: &mut Environment| -> Result<Value, Error> {
+            let flow = match mode {
+                0 => vm.eval(expression, env)?,
+                1 => vm.eval_normal_argument(&input, &mut BTreeMap::new(), env)?,
+                _ => {
+                    let std::ops::ControlFlow::Continue(normal_inputs::StagedNormalInput::Value(
+                        value,
+                    )) = vm.interpret_staged_argument(&input, env, 0)?
+                    else {
+                        panic!("staged value");
+                    };
+                    return Ok(value);
+                }
+            };
+            let Flow::Value(value) = flow else {
+                panic!("method value");
+            };
+            Ok(value)
+        };
+        assert!(catch_unwind(AssertUnwindSafe(|| execute(&mut vm, &mut env))).is_err());
+        assert_eq!(vm.remaining_steps(), 0);
+        assert_eq!(vm.depth, 3, "scope mode {mode}");
+        assert_eq!(vm.invocation_depth, 0);
+        assert!(vm.resolved_method_bodies.is_empty());
+        vm.budget.steps = Budget::default().steps;
+        assert_eq!(execute(&mut vm, &mut env).unwrap(), Value::Function(id(10)));
+        assert_eq!(vm.depth, 3);
+        assert_eq!(calls.get(), 2);
+    }
+}
+
 fn function(declaration: u32, result: Term, body: Expr) -> Function {
     Function {
         declaration: id(declaration),

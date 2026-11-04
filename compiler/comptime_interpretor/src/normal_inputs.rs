@@ -91,9 +91,8 @@ impl Interpreter<'_> {
             LeaveScope,
             Next(&'a [A], usize, InputKey, usize),
         }
-        let original_depth = self.depth;
         let mut scopes: Vec<BTreeSet<LocalId>> = Vec::new();
-        let result = (|| {
+        let result = self.with_depth_checkpoint(|vm| {
             let mut work = vec![Work::Enter(input, depth, InputKey::root())];
             let mut values = Vec::new();
             while let Some(next) = work.pop() {
@@ -105,9 +104,9 @@ impl Interpreter<'_> {
                         }
                     }
                     Work::Exit(input) => {
-                        self.depth -= 1;
+                        vm.depth -= 1;
                         if input.is_diverging() {
-                            return Err(self.failure(ErrorKind::Type, Some(input.source())));
+                            return Err(vm.failure(ErrorKind::Type, Some(input.source())));
                         }
                     }
                     Work::LeaveScope => {
@@ -131,17 +130,15 @@ impl Interpreter<'_> {
                     }
                     Work::Enter(input, depth, key) => {
                         if depth >= 128 {
-                            return Err(
-                                self.failure(ErrorKind::DepthExhausted, Some(input.source()))
-                            );
+                            return Err(vm.failure(ErrorKind::DepthExhausted, Some(input.source())));
                         }
-                        self.tick(Some(input.source()))?;
-                        self.depth += 1;
+                        vm.tick(Some(input.source()))?;
+                        vm.depth += 1;
                         work.push(Work::Exit(input));
                         match input {
                             A::ListSpread(value) | A::Value(value) => {
                                 values.push(StagedNormalInput::Value(staged_value!(
-                                    self.eval(value, environment)
+                                    vm.eval(value, environment)
                                 )));
                             }
                             A::Integer { .. } | A::Unit { .. } | A::Null { .. } => {
@@ -162,11 +159,9 @@ impl Interpreter<'_> {
                                 ..
                             } => {
                                 let Value::Bool(flag) =
-                                    staged_value!(self.eval(condition, environment))
+                                    staged_value!(vm.eval(condition, environment))
                                 else {
-                                    return Err(
-                                        self.failure(ErrorKind::Type, Some(condition.source))
-                                    );
+                                    return Err(vm.failure(ErrorKind::Type, Some(condition.source)));
                                 };
                                 work.push(Work::Enter(
                                     if flag { then_input } else { else_input },
@@ -180,7 +175,7 @@ impl Interpreter<'_> {
                                 scopes.push(environment.keys().copied().collect());
                                 work.push(Work::LeaveScope);
                                 for statement in statements {
-                                    staged_value!(self.eval(statement, environment));
+                                    staged_value!(vm.eval(statement, environment));
                                 }
                                 match result {
                                     Some(result) => {
@@ -194,12 +189,12 @@ impl Interpreter<'_> {
                                 value,
                                 arms,
                             } => {
-                                let value = staged_value!(self.eval(value, environment));
+                                let value = staged_value!(vm.eval(value, environment));
                                 scopes.push(environment.keys().copied().collect());
                                 let mut selected = None;
                                 for (index, arm) in arms.iter().enumerate() {
-                                    self.tick(Some(*source))?;
-                                    match self.match_arm_guard(
+                                    vm.tick(Some(*source))?;
+                                    match vm.match_arm_guard(
                                         &arm.pattern,
                                         arm.guard.as_ref(),
                                         &value,
@@ -215,7 +210,7 @@ impl Interpreter<'_> {
                                     }
                                 }
                                 let (index, selected) = selected.ok_or_else(|| {
-                                    self.failure(ErrorKind::NonExhaustiveMatch, Some(*source))
+                                    vm.failure(ErrorKind::NonExhaustiveMatch, Some(*source))
                                 })?;
                                 work.push(Work::LeaveScope);
                                 work.push(Work::Enter(selected, depth + 1, key.child(index)));
@@ -225,13 +220,12 @@ impl Interpreter<'_> {
                 }
             }
             Ok(ControlFlow::Continue(values.pop().unwrap()))
-        })();
+        });
         // Transfers and errors bypass completion tasks but must still discard
         // temporary bindings. Mutations of pre-existing storage remain visible.
         while let Some(existing) = scopes.pop() {
             environment.retain(|id, _| existing.contains(id));
         }
-        self.depth = original_depth;
         result
     }
 

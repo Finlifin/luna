@@ -185,14 +185,14 @@ impl Interpreter<'_> {
                 return None;
             }
         }
-        let depth = self.depth;
-        let result = (|| {
+        let result = self.with_depth_checkpoint(|vm| {
+            let depth = vm.depth;
             // Reproduce tuple and local evaluation boundaries, including depth
             // failures and the complete representation-checking fuel charge.
-            self.tick(Some(subject.source))?;
-            self.depth += 1;
-            self.tick(Some(fields[0].source))?;
-            self.depth += 1;
+            vm.tick(Some(subject.source))?;
+            vm.depth += 1;
+            vm.tick(Some(fields[0].source))?;
+            vm.depth += 1;
             let root;
             let reference = match local {
                 Value::Storage(storage) => {
@@ -205,7 +205,7 @@ impl Interpreter<'_> {
             let contents = reference
                 .map(|reference| {
                     reference
-                        .borrow(&mut self.budget.steps)
+                        .borrow(&mut vm.budget.steps)
                         .map_err(|kind| Error {
                             kind,
                             source: Some(fields[0].source),
@@ -213,33 +213,32 @@ impl Interpreter<'_> {
                 })
                 .transpose()?;
             let value = contents.as_ref().map_or(local, |contents| contents.value());
-            self.check_borrowed_representation(value, fields[0].source, 0)?;
-            self.depth -= 1;
+            vm.check_borrowed_representation(value, fields[0].source, 0)?;
+            vm.depth -= 1;
             let selector = if length {
                 None
             } else {
                 let selector = &fields[1];
                 Some(match selector.kind {
                     K::Local(binding) => {
-                        self.tick(Some(selector.source))?;
-                        self.depth += 1;
-                        let value = self.local_value(environment, binding, Some(selector.source));
-                        self.depth -= 1;
+                        vm.tick(Some(selector.source))?;
+                        vm.depth += 1;
+                        let value = vm.local_value(environment, binding, Some(selector.source));
+                        vm.depth -= 1;
                         value?
                     }
-                    _ => match self.eval(selector, &mut Environment::new())? {
+                    _ => match vm.eval(selector, &mut Environment::new())? {
                         Flow::Value(value) => value,
                         flow => return Ok(flow),
                     },
                 })
             };
-            self.depth = depth;
+            vm.depth = depth;
             let Value::Object(object) = value else {
-                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                return Err(vm.failure(ErrorKind::Type, Some(expr.source)));
             };
-            self.query_object(*query, &expr.ty, object, selector, expr.source)
-        })();
-        self.depth = depth;
+            vm.query_object(*query, &expr.ty, object, selector, expr.source)
+        });
         Some(result)
     }
 
