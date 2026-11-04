@@ -1989,17 +1989,9 @@ fn comptime_storage_resolved(
                 .iter()
                 .find(|d| d.declaration == *declaration)
             {
-                def.instantiate_fields_in_scope(arguments, frames)
-                    .map_err(|_| StorageError::Invalid("invalid nominal storage instantiation"))?
-                    .into_iter()
-                    .map(|(_, ty)| ty)
-                    .collect()
+                def.instantiate_stored_fields(arguments, frames, fuel)?
             } else if let Some(def) = package.enums.iter().find(|d| d.declaration == *declaration) {
-                def.instantiate_variants_in_scope(arguments, frames)
-                    .map_err(|_| StorageError::Invalid("invalid nominal storage instantiation"))?
-                    .into_iter()
-                    .flat_map(|v| v.fields)
-                    .collect()
+                def.instantiate_stored_fields(arguments, frames, fuel)?
             } else if let Some(def) = package
                 .newtypes
                 .iter()

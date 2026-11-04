@@ -33,47 +33,19 @@ impl Checker<'_, '_> {
                     definition.representation_budgeted(arguments, &frames, fuel)?,
                 ]);
             }
-            let (parameters, domains, fields): (_, _, Vec<_>) =
-                if let Some(definition) = self.structs.get(declaration) {
-                    *fuel = fuel
-                        .checked_sub(definition.fields.len())
-                        .ok_or(StorageError::Budget)?;
-                    (
-                        &definition.type_parameters,
-                        &definition.parameter_types,
-                        definition.fields.iter().map(|(_, field)| field).collect(),
-                    )
-                } else if let Some(definition) = self.enums.get(declaration) {
-                    for variant in &definition.variants {
-                        *fuel = fuel
-                            .checked_sub(variant.fields.len().saturating_add(1))
-                            .ok_or(StorageError::Budget)?;
-                    }
-                    (
-                        &definition.type_parameters,
-                        &definition.parameter_types,
-                        definition
-                            .variants
-                            .iter()
-                            .flat_map(|variant| &variant.fields)
-                            .collect(),
-                    )
-                } else {
-                    // Abstract or not-yet-published descriptors are rechecked
-                    // when concrete generator arguments are admitted.
-                    return Ok(vec![]);
-                };
-            let substitution = nir::DeclarationSubstitution::bounded(
-                parameters, domains, arguments, &frames, fuel,
-            )?;
-            fields
-                .into_iter()
-                .map(|field| {
-                    substitution
-                        .instantiate_bounded(field, fuel)
-                        .map_err(Into::into)
-                })
-                .collect()
+            if let Some(definition) = self.structs.get(declaration) {
+                definition
+                    .instantiate_stored_fields(arguments, &frames, fuel)
+                    .map_err(Into::into)
+            } else if let Some(definition) = self.enums.get(declaration) {
+                definition
+                    .instantiate_stored_fields(arguments, &frames, fuel)
+                    .map_err(Into::into)
+            } else {
+                // Abstract or not-yet-published descriptors are rechecked when
+                // concrete generator arguments are admitted.
+                Ok(vec![])
+            }
         };
         nir::phases::validate_comptime_storage_with_layouts(ty, &frames, &resolve, fuel).is_ok()
     }

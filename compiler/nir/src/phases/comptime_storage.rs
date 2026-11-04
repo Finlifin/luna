@@ -121,21 +121,11 @@ fn contains_pointer(
                     .iter()
                     .find(|d| d.declaration == *declaration)
             }) {
-                definition
-                    .instantiate_fields_in_scope(arguments, frames)
-                    .map_err(|_| StorageError::Invalid("invalid nominal storage instantiation"))?
-                    .into_iter()
-                    .map(|(_, field)| field)
-                    .collect()
+                definition.instantiate_stored_fields(arguments, frames, fuel)?
             } else if let Some(definition) = package
                 .and_then(|package| package.enums.iter().find(|d| d.declaration == *declaration))
             {
-                definition
-                    .instantiate_variants_in_scope(arguments, frames)
-                    .map_err(|_| StorageError::Invalid("invalid nominal storage instantiation"))?
-                    .into_iter()
-                    .flat_map(|variant| variant.fields)
-                    .collect()
+                definition.instantiate_stored_fields(arguments, frames, fuel)?
             } else if let Some(definition) = package.and_then(|package| {
                 package
                     .newtypes

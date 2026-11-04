@@ -1131,8 +1131,9 @@ DomainQueries 直接传递该结果；materialization 的 callable identity 路�
 由调用方猜测。缺失声明、错误变体和不合域的实参属于 Invalid，预算或递归限制
 属于 Budget。失败的预算预留保留原有余额，正余额不代表查询尚有能力完成。
 
-`instantiate_value_fields_checked` 是唯一的选中字段代入核心，按字段及参数帧
-预留成本，仍验证空载荷的完整参数帧。旧 Option 接口仅向这个核心单向适配，
+`declaration_fields::instantiate` 是字段代入核心，按字段及参数帧预留成本，
+显式接收 caller frames，仍验证空载荷的完整参数帧。`instantiate_value_fields_checked`
+作为闭合的选中字段入口向它单向适配（见第 26 节），旧 Option 接口也只向这一核心适配，
 在兼容边界把 Budget 转为零 fuel；没有保留另一套检查或布局算法。
 
 源世界的普通函数参数、trait／impl 参数、DeclarationWorld 查询和 materialization
@@ -1252,8 +1253,8 @@ VM 按错误类别选择 StepsExhausted 或 PhaseMismatch，不能根据 fuel==0
 签名不等于保存指针载荷，opaque NF 头仍不展开。既有这些准入边界保持不变。
 
 旧 source convenience 入口仍将最终错误渲染成静态文本，生成器候选预检仍返回
-bool；它们是外层诊断／选择边界，没有第二套存储算法。本阶段也没有完成源声明
-struct/enum 代入的统一受限布局计划，或更一般的观察依赖和可恢复请求协议。
+bool；它们是外层诊断／选择边界，没有第二套存储算法。源声明 struct/enum 的受限字段代入现已按第 26 节接通；
+更一般的观察依赖、目标布局计划和可恢复请求协议仍未完成。
 
 验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`：
 
@@ -1273,3 +1274,45 @@ struct/enum 代入的统一受限布局计划，或更一般的观察依赖和�
 改用已有的 `declaration_parameter_domains_checked` 后完成上述检查，没有按字符串
 内容猜测预算错误。未运行全 workspace、native 或性能基准；正式 docs 与原有改动
 保持不变。
+
+
+## 26. 源声明存储字段使用同一受限代入核心
+
+字段代入归属于声明 telescope 的通用 substitution，不属于 Tuple/List 特例，也
+不是 NF 头执行。`declaration_fields::instantiate` 从原选中字段核心提取，显式接收
+调用者的 binder frames；复制前预留字段和参数帧成本，再用已有 bounded substitution
+检查与代入。闭合值准入继续通过空 frames 使用它，开放存储描述保留嵌套 binder 深度。
+
+Struct／Enum 的 `instantiate_stored_fields` 仅交付字段类型，不复制随后被丢弃的
+字段名称、变体名称或 shape。Enum 先预留全部变体遍历及字段引用收集的成本，再
+一次代入完整字段集合；空变体仍消耗遍历预算，零字段的声明仍验证完整参数帧。
+值准入的选中变体查询继续只代入选中字段，两种选择共用核心而不互相替代。
+
+NIR runtime／comptime 存储检查、VM 源声明存储检查，以及生成器的数据检查均已
+替换原来的无界命名字段／变体实例化路径。VM 的具体 IIR 路径继续观察保留的实例，
+不重新应用源声明参数。形成 predicate、目标布局、资源权利与缓存准入仍由各自
+消费者负责，取得字段类型不能代替这些检查。
+
+基线复现保留最终测试，只将 VM 的生产实现恢复为本轮前 HEAD `e8b6d7bc`：
+源声明的 128 个空变体在预算 16 时错误成功，`/tmp/luna-tools-vu7znsjh/result.json`
+退出 101。测试同时覆盖源世界和具体 IIR 世界的计费、正余额失败及恢复；修复后
+两条路径均通过。基线检查后逐字节恢复最终 VM 文件，没有改动其他工作区内容。
+
+`instantiate_fields_in_scope`／`instantiate_variants_in_scope` 仍有需要名称和变体
+元数据的其他消费者，本次没有将其全部删除或宣称完整布局服务已统一。后续应按
+调用方所需视图推进，不能用完整命名结构的复制替代只需字段类型的受限观察。
+
+验证目录 `/home/fin/luna`，统一入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --test nominal_parameters --test phases --test closure_contexts --no-fail-fast`：
+  76 通过，退出 0；`/tmp/luna-tools-lfjzfg0m/result.json`。覆盖逐档预算到成功、
+  开放帧与嵌套函数深度、空载荷错误实参、NF 头保留、名称无关成本及全部变体。
+- `-p comptime_interpretor --lib`：451 通过，退出 0；
+  `/tmp/luna-tools-e8076_m4/result.json`。随后基线对照没有改变最终源码。
+- `-p luna --test comptime_storage_domains --test comptime_pointer_phase
+  --test cmtt_phase_boundaries --test cmtt_type_inputs --test closure_environment_parameters
+  --test comptime_iir_bytecode --test invocation_value_templates --test nominal_staging
+  --test nominal_value_parameters --test newtypes --no-fail-fast`：606 通过，退出 0；
+  `/tmp/luna-tools-yhr9c8na/result.json`。覆盖实际消费者和真实 sysroot 调用模板。
+
+未运行全 workspace、native 或性能基准；正式 docs 和原有工作区修改保持不变。

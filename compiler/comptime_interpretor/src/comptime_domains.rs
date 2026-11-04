@@ -109,23 +109,13 @@ impl Interpreter<'_> {
                 };
                 charge_layout_work(fuel, 1)?;
                 if let Some(definition) = self.structs.get(declaration) {
-                    Ok(definition
-                        .instantiate_fields_in_scope(arguments, &[])
-                        .map_err(|_| {
-                            StorageError::Invalid("invalid nominal storage instantiation")
-                        })?
-                        .into_iter()
-                        .map(|(_, field)| field)
-                        .collect())
+                    definition
+                        .instantiate_stored_fields(arguments, &[], fuel)
+                        .map_err(Into::into)
                 } else if let Some(definition) = self.enums.get(declaration) {
-                    Ok(definition
-                        .instantiate_variants_in_scope(arguments, &[])
-                        .map_err(|_| {
-                            StorageError::Invalid("invalid nominal storage instantiation")
-                        })?
-                        .into_iter()
-                        .flat_map(|variant| variant.fields)
-                        .collect())
+                    definition
+                        .instantiate_stored_fields(arguments, &[], fuel)
+                        .map_err(Into::into)
                 } else if let Some(definition) = self.newtypes.get(declaration) {
                     Ok(vec![definition.representation_budgeted(
                         arguments,
@@ -379,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn concrete_domain_checks_charge_empty_enum_alternatives() {
+    fn source_and_concrete_domain_checks_charge_empty_enum_alternatives() {
         let declaration = DeclarationId {
             package: 91,
             local: 1,
@@ -413,31 +403,45 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mut costs = vec![];
-        for count in [1, 128] {
-            let graph = make(count);
-            let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
-            if count == 128 {
-                let available = vm.budget.steps;
-                vm.budget.steps = 16;
-                let error = vm
-                    .check_comptime_domain(&ty, SourceRange { start: 1, end: 2 })
-                    .unwrap_err();
-                assert_eq!(error.kind, ErrorKind::StepsExhausted);
-                assert!(
-                    vm.remaining_steps() > 0,
-                    "a failed reservation keeps its unused fuel"
-                );
-                vm.budget.steps = available;
-            }
-            let before = vm.remaining_steps();
-            vm.check_comptime_domain(&ty, SourceRange { start: 1, end: 2 })
+        for source_world in [false, true] {
+            let mut costs = vec![];
+            for count in [1, 128] {
+                let graph = make(count);
+                let iir::NominalDefinition::Enum(definition) = &graph.nominals[0].definition else {
+                    unreachable!()
+                };
+                let source = Package {
+                    enums: vec![definition.clone()],
+                    ..Default::default()
+                };
+                let mut vm = if source_world {
+                    Interpreter::for_comptime(&source, Budget::default())
+                } else {
+                    Interpreter::from_iir_for_comptime(&graph, Budget::default())
+                }
                 .unwrap();
-            costs.push(before - vm.remaining_steps());
+                if count == 128 {
+                    let available = vm.budget.steps;
+                    vm.budget.steps = 16;
+                    let error = vm
+                        .check_comptime_domain(&ty, SourceRange { start: 1, end: 2 })
+                        .unwrap_err();
+                    assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                    assert!(
+                        vm.remaining_steps() > 0,
+                        "a failed reservation keeps its unused fuel"
+                    );
+                    vm.budget.steps = available;
+                }
+                let before = vm.remaining_steps();
+                vm.check_comptime_domain(&ty, SourceRange { start: 1, end: 2 })
+                    .unwrap();
+                costs.push(before - vm.remaining_steps());
+            }
+            assert!(
+                costs[1] >= costs[0] + 127,
+                "empty variants were scanned for free: {costs:?}"
+            );
         }
-        assert!(
-            costs[1] >= costs[0] + 127,
-            "empty variants were scanned for free: {costs:?}"
-        );
     }
 }

@@ -1111,26 +1111,8 @@ pub fn instantiate_value_fields_checked<'a>(
     fields: impl ExactSizeIterator<Item = &'a Term>,
     fuel: &mut usize,
 ) -> Result<Vec<Term>, crate::NominalAdmissionError> {
-    *fuel = fuel
-        .checked_sub(
-            fields
-                .len()
-                .saturating_add(parameters.len())
-                .saturating_add(arguments.len()),
-        )
-        .ok_or(crate::NominalAdmissionError::Budget)?;
-    for domain in domains {
-        crate::type_computations::charge_term(domain, fuel)?;
-    }
-    let substitution =
-        crate::DeclarationSubstitution::bounded(parameters, domains, arguments, &[], fuel)?;
-    fields
-        .map(|field| {
-            substitution
-                .instantiate_bounded(field, fuel)
-                .map_err(Into::into)
-        })
-        .collect()
+    crate::declaration_fields::instantiate(parameters, domains, arguments, fields, &[], fuel)
+        .map_err(Into::into)
 }
 
 fn nominal_domain_scope(

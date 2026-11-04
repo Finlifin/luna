@@ -1091,3 +1091,146 @@ fn nominal_collection_layouts_use_registered_domains_and_capture_order() {
         .is_none()
     );
 }
+
+#[test]
+fn stored_fields_share_bounded_substitution_and_preserve_nested_scope() {
+    use nir::type_computations::Error;
+    let mut definition = record(vec![Term::Primitive(P::Type), Term::Primitive(P::Bool)]);
+    definition.fields.push((
+        "callback".into(),
+        Term::Function {
+            parameters: vec![],
+            result: Box::new(rigid(1, Sort::Type)),
+        },
+    ));
+    let outer = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let arguments = [outer.clone(), Term::Bool(false)];
+    let frames = [vec![Sort::Type]];
+    let expected = vec![
+        outer,
+        Term::NormalForm {
+            head: id(3),
+            sort: Sort::Type,
+            arguments: vec![Term::Bool(false)],
+        },
+        Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Bound {
+                depth: 1,
+                index: 0,
+                sort: Sort::Type,
+            }),
+        },
+    ];
+    let mut completed = false;
+    for mut allowance in 0..1000 {
+        match definition.instantiate_stored_fields(&arguments, &frames, &mut allowance) {
+            Err(Error::Budget) => {}
+            Ok(fields) => {
+                assert_eq!(fields, expected);
+                completed = true;
+                break;
+            }
+            Err(error) => panic!("valid scoped fields rejected: {error}"),
+        }
+    }
+    assert!(completed);
+    assert!(matches!(
+        definition.instantiate_stored_fields(&arguments, &[], &mut 1000),
+        Err(Error::Scope(_))
+    ));
+    let mut fuel = 1000;
+    definition
+        .instantiate_stored_fields(&arguments, &frames, &mut fuel)
+        .unwrap();
+    for (name, _) in &mut definition.fields {
+        *name = "unused-label".repeat(1000);
+    }
+    let mut renamed_fuel = 1000;
+    assert_eq!(
+        definition
+            .instantiate_stored_fields(&arguments, &frames, &mut renamed_fuel)
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        fuel, renamed_fuel,
+        "storage queries must not copy discarded field labels"
+    );
+    definition.fields.clear();
+    assert!(matches!(
+        definition.instantiate_stored_fields(&arguments[..1], &frames, &mut 1000),
+        Err(Error::Scope(_))
+    ));
+    definition
+        .instantiate_stored_fields(&arguments, &frames, &mut 1000)
+        .unwrap();
+}
+
+#[test]
+fn all_variant_storage_fields_charge_empty_alternatives_and_validate_empty_frames() {
+    use nir::type_computations::Error;
+    let mut definition = Enum {
+        declaration: id(4),
+        name: "Choice".into(),
+        type_parameters: vec![id(1)],
+        parameter_types: vec![Term::Primitive(P::Type)],
+        requirements: vec![],
+        capabilities: vec![],
+        groups: vec![],
+        encoding: None,
+        symbol_encoding: None,
+        is_intrinsic: false,
+        variants: (0..128)
+            .map(|_| Variant {
+                name: "empty".into(),
+                shape: VariantShape::Unit,
+                fields: vec![],
+            })
+            .collect(),
+    };
+    let args = [Term::Primitive(P::Bool)];
+    let mut fuel = 16;
+    assert_eq!(
+        definition.instantiate_stored_fields(&args, &[], &mut fuel),
+        Err(Error::Budget)
+    );
+    assert_eq!(fuel, 16);
+    assert_eq!(
+        definition
+            .instantiate_stored_fields(&args, &[], &mut 1000)
+            .unwrap(),
+        vec![]
+    );
+    assert!(matches!(
+        definition.instantiate_stored_fields(&[], &[], &mut 1000),
+        Err(Error::Scope(_))
+    ));
+    definition.variants.push(Variant {
+        name: "payload".into(),
+        shape: VariantShape::Tuple,
+        fields: vec![Term::Pointer(Box::new(rigid(1, Sort::Type)))],
+    });
+    assert_eq!(
+        definition
+            .instantiate_stored_fields(&args, &[], &mut 1000)
+            .unwrap(),
+        vec![Term::Pointer(Box::new(Term::Primitive(P::Bool)))]
+    );
+    let mut fuel = 1000;
+    definition
+        .instantiate_stored_fields(&args, &[], &mut fuel)
+        .unwrap();
+    for variant in &mut definition.variants {
+        variant.name = "unused-label".repeat(1000);
+    }
+    let mut renamed_fuel = 1000;
+    definition
+        .instantiate_stored_fields(&args, &[], &mut renamed_fuel)
+        .unwrap();
+    assert_eq!(fuel, renamed_fuel);
+}
