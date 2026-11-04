@@ -4,7 +4,6 @@
 //! Callers supply fully prepared arguments; defaults and
 //! input evaluation are outside this cache. Optional paired source Copy/Drop
 //! bindings authorize pointer transfers in this immutable compilation snapshot.
-mod staging;
 use crate::comptime_keys::{Protocol, Snapshot};
 use comptime_executor::{Cache, Context, Error, KeyProtocol, Outcome, QueryId, Scope};
 use comptime_interpretor::{Budget, Interpreter, Value};
@@ -18,7 +17,7 @@ use nir::{
 pub struct Invocation {
     package: std::sync::Arc<Package>,
     code_session: comptime_interpretor::CodeSession,
-    staging: staging::Cache,
+    stats: crate::invocation::InvocationStats,
     declaration: DeclarationId,
     arguments: Vec<Term>,
     signature: Term,
@@ -215,22 +214,14 @@ impl Invocation {
         } else {
             vec![]
         };
-        let mut staging_fuel = budget.steps;
-        let needs_staging =
-            crate::invocation::needs_input_staging(package, declaration, &mut staging_fuel)?;
-        let dispatch = if needs_staging {
-            // Ordinary Type inputs select the concrete dispatch world at a miss.
-            Vec::new()
-        } else {
-            elaboration::materialization::dispatch_instances_for_invocation(
-                package,
-                &[iir::InstanceKey {
-                    declaration,
-                    arguments: arguments.clone().into(),
-                }],
-                budget,
-            )?
-        };
+        let dispatch = elaboration::materialization::dispatch_instances_for_invocation(
+            package,
+            &[iir::InstanceKey {
+                declaration,
+                arguments: arguments.clone().into(),
+            }],
+            budget,
+        )?;
         let mut package = package.clone();
         package.dispatch_instances = dispatch;
         let package = std::sync::Arc::new(package);
@@ -238,7 +229,7 @@ impl Invocation {
         Ok(Self {
             package,
             code_session,
-            staging: staging::Cache::new(needs_staging, &signature),
+            stats: Default::default(),
             declaration,
             arguments,
             signature,
@@ -261,12 +252,8 @@ impl Invocation {
             budget,
         })
     }
-    /// Successful IIR preparations; distinct from result-cache activity.
-    pub fn staged_preparations(&self) -> usize {
-        self.staging.preparations
-    }
     pub fn last_execution_stats(&self) -> crate::invocation::InvocationStats {
-        self.staging.stats
+        self.stats
     }
     pub fn cached_results(&self) -> usize {
         self.cache.len()
@@ -276,7 +263,7 @@ impl Invocation {
         values: Vec<Value>,
         context: &mut Context,
     ) -> Result<Outcome<Value>, Error<String>> {
-        self.staging.stats = Default::default();
+        self.stats = Default::default();
         let (types, result_type) = self.bind_inputs(&values, context)?;
         // Gate before preparing Eq/Hash, snapshots or cache keys. A dependent
         // result is classified only after binding this invocation's inputs.
@@ -291,7 +278,7 @@ impl Invocation {
             let (value, _) = evaluate(
                 &self.package,
                 &mut self.code_session,
-                &mut self.staging,
+                &mut self.stats,
                 &world,
                 self.resources,
                 self.budget,
@@ -368,7 +355,7 @@ impl Invocation {
             execute(
                 &self.package,
                 &mut self.code_session,
-                &mut self.staging,
+                &mut self.stats,
                 &world,
                 self.resources,
                 self.budget,
@@ -385,7 +372,7 @@ impl Invocation {
             execute(
                 &self.package,
                 &mut self.code_session,
-                &mut self.staging,
+                &mut self.stats,
                 &world,
                 self.resources,
                 self.budget,
@@ -529,7 +516,7 @@ impl std::fmt::Display for Invocation {
 fn execute(
     package: &Package,
     code_session: &mut comptime_interpretor::CodeSession,
-    staging: &mut staging::Cache,
+    stats: &mut crate::invocation::InvocationStats,
     world: &World<'_>,
     resources: Option<(DeclarationId, DeclarationId)>,
     budget: ptc::Budget,
@@ -563,7 +550,7 @@ fn execute(
             evaluate(
                 package,
                 code_session,
-                staging,
+                stats,
                 world,
                 resources,
                 budget,
@@ -581,7 +568,7 @@ fn execute(
 fn evaluate(
     package: &Package,
     code_session: &mut comptime_interpretor::CodeSession,
-    staging: &mut staging::Cache,
+    stats: &mut crate::invocation::InvocationStats,
     world: &World<'_>,
     resources: Option<(DeclarationId, DeclarationId)>,
     budget: ptc::Budget,
@@ -595,37 +582,17 @@ fn evaluate(
     let solver = |predicate: &TypePredicate, remaining: &mut u64| {
         crate::implementation_world::solve_metered(world, predicate, budget, remaining)
     };
-    let (prepared, values) =
-        staging.prepare(package, declaration, arguments, values, budget, context)?;
-    let source = prepared
-        .as_ref()
-        .map_or(package, |(source, _, _)| source.as_ref());
-    let graph = prepared.as_ref().map(|(_, graph, _)| graph.as_ref());
     let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
-        crate::invocation::resolve_method_for_invocation(source, world.context, callee, remaining)
+        crate::invocation::resolve_method_for_invocation(package, world.context, callee, remaining)
     };
     let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
         elaboration::materialization::resolve_associated_value_for_invocation(
             world, access, remaining,
         )
     };
-    let entry = prepared
-        .as_ref()
-        .map_or(declaration, |(_, _, entry)| *entry);
-    let type_arguments = if prepared.is_some() {
-        Vec::new()
-    } else {
-        arguments.to_vec()
-    };
-    let code_session = staging.code.as_mut().unwrap_or(code_session);
     let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
     let mut vm_budget = Budget { steps, depth: 128 };
-    let prepared_vm = match graph {
-        Some(graph) => {
-            Interpreter::from_iir_for_comptime_in_session(graph, code_session, &mut vm_budget)
-        }
-        None => Interpreter::for_comptime_in_session(source, code_session, &mut vm_budget),
-    };
+    let prepared_vm = Interpreter::for_comptime_in_session(package, code_session, &mut vm_budget);
     let copy_failure = std::cell::RefCell::new(None::<String>);
     let pointer_copy = |ty: &Term, remaining: &mut u64| {
         let Some((copy, drop)) = resources else {
@@ -663,33 +630,12 @@ fn evaluate(
             return Err(error.to_string());
         }
     };
-    let mut admission_work = 0;
     let result = vm.with_code_session(code_session, |vm| {
-        let value = vm.invoke_instantiated(entry, type_arguments, values)?;
+        let value = vm.invoke_instantiated(declaration, arguments.to_vec(), values)?;
         let publish = if !cache_result || value.immutable_copy_work().is_none() {
             false
         } else {
-            let validation = if graph.is_some() {
-                // IIR intentionally lacks source formation metadata.
-                // Admit the result against the same owned source world.
-                let before = vm.remaining_steps();
-                let mut allowance = Budget {
-                    steps: before,
-                    depth: 128,
-                };
-                let result = admit_source_result(
-                    source,
-                    staging.admission.as_mut().expect("prepared source session"),
-                    &value,
-                    result_type,
-                    &solver,
-                    &mut allowance,
-                );
-                admission_work = before - allowance.steps;
-                result
-            } else {
-                vm.validate_immutable_input(&value, result_type)
-            };
+            let validation = vm.validate_immutable_input(&value, result_type);
             match validation {
                 Ok(()) => true,
                 Err(error)
@@ -706,12 +652,12 @@ fn evaluate(
         };
         Ok((value, publish))
     });
-    staging.stats = crate::invocation::InvocationStats {
+    *stats = crate::invocation::InvocationStats {
         bytecode_compilations: vm.bytecode_compilations(),
         bytecode_invocations: vm.bytecode_invocations(),
     };
     context
-        .spend::<String>((steps - vm.remaining_steps() + admission_work) as usize)
+        .spend::<String>((steps - vm.remaining_steps()) as usize)
         .map_err(|e| e.to_string())?;
     result.map_err(
         |e: comptime_interpretor::Error| match copy_failure.borrow().as_ref() {
@@ -719,26 +665,6 @@ fn evaluate(
             None => e.to_string(),
         },
     )
-}
-
-/*
- * IIR execution and source formation use distinct worlds, but share one
- * allowance. Synchronize it before propagating either construction or admission
- * failure, so an unsuccessful cache publication cannot refund the work.
- */
-fn admit_source_result(
-    package: &Package,
-    session: &mut comptime_interpretor::CodeSession,
-    value: &Value,
-    ty: &Term,
-    solver: &dyn Fn(&TypePredicate, &mut u64) -> comptime_interpretor::ContractOutcome,
-    budget: &mut Budget,
-) -> Result<(), comptime_interpretor::Error> {
-    let mut admission = Interpreter::for_comptime_in_session(package, session, budget)?
-        .with_budgeted_type_solver(solver);
-    let result = admission.validate_immutable_input(value, ty);
-    budget.steps = admission.remaining_steps();
-    result
 }
 
 // Only type predicates enter this transformation; state contracts stay in the VM.
@@ -779,260 +705,4 @@ fn map_requirement(
             }
         }
     })
-}
-
-// Specialize in a private snapshot: the original declaration must remain usable
-// by other input bindings, and no staged function identity escapes into the key.
-fn prepare_bound_entry<'a>(
-    package: &'a Package,
-    declaration: DeclarationId,
-    arguments: &[Term],
-    values: Vec<Value>,
-    budget: ptc::Budget,
-    context: &mut Context,
-) -> Result<
-    (
-        std::borrow::Cow<'a, Package>,
-        Option<iir::Package>,
-        DeclarationId,
-        Vec<Term>,
-        Vec<Value>,
-    ),
-    String,
-> {
-    let function = package
-        .functions
-        .iter()
-        .find(|f| f.declaration == declaration)
-        .ok_or("missing memoized declaration")?;
-    let mut fuel = context.remaining();
-    let before = fuel;
-    let staged = crate::invocation::needs_input_staging(package, declaration, &mut fuel);
-    context
-        .spend::<String>(before - fuel)
-        .map_err(|e| format!("{e:?}"))?;
-    if !staged? {
-        return Ok((
-            std::borrow::Cow::Borrowed(package),
-            None,
-            declaration,
-            arguments.to_vec(),
-            values,
-        ));
-    }
-    let mut fuel = context.remaining();
-    let before = fuel;
-    let result: Result<_, String> = (|| {
-        let binders = package.declaration_binders(&function.type_parameters, &mut fuel)?;
-        let mut template = function
-            .instantiate_parameters(&binders, arguments)
-            .map_err(|e| e.to_string())?;
-        template.type_parameters.clear();
-        let Term::Function { parameters, .. } = template.signature.callable_signature() else {
-            unreachable!()
-        };
-        let mut inputs = Vec::new();
-        let mut retained = Vec::new();
-        for (parameter, value) in parameters.iter().zip(values) {
-            if parameter.sort == nir::Sort::Type {
-                let Value::Type(ty) = value else {
-                    return Err("staged Type input is not Type".into());
-                };
-                inputs.push(Some(nir::program::Expr {
-                    ty: Term::Primitive(nir::Primitive::Type),
-                    kind: nir::program::ExprKind::TypeValue(ty),
-                    source: template.body.source,
-                }));
-            } else {
-                inputs.push(None);
-                retained.push(value);
-            }
-        }
-        let mut bound =
-            iir::staging::bind_inputs_with_layouts(package, &template, &inputs, &mut fuel)?;
-        let mut identity = DeclarationId {
-            package: u64::MAX,
-            local: u32::MAX,
-        };
-        while package.functions.iter().any(|f| f.declaration == identity)
-            || package
-                .runtime_function_identities
-                .iter()
-                .any(|f| f.declaration == identity)
-        {
-            identity.local = identity
-                .local
-                .checked_sub(1)
-                .ok_or("no private invocation identity available")?;
-        }
-        bound.declaration = identity;
-        bound.name = "<memoized-input>".into();
-        for function in &package.functions {
-            iir::visit::expressions(function, &mut fuel, |_, _| Ok(()))?;
-        }
-        let mut prepared = package.clone();
-        prepared.functions.push(bound);
-        Ok((prepared, identity, retained))
-    })();
-    context
-        .spend::<String>(before - fuel)
-        .map_err(|e| format!("{e:?}"))?;
-    let (mut prepared, entry, values) = result?;
-    let dispatch_budget = ptc::Budget {
-        steps: budget.steps.min(context.remaining()),
-        max_depth: budget.max_depth,
-    };
-    context
-        .spend::<String>(dispatch_budget.steps)
-        .map_err(|e| format!("{e:?}"))?;
-    let graph = elaboration::materialization::instantiate(
-        &prepared,
-        &[iir::InstanceKey {
-            declaration: entry,
-            arguments: vec![].into(),
-        }],
-        std::collections::BTreeSet::new(),
-        dispatch_budget,
-    )?;
-    prepared.dispatch_instances = graph.dispatch.clone();
-    Ok((
-        std::borrow::Cow::Owned(prepared),
-        Some(graph),
-        entry,
-        vec![],
-        values,
-    ))
-}
-
-#[cfg(test)]
-mod budget_tests {
-    use super::*;
-    use comptime_interpretor::{ContractOutcome, ErrorKind};
-    use nir::Primitive;
-
-    #[test]
-    fn result_admission_reuses_indexes_but_rechecks_values_and_current_budget() {
-        let package = std::sync::Arc::new(Package {
-            structs: vec![nir::program::Struct {
-                declaration: DeclarationId {
-                    package: 1,
-                    local: 1,
-                },
-                name: "Record".into(),
-                type_parameters: vec![],
-                parameter_types: vec![],
-                fields: vec![],
-                requirements: vec![],
-                capabilities: vec![],
-            }],
-            ..Default::default()
-        });
-        let mut session = comptime_interpretor::CodeSession::new(package.clone());
-        let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
-        let ty = Term::Primitive(Primitive::Type);
-        let value = Value::Type(Term::Primitive(Primitive::Bool));
-        let mut cold = Budget::default();
-        admit_source_result(&package, &mut session, &value, &ty, &solver, &mut cold).unwrap();
-        let mut warm = Budget::default();
-        admit_source_result(&package, &mut session, &value, &ty, &solver, &mut warm).unwrap();
-        assert!(warm.steps > cold.steps);
-        assert!(warm.steps < Budget::default().steps);
-        let mut rejected = Budget::default();
-        assert_eq!(
-            admit_source_result(
-                &package,
-                &mut session,
-                &Value::Bool(true),
-                &ty,
-                &solver,
-                &mut rejected
-            )
-            .unwrap_err()
-            .kind,
-            ErrorKind::Type
-        );
-        assert!(rejected.steps < Budget::default().steps);
-        let mut exhausted = Budget {
-            steps: 0,
-            ..Budget::default()
-        };
-        assert_eq!(
-            admit_source_result(&package, &mut session, &value, &ty, &solver, &mut exhausted)
-                .unwrap_err()
-                .kind,
-            ErrorKind::StepsExhausted
-        );
-        let mut recovered = Budget::default();
-        admit_source_result(&package, &mut session, &value, &ty, &solver, &mut recovered).unwrap();
-        assert_eq!(recovered.steps, warm.steps);
-    }
-
-    #[test]
-    fn result_admission_charges_success_rejection_and_construction_failure() {
-        let package = std::sync::Arc::new(Package::default());
-        let mut session = comptime_interpretor::CodeSession::new(package.clone());
-        let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
-        let ty = Term::Primitive(Primitive::Type);
-        let value = Value::Type(Term::Primitive(Primitive::Bool));
-        let mut budget = Budget {
-            steps: 0,
-            depth: 128,
-        };
-        assert_eq!(
-            admit_source_result(&package, &mut session, &value, &ty, &solver, &mut budget)
-                .unwrap_err()
-                .kind,
-            ErrorKind::StepsExhausted
-        );
-        assert_eq!(budget.steps, 0);
-        let larger_world = Package {
-            tests: vec![DeclarationId {
-                package: 1,
-                local: 1,
-            }],
-            ..Default::default()
-        };
-        budget.steps = 1;
-        assert_eq!(
-            admit_source_result(
-                &larger_world,
-                &mut session,
-                &value,
-                &ty,
-                &solver,
-                &mut budget
-            )
-            .unwrap_err()
-            .kind,
-            ErrorKind::StepsExhausted
-        );
-        assert_eq!(budget.steps, 0);
-        budget.steps = 1000;
-        admit_source_result(&package, &mut session, &value, &ty, &solver, &mut budget).unwrap();
-        assert!(budget.steps > 0 && budget.steps < 1000);
-        let before = budget.steps;
-        assert_eq!(
-            admit_source_result(
-                &package,
-                &mut session,
-                &Value::Bool(true),
-                &ty,
-                &solver,
-                &mut budget
-            )
-            .unwrap_err()
-            .kind,
-            ErrorKind::Type
-        );
-        assert!(budget.steps < before);
-        // Enough for world construction, but not for value admission.
-        budget.steps = 1;
-        assert_eq!(
-            admit_source_result(&package, &mut session, &value, &ty, &solver, &mut budget)
-                .unwrap_err()
-                .kind,
-            ErrorKind::StepsExhausted
-        );
-        assert_eq!(budget.steps, 0);
-    }
 }

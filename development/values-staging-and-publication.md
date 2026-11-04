@@ -372,9 +372,10 @@ PhaseMismatch，导致“方法值会擦除接口契约”等形成错误失去�
 使用原 PhaseMismatch；构造期验证与调用期权限错误分别报告。同一不可变 source 的
 验证成功证据仍由 code session 持有，失败不会安装索引，也不复用同号但不同世界的证据。
 
-退役范围限于普通显式 invocation 入口。`memoization::staging` 的 Type 输入 IIR
-专门化仍存在；运行时 IIR、后端交付以及引用执行器继续使用各自协议。完整通用参数
-计划、动态 Type producer、调用中的世界发布和树 fallback 退役均未因此完成。
+这一步首先迁移普通显式 invocation；当时保留的 `memoization::staging` Type 输入
+IIR 专门化现已在下述后续迁移中删除。运行时 IIR、后端交付以及引用执行器继续使用
+各自协议。完整通用参数计划、动态 Type producer、调用中的世界发布和树 fallback
+退役均未因此完成。
 
 ### 本次验证与未修复基线
 
@@ -408,3 +409,73 @@ PhaseMismatch，导致“方法值会擦除接口契约”等形成错误失去�
 均退出 101。VM 跳过项是此前已确认的名义列表域失败分类差异，仍待处理；不能将上述
 局部成功称为全量通过。修改的 Rust 文件格式检查与提交范围的 `git diff --check` 通过；
 正式 docs、已有资源分析修改及 library README 保持原样。
+
+## 当前缓存 invocation 迁移：去掉 Type 输入专门化世界
+
+`memoization::Invocation` 现在也只持有一个源 package 与对应 CodeSession。准备阶段
+用 `dispatch_instances_for_invocation` 保留合法输入模板；执行时，声明实参与本次普通
+实参直接交给源 VM，方法和关联值通过现有 resolver 按实际输入选择。结果的成员资格
+与冻结准入由执行它的同一 VM 检查，不再为 IIR 返回值另建一个源 VM。
+
+已删除 `memoization/staging.rs`、`prepare_bound_entry`、`admit_source_result` 和最后
+一个 `needs_input_staging` 消费者及其可达性扫描。Type 实参变化不再触发 CLI 层复制
+package、挑选伪造私有声明身份、移除 Type 实参并实例化整份 IIR。旧的
+`staged_preparations` 计数 API 一并删除；实际代码编译／执行统计仍由
+`last_execution_stats` 提供，结果缓存数仍由 `cached_results` 提供。
+
+移除旧路径时观察到依赖注解主体每次重编译的问题，因此同步补齐 VM 的主体准备缓存。
+缓存按原声明或精确 owned body 身份定位，再比较完整 FunctionInputBinding，包括
+替换项、专门化后的签名和槽位域细化。签名相同不等于绑定相同；Type、普通值索引及
+动态成为 Type 域的输入不使用互相独立的特判键。新添的只读 `terms()` 观察用于预算
+预检，完整绑定相等仍是命中条件，不能只比较该观察返回的项而遗漏槽位细化。
+
+每个主体保留至多一个依赖绑定对应的已准备主体，返回相同 Arc 供现有 owned bytecode
+缓存复用。比较与复制前按当前预算检查双方键，存储权重同时计入主体和绑定，总量沿用
+既有上限。成功替换时扣除原项权重；预算失败或重绑定失败不替换旧项。抽象解释中的
+依赖主体不发布到该共享缓存；owned source 使用弱引用核对身份，不因缓存延长源主体
+寿命。这不是新的类型等价关系，也不保存本次局部值、可变存储、契约执行结果。
+
+不依赖输入的主体仍能跨 Type 实参复用。依赖主体的重绑定缓存与字节码缓存只消除准备
+工作，输入准入、调用契约、实际执行和结果检查仍按本次调用进行。Type 结果缓存保持
+原策略：只接受纯函数的已绑定 Type 结果，用实际输入与源 Eq/Hash 协议判定复用；
+非 Type 结果不查询结果缓存。没有扩大缓存资格，也没有把 Type 实参变成 NF 特殊槽。
+
+此迁移不等于完整通用参数计划已经实现。memoization 的输入域绑定仍是现有适配器，
+一般值依赖域、待定 Type producer、定义发布与可恢复 invocation 的后续迁移继续遵循
+本章目标。主体缓存是精确源世界内的有限复用，不承诺跨编辑持久化或无限保留实例。
+
+### 验证范围与仍未接通的路径
+
+工作目录 `/home/fin/luna`，命令前缀同上。
+
+| `check.py ... test` 参数／范围 | 结果与证据目录 |
+| --- | --- |
+| `-p comptime_interpretor --lib --no-fail-fast -- --skip normal_input_data_tests::clause_list_inputs_share_domain_scope_and_budget_validation` | 退出 0，449 通过，跳过此前已确认的 1 项列表域失败分类基线；`/tmp/luna-tools-2wvj6e01` |
+| `-p luna --test invocation_value_templates --test staged_invocation_reuse --test prepared_invocations --test comptime_memory --no-fail-fast` | 退出 101；存储 14、prepared 3、reuse 4 项全部通过；新 fixture 的 Type 键协议准备失败，见下文；`/tmp/luna-tools-um389xj0` |
+| `-p luna --test invocation_value_templates` | 调整新用例的输入选择后退出 0，4 通过；`/tmp/luna-tools-7llybjxc` |
+| `-p luna --test execution -- memoized` | 退出 0，13 通过；`/tmp/luna-tools-y5vs07g_` |
+| `-p luna --test comptime_bytecode_defaults --test comptime_iir_bytecode --test comptime_storage_domains --no-fail-fast` | 退出 0，9 + 10 + 7 通过；`/tmp/luna-tools-5uljt7zd` |
+
+移除 IIR 后最初出现的重复字节码编译由原测试检出：
+`memoized_invocation_checks_dependent_type_contracts_before_caching` 在
+`/tmp/luna-tools-o3j4u847` 失败。补齐共享主体缓存后，其原有“再次调用不编译字节码”
+断言通过，未删除或放宽该断言。删除的只是已经不存在的 IIR preparation 计数；
+不依赖输入的源码主体现在也要求在 Type 实参变化时继续复用代码。
+
+新增真实 sysroot 用例以 bool 作为结果缓存键，运行分支中的 `SelectFor(bool/u8)`，
+由 Type 实参选择 trait 方法值并与关联值核对；重复键命中、错误输入拒绝、关闭结果
+保留后的执行／准入计费、预算耗尽及恢复均有断言。内部缓存用例另覆盖相同签名但不同
+绑定、普通 bool 值索引、精确源主体身份、权重替换、失败不覆盖以及抽象调用不发布。
+
+编写该用例同时确认了未完成能力，不能据此声称任意 Type 输入缓存已经可用：
+
+- meta 的 ComptimeEq／ComptimeHash 当前没有 Type 实现，直接为 Type 输入准备真实
+  键协议会得到 `no-applicable-candidate`；不能提供恒定 Hash 占位实现掩盖缺口。
+- `SelectFor(if flag { bool } else { u8 })` 的 required Type 输入当前不能依赖尚未供应
+  的外层 flag，报 `required comptime input ... is not available`，证据为
+  `/tmp/luna-tools-ng7jwxcd`。分支内的具体 Type 调用已通过，不代表一般待定 Type
+  参数计划已接通。初始 fixture 的 assumes 中直接混用 Type 命题也未被当前前端接受。
+
+上述新 fixture 的探索未改动前端规则、库协议或既有测试的语义预期。Rust 格式检查
+`/tmp/luna-tools-yqcdaez2` 退出 0，提交范围 `git diff --check` 通过。已核对旧 staging
+模块及扫描／准备函数不再有 Rust 消费者；正式 docs 和先前已有修改保持原样。

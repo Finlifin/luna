@@ -23,14 +23,14 @@ const SOURCE: &str = "typealias Type=.Type'builtin;
     }";
 
 #[test]
-fn prepared_graph_reuses_code_but_executes_fresh_arguments_and_replaces_type_keys() {
+fn prepared_source_reuses_input_independent_code_across_type_values() {
     let mut call = prepare(SOURCE);
-    for (ty, value, expected, preparations, warm) in [
-        (Primitive::Bool, true, false, 1, false),
-        (Primitive::Bool, false, true, 1, true),
-        (Primitive::Char, false, false, 2, false),
-        (Primitive::Char, true, true, 2, true),
-        (Primitive::Bool, true, false, 3, false),
+    for (ty, value, expected, warm) in [
+        (Primitive::Bool, true, false, false),
+        (Primitive::Bool, false, true, true),
+        (Primitive::Char, false, false, true),
+        (Primitive::Char, true, true, true),
+        (Primitive::Bool, true, false, true),
     ] {
         let result = call
             .invoke(
@@ -41,7 +41,6 @@ fn prepared_graph_reuses_code_but_executes_fresh_arguments_and_replaces_type_key
         assert_eq!(*result.value, Value::Bool(expected));
         assert!(!result.reused);
         assert_eq!(call.cached_results(), 0);
-        assert_eq!(call.staged_preparations(), preparations);
         let stats = call.last_execution_stats();
         assert!(stats.bytecode_invocations > 0);
         assert_eq!(stats.bytecode_compilations == 0, warm);
@@ -64,7 +63,6 @@ fn failed_calls_preserve_only_prepared_code_and_never_contract_results() {
         ]
     };
     assert!(call.invoke(inputs(true), &mut Context::new(1)).is_err());
-    assert_eq!(call.staged_preparations(), 0);
     assert_eq!(
         *call
             .invoke(inputs(true), &mut Context::new(1_000_000))
@@ -76,7 +74,6 @@ fn failed_calls_preserve_only_prepared_code_and_never_contract_results() {
         call.invoke(inputs(false), &mut Context::new(1_000_000))
             .is_err()
     );
-    assert_eq!(call.staged_preparations(), 1);
     assert_eq!(call.last_execution_stats().bytecode_compilations, 0);
     assert_eq!(
         *call
@@ -85,24 +82,23 @@ fn failed_calls_preserve_only_prepared_code_and_never_contract_results() {
             .value,
         Value::Bool(true)
     );
-    assert_eq!(call.staged_preparations(), 1);
     assert_eq!(call.last_execution_stats().bytecode_compilations, 0);
     assert_eq!(call.cached_results(), 0);
 }
 
 #[test]
-fn type_key_positions_do_not_capture_interleaved_ordinary_values() {
+fn type_inputs_do_not_capture_interleaved_ordinary_values() {
     let mut call = prepare(
         "typealias Type=.Type'builtin;
         pure comptime fn choose(comptime A:Type, value:bool, comptime B:Type)->bool {
             if A == B {value} else {not value}
         }",
     );
-    for (a, b, value, expected, count) in [
-        (Primitive::Bool, Primitive::Char, true, false, 1),
-        (Primitive::Bool, Primitive::Char, false, true, 1),
-        (Primitive::Char, Primitive::Bool, true, false, 2),
-        (Primitive::Char, Primitive::Char, true, true, 3),
+    for (a, b, value, expected) in [
+        (Primitive::Bool, Primitive::Char, true, false),
+        (Primitive::Bool, Primitive::Char, false, true),
+        (Primitive::Char, Primitive::Bool, true, false),
+        (Primitive::Char, Primitive::Char, true, true),
     ] {
         let result = call
             .invoke(
@@ -115,13 +111,12 @@ fn type_key_positions_do_not_capture_interleaved_ordinary_values() {
             )
             .unwrap();
         assert_eq!(*result.value, Value::Bool(expected));
-        assert_eq!(call.staged_preparations(), count);
         assert!(!result.reused);
     }
 }
 
 #[test]
-fn dependent_type_domain_values_remain_live_inputs_to_a_warm_graph() {
+fn dependent_type_domain_values_remain_live_inputs_to_the_source_vm() {
     let mut call = prepare(
         "typealias Type=.Type'builtin;
         pure comptime fn choose(comptime kind:Type, comptime T:kind, value:bool)->bool

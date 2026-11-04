@@ -252,6 +252,12 @@ impl FunctionInputBinding {
         self.signature
     }
 
+    /// Borrow all stored terms for bounded structural observation. The binding
+    /// also carries slot refinements, so these terms alone are not its identity.
+    pub fn terms(&self) -> impl Iterator<Item = &Term> {
+        std::iter::once(&self.signature).chain(&self.replacements)
+    }
+
     /// Rebind annotations from the original function frame. Only a value slot
     /// whose instantiated type is exactly Type may change semantic domain.
     pub fn rebind(&self, term: &Term) -> Result<Term, TypeError> {

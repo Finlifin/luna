@@ -4306,7 +4306,6 @@ fn memoized_invocation_checks_dependent_type_contracts_before_caching() {
     let mut repeated = comptime_executor::Context::new(150_000);
     assert!(!call.invoke(args, &mut repeated).unwrap().reused);
     assert!(repeated.remaining() > modest.remaining());
-    assert_eq!(call.staged_preparations(), 1);
     assert_eq!(call.last_execution_stats().bytecode_compilations, 0);
     assert!(call.last_execution_stats().bytecode_invocations > 0);
 }
@@ -47608,7 +47607,7 @@ fn memoized_invocation_admits_only_bound_type_results() {
             .reused
     );
     // Disable result retention so each Type result reaches source admission.
-    // Changing the staged domain replaces both graph and source preparation.
+    // Changing the input domain keeps the same source world and fresh call state.
     let mut uncached = memoized(&package, "keep", vec![], 0).unwrap();
     for domain in [
         Primitive::Type,
@@ -47628,7 +47627,6 @@ fn memoized_invocation_admits_only_bound_type_results() {
         assert!(!result.reused);
         assert_eq!(uncached.cached_results(), 0);
     }
-    assert_eq!(uncached.staged_preparations(), 3);
     let mut make = memoized(&package, "Make", vec![], 8).unwrap();
     assert!(!make.invoke(vec![], &mut context).unwrap().reused);
     assert!(make.invoke(vec![], &mut context).unwrap().reused);
