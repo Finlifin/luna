@@ -1053,8 +1053,9 @@ ArgumentPlan，这次迁移不改变输入求值顺序或授予新的结果缓�
 查询接口保留显式 `Error::Budget`，即使宿主查询返回时调用者仍有剩余 fuel，也按
 预算失败处理，不转成类型不匹配。VM 已有的 typed callable 查询直接进入 NF 检查，
 不再先压成 Option 再靠零 fuel 猜测；声明世界的 callable 查询也已按下节迁移。
-名义布局核心及源世界／VM 准入已改为显式失败结果，见第 23 节；IIR、elaboration
-及部分旧描述观察服务仍保留 Option 适配，不能称为全部查询协议已统一。
+名义布局核心及源世界／VM 准入已改为显式失败结果，见第 23 节；IIR 的 NF 参数
+准入也已迁移，见第 24 节。存储观察、elaboration 及部分旧描述服务仍有 Option
+适配，不能称为全部查询协议已统一。
 
 原 `clause_list_inputs_share_domain_scope_and_budget_validation` 在改动前再次以
 `FunctionInputRejected { stage: Value, .. }` 与旧 `Type` 断言不符而失败，证据
@@ -1140,8 +1141,8 @@ DomainQueries 直接传递该结果；materialization 的 callable identity 路�
 源声明、生成声明或保留的具体 IIR 实例取得字段，再调用同一字段代入核心；
 不能把它替换为仅能看到原 package 的扫描器，丢失所属世界的声明证据。
 
-IIR TypeLinks、elaboration 的借用元数据入口，以及 VM 的旧描述／解码观察接口
-仍有 Option 边界。它们是后续迁移对象；本阶段没有实现统一 ArgumentPlan，
+IIR TypeLinks 的 NF 参数准入现已按第 24 节迁移；elaboration 的借用元数据入口、
+IIR 存储观察及 VM 的旧描述／解码观察接口仍有 Option 边界。本阶段没有实现统一 ArgumentPlan，
 没有改变形成 predicate、类型身份、调用顺序或缓存准入政策。
 
 验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`：
@@ -1171,3 +1172,39 @@ IIR TypeLinks、elaboration 的借用元数据入口，以及 VM 的旧描述／
 注册后的展开成功及所有非法载荷检查不变，没有改生产代码。使用同一入口执行
 `-p luna --test newtypes mixed_trait -- --nocapture`，两项通过、退出 0，证据
 `/tmp/luna-tools-vglziu_q/result.json`；该项不再列作未解决基线失败。
+
+
+## 24. IIR 的闭合参数检查保留接收世界错误
+
+IIR 使用保留的具体名义实例、callable 身份与接口签名核验闭合 NF 参数。
+该索引不访问源声明、不执行函数，也不以源泛型布局替代交付的具体布局。
+`TypeLinks::nominal` 和内部计费现在保留 `value_admission::Error`；布局查询将
+缺失证据、错误变体报告为 Invalid，费用不足报告为 Budget。函数／方法签名查询
+只有找不到完整实例键时返回 `Ok(None)`，查询失败直接传播。
+
+`validate_application` 中布局和 callable 的 Option／零 fuel 重建分支已删除。
+集合查询原已保留显式错误；这三个查询现在直接供应统一 DomainQueries。
+检查顺序、字段复制成本及索引键没有改动；开放 binder 或 runtime 依赖仍需要
+生产端的环境证据，不能由这项闭合值检查代替。接口签名证据也不代替外层对
+method dispatch 的独立检查。
+
+两个回归在生产代码修改前复现：callable allowance=418、nominal allowance=1225，
+均在 remaining=1 时误报不兼容值，见 `/tmp/luna-tools-4w07my_g`（退出 101）。
+修复后检查每一档预算直到首次成功，之前只允许预算失败；另检验缺失世界、错误
+变体／字段、方法的完整实例键及随后成功。没有通过增加预算或更换合法载荷避开问题。
+
+IIR 的 runtime storage 观察仍使用 Option 布局回调；elaboration、VM 描述观察及
+部分源世界调用方也尚未全部迁移。本阶段不宣称所有布局接口或可恢复参数计划完成。
+
+验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`，
+最终检查均退出 0：
+
+- `-p iir --lib --test types --test comptime_lists --test callable_type_cores
+  --test integer_formation --test float_formation --no-fail-fast`：100 通过，
+  `/tmp/luna-tools-kbzrciz5/result.json`。含 61 项 lib 检查与 39 项相关集成检查。
+- `-p luna --test normal_form_domains --test nominal_staging --test invocation_value_templates
+  --test library_list_hash --test library_type_equality --test comptime_iir_bytecode
+  --no-fail-fast`：43 通过，`/tmp/luna-tools-w4xecpvg/result.json`。覆盖真实 sysroot
+  列表协议／Type 相等及 source/IIR 调用。
+
+未运行全 workspace、native 或性能基准；正式 docs 和原有修改保持不变。

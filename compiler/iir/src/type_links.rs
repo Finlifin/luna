@@ -1,6 +1,6 @@
 //! Invocation-local borrowed indexes for completed type references.
 use crate::{NominalDefinition, Package, Term};
-use nir::DeclarationId;
+use nir::{DeclarationId, value_admission::Error};
 mod applications;
 type MethodKey<'a> = (
     DeclarationId,
@@ -26,15 +26,12 @@ pub(super) struct TypeLinks<'a> {
     heads: HashMap<DeclarationId, &'a nir::normal_forms::Head>,
 }
 
-fn tick(fuel: &mut usize) -> Result<(), String> {
-    *fuel = fuel
-        .checked_sub(1)
-        .ok_or("IIR type link budget exhausted")?;
+fn tick(fuel: &mut usize) -> Result<(), Error> {
+    *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
     Ok(())
 }
-fn charge(ty: &Term, fuel: &mut usize) -> Result<(), String> {
-    nir::type_computations::charge_term(ty, fuel)
-        .map_err(|e| format!("IIR type link key budget: {e}"))
+fn charge(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
+    nir::type_computations::charge_term(ty, fuel).map_err(Into::into)
 }
 impl<'a> TypeLinks<'a> {
     pub(super) fn new(package: &'a Package, fuel: &mut usize) -> Result<Self, String> {
@@ -117,7 +114,7 @@ impl<'a> TypeLinks<'a> {
         &self,
         ty: &Term,
         fuel: &mut usize,
-    ) -> Result<Option<&'a NominalDefinition>, String> {
+    ) -> Result<Option<&'a NominalDefinition>, Error> {
         tick(fuel)?;
         charge(ty, fuel)?;
         Ok(self.nominals.get(ty).copied())
@@ -270,6 +267,189 @@ mod tests {
             }),
         }
     }
+    fn value_head(domain: Term) -> nir::normal_forms::Head {
+        nir::normal_forms::Head {
+            declaration: id(90),
+            collector: None,
+            role: nir::normal_forms::Role::Opaque,
+            requirements: vec![],
+            parameters: vec![nir::normal_forms::Parameter {
+                declaration: id(91),
+                binding: nir::program::LocalId {
+                    owner: 90,
+                    index: 0,
+                },
+                kind: nir::normal_forms::Kind::Value,
+                ty: domain,
+            }],
+        }
+    }
+
+    fn check_query_budget_boundaries(links: &TypeLinks<'_>, domain: Term, value: Term) {
+        let head = value_head(domain);
+        let mut completed = false;
+        for allowance in 0..20_000 {
+            let mut fuel = allowance;
+            match links.validate_application(&head, std::slice::from_ref(&value), &mut fuel) {
+                Ok(()) => {
+                    completed = true;
+                    break;
+                }
+                Err(error) => assert!(
+                    error.contains("budget"),
+                    "allowance {allowance}, remaining {fuel}: {error}"
+                ),
+            }
+        }
+        assert!(
+            completed,
+            "valid retained evidence must eventually be admitted"
+        );
+        links
+            .validate_application(&head, &[value], &mut 20_000)
+            .unwrap();
+    }
+
+    #[test]
+    fn nominal_application_queries_preserve_budget_failures() {
+        let mut retained = instance(1, Primitive::Bool);
+        retained.ty = nominal(1, Term::String("index".repeat(40).into()));
+        let ty = retained.ty.clone();
+        let graph = Package {
+            nominals: vec![retained],
+            ..Default::default()
+        };
+        let links = TypeLinks::new(&graph, &mut 20_000).unwrap();
+        let value = Term::NominalValue {
+            ty: Box::new(ty.clone()),
+            variant: None,
+            fields: vec![Term::Bool(true)],
+        };
+        check_query_budget_boundaries(&links, ty.clone(), value.clone());
+        let head = value_head(ty.clone());
+        for (variant, fields) in [
+            (Some(0), vec![Term::Bool(true)]),
+            (None, vec![Term::Char('x')]),
+        ] {
+            let invalid = Term::NominalValue {
+                ty: Box::new(ty.clone()),
+                variant,
+                fields,
+            };
+            let failure = links
+                .validate_application(&head, &[invalid], &mut 20_000)
+                .unwrap_err();
+            assert!(!failure.contains("budget"), "{failure}");
+        }
+        let empty = Package::default();
+        let absent = TypeLinks::new(&empty, &mut 20_000).unwrap();
+        let failure = absent
+            .validate_application(&head, &[value], &mut 20_000)
+            .unwrap_err();
+        assert!(failure.contains("incompatible value"), "{failure}");
+        assert!(!failure.contains("budget"), "{failure}");
+    }
+
+    #[test]
+    fn callable_application_queries_preserve_budget_failures() {
+        let signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let inputs = vec![Term::String("input".repeat(40).into())];
+        let mut pool = nir::TypeInterner::default();
+        let identity = crate::CallableIdentity::intern(
+            crate::InstanceKey {
+                declaration: id(7),
+                arguments: inputs.clone().into(),
+            },
+            signature.clone(),
+            &mut pool,
+            &mut 20_000,
+        )
+        .unwrap();
+        let graph = Package {
+            callable_identities: vec![identity],
+            ..Default::default()
+        };
+        let links = TypeLinks::new(&graph, &mut 20_000).unwrap();
+        let value = Term::FunctionValue {
+            declaration: id(7),
+            arguments: inputs,
+        };
+        check_query_budget_boundaries(&links, signature.clone(), value.clone());
+        let head = value_head(signature);
+        let empty = Package::default();
+        let absent = TypeLinks::new(&empty, &mut 20_000).unwrap();
+        let failure = absent
+            .validate_application(&head, &[value], &mut 20_000)
+            .unwrap_err();
+        assert!(failure.contains("incompatible value"), "{failure}");
+        assert!(!failure.contains("budget"), "{failure}");
+    }
+
+    #[test]
+    fn method_application_queries_keep_instance_keys_and_budget_failures() {
+        let signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let method = nir::TraitMethodIdentity {
+            interface: nir::program::InterfaceInstance {
+                declaration: id(5),
+                arguments: vec![Term::String("trait".repeat(40).into())],
+            },
+            subject: Term::Primitive(Primitive::Bool),
+            member: id(6),
+            method_arguments: vec![Term::String("method".repeat(40).into())],
+        };
+        let graph = Package {
+            interfaces: vec![crate::InterfaceContract {
+                interface: method.interface.clone(),
+                subject: method.subject.clone(),
+                methods: vec![nir::program::MethodContract {
+                    phase: Default::default(),
+                    is_quote: false,
+                    pure: false,
+                    is_unsafe: false,
+                    declaration: method.member,
+                    name: "predicate".into(),
+                    signature: signature.clone().into(),
+                    parameter_bindings: vec![],
+                    type_arguments: method.method_arguments.clone(),
+                    type_parameters: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    by_value_receiver: false,
+                    by_reference_receiver: false,
+                    default: None,
+                    program: Default::default(),
+                }],
+            }],
+            ..Default::default()
+        };
+        let links = TypeLinks::new(&graph, &mut 20_000).unwrap();
+        let value = Term::MethodValue(Box::new(method.clone()));
+        check_query_budget_boundaries(&links, signature.clone(), value.clone());
+        let head = value_head(signature);
+        for changed_part in 0..4 {
+            let mut absent = method.clone();
+            match changed_part {
+                0 => absent.interface.arguments[0] = Term::String("other".repeat(40).into()),
+                1 => absent.subject = Term::Primitive(Primitive::Char),
+                2 => absent.member = id(99),
+                _ => absent.method_arguments[0] = Term::String("absent".repeat(40).into()),
+            }
+            let failure = links
+                .validate_application(&head, &[Term::MethodValue(Box::new(absent))], &mut 20_000)
+                .unwrap_err();
+            assert!(!failure.contains("budget"), "{failure}");
+        }
+        links
+            .validate_application(&head, &[value], &mut 20_000)
+            .unwrap();
+    }
+
     #[test]
     fn concrete_lookup_and_conversion_keep_complete_keys_and_constant_query_cost() {
         let query_cost = |padding: u32| {

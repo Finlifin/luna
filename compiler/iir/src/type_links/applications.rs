@@ -31,43 +31,49 @@ impl TypeLinks<'_> {
             }
         }
         let nominal_fields = |ty: &Term, variant: Option<u32>, fuel: &mut usize| {
-            let definition = self.nominal(ty, fuel).ok()??;
+            let definition = self
+                .nominal(ty, fuel)?
+                .ok_or_else(|| Error::from("nominal representation evidence unavailable"))?;
             match (definition, variant) {
                 (NominalDefinition::Struct(s), None) => {
                     for (_, ty) in &s.fields {
-                        charge(ty, fuel).ok()?;
+                        charge(ty, fuel)?;
                     }
-                    Some(s.fields.iter().map(|(_, ty)| ty.clone()).collect())
+                    Ok(s.fields.iter().map(|(_, ty)| ty.clone()).collect())
                 }
                 (NominalDefinition::Enum(e), Some(index)) => {
-                    let fields = &e.variants.get(index as usize)?.fields;
+                    let fields = &e
+                        .variants
+                        .get(index as usize)
+                        .ok_or_else(|| Error::from("enum variant index is unavailable"))?
+                        .fields;
                     for ty in fields {
-                        charge(ty, fuel).ok()?;
+                        charge(ty, fuel)?;
                     }
-                    Some(fields.clone())
+                    Ok(fields.clone())
                 }
                 (NominalDefinition::Newtype(n), None) => {
-                    charge(&n.representation, fuel).ok()?;
-                    Some(vec![n.representation.clone()])
+                    charge(&n.representation, fuel)?;
+                    Ok(vec![n.representation.clone()])
                 }
-                _ => None,
+                _ => Err("nominal variant kind mismatch".into()),
             }
         };
         let callable = |value: nir::CallableValueRef<'_>, fuel: &mut usize| {
-            tick(fuel).ok()?;
+            tick(fuel)?;
             let signature = match value {
                 nir::CallableValueRef::Function {
                     declaration,
                     arguments,
                 } => {
                     for argument in arguments {
-                        charge(argument, fuel).ok()?;
+                        charge(argument, fuel)?;
                     }
-                    self.callables.get(&(declaration, arguments))?
+                    self.callables.get(&(declaration, arguments))
                 }
                 nir::CallableValueRef::Method(method) => {
                     for argument in method.terms() {
-                        charge(argument, fuel).ok()?;
+                        charge(argument, fuel)?;
                     }
                     self.signatures.get(&(
                         method.interface.declaration,
@@ -75,10 +81,10 @@ impl TypeLinks<'_> {
                         &method.subject,
                         method.member,
                         method.method_arguments.as_slice(),
-                    ))?
+                    ))
                 }
             };
-            Some(Cow::Borrowed(*signature))
+            Ok(signature.map(|signature| Cow::Borrowed(*signature)))
         };
         head.check_arguments(
             arguments,
@@ -94,13 +100,7 @@ impl TypeLinks<'_> {
                             return Ok(fields.to_vec());
                         }
                     }
-                    nominal_fields(ty, variant, fuel).ok_or_else(|| {
-                        if *fuel == 0 {
-                            Error::Budget
-                        } else {
-                            "nominal representation evidence unavailable".into()
-                        }
-                    })
+                    nominal_fields(ty, variant, fuel)
                 },
                 declared: &mut |_, _, _| false,
                 collection: &mut |domain, fuel| {
@@ -114,11 +114,7 @@ impl TypeLinks<'_> {
                     nir::type_computations::charge_term(element, fuel)?;
                     Ok(Some(element.clone()))
                 },
-                callable: &mut |value, _, fuel| match callable(value, fuel) {
-                    Some(signature) => Ok(Some(signature)),
-                    None if *fuel == 0 => Err(Error::Budget),
-                    None => Ok(None),
-                },
+                callable: &mut |value, _, fuel| callable(value, fuel),
                 target: self.target,
             },
         )
