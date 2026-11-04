@@ -396,13 +396,14 @@ impl<'a> Session<'a> {
         if context.is_trial() {
             return Err(Error::SpeculativeContext);
         }
-        let mut interpreter = Interpreter::for_comptime_in_budget(package, assumptions, budget)
-            .map_err(Error::Invocation)?;
-        let scope = interpreter
-            .authorize_abstract_type_parameters(parameters)
-            .and_then(|()| interpreter.authorize_abstract_value_parameters(value_parameters));
-        budget.steps = interpreter.remaining_steps();
-        scope.map_err(Error::Invocation)?;
+        let mut interpreter = Interpreter::for_comptime_in_scope_in_budget(
+            package,
+            assumptions,
+            parameters,
+            value_parameters,
+            budget,
+        )
+        .map_err(Error::Invocation)?;
         if let Some(solver) = solver {
             interpreter = match solver {
                 ProofSolver::Unmetered(solver) => interpreter.with_type_solver(solver),

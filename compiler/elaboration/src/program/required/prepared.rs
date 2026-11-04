@@ -434,9 +434,11 @@ impl PreparedRequired {
             steps: std::mem::take(steps),
             depth: 128,
         };
-        let prepared = Interpreter::for_comptime_in_budget(
+        let prepared = Interpreter::for_comptime_in_scope_in_budget(
             &package,
             &invocation_assumptions,
+            &abstract_parameters,
+            &abstract_value_parameters,
             &mut preparation_budget,
         );
         *steps = preparation_budget.steps;
@@ -453,13 +455,6 @@ impl PreparedRequired {
             .with_associated_resolver(&associated_resolver);
         interpreter = interpreter.with_budgeted_type_solver(&type_solver);
         interpreter = interpreter.with_budgeted_pointer_copy_permission(&pointer_copy);
-        let scope = interpreter
-            .authorize_abstract_type_parameters(&abstract_parameters)
-            .and_then(|()| {
-                interpreter.authorize_abstract_value_parameters(&abstract_value_parameters)
-            });
-        *steps = interpreter.remaining_steps();
-        scope.map_err(|e| error(span, format!("required comptime scope failed: {e}")))?;
         let value = interpreter.invoke_with_prepared_arguments(entry, inputs);
         *steps = interpreter.remaining_steps();
         let value=value.map_err(|e| {

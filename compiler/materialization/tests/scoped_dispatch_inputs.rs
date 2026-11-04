@@ -221,3 +221,156 @@ fn interface_domains_depend_on_preceding_type_inputs() {
     let failure = prepare(&package, &scope, &mut Budget::default()).unwrap_err();
     assert!(failure.contains("domain evidence"), "{failure}");
 }
+
+#[test]
+fn private_vm_installs_scope_before_dispatch_admission() {
+    use comptime_interpretor::{Budget as VmBudget, ErrorKind, Interpreter, Value};
+    let scope = [(id(80), boolean())];
+    let mut package = fixture(boolean(), value(80));
+    package.dispatch_instances = prepare(&package, &scope, &mut Budget::default()).unwrap();
+    for closed in [
+        Interpreter::new(&package, VmBudget::default()),
+        Interpreter::for_comptime(&package, VmBudget::default()),
+    ] {
+        assert_eq!(closed.err().unwrap().kind, ErrorKind::InvalidCallPlan);
+    }
+    let mut budget = VmBudget::default();
+    let before = budget.steps;
+    let mut vm =
+        Interpreter::for_comptime_in_scope_in_budget(&package, &[], &[], &scope, &mut budget)
+            .unwrap();
+    assert_eq!(budget.steps, vm.remaining_steps());
+    assert!(budget.steps < before && budget.steps > 0);
+    assert_eq!(vm.invoke(id(20), vec![]).unwrap(), Value::Bool(true));
+    assert_eq!(
+        vm.decode_immutable_input(&value(80), &boolean()).unwrap(),
+        Value::AbstractValue {
+            declaration: id(80),
+            ty: boolean()
+        },
+    );
+    // Constructing and executing a private VM grants no permission to the next
+    // VM using the same immutable snapshot.
+    assert_eq!(
+        Interpreter::for_comptime(&package, VmBudget::default())
+            .err()
+            .unwrap()
+            .kind,
+        ErrorKind::InvalidCallPlan,
+    );
+}
+
+#[test]
+fn private_vm_rejects_foreign_scope_and_recovers_after_failure() {
+    use comptime_interpretor::{Budget as VmBudget, ErrorKind, Interpreter};
+    let scope = [(id(80), boolean())];
+    let mut package = fixture(boolean(), value(80));
+    package.dispatch_instances = prepare(&package, &scope, &mut Budget::default()).unwrap();
+    for scope in [
+        vec![],
+        vec![(id(81), boolean())],
+        vec![(id(80), Term::Primitive(Primitive::Char))],
+    ] {
+        let mut budget = VmBudget::default();
+        let failed =
+            Interpreter::for_comptime_in_scope_in_budget(&package, &[], &[], &scope, &mut budget);
+        assert_eq!(failed.err().unwrap().kind, ErrorKind::InvalidCallPlan);
+        assert_eq!(budget.steps, 0);
+    }
+    let mut budget = VmBudget::default();
+    assert_eq!(
+        Interpreter::for_comptime_in_scope_in_budget(
+            &package, &[], &[id(80)], &scope, &mut budget,
+        ).err().unwrap().kind,
+        ErrorKind::Type,
+    );
+    assert_eq!(budget.steps, 0);
+    budget.steps = 1;
+    assert_eq!(
+        Interpreter::for_comptime_in_scope_in_budget(&package, &[], &[], &scope, &mut budget,)
+            .err()
+            .unwrap()
+            .kind,
+        ErrorKind::StepsExhausted,
+    );
+    assert_eq!(budget.steps, 0);
+    assert!(
+        Interpreter::for_comptime_in_scope_in_budget(
+            &package,
+            &[],
+            &[],
+            &scope,
+            &mut VmBudget::default(),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn sharing_private_code_does_not_publish_scoped_source_indexes() {
+    use comptime_interpretor::{Budget as VmBudget, CodeSession, ErrorKind, Interpreter, Value};
+    let scope = [(id(80), boolean())];
+    let mut package = fixture(boolean(), value(80));
+    package.dispatch_instances = prepare(&package, &scope, &mut Budget::default()).unwrap();
+    let package = std::sync::Arc::new(package);
+    let mut session = CodeSession::new(package.clone());
+    let mut vm = Interpreter::for_comptime_in_scope_in_budget(
+        &package,
+        &[],
+        &[],
+        &scope,
+        &mut VmBudget::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        vm.with_code_session(&mut session, |vm| vm.invoke(id(20), vec![]))
+            .unwrap(),
+        Value::Bool(true),
+    );
+    let mut budget = VmBudget::default();
+    assert_eq!(
+        Interpreter::for_comptime_in_session(&package, &mut session, &mut budget)
+            .err()
+            .unwrap()
+            .kind,
+        ErrorKind::InvalidCallPlan,
+    );
+    assert_eq!(budget.steps, 0);
+    let mut retry = Interpreter::for_comptime_in_scope_in_budget(
+        &package,
+        &[],
+        &[],
+        &scope,
+        &mut VmBudget::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        retry
+            .with_code_session(&mut session, |vm| vm.invoke(id(20), vec![]))
+            .unwrap(),
+        Value::Bool(true),
+    );
+}
+
+#[test]
+fn constructor_scope_does_not_make_malformed_dispatch_payloads_valid() {
+    use comptime_interpretor::{Budget as VmBudget, ErrorKind, Interpreter};
+    let scope = [(id(80), boolean())];
+    let mut package = fixture(boolean(), value(80));
+    package.dispatch_instances = prepare(&package, &scope, &mut Budget::default()).unwrap();
+    let instance = &mut package.dispatch_instances[0];
+    // Preserve the selected implementation's substitution relationship while
+    // supplying the wrong ordinary value domain. Structural agreement alone
+    // must not let the newly prepared VM escape to its caller.
+    instance.arguments = vec![Term::Char('x')];
+    instance.interface_arguments = instance.arguments.clone();
+    let mut budget = VmBudget::default();
+    assert_eq!(
+        Interpreter::for_comptime_in_scope_in_budget(&package, &[], &[], &scope, &mut budget,)
+            .err()
+            .unwrap()
+            .kind,
+        ErrorKind::InvalidCallPlan,
+    );
+    assert_eq!(budget.steps, 0);
+}

@@ -3477,7 +3477,7 @@ Self 与 Type 参数先取得类型视图，普通值按实例化后的声明域
 域代入及共享准入工作消费本次准备额度。required invocation 从剩余预算中划出原有
 上限以内的 dispatch 额度并扣回实际成功消耗；失败保守保留整笔额度，不因重试补充。
 
-**源码用例尚未端到端接通。** 原先失败的具体输入确认为
+**该阶段结束时源码用例尚未端到端接通；后续修复见第 37 节。** 原先失败的具体输入确认为
 `(rigid (id (declaration (package 0) (local 15))) (sort comptime-value))`，即外层 flag。
 现在它已通过 dispatch 准备，但同一正例在 VM 构造时返回 InvalidCallPlan，仍保留
 成功预期和显式 ignore，原因已更新。构造器检查 dispatch 实现参数时使用无符号值
@@ -3508,3 +3508,51 @@ required input unavailable 问题仍独立存在；本阶段没有声称解决�
   library_protocols）：`/tmp/luna-tools-efr7ak88/result.json`，退出 0；108 项通过，
   1 项上述正例显式忽略。使用真实 sysroot 的库协议用例包括在内。该轮运行时 ignore
   的原因文字尚未更新；之后仅修正原因文字，没有改动用例内容或预期。
+
+## 37. 私有 VM 构造在发布前接纳 scoped dispatch
+
+第 36 节留下的 VM 构造顺序缺口已接通。统一入口
+`Interpreter::for_comptime_in_scope_in_budget` 接收显式 Type 与普通值参数作用域，
+Type Session 和普通值 required invocation 都使用它。构造过程先形成私有声明表，
+安装并检查调用作用域，再验证 dispatch 实现实参，全部成功后才把 VM 返回调用者。
+形成私有表不等于已经获得准入；失败时没有 VM 或共享索引发布，也不执行源程序。
+
+dispatch 输入改用接收 VM 的共同 DomainQueries。NIR telescope 准入新增保留 typed
+query error 的入口，旧 collection/layout API 转接到同一实现；依赖域的排序和代入
+规则没有复制一份。Budget、Unresolved 与 Invalid 继续区分，域查询失败不能变成
+没有证据后继续猜测。作用域中域的比较也消费共享预算。
+
+普通 runtime/闭合 comptime 构造仍以空作用域执行同一末端检查。开放构造不接收或
+发布 SourceIndexes；共享编译代码与获得本次调用权限分别处理。测试在同一个
+CodeSession 中运行私有 VM 后，再尝试闭合构造，仍然得到 InvalidCallPlan；显式
+重新提供正确作用域才可继续。即使伪造 payload 后仍保持接口实参与实现代入一致，
+错误的普通值域也不能让 VM 通过构造。
+
+`dynamic_nominal_clause_values_keep_their_formation_contracts` 的原源码正例已通过，
+移除 ignore，未改代码形状或成功预期。现在支持原例中的
+`selected<flag, Packet<flag, Subject> { value: true }>()`，并保持 flag 的符号身份。
+这不解决先把 packet 保存到尚未就绪局部再捕获的生产者路径，也不意味着任意开放
+快照可导出。完整稳定证据载体及部分专用被动观察的预算统一仍是后续工作。
+
+验证证据（工作目录 `/home/fin/luna`）：
+
+- 显式执行旧 ignore 正例：`/tmp/luna-tools-wvyc_030/result.json`，退出 0；
+  原源码成功返回 true，随后移除 ignore。
+- NIR nominal_parameters 与 materialization scoped_dispatch_inputs：
+  `/tmp/luna-tools-0fadjzqv/result.json`，退出 0；包含新增的 query 失败分类、
+  构造前作用域、伪造 payload 拒绝、代码缓存与权限隔离及失败后的重新准备。
+- 受影响的 NIR/VM/materialization/luna lib 与 13 组集成检查：
+  `/tmp/luna-tools-pp43r75v/result.json`，退出 0，809 项通过，原源码正例正常运行。
+  命令使用 `development/check.py --timeout 900 -- test -p nir -p comptime_interpretor
+  -p materialization -p luna --lib --test nominal_parameters --test value_admission
+  --test dependent_admission --test normal_callable_inputs --test normal_inputs
+  --test scoped_dispatch_inputs --test comptime_nominal_capabilities
+  --test deferred_associated_values --test associated_signatures --test dynamic_trait_clauses
+  --test normal_input_plans --test symbols --test library_protocols --no-fail-fast --
+  --skip clause_list_inputs_share_domain_scope_and_budget_validation`。仅过滤此前已记录
+  的 list 诊断基线问题；未运行全 workspace 或性能测量。
+- `test -p elaboration --lib program::required::prepared::tests`：
+  `/tmp/luna-tools-pk_rtffg/result.json`，退出 0，18 项通过；
+  `test -p elaboration --lib type_computations::admission_budget_tests`：
+  `/tmp/luna-tools-8rfy6i7v/result.json`，退出 0，1 项通过。二者均经上述 check.py。
+- 修改的十个 Rust 文件 rustfmt 检查：`/tmp/luna-tools-p59hcbfv/result.json`，退出 0。

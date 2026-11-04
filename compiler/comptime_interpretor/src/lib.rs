@@ -1046,7 +1046,7 @@ impl<'a> Interpreter<'a> {
         assumptions: &[nir::program::TraitRequirement],
         budget: Budget,
     ) -> Result<Self, Error> {
-        Self::with_assumptions_and_index(package, assumptions, budget, None)
+        Self::with_assumptions_and_index(package, assumptions, budget, None, None)
     }
 
     fn with_assumptions_and_index(
@@ -1054,10 +1054,12 @@ impl<'a> Interpreter<'a> {
         assumptions: &[nir::program::TraitRequirement],
         mut budget: Budget,
         positions: Option<Arc<declaration_index::SourceIndexes>>,
+        scope: Option<source_state::InvocationScope<'_>>,
     ) -> Result<Self, Error> {
         // Only sessions without caller premises publish complete world indexes.
         // A caller with extra premises still needs its own implication checks.
-        let positions = positions.filter(|index| std::ptr::eq(package, index.source.as_ref()));
+        let positions = positions
+            .filter(|index| scope.is_none() && std::ptr::eq(package, index.source.as_ref()));
         if assumptions.is_empty() {
             if let Some(index) = &positions {
                 return Self::from_source_indexes(package, budget, index.clone());
@@ -1452,29 +1454,6 @@ impl<'a> Interpreter<'a> {
                 .get(&instance.implementation)
                 .copied()
                 .ok_or_else(invalid)?;
-            nir::validate_declaration_arguments_with_collections_in(
-                &implementation.type_parameters,
-                &implementation.parameter_types,
-                &instance.arguments,
-                &mut trait_parameter_fuel,
-                |ty, variant, fuel| {
-                    nir::normal_forms::query_nominal_value_fields(package, ty, variant, fuel)
-                },
-                |_, _, _| false,
-                |domain, fuel| nir::normal_forms::list_element_budgeted(package, domain, fuel),
-                package.target,
-            )
-            .map_err(|error| match error {
-                nir::NominalAdmissionError::Budget => Error {
-                    kind: ErrorKind::StepsExhausted,
-                    source: None,
-                },
-                nir::NominalAdmissionError::Unresolved(_) => Error {
-                    kind: ErrorKind::TypeContractUnresolved,
-                    source: None,
-                },
-                nir::NominalAdmissionError::Invalid(_) => invalid(),
-            })?;
             if implementation
                 .interface_instance()
                 .ok_or_else(invalid)?
@@ -1871,7 +1850,7 @@ impl<'a> Interpreter<'a> {
                 .unwrap_or_else(|| Arc::new(method_contracts)),
         };
         let remaining_steps = budget.steps - (initial_trait_fuel - trait_parameter_fuel) as u64;
-        Self::from_source_state(
+        let mut interpreter = Self::from_source_state(
             package,
             Budget {
                 steps: remaining_steps,
@@ -1895,7 +1874,16 @@ impl<'a> Interpreter<'a> {
                 structs,
                 enums,
             },
-        )
+        )?;
+        if let Some(scope) = scope {
+            // Only phase-checked private comptime construction supplies scope.
+            // No VM or reusable source index is published before admission.
+            interpreter.comptime_only = true;
+            interpreter.authorize_abstract_type_parameters(scope.types)?;
+            interpreter.authorize_abstract_value_parameters(scope.values)?;
+        }
+        interpreter.admit_dispatch_inputs(&package.dispatch_instances, &implementations)?;
+        Ok(interpreter)
     }
     /// A phase-checked entrypoint for concrete first-order comptime functions.
     /// Resource/effect verification remains the caller's separate obligation.
@@ -1928,10 +1916,21 @@ impl<'a> Interpreter<'a> {
         budget: Budget,
         positions: Option<Arc<declaration_index::SourceIndexes>>,
     ) -> Result<Self, Error> {
+        Self::for_comptime_with_index_and_scope(package, assumptions, budget, positions, None)
+    }
+
+    fn for_comptime_with_index_and_scope(
+        package: &'a Package,
+        assumptions: &[nir::program::TraitRequirement],
+        budget: Budget,
+        positions: Option<Arc<declaration_index::SourceIndexes>>,
+        scope: Option<source_state::InvocationScope<'_>>,
+    ) -> Result<Self, Error> {
         // Index publication certifies successful phase validation of this exact
         // owned snapshot. Never transfer that evidence by declaration identity
         // or structural equality. Caller assumptions are not phase evidence.
-        let positions = positions.filter(|index| std::ptr::eq(package, index.source.as_ref()));
+        let positions = positions
+            .filter(|index| scope.is_none() && std::ptr::eq(package, index.source.as_ref()));
         if positions.is_none() {
             // Reject an undersized allowance before traversing bodies. Actual
             // charging still occurs once in with_assumptions_and_index.
@@ -1943,7 +1942,7 @@ impl<'a> Interpreter<'a> {
             })?;
         }
         let mut interpreter =
-            Self::with_assumptions_and_index(package, assumptions, budget, positions)?;
+            Self::with_assumptions_and_index(package, assumptions, budget, positions, scope)?;
         interpreter.comptime_only = true;
         Ok(interpreter)
     }
@@ -1964,6 +1963,33 @@ impl<'a> Interpreter<'a> {
         budget.steps = interpreter.remaining_steps();
         Ok(interpreter)
     }
+    /// Prepare a private open comptime world. Explicit caller scope is installed
+    /// before dispatch input admission, and is never published as a shared index.
+    /// Construction reserves the caller's allowance on failure, like the closed
+    /// entrypoint. These binders remain opaque and do not authorize export.
+    pub fn for_comptime_in_scope_in_budget(
+        package: &'a Package,
+        assumptions: &[nir::program::TraitRequirement],
+        parameters: &[DeclarationId],
+        value_parameters: &[(DeclarationId, Term)],
+        budget: &mut Budget,
+    ) -> Result<Self, Error> {
+        let reserved = *budget;
+        budget.steps = 0;
+        let interpreter = Self::for_comptime_with_index_and_scope(
+            package,
+            assumptions,
+            reserved,
+            None,
+            Some(source_state::InvocationScope {
+                types: parameters,
+                values: value_parameters,
+            }),
+        )?;
+        budget.steps = interpreter.remaining_steps();
+        Ok(interpreter)
+    }
+
     /// Resolve associated programs in this source VM's frozen world.
     pub fn with_associated_resolver(mut self, resolver: &'a AssociatedResolver<'a>) -> Self {
         self.associated_resolver = Some(resolver);

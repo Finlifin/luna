@@ -14,10 +14,23 @@ impl Interpreter<'_> {
     ) -> R {
         check(&mut nir::value_admission::DomainQueries {
             layout: &mut |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-            declared: &mut |value, domain, _| {
-                Ok(matches!(value,
-                    Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
-                    if self.abstract_value_parameters.get(declaration) == Some(domain)))
+            declared: &mut |value, domain, fuel| {
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or(nir::NominalAdmissionError::Budget)?;
+                let Term::Rigid {
+                    declaration,
+                    sort: nir::Sort::ComptimeValue,
+                } = value
+                else {
+                    return Ok(false);
+                };
+                let Some(expected) = self.abstract_value_parameters.get(declaration) else {
+                    return Ok(false);
+                };
+                nir::type_computations::charge_term(expected, fuel)?;
+                nir::type_computations::charge_term(domain, fuel)?;
+                Ok(expected == domain)
             },
             collection: &mut |domain, fuel| self.admitted_collection_domain(domain, fuel),
             callable: &mut |value, frames, fuel| {

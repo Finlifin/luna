@@ -1753,3 +1753,51 @@ fn named_payload_views_bound_expanded_arguments_and_recover() {
         vec![fields[0].1.clone()]
     );
 }
+
+#[test]
+fn telescope_admission_preserves_query_failures_and_can_retry() {
+    use nir::value_admission::{DomainQueries, Error};
+    let parameters = [id(1), id(2)];
+    let domains = [Term::Primitive(P::Type), rigid(1, Sort::Type)];
+    let arguments = [Term::Primitive(P::Bool), rigid(90, Sort::ComptimeValue)];
+    for outcome in [
+        Err(Error::Budget),
+        Err(Error::Unresolved("caller domain is pending".into())),
+        Err(Error::Invalid("caller scope has expired".into())),
+        Ok(true),
+    ] {
+        let mut fuel = 1000;
+        let mut calls = 0;
+        let result = nir::admit_declaration_arguments_with_queries_in(
+            &parameters,
+            &domains,
+            &arguments,
+            &mut fuel,
+            &mut DomainQueries {
+                layout: &mut |_, _, _| panic!("a scalar needs no layout"),
+                declared: &mut |value, domain, fuel| {
+                    assert_eq!(value, &arguments[1]);
+                    assert_eq!(domain, &Term::Primitive(P::Bool));
+                    *fuel -= 1;
+                    calls += 1;
+                    outcome.clone()
+                },
+                collection: &mut |_, _| Ok(None),
+                callable: &mut |_, _, _| Ok(None),
+                target: None,
+            },
+        );
+        assert_eq!(calls, 1);
+        assert!(fuel < 1000);
+        match outcome {
+            Err(expected) => assert_eq!(result.err().unwrap(), expected),
+            Ok(_) => assert_eq!(
+                result
+                    .unwrap()
+                    .instantiate(&rigid(2, Sort::ComptimeValue), &mut fuel)
+                    .unwrap(),
+                arguments[1],
+            ),
+        }
+    }
+}

@@ -1,6 +1,11 @@
 //! Validated source declarations separated from fresh invocation state.
 use super::*;
 
+pub(super) struct InvocationScope<'a> {
+    pub(super) types: &'a [DeclarationId],
+    pub(super) values: &'a [(DeclarationId, Term)],
+}
+
 pub(super) struct Prepared<'a> {
     pub(super) effect_declarations: declaration_index::Effects<'a>,
     pub(super) method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
@@ -21,6 +26,50 @@ pub(super) struct Prepared<'a> {
 }
 
 impl<'a> Interpreter<'a> {
+    /// Declaration tables are still private here. Validate dispatch payloads
+    /// after the caller's explicit scope is available, before returning a VM.
+    /// The closed constructors reach this same boundary with empty authority.
+    pub(super) fn admit_dispatch_inputs(
+        &mut self,
+        instances: &[nir::program::DispatchInstance],
+        implementations: &BTreeMap<DeclarationId, &nir::program::Implementation>,
+    ) -> Result<(), Error> {
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut remaining = before;
+        let admitted = self.with_admission_queries(|queries| {
+            for instance in instances {
+                remaining = remaining
+                    .checked_sub(1)
+                    .ok_or(nir::NominalAdmissionError::Budget)?;
+                let implementation =
+                    implementations
+                        .get(&instance.implementation)
+                        .ok_or_else(|| {
+                            nir::NominalAdmissionError::from("missing dispatch implementation")
+                        })?;
+                nir::admit_declaration_arguments_with_queries_in(
+                    &implementation.type_parameters,
+                    &implementation.parameter_types,
+                    &instance.arguments,
+                    &mut remaining,
+                    queries,
+                )?;
+            }
+            Ok::<_, nir::NominalAdmissionError>(())
+        });
+        self.budget.steps -= (before - remaining) as u64;
+        admitted.map_err(|error| {
+            self.failure(
+                match error {
+                    nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+                    nir::NominalAdmissionError::Unresolved(_) => ErrorKind::TypeContractUnresolved,
+                    nir::NominalAdmissionError::Invalid(_) => ErrorKind::InvalidCallPlan,
+                },
+                None,
+            )
+        })
+    }
+
     pub(super) fn from_source_indexes(
         package: &'a Package,
         mut budget: Budget,

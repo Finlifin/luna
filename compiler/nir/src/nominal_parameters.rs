@@ -539,6 +539,30 @@ pub fn admit_with_collections_in<'a>(
     mut collection: impl FnMut(&Term, &mut usize) -> Result<Option<Term>, AdmissionError>,
     target: Option<crate::target::TargetData>,
 ) -> Result<AdmittedArguments<'a>, AdmissionError> {
+    admit_with_queries_in(
+        parameters,
+        domains,
+        arguments,
+        fuel,
+        &mut crate::value_admission::DomainQueries {
+            layout: &mut layout,
+            declared: &mut |value, domain, fuel| Ok(declared(value, domain, fuel)),
+            collection: &mut collection,
+            callable: &mut |_, _, _| Ok(None),
+            target,
+        },
+    )
+}
+
+/// Admit a telescope using receiving-world evidence, preserving failed queries
+/// as errors instead of treating them as missing declaration evidence.
+pub fn admit_with_queries_in<'a>(
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &'a [Term],
+    fuel: &mut usize,
+    queries: &mut crate::value_admission::DomainQueries<'_, '_>,
+) -> Result<AdmittedArguments<'a>, AdmissionError> {
     *fuel = fuel
         .checked_sub(parameters.len())
         .ok_or(AdmissionError::Budget)?;
@@ -596,19 +620,7 @@ pub fn admit_with_collections_in<'a>(
                 return Err("nominal argument sort mismatch".into());
             }
             if expected != Sort::Type {
-                crate::value_admission::validate(
-                    argument,
-                    &domain,
-                    &[],
-                    fuel,
-                    &mut crate::value_admission::DomainQueries {
-                        layout: &mut layout,
-                        declared: &mut |value, domain, fuel| Ok(declared(value, domain, fuel)),
-                        collection: &mut collection,
-                        callable: &mut |_, _, _| Ok(None),
-                        target,
-                    },
-                )?;
+                crate::value_admission::validate(argument, &domain, &[], fuel, queries)?;
             }
             crate::type_computations::charge_term(argument, fuel)?;
             admitted_parameters.push(*parameter);

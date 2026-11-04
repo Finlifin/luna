@@ -63,6 +63,7 @@ pub use nominal_parameters::{
     ExpressionInstantiationError,
     admit_with_collections_in as admit_declaration_arguments_with_collections_in,
     admit_with_evidence_in as admit_declaration_arguments_with_evidence_in,
+    admit_with_queries_in as admit_declaration_arguments_with_queries_in,
     binders as declaration_parameters, validate_completed as validate_declaration_arguments,
     validate_completed_in as validate_declaration_arguments_in,
     validate_completed_with_layouts as validate_declaration_arguments_with_layouts,
