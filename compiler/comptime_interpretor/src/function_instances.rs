@@ -159,14 +159,6 @@ impl Interpreter<'_> {
             None
         };
         let before_preparation = self.budget.steps;
-        let binders = self.input_binders(&definition.type_parameters);
-        if existing.is_none() && shared.is_none() {
-            self.charge_copy_work(Some(source), |fuel| {
-                nir::copy_budget::charge_function_substitution(
-                    definition, &binders, arguments, fuel,
-                )
-            })?;
-        }
         if self.comptime_only {
             let definition = self
                 .functions
@@ -184,15 +176,8 @@ impl Interpreter<'_> {
             }
         }
         for capability in &definition.capabilities {
-            let nir::program::TypePredicate::Trait(bound) = self.specialize_function_predicate(
-                definition,
-                arguments,
-                &nir::program::TypePredicate::Trait(capability.clone()),
-                source,
-            )?
-            else {
-                unreachable!("trait substitution preserves predicate kind");
-            };
+            let bound =
+                self.specialize_function_requirement(definition, arguments, capability, source)?;
             let open = bound.subject.check_scope(&[]).is_err()
                 || bound
                     .interface_arguments
@@ -212,40 +197,33 @@ impl Interpreter<'_> {
                 .functions
                 .get(&declaration)
                 .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
+            let binders = self.input_binders(&definition.type_parameters);
+            self.charge_copy_work(Some(source), |fuel| {
+                *fuel = fuel
+                    .checked_sub(definition.parameters.len())
+                    .ok_or(nir::copy_budget::CopyBudgetExhausted::Steps)?;
+                nir::copy_budget::charge_type_substitution(
+                    &definition.signature,
+                    &binders,
+                    arguments,
+                    fuel,
+                )
+            })?;
             let signature = substitution
                 .instantiate(&definition.signature)
                 .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-            let mut body = definition.body.clone();
             // Body types live under the function's parameter telescope;
             // a declaration substitution must retain that frame.
             let Term::Function { parameters, .. } = signature.callable_signature() else {
                 return Err(self.failure(ErrorKind::Type, Some(source)));
             };
             let frames = vec![parameters.iter().map(|p| p.sort).collect()];
-            let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-            let mut fuel = before;
-            let rewritten = self
-                .function_substitution_bounded(
-                    &definition.type_parameters,
-                    arguments,
-                    &frames,
-                    &mut fuel,
-                )
-                .and_then(|substitution| {
-                    body.rewrite_types(&mut |ty| substitution.instantiate(ty))
-                        .map_err(nir::type_computations::Error::Scope)
-                });
-            self.budget.steps -= (before - fuel) as u64;
-            rewritten.map_err(|failure| {
-                self.failure(
-                    if matches!(failure, nir::type_computations::Error::Budget) {
-                        ErrorKind::StepsExhausted
-                    } else {
-                        ErrorKind::Type
-                    },
-                    Some(source),
-                )
-            })?;
+            let body = self.specialize_function_expression(
+                &definition.body,
+                &definition.type_parameters,
+                arguments,
+                &frames,
+            )?;
             let key = (declaration, Arc::<[Term]>::from(arguments));
             let instance = Arc::new(Closure {
                 definition_source: None,
@@ -285,6 +263,154 @@ impl Interpreter<'_> {
 #[cfg(test)]
 mod frame_tests {
     use super::*;
+
+    #[test]
+    fn expression_specialization_preserves_limit_reasons_and_recovers() {
+        let package = Package::default();
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let source = SourceRange { start: 2, end: 9 };
+        let small = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Bool),
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let mut deep = small.clone();
+        for _ in 0..nir::copy_budget::MAX_COPY_DEPTH + 1 {
+            deep = Expr {
+                source,
+                ty: Term::Primitive(Primitive::Void),
+                kind: K::Discard(Box::new(deep)),
+            };
+        }
+        let before = vm.budget.steps;
+        assert_eq!(
+            vm.specialize_function_expression(&deep, &[], &[], &[])
+                .unwrap_err()
+                .kind,
+            ErrorKind::DepthExhausted
+        );
+        assert!(vm.budget.steps > 0 && vm.budget.steps < before);
+        let wide = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Str),
+            kind: K::Literal(Literal::String("x".repeat(4096))),
+        };
+        vm.budget.steps = 500;
+        assert_eq!(
+            vm.specialize_function_expression(&wide, &[], &[], &[])
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+        assert!(vm.budget.steps > 0 && vm.budget.steps < 500);
+        assert_eq!(
+            vm.specialize_function_expression(&small, &[], &[], &[])
+                .unwrap(),
+            small
+        );
+        let invalid = Expr {
+            source,
+            ty: Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: nir::Sort::Type,
+            },
+            kind: K::Unit,
+        };
+        assert_eq!(
+            vm.specialize_function_expression(&invalid, &[], &[], &[])
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+        assert_eq!(
+            vm.specialize_function_expression(&small, &[], &[], &[])
+                .unwrap(),
+            small
+        );
+        assert!(vm.instances.is_empty());
+    }
+
+    #[test]
+    fn prepared_code_copies_selected_payloads_and_reuses_immutable_instances() {
+        let declaration = DeclarationId {
+            package: 97,
+            local: 1,
+        };
+        let parameter = DeclarationId {
+            package: 97,
+            local: 2,
+        };
+        let source = SourceRange { start: 2, end: 9 };
+        let function = nir::program::Function {
+            phase: nir::program::FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            declaration,
+            name: "not-retained-by-closure".repeat(10_000),
+            type_parameters: vec![parameter],
+            parameters: vec![],
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(Primitive::Bool)),
+            },
+            body: Expr {
+                source,
+                ty: Term::Primitive(Primitive::Bool),
+                kind: K::Literal(Literal::Bool(true)),
+            },
+            defaults: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+        };
+        let output = function.callable_type();
+        let package = Package {
+            functions: vec![function],
+            ..Default::default()
+        };
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        vm.budget.steps = 2000;
+        let arguments = [Term::Primitive(Primitive::Bool)];
+        let Value::Closure(first) = vm
+            .function_instance_value(declaration, &arguments, &output, source)
+            .unwrap()
+        else {
+            panic!("missing code instance")
+        };
+        let Value::Closure(second) = vm
+            .function_instance_value(declaration, &arguments, &output, source)
+            .unwrap()
+        else {
+            panic!("missing cached instance")
+        };
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(vm.instances.len(), 1);
+        assert_eq!(
+            vm.events
+                .iter()
+                .filter(|event| matches!(event, Event::InstantiateFunction { .. }))
+                .count(),
+            1
+        );
+        let failure = vm
+            .function_instance_value(declaration, &[Term::Bool(true)], &output, source)
+            .unwrap_err();
+        assert!(matches!(
+            failure.kind,
+            ErrorKind::FunctionInputRejected(_) | ErrorKind::Type
+        ));
+        assert_eq!(vm.instances.len(), 1);
+        assert!(matches!(
+            vm.function_instance_value(declaration, &arguments, &output, source)
+                .unwrap(),
+            Value::Closure(_)
+        ));
+    }
 
     #[test]
     fn borrowed_lookup_preserves_shared_frames_and_distinguishes_inputs() {

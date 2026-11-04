@@ -1740,3 +1740,45 @@ materialization 的普通函数选择统一使用此入口；已完成的 staged
 
 受影响 Rust 文件格式检查通过；未运行全 workspace、native 或性能基准。正式 docs
 与原有工作区修改保持不变。
+
+
+## 33. Invocation 代码实例与表达式代入内核
+
+源码 VM 的 closure 实例实际保留签名、参数身份和主体，程序契约与 capability 仍在
+调用路径检查。该生产者不再预检随后不复制的整份 Function；签名／参数身份单独
+受限，主体、实例默认表达式和 invocation condition 共享声明表达式代入内核。
+完整函数发布继续使用第 32 节的完整视图，两者不能互相冒充。
+
+内核返回 `ExpressionInstantiationError`，区分复制步数、复制深度与 scope 失败。
+VM 将它们分别映射为 StepsExhausted、DepthExhausted、Type；剩余预算为正不代表
+查询成功。原有 NIR 表达式／ProgramContract 接口通过显式转换保留其 Budget／Scope
+契约。程序规格依然属于程序验证层，公共内核只执行结构变换。
+
+去掉整份函数预检后，逐个 capability 的前置 clone 也必须删除，避免重新暴露
+未计费复制。函数身份准入和代码实例准备现在直接借用 requirement，以同一个
+scoped substitution 完成受限代入；函数 frame 在分配前计费。类型命题和 capability
+在实例缓存命中时仍检查，缓存不承担当前调用义务。没有类型代入的 condition
+使用普通复制预检，共享代码体按真实 clone 行为保留共享。
+
+新增 VM 检查覆盖深度失败、正余额下步数失败、scope 失败及随后恢复；失败没有
+向实例缓存发布条目。另以很长但 closure 不保留的声明名称验证所选代码视图，
+确认重复准备共享同一个 Arc、只产生一次实例化事件，缓存存在时错误实参仍被
+拒绝且合法实参仍能使用原实例。这里只验证准备好的代码缓存，不能推导为任意
+invocation 结果都可以缓存。
+
+源码默认值的固定 sort 代入、IIR 中的实例复制和其他签名观察入口仍有各自的
+消费者，尚未全部收敛；本轮没有完成跨阶段稳定 world、全局预算或实例发布协议。
+
+验证目录 `/home/fin/luna`，统一入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p comptime_interpretor --lib --no-fail-fast`：453 通过，退出 0；
+  `/tmp/luna-tools-_klz6gte/result.json`。
+- `-p nir --test calls --test copy_budget --test scoped_contracts --no-fail-fast`：
+  39 通过，退出 0；`/tmp/luna-tools-rz6h6lel/result.json`。
+- `-p luna --test prepared_invocations --test staged_invocation_reuse
+  --test invocation_value_templates --test comptime_bytecode_defaults --test default_calls
+  --test nominal_value_parameters --test newtypes --no-fail-fast`：583 通过，退出 0；
+  `/tmp/luna-tools-wuh_2_c7/result.json`。
+
+受影响 Rust 文件格式检查通过；未运行全 workspace 或性能基准。正式 docs 和
+原有工作区修改保持不变。

@@ -59,6 +59,7 @@ pub mod code_values;
 
 pub use nominal_parameters::{
     AdmissionError as NominalAdmissionError, AdmittedArguments, DeclarationSubstitution,
+    ExpressionInstantiationError,
     admit_with_collections_in as admit_declaration_arguments_with_collections_in,
     admit_with_evidence_in as admit_declaration_arguments_with_evidence_in,
     binders as declaration_parameters, validate_completed as validate_declaration_arguments,

@@ -65,15 +65,8 @@ impl Interpreter<'_> {
             }
         }
         for capability in &definition.capabilities {
-            let nir::program::TypePredicate::Trait(bound) = self.specialize_function_predicate(
-                definition,
-                arguments,
-                &nir::program::TypePredicate::Trait(capability.clone()),
-                source,
-            )?
-            else {
-                unreachable!("trait substitution preserves predicate kind");
-            };
+            let bound =
+                self.specialize_function_requirement(definition, arguments, capability, source)?;
             let open = bound.subject.check_scope(&[]).is_err()
                 || bound
                     .interface_arguments
@@ -133,6 +126,38 @@ impl Interpreter<'_> {
         })
     }
 
+    pub(super) fn specialize_function_expression(
+        &mut self,
+        expression: &Expr,
+        parameters: &[DeclarationId],
+        arguments: &[Term],
+        frames: &[Vec<nir::Sort>],
+    ) -> Result<Expr, Error> {
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = self
+            .function_substitution_bounded(parameters, arguments, frames, &mut fuel)
+            .map_err(|failure| match failure {
+                nir::type_computations::Error::Budget => ErrorKind::StepsExhausted,
+                _ => ErrorKind::Type,
+            })
+            .and_then(|substitution| {
+                substitution
+                    .instantiate_expression_bounded(expression, &mut fuel)
+                    .map_err(|failure| match failure {
+                        nir::ExpressionInstantiationError::Copy(
+                            nir::copy_budget::CopyBudgetExhausted::Steps,
+                        ) => ErrorKind::StepsExhausted,
+                        nir::ExpressionInstantiationError::Copy(
+                            nir::copy_budget::CopyBudgetExhausted::Depth,
+                        ) => ErrorKind::DepthExhausted,
+                        nir::ExpressionInstantiationError::Scope(_) => ErrorKind::Type,
+                    })
+            });
+        self.budget.steps -= (before - fuel) as u64;
+        result.map_err(|kind| self.failure(kind, Some(expression.source)))
+    }
+
     pub(super) fn specialize_function_predicate(
         &mut self,
         definition: &nir::program::Function,
@@ -140,22 +165,51 @@ impl Interpreter<'_> {
         predicate: &nir::program::TypePredicate,
         source: SourceRange,
     ) -> Result<nir::program::TypePredicate, Error> {
+        self.with_function_contract_scope(definition, arguments, source, |substitution, fuel| {
+            substitution.instantiate_predicate_bounded(predicate, fuel)
+        })
+    }
+
+    pub(super) fn specialize_function_requirement(
+        &mut self,
+        definition: &nir::program::Function,
+        arguments: &[Term],
+        requirement: &nir::program::TraitRequirement,
+        source: SourceRange,
+    ) -> Result<nir::program::TraitRequirement, Error> {
+        self.with_function_contract_scope(definition, arguments, source, |substitution, fuel| {
+            substitution.instantiate_requirement_bounded(requirement, fuel)
+        })
+    }
+
+    fn with_function_contract_scope<T>(
+        &mut self,
+        definition: &nir::program::Function,
+        arguments: &[Term],
+        source: SourceRange,
+        observe: impl FnOnce(
+            &nir::DeclarationSubstitution<'_>,
+            &mut usize,
+        ) -> Result<T, nir::type_computations::Error>,
+    ) -> Result<T, Error> {
         let Term::Function { parameters, .. } = definition.signature.callable_signature() else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };
-        let frames = vec![parameters.iter().map(|p| p.sort).collect()];
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let result = self
-            .function_substitution_bounded(
+        let result = (|| {
+            fuel = fuel
+                .checked_sub(parameters.len())
+                .ok_or(nir::type_computations::Error::Budget)?;
+            let frames = vec![parameters.iter().map(|p| p.sort).collect()];
+            let substitution = self.function_substitution_bounded(
                 &definition.type_parameters,
                 arguments,
                 &frames,
                 &mut fuel,
-            )
-            .and_then(|substitution| {
-                substitution.instantiate_predicate_bounded(predicate, &mut fuel)
-            });
+            )?;
+            observe(&substitution, &mut fuel)
+        })();
         self.budget.steps -= (before - fuel) as u64;
         result.map_err(|error| {
             self.failure(
@@ -203,17 +257,7 @@ impl Interpreter<'_> {
             .functions
             .get(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(construction)))?;
-        let binders = self.input_binders(&definition.type_parameters);
-        self.charge_copy_work(Some(expression.source), |fuel| {
-            nir::copy_budget::charge_substitution(expression, &binders, arguments, fuel)
-        })?;
-        let substitution =
-            self.function_substitution(&definition.type_parameters, arguments, expression.source)?;
-        let mut value = expression.clone();
-        value
-            .rewrite_types(&mut |ty| substitution.instantiate(ty))
-            .map_err(|_| self.failure(ErrorKind::Type, Some(expression.source)))?;
-        Ok(value)
+        self.specialize_function_expression(expression, &definition.type_parameters, arguments, &[])
     }
 
     pub(super) fn bound_default_expression(

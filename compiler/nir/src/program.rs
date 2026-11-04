@@ -3759,7 +3759,9 @@ impl Expr {
     ) -> Result<Self, crate::type_computations::Error> {
         let substitution =
             crate::DeclarationSubstitution::bounded(parameters, domains, arguments, frames, fuel)?;
-        substitution.instantiate_expression_bounded(self, fuel)
+        substitution
+            .instantiate_expression_bounded(self, fuel)
+            .map_err(Into::into)
     }
 
     /// Substitute type annotations throughout a checked template, including

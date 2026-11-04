@@ -63,8 +63,11 @@ impl ProgramContract {
         use crate::type_computations::Error;
         let substitution =
             crate::DeclarationSubstitution::bounded(parameters, domains, arguments, frames, fuel)?;
-        let mut expression =
-            |value: &Expr| substitution.instantiate_expression_bounded(value, fuel);
+        let mut expression = |value: &Expr| {
+            substitution
+                .instantiate_expression_bounded(value, fuel)
+                .map_err(Error::from)
+        };
         let preconditions = self
             .preconditions
             .iter()

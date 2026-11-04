@@ -158,6 +158,30 @@ pub fn validate_with_collections_in(
     .map(|_| ())
 }
 
+/// Failure of a copied expression specialization. Copy limits retain their
+/// reason for execution consumers; scope failures never become budget failures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExpressionInstantiationError {
+    Copy(crate::copy_budget::CopyBudgetExhausted),
+    Scope(TypeError),
+}
+impl std::fmt::Display for ExpressionInstantiationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Copy(reason) => write!(f, "expression specialization copy limit: {reason:?}"),
+            Self::Scope(reason) => write!(f, "expression specialization scope: {reason}"),
+        }
+    }
+}
+impl From<ExpressionInstantiationError> for crate::type_computations::Error {
+    fn from(error: ExpressionInstantiationError) -> Self {
+        match error {
+            ExpressionInstantiationError::Copy(_) => Self::Budget,
+            ExpressionInstantiationError::Scope(reason) => Self::Scope(reason),
+        }
+    }
+}
+
 /// Structural declaration substitution in an explicit caller scope. This checks
 /// scopes and sorts, including a dependent domain becoming Type. It does not
 /// validate scalar ranges, aggregate payloads, requirements or capabilities;
@@ -325,10 +349,10 @@ impl<'a> DeclarationSubstitution<'a> {
         &self,
         expression: &crate::program::Expr,
         fuel: &mut usize,
-    ) -> Result<crate::program::Expr, crate::type_computations::Error> {
-        use crate::type_computations::Error;
+    ) -> Result<crate::program::Expr, ExpressionInstantiationError> {
+        use ExpressionInstantiationError as Error;
         crate::copy_budget::charge_substitution(expression, &self.parameters, self.arguments, fuel)
-            .map_err(|_| Error::Budget)?;
+            .map_err(Error::Copy)?;
         let mut value = expression.clone();
         value
             .rewrite_types(&mut |ty| self.instantiate(ty))

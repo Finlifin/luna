@@ -2368,35 +2368,25 @@ impl<'a> Interpreter<'a> {
             }
             _ => None,
         };
-        let binders = if arguments.is_some() {
-            self.input_binders(&definition.type_parameters)
-        } else {
-            Vec::new()
-        };
-        self.charge_copy_work(Some(condition.source), |fuel| {
-            nir::copy_budget::charge_substitution(
-                condition,
-                &binders,
-                arguments.unwrap_or(&[]),
-                fuel,
-            )
-        })?;
         match arguments {
-            Some(arguments) => {
-                let substitution = self.function_substitution(
-                    &definition.type_parameters,
-                    arguments,
-                    condition.source,
-                )?;
-                let mut value = condition.clone();
-                value
-                    .rewrite_types(&mut |ty| substitution.instantiate(ty))
-                    .map_err(|_| self.failure(ErrorKind::Type, Some(condition.source)))?;
-                Ok(value)
+            Some(arguments) => self.specialize_function_expression(
+                condition,
+                &definition.type_parameters,
+                arguments,
+                &[],
+            ),
+            None => {
+                self.charge_copy_work(Some(condition.source), |fuel| {
+                    let mut steps = *fuel as u64;
+                    let result = nir::copy_budget::charge_expression(condition, &mut steps);
+                    *fuel = steps as usize;
+                    result
+                })?;
+                Ok(condition.clone())
             }
-            None => Ok(condition.clone()),
         }
     }
+
     pub fn invoke(
         &mut self,
         function: DeclarationId,
