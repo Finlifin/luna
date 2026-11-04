@@ -994,3 +994,32 @@ input staging 失败，退出 101：`/tmp/luna-tools-2ngvdo4c/result.json`。修
 未全文件重排；`git diff --check` 通过。清单、原始源码和原有修改的哈希核对保存在
 `/tmp/luna-invocation-template-dispatch-xuws5gmu`。未运行全 workspace、native 或性能
 基准；正式 docs 与原有工作区修改保持不变。
+
+## 20. 函数身份的成本、准入与执行权限
+
+`Value::immutable_copy_work`／`immutable_clone_work` 估算值表示的工作量，
+不接收源世界，不能判断声明是否存在，也不证明函数实例满足子句。Function 身份
+即使指向未知声明，仍有有界表示成本。此前 execution 测试要求包含这种身份的
+tuple 返回 None，与本文件第 2 节区分表示和接纳的边界冲突；现已纠正该断言，
+保留原有的准入拒绝，并增加独立正反例，而未改变生产实现以迁就测试。
+
+源世界中的 `validate_immutable_input` 负责域、声明身份和实例形成契约；
+`admit_callable_identity` 查询源声明及其输入约束，不执行函数。runtime 函数身份
+可以作为编译期所携带的数据，通过对应函数类型的准入；这不授予 comptime 调用
+该 runtime 函数的权限。comptime callable 的阶段类型仍须匹配。wire 解码是否
+允许重建 callable 是另一项传输政策，本次没有放宽。
+
+新增检查覆盖同成本的已知／未知函数及嵌套身份、同成本但满足／违反 Type 子句
+的实例、runtime／comptime 签名错配、准入不执行、runtime 调用的 PhaseMismatch，
+以及随后合法 comptime 调用恢复。它们防止再次用表示成本替代世界或阶段检查。
+
+验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p luna --test execution -- comptime_snapshot`：9 项通过，退出 0；
+  `/tmp/luna-tools-6bgon2u4/result.json`。
+- `-p luna --test execution -- memoized comptime_key comptime_snapshot pure_query`：
+  32 项通过，退出 0；`/tmp/luna-tools-c6gg0gyl/result.json`。包含上一阶段原失败项。
+
+初次新测试误用了私有 `invoke_value`，编译失败（`/tmp/luna-tools-tuqp5sq4`）；
+改用既有公开 `invoke` 后执行以上检查，没有扩大 VM API。未运行全量测试，
+没有修改正式 docs 或工作区原有修改；本次交付是契约检查的纠偏，不是新增执行能力。

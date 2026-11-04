@@ -837,7 +837,9 @@ fn comptime_snapshot_admission_checks_enum_tags_payloads_and_nested_references()
         .is_err()
     );
     let invalid = Value::Tuple(vec![Value::Function(unknown)]);
-    assert!(invalid.immutable_copy_work().is_none());
+    // The identity has a bounded representation. Only world/domain admission
+    // can reject an unknown declaration; a copy estimate cannot look it up.
+    assert!(invalid.immutable_copy_work().is_some());
     assert!(
         validate_immutable_host(
             &package,
@@ -870,6 +872,81 @@ fn comptime_snapshot_admission_checks_enum_tags_payloads_and_nested_references()
     assert!(
         validate_immutable_host(&package, &open_type, &Term::Primitive(Primitive::Type)).is_err()
     );
+}
+
+#[test]
+fn comptime_snapshot_callable_costs_do_not_supply_world_or_phase_authority() {
+    use nir::{Primitive, Term};
+    let package = compile(
+        "typealias Type = .Type'builtin;
+        fn runtime() -> bool { true }
+        fn bounded() -> bool where T, requires T == bool { true }
+        comptime fn staged() -> bool { true }",
+    );
+    let runtime = id(&package, "runtime");
+    let bounded = id(&package, "bounded");
+    let staged = id(&package, "staged");
+    let signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    let known = Value::Function(runtime);
+    let unknown = Value::Function(nir::DeclarationId {
+        package: u64::MAX,
+        local: u32::MAX,
+    });
+    assert_eq!(known.immutable_copy_work(), unknown.immutable_copy_work());
+    assert_eq!(known.immutable_clone_work(), unknown.immutable_clone_work());
+    assert!(known.immutable_copy_work().is_some());
+    for (value, valid) in [(&known, true), (&unknown, false)] {
+        assert_eq!(
+            validate_immutable_host(&package, value, &signature).is_ok(),
+            valid
+        );
+        assert_eq!(
+            validate_immutable_host(
+                &package,
+                &Value::Tuple(vec![value.clone()]),
+                &Term::Tuple(vec![signature.clone()]),
+            )
+            .is_ok(),
+            valid,
+        );
+    }
+    let allowed = Value::FunctionInstance {
+        declaration: bounded,
+        arguments: vec![Term::Primitive(Primitive::Bool)],
+    };
+    let rejected = Value::FunctionInstance {
+        declaration: bounded,
+        arguments: vec![Term::Primitive(Primitive::U8)],
+    };
+    assert_eq!(
+        allowed.immutable_copy_work(),
+        rejected.immutable_copy_work()
+    );
+    assert!(validate_immutable_host(&package, &allowed, &signature).is_ok());
+    assert_eq!(
+        validate_immutable_host(&package, &rejected, &signature),
+        Err(ErrorKind::TypeContractRejected),
+    );
+    let staged_signature = Term::ComptimeFunction(Box::new(signature.clone()));
+    assert!(validate_immutable_host(&package, &Value::Function(staged), &staged_signature).is_ok());
+    assert!(validate_immutable_host(&package, &Value::Function(staged), &signature).is_err());
+    assert!(validate_immutable_host(&package, &known, &staged_signature).is_err());
+
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    vm.validate_immutable_input(&known, &signature).unwrap();
+    assert!(
+        vm.events().is_empty(),
+        "admission must not execute the transported function"
+    );
+    assert_eq!(
+        vm.invoke(runtime, vec![]).unwrap_err().kind,
+        ErrorKind::PhaseMismatch
+    );
+    assert!(vm.events().is_empty());
+    assert_eq!(vm.invoke(staged, vec![]).unwrap(), Value::Bool(true));
 }
 
 #[test]

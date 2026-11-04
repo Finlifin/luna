@@ -528,12 +528,16 @@ Snapshot 的 owner 仍属于唯一 Protocol，两个 Protocol 即使来自同一
 没有改为不等式来掩盖逐字节复制。新预算用例按 Context 的既有预留契约区分尚未进入
 VM 的失败与已执行工作的计费，不改变 Context::spend 的实现。
 
-唯一尚未处理的扩大检查失败为
+本阶段扩大检查时唯一未处理的失败为
 `comptime_snapshot_admission_checks_enum_tags_payloads_and_nested_references`：
 包含未知 Function 身份的 tuple，其 `immutable_copy_work()` 当前并不返回 None。
 恢复本阶段之前的 comptime_keys.rs 后，`/tmp/luna-tools-2b2_r_h3` 仍在同一断言失败
 （退出 101），之后已恢复当前实现。本次未修改该预期；复制成本与世界准入的责任边界
 需单独核对，不能据此声称完整回归通过。
+
+后续已完成这项责任核对：复制成本只检查表示，未知身份应由世界准入拒绝。
+过期成本断言及新增正反例见
+[函数身份的成本、准入与执行权限](comptime-value-admission.md#20-函数身份的成本准入与执行权限)。
 
 Rust 格式检查 `/tmp/luna-tools-k8e_6o4o` 退出 0，提交范围 diff 检查通过。
 正式 docs、已有资源分析修改及 library README 均保持原样。
