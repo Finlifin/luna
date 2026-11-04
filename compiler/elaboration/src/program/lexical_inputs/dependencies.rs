@@ -37,7 +37,6 @@ struct Reads<'a, 'c, 'h> {
     patterns: BTreeSet<(OwnerId, n::LocalId)>,
     owners: BTreeSet<OwnerId>,
     graph: BTreeMap<OwnerId, OwnerReads>,
-    protocol_owners: BTreeMap<OwnerId, Vec<OwnerId>>,
     local_inputs: Option<&'a BTreeSet<n::LocalId>>,
     reads_local_input: bool,
     collect_locals: bool,
@@ -55,7 +54,6 @@ pub(super) fn collect(
 ) -> Result<BTreeSet<DeclarationId>, Error> {
     let mut reads = Reads::new(checker, owner, fuel, span);
     let result = (|| {
-        reads.prepare_protocols()?;
         reads.push(Node::Owner(owner))?;
         reads.drain()?;
         reads.close(owner)
@@ -78,7 +76,6 @@ pub(super) fn expression_may_use_inputs(
     let mut reads = Reads::new(checker, owner, fuel, span);
     reads.local_inputs = Some(inputs);
     let result = (|| {
-        reads.prepare_protocols()?;
         reads.inherited(owner)?;
         reads.protocols(owner)?;
         reads.expression(value)?;
@@ -123,7 +120,6 @@ pub(super) fn expression_local_dependencies(
                     .insert(reads.identity(*declaration), local(parameter.hir_id));
             }
         }
-        reads.prepare_protocols()?;
         reads.inherited(owner)?;
         reads.protocols(owner)?;
         reads.expression(value)?;
@@ -144,7 +140,6 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             expressions: BTreeSet::new(),
             patterns: BTreeSet::new(),
             graph: BTreeMap::new(),
-            protocol_owners: BTreeMap::new(),
             local_inputs: None,
             reads_local_input: false,
             collect_locals: false,
@@ -153,22 +148,6 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             fuel: *fuel,
             span,
         }
-    }
-    fn prepare_protocols(&mut self) -> Result<(), Error> {
-        // Local protocol contributions can supply implicit dependency edges.
-        // Retain their reads until selection provides narrower evidence.
-        for (&child, &parent) in &self.checker.package.lexical_parents {
-            self.charge()?;
-            if self
-                .checker
-                .package
-                .item(child)
-                .is_some_and(|item| matches!(item.kind, ItemKind::Impl(_) | ItemKind::Derive(_)))
-            {
-                self.protocol_owners.entry(parent).or_default().push(child);
-            }
-        }
-        Ok(())
     }
     fn drain(&mut self) -> Result<(), Error> {
         while let Some((context, node)) = self.pending.pop() {
@@ -514,9 +493,14 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
         Ok(())
     }
     fn protocols(&mut self, owner: OwnerId) -> Result<(), Error> {
-        let count = self.protocol_owners.get(&owner).map_or(0, Vec::len);
-        for index in 0..count {
-            let member = self.protocol_owners[&owner][index];
+        let checker = self.checker;
+        let members =
+            checker
+                .lexical_source_protocols
+                .for_parent(owner, &mut self.fuel, self.span)?;
+        for &member in members.into_iter().flatten() {
+            // The structural edge is shared; its declarations and premises
+            // are still observed in this query's own lexical/proof context.
             self.reference(member)?;
         }
         Ok(())

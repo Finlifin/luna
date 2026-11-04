@@ -1,6 +1,8 @@
 //! Shared lexical input plans for declaration formation and caller supply.
 use super::*;
 mod dependencies;
+mod source_index;
+pub(super) use source_index::SourceProtocolIndex;
 
 /// The implicit prefix of a local declaration's clause telescope. This is
 /// checker-local metadata over immutable HIR, not a persisted dependency summary.

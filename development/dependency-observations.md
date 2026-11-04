@@ -124,6 +124,49 @@ comptime 条件具备后，只执行选中分支；未选分支的来源和必�
 输出至少分为：静态/类型输入、runtime 依赖及环境要求、证明前提、代码上下文及控制端口。
 它们进入同一重绑定计划，但不能被统统转成普通 runtime 形参。
 
+### 4.5 已接通：源码协议索引与活动依赖观察分开
+
+共同遍历器原先在每次查询开始时扫描 `Package::lexical_parents`，重建局部
+impl/derive 的 parent → children 表。声明捕获、标注依赖、调用输入供应以及
+函数类型 binder 观察都重复支付这项整包成本；它并不是每个查询特有的语义事实。
+
+现在 `SourceProtocolIndex` 直接借用一份不可变 HIR Package，归对应 Checker
+所有，首次需要时建立完整索引。它不接收可替换的 Package 参数，不以裸 OwnerId
+作为跨世界缓存键。模板和派生展开在创建 Checker 前形成新 HIR，因此新视图自然
+得到新索引；同号 owner 不能误命中旧表。该索引也不替代生成定义的发布协议或
+当前 implementation world，只记录这份源码中已经存在的局部协议结构边。
+
+构建逐边计入当前预算，先在局部表中完成，再一次安装。构建耗尽时丢弃未完成表，
+已消耗预算不返还；随后可以用充足预算重试。词法边指向尚无源码声明的 child 时，
+明确报告缺失来源，不再沿用旧扫描的静默跳过；未完成视图不能产生“没有贡献”证据。
+修复后的新 HIR 视图建立自己的完整索引。完整索引已经安装后，某次查找失败
+不撤销这份不可变结构。热查询仍收费，选出的每条协议边及其正文、前提继续在
+查询自己的 Reads 中观察；没有缓存候选选择、活动 locals、推断状态、依赖结果
+或失败诊断。确定的 child 身份用有序集合保存，查询不复制整个表或分组。
+
+设 E 为全部词法父子边，Q 为协议查找次数，P 为有局部协议贡献的父节点数。
+原整包重建项为 O(QE)；现在构建一次 O(E log E) 的有序索引，随后按父节点查找
+O(log P)，再支付实际选中边及语义观察的成本。这里没有声称整体编译变成线性，
+也没有把预算单位当作墙钟耗时：递归声明、前提和完整源码遍历仍有独立成本。
+
+单元验证覆盖 impl/derive 分组、排除无关普通声明和全局 impl、4096 个无关声明下
+热查找无需整包扫描、构建耗尽后的重试、缺失声明拒绝及修复，以及同号 owner
+的新旧 HIR 视图隔离。
+生产消费者仍通过共同 `Reads::protocols` 接入，旧 `prepare_protocols` 重建入口
+与每次查询拥有的 `protocol_owners` 表已删除。稳定 query 的跨编辑失效、语义依赖
+摘要及 WorldSnapshot 仍是后续工作，不能把这份源码索引算作它们已经完成。
+
+本接线在 `/home/fin/luna` 通过 `development/check.py --timeout 900 -- test`
+验证：`-p elaboration --lib lexical_inputs` 5 项通过，证据
+`/tmp/luna-tools-840g0jmc/result.json`；luna 的局部模板、测试模板、标注行为、
+观察预算、开放函数、动态 trait 子句及 trait 阶段七组 628 项通过，证据
+`/tmp/luna-tools-wt3zmvs8/result.json`。两轮退出 0；既有 1 项 ignored 未解除。
+三个独立 Rust 文件的 rustfmt check 退出 0，证据
+`/tmp/luna-tools-4gfl7d3z/result.json`；program.rs 只增加构造及字段，未作全量
+重排。`git diff --check` 通过，原有受保护修改的哈希未变，正式 docs 未动。
+未运行全 workspace、native 或整体性能基准；本机清单与证据在
+`/tmp/luna-lexical-source-index-wpkauuvg`。
+
 ## 5. 四个判断精确性是否正确的例子
 
 | 场景 | 应得依赖 | 错误实现 |
