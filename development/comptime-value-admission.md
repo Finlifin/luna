@@ -1394,3 +1394,43 @@ Enum 新增 `instantiate_variant_fields`：与平铺的 `instantiate_stored_fiel
 未修改 Drop 测试、扩大栈或放宽拒绝预期；两个基线缺陷仍未修复，不能将整组 Drop
 报告为通过。未运行全 workspace、native 或性能基准。正式 docs 和原有工作区
 修改未纳入本次交付，materialization／覆盖检查等元数据消费者仍待迁移。
+
+
+## 27. 内存字段观察不再复制声明元数据
+
+内存字段观察属于程序验证层的存储描述；它不能授予 Copy／Drop，不能证明指针
+来源或替代资源取得，也不调用 PTC 证明内存命题。最终布局服务的环境与表示依赖
+尚未统一，本次先消除现有消费者的不受限字段复制，而不新增另一份布局真相。
+
+`memory::owned_fields`、数据／可读表示检查、pointer-free 检查及 effect 载荷检查
+现在直接使用 NIR 的受限字段代入。它们共享调用者工作预算，代入前计算展开成本，
+不再先检查未替换的字段和实参、随后无界展开。空 enum 分支也计入遍历成本；
+即使字段集合为空，仍检查完整参数帧。newtype 的受限表示边和 NF 身份规则保持原职责。
+
+`memory::owned_variants` 已删除，唯一替代入口 `owned_variant_fields` 返回按原分支
+编号排列的字段类型。它不复制 enum 名称／shape，也不为可选类型和错误结果构造
+假的 Variant 元数据。所有消费者同步迁移，包括指针叶、分支投影、模式载荷、
+callable 路径和 moves 的 tag-domain 检查。可选缺失分支仍为空；错误结果成功分支
+及错误行的逻辑编号不变；这不是物理 tag ABI 的重新定义。
+
+基线 `147b2393` 加入相同四项行为测试后，三项失败：字段查询在预算 2000 下仍交付
+64 份含 32 个字段的实参；两个表示检查在预算 16 下仍遍历 128 个空变体并成功。
+`/tmp/luna-tools-q0supyf2/result.json` 退出 101；分支／指针 guard 的对照测试通过。
+迁移后四项均通过，`/tmp/luna-tools-lu8nexwc/result.json` 退出 0。后续补充空载荷
+非法参数拒绝和 effect 数据／code／指针边界检查，失败后均重新执行合法查询。
+
+验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p program_verification --lib --tests --no-fail-fast`：111 项单元测试及 8 项集成测试
+  通过，退出 0；`/tmp/luna-tools-e3kg7mko/result.json`。
+- `-p luna --test effect_memory_transfers --test captured_memory --test method_memory_contracts
+  --test handler_capture_lifetimes --test nominal_value_parameters --test invocation_value_templates
+  --test drop --no-fail-fast --
+  --skip optional_inline_call_chains_preserve_defaults_contracts_and_owned_returns
+  --skip scheduled_handler_borrowed_copy_record_rejects_unproved_owner_layouts`：
+  1525 通过、2 过滤，退出 0；`/tmp/luna-tools-ewc1hqhj/result.json`。两个过滤项是
+  §26 已在改动前基线上复现的缺陷，本次未宣称修复，也未修改它们的测试源码。
+
+未运行全 workspace、native 或性能基准。其余 moves、materialization 和覆盖检查
+仍有旧的元数据代入消费者；此迁移不代表完整 LayoutPlan 或全链路共享预算已完成。
+正式 docs 与原有工作区改动未纳入本次交付。

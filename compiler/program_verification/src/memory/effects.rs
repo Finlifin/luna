@@ -210,22 +210,10 @@ fn effect_storage_layout(
                         .checked_sub(1)
                         .ok_or("effect data declaration budget exhausted")?;
                     if definition.declaration == *declaration {
-                        *fuel = fuel
-                            .checked_sub(definition.fields.len())
-                            .ok_or("effect data field budget exhausted")?;
-                        for (_, field) in &definition.fields {
-                            bound_type(field, fuel)?;
-                            for argument in arguments {
-                                bound_type(argument, fuel)?;
-                            }
-                        }
                         fields = Some(
                             definition
-                                .instantiate_fields(arguments)
-                                .map_err(|e| e.to_string())?
-                                .into_iter()
-                                .map(|(_, ty)| ty)
-                                .collect(),
+                                .instantiate_stored_fields(arguments, &[], fuel)
+                                .map_err(|e| e.to_string())?,
                         );
                         break;
                     }
@@ -236,24 +224,10 @@ fn effect_storage_layout(
                             .checked_sub(1)
                             .ok_or("effect data declaration budget exhausted")?;
                         if definition.declaration == *declaration {
-                            *fuel = fuel
-                                .checked_sub(definition.variants.len())
-                                .ok_or("effect data variant budget exhausted")?;
-                            for variant in &definition.variants {
-                                for field in &variant.fields {
-                                    bound_type(field, fuel)?;
-                                    for argument in arguments {
-                                        bound_type(argument, fuel)?;
-                                    }
-                                }
-                            }
                             fields = Some(
                                 definition
-                                    .instantiate_variants(arguments)
-                                    .map_err(|e| e.to_string())?
-                                    .into_iter()
-                                    .flat_map(|variant| variant.fields)
-                                    .collect(),
+                                    .instantiate_stored_fields(arguments, &[], fuel)
+                                    .map_err(|e| e.to_string())?,
                             );
                             break;
                         }
@@ -606,25 +580,12 @@ impl<'a> Infer<'a, '_> {
                     .package
                     .and_then(|p| p.enums.iter().find(|item| item.declaration == *declaration))
                     .ok_or("handler memory variant metadata missing")?;
-                *self.fuel = self
-                    .fuel
-                    .checked_sub(definition.variants.len())
-                    .ok_or("handler memory variant budget exhausted")?;
-                for variant in &definition.variants {
-                    for field in &variant.fields {
-                        bound_type(field, self.fuel)?;
-                        for argument in arguments {
-                            bound_type(argument, self.fuel)?;
-                        }
-                    }
-                }
                 let variants = definition
-                    .instantiate_variants(arguments)
+                    .instantiate_variant_fields(arguments, &[], self.fuel)
                     .map_err(|e| e.to_string())?;
-                let fields = &variants
+                let fields = variants
                     .get(*index)
-                    .ok_or("handler memory variant index invalid")?
-                    .fields;
+                    .ok_or("handler memory variant index invalid")?;
                 if fields.len() != patterns.len() {
                     return Err("handler memory variant arity mismatch".into());
                 }

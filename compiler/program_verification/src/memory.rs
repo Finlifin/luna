@@ -3,6 +3,8 @@
 //! not a certificate for termination, functional specifications, or escape safety.
 mod cleanup;
 mod method_contracts;
+#[cfg(test)]
+mod nominal_layout_tests;
 mod text_regions;
 use super::pattern_facts::{constant_bool, known_pattern, outer_guards};
 pub use method_contracts::{
@@ -626,8 +628,7 @@ fn owned_fields(
         } => package
             .and_then(|p| p.structs.iter().find(|s| s.declaration == *declaration))
             .ok_or("memory callable fields require a known struct layout")?
-            .instantiate_fields(arguments)
-            .map(|fields| fields.into_iter().map(|(_, ty)| ty).collect())
+            .instantiate_stored_fields(arguments, &[], fuel)
             .map_err(|e| e.to_string()),
         _ => Err("memory callable fields require an owned record or tuple layout".into()),
     }
@@ -806,12 +807,15 @@ pub fn borrowed_input_layout(
         if matches!(ty, Term::ErrorResult { .. } | Term::Optional(_))
             || matches!(ty,Term::Nominal {declaration,..} if package.is_some_and(|p|p.enums.iter().any(|e|e.declaration==*declaration)))
         {
-            for (tag, variant) in owned_variants(package, ty, fuel)?.into_iter().enumerate() {
+            for (tag, variant) in owned_variant_fields(package, ty, fuel)?
+                .into_iter()
+                .enumerate()
+            {
                 *fuel = fuel
                     .checked_sub(storage.len() + 1)
                     .ok_or("input pointer guard budget exhausted")?;
                 guards.push((storage.clone(), tag));
-                for (index, field) in variant.fields.iter().enumerate() {
+                for (index, field) in variant.iter().enumerate() {
                     input.extend([VARIANT_FIELD, tag, index]);
                     storage.push(index);
                     walk(package, field, input, storage, guards, output, fuel)?;
@@ -1040,12 +1044,11 @@ pub fn owned_variant_pattern<'p>(
         }
         _ => return Err("expected variant or error pattern".into()),
     };
-    let mut variants = owned_variants(package, ty, fuel)?;
+    let mut variants = owned_variant_fields(package, ty, fuel)?;
     let fields = std::mem::take(
-        &mut variants
+        variants
             .get_mut(tag)
-            .ok_or("pattern branch out of bounds")?
-            .fields,
+            .ok_or("pattern branch out of bounds")?,
     );
     if fields.len() != patterns.len() {
         return Err("pattern payload arity mismatch".into());
@@ -1053,38 +1056,27 @@ pub fn owned_variant_pattern<'p>(
     Ok((tag, patterns, fields))
 }
 
-pub(crate) fn owned_variants(
+// Branch-indexed payload types only. Guard paths retain source branch positions;
+// names, shapes and physical encoding are not part of this observation.
+pub(crate) fn owned_variant_fields(
     package: Option<&Package>,
     ty: &Term,
     fuel: &mut usize,
-) -> Result<Vec<nir::program::Variant>, String> {
+) -> Result<Vec<Vec<Term>>, String> {
     bound_type(ty, fuel)?;
     if let Term::Optional(payload) = ty {
         *fuel = fuel
             .checked_sub(2)
             .ok_or("optional variant layout budget exhausted")?;
-        return Ok(vec![
-            nir::program::Variant {
-                name: "absent".into(),
-                shape: nir::program::VariantShape::Unit,
-                fields: vec![],
-            },
-            nir::program::Variant {
-                name: "present".into(),
-                shape: nir::program::VariantShape::Tuple,
-                fields: vec![(**payload).clone()],
-            },
-        ]);
+        return Ok(vec![vec![], vec![(**payload).clone()]]);
     }
     if let Term::ErrorResult { errors, result } = ty {
+        *fuel = fuel
+            .checked_sub(errors.len().saturating_add(1))
+            .ok_or("error variant layout budget exhausted")?;
         return Ok(std::iter::once(result.as_ref())
             .chain(errors.iter())
-            .enumerate()
-            .map(|(tag, ty)| nir::program::Variant {
-                name: tag.to_string(),
-                shape: nir::program::VariantShape::Tuple,
-                fields: vec![ty.clone()],
-            })
+            .map(|ty| vec![ty.clone()])
             .collect());
     }
     let Term::Nominal {
@@ -1100,19 +1092,8 @@ pub(crate) fn owned_variants(
             .checked_sub(1)
             .ok_or("memory variant lookup budget exhausted")?;
         if definition.declaration == *declaration {
-            *fuel = fuel
-                .checked_sub(definition.variants.len())
-                .ok_or("memory variant layout budget exhausted")?;
-            for variant in &definition.variants {
-                for field in &variant.fields {
-                    bound_type(field, fuel)?;
-                    for argument in arguments {
-                        bound_type(argument, fuel)?;
-                    }
-                }
-            }
             return definition
-                .instantiate_variants(arguments)
+                .instantiate_variant_fields(arguments, &[], fuel)
                 .map_err(|e| e.to_string());
         }
     }
@@ -1132,9 +1113,9 @@ pub fn owned_path_type(
             let tail = path
                 .get(position + 1..position + 3)
                 .ok_or("incomplete memory variant field path")?;
-            ty = owned_variants(package, &ty, fuel)?
+            ty = owned_variant_fields(package, &ty, fuel)?
                 .get(tail[0])
-                .and_then(|variant| variant.fields.get(tail[1]))
+                .and_then(|variant| variant.get(tail[1]))
                 .cloned()
                 .ok_or("memory variant field index out of bounds")?;
             position += 3;
@@ -1453,9 +1434,9 @@ fn extend_storage_projection(
                 Term::ErrorResult { .. } | Term::Optional(_) => nir::program::FieldOwner::Anonymous,
                 _ => return Err("storage variant owner has no variant layout".into()),
             };
-            let selected = owned_variants(package, &result.ty, fuel)?
+            let selected = owned_variant_fields(package, &result.ty, fuel)?
                 .get(tail[0])
-                .and_then(|variant| variant.fields.get(tail[1]))
+                .and_then(|variant| variant.get(tail[1]))
                 .cloned()
                 .ok_or("storage variant field index out of bounds")?;
             result.guards.push((
@@ -1521,9 +1502,11 @@ fn owned_callable_bottom(
         if matches!(&ty, Term::ErrorResult { .. } | Term::Optional(_))
             || matches!(&ty,Term::Nominal {declaration,..} if package.is_some_and(|p|p.enums.iter().any(|e|e.declaration==*declaration)))
         {
-            for (variant, definition) in owned_variants(package, &ty, fuel)?.into_iter().enumerate()
+            for (variant, definition) in owned_variant_fields(package, &ty, fuel)?
+                .into_iter()
+                .enumerate()
             {
-                for (index, field) in definition.fields.into_iter().enumerate() {
+                for (index, field) in definition.into_iter().enumerate() {
                     let mut child = path.clone();
                     child.extend([VARIANT_FIELD, variant, index]);
                     pending.push((child, field));
@@ -2160,20 +2143,14 @@ fn storage_representation(
                     .find(|d| d.declaration == *declaration)
                 {
                     definition
-                        .instantiate_fields(arguments)
+                        .instantiate_stored_fields(arguments, &[], fuel)
                         .map_err(|e| e.to_string())?
-                        .into_iter()
-                        .map(|(_, ty)| ty)
-                        .collect()
                 } else if let Some(definition) =
                     package.enums.iter().find(|d| d.declaration == *declaration)
                 {
                     definition
-                        .instantiate_variants(arguments)
+                        .instantiate_stored_fields(arguments, &[], fuel)
                         .map_err(|e| e.to_string())?
-                        .into_iter()
-                        .flat_map(|variant| variant.fields)
-                        .collect()
                 } else {
                     return Ok(false);
                 }
@@ -2246,20 +2223,14 @@ pub(crate) fn require_pointer_free_owned(
                     .find(|d| d.declaration == *declaration)
                 {
                     definition
-                        .instantiate_fields(arguments)
+                        .instantiate_stored_fields(arguments, &[], fuel)
                         .map_err(|e| e.to_string())?
-                        .into_iter()
-                        .map(|(_, ty)| ty)
-                        .collect()
                 } else if let Some(definition) =
                     package.enums.iter().find(|d| d.declaration == *declaration)
                 {
                     definition
-                        .instantiate_variants(arguments)
+                        .instantiate_stored_fields(arguments, &[], fuel)
                         .map_err(|e| e.to_string())?
-                        .into_iter()
-                        .flat_map(|variant| variant.fields)
-                        .collect()
                 } else if let Some(definition) = package
                     .newtypes
                     .iter()
@@ -6485,10 +6456,10 @@ impl<'a> Infer<'a, '_> {
                 // pending/ready tag must not invent a rejection path.
                 let scalar_packet = matches!(&ty,Term::Nominal {declaration,..}
                     if self.package.is_some_and(|package|package.internal_return_packets.contains(declaration)))
-                    && owned_variants(self.package, &ty, self.fuel)?
+                    && owned_variant_fields(self.package, &ty, self.fuel)?
                         .iter()
                         .all(|variant| {
-                            variant.fields.iter().all(|field| {
+                            variant.iter().all(|field| {
                                 matches!(field, Term::Primitive(_))
                                     && intrinsic_pointer_value(field)
                                     || matches!(
@@ -10709,7 +10680,7 @@ mod optional_layout_tests {
         );
         assert!(owned_path_type(None, &outer, &[VARIANT_FIELD, 0, 0], &mut 1000).is_err());
         assert!(owned_variant_pattern(None, &present, &boolean, &mut 1000).is_err());
-        assert!(owned_variants(None, &outer, &mut 0).is_err());
-        assert!(owned_variants(None, &outer, &mut 1000).is_ok());
+        assert!(owned_variant_fields(None, &outer, &mut 0).is_err());
+        assert!(owned_variant_fields(None, &outer, &mut 1000).is_ok());
     }
 }

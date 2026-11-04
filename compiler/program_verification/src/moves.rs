@@ -847,7 +847,7 @@ fn validate_enum_domains(
         }
         super::memory::bound_type(subject, fuel).map_err(|e| error(source, e))?;
         let ty = owned_field_type(package, subject, path, fuel, source)?;
-        let variants = super::memory::owned_variants(package, &ty, fuel)
+        let variants = super::memory::owned_variant_fields(package, &ty, fuel)
             .map_err(|reason| error(source, reason))?;
         if tags.iter().any(|tag| *tag >= variants.len()) {
             return Err(error(source, "enum premise tag out of bounds"));
@@ -11999,8 +11999,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let path = &leaf.input_fields[..marker];
             let tag = leaf.input_fields[marker + 1];
             let owner = self.field_type(completion_type(ty), path, source)?;
-            let variants = super::memory::owned_variants(self.package, &owner, &mut self.fuel)
-                .map_err(|reason| error(source, reason))?;
+            let variants =
+                super::memory::owned_variant_fields(self.package, &owner, &mut self.fuel)
+                    .map_err(|reason| error(source, reason))?;
             self.fuel = self
                 .fuel
                 .checked_sub(variants.len() + path.len() + 1)
@@ -17499,12 +17500,12 @@ fn callable_value_paths(
         }
         Term::ErrorResult { .. } | Term::Optional(_) => {
             let mut result = vec![];
-            for (variant, layout) in super::memory::owned_variants(package, ty, fuel)
+            for (variant, layout) in super::memory::owned_variant_fields(package, ty, fuel)
                 .map_err(|reason| error(source, reason))?
                 .into_iter()
                 .enumerate()
             {
-                for (field, ty) in layout.fields.iter().enumerate() {
+                for (field, ty) in layout.iter().enumerate() {
                     for path in callable_value_paths(package, ty, fuel, source, depth + 1)? {
                         *fuel = fuel
                             .checked_sub(path.len().saturating_add(3))
@@ -18155,10 +18156,10 @@ fn owned_field_type(
                 let field = components
                     .next()
                     .ok_or_else(|| error(source, "missing error payload field"))?;
-                current = super::memory::owned_variants(package, &current, fuel)
+                current = super::memory::owned_variant_fields(package, &current, fuel)
                     .map_err(|reason| error(source, reason))?
                     .get(*variant)
-                    .and_then(|v| v.fields.get(*field))
+                    .and_then(|v| v.get(*field))
                     .cloned()
                     .ok_or_else(|| error(source, "error payload path out of bounds"))?;
                 continue;
