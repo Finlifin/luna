@@ -144,7 +144,7 @@ fn charge_node(
     rewrite: bool,
     replacements: Option<&std::collections::BTreeMap<crate::DeclarationId, &Term>>,
 ) -> Result<(), CopyBudgetExhausted> {
-    charge_node_observed(root, steps, rewrite, replacements, &mut |_| {})
+    charge_node_observed(root, steps, rewrite, replacements, &mut |_, _| {})
 }
 
 /// Conservatively inspect all embedded type terms, including nested binders,
@@ -156,7 +156,7 @@ pub fn expression_has_contextual_types(
     steps: &mut u64,
 ) -> Result<bool, CopyBudgetExhausted> {
     let mut found = false;
-    charge_node_observed(Node::Expr(value), steps, true, None, &mut |term| {
+    charge_node_observed(Node::Expr(value), steps, true, None, &mut |term, _| {
         found |= matches!(term, Term::Bound { .. } | Term::Hole { .. });
     })?;
     Ok(found)
@@ -188,7 +188,7 @@ fn declaration_inputs(
     steps: &mut u64,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, CopyBudgetExhausted> {
     let mut inputs = std::collections::BTreeSet::new();
-    charge_node_observed(root, steps, true, None, &mut |term| {
+    charge_node_observed(root, steps, true, None, &mut |term, _| {
         if let Term::Rigid { declaration, .. } = term {
             inputs.insert(*declaration);
         }
@@ -196,12 +196,77 @@ fn declaration_inputs(
     Ok(inputs)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InputObservationError {
+    Limit(CopyBudgetExhausted),
+    Scope(crate::TypeError),
+}
+
+impl std::fmt::Display for InputObservationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Limit(CopyBudgetExhausted::Steps) => {
+                f.write_str("input observation budget exhausted")
+            }
+            Self::Limit(CopyBudgetExhausted::Depth) => {
+                f.write_str("input observation depth exhausted")
+            }
+            Self::Scope(error) => write!(f, "invalid input observation scope: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for InputObservationError {}
+
+/// Observe the outer substitution frame of every embedded term, accounting
+/// for nested function binders. This never rewrites a value or clones shared
+/// bodies. All embedded terms must agree on the sort of each outer slot.
+pub fn expression_substitution_parameters(
+    value: &n::Expr,
+    steps: &mut u64,
+) -> Result<std::collections::BTreeMap<usize, crate::Sort>, InputObservationError> {
+    substitution_parameters(Node::Expr(value), steps)
+}
+
+/// The same observation for one term; opaque heads are never unfolded.
+pub fn term_substitution_parameters(
+    value: &Term,
+    steps: &mut u64,
+) -> Result<std::collections::BTreeMap<usize, crate::Sort>, InputObservationError> {
+    substitution_parameters(Node::Type(value), steps)
+}
+
+fn substitution_parameters(
+    root: Node<'_>,
+    steps: &mut u64,
+) -> Result<std::collections::BTreeMap<usize, crate::Sort>, InputObservationError> {
+    let mut slots = std::collections::BTreeMap::new();
+    let mut conflict = None;
+    charge_node_observed(root, steps, true, None, &mut |term, nesting| {
+        if let Term::Bound { depth, index, sort } = term
+            && *depth == nesting
+            && let Some(previous) = slots.insert(*index, *sort)
+            && previous != *sort
+        {
+            conflict.get_or_insert(crate::TypeError::WrongSort {
+                expected: previous,
+                actual: *sort,
+            });
+        }
+    })
+    .map_err(InputObservationError::Limit)?;
+    if let Some(error) = conflict {
+        return Err(InputObservationError::Scope(error));
+    }
+    Ok(slots)
+}
+
 fn charge_node_observed(
     root: Node<'_>,
     steps: &mut u64,
     rewrite: bool,
     replacements: Option<&std::collections::BTreeMap<crate::DeclarationId, &Term>>,
-    observe: &mut impl FnMut(&Term),
+    observe: &mut impl FnMut(&Term, u32),
 ) -> Result<(), CopyBudgetExhausted> {
     fn charge_width(steps: &mut u64, width: usize) -> Result<(), CopyBudgetExhausted> {
         *steps = steps
@@ -233,7 +298,7 @@ fn charge_node_observed(
             let mut fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
             let before = fuel;
             let empty = std::collections::BTreeMap::new();
-            let result = crate::type_computations::visit_expanded_term_for_copy(
+            let result = crate::type_computations::visit_expanded_term_scoped_for_copy(
                 ty,
                 &mut fuel,
                 (MAX_COPY_DEPTH - depth).min(128),

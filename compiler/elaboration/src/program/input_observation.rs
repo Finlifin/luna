@@ -16,6 +16,22 @@ fn structural_limit(limit: nir::copy_budget::CopyBudgetExhausted, span: Span) ->
     )
 }
 
+fn substitution_failure(failure: nir::copy_budget::InputObservationError, span: Span) -> Error {
+    match failure {
+        nir::copy_budget::InputObservationError::Limit(limit) => structural_limit(limit, span),
+        nir::copy_budget::InputObservationError::Scope(reason) => error(span, reason.to_string()),
+    }
+}
+
+pub(super) fn substitution_term(
+    value: &Term,
+    steps: &mut u64,
+    span: Span,
+) -> Result<BTreeMap<usize, Sort>, Error> {
+    nir::copy_budget::term_substitution_parameters(value, steps)
+        .map_err(|failure| substitution_failure(failure, span))
+}
+
 pub(super) fn expression(
     value: &n::Expr,
     steps: &mut u64,
@@ -54,6 +70,23 @@ pub(super) fn term(
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn checked_substitution_inputs(
+        &mut self,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<BTreeMap<usize, Sort>, Error> {
+        nir::copy_budget::expression_substitution_parameters(value, &mut self.required_steps)
+            .map_err(|failure| substitution_failure(failure, span))
+    }
+
+    pub(super) fn term_substitution_inputs(
+        &mut self,
+        value: &Term,
+        span: Span,
+    ) -> Result<BTreeMap<usize, Sort>, Error> {
+        substitution_term(value, &mut self.required_steps, span)
+    }
+
     pub(super) fn checked_declaration_inputs(
         &mut self,
         value: &n::Expr,

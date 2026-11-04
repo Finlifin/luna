@@ -90,10 +90,8 @@ impl Checker<'_, '_> {
         let mut indices = Vec::new();
         let mut parameters = Vec::new();
         for (index, parameter) in ordinary.iter().enumerate() {
-            if parameter
-                .ty
-                .substitution_parameters()
-                .map_err(|e| error(expr.span, e.to_string()))?
+            if self
+                .term_substitution_inputs(&parameter.ty, expr.span)?
                 .is_empty()
             {
                 indices.push(index);
@@ -528,12 +526,7 @@ impl Checker<'_, '_> {
             .map(|parameter| &parameter.ty)
             .chain(std::iter::once(result))
         {
-            demanded.extend(
-                ty.substitution_parameters()
-                    .map_err(|e| error(expr.span, e.to_string()))?
-                    .keys()
-                    .copied(),
-            );
+            demanded.extend(self.term_substitution_inputs(ty, expr.span)?.into_keys());
         }
         if let Some(requirements) = direct.and_then(|owner| self.capabilities.get(&owner)) {
             for requirement in requirements {
@@ -541,10 +534,12 @@ impl Checker<'_, '_> {
                     std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
                 {
                     demanded.extend(
-                        ty.substitution_parameters()
-                            .map_err(|e| error(expr.span, e.to_string()))?
-                            .keys()
-                            .copied(),
+                        input_observation::substitution_term(
+                            ty,
+                            &mut self.required_steps,
+                            expr.span,
+                        )?
+                        .into_keys(),
                     );
                 }
             }
@@ -553,10 +548,12 @@ impl Checker<'_, '_> {
             for requirement in requirements {
                 for ty in required::requirement_terms(requirement, expr.span)? {
                     demanded.extend(
-                        ty.substitution_parameters()
-                            .map_err(|e| error(expr.span, e.to_string()))?
-                            .keys()
-                            .copied(),
+                        input_observation::substitution_term(
+                            ty,
+                            &mut self.required_steps,
+                            expr.span,
+                        )?
+                        .into_keys(),
                     );
                 }
             }
@@ -573,19 +570,11 @@ impl Checker<'_, '_> {
                     "default computation needs declaration parameter metadata",
                 )
             })?;
-            let mut value = self.call_default(owner, parameter, callee, expr.span)?;
-            value.rewrite_types(&mut |ty| {
-                self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
-                    error(expr.span, "dependent default annotation budget exhausted")
-                })?;
-                demanded.extend(
-                    ty.substitution_parameters()
-                        .map_err(|e| error(expr.span, e.to_string()))?
-                        .keys()
-                        .copied(),
-                );
-                Ok::<_, Error>(ty.clone())
-            })?;
+            let value = self.call_default(owner, parameter, callee, expr.span)?;
+            demanded.extend(
+                self.checked_substitution_inputs(&value, expr.span)?
+                    .into_keys(),
+            );
             prepared.defaults[parameter] = Some(value);
         }
         for slot in demanded {
@@ -726,10 +715,8 @@ impl Checker<'_, '_> {
                     "dependent comptime input cannot read a runtime argument",
                 ));
             }
-            for dependency in parameter
-                .ty
-                .substitution_parameters()
-                .map_err(|e| error(source.span, e.to_string()))?
+            for dependency in self
+                .term_substitution_inputs(&parameter.ty, source.span)?
                 .keys()
             {
                 self.prepare_type_dependency(
@@ -751,7 +738,7 @@ impl Checker<'_, '_> {
             let route = routes.iter().find(|route| route.parameter + offset == slot);
             let mut bindings = Vec::new();
             let mut forwarded_default = None;
-            let mut value = if let Some(value) = &prepared.values[slot] {
+            let value = if let Some(value) = &prepared.values[slot] {
                 value.clone()
             } else if let Some(route) = route {
                 route.require_collection_type(self, &expected, source.span)?;
@@ -826,18 +813,8 @@ impl Checker<'_, '_> {
                     .and_then(|owner| self.type_parameters.get(&owner))
                     .cloned()
                     .unwrap_or_default();
-                let mut waiting = false;
-                value.rewrite_types(&mut |ty| {
-                    self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
-                        error(
-                            source.span,
-                            "dependent computation inspection budget exhausted",
-                        )
-                    })?;
-                    waiting |= unresolved.iter().any(|id| ty.mentions_rigid(*id));
-                    Ok::<_, Error>(ty.clone())
-                })?;
-                if waiting {
+                let inputs = self.checked_declaration_inputs(&value, source.span)?;
+                if unresolved.iter().any(|id| inputs.contains(id)) {
                     // Opaque heads and other structural Type values can retain
                     // rigids without invoking a computation over unknown inputs.
                     let mut budget = comptime_runtime::Budget {
@@ -909,7 +886,7 @@ impl Checker<'_, '_> {
 
 impl Checker<'_, '_> {
     pub(super) fn check_ordinary_type_requirements(
-        &self,
+        &mut self,
         owner: OwnerId,
         arguments: &[Term],
         inputs: &[Option<Term>],
@@ -918,21 +895,18 @@ impl Checker<'_, '_> {
         let Some(requirements) = self.requirements.get(&owner) else {
             return Ok(());
         };
-        let requirements = requirements
-            .iter()
-            .filter_map(|r| match required::requirement_terms(r, span) {
-                Ok(terms)
-                    if terms.iter().any(|ty| {
-                        ty.substitution_parameters()
-                            .is_ok_and(|slots| !slots.is_empty())
-                    }) =>
+        let mut dependent = Vec::new();
+        for requirement in requirements {
+            for ty in required::requirement_terms(requirement, span)? {
+                if !input_observation::substitution_term(ty, &mut self.required_steps, span)?
+                    .is_empty()
                 {
-                    Some(Ok(r))
+                    dependent.push(requirement);
+                    break;
                 }
-                Ok(_) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            }
+        }
+        let requirements = dependent;
         if requirements.is_empty() {
             return Ok(());
         }

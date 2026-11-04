@@ -2212,7 +2212,7 @@ impl Checker<'_, '_> {
                             this.checking_open_behavior = saved_open_behavior;
                             this.checking_default_behavior = saved_behavior;
                             this.describing_open_call = saved_call;
-                            let mut value = value?;
+                            let value = value?;
                             let mut fuel =
                                 usize::try_from(this.required_steps).unwrap_or(usize::MAX);
                             let before = fuel;
@@ -2235,19 +2235,10 @@ impl Checker<'_, '_> {
                                         .then_some(index)
                                 })
                                 .collect();
-                            value.rewrite_types(&mut |ty| {
-                                this.required_steps =
-                                    this.required_steps.checked_sub(1).ok_or_else(|| {
-                                        error(default.span, "default dependency budget exhausted")
-                                    })?;
-                                dependencies.extend(
-                                    ty.substitution_parameters()
-                                        .map_err(|e| error(default.span, e.to_string()))?
-                                        .keys()
-                                        .copied(),
-                                );
-                                Ok::<_, Error>(ty.clone())
-                            })?;
+                            dependencies.extend(
+                                this.checked_substitution_inputs(&value, default.span)?
+                                    .into_keys(),
+                            );
                             if dependencies.iter().any(|dependency| *dependency >= slot) {
                                 return Err(error(
                                     default.span,
@@ -6871,7 +6862,7 @@ impl Checker<'_, '_> {
     }
 
     fn open_annotation_requirements_ready(
-        &self,
+        &mut self,
         owner: OwnerId,
         clauses: &[DeclarationId],
         symbols: &[Option<Term>],
@@ -6882,12 +6873,12 @@ impl Checker<'_, '_> {
                 // No callee assumption becomes evidence for an unresolved
                 // declaration argument. Ordinary input facts can be discharged
                 // once their actual immutable symbols have arrived.
-                if clauses.iter().any(|id| ty.mentions_rigid(*id)) {
+                let declarations = self.term_declaration_inputs(ty, span)?;
+                if clauses.iter().any(|id| declarations.contains(id)) {
                     return Ok(false);
                 }
-                if ty
-                    .substitution_parameters()
-                    .map_err(|e| error(span, e.to_string()))?
+                if self
+                    .term_substitution_inputs(ty, span)?
                     .keys()
                     .any(|slot| symbols.get(*slot).is_none_or(Option::is_none))
                 {

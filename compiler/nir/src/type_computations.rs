@@ -577,9 +577,24 @@ pub(crate) fn visit_expanded_term_for_copy(
     replacements: &BTreeMap<DeclarationId, &Term>,
     visit: &mut impl FnMut(&Term),
 ) -> Result<(), crate::copy_budget::CopyBudgetExhausted> {
+    visit_expanded_term_scoped_for_copy(root, fuel, max_depth, replacements, &mut |term, _| {
+        visit(term)
+    })
+}
+
+/// Structural observation with the number of function binders crossed from
+/// this term root. Callable phase wrappers and closure environments introduce
+/// no binder; function parameter domains and results share one new frame.
+pub(crate) fn visit_expanded_term_scoped_for_copy(
+    root: &Term,
+    fuel: &mut usize,
+    max_depth: usize,
+    replacements: &BTreeMap<DeclarationId, &Term>,
+    visit: &mut impl FnMut(&Term, u32),
+) -> Result<(), crate::copy_budget::CopyBudgetExhausted> {
     use crate::copy_budget::CopyBudgetExhausted as Limit;
-    let mut work = vec![(root, 0usize, true)];
-    while let Some((term, depth, substitute)) = work.pop() {
+    let mut work = vec![(root, 0usize, 0u32, true)];
+    while let Some((term, depth, nesting, substitute)) = work.pop() {
         *fuel = fuel.checked_sub(1).ok_or(Limit::Steps)?;
         if depth >= max_depth.min(128) {
             return Err(Limit::Depth);
@@ -587,12 +602,12 @@ pub(crate) fn visit_expanded_term_for_copy(
         if substitute {
             if let Term::Rigid { declaration, .. } = term {
                 if let Some(replacement) = replacements.get(declaration) {
-                    work.push((replacement, depth, false));
+                    work.push((replacement, depth, nesting, false));
                     continue;
                 }
             }
         }
-        visit(term);
+        visit(term, nesting);
         // Scalar payloads and empty effect occurrences cost space even when
         // they add no child term. Charge them before cloning or substitution.
         let payload = match term {
@@ -618,11 +633,12 @@ pub(crate) fn visit_expanded_term_for_copy(
             _ => 0,
         };
         *fuel = fuel.checked_sub(payload).ok_or(Limit::Steps)?;
+        let child_nesting = nesting + u32::from(matches!(term, Term::Function { .. }));
         let mut push = |term| {
             if work.len() >= *fuel {
                 return Err(Limit::Steps);
             }
-            work.push((term, depth + 1, substitute));
+            work.push((term, depth + 1, child_nesting, substitute));
             Ok(())
         };
         term.visit_children(&mut push)?;

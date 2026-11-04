@@ -237,3 +237,15 @@ fn signature_source_dependency_closure_exhaustion_preserves_fresh_attempts() {
         4096,
     );
 }
+
+#[test]
+fn open_default_scoped_input_observation_exhaustion_preserves_recovery() {
+    check_source_observation(
+        "typealias Type = .Type'builtin;
+        comptime fn Pick(flag: bool) -> Type { if flag { bool } else { bool } }
+        fn choose(comptime .flag: bool = true, .value: defer Pick(flag) = true) -> bool { value }
+        fn run() -> bool { choose() }",
+        "checked input dependency budget exhausted",
+        4096,
+    );
+}
