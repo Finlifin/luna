@@ -570,6 +570,7 @@ pub fn validate(package: &Package) -> Result<(), &'static str> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApplicationError {
+    Budget { index: usize },
     Arity { expected: usize, actual: usize },
     InputType { index: usize },
     InputDependency { index: usize },
@@ -577,6 +578,9 @@ pub enum ApplicationError {
 impl fmt::Display for ApplicationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Budget { index } => {
+                write!(f, "normal-form input {index} validation budget exhausted")
+            }
             Self::Arity { expected, actual } => write!(
                 f,
                 "normal-form head expects {expected} inputs, found {actual}"
@@ -979,8 +983,6 @@ impl Head {
             let mut prior: BTreeMap<DeclarationId, usize> = BTreeMap::new();
             for (index, (parameter, argument)) in self.parameters.iter().zip(arguments).enumerate()
             {
-                crate::type_computations::charge_term(argument, &mut remaining)
-                    .map_err(|_| ApplicationError::InputType { index })?;
                 let expected = (|| {
                     use crate::type_computations::{Error, charge_term};
                     charge_term(&parameter.ty, &mut remaining)?;
@@ -1026,217 +1028,85 @@ impl Head {
                 .map_err(|error| {
                     if matches!(error, crate::type_computations::Error::Budget) {
                         remaining = 0;
+                        return ApplicationError::Budget { index };
                     }
                     ApplicationError::InputDependency { index }
                 })?;
-                let mut work = vec![(expected, argument, 0usize)];
-                while let Some((expected, argument, depth)) = work.pop() {
-                    if depth > 128 || remaining == 0 {
-                        return Err(ApplicationError::InputType { index });
+                use crate::value_admission::{self, DomainQueries, Error};
+                let missing = |fuel: &usize, message: &str| {
+                    if *fuel == 0 {
+                        Error::Budget
+                    } else {
+                        Error::from(message)
                     }
-                    remaining -= 1;
-                    let accepted = match (&expected, argument) {
-                        (
-                            _,
-                            Term::Rigid {
-                                sort: Sort::ComptimeValue,
-                                ..
-                            }
-                            | Term::Bound {
-                                sort: Sort::ComptimeValue,
-                                ..
-                            },
-                        ) => {
-                            expected != Term::Primitive(Primitive::Type)
-                                && declared(argument, &expected)
-                        }
-                        (
-                            Term::Function { .. }
-                            | Term::ComptimeFunction(_)
-                            | Term::NormalFormFunction(..)
-                            | Term::UnsafeFunction(_),
-                            Term::FunctionValue { .. } | Term::MethodValue(_),
-                        ) => {
-                            argument
-                                .check_scope(frames)
-                                .map_err(|_| ApplicationError::InputType { index })?;
-                            let signature = callable_signature(
-                                crate::CallableValueRef::from_term(argument).unwrap(),
-                                frames,
-                                &mut remaining,
-                            )
-                            .ok_or(ApplicationError::InputType { index })?;
-                            crate::type_computations::charge_term(&signature, &mut remaining)
-                                .map_err(|_| ApplicationError::InputType { index })?;
-                            signature.check_scope(frames).is_ok() && signature.as_ref() == &expected
-                        }
-                        (Term::Optional(payload), Term::OptionalValue { ty, value })
-                            if ty.as_ref() == &expected =>
-                        {
-                            if let Some(value) = value {
-                                work.push(((**payload).clone(), value.as_ref(), depth + 1));
-                            }
-                            true
-                        }
-                        (Term::ErrorResult { .. }, Term::ErrorValue { value, .. }) => {
-                            let payload = crate::error_results::frozen_payload_domain(
-                                argument,
-                                &expected,
-                                &mut remaining,
-                            )
-                            .map_err(|_| ApplicationError::InputType { index })?;
-                            work.push((payload.clone(), value.as_ref(), depth + 1));
-                            true
-                        }
-                        (
-                            Term::NormalForm {
-                                head,
-                                sort: Sort::Type,
-                                arguments,
-                            },
-                            Term::NominalValue {
-                                ty,
-                                variant: None,
-                                fields,
-                            },
-                        ) if ty.as_ref() == &expected && is_list(*head) => {
-                            let [element] = arguments.as_slice() else {
-                                return Err(ApplicationError::InputType { index });
-                            };
-                            if element.sort() != Sort::Type || fields.len() > remaining {
-                                return Err(ApplicationError::InputType { index });
-                            }
-                            for value in fields {
-                                crate::type_computations::charge_term(element, &mut remaining)
-                                    .map_err(|_| ApplicationError::InputType { index })?;
-                                work.push((element.clone(), value, depth + 1));
-                            }
-                            true
-                        }
-                        (
-                            Term::Nominal { .. },
-                            Term::NominalValue {
-                                ty,
-                                variant,
-                                fields,
-                            },
-                        ) if ty.as_ref() == &expected => {
-                            let types = nominal_fields(&expected, *variant, &mut remaining)
-                                .ok_or(ApplicationError::InputType { index })?;
-                            if types.len() != fields.len() || fields.len() > remaining {
-                                return Err(ApplicationError::InputType { index });
-                            }
-                            for (ty, value) in types.into_iter().zip(fields) {
-                                crate::type_computations::charge_term(&ty, &mut remaining)
-                                    .map_err(|_| ApplicationError::InputType { index })?;
-                                work.push((ty, value, depth + 1));
-                            }
-                            true
-                        }
-                        (
-                            Term::Primitive(Primitive::Object),
-                            Term::NominalValue {
-                                ty,
-                                variant: None,
-                                fields,
-                            },
-                        ) if ty.as_ref() == &expected => {
-                            if fields.len() > remaining {
-                                return Err(ApplicationError::InputType { index });
-                            }
-                            for entry in fields {
-                                let (_, domain, value) = crate::objects::entry_parts(entry)
-                                    .ok_or(ApplicationError::InputType { index })?;
-                                crate::type_computations::charge_term(domain, &mut remaining)
-                                    .map_err(|_| ApplicationError::InputType { index })?;
-                                work.push((domain.clone(), value, depth + 1));
-                            }
-                            true
-                        }
-                        (Term::Record(fields), Term::RecordValue(values))
-                            if fields.len() == values.len() && fields.len() <= remaining =>
-                        {
-                            let mut names = BTreeSet::new();
-                            for ((name, ty), (label, value)) in fields.iter().zip(values) {
-                                remaining = remaining
-                                    .checked_sub(name.len())
-                                    .and_then(|n| n.checked_sub(label.len()))
-                                    .ok_or(ApplicationError::InputType { index })?;
-                                if name != label || !names.insert(name) {
-                                    return Err(ApplicationError::InputType { index });
+                };
+                value_admission::validate(
+                    argument,
+                    &expected,
+                    frames,
+                    &mut remaining,
+                    &mut DomainQueries {
+                        layout: &mut |ty, variant, fuel| {
+                            if variant.is_none() {
+                                if let Term::NormalForm {
+                                    head, arguments, ..
+                                } = ty
+                                {
+                                    if is_tuple(*head) {
+                                        crate::type_computations::charge_term(ty, fuel)?;
+                                        return type_list_fields_with_layouts(arguments, &is_list)
+                                            .map(|fields| fields.to_vec())
+                                            .ok_or_else(|| {
+                                                Error::from(
+                                                    "tuple representation evidence unavailable",
+                                                )
+                                            });
+                                    }
                                 }
-                                work.push((ty.clone(), value, depth + 1));
                             }
-                            true
-                        }
-                        (
-                            Term::NormalForm {
+                            nominal_fields(ty, variant, fuel).ok_or_else(|| {
+                                missing(fuel, "nominal representation evidence unavailable")
+                            })
+                        },
+                        declared: &mut |value, domain, _| declared(value, domain),
+                        collection: &mut |domain, fuel| {
+                            let Term::NormalForm {
                                 head,
                                 sort: Sort::Type,
                                 arguments,
-                            },
-                            Term::TupleValue(values),
-                        ) if is_tuple(*head) => {
-                            let Some(fields) = type_list_fields_with_layouts(arguments, &is_list)
+                            } = domain
                             else {
-                                return Err(ApplicationError::InputType { index });
+                                return Ok(None);
                             };
-                            if fields.len() != values.len() || fields.len() > remaining {
-                                return Err(ApplicationError::InputType { index });
+                            if !is_list(*head) {
+                                return Ok(None);
                             }
-                            work.extend(
-                                fields
-                                    .iter()
-                                    .zip(values)
-                                    .map(|(ty, value)| (ty.clone(), value, depth + 1)),
-                            );
-                            true
-                        }
-                        (Term::Tuple(fields), Term::TupleValue(values))
-                            if fields.len() == values.len() && fields.len() <= remaining =>
-                        {
-                            work.extend(
-                                fields
-                                    .iter()
-                                    .zip(values)
-                                    .map(|(ty, value)| (ty.clone(), value, depth + 1)),
-                            );
-                            true
-                        }
-                        (Term::Primitive(Primitive::Type), value) => value.sort() == Sort::Type,
-                        (Term::ClosureContextType, Term::ClosureContextValue(_)) => true,
-                        (Term::Primitive(Primitive::BitVec(width)), Term::BitVec(value)) => {
-                            *width == value.width()
-                        }
-                        (Term::Primitive(Primitive::Void), Term::Unit) => true,
-                        (Term::Primitive(Primitive::Bool), Term::Bool(_)) => true,
-                        (Term::Primitive(Primitive::F16), Term::Float16(_)) => true,
-                        (Term::Primitive(Primitive::Bf16), Term::BFloat16(_)) => true,
-                        (Term::Primitive(Primitive::F32), Term::Float32(_)) => true,
-                        (Term::Primitive(Primitive::F64), Term::Float64(_)) => true,
-                        (Term::Primitive(Primitive::Integer), Term::Integer(_)) => true,
-                        (Term::Primitive(Primitive::Float), Term::Float(_)) => true,
-                        (Term::Primitive(Primitive::Char), Term::Char(_)) => true,
-                        (Term::Primitive(Primitive::Str), Term::String(_)) => true,
-                        (Term::Primitive(Primitive::Symbol), Term::Symbol(_)) => true,
-                        (Term::Primitive(primitive), Term::Integer(value)) => target
-                            .map_or_else(
-                                || primitive.fixed_integer_layout(),
-                                |target| target.integer_layout(*primitive),
-                            )
-                            .is_some_and(|(signed, width)| {
-                                if signed {
-                                    value.to_signed(width).is_ok()
-                                } else {
-                                    value.to_unsigned(width).is_ok()
-                                }
-                            }),
-                        _ => false,
-                    };
-                    if !accepted {
-                        return Err(ApplicationError::InputType { index });
+                            let [element] = arguments.as_slice() else {
+                                return Err("collection input domain is malformed".into());
+                            };
+                            if element.sort() != Sort::Type {
+                                return Err("collection element domain is not a Type".into());
+                            }
+                            crate::type_computations::charge_term(element, fuel)?;
+                            Ok(Some(element.clone()))
+                        },
+                        callable: &mut |value, frames, fuel| match callable_signature(
+                            value, frames, fuel,
+                        ) {
+                            Some(signature) => Ok(Some(signature)),
+                            None if *fuel == 0 => Err(Error::Budget),
+                            None => Ok(None),
+                        },
+                        target,
+                    },
+                )
+                .map_err(|error| match error {
+                    Error::Budget => {
+                        remaining = 0;
+                        ApplicationError::Budget { index }
                     }
-                }
+                    Error::Invalid(_) => ApplicationError::InputType { index },
+                })?;
                 prior.insert(parameter.declaration, index);
             }
             Ok(())

@@ -469,3 +469,39 @@ fn generic_default_stability_needs_its_definition_proof_environment() {
     ";
     assert_eq!(run(source), Value::Bool(true));
 }
+
+#[test]
+fn ordinary_clauses_and_opaque_heads_share_public_list_value_domains() {
+    let source = "
+        comptime fn first() -> bool
+        where .values: meta.List<bool> = []
+        {
+            values[0]
+        }
+        pure comptime fn Key<.values: meta.List<bool> = []> -> Type { bool }
+        comptime fn compare() -> bool {
+            let values: meta.List<bool> = [true, false];
+            let other: meta.List<bool> = [false, true];
+            first<.values = values>() and not first<.values = other>()
+                and Key<.values = values> == Key<.values = [true, false]>
+        }
+        fn run() -> bool { const result = compare(); result }
+    ";
+    assert_eq!(run(source), Value::Bool(true));
+}
+
+#[test]
+#[ignore = "ordinary clause collectors still restrict the domain to List<Type>"]
+fn ordinary_clause_collectors_accept_non_type_element_domains() {
+    assert_eq!(
+        run("
+        comptime fn first() -> bool
+        where ...values: meta.List<bool>
+        {
+            values[0]
+        }
+        fn run() -> bool { const result = first<.values = [true, false]>(); result }
+    "),
+        Value::Bool(true)
+    );
+}

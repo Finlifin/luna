@@ -140,3 +140,62 @@ fn input_rejection_dump_escapes_the_reason() {
         "(function-input-rejected (index 1) (parameter (declaration (package 7) (local 3))) (stage domain) (reason \"unavailable \\\"input\\\"\\nnext\"))"
     );
 }
+
+#[test]
+fn nested_callable_inputs_share_admission_and_keep_rejection_context() {
+    let mut world = world();
+    let mut callback = world.functions[0].clone();
+    callback.declaration = id(20);
+    callback.type_parameters.clear();
+    let callable = Term::ComptimeFunction(Box::new(callback.signature.clone()));
+    world.functions.push(callback);
+    let domain = Term::Optional(Box::new(callable));
+    let make = |declaration| Term::OptionalValue {
+        ty: Box::new(domain.clone()),
+        value: Some(Box::new(Term::FunctionValue {
+            declaration,
+            arguments: vec![],
+        })),
+    };
+    let mut vm = Interpreter::for_comptime(&world, Budget::default()).unwrap();
+    let error = vm
+        .invoke_instantiated(id(1), vec![domain.clone(), make(id(99))], vec![])
+        .unwrap_err();
+    assert!(rejected(error.kind).reason.contains("signature evidence"));
+    assert!(!vm.events().iter().any(|event| matches!(
+        event,
+        Event::InstantiateFunction { .. } | Event::EnterFunction(_)
+    )));
+    assert_eq!(
+        vm.invoke_instantiated(id(1), vec![domain.clone(), make(id(20))], vec![])
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn record_input_recovery_uses_field_domains_in_declaration_order() {
+    let world = world();
+    let mut vm = Interpreter::for_comptime(&world, Budget::default()).unwrap();
+    let domain = Term::Record(vec![
+        ("flag".into(), boolean()),
+        ("letter".into(), Term::Primitive(Primitive::Char)),
+    ]);
+    let value = Term::RecordValue(vec![
+        ("letter".into(), Term::Char('x')),
+        ("flag".into(), Term::Bool(true)),
+    ]);
+    assert_eq!(
+        vm.decode_immutable_input(&value, &domain).unwrap(),
+        Value::AnonymousRecord(vec![
+            ("flag".into(), Value::Bool(true)),
+            ("letter".into(), Value::Char('x'))
+        ])
+    );
+    let duplicated = Term::RecordValue(vec![
+        ("flag".into(), Term::Bool(true)),
+        ("flag".into(), Term::Bool(false)),
+    ]);
+    assert!(vm.decode_immutable_input(&duplicated, &domain).is_err());
+    assert!(vm.decode_immutable_input(&value, &domain).is_ok());
+}

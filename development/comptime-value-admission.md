@@ -23,7 +23,7 @@
 
 既有 list 编码已保留 NF 域，不能再把“所有 List<Type> 都被导出为无域类型向量”当作
 现状。仍有待迁移的具体分支不证明应删除全部紧凑存储或现有准入检查。
-本轮只静态核对这些生产入口，未执行所附测试。
+初始设计只静态核对这些生产入口；后续已接通的共同值域检查与运行证据见第 10 节。
 
 ## 2. 一个值通过四道不同的边界
 
@@ -205,5 +205,72 @@ meta.List.append_all 自追加、foreach 中回调修改原容器、List 的元�
 后同会话合法调用、闭包重建不重放原工厂、错误/optional 层次丢失及未完成代码义务。
 所有案例都要比较操作次数、值/类型与相关责任，而非只检查输出字符串。
 
-本轮没有执行这些用例。具体稳定节点 Rust 接口、持久 codec 及一般循环快照存储仍须
-按本协议细化；不在本次文档提交中声称这些生产路径已经统一。
+上表是完整迁移的验收范围，不等于目前全部通过。具体稳定节点 Rust 接口、持久 codec
+及一般循环快照存储仍须按本协议细化；第 10 节区分当前共同准入路径与其余未完成部分。
+
+
+## 10. 已接通的共同值域检查
+
+`nir::value_admission` 已接管不可变值描述的递归成员检查。普通 callable 子句、NF 输入、
+名义参数及 trait 中的符号聚合值使用同一个递归检查器；各自仍负责参数路由、依赖域
+替换和完整形成义务。旧 NF 聚合检查循环与名义参数递归检查器已移除。
+
+`DomainQueries` 只向接收世界查询已注册布局、集合元素域、符号值域依据和 callable
+签名；服务不拥有 elaborator，不执行源码，不凭 NF 头的拼写或载荷形状授予成员资格。
+当前布局注册仍使用既有的 Tuple/List 元数据，尚未完成 Role 的整体退役。
+
+普通 callable 输入不再按 Object/list/callable 分类伪造一个单参数 `Head`。它在原有
+完整 telescope 替换完成后直接交付实参与确定的域，包括嵌套聚合中的 callable。
+输入失败仍保留外层 slot、声明身份和 value 阶段，且发生在实例发布与函数主体执行前。
+例如 optional 内的函数值也通过接收世界取得签名，不能因外层 optional 不属于旧分支
+白名单而拒绝，也不能只凭内部 declaration 数字接受。
+
+VM 的签名查询移到 `callable_domains.rs`，typed 结果区分实际缺失、域错误和预算耗尽；
+普通值准入直接消费它。其他既有 `Option` 观察入口暂作适配：真实预算错误会置空剩余
+预算，不能把“剩余预算非零但不足以复制整个描述”误判成不存在的声明。NIR 的
+`ApplicationError` 同样新增独立 Budget 结果。NF 的旧外部 Option/bool 回调接口仍在，
+不能据此声称全部查询服务都已迁移为完整证据类型。
+
+共同服务保留 Type/sort/显式 frame 检查、准确 optional/error 分支、整数目标范围、
+字段域以及接收端 callable 身份与签名。记录成员按字段名取得各自的域；VM 恢复时按
+声明顺序重建内部字段序列，拒绝重名或缺字段。该恢复动作不改 NF 头、声明身份或类型
+等式，也不是调用源语言的相等协议。结构预算与域错误分开，不缓存不完整结论。
+
+当前返回值仍是成员检查成功/失败，不是第 2 节完整的 AdmittedValue/TransferPlan。
+尚未统一 LiveValue、闭包图快照、代码值/Any 传送及持久 codec；NormalFormArgument 的
+上下文表达式与参数准备路径也仍待 ArgumentPlan 迁移。本阶段没有将这些缺口包装成
+一个万能的“已验证值”。
+
+
+当前实际验收从 `/home/fin/luna` 通过 `development/check.py --timeout 900 -- test`
+执行，保留工作区原有资源分析修改，未跑全 workspace/native：
+
+| 范围 | 结果与证据 |
+| --- | --- |
+| NIR nominal_parameters、normal_inputs、trait_parameters、value_admission | 72 项通过，含跨入口记录域、嵌套 callable/集合、未知世界、frame 与预算恢复；`/tmp/luna-tools-lp15nyc2/result.json` |
+| VM abstract_values、function_input_diagnostics、nominal_types、runtime_function_identities、type_list_inputs | 120 项通过；`/tmp/luna-tools-xtlb4gc8/result.json` |
+| VM signature 单元组 | 检查资源限制、保留签名 core 借用与恢复；`/tmp/luna-tools-7f91pcbk/result.json` |
+| luna comptime_clause_inputs、function_template_local_definitions | 46、22 项通过；后者 2 项 ignored；真实六包的固定具名 `meta.List<bool>` 值同时用于普通子句与用户 NF；`/tmp/luna-tools-lt6asiz5/result.json` |
+| luna dependent_list_collectors、normal_form_domains、normal_form_methods | 1、3、6 项通过；`/tmp/luna-tools-grmad_md/result.json` |
+| luna nominal_value_parameters | 306 项通过，1 项既有失败，见下述对照；该组及混合命令整体退出 101，不写作全通过 |
+
+`memoized_value_indexed_keys_keep_declaration_and_value_arguments` 在
+`memoization::Invocation::prepare` 请求 dispatch 时仍报
+`requested dispatch function still requires ordinary invocation input staging`。
+将本次涉及的 8 个生产源文件暂时还原为 HEAD `962a03b4`、保留同一工作区资源修改后，
+单独运行此例仍在同一断言、同一消息处失败，退出 101：
+`/tmp/luna-tools-biw368sn/result.json`。对照备份、限定文件列表及恢复结果保存在
+`/tmp/luna-admission-baseline-wr76d3vj`；对照后已逐字节恢复本次源码。这项失败尚未修复，
+不能以共有值域检查通过推断 invocation staging 或结果缓存准备已经完成。
+
+真实六包尝试还暴露普通函数子句收集器的既有限制：`ensure_signature` 对 variadic
+调用 `is_type_list_type`，要求元素域恰为 Type。合法的
+`where ...values: meta.List<bool>` 因而在值准入之前就被拒绝。
+`ordinary_clause_collectors_accept_non_type_element_domains` 保留期望成功的 ignored
+回归；单独显式运行此例仍退出 101，证据为 `/tmp/luna-tools-i2jbbvo7/result.json`。
+另一个 ignored 仍是泛型 Copy 默认值的 P3/资源证据缺口。不得把这两个实现缺口
+变成语言禁止。下一步应沿声明输入到参数收集的完整路径移除该 Type 专用限制，
+包括普通子句的实例输入和默认/展开顺序，不能只换一个条件掩盖遗漏的绑定槽。
+
+源码验收只要求同头同参的 NF 相等；不同实参不能自动证明 opaque NF 结果不等，
+不通过放宽 PTC 的非单射边界来验证值域传送。当前源码仍保留各实参的实际描述与域。

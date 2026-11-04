@@ -256,12 +256,21 @@ impl Interpreter<'_> {
     ) -> Result<Value, Error> {
         let value = match (term, ty) {
             (Term::RecordValue(values), Term::Record(types)) if values.len() == types.len() => {
-                let mut fields = Vec::new();
-                for ((name, value), (expected_name, ty)) in values.iter().zip(types) {
-                    self.integer_operation(None, |budget| budget.consume(name.len()))?;
-                    if name != expected_name {
+                // Field names establish membership; restore declaration order
+                // before publishing the positional runtime representation.
+                let mut named = BTreeMap::new();
+                for (name, value) in values {
+                    self.integer_operation(None, |budget| budget.consume(name.len() + 1))?;
+                    if named.insert(name.as_str(), value).is_some() {
                         return Err(self.failure(ErrorKind::Type, None));
                     }
+                }
+                let mut fields = Vec::new();
+                for (name, ty) in types {
+                    self.integer_operation(None, |budget| budget.consume(name.len()))?;
+                    let value = named
+                        .remove(name.as_str())
+                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
                     fields.push((
                         name.clone(),
                         self.normal_pattern_value_at(value, ty, depth + 1, reconstruct_callables)?,

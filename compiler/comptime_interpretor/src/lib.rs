@@ -21,6 +21,7 @@ pub use code_values::CodeValue;
 mod bit_operations;
 mod bit_representation;
 mod bit_writeback;
+mod callable_domains;
 mod comptime_domains;
 mod comptime_graph;
 mod default_code;

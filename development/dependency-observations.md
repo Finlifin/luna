@@ -294,11 +294,12 @@ stdout.log 保留逐项实参和原因。中间 `/tmp/luna-tools-px3e7mk_` 是�
 新增 VM 案例验证依赖域第二个输入的拒绝位置、失败不发布实例/编译主体、失败后合法
 重试，以及缺少 symbolic evidence 时重复失败、只有显式授权匹配域后才形成实例。
 原有列表域/作用域/预算测试保留原判定，runtime 函数身份测试同时检查新增的诊断字段。
-旧 normal-form Head 适配分支仍有一个独立缺口：Object/list/callable 检查的
+在 `0d6ba379` 中，旧 normal-form Head 适配分支仍有一个独立缺口：Object/list/callable 检查的
 ApplicationError 会混合部分工作量限制与 InputType，不能仅凭剩余 fuel 非零就把它
 包装成“已证明的值域拒绝”。本次保留该分支原分类，不新增这样的断言；后续统一普通
 值准入时须替换带 Option/bool 回调的失败协议，明确 Budget/Unknown/Invalid 后一起
-迁移消费者，不能只改错误文本。该适配分支及 Tuple/List 的旧 Role 检查尚未退役。
+迁移消费者，不能只改错误文本。该适配分支后来已由[共同值域检查](comptime-value-admission.md#10-已接通的共同值域检查)接管，
+VM callable 签名查询的资源失败也已单独分类；Tuple/List 的旧 Role 检查仍未整体退役。
 
 `0d6ba379` 的这项接线解决信息丢失，当时尚未实现 §4 的依赖选择；默认 helper 正例
 当时保留 ignore，没有改成期望拒绝。当前实现见 §5.4。

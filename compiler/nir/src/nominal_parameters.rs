@@ -3,44 +3,7 @@
 use crate::{DeclarationId, DeclarationParameter, Primitive, Sort, Term, TypeError};
 use std::collections::BTreeSet;
 
-/// Resource exhaustion is distinct from a disproved input domain.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AdmissionError {
-    Budget,
-    Invalid(String),
-}
-impl std::fmt::Display for AdmissionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Budget => f.write_str("nominal input validation budget exhausted"),
-            Self::Invalid(message) => f.write_str(message),
-        }
-    }
-}
-impl std::error::Error for AdmissionError {}
-impl From<&str> for AdmissionError {
-    fn from(message: &str) -> Self {
-        Self::Invalid(message.into())
-    }
-}
-impl From<String> for AdmissionError {
-    fn from(message: String) -> Self {
-        Self::Invalid(message)
-    }
-}
-impl From<crate::type_computations::Error> for AdmissionError {
-    fn from(error: crate::type_computations::Error) -> Self {
-        match error {
-            crate::type_computations::Error::Budget => Self::Budget,
-            error => Self::Invalid(error.to_string()),
-        }
-    }
-}
-impl From<AdmissionError> for String {
-    fn from(error: AdmissionError) -> Self {
-        error.to_string()
-    }
-}
+pub use crate::value_admission::Error as AdmissionError;
 
 pub fn binders(
     parameters: &[DeclarationId],
@@ -577,15 +540,18 @@ pub fn admit_with_collections_in<'a>(
                 return Err("nominal argument sort mismatch".into());
             }
             if expected != Sort::Type {
-                validate_value(
+                crate::value_admission::validate(
                     argument,
                     &domain,
+                    &[],
                     fuel,
-                    &mut layout,
-                    &mut declared,
-                    &mut collection,
-                    0,
-                    target,
+                    &mut crate::value_admission::DomainQueries {
+                        layout: &mut layout,
+                        declared: &mut declared,
+                        collection: &mut collection,
+                        callable: &mut |_, _, _| Ok(None),
+                        target,
+                    },
                 )?;
             }
             crate::type_computations::charge_term(argument, fuel)?;
@@ -612,283 +578,29 @@ pub(crate) fn validate_symbolic_value(
     layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
     declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
 ) -> Result<(), AdmissionError> {
-    validate_symbolic_value_in(argument, domain, fuel, layout, declared, None)
+    validate_symbolic_value_in(argument, domain, &[], fuel, layout, declared, None)
 }
 
 pub(crate) fn validate_symbolic_value_in(
     argument: &Term,
     domain: &Term,
+    frames: &[Vec<Sort>],
     fuel: &mut usize,
     mut layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
     mut declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
     target: Option<crate::target::TargetData>,
 ) -> Result<(), AdmissionError> {
-    validate_value(
+    crate::value_admission::validate(
         argument,
         domain,
+        frames,
         fuel,
-        &mut layout,
-        &mut declared,
-        &mut |_, _| Ok(None),
-        0,
-        target,
-    )
-}
-
-fn validate_value(
-    argument: &Term,
-    domain: &Term,
-    fuel: &mut usize,
-    layout: &mut impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
-    declared: &mut impl FnMut(&Term, &Term, &mut usize) -> bool,
-    collection: &mut impl FnMut(&Term, &mut usize) -> Result<Option<Term>, AdmissionError>,
-    depth: usize,
-    target: Option<crate::target::TargetData>,
-) -> Result<(), AdmissionError> {
-    if depth >= 128 {
-        return Err("nominal value nesting exceeds admission depth".into());
-    }
-    *fuel = fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
-    if matches!(
-        argument,
-        Term::Rigid {
-            sort: Sort::ComptimeValue,
-            ..
-        }
-    ) {
-        return if declared(argument, domain, fuel) {
-            Ok(())
-        } else {
-            Err("nominal value index lacks matching completed domain evidence".into())
-        };
-    }
-    if let Term::OptionalValue { ty, value } = argument {
-        let Term::Optional(payload) = domain else {
-            return Err("optional value index requires an optional domain".into());
-        };
-        if ty.as_ref() != domain {
-            return Err("optional value index domain mismatch".into());
-        }
-        return match value {
-            Some(value) => validate_value(
-                value,
-                payload,
-                fuel,
-                layout,
-                declared,
-                collection,
-                depth + 1,
-                target,
-            ),
-            None => Ok(()),
-        };
-    }
-    if let Term::ErrorValue { value, .. } = argument {
-        let payload = crate::error_results::frozen_payload_domain(argument, domain, fuel).map_err(
-            |error| {
-                if error == crate::error_results::Error::Budget {
-                    AdmissionError::Budget
-                } else {
-                    AdmissionError::from("error value index domain or branch mismatch")
-                }
-            },
-        )?;
-        return validate_value(
-            value,
-            payload,
-            fuel,
-            layout,
-            declared,
-            collection,
-            depth + 1,
+        &mut crate::value_admission::DomainQueries {
+            layout: &mut layout,
+            declared: &mut declared,
+            collection: &mut |_, _| Ok(None),
+            callable: &mut |_, _, _| Ok(None),
             target,
-        );
-    }
-    if matches!(domain, Term::NormalForm { .. }) && matches!(argument, Term::NominalValue { .. }) {
-        if let Some(element) = collection(domain, fuel)? {
-            let fields =
-                crate::normal_forms::list_value_payload(domain, argument).ok_or_else(|| {
-                    AdmissionError::from("collection value domain or payload mismatch")
-                })?;
-            *fuel = fuel
-                .checked_sub(fields.len())
-                .ok_or(AdmissionError::Budget)?;
-            for value in fields {
-                validate_value(
-                    value,
-                    &element,
-                    fuel,
-                    layout,
-                    declared,
-                    collection,
-                    depth + 1,
-                    target,
-                )?;
-            }
-            return Ok(());
-        }
-    }
-    if let Term::NominalValue {
-        ty,
-        variant,
-        fields,
-    } = argument
-    {
-        if *domain == Term::Primitive(Primitive::Object)
-            && ty.as_ref() == domain
-            && variant.is_none()
-        {
-            for entry in fields {
-                let (_, domain, value) = crate::objects::entry_parts(entry)
-                    .ok_or_else(|| AdmissionError::from("invalid Object entry encoding"))?;
-                crate::type_computations::charge_term(domain, fuel)?;
-                validate_value(
-                    value,
-                    domain,
-                    fuel,
-                    layout,
-                    declared,
-                    collection,
-                    depth + 1,
-                    target,
-                )?;
-            }
-            return Ok(());
-        }
-        if !matches!(domain, Term::Nominal { .. }) || ty.as_ref() != domain {
-            return Err("nominal value index has a different nominal identity".into());
-        }
-        let expected = layout(domain, *variant, fuel)?;
-        if expected.len() != fields.len() {
-            return Err("nominal value index payload arity mismatch".into());
-        }
-        for (value, domain) in fields.iter().zip(&expected) {
-            crate::type_computations::charge_term(domain, fuel).map_err(AdmissionError::from)?;
-            validate_value(
-                value,
-                domain,
-                fuel,
-                layout,
-                declared,
-                collection,
-                depth + 1,
-                target,
-            )?;
-        }
-        return Ok(());
-    }
-    if let (Term::TupleValue(values), Term::NormalForm { .. }) = (argument, domain) {
-        // Only the caller's registered layout evidence may expose a tuple
-        // normal form. Its body and its spelling do not establish this view.
-        let domains = layout(domain, None, fuel)?;
-        if values.len() != domains.len() {
-            return Err("nominal tuple index arity mismatch".into());
-        }
-        for (value, domain) in values.iter().zip(&domains) {
-            crate::type_computations::charge_term(domain, fuel).map_err(AdmissionError::from)?;
-            validate_value(
-                value,
-                domain,
-                fuel,
-                layout,
-                declared,
-                collection,
-                depth + 1,
-                target,
-            )?;
-        }
-        return Ok(());
-    }
-    if let (Term::TupleValue(values), Term::Tuple(domains)) = (argument, domain) {
-        if values.len() != domains.len() {
-            return Err("nominal tuple index arity mismatch".into());
-        }
-        for (value, domain) in values.iter().zip(domains) {
-            validate_value(
-                value,
-                domain,
-                fuel,
-                layout,
-                declared,
-                collection,
-                depth + 1,
-                target,
-            )?;
-        }
-        return Ok(());
-    }
-    if let (Term::RecordValue(values), Term::Record(domains)) = (argument, domain) {
-        if values.len() != domains.len() {
-            return Err("nominal record index arity mismatch".into());
-        }
-        let mut names = BTreeSet::new();
-        for (name, _) in domains {
-            *fuel = fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
-            if !names.insert(name) {
-                return Err("duplicate nominal record domain field".into());
-            }
-        }
-        let mut seen = BTreeSet::new();
-        for (name, value) in values {
-            *fuel = fuel
-                .checked_sub(domains.len())
-                .ok_or(AdmissionError::Budget)?;
-            if !seen.insert(name) {
-                return Err("duplicate nominal record index field".into());
-            }
-            let domain = domains
-                .iter()
-                .find_map(|(field, domain)| (field == name).then_some(domain))
-                .ok_or_else(|| AdmissionError::from("unknown nominal record index field"))?;
-            validate_value(
-                value,
-                domain,
-                fuel,
-                layout,
-                declared,
-                collection,
-                depth + 1,
-                target,
-            )?;
-        }
-        return Ok(());
-    }
-    if *domain == Term::Primitive(Primitive::Type) && argument.sort() == Sort::Type {
-        return Ok(());
-    }
-    if let (Term::ClosureContextValue(fields), Term::ClosureContextType) = (argument, domain) {
-        for field in fields {
-            validate_value(
-                field,
-                &Term::Primitive(Primitive::Type),
-                fuel,
-                layout,
-                declared,
-                collection,
-                depth + 1,
-                target,
-            )?;
-        }
-        return Ok(());
-    }
-    if let (Term::Integer(value), Term::Primitive(primitive)) = (argument, domain) {
-        if let Some((signed, width)) = target.map_or_else(
-            || primitive.fixed_integer_layout(),
-            |target| target.integer_layout(*primitive),
-        ) {
-            let fits = if signed {
-                value.to_signed(width).is_ok()
-            } else {
-                value.to_unsigned(width).is_ok()
-            };
-            if !fits {
-                return Err("nominal integer index is outside its declared domain".into());
-            }
-            return Ok(());
-        }
-    }
-    if argument.scalar_index_domain().map(Term::Primitive).as_ref() != Some(domain) {
-        return Err("nominal value index lacks matching completed domain evidence".into());
-    }
-    Ok(())
+        },
+    )
 }

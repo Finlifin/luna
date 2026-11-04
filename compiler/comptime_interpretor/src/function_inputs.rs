@@ -101,64 +101,37 @@ impl Interpreter<'_> {
                         )
                     }
                 })?;
-            if domain == Term::Primitive(Primitive::Type) {
-                continue;
-            }
-            if domain == Term::Primitive(Primitive::Object)
-                || self.list_element(&domain).is_some()
-                || matches!(domain.callable_signature(), Term::Function { .. })
-            {
-                nir::type_computations::charge_term(&domain, fuel)
-                    .map_err(|_| ErrorKind::StepsExhausted)?;
-                // Ordinary function clauses have the same value-domain contract
-                // as normal-form inputs; this descriptor is only a checker,
-                // never a new declaration or a type identity.
-                let contract = nir::normal_forms::Head {
-                    collector: None,
-                    declaration: binder.declaration,
-                    role: nir::normal_forms::Role::Opaque,
-                    requirements: vec![],
-                    parameters: vec![nir::normal_forms::Parameter {
-                        declaration: binder.declaration,
-                        binding: LocalId {
-                            owner: binder.declaration.local,
-                            index: 0,
-                        },
-                        kind: nir::normal_forms::Kind::Value,
-                        ty: domain.clone(),
-                    }],
-                };
-                contract.check_arguments_in_scope_with_callable_values_budgeted_in(
-                    std::slice::from_ref(argument),
-                    |id| self.normal_forms.get(&id).is_some_and(|head| head.role == nir::normal_forms::Role::Tuple),
-                    |id| self.normal_forms.get(&id).is_some_and(|head| head.role == nir::normal_forms::Role::TypeList),
-                    |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-                    |value, domain| matches!(value, Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
-                        if self.abstract_value_parameters.get(declaration) == Some(domain)),
-                    |value, frames, fuel| self.normal_value_callable_signature_view(value, frames, fuel),
-                    frames, fuel, self.target,
-                ).map_err(|_| if *fuel == 0 {
-                    ErrorKind::StepsExhausted
-                } else {
-                    // This legacy checker conflates some limits and type
-                    // failures. Do not label an ambiguous result as a proven
-                    // per-input rejection until it supplies a typed cause.
-                    ErrorKind::Type
-                })?;
-                continue;
-            }
-            nir::validate_declaration_arguments_with_collections_in(
-                &[binder.declaration],
-                &[domain],
-                std::slice::from_ref(argument),
+            nir::value_admission::validate(
+                argument,
+                &domain,
+                frames,
                 fuel,
-                |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| self.admitted_collection_domain(domain, fuel), self.target)
+                &mut nir::value_admission::DomainQueries {
+                    layout: &mut |ty, variant, fuel| {
+                        self.admitted_nominal_layout(ty, variant, fuel)
+                    },
+                    declared: &mut |value, domain, _| {
+                        matches!(value,
+                        Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
+                        if self.abstract_value_parameters.get(declaration) == Some(domain))
+                    },
+                    collection: &mut |domain, fuel| self.admitted_collection_domain(domain, fuel),
+                    callable: &mut |value, frames, fuel| {
+                        self.admitted_callable_signature(value, frames, fuel)
+                    },
+                    target: self.target,
+                },
+            )
             .map_err(|failure| {
-                if matches!(failure, nir::NominalAdmissionError::Budget) {
+                if matches!(failure, nir::value_admission::Error::Budget) {
                     ErrorKind::StepsExhausted
                 } else {
-                    rejection(index, binder.declaration, InputAdmissionStage::Value, failure)
+                    rejection(
+                        index,
+                        binder.declaration,
+                        InputAdmissionStage::Value,
+                        failure,
+                    )
                 }
             })?;
         }

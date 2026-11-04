@@ -634,6 +634,7 @@ impl Trait {
                 crate::nominal_parameters::validate_symbolic_value_in(
                     argument,
                     &domain,
+                    scope,
                     fuel,
                     |ty, variant, fuel| {
                         let package = layouts.ok_or_else(|| {
@@ -680,6 +681,7 @@ impl Trait {
                             crate::nominal_parameters::validate_symbolic_value_in(
                                 value,
                                 expected,
+                                scope,
                                 fuel,
                                 |ty, variant, fuel| {
                                     let package = layouts.ok_or_else(|| {
