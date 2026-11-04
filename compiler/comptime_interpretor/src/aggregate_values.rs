@@ -10,6 +10,9 @@ impl Interpreter<'_> {
     ) -> Result<Term, Error> {
         let ty = self.selected_type_view(ty, Some(source))?;
         self.check_comptime_domain(&ty, source)?;
+        if self.comptime_only {
+            self.admit_type(&ty, 0)?;
+        }
         Ok(ty)
     }
 
@@ -60,9 +63,7 @@ impl Interpreter<'_> {
             index,
             fields: values,
         };
-        if !self.has_type(&value, ty) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        self.check_value_type(&value, ty, Some(source))?;
         Ok(value)
     }
 
@@ -127,9 +128,7 @@ impl Interpreter<'_> {
                     .collect(),
             )
         };
-        if !self.has_type(&value, ty) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        self.check_value_type(&value, ty, Some(source))?;
         Ok(value)
     }
 }

@@ -112,9 +112,7 @@ impl Interpreter<'_> {
                 _ => self.decode_scalar_normal_value(term, ty)?,
             }
         };
-        if !self.has_type(&value, ty) {
-            return Err(self.failure(ErrorKind::Type, None));
-        }
+        self.check_value_type(&value, ty, None)?;
         Ok(value)
     }
 }

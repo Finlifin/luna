@@ -88,9 +88,7 @@ impl Interpreter<'_> {
         let plan =
             self.prepare_error_conversion(*conversion, &operand.ty, &expr.ty, expr.source)?;
         let payload = value!(self.eval(operand, environment));
-        if !self.has_type(&payload, &plan.input) {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
+        self.check_value_type(&payload, &plan.input, Some(expr.source))?;
         self.retain_prepared(0, operand.source, &payload)?;
         self.complete_error_conversion(
             plan.conversion,
@@ -183,9 +181,7 @@ impl Interpreter<'_> {
                 )
             })?;
             let result = self.apply_error_transport(&plan, payload, at, 0)?;
-            if !self.has_type(&result, target_ty) {
-                return Err(self.failure(ErrorKind::Type, Some(at)));
-            }
+            self.check_value_type(&result, target_ty, Some(at))?;
             return Ok(result);
         }
         let Term::ErrorResult { errors, .. } = target_ty else {
@@ -232,9 +228,7 @@ impl Interpreter<'_> {
             error,
             value,
         };
-        if !self.has_type(&result, target_ty) {
-            return Err(self.failure(ErrorKind::Type, Some(at)));
-        }
+        self.check_value_type(&result, target_ty, Some(at))?;
         Ok(result)
     }
 }

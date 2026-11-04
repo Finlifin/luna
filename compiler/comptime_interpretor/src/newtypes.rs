@@ -77,14 +77,12 @@ impl Interpreter<'_> {
     }
 
     pub(super) fn complete_newtype_conversion(
-        &self,
+        &mut self,
         plan: &nir::newtypes::Conversion,
         value: Value,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        if !self.has_type(&value, plan.source()) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        self.check_value_type(&value, plan.source(), Some(source))?;
         let value = match plan.direction() {
             nir::newtypes::Direction::Wrap => Value::Newtype {
                 ty: plan.target().clone(),
@@ -100,9 +98,7 @@ impl Interpreter<'_> {
                 *value
             }
         };
-        if !self.has_type(&value, plan.target()) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        self.check_value_type(&value, plan.target(), Some(source))?;
         Ok(value)
     }
 }

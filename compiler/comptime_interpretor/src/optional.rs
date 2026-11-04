@@ -32,11 +32,8 @@ impl Interpreter<'_> {
         let Term::Optional(payload_ty) = ty else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };
-        if value
-            .as_ref()
-            .is_some_and(|value| !self.has_type(value, payload_ty))
-        {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
+        if let Some(value) = &value {
+            self.check_value_type(value, payload_ty, Some(source))?;
         }
         Ok(Value::Optional {
             ty: ty.clone(),

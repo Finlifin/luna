@@ -901,9 +901,7 @@ impl<'a> Interpreter<'a> {
         } else {
             result_type
         };
-        if !self.has_type(&value, delivered_type) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        self.check_value_type(&value, delivered_type, Some(source))?;
         if self.cleanup_schedule.is_some() {
             if !returned {
                 self.check_scheduled_result(&value, source, environment)?;

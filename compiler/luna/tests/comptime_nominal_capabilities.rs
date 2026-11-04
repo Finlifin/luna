@@ -42,3 +42,48 @@ fn dynamic_nominal_formation_queries_unused_generic_capabilities() {
         );
     }
 }
+
+#[test]
+fn nominal_values_recheck_capabilities_in_the_receiving_world() {
+    for (definition, construction, read) in [
+        (
+            "struct Packet where flag: bool, T :- Enabled<flag> { value: bool }",
+            "Packet<flag, Subject> { value: true }",
+            "value.value",
+        ),
+        (
+            "enum Packet where flag: bool, T :- Enabled<flag> { ready(bool), }",
+            "Packet<flag, Subject>.ready(true)",
+            "value match { .ready(result) => result }",
+        ),
+        (
+            "newtype Packet<flag: bool, T :- Enabled<flag>> = bool;",
+            "true.as(Packet<flag, Subject>)",
+            "value.as(bool)",
+        ),
+    ] {
+        let source = format!(
+            "trait Enabled where flag: bool {{}}
+            struct Subject {{}}
+            impl Enabled<flag> for Subject where flag: bool {{}}
+            {definition}
+            comptime fn make() -> Packet<flag, Subject>
+            where flag: bool
+            {{ {construction} }}
+            comptime fn relay(value: Packet<flag, Subject>) -> Packet<flag, Subject>
+            where flag: bool
+            {{ value }}
+            comptime fn read() -> bool
+            where flag: bool
+            {{ let value = relay<flag>(make<flag>()); {read} }}
+            comptime fn dynamic_read(flag: bool) -> bool {{ read<flag>() }}
+            comptime fn read_packet() -> bool {{ dynamic_read(true) }}"
+        );
+        let package = sysroot::compile(&source).unwrap();
+        assert_eq!(
+            luna::invocation::invoke(&package, "read_packet", 1_000_000)
+                .unwrap_or_else(|failure| panic!("{definition}: {failure}")),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+}

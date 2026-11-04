@@ -111,9 +111,7 @@ impl Interpreter<'_> {
         ty.check_scope(&[])
             .map_err(|_| self.failure(ErrorKind::Type, None))?;
         self.admit_type(ty, 0)?;
-        if !self.has_type(value, ty) {
-            return Err(self.failure(ErrorKind::Type, None));
-        }
+        self.check_value_type(value, ty, None)?;
         self.admit_value_types(value, 0)
     }
     /// Host inputs can hide Type descriptions inside immutable aggregates.

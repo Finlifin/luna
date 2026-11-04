@@ -13,7 +13,8 @@
 | 源码 | 已有能力 | 仍需统一的边界 |
 | --- | --- | --- |
 | [nir/comptime_values.rs](../compiler/nir/src/comptime_values.rs) | frozen list 保留准确声明域，Type 元素也使用普通名义值载体；标量范围、sort/scope 检查 | validate 明确不承担全部 aggregate/abstract 准入；不能把结构通过当作形成证明 |
-| [normal_terms.rs](../compiler/comptime_interpretor/src/normal_terms.rs)、[normal_values](../compiler/comptime_interpretor/src/normal_values/mod.rs) | 受预算的数据编码/恢复、作用域及恢复后 has_type 检查 | 各容器、Type、callable 分支仍与外部准入逻辑共同承担职责，尚无统一受限结果 |
+| [normal_terms.rs](../compiler/comptime_interpretor/src/normal_terms.rs)、[normal_values](../compiler/comptime_interpretor/src/normal_values/mod.rs) | 受预算的数据编码/恢复、作用域及恢复后的主动值检查 | 各容器、Type、callable 分支仍与外部准入逻辑共同承担职责，尚无统一受限结果 |
+| [value_types.rs](../compiler/comptime_interpretor/src/value_types.rs) | 结构遍历共用；主动边界收集名义形成义务并在接收世界检查，被动观察仍检查保留见证 | 部分位置、捕获和对象操作仍调用被动观察；结构布局查询中的独立额度尚待统一 |
 | [constants.rs](../compiler/elaboration/src/program/constants.rs) | 已求值依赖不重算；局部常量保留闭包图内共享，生成快照重建 factory | 不能把这种有来源的局部快照当作任意 wire 可调用工厂；生成函数尚承担内部传送职责 |
 | [value_reference.rs](../compiler/comptime_interpretor/src/value_reference.rs) | owner 共享、路径重验、RHS 后写回、根重绑定权限；不依赖 runtime Copy | 位置身份、内容版本和可导出快照需在统一边界表达 |
 | [comptime_graph.rs](../compiler/comptime_interpretor/src/comptime_graph.rs) | 每次观察重新检查可变捕获图，访问去重不复制 owner | visited 集合不是冻结许可，也不证明所有循环图可逃逸 |
@@ -53,6 +54,16 @@ FrozenValue = typed_nodes + root + stable_scope + dependencies + admission_summa
 证据不代替实际 payload。接纳过程中需要类型命题、布局或已有契约时，通过相应服务
 取得有前提的结果；值表示模块不反向拥有整个 elaborator。实际输入未就绪沿观察协议
 等待，缺少生产者、违反域和预算耗尽分别返回，不能失败后换成 Any 继续编码。
+
+当前主动值检查采用重新核验，不把证明附在 Value 上，也不把成功查询写入全局假设。
+结构匹配期间产生私有的待检名义域列表；它只是待检工作，不能当作 formation_evidence。
+整个结构匹配成功后，逐项调用接收世界的 Type 准入服务，全部成功才接受该值。
+结构失败、查询未决、明确拒绝和预算耗尽都不会留下“已经准入”的标记。检查容器内的
+名义值时，同样收集其实际域，不能只检查最外层 optional／record 的形状。
+
+未来若复用形成证明，必须让证据与世界、合法作用域及稳定依赖相绑定；这属于上述
+AdmittedValue／FrozenValue 的设计，不以当前待检列表或全局布尔缓存代替。只读的
+has_type 继续使用保留见证，不启动主动查询；主动接收点不能再把它当作完整准入。
 
 ## 3. 接收契约按用途区分
 
@@ -2995,9 +3006,9 @@ TraitRequirement 交给当前 invocation 的类型查询服务。驱动的服务
 也不豁免重新检查 capability，失败不会发布新的代码实例或 InstantiateFunction 事件。
 
 名义 Type 形成与 alias 主体准入也复用此主动能力检查，见下述边界。
-名义值的被动 has_type 仍依赖保留见证，尚未统一为主动准入／已准入值证据模型。
+名义值的被动 has_type 仍依赖保留见证；已迁移的主动值边界使用下述局部义务检查。
 没有把被动布尔类型观察改成可执行查询，也没有将查询成功塞入全局
-assumed_interfaces；不能据此宣称所有 carrier 的能力交付均已完成。
+assumed_interfaces；尚无统一的可复用值证据，不能宣称所有 carrier 均已迁移。
 
 该边界的验证工作目录 `/home/fin/luna`：
 
@@ -3030,9 +3041,9 @@ admission::admit_type 的源码名义契约替换改用有预算的 DeclarationS
 IIR 与源码名义 Type 的能力检查均复用 check_capability_contract，保留现有正面见证
 快路径；无需为没有方法调用的能力提前生成 dispatch 主体。
 
-Type 形成成功不等于已有 record／variant／newtype 值能跨世界携带证明。后者仍需
-独立的值准入和证据生命周期设计；不能删掉 has_type 中的能力检查，也不能用一次
-成功查询污染全局假设来绕过缺口。本阶段只接通 Type 及 alias 主体的主动检查。
+Type 形成成功不等于已有 record／variant／newtype 值能跨世界携带证明。
+主动值边界通过下述接收世界重验取得当前许可；被动观察中的能力检查仍保留，
+可复用证据的生命周期尚未实现。
 
 该边界的局部证据（工作目录 `/home/fin/luna`）：
 
@@ -3052,6 +3063,61 @@ Type 形成成功不等于已有 record／variant／newtype 值能跨世界携�
 - 四份 Rust 文件 scoped rustfmt check 退出 0；
   `/tmp/luna-tools-l4l4ahhn/result.json`。git diff --check 通过。
   未执行全 workspace 或性能基准。
+
+**名义值的接收世界重验。** 静态 Packet 实例的构造与传递原本能够成功，但当普通
+comptime 布尔输入被绑定为泛型子句实参时，合法的 Packet 值在构造处返回 Type。
+此前形成 Type 的主动查询不能解决后续 has_type 只查保留表的问题。复现保持相同
+泛型实现与值操作，只改变实参的供应时机；没有给测试补具体实现或额外的方法调用。
+
+value_types 从 VM 主文件分离完整的既有结构遍历。被动模式沿用保留能力检查；
+主动模式在遍历中收集待检名义域，按 VM 余额计入节点访问及域快照复制，然后调用
+admit_type。形状不匹配时不启动这些待检查询，查询失败不会发布或保留许可。
+关联投影先取得结构匹配使用的已选视图，只收集实际使用的名义域；替换前的投影
+不能再作为第二份义务交给不接受未完成投影的 Type 准入。
+名义构造准备还会在字段求值前检查域的形成契约，以免错误路径先产生字段副作用。
+
+已接入的边界包括 record／variant 构造、普通输入绑定、调用返回、不可变输入验证、
+冻结值恢复、newtype 转换、optional 与错误结果载荷、字段读取及 host prepared live
+输入。字段读取在取得独立值后释放借用，再做主动检查。runtime／具体 IIR 的既有
+被动行为保持原路径；本次不改变仿射复制权限，不把活动引用变成可冻结值。
+
+尚未迁移的对象、位置写入和部分捕获检查仍可到达被动 has_type；后续应按各自的
+借用与发布时点接入，不能机械地在持锁回调中启动可执行观察。共享结构遍历中的
+旧布局查询仍有独立额度，尚未全部合入调用方余额；当前新增的待检收集与主动契约
+查询使用调用方余额，不代表整个结构检查器已完成预算重构。
+
+该边界的复现与验证（工作目录 `/home/fin/luna`）：
+
+- 原有静态值构造和传递通过，`/tmp/luna-tools-drmh4sbf/result.json` 退出 0。
+  动态子句实参版本在名义 record 构造处返回 Type，
+  `/tmp/luna-tools-spfiss7u/result.json` 退出 101；接通主动值检查后同一用例通过，
+  `/tmp/luna-tools-561tb0iw/result.json` 退出 0。直接在普通输入的依赖结果上取字段
+  还会遇到独立的 invocation-time type elaboration 缺口；当前复现通过泛型函数内
+  的字段访问隔离此缺口，没有将那条未实现路径视为完成。
+- 最初的主动值局部测试三项通过，`/tmp/luna-tools-a__fd2q_/result.json` 退出 0：
+  查询成功不改变被动观察或全局假设；后续拒绝／未决仍失败；嵌套形状失败不查询，
+  低余额失败可重试；冻结名义值在不同接收世界重新检查能力。
+- 扩展的五组集成与两个库单测目标共 982 项通过，筛去既有列表诊断失败 1 项；
+  `/tmp/luna-tools-eg8ejnfa/result.json` 退出 0。覆盖动态 struct／enum／newtype 值的
+  构造、参数传递和返回，以及两条执行路径上形成失败先于字段副作用。
+  随后补充关联视图回归发现待检域收集过早，
+  `/tmp/luna-tools-13byckxp/result.json` 退出 101；已将收集移到实际类型视图确定之后。
+- 修复关联视图后的命令：`python3 -B development/check.py --timeout 900 -- test
+  -p comptime_interpretor -p luna --lib --test comptime_nominal_capabilities
+  --test associated_signatures --test nominal_value_parameters --test normal_input_plans
+  --test library_protocols --test trait_phases --no-fail-fast -- --skip
+  clause_list_inputs_share_domain_scope_and_budget_validation`：992 项通过，筛去同一既有
+  列表诊断失败 1 项，退出 0；`/tmp/luna-tools-7id6xhff/result.json`。
+- 最后对齐字节码错误转换的输入检查后，运行 `python3 -B development/check.py
+  --timeout 900 -- test -p comptime_interpretor -p luna --lib --test error_result_flow
+  --test error_surface --test optional_purity --no-fail-fast -- --skip
+  clause_list_inputs_share_domain_scope_and_budget_validation`：699 项通过，筛去同一项，
+  退出 0；`/tmp/luna-tools-19efo3j6/result.json`。新增双路径 optional／错误结果名义
+  载荷回归通过。这两轮数量有重叠，不相加作为独立覆盖数量。
+- 十三份 Rust 文件 scoped rustfmt check 退出 0，
+  `/tmp/luna-tools-30hm57q4/result.json`；git diff --check 通过。
+  集成检查包含工作区已有资源分析修改；其内容及已有 docs/library 修改未纳入本次
+  改动。未运行全 workspace 或性能基准。
 
 implementation 的标量冲突预检、每个普通值参数的结构遍历、重复 binder 比较与
 后续 Type 匹配共用 head 分区的余额，不再为每个实参刷新额度。调用的显式输入

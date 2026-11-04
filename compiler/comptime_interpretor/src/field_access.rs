@@ -96,9 +96,9 @@ impl Interpreter<'_> {
         }
         .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         let value = self.checkpoint_representation(selected, base_source)?;
-        if !self.has_type(&value, &ty) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        drop(referenced);
+        drop(guard);
+        self.check_value_type(&value, &ty, Some(source))?;
         Ok(value)
     }
 }

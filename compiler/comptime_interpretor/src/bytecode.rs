@@ -2243,9 +2243,7 @@ impl<'a> Interpreter<'a> {
                         .remove(destination)
                         .ok_or_else(missing)?;
                     let value = frame.slots[*value].take().ok_or_else(missing)?;
-                    if !self.has_type(&value, &conversion.input) {
-                        return Err(self.failure(ErrorKind::Type, Some(source)));
-                    }
+                    self.check_value_type(&value, &conversion.input, Some(source))?;
                     frame.slots[*destination] = Some(self.complete_error_conversion(
                         conversion.conversion,
                         &conversion.input,
