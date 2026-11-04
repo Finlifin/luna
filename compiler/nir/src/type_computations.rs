@@ -34,6 +34,24 @@ pub enum Error {
     MissingCapture(LocalId),
     Structure(String),
 }
+impl From<crate::free_bindings::Error> for Error {
+    fn from(error: crate::free_bindings::Error) -> Self {
+        match error {
+            crate::free_bindings::Error::Budget(_) | crate::free_bindings::Error::Depth(_) => {
+                Self::Budget
+            }
+            crate::free_bindings::Error::Invalid(message) => Self::Structure(message.into()),
+        }
+    }
+}
+impl From<crate::visit::Error> for Error {
+    fn from(error: crate::visit::Error) -> Self {
+        match error {
+            crate::visit::Error::Budget(_) => Self::Budget,
+            crate::visit::Error::Invalid(message) => Self::Structure(message.into()),
+        }
+    }
+}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -83,18 +101,19 @@ pub fn expression_entry(
             }));
         }
     }
-    let free = crate::free_bindings::collect(&body, fuel).map_err(Error::Structure)?;
+    let free = crate::free_bindings::collect(&body, fuel)?;
     if let Some(missing) = free.difference(&bindings).next() {
         return Err(Error::MissingCapture(*missing));
     }
-    crate::visit::expression(&body, fuel, |expr, fuel| {
-        bounded(&expr.ty, fuel).map_err(|error| error.to_string())?;
+    crate::visit::expression_checked(&body, fuel, |expr, fuel| {
+        bounded(&expr.ty, fuel)?;
         if expr.ty.sort() != Sort::Type {
-            return Err("expression annotation is not a Type".into());
+            return Err(Error::Structure(
+                "expression annotation is not a Type".into(),
+            ));
         }
-        Ok(())
-    })
-    .map_err(Error::Structure)?;
+        Ok::<_, Error>(())
+    })?;
     let result = body.ty.clone();
     let (parameters, types): (Vec<_>, Vec<_>) = inputs.into_iter().unzip();
     Ok(crate::program::Function {
@@ -795,7 +814,7 @@ fn capture_entry_domains(
         }
     }
     let mut needed = BTreeSet::new();
-    for id in crate::free_bindings::collect(&body, fuel).map_err(Error::Structure)? {
+    for id in crate::free_bindings::collect(&body, fuel)? {
         needed.insert(*positions.get(&id).ok_or(Error::MissingCapture(id))?);
     }
     let frames = vec![

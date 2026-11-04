@@ -73,10 +73,11 @@ fn validate_parameter_frame(
     for (slot, value) in &function.defaults {
         let free = crate::free_bindings::collect(value, &mut fuel).map_err(|reason| Error {
             source: value.source,
-            message: if reason.contains("exhausted") {
-                "function default binding analysis budget exhausted"
-            } else {
-                "invalid function default binding scope"
+            message: match reason {
+                crate::free_bindings::Error::Budget(_) | crate::free_bindings::Error::Depth(_) => {
+                    "function default binding analysis budget exhausted"
+                }
+                crate::free_bindings::Error::Invalid(_) => "invalid function default binding scope",
             },
         })?;
         if free.iter().any(|binding| {
@@ -943,8 +944,20 @@ pub fn machine_arithmetic_functions(
                                     // execute in the prepared parameter frame only.
                                     if parameter.sort == Sort::Runtime {
                                         let free = crate::free_bindings::collect(
-                                            &argument.value, &mut preparation_fuel,
-                                        ).map_err(|_| error("invalid call default binding scope or exhausted analysis budget"))?;
+                                            &argument.value,
+                                            &mut preparation_fuel,
+                                        )
+                                        .map_err(|reason| {
+                                            error(match reason {
+                                                crate::free_bindings::Error::Budget(_)
+                                                | crate::free_bindings::Error::Depth(_) => {
+                                                    "call default binding analysis budget exhausted"
+                                                }
+                                                crate::free_bindings::Error::Invalid(_) => {
+                                                    "invalid call default binding scope"
+                                                }
+                                            })
+                                        })?;
                                         if !free.is_subset(&available) {
                                             return Err(error(
                                                 "call default references an unavailable parameter binding",

@@ -1063,3 +1063,36 @@ fn constant_pool_preserves_domains_kinds_and_float_bits() {
         compile(&body, &mut 100_000).unwrap().to_string()
     );
 }
+
+#[test]
+fn template_dependency_depth_is_a_resource_error_and_compilation_can_retry() {
+    let mut nested = expr(K::Unit);
+    for _ in 0..130 {
+        nested = expr(K::Block {
+            statements: vec![],
+            result: Some(Box::new(nested)),
+        });
+    }
+    let template = |value| {
+        expr(K::CheckTypeAlias {
+            declaration: nir::DeclarationId {
+                package: 1,
+                local: 99,
+            },
+            preparations: vec![],
+            arguments: vec![],
+            bindings: None,
+            order: None,
+            body: Some(Box::new(value)),
+        })
+    };
+    let value = template(nested);
+    let mut compiler = comptime_compiler::CompilationSession::default();
+    let mut fuel = 100_000;
+    assert!(
+        matches!(compiler.compile(&value, &mut fuel), Err(Error::Depth(source)) if source == value.source)
+    );
+    assert!(fuel > 0 && fuel < 100_000);
+    let small = template(expr(K::Unit));
+    compiler.compile(&small, &mut 100_000).unwrap();
+}

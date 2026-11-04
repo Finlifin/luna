@@ -2091,14 +2091,13 @@ fn compile_root<'a>(
                         let copied = nir::copy_budget::charge_expression(expr, &mut copy_steps);
                         *fuel = copy_steps as usize;
                         copied.map_err(|error| copy_error(error, source))?;
-                        let bindings =
-                            nir::free_bindings::collect(expr, fuel).map_err(|message| {
-                                if message.contains("budget") {
-                                    Error::Budget(source)
-                                } else {
-                                    Error::Unsupported(source)
-                                }
-                            })?;
+                        let bindings = nir::free_bindings::collect(expr, fuel).map_err(
+                            |reason| match reason {
+                                nir::free_bindings::Error::Budget(_) => Error::Budget(source),
+                                nir::free_bindings::Error::Depth(_) => Error::Depth(source),
+                                nir::free_bindings::Error::Invalid(_) => Error::Unsupported(source),
+                            },
+                        )?;
                         *fuel = fuel
                             .checked_sub(bindings.len())
                             .ok_or(Error::Budget(source))?;

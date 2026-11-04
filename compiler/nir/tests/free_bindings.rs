@@ -122,10 +122,11 @@ fn closure_initializers_and_body_have_separate_scopes() {
         unreachable!()
     };
     *body = std::sync::Arc::new(local(99));
-    assert!(
-        nir::free_bindings::collect(&implicit, &mut 100)
-            .unwrap_err()
-            .contains("undeclared capture")
+    assert_eq!(
+        nir::free_bindings::collect(&implicit, &mut 100),
+        Err(nir::free_bindings::Error::Invalid(
+            "closure body references an undeclared capture"
+        )),
     );
 }
 #[test]
@@ -156,10 +157,11 @@ fn explicit_call_inputs_never_use_the_defaults_parameter_frame() {
         unreachable!()
     };
     arguments[1].value = local(3);
-    assert!(
-        nir::free_bindings::collect(&call, &mut 100)
-            .unwrap_err()
-            .contains("unavailable parameter")
+    assert_eq!(
+        nir::free_bindings::collect(&call, &mut 100),
+        Err(nir::free_bindings::Error::Invalid(
+            "call default references an unavailable parameter"
+        )),
     );
 }
 #[test]
@@ -454,4 +456,83 @@ fn symbolic_code_reads_respect_guard_scope_and_keep_external_dependencies() {
         (id(8), BTreeSet::from([id(9)])),
     ]);
     assert!(nir::free_bindings::collect_with_dependencies(&local(9), &cycle, &mut 1000).is_err());
+}
+
+#[test]
+fn binding_failures_distinguish_budget_depth_and_invalid_scope() {
+    use nir::free_bindings::Error;
+    use std::collections::{BTreeMap, BTreeSet};
+    let value = local(1);
+    let mut fuel = 1;
+    assert!(matches!(
+        nir::free_bindings::collect(&value, &mut fuel),
+        Err(Error::Budget(_))
+    ));
+    assert_eq!(fuel, 0);
+    assert_eq!(result(&value), vec![id(1)]);
+
+    let cycle = BTreeMap::from([(id(1), BTreeSet::from([id(1)]))]);
+    let mut fuel = 1000;
+    assert!(matches!(
+        nir::free_bindings::collect_with_dependencies(&value, &cycle, &mut fuel),
+        Err(Error::Depth(_))
+    ));
+    assert!(fuel > 0 && fuel < 1000);
+    assert_eq!(result(&value), vec![id(1)]);
+
+    let invalid = expr(K::Closure {
+        captures: vec![],
+        parameters: vec![],
+        body: std::sync::Arc::new(value),
+    });
+    assert_eq!(
+        nir::free_bindings::collect(&invalid, &mut 100),
+        Err(Error::Invalid(
+            "closure body references an undeclared capture"
+        ))
+    );
+}
+
+#[test]
+fn typed_traversal_preserves_callback_errors_and_structural_failures() {
+    use nir::visit::{Error, expression_checked};
+    let unit = expr(K::Unit);
+    // Diagnostic text cannot change a callback's explicit error category.
+    let callback_error = Error::Invalid("budget exhausted is merely text here");
+    assert_eq!(
+        expression_checked(&unit, &mut 100, |_, _| Err(callback_error)),
+        Err(callback_error)
+    );
+    assert!(matches!(
+        expression_checked(&unit, &mut 0, |_, _| Ok::<_, Error>(())),
+        Err(Error::Budget(_))
+    ));
+    let mut value = expr(K::LetPattern {
+        pattern: P::AnonymousRecord {
+            names: vec!["x".repeat(100)],
+            fields: vec![P::Wild],
+        },
+        value: Box::new(unit),
+        guard: None,
+        otherwise: None,
+    });
+    let mut fuel = 10;
+    assert!(matches!(
+        expression_checked(&value, &mut fuel, |_, _| Ok::<_, Error>(())),
+        Err(Error::Budget(_))
+    ));
+    assert!(fuel > 0 && fuel < 10);
+    expression_checked(&value, &mut 1000, |_, _| Ok::<_, Error>(())).unwrap();
+    let K::LetPattern {
+        pattern: P::AnonymousRecord { names, .. },
+        ..
+    } = &mut value.kind
+    else {
+        unreachable!()
+    };
+    names.clear();
+    assert_eq!(
+        expression_checked(&value, &mut 1000, |_, _| Ok::<_, Error>(())),
+        Err(Error::Invalid("anonymous record pattern arity mismatch"))
+    );
 }

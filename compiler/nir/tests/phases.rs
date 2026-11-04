@@ -1897,3 +1897,57 @@ fn phase_storage_rejects_undeclared_expression_frames_and_recovers() {
     package.functions[0].body.ty = Term::Primitive(Primitive::Bool);
     nir::phases::validate(&package).unwrap();
 }
+
+#[test]
+fn runtime_default_analysis_distinguishes_resource_limits_and_invalid_scope() {
+    let target = function(400, Phase::Runtime, &[Sort::Runtime]);
+    let mut caller = function(401, Phase::Runtime, &[]);
+    let mut value = flag(K::Literal(Literal::Bool(true)));
+    for _ in 0..130 {
+        value = flag(K::Block {
+            statements: vec![],
+            result: Some(Box::new(value)),
+        });
+    }
+    caller.body = call(&target, vec![(0, value)]);
+    let source = SourceRange {
+        start: 100,
+        end: 200,
+    };
+    caller.body.source = source;
+    let K::Call { arguments, .. } = &mut caller.body.kind else {
+        unreachable!()
+    };
+    arguments[0].is_default = true;
+    let mut package = Package {
+        functions: vec![target, caller],
+        ..Default::default()
+    };
+    let error = nir::phases::validate(&package).unwrap_err();
+    assert_eq!(error.source, source);
+    assert_eq!(
+        error.message,
+        "call default binding analysis budget exhausted"
+    );
+
+    let K::Call { arguments, .. } = &mut package.functions[1].body.kind else {
+        unreachable!()
+    };
+    arguments[0].value = flag(K::Closure {
+        captures: vec![],
+        parameters: vec![],
+        body: std::sync::Arc::new(flag(K::Local(LocalId {
+            owner: 999,
+            index: 0,
+        }))),
+    });
+    let error = nir::phases::validate(&package).unwrap_err();
+    assert_eq!(error.source, source);
+    assert_eq!(error.message, "invalid call default binding scope");
+
+    let K::Call { arguments, .. } = &mut package.functions[1].body.kind else {
+        unreachable!()
+    };
+    arguments[0].value = flag(K::Literal(Literal::Bool(true)));
+    nir::phases::validate(&package).unwrap();
+}

@@ -1,6 +1,26 @@
 //! Bounded traversal of the structured operations shared with normalization.
 use crate::program::{Expr, ExprKind as K, Function, Pattern as P};
 
+/// Traversal failures remain distinct from errors returned by a visitor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    Budget(&'static str),
+    Invalid(&'static str),
+}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Budget(message) | Self::Invalid(message) => f.write_str(message),
+        }
+    }
+}
+impl std::error::Error for Error {}
+impl From<Error> for String {
+    fn from(error: Error) -> Self {
+        error.to_string()
+    }
+}
+
 /// The callback may retain references into the borrowed immutable function,
 /// allowing analyses to index nodes without cloning expression subtrees.
 pub fn expressions<'a>(
@@ -194,6 +214,24 @@ pub fn expression_pruned<'a>(
 ) -> Result<(), String> {
     walk_roots(std::iter::once(expression), fuel, visit, true, true)
 }
+/// Preserve the callback's error type and explicitly convert traversal failures.
+pub fn expression_checked<'a, E: From<Error>>(
+    expression: &'a Expr,
+    fuel: &mut usize,
+    mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<(), E>,
+) -> Result<(), E> {
+    expression_pruned_checked(expression, fuel, |expr, fuel| {
+        visit(expr, fuel).map(|_| true)
+    })
+}
+/// The typed counterpart of `expression_pruned`; both use the same traversal.
+pub fn expression_pruned_checked<'a, E: From<Error>>(
+    expression: &'a Expr,
+    fuel: &mut usize,
+    visit: impl FnMut(&'a Expr, &mut usize) -> Result<bool, E>,
+) -> Result<(), E> {
+    walk_roots(std::iter::once(expression), fuel, visit, true, true)
+}
 fn walk<'a>(
     function: &'a Function,
     fuel: &mut usize,
@@ -219,13 +257,13 @@ fn walk<'a>(
         include_defaults,
     )
 }
-fn walk_roots<'a>(
+fn walk_roots<'a, E: From<Error>>(
     roots: impl Iterator<Item = &'a Expr>,
     fuel: &mut usize,
-    mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<bool, String>,
+    mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<bool, E>,
     include_defaults: bool,
     include_closure_bodies: bool,
-) -> Result<(), String> {
+) -> Result<(), E> {
     enum Node<'a> {
         Expr(&'a Expr),
         Pattern(&'a P),
@@ -233,7 +271,7 @@ fn walk_roots<'a>(
     let mut work: Vec<_> = roots.map(Node::Expr).collect();
     while let Some(node) = work.pop() {
         if *fuel == 0 {
-            return Err("IIR traversal budget exhausted".into());
+            return Err(Error::Budget("IIR traversal budget exhausted").into());
         }
         *fuel -= 1;
         match node {
@@ -265,7 +303,9 @@ fn walk_roots<'a>(
                 | P::Tuple(fields)
                 | P::TypeTuple(fields)
                 | P::Or(fields) => work.extend(fields.iter().map(Node::Pattern)),
-                P::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
+                P::CodeEvidence { .. } => {
+                    return Err(Error::Invalid("unresolved pattern-code evidence").into());
+                }
                 P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => {}
             },
             Node::Expr(expr) => {
@@ -444,7 +484,7 @@ fn walk_roots<'a>(
                     } => {
                         *fuel = fuel
                             .checked_sub(selections.len())
-                            .ok_or("bit selection traversal budget exhausted")?;
+                            .ok_or(Error::Budget("bit selection traversal budget exhausted"))?;
                         work.push(Node::Expr(pointer));
                         work.extend(
                             selections
@@ -459,7 +499,7 @@ fn walk_roots<'a>(
                     } => {
                         *fuel = fuel
                             .checked_sub(selections.len())
-                            .ok_or("bit selection traversal budget exhausted")?;
+                            .ok_or(Error::Budget("bit selection traversal budget exhausted"))?;
                         work.extend(
                             selections
                                 .iter()
@@ -979,21 +1019,17 @@ fn walk_mut(
     Ok(())
 }
 
-fn validate_record_pattern(
-    names: &[String],
-    fields: usize,
-    fuel: &mut usize,
-) -> Result<(), String> {
+fn validate_record_pattern(names: &[String], fields: usize, fuel: &mut usize) -> Result<(), Error> {
     if names.len() != fields {
-        return Err("anonymous record pattern arity mismatch".into());
+        return Err(Error::Invalid("anonymous record pattern arity mismatch"));
     }
     let mut seen = std::collections::BTreeSet::new();
     for name in names {
         *fuel = fuel
             .checked_sub(name.len().saturating_add(1))
-            .ok_or("anonymous record pattern budget exhausted")?;
+            .ok_or(Error::Budget("anonymous record pattern budget exhausted"))?;
         if !seen.insert(name) {
-            return Err("duplicate anonymous record pattern label".into());
+            return Err(Error::Invalid("duplicate anonymous record pattern label"));
         }
     }
     Ok(())

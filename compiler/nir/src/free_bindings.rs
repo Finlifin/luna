@@ -2,15 +2,48 @@
 //! follow interpretation; type-level bound slots are handled by substitution.
 use crate::program::{Expr, ExprKind as K, LocalId, NormalFormArgument as A, Pattern as P};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Resource limits must not be mistaken for malformed lexical scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    Budget(&'static str),
+    Depth(&'static str),
+    Invalid(&'static str),
+}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Budget(message) | Self::Depth(message) | Self::Invalid(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+impl std::error::Error for Error {}
+impl From<crate::visit::Error> for Error {
+    fn from(error: crate::visit::Error) -> Self {
+        match error {
+            crate::visit::Error::Budget(message) => Self::Budget(message),
+            crate::visit::Error::Invalid(message) => Self::Invalid(message),
+        }
+    }
+}
+// Text-only diagnostic consumers may discard the classification at their boundary.
+impl From<Error> for String {
+    fn from(error: Error) -> Self {
+        error.to_string()
+    }
+}
+
 type Dependencies = BTreeMap<LocalId, Scope>;
 type Scope = BTreeSet<LocalId>;
-fn charge(fuel: &mut usize, amount: usize) -> Result<(), String> {
+fn charge(fuel: &mut usize, amount: usize) -> Result<(), Error> {
     *fuel = fuel
         .checked_sub(amount)
-        .ok_or("capture analysis budget exhausted")?;
+        .ok_or(Error::Budget("capture analysis budget exhausted"))?;
     Ok(())
 }
-fn fork(scope: &Scope, fuel: &mut usize) -> Result<Scope, String> {
+fn fork(scope: &Scope, fuel: &mut usize) -> Result<Scope, Error> {
     charge(fuel, scope.len())?;
     Ok(scope.clone())
 }
@@ -21,13 +54,13 @@ fn read(
     dependencies: &Dependencies,
     fuel: &mut usize,
     depth: usize,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     charge(fuel, 1)?;
     if scope.contains(&id) {
         return Ok(());
     }
     if depth >= 128 {
-        return Err("capture dependency depth exhausted".into());
+        return Err(Error::Depth("capture dependency depth exhausted"));
     }
     if let Some(inputs) = dependencies.get(&id) {
         for input in inputs {
@@ -38,11 +71,11 @@ fn read(
     }
     Ok(())
 }
-pub fn collect(expr: &Expr, fuel: &mut usize) -> Result<Scope, String> {
+pub fn collect(expr: &Expr, fuel: &mut usize) -> Result<Scope, Error> {
     collect_with_dependencies(expr, &Dependencies::new(), fuel)
 }
 /// Runtime dependencies of pattern observations, excluding lexical binders.
-pub fn collect_pattern(pattern: &P, fuel: &mut usize) -> Result<Scope, String> {
+pub fn collect_pattern(pattern: &P, fuel: &mut usize) -> Result<Scope, Error> {
     let mut free = Scope::new();
     pattern_scan(
         pattern,
@@ -59,13 +92,13 @@ pub fn collect_with_dependencies(
     expr: &Expr,
     dependencies: &Dependencies,
     fuel: &mut usize,
-) -> Result<Scope, String> {
+) -> Result<Scope, Error> {
     let mut free = Scope::new();
     scan(expr, &Scope::new(), &mut free, fuel, 0, dependencies)?;
     Ok(free)
 }
 /// Lexical dependencies of one handler/match arm, excluding its own pattern binders.
-pub fn collect_arm(arm: &crate::program::MatchArm, fuel: &mut usize) -> Result<Scope, String> {
+pub fn collect_arm(arm: &crate::program::MatchArm, fuel: &mut usize) -> Result<Scope, Error> {
     collect_arm_with_dependencies(arm, &Dependencies::new(), fuel)
 }
 /// Expand symbolic code dependencies at each lexical use, so a guard's own
@@ -74,7 +107,7 @@ pub fn collect_arm_with_dependencies(
     arm: &crate::program::MatchArm,
     dependencies: &Dependencies,
     fuel: &mut usize,
-) -> Result<Scope, String> {
+) -> Result<Scope, Error> {
     let mut free = Scope::new();
     arm_scan(arm, &Scope::new(), &mut free, fuel, 0, dependencies)?;
     Ok(free)
@@ -86,11 +119,11 @@ fn scan(
     fuel: &mut usize,
     depth: usize,
     dependencies: &Dependencies,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if depth >= 128 {
-        return Err("capture analysis depth exhausted".into());
+        return Err(Error::Depth("capture analysis depth exhausted"));
     }
-    crate::visit::expression_pruned(expr, fuel, |node, fuel| {
+    crate::visit::expression_pruned_checked(expr, fuel, |node, fuel| {
         match &node.kind {
             K::Local(id) => read(*id, scope, free, dependencies, fuel, depth)?,
             K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. } => {
@@ -142,7 +175,9 @@ fn scan(
                 let mut missing = Scope::new();
                 scan(body, &inner, &mut missing, fuel, depth + 1, dependencies)?;
                 if !missing.is_empty() {
-                    return Err("closure body references an undeclared capture".into());
+                    return Err(Error::Invalid(
+                        "closure body references an undeclared capture",
+                    ));
                 }
                 return Ok(false);
             }
@@ -165,7 +200,9 @@ fn scan(
                             dependencies,
                         )?;
                         if !missing.is_empty() {
-                            return Err("call default references an unavailable parameter".into());
+                            return Err(Error::Invalid(
+                                "call default references an unavailable parameter",
+                            ));
                         }
                     } else {
                         scan(&argument.value, scope, free, fuel, depth + 1, dependencies)?;
@@ -199,10 +236,10 @@ fn scan(
                             || bindings.iter().collect::<BTreeSet<_>>().len() != bindings.len()
                     })
                 {
-                    return Err("invalid nominal input plan".into());
+                    return Err(Error::Invalid("invalid nominal input plan"));
                 }
                 if node.kind.nominal_local_bindings().is_none() {
-                    return Err("invalid nominal input bindings".into());
+                    return Err(Error::Invalid("invalid nominal input bindings"));
                 }
                 let mut preparations = preparations.iter().peekable();
                 let mut inner = fork(scope, fuel)?;
@@ -220,7 +257,7 @@ fn scan(
                     }
                     let slot = order.as_ref().map_or(position, |order| order[position]);
                     if slot >= arguments.len() || !seen.insert(slot) {
-                        return Err("invalid nominal input order".into());
+                        return Err(Error::Invalid("invalid nominal input order"));
                     }
                     normal(
                         &arguments[slot],
@@ -259,7 +296,7 @@ fn scan(
                 let mut inner = fork(scope, fuel)?;
                 if let Some(plan) = plan {
                     if !plan.valid(arguments.len()) {
-                        return Err("invalid normal-form input plan".into());
+                        return Err(Error::Invalid("invalid normal-form input plan"));
                     }
                     let mut preparations = plan.preparations.iter().peekable();
                     for (position, slot) in plan.order.iter().enumerate() {
@@ -326,7 +363,7 @@ fn statement(
     fuel: &mut usize,
     depth: usize,
     dependencies: &Dependencies,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     charge(fuel, 1)?;
     match &expr.kind {
         K::Let { binding, value } => {
@@ -361,7 +398,7 @@ fn arm_scan(
     fuel: &mut usize,
     depth: usize,
     dependencies: &Dependencies,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut inner = fork(scope, fuel)?;
     pattern_scan(
         &arm.pattern,
@@ -383,9 +420,9 @@ fn pattern_scan(
     fuel: &mut usize,
     depth: usize,
     dependencies: &Dependencies,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if depth >= 128 {
-        return Err("capture pattern depth exhausted".into());
+        return Err(Error::Depth("capture pattern depth exhausted"));
     }
     charge(fuel, 1)?;
     match pattern {
@@ -473,9 +510,9 @@ fn normal(
     fuel: &mut usize,
     depth: usize,
     dependencies: &Dependencies,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if depth >= 128 {
-        return Err("capture normal-input depth exhausted".into());
+        return Err(Error::Depth("capture normal-input depth exhausted"));
     }
     charge(fuel, 1)?;
     match argument {

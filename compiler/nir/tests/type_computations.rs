@@ -1112,3 +1112,54 @@ fn lexical_observation_reads_opaque_arguments_in_all_sorts_with_a_budget() {
     // to invoke while observing the supplied argument structure.
     assert!(!found.contains(&target()));
 }
+
+#[test]
+fn entry_analysis_resource_failures_remain_budget_errors_until_retry_succeeds() {
+    use nir::program::{Expr, ExprKind as K, SourceRange};
+    use nir::type_computations::{capture_entry, expression_entry};
+    let leaf = Expr {
+        source: SourceRange { start: 17, end: 19 },
+        ty: Term::Primitive(Primitive::Type),
+        kind: K::TypeValue(Term::Primitive(Primitive::Bool)),
+    };
+    let body = Expr {
+        kind: K::Block {
+            statements: vec![leaf.clone(); 4],
+            result: Some(Box::new(leaf.clone())),
+        },
+        ..leaf.clone()
+    };
+    // Sweep through analysis and annotation validation, not only the initial debit.
+    for capture in [false, true] {
+        let mut succeeded = false;
+        for allowance in 0..1000 {
+            let mut fuel = allowance;
+            let outcome = if capture {
+                capture_entry(target(), "capture".into(), body.clone(), &[], &mut fuel)
+                    .map(|entry| entry.function)
+            } else {
+                expression_entry(
+                    target(),
+                    "expression".into(),
+                    body.clone(),
+                    vec![],
+                    &mut fuel,
+                )
+            };
+            assert!(fuel <= allowance);
+            match outcome {
+                Ok(function) => {
+                    assert_eq!(function.body, body);
+                    succeeded = true;
+                    break;
+                }
+                Err(error) => assert_eq!(
+                    error,
+                    Error::Budget,
+                    "capture={capture}, allowance={allowance}"
+                ),
+            }
+        }
+        assert!(succeeded, "capture={capture}");
+    }
+}

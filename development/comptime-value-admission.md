@@ -1877,3 +1877,49 @@ comptime 值准入和 call-safety 的独立额度；当前存储适配器也仍�
   `/tmp/luna-tools-lc782jus/result.json`。
 
 格式检查通过；未运行全 workspace 或性能基准。正式 docs 与原有工作区修改未动。
+
+
+### 绑定分析的错误边界
+
+`free_bindings` 的表达式、pattern、arm 及符号依赖入口现在共同返回 typed error：
+Budget 表示步数预留失败，Depth 表示分析递归上限，Invalid 表示已有的作用域或
+输入计划拒绝。错误携带原诊断，但分类不取决于文本。文本诊断消费者可以在自身
+边界转换为 String；原有分析实现已直接迁移，没有保留另一套字符串分析内核。
+
+不可变 expression walker 共用一个支持 typed callback 的遍历内核，遍历本身的
+Budget／Invalid 与 callback 的错误通过显式转换衔接。现有字符串 visitor 接口
+仍作为适配器使用这个内核。此修改没有改变遍历顺序、词法绑定规则或资源限额；
+可变 visitor 及其他字符串检查服务尚未整体迁移。
+
+三条生产路径已接通：phase 默认值分析不再搜索 `exhausted`，并区分调用默认值的
+作用域拒绝和资源耗尽；Type invocation 的 expression/captured entry 构造将分析
+和注解遍历的资源失败保留为 Budget；字节码模板依赖分析将深度上限保留为 Depth，
+不再误报 Unsupported。entry 的既有 Error 没有细分步数／深度，因此在该边界二者
+仍合并为 Budget。phase 公共 Error 仍是位置和诊断，单次独立额度也仍存在；这只是
+共享 phase-validation context 的必要前置迁移，不能宣称总预算所有权已经闭合。
+
+三条生产回归在 `9038fb04` 的实现上均失败：调用默认值只给出含糊的合并诊断，
+entry 的零预算成为 Structure，模板依赖深度无法得到 Depth。
+`/tmp/luna-tools-2lnanfvt/result.json` 退出 101；随后恢复当前实现。新用例还检查
+从零到足额的预算梯度、失败后的成功重试、正余额预留失败、循环依赖的深度上限、
+原位置保留，以及诊断文本不能改变 callback 的明确错误分类。
+
+
+本次验证目录 `/home/fin/luna`，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --test free_bindings --test type_computations --test phases
+  --test closure_environment_visit -p comptime_compiler --test control --no-fail-fast`：
+  106 通过，退出 0；`/tmp/luna-tools-9v9k8s22/result.json`。
+- `-p comptime_interpretor -p elaboration -p program_verification -p materialization
+  --lib --test instance_budget --test runtime_function_identities --no-fail-fast`：
+  811 通过，退出 0；`/tmp/luna-tools-fm2urhy3/result.json`。
+- `-p luna --test default_calls --test quote_functions --test cmtt_type_inputs
+  --test comptime_bytecode_closures --test sysroot_preludes --test nominal_staging
+  --no-fail-fast`：201 通过，退出 0；`/tmp/luna-tools-t8pqj5mr/result.json`。
+
+首次局部构建发现两项旧测试对错误调用 String::contains，已改成精确的 Invalid
+断言；`/tmp/luna-tools-gvxlrhvm/result.json` 退出 101。一次检查命令重复指定
+`--lib` 被 Cargo 拒绝，退出 1；`/tmp/luna-tools-dt2_ztxf/result.json`。以上均不作为
+通过证据。格式检查通过；未运行全 workspace、native 或性能基准。正式 docs、
+用户原有源码和 library 修改保持不变。
