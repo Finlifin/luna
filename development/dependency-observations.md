@@ -167,6 +167,75 @@ O(log P)，再支付实际选中边及语义观察的成本。这里没有声称
 未运行全 workspace、native 或整体性能基准；本机清单与证据在
 `/tmp/luna-lexical-source-index-wpkauuvg`。
 
+### 4.6 已接通：自由源码输入与执行区域扫描分离
+
+`body_local_references` 原先复用 `scan_body_requirement`，后者为当前函数的
+staging 工作设计，刻意不进入闭包、quote 和后置 lambda 的主体。这个边界适合
+判断“当前区域需要展开什么”，却不能用于证明一个表达式没有捕获外层输入。
+现在删除前一入口：默认值依赖、默认值选择条件、staged 参数转发及其不可变别名
+分类，改用共同的 `expression_free_local_dependencies`；调用参数槽选择也使用
+同一结果。`scan_body_requirement` 继续承担其执行区域职责，未改成跨闭包扫描。
+
+自由输入不是“把完整源码中的 Local 节点做一次并集”。分析按 HIR 绑定身份记录
+直接引用、内部绑定和引用到的局部声明；函数／闭包形参、模式绑定、callable 类型
+的具名参数、代码上下文参数及结果绑定都在各自观察范围内扣除。引用外部形参时
+仍观察其域，但不会把该形参误登记为内部声明。相同拼写不影响身份比较。
+
+表达式根和它所在的函数声明具有独立观察范围。递归引用该函数时，函数的显式
+形参会从声明的隐式捕获中扣除，但不能因此删除表达式根确实读取的外部形参。
+局部声明的输入经共同的单调工作队列传播，每经过一个调用方，扣除该调用方自己
+提供的绑定；显式实参在调用点遍历。这样既保留递归组的真实外部输入，也不会把
+某个 callee 的内部参数泄漏为 caller 要供应的槽。原声明身份分析与新的局部绑定
+分析共用 `dependency_closure`，没有另写一份递归闭包求解器。
+
+遍历器只借用不可变源码、包身份、已形成的 self 类型／容器关系及源码协议索引，
+不再持有整个 Checker。它不能访问 VM、调用缓存、活动 locals 或生产者执行入口。
+结果仍只属于本次查询，不缓存活动依赖。遍历、闭包传播及后续参数映射逐项收费；
+缺失来源、未映射 delivered scope 和预算耗尽继续失败，不发表半成品集合。
+
+这一结果只说明依赖，**不授予 comptime 可用性、纯度或提前执行权限**。普通
+`let alias = do { let inner = flag; inner };` 不因自由输入都是 staged 就自动
+取得 staged 值资格。普通 phase 检查、实际输入准备、存储逃逸和行为检查继续
+独立执行；本轮没有扩大不可变别名消除的授权范围。
+
+源码级验证直接断言闭包及后置 lambda 的捕获集合、同名不同身份绑定、callable
+与代码上下文的内部参数、局部函数自身参数不外泄。共同闭包算法另检查递归组、
+表达式与所属声明分离、预算失败后重试以及缺失 callee 不能当成空捕获。
+真实 sysroot 用例检查 staged 实参中的块／模式绑定、局部 comptime helper 捕获、
+多层转发及 runtime 捕获拒绝，并实际执行 reference 路径和 IIR。
+捕获闭包的 runtime staged 实参准备仍需独立接通，不能用这批源码分析测试冒充其端到端支持；复现保留在
+`source_input_dependencies::staged_closure_arguments_keep_captured_invocation_inputs`。
+
+本轮验证均在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test`：
+`-p elaboration --lib lexical_inputs` 13 项通过，退出 0，证据
+`/tmp/luna-tools-jujjt9w3/result.json`。luna 的局部模板、测试模板、标注行为、
+观察预算、开放函数、动态 trait 子句及 trait 阶段七组 628 项通过；同轮扩大到
+整个 `cmtt` 时为 588 项通过、6 项失败，整轮退出 101，证据
+`/tmp/luna-tools-e0_5m9wd/result.json`。随后恢复本轮三个生产文件的 HEAD 内容，
+在同一受保护工作区重跑 `-p luna --test cmtt`，仍是相同 6 项失败，退出 101，
+证据 `/tmp/luna-tools-_3qhralm/result.json`；五项 BitVec 写回和一项 producer
+默认值的错误文本及 span 全部一致，未改这些测试或预期。对比后恢复本轮实现。
+
+最终 `source_input_dependencies`、`function_type_parameters`、
+`function_type_dependencies`、`cmtt_type_inputs`、`cmtt_phase_boundaries`
+五组共 126 项通过，退出 0，证据 `/tmp/luna-tools-amytaj6_/result.json`。
+既有局部模板 1 项 ignored 保留；新增加的 staged 捕获闭包复现保持成功预期，
+但标注未接通。基线显式执行时，
+直接闭包、局部闭包别名及局部 comptime helper 三种形式均失败，证据
+`/tmp/luna-tools-rwmhhe3s/result.json`；本轮显式执行后，仅两种闭包形式仍失败，
+局部 helper 已编译并执行成功，证据 `/tmp/luna-tools-c6mm1iha/result.json`。
+因此把局部 helper 提升为正常正例，只为未接通的两种闭包保留 ignored；没有
+把后者计作通过。局部 helper 移入正常正例后再次运行该测试组，
+2 项通过、1 项 ignored，退出 0，证据 `/tmp/luna-tools-sefv1fyw/result.json`；
+其中 helper 同时通过 reference 和 IIR 执行。局部 helper 捕获 runtime 值时
+目前先报作用域不可用，所以未把这个路径的失败冒充阶段检查已经完整接通；
+活动拒绝用例只验证有对应路径依据的块和闭包输入。
+五个独立 Rust 文件的 rustfmt check 退出 0，证据
+`/tmp/luna-tools-xveytv0n/result.json`；旧 open_functions.rs 仅排版本轮修改块。
+`git diff --check` 通过，原有受保护文件哈希未变，正式 docs 未动。
+未运行全 workspace、native 或性能基准；精确提交清单、对比结果和源码哈希在
+`/tmp/luna-free-source-inputs-7l1s22ht`。
+
 ## 5. 四个判断精确性是否正确的例子
 
 | 场景 | 应得依赖 | 错误实现 |

@@ -1,6 +1,7 @@
 //! Shared lexical input plans for declaration formation and caller supply.
 use super::*;
 mod dependencies;
+mod dependency_closure;
 mod source_index;
 pub(super) use source_index::SourceProtocolIndex;
 
@@ -131,6 +132,21 @@ impl Checker<'_, '_> {
         result
     }
 
+    /// Observe free source bindings, including closure captures, without
+    /// executing code or importing a referenced declaration's own parameters.
+    pub(super) fn expression_free_local_dependencies(
+        &mut self,
+        owner: OwnerId,
+        value: &Expr<'_>,
+    ) -> Result<BTreeSet<n::LocalId>, Error> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result =
+            dependencies::expression_local_dependencies(self, owner, value, &mut fuel, value.span);
+        self.required_steps -= (before - fuel) as u64;
+        result
+    }
+
     /// Select invocation slots by source binding identity, including captures
     /// and referenced local declarations. Observation never executes a supplier.
     pub(super) fn expression_parameter_dependencies(
@@ -138,12 +154,7 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         value: &Expr<'_>,
     ) -> Result<BTreeSet<usize>, Error> {
-        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let result =
-            dependencies::expression_local_dependencies(self, owner, value, &mut fuel, value.span);
-        self.required_steps -= (before - fuel) as u64;
-        let references = result?;
+        let references = self.expression_free_local_dependencies(owner, value)?;
         let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
             self.package.item(owner).map(|item| &item.kind)
         else {

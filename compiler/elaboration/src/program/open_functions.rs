@@ -713,7 +713,7 @@ impl Checker<'_, '_> {
                         if let Some(init) = binding.init {
                             aliases.push((
                                 pattern_binding_ids(&binding.pattern),
-                                this.body_local_references(init)?,
+                                this.expression_free_local_dependencies(owner, init)?,
                             ));
                         }
                     }
@@ -770,7 +770,7 @@ impl Checker<'_, '_> {
                 };
                 for selector in selectors {
                     if !this
-                        .body_local_references(selector)?
+                        .expression_free_local_dependencies(owner, selector)?
                         .is_disjoint(&pending_inputs)
                     {
                         return Ok(true);
@@ -1486,17 +1486,6 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    fn body_local_references(&mut self, value: &Expr<'_>) -> Result<BTreeSet<n::LocalId>, Error> {
-        let mut inputs = BTreeSet::new();
-        self.scan_body_requirement(value, |_, expression| {
-            if let H::ResolvedFnParam(_, binding) | H::ResolvedLocal(_, binding) = expression.kind {
-                inputs.insert(local(binding));
-            }
-            Ok(false)
-        })?;
-        Ok(inputs)
-    }
-
     // A fixed outer signature can still contain a call whose domain needs a
     // forwarded staged input. Propagate that requirement through direct calls
     // before checking bodies, independently of declaration order.
@@ -1580,7 +1569,7 @@ impl Checker<'_, '_> {
             }
             let mut routed_calls = Vec::new();
             for (target, callee, arguments, span, extended) in calls {
-                let mut inputs = self.body_local_references(&callee)?;
+                let mut inputs = self.expression_free_local_dependencies(owner, &callee)?;
                 // Only forwarding into a staged slot postpones type formation.
                 // Supplying a known staged value as an ordinary runtime input
                 // must not turn an otherwise closed function into a template.
@@ -1718,7 +1707,9 @@ impl Checker<'_, '_> {
                             )
                         {
                             if parameter.ty.is_comptime() {
-                                inputs.extend(self.body_local_references(argument)?);
+                                inputs.extend(
+                                    self.expression_free_local_dependencies(owner, argument)?,
+                                );
                             }
                         }
                     }
@@ -1733,7 +1724,9 @@ impl Checker<'_, '_> {
                             .filter(|route| target_sig.params[route.parameter].ty.is_comptime())
                         {
                             for (_, value) in route.source_inputs() {
-                                inputs.extend(self.body_local_references(value)?);
+                                inputs.extend(
+                                    self.expression_free_local_dependencies(owner, value)?,
+                                );
                             }
                         }
                     }
@@ -1742,7 +1735,10 @@ impl Checker<'_, '_> {
             }
             let mut alias_dependencies = Vec::new();
             for (bindings, init) in aliases {
-                alias_dependencies.push((bindings, self.body_local_references(&init)?));
+                alias_dependencies.push((
+                    bindings,
+                    self.expression_free_local_dependencies(owner, &init)?,
+                ));
             }
             loop {
                 let mut changed = false;
@@ -2229,7 +2225,9 @@ impl Checker<'_, '_> {
                             // The behavior view abstracts inline selectors; the
                             // original source still determines which earlier
                             // inputs must be available for actual selection.
-                            references.extend(this.body_local_references(default)?);
+                            references.extend(
+                                this.expression_free_local_dependencies(owner, default)?,
+                            );
                             let mut dependencies: BTreeSet<_> = sig
                                 .params
                                 .iter()

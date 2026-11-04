@@ -722,8 +722,8 @@ ArgumentPlan／ContextualExpr 已经完成。
 声明阶段没有调用的 `n + 1`（n:u8）也必须拒绝；`if n < 255 { n + 1 } else { n }`
 则按整段分支前提检查。参数标注和返回标注使用相同入口。
 
-这里没有使用 `body_local_references` 的不完整 body requirement walker 证明
-未知输入无关。新的 `annotation_may_use_pending_inputs` 复用 lexical_inputs 的
+这里不使用当前执行区域的 body requirement walker 证明未知输入无关。
+旧 `body_local_references` 已由[自由源码输入分析](dependency-observations.md#46-已接通自由源码输入与执行区域扫描分离)替换；新的 `annotation_may_use_pending_inputs` 复用 lexical_inputs 的
 完整源码边遍历，从标注表达式根出发，观察类型组件、模式、闭包／post-lambda body、
 被引用的局部声明及其签名、继承前提和局部协议贡献。它按实际绑定身份与待定输入
 比较，不凭名称，也不把别的函数的同名参数当成当前输入；未被引用的局部声明不因
@@ -828,6 +828,8 @@ staged 参数身份通过源码 telescope 的映射恢复；索引只为目标�
 符号保守保留上下文，调用供应必须交付实际源码参数槽，不能拿一个 bool 代替它。
 协议结构索引已改为[按不可变源码视图共享](dependency-observations.md#45-已接通源码协议索引与活动依赖观察分开)，
 不再为每次查询重扫整包；语义依赖仍逐次观察，未宣称完成整体规模优化。
+源码参数收集现按各观察范围扣除内部绑定，并沿局部声明递归传播自由输入；默认值、
+staged 转发与别名分类已汇入同一入口，当前执行区域的 staging 扫描仍独立保留。
 
 真实 sysroot 正例覆盖 Type 输入被直接及嵌套闭包捕获、直接调用与带类型子句的
 推断调用、默认 Type 计算中的闭包捕获，以及带范围守卫的闭包在 9/255 输入下

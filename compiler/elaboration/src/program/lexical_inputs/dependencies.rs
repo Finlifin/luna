@@ -1,12 +1,12 @@
 //! Declaration-rooted lexical reads. OwnerNodes is an index, not a complete
 //! syntax tree (in particular after template rebinding). Walk the actual roots,
 //! close referenced local declarations, and retain inherited proof premises.
+use super::dependency_closure::{ScopeReads, close};
 use super::*;
 use hir::clause::{ClauseConstraintKind as Constraint, ClauseParamKind as Clause};
 use hir::expr::ObjectEntry;
 use hir::pattern::PatternArm;
 use hir::pattern::{BitSegment, PatternKind as Pattern};
-use std::collections::VecDeque;
 
 // Every edge is charged before enqueueing, so a wide source node cannot allocate
 // an unbounded work list before discovering that its observation budget ran out.
@@ -22,25 +22,51 @@ enum Node<'a, 'h> {
     Variant(&'a hir::item::Variant<'h>),
 }
 
-#[derive(Default)]
-struct OwnerReads {
-    bindings: BTreeSet<DeclarationId>,
-    direct: BTreeSet<DeclarationId>,
-    callees: BTreeSet<OwnerId>,
+/// The expression being observed is not its enclosing declaration. In
+/// particular, a recursive reference must not bind the expression's inputs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LocalScope {
+    Expression,
+    Declaration(OwnerId),
 }
 
-struct Reads<'a, 'c, 'h> {
-    checker: &'a Checker<'c, 'h>,
-    pending: Vec<(OwnerId, Node<'a, 'h>)>,
+/// Only immutable source and formed declaration context are observable here.
+/// Keeping VM slots and the rest of Checker out prevents dependency discovery
+/// from accidentally executing a supplier or inspecting active call state.
+#[derive(Clone, Copy)]
+struct Source<'a, 'h> {
+    package: &'a hir::Package<'h>,
+    identities: &'a BTreeMap<u32, u64>,
+    self_types: &'a BTreeMap<OwnerId, Term>,
+    containers: &'a BTreeMap<OwnerId, OwnerId>,
+    protocols: &'a SourceProtocolIndex<'a, 'h>,
+}
+
+impl<'a, 'h> Source<'a, 'h> {
+    fn from_checker(checker: &'a Checker<'_, 'h>) -> Self {
+        Self {
+            package: checker.package,
+            identities: &checker.package_identities,
+            self_types: &checker.self_types,
+            containers: &checker.self_containers,
+            protocols: &checker.lexical_source_protocols,
+        }
+    }
+}
+
+struct Reads<'a, 'h> {
+    source: Source<'a, 'h>,
+    pending: Vec<(OwnerId, LocalScope, Node<'a, 'h>)>,
     current: OwnerId,
-    expressions: BTreeSet<(OwnerId, n::LocalId)>,
-    patterns: BTreeSet<(OwnerId, n::LocalId)>,
+    local_scope: LocalScope,
+    expressions: BTreeSet<(LocalScope, OwnerId, n::LocalId)>,
+    patterns: BTreeSet<(LocalScope, OwnerId, n::LocalId)>,
     owners: BTreeSet<OwnerId>,
-    graph: BTreeMap<OwnerId, OwnerReads>,
+    graph: BTreeMap<OwnerId, ScopeReads<OwnerId, DeclarationId>>,
     local_inputs: Option<&'a BTreeSet<n::LocalId>>,
     reads_local_input: bool,
     collect_locals: bool,
-    local_reads: BTreeSet<n::LocalId>,
+    local_graph: BTreeMap<LocalScope, ScopeReads<LocalScope, n::LocalId>>,
     staged_locals: BTreeMap<DeclarationId, n::LocalId>,
     fuel: usize,
     span: Span,
@@ -52,11 +78,11 @@ pub(super) fn collect(
     fuel: &mut usize,
     span: Span,
 ) -> Result<BTreeSet<DeclarationId>, Error> {
-    let mut reads = Reads::new(checker, owner, fuel, span);
+    let mut reads = Reads::new(Source::from_checker(checker), owner, fuel, span);
     let result = (|| {
         reads.push(Node::Owner(owner))?;
         reads.drain()?;
-        reads.close(owner)
+        close(&reads.graph, owner, &mut reads.fuel, span)
     })();
     *fuel = reads.fuel;
     result
@@ -73,7 +99,7 @@ pub(super) fn expression_may_use_inputs(
     fuel: &mut usize,
     span: Span,
 ) -> Result<bool, Error> {
-    let mut reads = Reads::new(checker, owner, fuel, span);
+    let mut reads = Reads::new(Source::from_checker(checker), owner, fuel, span);
     reads.local_inputs = Some(inputs);
     let result = (|| {
         reads.inherited(owner)?;
@@ -86,7 +112,7 @@ pub(super) fn expression_may_use_inputs(
     result
 }
 
-/// Collect source-frame inputs for invocation preparation. Scoped delivered
+/// Collect free source-frame inputs for invocation preparation. Scoped delivered
 /// terms need an explicit binder mapping; they cannot be treated as no reads.
 pub(super) fn expression_local_dependencies(
     checker: &Checker<'_, '_>,
@@ -95,8 +121,9 @@ pub(super) fn expression_local_dependencies(
     fuel: &mut usize,
     span: Span,
 ) -> Result<BTreeSet<n::LocalId>, Error> {
-    let mut reads = Reads::new(checker, owner, fuel, span);
+    let mut reads = Reads::new(Source::from_checker(checker), owner, fuel, span);
     reads.collect_locals = true;
+    reads.local_graph.entry(LocalScope::Expression).or_default();
     let result = (|| {
         let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
             checker.package.item(owner).map(|item| &item.kind)
@@ -124,33 +151,43 @@ pub(super) fn expression_local_dependencies(
         reads.protocols(owner)?;
         reads.expression(value)?;
         reads.drain()?;
-        Ok(std::mem::take(&mut reads.local_reads))
+        close(
+            &reads.local_graph,
+            LocalScope::Expression,
+            &mut reads.fuel,
+            span,
+        )
     })();
     *fuel = reads.fuel;
     result
 }
 
-impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
-    fn new(checker: &'a Checker<'c, 'h>, owner: OwnerId, fuel: &usize, span: Span) -> Self {
+impl<'a, 'h> Reads<'a, 'h> {
+    fn new(source: Source<'a, 'h>, owner: OwnerId, fuel: &usize, span: Span) -> Self {
         Self {
-            checker,
+            source,
             pending: Vec::new(),
             owners: BTreeSet::new(),
             current: owner,
+            local_scope: LocalScope::Expression,
             expressions: BTreeSet::new(),
             patterns: BTreeSet::new(),
             graph: BTreeMap::new(),
             local_inputs: None,
             reads_local_input: false,
             collect_locals: false,
-            local_reads: BTreeSet::new(),
+            local_graph: BTreeMap::new(),
             staged_locals: BTreeMap::new(),
             fuel: *fuel,
             span,
         }
     }
     fn drain(&mut self) -> Result<(), Error> {
-        while let Some((context, node)) = self.pending.pop() {
+        while let Some((context, scope, node)) = self.pending.pop() {
+            self.local_scope = match &node {
+                Node::Owner(owner) => LocalScope::Declaration(*owner),
+                _ => scope,
+            };
             self.current = match &node {
                 Node::Owner(owner) => *owner,
                 _ => context,
@@ -168,7 +205,7 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
     }
     fn push(&mut self, node: Node<'a, 'h>) -> Result<(), Error> {
         self.charge()?;
-        self.pending.push((self.current, node));
+        self.pending.push((self.current, self.local_scope, node));
         Ok(())
     }
     fn expression(&mut self, expr: &'a Expr<'h>) -> Result<(), Error> {
@@ -182,7 +219,7 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
     }
     fn input(&mut self, id: DeclarationId) {
         if let Some(binding) = self.staged_locals.get(&id) {
-            self.local_reads.insert(*binding);
+            self.read_local(*binding);
         }
         self.graph
             .entry(self.current)
@@ -230,6 +267,13 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
         Ok(())
     }
     fn reference(&mut self, owner: OwnerId) -> Result<(), Error> {
+        if self.collect_locals {
+            self.local_graph
+                .entry(self.local_scope)
+                .or_default()
+                .callees
+                .insert(LocalScope::Declaration(owner));
+        }
         self.graph
             .entry(self.current)
             .or_default()
@@ -237,63 +281,27 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             .insert(owner);
         self.push(Node::Owner(owner))
     }
-    /// Solve lexical reads on the declaration graph, not a union of syntax from
-    /// unrelated invocation frames. A callee's own binders do not become caller
-    /// captures; its argument expressions were observed in the caller already.
-    /// Work-list propagation also closes recursive groups without body expansion.
-    fn close(&mut self, root: OwnerId) -> Result<BTreeSet<DeclarationId>, Error> {
-        let mut reverse = BTreeMap::<OwnerId, BTreeSet<OwnerId>>::new();
-        let mut needed = BTreeMap::<OwnerId, BTreeSet<DeclarationId>>::new();
-        for (&owner, reads) in &self.graph {
-            for input in &reads.direct {
-                self.fuel = self.fuel.checked_sub(1).ok_or_else(|| {
-                    error(self.span, "lexical dependency closure budget exhausted")
-                })?;
-                if !reads.bindings.contains(input) {
-                    needed.entry(owner).or_default().insert(*input);
-                }
-            }
-            needed.entry(owner).or_default();
-            for callee in &reads.callees {
-                self.fuel = self.fuel.checked_sub(1).ok_or_else(|| {
-                    error(self.span, "lexical dependency closure budget exhausted")
-                })?;
-                if !self.graph.contains_key(callee) {
-                    return Err(error(self.span, "lexical callee observation is incomplete"));
-                }
-                reverse.entry(*callee).or_default().insert(owner);
-            }
+    fn read_local(&mut self, binding: n::LocalId) {
+        if self.collect_locals {
+            self.local_graph
+                .entry(self.local_scope)
+                .or_default()
+                .direct
+                .insert(binding);
         }
-        let mut queued = needed.keys().copied().collect::<BTreeSet<_>>();
-        let mut pending = VecDeque::from_iter(queued.iter().copied());
-        while let Some(callee) = pending.pop_front() {
-            queued.remove(&callee);
-            self.charge()?;
-            self.fuel = self
-                .fuel
-                .checked_sub(needed[&callee].len())
-                .ok_or_else(|| error(self.span, "lexical dependency closure budget exhausted"))?;
-            let outgoing = needed[&callee].clone();
-            for caller in reverse.get(&callee).into_iter().flatten() {
-                let mut changed = false;
-                for input in &outgoing {
-                    self.charge()?;
-                    if !self.graph[caller].bindings.contains(input) {
-                        changed |= needed.get_mut(caller).unwrap().insert(*input);
-                    }
-                }
-                if changed && queued.insert(*caller) {
-                    pending.push_back(*caller);
-                }
-            }
+    }
+    fn bind_local(&mut self, binding: hir::HirId) {
+        if self.collect_locals {
+            self.local_graph
+                .entry(self.local_scope)
+                .or_default()
+                .bindings
+                .insert(local(binding));
         }
-        needed
-            .remove(&root)
-            .ok_or_else(|| error(self.span, "missing lexical root observation"))
     }
     fn identity(&self, id: hir::common::DefId) -> DeclarationId {
         DeclarationId {
-            package: semantic_package(&self.checker.package_identities, id.pkg),
+            package: semantic_package(self.source.identities, id.pkg),
             local: id.index,
         }
     }
@@ -301,7 +309,7 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
         self.charge()?;
         // Global declarations cannot close over this lexical scope. Their
         // explicit applications are walked at the use site instead.
-        let Some(owner) = self.checker.package.definition_owner(id) else {
+        let Some(owner) = self.source.package.definition_owner(id) else {
             return Ok(());
         };
         let mut cursor = owner;
@@ -311,10 +319,10 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             if !seen.insert(cursor) {
                 return Err(error(self.span, "cyclic lexical declaration ownership"));
             }
-            if self.checker.package.lexical_parents.contains_key(&cursor) {
+            if self.source.package.lexical_parents.contains_key(&cursor) {
                 return self.reference(owner);
             }
-            let Some(parent) = self.checker.self_containers.get(&cursor).copied() else {
+            let Some(parent) = self.source.containers.get(&cursor).copied() else {
                 break;
             };
             cursor = parent;
@@ -379,14 +387,14 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
     fn inherited(&mut self, owner: OwnerId) -> Result<(), Error> {
         let mut cursor = owner;
         let mut seen = BTreeSet::new();
-        while let Some(parent) = self.checker.package.lexical_parents.get(&cursor).copied() {
+        while let Some(parent) = self.source.package.lexical_parents.get(&cursor).copied() {
             self.charge()?;
             if !seen.insert(parent) {
                 return Err(error(self.span, "cyclic lexical proof environment"));
             }
             self.protocols(parent)?;
             let item = self
-                .checker
+                .source
                 .package
                 .item(parent)
                 .ok_or_else(|| error(self.span, "missing lexical parent declaration"))?;
@@ -428,17 +436,22 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             Node::Owner(owner) => self.owner(owner)?,
             Node::Body(id) => {
                 let body = self
-                    .checker
+                    .source
                     .package
                     .body(id)
                     .ok_or_else(|| error(self.span, "missing lexical dependency body"))?;
                 for parameter in body.params {
+                    self.bind_local(parameter.hir_id);
                     self.push(Node::Parameter(&parameter.ty.kind))?;
                 }
                 self.expression(body.value)?;
             }
             Node::Signature(sig) => {
+                if let Some(binding) = sig.return_binding {
+                    self.bind_local(binding);
+                }
                 for parameter in sig.params {
+                    self.bind_local(parameter.hir_id);
                     self.push(Node::Parameter(&parameter.ty.kind))?;
                 }
                 self.optional(sig.return_ty)?;
@@ -493,11 +506,10 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
         Ok(())
     }
     fn protocols(&mut self, owner: OwnerId) -> Result<(), Error> {
-        let checker = self.checker;
-        let members =
-            checker
-                .lexical_source_protocols
-                .for_parent(owner, &mut self.fuel, self.span)?;
+        let members = self
+            .source
+            .protocols
+            .for_parent(owner, &mut self.fuel, self.span)?;
         for &member in members.into_iter().flatten() {
             // The structural edge is shared; its declarations and premises
             // are still observed in this query's own lexical/proof context.
@@ -509,12 +521,17 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
         if !self.owners.insert(owner) {
             return Ok(());
         }
+        if self.collect_locals {
+            self.local_graph
+                .entry(LocalScope::Declaration(owner))
+                .or_default();
+        }
         self.inherited(owner)?;
         self.protocols(owner)?;
-        if let Some(ty) = self.checker.self_types.get(&owner) {
+        if let Some(ty) = self.source.self_types.get(&owner) {
             self.term(ty)?;
         }
-        let package = self.checker.package;
+        let package = self.source.package;
         let item = package
             .item(owner)
             .ok_or_else(|| error(self.span, "missing lexical dependency declaration"))?;
@@ -602,6 +619,7 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
                 self.expression(def.ty)?;
                 self.optional(def.default)?;
                 for parameter in def.parameters {
+                    self.bind_local(parameter.hir_id);
                     self.push(Node::Parameter(&parameter.ty.kind))?;
                 }
                 self.clauses(def.clause_params, def.clause_constraints)?;
@@ -612,6 +630,7 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             }
             ItemKind::Deriver(def) => {
                 for parameter in def.parameters {
+                    self.bind_local(parameter.hir_id);
                     self.push(Node::Parameter(&parameter.ty.kind))?;
                 }
                 self.expression(def.trait_ref)?;
@@ -639,10 +658,13 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
         Ok(())
     }
     fn expr(&mut self, expr: &'a Expr<'h>) -> Result<(), Error> {
-        if !self.expressions.insert((self.current, local(expr.hir_id))) {
+        if !self
+            .expressions
+            .insert((self.local_scope, self.current, local(expr.hir_id)))
+        {
             return Ok(());
         }
-        let package = self.checker.package;
+        let package = self.source.package;
         if let Some(id) = package.member_projections.get(&expr.hir_id) {
             self.definition(*id)?;
         }
@@ -689,9 +711,7 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             }
             H::ResolvedDef { def_id, .. } => self.definition(*def_id)?,
             H::ResolvedFnParam(_, binding) | H::ResolvedLocal(_, binding) => {
-                if self.collect_locals {
-                    self.local_reads.insert(local(*binding));
-                }
+                self.read_local(local(*binding));
                 if self
                     .local_inputs
                     .is_some_and(|inputs| inputs.contains(&local(*binding)))
@@ -736,6 +756,7 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             H::ContextualExprType(bindings, value) | H::ContextualPatternType(value, bindings) => {
                 self.expression(value)?;
                 for binding in bindings {
+                    self.bind_local(binding.hir_id);
                     self.expression(binding.ty)?;
                     self.optional(binding.default)?;
                 }
@@ -850,6 +871,7 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             }
             H::Closure(parameters, annotation, body) => {
                 for parameter in *parameters {
+                    self.bind_local(parameter.hir_id);
                     self.push(Node::Pattern(&parameter.pat))?;
                     self.optional(parameter.ty)?;
                 }
@@ -910,6 +932,7 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             | H::TyNFFn(parameters)
             | H::TyModifiedFn(_, parameters) => {
                 for parameter in *parameters {
+                    self.bind_local(parameter.hir_id);
                     self.push(Node::Parameter(&parameter.kind))?;
                 }
             }
@@ -950,7 +973,10 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
         Ok(())
     }
     fn pattern(&mut self, pattern: &'a hir::Pattern<'h>) -> Result<(), Error> {
-        if !self.patterns.insert((self.current, local(pattern.hir_id))) {
+        if !self
+            .patterns
+            .insert((self.local_scope, self.current, local(pattern.hir_id)))
+        {
             return Ok(());
         }
         match &pattern.kind {
@@ -973,6 +999,7 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             | Pattern::Not(inner)
             | Pattern::Ref(inner) => self.push(Node::Pattern(inner))?,
             Pattern::Binding(_, _, inner) => {
+                self.bind_local(pattern.hir_id);
                 if let Some(inner) = inner {
                     self.push(Node::Pattern(inner))?;
                 }
@@ -1032,3 +1059,7 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "dependency_tests.rs"]
+mod tests;
