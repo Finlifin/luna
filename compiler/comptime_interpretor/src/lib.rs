@@ -1511,14 +1511,7 @@ impl<'a> Interpreter<'a> {
                 &instance.arguments,
                 &mut trait_parameter_fuel,
                 |ty, variant, fuel| {
-                    nir::normal_forms::nominal_value_fields_budgeted(package, ty, variant, fuel)
-                        .ok_or_else(|| {
-                            if *fuel == 0 {
-                                nir::NominalAdmissionError::Budget
-                            } else {
-                                "dispatch input lacks nominal layout evidence".into()
-                            }
-                        })
+                    nir::normal_forms::query_nominal_value_fields(package, ty, variant, fuel)
                 },
                 |_, _, _| false,
                 |domain, fuel| nir::normal_forms::list_element_budgeted(package, domain, fuel),

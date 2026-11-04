@@ -1135,8 +1135,9 @@ DomainQueries 直接传递该结果；materialization 的 callable identity 路�
 预留成本，仍验证空载荷的完整参数帧。旧 Option 接口仅向这个核心单向适配，
 在兼容边界把 Budget 转为零 fuel；没有保留另一套检查或布局算法。
 
-源世界的普通函数参数、trait 参数、DeclarationWorld 查询和 materialization
-准入已直接消费显式结果。VM 的普通／名义参数及 effect 参数也直接传播结果，
+源世界的普通函数参数、trait／impl 参数、DeclarationWorld 查询和 materialization
+准入／staged 名义值冻结已直接消费显式结果。VM 的普通／名义参数、effect 参数
+及启动时的 dispatch 实例接纳也直接传播结果，
 最终错误分类按错误枚举匹配，不能再次根据 fuel 是否为零分类。VM 仍从自身的
 源声明、生成声明或保留的具体 IIR 实例取得字段，再调用同一字段代入核心；
 不能把它替换为仅能看到原 package 的扫描器，丢失所属世界的声明证据。
@@ -1174,6 +1175,24 @@ IIR 存储观察及 VM 的旧描述／解码观察接口仍有 Option 边界。�
 `/tmp/luna-tools-vglziu_q/result.json`；该项不再列作未解决基线失败。
 
 
+后续将 impl 实参检查、VM dispatch 实例接纳和 staged 名义值冻结也迁入显式查询，
+删除两处零 fuel 重建以及一处“无效或超预算”的合并诊断。预算仍由原调用者持有，
+没有补发预算或缓存拒绝结果。type_resolution、comptime_interpretor、materialization
+中已无对 `nominal_value_fields_budgeted` 的引用；其余兼容观察者仍按上文保留。
+
+
+验证目录仍为 `/home/fin/luna`，同一 `development/check.py --timeout 900 -- test` 入口：
+
+- `-p type_resolution --lib captured_head_domains`：3 通过，退出 0；
+  `/tmp/luna-tools-rs7xw2i2/result.json`。
+- `-p comptime_interpretor --lib`：451 通过，退出 0；
+  `/tmp/luna-tools-3dhyk3bu/result.json`。
+- `-p luna --test nominal_value_parameters --test nominal_staging --test newtypes
+  --test invocation_value_templates --no-fail-fast`：534 通过，退出 0；
+  `/tmp/luna-tools-i0976fhf/result.json`。包括完整 newtypes 组、名义值参数及真实
+  sysroot 调用模板；未重复全 workspace 检查。
+
+
 ## 24. IIR 的闭合参数检查保留接收世界错误
 
 IIR 使用保留的具体名义实例、callable 身份与接口签名核验闭合 NF 参数。
@@ -1193,8 +1212,8 @@ method dispatch 的独立检查。
 修复后检查每一档预算直到首次成功，之前只允许预算失败；另检验缺失世界、错误
 变体／字段、方法的完整实例键及随后成功。没有通过增加预算或更换合法载荷避开问题。
 
-IIR 的 runtime storage 观察仍使用 Option 布局回调；elaboration、VM 描述观察及
-部分源世界调用方也尚未全部迁移。本阶段不宣称所有布局接口或可恢复参数计划完成。
+IIR 的 runtime storage 观察仍使用 Option 布局回调；elaboration 和 VM 描述观察
+也尚未全部迁移。本阶段不宣称所有布局接口或可恢复参数计划完成。
 
 验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`，
 最终检查均退出 0：

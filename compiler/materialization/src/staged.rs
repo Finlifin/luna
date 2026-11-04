@@ -694,13 +694,13 @@ impl Builder<'_> {
         {
             return Err("staged nominal result identity mismatch".into());
         }
-        let types = nir::normal_forms::nominal_value_fields_budgeted(
+        let types = nir::normal_forms::query_nominal_value_fields(
             self.package,
             ty,
             variant,
             &mut self.fuel,
         )
-        .ok_or("staged nominal layout is invalid or exceeds the budget")?;
+        .map_err(|error| format!("staged nominal layout: {error}"))?;
         if fields.len() != types.len() {
             return Err("staged nominal field count mismatch".into());
         }

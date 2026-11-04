@@ -1959,14 +1959,7 @@ fn validate_head_arguments_with_domains(
                         "nominal value admission requires declaration layout evidence",
                     )
                 })?;
-                nir::normal_forms::nominal_value_fields_budgeted(package, ty, variant, fuel)
-                    .ok_or_else(|| {
-                        if *fuel == 0 {
-                            nir::NominalAdmissionError::Budget
-                        } else {
-                            nir::NominalAdmissionError::from("invalid nominal value layout")
-                        }
-                    })
+                nir::normal_forms::query_nominal_value_fields(package, ty, variant, fuel)
             },
             symbolic,
             |domain, fuel| {
