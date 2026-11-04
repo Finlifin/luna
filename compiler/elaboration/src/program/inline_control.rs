@@ -201,6 +201,10 @@ impl Checker<'_, '_> {
                     Failure::Steps => "inline pattern selection budget exhausted".into(),
                     Failure::Depth => "inline pattern selection depth exceeded".into(),
                     Failure::Size => "inline pattern selection value size limit exceeded".into(),
+                    Failure::Structure => {
+                        "inline pattern selection structure budget exhausted".into()
+                    }
+                    Failure::Proof => "inline pattern selection proof budget exhausted".into(),
                     Failure::Invalid(message) => {
                         format!("invalid inline pattern evidence: {message}")
                     }

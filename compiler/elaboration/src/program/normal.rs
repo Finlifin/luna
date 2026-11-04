@@ -1,5 +1,6 @@
 //! Opaque head inputs: a stable value or a declaration-side symbolic input.
 use super::*;
+use observation::Failure;
 pub(super) mod known_patterns;
 pub(super) mod known_scalars;
 pub(super) mod observation;
@@ -144,12 +145,15 @@ impl Checker<'_, '_> {
                     }
                     n::NormalFormArgument::ListSpread(value) if value.ty == *ty => {
                         if !fields.is_empty() {
-                            parts.push(freeze_known_list(
-                                ty,
-                                element,
-                                std::mem::take(&mut fields),
-                                &mut budget,
-                            )?);
+                            parts.push(
+                                freeze_known_list(
+                                    ty,
+                                    element,
+                                    std::mem::take(&mut fields),
+                                    &mut budget,
+                                )
+                                .ok()?,
+                            );
                         }
                         parts.push(self.known_normal_input_in(value, 0, &mut budget, bindings)?);
                     }
@@ -157,7 +161,7 @@ impl Checker<'_, '_> {
                 }
             }
             if !fields.is_empty() {
-                parts.push(freeze_known_list(ty, element, fields, &mut budget)?);
+                parts.push(freeze_known_list(ty, element, fields, &mut budget).ok()?);
             }
             // Pay for inspecting/merging retained operands before normalization.
             for part in &parts {
@@ -1241,7 +1245,18 @@ impl Checker<'_, '_> {
         self.known_normal_input_in(expr, depth, budget, &BTreeMap::new())
     }
 
-    fn known_normal_arguments(
+    pub(in crate::program) fn known_normal_input_in(
+        &self,
+        expr: &n::Expr,
+        depth: usize,
+        budget: &mut comptime_runtime::Budget,
+        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+    ) -> Option<Term> {
+        self.observe_normal_input_in(expr, depth, budget, bindings)
+            .ok()
+    }
+
+    fn observe_normal_arguments(
         &self,
         head: DeclarationId,
         arguments: &[n::NormalFormArgument],
@@ -1249,16 +1264,14 @@ impl Checker<'_, '_> {
         depth: usize,
         budget: &mut comptime_runtime::Budget,
         bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-    ) -> Option<Vec<Term>> {
-        budget
-            .consume(arguments.len().saturating_add(bindings.len()))
-            .ok()?;
+    ) -> Result<Vec<Term>, Failure> {
+        budget.consume(arguments.len().saturating_add(bindings.len()))?;
         if let Some(plan) = plan {
             if !plan.preparations.is_empty()
                 || !plan.valid(arguments.len())
                 || plan.bindings.iter().any(|id| bindings.contains_key(id))
             {
-                return None;
+                return Err(Failure::Unavailable);
             }
         }
         // The signature is the source of a collection's domain, including an
@@ -1269,7 +1282,7 @@ impl Checker<'_, '_> {
             .any(|argument| matches!(argument, n::NormalFormArgument::List { .. }))
         {
             for (owner, inputs) in &self.normal_parameters {
-                budget.consume(1).ok()?;
+                budget.consume(1)?;
                 if matches_declaration(self.package, &self.package_identities, *owner, head) {
                     parameters = Some(inputs.as_slice());
                     break;
@@ -1277,7 +1290,7 @@ impl Checker<'_, '_> {
             }
         }
         if parameters.is_some_and(|inputs| inputs.len() != arguments.len()) {
-            return None;
+            return Err(Failure::Unavailable);
         }
         let order: Vec<_> =
             plan.map_or_else(|| (0..arguments.len()).collect(), |plan| plan.order.clone());
@@ -1302,22 +1315,20 @@ impl Checker<'_, '_> {
                         )
                         .and_then(|substitution| {
                             substitution.instantiate_bounded(&parameters[slot].2, &mut budget.steps)
-                        })
-                        .ok()?,
+                        })?,
                     )
                 } else {
                     None
                 };
                 if matches!(arguments[slot], n::NormalFormArgument::List { .. }) {
                     if let (Some(parameters), Some(domain)) = (parameters, domain.as_ref()) {
-                        budget
-                            .consume(parameters.len().saturating_mul(ids.len().saturating_add(1)))
-                            .ok()?;
+                        budget.consume(
+                            parameters.len().saturating_mul(ids.len().saturating_add(1)),
+                        )?;
                         let mut waiting = false;
                         for (id, _, _) in parameters {
                             if !ids.contains(id) {
-                                nir::type_computations::charge_term(domain, &mut budget.steps)
-                                    .ok()?;
+                                nir::type_computations::charge_term(domain, &mut budget.steps)?;
                                 if domain.mentions_rigid(*id) {
                                     waiting = true;
                                     break;
@@ -1335,59 +1346,61 @@ impl Checker<'_, '_> {
                     domain.as_ref(),
                     self.protocols.meta_list,
                     budget,
-                    |value, budget| self.known_normal_input_in(value, depth + 1, budget, &scoped),
+                    |value, budget| self.observe_normal_input_in(value, depth + 1, budget, &scoped),
                 )?;
                 if let Some(plan) = plan {
                     scoped.insert(
                         plan.bindings[slot],
-                        std::sync::Arc::new(clone_known_term(&value, budget)?),
+                        std::sync::Arc::new(copy_observed_term(&value, budget)?),
                     );
                 }
                 if let (Some(parameters), Some(domain)) = (parameters, domain) {
                     ids.push(parameters[slot].0);
                     domains.push(domain);
-                    completed.push(clone_known_term(&value, budget)?);
+                    completed.push(copy_observed_term(&value, budget)?);
                 }
                 values[slot] = Some(value);
             }
             if deferred.len() == before {
-                return None;
+                return Err(Failure::Unavailable);
             }
             pending = deferred;
         }
-        values.into_iter().collect()
+        values
+            .into_iter()
+            .map(|value| value.ok_or(Failure::Unavailable))
+            .collect()
     }
 
-    pub(in crate::program) fn known_normal_input_in(
+    pub(in crate::program) fn observe_normal_input_in(
         &self,
         expr: &n::Expr,
         depth: usize,
         budget: &mut comptime_runtime::Budget,
         bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-    ) -> Option<Term> {
-        if depth >= 128 || budget.consume(1).is_err() {
-            return None;
+    ) -> Result<Term, Failure> {
+        if depth >= 128 {
+            return Err(Failure::Depth);
         }
+        budget.consume(1)?;
         match &expr.kind {
             K::TypeValue(ty) | K::ComptimeValue(ty) | K::StagedValue(ty) => {
-                clone_known_term(ty, budget)
+                copy_observed_term(ty, budget)
             }
-            K::OptionalAbsent if matches!(expr.ty, Term::Optional(_)) => {
-                Some(Term::OptionalValue {
-                    ty: Box::new(clone_known_term(&expr.ty, budget)?),
-                    value: None,
-                })
-            }
+            K::OptionalAbsent if matches!(expr.ty, Term::Optional(_)) => Ok(Term::OptionalValue {
+                ty: Box::new(copy_observed_term(&expr.ty, budget)?),
+                value: None,
+            }),
             K::OptionalPresent(value) => {
                 let Term::Optional(payload) = &expr.ty else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 if value.ty != **payload {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
-                Some(Term::OptionalValue {
-                    ty: Box::new(clone_known_term(&expr.ty, budget)?),
-                    value: Some(Box::new(self.known_normal_input_in(
+                Ok(Term::OptionalValue {
+                    ty: Box::new(copy_observed_term(&expr.ty, budget)?),
+                    value: Some(Box::new(self.observe_normal_input_in(
                         value,
                         depth + 1,
                         budget,
@@ -1396,32 +1409,33 @@ impl Checker<'_, '_> {
                 })
             }
             K::TypeListIndex(values, index) => {
-                let element = self.list_element_type(&values.ty)?;
+                let element = self
+                    .list_element_type(&values.ty)
+                    .ok_or(Failure::Unavailable)?;
                 if *element != expr.ty {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
-                let frozen = self.known_normal_input_in(values, depth + 1, budget, bindings)?;
+                let frozen = self.observe_normal_input_in(values, depth + 1, budget, bindings)?;
                 let mut values = take_known_list_elements(frozen, &values.ty, element, budget)?;
                 let Term::Integer(index) =
-                    self.known_normal_input_in(index, depth + 1, budget, bindings)?
+                    self.observe_normal_input_in(index, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
-                budget
-                    .consume(index.bit_len().div_ceil(32).saturating_add(1))
-                    .ok()?;
-                let index = usize::try_from(index.to_u128().ok()?).ok()?;
+                budget.consume(index.bit_len().div_ceil(32).saturating_add(1))?;
+                let index = usize::try_from(index.to_u128()?)
+                    .map_err(|_| Failure::Invalid("list index overflow".into()))?;
                 if index >= values.len() {
-                    return None;
+                    return Err(Failure::Invalid("list index out of bounds".into()));
                 }
-                Some(values.swap_remove(index))
+                Ok(values.swap_remove(index))
             }
             K::NormalFormType {
                 head,
                 arguments,
                 plan,
             } => {
-                let arguments = self.known_normal_arguments(
+                let arguments = self.observe_normal_arguments(
                     *head,
                     arguments,
                     plan.as_ref(),
@@ -1429,46 +1443,50 @@ impl Checker<'_, '_> {
                     budget,
                     bindings,
                 )?;
-                Some(Term::NormalForm {
+                Ok(Term::NormalForm {
                     head: *head,
                     sort: Sort::Type,
                     arguments,
                 })
             }
             K::OptionalType(value) => {
-                let inner = self.known_normal_input_in(value, depth + 1, budget, bindings)?;
-                (inner.sort() == Sort::Type).then(|| Term::Optional(Box::new(inner)))
+                let inner = self.observe_normal_input_in(value, depth + 1, budget, bindings)?;
+                (inner.sort() == Sort::Type)
+                    .then(|| Term::Optional(Box::new(inner)))
+                    .ok_or(Failure::Unavailable)
             }
             K::PointerType(value) => {
-                let inner = self.known_normal_input_in(value, depth + 1, budget, bindings)?;
-                (inner.sort() == Sort::Type).then(|| Term::Pointer(Box::new(inner)))
+                let inner = self.observe_normal_input_in(value, depth + 1, budget, bindings)?;
+                (inner.sort() == Sort::Type)
+                    .then(|| Term::Pointer(Box::new(inner)))
+                    .ok_or(Failure::Unavailable)
             }
             K::BitVecType(value) => {
                 let Term::Integer(width) =
-                    self.known_normal_input_in(value, depth + 1, budget, bindings)?
+                    self.observe_normal_input_in(value, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
-                budget
-                    .consume(width.bit_len().div_ceil(32).saturating_add(1))
-                    .ok()?;
-                let width = usize::try_from(width.to_u128().ok()?).ok()?;
-                Some(p(P::BitVec(width)))
+                budget.consume(width.bit_len().div_ceil(32).saturating_add(1))?;
+                let width = usize::try_from(width.to_u128()?)
+                    .map_err(|_| Failure::Invalid("bit-vector width overflow".into()))?;
+                Ok(p(P::BitVec(width)))
             }
             K::FunctionType {
                 comptime,
                 comptime_parameters,
                 parameters,
             } => {
-                budget.consume(parameters.len().saturating_add(1)).ok()?;
+                budget.consume(parameters.len().saturating_add(1))?;
                 if comptime_parameters.len() != parameters.len() {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
                 let mut types = Vec::with_capacity(parameters.len());
                 for (parameter, staged) in parameters.iter().zip(comptime_parameters) {
-                    let ty = self.known_normal_input_in(parameter, depth + 1, budget, bindings)?;
+                    let ty =
+                        self.observe_normal_input_in(parameter, depth + 1, budget, bindings)?;
                     if ty.sort() != Sort::Type {
-                        return None;
+                        return Err(Failure::Unavailable);
                     }
                     types.push(Parameter {
                         sort: if *staged {
@@ -1483,108 +1501,115 @@ impl Checker<'_, '_> {
                         ty,
                     });
                 }
-                Some(
-                    Term::Function {
-                        parameters: types,
-                        result: Box::new(p(P::Void)),
-                    }
-                    .with_comptime_phase(*comptime),
-                )
+                Ok(Term::Function {
+                    parameters: types,
+                    result: Box::new(p(P::Void)),
+                }
+                .with_comptime_phase(*comptime))
             }
             K::FunctionResultType { signature, result } => {
                 let signature =
-                    self.known_normal_input_in(signature, depth + 1, budget, bindings)?;
+                    self.observe_normal_input_in(signature, depth + 1, budget, bindings)?;
                 if !matches!(signature.callable_signature(), Term::Function { .. }) {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
-                let result = self.known_normal_input_in(result, depth + 1, budget, bindings)?;
+                let result = self.observe_normal_input_in(result, depth + 1, budget, bindings)?;
                 if result.sort() != Sort::Type {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
-                signature.with_callable_result(result)
+                signature
+                    .with_callable_result(result)
+                    .ok_or(Failure::Unavailable)
             }
             K::ClosureType {
                 environment,
                 signature,
             } => {
-                budget.consume(environment.len().saturating_add(1)).ok()?;
+                budget.consume(environment.len().saturating_add(1))?;
                 let mut types = Vec::with_capacity(environment.len());
                 for field in environment {
-                    let ty = self.known_normal_input_in(field, depth + 1, budget, bindings)?;
+                    let ty = self.observe_normal_input_in(field, depth + 1, budget, bindings)?;
                     if ty.sort() != Sort::Type {
-                        return None;
+                        return Err(Failure::Unavailable);
                     }
                     types.push(ty);
                 }
                 let signature =
-                    self.known_normal_input_in(signature, depth + 1, budget, bindings)?;
+                    self.observe_normal_input_in(signature, depth + 1, budget, bindings)?;
                 if signature.sort() != Sort::Type {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
                 if types.is_empty() {
-                    Some(signature)
+                    Ok(signature)
                 } else {
                     if !matches!(
                         signature,
                         Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
                     ) {
-                        return None;
+                        return Err(Failure::Unavailable);
                     }
-                    Some(Term::Closure {
+                    Ok(Term::Closure {
                         environment: types,
                         signature: Box::new(signature),
                     })
                 }
             }
             K::TypeList(values) => {
-                let element = self.list_element_type(&expr.ty)?;
-                budget.consume(values.len()).ok()?;
+                let element = self
+                    .list_element_type(&expr.ty)
+                    .ok_or(Failure::Unavailable)?;
+                budget.consume(values.len())?;
                 let mut fields = Vec::with_capacity(values.len());
                 for value in values {
                     if value.ty != *element {
-                        return None;
+                        return Err(Failure::Unavailable);
                     }
-                    fields.push(self.known_normal_input_in(value, depth + 1, budget, bindings)?);
+                    fields.push(self.observe_normal_input_in(
+                        value,
+                        depth + 1,
+                        budget,
+                        bindings,
+                    )?);
                 }
                 freeze_known_list(&expr.ty, element, fields, budget)
             }
             K::Object { names, fields }
                 if expr.ty == p(P::Object) && names.len() == fields.len() =>
             {
-                budget.consume(fields.len().saturating_mul(4)).ok()?;
+                budget.consume(fields.len().saturating_mul(4))?;
                 let mut entries = Vec::with_capacity(fields.len());
                 for (key, field) in names.iter().zip(fields) {
                     if let Some(key) = key {
-                        budget.consume(key.len()).ok()?;
+                        budget.consume(key.len())?;
                     }
-                    let domain = clone_known_term(&field.ty, budget)?;
-                    let value = self.known_normal_input_in(field, depth + 1, budget, bindings)?;
+                    let domain = copy_observed_term(&field.ty, budget)?;
+                    let value = self.observe_normal_input_in(field, depth + 1, budget, bindings)?;
                     entries.push(nir::objects::entry(key.as_deref(), domain, value));
                 }
-                Some(nir::objects::value(entries))
+                Ok(nir::objects::value(entries))
             }
             K::AnonymousRecord { fields } => {
                 let Term::Record(types) = &expr.ty else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 if fields.len() != types.len() {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
-                Some(Term::RecordValue(
+                Ok(Term::RecordValue(
                     fields
                         .iter()
                         .zip(types)
                         .map(|(field, (name, ty))| {
-                            budget.consume(name.len()).ok()?;
+                            budget.consume(name.len())?;
                             if field.ty != *ty {
-                                return None;
+                                return Err(Failure::Unavailable);
                             }
-                            Some((
+                            Ok((
                                 name.clone(),
-                                self.known_normal_input_in(field, depth + 1, budget, bindings)?,
+                                self.observe_normal_input_in(field, depth + 1, budget, bindings)?,
                             ))
                         })
-                        .collect::<Option<Vec<_>>>()?,
+                        .collect::<Result<Vec<_>, Failure>>()?,
                 ))
             }
             K::Record {
@@ -1601,25 +1626,30 @@ impl Checker<'_, '_> {
                     ..
                 } = &expr.ty
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 if declaration != actual {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
                 if fields.len() > budget.steps {
-                    return None;
+                    return Err(Failure::Steps);
                 }
                 let variant = match &expr.kind {
-                    K::Variant { index, .. } => Some(u32::try_from(*index).ok()?),
+                    K::Variant { index, .. } => Some(
+                        u32::try_from(*index)
+                            .map_err(|_| Failure::Invalid("variant index overflow".into()))?,
+                    ),
                     _ => None,
                 };
-                Some(Term::NominalValue {
-                    ty: Box::new(clone_known_term(&expr.ty, budget)?),
+                Ok(Term::NominalValue {
+                    ty: Box::new(copy_observed_term(&expr.ty, budget)?),
                     variant,
                     fields: fields
                         .iter()
-                        .map(|field| self.known_normal_input_in(field, depth + 1, budget, bindings))
-                        .collect::<Option<Vec<_>>>()?,
+                        .map(|field| {
+                            self.observe_normal_input_in(field, depth + 1, budget, bindings)
+                        })
+                        .collect::<Result<Vec<_>, Failure>>()?,
                 })
             }
             K::Field {
@@ -1631,161 +1661,158 @@ impl Checker<'_, '_> {
                     ty,
                     variant: None,
                     mut fields,
-                } = self.known_normal_input_in(value, depth + 1, budget, bindings)?
+                } = self.observe_normal_input_in(value, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 let Term::Nominal {
                     declaration: actual,
                     ..
                 } = ty.as_ref()
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 if actual != declaration || *index >= fields.len() {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
-                Some(fields.swap_remove(*index))
+                Ok(fields.swap_remove(*index))
             }
             K::AnonymousField { value, name, index } => {
                 let Term::RecordValue(mut fields) =
-                    self.known_normal_input_in(value, depth + 1, budget, bindings)?
+                    self.observe_normal_input_in(value, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
-                let (actual, _) = fields.get(*index)?;
-                budget
-                    .consume(actual.len().saturating_add(name.len()))
-                    .ok()?;
+                let (actual, _) = fields
+                    .get(*index)
+                    .ok_or_else(|| Failure::Invalid("record field index out of bounds".into()))?;
+                budget.consume(actual.len().saturating_add(name.len()))?;
                 if actual != name {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
-                Some(fields.swap_remove(*index).1)
+                Ok(fields.swap_remove(*index).1)
             }
-            K::Tuple(values) => Some(Term::TupleValue(
+            K::Tuple(values) => Ok(Term::TupleValue(
                 values
                     .iter()
-                    .map(|value| self.known_normal_input_in(value, depth + 1, budget, bindings))
-                    .collect::<Option<Vec<_>>>()?,
+                    .map(|value| self.observe_normal_input_in(value, depth + 1, budget, bindings))
+                    .collect::<Result<Vec<_>, Failure>>()?,
             )),
-            K::Unit => Some(Term::Unit),
-            K::Literal(literal) => known_scalars::literal(literal, budget).ok(),
+            K::Unit => Ok(Term::Unit),
+            K::Literal(literal) => known_scalars::literal(literal, budget),
             K::SymbolName(value) => {
                 if expr.ty != p(P::Str) || value.ty != p(P::Symbol) {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
                 let Term::Symbol(name) =
-                    self.known_normal_input_in(value, depth + 1, budget, bindings)?
+                    self.observe_normal_input_in(value, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
-                Some(Term::String(name))
+                Ok(Term::String(name))
             }
             K::Not(value) => {
-                match self.known_normal_input_in(value, depth + 1, budget, bindings)? {
-                    Term::Bool(value) => Some(Term::Bool(!value)),
-                    Term::BitVec(value) => Some(Term::BitVec(value.not(budget).ok()?)),
-                    _ => None,
+                match self.observe_normal_input_in(value, depth + 1, budget, bindings)? {
+                    Term::Bool(value) => Ok(Term::Bool(!value)),
+                    Term::BitVec(value) => Ok(Term::BitVec(value.not(budget)?)),
+                    _ => Err(Failure::Unavailable),
                 }
             }
             K::And(left, right) | K::Or(left, right) => {
-                let left = self.known_normal_input_in(left, depth + 1, budget, bindings)?;
+                let left = self.observe_normal_input_in(left, depth + 1, budget, bindings)?;
                 let conjunction = matches!(expr.kind, K::And(..));
                 // Boolean operators short-circuit; bit-vector operators do not.
                 // In particular an unreachable call must not erase a known
                 // boolean context or consume its invocation budget here.
                 if let Term::Bool(value) = &left {
                     if *value != conjunction {
-                        return Some(Term::Bool(*value));
+                        return Ok(Term::Bool(*value));
                     }
                 }
-                let right = self.known_normal_input_in(right, depth + 1, budget, bindings)?;
+                let right = self.observe_normal_input_in(right, depth + 1, budget, bindings)?;
                 match (left, right) {
                     (Term::Bool(a), Term::Bool(b)) => {
-                        Some(Term::Bool(if conjunction { a && b } else { a || b }))
+                        Ok(Term::Bool(if conjunction { a && b } else { a || b }))
                     }
-                    (Term::BitVec(a), Term::BitVec(b)) => Some(Term::BitVec(
-                        if conjunction {
-                            a.and(&b, budget)
-                        } else {
-                            a.or(&b, budget)
-                        }
-                        .ok()?,
-                    )),
-                    _ => None,
+                    (Term::BitVec(a), Term::BitVec(b)) => Ok(Term::BitVec(if conjunction {
+                        a.and(&b, budget)
+                    } else {
+                        a.or(&b, budget)
+                    }?)),
+                    _ => Err(Failure::Unavailable),
                 }
             }
             K::BitConcat(left, right) | K::BitEqual(left, right) => {
                 let Term::BitVec(left) =
-                    self.known_normal_input_in(left, depth + 1, budget, bindings)?
+                    self.observe_normal_input_in(left, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 let Term::BitVec(right) =
-                    self.known_normal_input_in(right, depth + 1, budget, bindings)?
+                    self.observe_normal_input_in(right, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 if matches!(expr.kind, K::BitConcat(..)) {
-                    Some(Term::BitVec(left.concat(&right, budget).ok()?))
+                    Ok(Term::BitVec(left.concat(&right, budget)?))
                 } else {
                     if left.width() != right.width() {
-                        return None;
+                        return Err(Failure::Unavailable);
                     }
-                    budget.consume(left.words().len().saturating_add(1)).ok()?;
-                    Some(Term::Bool(left == right))
+                    budget.consume(left.words().len().saturating_add(1))?;
+                    Ok(Term::Bool(left == right))
                 }
             }
             K::BitSlice { value, start, end } => {
                 let Term::BitVec(value) =
-                    self.known_normal_input_in(value, depth + 1, budget, bindings)?
+                    self.observe_normal_input_in(value, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
-                Some(Term::BitVec(value.slice(*start, *end, budget).ok()?))
+                Ok(Term::BitVec(value.slice(*start, *end, budget)?))
             }
             K::TakeBits(value) => {
                 let Term::Primitive(primitive) = value.ty else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
-                let known = self.known_normal_input_in(value, depth + 1, budget, bindings)?;
+                let known = self.observe_normal_input_in(value, depth + 1, budget, bindings)?;
                 if let Term::BitVec(bits) = known {
-                    return Some(Term::BitVec(bits));
+                    return Ok(Term::BitVec(bits));
                 }
                 let Term::Integer(integer) = known else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
-                let (signed, width) = primitive.fixed_integer_layout()?;
+                let (signed, width) = primitive
+                    .fixed_integer_layout()
+                    .ok_or(Failure::Unavailable)?;
                 let raw = if signed {
-                    integer.to_signed(width).ok()? as u128
+                    integer.to_signed(width)? as u128
                 } else {
-                    integer.to_unsigned(width).ok()?
+                    integer.to_unsigned(width)?
                 };
                 let raw = if width == 128 {
                     raw
                 } else {
                     raw & ((1u128 << width) - 1)
                 };
-                Some(Term::BitVec(
-                    comptime_runtime::Integer::from_u128(raw)
-                        .to_bitvec(width as usize, budget)
-                        .ok()?,
+                Ok(Term::BitVec(
+                    comptime_runtime::Integer::from_u128(raw).to_bitvec(width as usize, budget)?,
                 ))
             }
             K::BitConvert(value) => {
                 let Term::Primitive(P::BitVec(width)) = expr.ty else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 let Term::BitVec(value) =
-                    self.known_normal_input_in(value, depth + 1, budget, bindings)?
+                    self.observe_normal_input_in(value, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
-                Some(Term::BitVec(value.widen(width, budget).ok()?))
+                Ok(Term::BitVec(value.widen(width, budget)?))
             }
             K::TypeEqual(left, right) => {
-                let left = self.known_normal_input_in(left, depth + 1, budget, bindings)?;
-                let right = self.known_normal_input_in(right, depth + 1, budget, bindings)?;
+                let left = self.observe_normal_input_in(left, depth + 1, budget, bindings)?;
+                let right = self.observe_normal_input_in(right, depth + 1, budget, bindings)?;
                 known_type_equality(&self.context, &left, &right, budget).map(Term::Bool)
             }
             K::ScalarEqual(left, right)
@@ -1793,8 +1820,8 @@ impl Checker<'_, '_> {
             | K::ScalarLessEqual(left, right)
             | K::ScalarGreater(left, right)
             | K::ScalarGreaterEqual(left, right) => {
-                let left = self.known_normal_input_in(left, depth + 1, budget, bindings)?;
-                let right = self.known_normal_input_in(right, depth + 1, budget, bindings)?;
+                let left = self.observe_normal_input_in(left, depth + 1, budget, bindings)?;
+                let right = self.observe_normal_input_in(right, depth + 1, budget, bindings)?;
                 let op = match expr.kind {
                     K::ScalarEqual(..) => n::IntegerOp::Equal,
                     K::ScalarLess(..) => n::IntegerOp::Less,
@@ -1803,27 +1830,25 @@ impl Checker<'_, '_> {
                     K::ScalarGreaterEqual(..) => n::IntegerOp::GreaterEqual,
                     _ => unreachable!(),
                 };
-                known_scalars::compare(&left, &right, op, budget)
-                    .ok()
-                    .map(Term::Bool)
+                known_scalars::compare(&left, &right, op, budget).map(Term::Bool)
             }
-            K::FloatNegate(value) => Some(
-                match self.known_normal_input_in(value, depth + 1, budget, bindings)? {
-                    Term::Float(value) => Term::Float(value.negate(budget).ok()?),
+            K::FloatNegate(value) => Ok(
+                match self.observe_normal_input_in(value, depth + 1, budget, bindings)? {
+                    Term::Float(value) => Term::Float(value.negate(budget)?),
                     Term::Float32(bits) => Term::Float32(bits ^ (1 << 31)),
                     Term::Float64(bits) => Term::Float64(bits ^ (1 << 63)),
-                    _ => return None,
+                    _ => return Err(Failure::Unavailable),
                 },
             ),
             K::FloatBinary { op, left, right } => {
-                let left = self.known_normal_input_in(left, depth + 1, budget, bindings)?;
-                let right = self.known_normal_input_in(right, depth + 1, budget, bindings)?;
-                Some(match (left, right) {
+                let left = self.observe_normal_input_in(left, depth + 1, budget, bindings)?;
+                let right = self.observe_normal_input_in(right, depth + 1, budget, bindings)?;
+                Ok(match (left, right) {
                     (Term::Float(left), Term::Float(right)) => Term::Float(match op {
-                        n::FloatOp::Add => left.add(&right, budget).ok()?,
-                        n::FloatOp::Subtract => left.subtract(&right, budget).ok()?,
-                        n::FloatOp::Multiply => left.multiply(&right, budget).ok()?,
-                        n::FloatOp::Divide => return None,
+                        n::FloatOp::Add => left.add(&right, budget)?,
+                        n::FloatOp::Subtract => left.subtract(&right, budget)?,
+                        n::FloatOp::Multiply => left.multiply(&right, budget)?,
+                        n::FloatOp::Divide => return Err(Failure::Unavailable),
                     }),
                     (Term::Float32(left), Term::Float32(right)) => {
                         Term::Float32(op.evaluate_f32(left, right))
@@ -1831,36 +1856,36 @@ impl Checker<'_, '_> {
                     (Term::Float64(left), Term::Float64(right)) => {
                         Term::Float64(op.evaluate_f64(left, right))
                     }
-                    _ => return None,
+                    _ => return Err(Failure::Unavailable),
                 })
             }
             K::IntegerNegate(value) => {
                 let Term::Integer(value) =
-                    self.known_normal_input_in(value, depth + 1, budget, bindings)?
+                    self.observe_normal_input_in(value, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
-                Some(Term::Integer(value.negate(budget).ok()?))
+                Ok(Term::Integer(value.negate(budget)?))
             }
             K::IntegerBinary { op, left, right } => {
                 let Term::Integer(left) =
-                    self.known_normal_input_in(left, depth + 1, budget, bindings)?
+                    self.observe_normal_input_in(left, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 let Term::Integer(right) =
-                    self.known_normal_input_in(right, depth + 1, budget, bindings)?
+                    self.observe_normal_input_in(right, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
-                op.evaluate(&left, &right, budget).ok()
+                op.evaluate(&left, &right, budget).map_err(Failure::from)
             }
             K::Match { value, arms } => {
-                let value = self.known_normal_input_in(value, depth + 1, budget, bindings)?;
+                let value = self.observe_normal_input_in(value, depth + 1, budget, bindings)?;
                 for arm in arms {
-                    budget.consume(bindings.len().saturating_add(1)).ok()?;
+                    budget.consume(bindings.len().saturating_add(1))?;
                     let mut scoped = bindings.clone();
-                    if !self.known_normal_pattern(
+                    if !self.observe_normal_pattern(
                         &arm.pattern,
                         &value,
                         depth + 1,
@@ -1871,17 +1896,17 @@ impl Checker<'_, '_> {
                     }
                     if let Some(guard) = &arm.guard {
                         let Term::Bool(accepted) =
-                            self.known_normal_input_in(guard, depth + 1, budget, &scoped)?
+                            self.observe_normal_input_in(guard, depth + 1, budget, &scoped)?
                         else {
-                            return None;
+                            return Err(Failure::Unavailable);
                         };
                         if !accepted {
                             continue;
                         }
                     }
-                    return self.known_normal_input_in(&arm.body, depth + 1, budget, &scoped);
+                    return self.observe_normal_input_in(&arm.body, depth + 1, budget, &scoped);
                 }
-                None
+                Err(Failure::Unavailable)
             }
             K::If {
                 condition,
@@ -1892,18 +1917,18 @@ impl Checker<'_, '_> {
                 // original expression remains in the input plan for execution;
                 // this never evaluates calls or guesses the result of effects.
                 let Term::Bool(condition) =
-                    self.known_normal_input_in(condition, depth + 1, budget, bindings)?
+                    self.observe_normal_input_in(condition, depth + 1, budget, bindings)?
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 if condition {
-                    self.known_normal_input_in(then_branch, depth + 1, budget, bindings)
+                    self.observe_normal_input_in(then_branch, depth + 1, budget, bindings)
                 } else {
                     match else_branch {
                         Some(branch) => {
-                            self.known_normal_input_in(branch, depth + 1, budget, bindings)
+                            self.observe_normal_input_in(branch, depth + 1, budget, bindings)
                         }
-                        None => Some(Term::Unit),
+                        None => Ok(Term::Unit),
                     }
                 }
             }
@@ -1911,16 +1936,16 @@ impl Checker<'_, '_> {
                 // Only immutable local construction is inspected. Calls,
                 // assignments and control transfer retain invocation-time work.
                 if statements.len() > budget.steps {
-                    return None;
+                    return Err(Failure::Steps);
                 }
-                budget.consume(bindings.len()).ok()?;
+                budget.consume(bindings.len())?;
                 let mut scoped = bindings.clone();
                 for statement in statements {
-                    budget.consume(1).ok()?;
+                    budget.consume(1)?;
                     match &statement.kind {
                         K::Let { binding, value } => {
                             let value =
-                                self.known_normal_input_in(value, depth + 1, budget, &scoped)?;
+                                self.observe_normal_input_in(value, depth + 1, budget, &scoped)?;
                             scoped.insert(*binding, std::sync::Arc::new(value));
                         }
                         K::LetPattern {
@@ -1930,40 +1955,46 @@ impl Checker<'_, '_> {
                             ..
                         } => {
                             let value =
-                                self.known_normal_input_in(value, depth + 1, budget, &scoped)?;
+                                self.observe_normal_input_in(value, depth + 1, budget, &scoped)?;
                             // Any failure leaves the whole block unknown. In
                             // particular a let-else transfer is not fallthrough.
-                            if !self.known_normal_pattern(
+                            if !self.observe_normal_pattern(
                                 pattern,
                                 &value,
                                 depth + 1,
                                 budget,
                                 &mut scoped,
                             )? {
-                                return None;
+                                return Err(Failure::Unavailable);
                             }
                             if let Some(guard) = guard {
-                                if self.known_normal_input_in(guard, depth + 1, budget, &scoped)?
-                                    != Term::Bool(true)
+                                if self.observe_normal_input_in(
+                                    guard,
+                                    depth + 1,
+                                    budget,
+                                    &scoped,
+                                )? != Term::Bool(true)
                                 {
-                                    return None;
+                                    return Err(Failure::Unavailable);
                                 }
                             }
                         }
-                        _ => return None,
+                        _ => return Err(Failure::Unavailable),
                     }
                 }
                 match result {
-                    Some(result) => self.known_normal_input_in(result, depth + 1, budget, &scoped),
-                    None => Some(Term::Unit),
+                    Some(result) => {
+                        self.observe_normal_input_in(result, depth + 1, budget, &scoped)
+                    }
+                    None => Ok(Term::Unit),
                 }
             }
             K::Local(binding) => {
                 if let Some(value) = bindings.get(binding) {
-                    return clone_known_term(value, budget);
+                    return copy_observed_term(value, budget);
                 }
                 if let Some((symbol, _)) = self.signature_comptime_input(*binding) {
-                    return clone_known_term(&symbol, budget);
+                    return copy_observed_term(&symbol, budget);
                 }
                 if self.locals.contains_key(binding) {
                     // Generator clause inputs use local expressions, but can
@@ -1979,24 +2010,29 @@ impl Checker<'_, '_> {
                             },
                         )
                     {
-                        return clone_known_term(value, budget);
+                        return copy_observed_term(value, budget);
                     }
                     if let Some((symbol, _)) = self.value_input_bindings.get(binding) {
-                        return clone_known_term(symbol, budget);
+                        return copy_observed_term(symbol, budget);
                     }
                     if let Some(symbol) = self.type_input_bindings.get(binding) {
-                        return clone_known_term(symbol, budget);
+                        return copy_observed_term(symbol, budget);
                     }
                 }
-                let parameters = self.normal_parameters.get(&self.signature_owner?)?;
-                let (declaration, _, _) =
-                    parameters.iter().find(|(_, local, _)| local == binding)?;
-                Some(Term::Rigid {
+                let parameters = self
+                    .normal_parameters
+                    .get(&self.signature_owner.ok_or(Failure::Unavailable)?)
+                    .ok_or(Failure::Unavailable)?;
+                let (declaration, _, _) = parameters
+                    .iter()
+                    .find(|(_, local, _)| local == binding)
+                    .ok_or(Failure::Unavailable)?;
+                Ok(Term::Rigid {
                     declaration: *declaration,
                     sort: Sort::ComptimeValue,
                 })
             }
-            _ => None,
+            _ => Err(Failure::Unavailable),
         }
     }
 }
@@ -2201,39 +2237,39 @@ fn collect_known_normal_argument(
     domain: Option<&Term>,
     list_head: Option<DeclarationId>,
     budget: &mut comptime_runtime::Budget,
-    mut known: impl FnMut(&n::Expr, &mut comptime_runtime::Budget) -> Option<Term>,
-) -> Option<Term> {
-    budget.consume(1).ok()?;
+    mut known: impl FnMut(&n::Expr, &mut comptime_runtime::Budget) -> Result<Term, Failure>,
+) -> Result<Term, Failure> {
+    budget.consume(1)?;
     let n::NormalFormArgument::List { items, .. } = argument else {
-        return known(argument.expression()?, budget);
+        return known(argument.expression().ok_or(Failure::Unavailable)?, budget);
     };
-    let domain = domain?;
+    let domain = domain.ok_or(Failure::Unavailable)?;
     let Term::NormalForm {
         head,
         sort: Sort::Type,
         arguments,
     } = domain
     else {
-        return None;
+        return Err(Failure::Unavailable);
     };
     if Some(*head) != list_head {
-        return None;
+        return Err(Failure::Unavailable);
     }
     let [element] = arguments.as_slice() else {
-        return None;
+        return Err(Failure::Unavailable);
     };
     if element.sort() != Sort::Type {
-        return None;
+        return Err(Failure::Unavailable);
     }
     let types = *element == p(P::Type);
     let mut collected = Vec::new();
     for item in items {
-        budget.consume(1).ok()?;
+        budget.consume(1)?;
         match item {
             n::NormalFormArgument::Value(expr) => {
                 let value = known(expr, budget)?;
                 if types && value.sort() != Sort::Type {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
                 collected.push(value);
             }
@@ -2242,7 +2278,7 @@ fn collect_known_normal_argument(
                     take_known_list_elements(known(expr, budget)?, domain, element, budget)?;
                 collected.extend(fields);
             }
-            _ => return None,
+            _ => return Err(Failure::Unavailable),
         }
     }
     freeze_known_list(domain, element, collected, budget)
@@ -2255,16 +2291,16 @@ fn take_known_list_elements(
     domain: &Term,
     element: &Term,
     budget: &mut comptime_runtime::Budget,
-) -> Option<Vec<Term>> {
+) -> Result<Vec<Term>, Failure> {
     let fields = match value {
         Term::NominalValue {
             ty,
             variant: None,
             fields,
         } if ty.as_ref() == domain => fields,
-        _ => return None,
+        _ => return Err(Failure::Unavailable),
     };
-    budget.consume(fields.len()).ok()?;
+    budget.consume(fields.len())?;
     let sort = if *element == p(P::Type) {
         Sort::Type
     } else {
@@ -2274,6 +2310,7 @@ fn take_known_list_elements(
         .iter()
         .all(|field| field.sort() == sort)
         .then_some(fields)
+        .ok_or_else(|| Failure::Invalid("list element sort mismatch".into()))
 }
 
 // Keep one canonical writer until all frozen-list consumers migrate together.
@@ -2282,13 +2319,14 @@ fn freeze_known_list(
     element: &Term,
     fields: Vec<Term>,
     budget: &mut comptime_runtime::Budget,
-) -> Option<Term> {
+) -> Result<Term, Failure> {
     if !matches!(domain, Term::NormalForm { arguments, .. }
         if matches!(arguments.as_slice(), [actual] if actual == element))
     {
-        return None;
+        return Err(Failure::Unavailable);
     }
-    nir::comptime_values::freeze_admitted_list(domain, fields, &mut budget.steps).ok()
+    nir::comptime_values::freeze_admitted_list(domain, fields, &mut budget.steps)
+        .map_err(Failure::from)
 }
 
 /// A type relation needs a proof in either direction. A failed equality query
@@ -2298,39 +2336,44 @@ fn known_type_equality(
     left: &Term,
     right: &Term,
     budget: &mut comptime_runtime::Budget,
-) -> Option<bool> {
-    use crate::ptc::{Formula, Outcome};
+) -> Result<bool, Failure> {
+    use crate::ptc::{Formula, Outcome, UnknownReason};
     if left.sort() != Sort::Type || right.sort() != Sort::Type {
-        return None;
+        return Err(Failure::Unavailable);
     }
     let equality = Formula::equal(
-        clone_known_term(left, budget)?,
-        clone_known_term(right, budget)?,
+        copy_observed_term(left, budget)?,
+        copy_observed_term(right, budget)?,
     );
     let inequality = Formula::equal(
-        clone_known_term(left, budget)?,
-        clone_known_term(right, budget)?,
+        copy_observed_term(left, budget)?,
+        copy_observed_term(right, budget)?,
     )
     .negate();
     let mut proof_budget = crate::ptc::Budget {
         steps: budget.steps,
         max_depth: 128,
     };
-    let result = if matches!(
-        context.prove_metered(equality, &mut proof_budget),
-        Outcome::Entailed(_)
-    ) {
-        Some(true)
-    } else if matches!(
-        context.prove_metered(inequality, &mut proof_budget),
-        Outcome::Entailed(_)
-    ) {
-        Some(false)
-    } else {
-        None
-    };
+    let result = (|| {
+        for (proposition, value) in [(equality, true), (inequality, false)] {
+            match context.prove_metered(proposition, &mut proof_budget) {
+                Outcome::Entailed(_) => return Ok(value),
+                Outcome::Unknown {
+                    reason: UnknownReason::BudgetExhausted,
+                    ..
+                } => return Err(Failure::Proof),
+                Outcome::IllFormed(message) => return Err(Failure::Invalid(message)),
+                Outcome::NotEntailed(_) | Outcome::Unknown { .. } => {}
+            }
+        }
+        Err(Failure::Unavailable)
+    })();
     budget.steps = proof_budget.steps;
     result
+}
+
+fn copy_observed_term(term: &Term, budget: &mut comptime_runtime::Budget) -> Result<Term, Failure> {
+    nir::copy_budget::clone_term(term, &mut budget.steps).map_err(Failure::from)
 }
 
 pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budget) -> Option<Term> {
@@ -2343,6 +2386,7 @@ pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budge
 mod tests {
     use super::clone_known_term;
     use super::known_type_equality;
+    use super::observation::Failure;
     use comptime_runtime::Budget;
     use nir::Term;
     use nir::{Primitive, Sort};
@@ -2374,8 +2418,8 @@ mod tests {
         let flag = Term::Primitive(Primitive::Bool);
         let byte = Term::Primitive(Primitive::U8);
         let resolve = |e: &Expr, budget: &mut Budget| match &e.kind {
-            K::TypeValue(ty) | K::ComptimeValue(ty) => super::clone_known_term(ty, budget),
-            _ => None,
+            K::TypeValue(ty) | K::ComptimeValue(ty) => super::copy_observed_term(ty, budget),
+            _ => Err(Failure::Unavailable),
         };
         let valid = input(vec![
             A::Value(expr(K::TypeValue(flag.clone()))),
@@ -2403,7 +2447,7 @@ mod tests {
                 &mut Budget::default(),
                 resolve
             ),
-            Some(Term::NominalValue {
+            Ok(Term::NominalValue {
                 ty: Box::new(list.clone()),
                 variant: None,
                 fields: vec![flag.clone(), byte.clone(), flag.clone(), byte],
@@ -2420,7 +2464,7 @@ mod tests {
                 },
                 resolve
             )
-            .is_none()
+            .is_err()
         );
         assert!(
             collect_known_normal_argument(
@@ -2430,7 +2474,7 @@ mod tests {
                 &mut Budget::default(),
                 resolve
             )
-            .is_some()
+            .is_ok()
         );
         for invalid in [
             A::Value(expr(K::ComptimeValue(Term::NominalValue {
@@ -2460,7 +2504,7 @@ mod tests {
                     &mut Budget::default(),
                     resolve
                 )
-                .is_none()
+                .is_err()
             );
         }
         let unknown = input(vec![
@@ -2479,7 +2523,7 @@ mod tests {
                     resolve(e, b)
                 }
             )
-            .is_none()
+            .is_err()
         );
         assert_eq!(visits, 1);
     }
@@ -2509,8 +2553,8 @@ mod tests {
             items: vec![],
         };
         let resolve = |expr: &Expr, budget: &mut Budget| match &expr.kind {
-            K::ComptimeValue(value) => super::clone_known_term(value, budget),
-            _ => None,
+            K::ComptimeValue(value) => super::copy_observed_term(value, budget),
+            _ => Err(Failure::Unavailable),
         };
         assert_eq!(
             super::collect_known_normal_argument(
@@ -2520,7 +2564,7 @@ mod tests {
                 &mut Budget::default(),
                 resolve
             ),
-            Some(nominal(&boolean, vec![]))
+            Ok(nominal(&boolean, vec![]))
         );
         assert_eq!(
             super::collect_known_normal_argument(
@@ -2530,7 +2574,7 @@ mod tests {
                 &mut Budget::default(),
                 resolve
             ),
-            Some(nominal(&character, vec![]))
+            Ok(nominal(&character, vec![]))
         );
         assert!(
             super::collect_known_normal_argument(
@@ -2540,7 +2584,7 @@ mod tests {
                 &mut Budget::default(),
                 resolve
             )
-            .is_none()
+            .is_err()
         );
         assert!(
             super::collect_known_normal_argument(
@@ -2550,7 +2594,7 @@ mod tests {
                 &mut Budget::default(),
                 resolve
             )
-            .is_none()
+            .is_err()
         );
         let spread = |ty: &Term, value| A::List {
             source,
@@ -2569,7 +2613,7 @@ mod tests {
                 &mut Budget::default(),
                 resolve
             ),
-            Some(values.clone())
+            Ok(values.clone())
         );
         assert!(
             super::collect_known_normal_argument(
@@ -2579,7 +2623,7 @@ mod tests {
                 &mut Budget::default(),
                 resolve
             )
-            .is_none()
+            .is_err()
         );
         assert!(
             super::collect_known_normal_argument(
@@ -2592,7 +2636,7 @@ mod tests {
                 },
                 resolve
             )
-            .is_none()
+            .is_err()
         );
     }
 
@@ -2629,7 +2673,7 @@ mod tests {
             let input = nominal(&ty, fields.clone());
             assert_eq!(
                 take_known_list_elements(input.clone(), &ty, &element, &mut Budget::default()),
-                Some(fields.clone())
+                Ok(fields.clone())
             );
             assert!(
                 take_known_list_elements(
@@ -2641,17 +2685,17 @@ mod tests {
                         max_limbs: 4096
                     }
                 )
-                .is_none()
+                .is_err()
             );
             assert_eq!(
                 take_known_list_elements(input, &ty, &element, &mut Budget::default()),
-                Some(fields.clone())
+                Ok(fields.clone())
             );
             let frozen =
                 freeze_known_list(&ty, &element, fields.clone(), &mut Budget::default()).unwrap();
             assert_eq!(
                 take_known_list_elements(frozen, &ty, &element, &mut Budget::default()),
-                Some(fields)
+                Ok(fields)
             );
         }
         for bad in [
@@ -2672,7 +2716,7 @@ mod tests {
                     &Term::Primitive(Primitive::Type),
                     &mut Budget::default()
                 )
-                .is_none()
+                .is_err()
             );
         }
         assert!(
@@ -2682,7 +2726,7 @@ mod tests {
                 &Term::Primitive(Primitive::Bool),
                 &mut Budget::default()
             )
-            .is_none()
+            .is_err()
         );
     }
 
@@ -2703,19 +2747,19 @@ mod tests {
         context.admit_congruence(head);
         assert_eq!(
             known_type_equality(&context, &boolean, &boolean, &mut Budget::default()),
-            Some(true)
+            Ok(true)
         );
         assert_eq!(
             known_type_equality(&context, &boolean, &character, &mut Budget::default()),
-            Some(false)
+            Ok(false)
         );
         assert_eq!(
             known_type_equality(&context, &opaque, &boolean, &mut Budget::default()),
-            None
+            Err(Failure::Unavailable)
         );
         assert_eq!(
             known_type_equality(&context, &opaque, &opaque, &mut Budget::default()),
-            Some(true)
+            Ok(true)
         );
         let mut empty = Budget {
             steps: 0,
@@ -2723,11 +2767,11 @@ mod tests {
         };
         assert_eq!(
             known_type_equality(&context, &boolean, &boolean, &mut empty),
-            None
+            Err(Failure::Steps)
         );
         assert_eq!(
             known_type_equality(&context, &boolean, &boolean, &mut Budget::default()),
-            Some(true)
+            Ok(true)
         );
         assert_eq!(
             known_type_equality(
@@ -2736,7 +2780,105 @@ mod tests {
                 &Term::Bool(true),
                 &mut Budget::default()
             ),
-            None
+            Err(Failure::Unavailable)
+        );
+    }
+
+    #[test]
+    fn type_observation_distinguishes_copy_proof_limits_and_unknown_relations() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let mut budget = Budget {
+            steps: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            known_type_equality(&Default::default(), &boolean, &boolean, &mut budget),
+            Err(Failure::Proof)
+        );
+        assert_eq!(
+            known_type_equality(
+                &Default::default(),
+                &boolean,
+                &boolean,
+                &mut Budget {
+                    steps: 3,
+                    ..Default::default()
+                }
+            ),
+            Err(Failure::Steps)
+        );
+        assert_eq!(
+            known_type_equality(
+                &Default::default(),
+                &boolean,
+                &boolean,
+                &mut Budget::default()
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn collection_observation_propagates_failure_without_reading_later_inputs() {
+        use nir::program::{Expr, ExprKind, NormalFormArgument as A, SourceRange};
+        let head = nir::DeclarationId {
+            package: 1,
+            local: 17,
+        };
+        let domain = Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        };
+        let source = SourceRange { start: 0, end: 1 };
+        let value = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Bool),
+            kind: ExprKind::ComptimeValue(Term::Bool(true)),
+        };
+        let argument = A::List {
+            source,
+            items: vec![A::Value(value.clone()), A::Value(value)],
+        };
+        for failure in [
+            Failure::Unavailable,
+            Failure::Steps,
+            Failure::Depth,
+            Failure::Size,
+            Failure::Structure,
+            Failure::Proof,
+            Failure::Invalid("invalid input".into()),
+        ] {
+            let mut visits = 0;
+            let result = super::collect_known_normal_argument(
+                &argument,
+                Some(&domain),
+                Some(head),
+                &mut Budget::default(),
+                |_, _| {
+                    visits += 1;
+                    Err(failure.clone())
+                },
+            );
+            assert_eq!(result, Err(failure));
+            assert_eq!(visits, 1);
+        }
+        let value = super::collect_known_normal_argument(
+            &argument,
+            Some(&domain),
+            Some(head),
+            &mut Budget::default(),
+            |_, _| Ok(Term::Bool(true)),
+        )
+        .unwrap();
+        assert_eq!(
+            super::take_known_list_elements(
+                value,
+                &domain,
+                &Term::Primitive(Primitive::Bool),
+                &mut Budget::default()
+            ),
+            Ok(vec![Term::Bool(true), Term::Bool(true)])
         );
     }
 

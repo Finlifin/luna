@@ -173,6 +173,7 @@ impl Checker<'_, '_> {
         let mut waiting = Vec::new();
         let mut known_binders = Vec::new();
         let mut known_values = Vec::new();
+        let mut failed_observations = BTreeMap::new();
         let mut pending_types = parameters
             .iter()
             .zip(domains)
@@ -334,10 +335,17 @@ impl Checker<'_, '_> {
                     max_limbs: 4096,
                 };
                 let before = budget.steps;
-                let known = self
-                    .known_normal_input(&value, 0, &mut budget)
-                    .filter(|term| term.sort() == Sort::Type);
+                let observed =
+                    self.observe_normal_input_in(&value, 0, &mut budget, &BTreeMap::new());
                 self.required_steps -= (before - budget.steps) as u64;
+                let known = match observed {
+                    Ok(ty) if ty.sort() == Sort::Type => Some(ty),
+                    Ok(_) | Err(normal::observation::Failure::Unavailable) => None,
+                    Err(failure) => {
+                        failed_observations.insert(parameters[slot], failure);
+                        None
+                    }
+                };
                 if let Some(ty) = &known {
                     known_binders.push(nir::DeclarationParameter {
                         declaration: parameters[slot],
@@ -383,7 +391,27 @@ impl Checker<'_, '_> {
                 })?;
             }
             let dependent = pending_types.iter().any(|id| domain.mentions_rigid(*id));
-            let value = self.expr(pending.input, (!dependent).then_some(&domain))?;
+            let value = self
+                .expr(pending.input, (!dependent).then_some(&domain))
+                .map_err(|failure| {
+                    // Observation is optional unless a check needs the missing domain.
+                    // Do not replace unrelated errors or reject independently typed inputs.
+                    if failure.needs_context {
+                        if let Some((_, observation)) = failed_observations
+                            .iter()
+                            .find(|(id, _)| domain.mentions_rigid(**id))
+                        {
+                            return error(
+                                pending.input.span,
+                                format!(
+                                    "{}; required Type observation failed: {observation}",
+                                    failure.message
+                                ),
+                            );
+                        }
+                    }
+                    failure
+                })?;
             let value = self.bind_type_input(
                 value,
                 &mut preparations[pending.source_index],

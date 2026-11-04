@@ -477,10 +477,9 @@ literal 仍不提供证据，没有借此变更语言的数值规则。
 
 必需的 `select_inline_pattern` 消费带类型的结果，分别报告证据不可得、步数耗尽、
 深度超限、值大小超限和非法证据；真实 invocation 错误继续保留原诊断和位置。
-可选静态表达式观察仍通过适配器放弃失败证据。尤其 `known_normal_input_in` 的
-任意 guard/Then 观察尚不能保留所有内部失败类别，不能把它的 None 重新命名后
-声称分类已经完成；本节只完成 pattern 自身、标量服务与必需 inline 选择的接线。
-NF contextual 参数树及整个通用观察协议仍待迁移。
+可选静态表达式观察的上层适配器仍可放弃失败证据。本节首先完成 pattern 自身、
+标量服务与必需 inline 选择的接线；表达式内部递归及 guard/Then 的后续迁移见第 16 节。
+NF contextual 参数树及整个通用观察协议仍待迁移，不能仅靠更名宣称完成。
 
 验证在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test`：
 `-p elaboration --lib program::normal::` 17 项通过，证据
@@ -493,3 +492,56 @@ pattern 的预算失败边界，确认生产诊断，并用新预算重试及执
 workspace、native 或性能验收，ignored 的动态 Type 生产者未由本次解决。
 修改 Rust 文件的 rustfmt check 退出 0，证据 `/tmp/luna-tools-mjo4anyo/result.json`；
 `git diff --check` 通过，原有工作区修改未改动，正式 docs 未修改。
+
+
+## 16. 表达式递归观察传递失败，域需求决定诊断责任
+
+`observe_normal_input_in` 是原静态观察器的迁移，不是新增解释器。它与 NF 实参
+观察、收集值、pattern 回调、算术、复制和类型相等观察统一返回 Result；内部递归
+不再经过 `known_normal_input_in` 的 Option 适配器。表达式仍使用同一 NIR，不运行
+函数、不展开 NF 头，也不把观察到的静态身份视为删除原生产者的许可。
+
+If、布尔短路、Match、块中的不可变绑定仍只观察实际选中的路径；未知条件、需要
+invocation 的表达式、未支持的结构及无法证明的类型关系返回 Unavailable。错误不
+变成 false，失败不授权下一分支胜出。列表越界、运算非法、集合编码／替换无效与
+资源不足保留各自结果；某些结构形状仍仅能判断“无法提供证据”，本次没有把所有
+不支持的形状都升级为语言错误。
+
+复制与运算可以分别报告 Steps、Depth、Size。共享结构／替换 API 本身只提供汇总
+Budget 时保留 Structure；PTC 只处理 Type 命题，其 BudgetExhausted 保留 Proof。
+不凭剩余 fuel 猜测是哪种限制，也不把 PTC 未证实相等解释为已证实不等。对相等与
+不等分别查询证明，预算／非法命题失败不被第二次查询掩盖。
+
+普通子句准备保存 Type 观察失败，但不立即拒绝调用。待定输入若无需该证据即可
+完成检查，仍按原路径继续；若其检查明确返回 needs_context，且所缺域涉及那个
+失败的 Type 观察，则报告原上下文错误与观察原因，且不再标记为可继续推断的错误。
+无关的语义错误保持原诊断。仅有 Unavailable 的 Type 生产者仍等待后续 invocation
+机制，本次不会为了获得上下文而提前执行它。
+
+剩余迁移边界是明确的：`known_normal_input`／`known_normal_input_in` 作为上层可选
+证据适配器仍返回 Option，其他消费者仍须按其语义需求逐步改接带类型结果；
+`known_collected_list_in` 的外围可选组装也尚保留旧接口。没有将这些适配器、NF
+contextual 参数树或动态 Type 生产者问题算作已退役。
+
+本节在 `/home/fin/luna` 用 `development/check.py --timeout 900 -- check -p elaboration`
+检查通过，证据 `/tmp/luna-tools-d_vlbx7n/result.json`。最终 `test -p elaboration
+--lib program::normal::` 19 项通过，证据 `/tmp/luna-tools-vd4y8fe6/result.json`；
+类型相等用例区分复制不足、证明预算不足和正常证明，集合用例验证各类失败停止读取
+后续输入并允许新尝试恢复。
+
+`test -p luna --test inline_pattern_observation` 2 项通过，证据
+`/tmp/luna-tools-75uqxs87/result.json`。新增用例使用用户定义 opaque 头和类型别名，
+令显式 optional 参数依赖后置 Type，验证复制失败不会仅落成缺少上下文；同一份
+解析后的 HIR 在正常预算下重试，并执行正确结果。低预算探测不固定前序准备成本；
+直接 NF 构造可能先耗尽在其他准备步骤，所以该用例使用已形成的别名 Type 来覆盖
+复制观察的实际边界。临时诊断输出已删除，生产源码恢复并完成后续检查。
+
+普通子句、comptime 子句、名义参数、模板局部定义、动态 trait、依赖列表收集、NF
+域和 NF 方法八组共 420 项通过、2 项既有 ignored、1 项既有失败显式跳过，命令退出
+0，证据 `/tmp/luna-tools-xfhdt1g9/result.json`。跳过项仍是
+`memoized_value_indexed_keys_keep_declaration_and_value_arguments` 的 staging 缺口；
+两个 ignored 仍为抽象 Copy 默认值与 invocation Type 生产者，不声称本次修复。
+`test -p luna --test inline_control pattern` 23 项通过，证据
+`/tmp/luna-tools-f75ga0fu/result.json`。修改文件 rustfmt check 退出 0，证据
+`/tmp/luna-tools-f028_ogy/result.json`；`git diff --check` 通过。未运行全 workspace、
+native 或性能基准，正式 docs 与原有工作区改动保持不变。

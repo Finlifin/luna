@@ -7,6 +7,8 @@ pub(in crate::program) enum Failure {
     Steps,
     Depth,
     Size,
+    Structure,
+    Proof,
     Invalid(String),
 }
 impl fmt::Display for Failure {
@@ -16,6 +18,8 @@ impl fmt::Display for Failure {
             Self::Steps => f.write_str("(observation-limit steps)"),
             Self::Depth => f.write_str("(observation-limit depth)"),
             Self::Size => f.write_str("(observation-limit size)"),
+            Self::Structure => f.write_str("(observation-limit structure)"),
+            Self::Proof => f.write_str("(observation-limit proof)"),
             Self::Invalid(message) => write!(f, "(observation-invalid {message:?})"),
         }
     }
@@ -43,6 +47,23 @@ impl From<nir::copy_budget::CopyBudgetExhausted> for Failure {
         match error {
             nir::copy_budget::CopyBudgetExhausted::Steps => Self::Steps,
             nir::copy_budget::CopyBudgetExhausted::Depth => Self::Depth,
+        }
+    }
+}
+
+impl From<nir::type_computations::Error> for Failure {
+    fn from(error: nir::type_computations::Error) -> Self {
+        match error {
+            nir::type_computations::Error::Budget => Self::Structure,
+            error => Self::Invalid(error.to_string()),
+        }
+    }
+}
+impl From<nir::comptime_values::Error> for Failure {
+    fn from(error: nir::comptime_values::Error) -> Self {
+        match error {
+            nir::comptime_values::Error::Budget => Self::Structure,
+            error => Self::Invalid(error.to_string()),
         }
     }
 }

@@ -4,14 +4,14 @@ use super::observation::Failure;
 use super::*;
 
 impl Checker<'_, '_> {
-    pub(in crate::program) fn known_normal_pattern(
+    pub(in crate::program) fn observe_normal_pattern(
         &self,
         pattern: &n::Pattern,
         value: &Term,
         depth: usize,
         budget: &mut comptime_runtime::Budget,
         bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-    ) -> Option<bool> {
+    ) -> Result<bool, Failure> {
         PatternInspector {
             tuple_head: self.bound_tuple_metadata(),
             evaluate:
@@ -19,12 +19,10 @@ impl Checker<'_, '_> {
                  depth,
                  budget: &mut comptime_runtime::Budget,
                  bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| {
-                    self.known_normal_input_in(expr, depth, budget, bindings)
-                        .ok_or(Failure::Unavailable)
+                    self.observe_normal_input_in(expr, depth, budget, bindings)
                 },
         }
         .inspect(pattern, value, depth, budget, bindings)
-        .ok()
     }
 }
 
