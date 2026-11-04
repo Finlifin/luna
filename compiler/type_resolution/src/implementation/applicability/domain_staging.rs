@@ -177,7 +177,7 @@ impl ImplementationHead {
         let mut original = self.clone();
         original.requirements.clear();
         original
-            .verify_subject_evidence_with_domains(
+            .replay_subject_evidence(
                 &matched.evidence,
                 subject,
                 interface_arguments,
@@ -187,7 +187,7 @@ impl ImplementationHead {
                 layouts,
                 |proof, budget| context.verify_proof(proof, budget),
             )
-            .map_err(|error| pending(format!("dependent head replay: {error:?}")))?;
+            .map_err(replay::Failure::into_assessment)?;
         Ok(Some(matched))
     }
 }

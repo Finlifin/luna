@@ -2854,6 +2854,42 @@ Invalid；dump 分别输出 budget-exhausted、unresolved、invalid。替换、g
 未决或资源失败而强行保留候选。选择仍为 Deferred 时才向外传播保留的资源／非法
 失败；纯粹的递归未决保留为 Pending，不制造正面或负面证据。
 
+implementation 的主体资格检查已从 applicability 拆出为同一生产入口使用的
+eligibility 模块。结构视图查询与可接受形态析取证明保留各自失败原因；备选证明的
+`Result<Option<Proof>, ...>` 中，None 只表示搜索完成但没有证明，不能再吸收额度
+耗尽。结构视图失败后，独立析取证明仍可以交付资格；两条路径都没完成时，资源
+失败不能退化为普通 Pending。已知 closure 主体仍由原规则排除，抽象主体缺少证据
+仍保持未决，NF 身份不因取得结构视图而被展开或替换。
+
+依赖参数完成后仍先生成私有残余候选，再以原始声明重放其结果。重放内核区分域查询
+失败与 PTC 证据失败，候选恢复直接消费这个结果：BudgetExhausted 传回资源失败，
+ArithmeticRange 与域查询 Unresolved 保留未决，无效证据报告 Invalid；不再将所有
+重放错误格式化成 Pending，也不先把域查询未决压成无效证明。现有公共 proof replay
+接口仍只有 ProofError，其兼容适配层才将无法表达的 Unresolved 合入 Invalid。
+该旧公共接口及消费者尚待迁移，不能据内部候选路径的修复声称全部证据重放已统一。
+候选匹配的预算分区与 reservation 也仍存在。
+
+主体资格与重放迁移验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
+  --lib --test implementation --test capabilities --test associated --test inherent
+  --test implementation_phases --no-fail-fast`：215 项通过，退出 0；
+  `/tmp/luna-tools-1lp7yi7g/result.json`。
+- 同一入口 `test -p luna --test trait_domain_substitution --test dynamic_trait_clauses
+  --test nominal_value_parameters --test normal_form_inference --test library_list_equality
+  --test library_type_equality --test sysroot_preludes --test trait_query_failures
+  --no-fail-fast`：348 项通过，退出 0；`/tmp/luna-tools-vfens9vt/result.json`。
+- 拆出重放内核前还运行了包含 `library_meta_math`、luna 单元组及上述部分组的
+  588 项检查，退出 0；`/tmp/luna-tools-a0maw17i/result.json`。其覆盖与最终两条
+  大量重叠，不累加为独立用例，也不替代最终内核的检查。
+- 五个修改／新增 Rust 文件通过 scoped rustfmt check，退出 0；
+  `/tmp/luna-tools-l6pb7enb/result.json`。git diff --check 通过。
+
+预算扫描检查同一合法主体在各个额度上只能成功或资源失败，每份成功证据都重新
+对原声明验证；另覆盖无资格证据、禁止的 closure 主体，以及视图耗尽后独立析取
+证明成功。重放回归撤去／补齐 congruence 证据以区分 Unresolved 与成功，修改证明
+列表确认无效证据不能发布，并验证资源失败后的恢复。生产预算未增大。
+
 qualification 的封闭输入检查复用世界命题的 closed_inputs_metered，使用同一余额，
 不再给每个结构键刷新预算或将检查失败转换成“开放”。调用者已证明的结构等式可以
 建立封闭性；没有关系证据时仍不能从抽象主体推导不存在实现，也不展开 NF 的函数体。

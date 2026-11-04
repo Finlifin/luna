@@ -3795,3 +3795,117 @@ fn repeated_record_value_matching_and_replay_preserve_exhaustion() {
     )
     .unwrap();
 }
+
+#[test]
+fn subject_eligibility_exhaustion_is_not_ordinary_pending_or_exclusion() {
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::{Context, Formula};
+    for subject in [
+        var(90),
+        Term::NormalForm {
+            head: id(91),
+            sort: Sort::Type,
+            arguments: vec![var(92)],
+        },
+    ] {
+        let mut context = Context::default();
+        context.assume(Formula::equal(subject.clone(), ty(P::Bool)));
+        let h = generic(200, var(1), vec![id(1)]);
+        let mut failures = 0;
+        let mut successes = 0;
+        for steps in (0..2048).step_by(17).chain([10_000, 100_000]) {
+            let result = h.assess_types(
+                &subject,
+                &[],
+                &context,
+                Budget {
+                    steps,
+                    ..Budget::default()
+                },
+            );
+            match result {
+                TypeAssessment::BudgetExhausted => failures += 1,
+                TypeAssessment::Applicable(evidence) => {
+                    successes += 1;
+                    assert_eq!(evidence.type_arguments, vec![subject.clone()]);
+                    h.verify_type_evidence(&evidence, &subject, &[], &context, Budget::default())
+                        .unwrap();
+                }
+                other => panic!("steps {steps}: {other:?}"),
+            }
+        }
+        assert!(failures > 0 && successes > 0);
+        let result = h.assess_types(&subject, &[], &context, Budget::default());
+        assert!(matches!(result, TypeAssessment::Applicable(_)));
+    }
+}
+
+#[test]
+fn eligibility_without_evidence_stays_unresolved_and_forbidden_shapes_stay_excluded() {
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::Context;
+    let h = generic(200, var(1), vec![id(1)]);
+    let subject = var(90);
+    assert!(matches!(
+        h.assess_types(&subject, &[], &Context::default(), Budget::default()),
+        TypeAssessment::Pending(_)
+    ));
+    let forbidden = Term::Closure {
+        environment: vec![],
+        signature: Box::new(Term::Function {
+            parameters: vec![],
+            result: Box::new(ty(P::Bool)),
+        }),
+    };
+    assert!(matches!(
+        h.assess_types(&forbidden, &[], &Context::default(), Budget::default()),
+        TypeAssessment::ForbiddenSubject(_)
+    ));
+}
+
+#[test]
+fn dependent_head_budget_scan_replays_every_completed_result() {
+    use nir::program::TypePredicate;
+    use type_resolution::implementation::TypeAssessment;
+    let value = Term::Rigid {
+        declaration: id(2),
+        sort: Sort::ComptimeValue,
+    };
+    let query = node(10, vec![ty(P::Type), ty(P::Bool), ty(P::Bool)]);
+    let context = context();
+    let mut h = generic(
+        200,
+        node(10, vec![var(1), value.clone(), value.clone()]),
+        vec![id(1), id(2)],
+    );
+    h.parameter_types = vec![ty(P::Type), var(1)];
+    h.interface_arguments = vec![node(11, vec![value.clone()])];
+    h.requirements = vec![TypePredicate::Equal(
+        node(12, vec![value]),
+        node(12, vec![ty(P::Bool)]),
+    )];
+    let interfaces = vec![node(11, vec![ty(P::Bool)])];
+    let mut failures = 0;
+    let mut successes = 0;
+    for steps in (0..10_000).step_by(31).chain([100_000]) {
+        match h.assess_types(
+            &query,
+            &interfaces,
+            &context,
+            Budget {
+                steps,
+                ..Budget::default()
+            },
+        ) {
+            TypeAssessment::BudgetExhausted => failures += 1,
+            TypeAssessment::Applicable(evidence) => {
+                successes += 1;
+                assert_eq!(evidence.type_arguments, vec![ty(P::Type), ty(P::Bool)]);
+                h.verify_type_evidence(&evidence, &query, &interfaces, &context, Budget::default())
+                    .unwrap();
+            }
+            other => panic!("steps {steps}: {other:?}"),
+        }
+    }
+    assert!(failures > 0 && successes > 0);
+}

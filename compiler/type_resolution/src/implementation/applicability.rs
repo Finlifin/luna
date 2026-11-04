@@ -1,80 +1,19 @@
 //! Type-only applicability. These proofs do not discharge phase, package
 //! coherence, associated members or runtime environment delivery obligations.
 mod domain_staging;
+mod eligibility;
+mod replay;
 use super::{Applicability, Error, ImplementationHead, Index, Selection};
 use crate::InferenceTerm as I;
 use crate::obligations::{Engine, State};
 use crate::ptc::{Budget, Context, Formula, Outcome, Proof};
+use eligibility::{eligible_alternatives, eligible_shape};
 use nir::program::TypePredicate;
 use nir::{DeclarationId, Sort, Term};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
-
-// Eligibility need not reveal one concrete shape. A finite disjunction of
-// admissible shapes can authorize matching while the subject stays symbolic.
-fn eligible_shape(context: &Context, ty: &Term) -> bool {
-    matches!(
-        ty,
-        Term::Primitive(_)
-            | Term::ErrorResult { .. }
-            | Term::Nominal { .. }
-            | Term::Tuple(_)
-            | Term::Record(_)
-            | Term::Optional(_)
-            | Term::Pointer(_)
-            | Term::Function { .. }
-            | Term::ComptimeFunction(_)
-            | Term::NormalFormFunction(..)
-            | Term::UnsafeFunction(_)
-    ) || context.is_tuple_type(ty)
-        || context.is_list_type(ty)
-}
-
-fn prove_eligible_alternatives(
-    context: &Context,
-    subject: &Term,
-    budget: &mut Budget,
-) -> Option<Proof> {
-    budget.steps = budget.steps.checked_sub(context.assumptions().len())?;
-    let mut pending: Vec<_> = context.assumptions().iter().collect();
-    let mut seen = std::collections::HashSet::new();
-    let mut alternatives = Vec::new();
-    while let Some(formula) = pending.pop() {
-        budget.steps = budget.steps.checked_sub(1)?;
-        match formula {
-            Formula::Equal(crate::ptc::Equality(a, b)) => {
-                for ty in [a, b] {
-                    nir::type_computations::charge_term(ty, &mut budget.steps).ok()?;
-                    if eligible_shape(context, ty) && seen.insert(ty.clone()) {
-                        nir::type_computations::charge_term(subject, &mut budget.steps).ok()?;
-                        alternatives.push(Formula::equal(subject.clone(), ty.clone()));
-                    }
-                }
-            }
-            Formula::And(parts) | Formula::Or(parts) => {
-                budget.steps = budget.steps.checked_sub(parts.len())?;
-                pending.extend(parts);
-            }
-            Formula::Not(inner) => pending.push(inner),
-            _ => {}
-        }
-    }
-    if alternatives.is_empty() {
-        return None;
-    }
-    match context.prove_metered(Formula::Or(alternatives), budget) {
-        Outcome::Entailed(proof) => Some(proof),
-        _ => None,
-    }
-}
-
-fn eligible_alternatives(context: &Context, subject: &Term, formula: &Formula) -> bool {
-    matches!(formula, Formula::Or(parts) if !parts.is_empty() && parts.iter().all(|part|
-        matches!(part, Formula::Equal(crate::ptc::Equality(original, shape))
-            if original == subject && eligible_shape(context, shape))))
-}
 
 /// Discharge a required Type-domain equality with shared fuel. A validated
 /// counterexample denies this admission, not a proof of the negated equality.
@@ -836,34 +775,8 @@ impl ImplementationHead {
                 return Err(TypeAssessment::Excluded(proof));
             }
         }
-        let (shape, eligibility_proof) = match subject {
-            subject if context.is_tuple_type(subject) || context.is_list_type(subject) => {
-                (subject.clone(), None)
-            }
-            Term::Rigid { .. } | Term::NormalForm { .. } | Term::AssociatedType { .. } => {
-                let view_budget = Budget {
-                    steps: budget.steps.min(head_budget.steps),
-                    ..budget
-                };
-                let (view, spent) =
-                    context.structural_view_with_heads_metered(subject, view_budget, |head| {
-                        context.is_tuple_head(head) || context.is_list_inference_head(head)
-                    });
-                head_budget.steps -= spent;
-                match view {
-                    Ok(Some((shape, proof))) => (shape, Some(proof)),
-                    _ => match prove_eligible_alternatives(context, subject, &mut head_budget) {
-                        Some(proof) => (subject.clone(), Some(proof)),
-                        None => {
-                            return Err(TypeAssessment::Pending(
-                                "user implementation subject eligibility is unresolved".into(),
-                            ));
-                        }
-                    },
-                }
-            }
-            other => (other.clone(), None),
-        };
+        let (shape, eligibility_proof) =
+            eligibility::subject_view(context, subject, budget, &mut head_budget)?;
         if matches!(shape, Term::Closure { .. } | Term::ContextualClosure { .. }) {
             return Err(TypeAssessment::ForbiddenSubject(shape));
         }
@@ -1778,138 +1691,19 @@ impl ImplementationHead {
         budget: Budget,
         domains: &BTreeMap<DeclarationId, Term>,
         layouts: Option<&nir::program::Package>,
-        mut verify_requirement: impl FnMut(
-            &crate::ptc::Proof,
-            Budget,
-        ) -> Result<(), crate::ptc::ProofError>,
+        verify_requirement: impl FnMut(&crate::ptc::Proof, Budget) -> Result<(), crate::ptc::ProofError>,
     ) -> Result<(), crate::ptc::ProofError> {
-        use crate::ptc::{Equality, ProofError};
-        let remaining = validate(self, subject, interface_arguments, budget)
-            .map_err(|_| ProofError::BudgetExhausted)?;
-        let remaining = validate(
-            self,
+        self.replay_subject_evidence(
+            evidence,
             subject,
-            &evidence.type_arguments,
-            Budget {
-                steps: remaining,
-                max_depth: budget.max_depth,
-            },
-        )
-        .map_err(|_| ProofError::BudgetExhausted)?;
-        if evidence.implementation != self.declaration
-            || evidence.type_arguments.len() != self.type_parameters.len()
-            || interface_arguments.len() != self.interface_arguments.len()
-        {
-            return Err(ProofError::Invalid);
-        }
-        let parameters = self.parameter_binders().map_err(|_| ProofError::Invalid)?;
-        let mut domain_fuel = remaining;
-        validate_head_arguments_with_domains(
-            &parameters,
-            &self.parameter_types,
-            &evidence.type_arguments,
+            interface_arguments,
+            context,
+            budget,
             domains,
-            Some((context, budget.max_depth)),
             layouts,
-            &mut domain_fuel,
+            verify_requirement,
         )
-        .map_err(|error| match error {
-            nir::NominalAdmissionError::Budget => ProofError::BudgetExhausted,
-            _ => ProofError::Invalid,
-        })?;
-        let substitution = nir::DeclarationSubstitution::bounded(
-            &self.type_parameters,
-            &self.parameter_types,
-            &evidence.type_arguments,
-            context.scope(),
-            &mut domain_fuel,
-        )
-        .map_err(substitution_proof_error)?;
-        let allowance =
-            domain_fuel / (4 + evidence.head_proofs.len() + evidence.requirement_proofs.len());
-        if allowance == 0 {
-            return Err(ProofError::BudgetExhausted);
-        }
-        // Proof replay has no returned meter. Reserve each proof slot once;
-        // value traversal and substitution may spend only the remainder.
-        let proof_slots = evidence.head_proofs.len()
-            + evidence.requirement_proofs.len()
-            + usize::from(evidence.eligibility_proof.is_some());
-        domain_fuel -= allowance * proof_slots;
-        let budget = Budget {
-            steps: allowance,
-            max_depth: budget.max_depth,
-        };
-        let shape = if let Some(proof) = &evidence.eligibility_proof {
-            context.verify_proof(proof, budget)?;
-            match &proof.goal {
-                Formula::Equal(Equality(original, shape)) if original == subject => shape,
-                goal if eligible_alternatives(context, subject, goal) => subject,
-                _ => return Err(ProofError::Invalid),
-            }
-        } else {
-            subject
-        };
-        if !eligible_shape(context, shape)
-            && !evidence
-                .eligibility_proof
-                .as_ref()
-                .is_some_and(|proof| eligible_alternatives(context, subject, &proof.goal))
-        {
-            return Err(ProofError::Invalid);
-        }
-        let instantiated = substitution
-            .instantiate_bounded(&self.subject, &mut domain_fuel)
-            .map_err(substitution_proof_error)?;
-        let mut expected = vec![Formula::equal(instantiated.clone(), subject.clone())];
-        if shape != subject {
-            expected.push(Formula::equal(instantiated, shape.clone()));
-        }
-        for (template, actual) in self.interface_arguments.iter().zip(interface_arguments) {
-            let template = substitution
-                .instantiate_bounded(template, &mut domain_fuel)
-                .map_err(substitution_proof_error)?;
-            if template == *actual
-                && matches!(actual, Term::Rigid { declaration, sort: Sort::ComptimeValue } if domains.contains_key(declaration))
-            {
-                continue;
-            }
-            if template.is_symbolic_index_value() && actual.is_symbolic_index_value() {
-                let type_relations = template
-                    .index_type_relations_budgeted(actual, &mut domain_fuel)
-                    .map_err(substitution_proof_error)?
-                    .ok_or(ProofError::Invalid)?;
-                for (left, right) in type_relations {
-                    expected.push(Formula::equal(left.clone(), right.clone()));
-                }
-                continue;
-            }
-            if template.sort() != Sort::Type || actual.sort() != Sort::Type {
-                return Err(ProofError::Invalid);
-            }
-            expected.push(Formula::equal(template, actual.clone()));
-        }
-        if expected.len() != evidence.head_proofs.len()
-            || self.requirements.len() != evidence.requirement_proofs.len()
-        {
-            return Err(ProofError::Invalid);
-        }
-        for (goal, proof) in expected.iter().zip(&evidence.head_proofs) {
-            if goal != &proof.goal {
-                return Err(ProofError::Invalid);
-            }
-            context.verify_proof(proof, budget)?;
-        }
-        for (requirement, proof) in self.requirements.iter().zip(&evidence.requirement_proofs) {
-            let instantiated = substitution
-                .instantiate_predicate_bounded(requirement, &mut domain_fuel)
-                .map_err(substitution_proof_error)?;
-            if Formula::from_predicate(&instantiated) != proof.goal {
-                return Err(ProofError::Invalid);
-            }
-            verify_requirement(proof, budget)?;
-        }
-        Ok(())
+        .map_err(replay::Failure::into_proof_error)
     }
 }
 
