@@ -331,6 +331,34 @@ Rust 控制流下的主动放弃与 Drop，不宣称进程崩溃或任意 panic 
 - 五个修改／新增 Rust 文件的 rustfmt 检查：`/tmp/luna-tools-i92usp8x/result.json`，
   退出 0。未运行全 workspace、native 或性能基准。
 
+### 已接通：调用与方法准备归会话所有
+
+字节码的 `BeginCall`、`TraitMethod` 与动态实例的方法值分支不再在指令内部完成
+调用准备／方法选择。指令推进 PC 后交出 owning `Preparation`，帧进入等待状态，
+由同一执行会话在下一次驱动转换中消费；等待期间再次执行该帧被拒绝。普通调用与
+直接 trait 调用共用此边界，保留动态方法身份，不能用实现函数替换公共接口后丢掉
+默认参数与程序契约。调用准备持有原 CodeObject 和指令位置，不复制签名或重跑指令。
+
+原有步骤顺序保持：动态接口默认输入、接口程序契约、方法选择、callee 身份、参数
+绑定检查、调用暂存区安装，之后才执行调用参数。方法值读取也在准备结束后才写回
+目的槽。Session 的请求槽以单一枚举持有关联请求或字节码准备，取消先丢弃未执行的
+请求，再恢复已有调用栈；已执行的 caller 写入与消耗的预算不回滚。
+
+这里的 `Preparation` 是内部驱动工作，不是已验证的外部 HostRequest。其中的域观察、
+resolver 和函数实例准入仍同步执行；此处未承诺这些操作内部的暂停／恢复，也未完成
+前端 region、跨 world 响应或独立请求身份协议。树解释继续使用原来的同步选择服务。
+
+验证工作目录 `/home/fin/luna`：
+
+- VM 首轮全库检查 `/tmp/luna-tools-p1c2no03/result.json` 退出 101：504 项通过，
+  原 `pending_call_requires_delivery_and_rejects_bad_slots_before_effects` 尚未处理新增的
+  准备暂停点。该测试已分别断言准备与调用两个等待边界均拒绝继续执行，保留原有
+  重复交付拒绝及错误参数先于副作用的检查。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --lib --test comptime_bytecode_traits --test dynamic_trait_clauses --test builder_invocations --test comptime_bytecode_types --test deferred_associated_values --test library_meta_objects --test library_list_hash --no-fail-fast`
+  退出 0，`/tmp/luna-tools-u7eugzo2/result.json`。内部测试覆盖每个严格执行前缀的
+  取消、选择失败及新调用恢复；源码组覆盖直接／存储／动态 trait 调用、接口契约、
+  默认参数及调用顺序，并运行真实 sysroot 的 builder、meta 对象与 List hash 接口。
+
 ### 已接通：关联选择请求与初始化器准入分离
 
 `associated_execution` 将关联访问分成 `Preparation::Request` 和已准入的

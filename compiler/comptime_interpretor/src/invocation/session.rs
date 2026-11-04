@@ -34,11 +34,25 @@ impl Root<'_> {
     }
 }
 
+enum Request {
+    Associated(associated_execution::Request),
+    Bytecode(bytecode::Preparation),
+}
+
+impl fmt::Display for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Associated(request) => write!(f, "{request}"),
+            Self::Bytecode(request) => write!(f, "{request}"),
+        }
+    }
+}
+
 pub(super) struct Session<'vm, 'a, 'r> {
     vm: &'vm mut Interpreter<'a>,
     root: Root<'r>,
     execution: Option<Execution<'a>>,
-    associated_request: Option<associated_execution::Request>,
+    request: Option<Request>,
     stack: Vec<StackEntry<'a>>,
     result: Option<Completion>,
     terminal: bool,
@@ -50,7 +64,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             vm,
             root,
             execution: None,
-            associated_request: None,
+            request: None,
             stack: Vec::new(),
             result: None,
             terminal: false,
@@ -76,7 +90,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 });
             }
             associated_execution::Preparation::Request(request) => {
-                session.associated_request = Some(request);
+                session.request = Some(Request::Associated(request));
             }
         }
         session
@@ -115,7 +129,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 self.stack.is_empty()
                     && self.execution.is_none()
                     && self.result.is_none()
-                    && self.associated_request.is_none()
+                    && self.request.is_none()
             );
             if result.is_err() {
                 self.root.cancel();
@@ -130,25 +144,40 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             vm,
             root,
             execution,
-            associated_request,
+            request,
             stack,
             result,
             ..
         } = self;
-        if let Some(request) = associated_request.take() {
-            match vm.resolve_associated_request(request) {
-                Ok(activation) => {
-                    *execution = Some(Execution::Associated {
-                        activation,
-                        environment: Environment::default(),
-                    });
+        if let Some(pending) = request.take() {
+            match pending {
+                Request::Bytecode(preparation) => {
+                    let parent = stack
+                        .last_mut()
+                        .and_then(StackEntry::code)
+                        .or_else(|| root.code())
+                        .expect("preparation owner");
+                    if let Err(error) = vm.prepare_bytecode_request(parent, preparation) {
+                        *result = Some(Completion::Ordinary {
+                            flow: Err(error),
+                            defaults: None,
+                        });
+                    }
                 }
-                Err(error) => {
-                    *result = Some(Completion::Ordinary {
-                        flow: Err(error),
-                        defaults: None,
-                    });
-                }
+                Request::Associated(request) => match vm.resolve_associated_request(request) {
+                    Ok(activation) => {
+                        *execution = Some(Execution::Associated {
+                            activation,
+                            environment: Environment::default(),
+                        });
+                    }
+                    Err(error) => {
+                        *result = Some(Completion::Ordinary {
+                            flow: Err(error),
+                            defaults: None,
+                        });
+                    }
+                },
             }
         }
         if let Some(mut active) = execution.take() {
@@ -291,6 +320,9 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             .or_else(|| root.code())
             .expect("active execution");
         match vm.resume_frame(code, 1024) {
+            Ok(bytecode::Progress::Prepare(preparation)) => {
+                *request = Some(Request::Bytecode(preparation));
+            }
             Ok(bytecode::Progress::TypeInputPlan {
                 expression,
                 environment,
@@ -320,8 +352,8 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                             environment: Environment::default(),
                         })
                     }
-                    Ok(associated_execution::Preparation::Request(request)) => {
-                        *associated_request = Some(request);
+                    Ok(associated_execution::Preparation::Request(pending)) => {
+                        *request = Some(Request::Associated(pending));
                     }
                     Err(error) => {
                         *result = Some(Completion::Ordinary {
@@ -381,9 +413,9 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         if self.terminal {
             return;
         }
-        // A pending selection has not called the host or acquired an initializer
-        // key. Discard it before draining errors so cancellation cannot resolve it.
-        self.associated_request = None;
+        // Pending preparation has not called its host or started the callee.
+        // Discard it before draining errors so cancellation cannot perform it.
+        self.request = None;
         let error = self.vm.failure(ErrorKind::InvalidControlFlow, None);
         self.result = if let Some(active) = self.execution.take() {
             Some(self.vm.complete_execution(active, Err(error)))
@@ -448,7 +480,7 @@ impl fmt::Display for Session<'_, '_, '_> {
             execution(f, value)?;
         }
         f.write_str(") (request")?;
-        if let Some(request) = &self.associated_request {
+        if let Some(request) = &self.request {
             write!(f, " {request}")?;
         }
         f.write_str(") (completion")?;
@@ -479,6 +511,7 @@ impl fmt::Display for Session<'_, '_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod method_preparation;
     use input_collection::InputPlan;
     use nir::normal_forms::{Head, Kind, Parameter, Role};
     use nir::program::{NormalFormArgument, NormalFormInputPlan, NormalFormPreparation, Place};
@@ -718,7 +751,7 @@ mod tests {
                 }
                 session = Box::new(*session);
             }
-            if session.associated_request.is_some() {
+            if matches!(session.request, Some(Request::Associated(_))) {
                 pending_cancellations += 1;
                 assert!(
                     session

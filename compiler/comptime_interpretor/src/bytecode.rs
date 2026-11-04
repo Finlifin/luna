@@ -4,6 +4,8 @@ use super::*;
 use comptime_compiler::{Op, Program};
 #[path = "bytecode_interface.rs"]
 mod interface;
+mod preparation;
+pub(super) use preparation::Preparation;
 
 pub(super) struct Frame {
     code: Arc<Program>,
@@ -120,6 +122,7 @@ impl Frame {
 }
 
 enum Waiting {
+    Preparation,
     Interface,
     Call(usize),
     Default {
@@ -165,6 +168,7 @@ impl std::fmt::Display for PreparedArgument {
 
 #[derive(Debug)]
 pub(super) enum Progress {
+    Prepare(Preparation),
     Associated {
         access: Arc<comptime_compiler::associated::Access>,
         source: SourceRange,
@@ -239,6 +243,7 @@ impl fmt::Display for Frame {
         }
         write!(f, ") (waiting")?;
         match &self.waiting {
+            Some(Waiting::Preparation) => write!(f, " (preparation)")?,
             Some(Waiting::Interface) => write!(f, " (interface)")?,
             Some(Waiting::Plan {
                 destination,
@@ -1205,8 +1210,11 @@ impl<'a> Interpreter<'a> {
                         // the implementation here would erase its contract and defaults.
                         frame.instance_methods.insert(*destination, instance);
                     } else {
-                        frame.slots[*destination] =
-                            Some(self.bytecode_trait_method(instance.view(), false)?);
+                        frame.waiting = Some(Waiting::Preparation);
+                        return Ok(Progress::Prepare(Preparation::Method {
+                            destination: *destination,
+                            method: Arc::new(instance),
+                        }));
                     }
                 }
                 Op::PreparePredicate { valid } => {
@@ -2360,88 +2368,14 @@ impl<'a> Interpreter<'a> {
                     frame.slots[*destination] = Some(value);
                 }
 
-                Op::BeginCall {
-                    call,
-                    callee,
-                    callee_source,
-                    normal_form,
-                    parameter_bindings,
-                    prepare_defaults,
-                    method,
-                } => {
+                Op::BeginCall { callee, .. } => {
                     let dynamic_method = frame.instance_methods.remove(callee);
-                    let trait_defaults = if *prepare_defaults {
-                        dynamic_method
-                            .as_ref()
-                            .map(|method| self.trait_method_default_inputs(method.view()))
-                            .transpose()?
-                    } else {
-                        None
-                    };
-                    let method = method.as_deref().or(dynamic_method.as_ref());
-                    let (interface_program, interface_parameters) = if let Some(method) = method {
-                        self.interface_method_contract(method.view(), source)?
-                    } else {
-                        (Default::default(), None)
-                    };
-                    let callee = if let Some(method) = method {
-                        self.tick(Some(method.source))?;
-                        self.depth += 1;
-                        let value = self.bytecode_trait_method(method.view(), true);
-                        self.depth -= 1;
-                        value?
-                    } else {
-                        frame.slots[*callee].take().ok_or_else(missing)?
-                    };
-                    let callee = if normal_form.is_none() {
-                        self.resolve_invocation_identity(callee)?
-                    } else {
-                        callee
-                    };
-                    let (normal_head, parameters, count) = if let Some((ty, count)) = normal_form {
-                        if !self.has_type(&callee, ty) {
-                            return Err(self.failure(ErrorKind::Type, Some(*callee_source)));
-                        }
-                        let Value::Function(head) = &callee else {
-                            return Err(self.failure(ErrorKind::Type, Some(*callee_source)));
-                        };
-                        let metadata = self.normal_forms.get(head).ok_or_else(missing)?;
-                        if !parameter_bindings.is_empty() || *count != metadata.parameters.len() {
-                            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-                        }
-                        (Some(*head), vec![], *count)
-                    } else {
-                        let parameters = self.call_parameters(&callee, source)?;
-                        let count = parameters.len();
-                        (None, parameters, count)
-                    };
-                    let preparation_parameters =
-                        interface_parameters.as_ref().unwrap_or(&parameters);
-                    if !parameter_bindings.is_empty()
-                        && (*parameter_bindings != *preparation_parameters
-                            || parameter_bindings.len() != count)
-                    {
-                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-                    }
-                    self.effect_charge(count, Some(source))?;
-                    frame.calls.insert(
-                        *call,
-                        PendingCall {
-                            callee,
-                            normal_head,
-                            trait_defaults,
-                            interface: interface_parameters
-                                .map(|parameters| (interface_program, parameters)),
-                            arguments: (0..count).map(|_| None).collect(),
-                            parameter_bindings: if *prepare_defaults {
-                                parameter_bindings.clone()
-                            } else {
-                                vec![]
-                            },
-                            defaults: Environment::new(),
-                            last_default: None,
-                        },
-                    );
+                    frame.waiting = Some(Waiting::Preparation);
+                    return Ok(Progress::Prepare(Preparation::Call {
+                        code: code.clone(),
+                        instruction: frame.pc - 1,
+                        dynamic_method,
+                    }));
                 }
                 Op::CheckCallArgument {
                     call,
@@ -2673,8 +2607,11 @@ impl<'a> Interpreter<'a> {
                     destination,
                     method,
                 } => {
-                    frame.slots[*destination] =
-                        Some(self.bytecode_trait_method(method.view(), false)?);
+                    frame.waiting = Some(Waiting::Preparation);
+                    return Ok(Progress::Prepare(Preparation::Method {
+                        destination: *destination,
+                        method: method.clone(),
+                    }));
                 }
                 Op::EnterScope => frame.scopes.push(PatternScope::default()),
                 Op::LeaveScope => frame.leave_scope()?,
@@ -3822,6 +3759,17 @@ mod tests {
         environment.insert(trace, Value::Bool(true));
         let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
         let mut frame = vm.start_frame(&code, &mut environment).unwrap();
+        let Progress::Prepare(preparation) = vm.resume_frame(&mut frame, 100).unwrap() else {
+            panic!("expected suspended preparation");
+        };
+        let stopped = frame.to_string();
+        assert_eq!(
+            vm.resume_frame(&mut frame, 100).unwrap_err().kind,
+            ErrorKind::InvalidControlFlow
+        );
+        assert_eq!(frame.to_string(), stopped);
+        vm.prepare_bytecode_request(&mut frame, preparation)
+            .unwrap();
         let Progress::Call { callee, arguments } = vm.resume_frame(&mut frame, 100).unwrap() else {
             panic!("expected suspended call");
         };
@@ -4311,7 +4259,8 @@ mod tests {
                     | Progress::Default { .. }
                     | Progress::TypeInputPlan { .. }
                     | Progress::Contract { .. }
-                    | Progress::Associated { .. },
+                    | Progress::Associated { .. }
+                    | Progress::Prepare(_),
                 ) => {
                     panic!("malformed operation completed")
                 }
