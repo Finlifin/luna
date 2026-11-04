@@ -118,6 +118,9 @@ pub enum UnknownReason {
     BudgetExhausted,
     UnvalidatedModel,
     ArithmeticRange,
+    /// A type-query prerequisite in the owning world has not been established.
+    /// The explanation is diagnostic data, never a negative proposition.
+    UnresolvedPrerequisite(String),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValidationError {

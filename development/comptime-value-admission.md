@@ -2518,6 +2518,23 @@ value_admission 内核，退役该路径重复构造单参数声明并经过布�
 一次失败查询永久排除候选。实际回归覆盖缺少 congruence 时 Pending，补齐同一
 世界中的证据后重新匹配成功。
 
+**条件 trait 形成。** capability 的 condition_fact 返回 typed admission 结果，
+域准入、参数替换或前提证明的 Budget 不再转换成 IllFormed；Unresolved 通过
+UnknownReason::UnresolvedPrerequisite 保留诊断原因，真正非法输入才保持
+IllFormed。条件事实查询只使用分给自己的额度，成功、失败和未决后均将未用额度
+归还外层；形成要求改用 prove_metered，证明工作不再由新的临时 Budget 隐藏。
+
+未完成的条件事实不进入候选的局部 Context，也不能用缺失事实的反模型排除候选。
+其余独立事实仍可继续证明目标；若已有独立的 Entailed 结果，不因一个未决的析取
+分支而拒绝。没有这样的证明时，保留实际未决原因。HeadMatch 的正／反要求查询
+仍分别执行，但最终 Pending 现在带有要求位置与两侧的 Unknown 原因，不再统一
+改写成一句无原因的“requirements are unsettled”。正式 Type 命题、程序验证与
+NF 头不展开的边界保持。
+
+回归覆盖缺失 NF congruence 导致条件候选 Pending、补充证据后选择并 replay
+成功，以及另一个已建立的析取分支独立完成证明。形成检查还验证重复前提证明的
+成本、子查询额度上限、语义拒绝、资源失败与后续重试。
+
 NF 的 ApplicationError::Unresolved 保留失败的参数位置和原因；dispatch 转回
 共享准入错误时不丢失该分类。执行侧 typed admission 消费者将其映射为
 TypeContractUnresolved，区别于 StepsExhausted 和类型错误。NF 未完成检查不会
@@ -2537,9 +2554,10 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
 - fresh phase pass 仍使用自己的默认额度，VM 随后再做结构检查；构造失败的
   for_comptime_in_budget 仍保守保留全部 reservation，尚非精确失败扣款。
 - 后续关联项／方法签名与 world capability 的部分实例化尚未有界。
-- PTC 的域关系查询已保留 Unknown，但 capability 外层仍有 String、is_ok 与
-  可选结果边界；proof replay 也仍有合并 admission 错误的路径。完整求解链的
-  Pending／资源／反例传播尚未完成。
+- 条件 trait 形成与要求 discharge 已保留具体未决原因，但 capability 的公开
+  resolve／decide_trait、given 和 projection 仍有 String、is_ok 或可选结果边界；
+  条件形成中的旧 nested resolution 失败仍可能只表示暂无事实。proof replay
+  也仍有合并 admission 错误的路径，完整求解链的 Pending／资源／反例传播未完成。
 - 旧 layout／callable 可选观察器把 Unresolved 表示为 unavailable view，仍不能
   保留具体原因；typed admission 直接消费完整错误。后续须迁移这些观察器及其
   消费者，不能把本次新增分类说成所有描述观察都已无损。
@@ -2551,17 +2569,19 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
 
 最终源码的验证范围与输出锚点如下（工作目录 `/home/fin/luna`）：
 
-- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p nir
-  -p comptime_interpretor -p iir --lib --test implementation --test capabilities
-  --test trait_parameters --test value_admission --test normal_inputs
-  --test normal_callable_inputs --test callable_world --no-fail-fast`：769 通过，
-  退出 0；`/tmp/luna-tools-1rr5l0my/result.json`。
-- 修改文件的 rustfmt check：退出 0；`/tmp/luna-tools-x0qkiza3/result.json`。
-- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases
-  --test trait_domain_substitution --test dynamic_trait_clauses --test comptime_bytecode_traits
-  --test sysroot_preludes --test library_list_equality --test normal_input_plans
-  --test cmtt_type_inputs --test nominal_staging --test newtypes --no-fail-fast`：371 通过，
-  退出 0；`/tmp/luna-tools-j7zkw6a9/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution
+  -p elaboration --lib --test solver --test type_inputs --test capabilities
+  --test implementation --test implementation_phases --no-fail-fast`：491 通过，
+  退出 0；`/tmp/luna-tools-vhg5qrk0/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test predicate_calls
+  --test trait_purity --test trait_phases --test trait_domain_substitution
+  --test dynamic_trait_clauses --test comptime_bytecode_traits --test sysroot_preludes
+  --test library_list_equality --test normal_input_plans --test cmtt_type_inputs
+  --no-fail-fast`：173 通过、1 ignored，退出 0；
+  `/tmp/luna-tools-l_1yjes4/result.json`。忽略项是既有的
+  comptime_decisions_check_their_results_before_returning_types，仍缺阶段敏感的
+  值引用稳定性证据，本次没有修改或宣称修复。
+- 修改文件的 rustfmt check：退出 0；`/tmp/luna-tools-bj2k1tz0/result.json`。
 
 未跑全 workspace 或性能基准，其他已记录基线问题不在这批宣称解决。
 正式 docs、program verification 与 library 的既有工作区修改保持原字节内容。

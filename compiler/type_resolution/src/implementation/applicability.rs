@@ -1375,7 +1375,7 @@ impl HeadMatch {
             ..
         } = evidence;
         let mut requirements = Vec::new();
-        let mut pending = false;
+        let mut pending = None;
         // The head reserved two query slots per requirement. Positive proofs
         // usually settle the requirement alone; reuse their unspent work rather
         // than stranding it in negative queries that will never execute.
@@ -1401,7 +1401,11 @@ impl HeadMatch {
             match outcome {
                 Outcome::Entailed(proof) => requirements.push(proof),
                 Outcome::IllFormed(reason) => return TypeAssessment::Invalid(reason),
-                _ => {
+                positive => {
+                    let positive_reason = match positive {
+                        Outcome::Unknown { reason, .. } => Some(reason),
+                        _ => None,
+                    };
                     let before = allowance.steps;
                     let outcome = prove(requirement.negate(), &mut allowance);
                     if allowance.steps > before {
@@ -1413,13 +1417,31 @@ impl HeadMatch {
                     match outcome {
                         Outcome::Entailed(proof) => return TypeAssessment::Excluded(proof),
                         Outcome::IllFormed(reason) => return TypeAssessment::Invalid(reason),
-                        _ => pending = true,
+                        negative => {
+                            let detail = match (positive_reason, negative) {
+                                (
+                                    Some(reason),
+                                    Outcome::Unknown {
+                                        reason: negative, ..
+                                    },
+                                ) => format!("{reason:?}; negation: {negative:?}"),
+                                (Some(reason), _) | (None, Outcome::Unknown { reason, .. }) => {
+                                    format!("{reason:?}")
+                                }
+                                _ => {
+                                    "neither the requirement nor its negation is established".into()
+                                }
+                            };
+                            pending.get_or_insert_with(|| {
+                                format!("implementation requirement {index} is unsettled: {detail}")
+                            });
+                        }
                     }
                 }
             }
         }
-        if pending {
-            return TypeAssessment::Pending("implementation requirements are unsettled".into());
+        if let Some(reason) = pending {
+            return TypeAssessment::Pending(reason);
         }
         TypeAssessment::Applicable(TypeEvidence {
             implementation,

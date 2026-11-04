@@ -74,6 +74,102 @@ fn context() -> Context {
     c.admit_nominal_constructor(id(10));
     c
 }
+
+#[test]
+fn unknown_conditional_trait_domains_do_not_exclude_the_candidate() {
+    use nir::program::TypePredicate;
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::Formula;
+    let ty = |n| Term::Rigid {
+        declaration: id(n),
+        sort: Sort::Type,
+    };
+    let nf = |value| Term::NormalForm {
+        head: id(90),
+        sort: Sort::Type,
+        arguments: vec![value],
+    };
+    let input = Term::Rigid {
+        declaration: id(203),
+        sort: Sort::ComptimeValue,
+    };
+    let subject = Term::Primitive(Primitive::Bool);
+    let given = TraitRequirement {
+        interface: id(101),
+        subject: subject.clone(),
+        interface_arguments: vec![input],
+    };
+    let mut candidate = implementation(20, 100, subject.clone(), vec![], vec![]);
+    candidate.requirements = vec![TypePredicate::Trait(given.clone())];
+    let implementations = vec![candidate];
+    let mut traits = vec![marker(100), marker(101)];
+    traits[1].type_parameters = vec![id(202)];
+    traits[1].parameter_types = vec![nf(ty(201))];
+    let mut ix = index(&implementations);
+    ix.register_parameter_domain(id(203), nf(ty(204))).unwrap();
+    let assumptions = [given];
+    let mut ctx = context();
+    ctx.assume(Formula::equal(ty(201), ty(204)));
+    let world = World {
+        index: &ix,
+        implementations: &implementations,
+        traits: &traits,
+        assumptions: &assumptions,
+        context: &ctx,
+    };
+    let result = world.resolve(id(100), &subject, Budget::default()).unwrap();
+    assert!(
+        matches!(result.types.assessments.get(&id(20)),
+        Some(TypeAssessment::Pending(reason)) if reason.contains("UnresolvedPrerequisite") && reason.contains("UnvalidatedModel")),
+        "{:?}",
+        result.types.assessments
+    );
+    assert!(!matches!(
+        result.types.selection,
+        Selection::NoApplicableCandidate
+    ));
+    ctx.admit_congruence(id(90));
+    let world = World {
+        context: &ctx,
+        index: &ix,
+        implementations: &implementations,
+        traits: &traits,
+        assumptions: &assumptions,
+    };
+    let result = world.resolve(id(100), &subject, Budget::default()).unwrap();
+    assert!(matches!(result.types.selection, Selection::Selected(selected) if selected == id(20)));
+    world
+        .verify_condition_support(&result, Budget::default())
+        .unwrap();
+
+    // An unresolved alternative must not block a separately established
+    // disjunct, nor become a negative fact used to discharge that disjunct.
+    let known = requirement(102, subject.clone());
+    let mut alternatives = implementations.clone();
+    alternatives[0].requirements = vec![TypePredicate::Or(vec![
+        alternatives[0].requirements[0].clone(),
+        TypePredicate::Trait(known.clone()),
+    ])];
+    let mut ix = index(&alternatives);
+    ix.register_parameter_domain(id(203), nf(ty(204))).unwrap();
+    let mut traits = traits.clone();
+    traits.push(marker(102));
+    let assumptions = [assumptions[0].clone(), known];
+    let mut incomplete = context();
+    incomplete.assume(Formula::equal(ty(201), ty(204)));
+    let world = World {
+        index: &ix,
+        implementations: &alternatives,
+        traits: &traits,
+        assumptions: &assumptions,
+        context: &incomplete,
+    };
+    let result = world.resolve(id(100), &subject, Budget::default()).unwrap();
+    assert!(matches!(result.types.selection, Selection::Selected(selected) if selected == id(20)));
+    world
+        .verify_condition_support(&result, Budget::default())
+        .unwrap();
+}
 #[test]
 fn qualification_absence_is_world_local_and_does_not_poison_later_queries() {
     let mut implementations = vec![

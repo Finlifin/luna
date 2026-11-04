@@ -28,6 +28,91 @@ struct ConditionFact {
     resolution: Option<Box<Resolution>>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nir::program::TypePredicate;
+    use nir::{DeclarationId, Primitive};
+
+    #[test]
+    fn conditional_formation_proofs_consume_their_reserved_allowance() {
+        let id = |local| DeclarationId { package: 94, local };
+        let trait_with = |requirements| Trait {
+            declaration: id(1),
+            self_parameter: id(2),
+            name: "Conditional".into(),
+            comptime_only: false,
+            parameter_types: vec![],
+            type_parameters: vec![],
+            parents: vec![],
+            associated: vec![],
+            methods: vec![],
+            capabilities: vec![],
+            requirements,
+        };
+        let index = Index::default();
+        let context = Context::default();
+        let query = TraitQuery {
+            interface: id(1),
+            subject: Term::Primitive(Primitive::Bool),
+            arguments: vec![],
+        };
+        let check = |traits: &[Trait], steps| {
+            let world = World {
+                index: &index,
+                context: &context,
+                traits,
+                implementations: &[],
+                assumptions: &[],
+            };
+            let mut solver = Solver {
+                world: &world,
+                scope: ResolutionScope::capture(&world),
+                active: HashSet::new(),
+                remaining: 100_000,
+            };
+            let result = solver.condition_fact(
+                &query,
+                Budget {
+                    steps,
+                    max_depth: 128,
+                },
+                0,
+            );
+            (result, 100_000 - solver.remaining)
+        };
+        let (empty, baseline) = check(&[trait_with(vec![])], 10_000);
+        assert!(!empty.unwrap().unwrap().truth);
+        let count = 32;
+        let traits = [trait_with(vec![TypePredicate::Bool(true); count])];
+        let (complete, consumed) = check(&traits, 10_000);
+        assert!(!complete.unwrap().unwrap().truth);
+        let mut proof_budget = Budget {
+            steps: 10_000,
+            max_depth: 128,
+        };
+        assert!(matches!(
+            context.prove_metered(Formula::True, &mut proof_budget),
+            Outcome::Entailed(_)
+        ));
+        let proof_cost = 10_000 - proof_budget.steps;
+        assert!(proof_cost > 0);
+        assert!(consumed >= baseline + count * (proof_cost + 1));
+        let (short, consumed) = check(&traits, 8);
+        assert!(matches!(short, Err(nir::NominalAdmissionError::Budget)));
+        assert!(consumed > 0 && consumed <= 8);
+        assert!(!check(&traits, 10_000).0.unwrap().unwrap().truth);
+        let malformed = [trait_with(vec![TypePredicate::Equal(
+            Term::Bool(true),
+            Term::Primitive(Primitive::Bool),
+        )])];
+        assert!(matches!(
+            check(&malformed, 10_000).0,
+            Err(nir::NominalAdmissionError::Invalid(_))
+        ));
+    }
+}
+
 impl Solver<'_, '_> {
     pub(super) fn prove_condition_metered(
         &mut self,
@@ -124,6 +209,7 @@ impl Solver<'_, '_> {
         let mut obligations = queries.len() + projection_types.len();
         let mut context = self.world.context.fork();
         let mut facts = Vec::new();
+        let mut pending_reason = None;
         for query in queries {
             let allowance = Budget {
                 steps: self.remaining / (obligations + 1),
@@ -137,7 +223,15 @@ impl Solver<'_, '_> {
                     facts.push(fact);
                 }
                 Ok(None) => {}
-                Err(reason) => return Outcome::IllFormed(reason),
+                Err(nir::NominalAdmissionError::Budget) => {
+                    pending_reason = Some(UnknownReason::BudgetExhausted);
+                }
+                Err(nir::NominalAdmissionError::Unresolved(reason)) => {
+                    pending_reason.get_or_insert(UnknownReason::UnresolvedPrerequisite(reason));
+                }
+                Err(nir::NominalAdmissionError::Invalid(reason)) => {
+                    return Outcome::IllFormed(reason);
+                }
             }
         }
         let mut projections = Vec::new();
@@ -166,6 +260,18 @@ impl Solver<'_, '_> {
         let before = proof_budget.steps;
         let outcome = context.prove_metered(goal, &mut proof_budget);
         self.remaining -= before - proof_budget.steps;
+        // A missing fact does not prevent an independent proof. It does
+        // prevent a partial-world countermodel from excluding the candidate.
+        let outcome = match (outcome, pending_reason) {
+            (Outcome::NotEntailed(witness), Some(reason)) => Outcome::Unknown {
+                reason,
+                residual: witness.goal,
+            },
+            (Outcome::Unknown { residual, .. }, Some(reason)) => {
+                Outcome::Unknown { reason, residual }
+            }
+            (outcome, _) => outcome,
+        };
         if let Outcome::Entailed(proof) = &outcome {
             support.push(ConditionSupport {
                 context,
@@ -182,9 +288,23 @@ impl Solver<'_, '_> {
         query: &TraitQuery,
         budget: Budget,
         depth: usize,
-    ) -> Result<Option<ConditionFact>, String> {
+    ) -> Result<Option<ConditionFact>, nir::NominalAdmissionError> {
+        let outer = self.remaining;
+        let allowance = outer.min(budget.steps);
+        self.remaining = allowance;
+        let result = self.condition_fact_in(query, budget, depth);
+        self.remaining = outer - (allowance - self.remaining);
+        result
+    }
+
+    fn condition_fact_in(
+        &mut self,
+        query: &TraitQuery,
+        budget: Budget,
+        depth: usize,
+    ) -> Result<Option<ConditionFact>, nir::NominalAdmissionError> {
         if depth >= budget.max_depth.min(128) || self.remaining == 0 {
-            return Ok(None);
+            return Err(nir::NominalAdmissionError::Budget);
         }
         let contract = self
             .world
@@ -210,23 +330,38 @@ impl Solver<'_, '_> {
         let inputs: Vec<_> = std::iter::once(query.subject.clone())
             .chain(query.arguments.iter().cloned())
             .collect();
-        let substitution = contract
-            .input_substitution(&inputs, &[], &mut self.remaining)
-            .map_err(|error| error.to_string())?;
+        let substitution = contract.input_substitution(&inputs, &[], &mut self.remaining)?;
         for requirement in &contract.requirements {
             if requirement.mentions_rigid(contract.self_parameter) {
                 continue;
             }
-            let requirement = substitution
-                .instantiate_predicate_bounded(requirement, &mut self.remaining)
-                .map_err(|error| error.to_string())?;
-            if !matches!(
-                self.world
-                    .context
-                    .prove(Formula::from_predicate(&requirement), budget),
-                Outcome::Entailed(_)
-            ) {
-                return Ok(None);
+            let requirement =
+                substitution.instantiate_predicate_bounded(requirement, &mut self.remaining)?;
+            let mut proof_budget = Budget {
+                steps: self.remaining.min(budget.steps),
+                ..budget
+            };
+            let before = proof_budget.steps;
+            let outcome = self
+                .world
+                .context
+                .prove_metered(Formula::from_predicate(&requirement), &mut proof_budget);
+            self.remaining -= before - proof_budget.steps;
+            match outcome {
+                Outcome::Entailed(_) => {}
+                Outcome::NotEntailed(_) => return Ok(None),
+                Outcome::Unknown {
+                    reason: UnknownReason::BudgetExhausted,
+                    ..
+                } => return Err(nir::NominalAdmissionError::Budget),
+                Outcome::Unknown { reason, .. } => {
+                    return Err(nir::NominalAdmissionError::Unresolved(format!(
+                        "conditional interface requirement: {reason:?}"
+                    )));
+                }
+                Outcome::IllFormed(reason) => {
+                    return Err(nir::NominalAdmissionError::Invalid(reason));
+                }
             }
         }
         // Formation must not bootstrap itself from the queried implementation.
@@ -234,9 +369,8 @@ impl Solver<'_, '_> {
             if capability.mentions_rigid(contract.self_parameter) {
                 continue;
             }
-            let capability = substitution
-                .instantiate_requirement_bounded(capability, &mut self.remaining)
-                .map_err(|error| error.to_string())?;
+            let capability =
+                substitution.instantiate_requirement_bounded(capability, &mut self.remaining)?;
             if self.given(&capability, budget).is_none() {
                 let Ok(resolution) = self.resolve(
                     &capability.interface_instance(),
