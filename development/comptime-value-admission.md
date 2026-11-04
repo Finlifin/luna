@@ -1923,3 +1923,73 @@ entry 的零预算成为 Structure，模板依赖深度无法得到 Depth。
 `--lib` 被 Cargo 拒绝，退出 1；`/tmp/luna-tools-dt2_ztxf/result.json`。以上均不作为
 通过证据。格式检查通过；未运行全 workspace、native 或性能基准。正式 docs、
 用户原有源码和 library 修改保持不变。
+
+
+### 参数校验预算的归并
+
+phase validation 的声明参数目录、alias formation contracts、源码函数和 quote
+模板的 frame／默认值分析现在共享 pass 提供的一份参数额度；子服务没有自行
+补充 fuel。当前兼容入口为这部分分配 1,000,000，并不表示整个 phase validator
+或 VM 构造已使用调用者总预算。独立的 trait membership、NF 元数据校验、生成的
+trait summary、主体准备、存储和 call-safety 仍待迁移；对外 Error 仍为原位置和
+诊断，typed 参数 Failure 只在内部保留。
+
+参数目录改用 checked 入口，Budget 不再被翻译成“声明域无效”。目录遍历对没有
+输入的声明也计费，防止空 telescope 集合绕过额度。完成目录后，phase 不再为
+struct、enum 和 implementation 重复构造同一 binder 集合；enum encoding 等
+独立检查保留。参数 frame 先预留参数／默认值列表及 signature 观察成本，再建立
+索引；单一位置索引同时负责重复身份与默认值的前向引用检查。frame 仅借用 NIR，
+不复制默认表达式，也不改变 quote 与 runtime 的执行规则。
+
+alias contracts 的 `validate_in` 返回 Budget／Invalid 并使用调用者额度；旧
+`validate` 仅保留固定额度的诊断适配。形成义务的 term、predicate 和 capability
+复用一个有界工作栈，展开子数组前预留成本，移除了两个重复的 term 校验路径。
+按 binder 身份建立的排序索引同时检查 sort 和声明先后，替代逐个引用线性扫描
+整个 telescope；这不是新增类型推导，也不把程序验证命题引入 PTC。
+
+生产参数 pass 的回归验证一份精确额度可完成目录、alias、quote 和多个函数，少
+一步在后一个函数的默认值处失败并保留源位置，足额重试成功。另两项公共入口
+回归在 `5814cfc2` 基线上失败：空声明目录在不足额度时仍返回 Ok，宽声明域的
+资源失败仍被报告为无效元数据；`/tmp/luna-tools-ust9ixm1/result.json` 退出 101。
+随后恢复当前实现，未修改既有语义断言或扩大通过条件。
+
+
+计入空声明成本后，首次真实 sysroot 验收出现 11 项 P4 拒绝；
+`/tmp/luna-tools-e47rox3q/result.json` 退出 101。临时诊断定位到
+`rejection::Cache::query -> declaration_parameter_sorts`：同一不可变 Package 的
+每个冷实例都重建整包目录，资源检查在重复工作中耗尽额度，最后表现为
+`mix_digest` 缺少 P4 证据。单例诊断 `/tmp/luna-tools-o043vd2o/result.json`
+退出 101 并保留调用栈；诊断插桩随后全部撤销，purity.rs 恢复原内容。
+
+只在单个 rejection cache 内保存目录仍不足以修复 sysroot：每个独立资源分析
+都会新建 cache；`/tmp/luna-tools-u_evobs_/result.json` 再次退出 101，同样为 11 项
+P4 拒绝。这证明仅缓存冷查询结果没有消除不必要的观察。
+
+最终路径按实际依赖取得声明 sort：空 telescope 不查询整包目录；遍历到有声明
+输入的被调函数时才构建目录。其成功结果保存在本次 Package 借用内，与已有的
+函数索引共享生命周期；每个新实例的扫描和 cleanup 证明照旧独立计费。目录
+构造失败不发布条目，不保存部分结果；不同 Package 使用独立 cache。回归覆盖
+低额度失败后的足额重试、不同 root 复用目录时仍计费、新世界同号函数的不同
+拒绝行为，以及无效目录重复拒绝。另有闭合调用进入泛型调用边的用例，保证延迟目录取得
+不会跳过后来需要的声明证据。这是消除不必要和重复的观察，未扩大 P4 预算或
+豁免任何资源义务；全局 world/parameter query 服务仍待后续归并。
+
+
+本批验证目录 `/home/fin/luna`，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --lib --test phases --test trait_parameters --test type_aliases
+  --test nominal_parameters --no-fail-fast`：118 通过，退出 0；
+  `/tmp/luna-tools-pkmzs4bg/result.json`。
+- `-p comptime_interpretor -p elaboration -p materialization --lib
+  --test instance_budget --test runtime_function_identities --no-fail-fast`：
+  694 通过，退出 0；`/tmp/luna-tools-r6pk_gjz/result.json`。
+- `-p program_verification --lib --no-fail-fast`：119 通过，退出 0；
+  `/tmp/luna-tools-0wj500ra/result.json`。
+- `-p luna --test default_calls --test quote_functions --test nominal_value_parameters
+  --test trait_phases --test sysroot_preludes --no-fail-fast`：543 通过，退出 0；
+  `/tmp/luna-tools-382ohk1h/result.json`。其中真实 sysroot 全部 15 项通过，覆盖此前
+  11 项 P4 回归；未通过扩大纯度预算或更改库实现绕过拒绝。
+
+格式检查 `/tmp/luna-tools-nj8ep5ng/result.json` 退出 0。未执行全 workspace 或
+性能基准。正式 docs、用户已有的资源源码修改及 library 修改保持不变。

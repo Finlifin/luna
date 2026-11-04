@@ -1038,7 +1038,7 @@ impl crate::program::Package {
             )
         {
             *fuel = fuel
-                .checked_sub(ids.len())
+                .checked_sub(ids.len().saturating_add(1))
                 .ok_or(crate::type_computations::Error::Budget)?;
             for domain in domains {
                 crate::type_computations::charge_term(domain, fuel)?;
@@ -1089,7 +1089,7 @@ impl crate::program::Package {
             )
         {
             *fuel = fuel
-                .checked_sub(ids.len())
+                .checked_sub(ids.len().saturating_add(1))
                 .ok_or(crate::type_computations::Error::Budget)?;
             for domain in domains {
                 crate::type_computations::charge_term(domain, fuel)?;

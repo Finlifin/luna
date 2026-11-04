@@ -1951,3 +1951,36 @@ fn runtime_default_analysis_distinguishes_resource_limits_and_invalid_scope() {
     arguments[0].value = flag(K::Literal(Literal::Bool(true)));
     nir::phases::validate(&package).unwrap();
 }
+
+#[test]
+fn parameter_domain_resource_failure_is_not_reported_as_invalid_metadata() {
+    let mut package = Package {
+        alias_contracts: vec![nir::type_aliases::Contract {
+            declaration: DeclarationId {
+                package: 40,
+                local: 0,
+            },
+            parameters: vec![DeclarationId {
+                package: 40,
+                local: 1,
+            }],
+            parameter_types: vec![Term::Record(vec![(
+                "field".repeat(250_000),
+                Term::Primitive(Primitive::Bool),
+            )])],
+            requirements: vec![],
+            capabilities: vec![],
+        }],
+        ..Default::default()
+    };
+    let error = nir::phases::validate(&package).unwrap_err();
+    assert_eq!(
+        error.message,
+        "declaration parameter domain analysis budget exhausted"
+    );
+    let Term::Record(fields) = &mut package.alias_contracts[0].parameter_types[0] else {
+        unreachable!()
+    };
+    fields[0].0 = "field".into();
+    nir::phases::validate(&package).unwrap();
+}

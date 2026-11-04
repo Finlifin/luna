@@ -44,113 +44,141 @@ impl fmt::Display for Contract {
     }
 }
 
+/// Resource failure does not establish that a formation contract is invalid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValidationError {
+    Budget,
+    Invalid(&'static str),
+}
+impl ValidationError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Budget => "alias contract validation budget exhausted",
+            Self::Invalid(message) => message,
+        }
+    }
+}
+impl fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.message())
+    }
+}
+impl std::error::Error for ValidationError {}
+
+/// Compatibility entry for callers that do not yet own a shared allowance.
 pub fn validate(contracts: &[Contract]) -> Result<(), &'static str> {
-    let mut fuel = 100_000usize;
+    validate_in(contracts, &mut 100_000).map_err(ValidationError::message)
+}
+
+/// Validate formation evidence using the caller's allowance, including failure.
+pub fn validate_in(contracts: &[Contract], fuel: &mut usize) -> Result<(), ValidationError> {
+    use ValidationError::Invalid;
+    charge(fuel, contracts.len())?;
     let mut identities = BTreeSet::new();
     for contract in contracts {
-        fuel = fuel
-            .checked_sub(contract.parameters.len().saturating_add(1))
-            .ok_or("alias contract validation budget exhausted")?;
+        charge(fuel, contract.parameters.len())?;
+        charge(fuel, contract.parameter_types.len())?;
         if !identities.insert(contract.declaration) {
-            return Err("duplicate alias contract identity");
+            return Err(Invalid("duplicate alias contract identity"));
         }
         let parameters: BTreeSet<_> = contract.parameters.iter().copied().collect();
         if parameters.len() != contract.parameters.len() {
-            return Err("duplicate alias contract parameter");
+            return Err(Invalid("duplicate alias contract parameter"));
         }
         for domain in &contract.parameter_types {
-            crate::type_computations::charge_term(domain, &mut fuel)
-                .map_err(|_| "alias contract validation budget exhausted")?;
+            charge_term(domain, fuel)?;
         }
         let binders = contract
             .parameter_binders()
-            .map_err(|_| "invalid alias contract parameter domains")?;
+            .map_err(|_| Invalid("invalid alias contract parameter domains"))?;
+        let positions: std::collections::BTreeMap<_, _> = binders
+            .iter()
+            .enumerate()
+            .map(|(index, binder)| (binder.declaration, (binder.sort, index)))
+            .collect();
         // Domains form a telescope: only earlier binders are in scope.
         for (index, domain) in contract.parameter_types.iter().enumerate() {
             if domain
                 .rigid_parameters()
-                .map_err(|_| "invalid alias contract parameter sorts")?
+                .map_err(|_| Invalid("invalid alias contract parameter sorts"))?
                 .into_iter()
                 .any(|(id, sort)| {
-                    !binders[..index]
-                        .iter()
-                        .any(|binder| binder.declaration == id && binder.sort == sort)
+                    !positions
+                        .get(&id)
+                        .is_some_and(|(expected, position)| *expected == sort && *position < index)
                 })
             {
-                return Err("alias contract domain has an unavailable parameter");
+                return Err(Invalid(
+                    "alias contract domain has an unavailable parameter",
+                ));
             }
         }
-        let mut check = |term: &Term| -> Result<(), &'static str> {
-            crate::type_computations::charge_term(term, &mut fuel)
-                .map_err(|_| "alias contract validation budget exhausted")?;
-            term.check_scope(&[])
-                .map_err(|_| "invalid alias contract scope")?;
-            if term
-                .rigid_parameters()
-                .map_err(|_| "invalid alias contract parameter sorts")?
-                .into_iter()
-                .any(|(id, sort)| {
-                    !binders
-                        .iter()
-                        .any(|binder| binder.declaration == id && binder.sort == sort)
-                })
-            {
-                return Err("alias contract has an undeclared parameter");
-            }
-            Ok(())
-        };
-        for capability in &contract.capabilities {
-            check(&capability.subject)?;
-            for argument in &capability.interface_arguments {
-                check(argument)?;
-            }
+        enum Work<'a> {
+            Term(&'a Term),
+            Predicate(&'a TypePredicate),
+            Capability(&'a TraitRequirement),
         }
-        drop(check);
-        fuel = fuel
-            .checked_sub(contract.requirements.len())
-            .ok_or("alias contract validation budget exhausted")?;
-        let mut pending: Vec<_> = contract.requirements.iter().collect();
-        while let Some(predicate) = pending.pop() {
-            let mut terms = Vec::new();
-            match predicate {
-                TypePredicate::Bool(_) => {}
-                TypePredicate::Equal(a, b) => terms.extend([a, b]),
-                TypePredicate::Trait(capability) => {
-                    terms.push(&capability.subject);
-                    terms.extend(&capability.interface_arguments);
+        charge(fuel, contract.capabilities.len())?;
+        charge(fuel, contract.requirements.len())?;
+        let mut pending: Vec<_> = contract
+            .capabilities
+            .iter()
+            .map(Work::Capability)
+            .chain(contract.requirements.iter().map(Work::Predicate))
+            .collect();
+        while let Some(node) = pending.pop() {
+            match node {
+                Work::Term(term) => {
+                    charge_term(term, fuel)?;
+                    term.check_scope(&[])
+                        .map_err(|_| Invalid("invalid alias contract scope"))?;
+                    if term
+                        .rigid_parameters()
+                        .map_err(|_| Invalid("invalid alias contract parameter sorts"))?
+                        .into_iter()
+                        .any(|(id, sort)| {
+                            !positions
+                                .get(&id)
+                                .is_some_and(|(expected, _)| *expected == sort)
+                        })
+                    {
+                        return Err(Invalid("alias contract has an undeclared parameter"));
+                    }
                 }
-                TypePredicate::Not(inner) => {
-                    fuel = fuel
-                        .checked_sub(1)
-                        .ok_or("alias contract validation budget exhausted")?;
-                    pending.push(inner);
+                Work::Capability(capability) => {
+                    charge(fuel, capability.interface_arguments.len().saturating_add(1))?;
+                    pending.push(Work::Term(&capability.subject));
+                    pending.extend(capability.interface_arguments.iter().map(Work::Term));
                 }
-                TypePredicate::And(parts) | TypePredicate::Or(parts) => {
-                    fuel = fuel
-                        .checked_sub(parts.len())
-                        .ok_or("alias contract validation budget exhausted")?;
-                    pending.extend(parts);
-                }
-            }
-            for term in terms {
-                crate::type_computations::charge_term(term, &mut fuel)
-                    .map_err(|_| "alias contract validation budget exhausted")?;
-                term.check_scope(&[])
-                    .map_err(|_| "invalid alias contract scope")?;
-                if term
-                    .rigid_parameters()
-                    .map_err(|_| "invalid alias contract parameter sorts")?
-                    .into_iter()
-                    .any(|(id, sort)| {
-                        !binders
-                            .iter()
-                            .any(|binder| binder.declaration == id && binder.sort == sort)
-                    })
-                {
-                    return Err("alias contract has an undeclared parameter");
-                }
+                Work::Predicate(predicate) => match predicate {
+                    TypePredicate::Bool(_) => {}
+                    TypePredicate::Equal(a, b) => {
+                        charge(fuel, 2)?;
+                        pending.extend([Work::Term(a), Work::Term(b)]);
+                    }
+                    TypePredicate::Trait(capability) => {
+                        charge(fuel, 1)?;
+                        pending.push(Work::Capability(capability));
+                    }
+                    TypePredicate::Not(inner) => {
+                        charge(fuel, 1)?;
+                        pending.push(Work::Predicate(inner));
+                    }
+                    TypePredicate::And(parts) | TypePredicate::Or(parts) => {
+                        charge(fuel, parts.len())?;
+                        pending.extend(parts.iter().map(Work::Predicate));
+                    }
+                },
             }
         }
     }
     Ok(())
+}
+
+fn charge(fuel: &mut usize, amount: usize) -> Result<(), ValidationError> {
+    *fuel = fuel.checked_sub(amount).ok_or(ValidationError::Budget)?;
+    Ok(())
+}
+fn charge_term(term: &Term, fuel: &mut usize) -> Result<(), ValidationError> {
+    crate::type_computations::charge_term(term, fuel).map_err(|_| ValidationError::Budget)
 }

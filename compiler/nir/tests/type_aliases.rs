@@ -122,3 +122,49 @@ fn alias_contract_domains_are_a_typed_telescope() {
     value.parameter_types.pop();
     assert!(validate(&[value]).is_err());
 }
+
+#[test]
+fn caller_owned_alias_budget_covers_predicates_capabilities_and_retries() {
+    use nir::type_aliases::{ValidationError, validate_in};
+    let mut value = contract();
+    value.capabilities.push(nir::program::TraitRequirement {
+        subject: Term::Rigid {
+            declaration: id(2),
+            sort: Sort::Type,
+        },
+        interface: id(90),
+        interface_arguments: vec![Term::Primitive(Primitive::Bool); 20],
+    });
+    value.requirements = vec![TypePredicate::Not(Box::new(TypePredicate::And(
+        value.requirements,
+    )))];
+    let values = [value];
+    let mut successful = false;
+    for initial in 0..1000 {
+        let mut fuel = initial;
+        match validate_in(&values, &mut fuel) {
+            Ok(()) => {
+                assert!(fuel < initial);
+                successful = true;
+                break;
+            }
+            Err(error) => {
+                assert_eq!(error, ValidationError::Budget);
+                assert!(fuel <= initial);
+            }
+        }
+    }
+    assert!(successful);
+    let mut invalid = values[0].clone();
+    invalid.capabilities[0].interface_arguments[0] = Term::Rigid {
+        declaration: id(99),
+        sort: Sort::Type,
+    };
+    assert_eq!(
+        validate_in(&[invalid], &mut 1000),
+        Err(ValidationError::Invalid(
+            "alias contract has an undeclared parameter"
+        ))
+    );
+    validate_in(&values, &mut 1000).unwrap();
+}

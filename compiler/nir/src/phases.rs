@@ -5,6 +5,7 @@ use crate::{Primitive, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod comptime_storage;
+mod parameters;
 mod storage_cache;
 mod storage_error;
 pub use storage_error::StorageError;
@@ -18,81 +19,6 @@ enum Work<'a> {
     Expr(&'a Expr, bool, bool), // direct callee, comptime execution context
     Pattern(&'a Pattern, bool),
 }
-fn validate_parameter_frame(
-    function: &crate::program::Function,
-    quote: bool,
-) -> Result<&[crate::Parameter], Error> {
-    let messages = if quote {
-        [
-            "quote template parameter frame has no callable signature",
-            "quote template parameter frame arity mismatch",
-            "duplicate quote template parameter identity",
-            "invalid quote template parameter default slot",
-        ]
-    } else {
-        [
-            "function parameter frame has no callable signature",
-            "function parameter frame arity mismatch",
-            "duplicate function parameter identity",
-            "invalid function parameter default slot",
-        ]
-    };
-    let fail = |index: usize| Error {
-        source: function.body.source,
-        message: messages[index],
-    };
-    let Term::Function { parameters, .. } = function.signature.callable_signature() else {
-        return Err(fail(0));
-    };
-    if parameters.len() != function.parameters.len() {
-        return Err(fail(1));
-    }
-    let mut bindings = BTreeSet::new();
-    if function
-        .parameters
-        .iter()
-        .any(|binding| !bindings.insert(*binding))
-    {
-        return Err(fail(2));
-    }
-    let mut defaults = BTreeSet::new();
-    if function
-        .defaults
-        .iter()
-        .any(|(slot, _)| *slot >= parameters.len() || !defaults.insert(*slot))
-    {
-        return Err(fail(3));
-    }
-    let positions: BTreeMap<_, _> = function
-        .parameters
-        .iter()
-        .enumerate()
-        .map(|(slot, binding)| (*binding, slot))
-        .collect();
-    let mut fuel = 100_000;
-    for (slot, value) in &function.defaults {
-        let free = crate::free_bindings::collect(value, &mut fuel).map_err(|reason| Error {
-            source: value.source,
-            message: match reason {
-                crate::free_bindings::Error::Budget(_) | crate::free_bindings::Error::Depth(_) => {
-                    "function default binding analysis budget exhausted"
-                }
-                crate::free_bindings::Error::Invalid(_) => "invalid function default binding scope",
-            },
-        })?;
-        if free.iter().any(|binding| {
-            positions
-                .get(binding)
-                .is_none_or(|position| position >= slot)
-        }) {
-            return Err(Error {
-                source: value.source,
-                message: "function default references an unavailable parameter binding",
-            });
-        }
-    }
-    Ok(parameters)
-}
 
 pub fn validate(package: &Package) -> Result<(), Error> {
     machine_arithmetic_functions(package).map(|_| ())
@@ -102,28 +28,19 @@ pub fn validate(package: &Package) -> Result<(), Error> {
 pub fn machine_arithmetic_functions(
     package: &Package,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
+    machine_arithmetic_functions_with_parameter_budget(package, &mut 1_000_000)
+}
+
+// Other phase subservices still own separate allowances. Keep this argument
+// explicitly parameter-only until the remaining checks share caller fuel too.
+fn machine_arithmetic_functions_with_parameter_budget(
+    package: &Package,
+    parameter_fuel: &mut usize,
+) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
     let mut machine_owners = std::collections::BTreeSet::new();
-    let parameter_domains = package
-        .declaration_parameter_domains(&mut 100_000)
-        .map_err(|_| Error {
-            source: SourceRange { start: 0, end: 0 },
-            message: "invalid declaration parameter domains",
-        })?;
-    crate::type_aliases::validate(&package.alias_contracts).map_err(|message| Error {
-        source: SourceRange { start: 0, end: 0 },
-        message,
-    })?;
-    for definition in &package.structs {
-        definition.parameter_binders().map_err(|_| Error {
-            source: SourceRange { start: 0, end: 0 },
-            message: "invalid struct parameter domains",
-        })?;
-    }
+    let parameter_domains = parameters::domains(package, parameter_fuel)
+        .map_err(parameters::Failure::into_diagnostic)?;
     for definition in &package.enums {
-        definition.parameter_binders().map_err(|_| Error {
-            source: SourceRange { start: 0, end: 0 },
-            message: "invalid enum parameter domains",
-        })?;
         definition
             .validate_encoding_in(package.target)
             .map_err(|message| Error {
@@ -195,10 +112,6 @@ pub fn machine_arithmetic_functions(
                 message: "invalid implementation phase availability",
             });
         }
-        definition.parameter_binders().map_err(|_| Error {
-            source: SourceRange { start: 0, end: 0 },
-            message: "invalid implementation parameter domains",
-        })?;
         if let Some(members) = definition.interface.and_then(|id| membership.get(&id)) {
             for (name, _) in &definition.methods {
                 membership_fuel = membership_fuel.checked_sub(1 + name.len()).ok_or(Error {
@@ -238,7 +151,8 @@ pub fn machine_arithmetic_functions(
                 message: "invalid or duplicate quote template identity",
             });
         }
-        let parameters = validate_parameter_frame(template, true)?;
+        let parameters = parameters::validate_frame(template, true, parameter_fuel)
+            .map_err(parameters::Failure::into_diagnostic)?;
         if parameters
             .iter()
             .any(|parameter| parameter.sort != Sort::Runtime)
@@ -266,7 +180,8 @@ pub fn machine_arithmetic_functions(
         message,
     })?;
     for function in &package.functions {
-        validate_parameter_frame(function, false)?;
+        parameters::validate_frame(function, false, parameter_fuel)
+            .map_err(parameters::Failure::into_diagnostic)?;
     }
     let functions: BTreeMap<_, _> = package
         .functions

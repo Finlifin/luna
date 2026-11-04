@@ -1185,3 +1185,31 @@ fn value_difference_reports_exhaustion_separately_from_unknown_types() {
         Ok(false)
     );
 }
+
+#[test]
+fn empty_declaration_telescopes_still_consume_directory_budget() {
+    let package = nir::program::Package {
+        alias_contracts: (0..32)
+            .map(|local| nir::type_aliases::Contract {
+                declaration: nir::DeclarationId { package: 99, local },
+                parameters: vec![],
+                parameter_types: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let mut fuel = 1;
+    assert_eq!(
+        package.declaration_parameter_domains_checked(&mut fuel),
+        Err(nir::type_computations::Error::Budget)
+    );
+    assert_eq!(fuel, 0);
+    assert!(
+        package
+            .declaration_parameter_domains_checked(&mut 1000)
+            .unwrap()
+            .is_empty()
+    );
+}

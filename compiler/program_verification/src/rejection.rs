@@ -118,6 +118,7 @@ enum Work<'a> {
 pub(super) struct Cache<'a> {
     package: Option<&'a Package>,
     definitions: Option<BTreeMap<DeclarationId, &'a Function>>,
+    parameter_sorts: Option<BTreeMap<DeclarationId, nir::Sort>>,
     completed: HashMap<Instance, bool>,
 }
 impl<'a> Cache<'a> {
@@ -125,6 +126,7 @@ impl<'a> Cache<'a> {
         Self {
             package,
             definitions: None,
+            parameter_sorts: None,
             completed: HashMap::new(),
         }
     }
@@ -197,11 +199,9 @@ impl<'a> Cache<'a> {
             }
             self.definitions = Some(definitions);
         }
-        let sorts = package
-            .declaration_parameter_sorts(fuel)
-            .map_err(|_| "invalid rejection declaration metadata or exhausted budget")?;
         let (result, visited) = scan(
-            &sorts,
+            package,
+            &mut self.parameter_sorts,
             self.definitions.as_ref().unwrap(),
             &self.completed,
             root.clone(),
@@ -233,7 +233,8 @@ fn cleanup_rejection(
 }
 
 fn scan<'a>(
-    sorts: &BTreeMap<DeclarationId, nir::Sort>,
+    package: &Package,
+    parameter_sorts: &mut Option<BTreeMap<DeclarationId, nir::Sort>>,
     definitions: &BTreeMap<DeclarationId, &'a Function>,
     completed: &HashMap<Instance, bool>,
     root: Instance,
@@ -242,6 +243,7 @@ fn scan<'a>(
 ) -> Result<(bool, HashSet<Instance>), &'static str> {
     let mut work = vec![Work::Function(root)];
     let mut visited = HashSet::new();
+    let empty_sorts = BTreeMap::new();
     while let Some(item) = work.pop() {
         *fuel = fuel
             .checked_sub(1)
@@ -265,9 +267,17 @@ fn scan<'a>(
                 {
                     return Ok((true, visited));
                 }
+                // An empty telescope has no sort observations. Follow calls
+                // normally; a reached generic callee acquires the directory at
+                // that point. Only complete immutable metadata is published.
+                if !function.type_parameters.is_empty() && parameter_sorts.is_none() {
+                    *parameter_sorts = Some(package.declaration_parameter_sorts(fuel).map_err(
+                        |_| "invalid rejection declaration metadata or exhausted budget",
+                    )?);
+                }
                 let context = Substitution::new(
                     &function.type_parameters,
-                    sorts,
+                    parameter_sorts.as_ref().unwrap_or(&empty_sorts),
                     id.arguments.clone(),
                     fuel,
                 )?;
@@ -1205,5 +1215,88 @@ mod tests {
                 .unwrap_err()
                 .contains("duplicate")
         );
+    }
+
+    #[test]
+    fn declaration_evidence_is_shared_across_queries_without_caching_failures() {
+        let package = Package {
+            functions: vec![
+                generic_function(0, 900, expr(K::Unit)),
+                generic_function(1, 901, expr(K::Unit)),
+            ],
+            alias_contracts: (100..356)
+                .map(|local| nir::type_aliases::Contract {
+                    declaration: id(local),
+                    parameters: vec![],
+                    parameter_types: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let callee = |local| generic_callee(local, vec![Term::Primitive(Primitive::Bool)]);
+        let mut cache = Cache::new(Some(&package));
+        assert!(cache.may_reject(&callee(0), &mut 64).is_err());
+        assert!(cache.parameter_sorts.is_none());
+        assert!(cache.completed.is_empty());
+        assert!(!cache.may_reject(&callee(0), &mut 10_000).unwrap());
+        assert!(cache.parameter_sorts.is_some());
+        // This is a different root, so only the declaration directory is warm.
+        assert_eq!(cache.completed.len(), 1);
+        let mut fuel = 64;
+        assert!(!cache.may_reject(&callee(1), &mut fuel).unwrap());
+        assert!(fuel < 64);
+        assert_eq!(cache.completed.len(), 2);
+        assert!(
+            Cache::new(Some(&package))
+                .may_reject(&callee(1), &mut 64)
+                .is_err()
+        );
+
+        let mut other_world = package.clone();
+        other_world.functions[1].body = rejected();
+        assert!(
+            Cache::new(Some(&other_world))
+                .may_reject(&callee(1), &mut 10_000)
+                .unwrap()
+        );
+        assert!(!cache.may_reject(&callee(1), &mut 100).unwrap());
+        other_world.alias_contracts[0].parameters = vec![id(900), id(900)];
+        let mut invalid = Cache::new(Some(&other_world));
+        for _ in 0..2 {
+            assert!(invalid.may_reject(&callee(1), &mut 10_000).is_err());
+            assert!(invalid.parameter_sorts.is_none());
+            assert!(invalid.completed.is_empty());
+        }
+    }
+
+    #[test]
+    fn closed_calls_defer_sort_observation_until_a_generic_edge_is_reached() {
+        let package = Package {
+            functions: vec![
+                function(0, expr(K::Unit)),
+                function(1, generic_call(2, Term::Primitive(Primitive::Bool))),
+                generic_function(2, 900, expr(K::Unit)),
+            ],
+            alias_contracts: (100..356)
+                .map(|local| nir::type_aliases::Contract {
+                    declaration: id(local),
+                    parameters: vec![],
+                    parameter_types: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut cache = Cache::new(Some(&package));
+        assert!(!cache.may_reject(&callee(0), &mut 64).unwrap());
+        assert!(cache.parameter_sorts.is_none());
+        assert!(cache.may_reject(&callee(1), &mut 64).is_err());
+        assert!(cache.parameter_sorts.is_none());
+        assert_eq!(cache.completed.len(), 1);
+        assert!(!cache.may_reject(&callee(1), &mut 10_000).unwrap());
+        assert!(cache.parameter_sorts.is_some());
     }
 }
