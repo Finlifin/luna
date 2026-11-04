@@ -440,33 +440,9 @@ impl Newtype {
         frames: &[Vec<Sort>],
         fuel: &mut usize,
     ) -> Result<Term, ConversionError> {
-        let result = (|| {
-            if self.capture_count > self.type_parameters.len() {
-                return Err(crate::type_computations::Error::Scope(
-                    TypeError::ArgumentCount {
-                        expected: self.type_parameters.len(),
-                        actual: self.capture_count,
-                    },
-                ));
-            }
-            let actual = self.representation.sort();
-            if actual != Sort::Type {
-                return Err(crate::type_computations::Error::Scope(
-                    TypeError::WrongSort {
-                        expected: Sort::Type,
-                        actual,
-                    },
-                ));
-            }
-            let substitution = crate::DeclarationSubstitution::bounded(
-                &self.type_parameters,
-                &self.parameter_types,
-                arguments,
-                frames,
-                fuel,
-            )?;
-            substitution.instantiate_bounded(&self.representation, fuel)
-        })();
+        let result = self
+            .representation_substitution(arguments, frames, fuel)
+            .and_then(|substitution| substitution.instantiate_bounded(&self.representation, fuel));
         result.map_err(|error| match error {
             crate::type_computations::Error::Scope(error) => ConversionError::Type(error),
             _ => {
@@ -474,6 +450,37 @@ impl Newtype {
                 ConversionError::Budget
             }
         })
+    }
+
+    /// Shared preparation for representation-only queries and complete instance
+    /// construction. Argument identity order retains the lexical capture suffix.
+    pub(crate) fn representation_substitution<'a>(
+        &self,
+        arguments: &'a [Term],
+        frames: &'a [Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<crate::DeclarationSubstitution<'a>, crate::type_computations::Error> {
+        use crate::type_computations::Error;
+        if self.capture_count > self.type_parameters.len() {
+            return Err(Error::Scope(TypeError::ArgumentCount {
+                expected: self.type_parameters.len(),
+                actual: self.capture_count,
+            }));
+        }
+        let actual = self.representation.sort();
+        if actual != Sort::Type {
+            return Err(Error::Scope(TypeError::WrongSort {
+                expected: Sort::Type,
+                actual,
+            }));
+        }
+        crate::DeclarationSubstitution::bounded(
+            &self.type_parameters,
+            &self.parameter_types,
+            arguments,
+            frames,
+            fuel,
+        )
     }
 }
 

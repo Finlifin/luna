@@ -2621,41 +2621,43 @@ impl Builder<'_> {
                         &parameters,
                         arguments,
                     )?;
-                    let representation = n
-                        .representation_budgeted(arguments, &[], &mut self.fuel)
-                        .map_err(|e| e.to_string())?;
-                    if self.instances.is_some() {
-                        let mut definition = n.clone();
-                        definition.representation = self.normalized_type(&representation)?;
-                        definition.requirements = n
-                            .requirements
-                            .iter()
-                            .map(|r| r.instantiate_parameters(&parameters, arguments))
-                            .collect::<Result<_, _>>()
+                    let representation = if self.instances.is_some() {
+                        let mut definition = n
+                            .instantiate_definition_bounded(arguments, &[], &mut self.fuel)
                             .map_err(|e| e.to_string())?;
-                        definition.capabilities = n
-                            .capabilities
-                            .iter()
-                            .map(|c| c.instantiate_parameters(&parameters, arguments))
-                            .collect::<Result<_, _>>()
-                            .map_err(|e| e.to_string())?;
+                        definition.representation =
+                            self.normalized_type(&definition.representation)?;
                         for capability in &mut definition.capabilities {
                             *capability = self.normalized_capability(capability)?;
                         }
                         for requirement in &mut definition.requirements {
                             *requirement = self.normalized_predicate(requirement, 0)?;
                         }
-                        definition.type_parameters.clear();
-                        definition.parameter_types.clear();
-                        definition.capture_count = 0;
+                        let representation = nir::copy_budget::clone_term(
+                            &definition.representation,
+                            &mut self.fuel,
+                        )
+                        .map_err(|e| format!("nominal dependency copy budget: {e:?}"))?;
                         self.nominals.push(iir::NominalInstance {
                             ty: ty.clone(),
                             definition: iir::NominalDefinition::Newtype(definition),
                         });
-                    }
+                        representation
+                    } else {
+                        n.representation_budgeted(arguments, &[], &mut self.fuel)
+                            .map_err(|e| e.to_string())?
+                    };
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        &n.type_parameters,
+                        &n.parameter_types,
+                        arguments,
+                        &[],
+                        &mut self.fuel,
+                    )
+                    .map_err(|e| e.to_string())?;
                     for cap in &n.capabilities {
-                        let cap = cap
-                            .instantiate_parameters(&parameters, arguments)
+                        let cap = substitution
+                            .instantiate_requirement_bounded(cap, &mut self.fuel)
                             .map_err(|e| e.to_string())?;
                         self.queue
                             .push_back(Task::Interface(cap.interface_instance(), cap.subject));

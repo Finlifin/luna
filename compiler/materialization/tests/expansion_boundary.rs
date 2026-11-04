@@ -9,10 +9,10 @@ fn id(local: u32) -> Id {
 
 #[test]
 fn nominal_publication_charges_metadata_and_recovers_after_failure() {
-    for is_enum in [false, true] {
+    for kind in 0..3 {
         let mut package = n::Package::default();
         let name = "x".repeat(100_000);
-        if is_enum {
+        if kind == 1 {
             package.enums.push(n::Enum {
                 declaration: id(10),
                 name: "Choice".into(),
@@ -29,6 +29,17 @@ fn nominal_publication_charges_metadata_and_recovers_after_failure() {
                     shape: n::VariantShape::Unit,
                     fields: vec![],
                 }],
+            });
+        } else if kind == 2 {
+            package.newtypes.push(nir::newtypes::Newtype {
+                declaration: id(10),
+                name,
+                type_parameters: vec![],
+                parameter_types: vec![],
+                capture_count: 0,
+                requirements: vec![],
+                capabilities: vec![],
+                representation: Term::Primitive(Primitive::Bool),
             });
         } else {
             package.structs.push(n::Struct {
@@ -71,7 +82,13 @@ fn nominal_publication_charges_metadata_and_recovers_after_failure() {
             iir::NominalDefinition::Enum(definition) => {
                 assert_eq!(definition.variants, package.enums[0].variants)
             }
-            _ => panic!("nominal kind changed"),
+            iir::NominalDefinition::Newtype(definition) => {
+                assert_eq!(definition.name, package.newtypes[0].name);
+                assert_eq!(
+                    definition.representation,
+                    package.newtypes[0].representation
+                );
+            }
         }
     }
 }

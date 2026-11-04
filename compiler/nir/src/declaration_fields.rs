@@ -234,6 +234,34 @@ impl Enum {
     }
 }
 
+impl crate::newtypes::Newtype {
+    /// Specialize a complete newtype without changing its nominal identity or
+    /// using its representation as equality evidence. Completed domain admission
+    /// and formation remain separate obligations of the receiving consumer.
+    pub fn instantiate_definition_bounded(
+        &self,
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Self, Error> {
+        let substitution = self.representation_substitution(arguments, frames, fuel)?;
+        charge_text(&self.name, fuel)?;
+        let representation = substitution.instantiate_bounded(&self.representation, fuel)?;
+        let (requirements, capabilities) =
+            contracts(&substitution, &self.requirements, &self.capabilities, fuel)?;
+        Ok(Self {
+            declaration: self.declaration,
+            name: self.name.clone(),
+            representation,
+            type_parameters: vec![],
+            parameter_types: vec![],
+            capture_count: 0,
+            requirements,
+            capabilities,
+        })
+    }
+}
+
 fn reserve(work: usize, fuel: &mut usize) -> Result<(), Error> {
     *fuel = fuel.checked_sub(work).ok_or(Error::Budget)?;
     Ok(())

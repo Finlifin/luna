@@ -216,6 +216,141 @@ fn completed_value_domains_can_use_captured_type_suffixes() {
         nir::validate_declaration_arguments(&parameters, &domains, &symbolic, &mut 1000).is_err()
     );
 }
+
+#[test]
+fn complete_newtype_instances_preserve_capture_order_and_opaque_identity() {
+    use nir::program::{TraitRequirement, TypePredicate};
+    use nir::type_computations::Error;
+    let mut declaration = nir::newtypes::Newtype {
+        declaration: id(5),
+        name: "Captured".into(),
+        type_parameters: vec![id(1), id(2)],
+        parameter_types: vec![rigid(2, Sort::Type), Term::Primitive(P::Type)],
+        capture_count: 1,
+        representation: Term::NormalForm {
+            head: id(90),
+            sort: Sort::Type,
+            arguments: vec![rigid(1, Sort::ComptimeValue), rigid(2, Sort::Type)],
+        },
+        requirements: vec![TypePredicate::Equal(
+            rigid(1, Sort::ComptimeValue),
+            Term::Bool(true),
+        )],
+        capabilities: vec![TraitRequirement {
+            interface: id(9),
+            subject: rigid(2, Sort::Type),
+            interface_arguments: vec![rigid(1, Sort::ComptimeValue)],
+        }],
+    };
+    let arguments = [Term::Bool(true), Term::Primitive(P::Bool)];
+    declaration
+        .validate_completed_arguments(&arguments, &mut 10_000)
+        .unwrap();
+    let original = declaration.clone();
+    let instance = declaration
+        .instantiate_definition_bounded(&arguments, &[], &mut 10_000)
+        .unwrap();
+    assert_eq!(instance.declaration, declaration.declaration);
+    assert_eq!(instance.name, declaration.name);
+    assert_eq!(instance.capture_count, 0);
+    assert!(instance.type_parameters.is_empty() && instance.parameter_types.is_empty());
+    assert_eq!(
+        instance.representation,
+        Term::NormalForm {
+            head: id(90),
+            sort: Sort::Type,
+            arguments: arguments.to_vec()
+        }
+    );
+    assert_eq!(
+        instance.requirements,
+        vec![TypePredicate::Equal(Term::Bool(true), Term::Bool(true))]
+    );
+    assert_eq!(instance.capabilities[0].subject, arguments[1]);
+    assert_eq!(
+        instance.capabilities[0].interface_arguments,
+        vec![arguments[0].clone()]
+    );
+    assert_eq!(
+        declaration
+            .representation_budgeted(&arguments, &[], &mut 10_000)
+            .unwrap(),
+        instance.representation
+    );
+    assert_eq!(declaration, original);
+    assert!(matches!(
+        declaration.instantiate_definition_bounded(&arguments, &[], &mut 0),
+        Err(Error::Budget)
+    ));
+    for malformed in 0..2 {
+        declaration = original.clone();
+        if malformed == 0 {
+            declaration.capture_count = 3;
+        } else {
+            declaration.representation = Term::Bool(false);
+        }
+        assert!(matches!(
+            declaration.instantiate_definition_bounded(&arguments, &[], &mut 10_000),
+            Err(Error::Scope(_))
+        ));
+        assert!(matches!(
+            declaration.representation_budgeted(&arguments, &[], &mut 10_000),
+            Err(nir::newtypes::ConversionError::Type(_))
+        ));
+    }
+    assert_eq!(
+        original
+            .instantiate_definition_bounded(&arguments, &[], &mut 10_000)
+            .unwrap(),
+        instance
+    );
+}
+
+#[test]
+fn complete_newtype_instances_keep_open_frames_and_metadata_budgets_separate() {
+    use nir::type_computations::Error;
+    let declaration = nir::newtypes::Newtype {
+        declaration: id(5),
+        name: "n".repeat(10_000),
+        type_parameters: vec![id(1)],
+        parameter_types: vec![Term::Primitive(P::Type)],
+        capture_count: 1,
+        representation: Term::Pointer(Box::new(rigid(1, Sort::Type))),
+        requirements: vec![],
+        capabilities: vec![],
+    };
+    let outer = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let frames = [vec![Sort::Type]];
+    let arguments = [outer.clone()];
+    assert_eq!(
+        declaration
+            .representation_budgeted(&arguments, &frames, &mut 1000)
+            .unwrap(),
+        Term::Pointer(Box::new(outer))
+    );
+    assert!(matches!(
+        declaration.instantiate_definition_bounded(&arguments, &frames, &mut 1000),
+        Err(Error::Budget)
+    ));
+    assert!(matches!(
+        declaration.instantiate_definition_bounded(&arguments, &[], &mut 100_000),
+        Err(Error::Scope(_))
+    ));
+    let instance = declaration
+        .instantiate_definition_bounded(&arguments, &frames, &mut 100_000)
+        .unwrap();
+    assert_eq!(instance.name, declaration.name);
+    assert_eq!(
+        instance.representation,
+        declaration
+            .representation_budgeted(&arguments, &frames, &mut 1000)
+            .unwrap()
+    );
+}
 fn record(domains: Vec<Term>) -> Struct {
     Struct {
         parameter_types: domains,

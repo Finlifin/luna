@@ -1516,6 +1516,42 @@ word，没有放宽 BitVec 的 exact representation 检查。
   --test invocation_value_templates --no-fail-fast`：567 通过，退出 0；
   `/tmp/luna-tools-oeoz2xmq/result.json`。包含真实 sysroot 调用、形成拒绝与编码保持。
 
-未运行全 workspace、native 或性能基准。newtype 完整定义的构造及 elaboration 中的
-旧命名元数据消费者仍待清理；其原有表示检查未被绕过。本次不是完整 LayoutPlan、
+未运行全 workspace、native 或性能基准。elaboration 中的旧命名元数据消费者仍待
+清理；newtype 的完整定义构造按下述继续迁移，原有表示检查未被绕过。本次不是完整 LayoutPlan、
 全阶段统一预算或所有发布协议已完成的声明。正式 docs 与既有修改未纳入提交。
+
+
+newtype 已接入同一完整实例构造协议。`representation_substitution` 是表示查询和
+完整实例共享的参数准备入口，检查 capture_count 与表示的 Type sort；原来的
+`representation_budgeted` 继续只返回表示，不复制名字或契约。完整实例则在同一
+受限 substitution 下代入 representation、requirements、capabilities，并单独计费
+名称，完成后清空已供应 telescope 与 capture_count。
+
+捕获的身份参数顺序没有改变：自己的值参数仍可在前，提供其域的词法 Type 捕获仍
+位于后缀；completed admission 保留先检查捕获域的既有规则。实例保存原 newtype
+声明身份，显式表示里的 NF 头仍不展开，也不把表示观察当成类型相等或转换权限。
+调用者 frames 继续显式供应，缺少 frame 的开放 Type 仍拒绝。
+
+materialization 已删除 newtype 的整个声明 clone／覆盖路径。具体 IIR 的表示依赖
+从 normalized representation 作受预算约束的复制；dispatch 只查询表示。newtype
+capability 依赖也改为 bounded requirement 代入，不再用未计费的普通代入补队列。
+struct／enum／newtype 的具体声明均使用受限构造，仍须经过原有形成与发布检查。
+
+将上一轮元数据发布回归扩展到 newtype 后，基线 `fef2c07f` 在预算 5000 下仍接受
+十万字符名称，`/tmp/luna-tools-nmgb7ajx/result.json` 退出 101。迁移后同一测试
+三种声明均通过，`/tmp/luna-tools-zs_nz0c2/result.json` 退出 0。
+NIR 新增检查覆盖捕获后缀、依赖域、契约与表示一致、NF 头保留、非法 capture_count／
+表示 sort、开放 frame、名字预算，以及失败后恢复；源声明始终保持不变。
+
+验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --test nominal_parameters --test newtypes --no-fail-fast`：52 通过，退出 0；
+  `/tmp/luna-tools-f589j2ql/result.json`。
+- `-p materialization --lib --tests --no-fail-fast`：22 通过，退出 0；
+  `/tmp/luna-tools-reszj1w7/result.json`。
+- `-p luna --test newtypes --test nominal_value_parameters --test nominal_staging
+  --test invocation_value_templates --no-fail-fast`：535 通过，退出 0；
+  `/tmp/luna-tools-ub3zffep/result.json`。包含捕获／值索引源码与真实 sysroot 调用。
+
+未运行全 workspace、native 或性能基准；正式 docs 和原有工作区修改保持不变。
+elaboration 的旧元数据观察仍未迁移，完整 LayoutPlan 与跨阶段共享预算仍未完成。
