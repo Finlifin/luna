@@ -344,3 +344,67 @@ quote fn 的普通实参先建立新鲜绑定，主体重复引用也不重算�
 实参供应后再恢复普通值表示。它不新增源语言的值种类或新的缓存资格，也不是完整
 OpenDefinition/WorldView 已经落地。冻结入口、实际执行入口及 IIR 仍要求相应完成证据，
 不能借参数域已知就取得还没有供应的输入值。
+
+
+## 当前显式 invocation 迁移：统一源世界 VM
+
+普通 CLI／`luna::invocation` 与 `PreparedInvocation` 已删除“同时遇到普通 Type
+参数和 trait／关联值就先实例化整份 IIR”的分流。准备对象只持有源 package、入口身份
+与源代码 session；执行统一通过源世界 VM 绑定本次实参、使用 demand resolver 选择
+方法和关联值，并运行原有类型与程序契约。`needs_materialized_dispatch`、可选 IIR
+字段、两类构造器和两套调用出口已从普通入口删除。
+
+这条分流的历史前提是源 VM 尚不能按实际参数解析方法。现在该服务已存在，继续在
+入口根据可达语法扫描切换世界，会使同一种 comptime 调用受到两套准备责任约束。
+普通入口仍调用 `dispatch_instances_for_invocation` 准备可用 dispatch，并保留已接纳的
+实现关系见证；这不是执行 IIR materialization。代码 session 复用代码，调用值、局部
+存储、契约状态与 builder 服务仍在每次 invocation 中建立。
+
+带程序前提的独立 callable 转换仍遵循[函数值契约边界](../docs/functions/comptime_fn.md)：
+当前普通函数类型未携带该前提时拒绝转换。IIR 不提供擦除前提的许可，不能把这个拒绝
+误认成必须保留整条 comptime IIR 分流的理由。直接方法调用继续消费接口契约，合法的
+无前提方法值可以保存和经高阶参数调用。完整携带程序契约的 callable 仍是后续能力，
+本次没有通过删除检查来扩充其支持范围。
+
+移除分流后，VM 构造的诊断责任变得明确：`nir::phases::validate` 的具体失败现在通过
+`ErrorKind::InvalidPhase` 保留原因与源码位置，`Display` 输出原始原因。此前全部被压成
+PhaseMismatch，导致“方法值会擦除接口契约”等形成错误失去解释。实际执行错阶段仍
+使用原 PhaseMismatch；构造期验证与调用期权限错误分别报告。同一不可变 source 的
+验证成功证据仍由 code session 持有，失败不会安装索引，也不复用同号但不同世界的证据。
+
+退役范围限于普通显式 invocation 入口。`memoization::staging` 的 Type 输入 IIR
+专门化仍存在；运行时 IIR、后端交付以及引用执行器继续使用各自协议。完整通用参数
+计划、动态 Type producer、调用中的世界发布和树 fallback 退役均未因此完成。
+
+### 本次验证与未修复基线
+
+工作目录均为 `/home/fin/luna`；下表命令参数接在
+`python3 -B development/check.py --timeout 900 -- test` 后。
+证据目录中的 `result.json` 保存完整命令与退出结果，`stdout.log` 保存断言输出。
+
+| 参数／范围 | 结果与证据目录 |
+| --- | --- |
+| `-p comptime_interpretor --lib --no-fail-fast -- --skip normal_input_data_tests::clause_list_inputs_share_domain_scope_and_budget_validation` | 退出 0，446 通过、1 项已知基线跳过；`/tmp/luna-tools-6ce5etz8` |
+| `-p luna --test execution -- ordinary_type stored_staged_methods_reject_erased_interface_contracts conditional_method_signatures_are_materialized_only_when_called`，另跳过下述 3 项 Type 前端基线 | 退出 0，19 通过；`/tmp/luna-tools-jqapa_na` |
+| `-p luna --test prepared_invocations --test invocation_value_templates --test comptime_pointer_phase --test comptime_storage_domains --test comptime_iir_bytecode --test comptime_bytecode_defaults --no-fail-fast` | 退出 101，36 通过，1 项仍断言旧 PhaseMismatch；`/tmp/luna-tools-ghtesw9n` |
+| `-p luna --test comptime_bytecode_defaults` | 补充默认参数顺序／绑定帧错误的具体原因和来源断言后，退出 0，9 通过；`/tmp/luna-tools-ywr1egel` |
+
+新增真实 sysroot 用例同时覆盖 Type 驱动的 trait 方法／关联值、保存并高阶调用方法值、
+重复 invocation 的新鲜局部状态，以及预算失败后恢复。既有接口前提擦除拒绝例在迁移
+初期失去具体原因，补齐 InvalidPhase 后原断言通过；没有放宽 callable 转换契约。
+默认参数拒绝测试分别检查“默认参数顺序／绑定帧错误”和“显式参数出现在默认参数后”，
+保留引用执行器自身的 InvalidCallPlan 防御检查。
+
+扩大检查发现以下 5 项源码前端失败；临时恢复本阶段改动前的生产文件后，原失败重现，
+随后恢复当前实现。它们都在 invocation 前失败，本次未修改其预期或实现：
+
+- `enum_builder_edits_payloads_groups_and_runtime_patterns`：fixture 中 Symbol 未解析。
+- `known_type_list_index_failures_remain_invocation_failures`：静态观察整数不能以目标定宽表示。
+- `ordinary_type_inputs_do_not_hide_selective_memory_writes`、
+  `ordinary_type_memory_summaries_forward_across_different_input_positions`：程序后置条件未证明。
+- `ordinary_type_list_annotation_inputs_report_the_phase_boundary`：required comptime 输入不可用。
+
+前两项基线复现为 `/tmp/luna-tools-lbxrkexa`，后三项为 `/tmp/luna-tools-j0r5g11s`，
+均退出 101。VM 跳过项是此前已确认的名义列表域失败分类差异，仍待处理；不能将上述
+局部成功称为全量通过。修改的 Rust 文件格式检查与提交范围的 `git diff --check` 通过；
+正式 docs、已有资源分析修改及 library README 保持原样。

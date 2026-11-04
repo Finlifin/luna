@@ -766,6 +766,7 @@ pub enum ErrorKind {
     IndexOutOfBounds,
     MachineOverflow,
     PhaseMismatch,
+    InvalidPhase(nir::phases::Error),
     InvalidBitWidth,
     ProgramContractRejected,
     TypeContractRejected,
@@ -799,6 +800,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
             ErrorKind::InvalidDefinition(reason) => write!(f, "interpretation {reason}")?,
+            ErrorKind::InvalidPhase(reason) => {
+                write!(f, "interpretation phase: {}", reason.message)?
+            }
             ErrorKind::FunctionInputRejected(reason) => write!(f, "interpretation {reason}")?,
             _ => write!(f, "interpretation {:?}", self.kind)?,
         }
@@ -1986,8 +1990,8 @@ impl<'a> Interpreter<'a> {
             let mut phase_allowance = budget;
             invocation_budget::charge_world_tables(package, &mut phase_allowance)?;
             nir::phases::validate(package).map_err(|error| Error {
-                kind: ErrorKind::PhaseMismatch,
                 source: Some(error.source),
+                kind: ErrorKind::InvalidPhase(error),
             })?;
         }
         let mut interpreter =

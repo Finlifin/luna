@@ -33,7 +33,15 @@ fn comptime_pointer_operations_are_rejected_before_invocation() {
                     comptime_interpretor::Interpreter::for_comptime(&package, Default::default())
                         .err()
                         .expect("accepted comptime pointer operation");
-                assert_eq!(error.kind, comptime_interpretor::ErrorKind::PhaseMismatch);
+                let comptime_interpretor::ErrorKind::InvalidPhase(reason) = &error.kind else {
+                    panic!("expected the source phase failure: {error}");
+                };
+                assert!(
+                    reason
+                        .message
+                        .contains("pointer operations cannot execute at comptime")
+                );
+                assert_eq!(error.source, Some(reason.source));
             }
         }
     }

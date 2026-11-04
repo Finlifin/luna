@@ -8,7 +8,6 @@ use nir::{DeclarationId, Term};
 /// Code is shared; values, mutable storage and evidence are fresh on each call.
 pub struct PreparedInvocation {
     package: std::sync::Arc<Package>,
-    graph: Option<std::sync::Arc<iir::Package>>,
     declaration: DeclarationId,
     entry: String,
     code: comptime_interpretor::CodeSession,
@@ -25,20 +24,15 @@ impl PreparedInvocation {
         entry: &str,
         identity: Option<u64>,
     ) -> Result<Self, String> {
-        let (prepared, graph, declaration) = prepare_invocation(&package, entry, identity)?;
+        let (prepared, declaration) = prepare_invocation(&package, entry, identity)?;
         let prepared = match prepared {
             std::borrow::Cow::Borrowed(_) => package.clone(),
             std::borrow::Cow::Owned(package) => std::sync::Arc::new(package),
         };
-        let graph = graph.map(std::sync::Arc::new);
-        let code = match &graph {
-            Some(graph) => comptime_interpretor::CodeSession::for_iir(graph.clone()),
-            None => comptime_interpretor::CodeSession::new(prepared.clone()),
-        };
+        let code = comptime_interpretor::CodeSession::new(prepared.clone());
         Ok(Self {
             code,
             package: prepared,
-            graph,
             declaration,
             entry: entry.into(),
             last_stats: InvocationStats::default(),
@@ -51,7 +45,6 @@ impl PreparedInvocation {
         }
         execute_prepared(
             &self.package,
-            self.graph.as_deref(),
             self.declaration,
             &self.entry,
             None,
@@ -138,10 +131,9 @@ pub(crate) fn invoke_selected_with_publisher(
     if fuel == 0 {
         return Err("invocation fuel must be positive".into());
     }
-    let (prepared, graph, declaration) = prepare_invocation(package, entry, identity)?;
+    let (prepared, declaration) = prepare_invocation(package, entry, identity)?;
     execute_prepared(
         prepared.as_ref(),
-        graph.as_ref(),
         declaration,
         entry,
         protocols,
@@ -156,14 +148,7 @@ fn prepare_invocation<'a>(
     package: &'a Package,
     entry: &str,
     identity: Option<u64>,
-) -> Result<
-    (
-        std::borrow::Cow<'a, Package>,
-        Option<iir::Package>,
-        DeclarationId,
-    ),
-    String,
-> {
+) -> Result<(std::borrow::Cow<'a, Package>, DeclarationId), String> {
     let (mut prepared, declaration) =
         prepare_entry_in_package(package, entry, FunctionPhase::Comptime, identity)?;
     let roots = [iir::InstanceKey {
@@ -171,60 +156,43 @@ fn prepare_invocation<'a>(
         arguments: vec![].into(),
     }];
     let preparation_budget = elaboration::ptc::Budget::default();
-    let mut reachability_fuel = preparation_budget.steps;
-    let graph = if needs_input_staging(prepared.as_ref(), declaration, &mut reachability_fuel)?
-        && needs_materialized_dispatch(prepared.as_ref(), declaration, &mut reachability_fuel)?
-    {
-        Some(
-            elaboration::materialization::instantiate(
-                prepared.as_ref(),
-                &roots,
-                std::collections::BTreeSet::new(),
-                preparation_budget,
+    let mut dispatch = elaboration::materialization::dispatch_instances_for_invocation(
+        prepared.as_ref(),
+        &roots,
+        preparation_budget,
+    )
+    .map_err(|error| format!("cannot prepare invocation dispatch: {error}"))?;
+    // The NIR world still contains its concrete implementation contracts.
+    // Keep their admitted relationship witnesses (including generic parents
+    // such as Once<T>), without installing unused executable method links.
+    let mut selected: std::collections::HashSet<_> = dispatch
+        .iter()
+        .map(|instance| {
+            (
+                instance.interface_instance(),
+                instance.subject.clone(),
+                instance.implementation,
             )
-            .map_err(|error| format!("cannot prepare staged comptime invocation: {error}"))?,
-        )
-    } else {
-        let mut dispatch = elaboration::materialization::dispatch_instances_for_invocation(
-            prepared.as_ref(),
-            &roots,
-            preparation_budget,
-        )
-        .map_err(|error| format!("cannot prepare invocation dispatch: {error}"))?;
-        // The NIR world still contains its concrete implementation contracts.
-        // Keep their admitted relationship witnesses (including generic parents
-        // such as Once<T>), without installing unused executable method links.
-        let mut selected: std::collections::HashSet<_> = dispatch
-            .iter()
-            .map(|instance| {
-                (
-                    instance.interface_instance(),
-                    instance.subject.clone(),
-                    instance.implementation,
-                )
-            })
-            .collect();
-        for original in &prepared.dispatch_instances {
-            if selected.insert((
-                original.interface_instance(),
-                original.subject.clone(),
-                original.implementation,
-            )) {
-                let mut witness = original.clone();
-                witness.methods.clear();
-                dispatch.push(witness);
-            }
+        })
+        .collect();
+    for original in &prepared.dispatch_instances {
+        if selected.insert((
+            original.interface_instance(),
+            original.subject.clone(),
+            original.implementation,
+        )) {
+            let mut witness = original.clone();
+            witness.methods.clear();
+            dispatch.push(witness);
         }
-        prepared.to_mut().dispatch_instances = dispatch;
-        None
-    };
-    Ok((prepared, graph, declaration))
+    }
+    prepared.to_mut().dispatch_instances = dispatch;
+    Ok((prepared, declaration))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn execute_prepared(
     package: &Package,
-    graph: Option<&iir::Package>,
     declaration: DeclarationId,
     entry: &str,
     protocols: Option<(
@@ -237,10 +205,6 @@ fn execute_prepared(
     stats: &mut InvocationStats,
 ) -> Result<Value, String> {
     let preparation_budget = elaboration::ptc::Budget::default();
-    let roots = [iir::InstanceKey {
-        declaration,
-        arguments: vec![].into(),
-    }];
     let context = elaboration::ptc::Context::from_package(package)
         .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
     let index = crate::implementation_world::index(&package, preparation_budget)
@@ -301,17 +265,9 @@ fn execute_prepared(
         steps: fuel,
         depth: 128,
     };
-    let interpreter = match graph {
-        Some(graph) => match session.as_deref_mut() {
-            Some(session) => {
-                Interpreter::from_iir_for_comptime_in_session(graph, session, &mut budget)
-            }
-            None => Interpreter::from_iir_for_comptime_metered(graph, &mut budget),
-        },
-        None => match session.as_deref_mut() {
-            Some(session) => Interpreter::for_comptime_in_session(package, session, &mut budget),
-            None => Interpreter::for_comptime(package, budget),
-        },
+    let interpreter = match session.as_deref_mut() {
+        Some(session) => Interpreter::for_comptime_in_session(package, session, &mut budget),
+        None => Interpreter::for_comptime(package, budget),
     };
     let mut interpreter = interpreter
         .map_err(|error| format!("cannot prepare comptime invocation: {error}"))?
@@ -341,13 +297,7 @@ fn execute_prepared(
             .with_enum_builder(&enum_builder)
             .with_newtype_builder(&newtype_builder);
     }
-    let operation = |vm: &mut Interpreter<'_>| {
-        if graph.is_some() {
-            vm.invoke_instance(&roots[0], vec![])
-        } else {
-            vm.invoke(declaration, vec![])
-        }
-    };
+    let operation = |vm: &mut Interpreter<'_>| vm.invoke(declaration, vec![]);
     let result = match session {
         Some(session) => interpreter.with_code_session(session, operation),
         None => operation(&mut interpreter),
@@ -594,51 +544,6 @@ pub(crate) fn needs_input_staging(
             Ok(())
         })?;
         if staged_call {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-// Type telescopes alone do not require IIR: the comptime interpreter binds
-// those inputs on each call. Method/associated-value selection still uses
-// materialized dispatch. Follow stored and higher-order function identities
-// too, including declarations whose Type telescope has not yet been bound.
-fn needs_materialized_dispatch(
-    package: &Package,
-    root: DeclarationId,
-    fuel: &mut usize,
-) -> Result<bool, String> {
-    use nir::program::ExprKind as K;
-    let mut pending = vec![root];
-    let mut seen = std::collections::HashSet::new();
-    while let Some(id) = pending.pop() {
-        *fuel = fuel
-            .checked_sub(1)
-            .ok_or("invocation reachability budget exhausted")?;
-        if !seen.insert(id) {
-            continue;
-        }
-        let Some(function) = package
-            .functions
-            .iter()
-            .find(|function| function.declaration == id)
-        else {
-            continue;
-        };
-        let mut dispatch = false;
-        iir::visit::expressions(function, fuel, |expr, _| {
-            match &expr.kind {
-                K::TraitMethod { .. } | K::AssociatedValue { .. } => dispatch = true,
-                K::Function(id)
-                | K::FunctionInstance {
-                    declaration: id, ..
-                } => pending.push(*id),
-                _ => {}
-            }
-            Ok(())
-        })?;
-        if dispatch {
             return Ok(true);
         }
     }

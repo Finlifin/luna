@@ -260,7 +260,10 @@ mod tests {
                 Interpreter::for_comptime_in_session(
                     &changed, &mut failed, &mut Budget::default(),
                 ).err().unwrap().kind,
-                ErrorKind::PhaseMismatch,
+                ErrorKind::InvalidPhase(nir::phases::Error {
+                    source: changed.functions[0].body.source,
+                    message: "invalid function parameter default slot",
+                }),
             );
             assert!(failed.indexes.is_none());
             assert_eq!(
@@ -272,7 +275,10 @@ mod tests {
                 .err()
                 .unwrap()
                 .kind,
-                ErrorKind::PhaseMismatch,
+                ErrorKind::InvalidPhase(nir::phases::Error {
+                    source: changed.functions[0].body.source,
+                    message: "invalid function parameter default slot",
+                }),
             );
             // Also defend the internal constructor, rather than depending only
             // on the public session entry point to establish world identity.
@@ -286,7 +292,10 @@ mod tests {
                 .err()
                 .unwrap()
                 .kind,
-                ErrorKind::PhaseMismatch,
+                ErrorKind::InvalidPhase(nir::phases::Error {
+                    source: changed.functions[0].body.source,
+                    message: "invalid function parameter default slot",
+                }),
             );
         }
         let recovered =

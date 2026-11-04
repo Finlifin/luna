@@ -243,11 +243,13 @@ fn malformed_default_plans_are_rejected_before_execution() {
             .iter_mut()
             .find(|f| f.declaration == root)
             .unwrap();
+        let call = tail_expression(&mut function.body);
+        let source = call.source;
         let K::Call {
             arguments,
             parameter_bindings,
             ..
-        } = &mut tail_expression(&mut function.body).kind
+        } = &mut call.kind
         else {
             panic!("expected call")
         };
@@ -262,7 +264,17 @@ fn malformed_default_plans_are_rejected_before_execution() {
         let Err(error) = Interpreter::for_comptime(&package, Budget::default()) else {
             panic!("malformed default plan admitted");
         };
-        assert_eq!(error.kind, ErrorKind::PhaseMismatch);
+        assert_eq!(
+            error.kind,
+            ErrorKind::InvalidPhase(nir::phases::Error {
+                source,
+                message: match fault {
+                    1 => "explicit call argument follows a default argument",
+                    _ => "invalid call default argument order or binding frame",
+                },
+            })
+        );
+        assert_eq!(error.source, Some(source));
         let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
             tree.invoke(root, vec![]).unwrap_err().kind,
