@@ -209,7 +209,7 @@ python3 -B development/reproduce.py --timeout 60 --binary /tmp/luna-design-basel
 的推测。显式覆盖默认的成功不能证明原默认可执行；unused 的成功也不代表其 helper
 可以被调用。本次只执行 dump，没有把它们计作 runtime 执行通过。
 
-进一步的静态接线核对把问题分成四个边界：
+清理前的静态接线核对把问题分成四个边界；第 1 项的后续迁移见 §5.2：
 
 1. `program.rs::ensure_signature` 全量继承父 type_parameters，并补父 staged inputs；
    `lexical_function_arguments` 又从父声明枚举供应。生产与供应必须一起改为消费同一需求。
@@ -227,6 +227,35 @@ python3 -B development/reproduce.py --timeout 60 --binary /tmp/luna-design-basel
 本次没有失败现场的实际实参、abstract 授权表或 VM 分支轨迹，不能宣称第 4 项中的
 某一个分支已经被唯一定位。后续实施时须显示这三项及其来源；保留已有数量、作用域和
 值域检查，不能通过扩大 abstract 授权、跳过准入或忽略缺少的输入来消除报错。
+
+### 5.2 已接通的首步：生产与供应共用词法输入计划
+
+`program/lexical_inputs.rs::LexicalInputPlan` 现在是普通局部函数隐式输入前缀的
+共同描述，`ensure_signature` 与 `lexical_function_arguments` 都消费它。
+调用端不再独立枚举父 type_parameters 和 staged 参数。每个输入保留声明身份、sort
+及供应方式：固定声明替换，或外层 staged 绑定；可用 S-expression Display 检查顺序。
+
+计划只存在于当前 checker 的不可变 HIR 视图中，按新鲜 OwnerId 保存。父签名和全部
+staged 域形成后才登记；签名构造失败时移除该声明的计划。域继续由既有声明域索引
+提供，没有另建一份可修改的域真相。递归调用仍优先使用已捕获输入，不把父函数的
+Bound 槽解释为当前函数的参数槽；模板克隆后按新身份重新生产计划。
+
+这是输入生产/供应协议的第一步，不是精确依赖完成：选择器仍保留全部外围输入，
+外围契约仍整体继承，required 的输入准备和 VM 准入没有放宽。§5.1 的正确正例仍
+保留 ignore；后续需在该单一生产入口接通实际引用、域与证明前提、间接调用和递归
+闭包。当前计划不是可持久化的依赖摘要，也没有实现跨 world 的缓存失效协议。
+
+针对性验证从 `/home/fin/luna` 运行，包含工作区原有资源分析改动：
+
+| 检查 | 结果与证据 |
+| --- | --- |
+| `python3 -B development/check.py --timeout 900 -- test -p luna --test function_template_local_definitions` | 退出 0；10 通过、原缺口 1 ignored；`/tmp/luna-tools-tm439wnv/result.json` |
+| `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs` | 退出 0；46 通过；`/tmp/luna-tools-xfy_s2nd/result.json` |
+
+新增真实 sysroot 案例在三层局部声明中递归读取外层 Type/值输入，分别实例化 bool 的
+true/false 与 u8 的 7；确认执行结果且拒绝 `outer(u8, true)`。原有测试继续覆盖模板
+身份、局部别名、公开库方法、默认供应、输入顺序与隐藏槽不可由调用者显式供应。
+没有运行全量或 native 验收，不能据此声称完整依赖迁移完成。
 
 ## 6. 接口生产必须有可观察前缀
 

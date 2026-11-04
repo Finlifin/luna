@@ -1,7 +1,198 @@
-//! Lift enclosing staged inputs into the local declaration's parameter scope.
+//! Shared lexical input plans for declaration formation and caller supply.
 use super::*;
 
+/// The implicit prefix of a local declaration's clause telescope. This is
+/// checker-local metadata over immutable HIR, not a persisted dependency summary.
+/// Selection still conservatively retains the enclosing telescope; precise
+/// dependency and proof closure must replace selection at this single producer.
+#[derive(Clone, Default)]
+pub(super) struct LexicalInputPlan {
+    inputs: Vec<LexicalInput>,
+}
+
+#[derive(Clone)]
+struct LexicalInput {
+    declaration: DeclarationId,
+    sort: Sort,
+    supply: LexicalSupply,
+}
+
+#[derive(Clone)]
+enum LexicalSupply {
+    Declaration,
+    Staged(hir::HirId),
+}
+
+impl LexicalInputPlan {
+    pub(super) fn declarations(&self) -> impl Iterator<Item = DeclarationId> + '_ {
+        self.inputs.iter().map(|input| input.declaration)
+    }
+}
+
+impl std::fmt::Display for LexicalInputPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(lexical-input-plan")?;
+        for input in &self.inputs {
+            write!(
+                f,
+                " (input {} (sort {}) (supply ",
+                input.declaration, input.sort
+            )?;
+            match input.supply {
+                LexicalSupply::Declaration => f.write_str("declaration")?,
+                LexicalSupply::Staged(binding) => write!(f, "(staged {})", local(binding))?,
+            }
+            f.write_str("))")?;
+        }
+        f.write_str(")")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lexical_input_dump_distinguishes_supply_frames() {
+        let plan = LexicalInputPlan {
+            inputs: vec![
+                LexicalInput {
+                    declaration: DeclarationId {
+                        package: 3,
+                        local: 4,
+                    },
+                    sort: Sort::Type,
+                    supply: LexicalSupply::Declaration,
+                },
+                LexicalInput {
+                    declaration: DeclarationId {
+                        package: 3,
+                        local: 5,
+                    },
+                    sort: Sort::ComptimeValue,
+                    supply: LexicalSupply::Staged(hir::HirId {
+                        owner: OwnerId::new(hir::LocalDefId::new(8)),
+                        local_id: hir::ItemLocalId::new(2),
+                    }),
+                },
+            ],
+        };
+        assert_eq!(
+            plan.to_string(),
+            "(lexical-input-plan \
+             (input (declaration (package 3) (local 4)) (sort type) (supply declaration)) \
+             (input (declaration (package 3) (local 5)) (sort comptime-value) \
+             (supply (staged (local 8 2)))))"
+        );
+        assert_eq!(
+            LexicalInputPlan::default().to_string(),
+            "(lexical-input-plan)"
+        );
+    }
+}
+
 impl Checker<'_, '_> {
+    /// Form the prefix once from a completed parent signature. Both signature
+    /// construction and all ordinary local-function call paths consume it.
+    /// A missing parent signature is an error, never an empty capture list.
+    pub(super) fn lexical_input_plan(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<LexicalInputPlan, Error> {
+        if let Some(plan) = self.lexical_input_plans.get(&owner) {
+            return Ok(plan.clone());
+        }
+        let Some(parent) = self.package.lexical_parents.get(&owner).copied() else {
+            return Ok(LexicalInputPlan::default());
+        };
+        self.ensure_signature(parent, span)?;
+        let parameters = self.type_parameters[&parent]
+            .iter()
+            .copied()
+            .chain(self.nominal_capture_ids(parent))
+            .collect::<Vec<_>>();
+        let mut inputs = self
+            .input_binders(&parameters)
+            .into_iter()
+            .map(|binder| LexicalInput {
+                declaration: binder.declaration,
+                sort: binder.sort,
+                supply: LexicalSupply::Declaration,
+            })
+            .collect::<Vec<_>>();
+        let staged = self.lexical_staged_inputs(parent, span)?;
+        for (binding, declaration, sort, _) in &staged {
+            if !inputs.iter().any(|input| input.declaration == *declaration) {
+                inputs.push(LexicalInput {
+                    declaration: *declaration,
+                    sort: *sort,
+                    supply: LexicalSupply::Staged(*binding),
+                });
+            }
+        }
+        // Publish domain metadata only after every staged domain was formed.
+        // The existing declaration-domain index remains its single authority.
+        for (_, declaration, _, domain) in staged {
+            self.lexical_input_domains.insert(declaration, domain);
+        }
+        let plan = LexicalInputPlan { inputs };
+        self.lexical_input_plans.insert(owner, plan.clone());
+        Ok(plan)
+    }
+
+    /// Lexical inputs are fixed by the enclosing instance; source arguments
+    /// instantiate only the local function's explicit clause telescope.
+    pub(super) fn lexical_function_arguments(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<Vec<Term>, Error> {
+        if !matches!(
+            self.package.item(owner).map(|item| &item.kind),
+            Some(ItemKind::Fn(..) | ItemKind::FnDeclaration(..))
+        ) {
+            return Ok(Vec::new());
+        }
+        let plan = self.lexical_input_plan(owner, span)?;
+        let mut arguments = Vec::with_capacity(plan.inputs.len());
+        for input in plan.inputs {
+            let value = match input.supply {
+                LexicalSupply::Declaration => {
+                    if let Some(value) = self.alias_substitution.get(&input.declaration).cloned() {
+                        self.copy_alias_type(&value, span)?
+                    } else {
+                        Term::Rigid {
+                            declaration: input.declaration,
+                            sort: input.sort,
+                        }
+                    }
+                }
+                LexicalSupply::Staged(binding) => {
+                    // Descendants use their fixed lexical input, not the
+                    // parent's Bound index: a recursive callee's own parameter
+                    // at that index can have a completely different sort.
+                    if let Some((value, _)) = self.captured_staged_input(binding, span)? {
+                        value
+                    } else {
+                        let value = if input.sort == Sort::Type {
+                            self.type_input_bindings.get(&local(binding)).cloned()
+                        } else {
+                            self.value_input_bindings
+                                .get(&local(binding))
+                                .map(|(value, _)| value.clone())
+                        };
+                        value.ok_or_else(|| {
+                            error(span, "lexical staged input is unavailable at this use")
+                        })?
+                    }
+                }
+            };
+            arguments.push(value);
+        }
+        Ok(arguments)
+    }
+
     /// Distinguish an unimplemented invocation environment from an unresolved
     /// name. Only diagnose after ordinary locals/closure captures were tried:
     /// lambdas already carry invocation values through their own environments.

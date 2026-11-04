@@ -197,6 +197,29 @@ fn local_comptime_calls_in_clause_defaults_need_precise_lexical_dependencies() {
 }
 
 #[test]
+fn recursive_helpers_keep_staged_capture_domains_and_instance_values() {
+    let source = "
+        fn outer(comptime T: Type, comptime seed: T) -> T {
+            fn middle() -> T {
+                fn inner(done: bool) -> T {
+                    if done { seed } else { inner(true) }
+                }
+                inner(false)
+            }
+            middle()
+        }
+        fn run() -> bool {
+            outer(bool, true) and not outer(bool, false) and outer(u8, 7) == 7
+        }
+    ";
+    assert_eq!(run(source), Value::Bool(true));
+    let invalid = source.replace("outer(u8, 7)", "outer(u8, true)");
+    let failure = compile(&invalid).unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+    assert!(failure.contains("type mismatch"), "{failure}");
+}
+
+#[test]
 fn local_nominal_definitions_receive_distinct_instance_identities() {
     let source = "
         template fn wrap(value: bool, quote lambda body: <current: bool |- bool>) -> bool {

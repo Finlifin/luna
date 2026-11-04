@@ -475,6 +475,7 @@ fn elaborate_with_attributes(
         type_input_bindings: BTreeMap::new(),
         partial_staged_bindings: BTreeMap::new(),
         lexical_input_domains: BTreeMap::new(),
+        lexical_input_plans: BTreeMap::new(),
         callable_type_inputs: BTreeMap::new(),
         callable_value_inputs: BTreeMap::new(),
         value_input_bindings: BTreeMap::new(),
@@ -1660,6 +1661,7 @@ struct Checker<'a, 'h> {
     type_input_bindings: BTreeMap<n::LocalId, Term>,
     partial_staged_bindings: BTreeMap<n::LocalId, std::sync::Arc<constants::PartialStagedValue>>,
     lexical_input_domains: BTreeMap<DeclarationId, Term>,
+    lexical_input_plans: BTreeMap<OwnerId, lexical_inputs::LexicalInputPlan>,
     callable_type_inputs: BTreeMap<n::LocalId, Option<Term>>,
     callable_value_inputs: BTreeMap<n::LocalId, (Term, Term)>,
     // Ordinary comptime values retain both their bound identity and domain.
@@ -1882,20 +1884,19 @@ impl Checker<'_, '_> {
             if let Some(parent) = self.effect_parents.get(&owner).copied() {
                 self.ensure_contract(parent, span)?;
             }
-            if let Some(parent) = package.lexical_parents.get(&owner).copied() {
-                self.ensure_signature(parent, span)?;
-            }
+            let lexical_inputs = self.lexical_input_plan(owner, span)?;
             let mut type_parameters = if let Some(parent) = self
                 .effect_parents
                 .get(&owner)
                 .or_else(|| self.self_containers.get(&owner))
-                .or_else(|| package.lexical_parents.get(&owner))
             {
                 self.type_parameters[parent]
                     .iter()
                     .copied()
                     .chain(self.nominal_capture_ids(*parent))
                     .collect()
+            } else if package.lexical_parents.contains_key(&owner) {
+                lexical_inputs.declarations().collect()
             } else {
                 match self.self_types.get(&owner) {
                     Some(Term::Rigid {
@@ -1921,14 +1922,6 @@ impl Checker<'_, '_> {
                     _ => Vec::new(),
                 }
             };
-            if let Some(parent) = package.lexical_parents.get(&owner).copied() {
-                for (_, input, _, domain) in self.lexical_staged_inputs(parent, span)? {
-                    if !type_parameters.contains(&input) {
-                        type_parameters.push(input);
-                    }
-                    self.lexical_input_domains.insert(input, domain);
-                }
-            }
             self.prepare_template_application(owner)?;
             let parent = self
                 .effect_parents
@@ -2433,6 +2426,7 @@ impl Checker<'_, '_> {
         self.signature_prefixes.remove(&owner);
         self.signature_domains.remove(&owner);
         if checked.is_err() {
+            self.lexical_input_plans.remove(&owner);
             self.pending_refinements
                 .retain(|pending| pending.owner != owner);
             self.type_input_bindings
@@ -5298,59 +5292,6 @@ impl Checker<'_, '_> {
         self.context = saved_context;
         result
     }
-    /// Lexical clause inputs are fixed by the enclosing instance; source
-    /// arguments only instantiate the local function's own clause telescope.
-    fn lexical_function_arguments(
-        &mut self,
-        owner: OwnerId,
-        span: Span,
-    ) -> Result<Vec<Term>, Error> {
-        if !matches!(
-            self.package.item(owner).map(|item| &item.kind),
-            Some(ItemKind::Fn(..) | ItemKind::FnDeclaration(..))
-        ) {
-            return Ok(Vec::new());
-        }
-        let Some(parent) = self.package.lexical_parents.get(&owner).copied() else {
-            return Ok(Vec::new());
-        };
-        self.ensure_signature(parent, span)?;
-        let parameters = self.type_parameters[&parent].clone();
-        let mut arguments = parameters
-            .into_iter()
-            .map(|id| {
-                if let Some(value) = self.alias_substitution.get(&id).cloned() {
-                    self.copy_alias_type(&value, span)
-                } else {
-                    Ok(Term::Rigid {
-                        declaration: id,
-                        sort: self.input_binders(&[id])[0].sort,
-                    })
-                }
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        for (binding, _, sort, _) in self.lexical_staged_inputs(parent, span)? {
-            // Inside a descendant, this input belongs to the descendant's
-            // fixed lexical telescope, not to the parent's parameter frame.
-            // Reusing the outer Bound index would alias the recursive callee's
-            // own parameters (which may have completely different sorts).
-            if let Some((value, _)) = self.captured_staged_input(binding, span)? {
-                arguments.push(value);
-                continue;
-            }
-            let value = if sort == Sort::Type {
-                self.type_input_bindings.get(&local(binding)).cloned()
-            } else {
-                self.value_input_bindings
-                    .get(&local(binding))
-                    .map(|(value, _)| value.clone())
-            }
-            .ok_or_else(|| error(span, "lexical staged input is unavailable at this use"))?;
-            arguments.push(value);
-        }
-        Ok(arguments)
-    }
-
     /// Receiver transport follows declaration syntax, including explicit UFCS.
     /// An ordinary first parameter remains a value even when named similarly.
     fn comptime_receiver_arguments(
