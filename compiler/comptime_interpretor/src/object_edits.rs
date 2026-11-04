@@ -125,9 +125,7 @@ impl Interpreter<'_> {
                 self.integer_operation(Some(source), |budget| {
                     budget.consume(work.saturating_add(entries.len()).saturating_add(1))
                 })?;
-                if !self.has_type(&value, ty) {
-                    return Err(failure());
-                }
+                self.check_value_type(&value, ty, Some(source))?;
                 let value = ObjectValue {
                     ty: ty.clone(),
                     value,

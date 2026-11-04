@@ -1,6 +1,8 @@
 use super::*;
 use std::cell::Cell;
 
+mod containers;
+
 const SOURCE: SourceRange = SourceRange { start: 3, end: 8 };
 
 fn id(local: u32) -> DeclarationId {

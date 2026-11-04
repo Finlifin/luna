@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | [nir/comptime_values.rs](../compiler/nir/src/comptime_values.rs) | frozen list 保留准确声明域，Type 元素也使用普通名义值载体；标量范围、sort/scope 检查 | validate 明确不承担全部 aggregate/abstract 准入；不能把结构通过当作形成证明 |
 | [normal_terms.rs](../compiler/comptime_interpretor/src/normal_terms.rs)、[normal_values](../compiler/comptime_interpretor/src/normal_values/mod.rs) | 受预算的数据编码/恢复、作用域及恢复后的主动值检查 | 各容器、Type、callable 分支仍与外部准入逻辑共同承担职责，尚无统一受限结果 |
-| [value_types.rs](../compiler/comptime_interpretor/src/value_types.rs) | 结构遍历共用；主动边界收集名义形成义务并在接收世界检查，被动观察仍检查保留见证 | 部分位置、捕获和对象操作仍调用被动观察；结构布局查询中的独立额度尚待统一 |
+| [value_types.rs](../compiler/comptime_interpretor/src/value_types.rs) | 结构遍历共用；主动边界收集名义形成义务并在接收世界检查，被动观察仍检查保留见证 | 部分关联值与效应边界仍调用被动观察；结构布局查询中的独立额度尚待统一 |
 | [constants.rs](../compiler/elaboration/src/program/constants.rs) | 已求值依赖不重算；局部常量保留闭包图内共享，生成快照重建 factory | 不能把这种有来源的局部快照当作任意 wire 可调用工厂；生成函数尚承担内部传送职责 |
 | [value_reference.rs](../compiler/comptime_interpretor/src/value_reference.rs) | owner 共享、路径重验、RHS 后写回、根重绑定权限；不依赖 runtime Copy | 位置身份、内容版本和可导出快照需在统一边界表达 |
 | [comptime_graph.rs](../compiler/comptime_interpretor/src/comptime_graph.rs) | 每次观察重新检查可变捕获图，访问去重不复制 owner | visited 集合不是冻结许可，也不证明所有循环图可逃逸 |
@@ -3077,12 +3077,14 @@ admit_type。形状不匹配时不启动这些待检查询，查询失败不会�
 名义构造准备还会在字段求值前检查域的形成契约，以免错误路径先产生字段副作用。
 
 已接入的边界包括 record／variant 构造、普通输入绑定、调用返回、不可变输入验证、
-冻结值恢复、newtype 转换、optional 与错误结果载荷、字段读取及 host prepared live
-输入。字段读取在取得独立值后释放借用，再做主动检查。runtime／具体 IIR 的既有
-被动行为保持原路径；本次不改变仿射复制权限，不把活动引用变成可冻结值。
+冻结值恢复、newtype 转换、optional 与错误结果载荷、字段读取、host prepared live
+输入、Object 条目及闭包捕获。字段读取在取得独立值后释放借用，再做主动检查。
+runtime／具体 IIR 的既有被动行为保持原路径；本次不改变仿射复制权限，不把活动
+引用变成可冻结值。
 
-尚未迁移的对象、位置写入和部分捕获检查仍可到达被动 has_type；后续应按各自的
-借用与发布时点接入，不能机械地在持锁回调中启动可执行观察。共享结构遍历中的
+关联值结果与部分效应边界仍可到达被动 has_type；后续应按各自的借用与发布时点
+接入，不能机械地在持锁回调中启动可执行观察。runtime 指针读写的被动检查不是
+comptime 准入迁移对象。共享结构遍历中的
 旧布局查询仍有独立额度，尚未全部合入调用方余额；当前新增的待检收集与主动契约
 查询使用调用方余额，不代表整个结构检查器已完成预算重构。
 
@@ -3118,6 +3120,50 @@ admit_type。形状不匹配时不启动这些待检查询，查询失败不会�
   `/tmp/luna-tools-30hm57q4/result.json`；git diff --check 通过。
   集成检查包含工作区已有资源分析修改；其内容及已有 docs/library 修改未纳入本次
   改动。未运行全 workspace 或性能基准。
+
+**Object 与捕获发布。** Object 的构造、按名／按序号读取以及 append／replace 载荷
+检查已接入主动值检查。未决或拒绝的能力不折叠成字段缺失、类型不匹配或 null。
+按名查找仍检查所有条目，包括被后续同名条目遮蔽的值；命中策略与原始条目顺序
+保持既有契约。对象编辑仍生成独立结果，失败不修改调用方已有快照。
+
+树解释与字节码的捕获装配共用 check_closure_capture：先核对捕获描述与闭包环境
+签名，再检查实际值；通过后才能放入私有捕获存储。CreateClosure 仍在全部捕获
+完成后产生。失败不发布闭包或保存能力许可；重新构造重新检查。已执行的捕获
+初始化行为不因此回滚，原有捕获次序、准备值清理和运行时移动规则保持不变。
+
+位置写回审计确认，Object／List 通过 validate_container_replacement 已接通
+validate_immutable_input，在替换前检查新值和旧值；这条路径没有再造新的验证器。
+实际存储许可、引用路径重新验证与最终 replace 仍由 value_reference 管理。
+一般位置的声明域检查不因本次覆盖了容器替换就被视为全部完成。
+
+复现与局部证据（工作目录 `/home/fin/luna`）：
+
+- 真实 sysroot 中动态 Packet 值的闭包捕获和 Object.set／get 快照用例原均在
+  invocation 返回 Type，`/tmp/luna-tools-tvd8rj7n/result.json` 退出 101；迁移后同一
+  两项通过，`/tmp/luna-tools-f38lttge/result.json` 退出 0。未添加具体 impl 或方法
+  调用来预热实现表。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib value_types::tests::containers -- --nocapture`：3 项通过，退出 0；
+  `/tmp/luna-tools-nd2qf3rf/result.json`。覆盖双路径捕获失败不发布、成功重试、
+  Object 查询／编辑保留失败、引用写回失败与预算耗尽保留旧值及独立快照。
+- 相关回归命令：`python3 -B development/check.py --timeout 900 -- test
+  -p comptime_interpretor -p luna --lib --test comptime_nominal_capabilities
+  --test comptime_bytecode_closures --test comptime_bytecode_references
+  --test comptime_object_storage --test comptime_object_contracts --test library_meta_objects
+  --test closure_environment_parameters --test library_protocols --no-fail-fast -- --skip
+  clause_list_inputs_share_domain_scope_and_budget_validation`：659 项通过、2 项失败，
+  筛去既有列表诊断失败 1 项，退出 101；`/tmp/luna-tools-n4ikv4st/result.json`。
+  两项失败位于 library_meta_objects，不能将这轮命令称为全通过。
+- 暂时用 `dc9536e9` 的五份生产文件作对照，运行 library_meta_objects 的 object_range
+  过滤组，同样 1 项通过、2 项失败，退出 101；`/tmp/luna-tools-upe970md/result.json`。
+  对照后逐字节恢复本次修改。共享示例缺少 Symbol／Integer 绑定，以及总字节码
+  调用次数依赖库包装层数，是两个既有测试问题。`02bb91e0` 补齐已有绑定的导入，
+  将后者改为检查用户入口只执行一次、返回条目的名称／域／值及顺序；拒绝例保持。
+  修复后同组三项通过，退出 0；`/tmp/luna-tools-ksuwl14a/result.json`。
+- 八份修改／新增 Rust 文件 scoped rustfmt check 退出 0，
+  `/tmp/luna-tools-xehbrzed/result.json`；git diff --check 通过。上述编译器／库回归
+  包含工作区原有资源分析修改；其内容及已有 docs/library 修改保持原样。
+  未运行全 workspace 或性能基准。
 
 implementation 的标量冲突预检、每个普通值参数的结构遍历、重复 binder 比较与
 后续 Type 匹配共用 head 分区的余额，不再为每个实参刷新额度。调用的显式输入

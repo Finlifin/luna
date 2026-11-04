@@ -4042,6 +4042,19 @@ impl<'a> Interpreter<'a> {
         Ok(capture_types)
     }
 
+    fn check_closure_capture(
+        &mut self,
+        value: &Value,
+        supplied: &Term,
+        expected: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if supplied != expected {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        self.check_value_type(value, expected, Some(source))
+    }
+
     #[inline(never)]
     fn eval_closure(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
         self.with_prepared_frame(expr.source, |this| {
@@ -4074,9 +4087,7 @@ impl<'a> Interpreter<'a> {
                             this.cleanup_transfer(expr.source, capture.binding, &[], environment)?;
                             value
                         };
-                        if &capture.ty != ty || !this.has_type(&value, ty) {
-                            return Err(this.failure(ErrorKind::Type, Some(expr.source)));
-                        }
+                        this.check_closure_capture(&value, &capture.ty, ty, expr.source)?;
                         this.retain_prepared(
                             slot,
                             capture

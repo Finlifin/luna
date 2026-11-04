@@ -377,9 +377,7 @@ impl Interpreter<'_> {
                     .ok_or_else(failure)?;
                 self.integer_operation(Some(source), |budget| budget.consume(work))?;
                 let value = if entry.value().ty == **target {
-                    if !self.has_type(&entry.value().value, target) {
-                        return Err(failure());
-                    }
+                    self.check_value_type(&entry.value().value, target, Some(source))?;
                     Some(Box::new(
                         self.checkpoint_representation(&entry.value().value, source)?,
                     ))

@@ -87,3 +87,54 @@ fn nominal_values_recheck_capabilities_in_the_receiving_world() {
         );
     }
 }
+
+fn invoke_dynamic_packet(body: &str) -> Result<comptime_interpretor::Value, String> {
+    let source = format!(
+        "trait Enabled where flag: bool {{}}
+        struct Subject {{}}
+        impl Enabled<flag> for Subject where flag: bool {{}}
+        struct Packet where flag: bool, T :- Enabled<flag> {{ value: bool }}
+        comptime fn read() -> bool
+        where flag: bool
+        {{ {body} }}
+        comptime fn dynamic_read(flag: bool) -> bool {{ read<flag>() }}
+        comptime fn read_stored_packet() -> bool {{ dynamic_read(true) }}"
+    );
+    let package = sysroot::compile(&source)?;
+    luna::invocation::invoke(&package, "read_stored_packet", 1_000_000)
+}
+
+#[test]
+fn dynamic_nominal_values_survive_closure_capture() {
+    assert_eq!(
+        invoke_dynamic_packet(
+            "
+        let packet = Packet<flag, Subject> { value: true };
+        let read: %{packet: Packet<flag, Subject>} comptime fn() -> bool = || packet.value;
+        read()
+    "
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn dynamic_nominal_values_survive_object_edits() {
+    assert_eq!(
+        invoke_dynamic_packet(
+            "
+        var object = {packet: Packet<flag, Subject> { value: true }};
+        let saved = object;
+        object.set(0, Packet<flag, Subject> { value: false });
+        (saved.get<Packet<flag, Subject>>(.packet) match {
+            value? => value.value, null => false
+        }) and (object.get<Packet<flag, Subject>>(.packet) match {
+            value? => not value.value, null => false
+        })
+    "
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}

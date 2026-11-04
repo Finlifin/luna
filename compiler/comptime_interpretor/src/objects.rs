@@ -43,9 +43,7 @@ impl Interpreter<'_> {
             self.check_comptime_domain(&typed.ty, source)?;
             self.check_comptime_graph(&typed.value, source, 0)?;
             self.admit_embedded_type_descriptions(&typed.value, 0)?;
-            if !self.has_type(&typed.value, &typed.ty) {
-                return Err(self.failure(ErrorKind::Type, None));
-            }
+            self.check_value_type(&typed.value, &typed.ty, None)?;
             if let Some(name) = entry.key() {
                 self.integer_operation(None, |budget| {
                     budget.consume(name.len().min(key.len()).saturating_add(1))
@@ -91,9 +89,7 @@ impl Interpreter<'_> {
         name: Option<&str>,
         source: SourceRange,
     ) -> Result<(), Error> {
-        if !self.has_type(value, ty) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        self.check_value_type(value, ty, Some(source))?;
         self.charge_object_entry(ty, name, source)
     }
 
@@ -135,9 +131,7 @@ impl Interpreter<'_> {
                     Flow::Value(value) => value,
                     transfer => return Ok(transfer),
                 };
-                if !this.has_type(&value, &field.ty) {
-                    return Err(this.failure(ErrorKind::Type, Some(field.source)));
-                }
+                this.check_value_type(&value, &field.ty, Some(field.source))?;
                 this.retain_prepared(slot, field.source, &value)?;
                 this.charge_object_entry(&field.ty, name.as_deref(), field.source)?;
                 let value = ObjectValue {

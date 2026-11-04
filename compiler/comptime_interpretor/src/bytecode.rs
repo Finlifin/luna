@@ -1443,9 +1443,7 @@ impl<'a> Interpreter<'a> {
                         source,
                     )?;
                     let value = frame.slots[*value].take().ok_or_else(missing)?;
-                    if ty != &capture_types[*index] || !self.has_type(&value, ty) {
-                        return Err(self.failure(ErrorKind::Type, Some(source)));
-                    }
+                    self.check_closure_capture(&value, ty, &capture_types[*index], source)?;
                     if constructor.parameters.contains(binding)
                         || pending.environment.contains_key(binding)
                     {
