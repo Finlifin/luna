@@ -1843,28 +1843,14 @@ impl Function {
 
     /// Specialize a declaration using completed domains while retaining its
     /// ordinary input frame in contracts, defaults and body annotations.
-    /// Callers separately admit values and charge the template copy.
+    /// Owns the complete expanded-copy preflight. Callers still admit values;
+    /// structural substitution does not establish formation or resource rights.
     pub fn instantiate_declaration_parameters(
         &self,
         domains: &[Term],
         arguments: &[Term],
         fuel: &mut usize,
     ) -> Result<Self, crate::type_computations::Error> {
-        // Type-only declarations cannot change binder sorts. Reuse their
-        // strict substitution path without rescanning wide, unused Type inputs.
-        if domains
-            .iter()
-            .all(|domain| *domain == Term::Primitive(crate::Primitive::Type))
-        {
-            *fuel = fuel
-                .checked_sub(self.type_parameters.len())
-                .ok_or(crate::type_computations::Error::Budget)?;
-            let binders = crate::declaration_parameters(&self.type_parameters, domains)
-                .map_err(crate::type_computations::Error::Scope)?;
-            return self
-                .instantiate_parameters(&binders, arguments)
-                .map_err(crate::type_computations::Error::Scope);
-        }
         let closed = crate::DeclarationSubstitution::bounded(
             &self.type_parameters,
             domains,
@@ -1872,6 +1858,9 @@ impl Function {
             &[],
             fuel,
         )?;
+        // Charge metadata, contracts, defaults and shared code before any
+        // template copy. The scoped rewriter below consumes this preflight.
+        closed.charge_function_substitution(self, fuel)?;
         let frames = match self.signature.callable_signature() {
             Term::Function { parameters, .. } => vec![parameters.iter().map(|p| p.sort).collect()],
             _ => vec![],

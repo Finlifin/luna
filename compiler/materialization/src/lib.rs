@@ -747,24 +747,12 @@ impl Builder<'_> {
                 self.queue.push_back(Task::Type(argument.clone()));
             }
         }
-        // Check the complete selected template before Clone or substitution
-        // enters recursive owned trees. Later dependency traversal is too late
-        // to enforce the depth bound safely. Include contracts and defaults,
-        // and shared closure bodies that type rewriting may copy on write.
-        // Ordinary templates charge substituted type occurrences as well:
-        // bounding only the original tree misses wide generic expansions.
-        let staged = self.staged_functions.get(&(id, arguments.clone()));
-        let template = staged.unwrap_or(f);
-        let parameters = self.input_binders(&f.type_parameters);
-        let checked = nir::copy_budget::charge_function_substitution(
-            template,
-            if staged.is_some() { &[] } else { &parameters },
-            if staged.is_some() { &[] } else { &arguments },
-            &mut self.fuel,
-        );
-        checked.map_err(|reason| format!("dispatch template copy budget exhausted: {reason:?}"))?;
+        // Already-staged functions only need a bounded copy; ordinary templates
+        // own their complete expansion preflight inside declaration substitution.
         let mut function = if let Some(staged) = self.staged_functions.get(&(id, arguments.clone()))
         {
+            nir::copy_budget::charge_function_substitution(staged, &[], &[], &mut self.fuel)
+                .map_err(|reason| format!("dispatch template copy budget exhausted: {reason:?}"))?;
             staged.clone()
         } else {
             if self.instances.is_some()
@@ -773,30 +761,20 @@ impl Builder<'_> {
             {
                 return Err("staged runtime function requires a specialized direct call".into());
             }
-            if parameters
-                .iter()
-                .all(|parameter| parameter.sort == nir::Sort::Type)
-            {
-                // The key's Type inputs were already checked above; preserve
-                // the strict path and avoid copying their known Type domains.
-                f.instantiate_parameters(&parameters, &arguments)
-                    .map_err(|e| e.to_string())?
-            } else {
-                let domains = self
-                    .world
-                    .input_domains(&f.type_parameters, &mut self.fuel)?;
-                if self.instances.is_some() {
-                    nir::function_parameters::validate_arguments(
-                        self.package,
-                        &f.type_parameters,
-                        &domains,
-                        &arguments,
-                        &mut self.fuel,
-                    )?;
-                }
-                f.instantiate_declaration_parameters(&domains, &arguments, &mut self.fuel)
-                    .map_err(|e| e.to_string())?
+            let domains = self
+                .world
+                .input_domains(&f.type_parameters, &mut self.fuel)?;
+            if self.instances.is_some() {
+                nir::function_parameters::validate_arguments(
+                    self.package,
+                    &f.type_parameters,
+                    &domains,
+                    &arguments,
+                    &mut self.fuel,
+                )?;
             }
+            f.instantiate_declaration_parameters(&domains, &arguments, &mut self.fuel)
+                .map_err(|e| e.to_string())?
         };
         if self.instances.is_some() {
             if function.phase == n::FunctionPhase::Comptime

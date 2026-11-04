@@ -558,18 +558,7 @@ impl Expansion<'_> {
         types: Vec<Term>,
     ) -> Result<Box<PreparedTemplate>, Error> {
         let span = at(expression.source);
-        // Charge the complete template before copying any owned tree.
-        let mut fuel = usize::try_from(*self.fuel).unwrap_or(usize::MAX);
-        nir::visit::expressions(source_template, &mut fuel, |expr, fuel| {
-            nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())
-        })
-        .map_err(|message| error(span, message))?;
-        *self.fuel = fuel as u64;
-        for ty in &types {
-            nir::type_computations::charge_term(ty, &mut fuel)
-                .map_err(|failure| error(span, failure.to_string()))?;
-        }
-        *self.fuel = fuel as u64;
+        // Declaration specialization owns the complete expanded-copy preflight.
         let domains = self.domains(&source_template.type_parameters, span)?;
         let mut fuel = usize::try_from(*self.fuel).unwrap_or(usize::MAX);
         let template =

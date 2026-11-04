@@ -1225,9 +1225,6 @@ impl Query<'_, '_> {
         if body.phase != FunctionPhase::Runtime || body.type_parameters.len() != arguments.len() {
             return Err("text region inference requires a concrete runtime body".into());
         }
-        nir::visit::expressions(body, self.fuel, |expr, fuel| bound_type(&expr.ty, fuel))?;
-        charge(self.fuel, body.entry_snapshots.len())?;
-        bound_type(&body.signature, self.fuel)?;
         let domains =
             self.metadata
                 .domains(Some(self.package), &body.type_parameters, self.fuel)?;
@@ -1555,7 +1552,6 @@ impl Query<'_, '_> {
         if body.phase != FunctionPhase::Runtime || body.type_parameters.len() != arguments.len() {
             return Err("text descriptor call requires a concrete runtime body".into());
         }
-        nir::visit::expressions(body, self.fuel, |expr, fuel| bound_type(&expr.ty, fuel))?;
         let domains =
             self.metadata
                 .domains(Some(self.package), &body.type_parameters, self.fuel)?;

@@ -304,6 +304,20 @@ impl<'a> DeclarationSubstitution<'a> {
             }
         })
     }
+    pub(crate) fn charge_function_substitution(
+        &self,
+        function: &crate::program::Function,
+        fuel: &mut usize,
+    ) -> Result<(), crate::type_computations::Error> {
+        crate::copy_budget::charge_function_substitution(
+            function,
+            &self.parameters,
+            self.arguments,
+            fuel,
+        )
+        .map_err(|_| crate::type_computations::Error::Budget)
+    }
+
     /// Copy and specialize a checked expression only after bounding the entire
     /// expanded tree, including shared closure bodies and hidden type operands.
     /// The source is immutable; a failed rewrite never publishes a partial tree.

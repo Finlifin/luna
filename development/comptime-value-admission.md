@@ -1689,3 +1689,54 @@ associated implementation 选择当作结构代入的一部分。
 
 格式检查通过。未运行全 workspace、native 或性能基准；正式 docs 和原有工作区
 修改保持不变。
+
+
+## 32. 完整函数模板的预检所有权
+
+`Function::instantiate_declaration_parameters` 原来要求调用者另行计费，并对纯 Type
+输入走无界的严格代入分支。这样，即使接口显式接收 fuel，直接调用仍可能在低预算
+下复制任意长名称、函数体、前后条件和默认值；载荷未使用的实参也不能证明整个
+函数复制是受限的。新增两项直接接口回归在 `d324b704` 基线上失败：
+`/tmp/luna-tools-u1v_fpgr/result.json`，退出 101。
+
+现在该函数接口拥有整个展开后的复制预检，包括声明元数据、签名、类型命题、
+capability、程序契约、默认值与共享闭包体。纯 Type 与 dependent-domain 输入均
+通过 DeclarationSubstitution；普通调用输入 frame 只用于主体与契约，签名仍按
+关闭的外层 scope 代入。调用者继续负责实际值域准入、形成义务、value-local 替换
+与 staged 参数消除，结构代入不授予任何资源权限。
+
+materialization 的普通函数选择统一使用此入口；已完成的 staged function 仍只做
+复制预检，不重复做声明参数代入。quote fn 展开与文本区域的函数摘要分析删除了
+原有只扫描 expr.ty 的不完整复制预检，使用内核的完整预检。前者仍是 quote fn，
+不因共享代入设施变成 comptime fn；后者仍属于程序分析，不向 PTC 注入内存事实。
+
+新增检查同时覆盖无参数和带 bool 参数模板的各个 payload、Type 实参重复展开、
+正余额下预留失败、失败后足额恢复及原模板不变。另验证普通 Type 输入 frame 在
+主体、默认值和前置条件中保留，非法 frame 索引拒绝后能够恢复。固定 sort 的旧
+`Function::instantiate_parameters` 与其他模板消费路径仍未完全退役；这次移除了
+主 dispatch 中对该入口的调用，不代表整个模板系统或预算所有权改造已经完成。
+
+
+验证目录 `/home/fin/luna`，统一入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --test copy_budget --test calls --test scoped_contracts --no-fail-fast`：
+  39 通过，退出 0；`/tmp/luna-tools-wotc551p/result.json`。
+- `-p materialization -p elaboration -p program_verification --lib --no-fail-fast`：
+  303 通过，退出 0；`/tmp/luna-tools-0qtko0ie/result.json`。
+- `-p luna --test quote_functions --test cmtt_methods --test cmtt_type_inputs
+  --test text_regions --test nominal_value_parameters --test newtypes --test default_calls
+  --test invocation_value_templates --no-fail-fast`：899 通过、1 失败，退出 101；
+  `/tmp/luna-tools-jd4ycivk/result.json`。
+
+源码组的唯一失败是 `code_method_parent_value_clauses_form_indexed_code_signatures`，
+诊断 `139..143: expression elaboration requires a protocol or construct not yet implemented`。
+临时恢复本阶段修改前的五份实现文件，在 `d324b704` 基线上精确运行该用例，同样
+失败于上述诊断：`/tmp/luna-tools-axb96zfg/result.json`，退出 101。随后逐字节恢复
+当前实现。未修改用例或将它标为 ignored；本轮不声称整个 CMTT 组已通过。
+
+`-p materialization --test expansion_boundary --no-fail-fast`：6 通过，退出 0；
+`/tmp/luna-tools-gmm6xmz1/result.json`。补充正余额断言后精确重跑两项预算回归，
+`/tmp/luna-tools-y97xkmhn/result.json`：2 通过，退出 0。
+
+受影响 Rust 文件格式检查通过；未运行全 workspace、native 或性能基准。正式 docs
+与原有工作区修改保持不变。

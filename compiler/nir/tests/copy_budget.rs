@@ -629,3 +629,148 @@ fn term_copy_distinguishes_depth_from_steps_at_the_boundary() {
     );
     assert_eq!(clone_term(&Term::Unit, &mut 1), Ok(Term::Unit));
 }
+
+#[test]
+fn function_declaration_specialization_owns_complete_copy_budget() {
+    use nir::type_computations::Error;
+    for mixed in [false, true] {
+        for slot in 0..5 {
+            let mut value = function();
+            let (domains, arguments) = if mixed {
+                value.type_parameters.push(DeclarationId {
+                    package: 97,
+                    local: 1,
+                });
+                (vec![Term::Primitive(P::Bool)], vec![Term::Bool(true)])
+            } else {
+                (vec![], vec![])
+            };
+            match slot {
+                0 => value.name = "name".repeat(1000),
+                1 => value.body = large(),
+                2 => value.preconditions.push(large()),
+                3 => value.postconditions.push(large()),
+                _ => value.defaults.push((0, large())),
+            }
+            let original = value.clone();
+            let mut fuel = 500;
+            assert_eq!(
+                value.instantiate_declaration_parameters(&domains, &arguments, &mut fuel),
+                Err(Error::Budget),
+                "mixed={mixed}, slot={slot}"
+            );
+            assert!(fuel > 0 && fuel < 500);
+            assert_eq!(value, original);
+            let result = value
+                .instantiate_declaration_parameters(&domains, &arguments, &mut 100_000)
+                .unwrap();
+            assert_eq!(result, original);
+        }
+    }
+}
+
+#[test]
+fn function_declaration_specialization_bounds_repeated_type_arguments() {
+    use nir::{Sort, type_computations::Error};
+    let parameter = DeclarationId {
+        package: 97,
+        local: 1,
+    };
+    let mut value = function();
+    value.type_parameters = vec![parameter];
+    value.capabilities = (0..64)
+        .map(|_| nir::program::TraitRequirement {
+            interface: DeclarationId {
+                package: 97,
+                local: 2,
+            },
+            subject: Term::Rigid {
+                declaration: parameter,
+                sort: Sort::Type,
+            },
+            interface_arguments: vec![],
+        })
+        .collect();
+    let arguments = [Term::Record(
+        (0..32)
+            .map(|i| (format!("field{i}"), Term::Primitive(P::Bool)))
+            .collect(),
+    )];
+    let domains = [Term::Primitive(P::Type)];
+    assert_eq!(
+        value.instantiate_declaration_parameters(&domains, &arguments, &mut 2000),
+        Err(Error::Budget)
+    );
+    let result = value
+        .instantiate_declaration_parameters(&domains, &arguments, &mut 100_000)
+        .unwrap();
+    assert!(
+        result
+            .capabilities
+            .iter()
+            .all(|capability| capability.subject == arguments[0])
+    );
+    assert!(
+        value
+            .capabilities
+            .iter()
+            .all(|capability| matches!(capability.subject, Term::Rigid { .. }))
+    );
+}
+
+#[test]
+fn function_specialization_separates_closed_signature_and_ordinary_input_frames() {
+    use nir::{Parameter, Sort, type_computations::Error};
+    let parameter = DeclarationId {
+        package: 97,
+        local: 1,
+    };
+    let bound = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let mut template = function();
+    template.type_parameters = vec![parameter];
+    template.signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Type,
+            ty: Term::Primitive(P::Type),
+        }],
+        result: Box::new(Term::Rigid {
+            declaration: parameter,
+            sort: Sort::Type,
+        }),
+    };
+    template.body = Expr {
+        ty: Term::Primitive(P::Type),
+        source: template.body.source,
+        kind: K::TypeValue(bound.clone()),
+    };
+    template.defaults.push((0, template.body.clone()));
+    template.preconditions.push(template.body.clone());
+    let run = |template: &nir::program::Function| {
+        template.instantiate_declaration_parameters(
+            &[Term::Primitive(P::Type)],
+            &[Term::Primitive(P::Bool)],
+            &mut 10_000,
+        )
+    };
+    let specialized = run(&template).unwrap();
+    assert_eq!(specialized.body, template.body);
+    assert_eq!(specialized.defaults, template.defaults);
+    assert_eq!(specialized.preconditions, template.preconditions);
+    assert!(
+        matches!(specialized.signature, Term::Function { result, .. } if *result == Term::Primitive(P::Bool))
+    );
+    template.body.ty = Term::Bound {
+        depth: 0,
+        index: 1,
+        sort: Sort::Type,
+    };
+    let original = template.clone();
+    assert!(matches!(run(&template), Err(Error::Scope(_))));
+    assert_eq!(template, original);
+    template.body.ty = Term::Primitive(P::Type);
+    run(&template).unwrap();
+}
