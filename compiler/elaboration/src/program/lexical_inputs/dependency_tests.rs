@@ -440,10 +440,10 @@ fn exact_declaration_queries_reject_unmapped_delivered_scopes() {
             sort: Sort::Type,
         })),
     );
-    {
+    for query in [Query::FreeDeclarations, Query::FreeInputs] {
         let fixture = Fixture::new(&package);
         let mut reads = fixture.reads(owner);
-        reads.query = Query::FreeDeclarations;
+        reads.query = query;
         reads.expression(value).unwrap();
         assert!(
             reads
@@ -453,4 +453,43 @@ fn exact_declaration_queries_reject_unmapped_delivered_scopes() {
                 .contains("requires a delivered scope mapping")
         );
     }
+}
+
+#[test]
+fn readiness_inputs_separate_clause_supply_from_staged_local_supply() {
+    let arena = HirArena::new();
+    let mut package = hir::Package::new();
+    let owner = package.alloc_owner_id();
+    let binding = id(owner, 1);
+    let staged = hir::common::DefId { pkg: 0, index: 10 };
+    let clause = hir::common::DefId { pkg: 0, index: 11 };
+    package.staged_parameter_definitions.insert(binding, staged);
+    let local_use = expr(&arena, owner, 2, H::ResolvedFnParam(name(), binding));
+    let clause_use = expr(&arena, owner, 3, H::ResolvedClauseParam(name(), clause));
+    let transported = expr(&arena, owner, 4, H::ResolvedClauseParam(name(), staged));
+    let fields = [local_use.clone(), clause_use.clone(), transported.clone()];
+    let value = expr(&arena, owner, 5, H::Tuple(&fields));
+    let fixture = Fixture::new(&package);
+    let mut failed = fixture.reads(owner);
+    failed.query = Query::FreeInputs;
+    failed.fuel = 0;
+    assert!(failed.expression(value).is_err());
+    let mut reads = fixture.reads(owner);
+    reads.query = Query::FreeInputs;
+    reads.expression(value).unwrap();
+    reads.drain().unwrap();
+    let expected = SourceInputs {
+        locals: BTreeSet::from([local(binding)]),
+        declarations: BTreeSet::from([reads.identity(clause)]),
+    };
+    let observed = reads.free_inputs().unwrap();
+    assert_eq!(observed, expected);
+    assert_eq!(
+        observed.to_string(),
+        format!(
+            "(source-inputs (locals {}) (declarations {}))",
+            local(binding),
+            reads.identity(clause)
+        )
+    );
 }

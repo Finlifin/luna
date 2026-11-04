@@ -1,9 +1,38 @@
 //! Shared lexical input plans for declaration formation and caller supply.
 use super::*;
+use std::fmt;
 mod dependencies;
 mod dependency_closure;
 mod source_index;
 pub(super) use source_index::SourceProtocolIndex;
+
+/// Free source inputs, separated by the identity used to supply them. An
+/// observed staged binder is represented as a local, not also as a clause.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct SourceInputs {
+    pub locals: BTreeSet<n::LocalId>,
+    pub declarations: BTreeSet<DeclarationId>,
+}
+
+impl SourceInputs {
+    pub fn is_empty(&self) -> bool {
+        self.locals.is_empty() && self.declarations.is_empty()
+    }
+}
+
+impl fmt::Display for SourceInputs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(source-inputs (locals")?;
+        for binding in &self.locals {
+            write!(f, " {binding}")?;
+        }
+        f.write_str(") (declarations")?;
+        for declaration in &self.declarations {
+            write!(f, " {declaration}")?;
+        }
+        f.write_str("))")
+    }
+}
 
 /// The implicit prefix of a local declaration's clause telescope. This is
 /// checker-local metadata over immutable HIR, not a persisted dependency summary.
@@ -96,6 +125,18 @@ mod tests {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn source_expression_inputs(
+        &mut self,
+        owner: OwnerId,
+        value: &Expr<'_>,
+    ) -> Result<SourceInputs, Error> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = dependencies::expression_inputs(self, owner, value, &mut fuel, value.span);
+        self.required_steps -= (before - fuel) as u64;
+        result
+    }
+
     /// Pending domains may be excluded only after a complete source dependency
     /// observation. All outcomes debit the caller's shared preparation budget.
     pub(super) fn annotation_may_use_pending_inputs(

@@ -38,6 +38,7 @@ enum Query<'a> {
     Declaration,
     FreeLocals,
     FreeDeclarations,
+    FreeInputs,
     MayUse(&'a BTreeSet<n::LocalId>),
 }
 
@@ -80,6 +81,49 @@ struct Reads<'a, 'h> {
     staged_locals: BTreeMap<DeclarationId, n::LocalId>,
     fuel: usize,
     span: Span,
+}
+
+/// A single source walk serves readiness queries for locals and clauses. The
+/// caller decides availability; this observation never evaluates an operand.
+pub(super) fn expression_inputs(
+    checker: &Checker<'_, '_>,
+    owner: OwnerId,
+    value: &Expr<'_>,
+    fuel: &mut usize,
+    span: Span,
+) -> Result<SourceInputs, Error> {
+    let mut reads = Reads::new(Source::from_checker(checker), owner, fuel, span);
+    reads.query = Query::FreeInputs;
+    reads.graph.entry(SourceScope::Expression).or_default();
+    reads
+        .local_graph
+        .entry(SourceScope::Expression)
+        .or_default();
+    let result = (|| {
+        if let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+            checker.package.item(owner).map(|item| &item.kind)
+        {
+            for parameter in sig.params {
+                reads.charge()?;
+                if let Some(declaration) = checker
+                    .package
+                    .staged_parameter_definitions
+                    .get(&parameter.hir_id)
+                {
+                    reads
+                        .staged_locals
+                        .insert(reads.identity(*declaration), local(parameter.hir_id));
+                }
+            }
+        }
+        reads.inherited(owner)?;
+        reads.protocols(owner)?;
+        reads.expression(value)?;
+        reads.drain()?;
+        reads.free_inputs()
+    })();
+    *fuel = reads.fuel;
+    result
 }
 
 pub(super) fn collect(
@@ -204,6 +248,28 @@ pub(super) fn expression_local_dependencies(
 }
 
 impl<'a, 'h> Reads<'a, 'h> {
+    fn free_inputs(&mut self) -> Result<SourceInputs, Error> {
+        let locals = close(
+            &self.local_graph,
+            SourceScope::Expression,
+            &mut self.fuel,
+            self.span,
+        )?;
+        let mut declarations = close(
+            &self.graph,
+            SourceScope::Expression,
+            &mut self.fuel,
+            self.span,
+        )?;
+        // A transported staged parameter and its source local name are one
+        // input. Do not ask the clause supply path to provide it a second time.
+        declarations.retain(|id| !self.staged_locals.contains_key(id));
+        Ok(SourceInputs {
+            locals,
+            declarations,
+        })
+    }
+
     fn new(source: Source<'a, 'h>, owner: OwnerId, fuel: &usize, span: Span) -> Self {
         Self {
             source,
@@ -275,7 +341,10 @@ impl<'a, 'h> Reads<'a, 'h> {
                 .map_err(|failure| error(self.span, failure.to_string()))?
                 .is_empty()
             {
-                if matches!(self.query, Query::FreeLocals | Query::FreeDeclarations) {
+                if matches!(
+                    self.query,
+                    Query::FreeLocals | Query::FreeDeclarations | Query::FreeInputs
+                ) {
                     return Err(error(
                         self.span,
                         "source dependency requires a delivered scope mapping",
@@ -303,7 +372,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         Ok(())
     }
     fn reference(&mut self, owner: OwnerId) -> Result<(), Error> {
-        if matches!(self.query, Query::FreeLocals) {
+        if matches!(self.query, Query::FreeLocals | Query::FreeInputs) {
             self.local_graph
                 .entry(self.scope)
                 .or_default()
@@ -318,7 +387,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         self.push(Node::Owner(owner))
     }
     fn read_local(&mut self, binding: n::LocalId) {
-        if matches!(self.query, Query::FreeLocals) {
+        if matches!(self.query, Query::FreeLocals | Query::FreeInputs) {
             self.local_graph
                 .entry(self.scope)
                 .or_default()
@@ -327,7 +396,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
     }
     fn bind_local(&mut self, binding: hir::HirId) {
-        if matches!(self.query, Query::FreeLocals) {
+        if matches!(self.query, Query::FreeLocals | Query::FreeInputs) {
             self.local_graph
                 .entry(self.scope)
                 .or_default()
@@ -557,7 +626,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         if !self.owners.insert(owner) {
             return Ok(());
         }
-        if matches!(self.query, Query::FreeLocals) {
+        if matches!(self.query, Query::FreeLocals | Query::FreeInputs) {
             self.local_graph
                 .entry(SourceScope::Declaration(owner))
                 .or_default();
@@ -764,7 +833,11 @@ impl<'a, 'h> Reads<'a, 'h> {
                     self.reads_local_input = true;
                 }
                 if let Some(id) = package.staged_parameter_definitions.get(binding) {
-                    self.input(self.identity(*id));
+                    let id = self.identity(*id);
+                    if matches!(self.query, Query::FreeInputs) {
+                        self.staged_locals.insert(id, local(*binding));
+                    }
+                    self.input(id);
                 }
                 if let Some(item) = package.item(binding.owner) {
                     if let ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) = &item.kind {

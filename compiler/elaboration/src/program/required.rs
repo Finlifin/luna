@@ -22,6 +22,7 @@ impl Checker<'_, '_> {
     // positive equality conjuncts participate; program predicates never do.
     pub(super) fn signature_parameter_domain(
         &mut self,
+        owner: OwnerId,
         ty: Term,
         clauses: &[hir::clause::ClauseConstraint<'_>],
         span: Span,
@@ -62,9 +63,12 @@ impl Checker<'_, '_> {
                 .required_steps
                 .checked_sub(1)
                 .ok_or_else(|| error(span, "signature domain constraint budget exhausted"))?;
-            if !signature_inputs_ready(&atom, 0, &|id| {
-                self.type_input_bindings.contains_key(&local(id))
-            })? || self.program_requirement(&atom)?
+            let inputs = self.source_expression_inputs(owner, &atom)?;
+            if !inputs
+                .locals
+                .iter()
+                .all(|id| self.type_input_bindings.contains_key(id))
+                || self.program_requirement(&atom)?
             {
                 continue;
             }
@@ -421,32 +425,33 @@ impl Checker<'_, '_> {
                         "signature capability preparation budget exhausted",
                     )
                 })?;
-                let ready = complete
-                    || signature_inputs_ready_with_clauses(
-                        &value,
-                        0,
-                        &|id| {
-                            self.type_input_bindings.contains_key(&local(id))
-                                || self.value_input_bindings.contains_key(&local(id))
-                        },
-                        &|id| {
-                            !check_clauses
-                                || self.type_clause_params(owner).iter().any(|parameter| {
-                                    parameter.definition == Some(id)
-                                        && matches!(
-                                            parameter.kind,
-                                            hir::clause::ClauseParamKind::Type(_)
-                                                | hir::clause::ClauseParamKind::TraitBound(..)
-                                        )
-                                })
-                                || self
-                                    .trait_input_domain(DeclarationId {
-                                        package: semantic_package(&self.package_identities, id.pkg),
-                                        local: id.index,
-                                    })
-                                    .is_some()
-                        },
-                    )?;
+                let ready = if complete {
+                    true
+                } else {
+                    let inputs = self.source_expression_inputs(owner, &value)?;
+                    inputs.locals.iter().all(|id| {
+                        self.type_input_bindings.contains_key(id)
+                            || self.value_input_bindings.contains_key(id)
+                    }) && inputs.declarations.iter().all(|id| {
+                        !check_clauses
+                            || self.type_clause_params(owner).iter().any(|parameter| {
+                                parameter.definition.is_some_and(|definition| {
+                                    DeclarationId {
+                                        package: semantic_package(
+                                            &self.package_identities,
+                                            definition.pkg,
+                                        ),
+                                        local: definition.index,
+                                    } == *id
+                                }) && matches!(
+                                    parameter.kind,
+                                    hir::clause::ClauseParamKind::Type(_)
+                                        | hir::clause::ClauseParamKind::TraitBound(..)
+                                )
+                            })
+                            || self.trait_input_domain(*id).is_some()
+                    })
+                };
                 if !ready {
                     pending.push(value);
                     continue;
@@ -456,7 +461,13 @@ impl Checker<'_, '_> {
                 let capabilities = self.capabilities.get(&owner).cloned();
                 let context = self.context.clone();
                 let pending_len = self.pending_type_uses.as_ref().map(Vec::len);
-                match self.positive_type_requirements(owner, &value, &mut Vec::new(), 0) {
+                // This atom is still being formed. Its operands may use prior
+                // binder evidence, but cannot demand the enclosing contract as
+                // a premise and recursively assume the atom they are computing.
+                let saved_checking = std::mem::replace(&mut self.checking_contract, true);
+                let checked = self.positive_type_requirements(owner, &value, &mut Vec::new(), 0);
+                self.checking_contract = saved_checking;
+                match checked {
                     Ok(()) => progress = true,
                     Err(failure) => {
                         self.context = context;
@@ -3183,260 +3194,6 @@ pub(super) fn signature_capability_atoms<'h>(
         _ => {}
     }
     Ok(())
-}
-
-// This is readiness, not type checking. Unknown expression forms wait for the
-// final signature pass, where normal elaboration supplies their diagnostics.
-pub(super) fn signature_inputs_ready(
-    value: &Expr<'_>,
-    depth: usize,
-    available: &impl Fn(hir::HirId) -> bool,
-) -> Result<bool, Error> {
-    signature_inputs_ready_with_clauses(value, depth, available, &|_| true)
-}
-
-pub(super) fn signature_inputs_ready_with_clauses(
-    value: &Expr<'_>,
-    depth: usize,
-    available: &impl Fn(hir::HirId) -> bool,
-    clause_available: &impl Fn(hir::common::DefId) -> bool,
-) -> Result<bool, Error> {
-    if depth >= 128 {
-        return Err(error(
-            value.span,
-            "signature input dependency depth exhausted",
-        ));
-    }
-    let ready =
-        |value| signature_inputs_ready_with_clauses(value, depth + 1, available, clause_available);
-    Ok(match &value.kind {
-        H::ResolvedFnParam(_, id) => available(*id),
-        H::ResolvedClauseParam(_, id) => clause_available(*id),
-        H::Lit(_)
-        | H::ResolvedDef { .. }
-        | H::Builtin(_)
-        | H::TyType
-        | H::TyAny
-        | H::TyVoid
-        | H::TyNoReturn
-        | H::TySelf
-        | H::Unit => true,
-        H::TraitBound(a, b)
-        | H::Assign(a, b)
-        | H::Binary(_, a, b)
-        | H::Cast(a, b)
-        | H::Index(a, b)
-        | H::TyFnArrow(a, b)
-        | H::TyClosure(a, b)
-        | H::EffectQualifiedType(a, b)
-        | H::ErrorQualifiedType(a, b) => ready(a)? & ready(b)?,
-        H::Projection(value, _)
-        | H::TyPtr(value)
-        | H::TyOptional(value)
-        | H::Unary(_, value)
-        | H::LiteralConversion { literal: value, .. }
-        | H::TypeOf(value) => ready(value)?,
-        H::Semi(value) => ready(value)?,
-        H::Let(binding) => {
-            let mut all = signature_pattern_inputs_ready(
-                &binding.pattern,
-                depth + 1,
-                available,
-                clause_available,
-            )?;
-            for value in [binding.ty, binding.init, binding.guard, binding.otherwise]
-                .into_iter()
-                .flatten()
-            {
-                all &= ready(value)?;
-            }
-            all
-        }
-        H::Block(block) | H::UnsafeBlock(block) | H::Loop(block) => {
-            let mut all = true;
-            for statement in block.stmts {
-                all &= ready(statement)?;
-            }
-            if let Some(tail) = block.expr {
-                all &= ready(tail)?;
-            }
-            all
-        }
-        H::If(condition, yes, no) => {
-            let mut all = ready(condition)?;
-            for statement in yes.stmts {
-                all &= ready(statement)?;
-            }
-            if let Some(tail) = yes.expr {
-                all &= ready(tail)?;
-            }
-            if let Some(no) = no {
-                all &= ready(no)?;
-            }
-            all
-        }
-        H::When(arms) => {
-            let mut all = true;
-            for arm in *arms {
-                if let Some(condition) = arm.cond {
-                    all &= ready(condition)?;
-                }
-                all &= ready(arm.body)?;
-            }
-            all
-        }
-        H::Match(subject, arms) => {
-            let mut all = ready(subject)?;
-            for arm in *arms {
-                all &= signature_pattern_inputs_ready(
-                    &arm.pat,
-                    depth + 1,
-                    available,
-                    clause_available,
-                )?;
-                if let Some(guard) = arm.guard {
-                    all &= ready(guard)?;
-                }
-                all &= ready(arm.body)?;
-            }
-            all
-        }
-        H::Tuple(values) | H::List(values) => {
-            let mut all = true;
-            for value in *values {
-                all &= ready(value)?;
-            }
-            all
-        }
-        H::NFApplication(head, args)
-        | H::Application(head, args)
-        | H::ExtendedApplication(head, args) => {
-            let mut all = ready(head)?;
-            for arg in *args {
-                let (Arg::Positional(value)
-                | Arg::Named(_, value)
-                | Arg::Expand(value)
-                | Arg::Implicit(value)
-                | Arg::PostLambda(value)) = arg;
-                all &= ready(value)?;
-            }
-            all
-        }
-        H::TyFn(parameters)
-        | H::TyComptimeFn(parameters)
-        | H::TyModifiedFn(_, parameters)
-        | H::TyNFFn(parameters) => {
-            let mut all = true;
-            for parameter in *parameters {
-                match parameter.kind {
-                    TyParamKind::Optional(_, ty, default) => {
-                        all &= ready(ty)? & ready(default)?;
-                    }
-                    TyParamKind::Positional(ty)
-                    | TyParamKind::PositionalDependencyCatched(_, ty)
-                    | TyParamKind::Varadic(_, ty) => {
-                        all &= ready(ty)?;
-                    }
-                    TyParamKind::Itself { .. } => {}
-                }
-            }
-            all
-        }
-        _ => false,
-    })
-}
-
-fn signature_pattern_inputs_ready(
-    pattern: &hir::pattern::Pattern<'_>,
-    depth: usize,
-    available: &impl Fn(hir::HirId) -> bool,
-    clause_available: &impl Fn(hir::common::DefId) -> bool,
-) -> Result<bool, Error> {
-    use hir::pattern::PatternKind as K;
-    if depth >= 128 {
-        return Err(error(
-            pattern.span,
-            "signature pattern dependency depth exhausted",
-        ));
-    }
-    let pat = |value| signature_pattern_inputs_ready(value, depth + 1, available, clause_available);
-    let expr =
-        |value| signature_inputs_ready_with_clauses(value, depth + 1, available, clause_available);
-    Ok(match &pattern.kind {
-        K::Wild | K::OptionNull | K::Binding(_, _, None) => true,
-        K::Const(value) | K::Comptime(value) => expr(value)?,
-        K::Binding(_, _, Some(inner))
-        | K::Projection(inner, _)
-        | K::OptionSome(inner)
-        | K::ErrorOk(inner)
-        | K::ErrorErr(inner)
-        | K::Not(inner)
-        | K::Ref(inner) => pat(inner)?,
-        K::Guard(inner, guard) => pat(inner)? & expr(guard)?,
-        K::Then(first, view, second) => pat(first)? & expr(view)? & pat(second)?,
-        K::Tuple(fields) | K::Or(fields) => {
-            let mut all = true;
-            for field in *fields {
-                all &= pat(field)?;
-            }
-            all
-        }
-        K::List(fields, tail) => {
-            let mut all = true;
-            for field in *fields {
-                all &= pat(field)?;
-            }
-            if let Some(tail) = tail {
-                all &= pat(tail)?;
-            }
-            all
-        }
-        K::AppTuple(head, fields) => {
-            let mut all = pat(head)?;
-            for field in *fields {
-                all &= pat(field)?;
-            }
-            all
-        }
-        K::Struct(head, fields, _) | K::AppStruct(head, fields) => {
-            let mut all = pat(head)?;
-            for field in *fields {
-                all &= pat(&field.pat)?;
-            }
-            all
-        }
-        K::NormalForm(head, args) => {
-            let mut all = expr(head)?;
-            for argument in *args {
-                all &= pat(&argument.pattern)?;
-            }
-            all
-        }
-        K::BitVec { segments, .. } => {
-            let mut all = true;
-            for segment in segments {
-                match segment {
-                    hir::pattern::BitSegment::Literal { .. } => {}
-                    hir::pattern::BitSegment::Typed { pattern, ty } => {
-                        all &= pat(pattern)? & expr(ty)?;
-                    }
-                    hir::pattern::BitSegment::Computed(value) => {
-                        all &= expr(value)?;
-                    }
-                }
-            }
-            all
-        }
-        K::Range(start, end, _) => {
-            let mut all = true;
-            for value in [*start, *end].into_iter().flatten() {
-                all &= expr(value)?;
-            }
-            all
-        }
-        K::CodeSplice(operand, _) => expr(operand)?,
-        K::Async | K::Invalid => false,
-    })
 }
 
 /// Own the synthetic subjects while atoms borrow their declaration identities.

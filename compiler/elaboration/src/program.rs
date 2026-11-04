@@ -2295,7 +2295,9 @@ impl Checker<'_, '_> {
                     unreachable!()
                 };
                 let ty = if parameter.ty.is_comptime() {
-                    self.signature_parameter_domain(ty, sig.clause_constraints, parameter.span)?
+                    self.signature_parameter_domain(
+                        owner, ty, sig.clause_constraints, parameter.span,
+                    )?
                 } else {
                     ty
                 };
@@ -7097,9 +7099,17 @@ impl Checker<'_, '_> {
         }
         let saved_returns = self.return_observations.take();
         let saved_loops = std::mem::take(&mut self.loops);
+        let mut outer = self.locals.keys().copied().collect::<BTreeSet<_>>();
+        if comptime {
+            // Signature inputs can be read before a runtime locals frame exists.
+            // Snapshot their binding identities for capture routing; the normal
+            // expression path still checks their domain, phase and availability.
+            outer.extend(self.type_input_bindings.keys().copied());
+            outer.extend(self.value_input_bindings.keys().copied());
+        }
         self.captures.push(CaptureFrame {
             comptime,
-            outer: self.locals.keys().copied().collect(),
+            outer,
             values: Vec::new(),
         });
         let checked = (|| {

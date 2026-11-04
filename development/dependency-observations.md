@@ -195,6 +195,29 @@ readiness 返回值并靠 RefCell 回调收集子句读取；它使用完整的�
 自己的类型子句不再因语法白名单而漏读或混入 caller。Query 枚举明确区分声明
 形成、自由局部输入、自由声明输入及保守 may-use，替代彼此独立的查询开关。
 
+签名就绪判断也消费同一图。旧 `signature_inputs_ready` 及其单独的 pattern 白名单
+已删除；`SourceInputs` 用一次源码遍历取得自由 Local 与 Declaration 集合，随后由
+调用点判断当前供应。已观察到的 staged 参数声明身份映射回源 Local，只计为一个
+输入，不再同时要求子句供应路径提供它。两类依赖分别闭合、一起返回；任何观察或
+闭包传播失败都不能当作就绪。Display 使用稳定的 `(source-inputs ...)`。
+
+Type 域等式仍只接受已供应的 Type 参数和正向类型等式；capability 准备仍按当前
+telescope 前缀决定可用性，最终检查及失败回滚保持独立。开放函数值与 NF 的描述路径
+分别选取其所需的自由输入条件，不从“没有依赖”推出纯度或执行许可。局部绑定、
+闭包和引用到的局部声明按绑定关系处理，语法不在旧白名单内不再直接等同于未就绪。
+
+早期 capability 原子的操作数检查与正式契约检查共用 `checking_contract` 边界，
+退出时恢复原状态。原子的 Type 实参可以包含正常 comptime 计算，但形成中的整个
+外围契约不能成为该计算自己的前提；已建立的 binder 事实继续可用。旧路径会在
+准备 `Source<do { ... }>` 时反向调用外围 `ensure_contract`，再次计算同一个原子，
+轨迹见 `/tmp/luna-tools-pspjhcjb/stderr.log`。修复保留真正循环或缺失证据的拒绝，
+不是跳过 formation obligations 或把递归当作成功。
+
+签名中建立 comptime 闭包时，捕获路由现在也包含当前已形成的 Type／值输入身份。
+这些输入可以在 runtime locals 帧建立前被合法读取；只枚举 locals 会漏掉实际读取，
+产生未声明捕获的 NIR。新增身份仍只在正常表达式检查实际读取后进入 capture，
+不赋予未供应输入、后续参数或 runtime 参数新的可用性。
+
 这不是把全部默认值都延期到具体值阶段。域为 Type 的默认值仍使用原有符号
 形成路径；需要实际值的默认值在依赖具备后按既有顺序准备。后续默认值读取前面
 的结果，显式覆盖不执行对应默认计算，但不跳过定义端的域和行为检查。观察本身
@@ -251,6 +274,22 @@ readiness 返回值并靠 RefCell 回调收集子句读取；它使用完整的�
 `/tmp/luna-clause-source-inputs-1bwjh39w`；上一轮局部输入接线证据仍在
 `/tmp/luna-free-source-inputs-7l1s22ht`。
 
+签名就绪迁移的最终验证仍从 `/home/fin/luna` 使用同一 `development/check.py` 入口：
+
+| 范围 | 实际结果与证据 |
+| --- | --- |
+| 源码观察与依赖闭包 | `-p elaboration --lib lexical_inputs`，16 项通过、退出 0；`/tmp/luna-tools-lgv5s1tv/result.json`。包含两种输入身份的去重供应、稳定 dump、失败重试及 delivered scope 映射拒绝。 |
+| 开放函数、闭包、Type 参数、trait、关联值及输入预算 | 13 个受影响集成组中 668 项通过、1 项失败、1 项既有 ignored，退出 101；`/tmp/luna-tools-boawx4yt/result.json`。唯一失败是新拒绝例对诊断措辞的断言：实际已经以 `requires established trait evidence` 拒绝，没有接受循环证据。 |
+| 签名源码约束正反例最终复验 | `-p luna --test signature_source_readiness`，3 项通过、退出 0；`/tmp/luna-tools-z5messeb/result.json`。修正为断言上述准确诊断后复验；生产代码未再变化。四种主体／接口实参组合经真实 sysroot 与 IIR 执行，缺失证据及自依赖分别拒绝。 |
+
+闭包捕获遗漏的修复前错误见 `/tmp/luna-tools-45gx9w9u/result.json`；
+capability 形成递归的修复前错误见 `/tmp/luna-tools-0nmp1s3o/result.json`。
+六个常规排版 Rust 文件的 rustfmt check 退出 0，证据
+`/tmp/luna-tools-gels77_i/result.json`；两个大型文件仅修改相关片段，未整文件重排。
+完整命令、源码哈希与受保护文件核对保存在 `/tmp/luna-signature-readiness-dkxibtkj`。
+未运行全 workspace、整个 CMTT 组、native 或性能基准；runtime staged 捕获闭包的
+既有 ignored 仍未接通，不将签名中 comptime 闭包的修复扩大为该路径已完成。
+
 ### 4.7 已接通：检查后结构的依赖观察不改写代码
 
 源码自由输入与检查后结构中的输入是不同的观察。前者保存词法捕获和声明关系；
@@ -286,7 +325,7 @@ rigid 输入使用。周围未被选入的源码声明和全局实现世界不�
 表达式观察沿用 copy preflight 的保守结构成本与深度界限，包括集合和字符串宽度；
 这不是专门优化过的轻量成本模型。独立 Term 观察使用已有有界声明收集器。
 两者在失败时仍扣除已消耗预算，不公布部分依赖集，不把耗尽转成空集或 ready。
-相关调用点已经迁移，其他 `mentions_rigid` 和旧 readiness 入口仍需逐项清理；
+相关调用点已经迁移，其他 `mentions_rigid` 查询仍需逐项清理；
 本阶段也没有把它升级成跨 world 的依赖缓存或发布协议。
 
 验证工作目录为 `/home/fin/luna`，入口为
@@ -319,7 +358,7 @@ rigid 输入使用。周围未被选入的源码声明和全局实现世界不�
 
 本次清单、源码哈希与完整命令结果在 `/tmp/luna-prepared-input-observation-w14blcpa`。
 未重跑整个 CMTT 组，不将上一阶段的结果当作本阶段运行证据；没有运行全 workspace、
-native 或性能基准。剩余签名就绪扫描、生命周期和查询失效迁移仍未完成。
+native 或性能基准。其余 typed 依赖判断、生命周期和查询失效迁移仍未完成。
 
 ## 5. 四个判断精确性是否正确的例子
 

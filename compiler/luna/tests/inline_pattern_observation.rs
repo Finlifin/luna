@@ -222,3 +222,18 @@ fn prepared_annotation_input_observation_exhaustion_preserves_fresh_attempts() {
         4096,
     );
 }
+
+#[test]
+fn signature_source_dependency_closure_exhaustion_preserves_fresh_attempts() {
+    check_source_observation(
+        "typealias Type = .Type'builtin;
+        trait Bound {}
+        impl Bound for bool {}
+        fn take(comptime T: Type, value: T) -> T
+        where requires T :- Bound
+        { value }
+        fn run() -> bool { take(bool, true) }",
+        "lexical dependency closure budget exhausted",
+        4096,
+    );
+}

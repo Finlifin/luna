@@ -365,12 +365,9 @@ impl Checker<'_, '_> {
                         value.kind,
                         H::ResolvedFnParam(..) | H::ResolvedClauseParam(..) | H::ResolvedLocal(..)
                     ) {
-                        pending_source |= !required::signature_inputs_ready_with_clauses(
-                            value,
-                            0,
-                            &|_| false,
-                            &|_| false,
-                        )?;
+                        pending_source |= !self
+                            .source_expression_inputs(value.hir_id.owner, value)?
+                            .is_empty();
                     }
                 }
                 _ => simple = false,
@@ -3037,15 +3034,10 @@ impl Checker<'_, '_> {
                 D::Any
             }
             H::NFApplication(head, arguments) if describable_open_type(expr, 0) => {
-                let dependent = std::cell::Cell::new(false);
-                let ready = required::signature_inputs_ready(expr, 0, &|_| {
-                    dependent.set(true);
-                    true
-                })?;
-                // Local references can carry pending descriptions even when
-                // this subtree no longer mentions a function parameter directly.
-                // Do not discard the dependency walk's readiness result.
-                if ready && !dependent.get() {
+                let inputs = self.source_expression_inputs(expr.hir_id.owner, expr)?;
+                // Source locals and captures of referenced local declarations
+                // remain dependencies even without a direct parameter node.
+                if inputs.is_empty() {
                     return self.describe_known_region(expr, expected);
                 }
                 let H::ResolvedDef { def_id, .. } = head.kind else {
@@ -3128,7 +3120,10 @@ impl Checker<'_, '_> {
                 for (slot, value, _, _, _) in &routed {
                     let Some(value) = value else { continue };
                     if parameters[*slot].2 == p(P::Type)
-                        && required::signature_inputs_ready(value, 0, &|_| false)?
+                        && self
+                            .source_expression_inputs(value.hir_id.owner, value)?
+                            .locals
+                            .is_empty()
                     {
                         known_parameters.push(parameters[*slot].0);
                         known_arguments.push(self.type_expr(value)?);
