@@ -2287,3 +2287,49 @@ requires a memory contract`，未匹配该用例预期的拒绝原因。保持�
 对照结束后恢复已测试的新 phase 文件并核对内容一致。格式检查
 `/tmp/luna-tools-2ramcsip/result.json` 退出 0。未运行全 workspace 或性能基准；
 正式 docs 与原有工作区修改保持不变。
+
+
+### Callable 检查上下文的单次准备
+
+phase 为每个 callable 构造一个私有 `InspectionFrame`：借用原有 telescope，保留
+参数 sort 的原顺序，建立 snapshot target 集合。只沿 callable 包装层迭代观察，
+不复制类型载荷或展开 normal-form 定义。包装层、sort frame 槽位以及输入／snapshot
+索引项均消费同一 inspection allowance，预留成功后才分配相应集合。
+
+原先每个 snapshot 两次线性扫描参数列表，现改为一次参数索引构造及集合查询；
+参数 membership 仅在 result binding 或 snapshot 实际需要时建立。result 与输入
+别名、snapshot 来源不在输入中、target 与输入／result 冲突及 target 重复，仍是
+原有的 Invalid 诊断；资源不足是独立的 Budget，不伪装成非法绑定。批次预留失败
+可以保留正余额，失败后的重新检查不继承半成品集合。
+
+每个 callable 在同一轮完成 body、comptime storage 和 call-safety 检查，复用同一
+sort frame；删除第二次全包 callable 遍历及重复 frame 构造。所有跨 callable 的
+声明索引仍先建立，合并循环不以已检查的函数前缀充当可见声明全集。若多个 callable
+同时非法，首个诊断可能因逐 callable 完成检查而改变；不承诺保留旧的跨函数错误
+优先次序。没有放宽合法程序的准入要求。
+
+验证覆盖预算耗尽后的重试、sort 顺序与原 telescope 借用、snapshot／result 的
+五类非法关系，以及生产 phase 中无法支付准备成本的拒绝。长链遍历回归保留
+child 与 owner 的不同源位置，去掉对旧准备成本下恰好落在第几个节点的依赖。
+
+本批目录 `/home/fin/luna`，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --lib --test phases --no-fail-fast`：79 通过，退出 0；
+  `/tmp/luna-tools-5q715wvh/result.json`。
+- `-p nir -p iir -p comptime_interpretor --lib --test phases --test instance_budget
+  --test runtime_function_identities --no-fail-fast`：649 通过，退出 0；
+  `/tmp/luna-tools-jbhaedz6/result.json`。
+- `-p luna --test snapshot_contracts --test method_memory_contracts
+  --test default_calls --test quote_functions --test cmtt_type_inputs
+  --test trait_phases --test sysroot_preludes --no-fail-fast`：272 通过，退出 0；
+  `/tmp/luna-tools-9nsr0_64/result.json`。
+
+格式检查 `/tmp/luna-tools-_y_xybz8/result.json` 退出 0。未执行全 workspace 或性能
+基准；集合复杂度改善不作为已测量的吞吐提升报告。上一批已复现的
+`closure_local_handlers` 拒绝原因基线问题本批未修改，也未重新宣称该组通过。
+
+此上下文不替代声明准入或 trait method view 的前置检查。方法 view 构造中的包装
+观察、normal-form/newtype 元数据、其他临时索引及 VM constructor 的完整成本和
+资源错误分类仍需继续迁移；不能由本批推出整个 pass 或 VM 构造已经完全有界。
+正式 docs 与原有工作区修改保持不变。

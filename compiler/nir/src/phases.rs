@@ -133,14 +133,6 @@ fn machine_arithmetic_functions_with_budgets(
         .map(|function| (function.declaration, function.parameters.as_slice()))
         .collect();
     let mut storage_queries = storage_cache::StorageQueries::new(package);
-    let mut runtime_storage = |ty: &Term, source, frames: &[Vec<Sort>], fuel: &mut usize| {
-        storage_queries
-            .check_runtime(ty, frames, fuel)
-            .map_err(|failure| Error {
-                source,
-                message: failure.message(),
-            })
-    };
     // Validation borrows method contracts. Only actual specialization needs
     // an owned summary, and that path has its own caller-supplied budget.
     let programs = || {
@@ -166,35 +158,20 @@ fn machine_arithmetic_functions_with_budgets(
     // not change the owner's declaration phase or require cloned summary bodies.
     for function in programs() {
         let function = function?;
-        let caller_frames = match function.signature.callable_signature() {
-            Term::Function { parameters, .. } => vec![parameters.iter().map(|p| p.sort).collect()],
-            _ => vec![],
-        };
         let ct = function.phase != Phase::Runtime;
         if !ct {
-            runtime_storage(function.signature, function.source, &[], inspection_fuel)?;
+            storage_queries
+                .check_runtime(function.signature, &[], inspection_fuel)
+                .map_err(|failure| Error {
+                    source: function.source,
+                    message: failure.message(),
+                })?;
         }
+        let inspection = parameters::InspectionFrame::new(function, inspection_fuel)
+            .map_err(parameters::Failure::into_diagnostic)?;
+        let caller_frames = &inspection.frames;
+        let frozen = &inspection.frozen;
         let fail = |source, message| Error { source, message };
-
-        if function
-            .result_binding
-            .is_some_and(|binding| function.parameters.contains(&binding))
-        {
-            return Err(fail(
-                function.source,
-                "result binding aliases an input parameter",
-            ));
-        }
-        let mut frozen = BTreeSet::new();
-        for snapshot in function.entry_snapshots {
-            if !function.parameters.contains(&snapshot.parameter)
-                || function.parameters.contains(&snapshot.binding)
-                || function.result_binding == Some(snapshot.binding)
-                || !frozen.insert(snapshot.binding)
-            {
-                return Err(fail(function.source, "invalid entry snapshot binding"));
-            }
-        }
         let mut work = Worklist::new(function.source);
         work.extend(
             function
@@ -227,7 +204,7 @@ fn machine_arithmetic_functions_with_budgets(
         }
         work.extend(
             function.defaults.iter().map(|(index, value)| {
-                let staged = matches!(function.signature.callable_signature(),
+                let staged = matches!(inspection.signature,
                         crate::Term::Function {parameters,..}
                         if parameters.get(*index).is_some_and(|p|p.sort!=crate::Sort::Runtime));
                 Work::Expr(value, false, ct || staged)
@@ -369,7 +346,9 @@ fn machine_arithmetic_functions_with_budgets(
                         machine_owners.insert(function.declaration);
                     }
                     if !ct {
-                        runtime_storage(&expr.ty, expr.source, &caller_frames, inspection_fuel)?;
+                        storage_queries
+                            .check_runtime(&expr.ty, caller_frames, inspection_fuel)
+                            .map_err(|failure| fail(expr.source, failure.message()))?;
                         if !machine
                             && matches!(expr.kind, K::IntegerNegate(_) | K::IntegerBinary { .. })
                             && !deferred_integer
@@ -588,7 +567,7 @@ fn machine_arithmetic_functions_with_budgets(
                                 member,
                                 subject,
                                 &interface.arguments,
-                                &caller_frames,
+                                caller_frames,
                                 inspection_fuel,
                             )
                             .map_err(|failure| {
@@ -651,7 +630,7 @@ fn machine_arithmetic_functions_with_budgets(
                                 interface_arguments,
                                 method_arguments,
                                 &parameter_domains,
-                                &caller_frames,
+                                caller_frames,
                                 inspection_fuel,
                             )
                             .map_err(|failure| {
@@ -1565,9 +1544,7 @@ fn machine_arithmetic_functions_with_budgets(
                             work.push(Work::Expr(selector, false, ct), inspection_fuel)?;
                         }
                         K::StagedValue(value) => {
-                            let Term::Function { parameters, .. } =
-                                function.signature.callable_signature()
-                            else {
+                            let Term::Function { parameters, .. } = inspection.signature else {
                                 return Err(fail(
                                     expr.source,
                                     "staged value has no invocation frame",
@@ -1602,12 +1579,7 @@ fn machine_arithmetic_functions_with_budgets(
                 }
             }
         }
-    }
-    for function in programs() {
-        let function = function?;
-        if let Term::Function { parameters, result } = function.signature.callable_signature() {
-            let ct = function.phase != Phase::Runtime;
-            let frames = vec![parameters.iter().map(|parameter| parameter.sort).collect()];
+        if let Term::Function { parameters, result } = inspection.signature {
             for domain in parameters
                 .iter()
                 .filter(|parameter| ct || parameter.sort != Sort::Runtime)
@@ -1615,7 +1587,7 @@ fn machine_arithmetic_functions_with_budgets(
                 .chain(ct.then_some(result.as_ref()))
             {
                 storage_queries
-                    .check_comptime(domain, &frames, inspection_fuel)
+                    .check_comptime(domain, caller_frames, inspection_fuel)
                     .map_err(|error| Error {
                         source: function.source,
                         message: error.message(),

@@ -38,6 +38,18 @@ fn run(package: &Package, fuel: &mut usize) -> Result<BTreeSet<crate::Declaratio
 }
 
 #[test]
+fn callable_preparation_cannot_allocate_a_frame_without_inspection_fuel() {
+    let package = Package {
+        functions: vec![function(1, Phase::Comptime)],
+        ..Default::default()
+    };
+    let error = run(&package, &mut 1).unwrap_err();
+    assert_eq!(error.message, "function inspection frame budget exhausted");
+    assert_eq!(error.source, package.functions[0].body.source);
+    run(&package, &mut 1000).unwrap();
+}
+
+#[test]
 fn storage_and_call_safety_consume_the_same_inspection_allowance() {
     for phase in [Phase::Runtime, Phase::Comptime] {
         let package = Package {
@@ -163,16 +175,14 @@ fn broad_expression_and_pattern_work_share_phase_inspection_fuel() {
 #[test]
 fn narrow_expression_chains_cannot_bypass_worklist_charges() {
     let mut callable = function(1, Phase::Comptime);
-    for index in 0..30 {
+    for _ in 0..30 {
         callable.body = Expr {
-            source: SourceRange {
-                start: index,
-                end: index + 1,
-            },
+            source: SourceRange { start: 20, end: 21 },
             ty: Term::Primitive(Primitive::Bool),
             kind: K::Not(Box::new(callable.body)),
         };
     }
+    callable.body.source = SourceRange { start: 1, end: 2 };
     let package = Package {
         functions: vec![callable],
         ..Default::default()
@@ -180,7 +190,7 @@ fn narrow_expression_chains_cannot_bypass_worklist_charges() {
     let mut fuel = 10;
     let error = run(&package, &mut fuel).unwrap_err();
     assert_eq!(error.message, "phase traversal budget exhausted");
-    assert_eq!(error.source, SourceRange { start: 19, end: 20 });
+    assert_eq!(error.source, SourceRange { start: 20, end: 21 });
     assert_eq!(fuel, 0);
     run(&package, &mut 1000).unwrap();
 }
