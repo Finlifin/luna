@@ -409,29 +409,30 @@ impl<'a> DeclarationWorld<'a> {
         ty: &Term,
         budget: Budget,
         fuel: &mut usize,
-    ) -> Result<Term, String> {
+    ) -> Result<Term, AdmissionError> {
         crate::associated::charge_projection_copy(ty, fuel)?;
         if let Some(value) = self.normalized_types.get(ty) {
             crate::associated::charge_projection_copy(value, fuel)?;
             return Ok(value.clone());
         }
-        let (normalized, remaining) = crate::capabilities::World {
+        let mut query_budget = Budget {
+            steps: *fuel,
+            ..budget
+        };
+        let prepared = crate::capabilities::World {
             index: &self.index,
             implementations: &self.package.implementations,
             traits: &self.package.traits,
             assumptions: &self.assumptions,
             context: &self.context,
         }
-        .normalize_associated_types_cached(
-            ty,
-            Budget {
-                steps: *fuel,
-                ..budget
-            },
-            &mut self.normalized_types,
-        )?;
-        *fuel = remaining;
+        .prepare_normalized_types(ty, &mut query_budget, &self.normalized_types);
+        *fuel = query_budget.steps;
+        let (normalized, completed) = prepared?;
+        // Retaining the root is part of this transaction. Failed retention
+        // cannot expose its successfully normalized children to later queries.
         crate::associated::charge_projection_copy(&normalized.value, fuel)?;
+        self.normalized_types.extend(completed);
         self.normalized_types
             .insert(ty.clone(), normalized.value.clone());
         Ok(normalized.value)
@@ -439,25 +440,25 @@ impl<'a> DeclarationWorld<'a> {
 }
 
 /// Query a concrete annotation without executing or expanding any body.
-/// Failed speculative queries consume their remaining allowance.
+/// Query failures preserve unused work. World construction still reserves its
+/// whole allowance on failure until its metadata builders share a failure meter.
 pub fn normalize_concrete_type(
     package: &n::Package,
     ty: &Term,
     fuel: &mut usize,
 ) -> Result<Term, String> {
-    let result = (|| {
-        let budget = Budget {
-            steps: *fuel,
-            ..Budget::default()
-        };
-        let (mut world, remaining) = DeclarationWorld::new(package, budget, None)?;
-        *fuel = remaining;
-        world.normalized_type(ty, budget, fuel)
-    })();
-    if result.is_err() {
+    let budget = Budget {
+        steps: *fuel,
+        ..Budget::default()
+    };
+    let (mut world, remaining) = DeclarationWorld::new(package, budget, None).map_err(|error| {
         *fuel = 0;
-    }
-    result
+        error
+    })?;
+    *fuel = remaining;
+    world
+        .normalized_type(ty, budget, fuel)
+        .map_err(String::from)
 }
 
 impl DeclarationWorld<'_> {

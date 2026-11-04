@@ -2747,6 +2747,38 @@ NIR 新回归区分声明缺失／重复／耗尽，注入三类集合证据失�
 验证布尔结果、执行事件与无结果缓存。Luna 的 type_resolution dev-dependency 仅供
 该生产边界测试使用，不为测试复制世界构造逻辑。
 
+**DeclarationWorld 的归约事务。** 查询层先由 prepare_normalized_types 在局部状态
+计算结果和待发布子投影；它只借用当前世界缓存，不写入。normalized_type 收到归约
+结果后完成根结果的保留复制检查，随后一次性扩展子投影缓存和根缓存。以前严格
+normalization 的缓存入口已经发布子结果，外层复制仍可能失败，形成“失败查询
+留下成功子缓存”的边界错位；现在外层事务拥有最后发布权。
+
+归约成功或失败都交回预算余额；normalized_type 使用 typed admission 错误。
+materialization 在已有字符串诊断边界渲染，但不改写余额。normalize_concrete_type
+只在世界构建失败时保留原有整份 allowance 扣款；世界已经建立后，查询失败按实际
+追踪消耗返回余额，允许调用者继续独立检查。此处未统一 DeclarationWorld::new：
+Context::from_package 的独立验证预算、各 Index::insert 复用预算、布局元数据复制及
+parameter domain 注册的独立额度仍须一起迁移，不能仅去掉外围清零就声称构建失败
+也已精确计费。便利入口的字符串结果也不作为 typed query 成果。
+
+事务回归使用同一个声明世界的底层归约找到“子结果完成、根保留失败”的实际额度，
+不假设大额度观测消耗是最小成功阈值。失败后重试与全新世界具有相同开销；成功后
+重复查询才获得缓存收益。另检查非法输入、语义未决、已有缓存保留、正余额与恢复。
+
+本次归约事务验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
+  --lib --test associated --test callable_world --test projection_copy_budget
+  --no-fail-fast`：49 项通过，退出 0；`/tmp/luna-tools-l6xerovt/result.json`。
+- 补充同世界探测及明确错误分类检查后，同一入口 `test -p type_resolution -p luna`，
+  选择 `associated`、`associated_signatures`、`deferred_associated_values`、
+  `trait_query_failures`、`normal_input_plans`、`prepared_invocations`、
+  `invocation_value_templates`、`library_list_equality`、`sysroot_preludes`，附
+  `--no-fail-fast`：86 项通过，退出 0；`/tmp/luna-tools-kmwty6y6/result.json`。
+  associated 的 26 项与上一条范围重叠，不累加为独立用例。
+- 四个修改的 Rust 文件通过 scoped rustfmt check，退出 0；
+  `/tmp/luna-tools-10wgpspg/result.json`。git diff --check 通过。
+
 **Given 前提查询。** World／Solver 的 given 系列接口现在返回
 `Result<Option<TraitRequirement>, NominalAdmissionError>`：只有 `Ok(None)` 表示
 已完成查询但没有见证。输入／域非法、预算不足、关系未决分别保留 Invalid、Budget、
@@ -2809,7 +2841,8 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
 - 直接／projected trait resolution、世界命题、条件事实、Type 投影及普通关联值的
   payload／initializer 校验已保留 typed 失败。inherent 查询、qualification／
   TypeAssessment 的部分内部原因仍有 String 或可选结果边界。
-  DeclarationWorld 的外围失败扣款也仍有保守处理；不能据 metered Type/value view 的
+  DeclarationWorld 的构建失败扣款仍有保守处理；其完成类型查询已按外层事务发布并
+  返回实际归约余额。不能据 metered Type/value view 的
   实际扣款声称全部预算所有权已完成。proof replay 仍有合并 admission 错误的路径，
   完整求解链的 Pending／资源／反例传播未完成。
   当前查询复用 NominalAdmissionError，并不意味着所有能力选择都属于值域检查；

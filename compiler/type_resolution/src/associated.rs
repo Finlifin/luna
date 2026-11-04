@@ -333,10 +333,28 @@ impl World<'_> {
         budget: Budget,
         cache: &mut std::collections::HashMap<Term, Term>,
     ) -> Result<(AssociatedTypeNormalization, usize), QueryError> {
-        let (result, remaining, completed) =
-            self.normalize_associated_types_mode(ty, &mut { budget }, false, Some(cache), None)?;
+        let mut budget = budget;
+        let (result, completed) = self.prepare_normalized_types(ty, &mut budget, cache)?;
         cache.extend(completed);
-        Ok((result, remaining))
+        Ok((result, budget.steps))
+    }
+
+    /// Compute in query-local storage. The enclosing operation publishes these
+    /// completed entries only after its own retention checks have succeeded.
+    pub(crate) fn prepare_normalized_types(
+        &self,
+        ty: &Term,
+        budget: &mut Budget,
+        cache: &std::collections::HashMap<Term, Term>,
+    ) -> Result<
+        (
+            AssociatedTypeNormalization,
+            std::collections::HashMap<Term, Term>,
+        ),
+        QueryError,
+    > {
+        self.normalize_associated_types_mode(ty, budget, false, Some(cache), None)
+            .map(|(result, _, completed)| (result, completed))
     }
 
     /// Definition-side type view: given interfaces remain abstract, while

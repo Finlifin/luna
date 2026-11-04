@@ -2249,7 +2249,9 @@ impl Builder<'_> {
     }
 
     fn normalized_type(&mut self, ty: &Term) -> Result<Term, String> {
-        self.world.normalized_type(ty, self.budget, &mut self.fuel)
+        self.world
+            .normalized_type(ty, self.budget, &mut self.fuel)
+            .map_err(String::from)
     }
     fn staging_type_view(&mut self, ty: &Term) -> Result<Term, String> {
         // The annotation walker also visits complete interface identity inputs.

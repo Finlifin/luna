@@ -921,6 +921,22 @@ fn declaration_world_queries_keep_caches_private_and_failure_fuel_spent() {
         fuel_a < before,
         "cached copies still consume their work budget"
     );
+    for (invalid, expected_invalid) in [
+        (Term::Bool(true), true),
+        (projection(ty(P::I32), vec![]), false),
+    ] {
+        let mut fuel = budget.steps;
+        let failure = a.normalized_type(&invalid, budget, &mut fuel).unwrap_err();
+        assert!(matches!(failure, nir::NominalAdmissionError::Invalid(_)) == expected_invalid);
+        if !expected_invalid {
+            assert!(matches!(failure, nir::NominalAdmissionError::Unresolved(_)));
+        }
+        assert!(fuel > 0 && fuel < budget.steps);
+        assert_eq!(
+            a.normalized_type(&query, budget, &mut fuel).unwrap(),
+            ty(P::U8)
+        );
+    }
     assert_eq!(
         b.normalized_type(&query, budget, &mut fuel_b).unwrap(),
         ty(P::Char)
@@ -937,7 +953,14 @@ fn declaration_world_queries_keep_caches_private_and_failure_fuel_spent() {
     let error =
         normalize_concrete_type(&first, &projection(ty(P::I32), vec![]), &mut unknown).unwrap_err();
     assert!(error.contains("remaining-steps"), "{error}");
-    assert_eq!(unknown, 0, "failed selection cannot replenish fuel");
+    assert!(
+        unknown > 0 && unknown < budget.steps,
+        "failed selection returns only unused fuel"
+    );
+    assert_eq!(
+        normalize_concrete_type(&first, &query, &mut unknown).unwrap(),
+        ty(P::U8)
+    );
 }
 
 #[test]
@@ -1234,4 +1257,97 @@ fn completed_associated_tuples_follow_current_declaration_layout_evidence() {
     assert!(resolve(&index).is_err());
     index.set_normal_form_metadata(vec![head]);
     assert_eq!(resolve(&index).unwrap().value, payload);
+}
+
+#[test]
+fn declaration_world_failed_retention_does_not_publish_completed_children() {
+    use std::collections::HashMap;
+    use type_resolution::{associated::charge_projection_copy, dispatch::DeclarationWorld};
+    let result = Term::Record(
+        (0..96)
+            .map(|i| (format!("field{i:03}"), ty(P::U8)))
+            .collect(),
+    );
+    let package = nir::program::Package {
+        traits: vec![contract()],
+        implementations: vec![implementation(ty(P::Bool), result.clone())],
+        ..Default::default()
+    };
+    let query = Term::Pointer(Box::new(projection(ty(P::Bool), vec![])));
+    let expected = Term::Pointer(Box::new(result));
+    let make = || {
+        DeclarationWorld::new(&package, Budget::default(), None)
+            .unwrap()
+            .0
+    };
+    let mut fresh = make();
+    let mut full_fuel = 100_000;
+    assert_eq!(
+        fresh
+            .normalized_type(&query, Budget::default(), &mut full_fuel)
+            .unwrap(),
+        expected
+    );
+    let full_work = 100_000 - full_fuel;
+    let mut copy_fuel = 100_000;
+    charge_projection_copy(&expected, &mut copy_fuel).unwrap();
+    let copy_work = 100_000 - copy_fuel;
+    let probe = make();
+    let world = World {
+        index: probe.index(),
+        implementations: &package.implementations,
+        traits: &package.traits,
+        assumptions: probe.assumptions(),
+        context: probe.context(),
+    };
+
+    // Find a real boundary where normalization finishes, but retaining the
+    // root cannot. Do not assume observed PTC work is a minimum success budget.
+    let (allowance, remaining) = (full_work.saturating_sub(copy_work)..full_work)
+        .rev()
+        .find_map(|steps| {
+            let mut fuel = steps;
+            charge_projection_copy(&query, &mut fuel).ok()?;
+            let (normalized, mut remaining) = world
+                .normalize_associated_types_cached(
+                    &query,
+                    Budget {
+                        steps: fuel,
+                        ..Budget::default()
+                    },
+                    &mut HashMap::new(),
+                )
+                .ok()?;
+            assert_eq!(normalized.value, expected);
+            charge_projection_copy(&normalized.value, &mut remaining)
+                .is_err()
+                .then_some((steps, remaining))
+        })
+        .expect("the final root retention has a nonzero resource boundary");
+    let mut queried = make();
+    let mut fuel = allowance;
+    assert!(matches!(
+        queried.normalized_type(&query, Budget::default(), &mut fuel),
+        Err(nir::NominalAdmissionError::Budget)
+    ));
+    assert_eq!(
+        fuel, remaining,
+        "failure returns actual normalization and copy consumption"
+    );
+    let mut retry_fuel = 100_000;
+    assert_eq!(
+        queried
+            .normalized_type(&query, Budget::default(), &mut retry_fuel)
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        retry_fuel, full_fuel,
+        "failed root retention must not warm a child cache"
+    );
+    let mut warm_fuel = 100_000;
+    queried
+        .normalized_type(&query, Budget::default(), &mut warm_fuel)
+        .unwrap();
+    assert!(warm_fuel > retry_fuel && warm_fuel < 100_000);
 }
