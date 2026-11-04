@@ -222,7 +222,7 @@ impl Invocation {
             // Ordinary Type inputs select the concrete dispatch world at a miss.
             Vec::new()
         } else {
-            elaboration::materialization::dispatch_instances_for_roots(
+            elaboration::materialization::dispatch_instances_for_invocation(
                 package,
                 &[iir::InstanceKey {
                     declaration,
@@ -601,6 +601,14 @@ fn evaluate(
         .as_ref()
         .map_or(package, |(source, _, _)| source.as_ref());
     let graph = prepared.as_ref().map(|(_, graph, _)| graph.as_ref());
+    let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
+        crate::invocation::resolve_method_for_invocation(source, world.context, callee, remaining)
+    };
+    let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
+        elaboration::materialization::resolve_associated_value_for_invocation(
+            world, access, remaining,
+        )
+    };
     let entry = prepared
         .as_ref()
         .map_or(declaration, |(_, _, entry)| *entry);
@@ -644,6 +652,8 @@ fn evaluate(
     };
     let mut vm = match prepared_vm {
         Ok(vm) => vm
+            .with_method_resolver(&method_resolver)
+            .with_associated_resolver(&associated_resolver)
             .with_budgeted_type_solver(&solver)
             .with_budgeted_pointer_copy_permission(&pointer_copy),
         Err(error) => {

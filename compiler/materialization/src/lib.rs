@@ -154,8 +154,9 @@ pub fn dispatch_instances_for_roots(
     .map(|result| result.dispatch)
 }
 
-/// Prepare reachable dispatch while retaining ordinary Type telescopes for
-/// binding by the comptime interpreter at invocation time.
+/// Prepare reachable dispatch while retaining ordinary comptime input telescopes
+/// for binding by the interpreter at invocation time. Type and value inputs both
+/// remain invocation binders; this does not authorize their IIR materialization.
 pub fn dispatch_instances_for_invocation(
     package: &n::Package,
     roots: &[iir::InstanceKey],

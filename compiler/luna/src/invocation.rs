@@ -295,20 +295,7 @@ fn execute_prepared(
         )
     };
     let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
-        let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
-        let before = fuel;
-        let result = elaboration::materialization::resolve_method_identity_in_context(
-            package,
-            callee,
-            &context,
-            &[],
-            &mut fuel,
-        );
-        *remaining -= (before - fuel) as u64;
-        result.map_err(|_| comptime_interpretor::Error {
-            kind: comptime_interpretor::ErrorKind::UnmaterializedDispatch,
-            source: Some(callee.source),
-        })
+        resolve_method_for_invocation(package, &context, callee, remaining)
     };
     let mut budget = Budget {
         steps: fuel,
@@ -378,6 +365,30 @@ fn execute_prepared(
             message.push_str(&format!("; pointer Copy evidence: {reason}"));
         }
         message
+    })
+}
+
+/// Resolve only the invocation-demanded method in the owning source world.
+/// Selection consumes the caller's budget; body execution remains in the VM.
+pub(crate) fn resolve_method_for_invocation(
+    package: &Package,
+    context: &elaboration::ptc::Context,
+    callee: &nir::program::Expr,
+    remaining: &mut u64,
+) -> Result<nir::program::MethodInstance, comptime_interpretor::Error> {
+    let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
+    let before = fuel;
+    let result = elaboration::materialization::resolve_method_identity_in_context(
+        package,
+        callee,
+        context,
+        &[],
+        &mut fuel,
+    );
+    *remaining -= (before - fuel) as u64;
+    result.map_err(|_| comptime_interpretor::Error {
+        kind: comptime_interpretor::ErrorKind::UnmaterializedDispatch,
+        source: Some(callee.source),
     })
 }
 

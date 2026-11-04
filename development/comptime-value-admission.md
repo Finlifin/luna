@@ -260,8 +260,9 @@ VM 的签名查询移到 `callable_domains.rs`，typed 结果区分实际缺失�
 将本次涉及的 8 个生产源文件暂时还原为 HEAD `962a03b4`、保留同一工作区资源修改后，
 单独运行此例仍在同一断言、同一消息处失败，退出 101：
 `/tmp/luna-tools-biw368sn/result.json`。对照备份、限定文件列表及恢复结果保存在
-`/tmp/luna-admission-baseline-wr76d3vj`；对照后已逐字节恢复本次源码。这项失败尚未修复，
-不能以共有值域检查通过推断 invocation staging 或结果缓存准备已经完成。
+`/tmp/luna-admission-baseline-wr76d3vj`；对照后已逐字节恢复本次源码。该阶段未修复
+此失败；第 19 节说明后续 invocation 准备入口的实际修复。共有值域检查本身不能证明
+invocation staging 或结果缓存准备已经完成。
 
 真实六包尝试还暴露普通函数子句收集器的既有限制。进一步核对 `bcd5127e`
 中的 `ensure_signature`：旧条件是 `!is_normal_form_head || list_element_type(...).is_none()`，
@@ -943,3 +944,53 @@ README 的原有工作区内容保持不变。
 
 修改 Rust 文件的格式检查退出 0，证据 `/tmp/luna-tools-jz03jkgm/result.json`；
 本次范围的 `git diff --check` 通过。
+
+
+## 19. 可复用 invocation 保留普通 comptime 值参数
+
+`memoization::Invocation` 同时承担可复用代码准备与受限的 Type 结果缓存。旧准备
+分支对无需普通 Type 参数专门化的 callable 使用 strict dispatch closure；该 closure
+要求所有普通输入均已完成 staging。因此合法的 `comptime enabled: bool` 在调用值
+尚未供应时就被拒绝。问题位于执行准备责任，与名义类型值参数的接纳、Eq／Hash 或
+是否缓存 bool 结果无关。
+
+准备现在使用与普通 invocation 相同的 `dispatch_instances_for_invocation`。带普通
+comptime 输入的声明保留模板与契约，VM 在每次调用时按原参数协议绑定实际值。
+仅取得函数身份不执行主体或输入，也不授权将未绑定模板转成可执行 IIR；strict
+materialization 的检查仍保留。现有 Type 输入专门化与其代码准备缓存继续承担原职责。
+
+被保留模板内的 trait 方法与关联值直到实际调用才会被需求。可复用 invocation 现已
+安装与普通入口相同的源世界解析服务，方法选择共用 `resolve_method_for_invocation`，
+使用所属不可变 package/context 和当前调用预算。关联值同样经过原有的被选初始化器
+协议。VM 执行所选主体、检查接口和参数契约；代码复用不保存本次值、成功断言或
+消费权限。传入不同名义 value index 的值仍拒绝，随后合法调用可以继续使用同一准备对象。
+
+Type 结果过滤保持在结果缓存准备之前。非 Type 返回值不准备键协议，也不查存结果；
+返回 Type 的调用仍要求源 Eq／Hash、兼容的结构判别与结果形成检查。新源码用例直接
+使用真实六包的 `ComptimeEq`、`ComptimeHash`，通过 bool 参数选择 bool／u8 返回值，
+分别验证首次执行和后续命中。没有新增按某个库定义或源码形状识别的分支。
+
+本轮开始在 HEAD `1682462e` 显式复现
+`memoized_value_indexed_keys_keep_declaration_and_value_arguments`，仍以 dispatch
+input staging 失败，退出 101：`/tmp/luna-tools-2ngvdo4c/result.json`。修复后该项
+随 nominal_value_parameters 全组通过，不再需要显式跳过，原用例与期望未改动。
+
+完整 ArgumentPlan、动态 Type producer 的列表上下文、生成定义的 invocation 发布
+与统一世界所有权仍未完成。本节闭合可复用入口的模板保留和需求解析，不将其描述为
+所有 comptime 调用准备已经统一。
+
+
+验证目录 `/home/fin/luna`，统一入口 `development/check.py --timeout 900 -- test`：
+
+| 范围 | 本轮结果 |
+| --- | --- |
+| 原失败与 Type 输入准备缓存 | `-p luna --test nominal_value_parameters --test staged_invocation_reuse` 在混合命令中分别 307、4 项通过；证据 `/tmp/luna-tools-m_sqthdz/result.json`。该混合命令整体退出 101，因为新增用例最初选中了同名方法入口，以及契约失败断言使用了错误的错误类别，不能把整条命令写作成功。 |
+| 最终真实 sysroot 用例 | `-p luna --test invocation_value_templates --no-fail-fast`，3 项通过，退出 0；`/tmp/luna-tools-bijraiqu/result.json`。使用唯一命名入口，明确检查 ProgramContractRejected；覆盖每次值供应、名义域拒绝、方法／关联值选择、预算／契约失败恢复、非 Type 结果不缓存、真实 meta 协议的 Type 结果命中。 |
+| 原 invocation、值引用与关联调用 | `-p luna --test prepared_invocations --test dynamic_trait_clauses --test deferred_associated_values --test comptime_memory --no-fail-fast`，35 项通过，退出 0；`/tmp/luna-tools-9ud_aaij/result.json`。 |
+| 结果缓存与泛型调用回归 | `-p luna --test execution memoized -- --nocapture`，13 项通过，退出 0；`/tmp/luna-tools-ipoojvso/result.json`。覆盖协议判别、失败不发布、独立世界、Type 普通输入及结果形成检查。 |
+
+最终生产源码在以上检查之间没有语义改动。三个 Rust 实现／测试文件的格式检查
+退出 0，证据 `/tmp/luna-tools-s95822j3/result.json`；materialization 仅修改接口注释，
+未全文件重排；`git diff --check` 通过。清单、原始源码和原有修改的哈希核对保存在
+`/tmp/luna-invocation-template-dispatch-xuws5gmu`。未运行全 workspace、native 或性能
+基准；正式 docs 与原有工作区修改保持不变。
