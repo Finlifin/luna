@@ -38,6 +38,33 @@ fn run(package: &Package, fuel: &mut usize) -> Result<BTreeSet<crate::Declaratio
 }
 
 #[test]
+fn opaque_metadata_consumes_the_phase_declaration_allowance() {
+    let package = Package {
+        normal_forms: vec![crate::normal_forms::Head {
+            declaration: crate::DeclarationId {
+                package: 1,
+                local: 1,
+            },
+            role: crate::normal_forms::Role::Opaque,
+            collector: None,
+            parameters: vec![],
+            requirements: vec![crate::program::TypePredicate::Bool(true); 40],
+        }],
+        ..Default::default()
+    };
+    let mut fuel = 1000;
+    machine_arithmetic_functions_with_budgets(&package, &mut fuel, &mut 1000).unwrap();
+    let cost = 1000 - fuel;
+    let error = machine_arithmetic_functions_with_budgets(&package, &mut (cost - 1), &mut 1000)
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "normal-form metadata validation budget exhausted"
+    );
+    machine_arithmetic_functions_with_budgets(&package, &mut cost.clone(), &mut 1000).unwrap();
+}
+
+#[test]
 fn callable_preparation_cannot_allocate_a_frame_without_inspection_fuel() {
     let package = Package {
         functions: vec![function(1, Phase::Comptime)],

@@ -2333,3 +2333,71 @@ child 与 owner 的不同源位置，去掉对旧准备成本下恰好落在第�
 观察、normal-form/newtype 元数据、其他临时索引及 VM constructor 的完整成本和
 资源错误分类仍需继续迁移；不能由本批推出整个 pass 或 VM 构造已经完全有界。
 正式 docs 与原有工作区修改保持不变。
+
+
+### NF／newtype 声明元数据的共享准入预算
+
+phase 的 normal-form 与 newtype 元数据检查现消费同一 declaration allowance。
+`normal_forms::validate_in` 调用 `newtypes::validate_in`，不为每个 head、参数域或
+newtype 重新创建额度。集合和输入槽位在分配前预留，类型／契约观察及表示替换继续
+消费该额度。保留兼容 `validate` 入口给尚未迁移的独立调用方，使用一次 100,000
+额度；phase 不经过该入口，也未提高既有 phase 默认额度。
+
+两个检查器分别保留 typed Budget 与 Invalid；NF 检查还保留内层 newtype 错误。
+newtype 表示查询的资源失败不再变成“非法或过大的表示”，NF 参数域的预算耗尽也
+不再成为“不支持或前向依赖的类型”。类型遍历的实现深度限制仍归资源 Budget，
+本批未另建精确的 depth 错误协议。旧静态字符串边界按 message 显示资源原因。
+
+NF 元数据检查独立移入 `normal_forms/validation.rs`。每次检查建立借用的 head／
+function 身份索引与 nominal 集合，collection 角色查询不再对每个类型节点扫描
+整个声明列表。查询依据注册身份与既有表示契约，不增加按源码名称猜测的规则；
+NF 主体保持不执行、头保持不展开。预先建立索引可以改变同时存在多种非法元数据
+时的首个诊断顺序，不改变这些元数据均须拒绝的规则。
+
+newtype 捕获观察改为预算内借用遍历，删除为了收集 rigid 参数而通过 rewrite
+克隆整棵类型树的路径。重复参数的 sort 冲突、未声明捕获及 capture-first 域检查
+保留。开放 collection 域已经通过 scope 检查后，只需一次 rigid 观察判定是否开放，
+不再为每个 prior 参数重走同一类型。返回域或布局没有借此获得额外的相等证据。
+
+生产回归检查无函数体的保留 head contracts 也消耗 phase 声明预算；独立测试覆盖
+newtype 各个耗尽点、失败后重试、跨 head 共享额度、捕获 sort 错误和宽类型域。
+新域检查接口 `supported_input_type_with_collections_budgeted` 区分普通 false 与
+资源错误，能消费调用方实际给出的额度，不再内置每域 100,000 的隐藏上限。
+
+本批工作目录 `/home/fin/luna`，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --lib --test phases --test declaration_metadata --test newtypes
+  --test normal_inputs --no-fail-fast`：129 通过，退出 0；
+  `/tmp/luna-tools-tdpqkt6c/result.json`。
+- `-p nir -p ptc -p comptime_interpretor --lib --test declaration_metadata
+  --test newtypes --test normal_inputs --test type_list_inputs --test instance_budget
+  --no-fail-fast`：654 通过、1 失败，退出 101；
+  `/tmp/luna-tools-dhaeu8dr/result.json`。
+- `-p luna --test newtypes --test normal_form_domains --test normal_input_plans
+  --test open_normal_input_plans --test dependent_list_collectors --test tuple_examples
+  --test type_lists --test sysroot_preludes --test library_list_equality --no-fail-fast`：
+  286 通过、1 失败，退出 101；`/tmp/luna-tools-2p3ztkkw/result.json`。
+
+两项失败已分别用本批之前 `51bbc523` 的 newtypes／normal_forms／phase 源码重跑，
+其余工作区保持不变：
+
+- VM 的 `type_list_constant_nodes_validate_elements_domain_and_substitution` 在
+  `type_list_inputs.rs:335` 仍断言构造期错误应为 `PhaseMismatch`。基线命令
+  `-p comptime_interpretor --test type_list_inputs
+  type_list_constant_nodes_validate_elements_domain_and_substitution -- --exact`
+  同样失败于该断言，`/tmp/luna-tools-xzxolwbo/result.json` 退出 101。
+- `tuple_examples::migrated_tuple_examples_compile_with_their_source_protocols`
+  在第一个 `anonymous-record-patterns.fl` 报 `bool` 未绑定，未进入本批元数据检查。
+  基线命令 `-p luna --test tuple_examples
+  migrated_tuple_examples_compile_with_their_source_protocols -- --exact` 同样报错，
+  `/tmp/luna-tools-vpmgjz2w/result.json` 退出 101。
+
+本批没有修改这两个用例或降低它们的预期，也不把这些检查组报告为全通过。对照后
+逐字节恢复已经测试的新实现，格式检查 `/tmp/luna-tools-j27x2e7w/result.json` 退出 0。
+没有运行全 workspace 或性能基准；正式 docs 和原有工作区修改保持不变。
+
+后续边界仍明确存在：elaboration／CMTT 的五处域观察尚用兼容 bool 入口，需随其
+调用方额度和诊断一起迁移，不能据此宣称所有“unsupported”误报已消除。PTC／VM
+独立 metadata 构造仍用兼容入口，完整 phase／constructor 的精确扣款、错误分类与
+稳定世界证据复用仍未闭合。其他声明观察和临时集合亦须继续审计。

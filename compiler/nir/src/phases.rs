@@ -101,9 +101,9 @@ fn machine_arithmetic_functions_with_budgets(
             });
         }
     }
-    crate::normal_forms::validate(package).map_err(|message| Error {
+    crate::normal_forms::validate_in(package, declaration_fuel).map_err(|error| Error {
         source: SourceRange { start: 0, end: 0 },
-        message,
+        message: error.message(),
     })?;
     for function in &package.functions {
         parameters::validate_frame(function, false, declaration_fuel)

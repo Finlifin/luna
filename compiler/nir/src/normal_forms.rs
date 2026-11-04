@@ -6,6 +6,9 @@ use std::{
     fmt,
 };
 
+mod validation;
+pub use validation::{ValidationError, validate, validate_in};
+
 /// Compiler-provided callable identities and their ordinary signatures.
 /// This registry describes builtin exports; it does not change NF application,
 /// argument representation, or matching for any declaration.
@@ -184,13 +187,39 @@ pub fn supported_input_type_with_collections_in(
     is_nominal: impl Fn(DeclarationId) -> bool,
     target: Option<crate::target::TargetData>,
 ) -> bool {
+    supported_input_type_with_collections_budgeted(
+        ty,
+        prior,
+        is_tuple,
+        is_list,
+        is_nominal,
+        target,
+        &mut 100_000,
+    )
+    .unwrap_or(false)
+}
+
+/// Representation admission with explicit resource failure. Ordinary domain
+/// rejection is false; exhausted inspection must not become an invalid type.
+pub fn supported_input_type_with_collections_budgeted(
+    ty: &Term,
+    prior: &[crate::DeclarationParameter],
+    is_tuple: impl Fn(DeclarationId) -> bool,
+    is_list: impl Fn(DeclarationId) -> bool,
+    is_nominal: impl Fn(DeclarationId) -> bool,
+    target: Option<crate::target::TargetData>,
+    fuel: &mut usize,
+) -> Result<bool, crate::type_computations::Error> {
+    use crate::type_computations::{Error, charge_term};
+    // Prepay the borrowed worklist and all payload inspections before growing
+    // it. Scope checks below still consume their additional traversal cost.
+    charge_term(ty, fuel)?;
     let mut work = vec![(ty, 0usize)];
-    let mut remaining = 100_000usize;
     while let Some((ty, depth)) = work.pop() {
-        if depth > 128 || remaining == 0 {
-            return false;
+        if depth > 128 {
+            return Err(Error::Budget);
         }
-        remaining -= 1;
+        *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
         match ty {
             Term::ClosureContextType => {}
             Term::Optional(payload) => {
@@ -199,8 +228,8 @@ pub fn supported_input_type_with_collections_in(
                 }
             }
             Term::ErrorResult { errors, result } => {
-                if errors.is_empty() || errors.len().saturating_add(1) > remaining {
-                    return false;
+                if errors.is_empty() {
+                    return Ok(false);
                 }
                 work.extend(errors.iter().map(|ty| (ty, depth + 1)));
                 if result.as_ref() != &Term::Primitive(Primitive::Never) {
@@ -233,12 +262,18 @@ pub fn supported_input_type_with_collections_in(
             Term::Rigid {
                 declaration,
                 sort: Sort::Type,
-            } if prior
-                .iter()
-                .any(|p| p.declaration == *declaration && p.sort == Sort::Type) => {}
+            } => {
+                *fuel = fuel.checked_sub(prior.len()).ok_or(Error::Budget)?;
+                if !prior
+                    .iter()
+                    .any(|p| p.declaration == *declaration && p.sort == Sort::Type)
+                {
+                    return Ok(false);
+                }
+            }
             Term::Nominal { declaration, .. } if is_nominal(*declaration) => {
-                if !nominal_domain_scope(ty, prior, &mut remaining) {
-                    return false;
+                if !nominal_domain_scope(ty, prior, fuel)? {
+                    return Ok(false);
                 }
             }
             Term::Function { .. }
@@ -248,30 +283,23 @@ pub fn supported_input_type_with_collections_in(
                 // Runtime callable identities are ordinary comptime data too.
                 // Their signature may describe runtime-only argument domains;
                 // admitting the identity does not execute the function.
-                if !nominal_domain_scope(ty, prior, &mut remaining) {
-                    return false;
+                if !nominal_domain_scope(ty, prior, fuel)? {
+                    return Ok(false);
                 }
             }
             Term::AssociatedType { .. } => {
                 // Declaration-side projections are symbolic domains, just as
                 // a prior Type input is. Selection must resolve the actual
                 // value representation before admitting a completed input.
-                if !nominal_domain_scope(ty, prior, &mut remaining) {
-                    return false;
+                if !nominal_domain_scope(ty, prior, fuel)? {
+                    return Ok(false);
                 }
             }
             Term::Record(fields) => {
-                if fields.len() > remaining {
-                    return false;
-                }
                 let mut names = BTreeSet::new();
                 for (name, ty) in fields {
-                    let Some(rest) = remaining.checked_sub(name.len()) else {
-                        return false;
-                    };
-                    remaining = rest;
                     if !names.insert(name) {
-                        return false;
+                        return Ok(false);
                     }
                     work.push((ty, depth + 1));
                 }
@@ -282,10 +310,10 @@ pub fn supported_input_type_with_collections_in(
                 arguments,
             } if is_list(*head) => {
                 let [element] = arguments.as_slice() else {
-                    return false;
+                    return Ok(false);
                 };
                 if element.sort() != Sort::Type {
-                    return false;
+                    return Ok(false);
                 }
                 work.push((element, depth + 1));
             }
@@ -298,27 +326,17 @@ pub fn supported_input_type_with_collections_in(
                     // An open domain need not expose a completed value layout.
                     // Formation has checked the head application; argument
                     // admission checks its instantiated representation later.
-                    if !nominal_domain_scope(ty, prior, &mut remaining) {
-                        return false;
+                    if !nominal_domain_scope(ty, prior, fuel)? {
+                        return Ok(false);
                     }
-                    let mut open = false;
-                    for parameter in prior {
-                        if crate::type_computations::charge_term(ty, &mut remaining).is_err() {
-                            return false;
-                        }
-                        if ty.mentions_rigid(parameter.declaration) {
-                            open = true;
-                            break;
-                        }
-                    }
-                    if !open {
-                        return false;
+                    // Scope admission above already proves that every rigid
+                    // is a prior input. One borrowed walk replaces one walk
+                    // per input; no definition or substitution is evaluated.
+                    if !crate::type_computations::has_rigid_parameters_bounded(ty, fuel)? {
+                        return Ok(false);
                     }
                     continue;
                 };
-                if fields.len() > remaining {
-                    return false;
-                }
                 work.extend(fields.iter().map(|field| (field, depth + 1)));
             }
             Term::NormalForm {
@@ -327,20 +345,17 @@ pub fn supported_input_type_with_collections_in(
                 // Opaque user heads are ordinary parameter domains. Do not
                 // unfold them or require a builtin collection role merely to
                 // declare an input; values still need completed admission.
-                if !nominal_domain_scope(ty, prior, &mut remaining) {
-                    return false;
+                if !nominal_domain_scope(ty, prior, fuel)? {
+                    return Ok(false);
                 }
             }
             Term::Tuple(fields) => {
-                if fields.len() > remaining {
-                    return false;
-                }
                 work.extend(fields.iter().map(|field| (field, depth + 1)));
             }
-            _ => return false,
+            _ => return Ok(false),
         }
     }
-    true
+    Ok(true)
 }
 
 /// Representation-shape guard for the list layout. A matching shape alone
@@ -421,151 +436,6 @@ pub fn list_element_budgeted(
     };
     crate::type_computations::charge_term(element, fuel)?;
     Ok(Some(element.clone()))
-}
-
-/// Validate the currently supported telescope and its executable-body metadata.
-/// External opaque terms need not supply a local body; local head definitions do.
-pub fn validate(package: &Package) -> Result<(), &'static str> {
-    crate::newtypes::validate(package)?;
-    let mut functions = BTreeMap::new();
-    for function in &package.functions {
-        if functions.insert(function.declaration, function).is_some() {
-            return Err("duplicate function declaration");
-        }
-    }
-    let mut heads = BTreeSet::new();
-    for head in &package.normal_forms {
-        if !heads.insert(head.declaration) {
-            return Err("duplicate normal-form head metadata");
-        }
-        if head.role == Role::Tuple
-            && (head.parameters.len() != 1
-                || head.parameters[0].kind != Kind::Value
-                || !package
-                    .normal_forms
-                    .iter()
-                    .any(|list| list.is_type_list_instance(&head.parameters[0].ty)))
-        {
-            return Err("Tuple head requires exactly one Type-list input");
-        }
-        if head.role == Role::TypeList
-            && (head.parameters.len() != 1 || head.parameters[0].kind != Kind::Type)
-        {
-            return Err(
-                "meta.List binding has an invalid constructor signature: expected exactly one Type input",
-            );
-        }
-        if head
-            .collector
-            .is_some_and(|index| index.checked_add(1) != Some(head.parameters.len()))
-        {
-            return Err("normal-form collector must be the final input");
-        }
-        let function = functions.get(&head.declaration);
-        if function.is_some_and(|f| f.phase != FunctionPhase::NormalForm || !f.pure) {
-            return Err("normal-form metadata requires a pure opaque definition");
-        }
-        let mut declarations = BTreeSet::new();
-        let mut bindings = BTreeSet::new();
-        let mut types = Vec::new();
-        let mut values = Vec::new();
-        let mut prior = Vec::new();
-        for parameter in &head.parameters {
-            if !declarations.insert(parameter.declaration) || !bindings.insert(parameter.binding) {
-                return Err("duplicate normal-form input identity");
-            }
-            match parameter.kind {
-                Kind::Type => {
-                    if parameter.ty != Term::Primitive(Primitive::Type) {
-                        return Err("normal-form Type input must have Type type");
-                    }
-                    types.push(parameter.declaration);
-                }
-                Kind::Value => {
-                    let supported = supported_input_type_with_collections_in(
-                        &parameter.ty,
-                        &prior,
-                        |id| {
-                            package
-                                .normal_forms
-                                .iter()
-                                .any(|head| head.declaration == id && head.role == Role::Tuple)
-                        },
-                        |id| {
-                            package
-                                .normal_forms
-                                .iter()
-                                .any(|head| head.declaration == id && head.role == Role::TypeList)
-                        },
-                        |id| {
-                            package.structs.iter().any(|s| s.declaration == id)
-                                || package.enums.iter().any(|e| e.declaration == id)
-                                || package.newtypes.iter().any(|n| n.declaration == id)
-                        },
-                        package.target,
-                    );
-                    if !supported {
-                        return Err(
-                            "normal-form value input has an unsupported or forward-dependent type",
-                        );
-                    }
-                    values.push(parameter);
-                }
-            }
-            prior.push(crate::DeclarationParameter {
-                declaration: parameter.declaration,
-                sort: if parameter.kind == Kind::Type {
-                    Sort::Type
-                } else {
-                    Sort::ComptimeValue
-                },
-            });
-        }
-        // Head declarations can accompany a required-computation package
-        // without transporting their non-invocable definition bodies.
-        let Some(function) = function else {
-            continue;
-        };
-        // Formation must retain both ordinary predicates and trait capability
-        // obligations, including when the non-invocable body is omitted later.
-        let count = function
-            .requirements
-            .len()
-            .checked_add(function.capabilities.len())
-            .ok_or("normal-form contract count overflow")?;
-        if head.requirements.len() != count
-            || head.requirements[..function.requirements.len()] != function.requirements
-            || !head.requirements[function.requirements.len()..].iter().zip(&function.capabilities)
-                .all(|(predicate, capability)| matches!(predicate, TypePredicate::Trait(retained) if retained == capability))
-        {
-            return Err("normal-form contracts disagree with the checked definition");
-        }
-        if function.type_parameters != types
-            || function.parameters != values.iter().map(|p| p.binding).collect::<Vec<_>>()
-        {
-            return Err("normal-form input identities disagree with the checked body");
-        }
-        let Term::Function { parameters, result } = &function.signature else {
-            return Err("normal-form body signature is not a function");
-        };
-        if **result != Term::Primitive(Primitive::Type)
-            || parameters.len() != values.len()
-            || parameters
-                .iter()
-                .zip(values)
-                .any(|(actual, input)| actual.sort != Sort::ComptimeValue || actual.ty != input.ty)
-        {
-            return Err("normal-form body signature disagrees with its input telescope");
-        }
-    }
-    if package
-        .functions
-        .iter()
-        .any(|f| f.phase == FunctionPhase::NormalForm && !heads.contains(&f.declaration))
-    {
-        return Err("normal-form definition is missing its ordered input metadata");
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1119,19 +989,23 @@ fn nominal_domain_scope(
     ty: &Term,
     prior: &[crate::DeclarationParameter],
     fuel: &mut usize,
-) -> bool {
-    if crate::type_computations::charge_term(ty, fuel).is_err() {
-        return false;
-    }
+) -> Result<bool, crate::type_computations::Error> {
+    use crate::type_computations::Error;
+    crate::type_computations::charge_term(ty, fuel)?;
     let mut pending = vec![ty];
     while let Some(term) = pending.pop() {
         match term {
-            Term::Rigid { declaration, sort }
-                if prior
+            Term::Rigid { declaration, sort } => {
+                *fuel = fuel.checked_sub(prior.len()).ok_or(Error::Budget)?;
+                if !prior
                     .iter()
-                    .any(|p| p.declaration == *declaration && p.sort == *sort) => {}
-            Term::Rigid { .. } | Term::Hole { .. } | Term::Runtime(_) | Term::Value { .. } => {
-                return false;
+                    .any(|p| p.declaration == *declaration && p.sort == *sort)
+                {
+                    return Ok(false);
+                }
+            }
+            Term::Hole { .. } | Term::Runtime(_) | Term::Value { .. } => {
+                return Ok(false);
             }
             Term::Nominal { arguments, .. }
             | Term::NormalForm { arguments, .. }
@@ -1198,5 +1072,5 @@ fn nominal_domain_scope(
             _ => {}
         }
     }
-    ty.check_scope(&[]).is_ok()
+    Ok(ty.check_scope(&[]).is_ok())
 }

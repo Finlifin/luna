@@ -239,8 +239,41 @@ impl fmt::Display for Newtype {
 
 /// Validate declaration metadata independently of executable casts. A newtype
 /// cannot borrow the identity of a struct or enum to obtain its operations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValidationError {
+    Budget,
+    Invalid(&'static str),
+}
+impl ValidationError {
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::Budget => "newtype metadata validation budget exhausted",
+            Self::Invalid(message) => message,
+        }
+    }
+}
+impl fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.message())
+    }
+}
+impl std::error::Error for ValidationError {}
+
+/// Compatibility entry for callers without a shared declaration allowance.
 pub fn validate(package: &crate::program::Package) -> Result<(), &'static str> {
-    let mut fuel = 100_000;
+    validate_in(package, &mut 100_000).map_err(|error| error.message())
+}
+
+/// Validate metadata without reducing opaque heads. Index construction, domain
+/// inspection, representation substitution and contracts share caller fuel.
+pub fn validate_in(
+    package: &crate::program::Package,
+    fuel: &mut usize,
+) -> Result<(), ValidationError> {
+    use ValidationError::Invalid;
+    metadata_spend(fuel, package.structs.len())?;
+    metadata_spend(fuel, package.enums.len())?;
+    metadata_spend(fuel, package.newtypes.len())?;
     let mut identities = std::collections::BTreeSet::new();
     for definition in &package.structs {
         identities.insert(definition.declaration);
@@ -249,23 +282,23 @@ pub fn validate(package: &crate::program::Package) -> Result<(), &'static str> {
         identities.insert(definition.declaration);
     }
     for definition in &package.newtypes {
-        spend(
-            &mut fuel,
-            definition.type_parameters.len().saturating_add(1),
-        )
-        .map_err(|_| "newtype metadata validation budget exhausted")?;
+        metadata_spend(fuel, definition.type_parameters.len())?;
+        metadata_spend(fuel, definition.parameter_types.len())?;
+        for domain in &definition.parameter_types {
+            metadata_term(domain, fuel)?;
+        }
         if !identities.insert(definition.declaration) {
-            return Err("duplicate nominal newtype identity");
+            return Err(Invalid("duplicate nominal newtype identity"));
         }
         let binders = definition
             .parameter_binders()
-            .map_err(|_| "invalid newtype parameter domains")?;
+            .map_err(|_| Invalid("invalid newtype parameter domains"))?;
         let mut parameters = std::collections::BTreeMap::new();
         let own = binders.len() - definition.capture_count;
         for index in (own..binders.len()).chain(0..own) {
             let parameter = &binders[index];
             if let Some(domain) = definition.parameter_types.get(index) {
-                validate_contract_capture(domain, &parameters, &mut fuel)?;
+                validate_contract_capture(domain, &parameters, fuel)?;
             }
             parameters.insert(parameter.declaration, parameter.sort);
         }
@@ -277,12 +310,15 @@ pub fn validate(package: &crate::program::Package) -> Result<(), &'static str> {
             })
             .collect::<Vec<_>>();
         definition
-            .representation_budgeted(&arguments, &[], &mut fuel)
-            .map_err(|_| "invalid or excessively large newtype representation or telescope")?;
-        validate_contract_capture(&definition.representation, &parameters, &mut fuel).map_err(
+            .representation_budgeted(&arguments, &[], fuel)
+            .map_err(|error| match error {
+                ConversionError::Budget => ValidationError::Budget,
+                _ => Invalid("invalid or excessively large newtype representation or telescope"),
+            })?;
+        validate_contract_capture(&definition.representation, &parameters, fuel).map_err(
             |reason| {
-                if reason == "newtype contract has an undeclared captured parameter" {
-                    "newtype representation has an undeclared captured parameter"
+                if reason == Invalid("newtype contract has an undeclared captured parameter") {
+                    Invalid("newtype representation has an undeclared captured parameter")
                 } else {
                     reason
                 }
@@ -291,36 +327,36 @@ pub fn validate(package: &crate::program::Package) -> Result<(), &'static str> {
         // Formation premises are part of the same closed declaration as its
         // representation. Even a constant representation may capture types
         // solely through a capability or requirement.
+        metadata_spend(fuel, definition.capabilities.len())?;
         for capability in &definition.capabilities {
-            validate_contract_capture(&capability.subject, &parameters, &mut fuel)?;
+            validate_contract_capture(&capability.subject, &parameters, fuel)?;
+            metadata_spend(fuel, capability.interface_arguments.len())?;
             for argument in &capability.interface_arguments {
-                validate_contract_capture(argument, &parameters, &mut fuel)?;
+                validate_contract_capture(argument, &parameters, fuel)?;
             }
         }
-        spend(&mut fuel, definition.requirements.len())
-            .map_err(|_| "newtype metadata validation budget exhausted")?;
+        metadata_spend(fuel, definition.requirements.len())?;
         let mut predicates: Vec<_> = definition.requirements.iter().collect();
         while let Some(predicate) = predicates.pop() {
             match predicate {
                 TypePredicate::Bool(_) => {}
                 TypePredicate::Equal(left, right) => {
-                    validate_contract_capture(left, &parameters, &mut fuel)?;
-                    validate_contract_capture(right, &parameters, &mut fuel)?;
+                    validate_contract_capture(left, &parameters, fuel)?;
+                    validate_contract_capture(right, &parameters, fuel)?;
                 }
                 TypePredicate::Trait(capability) => {
-                    validate_contract_capture(&capability.subject, &parameters, &mut fuel)?;
+                    validate_contract_capture(&capability.subject, &parameters, fuel)?;
+                    metadata_spend(fuel, capability.interface_arguments.len())?;
                     for argument in &capability.interface_arguments {
-                        validate_contract_capture(argument, &parameters, &mut fuel)?;
+                        validate_contract_capture(argument, &parameters, fuel)?;
                     }
                 }
                 TypePredicate::Not(inner) => {
-                    spend(&mut fuel, 1)
-                        .map_err(|_| "newtype metadata validation budget exhausted")?;
+                    metadata_spend(fuel, 1)?;
                     predicates.push(inner);
                 }
                 TypePredicate::And(parts) | TypePredicate::Or(parts) => {
-                    spend(&mut fuel, parts.len())
-                        .map_err(|_| "newtype metadata validation budget exhausted")?;
+                    metadata_spend(fuel, parts.len())?;
                     predicates.extend(parts);
                 }
             }
@@ -333,18 +369,48 @@ fn validate_contract_capture(
     term: &Term,
     parameters: &std::collections::BTreeMap<DeclarationId, Sort>,
     fuel: &mut usize,
-) -> Result<(), &'static str> {
-    charge(term, fuel).map_err(|_| "newtype metadata validation budget exhausted")?;
-    let free = term
-        .rigid_parameters()
-        .map_err(|_| "invalid newtype contract parameters")?;
+) -> Result<(), ValidationError> {
+    let mut free = std::collections::BTreeMap::new();
+    let mut inconsistent_sort = false;
+    crate::type_computations::visit_expanded_term(
+        term,
+        fuel,
+        128,
+        &std::collections::BTreeMap::new(),
+        &mut |term| {
+            if let Term::Rigid { declaration, sort } = term {
+                if free
+                    .insert(*declaration, *sort)
+                    .is_some_and(|previous| previous != *sort)
+                {
+                    inconsistent_sort = true;
+                }
+            }
+        },
+    )
+    .map_err(|_| ValidationError::Budget)?;
+    if inconsistent_sort {
+        return Err(ValidationError::Invalid(
+            "invalid newtype contract parameters",
+        ));
+    }
     if free
         .into_iter()
         .any(|(parameter, sort)| parameters.get(&parameter) != Some(&sort))
     {
-        return Err("newtype contract has an undeclared captured parameter");
+        return Err(ValidationError::Invalid(
+            "newtype contract has an undeclared captured parameter",
+        ));
     }
     Ok(())
+}
+
+fn metadata_spend(fuel: &mut usize, amount: usize) -> Result<(), ValidationError> {
+    *fuel = fuel.checked_sub(amount).ok_or(ValidationError::Budget)?;
+    Ok(())
+}
+fn metadata_term(term: &Term, fuel: &mut usize) -> Result<(), ValidationError> {
+    crate::type_computations::charge_term(term, fuel).map_err(|_| ValidationError::Budget)
 }
 
 /// The operation changes ownership of the whole input value; it neither reads
