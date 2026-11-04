@@ -93,6 +93,31 @@ mod tests {
 }
 
 impl Checker<'_, '_> {
+    /// Pending domains may be excluded only after a complete source dependency
+    /// observation. All outcomes debit the caller's shared preparation budget.
+    pub(super) fn annotation_may_use_pending_inputs(
+        &mut self,
+        value: &Expr<'_>,
+        inputs: &BTreeSet<n::LocalId>,
+    ) -> Result<bool, Error> {
+        if inputs.is_empty() {
+            return Ok(false);
+        }
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = dependencies::expression_may_use_inputs(
+            self,
+            self.signature_owner
+                .ok_or_else(|| error(value.span, "annotation has no definition owner"))?,
+            value,
+            inputs,
+            &mut fuel,
+            value.span,
+        );
+        self.required_steps -= (before - fuel) as u64;
+        result
+    }
+
     /// Form the prefix once from a completed parent signature. Both signature
     /// construction and all ordinary local-function call paths consume it.
     /// A missing parent signature is an error, never an empty capture list.

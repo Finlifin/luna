@@ -1,0 +1,19 @@
+{-
+    Intended result: run returns true. Check with the real sysroot.
+    Current limitation: a closure reading a Type input whose domain is still
+    deferred is rejected before that input arrives. This also fails with the
+    annotation-checking path from d93fcd33; dependency observation is separate.
+-}
+comptime fn Domain(flag: bool) -> Type {
+    if flag { Type } else { bool }
+}
+
+fn identity(value: bool) -> bool { value }
+
+fn accept(comptime flag: bool, comptime T: defer Domain(flag),
+    callback: defer do { let choose = || T; fn(choose()) -> choose() }) -> bool
+{
+    true
+}
+
+fn run() -> bool { accept(true, bool, identity) }

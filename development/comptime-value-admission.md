@@ -709,10 +709,10 @@ ArgumentPlan／ContextualExpr 已经完成。
 
 ### 已知输入域的签名标注保留完整行为
 
-`check_suspended_annotation` 现在先区分输入域环境，而不是检查失败后再试另一条
-路径。已有外层输入域全部明确时，未知的仍然可以是普通值；标注经共享的
-`elaborate_known_region` 一次生成普通 NIR，再把整个区域交给现有 phase／机器算术
-检查。原输入绑定、局部 let、条件与短路结构一起进入证明，检查完成后才丢弃这一
+`check_suspended_annotation` 先观察输入域依赖，而不是检查失败后再试另一条
+路径。外层输入域全部明确，或完整依赖观察证明标注不使用那些待定输入时，未知的
+仍然可以是普通值；标注经共享的 `elaborate_known_region` 一次生成普通 NIR，再把
+整个区域交给现有 phase／机器算术检查。原输入绑定、局部 let、条件与短路结构一起进入证明，检查完成后才丢弃这一
 定义侧区域。具体调用仍用原 suspended source 形成实际签名；NF 头不展开，静态
 域已知不等于执行过生产者，也不把临时区域发布为冻结 invocation 产物。
 
@@ -722,12 +722,25 @@ ArgumentPlan／ContextualExpr 已经完成。
 声明阶段没有调用的 `n + 1`（n:u8）也必须拒绝；`if n < 255 { n + 1 } else { n }`
 则按整段分支前提检查。参数标注和返回标注使用相同入口。
 
-本次有意没有用 `body_local_references` 的扫描结果声称未知输入与标注无关：其
-body requirement walker 并不是完整的依赖观察器，不能充当该证明。外层域环境中
-存在 Any 描述时仍走原 contextual 描述路径。这意味着即使未知输入实际上未被
-该标注使用，也暂不能据此宣称此标注的完整定义侧行为已检查。下一步需要包含
-隐式声明依赖、类型组件及绑定作用域的需求证据，或者直接保留带待定域的结构区域；
-不能靠不完整引用扫描、捕获所有输入、忽略失败或再次执行生产者代替这一机制。
+这里没有使用 `body_local_references` 的不完整 body requirement walker 证明
+未知输入无关。新的 `annotation_may_use_pending_inputs` 复用 lexical_inputs 的
+完整源码边遍历，从标注表达式根出发，观察类型组件、模式、闭包／post-lambda body、
+被引用的局部声明及其签名、继承前提和局部协议贡献。它按实际绑定身份与待定输入
+比较，不凭名称，也不把别的函数的同名参数当成当前输入；未被引用的局部声明不因
+出现 Item 节点而把整份外围环境强加给标注。公共遍历的初始化、协议索引和工作队列
+已在声明捕获与这项表达式查询间共用，不新增第二套表达式边表。
+
+该查询的 false 才是“不依赖待定输入”的证据。引用到候选绑定、存在未映射的
+clause／Rigid 身份，或 delivered term 带未映射作用域参数时，都保守保留 pending；
+不能把“没有 Local 节点”当成不依赖的证明。缺失／未完成的源信息与预算失败直接
+传播，不能转成 false，也不凭失败改走较弱路径。输入环境扫描和查询的成功、失败
+均记入同一 preparation 预算；查询只观察源码及已存在元数据，不调用生产者，也不
+发布含当前活动上下文的缓存产物。
+
+因此，位于标注前面的无关 Any 输入不再屏蔽 `Index<n + 1>` 的定义侧范围检查；
+参数标注和结果标注一致。实际依赖未知域、或尚不能证明不相关的标注仍走原
+contextual 描述器，其完整控制流／证明义务保留尚未迁移。后续仍需待定域结构区域
+和更精确的符号身份映射，不能用本次依赖查询声称所有开放签名行为已完成。
 
 普通 typed region 与旧描述器的拒绝诊断位置不同。测试据此核对同一错误行为：缺少
 输入仍拒绝，过宽 packet 报超出位置槽，bool／void 不能代替 tuple，runtime 生产者
@@ -754,3 +767,32 @@ value-indexed key 的一项显式 skip 仍保留，未算作本次交付。没�
 重排。`git diff --check` 通过，受保护文件哈希未变。提交清单、源码哈希和试验
 证据在 `/tmp/luna-open-annotation-behavior-3js_nxhn`。未运行全 workspace、native
 或性能基准，正式 docs 未动。
+
+
+依赖查询扩展还定位到独立的既有缺口：直接在标注中写 `let choose = || T`，其中
+T 的域仍由早前输入决定，再以 `choose()` 构造函数类型，会报告
+`required comptime input is not yet available in this definition`。将
+open_functions.rs 恢复为 d93fcd33 的内容、保留公共遍历重构但停用新查询消费者后，
+相同来源仍给出逐字节相同诊断，证据 `/tmp/luna-tools-xc5fg3pz/result.json` 与
+`/tmp/luna-tools-iqt0f2hh/result.json`，均退出 101；随后恢复本次源码。
+[复现](repros/pending-type-closure-annotation.fl) 保留语言期望的正例，不修改它去迎合
+当前拒绝，也不把它纳入已通过项。新回归覆盖的是已有合法路径：显式 comptime
+类型输入、类型组件和捕获已知域条件的局部闭包；直接捕获待定 Type 仍须后续接通。
+
+
+本次依赖观察接线在 `/home/fin/luna` 使用 `development/check.py --timeout 900 --
+test -p luna` 验证。开放函数、两类 NF 输入计划、展开、标注行为和观察预算六组
+512 项通过，退出 0，完整参数和证据 `/tmp/luna-tools-n7wppk30/result.json`。
+新增拒绝例不提供具体调用，确认参数／结果标注不能因无关待定输入而漏掉范围证明；
+正例使用真实 sysroot，覆盖守卫及边界、确有依赖的类型组件和局部闭包。观察预算
+用例在同一份 HIR 上找到失败边界，再用足够预算重新检查并执行，不以失败授权
+更强的 typed path。
+
+公共遍历的旧消费者也复验：模板局部定义、comptime 子句、普通收集器、名义参数、
+CMTT 类型输入和函数类型依赖六组 463 项通过，退出 0，证据
+`/tmp/luna-tools-lg_hamot/result.json`。2 项既有 ignored 与 memoized value-indexed
+key 的 1 项显式 skip 未解除。四个已格式化 Rust 文件的 rustfmt check 退出 0，
+证据 `/tmp/luna-tools-iy7l0mjk/result.json`；open_functions.rs 保持局部排版。
+`git diff --check` 通过；原有受保护文件的哈希未变。清单、源码哈希、基线比较及
+本机检查证据在 `/tmp/luna-annotation-dependencies-fja2zljt`。未执行全 workspace、
+native 或性能基准，未把闭包待定 Type 的既有失败计入通过项。

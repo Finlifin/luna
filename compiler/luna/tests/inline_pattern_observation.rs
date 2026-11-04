@@ -131,3 +131,17 @@ fn normal_inputs_report_observation_limits_and_recover_with_fresh_fuel() {
         check_source_observation(&source, "static value observation failed", 4096);
     }
 }
+
+#[test]
+fn pending_annotation_dependency_failure_does_not_authorize_the_typed_path() {
+    check_source_observation(
+        "typealias Type = .Type'builtin; typealias u8 = .u8'builtin;
+        pure comptime fn Index<n: u8> -> Type { bool }
+        comptime fn Domain(flag: bool) -> Type { if flag { Type } else { bool } }
+        comptime fn accept(flag: bool, T: defer Domain(flag), n: u8,
+            callback: defer fn(Index<if n < 255 { n + 1 } else { n }>) -> bool) -> bool { true }
+        fn run() -> bool { true }",
+        "lexical dependency observation budget exhausted",
+        4096,
+    );
+}

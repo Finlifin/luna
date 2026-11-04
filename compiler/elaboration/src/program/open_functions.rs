@@ -1812,12 +1812,15 @@ impl Checker<'_, '_> {
         let H::Defer(value) = source.kind else {
             return Err(error(source.span, "suspended annotation must use defer"));
         };
-        // A fully typed input environment can be checked as one ordinary NIR
-        // region, even though its values are not supplied yet. A context with
-        // unknown domains still needs description. Do not use the incomplete
-        // body requirement scan as proof that an unknown input is irrelevant,
-        // or retry a failed region through the weaker descriptor.
-        let pending_domain = locals.values().any(|domain| matches!(domain, D::Any));
+        self.required_steps = self
+            .required_steps
+            .checked_sub(locals.len() as u64)
+            .ok_or_else(|| error(source.span, "annotation input observation budget exhausted"))?;
+        let pending_inputs = locals
+            .iter()
+            .filter_map(|(binding, domain)| matches!(domain, D::Any).then_some(*binding))
+            .collect();
+        let pending_domain = self.annotation_may_use_pending_inputs(value, &pending_inputs)?;
         self.with_staged_input(true, |this| {
             if pending_domain {
                 return this

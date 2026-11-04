@@ -38,6 +38,8 @@ struct Reads<'a, 'c, 'h> {
     owners: BTreeSet<OwnerId>,
     graph: BTreeMap<OwnerId, OwnerReads>,
     protocol_owners: BTreeMap<OwnerId, Vec<OwnerId>>,
+    local_inputs: Option<&'a BTreeSet<n::LocalId>>,
+    reads_local_input: bool,
     fuel: usize,
     span: Span,
 }
@@ -48,46 +50,85 @@ pub(super) fn collect(
     fuel: &mut usize,
     span: Span,
 ) -> Result<BTreeSet<DeclarationId>, Error> {
-    let mut reads = Reads {
-        checker,
-        pending: Vec::new(),
-        owners: BTreeSet::new(),
-        current: owner,
-        expressions: BTreeSet::new(),
-        patterns: BTreeSet::new(),
-        graph: BTreeMap::new(),
-        protocol_owners: BTreeMap::new(),
-        fuel: *fuel,
-        span,
-    };
-    let result =
-        (|| {
-            // Local protocol contributions are part of the declaration's checking
-            // environment even when a method is selected without a ResolvedDef.
-            // Retain their reads until selection can provide narrower proof edges.
-            for (&child, &parent) in &checker.package.lexical_parents {
-                reads.charge()?;
-                if checker.package.item(child).is_some_and(|item| {
-                    matches!(item.kind, ItemKind::Impl(_) | ItemKind::Derive(_))
-                }) {
-                    reads.protocol_owners.entry(parent).or_default().push(child);
-                }
-            }
-            reads.push(Node::Owner(owner))?;
-            while let Some((context, node)) = reads.pending.pop() {
-                reads.current = match &node {
-                    Node::Owner(owner) => *owner,
-                    _ => context,
-                };
-                reads.node(node)?;
-            }
-            reads.close(owner)
-        })();
+    let mut reads = Reads::new(checker, owner, fuel, span);
+    let result = (|| {
+        reads.prepare_protocols()?;
+        reads.push(Node::Owner(owner))?;
+        reads.drain()?;
+        reads.close(owner)
+    })();
+    *fuel = reads.fuel;
+    result
+}
+
+/// Observe the complete expression and referenced local declarations before
+/// claiming that a pending input domain is irrelevant. This query never invokes
+/// a producer or stores the caller's active context as declaration metadata.
+pub(super) fn expression_may_use_inputs(
+    checker: &Checker<'_, '_>,
+    owner: OwnerId,
+    value: &Expr<'_>,
+    inputs: &BTreeSet<n::LocalId>,
+    fuel: &mut usize,
+    span: Span,
+) -> Result<bool, Error> {
+    let mut reads = Reads::new(checker, owner, fuel, span);
+    reads.local_inputs = Some(inputs);
+    let result = (|| {
+        reads.prepare_protocols()?;
+        reads.inherited(owner)?;
+        reads.protocols(owner)?;
+        reads.expression(value)?;
+        reads.drain()?;
+        Ok(reads.reads_local_input)
+    })();
     *fuel = reads.fuel;
     result
 }
 
 impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
+    fn new(checker: &'a Checker<'c, 'h>, owner: OwnerId, fuel: &usize, span: Span) -> Self {
+        Self {
+            checker,
+            pending: Vec::new(),
+            owners: BTreeSet::new(),
+            current: owner,
+            expressions: BTreeSet::new(),
+            patterns: BTreeSet::new(),
+            graph: BTreeMap::new(),
+            protocol_owners: BTreeMap::new(),
+            local_inputs: None,
+            reads_local_input: false,
+            fuel: *fuel,
+            span,
+        }
+    }
+    fn prepare_protocols(&mut self) -> Result<(), Error> {
+        // Local protocol contributions can supply implicit dependency edges.
+        // Retain their reads until selection provides narrower evidence.
+        for (&child, &parent) in &self.checker.package.lexical_parents {
+            self.charge()?;
+            if self
+                .checker
+                .package
+                .item(child)
+                .is_some_and(|item| matches!(item.kind, ItemKind::Impl(_) | ItemKind::Derive(_)))
+            {
+                self.protocol_owners.entry(parent).or_default().push(child);
+            }
+        }
+        Ok(())
+    }
+    fn drain(&mut self) -> Result<(), Error> {
+        while let Some((context, node)) = self.pending.pop() {
+            self.current = match &node {
+                Node::Owner(owner) => *owner,
+                _ => context,
+            };
+            self.node(node)?;
+        }
+        Ok(())
+    }
     fn charge(&mut self) -> Result<(), Error> {
         self.fuel = self
             .fuel
@@ -117,9 +158,39 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
             .insert(id);
     }
     fn term(&mut self, term: &Term) -> Result<(), Error> {
-        let direct = &mut self.graph.entry(self.current).or_default().direct;
+        if self.local_inputs.is_some() {
+            // A delivered term may carry a scope that is not the source local
+            // frame. Without its mapping, absence of a Local read is no proof
+            // that the pending inputs are irrelevant.
+            nir::type_computations::charge_term(term, &mut self.fuel)
+                .map_err(|failure| error(self.span, failure.to_string()))?;
+            if !term
+                .substitution_parameters()
+                .map_err(|failure| error(self.span, failure.to_string()))?
+                .is_empty()
+            {
+                self.reads_local_input = true;
+            }
+        }
+        let mut symbolic = BTreeSet::new();
+        let direct = if self.local_inputs.is_some() {
+            &mut symbolic
+        } else {
+            &mut self.graph.entry(self.current).or_default().direct
+        };
         nir::type_computations::rigid_declarations_bounded(term, &mut self.fuel, direct)
-            .map_err(|e| error(self.span, e.to_string()))
+            .map_err(|e| error(self.span, e.to_string()))?;
+        if !symbolic.is_empty() {
+            // Rigid declarations also require a declaration-to-local mapping.
+            // Until that evidence is available, retain the pending context.
+            self.reads_local_input = true;
+            self.graph
+                .entry(self.current)
+                .or_default()
+                .direct
+                .extend(symbolic);
+        }
+        Ok(())
     }
     fn reference(&mut self, owner: OwnerId) -> Result<(), Error> {
         self.graph
@@ -566,10 +637,22 @@ impl<'a, 'c, 'h> Reads<'a, 'c, 'h> {
         match &expr.kind {
             H::DeliveredType(ty) => self.term(ty)?,
             H::ResolvedClauseParam(_, id) => {
+                // The query's candidate IDs belong to source local frames.
+                // A clause identity can be a transported staged input; without
+                // that mapping it cannot establish independence from them.
+                if self.local_inputs.is_some() {
+                    self.reads_local_input = true;
+                }
                 self.input(self.identity(*id));
             }
             H::ResolvedDef { def_id, .. } => self.definition(*def_id)?,
             H::ResolvedFnParam(_, binding) | H::ResolvedLocal(_, binding) => {
+                if self
+                    .local_inputs
+                    .is_some_and(|inputs| inputs.contains(&local(*binding)))
+                {
+                    self.reads_local_input = true;
+                }
                 if let Some(id) = package.staged_parameter_definitions.get(binding) {
                     self.input(self.identity(*id));
                 }
