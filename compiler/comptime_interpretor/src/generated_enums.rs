@@ -75,30 +75,23 @@ impl<'a> EnumBatch<'a> {
     }
 }
 
-pub(super) struct Installation<'vm, 'world> {
-    vm: &'vm mut Interpreter<'world>,
-    definitions: EnumBatch<'world>,
-    inserted: usize,
-    committed: bool,
-}
-impl Drop for Installation<'_, '_> {
-    fn drop(&mut self) {
-        if !self.committed {
-            for definition in &self.definitions[..self.inserted] {
-                self.vm.enums.remove(&definition.declaration);
-            }
-        }
-    }
-}
+type Installation<'vm, 'world> =
+    definition_installation::Installation<'vm, 'world, EnumBatch<'world>>;
 
-impl Installation<'_, '_> {
-    fn commit_with<T, E>(
-        mut self,
-        commit: impl FnOnce() -> Result<T, E>,
-    ) -> Result<T, EnumPublicationError<E>> {
-        let result = commit().map_err(EnumPublicationError::Commit)?;
-        self.committed = true;
-        Ok(result)
+impl<'world> definition_installation::Batch<'world> for EnumBatch<'world> {
+    const KIND: &'static str = "enum";
+    fn length(&self) -> usize {
+        self.len()
+    }
+    fn declaration(&self, index: usize) -> DeclarationId {
+        self[index].declaration
+    }
+    fn insert(&self, vm: &mut Interpreter<'world>, index: usize) {
+        vm.enums
+            .insert(self[index].declaration, self.definition(index));
+    }
+    fn remove(&self, vm: &mut Interpreter<'world>, index: usize) {
+        vm.enums.remove(&self[index].declaration);
     }
 }
 
@@ -139,6 +132,7 @@ impl<'world> Interpreter<'world> {
         self.prepare_generated_enums(EnumBatch::Borrowed(definitions))
             .map_err(EnumPublicationError::Admission)?
             .commit_with(commit)
+            .map_err(EnumPublicationError::Commit)
     }
 
     /// Retain shared checked descriptors created after this VM was started.
@@ -152,6 +146,7 @@ impl<'world> Interpreter<'world> {
         self.prepare_generated_enums(EnumBatch::Shared(definitions))
             .map_err(EnumPublicationError::Admission)?
             .commit_with(commit)
+            .map_err(EnumPublicationError::Commit)
     }
 
     // Only the private admission session may commit this exact immutable batch
@@ -161,20 +156,9 @@ impl<'world> Interpreter<'world> {
         definitions: Arc<[nir::program::Enum]>,
         commit: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, EnumPublicationError<E>> {
-        let mut installation = Installation {
-            vm: self,
-            definitions: EnumBatch::Shared(definitions),
-            inserted: 0,
-            committed: false,
-        };
-        for (index, definition) in installation.definitions.iter().enumerate() {
-            installation.inserted += 1;
-            installation.vm.enums.insert(
-                definition.declaration,
-                installation.definitions.definition(index),
-            );
-        }
-        installation.commit_with(commit)
+        Installation::stage(self, EnumBatch::Shared(definitions))
+            .commit_with(commit)
+            .map_err(EnumPublicationError::Commit)
     }
 
     pub(super) fn prepare_generated_enums<'vm>(
@@ -308,19 +292,7 @@ impl<'world> Interpreter<'world> {
         self.integer_operation(None, |budget| {
             budget.consume(definitions.len().saturating_mul(2))
         })?;
-        let mut installation = Installation {
-            vm: self,
-            definitions: definitions.clone(),
-            inserted: 0,
-            committed: false,
-        };
-        for (index, definition) in definitions.iter().enumerate() {
-            installation.inserted += 1;
-            installation
-                .vm
-                .enums
-                .insert(definition.declaration, definitions.definition(index));
-        }
+        let installation = Installation::stage(self, definitions.clone());
         for definition in definitions.iter() {
             let ty = Term::Nominal {
                 declaration: definition.declaration,

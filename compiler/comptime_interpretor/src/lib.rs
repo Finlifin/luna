@@ -67,6 +67,7 @@ mod trait_methods;
 mod value_reference;
 pub use objects::ObjectProperty;
 pub use value_reference::ValueReference;
+mod definition_installation;
 mod generated_newtypes;
 pub use generated_newtypes::NewtypePublicationError;
 mod generated_enums;

@@ -581,6 +581,43 @@ trait 的优先级。既有泛型名义值 trait 实参转发用例保持原有�
 事务保留可修复草稿；预算消费不回滚。预留编号可以留下空隙，不能将已观察身份复用给
 不同定义。源码创建和 builder 创建共享检查规则，不为“简单 struct”另造长期语义通道。
 
+### 当前 VM 的具体名义批次共用安装所有权
+
+struct、enum、newtype 已删除各自的 Installation／Drop／commit 实现，改为共同的
+`definition_installation::Installation`。借入批次、共享 owned 批次，以及
+DefinitionAdmissionSession 已检查 receipt 的实际提交都通过这个边界。类型专用
+适配器只选择目录及不可变描述句柄，不另维护安装进度或提交状态。
+
+进入安装前仍由各类定义完成身份冲突、阶段、scope 和结构检查，并预付插入／回滚
+工作；enum 编码和 newtype 表示等条件没有合并或删除。共同 guard 先安装整个批次，
+使本批次前向引用可见，再执行已有 formation 检查。只有 publisher 的 commit 成功，
+guard 才转为已提交；准入失败、commit 错误或 unwind 都只删除本 guard 插入的项。
+回滚不申请新的执行预算，不撤销宿主外部副作用，也不退还已消费工作。
+
+guard 继续持有原批次及插入计数，不增加逐定义复制或另一份可变目录。S-expression
+dump 显示定义种类、提交状态和已插入身份。公开的各类 publication error 仍区分
+Admission 与 Commit；receipt 的 world 身份、revision 检查及竞争收据失效规则保持。
+
+这只统一 VM 安装事务的所有权。混合 definition 同批发布、函数／trait／impl builder、
+跨目录与协议索引的 PublicationBundle、宿主请求与活动 invocation 的接线仍未完成。
+现有同步 publisher 回调仍可失败，不能把共享 guard 当成目标协议的完整原子发布。
+
+工作目录 `/home/fin/luna` 的验证：
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib generated_ -- --nocapture`：`/tmp/luna-tools-f9nkw89e/result.json`，退出 0，
+  26 项通过。沿用实际发布测试，覆盖借入／owned 描述、前向引用、形成失败、commit
+  错误与 unwind、预算耗尽，以及 receipt 的 revision／world 拒绝与失败后恢复。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  -p luna --lib --test builder_invocations --test generated_definitions
+  --test reflected_definitions --test library_meta_objects --no-fail-fast`：
+  `/tmp/luna-tools-d0co2xbd/result.json`，退出 101，693 项通过、1 项失败。唯一失败
+  仍是上文已复核的 enum builder fixture 缺少 `Symbol` 绑定，尚未进入 VM 发布；
+  本次没有修改 fixture 或预期。其余 builder、真实包／prelude、反射和 meta object
+  路径通过，不能将完整命令称为全通过。
+- 六个修改／新增 Rust 文件 scoped rustfmt 检查：
+  `/tmp/luna-tools-6vw9vkw8/result.json`，退出 0。未运行全 workspace、native 或性能基准。
+
 ## 10. 删除旧路径的条件
 
 | 旧路径 | 删除前必须看到的生产行为 |

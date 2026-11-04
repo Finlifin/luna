@@ -70,30 +70,23 @@ impl<'a> NewtypeBatch<'a> {
     }
 }
 
-pub(super) struct Installation<'vm, 'world> {
-    vm: &'vm mut Interpreter<'world>,
-    definitions: NewtypeBatch<'world>,
-    inserted: usize,
-    committed: bool,
-}
-impl Drop for Installation<'_, '_> {
-    fn drop(&mut self) {
-        if !self.committed {
-            for definition in &self.definitions[..self.inserted] {
-                self.vm.newtypes.remove(&definition.declaration);
-            }
-        }
-    }
-}
+type Installation<'vm, 'world> =
+    definition_installation::Installation<'vm, 'world, NewtypeBatch<'world>>;
 
-impl Installation<'_, '_> {
-    fn commit_with<T, E>(
-        mut self,
-        commit: impl FnOnce() -> Result<T, E>,
-    ) -> Result<T, NewtypePublicationError<E>> {
-        let result = commit().map_err(NewtypePublicationError::Commit)?;
-        self.committed = true;
-        Ok(result)
+impl<'world> definition_installation::Batch<'world> for NewtypeBatch<'world> {
+    const KIND: &'static str = "newtype";
+    fn length(&self) -> usize {
+        self.len()
+    }
+    fn declaration(&self, index: usize) -> DeclarationId {
+        self[index].declaration
+    }
+    fn insert(&self, vm: &mut Interpreter<'world>, index: usize) {
+        vm.newtypes
+            .insert(self[index].declaration, self.definition(index));
+    }
+    fn remove(&self, vm: &mut Interpreter<'world>, index: usize) {
+        vm.newtypes.remove(&self[index].declaration);
     }
 }
 
@@ -134,6 +127,7 @@ impl<'world> Interpreter<'world> {
         self.prepare_generated_newtypes(NewtypeBatch::Borrowed(definitions))
             .map_err(NewtypePublicationError::Admission)?
             .commit_with(commit)
+            .map_err(NewtypePublicationError::Commit)
     }
 
     /// Retain shared checked descriptors created after this VM was started.
@@ -147,6 +141,7 @@ impl<'world> Interpreter<'world> {
         self.prepare_generated_newtypes(NewtypeBatch::Shared(definitions))
             .map_err(NewtypePublicationError::Admission)?
             .commit_with(commit)
+            .map_err(NewtypePublicationError::Commit)
     }
 
     // Only the private admission session may commit this exact immutable batch
@@ -156,20 +151,9 @@ impl<'world> Interpreter<'world> {
         definitions: Arc<[nir::newtypes::Newtype]>,
         commit: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, NewtypePublicationError<E>> {
-        let mut installation = Installation {
-            vm: self,
-            definitions: NewtypeBatch::Shared(definitions),
-            inserted: 0,
-            committed: false,
-        };
-        for (index, definition) in installation.definitions.iter().enumerate() {
-            installation.inserted += 1;
-            installation.vm.newtypes.insert(
-                definition.declaration,
-                installation.definitions.definition(index),
-            );
-        }
-        installation.commit_with(commit)
+        Installation::stage(self, NewtypeBatch::Shared(definitions))
+            .commit_with(commit)
+            .map_err(NewtypePublicationError::Commit)
     }
 
     pub(super) fn prepare_generated_newtypes<'vm>(
@@ -241,19 +225,7 @@ impl<'world> Interpreter<'world> {
         self.integer_operation(None, |budget| {
             budget.consume(definitions.len().saturating_mul(2))
         })?;
-        let mut installation = Installation {
-            vm: self,
-            definitions: definitions.clone(),
-            inserted: 0,
-            committed: false,
-        };
-        for (index, definition) in definitions.iter().enumerate() {
-            installation.inserted += 1;
-            installation
-                .vm
-                .newtypes
-                .insert(definition.declaration, definitions.definition(index));
-        }
+        let installation = Installation::stage(self, definitions.clone());
         for definition in definitions.iter() {
             let ty = Term::Nominal {
                 declaration: definition.declaration,

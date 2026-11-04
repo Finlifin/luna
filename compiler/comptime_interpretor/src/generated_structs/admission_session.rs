@@ -219,22 +219,10 @@ impl<'world> DefinitionAdmissionSession<'world> {
             }));
         }
         let definitions = StructBatch::Shared(prepared.definitions);
-        let mut installation = Installation {
-            vm: &mut self.vm,
-            definitions,
-            inserted: 0,
-            committed: false,
-        };
-        // No mutation is possible between admission and this revision check.
-        // The same immutable batch was already collision- and scope-checked.
-        for (index, definition) in installation.definitions.iter().enumerate() {
-            installation.inserted += 1;
-            installation.vm.structs.insert(
-                definition.declaration,
-                installation.definitions.definition(index),
-            );
-        }
-        let result = installation.commit_with(commit)?;
+        // The revision check preserves the exact collision-checked batch.
+        let result = Installation::stage(&mut self.vm, definitions)
+            .commit_with(commit)
+            .map_err(StructPublicationError::Commit)?;
         self.revision = next.unwrap();
         Ok(result)
     }
