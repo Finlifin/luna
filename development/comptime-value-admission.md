@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | [nir/comptime_values.rs](../compiler/nir/src/comptime_values.rs) | frozen list 保留准确声明域，Type 元素也使用普通名义值载体；标量范围、sort/scope 检查 | validate 明确不承担全部 aggregate/abstract 准入；不能把结构通过当作形成证明 |
 | [normal_terms.rs](../compiler/comptime_interpretor/src/normal_terms.rs)、[normal_values](../compiler/comptime_interpretor/src/normal_values/mod.rs) | 受预算的数据编码/恢复、作用域及恢复后的主动值检查 | 各容器、Type、callable 分支仍与外部准入逻辑共同承担职责，尚无统一受限结果 |
-| [value_types.rs](../compiler/comptime_interpretor/src/value_types.rs) | 结构遍历共用；主动边界收集名义形成义务并在接收世界检查，被动观察仍检查保留见证 | 部分关联值与效应边界仍调用被动观察；结构布局查询中的独立额度尚待统一 |
+| [value_types.rs](../compiler/comptime_interpretor/src/value_types.rs) | 结构遍历共用；主动边界收集名义形成义务并在接收世界检查，被动观察仍检查保留见证 | 结构布局查询中的独立额度尚待统一；源码侧的符号值域证据不能由 VM 查询补造 |
 | [constants.rs](../compiler/elaboration/src/program/constants.rs) | 已求值依赖不重算；局部常量保留闭包图内共享，生成快照重建 factory | 不能把这种有来源的局部快照当作任意 wire 可调用工厂；生成函数尚承担内部传送职责 |
 | [value_reference.rs](../compiler/comptime_interpretor/src/value_reference.rs) | owner 共享、路径重验、RHS 后写回、根重绑定权限；不依赖 runtime Copy | 位置身份、内容版本和可导出快照需在统一边界表达 |
 | [comptime_graph.rs](../compiler/comptime_interpretor/src/comptime_graph.rs) | 每次观察重新检查可变捕获图，访问去重不复制 owner | visited 集合不是冻结许可，也不证明所有循环图可逃逸 |
@@ -3078,13 +3078,16 @@ admit_type。形状不匹配时不启动这些待检查询，查询失败不会�
 
 已接入的边界包括 record／variant 构造、普通输入绑定、调用返回、不可变输入验证、
 冻结值恢复、newtype 转换、optional 与错误结果载荷、字段读取、host prepared live
-输入、Object 条目及闭包捕获。字段读取在取得独立值后释放借用，再做主动检查。
+输入、Object 条目、闭包捕获、关联值结果、动态子句值包及枚举标签名称读取。
+字段读取在取得独立值后释放借用，再做主动检查。
 runtime／具体 IIR 的既有被动行为保持原路径；本次不改变仿射复制权限，不把活动
 引用变成可冻结值。
 
-关联值结果与部分效应边界仍可到达被动 has_type；后续应按各自的借用与发布时点
-接入，不能机械地在持锁回调中启动可执行观察。runtime 指针读写的被动检查不是
-comptime 准入迁移对象。共享结构遍历中的
+当前 effects::eval_effect 在入口拒绝 comptime，其参数、handler 结果及 direct-passing
+槽检查服务于 runtime/IIR 执行；不能仅因它们调用 has_type 就纳入本次 comptime
+迁移，也不由此推导语言永久禁止 comptime effect。runtime 指针读写同样保留原有
+被动检查。剩余专用观察须先核对阶段、真实输入域与发布时点，不能机械地在持锁
+回调中启动可执行观察。共享结构遍历中的
 旧布局查询仍有独立额度，尚未全部合入调用方余额；当前新增的待检收集与主动契约
 查询使用调用方余额，不代表整个结构检查器已完成预算重构。
 
@@ -3164,6 +3167,56 @@ validate_immutable_input，在替换前检查新值和旧值；这条路径没�
   `/tmp/luna-tools-xehbrzed/result.json`；git diff --check 通过。上述编译器／库回归
   包含工作区原有资源分析修改；其内容及已有 docs/library 修改保持原样。
   未运行全 workspace 或性能基准。
+
+**结果观察与子句值包。** 关联值完成时先释放 active initializer 标记，再通过主动
+值检查接受结果；未决、拒绝或形状错误不能留下初始化中的状态。动态子句参数在
+编码为普通 comptime 项之前检查实际接收域。枚举标签读取在取得名称、保留残余
+之前检查值的名义形成契约。三者均不从 dispatch 表缺项推导非法类型，也不发布
+全局能力许可。
+
+真实源码的关联值案例原已通过，不能将该案例称为修复前失败；局部构造的缺少
+保留见证但具备接收世界查询服务的值，才验证此完成入口的主动检查。动态枚举的
+标签名称用例则确实在修复前返回 Type。两条解释路径共用观察完成逻辑。
+
+**私有 dispatch 快照的值域证据缺口仍未解决。**
+dynamic_nominal_clause_values_keep_their_formation_contracts 保留成功预期，当前显式
+ignore，原因是源码还未进入 VM 就在 required comptime dispatch 准备中失败：
+`interface value input normalization requires domain evidence`。
+调用形状是 `selected<flag, Packet<flag, Subject> { value: true }>()`，其中 flag 为
+外层泛型函数的布尔子句输入；Packet 的约束由通用 Enabled<flag> 实现满足。
+若先保存到局部 packet 再供应子句，还会触发 required comptime input unavailable。
+不能将这两种失败改成语言拒绝规则，也不能用本次 VM 局部通过宣称全链路完成。
+
+后续接线必须让 required invocation 将**当前合法作用域**中的值 binder 与声明域
+交给私有 dispatch 准备。现有 dispatch_instances_in_context 仅接收类型 Context 与
+trait 前提；Builder::normalized_interface_input 接受闭合结构值，却没有用于符号
+普通值的作用域证据。应复用值域准入服务并按调用方预算检查受权 binder，区分私有
+开放快照与最终严格 IIR。不能仅放行 is_symbolic_index_value，不能把声明目录中所有
+参数都当作当前可见输入，也不能将普通值域义务塞入 PTC 类型命题。所需作用域应
+来自 required 输入和稳定依赖，不能从待编码的未验证值反向制造权限。
+
+结果观察边界的验证（工作目录 `/home/fin/luna`）：
+
+- 三个 VM 局部用例在迁移前均把未决能力变为 Type，
+  `/tmp/luna-tools-d46rv9hq/result.json` 退出 101。关联值的真实源码正例在迁移前
+  已通过，`/tmp/luna-tools-7l42ytt_/result.json` 退出 0；动态枚举标签读取在迁移前
+  返回 Type，`/tmp/luna-tools-ghruccd8/result.json` 退出 101。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  -p luna --lib --test comptime_nominal_capabilities --test deferred_associated_values
+  --test associated_signatures --test dynamic_trait_clauses --test normal_input_plans
+  --test symbols --test library_protocols --no-fail-fast -- --skip
+  clause_list_inputs_share_domain_scope_and_budget_validation`：672 项通过，1 项上述
+  符号域证据缺口显式 ignored，1 项既有列表诊断失败被筛除，退出 0；
+  `/tmp/luna-tools-ncb3zbgx/result.json`。局部用例检查未决／拒绝诊断、初始化标记
+  释放、后续成功重试、冻结前检查，以及标签读取的树／字节码一致性。
+- 当前代码显式运行 `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test comptime_nominal_capabilities dynamic_nominal_clause_values_keep_their_formation_contracts
+  -- --exact --ignored --nocapture`，仍在私有 dispatch 准备中缺少域证据，退出 101；
+  `/tmp/luna-tools-7eqrd4gz/result.json`。此项没有算入通过数量，VM 子句包局部通过
+  不替代源码端到端支持。
+- 六份 Rust 文件 scoped rustfmt check 退出 0，
+  `/tmp/luna-tools-zlo4avox/result.json`；git diff --check 通过。回归包含工作区原有
+  资源分析修改；已有 docs/library 修改未动。未执行全 workspace 或性能基准。
 
 implementation 的标量冲突预检、每个普通值参数的结构遍历、重复 binder 比较与
 后续 Type 匹配共用 head 分区的余额，不再为每个实参刷新额度。调用的显式输入

@@ -409,9 +409,7 @@ impl Interpreter<'_> {
         self.integer_operation(Some(source), |budget| budget.consume(values.len()))?;
         let mut arguments = Vec::with_capacity(values.len());
         for (value, domain) in values.into_iter().zip(domains) {
-            if !self.has_type(&value, domain) {
-                return Err(self.failure(ErrorKind::Type, Some(source)));
-            }
+            self.check_value_type(&value, domain, Some(source))?;
             arguments.push(self.residual_input_term(value, source)?);
         }
         Ok(arguments)

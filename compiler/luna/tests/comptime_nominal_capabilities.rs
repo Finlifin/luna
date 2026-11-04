@@ -89,11 +89,19 @@ fn nominal_values_recheck_capabilities_in_the_receiving_world() {
 }
 
 fn invoke_dynamic_packet(body: &str) -> Result<comptime_interpretor::Value, String> {
+    invoke_packet_program("", body)
+}
+
+fn invoke_packet_program(
+    definitions: &str,
+    body: &str,
+) -> Result<comptime_interpretor::Value, String> {
     let source = format!(
         "trait Enabled where flag: bool {{}}
         struct Subject {{}}
         impl Enabled<flag> for Subject where flag: bool {{}}
         struct Packet where flag: bool, T :- Enabled<flag> {{ value: bool }}
+        {definitions}
         comptime fn read() -> bool
         where flag: bool
         {{ {body} }}
@@ -133,6 +141,54 @@ fn dynamic_nominal_values_survive_object_edits() {
             value? => not value.value, null => false
         })
     "
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn dynamic_nominal_associated_values_keep_their_formation_contracts() {
+    assert_eq!(
+        invoke_packet_program(
+            "
+        trait Source where flag: bool { assoc packet: Packet<flag, Subject>; }
+        impl Source<flag> for bool where flag: bool {
+            assoc packet: Packet<flag, Subject> = (Packet<flag, Subject> { value: true });
+        }
+    ",
+            "bool.as(Source<flag>).packet.value"
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+#[ignore = "private dispatch snapshots lack scoped evidence for symbolic value inputs"]
+fn dynamic_nominal_clause_values_keep_their_formation_contracts() {
+    assert_eq!(
+        invoke_packet_program(
+            "
+        comptime fn selected() -> bool
+        where flag: bool, packet: Packet<flag, Subject>
+        { packet.value }
+    ",
+            "selected<flag, Packet<flag, Subject> { value: true }>()"
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn dynamic_nominal_enum_names_keep_their_formation_contracts() {
+    assert_eq!(
+        invoke_packet_program(
+            "
+        enum Choice where flag: bool, T :- Enabled<flag> { ready, }
+    ",
+            "Choice<flag, Subject>.ready'tag_name == \"ready\""
         )
         .unwrap(),
         comptime_interpretor::Value::Bool(true)

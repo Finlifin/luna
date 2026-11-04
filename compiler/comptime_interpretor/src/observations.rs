@@ -240,9 +240,7 @@ impl Interpreter<'_> {
             O::StructFields { names } => self.observe_struct_fields(value, output, names, source),
             O::EnumStructure(query) => self.observe_enum_structure(value, output, query, source),
             O::EnumName => {
-                if !self.has_type(&value, input) {
-                    return Err(self.failure(ErrorKind::Type, Some(source)));
-                }
+                self.check_value_type(&value, input, Some(source))?;
                 self.retain_residual(observation.operand_source, &value)?;
                 let Value::Variant {
                     declaration,

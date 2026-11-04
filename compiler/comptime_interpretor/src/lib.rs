@@ -3962,9 +3962,7 @@ impl<'a> Interpreter<'a> {
         let Flow::Value(value) = result else {
             return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
         };
-        if !self.has_type(&value, ty) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        self.check_value_type(&value, ty, Some(source))?;
         Ok(Flow::Value(value))
     }
     #[inline(never)]

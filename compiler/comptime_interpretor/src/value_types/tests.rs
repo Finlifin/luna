@@ -2,6 +2,7 @@ use super::*;
 use std::cell::Cell;
 
 mod containers;
+mod observations;
 
 const SOURCE: SourceRange = SourceRange { start: 3, end: 8 };
 
