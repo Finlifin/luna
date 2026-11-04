@@ -2342,43 +2342,46 @@ impl Checker<'_, '_> {
                         error(expr.span, format!("required comptime evaluation cannot execute a runtime function or normal-form head: {failure}"))
                     } else { error(expr.span, failure.to_string()) }
                 })?;
-            let prepared =
-                PreparedRequired {
-                    copy_authority: self.protocols.copy.zip(self.protocols.drop).map(
-                        |(copy, drop)| {
-                            let resources = n::Package {
-                                builtin_implementation_packages: self
-                                    .protocols
-                                    .builtin_implementation_packages
-                                    .clone(),
-                                target: self.target,
-                                traits: self.checked_traits.clone(),
-                                implementations: self.checked_implementations.clone(),
-                                normal_forms: package.normal_forms.clone(),
-                                structs: package.structs.clone(),
-                                newtypes: package.newtypes.clone(),
-                                alias_contracts: package.alias_contracts.clone(),
-                                enums: package.enums.clone(),
-                                ..Default::default()
-                            };
-                            (copy, drop, std::sync::Arc::new(resources))
-                        },
-                    ),
-                    world: prepared::RequiredWorld::new(package, expr.span)?,
-                    entry,
-                    inputs,
-                    result_type,
-                    scoped_parameters,
-                    scoped_arguments,
-                    input_frames,
-                    invocation_assumptions,
-                    abstract_parameters,
-                    abstract_value_parameters,
-                    context: invocation_type_context.clone(),
-                    in_signature: self
-                        .signature_owner
-                        .is_some_and(|owner| self.active_signatures.contains(&owner)),
-                };
+            let prepared = PreparedRequired {
+                copy_authority: self
+                    .protocols
+                    .copy
+                    .zip(self.protocols.drop)
+                    .map(|(copy, drop)| {
+                        let resources = n::Package {
+                            builtin_implementation_packages: self
+                                .protocols
+                                .builtin_implementation_packages
+                                .clone(),
+                            target: self.target,
+                            traits: self.checked_traits.clone(),
+                            implementations: self.checked_implementations.clone(),
+                            normal_forms: package.normal_forms.clone(),
+                            structs: package.structs.clone(),
+                            newtypes: package.newtypes.clone(),
+                            alias_contracts: package.alias_contracts.clone(),
+                            enums: package.enums.clone(),
+                            ..Default::default()
+                        };
+                        prepared::RequiredWorld::new(resources, expr.span)
+                            .map(|world| (copy, drop, world))
+                    })
+                    .transpose()?,
+                world: prepared::RequiredWorld::new(package, expr.span)?,
+                entry,
+                inputs,
+                result_type,
+                scoped_parameters,
+                scoped_arguments,
+                input_frames,
+                invocation_assumptions,
+                abstract_parameters,
+                abstract_value_parameters,
+                context: invocation_type_context.clone(),
+                in_signature: self
+                    .signature_owner
+                    .is_some_and(|owner| self.active_signatures.contains(&owner)),
+            };
             Ok(prepared)
         })();
         let pending = std::mem::replace(&mut self.pending_type_uses, saved_pending).unwrap();

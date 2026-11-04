@@ -19,6 +19,20 @@ impl RequiredWorld {
             implementation_index,
         }))
     }
+
+    fn capabilities<'a>(
+        &'a self,
+        assumptions: &'a [n::TraitRequirement],
+        context: &'a crate::ptc::Context,
+    ) -> crate::capabilities::World<'a> {
+        crate::capabilities::World {
+            index: &self.implementation_index,
+            implementations: &self.package.implementations,
+            traits: &self.package.traits,
+            assumptions,
+            context,
+        }
+    }
 }
 
 pub(in crate::program) struct PreparedRequired {
@@ -34,7 +48,7 @@ pub(in crate::program) struct PreparedRequired {
     pub abstract_value_parameters: Vec<(DeclarationId, Term)>,
     pub context: crate::ptc::Context,
     pub in_signature: bool,
-    pub copy_authority: Option<(DeclarationId, DeclarationId, std::sync::Arc<n::Package>)>,
+    pub(super) copy_authority: Option<(DeclarationId, DeclarationId, Arc<RequiredWorld>)>,
 }
 
 impl PreparedRequired {
@@ -197,7 +211,6 @@ impl PreparedRequired {
     ) -> Result<(Value, Term), Error> {
         let world = Arc::clone(&self.world);
         let package = &world.package;
-        let implementation_index = &world.implementation_index;
         let build = |request: &comptime_interpretor::StructBuildRequest, fuel: &mut u64| {
             builder
                 .expect("configured builder service")
@@ -276,13 +289,7 @@ impl PreparedRequired {
                 restored = value;
                 (&restored, scoped_context.as_ref().unwrap())
             };
-            let world = crate::capabilities::World {
-                index: implementation_index,
-                implementations: &package.implementations,
-                traits: &package.traits,
-                assumptions: &invocation_assumptions,
-                context: proof_context,
-            };
+            let world = world.capabilities(&invocation_assumptions, proof_context);
             let mut proof_budget = crate::ptc::Budget {
                 steps: crate::ptc::Budget::default()
                     .steps
@@ -308,15 +315,9 @@ impl PreparedRequired {
             };
             let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
             let before = fuel;
-            let world = crate::capabilities::World {
-                index: implementation_index,
-                implementations: &resources.implementations,
-                traits: &resources.traits,
-                assumptions: &invocation_assumptions,
-                context: invocation_type_context,
-            };
+            let world = resources.capabilities(&invocation_assumptions, invocation_type_context);
             let evidence = crate::verification::copy::acquire(
-                resources,
+                &resources.package,
                 &world,
                 *copy,
                 *drop,
@@ -337,13 +338,7 @@ impl PreparedRequired {
             None => message,
         };
         let associated_resolver = |access: &n::Expr, remaining: &mut u64| {
-            let world = crate::capabilities::World {
-                index: implementation_index,
-                implementations: &package.implementations,
-                traits: &package.traits,
-                assumptions: &invocation_assumptions,
-                context: invocation_type_context,
-            };
+            let world = world.capabilities(&invocation_assumptions, invocation_type_context);
             crate::materialization::resolve_associated_value_for_invocation(
                 &world, access, remaining,
             )
@@ -545,8 +540,12 @@ impl std::fmt::Display for PreparedRequired {
             ") (in-signature {}) (context {}) (implementation-index {}) (program {})",
             self.in_signature, self.context, self.world.implementation_index, self.world.package
         )?;
-        if let Some((copy, drop, package)) = &self.copy_authority {
-            write!(f, " (copy-authority (copy {copy}) (drop {drop}) {package})")?;
+        if let Some((copy, drop, world)) = &self.copy_authority {
+            write!(
+                f,
+                " (copy-authority (copy {copy}) (drop {drop}) (implementation-index {}) (program {}))",
+                world.implementation_index, world.package
+            )?;
         }
         write!(f, ")")
     }
@@ -697,6 +696,121 @@ mod tests {
                 Value::Bool(false)
             );
         }
+    }
+
+    #[test]
+    fn prepared_resource_authority_uses_its_own_implementation_world() {
+        use crate::verification::copy::{Classification, classify};
+        let span = Span::default();
+        let id = |local| DeclarationId { package: 7, local };
+        let copy = id(30);
+        let drop = id(31);
+        let subject = Term::Record(vec![("flag".into(), p(P::Bool))]);
+        let mut prepared = literal_preparation(false);
+        let mut package = prepared.world.package.clone();
+        package.traits.push(n::Trait {
+            declaration: copy,
+            self_parameter: id(32),
+            name: "Copy".into(),
+            comptime_only: false,
+            parameter_types: vec![],
+            type_parameters: vec![],
+            parents: vec![],
+            associated: vec![],
+            methods: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+        });
+        // The executable closure does not retain this runtime implementation;
+        // resource authority does. Their indexes must follow their own source.
+        prepared.world = RequiredWorld::new(package.clone(), span).unwrap();
+        package.implementations.push(n::Implementation {
+            declaration: id(33),
+            subject: subject.clone(),
+            interface: Some(copy),
+            phases: Default::default(),
+            parameter_types: vec![],
+            type_parameters: vec![],
+            associated: vec![],
+            associated_initializers: vec![],
+            interface_arguments: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            methods: vec![],
+        });
+        let resources = RequiredWorld::new(package, span).unwrap();
+        prepared.copy_authority = Some((copy, drop, resources.clone()));
+        let sibling = prepared.fork();
+        assert!(Arc::ptr_eq(
+            &resources,
+            &sibling.copy_authority.as_ref().unwrap().2
+        ));
+        let context = crate::ptc::Context::default();
+        let budget = crate::ptc::Budget::default();
+        assert_eq!(
+            classify(
+                &prepared.world.capabilities(&[], &context),
+                copy,
+                &subject,
+                budget
+            )
+            .unwrap(),
+            Classification::Affine
+        );
+        assert_eq!(
+            classify(
+                &resources.capabilities(&[], &context),
+                copy,
+                &subject,
+                budget
+            )
+            .unwrap(),
+            Classification::Declared {
+                implementation: id(33),
+                arguments: vec![]
+            }
+        );
+        // An unrelated non-Copy subject cannot acquire the indexed declaration.
+        assert_eq!(
+            classify(
+                &resources.capabilities(&[], &context),
+                copy,
+                &Term::Record(vec![("flag".into(), p(P::Char))]),
+                budget
+            )
+            .unwrap(),
+            Classification::Affine
+        );
+        assert!(
+            classify(
+                &resources.capabilities(&[], &context),
+                copy,
+                &subject,
+                crate::ptc::Budget { steps: 0, ..budget }
+            )
+            .unwrap()
+            .to_string()
+            .contains("pending")
+        );
+        assert!(matches!(
+            classify(
+                &resources.capabilities(&[], &context),
+                copy,
+                &subject,
+                budget
+            )
+            .unwrap(),
+            Classification::Declared { .. }
+        ));
+        let dump = prepared.to_string();
+        assert!(dump.contains(&format!(
+            "(copy-authority (copy {copy}) (drop {drop}) (implementation-index"
+        )));
+        assert_eq!(dump, prepared.to_string());
+        assert_eq!(
+            sibling.invoke(&mut 100_000, span).unwrap().0,
+            Value::Bool(true)
+        );
     }
 
     fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
