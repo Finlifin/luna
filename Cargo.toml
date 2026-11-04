@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    # Active crates (no dependency on ty/hir/query/resolve)
+    # Syntax and source inputs:
     "compiler/symbol",
     "compiler/ast",
     "compiler/diagnostic",
@@ -22,13 +22,6 @@ members = [
     "compiler/materialization",
     "compiler/program_verification",
     "compiler/luna", "compiler/nir", "compiler/comptime_executor", "compiler/comptime_interpretor", "compiler/comptime_runtime", "compiler/comptime_compiler", "compiler/iir",
-    # Disabled until upstream crates are updated to use middle:: instead of ty:::
-    # "compiler/ty",
-    # "compiler/codegen",
-    # "compiler/mir",
-    # "compiler/mir_build",
-    # "compiler/typeck",
-    # "compiler/luna",
 ]
 resolver = "2"
 
