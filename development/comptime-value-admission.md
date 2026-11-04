@@ -1431,6 +1431,46 @@ callable 路径和 moves 的 tag-domain 检查。可选缺失分支仍为空；�
   1525 通过、2 过滤，退出 0；`/tmp/luna-tools-ewc1hqhj/result.json`。两个过滤项是
   §26 已在改动前基线上复现的缺陷，本次未宣称修复，也未修改它们的测试源码。
 
-未运行全 workspace、native 或性能基准。其余 moves、materialization 和覆盖检查
-仍有旧的元数据代入消费者；此迁移不代表完整 LayoutPlan 或全链路共享预算已完成。
+未运行全 workspace、native 或性能基准。materialization 和覆盖检查仍有旧的元数据
+代入消费者；moves 的后续迁移见下文。此迁移不代表完整 LayoutPlan 或全链路共享预算已完成。
 正式 docs 与原有工作区改动未纳入本次交付。
+
+
+moves 的名义类型观察也已使用同一受限代入：观察模式、record 分解、ownership shape、
+callable 输入／返回路径、捕获恢复、临时投影及 pointer-origin 查询不再调用完整命名
+字段／变体实例化。原 `callable_variant_layout` 退役为仅附加 SourceRange 诊断的
+`callable_variant_fields`，不再自己遍历源字段并重复计费参数。enum 观察模式从受限
+结果中移动所选字段集合，不额外复制该集合。程序验证 crate 已无
+`instantiate_fields`／`instantiate_variants`（包括 in_scope 版本）的调用。
+
+这次验证使用一个字段内部重复引用参数 64 次、参数自身含 32 个指针字段的输入。
+它区别于多个字段各引用参数一次：原“每个字段检查一次实参”的估算仍会漏算此展开。
+基线 `639424ee` 加上相同四项测试，变体观察、临时投影与 pointer-origin 三项均错误
+接受预算 2000，`/tmp/luna-tools-mhaj3xso/result.json` 退出 101；callable 路径及指针
+权限对照通过。额外回归遍历低预算失败到成功，检查 qualified 路径始终恢复，且
+只由既有 tag 证据排除指针分支；域错误不转成“没有指针”，合法查询可随后成功。
+
+迁移中一次编译检查发现将匿名 record 的 `(name, type)` 错当字段类型，
+`/tmp/luna-tools-7t_adqss/result.json` 退出 101，已恢复该原始结构分支。随后
+`/tmp/luna-tools-mi4d62qh/result.json` 的 1 项失败暴露旧错误适配器用 Debug 输出
+`Budget`；三处迁移入口已改用错误的 Display，保留预算原因及源位置，不靠调整
+测试字符串隐藏差异。上述两轮不是最终通过证据。
+
+字段视图不授予 Copy，不创建 code identity，不改变实际分支 guard、析构责任或
+pointer contract。ownership shape 的预算仍由现有分析入口单独供应；此阶段不声称
+整个 moves 的预算与内存／资源证明都已统一。正式 docs 与原有修改保持不变。
+
+验证目录 `/home/fin/luna`，统一入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p program_verification --lib --tests --no-fail-fast`：117 项单元测试与 8 项集成测试
+  通过，退出 0；`/tmp/luna-tools-r8s6ydfc/result.json`。
+- `-p luna --test drop --test match_cleanup --test temporary_method_cleanup
+  --test conditional_capture_cleanup --test handler_affine_captures --test nominal_value_parameters
+  --test newtypes --test invocation_value_templates --no-fail-fast --
+  --skip optional_inline_call_chains_preserve_defaults_contracts_and_owned_returns
+  --skip scheduled_handler_borrowed_copy_record_rejects_unproved_owner_layouts`：
+  1537 通过、2 过滤，退出 0；`/tmp/luna-tools-13ps23iz/result.json`。
+  两个过滤项仍是 §26 的既有缺陷，未改测试源码或宣称已解决。
+
+未运行全 workspace、native 或性能基准。格式检查通过；已有工作区修改的摘要
+保持不变，提交范围限于 moves 生产迁移、行为回归和本开发记录。

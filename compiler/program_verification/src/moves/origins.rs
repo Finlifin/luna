@@ -181,13 +181,10 @@ pub(super) fn pointer_possible(
                 .iter()
                 .find(|item| item.declaration == *declaration)
             {
-                for (_, ty) in &definition.fields {
-                    crate::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
-                }
                 let types = definition
-                    .instantiate_fields(arguments)
+                    .instantiate_stored_fields(arguments, &[], fuel)
                     .map_err(|e| error(source, e.to_string()))?;
-                let Some((_, ty)) = types.get(field) else {
+                let Some(ty) = types.get(field) else {
                     return Ok(false);
                 };
                 qualified.push(field);
@@ -236,13 +233,8 @@ pub(super) fn pointer_possible(
                 .iter()
                 .find(|item| item.declaration == *declaration)
             {
-                for variant in &definition.variants {
-                    for ty in &variant.fields {
-                        crate::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
-                    }
-                }
                 let variants = definition
-                    .instantiate_variants(arguments)
+                    .instantiate_variant_fields(arguments, &[], fuel)
                     .map_err(|e| error(source, e.to_string()))?;
                 let allowed = domains.get(qualified);
                 for (index, variant) in variants.iter().enumerate() {
@@ -252,7 +244,7 @@ pub(super) fn pointer_possible(
                     if allowed.is_some_and(|tags| !tags.contains(&index)) {
                         continue;
                     }
-                    let Some(ty) = variant.fields.get(field) else {
+                    let Some(ty) = variant.get(field) else {
                         continue;
                     };
                     qualified.extend([VARIANT_PATH, index, field]);

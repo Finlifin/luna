@@ -23,6 +23,8 @@ pub use borrowed_code::copy_borrowed_code;
 mod cleanup_memory;
 pub use cleanup_memory::BorrowedRoot;
 mod effects;
+#[cfg(test)]
+mod layout_tests;
 mod origins;
 mod patterns;
 pub use effects::effect_result_slots;
@@ -800,7 +802,7 @@ fn exclude_absent_code_leaf(
         }) else {
             return Ok(false);
         };
-        let variants = callable_variant_layout(definition, &arguments, fuel, source)?;
+        let variants = callable_variant_fields(definition, &arguments, fuel, source)?;
         *fuel = fuel
             .checked_sub(variants.len() + path.len() + 1)
             .ok_or_else(|| error(source, "returned capture absence budget exhausted"))?;
@@ -8729,12 +8731,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             error(source, "enum observation requires declaration metadata")
                         })?;
                     definition
-                        .instantiate_variants(arguments)
+                        .instantiate_variant_fields(arguments, &[], &mut self.fuel)
                         .map_err(|failure| error(source, format!("enum observation: {failure}")))?
-                        .get(*index)
+                        .into_iter()
+                        .nth(*index)
                         .ok_or_else(|| error(source, "enum observation variant out of bounds"))?
-                        .fields
-                        .clone()
                 } else {
                     let definition = package
                         .structs
@@ -8744,11 +8745,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             error(source, "record observation requires declaration metadata")
                         })?;
                     definition
-                        .instantiate_fields(arguments)
-                        .map_err(|failure| error(source, format!("record observation: {failure}")))?
-                        .into_iter()
-                        .map(|(_, ty)| ty)
-                        .collect()
+                        .instantiate_stored_fields(arguments, &[], &mut self.fuel)
+                        .map_err(|failure| {
+                            error(source, format!("record observation: {failure}"))
+                        })?
                 };
                 (fields, types)
             }
@@ -9387,11 +9387,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         error(source, "record pattern ownership requires package metadata")
                     })?;
                 let fields_types: Vec<_> = definition
-                    .instantiate_fields(arguments)
-                    .map_err(|e| error(source, format!("record pattern ownership: {e:?}")))?
-                    .into_iter()
-                    .map(|(_, ty)| ty)
-                    .collect();
+                    .instantiate_stored_fields(arguments, &[], &mut self.fuel)
+                    .map_err(|e| error(source, format!("record pattern ownership: {e}")))?;
                 if !preparation.copy_bindings {
                     self.decomposition(ty, source, path, None, fields.is_empty())?;
                 }
@@ -16286,11 +16283,8 @@ fn ownership_shape(
                 return Ok(Shape::Value);
             };
             definition
-                .instantiate_fields(arguments)
-                .map_err(|e| format!("ownership fields: {e:?}"))?
-                .into_iter()
-                .map(|(_, ty)| ty)
-                .collect()
+                .instantiate_stored_fields(arguments, &[], fuel)
+                .map_err(|e| format!("ownership fields: {e}"))?
         }
         _ => return Ok(Shape::Value),
     };
@@ -17443,26 +17437,14 @@ pub fn callable_parameter_paths(
     Ok(result)
 }
 
-fn callable_variant_layout(
+fn callable_variant_fields(
     definition: &nir::program::Enum,
     arguments: &[Term],
     fuel: &mut usize,
     source: SourceRange,
-) -> Result<Vec<nir::program::Variant>, Error> {
-    // Charge even empty variants before allocating the instantiated layout.
-    *fuel = fuel
-        .checked_sub(definition.variants.len())
-        .ok_or_else(|| error(source, "callable variant layout budget exhausted"))?;
-    for variant in &definition.variants {
-        for field in &variant.fields {
-            super::memory::bound_type(field, fuel).map_err(|e| error(source, e))?;
-            for argument in arguments {
-                super::memory::bound_type(argument, fuel).map_err(|e| error(source, e))?;
-            }
-        }
-    }
+) -> Result<Vec<Vec<Term>>, Error> {
     definition
-        .instantiate_variants(arguments)
+        .instantiate_variant_fields(arguments, &[], fuel)
         .map_err(|e| error(source, format!("callable variant fields: {e}")))
 }
 
@@ -17544,10 +17526,10 @@ fn callable_value_paths(
             if let Some(definition) =
                 package.and_then(|p| p.enums.iter().find(|e| e.declaration == *declaration))
             {
-                let variants = callable_variant_layout(definition, arguments, fuel, source)?;
+                let variants = callable_variant_fields(definition, arguments, fuel, source)?;
                 let mut result = vec![];
                 for (variant, layout) in variants.iter().enumerate() {
-                    for (field, ty) in layout.fields.iter().enumerate() {
+                    for (field, ty) in layout.iter().enumerate() {
                         for path in callable_value_paths(package, ty, fuel, source, depth + 1)? {
                             *fuel = fuel.checked_sub(path.len().saturating_add(3)).ok_or_else(
                                 || error(source, "callable input layout budget exhausted"),
@@ -17565,18 +17547,9 @@ fn callable_value_paths(
             else {
                 return Ok(vec![]);
             };
-            for (_, field) in &definition.fields {
-                super::memory::bound_type(field, fuel).map_err(|e| error(source, e))?;
-                for argument in arguments {
-                    super::memory::bound_type(argument, fuel).map_err(|e| error(source, e))?;
-                }
-            }
             definition
-                .instantiate_fields(arguments)
+                .instantiate_stored_fields(arguments, &[], fuel)
                 .map_err(|e| error(source, format!("callable parameter fields: {e}")))?
-                .into_iter()
-                .map(|(_, ty)| ty)
-                .collect()
         }
         _ => return Ok(vec![]),
     };
@@ -17657,8 +17630,8 @@ fn recoverable_return_capture_layout(
                 if let Some(definition) =
                     package.and_then(|p| p.enums.iter().find(|e| e.declaration == *declaration))
                 {
-                    for variant in callable_variant_layout(definition, arguments, fuel, source)? {
-                        for field in variant.fields {
+                    for variant in callable_variant_fields(definition, arguments, fuel, source)? {
+                        for field in variant {
                             if !recoverable_return_capture_layout(
                                 package,
                                 &field,
@@ -17678,15 +17651,9 @@ fn recoverable_return_capture_layout(
                 else {
                     return Ok(false);
                 };
-                for (_, ty) in &definition.fields {
-                    super::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
-                }
                 definition
-                    .instantiate_fields(arguments)
+                    .instantiate_stored_fields(arguments, &[], fuel)
                     .map_err(|e| error(source, format!("returned capture fields: {e}")))?
-                    .into_iter()
-                    .map(|(_, ty)| ty)
-                    .collect()
             }
             _ => return Ok(false),
         }
@@ -17890,12 +17857,12 @@ fn contains_return_evidence_kind(
                 // A tag constrains reachable branches even when no variant
                 // stores code. Validate its instantiated layout before requesting
                 // the bounded body summary that supplies actual tag evidence.
-                let variants = callable_variant_layout(definition, arguments, fuel, source)?;
+                let variants = callable_variant_fields(definition, arguments, fuel, source)?;
                 if include_tags {
                     return Ok(true);
                 }
                 for variant in variants {
-                    for field in variant.fields {
+                    for field in variant {
                         if contains_return_evidence_kind(
                             package,
                             &field,
@@ -17916,18 +17883,10 @@ fn contains_return_evidence_kind(
             else {
                 return Ok(false);
             };
-            // Charge the declaration and substitution inputs before allocating
-            // instantiated layouts. Structural tuple/record traversal borrows.
-            for (_, field) in &definition.fields {
-                super::memory::bound_type(field, fuel).map_err(|e| error(source, e))?;
-                for argument in arguments {
-                    super::memory::bound_type(argument, fuel).map_err(|e| error(source, e))?;
-                }
-            }
             let fields = definition
-                .instantiate_fields(arguments)
+                .instantiate_stored_fields(arguments, &[], fuel)
                 .map_err(|e| error(source, format!("callable result fields: {e}")))?;
-            for (_, field) in fields {
+            for field in fields {
                 if contains_return_evidence_kind(
                     package,
                     &field,
@@ -18197,10 +18156,10 @@ fn owned_field_type(
                         .ok_or_else(|| {
                             error(source, "callable variant path requires enum metadata")
                         })?;
-                    let variants = callable_variant_layout(definition, arguments, fuel, source)?;
+                    let variants = callable_variant_fields(definition, arguments, fuel, source)?;
                     current = variants
                         .get(*variant)
-                        .and_then(|v| v.fields.get(*field))
+                        .and_then(|v| v.get(*field))
                         .cloned()
                         .ok_or_else(|| {
                             error(source, "callable variant field index out of bounds")
@@ -18216,11 +18175,8 @@ fn owned_field_type(
                         )
                     })?;
                 definition
-                    .instantiate_fields(arguments)
-                    .map_err(|e| error(source, format!("temporary projection fields: {e:?}")))?
-                    .into_iter()
-                    .map(|(_, ty)| ty)
-                    .collect()
+                    .instantiate_stored_fields(arguments, &[], fuel)
+                    .map_err(|e| error(source, format!("temporary projection fields: {e}")))?
             }
             _ => {
                 return Err(error(
@@ -18643,9 +18599,9 @@ mod record_shape_tests {
         for variant in &mut empty_variants.variants {
             variant.fields.clear();
         }
-        assert!(callable_variant_layout(&empty_variants, &[], &mut 1, source).is_err());
+        assert!(callable_variant_fields(&empty_variants, &[], &mut 1, source).is_err());
         assert_eq!(
-            callable_variant_layout(&empty_variants, &[], &mut 2, source)
+            callable_variant_fields(&empty_variants, &[], &mut 2, source)
                 .unwrap()
                 .len(),
             2
