@@ -1812,15 +1812,26 @@ impl Checker<'_, '_> {
         let H::Defer(value) = source.kind else {
             return Err(error(source.span, "suspended annotation must use defer"));
         };
+        // A fully typed input environment can be checked as one ordinary NIR
+        // region, even though its values are not supplied yet. A context with
+        // unknown domains still needs description. Do not use the incomplete
+        // body requirement scan as proof that an unknown input is irrelevant,
+        // or retry a failed region through the weaker descriptor.
+        let pending_domain = locals.values().any(|domain| matches!(domain, D::Any));
         self.with_staged_input(true, |this| {
-            this.describe_open_expression(
-                value,
-                &mut locals.clone(),
-                None,
-                Some(&D::Known(p(P::Type))),
-                0,
-            )
-            .map(|_| ())
+            if pending_domain {
+                return this
+                    .describe_open_expression(
+                        value,
+                        &mut locals.clone(),
+                        None,
+                        Some(&D::Known(p(P::Type))),
+                        0,
+                    )
+                    .map(|_| ());
+            }
+            let value = this.elaborate_known_region(value, Some(&D::Known(p(P::Type))))?;
+            this.check_open_fragment(&value, source.span, true)
         })
     }
 
@@ -5120,7 +5131,14 @@ impl Checker<'_, '_> {
         Ok(D::Known(value.ty))
     }
 
-    fn describe_known_region(&mut self, expr: &Expr<'_>, expected: Option<&D>) -> Result<D, Error> {
+    /// Retain the checked region until its consumer has validated behavior.
+    /// Domain-only consumers may discard it after their phase check; annotation
+    /// consumers also need its bindings and control flow for safe arithmetic.
+    fn elaborate_known_region(
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&D>,
+    ) -> Result<n::Expr, Error> {
         let expected = match expected {
             Some(D::Known(ty)) => Some(ty),
             _ => None,
@@ -5151,6 +5169,11 @@ impl Checker<'_, '_> {
             }
             failure
         })?;
+        Ok(value)
+    }
+
+    fn describe_known_region(&mut self, expr: &Expr<'_>, expected: Option<&D>) -> Result<D, Error> {
+        let value = self.elaborate_known_region(expr, expected)?;
         self.check_open_fragment(&value, expr.span, false)?;
         Ok(D::Known(value.ty))
     }

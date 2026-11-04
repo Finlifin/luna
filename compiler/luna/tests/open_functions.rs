@@ -5775,7 +5775,7 @@ fn suspended_normal_type_routes_reject_invalid_labels_and_missing_inputs() {
     for (application, diagnostic) in [
         ("Pair<T,.U=T,.U=T>", "duplicate normal-form argument"),
         ("Pair<.unknown=T,T>", "unknown named normal-form argument"),
-        ("Pair<.U=T>", "missing required type argument"),
+        ("Pair<.U=T>", "normal-form argument count mismatch"),
         ("Pair<T,T>", "normal-form argument count mismatch"),
     ] {
         let failure=compile_with_protocols(&format!("typealias Type=.Type'builtin;
@@ -5942,7 +5942,7 @@ fn suspended_list_producers_preserve_phase_and_invocation_failures() {
     let failure =
         compile_with_source_bindings(&runtime, &Default::default(), selectors.clone()).unwrap_err();
     assert!(
-        failure.contains("unavailable in this execution phase"),
+        failure.contains("runtime function is unavailable during comptime execution"),
         "{failure}"
     );
     let failing = format!(
@@ -6101,15 +6101,15 @@ fn suspended_fixed_head_packets_check_shape_and_field_domains() {
         ),
         (
             "comptime fn packet(T:Type)->Tuple<Type> {(T,)}",
-            "missing required type argument",
-        ),
-        (
-            "comptime fn packet(T:Type)->Tuple<Type,Type,Type> {(T,T,T)}",
             "normal-form argument count mismatch",
         ),
         (
+            "comptime fn packet(T:Type)->Tuple<Type,Type,Type> {(T,T,T)}",
+            "spread tuple widths exceed positional slots",
+        ),
+        (
             "comptime fn packet(T:Type)->bool {true}",
-            "type argument spread requires a tuple",
+            "found (primitive bool)",
         ),
     ] {
         let source=format!("typealias Type=.Type'builtin;
@@ -6177,7 +6177,7 @@ fn suspended_empty_packets_precede_defaults_and_do_not_admit_void() {
     )
     .unwrap_err();
     assert!(
-        failure.contains("type argument spread requires a tuple"),
+        failure.contains("found (primitive void)"),
         "{failure}"
     );
 }

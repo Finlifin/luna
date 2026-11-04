@@ -114,7 +114,10 @@ fn suspended_collection_routes_reject_conflicts_and_known_wrong_domains() {
             "Packet<T, .missing = items>",
             "unknown named normal-form argument",
         ),
-        ("Packet<.values = items>", "missing required type argument"),
+        (
+            "Packet<.values = items>",
+            "normal-form argument count mismatch",
+        ),
         ("Packet<T, ... (value,)>", "type"),
     ] {
         let source = format!(

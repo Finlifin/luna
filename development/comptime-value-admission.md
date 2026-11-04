@@ -694,14 +694,63 @@ opaque Tuple 仍被拒绝，但诊断已在 packet 入口给出；收集准备�
 传播，并保留已绑定路径的完整 NF 实参与调用顺序检查；提前返回还在两种 VM 上
 验证只调用 Run，不执行 Later 或 Default。
 
-第一项仍是真实缺口：开放签名描述没有保留足够的完整表达式／前提，机器算术的
+第一项暴露了真实缺口：开放签名描述没有保留足够的完整表达式／前提，机器算术的
 定义侧证明因此可能遗漏，不能以具体 n=9 时计算成功替代。直接对每个描述片段
-打开算术检查会丢失分支守卫及其前提；重新 elaboration 整个标注也可能重复准备／
-执行生产者。后续需保留定义侧行为与证明义务，并在完整前提环境中检查，不用局部
-开关或放宽该用例来掩盖这一缺口。
+打开算术检查会丢失分支守卫及其前提；先描述再重新 elaboration 整个标注也可能
+重复准备／执行生产者。该用例现由下面的完整 typed region 路径修复，原拒绝预期
+保持不变；含未知域的环境仍未完成这一迁移。
 
 局部 rustfmt check 退出 0，证据 `/tmp/luna-tools-s59wtbhs/result.json`；
 `git diff --check` 通过。旧路由两函数已无源码引用。提交范围、源码哈希、基线比较与
 原有改动哈希保存在 `/tmp/luna-open-routing-ivho07zy`。正式 docs 及原有工作区修改
 均未动；未运行全 workspace、native 或性能基准，不以这些检查声称完整
 ArgumentPlan／ContextualExpr 已经完成。
+
+
+### 已知输入域的签名标注保留完整行为
+
+`check_suspended_annotation` 现在先区分输入域环境，而不是检查失败后再试另一条
+路径。已有外层输入域全部明确时，未知的仍然可以是普通值；标注经共享的
+`elaborate_known_region` 一次生成普通 NIR，再把整个区域交给现有 phase／机器算术
+检查。原输入绑定、局部 let、条件与短路结构一起进入证明，检查完成后才丢弃这一
+定义侧区域。具体调用仍用原 suspended source 形成实际签名；NF 头不展开，静态
+域已知不等于执行过生产者，也不把临时区域发布为冻结 invocation 产物。
+
+`describe_known_region` 复用同一生成入口，但只在其原有 domain-only 消费位置丢弃
+行为。已知域的签名标注不再先逐片描述、用临时操作数代替原绑定，再仅返回 Type
+域。失败直接传播，既不退回较弱的描述器，也不等实际调用恰好给出小整数后才检查。
+声明阶段没有调用的 `n + 1`（n:u8）也必须拒绝；`if n < 255 { n + 1 } else { n }`
+则按整段分支前提检查。参数标注和返回标注使用相同入口。
+
+本次有意没有用 `body_local_references` 的扫描结果声称未知输入与标注无关：其
+body requirement walker 并不是完整的依赖观察器，不能充当该证明。外层域环境中
+存在 Any 描述时仍走原 contextual 描述路径。这意味着即使未知输入实际上未被
+该标注使用，也暂不能据此宣称此标注的完整定义侧行为已检查。下一步需要包含
+隐式声明依赖、类型组件及绑定作用域的需求证据，或者直接保留带待定域的结构区域；
+不能靠不完整引用扫描、捕获所有输入、忽略失败或再次执行生产者代替这一机制。
+
+普通 typed region 与旧描述器的拒绝诊断位置不同。测试据此核对同一错误行为：缺少
+输入仍拒绝，过宽 packet 报超出位置槽，bool／void 不能代替 tuple，runtime 生产者
+不能在 comptime 标注中调用。没有放宽类型或阶段检查。现有 dormant 无限循环
+生产者用例也保留：仅定义标注不调用生产者，实际调用的契约失败仍正常传播。
+
+
+本次在 `/home/fin/luna` 执行 `development/check.py --timeout 900 -- test -p luna`，
+open_annotation_behavior、open_functions、open_normal_input_plans、normal_input_plans、
+type_spreads、inline_pattern_observation 六组共 508 项通过，退出 0，完整命令与
+证据 `/tmp/luna-tools-wttogcs2/result.json`。原先唯一真实失败的机器算术定义检查
+用例保留原断言并通过；open_functions 全部 390 项通过。新增真实 sysroot 三项
+测试覆盖直接／局部别名／死分支的范围保护、255 边界调用，以及未被调用的参数／
+返回标注仍须拒绝无范围证明的运算；正例在两种 VM 中执行。
+
+随后五组相邻检查（模板局部定义、comptime 子句、普通收集器、名义参数、CMTT
+类型输入）共 424 项通过，退出 0，证据 `/tmp/luna-tools-znsww3fa/result.json`。
+原来的抽象 Copy 默认值和 invocation Type 生产者两项 ignored，以及 memoized
+value-indexed key 的一项显式 skip 仍保留，未算作本次交付。没有通过修改原
+机器算术拒绝预期获得成功，也没有把未知域上下文计为已检查。
+
+新测试及 open_normal_input_plans 的 rustfmt check 退出 0，证据
+`/tmp/luna-tools-gipq3qnm/result.json`；两个既有大文件保持局部排版，避免无关全量
+重排。`git diff --check` 通过，受保护文件哈希未变。提交清单、源码哈希和试验
+证据在 `/tmp/luna-open-annotation-behavior-3js_nxhn`。未运行全 workspace、native
+或性能基准，正式 docs 未动。
