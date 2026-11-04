@@ -262,11 +262,12 @@ frame 保存 PC、局部槽、结果目的地、控制和清理进度；异常�
 原 `run_executions` 的局部调用栈、待启动计算和待交付结果已经迁入
 `invocation::session::Session`。生产中的字节码 invocation、借入 fragment、借入输入
 计划都由该会话驱动，默认值、关联值、契约与嵌套类型计划仍使用同一调用栈。
+类型观察等非字节码入口启动的关联初始化器也作为独立 associated root 进入该驱动。
 固定树模式的轻量入口保留，避免每层树解释都挂上字节码驱动栈帧。
 
 会话在存活期间独占借用 Interpreter；暂停现场不能被拿去交给另一个 VM，也不能
-同时在原 VM 上启动不相干的外部调用。根入口用枚举区分 invocation、fragment 和
-输入计划，不能同时供应两个 root。每次 poll 推进一次驱动迭代，至多执行一个
+同时在原 VM 上启动不相干的外部调用。根入口用枚举区分 invocation、associated、fragment
+和输入计划，不能同时供应两个 root。每次 poll 推进一次驱动迭代，至多执行一个
 字节码片段；已有同步准备和树解释仍受各自预算控制。这不是硬实时调度、instruction
 级抢占或 `HostRequest` 已完成的承诺。
 
@@ -353,6 +354,39 @@ region 的可恢复检查，不能把此处 Pending 宣称为完整宿主等待�
   以及真实 sysroot 协议。没有运行全 workspace 测试或性能基准。
 - 六个修改／新增 Rust 文件 scoped rustfmt 检查：
   `/tmp/luna-tools-9konbg79/result.json`，退出 0。
+
+类型观察入口此前调用 `eval_associated_value` 后直接树解释主体；即使 VM 启用了
+字节码，关联初始化链仍递归占用原生栈。当前此入口先保留 Preparation，再通过
+`Session::associated` 持有待选择请求或已准入 Activation，代码选择、嵌套读取、
+完成值域检查及取消均走已有驱动。固定树模式、活动 effect 环境或 runtime 清理等
+不适用字节码的上下文保留原路径；分支在进入独立驱动函数前选择，避免固定树递归
+为每层保留大型 Session 栈帧。初始化器的词法环境继续独立，不读取调用方 locals。
+
+96 层初始化器链在原生深度额度 8 下，旧字节码模式实际报 `DepthExhausted`；
+修复后同额度成功，每次查询仍进入末端 Type 函数一次。固定树模式仍按该额度拒绝，
+不会绕过资源限制。执行步骤耗尽后活动 key 和深度恢复，同一 VM 补充额度后可重新
+执行。新的 associated root 逐个取消全部严格执行前缀，分别覆盖尚未调用 resolver
+的请求及已取得初始化 key 的 Ready 状态；取消不花费执行预算或调用 resolver，
+随后新执行只选择尚未取得的主体。
+
+工作目录 `/home/fin/luna`：新增深链回归、生产代码未修改时，
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+--lib type_observation_runs_deep_initializers_on_the_driver_stack -- --nocapture`
+在 `/tmp/luna-tools-7o_sr5p5/result.json` 退出 101，字节码阶段仍耗尽原生深度。
+接通后同命令在 `/tmp/luna-tools-mt1dyv9r/result.json` 退出 0；含根入口取消用例的
+VM 全部 495 项在 `/tmp/luna-tools-594poq_s/result.json` 退出 0。
+
+最终源码（含固定树入口与驱动栈帧分离）运行
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+-p luna --lib --test deferred_associated_values --test associated_signatures
+--test associated_purity --test comptime_bytecode_traits --test library_protocols
+--test comptime_bytecode_observations --test comptime_bytecode_defaults --no-fail-fast`：
+`/tmp/luna-tools-5d7qn9ck/result.json` 退出 0，647 项通过。四份 Rust 文件 scoped
+rustfmt 检查 `/tmp/luna-tools-o8ci7k_t/result.json` 退出 0。未运行全 workspace
+或墙钟性能基准。
+
+这次统一的是初始化器主体的执行入口。关联 subject／参数／结果域准备仍同步，
+外层类型观察循环也未向前端暴露可恢复请求；不能据此宣称全链路异步宿主协议完成。
 
 ## 6. 缓存分别回答不同问题
 

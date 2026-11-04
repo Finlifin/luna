@@ -210,3 +210,76 @@ fn incomplete_observations_leave_no_values_for_a_later_query() {
         }
     }
 }
+
+#[test]
+fn type_observation_runs_deep_initializers_on_the_driver_stack() {
+    let mut package = package();
+    package.traits[0]
+        .associated
+        .extend((100..196).map(|member| nir::program::AssociatedContract {
+            declaration: id(member),
+            name: format!("Link{member}"),
+            phase: nir::program::TraitPhase::Comptime,
+            ty: ty(Primitive::Type),
+            default: None,
+        }));
+    let resolver = |request: &Expr, fuel: &mut u64| {
+        let K::AssociatedValue { member, .. } = request.kind else {
+            unreachable!()
+        };
+        let body = if member.local == 195 {
+            call(9)
+        } else {
+            access(member.local + 1)
+        };
+        let mut allowance = usize::try_from(*fuel).unwrap();
+        let initializer =
+            nir::associated_initializers::AssociatedInitializer::new(body, &mut allowance).unwrap();
+        *fuel = allowance as u64;
+        Ok(AssociatedSelection {
+            initializer,
+            requires_invocation: true,
+        })
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_associated_resolver(&resolver);
+    vm.bytecode_enabled = false;
+    vm.budget.depth = 8;
+    assert_eq!(
+        vm.selected_type_view(&projection(100), Some(SOURCE))
+            .unwrap_err()
+            .kind,
+        ErrorKind::DepthExhausted
+    );
+    assert!(vm.active_associated_initializers.is_empty());
+    assert_eq!(vm.depth, 0);
+    vm.bytecode_enabled = true;
+    for _ in 0..3 {
+        let start = vm.events.len();
+        assert_eq!(
+            vm.selected_type_view(&projection(100), Some(SOURCE))
+                .unwrap(),
+            ty(Primitive::Bool)
+        );
+        assert_eq!(entries(&vm, start), [id(9)]);
+        assert!(vm.associated_values.is_empty());
+        assert!(vm.active_associated_initializers.is_empty());
+        assert_eq!(vm.depth, 0);
+    }
+    vm.budget.steps = 100;
+    assert_eq!(
+        vm.selected_type_view(&projection(100), Some(SOURCE))
+            .unwrap_err()
+            .kind,
+        ErrorKind::StepsExhausted
+    );
+    assert!(vm.active_associated_initializers.is_empty());
+    assert_eq!(vm.depth, 0);
+    vm.budget.steps = Budget::default().steps;
+    assert_eq!(
+        vm.selected_type_view(&projection(100), Some(SOURCE))
+            .unwrap(),
+        ty(Primitive::Bool)
+    );
+}

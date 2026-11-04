@@ -75,19 +75,19 @@ impl<'a> Interpreter<'a> {
         else {
             unreachable!()
         };
-        let active = match self.prepare_associated_value(
-            interface,
-            subject,
-            *member,
-            &expr.ty,
-            expr.source,
-        )? {
-            Preparation::Ready(active) => active,
-            Preparation::Request(request) => self.resolve_associated_request(request)?,
-        };
-        // Initializers cannot read the caller's lexical environment.
-        let result = self.eval(active.expression.expression(), &mut Environment::default());
-        active.complete(self, result)
+        let prepared =
+            self.prepare_associated_value(interface, subject, *member, &expr.ty, expr.source)?;
+        if !self.bytecode_invocation_available() {
+            let active = match prepared {
+                Preparation::Ready(active) => active,
+                Preparation::Request(request) => self.resolve_associated_request(request)?,
+            };
+            // Keep fixed tree recursion out of the driver's native stack frame.
+            // Initializers never inherit the caller's lexical environment.
+            let result = self.eval(active.expression.expression(), &mut Environment::default());
+            return active.complete(self, result);
+        }
+        self.run_associated_preparation(prepared)
     }
 
     pub(super) fn prepare_associated_value(

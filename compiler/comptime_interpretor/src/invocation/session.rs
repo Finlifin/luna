@@ -5,6 +5,7 @@ use std::task::Poll;
 
 enum Root<'r> {
     Invocation,
+    Associated,
     Fragment(&'r mut bytecode::Frame),
     Plan(&'r mut dyn input_collection::InputPlan, &'r mut Environment),
 }
@@ -26,7 +27,7 @@ impl Root<'_> {
 
     fn cancel(&mut self) {
         match self {
-            Self::Invocation => {}
+            Self::Invocation | Self::Associated => {}
             Self::Fragment(frame) => frame.cancel(),
             Self::Plan(frame, environment) => frame.cancel(environment),
         }
@@ -59,6 +60,25 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
     pub(super) fn invocation(vm: &'vm mut Interpreter<'a>, active: Box<Activation<'a>>) -> Self {
         let mut session = Self::new(vm, Root::Invocation);
         session.execution = Some(Execution::Invocation(active));
+        session
+    }
+
+    pub(super) fn associated(
+        vm: &'vm mut Interpreter<'a>,
+        prepared: associated_execution::Preparation<'a>,
+    ) -> Self {
+        let mut session = Self::new(vm, Root::Associated);
+        match prepared {
+            associated_execution::Preparation::Ready(activation) => {
+                session.execution = Some(Execution::Associated {
+                    activation,
+                    environment: Environment::default(),
+                });
+            }
+            associated_execution::Preparation::Request(request) => {
+                session.associated_request = Some(request);
+            }
+        }
         session
     }
 
@@ -418,6 +438,7 @@ impl fmt::Display for Session<'_, '_, '_> {
         write!(f, "(execution-session (terminal {}) (root ", self.terminal)?;
         match &self.root {
             Root::Invocation => f.write_str("invocation")?,
+            Root::Associated => f.write_str("associated")?,
             Root::Fragment(code) => write!(f, "(fragment {code})")?,
             Root::Plan(plan, _) => write!(f, "(plan {plan})")?,
         }
@@ -741,6 +762,108 @@ mod tests {
         }
         assert!(completed_polls.is_some());
         assert_eq!(pending_cancellations, 4);
+    }
+
+    #[test]
+    fn associated_roots_own_pending_requests_and_already_admitted_keys() {
+        use std::cell::RefCell;
+        let package = Package::default();
+        let interface = InterfaceInstance {
+            declaration: id(1),
+            arguments: vec![],
+        };
+        let access = |member| {
+            expr(
+                ty(Primitive::Bool),
+                K::AssociatedValue {
+                    interface: interface.clone(),
+                    subject: ty(Primitive::Bool),
+                    member: id(member),
+                },
+            )
+        };
+        for cached_root in [false, true] {
+            let mut completed_polls = None;
+            for limit in std::iter::once(usize::MAX).chain(0..32) {
+                if completed_polls.is_some_and(|count| limit >= count) {
+                    break;
+                }
+                let calls = RefCell::new(Vec::new());
+                let resolver = |request: &Expr, fuel: &mut u64| {
+                    let K::AssociatedValue { member, .. } = request.kind else {
+                        unreachable!()
+                    };
+                    calls.borrow_mut().push(member);
+                    let body = if member.local < 5 {
+                        access(member.local + 1)
+                    } else {
+                        expr(ty(Primitive::Bool), K::Literal(Literal::Bool(true)))
+                    };
+                    let mut allowance = usize::try_from(*fuel).unwrap();
+                    let initializer = nir::associated_initializers::AssociatedInitializer::new(
+                        body,
+                        &mut allowance,
+                    )
+                    .unwrap();
+                    *fuel = allowance as u64;
+                    Ok(AssociatedSelection {
+                        initializer,
+                        requires_invocation: true,
+                    })
+                };
+                let mut vm = Interpreter::for_comptime(&package, Budget::default())
+                    .unwrap()
+                    .with_associated_resolver(&resolver);
+                if cached_root {
+                    vm.associated_initializers.insert_owned(
+                        (interface.clone(), ty(Primitive::Bool), id(2)),
+                        Arc::new(access(3)),
+                    );
+                }
+                let prepared = vm
+                    .prepare_associated_value(
+                        &interface,
+                        &ty(Primitive::Bool),
+                        id(2),
+                        &ty(Primitive::Bool),
+                        SOURCE,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    vm.active_associated_initializers.len(),
+                    usize::from(cached_root)
+                );
+                let mut session = Session::associated(&mut vm, prepared);
+                assert!(session.to_string().contains("(root associated)"));
+                for polls in 1..=limit {
+                    if let Poll::Ready(flow) = session.poll().unwrap() {
+                        assert!(matches!(flow, Some(Flow::Value(Value::Bool(true)))));
+                        completed_polls = Some(polls);
+                        break;
+                    }
+                }
+                let called = calls.borrow().clone();
+                let remaining = session.vm.remaining_steps();
+                session.cancel();
+                assert_eq!(*calls.borrow(), called);
+                assert_eq!(session.vm.remaining_steps(), remaining);
+                assert!(session.vm.active_associated_initializers.is_empty());
+                assert_eq!(
+                    session.poll().unwrap_err().kind,
+                    ErrorKind::InvalidControlFlow
+                );
+                drop(session);
+                assert_eq!(vm.depth, 0);
+                assert!(matches!(
+                    vm.eval_associated_value(&access(2)).unwrap(),
+                    Flow::Value(Value::Bool(true))
+                ));
+                let expected: Vec<_> = (if cached_root { 3 } else { 2 }..=5).map(id).collect();
+                assert_eq!(*calls.borrow(), expected);
+                assert!(vm.active_associated_initializers.is_empty());
+            }
+            assert!(completed_polls.is_some());
+        }
     }
 
     #[test]

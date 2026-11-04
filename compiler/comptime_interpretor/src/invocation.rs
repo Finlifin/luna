@@ -130,6 +130,16 @@ impl StackEntry<'_> {
 }
 
 impl<'a> Interpreter<'a> {
+    #[inline(never)]
+    pub(super) fn run_associated_preparation(
+        &mut self,
+        prepared: associated_execution::Preparation<'a>,
+    ) -> Result<Flow, Error> {
+        Session::associated(self, prepared)
+            .run()?
+            .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))
+    }
+
     pub(super) fn invoke_value_scoped(
         &mut self,
         function: Value,
