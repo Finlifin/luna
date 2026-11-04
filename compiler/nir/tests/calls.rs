@@ -631,24 +631,178 @@ fn dependent_value_expressions_become_type_values_after_domain_completion() {
     };
     let domains = [p(Primitive::Type), domain];
     let typed = template
-        .instantiate_declaration_parameters_in_scope(
+        .instantiate_declaration_parameters_bounded(
             &ids,
             &domains,
             &[p(Primitive::Type), p(Primitive::Bool)],
             &[],
+            &mut 10_000,
         )
         .unwrap();
     assert_eq!(typed.ty, p(Primitive::Type));
     assert!(matches!(typed.kind, ExprKind::TypeValue(ty) if ty == p(Primitive::Bool)));
     assert!(
         template
-            .instantiate_declaration_parameters_in_scope(
+            .instantiate_declaration_parameters_bounded(
                 &ids,
                 &domains,
                 &[p(Primitive::Bool), p(Primitive::Bool)],
-                &[]
+                &[],
+                &mut 10_000,
             )
             .is_err()
     );
     assert!(matches!(template.kind, ExprKind::ComptimeValue(_)));
+}
+
+#[test]
+fn declaration_expression_substitution_bounds_expansion_and_preserves_source() {
+    use nir::program::{Expr, ExprKind as K, SourceRange};
+    use nir::type_computations::Error;
+    let parameter = DeclarationId {
+        package: 97,
+        local: 1,
+    };
+    let template = Expr {
+        ty: p(Primitive::Type),
+        source: SourceRange { start: 4, end: 8 },
+        kind: K::TypeValue(Term::Record(
+            (0..64)
+                .map(|i| {
+                    (
+                        format!("field{i}"),
+                        Term::Rigid {
+                            declaration: parameter,
+                            sort: nir::Sort::Type,
+                        },
+                    )
+                })
+                .collect(),
+        )),
+    };
+    let original = template.clone();
+    let argument = Term::Record(
+        (0..32)
+            .map(|i| (format!("argument{i}"), p(Primitive::Bool)))
+            .collect(),
+    );
+    assert_eq!(
+        template.instantiate_declaration_parameters_bounded(
+            &[parameter],
+            &[p(Primitive::Type)],
+            &[argument.clone()],
+            &[],
+            &mut 2000,
+        ),
+        Err(Error::Budget)
+    );
+    assert_eq!(template, original);
+    let result = template
+        .instantiate_declaration_parameters_bounded(
+            &[parameter],
+            &[p(Primitive::Type)],
+            &[argument.clone()],
+            &[],
+            &mut 100_000,
+        )
+        .unwrap();
+    assert_eq!(result.source, original.source);
+    assert_eq!(
+        result.kind,
+        K::TypeValue(Term::Record(
+            (0..64)
+                .map(|i| (format!("field{i}"), argument.clone()))
+                .collect()
+        ))
+    );
+    assert_eq!(template, original);
+}
+
+#[test]
+fn declaration_expression_substitution_bounds_shared_bodies_before_copying() {
+    use nir::program::{Expr, ExprKind as K, Literal, SourceRange};
+    use nir::type_computations::Error;
+    use std::sync::Arc;
+    let body = Arc::new(Expr {
+        ty: p(Primitive::Str),
+        source: SourceRange { start: 1, end: 3 },
+        kind: K::Literal(Literal::String("payload".repeat(1000))),
+    });
+    let template = Expr {
+        ty: p(Primitive::Type),
+        source: body.source,
+        kind: K::Closure {
+            parameters: vec![],
+            captures: vec![],
+            body: body.clone(),
+        },
+    };
+    let mut fuel = 500;
+    assert_eq!(
+        template.instantiate_declaration_parameters_bounded(&[], &[], &[], &[], &mut fuel),
+        Err(Error::Budget)
+    );
+    assert!(fuel > 0 && fuel < 500);
+    assert_eq!(Arc::strong_count(&body), 2);
+    let result = template
+        .instantiate_declaration_parameters_bounded(&[], &[], &[], &[], &mut 100_000)
+        .unwrap();
+    let K::Closure {
+        body: specialized, ..
+    } = &result.kind
+    else {
+        panic!("closure lost")
+    };
+    assert!(!Arc::ptr_eq(&body, specialized));
+    assert_eq!(body, *specialized);
+    assert_eq!(Arc::strong_count(&body), 2);
+}
+
+#[test]
+fn declaration_expression_substitution_preserves_nested_frames_and_recovers_from_scope_errors() {
+    use nir::program::{Expr, ExprKind as K, SourceRange};
+    use nir::type_computations::Error;
+    let parameter = DeclarationId {
+        package: 97,
+        local: 1,
+    };
+    let template = Expr {
+        ty: p(Primitive::Type),
+        source: SourceRange { start: 1, end: 3 },
+        kind: K::TypeValue(Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Rigid {
+                declaration: parameter,
+                sort: nir::Sort::Type,
+            }),
+        }),
+    };
+    let arguments = [Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: nir::Sort::Type,
+    }];
+    let run = |frames: &[Vec<nir::Sort>]| {
+        template.instantiate_declaration_parameters_bounded(
+            &[parameter],
+            &[p(Primitive::Type)],
+            &arguments,
+            frames,
+            &mut 10_000,
+        )
+    };
+    assert!(matches!(run(&[]), Err(Error::Scope(_))));
+    let result = run(&[vec![nir::Sort::Type]]).unwrap();
+    assert_eq!(
+        result.kind,
+        K::TypeValue(Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Bound {
+                depth: 1,
+                index: 0,
+                sort: nir::Sort::Type
+            }),
+        })
+    );
+    assert!(matches!(template.kind, K::TypeValue(Term::Function { .. })));
 }

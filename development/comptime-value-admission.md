@@ -1644,3 +1644,48 @@ Rust 表示误写为纯 Term 列表，编译失败于 `/tmp/luna-tools-9dja_079/
 
 受影响 Rust 文件格式检查通过；未运行全 workspace 或性能基准。正式 docs 与
 原有工作区修改未纳入本次变更。
+
+
+## 31. 默认表达式与程序规格的声明代入
+
+声明拥有的 checked expression 现在通过
+`DeclarationSubstitution::instantiate_expression_bounded` 复制和代入：先检查
+完整展开树的成本，再复制私有树、重写其中的类型。预检包括共享闭包体、模式
+条件及隐藏的类型操作数；不是只计顶层类型，也不是只计展开前的实参体积。
+失败不发布局部重写结果，原始模板保持不变。已有 binder frame、dependent domain
+成为 Type 时的 sort 检查和 ComptimeValue 到 TypeValue 的重写继续沿用统一机制。
+
+删除表达式上的 `instantiate_declaration_parameters_in_scope` 无界入口，改为
+强制 caller frames 和 fuel 的 `instantiate_declaration_parameters_bounded`。
+struct／enum 默认字段、上下文推导后的 enum 默认值与 associated initializer 的
+五处生产消费者均接通既有 elaboration 预算；失败前消耗照常扣减。字段默认值缓存
+取出与首次写入也在复制前预检。associated initializer 原来只预检原模板的做法由
+展开预检替代，不再漏掉参数重复出现造成的复制增长。
+
+`ProgramContract` 复用同一个表达式代入内核，删除重复 binder 构造和复制逻辑。
+这只是程序规格的结构变换，不把程序状态命题送入 PTC，也不把形成检查、验证或
+associated implementation 选择当作结构代入的一部分。
+
+新增用例验证 64 次引用乘以 32 字段实参的预算失败与恢复、共享闭包体在复制前
+计费且不改变原 Arc、开放 caller frame 经嵌套函数类型的深度调整、缺失 frame
+拒绝，以及已有 dependent value 成为 Type 的行为。首次脚本替换错误跨越了构造器
+代码边界，格式检查 `/tmp/luna-tools-nk3tirq1/result.json` 退出 1；使用本阶段修改前
+快照重新应用限定范围的修改后恢复，未覆盖其他人的改动。
+
+这次退役仅覆盖 declaration-owned expression 接口。旧的按固定 sort 参数／Type
+进行表达式或完整函数代入仍有消费者，不能据此声称所有模板复制都已受限。
+输入域获取、默认表达式形成与元数据取得的前置复制，以及全阶段预算所有权，
+也仍需继续整理。
+
+验证目录 `/home/fin/luna`，统一入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --test calls --test copy_budget --test type_rewrite --no-fail-fast`：
+  45 通过，退出 0；`/tmp/luna-tools-zohk9ngp/result.json`。
+- `-p elaboration --lib --no-fail-fast`：170 通过，退出 0；
+  `/tmp/luna-tools-402vjsfh/result.json`。
+- `-p luna --test nominal_value_parameters --test default_calls --test associated_signatures
+  --test deferred_associated_values --test associated_purity --test newtypes --test enum_groups
+  --no-fail-fast`：591 通过，退出 0；`/tmp/luna-tools-83c57c4o/result.json`。
+
+格式检查通过。未运行全 workspace、native 或性能基准；正式 docs 和原有工作区
+修改保持不变。

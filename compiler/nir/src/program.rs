@@ -3760,18 +3760,17 @@ impl Expr {
 
     /// Specialize a declaration-owned template using completed parameter
     /// domains. Full value/formation admission belongs to the caller.
-    pub fn instantiate_declaration_parameters_in_scope(
+    pub fn instantiate_declaration_parameters_bounded(
         &self,
         parameters: &[DeclarationId],
         domains: &[Term],
         arguments: &[Term],
         frames: &[Vec<crate::Sort>],
-    ) -> Result<Self, crate::TypeError> {
+        fuel: &mut usize,
+    ) -> Result<Self, crate::type_computations::Error> {
         let substitution =
-            crate::DeclarationSubstitution::new(parameters, domains, arguments, frames)?;
-        let mut value = self.clone();
-        value.rewrite_types(&mut |ty| substitution.instantiate(ty))?;
-        Ok(value)
+            crate::DeclarationSubstitution::bounded(parameters, domains, arguments, frames, fuel)?;
+        substitution.instantiate_expression_bounded(self, fuel)
     }
 
     /// Substitute type annotations throughout a checked template, including

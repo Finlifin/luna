@@ -2556,14 +2556,18 @@ impl Checker<'_, '_> {
                         format!("missing required enum payload field {}", names[slot]),
                     )
                 })?;
-                self.field_default(owner, Some(index), slot)?
-                    .instantiate_declaration_parameters_in_scope(
+                let default = self.field_default(owner, Some(index), slot)?;
+                let frames = self.call_input_frames();
+                nominal_fields::metered(&mut self.required_steps, |fuel| {
+                    default.instantiate_declaration_parameters_bounded(
                         &self.enums[&id].type_parameters,
                         &self.enums[&id].parameter_types,
                         arguments,
-                        &self.call_input_frames(),
+                        &frames,
+                        fuel,
                     )
-                    .map_err(|e| error(expr.span, e.to_string()))?
+                })
+                .map_err(|e| error(expr.span, e.to_string()))?
             });
         }
         let ty = if fields.iter().any(|f| is_never(&f.ty)) {
@@ -2884,15 +2888,21 @@ impl Checker<'_, '_> {
         for (slot, (value, default)) in checked.into_iter().zip(defaults).enumerate() {
             let value = match value {
                 Some(value) => value,
-                None => default
-                    .expect("omitted payload has a checked default")
-                    .instantiate_declaration_parameters_in_scope(
-                        &definition.type_parameters,
-                        &definition.parameter_types,
-                        &complete_arguments,
-                        &self.call_input_frames(),
-                    )
-                    .map_err(|e| error(expr.span, e.to_string()))?,
+                None => {
+                    let frames = self.call_input_frames();
+                    nominal_fields::metered(&mut self.required_steps, |fuel| {
+                        default
+                            .expect("omitted payload has a checked default")
+                            .instantiate_declaration_parameters_bounded(
+                                &definition.type_parameters,
+                                &definition.parameter_types,
+                                &complete_arguments,
+                                &frames,
+                                fuel,
+                            )
+                    })
+                    .map_err(|e| error(expr.span, e.to_string()))?
+                }
             };
             self.require(&value.ty, &variants[index].fields[slot], expr.span)?;
             fields.push(value);
@@ -3230,6 +3240,8 @@ impl Checker<'_, '_> {
         index: usize,
     ) -> Result<n::Expr, Error> {
         if let Some(value) = self.field_defaults.get(&(owner, variant, index)) {
+            let span = self.package.item(owner).unwrap().span;
+            constants::charge_copy(value, &mut self.required_steps, span)?;
             return Ok(value.clone());
         }
         let item = self.package.item(owner).unwrap();
@@ -3299,6 +3311,7 @@ impl Checker<'_, '_> {
         self.loops = loops;
         self.active_defaults.remove(&(owner, variant, index));
         let checked = checked?;
+        constants::charge_copy(&checked, &mut self.required_steps, field.span)?;
         self.field_defaults
             .insert((owner, variant, index), checked.clone());
         Ok(checked)
@@ -3363,7 +3376,7 @@ impl Checker<'_, '_> {
                 let field_type = self.callable_input_view(field_type, value.span)?;
                 self.expr(value, Some(&field_type))?
             } else {
-                self.field_default(
+                let default = self.field_default(
                     owner.ok_or_else(|| {
                         error(
                             expr.span,
@@ -3372,13 +3385,17 @@ impl Checker<'_, '_> {
                     })?,
                     None,
                     index,
-                )?
-                .instantiate_declaration_parameters_in_scope(
-                    &type_parameters,
-                    &parameter_types,
-                    arguments,
-                    &self.call_input_frames(),
-                )
+                )?;
+                let frames = self.call_input_frames();
+                nominal_fields::metered(&mut self.required_steps, |fuel| {
+                    default.instantiate_declaration_parameters_bounded(
+                        &type_parameters,
+                        &parameter_types,
+                        arguments,
+                        &frames,
+                        fuel,
+                    )
+                })
                 .map_err(|e| error(expr.span, e.to_string()))?
             });
         }

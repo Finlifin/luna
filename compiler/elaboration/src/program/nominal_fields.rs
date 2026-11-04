@@ -3,7 +3,7 @@
 use super::*;
 use nir::type_computations::Error as QueryError;
 
-fn metered<T>(
+pub(super) fn metered<T>(
     steps: &mut u64,
     query: impl FnOnce(&mut usize) -> Result<T, QueryError>,
 ) -> Result<T, QueryError> {

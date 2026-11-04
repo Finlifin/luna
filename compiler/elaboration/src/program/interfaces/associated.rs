@@ -242,20 +242,21 @@ impl Checker<'_, '_> {
             ));
         };
         let value = self.selected_associated_value(selected, member, span)?;
-        constants::charge_copy(&value, &mut self.required_steps, span)?;
         let implementation = self
             .checked_implementations
             .iter()
             .find(|i| i.declaration == selected)
             .unwrap();
-        let mut value = value
-            .instantiate_declaration_parameters_in_scope(
+        let mut value = nominal_fields::metered(&mut self.required_steps, |fuel| {
+            value.instantiate_declaration_parameters_bounded(
                 &implementation.type_parameters,
                 &implementation.parameter_types,
                 &evidence.type_arguments,
                 &[],
+                fuel,
             )
-            .map_err(|e| error(span, e.to_string()))?;
+        })
+        .map_err(|e| error(span, e.to_string()))?;
         if matches!(value.ty, Term::Primitive(_))
             && value.ty != p(P::Type)
             && self.initializer_implementation().is_none()
@@ -430,18 +431,20 @@ impl Checker<'_, '_> {
                 .associated_contract(owner, true)?
                 .default
                 .ok_or_else(|| error(span, "associated value initializer is missing"))?;
-            constants::charge_copy(&value, &mut self.required_steps, span)?;
-            value
-                .instantiate_declaration_parameters_in_scope(
+            let domains = parameters
+                .iter()
+                .map(|id| self.trait_input_domain(*id).unwrap_or(p(P::Type)))
+                .collect::<Vec<_>>();
+            nominal_fields::metered(&mut self.required_steps, |fuel| {
+                value.instantiate_declaration_parameters_bounded(
                     &parameters,
-                    &parameters
-                        .iter()
-                        .map(|id| self.trait_input_domain(*id).unwrap_or(p(P::Type)))
-                        .collect::<Vec<_>>(),
+                    &domains,
                     &arguments,
                     &[],
+                    fuel,
                 )
-                .map_err(|e| error(span, e.to_string()))
+            })
+            .map_err(|e| error(span, e.to_string()))
         })();
         self.selected_associated_implementation = saved_selection;
         self.active_associated_values.remove(&key);

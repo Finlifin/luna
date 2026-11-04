@@ -304,6 +304,24 @@ impl<'a> DeclarationSubstitution<'a> {
             }
         })
     }
+    /// Copy and specialize a checked expression only after bounding the entire
+    /// expanded tree, including shared closure bodies and hidden type operands.
+    /// The source is immutable; a failed rewrite never publishes a partial tree.
+    pub fn instantiate_expression_bounded(
+        &self,
+        expression: &crate::program::Expr,
+        fuel: &mut usize,
+    ) -> Result<crate::program::Expr, crate::type_computations::Error> {
+        use crate::type_computations::Error;
+        crate::copy_budget::charge_substitution(expression, &self.parameters, self.arguments, fuel)
+            .map_err(|_| Error::Budget)?;
+        let mut value = expression.clone();
+        value
+            .rewrite_types(&mut |ty| self.instantiate(ty))
+            .map_err(Error::Scope)?;
+        Ok(value)
+    }
+
     pub fn instantiate_predicate_bounded(
         &self,
         predicate: &crate::program::TypePredicate,

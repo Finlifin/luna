@@ -61,18 +61,10 @@ impl ProgramContract {
         fuel: &mut usize,
     ) -> Result<Self, crate::type_computations::Error> {
         use crate::type_computations::Error;
-        let binders = crate::declaration_parameters(parameters, domains).map_err(Error::Scope)?;
         let substitution =
             crate::DeclarationSubstitution::bounded(parameters, domains, arguments, frames, fuel)?;
-        let mut expression = |value: &Expr| {
-            crate::copy_budget::charge_substitution(value, &binders, arguments, fuel)
-                .map_err(|_| Error::Budget)?;
-            let mut value = value.clone();
-            value
-                .rewrite_types(&mut |ty| substitution.instantiate(ty))
-                .map_err(Error::Scope)?;
-            Ok::<_, Error>(value)
-        };
+        let mut expression =
+            |value: &Expr| substitution.instantiate_expression_bounded(value, fuel);
         let preconditions = self
             .preconditions
             .iter()
