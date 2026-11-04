@@ -120,3 +120,67 @@ fn contract_shape_uses_phase_fuel_instead_of_reporting_an_invalid_predicate() {
     assert_eq!(error.source, package.functions[0].preconditions[0].source);
     validate(&package).unwrap();
 }
+
+#[test]
+fn broad_expression_and_pattern_work_share_phase_inspection_fuel() {
+    let fields: Vec<_> = (0..40).map(|_| flag()).collect();
+    let mut tuple = function(1, Phase::Comptime);
+    tuple.body = Expr {
+        source: SourceRange { start: 50, end: 60 },
+        ty: Term::Tuple(vec![Term::Primitive(Primitive::Bool); fields.len()]),
+        kind: K::Tuple(fields),
+    };
+    tuple.signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(tuple.body.ty.clone()),
+    };
+    let mut matching = function(2, Phase::Comptime);
+    matching.body.kind = K::Match {
+        value: Box::new(flag()),
+        arms: vec![crate::program::MatchArm {
+            pattern: Pattern::Or(vec![Pattern::Wild; 40]),
+            guard: None,
+            body: flag(),
+        }],
+    };
+    for function in [tuple, matching] {
+        let source = function.body.source;
+        let package = Package {
+            functions: vec![function],
+            ..Default::default()
+        };
+        let original = package.to_string();
+        let mut fuel = 20;
+        let error = run(&package, &mut fuel).unwrap_err();
+        assert_eq!(error.message, "phase traversal budget exhausted");
+        assert_eq!(error.source, source);
+        assert!(fuel > 0 && fuel < 20);
+        assert_eq!(package.to_string(), original);
+        run(&package, &mut 10_000).unwrap();
+    }
+}
+
+#[test]
+fn narrow_expression_chains_cannot_bypass_worklist_charges() {
+    let mut callable = function(1, Phase::Comptime);
+    for index in 0..30 {
+        callable.body = Expr {
+            source: SourceRange {
+                start: index,
+                end: index + 1,
+            },
+            ty: Term::Primitive(Primitive::Bool),
+            kind: K::Not(Box::new(callable.body)),
+        };
+    }
+    let package = Package {
+        functions: vec![callable],
+        ..Default::default()
+    };
+    let mut fuel = 10;
+    let error = run(&package, &mut fuel).unwrap_err();
+    assert_eq!(error.message, "phase traversal budget exhausted");
+    assert_eq!(error.source, SourceRange { start: 19, end: 20 });
+    assert_eq!(fuel, 0);
+    run(&package, &mut 1000).unwrap();
+}

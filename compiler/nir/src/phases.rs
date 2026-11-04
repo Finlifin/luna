@@ -12,16 +12,14 @@ mod parameters;
 mod storage_cache;
 mod storage_error;
 mod trait_index;
+mod worklist;
 pub use storage_error::StorageError;
+use worklist::{Work, Worklist};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub source: SourceRange,
     pub message: &'static str,
-}
-enum Work<'a> {
-    Expr(&'a Expr, bool, bool), // direct callee, comptime execution context
-    Pattern(&'a Pattern, bool),
 }
 
 pub fn validate(package: &Package) -> Result<(), Error> {
@@ -197,11 +195,14 @@ fn machine_arithmetic_functions_with_budgets(
                 return Err(fail(function.source, "invalid entry snapshot binding"));
             }
         }
-        let mut work: Vec<_> = function
-            .body
-            .into_iter()
-            .map(|body| Work::Expr(body, false, ct))
-            .collect();
+        let mut work = Worklist::new(function.source);
+        work.extend(
+            function
+                .body
+                .into_iter()
+                .map(|body| Work::Expr(body, false, ct)),
+            inspection_fuel,
+        )?;
         if !function.preconditions.is_empty() || !function.postconditions.is_empty() {
             machine_owners.insert(function.declaration);
             if function.phase == Phase::NormalForm {
@@ -221,15 +222,18 @@ fn machine_arithmetic_functions_with_budgets(
                 )? {
                     return Err(fail(condition.source, "invalid program contract predicate"));
                 }
-                work.push(Work::Expr(condition, false, ct));
+                work.push(Work::Expr(condition, false, ct), inspection_fuel)?;
             }
         }
-        work.extend(function.defaults.iter().map(|(index, value)| {
-            let staged = matches!(function.signature.callable_signature(),
+        work.extend(
+            function.defaults.iter().map(|(index, value)| {
+                let staged = matches!(function.signature.callable_signature(),
                         crate::Term::Function {parameters,..}
                         if parameters.get(*index).is_some_and(|p|p.sort!=crate::Sort::Runtime));
-            Work::Expr(value, false, ct || staged)
-        }));
+                Work::Expr(value, false, ct || staged)
+            }),
+            inspection_fuel,
+        )?;
         while let Some(node) = work.pop() {
             match node {
                 Work::Pattern(pattern, ct) => match pattern {
@@ -240,16 +244,19 @@ fn machine_arithmetic_functions_with_budgets(
                                 "nominal input decomposition requires comptime",
                             ));
                         }
-                        work.extend(fields.iter().map(|field| Work::Pattern(field, ct)));
+                        work.extend(
+                            fields.iter().map(|field| Work::Pattern(field, ct)),
+                            inspection_fuel,
+                        )?;
                     }
                     Pattern::Then { first, value, next } => {
-                        work.push(Work::Pattern(first, ct));
-                        work.push(Work::Expr(value, false, ct));
-                        work.push(Work::Pattern(next, ct));
+                        work.push(Work::Pattern(first, ct), inspection_fuel)?;
+                        work.push(Work::Expr(value, false, ct), inspection_fuel)?;
+                        work.push(Work::Pattern(next, ct), inspection_fuel)?;
                     }
                     Pattern::Guard { pattern, condition } => {
-                        work.push(Work::Pattern(pattern, ct));
-                        work.push(Work::Expr(condition, false, ct));
+                        work.push(Work::Pattern(pattern, ct), inspection_fuel)?;
+                        work.push(Work::Expr(condition, false, ct), inspection_fuel)?;
                     }
                     Pattern::Remap { pattern, bindings } => {
                         if bindings
@@ -258,7 +265,7 @@ fn machine_arithmetic_functions_with_budgets(
                         {
                             return Err(fail(function.source, "entry snapshots are immutable"));
                         }
-                        work.push(Work::Pattern(pattern, ct));
+                        work.push(Work::Pattern(pattern, ct), inspection_fuel)?;
                     }
                     Pattern::Observe {
                         inner: pattern,
@@ -271,10 +278,10 @@ fn machine_arithmetic_functions_with_budgets(
                         if frozen.contains(binding) {
                             return Err(fail(function.source, "entry snapshots are immutable"));
                         }
-                        work.push(Work::Pattern(pattern, ct));
+                        work.push(Work::Pattern(pattern, ct), inspection_fuel)?;
                     }
                     Pattern::OptionalPresent(inner) | Pattern::ErrorResult { inner, .. } => {
-                        work.push(Work::Pattern(inner, ct))
+                        work.push(Work::Pattern(inner, ct), inspection_fuel)?
                     }
                     Pattern::Record { fields, .. }
                     | Pattern::AnonymousRecord { fields, .. }
@@ -285,7 +292,10 @@ fn machine_arithmetic_functions_with_budgets(
                     | Pattern::TypeTuple(fields)
                     | Pattern::Tuple(fields)
                     | Pattern::Or(fields) => {
-                        work.extend(fields.iter().map(|pattern| Work::Pattern(pattern, ct)));
+                        work.extend(
+                            fields.iter().map(|pattern| Work::Pattern(pattern, ct)),
+                            inspection_fuel,
+                        )?;
                     }
                     Pattern::CodeEvidence { .. } => {
                         return Err(fail(function.source, "unresolved pattern-code evidence"));
@@ -432,7 +442,10 @@ fn machine_arithmetic_functions_with_budgets(
                                     .validate_target_layout(package.target)
                                     .map_err(error)?;
                             }
-                            work.extend(inputs.iter().map(|e| Work::Expr(e, false, ct)));
+                            work.extend(
+                                inputs.iter().map(|e| Work::Expr(e, false, ct)),
+                                inspection_fuel,
+                            )?;
                         }
                         K::EffectHandle {
                             computation,
@@ -442,14 +455,14 @@ fn machine_arithmetic_functions_with_budgets(
                             if ct {
                                 return Err(error("comptime effect handlers are not implemented"));
                             }
-                            work.push(Work::Expr(computation, false, ct));
+                            work.push(Work::Expr(computation, false, ct), inspection_fuel)?;
                             for handler in handlers {
                                 for arm in &handler.arms {
-                                    work.push(Work::Pattern(&arm.pattern, ct));
+                                    work.push(Work::Pattern(&arm.pattern, ct), inspection_fuel)?;
                                     if let Some(g) = &arm.guard {
-                                        work.push(Work::Expr(g, false, ct));
+                                        work.push(Work::Expr(g, false, ct), inspection_fuel)?;
                                     }
-                                    work.push(Work::Expr(&arm.body, false, ct));
+                                    work.push(Work::Expr(&arm.body, false, ct), inspection_fuel)?;
                                 }
                             }
                         }
@@ -463,7 +476,7 @@ fn machine_arithmetic_functions_with_budgets(
                                     "comptime effect computations are not implemented",
                                 ));
                             }
-                            work.push(Work::Expr(body, false, ct));
+                            work.push(Work::Expr(body, false, ct), inspection_fuel)?;
                         }
                         K::EffectRequest { arguments, .. } => {
                             if ct {
@@ -473,7 +486,8 @@ fn machine_arithmetic_functions_with_budgets(
                                 arguments
                                     .iter()
                                     .map(|argument| Work::Expr(argument, false, ct)),
-                            );
+                                inspection_fuel,
+                            )?;
                         }
                         K::Function(id)
                         | K::FunctionInstance {
@@ -703,7 +717,7 @@ fn machine_arithmetic_functions_with_budgets(
                                     "callable type is unavailable in this execution phase",
                                 ));
                             }
-                            work.push(Work::Expr(callee, true, ct));
+                            work.push(Work::Expr(callee, true, ct), inspection_fuel)?;
                             let Term::Function { parameters, .. } = callee.ty.callable_signature()
                             else {
                                 return Err(error("call target has no callable signature"));
@@ -797,7 +811,10 @@ fn machine_arithmetic_functions_with_budgets(
                                 // This changes execution phase only; the frontend separately
                                 // proves that referenced inputs are available at that stage.
                                 let input_ct = ct || parameter.sort != crate::Sort::Runtime;
-                                work.push(Work::Expr(&argument.value, false, input_ct));
+                                work.push(
+                                    Work::Expr(&argument.value, false, input_ct),
+                                    inspection_fuel,
+                                )?;
                             }
                         }
                         // Immutable type observations may remain symbolic until
@@ -807,8 +824,8 @@ fn machine_arithmetic_functions_with_budgets(
                             if matches!(left.kind, K::TypeValue(_))
                                 && matches!(right.kind, K::TypeValue(_)) =>
                         {
-                            work.push(Work::Expr(left, false, true));
-                            work.push(Work::Expr(right, false, true));
+                            work.push(Work::Expr(left, false, true), inspection_fuel)?;
+                            work.push(Work::Expr(right, false, true), inspection_fuel)?;
                         }
                         K::Closure {
                             captures,
@@ -857,13 +874,14 @@ fn machine_arithmetic_functions_with_budgets(
                                     "closure type does not preserve its execution phase",
                                 ));
                             }
-                            work.push(Work::Expr(body, false, ct));
+                            work.push(Work::Expr(body, false, ct), inspection_fuel)?;
                             work.extend(
                                 captures
                                     .iter()
                                     .filter_map(|c| c.value.as_deref())
                                     .map(|e| Work::Expr(e, false, ct)),
-                            );
+                                inspection_fuel,
+                            )?;
                         }
                         K::NormalFormType {
                             head,
@@ -874,13 +892,15 @@ fn machine_arithmetic_functions_with_budgets(
                                 plan.iter()
                                     .flat_map(|p| &p.preparations)
                                     .map(|p| Work::Expr(&p.expression, false, ct)),
-                            );
+                                inspection_fuel,
+                            )?;
                             work.extend(
                                 arguments
                                     .iter()
                                     .flat_map(|a| a.patterns())
                                     .map(|pattern| Work::Pattern(pattern, ct)),
-                            );
+                                inspection_fuel,
+                            )?;
                             if !ct {
                                 return Err(error(
                                     "normal-form type construction requires comptime",
@@ -909,14 +929,18 @@ fn machine_arithmetic_functions_with_budgets(
                                     .iter()
                                     .flat_map(|a| a.expressions())
                                     .map(|e| Work::Expr(e, false, ct)),
-                            );
+                                inspection_fuel,
+                            )?;
                         }
                         K::ClosureType {
                             environment,
                             signature,
                         } => {
-                            work.extend(environment.iter().map(|e| Work::Expr(e, false, ct)));
-                            work.push(Work::Expr(signature, false, ct));
+                            work.extend(
+                                environment.iter().map(|e| Work::Expr(e, false, ct)),
+                                inspection_fuel,
+                            )?;
+                            work.push(Work::Expr(signature, false, ct), inspection_fuel)?;
                         }
                         K::CheckTypeAlias {
                             declaration,
@@ -976,25 +1000,28 @@ fn machine_arithmetic_functions_with_budgets(
                                 return Err(error("invalid alias formation guard inputs"));
                             }
                             if let Some(body) = body {
-                                work.push(Work::Expr(body, false, ct));
+                                work.push(Work::Expr(body, false, ct), inspection_fuel)?;
                             }
                             work.extend(
                                 preparations
                                     .iter()
                                     .map(|p| Work::Expr(&p.expression, false, ct)),
-                            );
+                                inspection_fuel,
+                            )?;
                             work.extend(
                                 arguments
                                     .iter()
                                     .flat_map(|a| a.expressions())
                                     .map(|e| Work::Expr(e, false, ct)),
-                            );
+                                inspection_fuel,
+                            )?;
                             work.extend(
                                 arguments
                                     .iter()
                                     .flat_map(|a| a.patterns())
                                     .map(|p| Work::Pattern(p, ct)),
-                            );
+                                inspection_fuel,
+                            )?;
                         }
                         K::NominalType {
                             arguments,
@@ -1005,13 +1032,15 @@ fn machine_arithmetic_functions_with_budgets(
                                 preparations
                                     .iter()
                                     .map(|p| Work::Expr(&p.expression, false, ct)),
-                            );
+                                inspection_fuel,
+                            )?;
                             work.extend(
                                 arguments
                                     .iter()
                                     .flat_map(|a| a.patterns())
                                     .map(|pattern| Work::Pattern(pattern, ct)),
-                            );
+                                inspection_fuel,
+                            )?;
                             if !ct {
                                 return Err(error(
                                     "nominal type construction requires comptime execution",
@@ -1022,7 +1051,8 @@ fn machine_arithmetic_functions_with_budgets(
                                     .iter()
                                     .flat_map(|a| a.expressions())
                                     .map(|e| Work::Expr(e, false, ct)),
-                            );
+                                inspection_fuel,
+                            )?;
                         }
                         K::FunctionType {
                             parameters,
@@ -1034,14 +1064,18 @@ fn machine_arithmetic_functions_with_budgets(
                                     "function type parameter stages must match domains",
                                 ));
                             }
-                            work.extend(parameters.iter().map(|e| Work::Expr(e, false, ct)));
+                            work.extend(
+                                parameters.iter().map(|e| Work::Expr(e, false, ct)),
+                                inspection_fuel,
+                            )?;
                         }
                         K::TypeList(fields)
                         | K::Tuple(fields)
                         | K::Record { fields, .. }
-                        | K::Variant { fields, .. } => {
-                            work.extend(fields.iter().map(|e| Work::Expr(e, false, ct)))
-                        }
+                        | K::Variant { fields, .. } => work.extend(
+                            fields.iter().map(|e| Work::Expr(e, false, ct)),
+                            inspection_fuel,
+                        )?,
                         K::AnonymousRecord { fields } => {
                             match &expr.ty {
                                 crate::Term::Record(types) if types.len() == fields.len() => {}
@@ -1055,7 +1089,10 @@ fn machine_arithmetic_functions_with_budgets(
                                     ));
                                 }
                             }
-                            work.extend(fields.iter().map(|e| Work::Expr(e, false, ct)));
+                            work.extend(
+                                fields.iter().map(|e| Work::Expr(e, false, ct)),
+                                inspection_fuel,
+                            )?;
                         }
                         K::Object { names, fields } => {
                             let diverges = fields.iter().any(|field| {
@@ -1071,7 +1108,10 @@ fn machine_arithmetic_functions_with_budgets(
                                     "Object construction requires comptime evaluation and matching entries",
                                 ));
                             }
-                            work.extend(fields.iter().map(|e| Work::Expr(e, false, ct)));
+                            work.extend(
+                                fields.iter().map(|e| Work::Expr(e, false, ct)),
+                                inspection_fuel,
+                            )?;
                         }
                         K::AnonymousField { value, name, index } => {
                             match &value.ty {
@@ -1090,13 +1130,13 @@ fn machine_arithmetic_functions_with_budgets(
                                     ));
                                 }
                             }
-                            work.push(Work::Expr(value, false, ct));
+                            work.push(Work::Expr(value, false, ct), inspection_fuel)?;
                         }
                         K::Snapshot(value) => {
                             if value.ty != expr.ty {
                                 return Err(error("entry snapshot must preserve its operand type"));
                             }
-                            work.push(Work::Expr(value, false, ct));
+                            work.push(Work::Expr(value, false, ct), inspection_fuel)?;
                         }
                         K::RequirePredicate(condition)
                         | K::EnsurePredicate(condition)
@@ -1117,7 +1157,7 @@ fn machine_arithmetic_functions_with_budgets(
                                     "program check requires a supported effect-free bool predicate and void result",
                                 ));
                             }
-                            work.push(Work::Expr(condition, false, ct));
+                            work.push(Work::Expr(condition, false, ct), inspection_fuel)?;
                         }
                         K::ComptimeFunctionInstance {
                             declaration,
@@ -1162,7 +1202,7 @@ fn machine_arithmetic_functions_with_budgets(
                                     ));
                                 }
                             }
-                            work.push(Work::Expr(subject, false, true));
+                            work.push(Work::Expr(subject, false, true), inspection_fuel)?;
                         }
                         K::BuildStruct(value)
                         | K::BuildNewtype(value)
@@ -1179,7 +1219,7 @@ fn machine_arithmetic_functions_with_budgets(
                                     "definition construction or struct reflection requires comptime invocation",
                                 ));
                             }
-                            work.push(Work::Expr(value, false, true));
+                            work.push(Work::Expr(value, false, true), inspection_fuel)?;
                         }
                         K::AddressOf(value)
                         | K::ReadPointer(value)
@@ -1206,7 +1246,9 @@ fn machine_arithmetic_functions_with_budgets(
                         | K::SymbolName(value)
                         | K::EnumName(value)
                         | K::Not(value)
-                        | K::Loop { body: value, .. } => work.push(Work::Expr(value, false, ct)),
+                        | K::Loop { body: value, .. } => {
+                            work.push(Work::Expr(value, false, ct), inspection_fuel)?
+                        }
                         K::ComptimeIntegerConvert(value) => {
                             if !ct
                                 || !crate::program::comptime_integer_conversion_valid(
@@ -1218,7 +1260,7 @@ fn machine_arithmetic_functions_with_budgets(
                                     "integer conversion requires comptime integer domains",
                                 ));
                             }
-                            work.push(Work::Expr(value, false, true));
+                            work.push(Work::Expr(value, false, true), inspection_fuel)?;
                         }
                         K::IntegerRepresentation(value) => {
                             if !crate::program::integer_representation_valid(&value.ty, &expr.ty) {
@@ -1227,13 +1269,13 @@ fn machine_arithmetic_functions_with_budgets(
                                     "integer representation domain mismatch",
                                 ));
                             }
-                            work.push(Work::Expr(value, false, ct));
+                            work.push(Work::Expr(value, false, ct), inspection_fuel)?;
                         }
                         K::TextQuery { subject, query } => {
                             if !query.validate(&subject.ty, &expr.ty) {
                                 return Err(fail(expr.source, "text query domain mismatch"));
                             }
-                            work.push(Work::Expr(subject, false, ct));
+                            work.push(Work::Expr(subject, false, ct), inspection_fuel)?;
                         }
                         K::WritePointer {
                             pointer: a,
@@ -1262,8 +1304,8 @@ fn machine_arithmetic_functions_with_budgets(
                         | K::BitConcat(a, b)
                         | K::And(a, b)
                         | K::Or(a, b) => {
-                            work.push(Work::Expr(a, false, ct));
-                            work.push(Work::Expr(b, false, ct));
+                            work.push(Work::Expr(a, false, ct), inspection_fuel)?;
+                            work.push(Work::Expr(b, false, ct), inspection_fuel)?;
                         }
                         K::BitWritePointer {
                             pointer,
@@ -1287,14 +1329,14 @@ fn machine_arithmetic_functions_with_budgets(
                             ) {
                                 return Err(error(message));
                             }
-                            work.push(Work::Expr(pointer, false, ct));
+                            work.push(Work::Expr(pointer, false, ct), inspection_fuel)?;
                             for input in selections
                                 .iter()
                                 .flat_map(crate::program::BitSelection::expressions)
                             {
-                                work.push(Work::Expr(input, false, ct));
+                                work.push(Work::Expr(input, false, ct), inspection_fuel)?;
                             }
-                            work.push(Work::Expr(value, false, ct));
+                            work.push(Work::Expr(value, false, ct), inspection_fuel)?;
                         }
                         K::BitUpdate {
                             storage_type,
@@ -1320,9 +1362,9 @@ fn machine_arithmetic_functions_with_budgets(
                                 .iter()
                                 .flat_map(crate::program::BitSelection::expressions)
                             {
-                                work.push(Work::Expr(input, false, ct));
+                                work.push(Work::Expr(input, false, ct), inspection_fuel)?;
                             }
-                            work.push(Work::Expr(value, false, ct));
+                            work.push(Work::Expr(value, false, ct), inspection_fuel)?;
                         }
                         K::BitWindow { value, start, end } => {
                             let never = Term::Primitive(Primitive::Never);
@@ -1333,9 +1375,9 @@ fn machine_arithmetic_functions_with_budgets(
                                     else {!matches!(expr.ty, Term::Primitive(Primitive::BitVec(_)))} {
                                 return Err(error("invalid dynamic BitVec slice operand or result type"));
                             }
-                            work.push(Work::Expr(value, false, ct));
-                            work.push(Work::Expr(start, false, ct));
-                            work.push(Work::Expr(end, false, ct));
+                            work.push(Work::Expr(value, false, ct), inspection_fuel)?;
+                            work.push(Work::Expr(start, false, ct), inspection_fuel)?;
+                            work.push(Work::Expr(end, false, ct), inspection_fuel)?;
                         }
                         K::BitIndex(value, index) => {
                             let never = Term::Primitive(Primitive::Never);
@@ -1357,17 +1399,17 @@ fn machine_arithmetic_functions_with_budgets(
                                     "invalid dynamic BitVec index operand or result type",
                                 ));
                             }
-                            work.push(Work::Expr(value, false, ct));
-                            work.push(Work::Expr(index, false, ct));
+                            work.push(Work::Expr(value, false, ct), inspection_fuel)?;
+                            work.push(Work::Expr(index, false, ct), inspection_fuel)?;
                         }
                         K::Match { value, arms } => {
-                            work.push(Work::Expr(value, false, ct));
+                            work.push(Work::Expr(value, false, ct), inspection_fuel)?;
                             for arm in arms {
-                                work.push(Work::Pattern(&arm.pattern, ct));
+                                work.push(Work::Pattern(&arm.pattern, ct), inspection_fuel)?;
                                 if let Some(g) = &arm.guard {
-                                    work.push(Work::Expr(g, false, ct));
+                                    work.push(Work::Expr(g, false, ct), inspection_fuel)?;
                                 }
-                                work.push(Work::Expr(&arm.body, false, ct));
+                                work.push(Work::Expr(&arm.body, false, ct), inspection_fuel)?;
                             }
                         }
                         K::Block { statements, result }
@@ -1450,11 +1492,14 @@ fn machine_arithmetic_functions_with_budgets(
                             })?
                             .map(|(indices, _)| indices)
                             .unwrap_or_default();
-                            work.extend(statements.iter().enumerate().map(|(index, e)| {
-                                Work::Expr(e, false, ct || staged.contains(&index))
-                            }));
+                            work.extend(
+                                statements.iter().enumerate().map(|(index, e)| {
+                                    Work::Expr(e, false, ct || staged.contains(&index))
+                                }),
+                                inspection_fuel,
+                            )?;
                             if let Some(result) = result {
-                                work.push(Work::Expr(result, false, ct));
+                                work.push(Work::Expr(result, false, ct), inspection_fuel)?;
                             }
                         }
                         K::LetPattern {
@@ -1463,13 +1508,13 @@ fn machine_arithmetic_functions_with_budgets(
                             guard,
                             otherwise,
                         } => {
-                            work.push(Work::Pattern(pattern, ct));
-                            work.push(Work::Expr(value, false, ct));
+                            work.push(Work::Pattern(pattern, ct), inspection_fuel)?;
+                            work.push(Work::Expr(value, false, ct), inspection_fuel)?;
                             if let Some(g) = guard {
-                                work.push(Work::Expr(g, false, ct));
+                                work.push(Work::Expr(g, false, ct), inspection_fuel)?;
                             }
                             if let Some(e) = otherwise {
-                                work.push(Work::Expr(e, false, ct));
+                                work.push(Work::Expr(e, false, ct), inspection_fuel)?;
                             }
                         }
                         K::If {
@@ -1477,15 +1522,15 @@ fn machine_arithmetic_functions_with_budgets(
                             then_branch,
                             else_branch,
                         } => {
-                            work.push(Work::Expr(condition, false, ct));
-                            work.push(Work::Expr(then_branch, false, ct));
+                            work.push(Work::Expr(condition, false, ct), inspection_fuel)?;
+                            work.push(Work::Expr(then_branch, false, ct), inspection_fuel)?;
                             if let Some(e) = else_branch {
-                                work.push(Work::Expr(e, false, ct));
+                                work.push(Work::Expr(e, false, ct), inspection_fuel)?;
                             }
                         }
                         K::Return(value) => {
                             if let Some(e) = value {
-                                work.push(Work::Expr(e, false, ct));
+                                work.push(Work::Expr(e, false, ct), inspection_fuel)?;
                             }
                         }
                         K::BuildMetadata {
@@ -1517,7 +1562,7 @@ fn machine_arithmetic_functions_with_budgets(
                                     })?;
                                 }
                             }
-                            work.push(Work::Expr(selector, false, ct));
+                            work.push(Work::Expr(selector, false, ct), inspection_fuel)?;
                         }
                         K::StagedValue(value) => {
                             let Term::Function { parameters, .. } =

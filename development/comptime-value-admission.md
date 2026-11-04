@@ -2233,3 +2233,57 @@ intrinsic helper 的其他准入契约。normal-form/newtype metadata、主 phas
 格式检查 `/tmp/luna-tools-ut_lz41d/result.json` 退出 0。未运行全 workspace 或性能
 基准。正式 docs 与原有工作区修改保持不变；通过检查不能替代完整 phase／VM
 预算及程序谓词调用协议的后续交付。
+
+
+### Phase 主工作栈的入栈预算
+
+phase 的表达式／pattern 主遍历改用私有 `Worklist`。body、contracts、defaults、
+closure captures、effect arms 和 contextual inputs 的全部入栈路径消费同一次
+inspection allowance；原先裸 Vec 的 78 处 push／extend 已迁移。入栈前支付一个
+待处理节点，pop 不重复收费。direct-callee 与 comptime-context 标记随节点保留，
+不借这次迁移改变遍历顺序、staged producer 传播或 runtime／comptime 准入规则。
+
+已知精确长度的批次先预留整个宽度，再迭代并扩展 Vec；失败保留原有 pending
+内容且不执行映射闭包。未知宽度的过滤／展开迭代器逐个支付节点成本，不能把
+未付费子项留在待处理栈里。后者失败时允许内部队列保留已经付费的前缀，但整个
+phase 查询立即失败，队列随查询丢弃，没有部分 phase 结果对外发布。宽度预留
+失败仍可能留下正余额，不能由余额推断检查成功。
+
+生产回归覆盖宽 tuple、宽 pattern alternatives 和连续单子节点表达式链。
+在 `6357b484` 的原 phase 实现上，长链先完成未计费的主遍历，才在后续 call safety
+耗尽；`/tmp/luna-tools-qh7uu37o/result.json` 退出 101，实际诊断为 call-safety
+budget。恢复当前实现后，同一测试在主遍历入栈时报告 traversal budget，并保留
+对应表达式源位置。批次失败定位于函数 owner，pattern 仍沿用 owner 来源。
+
+这次限定为工作节点和 pending 槽位的成本归属，不将它等同于全量检查成本。
+过滤器在产生节点前扫描的 capture／input 元数据、函数 frames／snapshot 集合、
+成员计划与部分类型／声明观察仍需单独计费或接入共享索引。normal-form/newtype
+metadata 与 VM constructor 资源分类／精确扣款也仍未完成。后续统一入口前必须
+继续核对这些操作，不能因主栈有预算就把 pass 标记为完整有界。
+
+本批验证目录 `/home/fin/luna`，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --lib --test phases --no-fail-fast`：75 通过，退出 0；
+  `/tmp/luna-tools-n675xbzg/result.json`。
+- `-p nir -p comptime_interpretor --lib --test phases --test instance_budget
+  --test runtime_function_identities --no-fail-fast`：584 通过，退出 0；
+  `/tmp/luna-tools-r6njd5ou/result.json`，已恢复新实现后的检查。
+- `-p luna --test default_calls --test quote_functions --test cmtt_type_inputs
+  --test trait_phases --test sysroot_preludes --test comptime_bytecode_patterns
+  --test closure_local_handlers --no-fail-fast`：272 通过、1 失败，退出 101；
+  `/tmp/luna-tools-v4gzhzpq/result.json`。
+
+唯一集成失败为
+`closure_local_handlers::outward_request_cannot_retire_the_storage_a_callback_will_read`：
+程序拒绝于 source 525..573，诊断为 `handler lexical capture address exposure
+requires a memory contract`，未匹配该用例预期的拒绝原因。保持其余工作区及用户
+改动不变，仅恢复本批之前的 `6357b484` phase 实现，运行
+`-p luna --test closure_local_handlers
+ outward_request_cannot_retire_the_storage_a_callback_will_read -- --exact`，
+`/tmp/luna-tools-28v7rs67/result.json` 同样退出 101，源位置与诊断完全相同。
+该基线问题未修复，也未修改测试预期；不能把此组记为全通过。
+
+对照结束后恢复已测试的新 phase 文件并核对内容一致。格式检查
+`/tmp/luna-tools-2ramcsip/result.json` 退出 0。未运行全 workspace 或性能基准；
+正式 docs 与原有工作区修改保持不变。
