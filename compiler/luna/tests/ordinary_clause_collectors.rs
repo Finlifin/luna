@@ -212,7 +212,6 @@ fn clause_collectors_preserve_early_exit_before_later_producers() {
 }
 
 #[test]
-#[ignore = "required clause invocation still uses the separate trait input routing path"]
 fn clause_collectors_also_supply_runtime_callable_identities() {
     assert_eq!(
         run("
@@ -235,4 +234,123 @@ fn clause_collectors_combine_many_list_spreads() {
     "
     );
     assert_eq!(run(&source), Value::Bool(true));
+}
+
+#[test]
+fn required_collector_inputs_drive_runtime_specialization() {
+    assert_eq!(
+        run("
+        fn choose(input: bool) -> bool where ...flags: meta.List<bool> {
+            const flip = flags.length() > 0 and flags[0];
+            if flip { not input } else { input }
+        }
+        fn run() -> bool {
+            choose<true>(false) and choose<>(true)
+                and not choose<.flags = [false]>(false)
+                and choose<...[true]>(false)
+        }
+    "),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn required_collector_inputs_keep_prefix_defaults_and_value_contexts() {
+    assert_eq!(
+        run("
+        fn choose(input: bool) -> bool
+        where T, seed: bool, .flip: bool = seed, ...flags: meta.List<T>
+        {
+            if flip { not input } else { input }
+        }
+        fn run() -> bool {
+            choose<u8, true, 1, 255>(false)
+                and choose<...(bool, false), .flags = [true]>(true)
+                and choose<bool, false, .flip = true>(false)
+        }
+    "),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn required_collector_inputs_reject_runtime_reads_and_caller_control_exits() {
+    for supplied in [
+        "value",
+        "do { return true; false }",
+        "...do { let items: meta.List<bool> = [value]; items }",
+    ] {
+        let source = format!(
+            "
+            fn accepted() -> bool where ...values: meta.List<bool> {{ true }}
+            fn run(value: bool) -> bool {{ accepted<{supplied}>() }}
+        "
+        );
+        assert!(
+            compile(&source).is_err(),
+            "accepted runtime input {supplied}"
+        );
+    }
+}
+
+#[test]
+fn collector_instance_formation_does_not_admit_runtime_execution_at_comptime() {
+    let source = "
+        fn accepted() -> bool where ...values: meta.List<bool> { true }
+        fn run() -> bool { const result = accepted<true>(); result }
+    ";
+    assert!(compile(source).is_err());
+}
+
+#[test]
+fn required_collectors_on_static_methods_use_the_same_clause_packet() {
+    assert_eq!(
+        run("
+        struct Flag {}
+        impl Flag {
+            fn choose(input: bool) -> bool
+            where .flip: bool = true, ...values: meta.List<u8>
+            {
+                if flip { not input } else { input }
+            }
+        }
+        fn run() -> bool {
+            Flag.choose<1, 255>(false) and Flag.choose<.values = [], .flip = false>(true)
+        }
+    "),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn required_collector_packets_can_be_nested_in_constant_callable_formation() {
+    assert_eq!(
+        run("
+        fn choose(input: bool) -> bool where flip: bool, ...flags: meta.List<bool> {
+            if flip { not input } else { input }
+        }
+        fn run() -> bool {
+            const selected = choose<true, false>;
+            const unchanged = choose<false, .flags = []>;
+            selected(false) and unchanged(true)
+        }
+    "),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn required_collector_packets_still_reject_recursive_sources() {
+    let error = compile(
+        "
+        const flags: meta.List<bool> = flags;
+        fn accepted() -> bool where ...values: meta.List<bool> { true }
+        fn run() -> bool { accepted<.values = flags>() }
+    ",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("cyclic") || error.contains("recursive"),
+        "{error}"
+    );
 }

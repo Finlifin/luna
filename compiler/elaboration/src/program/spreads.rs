@@ -369,22 +369,17 @@ impl Checker<'_, '_> {
                     self.ensure_signature(owner, expr.span)?;
                     if self.open_functions.contains_key(&owner) {
                         self.require_non_trait_body_reference(owner, callee.span)?;
-                        return self.with_explicit_open_clauses(
-                            owner,
-                            clauses,
-                            expr.span,
-                            |this| {
-                                this.spread_call_resolved(
-                                    expr,
-                                    callee,
-                                    args,
-                                    expected,
-                                    partial,
-                                    None,
-                                    Some(owner),
-                                )
-                            },
-                        );
+                        return self.with_explicit_open_clauses(owner, clauses, expr, |this| {
+                            this.spread_call_resolved(
+                                expr,
+                                callee,
+                                args,
+                                expected,
+                                partial,
+                                None,
+                                Some(owner),
+                            )
+                        });
                     }
                 }
             }

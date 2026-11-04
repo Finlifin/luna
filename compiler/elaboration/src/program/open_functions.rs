@@ -438,8 +438,7 @@ impl Checker<'_, '_> {
                 return Ok(Some(D::Any));
             }
         }
-        let arguments =
-            self.type_clause_arguments_with_prefix(owner, clauses, None, expr.span, lexical)?;
+        let arguments = self.function_clause_arguments(expr, owner, clauses)?;
         self.check_type_application(owner, &arguments, expr.span)?;
         let mut unresolved = Vec::new();
         for (binder, argument) in self.declaration_binders(owner).iter().zip(&arguments) {
@@ -5235,7 +5234,7 @@ impl Checker<'_, '_> {
                 .any(|argument| matches!(argument, Arg::Named(..)))
         {
             if let H::NFApplication(head, clauses) = callee.kind {
-                return self.with_explicit_open_clauses(owner, clauses, expr.span, |this| {
+                return self.with_explicit_open_clauses(owner, clauses, expr, |this| {
                     this.describe_open_extended_call(
                         expr, head, args, locals, returns, expected, depth, true,
                     )
@@ -5421,7 +5420,7 @@ impl Checker<'_, '_> {
                         "explicit instantiation requires a generic function",
                     ));
                 }
-                let arguments = self.type_clause_arguments(owner, clauses, None, expr.span)?;
+                let arguments = self.function_clause_arguments(expr, owner, clauses)?;
                 self.check_type_application(owner, &arguments, expr.span)?;
                 let saved = self.alias_substitution.clone();
                 for (binder, argument) in self.declaration_binders(owner).into_iter().zip(arguments)
@@ -5456,7 +5455,7 @@ impl Checker<'_, '_> {
         }
         if self.open_functions.contains_key(&owner) && !self.type_parameters[&owner].is_empty() {
             let arguments = if let Some(explicit) = explicit {
-                self.type_clause_arguments(owner, explicit, None, expr.span)?
+                self.function_clause_arguments(expr, owner, explicit)?
             } else {
                 let target = match expected {
                     Some(D::Known(ty)) => Some(ty),
@@ -6094,7 +6093,7 @@ impl Checker<'_, '_> {
         let signature = signature.clone();
         let all_generic = self.type_parameters[&owner].clone();
         let fixed = match explicit {
-            Some(types) => self.type_clause_arguments(owner, types, None, expr.span)?,
+            Some(types) => self.function_clause_arguments(expr, owner, types)?,
             None => self.lexical_function_arguments(owner, expr.span)?,
         };
         let (generic, template, pending_defaults) =
@@ -7770,18 +7769,18 @@ impl Checker<'_, '_> {
         &mut self,
         owner: OwnerId,
         clauses: &[Arg<'_>],
-        span: Span,
+        expr: &Expr<'_>,
         build: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> Result<R, Error> {
         self.check_open_definition(owner)?;
         if self.type_parameters[&owner].is_empty() {
             return Err(error(
-                span,
+                expr.span,
                 "explicit instantiation requires a generic function",
             ));
         }
-        let arguments = self.type_clause_arguments(owner, clauses, None, span)?;
-        self.check_type_application(owner, &arguments, span)?;
+        let arguments = self.function_clause_arguments(expr, owner, clauses)?;
+        self.check_type_application(owner, &arguments, expr.span)?;
         let saved = self.alias_substitution.clone();
         for (binder, argument) in self.declaration_binders(owner).into_iter().zip(arguments) {
             self.alias_substitution
@@ -7901,9 +7900,7 @@ impl Checker<'_, '_> {
                 let known = match fixed {
                     Some(arguments) => arguments,
                     None => match clauses {
-                        Some(clauses) => {
-                            self.type_clause_arguments(owner, clauses, None, expr.span)?
-                        }
+                        Some(clauses) => self.function_clause_arguments(expr, owner, clauses)?,
                         None => self.lexical_function_arguments(owner, expr.span)?,
                     },
                 };
@@ -7935,7 +7932,7 @@ impl Checker<'_, '_> {
             return Ok(call);
         }
         if let Some(clauses) = clauses {
-            return self.with_explicit_open_clauses(owner, clauses, expr.span, |this| {
+            return self.with_explicit_open_clauses(owner, clauses, expr, |this| {
                 this.instantiated_open_call(expr, owner, args, expected)
             });
         }

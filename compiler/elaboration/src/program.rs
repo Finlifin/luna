@@ -1742,7 +1742,7 @@ struct Checker<'a, 'h> {
     constants: BTreeMap<OwnerId, n::Expr>,
     active_constants: BTreeSet<OwnerId>,
     active_nominals: BTreeSet<OwnerId>,
-    active_required: BTreeSet<n::LocalId>,
+    active_required: BTreeSet<(n::LocalId, required::RootKind)>,
     active_contracts: BTreeSet<OwnerId>,
     active_function_defaults: BTreeSet<(OwnerId, usize)>,
     active_type_defaults: BTreeSet<(OwnerId, usize)>,
@@ -5439,7 +5439,7 @@ impl Checker<'_, '_> {
         self.ensure_signature(owner, expr.span)?;
         let lexical = self.lexical_function_arguments(owner, expr.span)?;
         if let Some(value) =
-            self.comptime_function_instance(expr, owner, args, &lexical, None, allow_optional)?
+            self.prepared_callable_instance(expr, owner, args, &lexical, None, allow_optional)?
         {
             return if allow_optional {
                 Ok(value)

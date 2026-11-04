@@ -155,15 +155,18 @@ fn source_dynamic_trait_clauses_evaluate_once_before_explicit_arguments() {
     let text = source(
         "comptime fn choose(value:bool)->bool where flag:bool {value}",
         r#"
-        comptime fn take(pointer:*bool)->bool {
-            let old = pointer.*;
-            pointer.* = not old;
-            old
+        struct State { flag: bool }
+        impl State {
+            comptime fn take(self) -> bool {
+                let old = self.flag;
+                self.flag = not old;
+                old
+            }
         }
-        comptime fn run()->bool {
-            let flag = false;
-            let selected = Subject.as(Choose).choose<take(flag.ref)>(.value=flag);
-            selected and flag
+        comptime fn run() -> bool {
+            let state = State { flag: false };
+            let selected = Subject.as(Choose).choose<state.take()>(.value = state.flag);
+            selected and state.flag
         }
     "#,
     );

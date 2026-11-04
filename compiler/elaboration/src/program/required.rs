@@ -8,6 +8,14 @@ pub(super) mod prepared;
 mod restore;
 use prepared::PreparedRequired;
 
+/// Required expression evaluation can prepare a distinct clause packet at the
+/// same source node. Query identity includes the operation, not just its site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum RootKind {
+    Expression,
+    CallableInputs,
+}
+
 impl Checker<'_, '_> {
     // A comptime parameter may acquire a Type domain from an explicit type
     // equality in this declaration. Only already available type binders and
@@ -1364,13 +1372,40 @@ impl Checker<'_, '_> {
         defer_inputs: bool,
         live: &[(n::LocalId, Term, Value)],
     ) -> Result<PreparedRequired, Error> {
+        self.prepare_required_root_with_live_inputs(
+            expr,
+            RootKind::Expression,
+            inputs,
+            defer_inputs,
+            live,
+            |checker| {
+                checked
+                    .map(Ok)
+                    .unwrap_or_else(|| checker.expr(expr, expected))
+            },
+        )
+    }
+
+    /// Construct a required root inside the same isolated checking context as
+    /// source expressions. Callers must not precheck staged producers in the
+    /// runtime caller's return, loop, or capture context.
+    pub(super) fn prepare_required_root_with_live_inputs(
+        &mut self,
+        expr: &Expr<'_>,
+        kind: RootKind,
+        inputs: Vec<(n::LocalId, Term, Term)>,
+        defer_inputs: bool,
+        live: &[(n::LocalId, Term, Value)],
+        build: impl FnOnce(&mut Self) -> Result<n::Expr, Error>,
+    ) -> Result<PreparedRequired, Error> {
         let mut supplied: BTreeSet<_> = inputs.iter().map(|(binding, _, _)| *binding).collect();
         for (binding, _, _) in live {
             if !supplied.insert(*binding) {
                 return Err(error(expr.span, "duplicate required comptime input"));
             }
         }
-        if self.active_required.len() >= 32 || !self.active_required.insert(local(expr.hir_id)) {
+        let query = (local(expr.hir_id), kind);
+        if self.active_required.len() >= 32 || !self.active_required.insert(query) {
             return Err(error(
                 expr.span,
                 "cyclic or excessively deep required comptime dependency",
@@ -1442,17 +1477,13 @@ impl Checker<'_, '_> {
                 }
                 inputs.push((binding, domain, value));
             }
-            let mut root = checked
-                .map(Ok)
-                .unwrap_or_else(|| self.expr(expr, expected))
-                .map_err(|mut e| {
-                    if e.message == "local binding is unavailable in this scope" {
-                        e.message =
-                            "required comptime input is not yet available in this definition"
-                                .into();
-                    }
-                    e
-                })?;
+            let mut root = build(self).map_err(|mut e| {
+                if e.message == "local binding is unavailable in this scope" {
+                    e.message =
+                        "required comptime input is not yet available in this definition".into();
+                }
+                e
+            })?;
             if let Some((parameters, arguments)) = self.initializer_substitution() {
                 root = root
                     .instantiate_parameters(&self.input_binders(parameters), arguments)
@@ -2331,7 +2362,7 @@ impl Checker<'_, '_> {
         self.captures = saved_captures;
         self.in_required_comptime = saved_mode;
         self.numeric_defaults = saved_numeric;
-        self.active_required.remove(&local(expr.hir_id));
+        self.active_required.remove(&query);
         result
     }
 

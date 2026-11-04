@@ -3045,8 +3045,13 @@ impl Checker<'_, '_> {
             K::FunctionInstance { .. } | K::TraitMethod { .. }
         ) {
             if let Some(value) =
-                self.comptime_function_instance(expr, owner, args, &fixed, None, allow_optional)?
+                self.prepared_callable_instance(expr, owner, args, &fixed, None, allow_optional)?
             {
+                let value = if matches!(value.kind, K::FunctionInstance { .. }) {
+                    self.retain_method_origin(method, value)
+                } else {
+                    value
+                };
                 return if allow_optional {
                     Ok(value)
                 } else {

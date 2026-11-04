@@ -1,4 +1,4 @@
-//! Invocation-time clause inputs for already-known comptime callable signatures.
+//! Shared clause packets, required input invocation, and staged comptime callables.
 use super::*;
 
 impl Checker<'_, '_> {
@@ -36,6 +36,28 @@ impl Checker<'_, '_> {
                 })
                 .collect(),
         )
+    }
+
+    pub(super) fn prepared_callable_instance(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        prefix: &[Term],
+        expected: Option<&Term>,
+        allow_optional: bool,
+    ) -> Result<Option<n::Expr>, Error> {
+        if let Some(value) =
+            self.comptime_function_instance(expr, owner, args, prefix, expected, allow_optional)?
+        {
+            return Ok(Some(value));
+        }
+        if !self.clause_has_collector(owner) || self.in_code_body {
+            return Ok(None);
+        }
+        let inputs = self.required_callable_clause_arguments(expr, owner, args, prefix)?;
+        self.function_instance(expr, owner, inputs, expected, allow_optional)
+            .map(Some)
     }
 
     pub(super) fn comptime_function_instance(
@@ -76,20 +98,8 @@ impl Checker<'_, '_> {
         {
             return Ok(None);
         }
-        let declared_domains = self.trait_domains(owner)?;
+        let domains = self.callable_clause_domains(owner, &parameters, prefix, expr.span)?;
         let prefix_binders = self.input_binders(&parameters[..prefix.len()]);
-        let domains = declared_domains
-            .iter()
-            .map(|domain| {
-                domain
-                    .instantiate_parameters_in_scope(
-                        &prefix_binders,
-                        prefix,
-                        &self.call_input_frames(),
-                    )
-                    .map_err(|failure| error(expr.span, failure.to_string()))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
         if domains.iter().all(|domain| *domain == p(P::Type)) {
             return Ok(None);
         }
@@ -111,6 +121,41 @@ impl Checker<'_, '_> {
         }
         if !allow_optional {
             arguments::require_function_value_parameters(sig.params, expr.span)?;
+        }
+        let (packet, symbols) =
+            self.prepare_callable_clause_packet(expr, owner, args, prefix, &parameters, &domains)?;
+        let signature =
+            self.instantiate_input_types(&signature, &parameters, &symbols, expr.span)?;
+        let ty = self.callable_type(owner, signature);
+        if let Some(expected) = expected {
+            self.require(&ty, expected, expr.span)?;
+        }
+        Ok(Some(n::Expr {
+            source: source(expr.span),
+            ty,
+            kind: K::ComptimeFunctionInstance {
+                declaration: declaration(self.package, &self.package_identities, owner),
+                subject: Box::new(packet),
+            },
+        }))
+    }
+
+    /// Prepare ordinary clause values without choosing their execution time or
+    /// the phase of the eventual callable. The packet is an internal carrier;
+    /// every operand retains its declaration domain and source-order producer.
+    pub(super) fn prepare_callable_clause_packet(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        prefix: &[Term],
+        parameters: &[DeclarationId],
+        domains: &[Term],
+    ) -> Result<(n::Expr, Vec<Term>), Error> {
+        if parameters.len() != domains.len()
+            || prefix.len() + self.type_clause_params(owner).len() != parameters.len()
+        {
+            return Err(error(expr.span, "clause input prefix arity mismatch"));
         }
         let saved_locals = self.locals.clone();
         let saved_substitution = self.alias_substitution.clone();
@@ -228,7 +273,11 @@ impl Checker<'_, '_> {
             owner,
             FormationInputs {
                 terms: symbols.clone(),
-                deferred: value_parameters.into_iter().collect(),
+                deferred: parameters
+                    .iter()
+                    .zip(domains)
+                    .filter_map(|(id, domain)| (*domain != p(P::Type)).then_some(*id))
+                    .collect(),
                 environment: BTreeMap::new(),
             },
             expr.span,
@@ -236,36 +285,119 @@ impl Checker<'_, '_> {
         // Named Type inputs may occur after their value inputs. Once routing
         // completes, validate every retained value against the completed domain
         // even if this function is never invoked.
-        for (operand, domain) in operands.iter().zip(&domains) {
-            let domain = self.instantiate_input_types(domain, &parameters, &symbols, expr.span)?;
+        for (operand, domain) in operands.iter().zip(domains) {
+            let domain = self.instantiate_input_types(domain, parameters, &symbols, expr.span)?;
             self.require(&operand.ty, &domain, expr.span)?;
         }
-        let signature =
-            self.instantiate_input_types(&signature, &parameters, &symbols, expr.span)?;
-        let ty = self.callable_type(owner, signature);
-        if let Some(expected) = expected {
-            self.require(&ty, expected, expr.span)?;
-        }
-        Ok(Some(n::Expr {
-            source: source(expr.span),
-            ty,
-            kind: K::ComptimeFunctionInstance {
-                declaration: declaration(self.package, &self.package_identities, owner),
-                subject: Box::new(n::Expr {
-                    source: source(expr.span),
-                    ty: Term::Tuple(operands.iter().map(|value| value.ty.clone()).collect()),
-                    kind: K::Block {
-                        statements,
-                        result: Some(Box::new(n::Expr {
-                            source: source(expr.span),
-                            ty: Term::Tuple(
-                                operands.iter().map(|value| value.ty.clone()).collect(),
-                            ),
-                            kind: K::Tuple(operands),
-                        })),
-                    },
-                }),
+        let ty = Term::Tuple(operands.iter().map(|value| value.ty.clone()).collect());
+        Ok((
+            n::Expr {
+                source: source(expr.span),
+                ty: ty.clone(),
+                kind: K::Block {
+                    statements,
+                    result: Some(Box::new(n::Expr {
+                        source: source(expr.span),
+                        ty,
+                        kind: K::Tuple(operands),
+                    })),
+                },
             },
-        }))
+            symbols,
+        ))
+    }
+
+    fn callable_clause_domains(
+        &mut self,
+        owner: OwnerId,
+        parameters: &[DeclarationId],
+        prefix: &[Term],
+        span: Span,
+    ) -> Result<Vec<Term>, Error> {
+        if prefix.len() > parameters.len() {
+            return Err(error(span, "clause input prefix arity mismatch"));
+        }
+        let declared_domains = self.trait_domains(owner)?;
+        let prefix_binders = self.input_binders(&parameters[..prefix.len()]);
+        declared_domains
+            .iter()
+            .map(|domain| {
+                domain
+                    .instantiate_parameters_in_scope(
+                        &prefix_binders,
+                        prefix,
+                        &self.call_input_frames(),
+                    )
+                    .map_err(|failure| error(span, failure.to_string()))
+            })
+            .collect()
+    }
+
+    pub(super) fn function_clause_arguments(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+    ) -> Result<Vec<Term>, Error> {
+        let prefix = self.lexical_function_arguments(owner, expr.span)?;
+        if self.clause_has_collector(owner) {
+            self.required_callable_clause_arguments(expr, owner, args, &prefix)
+        } else {
+            self.type_clause_arguments_with_prefix(owner, args, None, expr.span, prefix)
+        }
+    }
+
+    /// Execute only the prepared input packet. Forming the eventual runtime
+    /// callable still uses ordinary function-instance admission; no runtime
+    /// function body is admitted to the comptime interpreter by this operation.
+    pub(super) fn required_callable_clause_arguments(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        prefix: &[Term],
+    ) -> Result<Vec<Term>, Error> {
+        let parameters = self.type_parameters[&owner].clone();
+        let domains = self.callable_clause_domains(owner, &parameters, prefix, expr.span)?;
+        let prepared = self.prepare_required_root_with_live_inputs(
+            expr,
+            required::RootKind::CallableInputs,
+            Vec::new(),
+            false,
+            &[],
+            |checker| {
+                checker
+                    .prepare_callable_clause_packet(
+                        expr,
+                        owner,
+                        args,
+                        prefix,
+                        &parameters,
+                        &domains,
+                    )
+                    .map(|(packet, _)| packet)
+            },
+        )?;
+        let (value, _) =
+            self.invoke_required_publishing(prepared, Vec::new(), expr.hir_id.owner, expr.span)?;
+        let comptime_interpretor::Value::Tuple(values) = value else {
+            return Err(error(
+                expr.span,
+                "clause input packet did not produce a tuple",
+            ));
+        };
+        if values.len() != parameters.len() {
+            return Err(error(expr.span, "clause input packet arity mismatch"));
+        }
+        values
+            .into_iter()
+            .map(|value| match value {
+                comptime_interpretor::Value::TypeParameter(declaration) => Ok(Term::Rigid {
+                    declaration,
+                    sort: Sort::Type,
+                }),
+                value => self.required_normal_term(value, expr.span),
+            })
+            .collect()
     }
 }

@@ -223,7 +223,7 @@ impl Checker<'_, '_> {
         })?;
         if direct_open {
             if let H::NFApplication(_, clauses) = callee.kind {
-                return self.with_explicit_open_clauses(owner, clauses, expr.span, |this| {
+                return self.with_explicit_open_clauses(owner, clauses, expr, |this| {
                     this.collect_properties_resolved(
                         expr, callee, args, expected, partial, None, owner, true,
                     )

@@ -298,11 +298,12 @@ VM 的签名查询移到 `callable_domains.rs`，typed 结果区分实际缺失�
 - 多段列表只在所有生产者已绑定后组装，使用已有列表值及 `ListConcat` 节点；组装树
   保持平衡，避免连续展开产生线性深度的 NIR 和反复复制全部前缀。它不重排生产者。
 
-实际边界仍须显式保留：普通 runtime callable 的 required 子句供应继续走旧
+`c851ac9a` 的阶段边界是：普通 runtime callable 的 required 子句供应仍走旧
 `trait_clause_arguments_with_prefix` 路径，尚未共享这份准备计划；签名本身依赖值输入、
 或元素域尚需后面的 Type 供应才能取得时，也还需要统一的 ContextualExpr/ArgumentPlan。
 尤其不能通过提前调用后面的 Type 生产函数，为先出现的列表字面量制造上下文。
-这些缺口应保留期望成功的独立回归，不修改语言规则来追认实现限制。
+这些缺口保留期望成功的独立回归，不修改语言规则来追认实现限制。runtime callable
+收集输入的后续接线见第 12 节；此处记录前一阶段的证据边界。
 
 本阶段在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test -p luna`
 检查 `ordinary_clause_collectors`、`function_template_local_definitions`、
@@ -318,3 +319,53 @@ memoized_value_indexed_keys_keep_declaration_and_value_arguments`：394 项通�
 现场 `/tmp/luna-tools-mc58vqey/result.json` 保留两种不同失败，不把 ignored 当作验收。
 其余一项 ignored 是既有抽象 Copy 默认值问题。已修改 Rust 文件的 rustfmt check
 退出 0，证据 `/tmp/luna-tools-vldv5jur/result.json`；未运行全 workspace 或 native 检查。
+
+
+## 12. required 与 invocation 共享 callable 参数包
+
+`prepare_callable_clause_packet` 从原 `comptime_function_instance` 中抽出。它处理前缀、
+显式输入、默认值、声明域与形成要求，返回内部 tuple 参数包及签名替换证据；它不决定
+执行时间，也不授予 callee 的执行资格。
+
+已知 comptime callable 仍把同一参数包留给 invocation。普通函数的 required 收集输入
+则在 required 检查上下文中构建并执行参数包，取得不可变子句值后走已有
+`function_instance` 形成与准入。直接函数、静态方法以及包含 staged const 的 open
+函数均接到这个入口；方法仍保留原 trait 来源。NF 头的身份规则没有改动。
+
+这里没有把 runtime 函数体塞进 comptime VM，也没有放宽 `ComptimeFunctionInstance`
+的阶段契约。新增的构建回调进入 required 原有的隔离上下文之后才检查生产者，避免把
+调用者的 runtime 局部值、return 及 loop 上下文当作编译期输入的权限。已有检查入口和
+回调入口共用捕获准备、依赖快照、预算、失败恢复与结果发布。
+
+required 的活动查询键从单独源码 LocalId 改为 `(LocalId, RootKind)`，区分源表达式
+与 callable 输入包计算。嵌套 `const saved = function<...>` 在同一源码节点下形成输入包
+是真实的不同查询，不能据此报告循环；相同查询的递归检测与深度限额继续保留。
+在增加种类之前，真实 sysroot 正例于 `/tmp/luna-tools-9x6lkqnq/result.json` 退出 101，
+报告 cyclic required dependency；修正后同一用例于 `/tmp/luna-tools-o7cg5qwq/result.json`
+通过。它只是现有 required 生命周期的局部修正，尚不是完整世界版本、依赖指纹和
+事务状态查询系统。
+
+测试保留 runtime 特化实际读取列表、空尾部、完整供应、展开、依赖元素域、默认值、
+方法及常量函数值形成；拒绝 runtime 局部读、调用者控制出口以及在 comptime 调用
+runtime 函数。动态 trait 的一次性求值测试原先使用 comptime 指针，违背已确认契约；
+现改成 struct 的值引用 self 方法更新字段，仍断言子句生产者执行一次、普通实参随后
+读取更新值，没有更改预期结果或赋予 comptime 指针资格。
+
+尚未完成的部分仍包括：先供应字面量而元素域依赖后来的 Type 输入、通用自定义收集
+协议、值相关 callable 签名，以及 trait/NF/普通输入的完整 ContextualExpr/ArgumentPlan
+合流。非收集器 required 参数目前仍有旧 trait 路由，不能把本次 packet 复用称为整个
+输入系统已经统一。任意 live comptime 环境中的 runtime callable 生成与传送也没有
+因静态 required 输入路径通过而自动获得完整证明。
+
+验收在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test -p luna`：
+`dynamic_trait_clauses` 10 项、`function_template_local_definitions` 22 项、
+`nominal_value_parameters` 306 项、`open_functions` 390 项、
+`ordinary_clause_collectors` 18 项通过，命令退出 0，证据
+`/tmp/luna-tools-vptmv1b_/result.json`。其中两个 ignored 分别为抽象 Copy 默认值及
+后置 Type 供应下的列表字面量；既有 memoization staging 失败继续按名称显式跳过，
+未宣称修复。此前同版生产源码的 `clause_staged_constants` 2 项与
+`comptime_clause_inputs` 46 项已通过；其混合命令随后因旧指针 fixture 失败而整体
+退出 101，证据 `/tmp/luna-tools-_bwxuxhw/result.json`，不能将整条命令写作成功。
+迁移该 fixture 后重新执行上述动态 trait 组通过。修改文件的 rustfmt check 与
+`git diff --check` 均通过，格式证据 `/tmp/luna-tools-iz3x2t1_/result.json`；未运行全
+workspace、性能基准或 native 验收。
