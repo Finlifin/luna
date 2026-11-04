@@ -4,6 +4,7 @@ use crate::{
     implementation::{ImplementationHead, Index, Selection, TypeAssessment},
     ptc::{Budget, Context},
 };
+use nir::value_admission::Error as AdmissionError;
 use nir::{DeclarationId as Id, Term, program as n};
 use std::collections::{BTreeMap, HashMap};
 
@@ -145,10 +146,14 @@ impl<'a> DeclarationWorld<'a> {
     pub fn assumptions(&self) -> &[n::TraitRequirement] {
         &self.assumptions
     }
-    pub fn input_domains(&self, parameters: &[Id], fuel: &mut usize) -> Result<Vec<Term>, String> {
+    pub fn input_domains(
+        &self,
+        parameters: &[Id],
+        fuel: &mut usize,
+    ) -> Result<Vec<Term>, AdmissionError> {
         *fuel = fuel
             .checked_sub(parameters.len())
-            .ok_or("input domain budget exhausted")?;
+            .ok_or(AdmissionError::Budget)?;
         parameters
             .iter()
             .map(|id| {
@@ -157,36 +162,42 @@ impl<'a> DeclarationWorld<'a> {
                     .parameter_domains()
                     .get(id)
                     .unwrap_or(&Term::Primitive(nir::Primitive::Type));
-                nir::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+                nir::type_computations::charge_term(domain, fuel)?;
                 Ok(domain.clone())
             })
             .collect()
     }
     /// Signature evidence for a frozen callable, without body traversal.
-    /// Formation predicates are discharged by the enclosing admission pass.
+    /// Missing declarations return `Ok(None)`; malformed inputs and exhausted
+    /// budgets remain distinct failures. Formation predicates are discharged by
+    /// the enclosing admission pass.
     pub fn callable_signature(
         &self,
         declaration: Id,
         arguments: &[Term],
         frames: &[Vec<nir::Sort>],
         fuel: &mut usize,
-    ) -> Option<Term> {
-        *fuel = fuel.checked_sub(1)?;
+    ) -> Result<Option<Term>, AdmissionError> {
+        *fuel = fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
         if let Some(head) = self.normal_heads.get(&declaration) {
             if !arguments.is_empty() {
-                return None;
+                return Err("normal-form callable identity cannot carry applied inputs".into());
             }
-            *fuel = fuel.checked_sub(head.parameters.len())?;
+            *fuel = fuel
+                .checked_sub(head.parameters.len())
+                .ok_or(AdmissionError::Budget)?;
             for parameter in &head.parameters {
-                nir::type_computations::charge_term(&parameter.ty, fuel).ok()?;
+                nir::type_computations::charge_term(&parameter.ty, fuel)?;
             }
-            return head.callable_type().ok();
+            return head
+                .callable_type()
+                .map(Some)
+                .map_err(|e| AdmissionError::Invalid(e.to_string()));
         }
         let (parameters, signature, qualifiers) =
             if let Some(identity) = self.runtime_callables.get(&declaration) {
                 (&identity.type_parameters, &identity.signature, None)
-            } else {
-                let function = self.callable_functions.get(&declaration)?;
+            } else if let Some(function) = self.callable_functions.get(&declaration) {
                 (
                     &function.type_parameters,
                     &function.signature,
@@ -195,6 +206,8 @@ impl<'a> DeclarationWorld<'a> {
                         function.is_unsafe,
                     )),
                 )
+            } else {
+                return Ok(None);
             };
         self.specialized_callable_signature(
             declaration,
@@ -205,6 +218,7 @@ impl<'a> DeclarationWorld<'a> {
             frames,
             fuel,
         )
+        .map(Some)
     }
 
     pub fn callable_value_signature(
@@ -212,52 +226,68 @@ impl<'a> DeclarationWorld<'a> {
         value: nir::CallableValueRef<'_>,
         frames: &[Vec<nir::Sort>],
         fuel: &mut usize,
-    ) -> Option<Term> {
+    ) -> Result<Option<Term>, AdmissionError> {
         match value {
             nir::CallableValueRef::Function {
                 declaration,
                 arguments,
             } => self.callable_signature(declaration, arguments, frames, fuel),
             nir::CallableValueRef::Method(method) => {
-                *fuel = fuel.checked_sub(self.package.traits.len().saturating_add(1))?;
-                let interface = self
+                *fuel = fuel
+                    .checked_sub(self.package.traits.len().saturating_add(1))
+                    .ok_or(AdmissionError::Budget)?;
+                let Some(interface) = self
                     .package
                     .traits
                     .iter()
-                    .find(|t| t.declaration == method.interface.declaration)?;
-                *fuel = fuel.checked_sub(interface.methods.len().saturating_add(1))?;
-                let contract = interface
+                    .find(|t| t.declaration == method.interface.declaration)
+                else {
+                    return Ok(None);
+                };
+                *fuel = fuel
+                    .checked_sub(interface.methods.len().saturating_add(1))
+                    .ok_or(AdmissionError::Budget)?;
+                let Some(contract) = interface
                     .methods
                     .iter()
-                    .find(|m| m.declaration == method.member)?;
+                    .find(|m| m.declaration == method.member)
+                else {
+                    return Ok(None);
+                };
                 if method.interface.arguments.len() != interface.type_parameters.len()
                     || method.method_arguments.len() != contract.type_parameters.len()
                     || contract.signature.is_comptime_callable()
                 {
-                    return None;
+                    return Err("method identity has incompatible inputs or callable phase".into());
                 }
                 for term in method.terms() {
-                    nir::type_computations::charge_term(term, fuel).ok()?;
+                    nir::type_computations::charge_term(term, fuel)?;
                 }
-                *fuel = fuel.checked_sub(
-                    interface
-                        .type_parameters
-                        .len()
-                        .saturating_add(contract.type_parameters.len())
-                        .saturating_add(1),
-                )?;
+                *fuel = fuel
+                    .checked_sub(
+                        interface
+                            .type_parameters
+                            .len()
+                            .saturating_add(contract.type_parameters.len())
+                            .saturating_add(1),
+                    )
+                    .ok_or(AdmissionError::Budget)?;
                 let mut parameters = interface.parameters_with_self();
                 parameters.extend(&contract.type_parameters);
                 let inputs: Vec<_> = method.terms().cloned().collect();
                 self.specialized_callable_signature(
                     method.member,
                     &parameters,
-                    contract.signature.ordinary().ok()?,
+                    contract
+                        .signature
+                        .ordinary()
+                        .map_err(|e| AdmissionError::Invalid(e.to_string()))?,
                     None,
                     &inputs,
                     frames,
                     fuel,
                 )
+                .map(Some)
             }
         }
     }
@@ -271,8 +301,8 @@ impl<'a> DeclarationWorld<'a> {
         arguments: &[Term],
         frames: &[Vec<nir::Sort>],
         fuel: &mut usize,
-    ) -> Option<Term> {
-        let domains = self.input_domains(parameters, fuel).ok()?;
+    ) -> Result<Term, AdmissionError> {
+        let domains = self.input_domains(parameters, fuel)?;
         let descriptor = nir::normal_forms::Head {
             declaration,
             collector: None,
@@ -300,14 +330,14 @@ impl<'a> DeclarationWorld<'a> {
         self.with_admission_queries(|queries| {
             descriptor.check_arguments(arguments, frames, fuel, queries)
         })
-        .ok()?;
-
+        .map_err(|error| match error {
+            nir::normal_forms::ApplicationError::Budget { .. } => AdmissionError::Budget,
+            error => AdmissionError::Invalid(error.to_string()),
+        })?;
         let signature =
-            nir::DeclarationSubstitution::bounded(parameters, &domains, arguments, frames, fuel)
-                .ok()?
-                .instantiate_bounded(signature, fuel)
-                .ok()?;
-        Some(match qualifiers {
+            nir::DeclarationSubstitution::bounded(parameters, &domains, arguments, frames, fuel)?
+                .instantiate_bounded(signature, fuel)?;
+        Ok(match qualifiers {
             Some((comptime, is_unsafe)) => signature
                 .with_comptime_phase(comptime)
                 .with_unsafe_call_requirement(is_unsafe),
@@ -357,12 +387,9 @@ impl<'a> DeclarationWorld<'a> {
                 nir::type_computations::charge_term(element, fuel)?;
                 Ok(Some(element.clone()))
             },
-            callable: &mut |value, frames, fuel| match self
-                .callable_value_signature(value, frames, fuel)
-            {
-                Some(signature) => Ok(Some(std::borrow::Cow::Owned(signature))),
-                None if *fuel == 0 => Err(Error::Budget),
-                None => Ok(None),
+            callable: &mut |value, frames, fuel| {
+                self.callable_value_signature(value, frames, fuel)
+                    .map(|signature| signature.map(std::borrow::Cow::Owned))
             },
             target: self.package.target,
         })

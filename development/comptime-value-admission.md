@@ -1052,8 +1052,9 @@ ArgumentPlan，这次迁移不改变输入求值顺序或授予新的结果缓�
 
 查询接口保留显式 `Error::Budget`，即使宿主查询返回时调用者仍有剩余 fuel，也按
 预算失败处理，不转成类型不匹配。VM 已有的 typed callable 查询直接进入 NF 检查，
-不再先压成 Option 再靠零 fuel 猜测；其他旧观察服务仍在各自提供者内适配其 Option
-结果，这部分不能称为已完成的统一 typed 查询协议。
+不再先压成 Option 再靠零 fuel 猜测；声明世界的 callable 查询也已按下节迁移。
+名义布局及部分旧描述观察服务仍在各自提供者内适配 Option 结果，这部分不能称为
+已完成的统一 typed 查询协议。
 
 原 `clause_list_inputs_share_domain_scope_and_budget_validation` 在改动前再次以
 `FunctionInputRejected { stage: Value, .. }` 与旧 `Type` 断言不符而失败，证据
@@ -1086,3 +1087,36 @@ ArgumentPlan，这次迁移不改变输入求值顺序或授予新的结果缓�
 标注，分别在 `/tmp/luna-tools-p1t_1ufe`、`/tmp/luna-tools-igc2pig2` 编译失败；
 补齐标注后完成上述检查。已全仓核对旧接口无剩余代码引用，没有再跑全量 VM
 或 workspace，也没有改变任何语言预期。
+
+## 22. 声明世界的 callable 查询保留失败类别
+
+旧 `DeclarationWorld::callable_signature`／`callable_value_signature` 将域查询、
+子句实参检查及签名代入的错误压成 Option。接到 DomainQueries 时只根据 fuel
+是否为零恢复 Budget，但预算预留失败不会消费尚未预留的额度：剩余 2，查身份后
+剩余 1，再尝试预留 3 个输入域就会失败，旧入口却返回 `Ok(None)`。改动前以该
+真实路径复现，`/tmp/luna-tools-vd8w5wh6` 退出 101，不能将其解释为缺少声明证据。
+
+这些入口现在返回 `Result<Option<Term>, value_admission::Error>`：只有未知声明、
+接口或成员返回 `Ok(None)`，已知 callable 的错误输入／签名返回 Invalid，资源
+失败返回 Budget。`input_domains` 同样保留 typed 错误，参数预留、NF 参数检查及
+substitution 的错误不再经过 `.ok()` 丢失原因。查询仍不读函数主体或执行调用，
+也不代替外层形成 predicate。预算计算和失败预留的剩余额度保持原规则。
+
+DomainQueries 直接传递该结果；materialization 的 callable identity 路径先保留
+失败原因，再单独诊断缺失声明证据。其他现有字符串诊断消费者通过错误的 Display
+取得原因，没有为查询添加结果缓存、失败缓存或执行降级。
+
+验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p type_resolution --test callable_world --no-fail-fast`：5 通过，退出 0；
+  `/tmp/luna-tools-ropet5x0`。覆盖索引成本、独立世界、缺失／无效身份，以及函数与
+  方法查询从零预算到成功的每个边界和失败后的恢复。初次新增测试使用了要求 Copy
+  的数组重复语法，编译失败于 `/tmp/luna-tools-xv7i7z0j`；改用普通 Vec 后通过。
+- `-p luna --test normal_form_domains --test nominal_staging --test invocation_value_templates
+  --test comptime_iir_bytecode --no-fail-fast`：28 通过，退出 0；`/tmp/luna-tools-s9zup4rc`。
+- `-p luna --test scoped_comptime_callables -- retained_callable_signatures normal_form_method_inputs
+  method_normal_form_inputs runtime_instances_retain_function_valued_type_arguments
+  materialized_callable_signatures`：5 通过，退出 0；`/tmp/luna-tools-6p2vc5nw`。
+
+未运行全 workspace、native 或性能基准。仍未统一所有布局／描述查询的失败协议，
+也未完成普通参数与 NF 参数的可恢复计划；正式 docs 与原有工作区修改保持不变。

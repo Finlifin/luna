@@ -2377,7 +2377,8 @@ impl Builder<'_> {
                 let signature = self
                     .world
                     .callable_signature(*declaration, arguments, &[], &mut self.fuel)
-                    .ok_or("IIR callable identity has invalid declaration inputs")?;
+                    .map_err(|error| format!("IIR callable identity: {error}"))?
+                    .ok_or("IIR callable identity has no declaration evidence")?;
                 nir::type_computations::charge_term(&signature, &mut self.fuel)
                     .map_err(|e| e.to_string())?;
                 children.push(signature.clone());

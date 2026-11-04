@@ -1,5 +1,6 @@
 //! Callable evidence is indexed per immutable declaration world, not memoized invocation.
 use nir::program::{Expr, ExprKind, Function, FunctionPhase, LocalId, Package, SourceRange};
+use nir::value_admission::Error as AdmissionError;
 use nir::{DeclarationId, Primitive, Sort, Term};
 use type_resolution::dispatch::DeclarationWorld;
 use type_resolution::ptc::Budget;
@@ -103,6 +104,7 @@ fn evidence_lookup_work_does_not_scale_with_unrelated_declarations() {
             let mut fuel = 100;
             let signature = world
                 .callable_signature(declaration, &arguments, &[], &mut fuel)
+                .unwrap()
                 .unwrap();
             signature.check_scope(&[]).unwrap();
             observed.push((signature, 100 - fuel));
@@ -118,21 +120,21 @@ fn evidence_lookup_work_does_not_scale_with_unrelated_declarations() {
         assert!(
             world
                 .callable_signature(id(9999), &[], &[], &mut 10)
+                .unwrap()
                 .is_none()
         );
-        assert!(
-            world
-                .callable_signature(id(1), &[], &[], &mut 100)
-                .is_none()
-        );
-        assert!(
-            world
-                .callable_signature(id(1), &[boolean()], &[], &mut 1)
-                .is_none()
+        assert!(matches!(
+            world.callable_signature(id(1), &[], &[], &mut 100),
+            Err(AdmissionError::Invalid(_))
+        ));
+        assert_eq!(
+            world.callable_signature(id(1), &[boolean()], &[], &mut 1),
+            Err(AdmissionError::Budget)
         );
         assert!(
             world
                 .callable_signature(id(1), &[boolean()], &[], &mut 100)
+                .unwrap()
                 .is_some()
         );
     }
@@ -147,19 +149,21 @@ fn worlds_keep_signature_and_input_evidence_isolated() {
     let (b, _) = DeclarationWorld::new(&second, Budget::default(), None).unwrap();
     let left = a
         .callable_signature(id(1), &[boolean()], &[], &mut 100)
+        .unwrap()
         .unwrap();
     let right = b
         .callable_signature(id(1), &[boolean()], &[], &mut 100)
+        .unwrap()
         .unwrap();
     assert!(!left.is_unsafe_callable());
     assert!(right.is_unsafe_callable());
-    assert!(
-        a.callable_signature(id(1), &[Term::Bool(true)], &[], &mut 100)
-            .is_none()
-    );
+    assert!(matches!(
+        a.callable_signature(id(1), &[Term::Bool(true)], &[], &mut 100),
+        Err(AdmissionError::Invalid(_))
+    ));
     assert_eq!(
         a.callable_signature(id(1), &[boolean()], &[], &mut 100),
-        Some(left)
+        Ok(Some(left))
     );
 }
 
@@ -183,4 +187,140 @@ fn ambiguous_runtime_metadata_does_not_publish_an_index() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn callable_query_exhaustion_is_not_missing_evidence_with_remaining_fuel() {
+    let mut package = package(0);
+    package.functions[0].type_parameters = vec![id(10), id(11), id(12)];
+    let (world, _) = DeclarationWorld::new(&package, Budget::default(), None).unwrap();
+    let arguments = [boolean(), boolean(), boolean()];
+    let mut fuel = 2;
+    let result = world.with_admission_queries(|queries| {
+        (queries.callable)(
+            nir::CallableValueRef::Function {
+                declaration: id(1),
+                arguments: &arguments,
+            },
+            &[],
+            &mut fuel,
+        )
+        .map(|signature| signature.map(|ty| ty.into_owned()))
+    });
+    assert_eq!(result, Err(nir::value_admission::Error::Budget));
+    assert_eq!(
+        fuel, 1,
+        "the failed reservation does not consume unreserved work"
+    );
+    let mut completed = false;
+    for allowance in 0..1000 {
+        let mut fuel = allowance;
+        match world.callable_signature(id(1), &arguments, &[], &mut fuel) {
+            Err(AdmissionError::Budget) => {}
+            Ok(Some(signature)) => {
+                assert_eq!(signature, callable(boolean()).with_comptime_phase(true));
+                completed = true;
+                break;
+            }
+            other => panic!("valid callable query lost its outcome: {other:?}"),
+        }
+    }
+    assert!(completed);
+    assert!(matches!(
+        world.callable_signature(id(1), &vec![Term::Bool(true); 3], &[], &mut 1000),
+        Err(AdmissionError::Invalid(_))
+    ));
+    assert_eq!(
+        world.callable_signature(id(9999), &[], &[], &mut 1000),
+        Ok(None)
+    );
+    assert!(
+        world
+            .callable_signature(id(1), &arguments, &[], &mut 1000)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn method_signature_queries_preserve_missing_invalid_and_budget_outcomes() {
+    use nir::program::{InterfaceInstance, MethodContract, Trait, TraitPhase};
+    let mut package = package(0);
+    package.traits.push(Trait {
+        comptime_only: false,
+        parameter_types: vec![],
+        associated: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        type_parameters: vec![],
+        declaration: id(70),
+        parents: vec![],
+        self_parameter: id(71),
+        name: "Inspect".into(),
+        methods: vec![MethodContract {
+            phase: TraitPhase::Runtime,
+            is_quote: false,
+            pure: false,
+            is_unsafe: false,
+            type_arguments: vec![],
+            type_parameters: vec![id(73)],
+            capabilities: vec![],
+            program: Default::default(),
+            parameter_bindings: vec![],
+            by_value_receiver: false,
+            by_reference_receiver: false,
+            declaration: id(72),
+            name: "inspect".into(),
+            signature: callable(Term::Rigid {
+                declaration: id(73),
+                sort: Sort::Type,
+            })
+            .into(),
+            requirements: vec![],
+            default: None,
+        }],
+    });
+    let method = nir::TraitMethodIdentity {
+        interface: InterfaceInstance {
+            declaration: id(70),
+            arguments: vec![],
+        },
+        subject: boolean(),
+        member: id(72),
+        method_arguments: vec![boolean()],
+    };
+    let (world, _) = DeclarationWorld::new(&package, Budget::default(), None).unwrap();
+    let query = |method: &nir::TraitMethodIdentity, fuel: &mut usize| {
+        world.callable_value_signature(nir::CallableValueRef::Method(method), &[], fuel)
+    };
+    let mut fuel = 1;
+    assert_eq!(query(&method, &mut fuel), Err(AdmissionError::Budget));
+    assert_eq!(fuel, 1);
+    let mut completed = false;
+    for allowance in 0..1000 {
+        let mut fuel = allowance;
+        match query(&method, &mut fuel) {
+            Err(AdmissionError::Budget) => {}
+            Ok(Some(signature)) => {
+                assert_eq!(signature, callable(boolean()));
+                completed = true;
+                break;
+            }
+            other => panic!("method query lost its outcome: {other:?}"),
+        }
+    }
+    assert!(completed);
+    let mut invalid = method.clone();
+    invalid.method_arguments.clear();
+    assert!(matches!(
+        query(&invalid, &mut 1000),
+        Err(AdmissionError::Invalid(_))
+    ));
+    invalid = method.clone();
+    invalid.member = id(9999);
+    assert_eq!(query(&invalid, &mut 1000), Ok(None));
+    invalid = method.clone();
+    invalid.interface.declaration = id(9999);
+    assert_eq!(query(&invalid, &mut 1000), Ok(None));
+    assert_eq!(query(&method, &mut 1000), Ok(Some(callable(boolean()))));
 }
