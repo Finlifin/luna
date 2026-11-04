@@ -371,28 +371,22 @@ impl<'h> Checker<'_, 'h> {
         &mut self,
         statements: &[n::Expr],
         inputs: &[n::Expr],
-    ) -> Vec<Option<Term>> {
-        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let mut budget = comptime_runtime::Budget {
-            steps: before,
-            max_limbs: 4096,
-        };
+        span: Span,
+    ) -> Result<Vec<Option<Term>>, Error> {
         let mut bindings = BTreeMap::new();
         for statement in statements {
             let K::Let { binding, value } = &statement.kind else {
                 break;
             };
-            let Some(term) = self.known_normal_input_in(value, 0, &mut budget, &bindings) else {
+            let Some(term) = self.checked_normal_input_in(value, &bindings, span)? else {
                 break;
             };
             bindings.insert(*binding, std::sync::Arc::new(term));
         }
-        let result = inputs
+        inputs
             .iter()
-            .map(|input| self.known_normal_input_in(input, 0, &mut budget, &bindings))
-            .collect();
-        self.required_steps -= (before - budget.steps) as u64;
-        result
+            .map(|input| self.checked_normal_input_in(input, &bindings, span))
+            .collect()
     }
 
     /// Retain the prepared input values for a selected member of this instance.
@@ -523,7 +517,7 @@ impl<'h> Checker<'_, 'h> {
                 } else {
                     let mut terms = Vec::new();
                     let mut deferred = BTreeSet::new();
-                    let observed = self.prepared_type_input_terms(&statements, &arguments);
+                    let observed = self.prepared_type_input_terms(&statements, &arguments, span)?;
                     for ((known, parameter), domain) in
                         observed.into_iter().zip(&parameters).zip(&domains)
                     {
@@ -803,13 +797,9 @@ impl<'h> Checker<'_, 'h> {
                 }
             }
             let mut checked = self.expr(value, Some(&domain))?;
-            let mut budget = comptime_runtime::Budget {
-                steps: self.required_steps as usize,
-                max_limbs: 4096,
-            };
-            let before = budget.steps;
-            let structural = self.known_normal_input(&checked, 0, &mut budget).is_some();
-            self.required_steps -= (before - budget.steps) as u64;
+            let structural = self
+                .checked_normal_input_in(&checked, &BTreeMap::new(), span)?
+                .is_some();
             if structural {
                 return Ok(Vec::new());
             }

@@ -67,3 +67,34 @@ impl From<nir::comptime_values::Error> for Failure {
         }
     }
 }
+
+/// Checking may defer an unavailable value, but a failed observation is not
+/// permission to retry with invocation or to publish a weaker obligation.
+pub(in crate::program) fn optional<T>(result: Result<T, Failure>) -> Result<Option<T>, Failure> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(Failure::Unavailable) => Ok(None),
+        Err(failure) => Err(failure),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_unavailable_observation_allows_deferred_checking() {
+        assert_eq!(optional(Ok(42)), Ok(Some(42)));
+        assert_eq!(optional::<u8>(Err(Failure::Unavailable)), Ok(None));
+        for failure in [
+            Failure::Steps,
+            Failure::Depth,
+            Failure::Size,
+            Failure::Structure,
+            Failure::Proof,
+            Failure::Invalid("bad value".into()),
+        ] {
+            assert_eq!(optional::<u8>(Err(failure.clone())), Err(failure));
+        }
+    }
+}

@@ -518,10 +518,20 @@ Budget 时保留 Structure；PTC 只处理 Type 命题，其 BudgetExhausted 保
 无关的语义错误保持原诊断。仅有 Unavailable 的 Type 生产者仍等待后续 invocation
 机制，本次不会为了获得上下文而提前执行它。
 
-剩余迁移边界是明确的：`known_normal_input`／`known_normal_input_in` 作为上层可选
-证据适配器仍返回 Option，其他消费者仍须按其语义需求逐步改接带类型结果；
-`known_collected_list_in` 的外围可选组装也尚保留旧接口。没有将这些适配器、NF
-contextual 参数树或动态 Type 生产者问题算作已退役。
+NF 的必需检查现已消费带类型结果：类型标注、收集值准备、先前参数对后续域的
+替换、computed packet 的字段观察、默认／显式参数、required NF 求值计划，以及
+名义类型的准备绑定和默认值依赖检查，均只把 Unavailable 转成可延后的 None。
+Steps、Depth、Size、Structure、Proof 与 Invalid 直接形成带源码位置的
+`static value observation failed` 诊断，不再降格成未知后尝试 invocation 或生成
+更弱的义务。每次观察无论成功、未知还是失败，都记回同一 required 预算；收集器
+组装也保留逐项读取、冻结和结构检查的真实失败。
+
+这一边界不把静态观察升级为一般求值。库 callable 等需要执行的表达式仍可以
+Unavailable，并保留实际 invocation 的错误、短路和执行次数。观察到静态身份也
+不删除原实参生产者。`known_normal_input`／`known_normal_input_in` 仍供其他可选
+证据消费者使用，CMTT 的 `known_collected_list_in` 仍是明确保留的 Option 适配器，
+其底层组装已经复用带类型结果；这些消费者还需按自身需求迁移。NF contextual
+参数树和动态 Type 生产者问题仍未整体退役。
 
 本节在 `/home/fin/luna` 用 `development/check.py --timeout 900 -- check -p elaboration`
 检查通过，证据 `/tmp/luna-tools-d_vlbx7n/result.json`。最终 `test -p elaboration
@@ -545,6 +555,30 @@ contextual 参数树或动态 Type 生产者问题算作已退役。
 `/tmp/luna-tools-f75ga0fu/result.json`。修改文件 rustfmt check 退出 0，证据
 `/tmp/luna-tools-f028_ogy/result.json`；`git diff --check` 通过。未运行全 workspace、
 native 或性能基准，正式 docs 与原有工作区改动保持不变。
+
+NF 必需观察接线的验证在 `/home/fin/luna` 完成：`development/check.py --timeout
+900 -- test -p elaboration --lib program::normal::` 21 项通过，退出 0，证据
+`/tmp/luna-tools-podnv8f6/result.json`。新增低预算源级用例保留同一份已解析 HIR，
+检查直接／分支 NF 输入的观察失败，再以充足预算重新 elaboration 并执行。
+真实 sysroot 用例以 `meta.div_trunc` 验证库调用仍等待 invocation、除零保留实际
+错误类别、死分支不执行，且失败后的同一 VM 可以继续执行；覆盖两种 VM。
+
+13 组受影响的 luna 集成检查（完整命令见
+`/tmp/luna-tools-s8tgc9g2/result.json`）最初 558 项通过、1 项新增测试断言失败，
+退出 101；该断言误用小写错误文本，现改为检查实际 `ErrorKind::DivisionByZero`。
+随后 `-p luna --test normal_input_plans --test open_functions --no-fail-fast` 的
+NF 输入计划 15 项全通过，开放函数 389 项通过、1 项既有失败，合并命令退出 101，
+证据 `/tmp/luna-tools-7sc2llhb/result.json`。其余 12 组无后续语义改动，连同复验
+共验证 559 项；2 项既有 ignored 和 memoized key 的 1 项显式 skip 仍保留。
+展开组 92 项通过，CMTT 类型输入 24 项通过，不据此声称可选观察消费者全部迁移。
+开放函数唯一失败是第 17 节说明的定义侧机器算术证明缺口；忽略线程位置和通用
+回溯提示后，失败内容与 `/tmp/luna-tools-zv3lbekk/result.json` 的基线逐字节一致。
+
+修改文件的 rustfmt check 退出 0，证据 `/tmp/luna-tools-6cnu96ee/result.json`；
+原有压缩排版的 type_spreads.rs 只局部整理本次函数，未全文件重排。
+`git diff --check` 通过；原有受保护文件的哈希未变。提交清单、源码哈希和基线
+比较保存于 `/tmp/luna-observation-checks-gyfdzef6`，未执行全 workspace、native
+或性能基准。
 
 ## 17. NF 输入统一准备，检查顺序与求值位置分离
 
@@ -654,8 +688,17 @@ suspended_index_computations_keep_short_circuit_and_arithmetic_checks、
 computed_prefix_packets_share_the_named_type_list_input_plan 和
 returning_type_list_inputs_keep_preparation_nodes_diverging。它们在改动前已复现于
 `/tmp/luna-tools-47tozw_6/result.json` 与 `/tmp/luna-tools-hfba0xl_/result.json`；
-除线程位置外的完整失败内容逐项一致，仍未解决。本次仅把重复供应、未知标签和数量
-错误的测试文本与共享路由诊断对齐，没有放宽拒绝例或改写上述三个失败的预期。
+除线程位置外的完整失败内容逐项一致。后续核对确认后两项是旧断言：未绑定的
+opaque Tuple 仍被拒绝，但诊断已在 packet 入口给出；收集准备使用普通列表节点，
+不再要求旧 Tuple 节点。现分别检查该拒绝诊断和 TypeList／ListConcat 的 Never
+传播，并保留已绑定路径的完整 NF 实参与调用顺序检查；提前返回还在两种 VM 上
+验证只调用 Run，不执行 Later 或 Default。
+
+第一项仍是真实缺口：开放签名描述没有保留足够的完整表达式／前提，机器算术的
+定义侧证明因此可能遗漏，不能以具体 n=9 时计算成功替代。直接对每个描述片段
+打开算术检查会丢失分支守卫及其前提；重新 elaboration 整个标注也可能重复准备／
+执行生产者。后续需保留定义侧行为与证明义务，并在完整前提环境中检查，不用局部
+开关或放宽该用例来掩盖这一缺口。
 
 局部 rustfmt check 退出 0，证据 `/tmp/luna-tools-s59wtbhs/result.json`；
 `git diff --check` 通过。旧路由两函数已无源码引用。提交范围、源码哈希、基线比较与

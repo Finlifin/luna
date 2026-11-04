@@ -1653,7 +1653,7 @@ fn computed_prefix_packets_share_the_named_type_list_input_plan() {
                 let error =
                     package.expect_err("an unbound opaque Tuple head cannot supply tuple layout");
                 assert!(
-                    error.contains("structural type view remains unresolved"),
+                    error.contains("type input spread requires a tuple"),
                     "{error}"
                 );
                 continue;
@@ -2316,14 +2316,17 @@ fn returning_type_list_inputs_keep_preparation_nodes_diverging() {
                 .body;
             let mut found = false;
             nir::visit::expression(body, &mut 10_000, |expression, _| {
-                if let nir::program::ExprKind::Tuple(fields) = &expression.kind {
-                    if fields
-                        .iter()
-                        .any(|field| field.ty == nir::Term::Primitive(nir::Primitive::Never))
-                    {
-                        found = true;
-                        assert_eq!(expression.ty, nir::Term::Primitive(nir::Primitive::Never));
-                    }
+                let children: Vec<&nir::program::Expr> = match &expression.kind {
+                    nir::program::ExprKind::TypeList(fields) => fields.iter().collect(),
+                    nir::program::ExprKind::ListConcat(left, right) => vec![left, right],
+                    _ => Vec::new(),
+                };
+                if children
+                    .iter()
+                    .any(|field| field.ty == nir::Term::Primitive(nir::Primitive::Never))
+                {
+                    found = true;
+                    assert_eq!(expression.ty, nir::Term::Primitive(nir::Primitive::Never));
                 }
                 if let nir::program::ExprKind::LetPattern { value, .. } = &expression.kind {
                     if value.ty == nir::Term::Primitive(nir::Primitive::Never) {
@@ -2333,10 +2336,19 @@ fn returning_type_list_inputs_keep_preparation_nodes_diverging() {
                 Ok(())
             })
             .unwrap();
-            assert!(found);
-            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-            assert_eq!(vm.invoke(run, vec![]).unwrap(), Value::Bool(true));
-            assert_eq!(calls(&package, &vm), vec!["Run"]);
+            assert!(
+                found,
+                "collection preparation must preserve divergence: {body}"
+            );
+            for tree in [false, true] {
+                let mut vm = if tree {
+                    Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+                } else {
+                    Interpreter::for_comptime(&package, Budget::default()).unwrap()
+                };
+                assert_eq!(vm.invoke(run, vec![]).unwrap(), Value::Bool(true));
+                assert_eq!(calls(&package, &vm), vec!["Run"]);
+            }
         }
     }
 }

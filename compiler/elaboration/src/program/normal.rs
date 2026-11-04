@@ -142,54 +142,79 @@ impl Checker<'_, '_> {
         value.map_err(|failure| error(span, failure.to_string()))
     }
 
+    // Legacy optional hint consumer. Required NF planning uses the typed
+    // boundary below; CMTT hint migration remains a separate consumer change.
     pub(super) fn known_collected_list_in(
         &mut self,
         items: &[n::NormalFormArgument],
         ty: &Term,
         bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
     ) -> Option<Term> {
-        let element = self.list_element_type(ty)?;
+        self.observe_collected_list_in(items, ty, bindings).ok()
+    }
+
+    fn checked_collected_list_in(
+        &mut self,
+        items: &[n::NormalFormArgument],
+        ty: &Term,
+        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        observation::optional(self.observe_collected_list_in(items, ty, bindings))
+            .map_err(|failure| error(span, format!("static value observation failed: {failure}")))
+    }
+
+    fn observe_collected_list_in(
+        &mut self,
+        items: &[n::NormalFormArgument],
+        ty: &Term,
+        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+    ) -> Result<Term, Failure> {
+        let element = self.list_element_type(ty).ok_or(Failure::Unavailable)?;
         let mut budget = comptime_runtime::Budget {
             steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
             max_limbs: 4096,
         };
         let before = budget.steps;
         let result = (|| {
-            budget.consume(items.len()).ok()?;
-            let domain = clone_known_term(ty, &mut budget)?;
+            budget.consume(items.len())?;
+            let domain = copy_observed_term(ty, &mut budget)?;
             let mut parts = Vec::new();
             let mut fields = Vec::new();
             for item in items {
                 match item {
                     n::NormalFormArgument::Value(value) if value.ty == *element => {
-                        let value = self.known_normal_input_in(value, 0, &mut budget, bindings)?;
+                        let value =
+                            self.observe_normal_input_in(value, 0, &mut budget, bindings)?;
                         fields.push(value);
                     }
                     n::NormalFormArgument::ListSpread(value) if value.ty == *ty => {
                         if !fields.is_empty() {
-                            parts.push(
-                                freeze_known_list(
-                                    ty,
-                                    element,
-                                    std::mem::take(&mut fields),
-                                    &mut budget,
-                                )
-                                .ok()?,
-                            );
+                            parts.push(freeze_known_list(
+                                ty,
+                                element,
+                                std::mem::take(&mut fields),
+                                &mut budget,
+                            )?);
                         }
-                        parts.push(self.known_normal_input_in(value, 0, &mut budget, bindings)?);
+                        parts.push(self.observe_normal_input_in(
+                            value,
+                            0,
+                            &mut budget,
+                            bindings,
+                        )?);
                     }
-                    _ => return None,
+                    _ => return Err(Failure::Unavailable),
                 }
             }
             if !fields.is_empty() {
-                parts.push(freeze_known_list(ty, element, fields, &mut budget).ok()?);
+                parts.push(freeze_known_list(ty, element, fields, &mut budget)?);
             }
             // Pay for inspecting/merging retained operands before normalization.
             for part in &parts {
-                nir::type_computations::charge_term(part, &mut budget.steps).ok()?;
+                nir::type_computations::charge_term(part, &mut budget.steps)?;
             }
-            Term::list_concat(domain, parts).ok()
+            Term::list_concat(domain, parts).map_err(|reason| Failure::Invalid(reason.to_string()))
         })();
         self.required_steps -= (before - budget.steps) as u64;
         result
@@ -673,13 +698,7 @@ impl Checker<'_, '_> {
         let checked = self.with_staged_input(true, |this| {
             this.normal_type_expression(expr, owner, inputs, Some(&p(P::Type)))
         })?;
-        let mut budget = comptime_runtime::Budget {
-            steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-            max_limbs: 4096,
-        };
-        let before = budget.steps;
-        let known = self.known_normal_input(&checked, 0, &mut budget);
-        self.required_steps -= (before - budget.steps) as u64;
+        let known = self.checked_normal_input_in(&checked, &BTreeMap::new(), expr.span)?;
         let known = match known {
             Some(known) => Some(known),
             None => self.required_normal_type_plan(expr, &checked)?,
@@ -905,6 +924,23 @@ impl Checker<'_, '_> {
             Some(PatternGuard::Exact(value)) => Some(value),
             _ => None,
         })
+    }
+
+    pub(super) fn checked_normal_input_in(
+        &mut self,
+        expr: &n::Expr,
+        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut budget = comptime_runtime::Budget {
+            steps: before,
+            max_limbs: 4096,
+        };
+        let observed = self.observe_normal_input_in(expr, 0, &mut budget, bindings);
+        self.required_steps -= (before - budget.steps) as u64;
+        observation::optional(observed)
+            .map_err(|failure| error(span, format!("static value observation failed: {failure}")))
     }
 
     // Recover an identity from already elaborated structure, never by running a
@@ -2837,13 +2873,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<n::Expr, Error> {
         let binding = self.spread_binding(span)?;
-        let mut budget = comptime_runtime::Budget {
-            steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-            max_limbs: 4096,
-        };
-        let budget_before = budget.steps;
-        let known = self.known_normal_input_in(&value, 0, &mut budget, known_bindings);
-        self.required_steps -= (budget_before - budget.steps) as u64;
+        let known = self.checked_normal_input_in(&value, known_bindings, span)?;
         if let Some(known) = known {
             known_bindings.insert(binding, std::sync::Arc::new(known));
         }
@@ -2934,13 +2964,7 @@ impl Checker<'_, '_> {
             let Some(RoutedNormalInput::Prepared(value)) = &routed[previous] else {
                 continue;
             };
-            let mut budget = comptime_runtime::Budget {
-                steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-                max_limbs: 4096,
-            };
-            let before = budget.steps;
-            let known = self.known_normal_input_in(value, 0, &mut budget, bindings);
-            self.required_steps -= (before - budget.steps) as u64;
+            let known = self.checked_normal_input_in(value, bindings, span)?;
             if let Some(value) = known {
                 known_parameters.push(parameters[previous].0);
                 known_values.push(value);
@@ -3108,14 +3132,8 @@ impl Checker<'_, '_> {
                         &positional_types,
                         packet.span,
                     )?;
-                    let mut budget = comptime_runtime::Budget {
-                        steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-                        max_limbs: 4096,
-                    };
-                    let budget_before = budget.steps;
                     let observed =
-                        self.known_normal_input_in(&value, 0, &mut budget, &prepared_bindings);
-                    self.required_steps -= (budget_before - budget.steps) as u64;
+                        self.checked_normal_input_in(&value, &prepared_bindings, packet.span)?;
                     let mut observed_fields = match observed {
                         Some(Term::TupleValue(values)) if values.len() == fields.len() => {
                             Some(values.into_iter())
@@ -3335,7 +3353,8 @@ impl Checker<'_, '_> {
                             "normal-form variadic collector requires meta.List<T>",
                         ));
                     }
-                    known[slot] = self.known_collected_list_in(&[], &ty, &prepared_bindings);
+                    known[slot] =
+                        self.checked_collected_list_in(&[], &ty, &prepared_bindings, span)?;
                     self.locals.insert(bindings[slot], ty.clone());
                     values[slot] = Some(n::NormalFormArgument::Value(n::Expr {
                         source: source(span),
@@ -3491,20 +3510,17 @@ impl Checker<'_, '_> {
                     }
                     failure
                 })?;
-                let mut budget = comptime_runtime::Budget {
-                    steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-                    max_limbs: 4096,
-                };
-                let budget_before = budget.steps;
                 known[slot] = match &value {
                     n::NormalFormArgument::List { items, .. } if !dependent => {
-                        self.known_collected_list_in(items, &ty, &prepared_bindings)
+                        self.checked_collected_list_in(items, &ty, &prepared_bindings, span)?
                     }
-                    _ => value.expression().and_then(|value| {
-                        self.known_normal_input_in(value, 0, &mut budget, &prepared_bindings)
-                    }),
+                    _ => match value.expression() {
+                        Some(value) => {
+                            self.checked_normal_input_in(value, &prepared_bindings, span)?
+                        }
+                        None => None,
+                    },
                 };
-                self.required_steps -= (budget_before - budget.steps) as u64;
                 if let Some(known) = &known[slot] {
                     prepared_bindings.insert(
                         bindings[slot],
@@ -3618,13 +3634,7 @@ impl Checker<'_, '_> {
         }
         for &slot in &plan.order {
             let input = arguments[slot].expression().unwrap();
-            let mut budget = comptime_runtime::Budget {
-                steps: self.required_steps as usize,
-                max_limbs: 4096,
-            };
-            let before = budget.steps;
-            let known = self.known_normal_input_in(input, 0, &mut budget, &scoped);
-            self.required_steps -= (before - budget.steps) as u64;
+            let known = self.checked_normal_input_in(input, &scoped, source.span)?;
             let term = if let Some(known) = known {
                 known
             } else {

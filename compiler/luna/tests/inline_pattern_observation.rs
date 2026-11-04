@@ -1,4 +1,4 @@
-//! Required pattern observation preserves resource failures across elaboration.
+//! Required static observation preserves resource failures across elaboration.
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
 
@@ -113,4 +113,21 @@ fn pending_clause_context_retains_the_failed_type_observation() {
         "x".repeat(128),
     );
     check_source_observation(&source, "required Type observation failed", 4096);
+}
+
+#[test]
+fn normal_inputs_report_observation_limits_and_recover_with_fresh_fuel() {
+    let label = format!("\"{}\"", "x".repeat(128));
+    for argument in [
+        label.clone(),
+        format!("if true {{ {label} }} else {{ \"short\" }}"),
+    ] {
+        let source = format!(
+            "typealias Type = .Type'builtin; typealias str = .str'builtin;
+            pure comptime fn Tagged<label: str> -> Type {{ bool }}
+            typealias Marker = Tagged<{argument}>;
+            fn run() -> bool {{ true }}",
+        );
+        check_source_observation(&source, "static value observation failed", 4096);
+    }
 }

@@ -597,3 +597,35 @@ fn nested_nominal_inputs_retain_abstract_values_and_formation_obligations() {
         );
     }
 }
+
+#[test]
+fn unobserved_invocations_keep_failure_and_dead_branch_behavior() {
+    // A library callable is unavailable to static observation. Its error belongs
+    // to invocation; observing an NF input must not execute that producer early.
+    let package = sysroot::compile(
+        "pure comptime fn Indexed<value: Integer> -> Type { bool }
+        comptime fn Fail() -> Type { Indexed<meta.div_trunc(1, 0)> }
+        comptime fn Skipped() -> Type {
+            Indexed<if false { meta.div_trunc(1, 0) } else { 7 }>
+        }
+        comptime fn Reference() -> Type { Indexed<7> }",
+    )
+    .unwrap();
+    for tree in [false, true] {
+        let mut vm = if tree {
+            Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+        } else {
+            Interpreter::for_comptime(&package, Budget::default()).unwrap()
+        };
+        let failure = vm.invoke(id(&package, "Fail"), vec![]).unwrap_err();
+        assert_eq!(
+            failure.kind,
+            comptime_interpretor::ErrorKind::DivisionByZero
+        );
+        let actual = vm.invoke(id(&package, "Skipped"), vec![]).unwrap();
+        assert_eq!(
+            actual,
+            vm.invoke(id(&package, "Reference"), vec![]).unwrap()
+        );
+    }
+}
