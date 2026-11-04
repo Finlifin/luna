@@ -2698,10 +2698,12 @@ impl Checker<'_, '_> {
         value: &n::Expr,
         span: Span,
     ) -> Result<(), Error> {
-        // Comptime execution owns its live store; symbolic declaration inputs
-        // are provenance, not cached runtime storage values.
+        // Required and deferred staged computations own their invocation store.
+        // Checking either cannot invalidate the enclosing runtime input snapshot;
+        // construction observations still need invalidation inside that store.
+        let staged = self.in_required_comptime || self.in_staged_input;
         if self.partial_staged_bindings.is_empty()
-            && (self.in_required_comptime || self.specialization_inputs.is_empty())
+            && (staged || self.specialization_inputs.is_empty())
         {
             return Ok(());
         }
@@ -2761,9 +2763,9 @@ impl Checker<'_, '_> {
         });
         self.partial_staged_bindings
             .retain(|binding, _| !invalidated.contains(binding));
-        // Invocation-time observations are invalidated even during required
-        // computation; symbolic declaration inputs keep their existing rules.
-        if self.in_required_comptime {
+        // Invocation-time observations are invalidated even during staged
+        // computation; the enclosing runtime input snapshot remains available.
+        if staged {
             return Ok(());
         }
         self.specialization_inputs

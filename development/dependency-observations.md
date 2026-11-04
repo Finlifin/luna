@@ -244,8 +244,8 @@ telescope 前缀决定可用性，最终检查及失败回滚保持独立。开�
 表达式与所属声明分离、预算失败后重试以及缺失 callee 不能当成空捕获。
 真实 sysroot 用例检查 staged 实参中的块／模式绑定、局部 comptime helper 捕获、
 多层转发及 runtime 捕获拒绝，并实际执行 reference 路径和 IIR。
-捕获闭包的 runtime staged 实参准备仍需独立接通，不能用这批源码分析测试冒充其端到端支持；复现保留在
-`source_input_dependencies::staged_closure_arguments_keep_captured_invocation_inputs`。
+该阶段的捕获闭包 runtime staged 实参准备尚未接通，后续实际修复及验证见 §4.8；
+对应回归为 `source_input_dependencies::staged_closure_arguments_keep_captured_invocation_inputs`。
 
 验证在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test`：
 
@@ -287,8 +287,8 @@ capability 形成递归的修复前错误见 `/tmp/luna-tools-0nmp1s3o/result.js
 六个常规排版 Rust 文件的 rustfmt check 退出 0，证据
 `/tmp/luna-tools-gels77_i/result.json`；两个大型文件仅修改相关片段，未整文件重排。
 完整命令、源码哈希与受保护文件核对保存在 `/tmp/luna-signature-readiness-dkxibtkj`。
-未运行全 workspace、整个 CMTT 组、native 或性能基准；runtime staged 捕获闭包的
-既有 ignored 仍未接通，不将签名中 comptime 闭包的修复扩大为该路径已完成。
+该阶段未运行全 workspace、整个 CMTT 组、native 或性能基准；当时 runtime staged
+捕获闭包的既有 ignored 尚未接通，后续修复见 §4.8。签名捕获与调用实参准备是两个独立问题。
 
 ### 4.7 已接通：检查后结构的依赖观察不改写代码
 
@@ -359,6 +359,46 @@ rigid 输入使用。周围未被选入的源码声明和全局实现世界不�
 本次清单、源码哈希与完整命令结果在 `/tmp/luna-prepared-input-observation-w14blcpa`。
 未重跑整个 CMTT 组，不将上一阶段的结果当作本阶段运行证据；没有运行全 workspace、
 native 或性能基准。其余 typed 依赖判断、生命周期和查询失效迁移仍未完成。
+
+### 4.8 已接通：staged 实参保留 invocation 输入
+
+required invocation 和延迟 staged 实参都在 comptime 存储中计算。
+检查 staged 实参内的赋值或闭包构造，不代表已经写入或逃逸 enclosing runtime 存储。
+失效规则必须区分这两个存储边界，同时保留 invocation 内部 construction observation
+自身的失效规则；不能通过供应伪造的 abstract value 补救丢失的实参。
+
+复现中，具体 `forward` 实例已收到 `flag = true`，进入主体时仍保存该输入。
+在准备内层调用的 staged 闭包实参时，旧 `invalidate_staged_storage` 只识别
+`in_required_comptime`，把 `in_staged_input` 中的闭包捕获当作 runtime 逃逸，
+删除 `specialization_inputs` 和 `value_input_bindings` 的对应项。
+随后的 `capture_sparse_entry` 正确拒绝了缺少输入的 invocation。
+修复在失效边界统一识别这两种 staged 上下文，保留外围输入；
+不改变捕获分析、阶段准入、抽象输入授权或 runtime 写入后的失效规则。
+临时跟踪代码已移除，正式 docs 未修改。
+
+原 ignored 正例恢复为活动回归。真实 sysroot 用例覆盖直接调用、局部别名、
+嵌套闭包、闭包环境连续修改以及环境修改不影响源值；经过多层转发分别实例化
+bool/u8，reference 与 IIR 两条路径实际执行。负例检查 runtime 输入不能被捕获
+后提升为 comptime，以及 runtime 写入、取址和捕获后不能恢复已经失效的输入。
+
+验证工作目录为 `/home/fin/luna`，入口仍为
+`python3 -B development/check.py --timeout 900 -- test`：
+
+| 范围 | 实际结果与证据 |
+| --- | --- |
+| 修复前复现 | 显式运行原 ignored，退出 101；`/tmp/luna-tools-lk3c_fvc/result.json`。两个形态均缺少 `(local 3 1)`。临时输入跟踪见 `/tmp/luna-tools-wxsie14w/stderr.log`。 |
+| 真实 sysroot 输入与捕获 | `-p luna --test source_input_dependencies`，4 项通过、无 ignored，退出 0；`/tmp/luna-tools-nuyt7q3p/result.json`。 |
+| 开放函数、闭包、签名观察及聚合输入失效 | `-p luna --test open_functions --test closure_environment_parameters --test comptime_bytecode_closures --test signature_source_readiness --test inline_pattern_observation --test staged_aggregate_contracts --test nominal_staging --no-fail-fast`，471 项通过、退出 0；`/tmp/luna-tools-3it1en62/result.json`。 |
+
+已有闭包私有状态回归 `-p luna --test execution staged_closure_capture_mutation`
+4 项通过、退出 0，证据 `/tmp/luna-tools-o54kr4jw/result.json`；包括默认实参、
+嵌套／同级环境及真实 caller 写入拒绝。两个修改的 Rust 文件通过 rustfmt check，
+证据 `/tmp/luna-tools-4rztovm2/result.json`；`git diff --check` 通过。
+
+这只是 invocation 输入保留边界的修复，不代表完整的生命周期、资源规则或
+跨 world 查询失效协议已经迁移；未运行全 workspace、整个 CMTT 组、native 或性能基准。
+本阶段清单、精确命令、源码哈希与原有修改核对保存在
+`/tmp/luna-staged-closure-inputs-8gkf2piw`。
 
 ## 5. 四个判断精确性是否正确的例子
 

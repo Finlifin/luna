@@ -60,26 +60,67 @@ fn captured_runtime_values_cannot_become_staged_arguments() {
 }
 
 #[test]
-#[ignore = "runtime staged closure arguments need contextual input preparation"]
 fn staged_closure_arguments_keep_captured_invocation_inputs() {
-    let mut failures = Vec::new();
     for input in [
         "(|inner: bool| flag and inner)(true)",
         "do { let capture = |inner: bool| flag and inner; capture(true) }",
+        "do { let outer = || { let inner = || flag; inner() }; outer() }",
+        "do { let toggle = || { flag = not flag; flag }; toggle(); toggle() }",
+        "do { let toggle = || { flag = not flag; flag }; toggle(); flag }",
     ] {
         let source = format!(
             "comptime fn Pick(flag: bool) -> Type {{ if flag {{ bool }} else {{ u8 }} }}
             fn consume(comptime flag: bool, value: defer Pick(flag)) -> defer Pick(flag) {{ value }}
-            fn forward(comptime flag: bool, value: bool) -> bool {{ consume({input}, value) }}
-            fn run() -> bool {{ forward(true, true) }}"
+            fn forward(comptime flag: bool, value: defer Pick(flag)) -> defer Pick(flag) {{
+                consume({input}, value)
+            }}
+            fn outer(comptime flag: bool, value: defer Pick(flag)) -> defer Pick(flag) {{
+                forward(flag, value)
+            }}
+            fn run_bool() -> bool {{ outer(true, true) }}
+            fn run_u8() -> bool {{ outer(false, 9) == 9 }}"
         );
-        match sysroot::compile(&source) {
-            Ok(package) => assert_eq!(
-                luna::execution::interpret(&package, "run", 200_000).unwrap(),
-                Value::Bool(true)
-            ),
-            Err(error) => failures.push(format!("{input}: {error}")),
+        let package = sysroot::compile(&source).unwrap_or_else(|error| panic!("{input}: {error}"));
+        for (root, expected) in [
+            ("run_bool", Value::Bool(true)),
+            ("run_u8", Value::Bool(true)),
+        ] {
+            assert_eq!(
+                luna::execution::interpret(&package, root, 200_000).unwrap(),
+                expected,
+                "{input}: {root}"
+            );
+            let graph = luna::instantiation::instantiate(&package, root, 200_000).unwrap();
+            let mut vm =
+                comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+            assert_eq!(
+                vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+                expected,
+                "{input}: {root}"
+            );
         }
     }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_closure_arguments_do_not_restore_invalidated_runtime_inputs() {
+    for prefix in [
+        "flag = false;",
+        "let pointer = flag.ref;",
+        "let capture = || flag;",
+    ] {
+        let source = format!(
+            "comptime fn Pick(flag: bool) -> Type {{ if flag {{ bool }} else {{ u8 }} }}
+            fn consume(comptime flag: bool, value: defer Pick(flag)) -> defer Pick(flag) {{ value }}
+            fn forward(comptime flag: bool, value: bool) -> bool {{
+                {prefix}
+                consume((|| flag)(), value)
+            }}
+            fn run() -> bool {{ forward(true, true) }}"
+        );
+        let failure = sysroot::compile(&source)
+            .err()
+            .unwrap_or_else(|| panic!("stale runtime input accepted: {prefix}"));
+        assert!(failure.contains("not available"), "{prefix}: {failure}");
+    }
 }
