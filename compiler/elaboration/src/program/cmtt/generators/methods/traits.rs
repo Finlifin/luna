@@ -30,6 +30,30 @@ impl Checker<'_, '_> {
         };
         let subject = self.method_subject_view(&subject, head.span)?;
         let requested = self.interface_expr_for(interface_expr, &subject)?;
+        self.with_trait_code_method_instance(
+            callee, head, arguments, subject, receiver, requested, name, invoke,
+        )
+    }
+
+    /// Explicit views and context-proven sources enter the same public call
+    /// contract. Classification alone does not select or execute a body.
+    pub(super) fn with_trait_code_method_instance<R>(
+        &mut self,
+        callee: &Expr<'_>,
+        head: &Expr<'_>,
+        arguments: Option<&[Arg<'_>]>,
+        subject: Term,
+        receiver: Option<&Expr<'_>>,
+        requested: n::InterfaceInstance,
+        name: hir::common::Ident,
+        invoke: impl FnOnce(&mut Self, &Expr<'_>, Option<&Expr<'_>>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        if !self.interfaces_ready {
+            return Err(error(
+                head.span,
+                "code method selection is waiting for the implementation world",
+            ));
+        }
         let requested_resolution = self
             .resolve_trait_capability(&requested, &subject, Budget::default())
             .map_err(|e| {

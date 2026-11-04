@@ -42,6 +42,74 @@ fn contextual_classification_depth_is_a_failure_not_an_ordinary_value() {
 }
 
 #[test]
+fn contextual_categories_use_implicit_capability_contracts_before_inherent_search() {
+    for (signature, body, forwarding, call) in [
+        (
+            "comptime fn produce() -> <|- bool>",
+            "'(true)",
+            "T.produce()",
+            "~<Caller.produce<Flag>()>",
+        ),
+        (
+            "comptime fn produce() -> <bool -| value: bool>",
+            "'<value>",
+            "T.produce()",
+            "do { const p = Caller.produce<Flag>(); let ~<p> = true; value }",
+        ),
+        (
+            "comptime fn produce(code: <|- bool>) -> bool",
+            "true",
+            "T.produce(code)",
+            "do { const result = Caller.produce<Flag>('(false)); result }",
+        ),
+    ] {
+        let source = format!(
+            "trait Producer {{ {signature}; }}
+            struct Flag {{}}
+            impl Producer for Flag {{ {signature} {{ {body} }} }}
+            struct Caller {{
+                pub {signature}
+                where T :- Producer
+                {{
+                    {forwarding}
+                }}
+            }}
+            fn run() -> bool {{ {call} }}"
+        );
+        assert_eq!(sysroot::run(&source), Value::Bool(true), "{signature}");
+        let inherited = source
+            .replace("struct Flag", "trait Child :- Producer {} struct Flag")
+            .replace("struct Caller", "impl Child for Flag {} struct Caller")
+            .replace("where T :- Producer", "where T :- Child");
+        assert_eq!(sysroot::run(&inherited), Value::Bool(true), "{signature}");
+        let ambiguous = source
+            .replace(
+                "trait Producer",
+                &format!("trait Other {{ {signature}; }} trait Producer"),
+            )
+            .replace("where T :- Producer", "where T :- Producer + Other");
+        let failure = sysroot::compile(&ambiguous).unwrap_err();
+        assert!(failure.contains("ambiguous capability member"), "{failure}");
+    }
+}
+
+#[test]
+fn contextual_classification_keeps_comptime_capability_source_priority() {
+    let source = "trait Ordinary { comptime fn produce() -> bool; }
+        pure comptime trait Code { comptime fn produce() -> <|- bool>; }
+        struct Flag {}
+        impl Ordinary for Flag { comptime fn produce() -> bool { false } }
+        comptime impl Code for Flag { comptime fn produce() -> <|- bool> { '(true) } }
+        comptime fn generate() -> <|- bool>
+        where T :- Ordinary + Code
+        {
+            T.produce()
+        }
+        fn run() -> bool { ~<generate<Flag>()> }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
 fn contextual_runtime_method_transport_preserves_the_public_contract() {
     let source =
         include_str!("../../../development/repros/cmtt-runtime-associated-method-transport.fl");

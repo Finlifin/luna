@@ -883,7 +883,8 @@ graph 仍有各自的收集路径，完整 WorldView／scope evidence 统一接�
   在 349..359 报 contextual method classification is unsettled。将 required.rs
   临时恢复为 `5b24b9fa` 的内容后精确执行该测试，仍为相同诊断，退出 101；
   `/tmp/luna-tools-sap3m1_3/result.json`。其后逐字节恢复本次源码。该方法分类缺口
-  尚未修复，不把整体运行称为全绿，也不改该用例的成功预期。
+  当时尚未修复；后续已通过[方法分类与公共来源一致](values-staging-and-publication.md#方法分类与公共来源一致)
+  对齐 capability 来源优先级，原用例通过。历史运行仍为失败记录，未改其成功预期。
 - 三份修改／新增 Rust 文件 scoped rustfmt check 退出 0；
   `/tmp/luna-tools-ungwcm5d/result.json`。本阶段未运行全 workspace、native 或性能基准。
 

@@ -299,7 +299,7 @@ impl Checker<'_, '_> {
                 if self.is_static_method_subject(base)
                     || self.local_field_domain(base)? == Some(p(P::Type)) =>
             {
-                Some((self.type_expr(base)?, name.name, None, None))
+                Some((self.type_expr(base)?, name, None, None))
             }
             H::Projection(base, name) => {
                 let subject = self
@@ -307,7 +307,7 @@ impl Checker<'_, '_> {
                     .ok_or_else(|| {
                         error(base.span, "code method receiver type is not established")
                     })?;
-                Some((subject, name.name, None, Some(base)))
+                Some((subject, name, None, Some(base)))
             }
             H::ResolvedDef { def_id, .. } => {
                 let owner = self.package.definition_owner(def_id);
@@ -327,7 +327,7 @@ impl Checker<'_, '_> {
                         self.check_type_application(parent, &[], head.span)?;
                         Some((
                             self.nominal_self_type(parent),
-                            self.package.item(owner).unwrap().ident.name,
+                            self.package.item(owner).unwrap().ident,
                             Some(owner),
                             None,
                         ))
@@ -338,6 +338,15 @@ impl Checker<'_, '_> {
             _ => None,
         };
         if let Some((subject, name, requested_owner, receiver)) = candidate {
+            if requested_owner.is_none() {
+                if let Some(interface) =
+                    self.context_member_interface(&subject, name.name.as_str(), head.span)?
+                {
+                    return self.with_trait_code_method_instance(
+                        callee, head, arguments, subject, receiver, interface, name, invoke,
+                    );
+                }
+            }
             if !self.interfaces_ready {
                 return Err(error(
                     head.span,
@@ -346,7 +355,7 @@ impl Checker<'_, '_> {
             }
             let subject = self.method_subject_view(&subject, head.span)?;
             if let Some((selected, inputs)) =
-                self.select_inherent_method_implementation(&subject, name.as_str(), head.span)?
+                self.select_inherent_method_implementation(&subject, name.name.as_str(), head.span)?
             {
                 let implementation = self
                     .checked_implementations
@@ -358,7 +367,7 @@ impl Checker<'_, '_> {
                 let body = implementation
                     .methods
                     .iter()
-                    .find(|(member, _)| member == name.as_str())
+                    .find(|(member, _)| member == name.name.as_str())
                     .map(|(_, body)| *body)
                     .ok_or_else(|| error(head.span, "selected code method is unavailable"))?;
                 let owner = self
@@ -415,7 +424,7 @@ impl Checker<'_, '_> {
                 })?;
                 let selected_head = Expr {
                     kind: H::ResolvedDef {
-                        name,
+                        name: name.name,
                         has_clause_param: !signature.clause_params.is_empty(),
                         def_id: definition,
                     },

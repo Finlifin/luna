@@ -359,6 +359,43 @@ runtime 方法传递问题见[代码实例的签名观察](comptime-value-admiss
 还验证递归未决的固有代码方法不会进入普通数据路径，补充独立实现后成功。既有方法
 组覆盖接收者、默认值、实参求值次数及写回，未为取得通过提高生产额度。
 
+### 方法分类与公共来源一致
+
+分类器不能跳过普通方法解析已有的 capability 来源规则。此前对抽象 T 的方法分类
+直接搜索固有实现；即使声明约束已明确给出 Read 的公共方法，另一个同名固有方法
+仍会产生 Deferred 并阻断调用。这里未决的是无关候选，不能用它否定已经确定的
+公共接口，也不能通过吞掉所有 Deferred 来修复。
+
+contextual_method_owner 现先复用 context_member_interface，遵守既有约束、父 trait
+来源、歧义检查和 comptime 来源优先级。公共声明决定 expr／pattern／data consumer
+类别；普通方法或关联值继续走普通调用。只有没有该来源时才进入固有方法查询，
+该查询的真正未决与失败仍向上传递。分类不执行实现、默认值或实参。
+
+隐式来源的 contextual 调用与显式 trait view 共用 with_trait_code_method_instance，
+不复制另一套主体选择流程：检查 implementation world 就绪、所请求及继承接口的
+证据、公共方法类别、访问权和接收者，再临时安装公共／实现捕获和目标映射。
+调用结束恢复这些映射。泛型主体检查仍只能使用已成立的公共契约；选择实际主体
+的要求没有因分类成功而放宽。
+
+真实 sysroot 回归覆盖三种类别的直接／继承来源和同层歧义，另检查 pure comptime
+trait 的优先级。既有泛型名义值 trait 实参转发用例保持原有成功及拒绝断言。
+独立查询预算与未决分类 waiter 仍未统一，限制同本节前述迁移边界。
+
+验证工作目录 `/home/fin/luna`：
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test cmtt_methods --test nominal_value_parameters --test trait_phases
+  --test library_protocols --test cmtt_phase_boundaries --no-fail-fast -- --skip
+  code_method_parent_value_clauses_form_indexed_code_signatures`：567 项通过，
+  筛去上述 1 项既有未实现用例，退出 0；`/tmp/luna-tools-ib0a7k7v/result.json`。
+- 四份修改的 Rust 文件 scoped rustfmt check 退出 0；
+  `/tmp/luna-tools-__km3ko3/result.json`。git diff --check 通过。
+
+首次扩展运行 `/tmp/luna-tools-4b93ojd9/result.json` 退出 101：新增来源优先级用例
+误将普通 trait 的 runtime-phase 成员实现放在 comptime impl 中，被阶段检查拒绝。
+最终按该 trait 的成员阶段使用普通 impl，保留 comptime 方法自身的执行阶段；
+没有修改 phase 检查。未运行全 workspace 或性能基准。
+
 ## 9. DefinitionTransaction
 
 目标让 struct/enum/newtype/fn/trait/impl 等走共同发布协议：

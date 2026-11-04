@@ -344,6 +344,31 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Option<OwnerId>, Error> {
         use crate::implementation::Selection;
+        // Capability sources precede inherent lookup in ordinary method calls.
+        // Their public declaration determines the category even when the
+        // generic receiver has no uniquely selected implementation yet.
+        if let Some(interface) = self.context_member_interface(subject, name, span)? {
+            let contract = self
+                .checked_traits
+                .iter()
+                .find(|item| item.declaration == interface.declaration)
+                .ok_or_else(|| error(span, "contextual method source lacks its trait contract"))?;
+            let Some(method) = contract.methods.iter().find(|method| method.name == name) else {
+                // Associated values use ordinary value/call elaboration.
+                return Ok(None);
+            };
+            return Ok(self.package.owners().find_map(|(owner, _)| {
+                (matches_declaration(
+                    self.package,
+                    &self.package_identities,
+                    owner,
+                    method.declaration,
+                ) && (self.is_code_generator(owner)
+                    || self.is_pattern_generator(owner)
+                    || self.is_data_consumer(owner)))
+                .then_some(owner)
+            }));
+        }
         let resolution = self
             .resolve_inherent_capability(name, subject, Budget::default())
             .map_err(|failure| {
