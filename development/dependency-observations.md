@@ -838,6 +838,59 @@ P3 与 runtime pure 共用 `type_domains` 的有限类型域覆盖算法。只�
   `/tmp/luna-tools-2rxinmue/result.json`。命令均由 `development/check.py --timeout 900 -- test`
   入口执行，详细参数保存在各 result.json。
 
+### 5.7 Required residual 保留声明值的词法作用域
+
+`inferred_producer_value_defaults_preserve_prior_inference_variables` 原先在第二种
+返回 tuple 的形式中失败。追踪显示，错误发生在声明签名形成，而非后续调用推断：
+`Tuple<Key<T, tag>>` 的普通参数准备产生包含 `ComptimeValue(rigid tag)` 的 residual。
+局部捕获已不再需要把 tag 作为 Local 实参传送，旧 required 作用域筛选却只检查
+捕获实参，于是删掉了 tag 的已有词法授权。VM 解码 residual 常量时没有相应域证据，
+正确报告 Type。`tag` 是声明 binder，不是可以冻结的活动推断变量。
+
+现在 `required/scope` 在 sparse entry 形成后，根据入口函数的完整依赖和选中冻结
+实参的值依赖筛选已有抽象值权限。入口观察包括签名、参数域、契约和 residual 主体，
+复用有界只读 input_observation，不复制／改写表达式。所有观察成功后才裁剪权限；
+预算失败保留原权限表，稍后可用新预算重试。没有候选权限时不扫描代码。
+旧的“对每个 binder 重新扫描实参”路径已删除。
+
+这一步只筛选已有词法权限，不从扫描结果为陌生声明创建权限，也不替换域证据。
+没有被代码或冻结实参使用的兄弟默认参数仍会移除。输入转发的来源检查、VM 的
+抽象值准入和无法观察未知分支的拒绝规则保持不变；记录 binder 依赖不等于知道
+它的值，更不等于允许在签名形成时执行某个默认值来取得答案。
+
+回归分别覆盖 residual 常量直接进入 VM、只在冻结实参中出现的 binder、未授权
+binder 不获许可、未使用权限被裁剪、预算失败不半途发布以及恢复。真实 sysroot
+用例在 comptime 中构造 bool/u8 的具名类型值，再通过 quote/splice 交付结果；
+把未知 tag 用于真正的分支判断仍须报告 AbstractValueUnresolved。原 CMTT 默认值
+用例保留全部源码和断言，覆盖普通返回与展开 tuple 两种调用形式。
+
+这个修复闭合的是 required 入口的词法权限筛选。Type 参数授权、转发输入与 live
+graph 仍有各自的收集路径，完整 WorldView／scope evidence 统一接收协议尚未完成，
+不能据此宣称所有 invocation carrier 已共用一个所有权模型。
+
+验证工作目录 `/home/fin/luna`：
+
+- 定位运行 `/tmp/luna-tools-p34hss30/result.json` 退出 101，栈停在
+  normal_values 的未授权 rigid value 解码；`/tmp/luna-tools-gmny7w4w/result.json`
+  显示已有 tag／unused 权限而残余入口没有 Local 实参。所有临时诊断已逐字节移除。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration -p luna
+  --lib --test normal_input_plans --test nominal_value_parameters --test cmtt
+  --test function_template_local_definitions --test default_calls
+  --test staged_invocation_reuse --no-fail-fast`：1249 通过、1 失败、1 既有 ignored，
+  退出 101；`/tmp/luna-tools-okle1e6_/result.json`。其中 CMTT 594 项全部通过，
+  新增权限／预算单测及真实 sysroot 正反例通过；默认值 P3 的既有 ignored 未改动。
+- 唯一失败是 symbolic_nominal_trait_arguments_forward_through_generic_bounds，
+  在 349..359 报 contextual method classification is unsettled。将 required.rs
+  临时恢复为 `5b24b9fa` 的内容后精确执行该测试，仍为相同诊断，退出 101；
+  `/tmp/luna-tools-sap3m1_3/result.json`。其后逐字节恢复本次源码。该方法分类缺口
+  尚未修复，不把整体运行称为全绿，也不改该用例的成功预期。
+- 三份修改／新增 Rust 文件 scoped rustfmt check 退出 0；
+  `/tmp/luna-tools-ungwcm5d/result.json`。本阶段未运行全 workspace、native 或性能基准。
+
+最初新增源码把 comptime 返回值直接存入 runtime let，正确触发 Splice 要求；
+`/tmp/luna-tools-mlwbjv_d/result.json` 保留该失败。最终用例按上述普通 quote/splice
+交付，未修改 phase 检查来接受错误阶段用法。
+
 ## 6. 接口生产必须有可观察前缀
 
 定义接口的任务按声明依赖供应已成立部分：已注册的 binder 身份、已形成的参数域、

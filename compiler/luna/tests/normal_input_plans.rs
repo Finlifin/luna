@@ -560,6 +560,34 @@ fn annotated_and_computed_callbacks_keep_outer_and_named_binders() {
 }
 
 #[test]
+fn signature_packets_preserve_residual_value_binders_without_local_captures() {
+    let source = "struct Key where T, tag: T { value: T }
+        comptime fn singleton(value: Key<T, tag>) -> Tuple<Key<T, tag>>
+        where T, tag: T, .unused: T = tag
+        {
+            (value,)
+        }
+        comptime fn build() -> <|- bool> {
+            let (yes,) = singleton(Key<bool, true> { value: true });
+            let (no,) = singleton(Key<bool, false> { value: false });
+            let (number,) = singleton(Key<u8, 7> { value: 7 });
+            let result = yes.value and not no.value and number.value == 7;
+            '(result)
+        }
+        fn run() -> bool { ~<build()> }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let observing = "struct Flag where tag: bool {}
+        comptime fn choose(flag: bool) -> bool { if flag { true } else { false } }
+        comptime fn singleton(value: Flag<tag>) -> Tuple<Flag<choose(tag)>>
+        where tag: bool
+        {
+            (value,)
+        }";
+    let failure = sysroot::compile(observing).unwrap_err();
+    assert!(failure.contains("AbstractValueUnresolved"), "{failure}");
+}
+
+#[test]
 fn nested_nominal_inputs_retain_abstract_values_and_formation_obligations() {
     let prefix = "
         pure comptime fn Selected<enabled: bool> -> Type { bool }

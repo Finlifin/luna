@@ -6,6 +6,7 @@ use comptime_interpretor::{Budget, Interpreter, Value};
 use std::collections::VecDeque;
 pub(super) mod prepared;
 mod restore;
+mod scope;
 use prepared::PreparedRequired;
 
 /// Required expression evaluation can prepare a distinct clause packet at the
@@ -2118,6 +2119,13 @@ impl Checker<'_, '_> {
                     })
                 })
                 .collect();
+            scope::retain_abstract_values(
+                &mut abstract_value_parameters,
+                &captured.function,
+                &inputs,
+                &mut self.required_steps,
+                expr.span,
+            )?;
             functions.push(captured.function);
             // Preserve the checked implementation world, projecting only its
             // method tables to the members this invocation can reference. This
@@ -2219,13 +2227,6 @@ impl Checker<'_, '_> {
                     && self
                         .trait_input_domain(*id)
                         .is_none_or(|domain| domain == p(P::Type))
-            });
-            abstract_value_parameters.retain(|(id, _)| {
-                inputs.iter().any(|(_, _, value)| {
-                    value
-                        .as_ref()
-                        .is_some_and(|value| value.mentions_rigid(*id))
-                })
             });
             abstract_parameters.extend(
                 scoped_parameters

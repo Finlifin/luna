@@ -347,8 +347,10 @@ cmtt_methods 的 indexed-code-signature 用例在修改前即于 139..143 报未
 及 inferred_producer_value_defaults_preserve_prior_inference_variables 均在相同源码
 位置报 interpretation Type。对照结束后逐字节恢复本次源码并核对哈希，未修改预期。
 后续 invocation 签名观察清理已修复上述五个 BitVec 用例：失败来自被动类型比较
-把尚未取得的关联 Type 视图当成不相等。保留全部断言的 CMTT 组现为 593 通过、
-1 项默认值推断失败；indexed-code-signature 仍未修复。具体机制、证据与新发现的
+把尚未取得的关联 Type 视图当成不相等。随后定位的默认值用例也已通过
+[required residual 作用域修复](dependency-observations.md#57-required-residual-保留声明值的词法作用域)
+恢复：失败实际发生于声明签名形成时丢掉抽象值权限，并非调用推断结果错误。
+indexed-code-signature 仍未修复。具体机制、证据与新发现的
 runtime 方法传递问题见[代码实例的签名观察](comptime-value-admission.md#签名观察与发布补充验证)；
 该传递问题已通过[恢复公共方法签名](comptime-value-admission.md#公共方法身份的重建)修复。
 

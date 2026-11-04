@@ -1851,6 +1851,9 @@ normal_input_data_tests::clause_list_inputs_share_domain_scope_and_budget_valida
 luna 库 84、关联签名 9、延迟关联值 9、公开库协议 27、meta.math 9 项均通过。
 CMTT 为 593 通过、1 项既有默认值推断失败；方法组为 154 通过、1 项新增验收失败。
 筛去的两项是此前已经复现的独立基线，不能称为全套通过。
+其中默认值用例随后定位为声明签名形成时的作用域交付错误，已由
+[required residual 权限筛选](dependency-observations.md#57-required-residual-保留声明值的词法作用域)
+修复，未修改调用推断规则或原测试预期。
 
 新增失败是 `bool.as(Factory).make` 作为 runtime callable 传给 comptime wrapper：
 前端交付的 TraitMethod 类型未保留公共关联返回类型契约，NIR phase 检查在进入
