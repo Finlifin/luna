@@ -2,9 +2,11 @@
     Expected: run returns true. Transporting Factory.make through comptime
     must preserve its public contract without executing its runtime body.
 
-    Current blocker: NIR phase validation reports that the trait method value
-    type does not preserve its contract, before VM signature observation.
-    See development/comptime-value-admission.md, section 33.
+    Regression: reconstruct the inner method with its public associated return
+    type, then expose the observed callable type to the receiving context.
+    The cmtt_methods source test compiles and executes this file, and checks
+    the retained NIR signature. See development/comptime-value-admission.md,
+    section 33.
 
     A second acceptance case replaces make's body with:
         while true {} false

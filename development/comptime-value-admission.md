@@ -1857,8 +1857,8 @@ CMTT 为 593 通过、1 项既有默认值推断失败；方法组为 154 通过
 VM 前报告 `trait method value type does not preserve its contract`。没有放宽
 `phases::validate` 的精确契约检查，也没有把成功预期改成拒绝预期；探索用例移入
 [独立复现文件](repros/cmtt-runtime-associated-method-transport.fl)，保持返回 true
-以及替换为不终止 runtime 主体后仍能完成编译这两个验收目标。这里仍缺完整的
-源码签名交付接线，不以 VM 层验证冒充端到端完成。
+以及替换为不终止 runtime 主体后仍能完成编译这两个验收目标。这份源码随后已进入
+方法组的正例回归；公共签名重建的接线与边界见下节。
 
 最后针对 VM 签名失败传播、缓存原子发布与 runtime 身份观察执行三项回归，退出 0；
 `/tmp/luna-tools-vb87u6sm/result.json`。runtime 身份用例不提供可执行主体：Type
@@ -1872,6 +1872,50 @@ code_method_parent_value_clauses_form_indexed_code_signatures` 退出 0，154 �
 1 筛去；`/tmp/luna-tools-no9s0s4v/result.json`。五份修改的 Rust 文件通过 scoped
 rustfmt check，`/tmp/luna-tools-wi8c4i5u/result.json` 退出 0。未重复全 workspace、
 native 或性能基准；正式 docs 及其他已有工作区修改未纳入本阶段。
+
+### 公共方法身份的重建
+
+RuntimeTraitMethod 是公共 interface 身份及其 receiver／trait／method 输入。
+从 VM 值重建 NIR 时，使用处已经观察到的 callable 域不能直接写在 TraitMethod
+节点上：它可能把关联返回类型化为 bool，导致节点不再表达声明契约。常量重建现先
+恢复公共签名，再复用 callable_value_view：内部节点保留签名及原方法身份，外层
+透明 Block 暴露求解后的 callable 类型并检查接收域。没有换成实现函数身份，
+没有执行 runtime 主体，也没有放宽 phase checker 的精确公共签名检查。
+
+`nir::member_types` 从 phase checker 中提取，供重建生产者与校验器共同使用。
+它只执行普通声明输入代入：分别检查 trait 和 method 输入数量，通过调用者提供的
+可失败域观察取得每个 binder 的域，复用受限 substitution，并保留 NF 头与关联投影。
+查询失败不降级为默认 Type；只有成功观察后确实没有显式域的既有 binder 采用 Type。
+签名重建、输入域查找和身份载荷复制消耗当前 required 额度，失败不发布 NIR 节点。
+视图求解及类型要求仍沿用 checker 的现行入口，尚未完成全局共享求解预算的迁移。
+
+相关 callable 值观察逻辑集中到 `program/interfaces/values.rs`，从接口声明文件
+分离。完整 TypeRef／证据对象迁移仍未完成；当前透明 Block 是既有 NIR 的合法表示，
+不能被解释为任意类型可以通过外层注记改写身份。
+
+真实 sysroot 回归覆盖：经 quote 传递的 runtime 方法能运行；内部关联返回类型
+仍存在且通过 NIR 校验；不终止的 runtime 主体不阻塞编译；不兼容 callable 域仍
+拒绝；generic trait 的 Type 输入与 method 的 bool 输入分别代入，方法身份还可以
+经过局部 const 和名义容器存储。共享内核另检查域查询失败、低预算、输入分区错位、
+普通值域不匹配、失败后恢复与 NF 头不展开。
+
+验证工作目录 `/home/fin/luna`，以下参数接在
+`python3 -B development/check.py --timeout 900 -- test` 后：
+
+- `-p nir --lib --test member_types --test scoped_contracts --no-fail-fast`：
+  36 + 1 + 5 项通过，退出 0；`/tmp/luna-tools-p9dtuhjf/result.json`。
+- `-p luna --test cmtt_methods --test trait_phases --test associated_signatures
+  --test deferred_associated_values --test library_protocols
+  --test library_comptime_comparison --no-fail-fast -- --skip
+  code_method_parent_value_clauses_form_indexed_code_signatures`：275 通过、1 筛去，
+  退出 0；`/tmp/luna-tools-_kawq2t8/result.json`。筛去项是先前确认的独立缺口，
+  本阶段没有修改其预期或称其已修复。
+- `-p luna --test cmtt --no-fail-fast -- callback runtime_function runtime_method`：
+  60 项通过、534 项未选取，退出 0；`/tmp/luna-tools-g_t2ls9n/result.json`。
+
+八份修改／新增 Rust 文件 scoped rustfmt check 退出 0，
+`/tmp/luna-tools-y3vyr90r/result.json`。没有运行全 workspace、native 或性能基准；
+正式 docs 及已有用户修改保持原样。
 
 
 ## 34. IIR callable 查询与代码复制视图

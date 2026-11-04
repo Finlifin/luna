@@ -1,12 +1,12 @@
-//! Phase checking observes member contracts through ordinary declaration input
-//! substitution. The caller supplies one allowance for copies and expansion.
+//! Observe public member signatures through ordinary declaration input
+//! substitution, without choosing an implementation or normalizing projections.
+//! Producers and validators share this bounded contract reconstruction.
 use crate::{
     DeclarationId, Primitive, Sort, Term,
     code_interfaces::MethodSignature,
     program::{AssociatedContract, MethodContract, Trait},
     type_computations::{Error, charge_term},
 };
-use std::collections::BTreeMap;
 
 fn arguments(
     subject: &Term,
@@ -32,7 +32,7 @@ fn arguments(
         .collect())
 }
 
-pub(super) fn associated(
+pub fn associated(
     contract: &Trait,
     member: &AssociatedContract,
     subject: &Term,
@@ -46,16 +46,21 @@ pub(super) fn associated(
         .instantiate_bounded(&member.ty, fuel)
 }
 
-pub(super) fn method(
+pub fn method<'a>(
     contract: &Trait,
     method: &MethodContract,
     subject: &Term,
     interface_inputs: &[Term],
     method_inputs: &[Term],
-    parameter_domains: &BTreeMap<DeclarationId, Term>,
+    mut domain: impl FnMut(DeclarationId, &mut usize) -> Result<Option<&'a Term>, Error>,
     frames: &[Vec<Sort>],
     fuel: &mut usize,
 ) -> Result<MethodSignature, Error> {
+    if interface_inputs.len() != contract.type_parameters.len()
+        || method_inputs.len() != method.type_parameters.len()
+    {
+        return Err(Error::Structure("trait method input arity mismatch".into()));
+    }
     *fuel = fuel
         .checked_sub(
             contract
@@ -71,9 +76,7 @@ pub(super) fn method(
         .collect();
     let mut domains = Vec::with_capacity(parameters.len());
     for id in &parameters {
-        let domain = parameter_domains
-            .get(id)
-            .unwrap_or(&Term::Primitive(Primitive::Type));
+        let domain = domain(*id, fuel)?.unwrap_or(&Term::Primitive(Primitive::Type));
         charge_term(domain, fuel)?;
         domains.push(domain.clone());
     }

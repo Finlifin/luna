@@ -42,6 +42,68 @@ fn contextual_classification_depth_is_a_failure_not_an_ordinary_value() {
 }
 
 #[test]
+fn contextual_runtime_method_transport_preserves_the_public_contract() {
+    let source =
+        include_str!("../../../development/repros/cmtt-runtime-associated-method-transport.fl");
+    let package = sysroot::compile(source).unwrap();
+    let run = package.functions.iter().find(|f| f.name == "run").unwrap();
+    let mut retained = 0;
+    nir::visit::expressions(run, &mut 10_000, |expr, _| {
+        if matches!(expr.kind, nir::program::ExprKind::TraitMethod { .. }) {
+            assert!(matches!(
+                &expr.ty,
+                nir::Term::Function { result, .. }
+                    if matches!(result.as_ref(), nir::Term::AssociatedType { .. })
+            ));
+            retained += 1;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(retained > 0, "public method identity must survive staging");
+    nir::phases::validate(&package).unwrap();
+    let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    sysroot::compile(&source.replace(
+        "fn make() -> bool { true }",
+        "fn make() -> bool { while true {} false }",
+    ))
+    .unwrap();
+    let wrong = source
+        .replace("callback: fn() -> bool", "callback: fn() -> char")
+        .replace("<|- bool>", "<|- char>")
+        .replace("fn run() -> bool", "fn run() -> char");
+    assert!(sysroot::compile(&wrong).is_err());
+}
+
+#[test]
+fn transported_runtime_methods_preserve_clause_domains_and_nested_storage() {
+    for selected in [true, false] {
+        let source = format!(
+            "trait Factory where T {{
+                assoc Item: Type;
+                fn make() -> Item where enabled: bool;
+            }}
+            impl Factory<bool> for bool {{
+                assoc Item: Type = bool;
+                fn make() -> bool where enabled: bool {{ enabled }}
+            }}
+            struct Callback {{ apply: fn() -> bool }}
+            comptime fn wrapper(value: Callback) -> <|- bool> {{ '(value.apply()) }}
+            fn run() -> bool {{
+                const callback = bool.as(Factory<bool>).make<{selected}>;
+                ~<wrapper(Callback {{ apply: callback }})>
+            }}"
+        );
+        assert_eq!(sysroot::run(&source), Value::Bool(selected));
+    }
+}
+
+#[test]
 fn contextual_calls_observe_associated_signatures_through_public_library_types() {
     let source = "trait Source {
             assoc Output: Type;

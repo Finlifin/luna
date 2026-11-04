@@ -3705,25 +3705,7 @@ impl Checker<'_, '_> {
                 }
             }
             Value::RuntimeTraitMethod(identity) => {
-                let comptime_interpretor::TraitMethodIdentity {
-                    interface,
-                    subject,
-                    member,
-                    method_arguments,
-                } = identity.as_ref();
-                for term in std::iter::once(subject)
-                    .chain(&interface.arguments)
-                    .chain(method_arguments)
-                {
-                    self.charge_constant_type_copy(term, span)?;
-                }
-                K::TraitMethod {
-                    interface: interface.declaration,
-                    interface_arguments: interface.arguments.clone(),
-                    subject: subject.clone(),
-                    member: *member,
-                    method_arguments: method_arguments.clone(),
-                }
+                return self.materialized_trait_method(identity, &ty, span);
             }
             Value::Closure(closure) => {
                 if let Some((declaration, arguments)) = closure.declaration_instance() {

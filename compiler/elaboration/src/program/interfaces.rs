@@ -11,6 +11,7 @@ mod phase_associated;
 mod phase_contributions;
 mod program_contracts;
 mod signatures;
+mod values;
 
 // Associated reads in program contracts need the complete implementation world.
 // Retain their exact declaration context without assuming the obligation itself.
@@ -3193,121 +3194,5 @@ impl Checker<'_, '_> {
             method_arguments,
         };
         Ok(call)
-    }
-}
-
-impl Checker<'_, '_> {
-    /// Expose the selected callable type to value contexts while retaining the
-    /// member's declaration signature on the inner node for phase validation.
-    pub(super) fn callable_value_view(
-        &self,
-        value: n::Expr,
-        expected: Option<&Term>,
-        span: Span,
-    ) -> Result<n::Expr, Error> {
-        if let Some((owner, _)) = self.method_instantiation_inputs(&value) {
-            if let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-                self.package.item(owner).map(|item| &item.kind)
-            {
-                if signature
-                    .params
-                    .iter()
-                    .any(|parameter| parameter.ty.is_implicit() || parameter.ty.is_lambda())
-                {
-                    arguments::require_function_value_parameters(signature.params, span)?;
-                }
-            }
-        }
-        let ty = self.callable_input_view(&value.ty, span)?;
-        if let Some(expected) = expected {
-            self.require(&ty, expected, span)?;
-        }
-        if ty == value.ty {
-            return Ok(value);
-        }
-        Ok(n::Expr {
-            ty,
-            source: value.source,
-            kind: K::Block {
-                statements: vec![],
-                result: Some(Box::new(value)),
-            },
-        })
-    }
-
-    /// Expression rewrites include staged values as well as Type annotations.
-    /// Preserve value terms for ordinary domain admission by the invocation.
-    pub(super) fn callable_argument_term_view(
-        &mut self,
-        term: &Term,
-        span: Span,
-    ) -> Result<Term, Error> {
-        if term.sort() == Sort::Type {
-            self.callable_input_view(term, span)
-        } else {
-            self.copy_alias_type(term, span)
-        }
-    }
-
-    pub(super) fn callable_input_view(&self, signature: &Term, span: Span) -> Result<Term, Error> {
-        self.callable_input_view_budgeted(signature, Budget::default(), span)
-    }
-
-    pub(super) fn callable_input_view_budgeted(
-        &self,
-        signature: &Term,
-        budget: Budget,
-        span: Span,
-    ) -> Result<Term, Error> {
-        self.callable_input_view_metered(signature, &mut { budget })
-            .map_err(|failure| error(span, failure))
-    }
-
-    pub(super) fn callable_input_view_metered(
-        &self,
-        signature: &Term,
-        budget: &mut Budget,
-    ) -> Result<Term, nir::NominalAdmissionError> {
-        // This view is also used for complete interface argument vectors.
-        // A finished scalar index has no associated Type projection to solve.
-        if signature.is_structural_index_value() {
-            crate::associated::charge_projection_copy(signature, &mut budget.steps)?;
-            return Ok(signature.clone());
-        }
-        if !self.interfaces_ready {
-            crate::associated::charge_projection_copy(signature, &mut budget.steps)?;
-            return Ok(signature.clone());
-        }
-        if !signature
-            .substitution_parameters()
-            .map_err(|e| e.to_string())?
-            .is_empty()
-            && self.context.scope() != self.call_input_frames().as_slice()
-        {
-            let parameters = self.call_inference_scope();
-            if parameters.is_empty() {
-                return Err("dependent callable has no enclosing function frame".into());
-            }
-            let scoped = Term::Function {
-                parameters,
-                result: Box::new(signature.clone()),
-            };
-            scoped.check_scope(&[]).map_err(|e| e.to_string())?;
-            let checked = self.callable_input_view_metered(&scoped, budget)?;
-            let Term::Function { result, .. } = checked else {
-                unreachable!()
-            };
-            return Ok(*result);
-        }
-        let assumptions = self.capability_assumptions();
-        crate::capabilities::World {
-            index: &self.implementation_index,
-            implementations: &self.checked_implementations,
-            traits: &self.checked_traits,
-            assumptions: &assumptions,
-            context: &self.context,
-        }
-        .associated_type_view_metered(signature, budget)
-        .map(|value| value.value)
     }
 }

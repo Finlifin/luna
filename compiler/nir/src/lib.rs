@@ -21,6 +21,7 @@ pub use trait_parameters::{
     validate_record_index_with_admission_in,
 };
 
+pub mod member_types;
 pub mod phases;
 
 pub mod callable_types;

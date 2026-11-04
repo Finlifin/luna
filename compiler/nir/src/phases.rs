@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod comptime_storage;
 #[cfg(test)]
 mod inspection_tests;
-mod member_types;
+use crate::member_types;
 mod parameters;
 mod storage_cache;
 mod storage_error;
@@ -629,7 +629,7 @@ fn machine_arithmetic_functions_with_budgets(
                                 subject,
                                 interface_arguments,
                                 method_arguments,
-                                &parameter_domains,
+                                |id, _| Ok(parameter_domains.get(&id)),
                                 caller_frames,
                                 inspection_fuel,
                             )

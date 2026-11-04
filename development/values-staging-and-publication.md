@@ -349,7 +349,8 @@ cmtt_methods 的 indexed-code-signature 用例在修改前即于 139..143 报未
 后续 invocation 签名观察清理已修复上述五个 BitVec 用例：失败来自被动类型比较
 把尚未取得的关联 Type 视图当成不相等。保留全部断言的 CMTT 组现为 593 通过、
 1 项默认值推断失败；indexed-code-signature 仍未修复。具体机制、证据与新发现的
-runtime 方法传递缺口见[代码实例的签名观察](comptime-value-admission.md#签名观察与发布补充验证)。
+runtime 方法传递问题见[代码实例的签名观察](comptime-value-admission.md#签名观察与发布补充验证)；
+该传递问题已通过[恢复公共方法签名](comptime-value-admission.md#公共方法身份的重建)修复。
 
 新增源码回归逐预算寻找 expr／pattern／data 分类的资源边界，随后在同一 HIR 上以
 新预算完成 elaboration 和执行；深嵌套 quote 检查必须报告分类深度失败。真实 sysroot
