@@ -799,6 +799,37 @@ trait、Self、方法、关联成员、impl、无主体函数参数表和 quote 
 混合 interpretation、runtime reference、原子发布及接收世界检查不在删除名单中。
 
 
+### 源码轨迹与显式绑定
+
+前文历史检查中的两项验证问题现已修复：enum builder 独立 fixture 缺少 `Symbol`
+绑定，以及 deferred normal input 用例要求固定的 contextual input 总数。保留历史
+失败报告用于说明当时的证据，不能继续将这两项列作当前未解决基线。
+
+类型用例保留原始值、NF 头和参数顺序断言，增加有名字的默认值及域观察函数，用完整
+`EnterFunction` 轨迹核对执行一次及顺序。Ready 的域观察先于值生产，Deferred 的值
+前缀先于域观察；提前返回不进入后续域生产者。相同源码在树解释与字节码中都执行，
+并覆盖切换元素类型后重复调用。字节码计数只检查实际源码调用进入了字节码、默认值
+执行一次及确实使用了 contextual／staged 路径，不再限定某次 IR 划分产生几个输入。
+这没有把旧预期 2 改为 3，也没有修改编译器或语言契约。
+
+enum builder 用例从该 fixture 已配置的 builtin 依赖显式导入 Type、u8、Symbol，
+替代局部原始绑定并补齐共享示例的符号类型。继续运行原有反射结果与 runtime pattern
+断言；真实 sysroot 路径仍由既有独立用例覆盖，不将隔离 fixture 冒充完整 prelude。
+
+工作目录 `/home/fin/luna`：
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test comptime_bytecode_types --test builder_invocations --no-fail-fast`：
+  `/tmp/luna-tools-ttr13p5t/result.json` 退出 0，101 项通过。
+- 临时把新类型 fixture 的 `enabled()` 改成 `enabled() and enabled()`，保留相同
+  返回值并重复源码调用；单独运行该用例在 `/tmp/luna-tools-9w0ht1mz/result.json`
+  退出 101，结果断言通过，源码轨迹准确检出重复的 default_flag／enabled 调用。
+  随后逐字节恢复最终测试，同命令在 `/tmp/luna-tools-n_lk4nl3/result.json` 退出 0。
+- 两份 Rust 测试文件 scoped rustfmt 检查：
+  `/tmp/luna-tools-npc50epa/result.json` 退出 0。未修改生产代码或运行全 workspace。
+
+以上仅修复验收载体。通用域等待、前端可恢复区域和完整宿主协议的未完成范围保持。
+
 ## 当前 NIR 迁移：残余值不等于冻结数据
 
 [依赖观察 §5.5](dependency-observations.md#55-invocation-残余值与冻结值分离)已接通

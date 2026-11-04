@@ -422,6 +422,11 @@ frozen/live 的同类错误及零执行、损坏的重复 capture 布局、部�
   `/tmp/luna-tools-0gw_a2sj/result.json`。
 
 
+上述 enum builder 的 `Symbol` fixture 问题现已通过显式导入已有 builtin 绑定修复，
+与旧上下文输入计数断言一并按源码行为重新验收；当前证据见
+[源码轨迹与显式绑定](values-staging-and-publication.md#源码轨迹与显式绑定)。
+历史失败报告不代表该 fixture 仍然阻塞。
+
 ## 13. 域检查顺序与源码求值顺序分离
 
 普通子句准备现在为每个源码输入保留独立 preparation 位置。接收域仍引用未提供的

@@ -491,18 +491,20 @@ fn deferred_normal_inputs_run_bytecode_before_their_domains_arrive() {
         "typealias Type = .Type'builtin;
         typealias List<T> = TupleElements<T>;
         pure comptime fn Payload<.T: Type = Type, value: T> -> Type { T }
-        comptime fn enabled(.flag: bool = true) -> bool { flag }
+        comptime fn default_flag() -> bool { true }
+        comptime fn enabled(.flag: bool = default_flag()) -> bool { flag }
+        comptime fn observe_domain(flag: bool) -> bool { flag }
         comptime fn Deferred(element: Type) -> Type {
             var touched = false;
             let result = Payload<do {
                 touched = not touched;
                 if enabled() { [17, 23] } else { [29] }
-            }, .T=if touched { List<element> } else { bool }>;
+            }, .T=if observe_domain(touched) { List<element> } else { bool }>;
             if touched { result } else { bool }
         }
         comptime fn Ready(element: Type) -> Type {
             var touched = false;
-            let result = Payload<.T=List<element>, do {
+            let result = Payload<.T=if observe_domain(true) { List<element> } else { bool }, do {
                 touched = not touched;
                 if enabled() { [17, 23] } else { [29] }
             }>;
@@ -512,94 +514,107 @@ fn deferred_normal_inputs_run_bytecode_before_their_domains_arrive() {
             Payload<.T=List<element>, do { return bool; [17, 23] }>
         }
         comptime fn Early(element: Type) -> Type {
-            Payload<do { return bool; [17, 23] }, .T=do { while true {} List<element> }>
+            Payload<do { return bool; [17, 23] }, .T=do { observe_domain(false); while true {} List<element> }>
         }",
     );
-    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    for primitive in [Primitive::U8, Primitive::Integer, Primitive::U8] {
-        let list = Term::NormalForm {
-            head: support::id(&package, "TupleElements"),
-            sort: nir::Sort::Type,
-            arguments: vec![Term::Primitive(primitive)],
-        };
-        let before = vm.bytecode_staged_inputs();
-        let contextual = vm.bytecode_contextual_inputs();
-        let defaults = vm.bytecode_default_evaluations();
-        assert_eq!(
-            vm.invoke(
-                support::id(&package, "Ready"),
-                vec![Value::Type(Term::Primitive(primitive))]
-            )
-            .unwrap(),
-            Value::Type(Term::NormalForm {
+    for tree in [false, true] {
+        let mut vm = if tree {
+            Interpreter::for_comptime_tree(&package, Budget::default())
+        } else {
+            Interpreter::for_comptime(&package, Budget::default())
+        }
+        .unwrap();
+        for primitive in [Primitive::U8, Primitive::Integer, Primitive::U8] {
+            let list = Term::NormalForm {
+                head: support::id(&package, "TupleElements"),
+                sort: nir::Sort::Type,
+                arguments: vec![Term::Primitive(primitive)],
+            };
+            let expected = Value::Type(Term::NormalForm {
                 head: support::id(&package, "Payload"),
                 sort: nir::Sort::Type,
                 arguments: vec![
                     list.clone(),
                     Term::NominalValue {
-                        ty: Box::new(list.clone()),
+                        ty: Box::new(list),
                         variant: None,
                         fields: [17, 23]
                             .into_iter()
                             .map(|n| Term::Integer(comptime_runtime::Integer::from_u128(n)))
                             .collect(),
-                    }
+                    },
                 ],
-            })
-        );
-        assert_eq!(vm.bytecode_staged_inputs() - before, 0);
-        assert_eq!(vm.bytecode_contextual_inputs() - contextual, 2);
-        assert_eq!(vm.bytecode_default_evaluations() - defaults, 1);
-        let before = vm.bytecode_staged_inputs();
-        let defaults = vm.bytecode_default_evaluations();
-        assert_eq!(
-            vm.invoke(
-                support::id(&package, "Deferred"),
-                vec![Value::Type(Term::Primitive(primitive))]
-            )
-            .unwrap(),
-            Value::Type(Term::NormalForm {
-                head: support::id(&package, "Payload"),
-                sort: nir::Sort::Type,
-                arguments: vec![
-                    list.clone(),
-                    Term::NominalValue {
-                        ty: Box::new(list.clone()),
-                        variant: None,
-                        fields: [17, 23]
-                            .into_iter()
-                            .map(|n| Term::Integer(comptime_runtime::Integer::from_u128(n)))
-                            .collect(),
+            });
+            for (name, calls, deferred, completes) in [
+                (
+                    "Ready",
+                    vec!["Ready", "observe_domain", "default_flag", "enabled"],
+                    false,
+                    true,
+                ),
+                (
+                    "Deferred",
+                    vec!["Deferred", "default_flag", "enabled", "observe_domain"],
+                    true,
+                    true,
+                ),
+                ("Early", vec!["Early"], true, false),
+                ("ReadyEarly", vec!["ReadyEarly"], false, false),
+            ] {
+                let events = vm.events().len();
+                let staged = vm.bytecode_staged_inputs();
+                let contextual = vm.bytecode_contextual_inputs();
+                let invocations = vm.bytecode_invocations();
+                let defaults = vm.bytecode_default_evaluations();
+                let actual = vm
+                    .invoke(
+                        support::id(&package, name),
+                        vec![Value::Type(Term::Primitive(primitive))],
+                    )
+                    .unwrap();
+                assert_eq!(
+                    actual,
+                    if completes {
+                        expected.clone()
+                    } else {
+                        Value::Type(Term::Primitive(Primitive::Bool))
+                    },
+                    "{name}, tree={tree}"
+                );
+                let entered: Vec<_> = vm.events()[events..]
+                    .iter()
+                    .filter_map(|event| match event {
+                        comptime_interpretor::Event::EnterFunction(declaration) => {
+                            Some(*declaration)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let expected_calls: Vec<_> = calls
+                    .iter()
+                    .map(|name| support::id(&package, name))
+                    .collect();
+                assert_eq!(
+                    entered, expected_calls,
+                    "source order and exactly-once execution: {name}, tree={tree}"
+                );
+                if !tree {
+                    // Body-entry events establish source behavior; these counters
+                    // only establish the selected engine, not an IR slot layout.
+                    assert_eq!(vm.bytecode_invocations() - invocations, entered.len());
+                    assert_eq!(
+                        vm.bytecode_default_evaluations() - defaults,
+                        usize::from(completes)
+                    );
+                    if deferred {
+                        assert!(vm.bytecode_staged_inputs() > staged);
+                    } else {
+                        assert_eq!(vm.bytecode_staged_inputs(), staged);
+                        assert!(vm.bytecode_contextual_inputs() > contextual);
                     }
-                ],
-            })
-        );
-        assert_eq!(vm.bytecode_staged_inputs() - before, 1);
-        assert_eq!(vm.bytecode_default_evaluations() - defaults, 1);
-        let before = vm.bytecode_staged_inputs();
-        let invocations = vm.bytecode_invocations();
-        assert_eq!(
-            vm.invoke(
-                support::id(&package, "Early"),
-                vec![Value::Type(Term::Primitive(primitive))]
-            )
-            .unwrap(),
-            Value::Type(Term::Primitive(Primitive::Bool))
-        );
-        assert_eq!(vm.bytecode_staged_inputs() - before, 1);
-        assert_eq!(vm.bytecode_invocations() - invocations, 1);
-        let invocations = vm.bytecode_invocations();
-        let contextual = vm.bytecode_contextual_inputs();
-        assert_eq!(
-            vm.invoke(
-                support::id(&package, "ReadyEarly"),
-                vec![Value::Type(Term::Primitive(primitive))]
-            )
-            .unwrap(),
-            Value::Type(Term::Primitive(Primitive::Bool))
-        );
-        assert_eq!(vm.bytecode_contextual_inputs() - contextual, 2);
-        assert_eq!(vm.bytecode_invocations() - invocations, 1);
+                }
+            }
+        }
     }
 }
 

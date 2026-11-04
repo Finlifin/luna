@@ -2287,7 +2287,7 @@ fn builder_diagnostics_identify_malformed_source_drafts() {
 #[test]
 fn enum_builder_edits_payloads_groups_and_runtime_patterns() {
     let fixture = Fixture::new(&format!(
-        "typealias Type=.Type'builtin; typealias u8=.u8'builtin; {}",
+        "use builtin.Type; use builtin.u8; use builtin.Symbol; {}",
         include_str!("../../../development/examples/sysroot-edited-enum.fl")
     ));
     let (Artifact::Nir(package), result, _) = fixture.invoke_meta("inspect_enum").unwrap() else {
