@@ -1,5 +1,5 @@
-//! Uncached source Eq/Hash execution for one concrete input type. The owner of a
-//! query cache still establishes immutability, purity and equality-compatible
+//! Source Eq/Hash execution with shared code but fresh values and results.
+//! The query cache owner establishes immutability, purity and equality-compatible
 //! reuse. Typed immutable snapshots do not enable global memoization.
 use comptime_executor::{Context, Error, KeyProtocol};
 use comptime_interpretor::{Budget, Interpreter, Value};
@@ -44,9 +44,17 @@ impl std::fmt::Display for Snapshot {
 }
 
 pub struct Protocol {
+    binding: Binding,
+    execution: Execution,
+}
+struct Execution {
+    code: comptime_interpretor::CodeSession,
+    stats: crate::invocation::InvocationStats,
+}
+struct Binding {
     owner: Arc<()>,
     subject: Arc<Term>,
-    package: Package,
+    package: Arc<Package>,
     context: ptc::Context,
     index: Index,
     eq: Selected,
@@ -129,20 +137,51 @@ impl Protocol {
         )?;
         let mut package = package.clone();
         package.dispatch_instances = dispatch;
+        let package = Arc::new(package);
         Ok(Self {
-            owner: Arc::new(()),
-            subject: Arc::new(subject.clone()),
-            package,
-            context,
-            index,
-            eq,
-            hash,
-            budget,
-            resources,
+            execution: Execution {
+                code: comptime_interpretor::CodeSession::new(package.clone()),
+                stats: Default::default(),
+            },
+            binding: Binding {
+                owner: Arc::new(()),
+                subject: Arc::new(subject.clone()),
+                package,
+                context,
+                index,
+                eq,
+                hash,
+                budget,
+                resources,
+            },
         })
     }
+    /// Counters from the most recent VM admission or method execution.
+    pub fn last_execution_stats(&self) -> crate::invocation::InvocationStats {
+        self.execution.stats
+    }
+    /// Validate fresh immutable data using this protocol's source session.
+    /// Code reuse never supplies the current value's admission evidence.
+    pub fn admit(
+        &mut self,
+        value: Value,
+        context: &mut Context,
+    ) -> Result<Snapshot, Error<String>> {
+        self.binding
+            .run(&mut self.execution, context, |interpreter| {
+                interpreter.validate_immutable_input(&value, &self.binding.subject)
+            })?;
+        Ok(Snapshot {
+            value: Arc::new(value),
+            ty: self.binding.subject.clone(),
+            owner: self.binding.owner.clone(),
+        })
+    }
+}
+impl Binding {
     fn invoke(
         &self,
+        execution: &mut Execution,
         method: &Selected,
         inputs: &[&Value],
         context: &mut Context,
@@ -152,7 +191,7 @@ impl Protocol {
         for value in inputs {
             input_work(value, context)?;
         }
-        self.run(context, |interpreter| {
+        self.run(execution, context, |interpreter| {
             for value in inputs {
                 interpreter.validate_immutable_input(value, &self.subject)?;
             }
@@ -163,20 +202,9 @@ impl Protocol {
             )
         })
     }
-    /// Validate and own immutable data without executing Eq or Hash. References
-    /// and captured functions are not frozen by copying their host handles.
-    pub fn admit(&self, value: Value, context: &mut Context) -> Result<Snapshot, Error<String>> {
-        self.run(context, |interpreter| {
-            interpreter.validate_immutable_input(&value, &self.subject)
-        })?;
-        Ok(Snapshot {
-            value: Arc::new(value),
-            ty: self.subject.clone(),
-            owner: self.owner.clone(),
-        })
-    }
     fn run<R>(
         &self,
+        execution: &mut Execution,
         context: &mut Context,
         action: impl FnOnce(&mut Interpreter<'_>) -> Result<R, comptime_interpretor::Error>,
     ) -> Result<R, Error<String>> {
@@ -217,20 +245,12 @@ impl Protocol {
         // Ordinary Type inputs become concrete only inside the invocation.
         // Resolve their method calls against this protocol's frozen source world.
         let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
-            let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
-            let before = fuel;
-            let result = elaboration::materialization::resolve_method_identity_in_context(
+            crate::invocation::resolve_method_for_invocation(
                 &self.package,
-                callee,
                 &self.context,
-                &[],
-                &mut fuel,
-            );
-            *remaining = remaining.saturating_sub((before - fuel) as u64);
-            result.map_err(|_| comptime_interpretor::Error {
-                kind: comptime_interpretor::ErrorKind::UnmaterializedDispatch,
-                source: Some(callee.source),
-            })
+                callee,
+                remaining,
+            )
         };
         let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
             elaboration::materialization::resolve_associated_value_for_invocation(
@@ -239,7 +259,12 @@ impl Protocol {
         };
         let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
         let mut allowance = Budget { steps, depth: 128 };
-        let prepared = Interpreter::for_comptime_in_budget(&self.package, &[], &mut allowance);
+        execution.stats = Default::default();
+        let prepared = Interpreter::for_comptime_in_session(
+            &self.package,
+            &mut execution.code,
+            &mut allowance,
+        );
         let mut interpreter = match prepared {
             Ok(interpreter) => interpreter
                 .with_budgeted_type_solver(&solver)
@@ -253,7 +278,11 @@ impl Protocol {
                 return Err(Error::Protocol(error.to_string()));
             }
         };
-        let result = action(&mut interpreter);
+        let result = interpreter.with_code_session(&mut execution.code, action);
+        execution.stats = crate::invocation::InvocationStats {
+            bytecode_compilations: interpreter.bytecode_compilations(),
+            bytecode_invocations: interpreter.bytecode_invocations(),
+        };
         context.spend::<String>((steps - interpreter.remaining_steps()) as usize)?;
         result.map_err(|e| {
             Error::Protocol(match copy_failure.borrow().as_ref() {
@@ -266,7 +295,9 @@ impl Protocol {
 impl KeyProtocol<Value> for Protocol {
     type Error = String;
     fn hash(&mut self, value: &Value, context: &mut Context) -> Result<u64, Error<String>> {
-        let value = self.invoke(&self.hash, &[value], context)?;
+        let value =
+            self.binding
+                .invoke(&mut self.execution, &self.binding.hash, &[value], context)?;
         let mut bucket = std::collections::hash_map::DefaultHasher::new();
         match value {
             Value::Integer(value) => {
@@ -286,7 +317,10 @@ impl KeyProtocol<Value> for Protocol {
         b: &Value,
         context: &mut Context,
     ) -> Result<bool, Error<String>> {
-        match self.invoke(&self.eq, &[a, b], context)? {
+        match self
+            .binding
+            .invoke(&mut self.execution, &self.binding.eq, &[a, b], context)?
+        {
             Value::Bool(value) => Ok(value),
             _ => Err(Error::Protocol("Eq returned a non-Boolean value".into())),
         }
@@ -311,7 +345,7 @@ impl KeyProtocol<Snapshot> for Protocol {
 }
 impl Protocol {
     pub(crate) fn owns(&self, value: &Snapshot) -> bool {
-        Arc::ptr_eq(&self.owner, &value.owner)
+        Arc::ptr_eq(&self.binding.owner, &value.owner)
     }
     fn check_owner(&self, value: &Snapshot) -> Result<(), Error<String>> {
         if self.owns(value) {
@@ -325,7 +359,11 @@ impl Protocol {
 }
 impl std::fmt::Display for Protocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(comptime-key-protocol {} {})", self.eq, self.hash)
+        write!(
+            f,
+            "(comptime-key-protocol {} {})",
+            self.binding.eq, self.binding.hash
+        )
     }
 }
 fn input_work(value: &Value, context: &mut Context) -> Result<(), Error<String>> {

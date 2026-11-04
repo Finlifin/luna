@@ -481,3 +481,59 @@ package、挑选伪造私有声明身份、移除 Type 实参并实例化整份 
 上述新 fixture 的探索未改动前端规则、库协议或既有测试的语义预期。Rust 格式检查
 `/tmp/luna-tools-yqcdaez2` 退出 0，提交范围 `git diff --check` 通过。已核对旧 staging
 模块及扫描／准备函数不再有 Rust 消费者；正式 docs 和先前已有修改保持原样。
+
+## 当前键协议迁移：共享代码与逐次执行分开
+
+`comptime_keys::Protocol` 不再为每次快照准入、Eq、Hash 从零准备源世界与代码。
+固定 Binding 持有协议选择、类型域、证明上下文、实现索引和 Arc<Package>；独立的
+Execution 持有绑定到该精确 package 的 CodeSession 与最近 VM 操作统计。普通
+invocation、缓存 invocation、键方法使用同一个 demand method resolver，删除键路径
+重复维护的选择／计费适配逻辑。
+
+每次操作仍构造新鲜 VM，安装原类型证明、方法／关联值和 Copy 证据服务，再检查本次
+输入与执行协议正文。CodeSession 仅复用源索引、已准备主体和字节码，不复用用户
+Eq／Hash 返回值、程序契约结论或接收者存储。构造失败保持原预算预留规则；执行失败
+由同一代码 session 退出协议收回代码，按 VM 实际消费同步调用者预算。输入复制的
+预算预留若在进入 VM 前失败，不伪造一次已执行的 VM 操作。
+
+为显式表达这份可变执行缓存，Rust `Protocol::admit` 改为 `&mut self`，memoization
+中相应的协议列表也通过可变借用准入新值，不引入隐藏的内部可变会话或共享活动 VM。
+Snapshot 的 owner 仍属于唯一 Protocol，两个 Protocol 即使来自同一源 package，
+也不能混用快照。`last_execution_stats` 返回最近一次 VM 准入或方法执行的字节码
+编译／调用次数；在进入 VM 前被拒绝的操作不会产生新的执行统计。
+
+本次没有改变结果缓存策略、源 Eq／Hash 的语义权限或 Type 哈希缺口。CodeSession
+只在其精确不可变源世界内有效；同号声明在新世界中的代码不能继承旧缓存，也不能
+反过来改变仍存活的旧 Protocol。
+
+### 验证
+
+工作目录 `/home/fin/luna`，以下参数接在
+`python3 -B development/check.py --timeout 900 -- test -p luna` 后。
+
+| 参数 | 结果与证据目录 |
+| --- | --- |
+| `--test key_code_sessions --test library_list_hash --no-fail-fast` | 退出 0，3 + 13 通过；`/tmp/luna-tools-qqoqdh14` |
+| `--test key_code_sessions --test library_list_hash --test invocation_value_templates --no-fail-fast`（迁移初次检查） | invocation_value_templates 的 4 项通过；另有新预算断言与旧成本测试的测量前提需调整，整条命令退出 101；`/tmp/luna-tools-t5g4c3m7` |
+| `--test execution -- memoized comptime_key comptime_snapshot pure_query` | 30 通过，1 项复制成本断言失败，退出 101；`/tmp/luna-tools-yyiiga0m` |
+| `--test library_hash --test library_comptime_comparison --test comptime_memory --no-fail-fast` | 退出 0，18 + 3 + 14 通过；`/tmp/luna-tools-8yqcdrlt` |
+
+新真实 sysroot 用例检查：重复 Hash／Eq 不重编译但仍执行方法，交替输入不复用答案，
+方法修改 self 不污染保存的输入快照，程序条件逐次检查且失败后恢复。同号声明修改
+主体后新旧 Protocol 使用各自代码，交叉快照拒绝。预算检查覆盖冷／热调用、输入预留
+拒绝、执行中耗尽与恢复；热调用仍消耗预算。
+
+原共享载荷成本测试比较小／大 payload 时，首次调用包含代码编译、后续调用已预热。
+现在在两种大小测量前均预热代码，再保留原成本相等断言，并断言测量时未重编译；
+没有改为不等式来掩盖逐字节复制。新预算用例按 Context 的既有预留契约区分尚未进入
+VM 的失败与已执行工作的计费，不改变 Context::spend 的实现。
+
+唯一尚未处理的扩大检查失败为
+`comptime_snapshot_admission_checks_enum_tags_payloads_and_nested_references`：
+包含未知 Function 身份的 tuple，其 `immutable_copy_work()` 当前并不返回 None。
+恢复本阶段之前的 comptime_keys.rs 后，`/tmp/luna-tools-2b2_r_h3` 仍在同一断言失败
+（退出 101），之后已恢复当前实现。本次未修改该预期；复制成本与世界准入的责任边界
+需单独核对，不能据此声称完整回归通过。
+
+Rust 格式检查 `/tmp/luna-tools-k8e_6o4o` 退出 0，提交范围 diff 检查通过。
+正式 docs、已有资源分析修改及 library README 均保持原样。

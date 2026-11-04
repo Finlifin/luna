@@ -511,8 +511,13 @@ fn key_invocation_clones_shared_payloads_without_charging_their_expanded_size() 
         // Admission checks actual element domains and warms only immutable data.
         let snapshot = protocol.admit(key, &mut Context::new(1_000_000)).unwrap();
         assert!(protocol.hash(&snapshot, &mut Context::new(1)).is_err());
+        // Compare payload costs with code warm on both input sizes.
+        protocol
+            .hash(&snapshot, &mut Context::new(1_000_000))
+            .unwrap();
         let mut context = Context::new(1_000_000);
         protocol.hash(&snapshot, &mut context).unwrap();
+        assert_eq!(protocol.last_execution_stats().bytecode_compilations, 0);
         costs.push(1_000_000 - context.remaining());
         assert!(
             protocol
@@ -576,8 +581,11 @@ fn key_protocol_input_cloning_shares_text_without_granting_content_equality() {
         let left = protocol
             .admit(key.clone(), &mut Context::new(1_000_000))
             .unwrap();
+        // Compiling the method is independent of the shared text payload.
+        protocol.hash(&left, &mut Context::new(1_000_000)).unwrap();
         let mut allowance = Context::new(1_000_000);
         let hash = protocol.hash(&left, &mut allowance).unwrap();
+        assert_eq!(protocol.last_execution_stats().bytecode_compilations, 0);
         costs.push(1_000_000 - allowance.remaining());
         let Value::Record { fields, .. } = &mut key else {
             panic!("record")

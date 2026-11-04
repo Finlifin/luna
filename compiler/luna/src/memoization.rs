@@ -310,14 +310,14 @@ impl Invocation {
             (index as u32, inputs)
         } else {
             context.spend::<String>(types.len().saturating_add(1))?;
-            let prepared = types
+            let mut prepared = types
                 .iter()
                 .map(|ty| Protocol::prepare(&self.package, &self.items, ty, self.budget))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(Error::Protocol)?;
             let inputs = values
                 .into_iter()
-                .zip(&prepared)
+                .zip(&mut prepared)
                 .map(|(value, protocol)| protocol.admit(value, context))
                 .collect::<Result<Vec<_>, _>>()?;
             if self.schemas.len() < self.capacity && self.schemas.len() < u32::MAX as usize {
