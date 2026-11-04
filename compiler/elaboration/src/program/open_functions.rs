@@ -6910,47 +6910,7 @@ impl Checker<'_, '_> {
         clauses: &[DeclarationId],
         span: Span,
     ) -> Result<bool, Error> {
-        let mentions = |ty: &Term| clauses.iter().any(|id| ty.mentions_rigid(*id));
-        if computation
-            .inputs
-            .iter()
-            .any(|(_, ty, value)| mentions(ty) || value.as_ref().is_some_and(&mentions))
-            || computation.scoped_arguments.iter().any(&mentions)
-            || computation.invocation_assumptions.iter().any(|r| {
-                clauses.iter().any(|id| {
-                    r.subject.mentions_rigid(*id)
-                        || r.interface_arguments
-                            .iter()
-                            .any(|ty| ty.mentions_rigid(*id))
-                })
-            })
-        {
-            return Ok(true);
-        }
-        // abstract_parameters describes the ambient scope, which may include
-        // unused binders. Inspect actual typed references before invocation.
-        for function in &computation.package.functions {
-            if mentions(&function.signature) {
-                return Ok(true);
-            }
-            let mut fuel = self.required_steps;
-            constants::charge_copy(&function.body, &mut fuel, span)?;
-            self.required_steps = fuel;
-            let mut body = function.body.clone();
-            let mut found = false;
-            body.rewrite_types(&mut |ty| {
-                self.required_steps = self
-                    .required_steps
-                    .checked_sub(1)
-                    .ok_or_else(|| error(span, "open annotation dependency budget exhausted"))?;
-                found |= mentions(ty);
-                Ok::<_, Error>(ty.clone())
-            })?;
-            if found {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        computation.uses_declaration_inputs(clauses, &mut self.required_steps, span)
     }
 
     fn infer_open_clause_arguments(

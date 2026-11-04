@@ -14,6 +14,7 @@ mod expression_values;
 mod extended;
 mod function_templates;
 mod function_types;
+mod input_observation;
 mod inline_control;
 mod inline_loops;
 pub mod inlining;

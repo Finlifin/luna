@@ -210,3 +210,15 @@ fn checked_default_observation_exhaustion_preserves_fresh_attempts() {
         4096,
     );
 }
+
+#[test]
+fn prepared_annotation_input_observation_exhaustion_preserves_fresh_attempts() {
+    check_source_observation(
+        "typealias Type = .Type'builtin;
+        comptime fn Select(flag: bool) -> Type { if flag { bool } else { bool } }
+        fn accept(value: defer Select(flag)) -> bool where flag: bool { value }
+        fn run() -> bool { accept<true>(true) }",
+        "prepared input selection budget exhausted",
+        4096,
+    );
+}

@@ -269,6 +269,20 @@ readiness 返回值并靠 RefCell 回调收集子句读取；它使用完整的�
 将是否等待未完成子句的判断用于实参证据和上下文约束；同一迭代不再对每个未完成
 绑定重复扫描同一类型，后续迭代仍重新判断，不跨候选缓存活动状态。
 
+开放函数的 `open_computation_uses_clauses` 也不再复制主体或调用改写器。
+观察由 `PreparedRequired::uses_declaration_inputs` 在准备结果自身完成，只依赖
+所携带的快照与调用方预算，不读取当前 Checker 世界。检查范围包括输入域与已供应值、
+结果域、scope 实参、invocation 前提，以及准备时选入的函数代码与契约。
+函数观察复用同一结构遍历，覆盖默认值、前后条件、类型谓词和 capability，
+修正旧扫描仅覆盖签名和主体的缺口。它仍是准备包内的保守结构观察，不模拟控制流。
+
+`abstract_parameters`、`abstract_value_parameters` 和 binder 声明列表表示环境允许
+传送哪些身份，不凭这些列表产生输入需求。只比较名字或 interface 身份也不构成
+rigid 输入使用。周围未被选入的源码声明和全局实现世界不参与此项扫描；
+这是 invocation 就绪的一个必要检查，不取代后续的作用域、域、证明与执行准入。
+共享的预算与错误映射收在 `program/input_observation.rs`，普通默认值、CMTT 和
+准备结果复用它，避免让只读观察依赖名义类型默认值模块或活动 Checker 状态。
+
 表达式观察沿用 copy preflight 的保守结构成本与深度界限，包括集合和字符串宽度；
 这不是专门优化过的轻量成本模型。独立 Term 观察使用已有有界声明收集器。
 两者在失败时仍扣除已消耗预算，不公布部分依赖集，不把耗尽转成空集或 ready。
@@ -289,6 +303,23 @@ readiness 返回值并靠 RefCell 回调收集子句读取；它使用完整的�
 `/tmp/luna-tools-39ju6tdp/result.json`。清单、源码哈希与基线比较保存于
 `/tmp/luna-typed-input-observation-6n7s0z2x`。未运行全 workspace、native 或性能基准，
 不能据此宣称整体编译耗时的改善幅度。
+
+准备结果接线的验证同样从 `/home/fin/luna` 经上述入口执行：
+
+- `-p elaboration --lib program::required::prepared::tests`，13 项通过，退出 0；
+  `/tmp/luna-tools-22t1fap2/result.json`。逐项检查携带的域、值与契约，确认环境授权
+  不自动产生依赖，观察不改变共享主体或残余节点，失败后可以重新观察并继续既有调用协议。
+- `-p luna --test prepared_input_dependencies --test inline_pattern_observation --test open_functions --test clause_source_dependencies --test function_type_dependencies --test function_type_parameters --no-fail-fast`，
+  502 项通过，退出 0；`/tmp/luna-tools-7fau4z7c/result.json`。新的真实 sysroot 用例
+  通过泛型转发保留捕获闭包的延迟类型计算，分别实例化 bool/u8 并拒绝错误域；
+  预算用例在同一 HIR 上验证准备依赖观察耗尽及新尝试恢复。
+- 六个修改的常规排版 Rust 文件通过 rustfmt check，退出 0；
+  `/tmp/luna-tools-va19wd79/result.json`。大型 `program.rs` 与 `open_functions.rs`
+  仅修改模块登记和对应方法，没有全文件重排；`git diff --check` 通过。
+
+本次清单、源码哈希与完整命令结果在 `/tmp/luna-prepared-input-observation-w14blcpa`。
+未重跑整个 CMTT 组，不将上一阶段的结果当作本阶段运行证据；没有运行全 workspace、
+native 或性能基准。剩余签名就绪扫描、生命周期和查询失效迁移仍未完成。
 
 ## 5. 四个判断精确性是否正确的例子
 

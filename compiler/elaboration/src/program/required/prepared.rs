@@ -22,6 +22,47 @@ pub(in crate::program) struct PreparedRequired {
 }
 
 impl PreparedRequired {
+    /// Observe the carried invocation inputs and code without consulting a
+    /// current Checker, copying the snapshot, or running its computations.
+    /// Ambient abstract binders authorize transport; they are not input uses.
+    pub(in crate::program) fn uses_declaration_inputs(
+        &self,
+        declarations: &[DeclarationId],
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<bool, Error> {
+        if declarations.is_empty() {
+            return Ok(false);
+        }
+        *steps = steps
+            .checked_sub(declarations.len() as u64)
+            .ok_or_else(|| error(span, "prepared input selection budget exhausted"))?;
+        let declarations = declarations.iter().copied().collect::<BTreeSet<_>>();
+        let terms = self
+            .inputs
+            .iter()
+            .flat_map(|(_, domain, value)| std::iter::once(domain).chain(value))
+            .chain(std::iter::once(&self.result_type))
+            .chain(&self.scoped_arguments)
+            .chain(self.invocation_assumptions.iter().flat_map(|requirement| {
+                std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
+            }));
+        for term in terms {
+            if !input_observation::term(term, steps, span)?.is_disjoint(&declarations) {
+                return Ok(true);
+            }
+        }
+        // The preparation has already selected its callable closure. Inspect
+        // the contracts/defaults carried with those functions as well as their
+        // signatures and bodies; do not scan the surrounding declaration world.
+        for function in &self.package.functions {
+            if !input_observation::function(function, steps, span)?.is_disjoint(&declarations) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(in crate::program) fn fork(&self, span: Span) -> Result<Self, Error> {
         Ok(Self {
             package: self.package.clone(),
@@ -570,6 +611,193 @@ mod tests {
             variant: None,
             fields,
         }
+    }
+
+    #[test]
+    fn prepared_input_observation_keeps_carried_contract_and_operand_dependencies() {
+        let input = DeclarationId {
+            package: 7,
+            local: 90,
+        };
+        let rigid = Term::Rigid {
+            declaration: input,
+            sort: Sort::Type,
+        };
+        let placements: &[fn(&mut PreparedRequired, Term)] = &[
+            |p, term| p.result_type = term,
+            |p, term| {
+                p.inputs.push((
+                    n::LocalId {
+                        owner: 11,
+                        index: 0,
+                    },
+                    term,
+                    None,
+                ))
+            },
+            |p, term| {
+                p.inputs.push((
+                    n::LocalId {
+                        owner: 11,
+                        index: 0,
+                    },
+                    p.result_type.clone(),
+                    Some(term),
+                ))
+            },
+            |p, term| p.scoped_arguments.push(term),
+            |p, term| {
+                p.invocation_assumptions.push(n::TraitRequirement {
+                    subject: term,
+                    interface: p.entry,
+                    interface_arguments: vec![],
+                })
+            },
+            |p, term| {
+                p.invocation_assumptions.push(n::TraitRequirement {
+                    subject: p.result_type.clone(),
+                    interface: p.entry,
+                    interface_arguments: vec![term],
+                })
+            },
+            |p, term| p.package.functions[0].signature = term,
+            |p, term| p.package.functions[0].body.kind = K::StagedValue(term),
+            |p, term| {
+                p.package.functions[0]
+                    .requirements
+                    .push(n::TypePredicate::Not(Box::new(n::TypePredicate::Equal(
+                        term,
+                        Term::Primitive(P::Bool),
+                    ))))
+            },
+            |p, term| {
+                p.package.functions[0]
+                    .capabilities
+                    .push(n::TraitRequirement {
+                        subject: term,
+                        interface: p.entry,
+                        interface_arguments: vec![],
+                    })
+            },
+            |p, term| {
+                let mut predicate = p.package.functions[0].body.clone();
+                predicate.kind = K::TypeValue(term);
+                p.package.functions[0].preconditions.push(predicate);
+            },
+            |p, term| {
+                let mut predicate = p.package.functions[0].body.clone();
+                predicate.kind = K::TypeValue(term);
+                p.package.functions[0].postconditions.push(predicate);
+            },
+            |p, term| {
+                let mut default = p.package.functions[0].body.clone();
+                default.kind = K::TypeValue(term);
+                p.package.functions[0].defaults.push((0, default));
+            },
+        ];
+        for (index, place) in placements.iter().enumerate() {
+            let mut prepared = literal_preparation(true);
+            assert!(
+                !prepared
+                    .uses_declaration_inputs(&[input], &mut 1000, Span::default())
+                    .unwrap()
+            );
+            place(&mut prepared, rigid.clone());
+            let before = prepared.to_string();
+            assert!(
+                prepared
+                    .uses_declaration_inputs(&[input], &mut 1000, Span::default())
+                    .unwrap(),
+                "placement {index}"
+            );
+            assert_eq!(prepared.to_string(), before);
+        }
+    }
+
+    #[test]
+    fn prepared_input_observation_ignores_ambient_authority_and_declaration_names() {
+        let input = DeclarationId {
+            package: 7,
+            local: 90,
+        };
+        let mut prepared = literal_preparation(true);
+        prepared.abstract_parameters.push(input);
+        prepared.abstract_value_parameters.push((input, p(P::Bool)));
+        prepared.scoped_parameters.push(nir::DeclarationParameter {
+            declaration: input,
+            sort: Sort::Type,
+        });
+        prepared.scoped_arguments.push(p(P::U8));
+        let function = &mut prepared.package.functions[0];
+        function.type_parameters.push(input);
+        function.capabilities.push(n::TraitRequirement {
+            subject: p(P::Bool),
+            interface: input,
+            interface_arguments: vec![],
+        });
+        assert!(
+            !prepared
+                .uses_declaration_inputs(&[input], &mut 1000, Span::default())
+                .unwrap()
+        );
+        assert!(
+            !prepared
+                .uses_declaration_inputs(&[], &mut 0, Span::default())
+                .unwrap()
+        );
+        let mut exhausted = 3;
+        assert!(
+            prepared
+                .uses_declaration_inputs(&[input], &mut exhausted, Span::default())
+                .is_err()
+        );
+        assert!(exhausted < 3);
+        assert!(
+            !prepared
+                .uses_declaration_inputs(&[input], &mut 1000, Span::default())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn prepared_input_observation_preserves_shared_code_and_recovers_from_exhaustion() {
+        let input = DeclarationId {
+            package: 7,
+            local: 90,
+        };
+        let mut prepared = literal_preparation(true);
+        let mut body = prepared.package.functions[0].body.clone();
+        body.kind = K::StagedValue(Term::Rigid {
+            declaration: input,
+            sort: Sort::Type,
+        });
+        let body = std::sync::Arc::new(body);
+        prepared.package.functions[0].body.kind = K::Closure {
+            parameters: vec![],
+            captures: vec![],
+            body: body.clone(),
+        };
+        let before = prepared.to_string();
+        let mut exhausted = 6;
+        assert!(
+            prepared
+                .uses_declaration_inputs(&[input], &mut exhausted, Span::default())
+                .is_err()
+        );
+        assert!(exhausted < 6);
+        assert_eq!(prepared.to_string(), before);
+        assert!(
+            prepared
+                .uses_declaration_inputs(&[input], &mut 1000, Span::default())
+                .unwrap()
+        );
+        let K::Closure { body: observed, .. } = &prepared.package.functions[0].body.kind else {
+            panic!()
+        };
+        assert!(std::sync::Arc::ptr_eq(&body, observed));
+        assert_eq!(std::sync::Arc::strong_count(&body), 2);
+        assert!(matches!(observed.kind, K::StagedValue(_)));
+        assert_eq!(prepared.to_string(), before);
     }
 
     #[test]

@@ -171,8 +171,24 @@ pub fn expression_declaration_inputs(
     value: &n::Expr,
     steps: &mut u64,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, CopyBudgetExhausted> {
+    declaration_inputs(Node::Expr(value), steps)
+}
+
+/// Observe carried function code and contracts, without treating declared
+/// binder identities themselves as uses or unfolding referenced declarations.
+pub fn function_declaration_inputs(
+    value: &n::Function,
+    steps: &mut u64,
+) -> Result<std::collections::BTreeSet<crate::DeclarationId>, CopyBudgetExhausted> {
+    declaration_inputs(Node::Function(value), steps)
+}
+
+fn declaration_inputs(
+    root: Node<'_>,
+    steps: &mut u64,
+) -> Result<std::collections::BTreeSet<crate::DeclarationId>, CopyBudgetExhausted> {
     let mut inputs = std::collections::BTreeSet::new();
-    charge_node_observed(Node::Expr(value), steps, true, None, &mut |term| {
+    charge_node_observed(root, steps, true, None, &mut |term| {
         if let Term::Rigid { declaration, .. } = term {
             inputs.insert(*declaration);
         }

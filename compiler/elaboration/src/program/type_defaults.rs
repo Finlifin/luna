@@ -3,50 +3,6 @@ use super::*;
 use comptime_interpretor::Value;
 
 impl<'h> Checker<'_, 'h> {
-    /// Inspect embedded types and values without normalizing a private copy or
-    /// cloning shared closure bodies merely to discover their dependencies.
-    pub(super) fn checked_declaration_inputs(
-        &mut self,
-        value: &n::Expr,
-        span: Span,
-    ) -> Result<BTreeSet<DeclarationId>, Error> {
-        nir::copy_budget::expression_declaration_inputs(value, &mut self.required_steps).map_err(
-            |limit| {
-                error(
-                    span,
-                    match limit {
-                        nir::copy_budget::CopyBudgetExhausted::Steps => {
-                            "checked input dependency budget exhausted"
-                        }
-                        nir::copy_budget::CopyBudgetExhausted::Depth => {
-                            "checked input dependency depth exhausted"
-                        }
-                    },
-                )
-            },
-        )
-    }
-
-    pub(super) fn term_declaration_inputs(
-        &mut self,
-        value: &Term,
-        span: Span,
-    ) -> Result<BTreeSet<DeclarationId>, Error> {
-        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let mut inputs = BTreeSet::new();
-        let result =
-            nir::type_computations::rigid_declarations_bounded(value, &mut fuel, &mut inputs);
-        self.required_steps -= (before - fuel) as u64;
-        result.map_err(|reason| {
-            error(
-                span,
-                format!("type input dependency observation failed: {reason}"),
-            )
-        })?;
-        Ok(inputs)
-    }
-
     fn type_packet_contexts(
         &mut self,
         args: &[Arg<'_>],
