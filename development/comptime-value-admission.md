@@ -1,6 +1,6 @@
 # Comptime 值的准入、快照与恢复
 
-状态：内部设计，未修改实现。承接[值与执行总览](values-staging-and-publication.md)，
+状态：内部设计与分阶段实现记录。第 10 节起说明实际接线与验证边界。承接[值与执行总览](values-staging-and-publication.md)，
 具体拆开值的成员资格、可传送性、物理编码和可缓存性。依据为
 [comptime 值引用](../docs/comptime/index.md)、
 [两阶段冻结](../docs/compilation/staging-and-freezing.md)、
@@ -546,63 +546,84 @@ contextual 参数树或动态 Type 生产者问题算作已退役。
 `/tmp/luna-tools-f028_ogy/result.json`；`git diff --check` 通过。未运行全 workspace、
 native 或性能基准，正式 docs 与原有工作区改动保持不变。
 
-## 17. NF 接收域检查与实参求值位置分离
+## 17. NF 输入统一准备，检查顺序与求值位置分离
 
-固定参数、具名整包收集参数及展开输入现在进入 `planned_normal_expression`。
-删除原简化路径中的整包输入检查、展开处理与独立的重排计划构造；计划同时处理
-显式输入、默认输入和新鲜绑定。保留的 `collected_normal_expression` 只接收无默认
-参数的逐项 positional 收集，边界直接体现在入口分派中。
+`normal_type_expression` 的固定参数、逐项收集、具名整包参数和展开输入均进入
+`planned_normal_expression`。原 `collected_normal_expression` 已删除，不再根据
+有无默认值或是否纯 positional 切换整套输入检查。纯 Type annotation、部分 callable
+形成等消费者仍有独立入口，不将表达式路径的统一扩称为所有 NF 消费者已统一。
 
-域检查可以查看声明上较早、源码中较晚的已路由实参。`normal_input_domain` 沿声明
-依赖取得可观察的静态证据，将已检查表达式留在原槽中；真正执行仍使用原 `order`。
-因此 `Packet<.values = if true { [1, 255] } else { [] }, u8>` 的列表和分支能够取得
-u8 上下文，进入普通表达式检查，NIR 不再为这个已就绪输入另造 NF If／List 树。
-这里没有执行 Type 产生器，也没有删除已观察表达式。动态 `Byte()` 仍交给原计划
-状态机：先执行当前输入可执行部分，再等待域接纳；失败是终止态，下一次 invocation
-可以重新开始，不在失败帧中重放已执行输入。
+计划先完成路由。收集元素和列表展开保留解析后的 HIR 引用、源码序号、前置固定
+输入数量及 spread 标记，随后在同一个检查环境中处理。它们不是另一棵可执行表达式
+树。域依赖可以查看声明上较早、源码中较晚的已路由实参；`normal_input_domain`
+将已检查产生器留在原槽，仅观察可用静态证据，不提前执行 Type 产生器。相同收集域
+在路由完成后只观察一次，不对每个元素重复检查 telescope；观察共用 required 预算。
 
-统一入口暴露了此前由另一条 annotation 路径掩盖的问题：检查后续签名域时，前缀
-中的普通 comptime 值尚未进入完整 `normal_parameters`，曾被表达式入口视为 Type。
-现在参数域查询包含已检查的 `normal_input_prefixes`，表达式保留该值的实际域及
-声明身份，使用抽象 ComptimeValue，而不是伪造当前 invocation 的 Local。前缀仍不
-发布为完整 callable 元数据。缺少 invocation 值的签名读取由共同的不可用绑定诊断
-说明阶段原因；不为迁移放行 runtime 参数读取。
+源码求值位置分成两个明确情况：
 
-残留逐项收集路径的静态观察也改用外层 `required_steps`，不再为每个固定前缀输入
-新建默认观察预算。NF 头仍 opaque，meta.List 与 Tuple 仍按公开绑定和普通输入值
-工作；这次未新增库名、特定实参组合或 PTC 程序状态特判。
+- 连续的收集后缀留在最终集合表达式中，按从左到右的叶序求值。后缀的定义依据源码
+  输入序号；任何固定、具名或 packet 输入都会结束前一段，不能只比较产生的字段数量。
+- 后缀以前的已检查产生器在原位置准备并绑定结果，包括空展开。preparation 按源码
+  输入分组，最终按源码顺序合并；两个产生器即使拥有相同 `before` 位置也不会倒序。
+  读取可变值保留当时的快照，后来的赋值不反向改变早先实参。
 
-剩余边界：普通函数子句与 NF 尚未共用一个完整 ArgumentPlan；纯 Type annotation
-等既有消费者仍有独立准备入口。动态域下的 NF contextual 树仍存在，逐项收集与
-交错具名输入的 preparation 尚不能普遍承载待定结构化输入。不能将这些结构简单
-改名为 ContextualExpr，也不能先全部组装到末尾再宣称保留了求值顺序。上层观察
-Option 适配器及失败原因按需求传播的后续迁移同样尚未完成。
+因此，后置的具名静态 Type 既能约束整包列表，也能约束其前面的分支、列表展开和
+逐项字面量。域已就绪的收集值通过普通子句也使用的 `clause_collection_expression`
+形成普通 NIR，不再生成 NF 专用 List 树。共享组装器保持域检查、元素与展开的叶序，
+使用平衡 ListConcat 结构，避免多次展开形成线性深度和反复复制整个前缀。组装器也
+传递 Never：元素或展开提前返回时，整体不伪装成正常返回的列表。已知输入形成 NF
+应用仍保留 opaque 头，meta.List 与 Tuple 没有获得额外的参数类别或权限。
 
-验证均在 `/home/fin/luna`，通过 `development/check.py --timeout 900 -- test` 执行。
-最终 `-p luna` 的 ordinary_clause_collectors、comptime_clause_inputs、
-nominal_value_parameters、function_template_local_definitions、dynamic_trait_clauses、
-dependent_list_collectors、normal_form_domains、normal_form_methods、normal_input_plans、
-inline_pattern_observation 十组共 426 项通过，退出 0，证据
-`/tmp/luna-tools-3lpr580b/result.json`。其中新增四项使用真实 sysroot，检查普通 NIR
-输入、两种 invocation 引擎的结果一致、动态产生器的顺序与失败恢复，并拒绝溢出、
-错误元素以及不可选分支中的非法输入。2 项既有 ignored 与 1 项显式 skip 保持不变，
-分别是抽象 Copy 默认值、普通子句的动态 Type 等待，以及 memoized value-indexed key
-的 staging 缺口，均不计为本次完成。
+静态观察器同时消费普通 ListConcat，按叶序读取、核对声明域并共用受预算的列表
+读写服务。Unknown、资源失败和非法值保持各自结果；左侧失败不读取右侧，不执行
+函数产生器。这个消费者不能遗漏，否则共享组装器虽能在 VM 中执行，却可能把原本
+定义时可判定的错误 formation 延迟到 invocation。实际拒绝例使用未调用的函数和
+含多个静态展开的 Type 命题，验证错误仍在定义检查时报告。
 
-`-p elaboration --lib program::normal::` 19 项通过，退出 0，证据
-`/tmp/luna-tools-f0l769bi/result.json`。`-p luna --test elaboration normal_form`
-26 项通过、5 项失败，退出 101，证据 `/tmp/luna-tools-ura2tr71/result.json`。这五项
-分别为 associated_values_do_not_unfold_normal_form_heads、
-mixed_normal_form_inputs_reject_wrong_types_stages_and_ranges、
-normal_form_integer_arguments_reject_wrong_stage_and_preserve_opacity、
-normal_form_source_checks_arguments_body_and_opaque_identity、
-normal_form_text_inputs_reject_wrong_kinds_and_different_names：旧预期要求
-`unresolved type equality`，当前诊断为 `type mismatch`。
 
-临时以 HEAD `5600092d` 的三份生产源码运行同一过滤组，得到相同的五项失败，
-证据 `/tmp/luna-tools-yesftgrp/result.json`；逐项比较触发源码及诊断完全相同。
-备份与恢复脚本位于 `/tmp/luna-nf-input-plans-wymi4st0`，恢复后再完成最终验证。
-初轮迁移曾暴露抽象签名前缀缺失，并曾弱化 runtime 参数的阶段诊断；两者均已修复，
-没有修改既有测试预期。rustfmt check 退出 0，证据
-`/tmp/luna-tools-f73rurd8/result.json`；`git diff --check` 通过。没有运行全 workspace、
-native 或性能基准；不以这些针对性检查宣称整个参数计划重构完成。
+动态域下的连续收集后缀仍可保留 contextual 分支、Match 和块。这些输入位于同一
+后缀，交给原计划状态机和 NF 参数解释器执行，不会跨过后续具名实参移动产生器。
+此前 defaulted 路径拒绝的此类后缀现在与普通 positional 收集走同一入口。动态域下
+夹在其他实参之前的结构化 contextual 输入仍需要可恢复 preparation；当前没有这个
+通用机制时仍报告缺少上下文，不能把整个输入移到末尾。无产生器效果的 contextual
+字面量保留既有延迟接纳行为，不以此声称接纳失败的时机已全面统一。
+
+签名检查期间，普通 comptime 值的已检查前缀通过 `normal_input_prefixes` 提供实际
+域和声明身份；表达式使用抽象 ComptimeValue，不伪造 invocation Local，也不把前缀
+发布为完整 callable 元数据。缺少 invocation 值的签名读取说明阶段原因，不放行
+runtime 输入。NF 头仍 opaque，不用 PTC 处理程序状态。
+
+剩余退役边界：普通子句与 NF 尚未共用完整 ArgumentPlan；动态域的 NF If／Block／
+Match／Integer 等参数树及其解释器仍存在。交错 contextual 输入需要保留产生器进度
+和待定域的共同表达式协议，而不是改名或新增第二套解释器。上层观察 Option 适配器
+及失败原因按需求传播也尚未完成。以上是当前实现限制，不是新的 Flurry 语言限制。
+
+验证在 `/home/fin/luna`，统一使用 `development/check.py --timeout 900 -- test`。
+普通子句、comptime 子句、名义参数、模板局部定义、动态 trait、依赖列表、NF 域、
+NF 方法、NF 输入计划与 inline 观察十组共 433 项通过，退出 0，证据
+`/tmp/luna-tools-h16xpa83/result.json`（包含完整参数列表）。2 项既有 ignored 和
+memoized value-indexed key 的 1 项显式 skip 没有解除，不计为本阶段完成。
+
+`-p elaboration --lib program::normal::` 20 项通过，退出 0，证据
+`/tmp/luna-tools-36iawn21/result.json`。新增 ListConcat 观察检查域、顺序、左侧失败
+停止读取、各类失败传播和新预算恢复。真实 sysroot 的 normal_input_plans 共 11 项，
+覆盖静态域和动态尾部、分支／Match／块、读取快照、空展开、元素及展开提前返回、
+192 次 inline 展开、两种引擎结果及精确调用轨迹，以及 invocation 失败后恢复。
+
+静态 formation 的源码回归曾在迁移中实际复现“未调用的错误函数被接受”，证据
+`/tmp/luna-tools-9c88msgu/result.json`，退出 101。接通普通 ListConcat 观察后拒绝例
+通过，并保留未知产生器的递归函数体而不运行它；最终结果包含在上述十组验证中。
+它证明共享表达式不仅能在 VM 中执行，也保留定义检查可取得的静态证据。
+
+`-p luna --test elaboration normal_form` 26 项通过、5 项失败，退出 101，证据
+`/tmp/luna-tools-iyx5oljt/result.json`。五项均为旧预期 `unresolved type equality`
+与实际 `type mismatch` 的差异；与提交基线 c1acf7fb 的
+`/tmp/luna-tools-ura2tr71/result.json` 逐项比较，失败名称、触发源码及诊断完全相同。
+没有改动旧测试预期。正式 docs 及原有工作区修改均未动；未运行全 workspace、native
+或性能基准，也不以测试数量声称完整 ArgumentPlan／ContextualExpr 已完成。
+
+最后保留普通整包输入已有绑定，避免共享组装入口为它额外绑定一次；随后重跑
+ordinary_clause_collectors、comptime_clause_inputs、normal_input_plans 三组，83 项通过、
+1 项既有 ignored，退出 0，证据 `/tmp/luna-tools-a6peqd46/result.json`。
+rustfmt check 退出 0，证据 `/tmp/luna-tools-_qyu_awj/result.json`；`git diff --check`
+通过。提交范围及原有改动的哈希核对保存在 `/tmp/luna-collection-plan-2y52iljg`。

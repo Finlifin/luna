@@ -37,6 +37,28 @@ enum RoutedNormalInput<'a, 'h> {
     Collected(Vec<n::NormalFormArgument>),
 }
 
+/// Source references awaiting collection checking, not another expression IR.
+/// `before` records the number of fixed inputs preceding this source input.
+struct PendingNormalCollection<'a, 'h> {
+    source_index: usize,
+    before: usize,
+    input: &'a Expr<'h>,
+    spread: bool,
+}
+
+impl std::fmt::Display for PendingNormalCollection<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(pending-normal-collection (source-index {}) (before {}) (spread {}) {})",
+            self.source_index,
+            self.before,
+            self.spread,
+            source(self.input.span)
+        )
+    }
+}
+
 impl Checker<'_, '_> {
     pub(super) fn is_registered_normal_form(&self, owner: OwnerId) -> bool {
         self.normal_parameters.contains_key(&owner)
@@ -806,177 +828,15 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         self.ensure_signature(owner, expr.span)?;
         self.ensure_contract(owner, expr.span)?;
-        if self.normal_type_inputs_need_plan(owner, inputs) {
-            let expanded = if self.clause_has_collector(owner) {
-                self.clause_prefix_literal_spreads(owner, inputs)
-            } else {
-                literal_spreads(inputs)
-            };
-            if let Some(expanded) = expanded {
-                return self.normal_type_expression(expr, owner, &expanded, expected);
-            }
-            return self.planned_normal_expression(owner, inputs, expr.span, expected);
-        }
-        self.collected_normal_expression(expr, owner, inputs, expected)
-    }
-
-    // Positional collection still retains contextual argument nodes when an
-    // invoked element domain is unavailable. Migrate this residual path only
-    // when the shared plan can preserve each element's evaluation position.
-    fn collected_normal_expression(
-        &mut self,
-        expr: &Expr<'_>,
-        owner: OwnerId,
-        inputs: &[Arg<'_>],
-        expected: Option<&Term>,
-    ) -> Result<n::Expr, Error> {
-        let parameters = self.normal_parameters[&owner].clone();
-        if inputs.len() < parameters.len() - 1 {
-            return Err(error(expr.span, "normal-form argument count mismatch"));
-        }
-        let mut arguments = vec![None; parameters.len()];
-        let mut known_parameters = Vec::new();
-        let mut known_types = Vec::new();
-        let mut pending_parameters = BTreeSet::new();
-        let mut formation_arguments = vec![None; parameters.len()];
-        let mut pending_inputs = BTreeSet::new();
-        let count = parameters.len();
-        for slot in 0..count {
-            let (parameter, _, declared) = parameters[slot].clone();
-            if slot + 1 == count {
-                let dependent = pending_parameters
-                    .iter()
-                    .any(|parameter| declared.mentions_rigid(*parameter));
-                let declared = self.instantiate_input_types(
-                    &declared,
-                    &known_parameters,
-                    &known_types,
-                    expr.span,
-                )?;
-                let mut items = Vec::new();
-                for input in &inputs[slot..] {
-                    let Arg::Positional(input) = input else {
-                        unreachable!("only positional collection uses the residual path")
-                    };
-                    if dependent {
-                        items.push(self.dependent_normal_argument(input, 0)?);
-                        continue;
-                    }
-                    let element_type = self.list_element_type(&declared).ok_or_else(|| {
-                        error(expr.span, "variadic input requires a bound meta.List<T>")
-                    })?;
-                    let value = self.expr(input, Some(element_type))?;
-                    items.push(n::NormalFormArgument::Value(value));
-                }
-                formation_arguments[slot] = Some(
-                    self.known_collected_list_in(&items, &declared, &BTreeMap::new())
-                        .unwrap_or_else(|| {
-                            pending_inputs.insert(parameter);
-                            Term::Rigid {
-                                declaration: parameter,
-                                sort: Sort::ComptimeValue,
-                            }
-                        }),
-                );
-                arguments[slot] = Some(n::NormalFormArgument::List {
-                    source: source(expr.span),
-                    items,
-                });
-                continue;
-            }
-            let input = &inputs[slot];
-            let Arg::Positional(input) = input else {
-                return Err(error(expr.span, "normal-form arguments must be positional"));
-            };
-            let dependent = pending_parameters
-                .iter()
-                .any(|parameter| declared.mentions_rigid(*parameter));
-            if dependent {
-                let argument = self.dependent_normal_argument(input, 0)?;
-                arguments[slot] = Some(argument);
-                pending_inputs.insert(parameter);
-                formation_arguments[slot] = Some(Term::Rigid {
-                    declaration: parameter,
-                    sort: Sort::ComptimeValue,
-                });
-                continue;
-            }
-            let ty = self.instantiate_input_types(
-                &declared,
-                &known_parameters,
-                &known_types,
-                input.span,
-            )?;
-            let value = self.expr(input, Some(&ty)).map_err(|mut failure| {
-                if declared != p(P::Type) && failure.message.contains("type mismatch") {
-                    failure.message = format!(
-                        "normal-form value argument type mismatch: {}",
-                        failure.message
-                    );
-                }
-                failure
-            })?;
-            let mut budget = comptime_runtime::Budget {
-                steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-                max_limbs: 4096,
-            };
-            let before = budget.steps;
-            let known = self.known_normal_input(&value, 0, &mut budget);
-            self.required_steps -= (before - budget.steps) as u64;
-            let known = known.filter(|value| declared != p(P::Type) || value.sort() == Sort::Type);
-            if let Some(value) = &known {
-                known_parameters.push(parameter);
-                known_types.push(value.clone());
-            } else {
-                pending_parameters.insert(parameter);
-            }
-            formation_arguments[slot] = Some(known.unwrap_or_else(|| {
-                pending_inputs.insert(parameter);
-                Term::Rigid {
-                    declaration: parameter,
-                    sort: if declared == p(P::Type) {
-                        Sort::Type
-                    } else {
-                        Sort::ComptimeValue
-                    },
-                }
-            }));
-            arguments[slot] = Some(n::NormalFormArgument::Value(value));
-        }
-        let arguments = arguments
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| error(expr.span, "incomplete normal-form input routing"))?;
-        let formation_arguments = formation_arguments
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| error(expr.span, "incomplete normal-form formation inputs"))?;
-        self.check_formation_application(
-            owner,
-            FormationInputs {
-                terms: formation_arguments,
-                deferred: pending_inputs,
-                environment: BTreeMap::new(),
-            },
-            expr.span,
-        )?;
-        let ty = if arguments.iter().any(n::NormalFormArgument::is_diverging) {
-            p(P::Never)
+        let expanded = if self.clause_has_collector(owner) {
+            self.clause_prefix_literal_spreads(owner, inputs)
         } else {
-            p(P::Type)
+            literal_spreads(inputs)
         };
-        if let Some(expected) = expected {
-            self.require(&ty, expected, expr.span)?;
+        if let Some(expanded) = expanded {
+            return self.normal_type_expression(expr, owner, &expanded, expected);
         }
-        Ok(n::Expr {
-            source: source(expr.span),
-            ty,
-            kind: K::NormalFormType {
-                plan: None,
-                head: declaration(self.package, &self.package_identities, owner),
-                arguments,
-            },
-        })
+        self.planned_normal_expression(owner, inputs, expr.span, expected)
     }
 }
 
@@ -1484,6 +1344,14 @@ impl Checker<'_, '_> {
                         signature: Box::new(signature),
                     })
                 }
+            }
+            K::ListConcat(left, right) => {
+                let element = self
+                    .list_element_type(&expr.ty)
+                    .ok_or(Failure::Unavailable)?;
+                observe_list_concat(&expr.ty, element, left, right, budget, |input, budget| {
+                    self.observe_normal_input_in(input, depth + 1, budget, bindings)
+                })
             }
             K::TypeList(values) => {
                 let element = self
@@ -2215,6 +2083,31 @@ fn collect_known_normal_argument(
     freeze_known_list(domain, element, collected, budget)
 }
 
+// Observe ordinary list assembly in leaf order. This shares the bounded
+// payload reader/writer with literal lists and never invokes a producer.
+fn observe_list_concat(
+    domain: &Term,
+    element: &Term,
+    left: &n::Expr,
+    right: &n::Expr,
+    budget: &mut comptime_runtime::Budget,
+    mut observe: impl FnMut(&n::Expr, &mut comptime_runtime::Budget) -> Result<Term, Failure>,
+) -> Result<Term, Failure> {
+    nir::type_computations::charge_term(domain, &mut budget.steps)?;
+    let mut fields = Vec::new();
+    for input in [left, right] {
+        nir::type_computations::charge_term(&input.ty, &mut budget.steps)?;
+        if input.ty != *domain {
+            return Err(Failure::Unavailable);
+        }
+        let value = observe(input, budget)?;
+        let values = take_known_list_elements(value, domain, element, budget)?;
+        budget.consume(values.len())?;
+        fields.extend(values);
+    }
+    freeze_known_list(domain, element, fields, budget)
+}
+
 // Callers establish the registered list domain before using this representation
 // reader. Payload encoding does not grant collection authority.
 fn take_known_list_elements(
@@ -2321,6 +2214,108 @@ mod tests {
     use comptime_runtime::Budget;
     use nir::Term;
     use nir::{Primitive, Sort};
+
+    #[test]
+    fn list_concat_observation_preserves_domains_order_and_failure_recovery() {
+        use nir::program::{Expr, ExprKind, SourceRange};
+        let element = Term::Primitive(Primitive::Bool);
+        let domain = Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 1,
+                local: 900,
+            },
+            sort: Sort::Type,
+            arguments: vec![element.clone()],
+        };
+        let input = |flag| Expr {
+            source: SourceRange { start: 1, end: 2 },
+            ty: domain.clone(),
+            kind: ExprKind::ComptimeValue(Term::NominalValue {
+                ty: Box::new(domain.clone()),
+                variant: None,
+                fields: vec![Term::Bool(flag)],
+            }),
+        };
+        let left = input(true);
+        let right = input(false);
+        let read = |expr: &Expr, _: &mut Budget| {
+            let ExprKind::ComptimeValue(value) = &expr.kind else {
+                unreachable!()
+            };
+            Ok(value.clone())
+        };
+        for failure in [
+            Failure::Unavailable,
+            Failure::Steps,
+            Failure::Depth,
+            Failure::Size,
+            Failure::Structure,
+            Failure::Proof,
+            Failure::Invalid("bad list".into()),
+        ] {
+            let mut visits = 0;
+            assert_eq!(
+                super::observe_list_concat(
+                    &domain,
+                    &element,
+                    &left,
+                    &right,
+                    &mut Budget::default(),
+                    |_, _| {
+                        visits += 1;
+                        Err(failure.clone())
+                    }
+                ),
+                Err(failure)
+            );
+            assert_eq!(visits, 1);
+        }
+        assert!(
+            super::observe_list_concat(
+                &domain,
+                &element,
+                &left,
+                &right,
+                &mut Budget {
+                    steps: 0,
+                    ..Default::default()
+                },
+                read
+            )
+            .is_err()
+        );
+        let mut wrong = right.clone();
+        wrong.ty = Term::Tuple(Vec::new());
+        let mut visits = 0;
+        assert_eq!(
+            super::observe_list_concat(
+                &domain,
+                &element,
+                &left,
+                &wrong,
+                &mut Budget::default(),
+                |expr, budget| {
+                    visits += 1;
+                    read(expr, budget)
+                }
+            ),
+            Err(Failure::Unavailable)
+        );
+        assert_eq!(visits, 1);
+        let value = super::observe_list_concat(
+            &domain,
+            &element,
+            &left,
+            &right,
+            &mut Budget::default(),
+            read,
+        )
+        .unwrap();
+        assert_eq!(
+            super::take_known_list_elements(value, &domain, &element, &mut Budget::default()),
+            Ok(vec![Term::Bool(true), Term::Bool(false)])
+        );
+    }
 
     #[test]
     fn known_type_list_collection_preserves_order_and_stops_at_unknowns() {
@@ -3180,34 +3175,20 @@ impl Checker<'_, '_> {
                 vec![None; inputs.len()]
             };
             let mut routed = vec![None; parameters.len()];
-            let mut preparations = Vec::new();
+            let mut preparations = vec![Vec::new(); inputs.len()];
             let mut order = Vec::new();
             let mut positional = 0;
-            let mut collected = Vec::new();
+            let mut pending_collection = Vec::new();
             let mut prepared_bindings = BTreeMap::new();
             for (input_index, input) in inputs.iter().enumerate() {
                 if let Arg::Expand(packet) = input {
                     if list_spreads.contains(&input_index) {
-                        let slot = collector.expect("list spread has a collector");
-                        let domain = self.normal_input_domain(
-                            slot,
-                            &parameters,
-                            &mut routed,
-                            &prepared_bindings,
-                            span,
-                        )?;
-                        let dependent = parameters
-                            .iter()
-                            .any(|(id, _, _)| domain.mentions_rigid(*id));
-                        let value = self.expr(packet, (!dependent).then_some(&domain))?;
-                        let value = self.prepare_normal_collection_input(
-                            value,
-                            order.len(),
-                            &mut preparations,
-                            &mut prepared_bindings,
-                            span,
-                        )?;
-                        collected.push(n::NormalFormArgument::ListSpread(value));
+                        pending_collection.push(PendingNormalCollection {
+                            source_index: input_index,
+                            before: order.len(),
+                            input: packet,
+                            spread: true,
+                        });
                         continue;
                     }
 
@@ -3303,7 +3284,7 @@ impl Checker<'_, '_> {
                         }
                         order.push(slot);
                     }
-                    preparations.push(n::NormalFormPreparation {
+                    preparations[input_index].push(n::NormalFormPreparation {
                         before,
                         expression: n::Expr {
                             source: n::SourceRange {
@@ -3342,61 +3323,12 @@ impl Checker<'_, '_> {
                                     "cannot combine a complete type-list argument with collected inputs",
                                 ));
                             }
-                            let domain = self.normal_input_domain(
-                                positional,
-                                &parameters,
-                                &mut routed,
-                                &prepared_bindings,
-                                span,
-                            )?;
-                            let element =
-                                self.list_element_type(&domain).cloned().ok_or_else(|| {
-                                    error(span, "variadic input requires a bound meta.List<T>")
-                                })?;
-                            let dependent = parameters
-                                .iter()
-                                .any(|(id, _, _)| element.mentions_rigid(*id));
-                            let value = if dependent {
-                                // Unit is contextual even though an independent unit
-                                // expression can be checked without numeric defaults.
-                                if matches!(value.kind, H::Unit) {
-                                    collected.push(n::NormalFormArgument::Unit {
-                                        source: source(value.span),
-                                    });
-                                    continue;
-                                }
-                                // Commit a fully typed input once. A context-seeking
-                                // attempt rolls back local bindings, return evidence
-                                // and pending obligations before contextual lowering.
-                                match self.checking_attempt(false, true, |checker| {
-                                    checker.expr(value, None)
-                                })? {
-                                    Some(value) => value,
-                                    None => match self.dependent_normal_argument(value, 0)? {
-                                        argument @ (n::NormalFormArgument::Integer { .. }
-                                        | n::NormalFormArgument::Null { .. }) => {
-                                            collected.push(argument);
-                                            continue;
-                                        }
-                                        _ => {
-                                            return Err(context_error(
-                                                value.span,
-                                                "structured collection input requires an element type context",
-                                            ));
-                                        }
-                                    },
-                                }
-                            } else {
-                                self.expr(value, Some(&element))?
-                            };
-                            let value = self.prepare_normal_collection_input(
-                                value,
-                                order.len(),
-                                &mut preparations,
-                                &mut prepared_bindings,
-                                span,
-                            )?;
-                            collected.push(n::NormalFormArgument::Value(value));
+                            pending_collection.push(PendingNormalCollection {
+                                source_index: input_index,
+                                before: order.len(),
+                                input: value,
+                                spread: false,
+                            });
                             continue;
                         }
                         let slot = positional;
@@ -3432,6 +3364,103 @@ impl Checker<'_, '_> {
                 }
                 order.push(slot);
             }
+            // A contiguous source suffix can execute inside the final
+            // collection. Earlier inputs need preparations at their original
+            // positions, including around zero-width packet producers.
+            let mut tail_start = inputs.len();
+            for input in pending_collection.iter().rev() {
+                if input.source_index + 1 != tail_start {
+                    break;
+                }
+                tail_start = input.source_index;
+            }
+            // Routing is complete, and collection temporaries cannot be
+            // referenced by declaration inputs. Observe the same receiver
+            // domain once instead of rechecking its telescope per element.
+            let collection_domain = if pending_collection.is_empty() {
+                None
+            } else {
+                let slot = collector.expect("collected input has a collector");
+                Some(self.normal_input_domain(
+                    slot,
+                    &parameters,
+                    &mut routed,
+                    &prepared_bindings,
+                    span,
+                )?)
+            };
+            let mut collected = Vec::with_capacity(pending_collection.len());
+            for pending in pending_collection {
+                let domain = collection_domain
+                    .as_ref()
+                    .expect("observed collection domain");
+                let expected = if pending.spread {
+                    domain
+                } else {
+                    self.list_element_type(domain).ok_or_else(|| {
+                        error(
+                            pending.input.span,
+                            "variadic input requires a bound meta.List<T>",
+                        )
+                    })?
+                };
+                let dependent = parameters
+                    .iter()
+                    .any(|(id, _, _)| expected.mentions_rigid(*id));
+                let at_tail = pending.source_index >= tail_start;
+                let value = if dependent && !pending.spread {
+                    if at_tail {
+                        collected.push(self.dependent_normal_argument(pending.input, 0)?);
+                        continue;
+                    }
+                    // Contextual literals have no producer effects. General
+                    // contextual control flow still needs a resumable source
+                    // preparation before it can cross another input's slot.
+                    if matches!(pending.input.kind, H::Unit) {
+                        collected.push(n::NormalFormArgument::Unit {
+                            source: source(pending.input.span),
+                        });
+                        continue;
+                    }
+                    match self.checking_attempt(false, true, |checker| {
+                        checker.expr(pending.input, None)
+                    })? {
+                        Some(value) => value,
+                        None => match self.dependent_normal_argument(pending.input, 0)? {
+                            argument @ (n::NormalFormArgument::Integer { .. }
+                            | n::NormalFormArgument::Null { .. }) => {
+                                collected.push(argument);
+                                continue;
+                            }
+                            _ => {
+                                return Err(context_error(
+                                    pending.input.span,
+                                    "structured collection input requires an element type context",
+                                ));
+                            }
+                        },
+                    }
+                } else {
+                    self.expr(pending.input, (!dependent).then_some(expected))?
+                };
+                let value = if at_tail {
+                    value
+                } else {
+                    self.prepare_normal_collection_input(
+                        value,
+                        pending.before,
+                        &mut preparations[pending.source_index],
+                        &mut prepared_bindings,
+                        span,
+                    )?
+                };
+                collected.push(if pending.spread {
+                    n::NormalFormArgument::ListSpread(value)
+                } else {
+                    n::NormalFormArgument::Value(value)
+                });
+            }
+            let preparations: Vec<_> = preparations.into_iter().flatten().collect();
             if !collected.is_empty() {
                 let slot = collector.expect("collected inputs have a collector");
                 routed[slot] = Some(RoutedNormalInput::Collected(collected));
@@ -3573,10 +3602,35 @@ impl Checker<'_, '_> {
                 }
                 let dependent = parameters.iter().any(|(id, _, _)| ty.mentions_rigid(*id));
                 let checked = if let Some(RoutedNormalInput::Collected(items)) = explicit {
-                    Ok(n::NormalFormArgument::List {
-                        source: source(span),
-                        items: items.clone(),
-                    })
+                    if !dependent
+                        && items.iter().all(|item| {
+                            matches!(
+                                item,
+                                n::NormalFormArgument::Value(_)
+                                    | n::NormalFormArgument::ListSpread(_)
+                            )
+                        })
+                    {
+                        let mut collection = super::clause_inputs::ClauseCollection::default();
+                        for item in items {
+                            match item {
+                                n::NormalFormArgument::Value(value) => {
+                                    collection.push_element(value.clone())
+                                }
+                                n::NormalFormArgument::ListSpread(value) => {
+                                    collection.push_spread(value.clone())
+                                }
+                                _ => unreachable!("checked collection input"),
+                            }
+                        }
+                        self.clause_collection_expression(collection, ty.clone(), span)
+                            .map(n::NormalFormArgument::Value)
+                    } else {
+                        Ok(n::NormalFormArgument::List {
+                            source: source(span),
+                            items: items.clone(),
+                        })
+                    }
                 } else if let Some(RoutedNormalInput::Prepared(value)) = explicit {
                     if !dependent {
                         self.require_expression(&value.ty, &ty, span)?;

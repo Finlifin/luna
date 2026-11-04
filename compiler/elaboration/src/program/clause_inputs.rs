@@ -2,7 +2,7 @@
 use super::*;
 
 #[derive(Default)]
-struct ClauseCollection {
+pub(super) struct ClauseCollection {
     whole: Option<n::Expr>,
     parts: Vec<CollectionPart>,
 }
@@ -27,12 +27,38 @@ impl ClauseCollection {
         Ok(())
     }
 
-    fn push_element(&mut self, value: n::Expr) {
+    pub(super) fn push_element(&mut self, value: n::Expr) {
         if let Some(CollectionPart::Elements(fields)) = self.parts.last_mut() {
             fields.push(value);
         } else {
             self.parts.push(CollectionPart::Elements(vec![value]));
         }
+    }
+    pub(super) fn push_spread(&mut self, value: n::Expr) {
+        self.parts.push(CollectionPart::Spread(value));
+    }
+}
+
+impl std::fmt::Display for ClauseCollection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(clause-collection (whole")?;
+        if let Some(value) = &self.whole {
+            write!(f, " {value}")?;
+        }
+        f.write_str(") (parts")?;
+        for part in &self.parts {
+            match part {
+                CollectionPart::Elements(elements) => {
+                    f.write_str(" (elements")?;
+                    for value in elements {
+                        write!(f, " {value}")?;
+                    }
+                    f.write_str(")")?;
+                }
+                CollectionPart::Spread(value) => write!(f, " (spread {value})")?,
+            }
+        }
+        f.write_str("))")
     }
 }
 
@@ -437,7 +463,7 @@ impl Checker<'_, '_> {
                 } else {
                     collector.check_append(span)?;
                     if input.spread {
-                        collector.parts.push(CollectionPart::Spread(input.value));
+                        collector.push_spread(input.value);
                     } else {
                         collector.push_element(input.value);
                     }
@@ -460,6 +486,25 @@ impl Checker<'_, '_> {
         statements: &mut Vec<n::Expr>,
         span: Span,
     ) -> Result<n::Expr, Error> {
+        // Whole supply already owns its source-position binding. Only a new
+        // assembly needs another binding in the ordinary clause packet.
+        let whole = collection.whole.is_some();
+        let value = self.clause_collection_expression(collection, domain, span)?;
+        if whole {
+            Ok(value)
+        } else {
+            self.bind_type_input(value, statements, span)
+        }
+    }
+
+    /// Assemble already checked inputs without moving their producers. Both
+    /// ordinary clause packets and opaque head plans use this expression.
+    pub(super) fn clause_collection_expression(
+        &mut self,
+        collection: ClauseCollection,
+        domain: Term,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
         if let Some(value) = collection.whole {
             self.require_expression(&value.ty, &domain, span)?;
             return Ok(value);
@@ -477,7 +522,11 @@ impl Checker<'_, '_> {
                     }
                     n::Expr {
                         source: source(span),
-                        ty: domain.clone(),
+                        ty: if fields.iter().any(|field| is_never(&field.ty)) {
+                            p(P::Never)
+                        } else {
+                            domain.clone()
+                        },
                         kind: K::TypeList(fields),
                     }
                 }
@@ -488,9 +537,9 @@ impl Checker<'_, '_> {
             };
             parts.push(value);
         }
-        // All producers have already been bound in source order. A balanced
-        // assembly keeps many spreads from creating a linear-depth NIR tree or
-        // repeatedly copying the entire accumulated prefix.
+        // Left-to-right leaf order is retained even when a caller leaves its
+        // contiguous tail producers inline. Balanced assembly avoids a linear
+        // NIR depth and repeated copies of the entire accumulated prefix.
         while parts.len() > 1 {
             let mut next = Vec::with_capacity(parts.len().div_ceil(2));
             let mut values = parts.into_iter();
@@ -498,7 +547,11 @@ impl Checker<'_, '_> {
                 next.push(if let Some(right) = values.next() {
                     n::Expr {
                         source: source(span),
-                        ty: domain.clone(),
+                        ty: if is_never(&left.ty) || is_never(&right.ty) {
+                            p(P::Never)
+                        } else {
+                            domain.clone()
+                        },
                         kind: K::ListConcat(Box::new(left), Box::new(right)),
                     }
                 } else {
@@ -512,6 +565,6 @@ impl Checker<'_, '_> {
             ty: domain,
             kind: K::TypeList(Vec::new()),
         });
-        self.bind_type_input(value, statements, span)
+        Ok(value)
     }
 }

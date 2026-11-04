@@ -65,7 +65,11 @@ ContextualExpr {
 
 当前普通子句已先分离[检查顺序与源码求值位置](comptime-value-admission.md#13-域检查顺序与源码求值顺序分离)：
 静态 Type 尚未取得时保留 HIR 输入，在其域就绪后交回普通 expr 检查。它不增加新的
-表达式解释器，也不提前执行 Type 生产者；NF 的旧 contextual 参数树仍须后续退役。
+表达式解释器，也不提前执行 Type 生产者。NF 表达式现已采用
+[统一输入准备与普通集合组装](comptime-value-admission.md#17-nf-输入统一准备检查顺序与求值位置分离)，
+删除独立 positional 收集入口；静态域使用同一普通列表表达式，连续尾部与交错产生器
+分别保留各自的源码位置。动态 contextual 参数树、交错输入的可恢复检查及其他 NF
+消费者仍须后续迁移，不能以共享组装器声称 ContextualExpr 已完成。
 
 
 ## 4. 两种执行载体和一个语义服务层
