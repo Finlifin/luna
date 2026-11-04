@@ -4,19 +4,17 @@ use input_collection::Progress;
 use nir::program::{NormalFormArgument as Argument, NormalFormInputPlan, NormalFormPreparation};
 
 enum Inputs<'a> {
-    Borrowed(&'a [Argument], &'a NormalFormInputPlan),
+    Borrowed(&'a [Argument], Option<&'a NormalFormInputPlan>),
     Owned(Arc<Expr>),
 }
 impl Inputs<'_> {
-    fn parts(&self) -> (&[Argument], &NormalFormInputPlan) {
+    fn parts(&self) -> (&[Argument], Option<&NormalFormInputPlan>) {
         match self {
-            Self::Borrowed(arguments, plan) => (arguments, plan),
+            Self::Borrowed(arguments, plan) => (arguments, *plan),
             Self::Owned(expression) => match &expression.kind {
                 K::NormalFormType {
-                    arguments,
-                    plan: Some(plan),
-                    ..
-                } => (arguments, plan),
+                    arguments, plan, ..
+                } => (arguments, plan.as_ref()),
                 _ => unreachable!("validated normal plan"),
             },
         }
@@ -48,7 +46,7 @@ impl<'a> Frame<'a> {
         head: DeclarationId,
         source: SourceRange,
         arguments: &'a [Argument],
-        plan: &'a NormalFormInputPlan,
+        plan: Option<&'a NormalFormInputPlan>,
     ) -> Self {
         Self::from_source(Source {
             head,
@@ -59,51 +57,40 @@ impl<'a> Frame<'a> {
         })
     }
 
+    pub(super) fn borrowed(
+        vm: &mut Interpreter<'_>,
+        expression: &'a Expr,
+        environment: &Environment,
+    ) -> Result<Self, Error> {
+        admit_inputs(vm, expression, environment)?;
+        let K::NormalFormType {
+            head,
+            arguments,
+            plan,
+        } = &expression.kind
+        else {
+            unreachable!("admitted normal input expression")
+        };
+        Ok(Self::new(
+            *head,
+            expression.source,
+            arguments,
+            plan.as_ref(),
+        ))
+    }
+
     pub(super) fn owned(
         vm: &mut Interpreter<'_>,
         expression: Arc<Expr>,
         environment: &Environment,
     ) -> Result<Frame<'static>, Error> {
+        admit_inputs(vm, &expression, environment)?;
         let K::NormalFormType {
-            head,
-            arguments,
-            plan: Some(plan),
+            head, arguments, ..
         } = &expression.kind
         else {
-            return Err(vm.failure(ErrorKind::Type, Some(expression.source)));
+            unreachable!("admitted normal input expression")
         };
-        if !plan.valid(arguments.len())
-            || plan
-                .local_bindings()
-                .unwrap()
-                .iter()
-                .any(|id| environment.contains_key(id))
-        {
-            return Err(vm.failure(ErrorKind::Type, Some(expression.source)));
-        }
-        let diverges = arguments.iter().any(Argument::is_diverging)
-            || plan
-                .preparations
-                .iter()
-                .any(|p| p.expression.ty == Term::Primitive(Primitive::Never));
-        vm.prepare_normal_type(
-            *head,
-            &expression.ty,
-            arguments.len(),
-            diverges,
-            expression.source,
-        )?;
-        nir::copy_budget::charge_type_rewrite(&expression, &mut vm.budget.steps).map_err(
-            |error| {
-                vm.failure(
-                    match error {
-                        nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
-                        nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
-                    },
-                    Some(expression.source),
-                )
-            },
-        )?;
         Ok(Frame::from_source(Source {
             head: *head,
             source: expression.source,
@@ -114,15 +101,72 @@ impl<'a> Frame<'a> {
     }
 }
 
+// Both borrowed tree entry and owned resumable entry validate before taking
+// ownership of plan locals. A missing plan means declaration order, not a
+// fabricated set of bindings in the caller's environment.
+fn admit_inputs(
+    vm: &mut Interpreter<'_>,
+    expression: &Expr,
+    environment: &Environment,
+) -> Result<(), Error> {
+    let K::NormalFormType {
+        head,
+        arguments,
+        plan,
+    } = &expression.kind
+    else {
+        return Err(vm.failure(ErrorKind::Type, Some(expression.source)));
+    };
+    if let Some(plan) = plan {
+        if !plan.valid(arguments.len())
+            || plan
+                .local_bindings()
+                .expect("validated plan")
+                .iter()
+                .any(|id| environment.contains_key(id))
+        {
+            return Err(vm.failure(ErrorKind::Type, Some(expression.source)));
+        }
+    }
+    let diverges = arguments.iter().any(Argument::is_diverging)
+        || plan
+            .iter()
+            .flat_map(|plan| &plan.preparations)
+            .any(|p| p.expression.ty == Term::Primitive(Primitive::Never));
+    vm.prepare_normal_type(
+        *head,
+        &expression.ty,
+        arguments.len(),
+        diverges,
+        expression.source,
+    )?;
+    nir::copy_budget::charge_type_rewrite(expression, &mut vm.budget.steps).map_err(|error| {
+        vm.failure(
+            match error {
+                nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
+                nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
+            },
+            Some(expression.source),
+        )
+    })
+}
+
 impl input_collection::Source for Source<'_> {
     fn source(&self) -> SourceRange {
         self.source
     }
     fn preparation(&self, index: usize) -> Option<&NormalFormPreparation> {
-        self.inputs.parts().1.preparations.get(index)
+        self.inputs
+            .parts()
+            .1
+            .and_then(|plan| plan.preparations.get(index))
     }
     fn slot(&self, position: usize) -> Option<usize> {
-        self.inputs.parts().1.order.get(position).copied()
+        let (arguments, plan) = self.inputs.parts();
+        match plan {
+            Some(plan) => plan.order.get(position).copied(),
+            None => (position < arguments.len()).then_some(position),
+        }
     }
     fn input(&self, slot: usize) -> &Argument {
         self.specialized
@@ -175,9 +219,14 @@ impl input_collection::Source for Source<'_> {
         value: Value,
     ) -> Result<(), Error> {
         let source = self.input(slot).source();
-        let copy = vm.checkpoint_representation(&value, source)?;
+        let binding = self.inputs.parts().1.map(|plan| plan.bindings[slot]);
+        let copy = binding
+            .map(|_| vm.checkpoint_representation(&value, source))
+            .transpose()?;
         vm.bind_normal_input(self.head, &mut self.bindings, slot, value, source)?;
-        env.insert(self.inputs.parts().1.bindings[slot], copy);
+        if let Some(binding) = binding {
+            env.insert(binding, copy.expect("requested input snapshot"));
+        }
         self.specialized.remove(&slot);
         Ok(())
     }
@@ -194,43 +243,24 @@ impl input_collection::Source for Source<'_> {
         )?)))
     }
     fn cleanup(&self, environment: &mut Environment) {
-        for binding in self
-            .inputs
-            .parts()
-            .1
-            .local_bindings()
-            .expect("validated plan")
-        {
-            environment.remove(&binding);
+        if let Some(plan) = self.inputs.parts().1 {
+            for binding in plan.local_bindings().expect("validated plan") {
+                environment.remove(&binding);
+            }
         }
     }
 }
 
 impl Interpreter<'_> {
-    pub(super) fn eval_normal_plan(
+    pub(super) fn eval_normal_form_type(
         &mut self,
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        let K::NormalFormType {
-            head,
-            arguments,
-            plan: Some(plan),
-        } = &expr.kind
-        else {
-            unreachable!()
-        };
-        nir::copy_budget::charge_type_rewrite(expr, &mut self.budget.steps).map_err(|error| {
-            self.failure(
-                match error {
-                    nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
-                    nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
-                },
-                Some(expr.source),
-            )
-        })?;
-        let mut frame = Frame::new(*head, expr.source, arguments, plan);
-        self.run_normal_plan(&mut frame, environment)
+        let mut frame = Frame::borrowed(self, expr, environment)?;
+        let result = self.run_normal_plan(&mut frame, environment);
+        input_collection::InputPlan::cleanup(&frame, environment);
+        result
     }
 }
 
@@ -254,9 +284,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn suspended_plan_resumes_once_and_retains_pending_literal_identity() {
-        let package = Package {
+    fn package() -> Package {
+        Package {
             normal_forms: vec![Head {
                 declaration: id(0),
                 collector: None,
@@ -281,7 +310,163 @@ mod tests {
                 ],
             }],
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unplanned_inputs_preserve_caller_bindings_and_recover_across_entries() {
+        let package = package();
+        for entry in ["borrowed", "owned", "bytecode"] {
+            let mut vm = if entry == "borrowed" {
+                Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+            } else {
+                Interpreter::for_comptime(&package, Budget::default()).unwrap()
+            };
+            // These identities collide with head bindings, not with any input
+            // plan locals: the unplanned expression owns no caller bindings.
+            for (spelling, from_local) in [("256", false), ("7", false), ("256", true), ("7", true)]
+            {
+                let original = Environment::from([
+                    (local(0), Value::UnsignedInteger(spelling.parse().unwrap())),
+                    (local(1), Value::Bool(true)),
+                    (local(10), Value::Char('x')),
+                ]);
+                let value = if from_local {
+                    Argument::Value(expr(Primitive::U8, K::Local(local(0))))
+                } else {
+                    Argument::Integer {
+                        source: SOURCE,
+                        spelling: spelling.into(),
+                        negative: false,
+                    }
+                };
+                let body = expr(
+                    Primitive::Type,
+                    K::NormalFormType {
+                        head: id(0),
+                        arguments: vec![
+                            Argument::Value(expr(
+                                Primitive::Type,
+                                K::TypeValue(Term::Primitive(Primitive::U8)),
+                            )),
+                            value,
+                        ],
+                        plan: None,
+                    },
+                );
+                let mut environment = original.clone();
+                let result = match entry {
+                    "borrowed" => vm.eval(&body, &mut environment),
+                    "owned" => {
+                        let mut frame =
+                            Frame::owned(&mut vm, Arc::new(body), &environment).unwrap();
+                        let result = vm.run_type_plan(&mut frame, &mut environment);
+                        frame.cleanup(&mut environment);
+                        result
+                    }
+                    "bytecode" => {
+                        let code =
+                            Arc::new(comptime_compiler::compile(&body, &mut 100_000).unwrap());
+                        vm.execute_code(&code, &mut environment)
+                    }
+                    _ => unreachable!(),
+                };
+                if spelling == "256" {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::Type, "{entry}");
+                } else {
+                    let Flow::Value(actual) = result.unwrap() else {
+                        panic!("{entry}");
+                    };
+                    assert_eq!(
+                        actual,
+                        Value::Type(Term::NormalForm {
+                            head: id(0),
+                            sort: nir::Sort::Type,
+                            arguments: vec![
+                                Term::Primitive(Primitive::U8),
+                                Term::Integer(comptime_runtime::Integer::from_u128(7))
+                            ],
+                        }),
+                        "{entry}"
+                    );
+                }
+                assert_eq!(environment, original, "{entry}: {spelling}");
+            }
+        }
+    }
+
+    #[test]
+    fn nested_tree_input_plans_obey_depth_and_recover() {
+        let mut package = package();
+        package.normal_forms.push(Head {
+            declaration: id(20),
+            collector: None,
+            role: Role::Opaque,
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: id(21),
+                binding: local(21),
+                kind: Kind::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+        });
+        let leaf = expr(
+            Primitive::Type,
+            K::TypeValue(Term::Primitive(Primitive::U8)),
+        );
+        let mut nested = leaf.clone();
+        for _ in 0..40 {
+            nested = expr(
+                Primitive::Type,
+                K::NormalFormType {
+                    head: id(20),
+                    arguments: vec![Argument::Value(nested)],
+                    plan: None,
+                },
+            );
+        }
+        let mut vm = Interpreter::for_comptime_tree(
+            &package,
+            Budget {
+                steps: 100_000,
+                depth: 16,
+            },
+        )
+        .unwrap();
+        let mut environment = Environment::from([(local(21), Value::Bool(true))]);
+        assert_eq!(
+            vm.eval(&nested, &mut environment).unwrap_err().kind,
+            ErrorKind::DepthExhausted
+        );
+        assert_eq!(environment.get(&local(21)), Some(&Value::Bool(true)));
+        let shallow = expr(
+            Primitive::Type,
+            K::NormalFormType {
+                head: id(20),
+                arguments: vec![Argument::Value(leaf)],
+                plan: None,
+            },
+        );
+        let Flow::Value(value) = vm.eval(&shallow, &mut environment).unwrap() else {
+            panic!("type value");
         };
+        assert_eq!(
+            value,
+            Value::Type(Term::NormalForm {
+                head: id(20),
+                sort: nir::Sort::Type,
+                arguments: vec![Term::Primitive(Primitive::U8)],
+            })
+        );
+        assert_eq!(
+            environment,
+            Environment::from([(local(21), Value::Bool(true))])
+        );
+    }
+
+    #[test]
+    fn suspended_plan_resumes_once_and_retains_pending_literal_identity() {
+        let package = package();
         let arguments = vec![
             Argument::Value(expr(
                 Primitive::Type,
@@ -304,7 +489,7 @@ mod tests {
             order: vec![0, 1],
             ..plan.clone()
         };
-        let mut failed = Frame::new(id(0), SOURCE, &arguments, &ordered);
+        let mut failed = Frame::new(id(0), SOURCE, &arguments, Some(&ordered));
         assert!(matches!(
             failed.advance(&mut vm, &mut env).unwrap(),
             Request::Ready(..)
@@ -328,7 +513,7 @@ mod tests {
             ErrorKind::InvalidControlFlow
         );
         vm.budget = Budget::default();
-        let mut failed = Frame::new(id(0), SOURCE, &arguments, &ordered);
+        let mut failed = Frame::new(id(0), SOURCE, &arguments, Some(&ordered));
         env.insert(local(90), Value::Bool(true));
         let Progress::Input(bytecode::InputFrame { mut code, finish }) =
             failed.next_input(&mut vm, &mut env).unwrap()
@@ -352,7 +537,7 @@ mod tests {
             ErrorKind::InvalidControlFlow
         );
         vm.budget = Budget::default();
-        let mut frame = Frame::new(id(0), SOURCE, &arguments, &plan);
+        let mut frame = Frame::new(id(0), SOURCE, &arguments, Some(&plan));
         let Request::Stage(argument) = frame.advance(&mut vm, &mut env).unwrap() else {
             panic!("expected deferred input");
         };

@@ -958,7 +958,7 @@ NF 与名义类型／typealias 的输入帧共用 `input_bindings::Bindings`。�
 
 ### 已接通的共同执行调度
 
-`input_collection::Frame<Source>` 现在实际承担 planned NF、名义类型与 typealias
+`input_collection::Frame<Source>` 现在实际承担 NF 解释入口、名义类型与 typealias
 输入的 preparation、源码求值位置、暂停请求、完成接收、待定值唤醒及终止。原
 `normal_plan` 和 `nominal_inputs` 中重复的调度循环已删除；invocation driver 直接
 使用共同 InputPlan/Progress 协议，不再从 normal_plan 借出另一种类型构造的接口。
@@ -967,7 +967,7 @@ NF 与名义类型／typealias 的输入帧共用 `input_bindings::Bindings`。�
 
 | 消费者 | 保留的独立责任 |
 | --- | --- |
-| planned NF | 校验 head/计划，按 NF 输入规则替换与准入，最终构造不透明 head application |
+| NF | 校验 head/可选计划，按 NF 输入规则替换与准入，最终构造不透明 head application |
 | 名义类型 | 保留捕获域、实际 sort 与声明 sort 不同时的证据准入，完成输入后检查形成契约 |
 | typealias | 在名义输入规则之上保留 alias 的输入类型检查，契约成功后才执行已专门化的透明主体 |
 
@@ -981,6 +981,18 @@ NF 与名义类型／typealias 的输入帧共用 `input_bindings::Bindings`。�
 发布；NF 的已完成输入释放临时专门化表达式，避免积累不再需要的副本。共同帧与
 各 Source 均提供 S-expression Display，显示等待位置、pending 槽和真实完成值。
 
+NF 的 borrowed 树解释入口与 owned 可恢复入口共用同一准入函数；原 lib.rs 中无计划
+NF 的独立参数循环已删除。没有显式计划时，Source 按声明顺序供应输入，不制造临时
+绑定、不向调用环境写入 head 的局部编号，也不清理调用者恰好使用这些编号的局部。
+只有显式计划要求导出局部时才取得快照和安装绑定。准入、必要的输入复制预算检查
+在接管计划绑定前完成，失败不授权清理外部环境。
+
+无计划 NF 的直接字节码指令序列仍保留，使用原有共同域准备、输入准入和 NF 完成
+服务。这是既有直线执行路径，不为通过共同调度测试而强制所有调用生成 owned plan。
+固定树模式由共同帧直接完成输入，不在每层嵌套 Type 构造中保留大型字节码驱动
+栈帧；仍使用同一个 next_input/终止协议。可恢复字节码模式继续交给 invocation
+驱动，不在准备过程中执行后备路径或重放已经产生的值。
+
 ### 剩余迁移边界
 
 共享输入所有权和调度不取消消费者的接纳边界。已完成的 Type 参数可使后续数据
@@ -989,9 +1001,9 @@ NF 与名义类型／typealias 的输入帧共用 `input_bindings::Bindings`。�
 `count<.values = [1, 255], Byte()>()` 仍是期望成功而未接通的 ignored 用例，不能
 提前执行 Byte() 越过源码位置来修补。
 
-NF 的无计划直接执行路径、旧 `NormalFormArgument` contextual 表示仍存在。
-本节没有把共享调度器等同于完整 ArgumentPlan/ContextualExpr，也没有新增语法
-白名单、把普通函数伪装为 NF，或赋予任何生产者隐式重算权限。
+旧 `NormalFormArgument` contextual 表示仍存在。本节没有把共享调度器等同于完整
+ArgumentPlan/ContextualExpr，也没有新增语法白名单、把普通函数伪装为 NF，或赋予
+任何生产者隐式重算权限。
 
 ### 当前验证与历史状态
 
@@ -999,24 +1011,31 @@ NF 的无计划直接执行路径、旧 `NormalFormArgument` contextual 表示�
 list 域诊断已在 §21 修正，并在 §38 单独复核；memoized value-indexed key 已在
 §19 修复。二者不再作为当前失败基线，也不应继续从检查中过滤。
 
-工作目录 `/home/fin/luna` 的调度迁移检查：
+工作目录 `/home/fin/luna` 的当前检查：
 
-- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
-  -p luna --lib --test normal_input_plans --test nominal_value_parameters
-  --test nominal_staging --test normal_form_domains --test dependent_list_collectors
-  --test ordinary_clause_collectors --test comptime_nominal_capabilities
-  --test comptime_clause_inputs --test inline_pattern_observation
-  --test library_protocols --no-fail-fast`：
-  `/tmp/luna-tools-m5m263oh/result.json`，退出 0，1,032 项通过，1 项上述动态 Type
-  producer 用例 ignored。没有按旧基线跳过 list 诊断或 memoized key 检查。
-- 新的 `transitive_pending_domains_drain_in_both_engines_and_fail_terminally`
-  包含 Type 最后到达、实际 sort 变化、两轮唤醒、u8 越界后的终止与清理，以及同 VM
-  新帧恢复；树解释器和字节码引擎都执行。原暂停帧移动、重复完成拒绝、预算失败、
-  源码顺序、控制出口和形成契约检查仍保留。新用例也已包含在上面的 482 项 VM 检查中。
-- 六个修改 Rust 文件的 rustfmt 检查：`/tmp/luna-tools-c3uw7c9k/result.json`，退出 0。
-  最后仅将测试使用的 trait 导入移入测试模块，随后
-  `python3 -B development/check.py --timeout 900 -- check -p comptime_interpretor`
-  通过：`/tmp/luna-tools-_me5ibar/result.json`，退出 0。
+- 扩大检查经 `python3 -B development/check.py --timeout 900 -- test
+  -p comptime_interpretor -p luna --lib --test normal_input_plans
+  --test open_normal_input_plans --test normal_form_domains
+  --test nominal_value_parameters --test nominal_staging --test dependent_list_collectors
+  --test library_protocols --test comptime_clause_inputs --test comptime_bytecode_lists
+  --test type_lists --test inline_pattern_observation --no-fail-fast` 执行：
+  `/tmp/luna-tools-sl2zam8f/result.json`，退出 0，1,036 项通过。这组没有执行上文的
+  ordinary callable 动态 Type producer 用例；不能以零 ignored 声称该缺口已解除。
+- 随后加入固定树模式的轻量驱动，并加强同编号 caller local 读取与深度恢复用例。
+  最终 `python3 -B development/check.py --timeout 900 -- test
+  -p comptime_interpretor --lib -- --nocapture`：
+  `/tmp/luna-tools-wclk8p2n/result.json`，退出 0，484 项通过。
+- 无计划输入的交叉检查覆盖 borrowed 树解释、owned 可恢复帧和直接字节码：保持
+  同一个 NF 头，先拒绝 256/u8，再在同 VM 接受 7/u8；既测试字面量，也测试读取与
+  head 绑定同编号的 caller local。环境不被覆盖或清理，避免只检查最终结果而漏掉
+  临时遮蔽。嵌套输入达到 depth 限制后可重新完成浅层构造。原多轮唤醒、动态 sort、
+  暂停帧移动、重复完成拒绝、预算失败、控制出口和形成契约用例继续保留。
+- 最终三组双引擎源码复核：
+  `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test normal_form_domains --test open_normal_input_plans
+  --test comptime_bytecode_lists --no-fail-fast`，
+  `/tmp/luna-tools-mp5_lljr/result.json`，退出 0，14 项通过。
+- 三个修改 Rust 文件 rustfmt 检查：`/tmp/luna-tools-1wtz9uu9/result.json`，退出 0。
   未运行全 workspace、native 或性能基准；不能据此声称 ContextualExpr 已统一。
 
 ## 19. 可复用 invocation 保留普通 comptime 值参数

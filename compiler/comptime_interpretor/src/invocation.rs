@@ -162,8 +162,7 @@ impl<'a> Interpreter<'a> {
         frame: &mut normal_plan::Frame<'_>,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        self.run_executions(None, None, Some((frame, environment)))?
-            .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))
+        self.run_type_plan(frame, environment)
     }
 
     pub(super) fn run_type_plan(
@@ -171,6 +170,16 @@ impl<'a> Interpreter<'a> {
         frame: &mut dyn input_collection::InputPlan,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
+        if !self.bytecode_enabled || !self.comptime_only {
+            // In a fixed tree mode the common scheduler completes its own
+            // inputs. Do not retain the large bytecode driver frame at each
+            // recursively constructed type. Dynamically disabled bytecode still
+            // uses the resumable driver below.
+            return match frame.next_input(self, environment)? {
+                input_collection::Progress::Complete(flow) => Ok(flow),
+                _ => Err(self.failure(ErrorKind::InvalidControlFlow, None)),
+            };
+        }
         self.run_executions(None, None, Some((frame, environment)))?
             .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))
     }
