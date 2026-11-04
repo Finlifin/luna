@@ -817,6 +817,51 @@ fn comptime_only_child_requires_comptime_parent_contribution() {
 }
 
 #[test]
+fn invocation_checks_unused_generic_capabilities_in_the_source_world() {
+    let source = include_str!("../../../development/repros/comptime-unused-generic-capability.fl");
+    let package = support::compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let ordinary = package
+        .traits
+        .iter()
+        .find(|item| item.name == "Ordinary")
+        .unwrap()
+        .declaration;
+    let mut missing = package.clone();
+    missing
+        .implementations
+        .retain(|item| item.interface != Some(ordinary));
+    let failure = luna::invocation::invoke(&missing, "run", 100_000).unwrap_err();
+    // An incomplete countermodel may remain unresolved; neither outcome
+    // authorizes the call in a world that has lost its capability evidence.
+    assert!(
+        failure.contains("TypeContractRejected") || failure.contains("TypeContractUnresolved"),
+        "{failure}"
+    );
+    let dynamic = source.replace(
+        "comptime fn run() -> bool { choose<true,false,Subject>() }",
+        "comptime fn flag(value: bool) -> bool { value }
+        comptime fn run() -> bool { choose<flag(true),flag(false),Subject>() }",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&support::compile(&dynamic), "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let inherited = source
+        .replace("struct Subject", "trait Child :- Ordinary<a> + Ordinary<b> + Preferred where a: bool, b: bool {} struct Subject")
+        .replace("comptime fn choose", "impl Child<a,b> for Subject where a: bool, b: bool {} comptime fn choose")
+        .replace("T :- Ordinary<a> + Ordinary<b> + Preferred", "T :- Child<a,b>");
+    let package = support::compile(&inherited);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
 fn preferred_source_does_not_compare_irrelevant_value_indices() {
     for bounds in ["Ordinary<a> + Ordinary<b> + Preferred", "Child<a,b>"] {
         let source = format!(

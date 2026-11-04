@@ -3,6 +3,53 @@ use super::*;
 use nir::program::TypePredicate as P;
 
 impl Interpreter<'_> {
+    /// A dispatch table is retained positive evidence, not a complete account
+    /// of the source world's capabilities. Demand missing evidence through the
+    /// existing bounded type-query service without installing method bodies.
+    pub(super) fn check_capability_contract(
+        &mut self,
+        requirement: &nir::program::TraitRequirement,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        self.tick(Some(source))?;
+        self.charge_copy_work(Some(source), |fuel| {
+            for term in
+                std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
+            {
+                nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+            }
+            Ok(())
+        })?;
+        if self.capabilities_hold_parameters(std::slice::from_ref(requirement), &[], &[]) {
+            return Ok(());
+        }
+        self.check_type_contract(&P::Trait(requirement.clone()), source)
+    }
+
+    pub(super) fn check_capability_parameters(
+        &mut self,
+        requirements: &[nir::program::TraitRequirement],
+        parameters: &[nir::DeclarationParameter],
+        arguments: &[Term],
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        for requirement in requirements {
+            self.charge_copy_work(Some(source), |fuel| {
+                for term in
+                    std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
+                {
+                    nir::copy_budget::charge_type_substitution(term, parameters, arguments, fuel)?;
+                }
+                Ok(())
+            })?;
+            let bound = requirement
+                .instantiate_parameters(parameters, arguments)
+                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+            self.check_capability_contract(&bound, source)?;
+        }
+        Ok(())
+    }
+
     #[inline(never)]
     pub(super) fn check_deferred_capabilities(
         &mut self,
@@ -18,8 +65,8 @@ impl Interpreter<'_> {
                 &P::Trait(capability.clone()),
                 source,
             )?;
-            // Closed capabilities already use the executable/assumed dispatch
-            // world. Only obligations deferred at formation need input binding.
+            // Closed capabilities were checked against retained evidence or
+            // the host world at formation. Deferred obligations need binding.
             if self
                 .bind_invocation_contract(&predicate, None, source, 0)?
                 .is_none()

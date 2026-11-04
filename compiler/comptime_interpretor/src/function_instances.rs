@@ -186,9 +186,7 @@ impl Interpreter<'_> {
             if self.comptime_only && open {
                 continue;
             }
-            if !self.capabilities_hold_parameters(std::slice::from_ref(&bound), &[], &[]) {
-                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-            }
+            self.check_capability_contract(&bound, source)?;
         }
         let prepared = existing.is_none() && shared.is_none();
         let instance = if let Some(instance) = existing.or(shared) {
@@ -270,6 +268,114 @@ impl Interpreter<'_> {
 #[cfg(test)]
 mod frame_tests {
     use super::*;
+
+    #[test]
+    fn capability_queries_precede_instance_publication_and_cached_reuse() {
+        use std::cell::Cell;
+        let declaration = DeclarationId {
+            package: 98,
+            local: 1,
+        };
+        let source = SourceRange { start: 3, end: 8 };
+        let requirement = nir::program::TraitRequirement {
+            interface: DeclarationId {
+                package: 98,
+                local: 2,
+            },
+            interface_arguments: vec![Term::Bool(true)],
+            subject: Term::Primitive(Primitive::Bool),
+        };
+        let function = nir::program::Function {
+            declaration,
+            name: "guarded".into(),
+            phase: nir::program::FunctionPhase::Comptime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            type_parameters: vec![],
+            parameters: vec![],
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(Primitive::Bool)),
+            },
+            body: Expr {
+                source,
+                ty: Term::Primitive(Primitive::Bool),
+                kind: K::Literal(Literal::Bool(true)),
+            },
+            defaults: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            requirements: vec![],
+            capabilities: vec![requirement.clone()],
+            result_binding: None,
+            entry_snapshots: vec![],
+        };
+        let output = function.callable_type();
+        let package = Package {
+            functions: vec![function],
+            ..Default::default()
+        };
+        let mode = Cell::new(0);
+        let calls = Cell::new(0);
+        let solver = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
+            assert_eq!(
+                predicate,
+                &nir::program::TypePredicate::Trait(requirement.clone())
+            );
+            calls.set(calls.get() + 1);
+            *fuel = fuel.saturating_sub(11);
+            match mode.get() {
+                0 => ContractOutcome::Unknown,
+                1 => ContractOutcome::Rejected,
+                _ => ContractOutcome::Satisfied,
+            }
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_budgeted_type_solver(&solver);
+        for (state, expected) in [
+            (0, ErrorKind::TypeContractUnresolved),
+            (1, ErrorKind::TypeContractRejected),
+        ] {
+            mode.set(state);
+            let before = vm.remaining_steps();
+            assert_eq!(
+                vm.function_instance_value(declaration, &[], &output, source)
+                    .unwrap_err()
+                    .kind,
+                expected
+            );
+            assert!(vm.remaining_steps() < before - 10);
+            assert!(vm.instances.is_empty());
+            assert_eq!(vm.prepared_instance_cache.count, 0);
+            assert!(
+                !vm.events
+                    .iter()
+                    .any(|event| matches!(event, Event::InstantiateFunction { .. }))
+            );
+        }
+        mode.set(2);
+        vm.function_instance_value(declaration, &[], &output, source)
+            .unwrap();
+        assert_eq!(vm.instances.len(), 1);
+        assert!(vm.method_bodies.is_empty());
+        assert!(vm.resolved_method_bodies.is_empty());
+        let count = calls.get();
+        mode.set(0);
+        assert_eq!(
+            vm.function_instance_value(declaration, &[], &output, source)
+                .unwrap_err()
+                .kind,
+            ErrorKind::TypeContractUnresolved
+        );
+        assert_eq!(calls.get(), count + 1);
+        assert_eq!(vm.instances.len(), 1);
+        mode.set(2);
+        vm.function_instance_value(declaration, &[], &output, source)
+            .unwrap();
+        assert_eq!(calls.get(), count + 2);
+    }
 
     #[test]
     fn expression_specialization_preserves_limit_reasons_and_recovers() {

@@ -75,9 +75,7 @@ impl Interpreter<'_> {
             if self.comptime_only && open {
                 continue;
             }
-            if !self.capabilities_hold_parameters(std::slice::from_ref(&bound), &[], &[]) {
-                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-            }
+            self.check_capability_contract(&bound, source)?;
         }
         Ok(())
     }

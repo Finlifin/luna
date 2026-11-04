@@ -2958,7 +2958,8 @@ type_resolution/input_identity::equivalent，成员来源去重也使用这一�
 `/tmp/luna-tools-2bksb0fw/result.json` 退出 101；追踪证据为
 `/tmp/luna-tools-m07op6hn/result.json`，临时诊断与基线替换均已逐字节恢复。
 独立复现保存在 [comptime-unused-generic-capability.fl](repros/comptime-unused-generic-capability.fl)，
-预期仍是成功返回 true；本次未修复该见证交付缺口。来源优先级回归改用具体实现，
+预期仍是成功返回 true；该阶段未修复该见证交付缺口，随后由下述主动准入查询接通。
+来源优先级回归改用具体实现，
 保留泛型函数中的两个未知值索引，分别验证来源选择与未决失败，不把 VM 缺口当作
 合法拒绝或削弱函数的 capability 检查。
 
@@ -2974,7 +2975,46 @@ type_resolution/input_identity::equivalent，成员来源去重也使用这一�
 - 七份修改／新增 Rust 文件 scoped rustfmt check 退出 0；
   `/tmp/luna-tools-tuqwokn1/result.json`。git diff --check 通过。
 
-未执行全 workspace、native 或性能基准；上述泛型见证交付复现仍未修复。
+未执行全 workspace、native 或性能基准；该阶段未覆盖泛型见证交付复现。
+
+**调用值准入与能力查询。** 已准备 dispatch 表只提供保留的正面见证，不枚举
+整个源码世界的全部能力。原 function_instance_value／admit_callable_identity 对
+闭合 capability 只查此表，因而把未使用成员的泛型 Ordinary 实例当成非法调用计划。
+动态子句在 VM 内形成实参包时尤其容易暴露这一缺口；提前遍历所有泛型方法主体
+或只识别常量 tuple 包都不能解决通用需求。
+
+主动函数／方法准入现复用 invocation_contracts::check_capability_contract：
+扣除输入观察和复制的工作量，已有保留／假设见证可直接满足；否则将绑定后的
+TraitRequirement 交给当前 invocation 的类型查询服务。驱动的服务关联完整冻结
+实现世界，按调用方余额选择并证明能力。没有服务或查询未决时仍拒绝，不能由
+源码声明目录制造见证；Rejected 与 Unknown 保持各自 TypeContract 诊断。
+
+这个查询不安装 dispatch、不遍历实现主体，也不授权运行方法。实际方法调用
+继续经过公共契约、phase、选择与程序规格检查。函数值形成及携带方法身份的值
+准入共用此边界；未绑定的普通输入义务仍在输入绑定后检查。已有代码实例缓存
+也不豁免重新检查 capability，失败不会发布新的代码实例或 InstantiateFunction 事件。
+
+名义值的被动 has_type 与构造路径仍依赖保留见证，尚未统一为主动准入／已准入值
+证据模型。本次没有把被动布尔类型观察改成可执行查询，也没有将查询成功塞入
+全局 assumed_interfaces；不能据此宣称所有 carrier 的能力交付均已完成。
+
+该边界的验证工作目录 `/home/fin/luna`：
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna
+  --lib --test trait_phases --test comptime_bytecode_traits --test trait_query_failures
+  --test library_protocols --test cmtt_methods --no-fail-fast -- --skip
+  code_method_parent_value_clauses_form_indexed_code_signatures --skip
+  clause_list_inputs_share_domain_scope_and_budget_validation`：823 项通过，
+  筛去既有 indexed code signature 未实现及列表诊断基线两项，退出 0；
+  `/tmp/luna-tools-ngpy7ef9/result.json`。VM 单测覆盖失败不发布、余额扣除、恢复、
+  已缓存实例仍查询义务以及不安装方法主体。
+- 扩展的 invocation_checks_unused_generic_capabilities_in_the_source_world 精确测试
+  退出 0；`/tmp/luna-tools-mx2kco1l/result.json`。原复现、父接口、动态计算子句实参
+  均返回 true；移除 Ordinary 实现后调用失败。首次负例要求 Rejected，而当前
+  世界模型验证返回 Unresolved，`/tmp/luna-tools-6btj1q75/result.json` 退出 101；
+  最终按“不授予缺失能力”的契约接受这两类失败，未改变生产求解器或拒绝规则。
+- 五份修改 Rust 文件 scoped rustfmt check 退出 0；
+  `/tmp/luna-tools-6y6fhig3/result.json`。未执行全 workspace/native 或性能基准。
 
 implementation 的标量冲突预检、每个普通值参数的结构遍历、重复 binder 比较与
 后续 Type 匹配共用 head 分区的余额，不再为每个实参刷新额度。调用的显式输入

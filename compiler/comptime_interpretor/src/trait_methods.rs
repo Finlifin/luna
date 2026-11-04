@@ -32,9 +32,7 @@ impl Interpreter<'_> {
             for requirement in &contract.requirements {
                 self.check_type_contract(requirement, source)?;
             }
-            if !self.capabilities_hold_parameters(&contract.capabilities, &[], &[]) {
-                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-            }
+            self.check_capability_parameters(&contract.capabilities, &[], &[], source)?;
             return Ok(());
         }
         let (parameters, contract) = self
@@ -121,13 +119,12 @@ impl Interpreter<'_> {
             .chain(interface_arguments.iter().cloned())
             .chain(method_arguments.iter().cloned())
             .collect();
-        if !self.capabilities_hold_parameters(
+        self.check_capability_parameters(
             &contract.capabilities,
             &parameters,
             &contract_arguments,
-        ) {
-            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-        }
+            source,
+        )?;
         for requirement in &contract.requirements {
             let requirement = requirement
                 .instantiate_parameters(&parameters, &contract_arguments)

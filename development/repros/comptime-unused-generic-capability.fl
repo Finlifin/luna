@@ -1,8 +1,8 @@
 {-
    A generic call must retain witnesses for every declared capability,
    including interfaces whose methods are not called by the body.
-   The source checker selects Preferred; direct comptime invocation currently
-   rejects the call plan because the unused Ordinary instances are unavailable.
+   The source checker selects Preferred. Direct comptime invocation must prove
+   the unused Ordinary instances without installing or executing their methods.
 -}
 trait Ordinary where flag: bool {
     comptime fn read() -> bool;
