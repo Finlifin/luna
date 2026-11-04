@@ -3556,3 +3556,67 @@ CodeSession 中运行私有 VM 后，再尝试闭合构造，仍然得到 Invali
   `test -p elaboration --lib type_computations::admission_budget_tests`：
   `/tmp/luna-tools-8rfy6i7v/result.json`，退出 0，1 项通过。二者均经上述 check.py。
 - 修改的十个 Rust 文件 rustfmt 检查：`/tmp/luna-tools-p59hcbfv/result.json`，退出 0。
+
+## 38. 子句域依赖不等于提前执行局部值
+
+第 37 节后继续复现 `let packet = Packet<flag, Subject> { value: true };
+selected<flag, packet>()`，仍在定义检查期间报 required input unavailable。
+进一步定位表明，这个例子没有丢失已经执行过的局部存储；旧分类把子句 telescope
+内部的值依赖也当成必须提前取得 callable 的条件，继而在函数调用前读取局部 packet。
+
+现在区分两种依赖：函数参数/结果组成的 callable 签名若依赖普通值，仍需先取得相应
+实例输入；只有子句参数域引用其他子句输入时，由准备中的 telescope 检查这些域。
+所需值身份可以来自受预算的静态观察，不能因此执行 producer、折叠任意 pure 函数
+或展开 NF 头。普通 comptime 局部依然属于它的 invocation，不提升成全局常量、
+specialization input 或当前已执行值。
+
+`PreparedClauseInputs` 将 source-ordered 实参槽与静态 identities 分开，提供稳定、
+转义正确的 S-expression Display。准备阶段先收集域中的声明依赖；可观察的 Type
+与普通值身份都参与依赖域的代入。具名倒序输入可以等待后面供应的身份完成检查，
+但产生的准备语句仍按源码顺序排列。普通值操作数保留原临时绑定，不用观察结果替换
+其求值；函数实例的最终域与形成契约仍由 VM 检查。
+
+这次没有删除最终类型检查。真实 sysroot 用例覆盖不可变局部、可变局部在两次形成
+实例之间更新、optional 具名倒序、生产者恰好执行一次，以及提前返回跳过后续子句
+和普通实参。`Packet<false>` 不能作为已知 `Packet<true>` 输入，bool 也不能冒充
+packet；两种错误都在 elaboration 阶段拒绝。
+
+**剩余边界。** 当前身份观察仍不是完整 ArgumentPlan 的 producer/waiter 协议。
+需要执行任意输入生产者才知道的 Type/值身份，以及多层等待输入继续产生新域证据，
+必须交给显式的 invocation-time 依赖计划；不能通过扩大 locals 捕获权限、重跑原始
+初始化器或跳过最终 require 来补齐。现有
+`pending_clause_domains_can_wait_for_a_type_producer` 仍显式 ignored。这不是语言
+禁止该调用的规则。下一步应让待取得域、已检查 producer 和执行次序分别有身份，
+就绪只触发尚未完成的检查，执行仍由原调用拥有，失败不发布部分实例。
+
+历史状态也按当前证据校正：`memoized_value_indexed_keys_keep_declaration_and_value_arguments`
+已在第 19 节修复，本次未过滤并再次通过。不能继续沿用更早阶段的失败清单。
+
+验证证据（工作目录 `/home/fin/luna`）：
+
+- 原局部值复现：`/tmp/luna-tools-ltcbra0s/result.json`，退出 101；首步修复后
+  `/tmp/luna-tools-k4ep49m_/result.json`，退出 0，原源码和成功预期未改。
+- 扩展的三种局部/快照场景：`/tmp/luna-tools-wh1dkvvf/result.json`，退出 0。
+  新具名用例最初错误地向锚定参数按名供应，随后按正式参数规则改为 optional；
+  默认的 struct literal 加括号并用 defer 保留阶段边界。这些 fixture 修正没有修改
+  参数供应规则或默认值语义。
+- 副作用顺序、次数、提前返回和错误域拒绝：
+  `/tmp/luna-tools-ihw2sex_/result.json`，退出 0。
+- 新准备载体的 Display 检查：`/tmp/luna-tools-y8l86ljv/result.json`，退出 0，
+  验证执行 local 与静态身份分离、符号转义及输出顺序。
+- 扩大到 12 组集成检查：`/tmp/luna-tools-bza5bxkn/result.json`，退出 0，
+  463 项通过、1 项上述调用时 Type 生产者用例显式忽略。命令为
+  `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test comptime_nominal_capabilities --test comptime_clause_inputs
+  --test nominal_value_parameters --test nominal_staging
+  --test ordinary_clause_collectors --test normal_form_domains
+  --test normal_input_plans --test dependent_list_collectors
+  --test dynamic_trait_clauses --test library_protocols
+  --test open_input_observation --test scoped_input_observation --no-fail-fast`。
+- 对旧 list 诊断基线单独执行
+  `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib clause_list_inputs_share_domain_scope_and_budget_validation -- --nocapture`：
+  `/tmp/luna-tools-wrxcy5tu/result.json`，退出 0，1 项通过。该项现在不应再从后续
+  检查中过滤；第 37 节保留当时实际使用的命令，不将历史跳过改写成已执行。
+- 修改的四个 Rust 文件 rustfmt 检查：`/tmp/luna-tools-pv7_4hkx/result.json`，
+  退出 0。未运行全 workspace 或性能测量。

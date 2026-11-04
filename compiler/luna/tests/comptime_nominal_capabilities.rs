@@ -181,6 +181,103 @@ fn dynamic_nominal_clause_values_keep_their_formation_contracts() {
 }
 
 #[test]
+fn local_nominal_clause_values_stay_in_their_invocation() {
+    for body in [
+        "let packet = Packet<flag, Subject> { value: true }; selected<flag, packet>()",
+        "let packet = Packet<flag, Subject> { value: true }; selected_named<.packet = packet, .flag = flag>()",
+        "var packet = Packet<flag, Subject> { value: true };
+         let first = selected<flag, packet>;
+         packet.value = false;
+         let second = selected<flag, packet>;
+         first() and not second()",
+    ] {
+        assert_eq!(
+            invoke_packet_program(
+                "
+        comptime fn selected() -> bool
+        where flag: bool, packet: Packet<flag, Subject>
+        { packet.value }
+        comptime fn selected_named() -> bool
+        where .flag: bool = false,
+              .packet: Packet<flag, Subject> = defer (Packet<flag, Subject> { value: false })
+        { packet.value }
+    ",
+                body,
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(true),
+            "{body}",
+        );
+    }
+}
+
+#[test]
+fn dependent_clause_domains_keep_producer_order_and_evaluation_count() {
+    for tail in [
+        "let result = selected<
+             .packet = do { trace.mark(2); packet },
+             .marker = trace.mark(3),
+             .flag = flag
+         >(trace.mark(4));
+         result and trace.value == 1234",
+        "selected<
+             .packet = do { trace.mark(2); return trace.value == 12; },
+             .marker = trace.mark(3),
+             .flag = flag
+         >(trace.mark(4));
+         false",
+    ] {
+        let body = format!(
+            "let trace = Trace {{ value: 0 }};
+             let packet = Packet<flag, Subject> {{ value: trace.mark(1) }};
+             {tail}"
+        );
+        assert_eq!(
+            invoke_packet_program(
+                "
+        struct Trace { value: Integer }
+        impl Trace {
+            comptime fn mark(self, digit: Integer) -> bool {
+                self.value = self.value * 10 + digit;
+                true
+            }
+        }
+        comptime fn selected(argument: bool) -> bool
+        where .flag: bool = false,
+              .packet: Packet<flag, Subject> = defer (Packet<flag, Subject> { value: false }),
+              .marker: bool = true
+        { packet.value and marker and argument }
+    ",
+                &body,
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(true),
+            "{tail}",
+        );
+    }
+}
+
+#[test]
+fn dependent_clause_domains_still_reject_incompatible_inputs() {
+    for body in [
+        "selected<true, Packet<false, Subject> { value: true }>()",
+        "selected<true, true>()",
+    ] {
+        let failure = invoke_packet_program(
+            "comptime fn selected() -> bool
+             where flag: bool, packet: Packet<flag, Subject>
+             { packet.value }",
+            body,
+        )
+        .unwrap_err();
+        assert!(
+            failure.starts_with("multi-package elaboration failed"),
+            "{body}: {failure}"
+        );
+    }
+}
+
+#[test]
 fn dynamic_nominal_enum_names_keep_their_formation_contracts() {
     assert_eq!(
         invoke_packet_program(

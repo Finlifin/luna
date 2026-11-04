@@ -258,6 +258,7 @@ impl<'h> Checker<'_, 'h> {
             domains,
             &parameters,
         )
+        .map(|prepared| prepared.inputs)
     }
 
     pub(super) fn prepared_packet_fields(

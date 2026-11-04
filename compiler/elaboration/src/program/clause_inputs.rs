@@ -1,6 +1,31 @@
 //! Source-order preparation of ordinary clause inputs and collection values.
 use super::*;
 
+/// Static identities assist dependent domain checking without replacing the
+/// source-ordered producers or the ordinary values retained in their slots.
+pub(super) struct PreparedClauseInputs {
+    pub inputs: Vec<(Option<hir::common::Ident>, n::Expr)>,
+    pub identities: BTreeMap<DeclarationId, Term>,
+}
+
+impl std::fmt::Display for PreparedClauseInputs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(prepared-clause-inputs (inputs")?;
+        for (name, value) in &self.inputs {
+            if let Some(name) = name {
+                write!(f, " (named {:?} {value})", name.name.to_string())?;
+            } else {
+                write!(f, " (positional {value})")?;
+            }
+        }
+        f.write_str(") (identities")?;
+        for (parameter, value) in &self.identities {
+            write!(f, " (input {parameter} {value})")?;
+        }
+        f.write_str("))")
+    }
+}
+
 /// Routing state is independent of expression checking and execution. Open
 /// descriptions and concrete NF preparation consume the same clause slots.
 /// A tuple packet supplies fixed inputs; a tail spread supplies the collector.
@@ -208,6 +233,14 @@ impl std::fmt::Display for PreparedClauseInput {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn copy_clause_identity(&mut self, value: &Term, span: Span) -> Result<Term, Error> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let copied = nir::copy_budget::clone_term(value, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        copied.map_err(|failure| error(span, format!("clause identity copy failed: {failure:?}")))
+    }
+
     pub(super) fn clause_has_collector(&self, owner: OwnerId) -> bool {
         self.type_clause_params(owner)
             .last()
@@ -278,9 +311,14 @@ impl Checker<'_, '_> {
         span: Span,
         domains: &[Term],
         parameters: &[DeclarationId],
-    ) -> Result<Vec<(Option<hir::common::Ident>, n::Expr)>, Error> {
+    ) -> Result<PreparedClauseInputs, Error> {
         if domains.iter().all(|domain| *domain == p(P::Type)) {
-            return self.prepared_type_inputs(args, count, statements, span);
+            return self
+                .prepared_type_inputs(args, count, statements, span)
+                .map(|inputs| PreparedClauseInputs {
+                    inputs,
+                    identities: BTreeMap::new(),
+                });
         }
         let collector_slot = self
             .clause_has_collector(owner)
@@ -303,16 +341,34 @@ impl Checker<'_, '_> {
         let mut waiting = Vec::new();
         let mut known_binders = Vec::new();
         let mut known_values = Vec::new();
+        let mut identities = BTreeMap::new();
         let mut failed_observations = BTreeMap::new();
-        let mut pending_types = parameters
+        let mut domain_dependencies = BTreeSet::new();
+        for domain in domains {
+            let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let charged = nir::type_computations::charge_term(domain, &mut fuel);
+            self.required_steps -= (before - fuel) as u64;
+            charged.map_err(|failure| error(span, failure.to_string()))?;
+            domain_dependencies.extend(
+                domain
+                    .rigid_parameters()
+                    .map_err(|failure| error(span, failure.to_string()))?
+                    .into_keys(),
+            );
+        }
+        let mut pending_domains = parameters
             .iter()
             .zip(domains)
-            .filter_map(|(parameter, domain)| (*domain == p(P::Type)).then_some(*parameter))
+            .filter_map(|(parameter, domain)| {
+                (*domain == p(P::Type) || domain_dependencies.contains(parameter))
+                    .then_some(*parameter)
+            })
             .collect::<BTreeSet<_>>();
         // Captured values can determine a nominal domain just like captured
         // Types. Concrete captures are already substituted by the projection;
         // any remaining dependency must wait for the selected instance.
-        pending_types.extend(self.nominal_captures(owner, span)?);
+        pending_domains.extend(self.nominal_captures(owner, span)?);
         for (argument_index, arg) in args.iter().enumerate() {
             let statements = &mut preparations[argument_index];
             if let Arg::Expand(input) = arg {
@@ -325,7 +381,7 @@ impl Checker<'_, '_> {
                         &known_values,
                         span,
                     )?;
-                    let dependent = pending_types.iter().any(|id| domain.mentions_rigid(*id));
+                    let dependent = pending_domains.iter().any(|id| domain.mentions_rigid(*id));
                     if dependent {
                         waiting.push(PendingClauseInput {
                             source_index: argument_index,
@@ -381,11 +437,11 @@ impl Checker<'_, '_> {
                         &known_values,
                         span,
                     )?;
-                    if !pending_types.iter().any(|id| domain.mentions_rigid(*id)) {
+                    if !pending_domains.iter().any(|id| domain.mentions_rigid(*id)) {
                         self.require(&field, &domain, input.span)?;
                     }
                     if domains[slot] == p(P::Type) {
-                        pending_types.insert(parameters[slot]);
+                        pending_domains.insert(parameters[slot]);
                     }
                     let binding = self.spread_binding(input.span)?;
                     self.locals.insert(binding, field.clone());
@@ -445,7 +501,7 @@ impl Checker<'_, '_> {
             } else {
                 domain
             };
-            let dependent = pending_types
+            let dependent = pending_domains
                 .iter()
                 .any(|id| input_domain.mentions_rigid(*id));
             if dependent {
@@ -459,7 +515,10 @@ impl Checker<'_, '_> {
                 continue;
             }
             let value = self.expr(input, Some(&input_domain))?;
-            let known_type = if domains[slot] == p(P::Type) {
+            let needed_for_domain = domain_dependencies.contains(&parameters[slot]);
+            let known = if domains[slot] == p(P::Type)
+                || (needed_for_domain && (Some(slot) != collector_slot || name.is_some()))
+            {
                 let mut budget = comptime_runtime::Budget {
                     steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
                     max_limbs: 4096,
@@ -469,8 +528,8 @@ impl Checker<'_, '_> {
                     self.observe_normal_input_in(&value, 0, &mut budget, &BTreeMap::new());
                 self.required_steps -= (before - budget.steps) as u64;
                 let known = match observed {
-                    Ok(ty) if ty.sort() == Sort::Type => Some(ty),
-                    Ok(_) | Err(normal::observation::Failure::Unavailable) => None,
+                    Ok(value) => Some(value),
+                    Err(normal::observation::Failure::Unavailable) => None,
                     Err(failure) => {
                         failed_observations.insert(parameters[slot], failure);
                         None
@@ -479,19 +538,20 @@ impl Checker<'_, '_> {
                 if let Some(ty) = &known {
                     known_binders.push(nir::DeclarationParameter {
                         declaration: parameters[slot],
-                        sort: Sort::Type,
+                        sort: ty.sort(),
                     });
-                    known_values.push(ty.clone());
-                    pending_types.remove(&parameters[slot]);
+                    known_values.push(self.copy_clause_identity(ty, span)?);
+                    identities.insert(parameters[slot], self.copy_clause_identity(ty, span)?);
+                    pending_domains.remove(&parameters[slot]);
                 } else {
-                    pending_types.insert(parameters[slot]);
+                    pending_domains.insert(parameters[slot]);
                 }
                 known
             } else {
                 None
             };
             let mut value = self.bind_type_input(value, statements, span)?;
-            if let Some(ty) = known_type {
+            if let Some(ty) = known.filter(|_| domains[slot] == p(P::Type)) {
                 // The source producer remains in its original preparation slot.
                 // Static identity evidence is not permission to erase execution.
                 value.kind = K::TypeValue(ty);
@@ -503,7 +563,7 @@ impl Checker<'_, '_> {
                 spread: false,
             });
         }
-        // Check each pending source once after collecting static Type evidence.
+        // Check each pending source once after collecting static input identities.
         // Checking order never determines the order of generated preparations.
         for pending in waiting {
             let mut domain = self.instantiate_trait_domain(
@@ -520,7 +580,7 @@ impl Checker<'_, '_> {
                     )
                 })?;
             }
-            let dependent = pending_types.iter().any(|id| domain.mentions_rigid(*id));
+            let dependent = pending_domains.iter().any(|id| domain.mentions_rigid(*id));
             let value = self
                 .expr(pending.input, (!dependent).then_some(&domain))
                 .map_err(|failure| {
@@ -580,7 +640,7 @@ impl Checker<'_, '_> {
             let value = self.finish_clause_collection(collector, domain, statements, span)?;
             inputs.push((Some(clauses[slot].name), value));
         }
-        Ok(inputs)
+        Ok(PreparedClauseInputs { inputs, identities })
     }
 
     fn finish_clause_collection(
@@ -670,5 +730,34 @@ impl Checker<'_, '_> {
             kind: K::TypeList(Vec::new()),
         });
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_clause_dump_separates_executable_inputs_from_identity_evidence() {
+        let id = |local| DeclarationId { package: 7, local };
+        let symbol = Term::Symbol("quote\"\nline".into());
+        let prepared = PreparedClauseInputs {
+            inputs: vec![(
+                None,
+                n::Expr {
+                    source: n::SourceRange { start: 0, end: 1 },
+                    ty: p(P::Bool),
+                    kind: K::Local(n::LocalId { owner: 1, index: 2 }),
+                },
+            )],
+            identities: BTreeMap::from([(id(9), symbol), (id(3), Term::Bool(true))]),
+        };
+        let dump = prepared.to_string();
+        assert_eq!(dump, prepared.to_string());
+        assert!(dump.starts_with("(prepared-clause-inputs (inputs (positional "));
+        assert!(dump.contains("(local 1 2)"), "{dump}");
+        assert!(dump.contains("quote\\\"\\nline"), "{dump}");
+        assert!(dump.find(&id(3).to_string()).unwrap() < dump.find(&id(9).to_string()).unwrap());
+        assert!(dump.contains(") (identities (input "), "{dump}");
     }
 }

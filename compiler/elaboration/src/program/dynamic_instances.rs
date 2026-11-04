@@ -83,8 +83,9 @@ impl Checker<'_, '_> {
         {
             return Ok(None);
         }
-        // Value-dependent callable signatures still need a separate invocation
-        // plan before their callable type can be formed.
+        // Dependencies inside the clause telescope are checked while preparing
+        // its packet. Only a value-dependent callable signature itself requires
+        // a separate invocation plan before the callable type can be formed.
         let parameters = self
             .type_parameters
             .get(&owner)
@@ -114,9 +115,10 @@ impl Checker<'_, '_> {
             .zip(&domains)
             .filter_map(|(id, domain)| (*domain != p(P::Type)).then_some(*id))
             .collect();
-        if value_parameters.iter().any(|id| {
-            signature.mentions_rigid(*id) || domains.iter().any(|domain| domain.mentions_rigid(*id))
-        }) {
+        if value_parameters
+            .iter()
+            .any(|id| signature.mentions_rigid(*id))
+        {
             return Ok(None);
         }
         if !allow_optional {
@@ -171,7 +173,7 @@ impl Checker<'_, '_> {
                 .filter(|clause| !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
                 .count();
             let mut statements = Vec::new();
-            let inputs = self.prepared_clause_inputs_in_domains(
+            let prepared = self.prepared_clause_inputs_in_domains(
                 owner,
                 args,
                 count,
@@ -182,7 +184,7 @@ impl Checker<'_, '_> {
             )?;
             let mut supplied = vec![None; clauses.len()];
             let mut positional = 0;
-            for (name, value) in inputs {
+            for (name, value) in prepared.inputs {
                 let slot = Self::type_input_slot(&clauses, name, &mut positional, expr.span)?;
                 let cell = supplied
                     .get_mut(slot)
@@ -241,14 +243,24 @@ impl Checker<'_, '_> {
                         self.alias_value_bindings.remove(&parameters[slot]);
                     }
                     K::Local(binding) if domains[slot] != p(P::Type) => {
-                        symbols.push(Term::Rigid {
-                            declaration: parameters[slot],
-                            sort: Sort::ComptimeValue,
+                        let identity = prepared.identities.get(&parameters[slot]);
+                        symbols.push(match identity {
+                            Some(identity) => self.copy_clause_identity(identity, expr.span)?,
+                            None => Term::Rigid {
+                                declaration: parameters[slot],
+                                sort: Sort::ComptimeValue,
+                            },
                         });
                         self.normal_default_bindings
                             .insert(parameters[slot], (*binding, value.ty.clone()));
                         self.alias_value_bindings.remove(&parameters[slot]);
-                        self.alias_substitution.remove(&parameters[slot]);
+                        if let Some(identity) = identity {
+                            let identity = self.copy_clause_identity(identity, expr.span)?;
+                            self.alias_substitution
+                                .insert(parameters[slot], std::sync::Arc::new(identity));
+                        } else {
+                            self.alias_substitution.remove(&parameters[slot]);
+                        }
                     }
                     _ => {
                         return Err(error(
