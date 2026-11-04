@@ -371,7 +371,7 @@ impl Solver<'_, '_> {
             }
             let capability =
                 substitution.instantiate_requirement_bounded(capability, &mut self.remaining)?;
-            if self.given(&capability, budget).is_none() {
+            if self.given(&capability, budget)?.is_none() {
                 let Ok(resolution) = self.resolve(
                     &capability.interface_instance(),
                     &capability.subject,
@@ -390,22 +390,32 @@ impl Solver<'_, '_> {
             interface_arguments: query.arguments.clone(),
             subject: query.subject.clone(),
         };
-        if let Some(given) = self.given(&requirement, budget) {
-            return Ok(Some(ConditionFact {
-                query: query.clone(),
-                truth: true,
-                given: Some(given),
-                resolution: None,
-            }));
-        }
+        let incomplete_given = match self.given(&requirement, budget) {
+            Ok(Some(given)) => {
+                return Ok(Some(ConditionFact {
+                    query: query.clone(),
+                    truth: true,
+                    given: Some(given),
+                    resolution: None,
+                }));
+            }
+            Ok(None) => None,
+            Err(error @ nir::NominalAdmissionError::Invalid(_)) => return Err(error),
+            Err(error) => Some(error),
+        };
         let Ok(resolution) = self.resolve(
             &requirement.interface_instance(),
             &query.subject,
             budget,
             depth,
         ) else {
-            return Ok(None);
+            return incomplete_given.map_or(Ok(None), Err);
         };
+        if !matches!(resolution.types.selection, Selection::Selected(_)) {
+            if let Some(error) = incomplete_given {
+                return Err(error);
+            }
+        }
         let truth = match &resolution.types.selection {
             Selection::Selected(id)
                 if matches!(
@@ -522,17 +532,20 @@ impl World<'_> {
                     let atom = Formula::Trait(fact.query.clone());
                     expected.assume(if fact.truth { atom } else { atom.negate() });
                     if let Some(given) = &fact.given {
-                        if !fact.truth
-                            || self
-                                .given(
-                                    given,
-                                    Budget {
-                                        steps: fuel,
-                                        ..budget
-                                    },
-                                )
-                                .is_none()
-                        {
+                        if !fact.truth {
+                            return Err(ProofError::Invalid);
+                        }
+                        let mut allowance = Budget {
+                            steps: fuel,
+                            ..budget
+                        };
+                        let found = self.given_metered(given, &mut allowance);
+                        fuel = allowance.steps;
+                        let found = found.map_err(|error| match error {
+                            nir::NominalAdmissionError::Budget => ProofError::BudgetExhausted,
+                            _ => ProofError::Invalid,
+                        })?;
+                        if found.is_none() {
                             return Err(ProofError::Invalid);
                         }
                     }

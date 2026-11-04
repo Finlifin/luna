@@ -204,7 +204,7 @@ pub fn select(
         interface_arguments: vec![],
         subject: subject.clone(),
     };
-    if let Some(requirement) = world.given(&requirement, budget) {
+    if let Some(requirement) = world.given(&requirement, budget)? {
         return Ok(Resolution::Assumed {
             requirement,
             contract,

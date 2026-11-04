@@ -296,7 +296,7 @@ impl Checker<'_, '_> {
         &self,
         subject: &Term,
         target: &n::InterfaceInstance,
-    ) -> bool {
+    ) -> Result<bool, nir::NominalAdmissionError> {
         let assumptions = self.capability_assumptions();
         let world = crate::capabilities::World {
             index: &self.implementation_index,
@@ -315,7 +315,7 @@ impl Checker<'_, '_> {
         if self.context.scope() == self.call_input_frames().as_slice() {
             world
                 .given_in_context(&requirement, Budget::default())
-                .is_some()
+                .map(|given| given.is_some())
         } else if self
             .call_inference_domains()
             .iter()
@@ -323,7 +323,7 @@ impl Checker<'_, '_> {
         {
             world
                 .given_in_input_scope(&requirement, Budget::default(), &self.call_input_frames())
-                .is_some()
+                .map(|given| given.is_some())
         } else {
             world
                 .given_in_scope(
@@ -331,7 +331,7 @@ impl Checker<'_, '_> {
                     Budget::default(),
                     &self.call_inference_scope(),
                 )
-                .is_some()
+                .map(|given| given.is_some())
         }
     }
     pub(super) fn comptime_member_context(&self) -> bool {

@@ -330,7 +330,7 @@ impl<'w> World<'w> {
                     .map_err(|e| e.to_string())?;
                 if metered(&mut fuel, allowance, |budget| {
                     self.given_in_context_metered(&requirement, budget)
-                })
+                })?
                 .is_none()
                 {
                     let (formed, _) = metered(&mut fuel, allowance, |budget| {
@@ -363,18 +363,23 @@ impl<'w> World<'w> {
                 interface_arguments: query.arguments.clone(),
                 subject: query.subject.clone(),
             };
-            if let Some(given) = metered(&mut fuel, allowance, |budget| {
+            let incomplete_given = match metered(&mut fuel, allowance, |budget| {
                 self.given_in_context_metered(&requirement, budget)
             }) {
-                return Ok(TraitDecision {
-                    world: self,
-                    query: query.clone(),
-                    truth: TraitTruth::Established,
-                    given: Some(given),
-                    resolution: None,
-                    input_equalities: Vec::new(),
-                });
-            }
+                Ok(Some(given)) => {
+                    return Ok(TraitDecision {
+                        world: self,
+                        query: query.clone(),
+                        truth: TraitTruth::Established,
+                        given: Some(given),
+                        resolution: None,
+                        input_equalities: Vec::new(),
+                    });
+                }
+                Ok(None) => None,
+                Err(error @ nir::NominalAdmissionError::Invalid(_)) => return Err(error.into()),
+                Err(error) => Some(error),
+            };
             let (selected_query, input_equalities) = metered(&mut fuel, allowance, |budget| {
                 self.proposition_input_views(query, budget)
             })?;
@@ -382,6 +387,9 @@ impl<'w> World<'w> {
                 .inputs()
                 .any(|ty| ty.check_scope(&[]).is_err())
             {
+                if let Some(error) = incomplete_given {
+                    return Err(error.into());
+                }
                 return Ok(TraitDecision {
                     world: self,
                     query: query.clone(),
@@ -391,8 +399,9 @@ impl<'w> World<'w> {
                     input_equalities,
                 });
             }
-            // Formation and given checks have finished. Let selection use
-            // their returned work; its meter preserves the caller's hard cap.
+            // Independent implementation evidence may establish the query
+            // even when given lookup was incomplete. It cannot justify absence
+            // from that partial search; retain the failure if proof is missing.
             let selection_budget = Budget {
                 steps: fuel,
                 ..budget
@@ -439,6 +448,11 @@ impl<'w> World<'w> {
                 }
                 _ => TraitTruth::Pending,
             };
+            if truth != TraitTruth::Established {
+                if let Some(error) = incomplete_given {
+                    return Err(error.into());
+                }
+            }
             Ok(TraitDecision {
                 world: self,
                 query: query.clone(),

@@ -46,15 +46,21 @@ impl Checker<'_, '_> {
                 declaration: protocol,
                 arguments: vec![],
             };
-            let direct = if self.symbolic_interface_evidence(&iterable.ty, &interface) {
+            let direct = if self
+                .symbolic_interface_evidence(&iterable.ty, &interface)
+                .map_err(|e| error(expr.span, e.to_string()))?
+            {
                 true
-            } else if self.symbolic_interface_evidence(
-                &iterable.ty,
-                &n::InterfaceInstance {
-                    declaration: conversion,
-                    arguments: vec![],
-                },
-            ) {
+            } else if self
+                .symbolic_interface_evidence(
+                    &iterable.ty,
+                    &n::InterfaceInstance {
+                        declaration: conversion,
+                        arguments: vec![],
+                    },
+                )
+                .map_err(|e| error(expr.span, e.to_string()))?
+            {
                 // A generic body's declared conversion evidence determines
                 // its operation; possible future Iterator implementations do
                 // not change that body when it is instantiated.

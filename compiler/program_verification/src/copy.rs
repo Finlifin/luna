@@ -238,7 +238,7 @@ pub fn classify_with_fuel(
     let before = allowance.steps;
     let given = world.given_metered(&requirement, &mut allowance);
     *fuel = fuel.saturating_sub(before - allowance.steps);
-    if let Some(given) = given {
+    if let Some(given) = given? {
         return Ok(Classification::Assumed(given));
     }
     let before = allowance.steps;

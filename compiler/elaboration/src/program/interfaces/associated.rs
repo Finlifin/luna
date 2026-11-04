@@ -164,7 +164,11 @@ impl Checker<'_, '_> {
             return Ok(Some(value));
         }
 
-        if interface != requested && !self.symbolic_interface_evidence(&subject, &requested) {
+        if interface != requested
+            && !self
+                .symbolic_interface_evidence(&subject, &requested)
+                .map_err(|e| error(span, e.to_string()))?
+        {
             let resolution = self
                 .resolve_trait_capability(&requested, &subject, Budget::default())
                 .map_err(|message| error(span, message))?;
@@ -175,7 +179,10 @@ impl Checker<'_, '_> {
                 return Err(error(span, "requested interface view is not established"));
             }
         }
-        if self.symbolic_interface_evidence(&subject, &interface) {
+        if self
+            .symbolic_interface_evidence(&subject, &interface)
+            .map_err(|e| error(span, e.to_string()))?
+        {
             // Given evidence fixes the member's origin, not its selected value.
             // In particular, a default must not become an abstract equality.
             let (parameters, inputs) = self.interface_substitution(&interface, &subject);

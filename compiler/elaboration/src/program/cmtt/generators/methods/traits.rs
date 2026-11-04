@@ -41,7 +41,9 @@ impl Checker<'_, '_> {
             requested_resolution.selection,
             crate::implementation::Selection::Selected(_)
         ) && !(self.checking_code_generator
-            && self.symbolic_interface_evidence(&subject, &requested))
+            && self
+                .symbolic_interface_evidence(&subject, &requested)
+                .map_err(|e| error(head.span, e.to_string()))?)
         {
             return Err(error(
                 head.span,
@@ -121,7 +123,9 @@ impl Checker<'_, '_> {
                 )
             }
             _ if self.checking_code_generator
-                && self.symbolic_interface_evidence(&subject, &interface) =>
+                && self
+                    .symbolic_interface_evidence(&subject, &interface)
+                    .map_err(|e| error(head.span, e.to_string()))? =>
             {
                 (public_id, Vec::new())
             }

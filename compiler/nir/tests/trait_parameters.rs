@@ -1347,3 +1347,38 @@ fn empty_declaration_telescopes_still_consume_directory_budget() {
             .is_empty()
     );
 }
+
+#[test]
+fn value_type_relations_preserve_shared_budget_failure() {
+    use nir::type_computations::Error;
+    let a = Term::TupleValue(vec![Term::Primitive(nir::Primitive::Bool); 64]);
+    let b = Term::TupleValue(vec![Term::Primitive(nir::Primitive::Char); 64]);
+    let mut fuel = 10_000;
+    assert_eq!(
+        a.index_type_relations_budgeted(&b, &mut fuel)
+            .unwrap()
+            .unwrap()
+            .len(),
+        64
+    );
+    let cost = 10_000 - fuel;
+    for steps in 0..cost {
+        let mut fuel = steps;
+        assert_eq!(
+            a.index_type_relations_budgeted(&b, &mut fuel),
+            Err(Error::Budget)
+        );
+        assert!(fuel <= steps);
+    }
+    assert_eq!(
+        a.index_type_relations_budgeted(&b, &mut { cost })
+            .unwrap()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        Term::Bool(false).index_type_relations_budgeted(&Term::Bool(true), &mut 100),
+        Ok(None)
+    );
+}

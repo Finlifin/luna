@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 mod closed_inputs;
 mod conditions;
+mod given;
 mod propositions;
 pub use conditions::ConditionSupport;
 pub use propositions::{TraitDecision, TraitTruth, WorldProposition};
@@ -296,90 +297,76 @@ struct Solver<'a, 'w> {
     remaining: usize,
 }
 impl World<'_> {
+    /// Search caller premises. Only Ok(None) denotes a completed search
+    /// without a witness; failures must not authorize negative selection.
     pub fn given(
         &self,
         requirement: &TraitRequirement,
         budget: Budget,
-    ) -> Option<TraitRequirement> {
+    ) -> Result<Option<TraitRequirement>, nir::NominalAdmissionError> {
         self.given_metered(requirement, &mut { budget })
     }
-    /// Return the solver's remaining allowance on success and failure alike.
     pub fn given_metered(
         &self,
         requirement: &TraitRequirement,
         budget: &mut Budget,
-    ) -> Option<TraitRequirement> {
-        let mut solver = Solver {
-            world: self,
-            scope: ResolutionScope::capture(self),
-            active: HashSet::new(),
-            remaining: budget.steps,
-        };
-        let result = solver.given(requirement, *budget);
-        budget.steps = budget.steps.min(solver.remaining);
-        result
+    ) -> Result<Option<TraitRequirement>, nir::NominalAdmissionError> {
+        given::lookup(self, requirement, *budget, &[], &[], &mut budget.steps)
     }
-    /// Search existing evidence in an ordinary caller telescope. This does not
-    /// select implementations or turn an unresolved query into negative proof.
     pub fn given_in_scope(
         &self,
         requirement: &TraitRequirement,
         budget: Budget,
         parameters: &[nir::Parameter],
-    ) -> Option<TraitRequirement> {
+    ) -> Result<Option<TraitRequirement>, nir::NominalAdmissionError> {
+        let mut fuel = budget.steps;
+        for parameter in parameters {
+            nir::type_computations::charge_term(&parameter.ty, &mut fuel)?;
+        }
         let signature = Term::Function {
             parameters: parameters.to_vec(),
             result: Box::new(Term::Primitive(nir::Primitive::Void)),
         };
-        signature.check_scope(&[]).ok()?;
-        Solver {
-            world: self,
-            scope: ResolutionScope::capture(self),
-            active: HashSet::new(),
-            remaining: budget.steps,
-        }
-        .given_scoped(requirement, budget, parameters)
+        signature.check_scope(&[]).map_err(|e| e.to_string())?;
+        let frames = if parameters.is_empty() {
+            vec![]
+        } else {
+            vec![parameters.iter().map(|p| p.sort).collect()]
+        };
+        given::lookup(self, requirement, budget, parameters, &frames, &mut fuel)
     }
     pub fn given_in_context(
         &self,
         requirement: &TraitRequirement,
         budget: Budget,
-    ) -> Option<TraitRequirement> {
+    ) -> Result<Option<TraitRequirement>, nir::NominalAdmissionError> {
         self.given_in_context_metered(requirement, &mut { budget })
     }
-
     pub(crate) fn given_in_context_metered(
         &self,
         requirement: &TraitRequirement,
         budget: &mut Budget,
-    ) -> Option<TraitRequirement> {
-        let mut solver = Solver {
-            world: self,
-            scope: ResolutionScope::capture(self),
-            active: HashSet::new(),
-            remaining: budget.steps,
-        };
-        let result = solver.given_frames(requirement, *budget, &[], self.context.scope());
-        budget.steps = budget.steps.min(solver.remaining);
-        result
+    ) -> Result<Option<TraitRequirement>, nir::NominalAdmissionError> {
+        given::lookup(
+            self,
+            requirement,
+            *budget,
+            &[],
+            self.context.scope(),
+            &mut budget.steps,
+        )
     }
-
-    /// Search caller-owned premises while some runtime domains are unavailable.
-    /// All subjects and interface arguments are validated in the supplied sort
-    /// frame. Equality needs the world's own context; no type wrapper is invented.
+    /// Incomplete runtime domains retain the caller's sort frame. No complete
+    /// telescope or Type equality wrapper is invented for these inputs.
     pub fn given_in_input_scope(
         &self,
         requirement: &TraitRequirement,
         budget: Budget,
         frames: &[Vec<nir::Sort>],
-    ) -> Option<TraitRequirement> {
-        Solver {
-            world: self,
-            scope: ResolutionScope::capture(self),
-            active: HashSet::new(),
-            remaining: budget.steps,
-        }
-        .given_frames(requirement, budget, &[], frames)
+    ) -> Result<Option<TraitRequirement>, nir::NominalAdmissionError> {
+        given::lookup(self, requirement, budget, &[], frames, &mut {
+            budget.steps
+        })
     }
     pub fn resolve(
         &self,
@@ -680,7 +667,7 @@ impl Solver<'_, '_> {
                             interface_arguments: parent.arguments.clone(),
                         },
                         budget,
-                    )
+                    )?
                     .is_some()
             {
                 continue;
@@ -703,180 +690,15 @@ impl Solver<'_, '_> {
         &mut self,
         requirement: &TraitRequirement,
         budget: Budget,
-    ) -> Option<TraitRequirement> {
-        self.given_scoped(requirement, budget, &[])
-    }
-    fn given_scoped(
-        &mut self,
-        requirement: &TraitRequirement,
-        budget: Budget,
-        scope: &[nir::Parameter],
-    ) -> Option<TraitRequirement> {
-        let frames = if scope.is_empty() {
-            vec![]
-        } else {
-            vec![scope.iter().map(|parameter| parameter.sort).collect()]
-        };
-        self.given_frames(requirement, budget, scope, &frames)
-    }
-    fn given_frames(
-        &mut self,
-        requirement: &TraitRequirement,
-        budget: Budget,
-        scope: &[nir::Parameter],
-        frames: &[Vec<nir::Sort>],
-    ) -> Option<TraitRequirement> {
-        let world = self.world;
-        let valid = |requirement: &TraitRequirement, fuel: &mut usize| {
-            for input in
-                std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
-            {
-                if crate::associated::charge_projection_copy(input, fuel).is_err() {
-                    return false;
-                }
-            }
-            if requirement.subject.sort() != nir::Sort::Type
-                || requirement.subject.check_scope(frames).is_err()
-            {
-                return false;
-            }
-            if let Some(contract) = world
-                .traits
-                .iter()
-                .find(|t| t.declaration == requirement.interface)
-            {
-                contract
-                    .validate_arguments_with_layouts(
-                        &requirement.subject,
-                        &requirement.interface_arguments,
-                        frames,
-                        world.traits,
-                        &world.index.parameter_domains,
-                        fuel,
-                        |left, right, fuel| {
-                            equivalent_domains(world.context, left, right, budget.max_depth, fuel)
-                        },
-                        Some(&world.index.nominal_layouts),
-                    )
-                    .is_ok()
-            } else {
-                requirement
-                    .interface_arguments
-                    .iter()
-                    .all(|ty| ty.sort() == nir::Sort::Type && ty.check_scope(frames).is_ok())
-            }
-        };
-        if !valid(requirement, &mut self.remaining) {
-            return None;
-        }
-        let equal = |left: &Term, right: &Term, fuel: &mut usize| {
-            for input in [left, right] {
-                if crate::associated::charge_projection_copy(input, fuel).is_err() {
-                    return false;
-                }
-            }
-            if left == right {
-                return true;
-            }
-            let closed = left.check_scope(&[]).is_ok() && right.check_scope(&[]).is_ok();
-            if !scope.is_empty() && !closed && world.context.scope() != frames {
-                for _ in 0..2 {
-                    for parameter in scope {
-                        if crate::associated::charge_projection_copy(&parameter.ty, fuel).is_err() {
-                            return false;
-                        }
-                    }
-                }
-            }
-            let scoped = |ty: &Term| {
-                if scope.is_empty() || closed || world.context.scope() == frames {
-                    ty.clone()
-                } else {
-                    Term::Function {
-                        parameters: scope.to_vec(),
-                        result: Box::new(ty.clone()),
-                    }
-                }
-            };
-            let goal = Formula::equal(scoped(left), scoped(right));
-            let mut proof_budget = Budget {
-                steps: budget.steps.min(*fuel),
-                ..budget
-            };
-            let before = proof_budget.steps;
-            let result = world.context.prove_metered(goal, &mut proof_budget);
-            *fuel = fuel.saturating_sub(before - proof_budget.steps);
-            matches!(result, Outcome::Entailed(_))
-        };
-        for assumption in world.assumptions {
-            if self.remaining == 0 {
-                return None;
-            }
-            if !valid(assumption, &mut self.remaining) {
-                continue;
-            }
-            let mut pending = vec![assumption.clone()];
-            let mut seen = HashSet::new();
-            while let Some(current) = pending.pop() {
-                if self.remaining == 0 {
-                    return None;
-                }
-                if !valid(&current, &mut self.remaining) {
-                    continue;
-                }
-                let interface = current.interface_instance();
-                if self.remaining == 0 {
-                    return None;
-                }
-                self.remaining -= 1;
-                if !seen.insert((interface.clone(), current.subject.clone())) {
-                    continue;
-                }
-                if interface.declaration == requirement.interface
-                    && interface.arguments.len() == requirement.interface_arguments.len()
-                    && interface
-                        .arguments
-                        .iter()
-                        .zip(&requirement.interface_arguments)
-                        .all(|(a, b)| equal(a, b, &mut self.remaining))
-                    && equal(&current.subject, &requirement.subject, &mut self.remaining)
-                {
-                    return Some(assumption.clone());
-                }
-                if let Some(t) = self
-                    .world
-                    .traits
-                    .iter()
-                    .find(|t| t.declaration == interface.declaration)
-                {
-                    let arguments: Vec<_> = std::iter::once(current.subject.clone())
-                        .chain(interface.arguments.iter().cloned())
-                        .collect();
-                    let substitution = t
-                        .input_substitution(&arguments, &frames, &mut self.remaining)
-                        .ok()?;
-                    for capability in &t.capabilities {
-                        if let Ok(capability) = substitution
-                            .instantiate_requirement_bounded(capability, &mut self.remaining)
-                        {
-                            pending.push(capability);
-                        }
-                    }
-                    for parent in &t.parents {
-                        if let Ok(parent) =
-                            substitution.instantiate_interface_bounded(parent, &mut self.remaining)
-                        {
-                            pending.push(TraitRequirement {
-                                subject: current.subject.clone(),
-                                interface: parent.declaration,
-                                interface_arguments: parent.arguments,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        None
+    ) -> Result<Option<TraitRequirement>, nir::NominalAdmissionError> {
+        given::lookup(
+            self.world,
+            requirement,
+            budget,
+            &[],
+            &[],
+            &mut self.remaining,
+        )
     }
     fn prerequisite_type(
         &mut self,
@@ -977,12 +799,21 @@ impl Solver<'_, '_> {
                 Ok(requirement) => requirement,
                 Err(e) => return Qualification::Pending(e.to_string()),
             };
-            if let Some(given) = self.given(&requirement, budget) {
-                witnesses.push(Witness {
-                    requirement,
-                    origin: Origin::Given(given),
-                });
-                continue;
+            let mut incomplete_given = None;
+            match self.given(&requirement, budget) {
+                Ok(Some(given)) => {
+                    witnesses.push(Witness {
+                        requirement,
+                        origin: Origin::Given(given),
+                    });
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error @ nir::NominalAdmissionError::Invalid(_)) => {
+                    pending = Some(error.to_string());
+                    continue;
+                }
+                Err(error) => incomplete_given = Some(error.to_string()),
             }
             let requirement = match (|| {
                 Ok::<_, String>(TraitRequirement {
@@ -1001,12 +832,20 @@ impl Solver<'_, '_> {
                     continue;
                 }
             };
-            if let Some(given) = self.given(&requirement, budget) {
-                witnesses.push(Witness {
-                    requirement,
-                    origin: Origin::Given(given),
-                });
-                continue;
+            match self.given(&requirement, budget) {
+                Ok(Some(given)) => {
+                    witnesses.push(Witness {
+                        requirement,
+                        origin: Origin::Given(given),
+                    });
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error @ nir::NominalAdmissionError::Invalid(_)) => {
+                    pending = Some(error.to_string());
+                    continue;
+                }
+                Err(error) => incomplete_given = Some(error.to_string()),
             }
             let resolution = match self.resolve(
                 &requirement.interface_instance(),
@@ -1020,6 +859,12 @@ impl Solver<'_, '_> {
                     continue;
                 }
             };
+            if !matches!(resolution.types.selection, Selection::Selected(_)) {
+                if let Some(reason) = incomplete_given {
+                    pending = Some(reason);
+                    continue;
+                }
+            }
             match resolution.types.selection {
                 Selection::Selected(id) => {
                     let Some(crate::implementation::TypeAssessment::Applicable(evidence)) =

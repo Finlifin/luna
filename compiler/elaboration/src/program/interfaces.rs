@@ -1328,7 +1328,11 @@ impl Checker<'_, '_> {
                             substitution.instantiate_requirement_bounded(&requirement, &mut fuel)
                         })
                         .map_err(|e| error(span, e.to_string()))?;
-                    if world.given(&requirement, Budget::default()).is_some() {
+                    if world
+                        .given(&requirement, Budget::default())
+                        .map_err(|e| error(span, e.to_string()))?
+                        .is_some()
+                    {
                         continue;
                     }
                     let resolution = world
@@ -1552,7 +1556,10 @@ impl Checker<'_, '_> {
         };
         let subject = if interface
             .as_ref()
-            .is_some_and(|interface| self.symbolic_interface_evidence(&subject, interface))
+            .map(|interface| self.symbolic_interface_evidence(&subject, interface))
+            .transpose()
+            .map_err(|e| error(span, e.to_string()))?
+            .unwrap_or(false)
         {
             subject
         } else {
@@ -1721,7 +1728,10 @@ impl Checker<'_, '_> {
             if &origin != interface {
                 // The requested child view must itself be justified. A
                 // parent implementation alone cannot grant that view.
-                if !self.symbolic_interface_evidence(&subject, interface) {
+                if !self
+                    .symbolic_interface_evidence(&subject, interface)
+                    .map_err(|e| error(span, e.to_string()))?
+                {
                     let resolution = self
                         .resolve_trait_capability(interface, &subject, Budget::default())
                         .map_err(|e| error(span, format!("interface view query failed: {e:?}")))?;
@@ -1744,7 +1754,10 @@ impl Checker<'_, '_> {
             }) {
                 return Ok(None);
             }
-            if self.symbolic_interface_evidence(&subject, interface) {
+            if self
+                .symbolic_interface_evidence(&subject, interface)
+                .map_err(|e| error(span, e.to_string()))?
+            {
                 let contract = self
                     .checked_traits
                     .iter()
@@ -2088,7 +2101,10 @@ impl Checker<'_, '_> {
                     .collect::<Result<_, _>>()?,
             };
             let interface = requirement.interface_instance();
-            if self.symbolic_interface_evidence(&requirement.subject, &interface) {
+            if self
+                .symbolic_interface_evidence(&requirement.subject, &interface)
+                .map_err(|e| error(span, e.to_string()))?
+            {
                 continue;
             }
             // This is an obligation, not method selection. The proposition
@@ -2377,7 +2393,10 @@ impl Checker<'_, '_> {
             .transpose()?;
         let mut subject = if interface
             .as_ref()
-            .is_some_and(|interface| self.symbolic_interface_evidence(&receiver.ty, interface))
+            .map(|interface| self.symbolic_interface_evidence(&receiver.ty, interface))
+            .transpose()
+            .map_err(|e| error(expr.span, e.to_string()))?
+            .unwrap_or(false)
         {
             receiver.ty.clone()
         } else {
@@ -2408,7 +2427,9 @@ impl Checker<'_, '_> {
             }
             let absent_at_pointer = if let Some(interface) = &candidate_interface {
                 matches!(subject, Term::Pointer(_))
-                    && !self.symbolic_interface_evidence(&subject, interface)
+                    && !self
+                        .symbolic_interface_evidence(&subject, interface)
+                        .map_err(|e| error(expr.span, e.to_string()))?
                     && matches!(
                         self.resolve_trait_capability(interface, &subject, Budget::default())
                             .map_err(|message| error(expr.span, message))?
@@ -2691,7 +2712,10 @@ impl Checker<'_, '_> {
                     .instantiate_parameters_in_scope(&parameters, arguments, &frames)
                     .map_err(|e| error(span, e.to_string()))?;
                 let instance = requirement.interface_instance();
-                if self.symbolic_interface_evidence(&requirement.subject, &instance) {
+                if self
+                    .symbolic_interface_evidence(&requirement.subject, &instance)
+                    .map_err(|e| error(span, e.to_string()))?
+                {
                     continue;
                 }
                 let mut requirement = requirement;
@@ -2700,7 +2724,10 @@ impl Checker<'_, '_> {
                     *argument = self.capability_argument_view(argument, span)?;
                 }
                 let instance = requirement.interface_instance();
-                if self.symbolic_interface_evidence(&requirement.subject, &instance) {
+                if self
+                    .symbolic_interface_evidence(&requirement.subject, &instance)
+                    .map_err(|e| error(span, e.to_string()))?
+                {
                     continue;
                 }
                 let resolution = self

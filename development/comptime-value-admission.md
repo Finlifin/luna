@@ -2535,6 +2535,32 @@ NF 头不展开的边界保持。
 成功，以及另一个已建立的析取分支独立完成证明。形成检查还验证重复前提证明的
 成本、子查询额度上限、语义拒绝、资源失败与后续重试。
 
+**Given 前提查询。** World／Solver 的 given 系列接口现在返回
+`Result<Option<TraitRequirement>, NominalAdmissionError>`：只有 `Ok(None)` 表示
+已完成查询但没有见证。输入／域非法、预算不足、关系未决分别保留 Invalid、Budget、
+Unresolved。独立的后续前提仍可给出有效见证；一次未决查找不能替代否定证据。
+
+查询移入独立的 given 模块，直接借用 world、上下文与根前提，不再为只读查找构造
+ResolutionScope 快照。输入载荷、见证复制、去重键和继承替换共用调用者的额度；
+子查询只消费获分配的额度，并在所有结果上扣除实际消耗。完整 telescope 可以构造
+Type 比较，未完成的 runtime telescope 仍保留原 sort frame，不伪造类型上下文。
+
+普通值参数先比较结构和已知标量差异，只有相同结构中的 Type 叶节点交给 PTC。
+NIR 提供共享额度的 index_type_relations_budgeted，遍历不足不会冒充无 Type 关系；
+这一 given 路径不再将 Symbol、record 等普通值作为 Type 等式提交。
+
+条件求解、候选 qualification 和世界命题保留独立 implementation 的正向证明路径。
+若前提查询未决，后续独立证明仍能建立目标；未选出候选则不能据此排除目标。
+关联成员、elaboration、materialization 和 Copy／Drop 调用者传播查询失败，不能继续
+走默认“不存在”分支。条件证据 replay 现在扣除 given 查询的实际开销，Budget 保持
+ProofError::BudgetExhausted；其他错误仍受既有 replay 错误类型的限制。
+
+回归区分非法作用域、真实无匹配、宽载荷耗尽与重试；覆盖缺少 NF congruence 时
+保留 Pending、独立给定证据及 implementation 证明、补齐关系证据后成功、损坏继承
+边不能导致假阴性，以及普通 record 值内 Type 关系与标量差异。两个旧的完整
+function telescope 比较会产生 UnvalidatedModel，现明确要求 Unresolved，不能将
+当前求解器尚不能验证的模型写成“已查完但没有前提”。
+
 NF 的 ApplicationError::Unresolved 保留失败的参数位置和原因；dispatch 转回
 共享准入错误时不丢失该分类。执行侧 typed admission 消费者将其映射为
 TypeContractUnresolved，区别于 StepsExhausted 和类型错误。NF 未完成检查不会
@@ -2554,8 +2580,8 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
 - fresh phase pass 仍使用自己的默认额度，VM 随后再做结构检查；构造失败的
   for_comptime_in_budget 仍保守保留全部 reservation，尚非精确失败扣款。
 - 后续关联项／方法签名与 world capability 的部分实例化尚未有界。
-- 条件 trait 形成与要求 discharge 已保留具体未决原因，但 capability 的公开
-  resolve／decide_trait、given 和 projection 仍有 String、is_ok 或可选结果边界；
+- 条件 trait 形成、given 与要求 discharge 已保留具体未决原因，但 capability 的公开
+  resolve／decide_trait 和 projection 仍有 String、is_ok 或可选结果边界；
   条件形成中的旧 nested resolution 失败仍可能只表示暂无事实。proof replay
   也仍有合并 admission 错误的路径，完整求解链的 Pending／资源／反例传播未完成。
 - 旧 layout／callable 可选观察器把 Unresolved 表示为 unavailable view，仍不能
@@ -2563,25 +2589,32 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
   消费者，不能把本次新增分类说成所有描述观察都已无损。
 - nominal 的既有公开 evidence 包装仍接收总布尔关系，再适配到共享内核；
   需要可失败域查询的消费者必须直接走 fallible DomainQueries。各公开包装的
-  后续迁移以及旧 index shape 布尔观察仍待处理。
+  后续迁移以及旧 index shape 布尔观察仍待处理。index_type_relations 的旧可选
+  包装仍供其他匹配路径使用，尚未全部改用共享额度接口。
 
 验证证据见下；历史中间版本的逐轮日志由 git 保留，不作为当前实现状态。
 
 最终源码的验证范围与输出锚点如下（工作目录 `/home/fin/luna`）：
 
-- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution
-  -p elaboration --lib --test solver --test type_inputs --test capabilities
-  --test implementation --test implementation_phases --no-fail-fast`：491 通过，
-  退出 0；`/tmp/luna-tools-vhg5qrk0/result.json`。
-- `python3 -B development/check.py --timeout 900 -- test -p luna --test predicate_calls
-  --test trait_purity --test trait_phases --test trait_domain_substitution
-  --test dynamic_trait_clauses --test comptime_bytecode_traits --test sysroot_preludes
-  --test library_list_equality --test normal_input_plans --test cmtt_type_inputs
-  --no-fail-fast`：173 通过、1 ignored，退出 0；
-  `/tmp/luna-tools-l_1yjes4/result.json`。忽略项是既有的
-  comptime_decisions_check_their_results_before_returning_types，仍缺阶段敏感的
-  值引用稳定性证据，本次没有修改或宣称修复。
-- 修改文件的 rustfmt check：退出 0；`/tmp/luna-tools-bj2k1tz0/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p nir
+  -p program_verification -p materialization --lib --test capabilities
+  --test trait_parameters --test associated --test implementation
+  --test implementation_phases --test associated_resources --test expansion_boundary
+  --no-fail-fast`：394 通过，退出 0；`/tmp/luna-tools-9s76f2py/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_purity
+  --test trait_phases --test trait_domain_substitution --test dynamic_trait_clauses
+  --test comptime_bytecode_traits --test sysroot_preludes --test library_list_equality
+  --test normal_input_plans --test cmtt_type_inputs --test associated_signatures
+  --test deferred_associated_values --test iteration --test library_iteration
+  --no-fail-fast`：其中 11 组完整通过，共 187 项；整体退出 101，不能称为整组通过。
+  `iteration` 的三个用例在 HIR lowering 找不到 bool，`library_iteration` 在
+  flat_map_short_circuit_cleans_inner_and_outer_remainders 栈溢出后中止；
+  `/tmp/luna-tools-4gco4dko/result.json`。
+- 以 `727522d7` 的本轮涉及源码作对照，保留此前已有工作区修改，复现同样的三个
+  HIR 失败与同一个栈溢出，分别退出 101：`/tmp/luna-tools-dv40cakg/result.json`、
+  `/tmp/luna-tools-n31xwqtz/result.json`。对照结束后，本轮源码逐字节恢复。
+  这些是确认仍存在的基线阻塞，不是通过或已修复的证据。
+- 修改文件的 rustfmt check：退出 0；`/tmp/luna-tools-ggdila70/result.json`。
 
-未跑全 workspace 或性能基准，其他已记录基线问题不在这批宣称解决。
-正式 docs、program verification 与 library 的既有工作区修改保持原字节内容。
+未跑全 workspace 或性能基准。正式 docs、moves/effects.rs 与 library/README.md
+此前的工作区修改保持原字节内容；没有为获得通过而改写失败用例或增大运行预算。

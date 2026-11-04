@@ -171,7 +171,7 @@ impl World<'_> {
             let capability = substitution
                 .instantiate_requirement_bounded(capability, &mut fuel)
                 .map_err(|e| e.to_string())?;
-            if self.given(&capability, query_budget).is_some() {
+            if self.given(&capability, query_budget)?.is_some() {
                 continue;
             }
             let mut allowance = query_budget;
@@ -621,7 +621,7 @@ impl Normalizer<'_, '_, '_> {
                     // A failed premise lookup may consume very little work.
                     // Charging its whole allowance starves nested projections.
                     self.spend(query_steps - given_budget.steps)?;
-                    if found.is_some() {
+                    if found?.is_some() {
                         let contract = self
                             .world
                             .traits
@@ -1391,7 +1391,7 @@ impl World<'_> {
             let capability = substitution
                 .instantiate_requirement_bounded(capability, &mut fuel)
                 .map_err(|e| e.to_string())?;
-            if self.given(&capability, query_budget).is_some() {
+            if self.given(&capability, query_budget)?.is_some() {
                 continue;
             }
             let resolved = self.resolve_projected_instance(

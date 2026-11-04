@@ -439,9 +439,9 @@ fn parameterized_parent_assumptions_substitute_all_interface_arguments() {
     };
     let mut required = requirement(101, boxed(Term::Primitive(Primitive::Char)));
     required.interface_arguments = vec![Term::Primitive(Primitive::Bool)];
-    assert!(world.given(&required, Budget::default()).is_some());
+    assert!(world.given(&required, Budget::default()).unwrap().is_some());
     required.interface_arguments = vec![Term::Primitive(Primitive::Char)];
-    assert!(world.given(&required, Budget::default()).is_none());
+    assert!(world.given(&required, Budget::default()).unwrap().is_none());
 }
 
 #[test]
@@ -583,15 +583,15 @@ fn given_capabilities_follow_parameter_edges_with_full_subject_identity() {
         interface_arguments: vec![rigid(1)],
     };
     assert_eq!(
-        world.given(&requirement, Budget::default()),
+        world.given(&requirement, Budget::default()).unwrap(),
         Some(assumption)
     );
     let mut wrong = requirement.clone();
     wrong.subject = rigid(3);
-    assert!(world.given(&wrong, Budget::default()).is_none());
+    assert!(world.given(&wrong, Budget::default()).unwrap().is_none());
     wrong = requirement.clone();
     wrong.interface_arguments = vec![rigid(3)];
-    assert!(world.given(&wrong, Budget::default()).is_none());
+    assert!(world.given(&wrong, Budget::default()).unwrap().is_none());
     assert!(
         world
             .given(
@@ -601,7 +601,7 @@ fn given_capabilities_follow_parameter_edges_with_full_subject_identity() {
                     ..Budget::default()
                 }
             )
-            .is_none()
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Budget))
     );
     let sources =
         type_resolution::capabilities::capability_sources(&traits, &assumptions, Budget::default())
@@ -718,7 +718,9 @@ fn scoped_given_evidence_follows_parents_and_parameter_capabilities() {
         interface_arguments: vec![bound(0)],
     };
     assert_eq!(
-        world.given_in_scope(&requested, Budget::default(), &scope),
+        world
+            .given_in_scope(&requested, Budget::default(), &scope)
+            .unwrap(),
         Some(assumption.clone())
     );
     let sources = type_resolution::capabilities::capability_sources_in_scope(
@@ -776,26 +778,31 @@ fn scoped_given_evidence_follows_parents_and_parameter_capabilities() {
         .is_err(),
         "a broken inherited edge must not silently remove a competing member source"
     );
-    assert!(world.given(&requested, Budget::default()).is_none());
+    assert!(
+        world
+            .given(&requested, Budget::default())
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Invalid(_)))
+    );
     let mut wrong = requested.clone();
     wrong.subject = bound(0);
     assert!(
         world
             .given_in_scope(&wrong, Budget::default(), &scope)
-            .is_none()
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Unresolved(_)))
     );
     wrong = requested.clone();
     wrong.interface_arguments = vec![bound(1)];
     assert!(
         world
             .given_in_scope(&wrong, Budget::default(), &scope)
-            .is_none()
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Unresolved(_)))
     );
     wrong = requested.clone();
     wrong.interface = id(130);
     assert!(
         world
             .given_in_scope(&wrong, Budget::default(), &scope)
+            .unwrap()
             .is_none()
     );
     assert!(
@@ -808,12 +815,12 @@ fn scoped_given_evidence_follows_parents_and_parameter_capabilities() {
                 },
                 &scope
             )
-            .is_none()
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Budget))
     );
     assert!(
         world
             .given_in_scope(&assumption, Budget::default(), &scope[..1])
-            .is_none()
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Invalid(_)))
     );
     let invalid_scope = vec![
         Parameter {
@@ -825,7 +832,7 @@ fn scoped_given_evidence_follows_parents_and_parameter_capabilities() {
     assert!(
         world
             .given_in_scope(&assumption, Budget::default(), &invalid_scope)
-            .is_none()
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Invalid(_)))
     );
     // No evidence is cached into a subsequent query with different assumptions.
     let empty = World {
@@ -835,6 +842,7 @@ fn scoped_given_evidence_follows_parents_and_parameter_capabilities() {
     assert!(
         empty
             .given_in_scope(&requested, Budget::default(), &scope)
+            .unwrap()
             .is_none()
     );
 }
@@ -861,11 +869,13 @@ fn scoped_given_evidence_retains_closed_type_equalities() {
         ty: Term::Primitive(Primitive::Type),
     }];
     assert_eq!(
-        world.given_in_scope(
-            &requirement(100, Term::Primitive(Primitive::Bool)),
-            Budget::default(),
-            &scope
-        ),
+        world
+            .given_in_scope(
+                &requirement(100, Term::Primitive(Primitive::Bool)),
+                Budget::default(),
+                &scope
+            )
+            .unwrap(),
         Some(assumptions[0].clone())
     );
     assert!(
@@ -875,6 +885,7 @@ fn scoped_given_evidence_retains_closed_type_equalities() {
                 Budget::default(),
                 &scope
             )
+            .unwrap()
             .is_none()
     );
     let malformed = vec![requirement(100, Term::Bool(true))];
@@ -885,7 +896,7 @@ fn scoped_given_evidence_retains_closed_type_equalities() {
     assert!(
         invalid_world
             .given_in_scope(&malformed[0], Budget::default(), &scope)
-            .is_none()
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Invalid(_)))
     );
 }
 #[test]
@@ -1031,9 +1042,9 @@ fn symbol_indexed_parent_assumptions_keep_input_sorts() {
         subject,
         interface_arguments: vec![Term::Symbol("px".into())],
     };
-    assert!(world.given(&query, Budget::default()).is_some());
+    assert!(world.given(&query, Budget::default()).unwrap().is_some());
     query.interface_arguments[0] = Term::Symbol("em".into());
-    assert!(world.given(&query, Budget::default()).is_none());
+    assert!(world.given(&query, Budget::default()).unwrap().is_none());
     let sources =
         type_resolution::capabilities::capability_sources(&traits, &assumptions, Budget::default())
             .unwrap();
@@ -1941,6 +1952,7 @@ fn scoped_given_evidence_uses_equalities_in_the_same_input_scope() {
     assert!(
         world
             .given_in_scope(&requirement(100, b.clone()), Budget::default(), &parameters)
+            .unwrap()
             .is_some()
     );
     let empty = Context::with_scope(vec![vec![Sort::Type, Sort::Type]]);
@@ -1951,12 +1963,13 @@ fn scoped_given_evidence_uses_equalities_in_the_same_input_scope() {
     assert!(
         world
             .given_in_scope(&requirement(100, b), Budget::default(), &parameters)
+            .unwrap()
             .is_none()
     );
     assert!(
         world
             .given(&requirement(100, a), Budget::default())
-            .is_none()
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Invalid(_)))
     );
 }
 
@@ -2601,9 +2614,14 @@ fn assumption_lookup_accounts_for_wide_type_inputs_and_recovers() {
                     ..Default::default()
                 }
             )
-            .is_none()
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Budget))
     );
-    assert!(world.given(&requested, Budget::default()).is_some());
+    assert!(
+        world
+            .given(&requested, Budget::default())
+            .unwrap()
+            .is_some()
+    );
     assert!(
         world
             .given(
@@ -2613,9 +2631,14 @@ fn assumption_lookup_accounts_for_wide_type_inputs_and_recovers() {
                     ..Default::default()
                 }
             )
-            .is_none()
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Budget))
     );
-    assert!(world.given(&requested, Budget::default()).is_some());
+    assert!(
+        world
+            .given(&requested, Budget::default())
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -2635,13 +2658,27 @@ fn metered_assumption_lookup_returns_consumed_allowance_on_failure_and_success()
         steps: 16,
         ..Default::default()
     };
-    assert!(world.given_metered(&requested, &mut small).is_none());
+    assert!(
+        world
+            .given_metered(&requested, &mut small)
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Budget))
+    );
     assert!(small.steps < 16);
     let mut enough = Budget::default();
     let before = enough.steps;
-    assert!(world.given_metered(&requested, &mut enough).is_some());
+    assert!(
+        world
+            .given_metered(&requested, &mut enough)
+            .unwrap()
+            .is_some()
+    );
     assert!(enough.steps + 64 < before);
-    assert!(world.given_metered(&requested, &mut enough).is_some());
+    assert!(
+        world
+            .given_metered(&requested, &mut enough)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -2958,7 +2995,9 @@ fn type_valued_indices_cross_parent_and_capability_edges_without_losing_identity
     };
     let requested = requirement(120, boxed(boolean.clone()));
     assert_eq!(
-        world.given_in_scope(&requested, Budget::default(), &[]),
+        world
+            .given_in_scope(&requested, Budget::default(), &[])
+            .unwrap(),
         Some(assumption.clone())
     );
     assert!(
@@ -2968,6 +3007,7 @@ fn type_valued_indices_cross_parent_and_capability_edges_without_losing_identity
                 Budget::default(),
                 &[]
             )
+            .unwrap()
             .is_none()
     );
     let sources = capability_sources(&traits, &assumptions, Budget::default()).unwrap();
@@ -2983,9 +3023,15 @@ fn type_valued_indices_cross_parent_and_capability_edges_without_losing_identity
         ..Budget::default()
     };
     assert!(capability_sources(&traits, &assumptions, tiny).is_err());
-    assert!(world.given_in_scope(&requested, tiny, &[]).is_none());
+    assert!(
+        world
+            .given_in_scope(&requested, tiny, &[])
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Budget))
+    );
     assert_eq!(
-        world.given_in_scope(&requested, Budget::default(), &[]),
+        world
+            .given_in_scope(&requested, Budget::default(), &[])
+            .unwrap(),
         Some(assumption)
     );
 }
@@ -3127,4 +3173,180 @@ fn inherent_qualification_retains_caller_scope_and_rejects_scope_changes() {
             .verify_inherent_evidence(&inherent, "read", &subject, &result, Budget::default())
             .is_err()
     );
+}
+
+#[test]
+fn incomplete_given_equality_does_not_authorize_absence_or_exclusion() {
+    use nir::NominalAdmissionError;
+    use type_resolution::ptc::Formula;
+    let nf = |ty| Term::NormalForm {
+        head: id(90),
+        sort: Sort::Type,
+        arguments: vec![ty],
+    };
+    let left = var();
+    let right = Term::Rigid {
+        declaration: id(2),
+        sort: Sort::Type,
+    };
+    let requested = requirement(101, nf(right.clone()));
+    let given = requirement(101, nf(left.clone()));
+    let implementations = [implementation(
+        20,
+        100,
+        Term::Primitive(Primitive::Bool),
+        vec![],
+        vec![requested.clone()],
+    )];
+    let ix = index(&implementations);
+    let traits = [marker(100), marker(101)];
+    let mut context = Context::default();
+    context.assume(Formula::equal(left, right));
+    let assumptions = [given];
+    let world = World {
+        index: &ix,
+        implementations: &implementations,
+        traits: &traits,
+        assumptions: &assumptions,
+        context: &context,
+    };
+    assert!(matches!(
+        world.given(&requested, Budget::default()),
+        Err(NominalAdmissionError::Unresolved(_))
+    ));
+    let result = world
+        .resolve(
+            id(100),
+            &Term::Primitive(Primitive::Bool),
+            Budget::default(),
+        )
+        .unwrap();
+    assert!(
+        matches!(result.qualifications.get(&id(20)), Some(Qualification::Pending(reason)) if reason.contains("UnvalidatedModel"))
+    );
+    assert!(!matches!(
+        result.types.selection,
+        Selection::NoApplicableCandidate
+    ));
+
+    // An earlier incomplete premise does not hide an independent exact witness.
+    let complete = [assumptions[0].clone(), requested.clone()];
+    let with_witness = World {
+        assumptions: &complete,
+        ..world
+    };
+    assert_eq!(
+        with_witness.given(&requested, Budget::default()),
+        Ok(Some(requested.clone()))
+    );
+    let mut recovered = context.clone();
+    recovered.admit_congruence(id(90));
+    let resolved = World {
+        context: &recovered,
+        ..world
+    };
+    assert_eq!(
+        resolved.given(&requested, Budget::default()),
+        Ok(Some(assumptions[0].clone()))
+    );
+    assert_eq!(
+        resolved
+            .resolve(
+                id(100),
+                &Term::Primitive(Primitive::Bool),
+                Budget::default()
+            )
+            .unwrap()
+            .types
+            .selection,
+        Selection::Selected(id(20))
+    );
+}
+
+#[test]
+fn given_lookup_preserves_invalid_inherited_edges_and_recovers() {
+    let mut child = marker(100);
+    child.capabilities.push(requirement(
+        101,
+        Term::Bound {
+            depth: 0,
+            index: 9,
+            sort: Sort::Type,
+        },
+    ));
+    let traits = [child, marker(101)];
+    let requested = requirement(101, Term::Primitive(Primitive::Bool));
+    let assumptions = [requirement(100, requested.subject.clone())];
+    let index = Index::default();
+    let context = Context::default();
+    let world = World {
+        index: &index,
+        implementations: &[],
+        traits: &traits,
+        assumptions: &assumptions,
+        context: &context,
+    };
+    assert!(matches!(
+        world.given(&requested, Budget::default()),
+        Err(nir::NominalAdmissionError::Invalid(_))
+    ));
+    let independent = [assumptions[0].clone(), requested.clone()];
+    assert_eq!(
+        World {
+            assumptions: &independent,
+            ..world
+        }
+        .given(&requested, Budget::default()),
+        Ok(Some(requested.clone()))
+    );
+    assert_eq!(
+        World {
+            assumptions: &[],
+            ..world
+        }
+        .given(&requested, Budget::default()),
+        Ok(None)
+    );
+}
+
+#[test]
+fn given_lookup_compares_type_leaves_inside_ordinary_record_values() {
+    use type_resolution::ptc::Formula;
+    let boolean = Term::Primitive(Primitive::Bool);
+    let a = var();
+    let b = Term::Rigid {
+        declaration: id(2),
+        sort: Sort::Type,
+    };
+    let mut contract = marker(100);
+    contract.type_parameters = vec![id(3)];
+    contract.parameter_types = vec![Term::Record(vec![
+        ("tag".into(), boolean.clone()),
+        ("ty".into(), Term::Primitive(Primitive::Type)),
+    ])];
+    let query = |tag, ty| TraitRequirement {
+        interface: id(100),
+        subject: boolean.clone(),
+        interface_arguments: vec![Term::RecordValue(vec![
+            ("tag".into(), Term::Bool(tag)),
+            ("ty".into(), ty),
+        ])],
+    };
+    let assumptions = [query(false, a.clone())];
+    let traits = [contract];
+    let index = Index::default();
+    let mut context = Context::default();
+    context.assume(Formula::equal(a, b.clone()));
+    let world = World {
+        index: &index,
+        implementations: &[],
+        traits: &traits,
+        assumptions: &assumptions,
+        context: &context,
+    };
+    assert_eq!(
+        world.given(&query(false, b.clone()), Budget::default()),
+        Ok(Some(assumptions[0].clone()))
+    );
+    assert_eq!(world.given(&query(true, b), Budget::default()), Ok(None));
 }

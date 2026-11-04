@@ -85,14 +85,27 @@ impl Term {
         &'a self,
         other: &'a Self,
     ) -> Option<Vec<(&'a Term, &'a Term)>> {
+        self.index_type_relations_budgeted(other, &mut 100_000)
+            .ok()
+            .flatten()
+    }
+
+    /// Compare value structure with caller-owned fuel. An unfinished traversal
+    /// cannot be used as evidence that no Type relations exist.
+    pub fn index_type_relations_budgeted<'a>(
+        &'a self,
+        other: &'a Self,
+        fuel: &mut usize,
+    ) -> Result<Option<Vec<(&'a Term, &'a Term)>>, crate::type_computations::Error> {
         let mut pending = vec![(self, other, 0usize)];
         let mut relations = Vec::new();
-        let mut remaining = 100_000usize;
+        crate::type_computations::charge_term(self, fuel)?;
+        crate::type_computations::charge_term(other, fuel)?;
         while let Some((left, right, depth)) = pending.pop() {
-            if remaining == 0 || depth >= 128 {
-                return None;
+            if *fuel == 0 || depth >= 128 {
+                return Err(crate::type_computations::Error::Budget);
             }
-            remaining -= 1;
+            *fuel -= 1;
             if depth > 0 && left.sort() == Sort::Type && right.sort() == Sort::Type {
                 relations.push((left, right));
             } else if let (
@@ -108,11 +121,8 @@ impl Term {
                 },
             ) = (left, right)
             {
-                if av != bv
-                    || af.len() != bf.len()
-                    || af.len().saturating_add(1) > remaining.saturating_sub(pending.len())
-                {
-                    return None;
+                if av != bv || af.len() != bf.len() {
+                    return Ok(None);
                 }
                 pending.push((a, b, depth + 1));
                 pending.extend(af.iter().zip(bf).rev().map(|(a, b)| (a, b, depth + 1)));
@@ -122,7 +132,7 @@ impl Term {
             ) = (left, right)
             {
                 if av.is_some() != bv.is_some() {
-                    return None;
+                    return Ok(None);
                 }
                 pending.push((a, b, depth + 1));
                 if let (Some(a), Some(b)) = (av, bv) {
@@ -142,7 +152,7 @@ impl Term {
             ) = (left, right)
             {
                 if al.is_some() != bl.is_some() {
-                    return None;
+                    return Ok(None);
                 }
                 pending.push((a, b, depth + 1));
                 if let (Some(a), Some(b)) = (al, bl) {
@@ -150,17 +160,17 @@ impl Term {
                 }
                 pending.push((av, bv, depth + 1));
             } else if let (Self::TupleValue(a), Self::TupleValue(b)) = (left, right) {
-                if a.len() != b.len() || a.len() > remaining.saturating_sub(pending.len()) {
-                    return None;
+                if a.len() != b.len() {
+                    return Ok(None);
                 }
                 pending.extend(a.iter().zip(b).rev().map(|(a, b)| (a, b, depth + 1)));
             } else if let (Self::RecordValue(a), Self::RecordValue(b)) = (left, right) {
-                if a.len() != b.len() || a.len() > remaining.saturating_sub(pending.len()) {
-                    return None;
+                if a.len() != b.len() {
+                    return Ok(None);
                 }
                 for ((name, a), (other_name, b)) in a.iter().zip(b).rev() {
                     if name != other_name {
-                        return None;
+                        return Ok(None);
                     }
                     pending.push((a, b, depth + 1));
                 }
@@ -175,10 +185,10 @@ impl Term {
             {
                 continue;
             } else if left.scalar_index_domain().is_none() || left != right {
-                return None;
+                return Ok(None);
             }
         }
-        Some(relations)
+        Ok(Some(relations))
     }
 
     /// Refute value identity using only known scalar or record-shape differences.

@@ -653,7 +653,7 @@ fn build(
                         subject: subject.clone(),
                     },
                     budget,
-                )
+                )?
                 .is_some();
                 if !given {
                     if builder.instances.is_some() {
