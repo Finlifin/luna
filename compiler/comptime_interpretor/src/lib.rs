@@ -1148,7 +1148,12 @@ impl<'a> Interpreter<'a> {
             kind: ErrorKind::InvalidCallPlan,
             source: None,
         };
-        nir::normal_forms::validate(package).map_err(|_| invalid())?;
+        // Matching source indexes certify structural metadata for this exact
+        // immutable snapshot. Caller premises still receive their own checks
+        // below, but cannot invalidate or replace this structural evidence.
+        if positions.is_none() {
+            invocation_budget::validate_opaque_metadata(package, &mut budget)?;
+        }
         let completed_tuple_heads = package
             .normal_forms
             .iter()

@@ -63,6 +63,35 @@ pub(super) fn charge_world_tables(package: &Package, budget: &mut Budget) -> Res
     Ok(())
 }
 
+/// Fresh worlds validate opaque declaration metadata using construction fuel.
+/// Resource exhaustion is not malformed metadata, even when fuel remains after
+/// a failed width reservation. The caller separately establishes phase evidence.
+pub(super) fn validate_opaque_metadata(
+    package: &Package,
+    budget: &mut Budget,
+) -> Result<(), Error> {
+    let before = usize::try_from(budget.steps).unwrap_or(usize::MAX);
+    let mut fuel = before;
+    let result = nir::normal_forms::validate_in(package, &mut fuel);
+    budget.steps -= (before - fuel) as u64;
+    result.map_err(|failure| {
+        use nir::normal_forms::ValidationError;
+        Error {
+            kind: match failure {
+                ValidationError::Budget
+                | ValidationError::Newtype(nir::newtypes::ValidationError::Budget) => {
+                    ErrorKind::StepsExhausted
+                }
+                ValidationError::Invalid(_)
+                | ValidationError::Newtype(nir::newtypes::ValidationError::Invalid(_)) => {
+                    ErrorKind::InvalidCallPlan
+                }
+            },
+            source: None,
+        }
+    })
+}
+
 struct Scope<'program, 'budget> {
     interpreter: Interpreter<'program>,
     budget: &'budget mut Budget,
@@ -103,6 +132,127 @@ impl<'program> Interpreter<'program> {
 mod tests {
     use super::*;
     use nir::{DeclarationId, Primitive, Term};
+
+    fn opaque_package() -> Package {
+        Package {
+            normal_forms: vec![nir::normal_forms::Head {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                role: Default::default(),
+                collector: None,
+                parameters: vec![],
+                requirements: vec![nir::program::TypePredicate::Bool(true); 100],
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn opaque_metadata_reservations_keep_resource_errors_and_successful_costs() {
+        let mut package = opaque_package();
+        let mut short = Budget {
+            steps: 5,
+            depth: 128,
+        };
+        assert_eq!(
+            validate_opaque_metadata(&package, &mut short)
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+        assert!(short.steps > 0 && short.steps < 5);
+        assert_eq!(short.depth, 128);
+        let mut generous = Budget {
+            steps: 10_000,
+            depth: 128,
+        };
+        validate_opaque_metadata(&package, &mut generous).unwrap();
+        let cost = 10_000 - generous.steps;
+        let mut exact = Budget {
+            steps: cost,
+            depth: 128,
+        };
+        validate_opaque_metadata(&package, &mut exact).unwrap();
+        assert_eq!(exact.steps, 0);
+        package.normal_forms[0].collector = Some(0);
+        assert_eq!(
+            validate_opaque_metadata(&package, &mut generous)
+                .unwrap_err()
+                .kind,
+            ErrorKind::InvalidCallPlan
+        );
+        package.normal_forms[0].collector = None;
+        validate_opaque_metadata(&package, &mut generous).unwrap();
+
+        let package = Package {
+            newtypes: vec![nir::newtypes::Newtype {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 2,
+                },
+                name: "Wide".into(),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                capture_count: 0,
+                requirements: vec![],
+                capabilities: vec![],
+                representation: Term::Tuple(vec![Term::Primitive(Primitive::Bool); 100]),
+            }],
+            ..Default::default()
+        };
+        let mut short = Budget {
+            steps: 10,
+            depth: 128,
+        };
+        assert_eq!(
+            validate_opaque_metadata(&package, &mut short)
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+        validate_opaque_metadata(&package, &mut generous).unwrap();
+    }
+
+    #[test]
+    fn fresh_constructors_charge_opaque_metadata_and_do_not_publish_failures() {
+        let package = opaque_package();
+        let before = package.to_string();
+        let vm = Interpreter::for_comptime(
+            &package,
+            Budget {
+                steps: 10_000,
+                depth: 128,
+            },
+        )
+        .unwrap();
+        let cost = 10_000 - vm.remaining_steps();
+        assert!(cost > 100);
+        for steps in 0..cost {
+            for result in [
+                Interpreter::new(&package, Budget { steps, depth: 128 }),
+                Interpreter::for_comptime(&package, Budget { steps, depth: 128 }),
+            ] {
+                assert_eq!(
+                    result.err().expect("insufficient constructor fuel").kind,
+                    ErrorKind::StepsExhausted,
+                    "steps {steps}"
+                );
+            }
+        }
+        let vm = Interpreter::for_comptime(
+            &package,
+            Budget {
+                steps: cost,
+                depth: 128,
+            },
+        )
+        .unwrap();
+        assert_eq!(vm.remaining_steps(), 0);
+        assert!(vm.events().is_empty());
+        assert_eq!(package.to_string(), before);
+    }
 
     #[test]
     fn declaration_domain_budget_failure_is_not_an_invalid_call_plan() {

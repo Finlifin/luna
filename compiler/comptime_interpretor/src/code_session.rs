@@ -212,6 +212,114 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extra_premises_reuse_metadata_only_from_the_identical_validated_snapshot() {
+        let id = |local| DeclarationId { package: 1, local };
+        let source = Arc::new(Package {
+            normal_forms: vec![nir::normal_forms::Head {
+                declaration: id(3),
+                role: Default::default(),
+                collector: None,
+                parameters: vec![],
+                requirements: vec![nir::program::TypePredicate::Bool(true); 2000],
+            }],
+            traits: vec![nir::program::Trait {
+                declaration: id(1),
+                self_parameter: id(2),
+                name: "Evidence".into(),
+                comptime_only: false,
+                type_parameters: vec![],
+                parameter_types: vec![],
+                associated: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                parents: vec![],
+                methods: vec![],
+            }],
+            ..Default::default()
+        });
+        let premise = nir::program::TraitRequirement {
+            interface: id(1),
+            interface_arguments: vec![],
+            subject: Term::Primitive(Primitive::Bool),
+        };
+        let small = Budget {
+            steps: 256,
+            depth: 128,
+        };
+        assert_eq!(
+            Interpreter::for_comptime_with_assumptions(
+                &source,
+                std::slice::from_ref(&premise),
+                small
+            )
+            .err()
+            .unwrap()
+            .kind,
+            ErrorKind::StepsExhausted
+        );
+        let mut session = CodeSession::new(source.clone());
+        Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
+            .unwrap();
+        let evidence = session.indexes.clone().unwrap();
+        let vm = Interpreter::for_comptime_with_index(
+            &source,
+            std::slice::from_ref(&premise),
+            small,
+            Some(evidence.clone()),
+        )
+        .unwrap();
+        assert!(
+            vm.assumed_interfaces
+                .contains(&(premise.interface_instance(), premise.subject.clone()))
+        );
+        assert!(vm.events().is_empty());
+        assert!(vm.remaining_steps() < small.steps);
+
+        // Equal declarations do not identify the owning snapshot. They must
+        // pay for fresh metadata even if the supplied indexes look reusable.
+        let copied = source.as_ref().clone();
+        assert_eq!(
+            Interpreter::for_comptime_with_index(
+                &copied,
+                std::slice::from_ref(&premise),
+                small,
+                Some(evidence.clone())
+            )
+            .err()
+            .unwrap()
+            .kind,
+            ErrorKind::StepsExhausted
+        );
+        let mut changed = copied;
+        changed.normal_forms[0].collector = Some(0);
+        assert!(matches!(
+            Interpreter::for_comptime_with_index(
+                &changed,
+                std::slice::from_ref(&premise),
+                Budget::default(),
+                Some(evidence.clone())
+            )
+            .err()
+            .unwrap()
+            .kind,
+            ErrorKind::InvalidPhase(_)
+        ));
+        let unknown = nir::program::TraitRequirement {
+            interface: id(99),
+            ..premise
+        };
+        assert_eq!(
+            Interpreter::for_comptime_with_index(&source, &[unknown], small, Some(evidence))
+                .err()
+                .unwrap()
+                .kind,
+            ErrorKind::InvalidCallPlan
+        );
+        Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
+            .unwrap();
+    }
+
+    #[test]
     fn source_phase_evidence_cannot_cross_snapshot_or_failed_publication() {
         let body = Expr {
             ty: Term::Primitive(Primitive::Bool),

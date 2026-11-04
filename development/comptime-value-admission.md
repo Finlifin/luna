@@ -2467,3 +2467,57 @@ record label 测试的资源／语义混淆。最终检查已覆盖相应修正�
 基线问题本批未处理，也未声明解决。required_steps 仍不是整个 elaborator 的完整
 成本模型；signature／generator 元数据准备、其他 owned 域观察、PTC／VM 构造中的
 预算与稳定世界证据仍须继续迁移。正式 docs 和原有工作区修改保持不变。
+
+
+### VM 构造中的 opaque 元数据成本与快照证据
+
+新 VM 构造现通过 `invocation_budget::validate_opaque_metadata` 调用
+`normal_forms::validate_in`，把 NF／newtype 结构检查的实际消耗扣入调用方 Budget，
+不再使用一份隐藏的 100,000 额度。外层与 newtype 内层 Budget 均保留为
+`StepsExhausted`；Invalid 仍归 `InvalidCallPlan`。批次预留失败留下正余额时也不能
+误判为语义错误。depth 配置不被修改，失败后的新构造不继承任何部分索引。
+
+`with_assumptions_and_index` 已在入口按 Package 地址过滤 SourceIndexes；索引本身
+持有原始 Arc 快照，避免仅靠地址或声明编号转交证据。匹配的索引已证明该快照的
+结构元数据有效，因此内部带 premises 的构造分支复用这份检查结果；premises 的
+接口、参数及闭包检查仍执行。相同内容的副本、修改后的 Package 和同号声明均不能
+借用原快照的验证结果。NF 主体依旧不执行，未把 caller assumptions 当作 NF 等式。
+
+这一复用的可达范围必须区分：公开 `for_comptime_in_session` 当前只传空 premises，
+继续走既有的完整索引复用途径；带非空 premises 与索引的组合目前由内部构造器
+回归覆盖。本批没有新增公开的带前提 session API，也不把内部用例说成已对外接通
+的新能力。生产交付是新世界构造的预算接线与错误分类；内部复用规则维护现有构造器
+对精确快照证据的统一解释。
+
+回归检查元数据预留失败仍有正余额、精确成功成本、newtype 内层资源耗尽、非法
+collector 拒绝与修复后重试。真实 fresh constructor 在每个不足的额度上返回
+StepsExhausted，充足额度后得到无执行事件的新 VM。内部索引回归同时检查 caller
+premise 确实安装、未知接口仍拒绝、同内容副本必须支付新检查成本、被修改世界必须
+拒绝，以及失败后原 session 仍可使用。
+
+恢复工作时，暂停前的 `/tmp` 日志与构建缓存已不在，不能用聊天中的通过记录替代
+当前可检验证据。本批在 `/home/fin/luna` 重新运行，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p comptime_interpretor -p elaboration --lib --test instance_budget
+  --test invocation_budget --test generated_normal_forms --no-fail-fast`：641 通过，
+  退出 0；`/tmp/luna-tools-al2ectu2/result.json`。
+- `-p luna --test newtypes --test normal_input_plans --test cmtt_type_inputs
+  --test sysroot_preludes --test library_list_equality --test trait_phases
+  --no-fail-fast`：340 通过，退出 0；`/tmp/luna-tools-qnyzd9ak/result.json`。
+- `-p luna --test key_code_sessions --no-fail-fast`：3 通过，退出 0；
+  `/tmp/luna-tools-am2vewue/result.json`。公开 key protocol 保持新鲜输入、契约与接收者
+  存储，不复用用户调用结果。
+- `-p luna --test builder_invocations public_newtype_builder --no-fail-fast`：
+  6 通过、80 filtered out，退出 0；`/tmp/luna-tools-yajlgzls/result.json`。
+  仅验证该筛选组，不声称整个 builder 集通过。
+
+格式检查 `/tmp/luna-tools-b5q2jsaz/result.json` 退出 0。未跑全 workspace 或性能
+基准；已有错误分类／示例／handler 基线问题未在此批宣称解决。正式 docs、用户
+已有源码及 library 修改保持不变。
+
+完整 constructor 计费仍未完成：fresh comptime 构造先执行的 phase pass 仍使用
+自己的默认额度，随后才进入本批计费的 VM 元数据检查；并未消除这条 fresh 路径的
+所有重复观察。`for_comptime_in_budget` 的构造失败仍保守保留全部 reservation，
+不是精确失败扣款。PTC 的独立 metadata compatibility 入口、其他构造检查的资源
+分类及共享状态所有权仍需继续迁移。
