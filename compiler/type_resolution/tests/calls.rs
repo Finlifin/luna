@@ -3137,3 +3137,53 @@ fn missing_tuple_collection_domains_do_not_manufacture_values_or_poison_retry() 
         );
     }
 }
+
+#[test]
+fn repeated_value_constraints_share_traversal_fuel_and_preserve_failed_trials() {
+    use type_resolution::{calls::Error, matching::MatchError};
+    let mut source = scheme(vec![], primitive(P::Bool), 1);
+    source.parameter_sorts = vec![Sort::ComptimeValue];
+    let mut candidate = source
+        .infer_partial_types(&[], None, Budget::default())
+        .unwrap();
+    let retained = Term::TupleValue(vec![Term::Bool(false); 64]);
+    let mut different = retained.clone();
+    let Term::TupleValue(fields) = &mut different else {
+        unreachable!()
+    };
+    fields[63] = Term::Bool(true);
+    candidate
+        .constrain_type_argument(0, &retained, Budget::default())
+        .unwrap();
+    let mut cost = 10_000;
+    nir::type_computations::charge_term(&retained, &mut cost).unwrap();
+    cost = 10_000 - cost;
+    // The first two payload checks fit; the relation traversal must consume
+    // this same budget rather than receiving a hidden fresh allowance.
+    for steps in 2 * cost..4 * cost {
+        assert!(
+            matches!(
+                candidate.constrain_type_argument(
+                    0,
+                    &different,
+                    Budget {
+                        steps,
+                        ..Budget::default()
+                    }
+                ),
+                Err(Error::Match(MatchError::BudgetExhausted))
+            ),
+            "steps={steps}"
+        );
+        assert_eq!(candidate.type_argument(0).unwrap(), Some(retained.clone()));
+    }
+    assert!(matches!(
+        candidate.constrain_type_argument(0, &different, Budget::default()),
+        Err(Error::InvalidSignature)
+    ));
+    assert_eq!(candidate.type_argument(0).unwrap(), Some(retained.clone()));
+    candidate
+        .constrain_type_argument(0, &retained, Budget::default())
+        .unwrap();
+    assert_eq!(candidate.finish().unwrap().type_arguments, vec![retained]);
+}

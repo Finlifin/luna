@@ -2547,7 +2547,21 @@ Type 比较，未完成的 runtime telescope 仍保留原 sort frame，不伪造
 
 普通值参数先比较结构和已知标量差异，只有相同结构中的 Type 叶节点交给 PTC。
 NIR 提供共享额度的 index_type_relations_budgeted，遍历不足不会冒充无 Type 关系；
-这一 given 路径不再将 Symbol、record 等普通值作为 Type 等式提交。
+given 不再将 Symbol、record 等普通值作为 Type 等式提交。调用候选、implementation
+重复参数匹配和 evidence replay 也已迁移到同一可失败接口；旧的
+index_type_relations 可选包装和 index_values_definitely_differ 布尔包装已删除，
+不再有内部自带额度或将耗尽转换成无匹配／未发现差异的公共捷径。
+
+implementation 的标量冲突预检、每个普通值参数的结构遍历、重复 binder 比较与
+后续 Type 匹配共用 head 分区的余额，不再为每个实参刷新额度。调用的显式输入
+约束在试探副本中完成：结构关系提取、Type 匹配及唤醒均沿用余额；失败不发布
+试探状态。Type 输入路径同样不再在匹配后重复使用原预算。
+
+implementation evidence replay 的域准入和关系提取保留 BudgetExhausted；
+每个没有精确返回消耗的 proof replay 仍预留一份额度，但这些预留现在从描述检查
+与替换的余额中扣除，二者不再同时花同一份预算。已完成的结构不匹配仍拒绝。
+回归逐额度检查普通 record 重复输入与 replay，允许成功或资源失败，禁止因资源
+不足而得到非法输入／不适用；调用测试还检查失败后的原值与后续重试。
 
 条件求解、候选 qualification 和世界命题保留独立 implementation 的正向证明路径。
 若前提查询未决，后续独立证明仍能建立目标；未选出候选则不能据此排除目标。
@@ -2589,32 +2603,34 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
   消费者，不能把本次新增分类说成所有描述观察都已无损。
 - nominal 的既有公开 evidence 包装仍接收总布尔关系，再适配到共享内核；
   需要可失败域查询的消费者必须直接走 fallible DomainQueries。各公开包装的
-  后续迁移以及旧 index shape 布尔观察仍待处理。index_type_relations 的旧可选
-  包装仍供其他匹配路径使用，尚未全部改用共享额度接口。
+  后续迁移以及旧 index shape 布尔观察仍待处理；本文涉及的两个值关系包装已退役。
 
 验证证据见下；历史中间版本的逐轮日志由 git 保留，不作为当前实现状态。
 
 最终源码的验证范围与输出锚点如下（工作目录 `/home/fin/luna`）：
 
 - `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p nir
-  -p program_verification -p materialization --lib --test capabilities
-  --test trait_parameters --test associated --test implementation
-  --test implementation_phases --test associated_resources --test expansion_boundary
-  --no-fail-fast`：394 通过，退出 0；`/tmp/luna-tools-9s76f2py/result.json`。
-- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_purity
-  --test trait_phases --test trait_domain_substitution --test dynamic_trait_clauses
-  --test comptime_bytecode_traits --test sysroot_preludes --test library_list_equality
-  --test normal_input_plans --test cmtt_type_inputs --test associated_signatures
-  --test deferred_associated_values --test iteration --test library_iteration
-  --no-fail-fast`：其中 11 组完整通过，共 187 项；整体退出 101，不能称为整组通过。
-  `iteration` 的三个用例在 HIR lowering 找不到 bool，`library_iteration` 在
-  flat_map_short_circuit_cleans_inner_and_outer_remainders 栈溢出后中止；
-  `/tmp/luna-tools-4gco4dko/result.json`。
-- 以 `727522d7` 的本轮涉及源码作对照，保留此前已有工作区修改，复现同样的三个
-  HIR 失败与同一个栈溢出，分别退出 101：`/tmp/luna-tools-dv40cakg/result.json`、
-  `/tmp/luna-tools-n31xwqtz/result.json`。对照结束后，本轮源码逐字节恢复。
-  这些是确认仍存在的基线阻塞，不是通过或已修复的证据。
-- 修改文件的 rustfmt check：退出 0；`/tmp/luna-tools-ggdila70/result.json`。
+  --test calls --test implementation --test trait_parameters --no-fail-fast`：
+  173 通过，退出 0；`/tmp/luna-tools-yr8odl4w/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p luna
+  --test capabilities --test implementation_phases --test callable_world
+  --test projection_copy_budget --test trait_domain_substitution
+  --test dynamic_trait_clauses --test normal_input_plans --test library_list_equality
+  --test sysroot_preludes --test associated_signatures --no-fail-fast`：
+  128 通过，退出 0；`/tmp/luna-tools-9miggq_w/result.json`。
+- 最后删除已无生产消费者的布尔包装后，执行
+  `python3 -B development/check.py --timeout 900 -- test -p nir
+  --test trait_parameters --test error_results --no-fail-fast`：57 通过，退出 0；
+  `/tmp/luna-tools-jufluuwt/result.json`。其中 trait_parameters 与首条范围重叠，
+  不累加为独立测试数量。源码搜索确认两个旧调用入口均无残留。
+- 修改文件的 rustfmt check：退出 0；`/tmp/luna-tools-xnr0r_4d/result.json`。
+
+仍存在的迭代器基线阻塞：iteration 的三个用例在 HIR lowering 找不到 bool，
+library_iteration 的 flat_map_short_circuit_cleans_inner_and_outer_remainders
+栈溢出。此前以 `727522d7` 涉及源码作对照，保留既有工作区修改，复现同样失败；
+对照证据为 `/tmp/luna-tools-dv40cakg/result.json` 和
+`/tmp/luna-tools-n31xwqtz/result.json`，均退出 101。这批未重新执行这些无关失败，
+也未将其标为通过或修复。
 
 未跑全 workspace 或性能基准。正式 docs、moves/effects.rs 与 library/README.md
 此前的工作区修改保持原字节内容；没有为获得通过而改写失败用例或增大运行预算。

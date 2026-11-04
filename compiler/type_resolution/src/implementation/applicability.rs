@@ -911,7 +911,6 @@ impl ImplementationHead {
         // Fixed value conflicts refute the entire head, even if another input
         // has an unresolved symbolic relation. Inspect them before inference
         // can return Pending for the first unknown field or argument.
-        let mut value_fuel = budget.steps;
         for (position, (template, actual)) in self
             .interface_arguments
             .iter()
@@ -921,17 +920,15 @@ impl ImplementationHead {
             if template.sort() != Sort::ComptimeValue || actual.sort() != Sort::ComptimeValue {
                 continue;
             }
-            if template.index_values_definitely_differ(actual, &mut value_fuel) {
+            if template
+                .index_values_definitely_differ_budgeted(actual, &mut head_budget.steps)
+                .map_err(|error| TypeAssessment::Pending(error.to_string()))?
+            {
                 return Err(TypeAssessment::ValueIndexMismatch {
                     position,
                     expected: template.clone(),
                     actual: actual.clone(),
                 });
-            }
-            if value_fuel == 0 {
-                return Err(TypeAssessment::Pending(
-                    "value conflict inspection budget exhausted".into(),
-                ));
             }
         }
         for (position, (template, actual)) in self
@@ -948,9 +945,9 @@ impl ImplementationHead {
                 // Type-valued leaves create type obligations; replay extracts
                 // those same leaves after the whole substitution is complete.
                 let mut pending = vec![(template, actual)];
-                let mut fuel = budget.steps;
+                let fuel = &mut head_budget.steps;
                 while let Some((template, actual)) = pending.pop() {
-                    fuel = fuel.checked_sub(1).ok_or_else(|| {
+                    *fuel = fuel.checked_sub(1).ok_or_else(|| {
                         TypeAssessment::Pending("value index matching budget exhausted".into())
                     })?;
                     if template.sort() == Sort::Type && actual.sort() == Sort::Type {
@@ -966,7 +963,7 @@ impl ImplementationHead {
                         sort: Sort::ComptimeValue,
                     } = template
                     {
-                        fuel = fuel.checked_sub(parameters.len()).ok_or_else(|| {
+                        *fuel = fuel.checked_sub(parameters.len()).ok_or_else(|| {
                             TypeAssessment::Pending("value binder lookup budget exhausted".into())
                         })?;
                         if let Some(input) = parameters.iter().position(|p| {
@@ -1018,10 +1015,17 @@ impl ImplementationHead {
                                     "rigid value index identity is unresolved".into(),
                                 ));
                             }
-                            let Some(type_relations) = bound.index_type_relations(actual) else {
+                            let Some(type_relations) = bound
+                                .index_type_relations_budgeted(actual, fuel)
+                                .map_err(|error| TypeAssessment::Pending(error.to_string()))?
+                            else {
                                 if (!bound.is_structural_index_value()
                                     || !actual.is_structural_index_value())
-                                    && !bound.index_values_definitely_differ(actual, &mut fuel)
+                                    && !bound
+                                        .index_values_definitely_differ_budgeted(actual, fuel)
+                                        .map_err(|error| {
+                                            TypeAssessment::Pending(error.to_string())
+                                        })?
                                 {
                                     return Err(TypeAssessment::Pending(
                                         "symbolic record index identity is unresolved".into(),
@@ -1785,7 +1789,10 @@ impl ImplementationHead {
             layouts,
             &mut domain_fuel,
         )
-        .map_err(|_| ProofError::Invalid)?;
+        .map_err(|error| match error {
+            nir::NominalAdmissionError::Budget => ProofError::BudgetExhausted,
+            _ => ProofError::Invalid,
+        })?;
         let substitution = nir::DeclarationSubstitution::bounded(
             &self.type_parameters,
             &self.parameter_types,
@@ -1799,6 +1806,12 @@ impl ImplementationHead {
         if allowance == 0 {
             return Err(ProofError::BudgetExhausted);
         }
+        // Proof replay has no returned meter. Reserve each proof slot once;
+        // value traversal and substitution may spend only the remainder.
+        let proof_slots = evidence.head_proofs.len()
+            + evidence.requirement_proofs.len()
+            + usize::from(evidence.eligibility_proof.is_some());
+        domain_fuel -= allowance * proof_slots;
         let budget = Budget {
             steps: allowance,
             max_depth: budget.max_depth,
@@ -1821,18 +1834,17 @@ impl ImplementationHead {
         {
             return Err(ProofError::Invalid);
         }
-        let mut instantiate = |ty: &Term| {
-            substitution
-                .instantiate_bounded(ty, &mut domain_fuel)
-                .map_err(substitution_proof_error)
-        };
-        let instantiated = instantiate(&self.subject)?;
+        let instantiated = substitution
+            .instantiate_bounded(&self.subject, &mut domain_fuel)
+            .map_err(substitution_proof_error)?;
         let mut expected = vec![Formula::equal(instantiated.clone(), subject.clone())];
         if shape != subject {
             expected.push(Formula::equal(instantiated, shape.clone()));
         }
         for (template, actual) in self.interface_arguments.iter().zip(interface_arguments) {
-            let template = instantiate(template)?;
+            let template = substitution
+                .instantiate_bounded(template, &mut domain_fuel)
+                .map_err(substitution_proof_error)?;
             if template == *actual
                 && matches!(actual, Term::Rigid { declaration, sort: Sort::ComptimeValue } if domains.contains_key(declaration))
             {
@@ -1840,7 +1852,8 @@ impl ImplementationHead {
             }
             if template.is_symbolic_index_value() && actual.is_symbolic_index_value() {
                 let type_relations = template
-                    .index_type_relations(actual)
+                    .index_type_relations_budgeted(actual, &mut domain_fuel)
+                    .map_err(substitution_proof_error)?
                     .ok_or(ProofError::Invalid)?;
                 for (left, right) in type_relations {
                     expected.push(Formula::equal(left.clone(), right.clone()));

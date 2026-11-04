@@ -78,18 +78,6 @@ impl Term {
         true
     }
 
-    /// Compare the value skeleton and extract only its Type-valued relations.
-    /// Inputs must have passed scope and domain validation. This does not prove
-    /// the returned type equalities, and never unfolds a normal-form head.
-    pub fn index_type_relations<'a>(
-        &'a self,
-        other: &'a Self,
-    ) -> Option<Vec<(&'a Term, &'a Term)>> {
-        self.index_type_relations_budgeted(other, &mut 100_000)
-            .ok()
-            .flatten()
-    }
-
     /// Compare value structure with caller-owned fuel. An unfinished traversal
     /// cannot be used as evidence that no Type relations exist.
     pub fn index_type_relations_budgeted<'a>(
@@ -193,14 +181,8 @@ impl Term {
 
     /// Refute value identity using only known scalar or record-shape differences.
     /// Unknown value leaves and Type relations cannot establish a mismatch.
-    pub fn index_values_definitely_differ(&self, other: &Self, fuel: &mut usize) -> bool {
-        self.index_values_definitely_differ_budgeted(other, fuel)
-            .unwrap_or(false)
-    }
-
-    /// Distinguish an inconclusive comparison from exhausted work. Candidate
-    /// enumeration must propagate exhaustion instead of publishing a partial
-    /// search; callers seeking only positive refutation can use the wrapper.
+    /// Exhaustion is distinct from completed non-refutation; candidate search
+    /// must propagate it instead of publishing a partial result.
     pub fn index_values_definitely_differ_budgeted(
         &self,
         other: &Self,

@@ -3736,3 +3736,62 @@ fn symbolic_scalar_union_excludes_error_heads_within_the_candidate_budget() {
         TypeAssessment::Excluded(_)
     ));
 }
+
+#[test]
+fn repeated_record_value_matching_and_replay_preserve_exhaustion() {
+    use type_resolution::{
+        implementation::TypeAssessment,
+        ptc::{Context, ProofError},
+    };
+    let fields: Vec<_> = (0..16)
+        .map(|i| (format!("field{i:02}"), ty(P::Bool)))
+        .collect();
+    let value = Term::RecordValue(
+        fields
+            .iter()
+            .map(|(name, _)| (name.clone(), Term::Bool(true)))
+            .collect(),
+    );
+    let mut h = head(200, ty(P::Bool));
+    h.type_parameters = vec![id(1)];
+    h.parameter_types = vec![Term::Record(fields)];
+    let variable = Term::Rigid {
+        declaration: id(1),
+        sort: Sort::ComptimeValue,
+    };
+    h.interface_arguments = vec![variable.clone(), variable];
+    let inputs = [value.clone(), value];
+    let context = Context::default();
+    let TypeAssessment::Applicable(evidence) =
+        h.assess_types(&ty(P::Bool), &inputs, &context, Budget::default())
+    else {
+        panic!("ordinary repeated record inputs must be applicable")
+    };
+    let mut pending = 0;
+    for steps in (0..8_000).step_by(29) {
+        let budget = Budget {
+            steps,
+            ..Budget::default()
+        };
+        match h.assess_types(&ty(P::Bool), &inputs, &context, budget) {
+            TypeAssessment::Applicable(_) => {}
+            TypeAssessment::Pending(_) => pending += 1,
+            other => panic!(
+                "unfinished matching must not refute or invalidate the input: {steps}: {other:?}"
+            ),
+        }
+        match h.verify_type_evidence(&evidence, &ty(P::Bool), &inputs, &context, budget) {
+            Ok(()) | Err(ProofError::BudgetExhausted) => {}
+            error => panic!("unfinished replay is not an invalid proof: {steps}: {error:?}"),
+        }
+    }
+    assert!(pending > 0);
+    h.verify_type_evidence(
+        &evidence,
+        &ty(P::Bool),
+        &inputs,
+        &context,
+        Budget::default(),
+    )
+    .unwrap();
+}

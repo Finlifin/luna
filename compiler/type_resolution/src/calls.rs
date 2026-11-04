@@ -1097,28 +1097,28 @@ impl CallCandidate {
                         .map_err(|_| Error::Match(MatchError::BudgetExhausted))?;
                     if retained != *value {
                         let relations = retained
-                            .index_type_relations(value)
+                            .index_type_relations_budgeted(value, &mut fuel)
+                            .map_err(|_| Error::Match(MatchError::BudgetExhausted))?
                             .ok_or(Error::InvalidSignature)?;
                         let relations: Vec<_> = relations
                             .into_iter()
                             .map(|(a, b)| (I::Stable(a.clone()), I::Stable(b.clone())))
                             .collect();
+                        let mut allowance = Budget {
+                            steps: fuel,
+                            ..budget
+                        };
                         engine = engine
-                            .match_many(
-                                &relations,
-                                Budget {
-                                    steps: fuel,
-                                    ..budget
-                                },
-                            )
+                            .match_many_metered(&relations, &mut allowance)
                             .map_err(Error::Match)?
                             .0;
+                        fuel = allowance.steps;
                     }
                 }
             }
-            engine.advance(
+            engine.advance_metered(
                 fuel,
-                Budget {
+                &mut Budget {
                     steps: fuel,
                     ..budget
                 },
@@ -1126,12 +1126,13 @@ impl CallCandidate {
             self.engine = engine;
             return Ok(());
         }
+        let mut remaining = budget;
         let (mut engine, _) = self
             .engine
-            .match_many(&[(input, I::Stable(value.clone()))], budget)
+            .match_many_metered(&[(input, I::Stable(value.clone()))], &mut remaining)
             .map_err(Error::Match)?;
         // Matching can wake every pre-existing relation that used this slot.
-        engine.advance(budget.steps, budget);
+        engine.advance_metered(remaining.steps, &mut remaining);
         self.engine = engine;
         Ok(())
     }

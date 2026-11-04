@@ -151,14 +151,16 @@ fn record_index_type_fields_are_domains_not_scalar_identities() {
             .unwrap();
     }
     assert_eq!(
-        left.index_type_relations(&right),
+        left.index_type_relations_budgeted(&right, &mut 100_000)
+            .unwrap(),
         Some(vec![(
             &Term::Primitive(Primitive::Bool),
             &Term::Primitive(Primitive::Char)
         )])
     );
     assert!(
-        left.index_type_relations(&index(Term::Bool(true)))
+        left.index_type_relations_budgeted(&index(Term::Bool(true)), &mut 100_000)
+            .unwrap()
             .is_none()
     );
     assert!(
@@ -848,18 +850,41 @@ fn record_index_refutation_uses_known_leaves_and_respects_limits() {
     let left = record(true, unknown.clone(), Term::Primitive(Primitive::Bool));
     let right = record(false, Term::Bool(true), Term::Primitive(Primitive::Char));
     for (a, b) in [(&left, &right), (&right, &left)] {
-        assert!(!a.index_values_definitely_differ(b, &mut 0));
-        assert!(a.index_values_definitely_differ(b, &mut 1000));
+        assert_eq!(
+            a.index_values_definitely_differ_budgeted(b, &mut 0),
+            Err(nir::type_computations::Error::Budget)
+        );
+        assert!(
+            a.index_values_definitely_differ_budgeted(b, &mut 1000)
+                .unwrap()
+        );
     }
     let uncertain = record(true, Term::Bool(true), Term::Primitive(Primitive::Char));
-    assert!(!left.index_values_definitely_differ(&uncertain, &mut 1000));
+    assert!(
+        !left
+            .index_values_definitely_differ_budgeted(&uncertain, &mut 1000)
+            .unwrap()
+    );
     assert!(
         !Term::Primitive(Primitive::Bool)
-            .index_values_definitely_differ(&Term::Primitive(Primitive::Char), &mut 1000)
+            .index_values_definitely_differ_budgeted(&Term::Primitive(Primitive::Char), &mut 1000)
+            .unwrap()
     );
-    assert!(!unknown.index_values_definitely_differ(&Term::Bool(true), &mut 1000));
-    assert!(Term::Bool(true).index_values_definitely_differ(&Term::Bool(false), &mut 1000));
-    assert!(!left.index_values_definitely_differ(&left, &mut 1000));
+    assert!(
+        !unknown
+            .index_values_definitely_differ_budgeted(&Term::Bool(true), &mut 1000)
+            .unwrap()
+    );
+    assert!(
+        Term::Bool(true)
+            .index_values_definitely_differ_budgeted(&Term::Bool(false), &mut 1000)
+            .unwrap()
+    );
+    assert!(
+        !left
+            .index_values_definitely_differ_budgeted(&left, &mut 1000)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -953,18 +978,26 @@ fn nominal_index_relations_preserve_variants_and_type_leaves() {
     let left = value(Some(0), Term::Primitive(Primitive::Bool));
     let right = value(Some(0), Term::Primitive(Primitive::Char));
     assert!(left.is_structural_index_value());
-    let relations = left.index_type_relations(&right).unwrap();
+    let relations = left
+        .index_type_relations_budgeted(&right, &mut 100_000)
+        .unwrap()
+        .unwrap();
     assert_eq!(relations.len(), 2);
     assert!(relations.contains(&(
         &Term::Primitive(Primitive::Bool),
         &Term::Primitive(Primitive::Char)
     )));
     assert!(
-        left.index_type_relations(&value(Some(1), Term::Primitive(Primitive::Bool)))
-            .is_none()
+        left.index_type_relations_budgeted(
+            &value(Some(1), Term::Primitive(Primitive::Bool)),
+            &mut 100_000
+        )
+        .unwrap()
+        .is_none()
     );
     assert!(
-        left.index_type_relations(&value(Some(0), Term::Bool(true)))
+        left.index_type_relations_budgeted(&value(Some(0), Term::Bool(true)), &mut 100_000)
+            .unwrap()
             .is_none()
     );
     let symbolic = value(
@@ -1004,18 +1037,41 @@ fn nominal_index_refutation_uses_known_leaves_and_respects_limits() {
     let left = record(true, unknown.clone(), Term::Primitive(Primitive::Bool));
     let right = record(false, Term::Bool(true), Term::Primitive(Primitive::Char));
     for (a, b) in [(&left, &right), (&right, &left)] {
-        assert!(!a.index_values_definitely_differ(b, &mut 0));
-        assert!(a.index_values_definitely_differ(b, &mut 1000));
+        assert_eq!(
+            a.index_values_definitely_differ_budgeted(b, &mut 0),
+            Err(nir::type_computations::Error::Budget)
+        );
+        assert!(
+            a.index_values_definitely_differ_budgeted(b, &mut 1000)
+                .unwrap()
+        );
     }
     let uncertain = record(true, Term::Bool(true), Term::Primitive(Primitive::Char));
-    assert!(!left.index_values_definitely_differ(&uncertain, &mut 1000));
+    assert!(
+        !left
+            .index_values_definitely_differ_budgeted(&uncertain, &mut 1000)
+            .unwrap()
+    );
     assert!(
         !Term::Primitive(Primitive::Bool)
-            .index_values_definitely_differ(&Term::Primitive(Primitive::Char), &mut 1000)
+            .index_values_definitely_differ_budgeted(&Term::Primitive(Primitive::Char), &mut 1000)
+            .unwrap()
     );
-    assert!(!unknown.index_values_definitely_differ(&Term::Bool(true), &mut 1000));
-    assert!(Term::Bool(true).index_values_definitely_differ(&Term::Bool(false), &mut 1000));
-    assert!(!left.index_values_definitely_differ(&left, &mut 1000));
+    assert!(
+        !unknown
+            .index_values_definitely_differ_budgeted(&Term::Bool(true), &mut 1000)
+            .unwrap()
+    );
+    assert!(
+        Term::Bool(true)
+            .index_values_definitely_differ_budgeted(&Term::Bool(false), &mut 1000)
+            .unwrap()
+    );
+    assert!(
+        !left
+            .index_values_definitely_differ_budgeted(&left, &mut 1000)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -1301,7 +1357,6 @@ fn value_difference_reports_exhaustion_separately_from_unknown_types() {
             left.index_values_definitely_differ_budgeted(&right, &mut { budget }),
             Err(nir::type_computations::Error::Budget)
         ));
-        assert!(!left.index_values_definitely_differ(&right, &mut { budget }));
     }
     assert_eq!(
         left.index_values_definitely_differ_budgeted(&right, &mut 10000),

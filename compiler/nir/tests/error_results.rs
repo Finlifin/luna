@@ -923,7 +923,11 @@ fn unresolved_inner_error_branch_survives_partial_then_complete_substitution() {
             .unwrap();
         assert_eq!(sequential, simultaneous);
         assert!(!sequential.has_pending_error_branch());
-        assert!(!partial.index_values_definitely_differ(&sequential, &mut 10000));
+        assert!(
+            !partial
+                .index_values_definitely_differ_budgeted(&sequential, &mut 10000)
+                .unwrap()
+        );
         assert!(matches!(sequential, Term::ErrorValue { label: actual, .. } if actual == label));
     }
 }
