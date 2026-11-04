@@ -385,6 +385,191 @@ fn associated_result_domains_survive_query_local_type_observations() {
 }
 
 #[test]
+fn invocation_type_comparison_preserves_query_failures_and_opaque_identity() {
+    use std::cell::Cell;
+    let package = Package::default();
+    let mode = Cell::new(0);
+    let calls = Cell::new(0);
+    let resolver = |_: &Expr, fuel: &mut u64| {
+        calls.set(calls.get() + 1);
+        *fuel -= 1;
+        let kind = match mode.get() {
+            0 => Some(ErrorKind::TypeContractUnresolved),
+            1 => Some(ErrorKind::StepsExhausted),
+            2 => Some(ErrorKind::Type),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            return Err(Error {
+                kind,
+                source: Some(SOURCE),
+            });
+        }
+        Ok(AssociatedSelection {
+            initializer: nir::associated_initializers::AssociatedInitializer::new(
+                Expr {
+                    source: SOURCE,
+                    ty: Term::Primitive(Primitive::Type),
+                    kind: K::TypeValue(Term::Primitive(Primitive::Bool)),
+                },
+                &mut 1000,
+            )
+            .unwrap(),
+            requires_invocation: true,
+        })
+    };
+    let projection = Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(1),
+            member: id(2),
+        }),
+        arguments: vec![],
+        subject: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    let callable = |result| Term::Function {
+        parameters: vec![],
+        result: Box::new(result),
+    };
+    let expected = callable(Term::Primitive(Primitive::Bool));
+    let output = callable(projection.clone());
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_associated_resolver(&resolver);
+    for (state, error) in [
+        (0, ErrorKind::TypeContractUnresolved),
+        (1, ErrorKind::StepsExhausted),
+        (2, ErrorKind::Type),
+    ] {
+        mode.set(state);
+        let before = vm.remaining_steps();
+        let failed = vm
+            .observe_same_type(&expected, &output, SOURCE)
+            .unwrap_err();
+        assert_eq!(failed.kind, error);
+        assert_eq!(failed.source, Some(SOURCE));
+        assert!(vm.remaining_steps() < before);
+        assert!(!vm.associated_values.contains_key(&key(2)));
+        assert!(!vm.associated_initializers.contains_key(&key(2)));
+        assert!(vm.active_associated_initializers.is_empty());
+    }
+    mode.set(3);
+    for _ in 0..2 {
+        assert!(vm.observe_same_type(&expected, &output, SOURCE).unwrap());
+        assert!(!vm.associated_values.contains_key(&key(2)));
+        assert!(vm.active_associated_initializers.is_empty());
+    }
+    assert_eq!(calls.get(), 4, "only the admitted initializer is retained");
+    assert!(
+        !vm.observe_same_type(&callable(Term::Primitive(Primitive::Char)), &output, SOURCE)
+            .unwrap()
+    );
+    let opaque = Term::NormalForm {
+        head: id(9),
+        sort: nir::Sort::Type,
+        arguments: vec![projection.clone()],
+    };
+    assert!(
+        !vm.observe_same_type(&opaque, &Term::Primitive(Primitive::Bool), SOURCE)
+            .unwrap()
+    );
+    assert!(
+        vm.observe_same_type(
+            &opaque,
+            &Term::NormalForm {
+                head: id(9),
+                sort: nir::Sort::Type,
+                arguments: vec![Term::Primitive(Primitive::Bool)],
+            },
+            SOURCE
+        )
+        .unwrap()
+    );
+    vm.budget.steps = 0;
+    assert_eq!(
+        vm.observe_same_type(&expected, &expected, SOURCE)
+            .unwrap_err()
+            .kind,
+        ErrorKind::StepsExhausted
+    );
+}
+
+#[test]
+fn runtime_identity_observes_associated_output_without_an_executable_body() {
+    use std::cell::Cell;
+    let signature = |result| Term::Function {
+        parameters: vec![],
+        result: Box::new(result),
+    };
+    let package = Package {
+        runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+            declaration: id(9),
+            type_parameters: vec![],
+            signature: signature(Term::AssociatedType {
+                origin: Box::new(nir::AssociatedTypeOrigin {
+                    interface: id(1),
+                    member: id(2),
+                }),
+                subject: Box::new(Term::Primitive(Primitive::Bool)),
+                arguments: vec![],
+            }),
+        }],
+        ..Default::default()
+    };
+    let ready = Cell::new(false);
+    let resolver = |_: &Expr, fuel: &mut u64| {
+        *fuel -= 1;
+        if !ready.get() {
+            return Err(Error {
+                kind: ErrorKind::TypeContractUnresolved,
+                source: Some(SOURCE),
+            });
+        }
+        Ok(AssociatedSelection {
+            initializer: nir::associated_initializers::AssociatedInitializer::new(
+                Expr {
+                    source: SOURCE,
+                    ty: Term::Primitive(Primitive::Type),
+                    kind: K::TypeValue(Term::Primitive(Primitive::Bool)),
+                },
+                &mut 1000,
+            )
+            .unwrap(),
+            requires_invocation: true,
+        })
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_associated_resolver(&resolver);
+    let output = signature(Term::Primitive(Primitive::Bool));
+    assert_eq!(
+        vm.function_instance_value(id(9), &[], &output, SOURCE)
+            .unwrap_err()
+            .kind,
+        ErrorKind::TypeContractUnresolved
+    );
+    ready.set(true);
+    assert_eq!(
+        vm.function_instance_value(id(9), &[], &output, SOURCE)
+            .unwrap(),
+        Value::FunctionInstance {
+            declaration: id(9),
+            arguments: vec![],
+        }
+    );
+    assert!(vm.instances.is_empty());
+    assert!(
+        !vm.events
+            .iter()
+            .any(|event| matches!(event, Event::InstantiateFunction { .. }))
+    );
+    assert!(!vm.associated_values.contains_key(&key(2)));
+    assert_eq!(
+        vm.invoke(id(9), vec![]).unwrap_err().kind,
+        ErrorKind::PhaseMismatch
+    );
+}
+
+#[test]
 fn associated_input_domains_admit_values_and_reject_mismatches() {
     let package = Package::default();
     let reference = ValueReference::owned(Value::Bool(true));

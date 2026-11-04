@@ -28,6 +28,29 @@ impl Lookup for Tracked<'_, '_> {
 }
 
 impl Interpreter<'_> {
+    /// Invocation-owned identity comparison may demand associated Type views.
+    /// Passive catalogue lookup cannot turn a missing view into inequality.
+    /// This observes projections only; opaque normal-form heads are retained.
+    pub(super) fn observe_same_type(
+        &mut self,
+        left: &Term,
+        right: &Term,
+        source: SourceRange,
+    ) -> Result<bool, Error> {
+        self.charge_copy_work(Some(source), |fuel| {
+            for ty in [left, right] {
+                nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel)?;
+            }
+            Ok(())
+        })?;
+        if left == right {
+            return Ok(true);
+        }
+        let left = self.selected_type_view(left, Some(source))?;
+        let right = self.selected_type_view(right, Some(source))?;
+        Ok(left == right)
+    }
+
     pub(super) fn selected_type_view(
         &mut self,
         ty: &Term,

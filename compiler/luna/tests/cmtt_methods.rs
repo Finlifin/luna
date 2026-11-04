@@ -42,6 +42,26 @@ fn contextual_classification_depth_is_a_failure_not_an_ordinary_value() {
 }
 
 #[test]
+fn contextual_calls_observe_associated_signatures_through_public_library_types() {
+    let source = "trait Source {
+            assoc Output: Type;
+            comptime fn produce() -> Output;
+        }
+        impl Source for bool {
+            assoc Output: Type = meta.List<bool>;
+            comptime fn produce() -> meta.List<bool> { [true, false] }
+        }
+        comptime fn identity(value: T) -> T where T { value }
+        comptime fn code() -> <|- bool> {
+            let values = identity(bool.as(Source).produce());
+            let good = values.length() == 2 and values[0] and not values[1];
+            '(good)
+        }
+        fn run() -> bool { ~<code()> }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
 fn trait_pattern_method_results_use_success_output_context() {
     let source = "trait Make {fn make()->Self;} impl Make for bool {fn make()->bool {true}}
         trait Builder {comptime fn pattern()-><bool -| value:T> where T :- Make;}

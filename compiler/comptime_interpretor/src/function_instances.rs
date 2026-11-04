@@ -122,7 +122,7 @@ impl Interpreter<'_> {
             let signature = substitution
                 .instantiate(&identity.signature)
                 .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-            if !selected_types::same(&signature, output, &self.associated_values) {
+            if !self.observe_same_type(&signature, output, source)? {
                 return Err(self.failure(ErrorKind::Type, Some(source)));
             }
             return Ok(Value::FunctionInstance {
@@ -190,6 +190,7 @@ impl Interpreter<'_> {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
             }
         }
+        let prepared = existing.is_none() && shared.is_none();
         let instance = if let Some(instance) = existing.or(shared) {
             instance
         } else {
@@ -224,11 +225,10 @@ impl Interpreter<'_> {
                 arguments,
                 &frames,
             )?;
-            let key = (declaration, Arc::<[Term]>::from(arguments));
-            let instance = Arc::new(Closure {
+            Arc::new(Closure {
                 definition_source: None,
                 origin: Some(declaration),
-                instance_arguments: Some(key.1.clone()),
+                instance_arguments: Some(Arc::from(arguments)),
                 parameters: definition.parameters.clone(),
                 environment: Environment::new(),
                 capture_order: vec![],
@@ -236,7 +236,18 @@ impl Interpreter<'_> {
                 ty: signature
                     .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime)
                     .with_unsafe_call_requirement(definition.is_unsafe),
-            });
+            })
+        };
+        if !self.observe_same_type(&instance.ty, output, source)? {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        // Preparation and signature observation are one publication boundary.
+        // A rejected output or missing view must not warm either instance cache.
+        if prepared {
+            let key = (
+                declaration,
+                instance.instance_arguments.as_ref().unwrap().clone(),
+            );
             self.events.push(Event::InstantiateFunction {
                 declaration,
                 arguments: arguments.to_vec(),
@@ -251,10 +262,6 @@ impl Interpreter<'_> {
                 );
             }
             self.instances.insert(key, instance.clone());
-            instance
-        };
-        if !selected_types::same(&instance.ty, output, &self.associated_values) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         Ok(Value::Closure(instance))
     }
@@ -376,6 +383,51 @@ mod frame_tests {
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         vm.budget.steps = 2000;
         let arguments = [Term::Primitive(Primitive::Bool)];
+        let missing = Term::AssociatedType {
+            origin: Box::new(nir::AssociatedTypeOrigin {
+                interface: DeclarationId {
+                    package: 97,
+                    local: 3,
+                },
+                member: DeclarationId {
+                    package: 97,
+                    local: 4,
+                },
+            }),
+            subject: Box::new(Term::Primitive(Primitive::Bool)),
+            arguments: vec![],
+        };
+        for (result, expected) in [
+            (Term::Primitive(Primitive::Char), ErrorKind::Type),
+            (missing, ErrorKind::UnmaterializedDispatch),
+            (
+                Term::Record(vec![(
+                    "wide".repeat(4096),
+                    Term::Primitive(Primitive::Bool),
+                )]),
+                ErrorKind::StepsExhausted,
+            ),
+        ] {
+            let wrong = Term::Function {
+                parameters: vec![],
+                result: Box::new(result),
+            };
+            let before = vm.remaining_steps();
+            assert_eq!(
+                vm.function_instance_value(declaration, &arguments, &wrong, source)
+                    .unwrap_err()
+                    .kind,
+                expected
+            );
+            assert!(vm.remaining_steps() < before);
+            assert!(vm.instances.is_empty());
+            assert_eq!(vm.prepared_instance_cache.count, 0);
+            assert!(
+                !vm.events
+                    .iter()
+                    .any(|event| matches!(event, Event::InstantiateFunction { .. }))
+            );
+        }
         let Value::Closure(first) = vm
             .function_instance_value(declaration, &arguments, &output, source)
             .unwrap()
@@ -389,6 +441,21 @@ mod frame_tests {
             panic!("missing cached instance")
         };
         assert!(Arc::ptr_eq(&first, &second));
+        let wrong = Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Char)),
+        };
+        assert_eq!(
+            vm.function_instance_value(declaration, &arguments, &wrong, source)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+        assert_eq!(vm.prepared_instance_cache.count, 1);
+        assert!(Arc::ptr_eq(
+            vm.instances.lookup(declaration, &arguments).unwrap(),
+            &first
+        ));
         assert_eq!(vm.instances.len(), 1);
         assert_eq!(
             vm.events

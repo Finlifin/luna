@@ -345,8 +345,11 @@ cmtt_methods 的 indexed-code-signature 用例在修改前即于 139..143 报未
 `/tmp/luna-tools-kdkooysw/result.json` 退出 101，同样 588 通过／6 失败。
 其中四个 generator_bit_compound_writeback_*、一个 generator_bit_update_frame 用例
 及 inferred_producer_value_defaults_preserve_prior_inference_variables 均在相同源码
-位置报 interpretation Type。对照结束后逐字节恢复本次源码并核对哈希；这些基线
-不计为已修复，也未修改其预期。
+位置报 interpretation Type。对照结束后逐字节恢复本次源码并核对哈希，未修改预期。
+后续 invocation 签名观察清理已修复上述五个 BitVec 用例：失败来自被动类型比较
+把尚未取得的关联 Type 视图当成不相等。保留全部断言的 CMTT 组现为 593 通过、
+1 项默认值推断失败；indexed-code-signature 仍未修复。具体机制、证据与新发现的
+runtime 方法传递缺口见[代码实例的签名观察](comptime-value-admission.md#签名观察与发布补充验证)。
 
 新增源码回归逐预算寻找 expr／pattern／data 分类的资源边界，随后在同一 HIR 上以
 新预算完成 elaboration 和执行；深嵌套 quote 检查必须报告分类深度失败。真实 sysroot

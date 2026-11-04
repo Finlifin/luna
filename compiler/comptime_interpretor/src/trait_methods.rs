@@ -210,7 +210,7 @@ impl Interpreter<'_> {
                 .signature
                 .instantiate_parameters(&self.input_binders(&identity.type_parameters), &arguments)
                 .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-            if !selected_types::same(&signature, output, &self.associated_values)
+            if !self.observe_same_type(&signature, output, source)?
                 || (!contract.program.preconditions.is_empty() && !retained_template)
             {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
@@ -247,7 +247,7 @@ impl Interpreter<'_> {
             .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?
             .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime)
             .with_unsafe_call_requirement(definition.is_unsafe);
-        if !selected_types::same(&ty, output, &self.associated_values) {
+        if !self.observe_same_type(&ty, output, source)? {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         if self.comptime_only && definition.phase == nir::program::FunctionPhase::Runtime {

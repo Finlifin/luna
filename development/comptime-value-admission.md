@@ -1805,6 +1805,20 @@ scoped substitution 完成受限代入；函数 frame 在分配前计费。类�
 拒绝且合法实参仍能使用原实例。这里只验证准备好的代码缓存，不能推导为任意
 invocation 结果都可以缓存。
 
+调用中的函数／trait 方法签名核对使用可失败的 observe_same_type：先计量直接身份
+比较，确有差异时通过当前 invocation 的关联项解析器观察双方类型，再比较完成的
+视图。缺少关联选择、未决查询和资源耗尽不能被被动 catalogue 的布尔 same 当成
+类型不相等。此处只观察关联投影，不展开 NF 头，也不把它升级成一般 PTC 等式搜索。
+需要执行的 Type initializer 继续遵循 selected_type_view 的查询局部生命周期；
+临时 Type 结果不进入持久关联值表，不缓存任意 invocation 结果。
+
+函数实例先私有准备，再完成输出签名核对，最后才发布到本次 invocation 的实例表、
+准备代码缓存并记录 InstantiateFunction。错误输出、观察未决和比较额度不足不能
+预热这两份缓存；缓存已经存在时仍重新核对当前输出，拒绝本次请求不会破坏原实例。
+运行时函数身份和 trait 方法身份的观察也使用同一可失败比较，观察不执行目标主体。
+构建世界时及其他被动观察者所用的旧 same 尚未整体迁移，不能据此声称全部类型比较
+都具有按需查询或统一预算。
+
 源码默认值的固定 sort 代入、IIR 中的实例复制和其他签名观察入口仍有各自的
 消费者，尚未全部收敛；本轮没有完成跨阶段稳定 world、全局预算或实例发布协议。
 
@@ -1821,6 +1835,43 @@ invocation 结果都可以缓存。
 
 受影响 Rust 文件格式检查通过；未运行全 workspace 或性能基准。正式 docs 和
 原有工作区修改保持不变。
+
+### 签名观察与发布补充验证
+
+工作目录和统一入口同上。`test -p luna --test cmtt generator_bit_ --no-fail-fast`
+退出 0，6 项通过，`/tmp/luna-tools-p0xlo8fp/result.json`。其中五项原先因签名中的
+关联 Type 尚未取得而报告 interpretation Type；本次没有修改它们的源码或断言。
+
+扩大检查 `-p comptime_interpretor -p luna --lib --test cmtt --test cmtt_methods
+--test library_protocols --test library_meta_math --test deferred_associated_values
+--test associated_signatures --no-fail-fast -- --skip
+normal_input_data_tests::clause_list_inputs_share_domain_scope_and_budget_validation
+--skip code_method_parent_value_clauses_form_indexed_code_signatures`：退出 101，
+1349 通过、2 失败、2 筛去；`/tmp/luna-tools-2izo59am/result.json`。其中 VM 库 464、
+luna 库 84、关联签名 9、延迟关联值 9、公开库协议 27、meta.math 9 项均通过。
+CMTT 为 593 通过、1 项既有默认值推断失败；方法组为 154 通过、1 项新增验收失败。
+筛去的两项是此前已经复现的独立基线，不能称为全套通过。
+
+新增失败是 `bool.as(Factory).make` 作为 runtime callable 传给 comptime wrapper：
+前端交付的 TraitMethod 类型未保留公共关联返回类型契约，NIR phase 检查在进入
+VM 前报告 `trait method value type does not preserve its contract`。没有放宽
+`phases::validate` 的精确契约检查，也没有把成功预期改成拒绝预期；探索用例移入
+[独立复现文件](repros/cmtt-runtime-associated-method-transport.fl)，保持返回 true
+以及替换为不终止 runtime 主体后仍能完成编译这两个验收目标。这里仍缺完整的
+源码签名交付接线，不以 VM 层验证冒充端到端完成。
+
+最后针对 VM 签名失败传播、缓存原子发布与 runtime 身份观察执行三项回归，退出 0；
+`/tmp/luna-tools-vb87u6sm/result.json`。runtime 身份用例不提供可执行主体：Type
+观察未决后可以重试，返回 FunctionInstance，但尝试执行身份仍报告 PhaseMismatch。
+`-p comptime_interpretor --test runtime_function_identities --no-fail-fast` 的
+45 项通过，退出 0；`/tmp/luna-tools-8npzsnwz/result.json`。查询局部 Type 结果、
+NF 头不展开及缓存命中后仍检查输出的边界都有断言。
+
+保留公开库调用回归后，`-p luna --test cmtt_methods -- --skip
+code_method_parent_value_clauses_form_indexed_code_signatures` 退出 0，154 通过、
+1 筛去；`/tmp/luna-tools-no9s0s4v/result.json`。五份修改的 Rust 文件通过 scoped
+rustfmt check，`/tmp/luna-tools-wi8c4i5u/result.json` 退出 0。未重复全 workspace、
+native 或性能基准；正式 docs 及其他已有工作区修改未纳入本阶段。
 
 
 ## 34. IIR callable 查询与代码复制视图
