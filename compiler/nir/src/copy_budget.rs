@@ -218,6 +218,34 @@ impl std::fmt::Display for InputObservationError {
 
 impl std::error::Error for InputObservationError {}
 
+/// Structural inputs of one term. Declaration identities and the outer
+/// substitution frame remain distinct; neither map grants invocation access.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TermInputs {
+    pub declarations: std::collections::BTreeMap<crate::DeclarationId, crate::Sort>,
+    pub parameters: std::collections::BTreeMap<usize, crate::Sort>,
+}
+
+impl std::fmt::Display for TermInputs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(term-inputs (declarations")?;
+        for (id, sort) in &self.declarations {
+            write!(f, " (input {id} {sort})")?;
+        }
+        write!(f, ") (parameters")?;
+        for (slot, sort) in &self.parameters {
+            write!(f, " (input {slot} {sort})")?;
+        }
+        write!(f, "))")
+    }
+}
+
+/// Collect declaration and scoped inputs in one bounded pass. Repeated
+/// identities must agree on their sort; errors publish neither partial map.
+pub fn term_inputs(value: &Term, steps: &mut u64) -> Result<TermInputs, InputObservationError> {
+    observe_inputs(Node::Type(value), steps, true)
+}
+
 /// Observe the outer substitution frame of every embedded term, accounting
 /// for nested function binders. This never rewrites a value or clones shared
 /// bodies. All embedded terms must agree on the sort of each outer slot.
@@ -240,25 +268,40 @@ fn substitution_parameters(
     root: Node<'_>,
     steps: &mut u64,
 ) -> Result<std::collections::BTreeMap<usize, crate::Sort>, InputObservationError> {
-    let mut slots = std::collections::BTreeMap::new();
+    observe_inputs(root, steps, false).map(|inputs| inputs.parameters)
+}
+
+fn observe_inputs(
+    root: Node<'_>,
+    steps: &mut u64,
+    declarations: bool,
+) -> Result<TermInputs, InputObservationError> {
+    let mut inputs = TermInputs::default();
     let mut conflict = None;
     charge_node_observed(root, steps, true, None, &mut |term, nesting| {
-        if let Term::Bound { depth, index, sort } = term
-            && *depth == nesting
-            && let Some(previous) = slots.insert(*index, *sort)
-            && previous != *sort
-        {
-            conflict.get_or_insert(crate::TypeError::WrongSort {
-                expected: previous,
-                actual: *sort,
-            });
+        let (previous, sort) = match term {
+            Term::Bound { depth, index, sort } if *depth == nesting => {
+                (inputs.parameters.insert(*index, *sort), *sort)
+            }
+            Term::Rigid { declaration, sort } if declarations => {
+                (inputs.declarations.insert(*declaration, *sort), *sort)
+            }
+            _ => return,
+        };
+        if let Some(previous) = previous {
+            if previous != sort {
+                conflict.get_or_insert(crate::TypeError::WrongSort {
+                    expected: previous,
+                    actual: sort,
+                });
+            }
         }
     })
     .map_err(InputObservationError::Limit)?;
     if let Some(error) = conflict {
         return Err(InputObservationError::Scope(error));
     }
-    Ok(slots)
+    Ok(inputs)
 }
 
 fn charge_node_observed(

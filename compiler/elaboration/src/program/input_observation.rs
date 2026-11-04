@@ -32,6 +32,15 @@ pub(super) fn substitution_term(
         .map_err(|failure| substitution_failure(failure, span))
 }
 
+pub(super) fn term_inputs(
+    value: &Term,
+    steps: &mut u64,
+    span: Span,
+) -> Result<nir::copy_budget::TermInputs, Error> {
+    nir::copy_budget::term_inputs(value, steps)
+        .map_err(|failure| substitution_failure(failure, span))
+}
+
 pub(super) fn expression(
     value: &n::Expr,
     steps: &mut u64,
@@ -70,6 +79,14 @@ pub(super) fn term(
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn observed_term_inputs(
+        &mut self,
+        value: &Term,
+        span: Span,
+    ) -> Result<nir::copy_budget::TermInputs, Error> {
+        term_inputs(value, &mut self.required_steps, span)
+    }
+
     pub(super) fn checked_substitution_inputs(
         &mut self,
         value: &n::Expr,

@@ -376,23 +376,14 @@ impl Checker<'_, '_> {
         if pending_source && simple {
             let parameters = self.type_clause_params(owner);
             let domains = self.trait_domains(owner)?;
-            for domain in &domains {
-                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let before = fuel;
-                let charged = nir::type_computations::charge_term(domain, &mut fuel);
-                self.required_steps -= (before - fuel) as u64;
-                charged.map_err(|failure| error(expr.span, failure.to_string()))?;
-            }
             // Domain-dependent telescopes need sequential value formation.
-            // Here each argument can be checked without inventing earlier values.
-            let independent = domains.iter().all(|domain| {
-                domain
-                    .rigid_parameters()
-                    .is_ok_and(|parameters| parameters.is_empty())
-                    && domain
-                        .substitution_parameters()
-                        .is_ok_and(|parameters| parameters.is_empty())
-            });
+            // Observe both input kinds once; observation failure is not a
+            // dependent domain that may silently take another checking path.
+            let mut independent = true;
+            for domain in &domains {
+                let inputs = self.observed_term_inputs(domain, expr.span)?;
+                independent &= inputs.declarations.is_empty() && inputs.parameters.is_empty();
+            }
             if independent && domains.len() == lexical.len() + parameters.len() {
                 let mut supplied = vec![false; parameters.len()];
                 let mut positional = 0;
@@ -439,21 +430,12 @@ impl Checker<'_, '_> {
         self.check_type_application(owner, &arguments, expr.span)?;
         let mut unresolved = Vec::new();
         for (binder, argument) in self.declaration_binders(owner).iter().zip(&arguments) {
-            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-            let before = fuel;
-            let charged = nir::type_computations::charge_term(argument, &mut fuel);
-            self.required_steps -= (before - fuel) as u64;
-            charged.map_err(|failure| error(expr.span, failure.to_string()))?;
-            if argument
-                .rigid_parameters()
-                .map_err(|failure| error(expr.span, failure.to_string()))?
-                .iter()
-                .any(|(_, sort)| *sort == Sort::ComptimeValue)
-                || argument
-                    .substitution_parameters()
-                    .map_err(|failure| error(expr.span, failure.to_string()))?
-                    .values()
-                    .any(|sort| *sort == Sort::ComptimeValue)
+            let inputs = self.observed_term_inputs(argument, expr.span)?;
+            if inputs
+                .declarations
+                .values()
+                .chain(inputs.parameters.values())
+                .any(|sort| *sort == Sort::ComptimeValue)
             {
                 unresolved.push(binder.declaration);
             }
@@ -3130,9 +3112,10 @@ impl Checker<'_, '_> {
                     let domain = declared
                         .instantiate_types(&known_parameters, &known_arguments)
                         .map_err(|failure| error(span, failure.to_string()))?;
+                    let inputs = self.term_declaration_inputs(&domain, span)?;
                     let description = if parameters
                         .iter()
-                        .any(|(id, _, _)| domain.mentions_rigid(*id))
+                        .any(|(id, _, _)| inputs.contains(id))
                     {
                         D::Any
                     } else {
@@ -3750,10 +3733,7 @@ impl Checker<'_, '_> {
                 };
                 if matches!(expr.kind, H::Deref(_))
                     && let Term::Pointer(pointee) = &ty
-                    && !pointee
-                        .substitution_parameters()
-                        .map_err(|failure| error(expr.span, failure.to_string()))?
-                        .is_empty()
+                    && !self.term_substitution_inputs(pointee, expr.span)?.is_empty()
                 {
                     // Only the result domain is known here. Concrete read
                     // formation and Copy/origin checks belong to the instance;
@@ -5505,11 +5485,7 @@ impl Checker<'_, '_> {
             let Annotation::Known(ty) = annotation else {
                 return Ok(None);
             };
-            if !ty
-                .substitution_parameters()
-                .map_err(|e| error(span, e.to_string()))?
-                .is_empty()
-            {
+            if !self.term_substitution_inputs(ty, span)?.is_empty() {
                 // Callee value binders need invocation substitution, not the
                 // caller's inference scope. Do not use their indices as types.
                 return Ok(None);
@@ -5528,9 +5504,8 @@ impl Checker<'_, '_> {
             // Private inference signature only, as in open clause inference.
             _ => (p(P::Void), None, false),
         };
-        let (result, target, known_result) = if result
-            .substitution_parameters()
-            .map_err(|e| error(span, e.to_string()))?
+        let (result, target, known_result) = if self
+            .term_substitution_inputs(&result, span)?
             .is_empty()
         {
             (result, target, known_result)
@@ -5916,8 +5891,7 @@ impl Checker<'_, '_> {
         for requirement in &self.open_definition_obligations(owner) {
             for term in required::requirement_terms(requirement, expr.span)? {
                 needed.extend(
-                    term.substitution_parameters()
-                        .map_err(|failure| error(expr.span, failure.to_string()))?
+                    self.term_substitution_inputs(term, expr.span)?
                         .keys()
                         .copied(),
                 );
@@ -5930,8 +5904,7 @@ impl Checker<'_, '_> {
         {
             if let D::Known(ty) = description {
                 needed.extend(
-                    ty.substitution_parameters()
-                        .map_err(|failure| error(expr.span, failure.to_string()))?
+                    self.term_substitution_inputs(ty, expr.span)?
                         .keys()
                         .copied(),
                 );
@@ -6119,8 +6092,11 @@ impl Checker<'_, '_> {
             default_diverges |= is_never(&ty);
             // A definition-side rigid type is not fresh caller evidence for
             // that same generic. Concrete default types may supply evidence.
-            if !is_never(&ty) && !generic.iter().any(|id| ty.mentions_rigid(*id)) {
-                actual[slot] = Some(ty);
+            if !is_never(&ty) {
+                let inputs = self.term_declaration_inputs(&ty, expr.span)?;
+                if !generic.iter().any(|id| inputs.contains(id)) {
+                    actual[slot] = Some(ty);
+                }
             }
         }
         let mut initial = scheme
@@ -6284,6 +6260,16 @@ impl Checker<'_, '_> {
             let Term::Function { parameters, .. } = signature.callable_signature() else {
                 unreachable!()
             };
+            // One observation per unknown operand domain, not one scan per
+            // generic binder. This support belongs only to this description.
+            let mut unknown_inputs = BTreeSet::new();
+            for (parameter, unknown) in parameters.iter().zip(&unknown) {
+                if *unknown {
+                    unknown_inputs.extend(
+                        self.term_declaration_inputs(&parameter.ty, expr.span)?,
+                    );
+                }
+            }
             let mut suspended = false;
             let mut supported = BTreeSet::new();
             let mut unresolved = Vec::new();
@@ -6297,11 +6283,7 @@ impl Checker<'_, '_> {
                     continue;
                 }
                 unresolved.push(*generic);
-                if parameters
-                    .iter()
-                    .zip(&unknown)
-                    .any(|(parameter, unknown)| *unknown && parameter.ty.mentions_rigid(*generic))
-                {
+                if unknown_inputs.contains(generic) {
                     supported.insert(*generic);
                 }
                 suspended = true;
@@ -6397,11 +6379,7 @@ impl Checker<'_, '_> {
             ));
         }
         if let Some(route) = routes.iter().find(|route| route.parameter == slot) {
-            for dependency in domain
-                .substitution_parameters()
-                .map_err(|failure| error(call.span, failure.to_string()))?
-                .keys()
-            {
+            for dependency in self.term_substitution_inputs(domain, call.span)?.keys() {
                 if *dependency >= slot {
                     return Err(error(
                         call.span,
@@ -6439,11 +6417,7 @@ impl Checker<'_, '_> {
             }
             this.normal_value_argument(default, domain)
         })?;
-        for dependency in term
-            .substitution_parameters()
-            .map_err(|failure| error(call.span, failure.to_string()))?
-            .keys()
-        {
+        for dependency in self.term_substitution_inputs(&term, call.span)?.keys() {
             if *dependency >= slot {
                 return Err(error(
                     call.span,
@@ -6873,12 +6847,12 @@ impl Checker<'_, '_> {
                 // No callee assumption becomes evidence for an unresolved
                 // declaration argument. Ordinary input facts can be discharged
                 // once their actual immutable symbols have arrived.
-                let declarations = self.term_declaration_inputs(ty, span)?;
-                if clauses.iter().any(|id| declarations.contains(id)) {
+                let inputs = self.observed_term_inputs(ty, span)?;
+                if clauses.iter().any(|id| inputs.declarations.contains_key(id)) {
                     return Ok(false);
                 }
-                if self
-                    .term_substitution_inputs(ty, span)?
+                if inputs
+                    .parameters
                     .keys()
                     .any(|slot| symbols.get(*slot).is_none_or(Option::is_none))
                 {
@@ -6935,8 +6909,7 @@ impl Checker<'_, '_> {
             {
                 if let Annotation::Known(ty) = annotation {
                     needed.extend(
-                        ty.substitution_parameters()
-                            .map_err(|e| error(expr.span, e.to_string()))?
+                        self.term_substitution_inputs(ty, expr.span)?
                             .keys()
                             .copied(),
                     );
@@ -6945,8 +6918,7 @@ impl Checker<'_, '_> {
             for requirement in self.open_definition_obligations(owner) {
                 for ty in required::requirement_terms(&requirement, expr.span)? {
                     needed.extend(
-                        ty.substitution_parameters()
-                            .map_err(|e| error(expr.span, e.to_string()))?
+                        self.term_substitution_inputs(ty, expr.span)?
                             .keys()
                             .copied(),
                     );
@@ -7103,11 +7075,9 @@ impl Checker<'_, '_> {
                     Err(e) => return Err(error(expr.span, e.to_string())),
                 };
                 let domain = self.instantiate_input_types(&domain, &all, &template, expr.span)?;
-                if generic.iter().any(|id| domain.mentions_rigid(*id))
-                    || !domain
-                        .substitution_parameters()
-                        .map_err(|e| error(expr.span, e.to_string()))?
-                        .is_empty()
+                let inputs = self.observed_term_inputs(&domain, expr.span)?;
+                if generic.iter().any(|id| inputs.declarations.contains_key(id))
+                    || !inputs.parameters.is_empty()
                 {
                     continue;
                 }
@@ -7127,7 +7097,8 @@ impl Checker<'_, '_> {
                             Err(nir::TypeError::MissingArgument(_)) => break,
                             Err(e) => return Err(error(expr.span, e.to_string())),
                         };
-                        if generic.iter().any(|id| ty.mentions_rigid(*id)) {
+                        let inputs = self.term_declaration_inputs(&ty, expr.span)?;
+                        if generic.iter().any(|id| inputs.contains(id)) {
                             break;
                         }
                         prefix.push(Parameter { sort: *sort, ty });
@@ -7152,7 +7123,8 @@ impl Checker<'_, '_> {
                             continue;
                         }
                         if let Annotation::Known(ty) = &preparation.parameters[route.parameter].1 {
-                            if generic.iter().any(|id| ty.mentions_rigid(*id)) {
+                            let inputs = self.term_declaration_inputs(ty, expr.span)?;
+                            if generic.iter().any(|id| inputs.contains(id)) {
                                 ready = false;
                                 break;
                             }
@@ -7289,11 +7261,7 @@ impl Checker<'_, '_> {
                 Err(nir::TypeError::MissingArgument(_)) => continue,
                 Err(e) => return Err(error(expr.span, e.to_string())),
             };
-            if !ty
-                .substitution_parameters()
-                .map_err(|e| error(expr.span, e.to_string()))?
-                .is_empty()
-            {
+            if !self.term_substitution_inputs(&ty, expr.span)?.is_empty() {
                 continue;
             }
             slots.push(slot);
@@ -7356,14 +7324,13 @@ impl Checker<'_, '_> {
             // A default annotated by the same unresolved declaration binder is
             // not independent evidence for that binder. Nor are caller-frame
             // slots or divergence usable as a concrete default domain.
-            if !is_never(&ty)
-                && !generic.iter().any(|id| ty.mentions_rigid(*id))
-                && ty
-                    .substitution_parameters()
-                    .map_err(|e| error(expr.span, e.to_string()))?
-                    .is_empty()
-            {
-                actual[index] = Some(ty);
+            if !is_never(&ty) {
+                let inputs = self.observed_term_inputs(&ty, expr.span)?;
+                if !generic.iter().any(|id| inputs.declarations.contains_key(id))
+                    && inputs.parameters.is_empty()
+                {
+                    actual[index] = Some(ty);
+                }
             }
         }
         let mut visited = BTreeSet::new();
@@ -7606,15 +7573,19 @@ impl Checker<'_, '_> {
                     && !unknown.is_empty()
                     && self.open_definition_obligations(owner).is_empty()
                 {
+                    let mut unknown_inputs = BTreeSet::new();
+                    for slot in &unknown {
+                        unknown_inputs.extend(
+                            self.term_declaration_inputs(&domains[*slot], expr.span)?,
+                        );
+                    }
                     let mut supported = BTreeSet::new();
                     for (index, id) in generic.iter().enumerate() {
                         if candidate
                             .type_argument(index)
                             .map_err(|e| call_inference_error(expr.span, e))?
                             .is_some()
-                            || unknown
-                                .iter()
-                                .any(|slot| domains[*slot].mentions_rigid(*id))
+                            || unknown_inputs.contains(id)
                         {
                             supported.insert(*id);
                         }
@@ -8791,8 +8762,7 @@ impl Checker<'_, '_> {
         signature: &Term,
         span: Span,
     ) -> Result<Vec<(nir::DeclarationParameter, Term)>, Error> {
-        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
+        let mut steps = self.required_steps;
         let result = (|| {
             let mut pending = Vec::new();
             let clauses = self
@@ -8807,17 +8777,13 @@ impl Checker<'_, '_> {
                 .chain(symbols.iter().flatten())
                 .chain(std::iter::once(signature))
             {
-                nir::type_computations::charge_term(value, &mut fuel)
-                    .map_err(|failure| error(span, failure.to_string()))?;
                 pending.extend(
-                    value
-                        .rigid_parameters()
-                        .map_err(|failure| error(span, failure.to_string()))?,
+                    input_observation::term_inputs(value, &mut steps, span)?.declarations,
                 );
             }
             let mut captures = BTreeMap::new();
             while let Some((declaration, sort)) = pending.pop() {
-                fuel = fuel
+                steps = steps
                     .checked_sub(1)
                     .ok_or_else(|| error(span, "open capture domain budget exhausted"))?;
                 if let Some((previous, _)) = captures.get(&declaration) {
@@ -8843,8 +8809,7 @@ impl Checker<'_, '_> {
                         ));
                     }
                 };
-                nir::type_computations::charge_term(&domain, &mut fuel)
-                    .map_err(|failure| error(span, failure.to_string()))?;
+                let inputs = input_observation::term_inputs(&domain, &mut steps, span)?;
                 domain
                     .check_scope(&[])
                     .map_err(|failure| error(span, failure.to_string()))?;
@@ -8856,11 +8821,7 @@ impl Checker<'_, '_> {
                         "open value capture has an incompatible declaration domain",
                     ));
                 }
-                pending.extend(
-                    domain
-                        .rigid_parameters()
-                        .map_err(|failure| error(span, failure.to_string()))?,
-                );
+                pending.extend(inputs.declarations);
                 captures.insert(declaration, (sort, domain));
             }
             Ok(captures
@@ -8870,7 +8831,7 @@ impl Checker<'_, '_> {
                 })
                 .collect())
         })();
-        self.required_steps -= (before - fuel) as u64;
+        self.required_steps = steps;
         result
     }
 

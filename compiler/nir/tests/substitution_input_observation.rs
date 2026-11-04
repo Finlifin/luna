@@ -162,3 +162,99 @@ fn exhaustion_never_publishes_partial_slots_and_fresh_observation_recovers() {
         expected
     );
 }
+
+#[test]
+fn combined_inputs_preserve_declaration_identity_sort_and_nested_scope() {
+    let declaration = DeclarationId {
+        package: 7,
+        local: 3,
+    };
+    let rigid = Term::Rigid {
+        declaration,
+        sort: Sort::ComptimeValue,
+    };
+    let value = Term::NormalForm {
+        head: DeclarationId {
+            package: 7,
+            local: 99,
+        },
+        sort: Sort::Type,
+        arguments: vec![
+            rigid.clone(),
+            Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Tuple(vec![
+                    rigid,
+                    bound(0, 7, Sort::Type),
+                    bound(1, 4, Sort::Type),
+                ])),
+            },
+        ],
+    };
+    let mut combined_budget = 1000;
+    let inputs = nir::copy_budget::term_inputs(&value, &mut combined_budget).unwrap();
+    assert_eq!(
+        inputs.declarations,
+        BTreeMap::from([(declaration, Sort::ComptimeValue)])
+    );
+    assert_eq!(inputs.parameters, BTreeMap::from([(4, Sort::Type)]));
+    assert_eq!(
+        inputs.to_string(),
+        format!(
+            "(term-inputs (declarations (input {declaration} {})) (parameters (input 4 {})))",
+            Sort::ComptimeValue,
+            Sort::Type
+        )
+    );
+    let mut slot_budget = 1000;
+    assert_eq!(
+        term_substitution_parameters(&value, &mut slot_budget).unwrap(),
+        inputs.parameters
+    );
+    assert_eq!(
+        combined_budget, slot_budget,
+        "both maps must share one structural walk"
+    );
+}
+
+#[test]
+fn declaration_sort_conflicts_and_budget_failures_publish_neither_map() {
+    let declaration = DeclarationId {
+        package: 7,
+        local: 3,
+    };
+    let value = Term::Tuple(vec![
+        Term::Rigid {
+            declaration,
+            sort: Sort::Type,
+        },
+        Term::Rigid {
+            declaration,
+            sort: Sort::ComptimeValue,
+        },
+        bound(0, 2, Sort::Type),
+    ]);
+    assert!(matches!(
+        nir::copy_budget::term_inputs(&value, &mut 1000),
+        Err(InputObservationError::Scope(TypeError::WrongSort { .. }))
+    ));
+    let value = Term::Tuple(vec![
+        Term::Rigid {
+            declaration,
+            sort: Sort::Type,
+        },
+        bound(0, 2, Sort::Type),
+    ]);
+    let mut fuel = 1;
+    assert_eq!(
+        nir::copy_budget::term_inputs(&value, &mut fuel),
+        Err(InputObservationError::Limit(CopyBudgetExhausted::Steps))
+    );
+    assert_eq!(fuel, 0);
+    let inputs = nir::copy_budget::term_inputs(&value, &mut 1000).unwrap();
+    assert_eq!(
+        inputs.declarations,
+        BTreeMap::from([(declaration, Sort::Type)])
+    );
+    assert_eq!(inputs.parameters, BTreeMap::from([(2, Sort::Type)]));
+}
