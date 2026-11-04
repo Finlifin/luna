@@ -199,7 +199,7 @@ impl InherentIndex {
         subject: &Term,
         context: &Context,
         budget: Budget,
-    ) -> Result<(), crate::ptc::ProofError> {
+    ) -> Result<(), EvidenceError> {
         self.verify_evidence_with(name, evidence, subject, context, budget, |proof, budget| {
             context.verify_proof(proof, budget)
         })
@@ -212,13 +212,13 @@ impl InherentIndex {
         context: &Context,
         budget: Budget,
         verify_requirement: impl FnMut(&crate::ptc::Proof, Budget) -> Result<(), crate::ptc::ProofError>,
-    ) -> Result<(), crate::ptc::ProofError> {
+    ) -> Result<(), EvidenceError> {
         let head = self
             .heads
             .get(&evidence.implementation)
             .ok_or(crate::ptc::ProofError::Invalid)?;
         if !head.members.contains(name) {
-            return Err(crate::ptc::ProofError::Invalid);
+            return Err(crate::ptc::ProofError::Invalid.into());
         }
         self.index.entries[&head.declaration]
             .head

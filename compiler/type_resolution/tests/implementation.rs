@@ -3781,7 +3781,13 @@ fn repeated_record_value_matching_and_replay_preserve_exhaustion() {
             ),
         }
         match h.verify_type_evidence(&evidence, &ty(P::Bool), &inputs, &context, budget) {
-            Ok(()) | Err(ProofError::BudgetExhausted) => {}
+            Ok(())
+            | Err(
+                type_resolution::implementation::EvidenceError::Proof(ProofError::BudgetExhausted)
+                | type_resolution::implementation::EvidenceError::Query(
+                    nir::NominalAdmissionError::Budget,
+                ),
+            ) => {}
             error => panic!("unfinished replay is not an invalid proof: {steps}: {error:?}"),
         }
     }
@@ -3908,4 +3914,108 @@ fn dependent_head_budget_scan_replays_every_completed_result() {
         }
     }
     assert!(failures > 0 && successes > 0);
+}
+
+#[test]
+fn public_replay_preserves_unresolved_domains_and_recovers_with_evidence() {
+    use nir::NominalAdmissionError as QueryError;
+    use type_resolution::implementation::EvidenceError;
+    use type_resolution::ptc::{Context, Formula, ProofError};
+    let value = |n| Term::Rigid {
+        declaration: id(n),
+        sort: Sort::ComptimeValue,
+    };
+    let domain = |input| Term::NormalForm {
+        head: id(80),
+        sort: Sort::Type,
+        arguments: vec![input],
+    };
+    let subject = ty(P::Bool);
+    let head = ImplementationHead {
+        declaration: id(90),
+        interface: Some(id(100)),
+        subject: subject.clone(),
+        type_parameters: vec![id(3)],
+        parameter_types: vec![domain(var(1))],
+        interface_arguments: vec![value(3)],
+        requirements: vec![],
+    };
+    let arguments = [value(4)];
+    let domains = std::collections::BTreeMap::from([(id(4), domain(var(2)))]);
+    let mut incomplete = Context::default();
+    incomplete.assume(Formula::equal(var(1), var(2)));
+    let mut complete = incomplete.clone();
+    complete.admit_congruence(id(80));
+    let matched = head
+        .match_types_with_domains(&subject, &arguments, &complete, Budget::default(), &domains)
+        .unwrap();
+    let mut index = Index::default();
+    index.insert(head.clone(), Budget::default()).unwrap();
+    index
+        .register_parameter_domain(id(4), domain(var(2)))
+        .unwrap();
+    let selected = index
+        .resolve_types(id(100), &arguments, &subject, &complete, Budget::default())
+        .unwrap();
+    let type_resolution::implementation::TypeAssessment::Applicable(evidence) =
+        &selected.assessments[&id(90)]
+    else {
+        panic!("{selected}");
+    };
+    let replay = |context: &Context, budget| {
+        head.verify_type_evidence_with_domains(
+            evidence, &subject, &arguments, context, budget, &domains,
+        )
+    };
+    for failure in [
+        replay(&incomplete, Budget::default()).unwrap_err(),
+        head.verify_head_match_with_domains(
+            &matched,
+            &subject,
+            &arguments,
+            &incomplete,
+            Budget::default(),
+            &domains,
+        )
+        .unwrap_err(),
+    ] {
+        assert!(
+            matches!(&failure, EvidenceError::Query(QueryError::Unresolved(reason)) if reason.contains("UnvalidatedModel"))
+        );
+        assert!(
+            failure
+                .to_string()
+                .starts_with("(evidence-query-error (unresolved ")
+        );
+    }
+    for steps in [0, 1, 10] {
+        let failure = replay(
+            &complete,
+            Budget {
+                steps,
+                ..Budget::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            failure,
+            EvidenceError::Query(QueryError::Budget)
+                | EvidenceError::Proof(ProofError::BudgetExhausted)
+        ));
+    }
+    replay(&complete, Budget::default()).unwrap();
+    let mut forged = evidence.clone();
+    forged.head_proofs.clear();
+    let failure = head
+        .verify_type_evidence_with_domains(
+            &forged,
+            &subject,
+            &arguments,
+            &complete,
+            Budget::default(),
+            &domains,
+        )
+        .unwrap_err();
+    assert_eq!(failure, EvidenceError::Proof(ProofError::Invalid));
+    replay(&complete, Budget::default()).unwrap();
 }

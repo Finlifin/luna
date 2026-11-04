@@ -3,7 +3,7 @@
 mod domain_staging;
 mod eligibility;
 mod replay;
-use super::{Applicability, Error, ImplementationHead, Index, Selection};
+use super::{Applicability, Error, EvidenceError, ImplementationHead, Index, Selection};
 use crate::InferenceTerm as I;
 use crate::obligations::{Engine, State};
 use crate::ptc::{Budget, Context, Formula, Outcome, Proof};
@@ -131,7 +131,7 @@ impl ImplementationHead {
         interface_arguments: &[Term],
         context: &Context,
         budget: Budget,
-    ) -> Result<(), crate::ptc::ProofError> {
+    ) -> Result<(), EvidenceError> {
         self.verify_head_match_with_domains(
             matched,
             subject,
@@ -152,7 +152,7 @@ impl ImplementationHead {
         context: &Context,
         budget: Budget,
         domains: &BTreeMap<DeclarationId, Term>,
-    ) -> Result<(), crate::ptc::ProofError> {
+    ) -> Result<(), EvidenceError> {
         self.verify_head_match_with_layouts(
             matched,
             subject,
@@ -173,10 +173,9 @@ impl ImplementationHead {
         budget: Budget,
         domains: &BTreeMap<DeclarationId, Term>,
         layouts: Option<&nir::program::Package>,
-    ) -> Result<(), crate::ptc::ProofError> {
+    ) -> Result<(), EvidenceError> {
         use crate::ptc::ProofError;
-        let remaining = validate(self, subject, interface_arguments, budget)
-            .map_err(|_| ProofError::BudgetExhausted)?;
+        let remaining = validate(self, subject, interface_arguments, budget)?;
         let remaining = validate(
             self,
             subject,
@@ -185,10 +184,9 @@ impl ImplementationHead {
                 steps: remaining,
                 ..budget
             },
-        )
-        .map_err(|_| ProofError::BudgetExhausted)?;
+        )?;
         if self.interface.is_none() || !matched.evidence.requirement_proofs.is_empty() {
-            return Err(ProofError::Invalid);
+            return Err(ProofError::Invalid.into());
         }
         let mut remaining = remaining;
         let substitution = nir::DeclarationSubstitution::bounded(
@@ -197,18 +195,16 @@ impl ImplementationHead {
             &matched.evidence.type_arguments,
             context.scope(),
             &mut remaining,
-        )
-        .map_err(substitution_proof_error)?;
+        )?;
         let expected = self
             .requirements
             .iter()
             .map(|requirement| {
                 substitution.instantiate_predicate_bounded(requirement, &mut remaining)
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(substitution_proof_error)?;
+            .collect::<Result<Vec<_>, _>>()?;
         if matched.requirements != expected {
-            return Err(ProofError::Invalid);
+            return Err(ProofError::Invalid.into());
         }
         let head = ImplementationHead {
             parameter_types: self.parameter_types.clone(),
@@ -1595,9 +1591,9 @@ impl ImplementationHead {
         interface_arguments: &[Term],
         context: &Context,
         budget: Budget,
-    ) -> Result<(), crate::ptc::ProofError> {
+    ) -> Result<(), EvidenceError> {
         if self.interface.is_none() {
-            return Err(crate::ptc::ProofError::Invalid);
+            return Err(crate::ptc::ProofError::Invalid.into());
         }
         self.verify_subject_type_evidence(evidence, subject, interface_arguments, context, budget)
     }
@@ -1609,7 +1605,7 @@ impl ImplementationHead {
         context: &Context,
         budget: Budget,
         domains: &BTreeMap<DeclarationId, Term>,
-    ) -> Result<(), crate::ptc::ProofError> {
+    ) -> Result<(), EvidenceError> {
         self.verify_type_evidence_with_layouts(
             evidence,
             subject,
@@ -1630,9 +1626,9 @@ impl ImplementationHead {
         budget: Budget,
         domains: &BTreeMap<DeclarationId, Term>,
         layouts: Option<&nir::program::Package>,
-    ) -> Result<(), crate::ptc::ProofError> {
+    ) -> Result<(), EvidenceError> {
         if self.interface.is_none() {
-            return Err(crate::ptc::ProofError::Invalid);
+            return Err(crate::ptc::ProofError::Invalid.into());
         }
         self.verify_subject_evidence_with_domains(
             evidence,
@@ -1652,7 +1648,7 @@ impl ImplementationHead {
         interface_arguments: &[Term],
         context: &Context,
         budget: Budget,
-    ) -> Result<(), crate::ptc::ProofError> {
+    ) -> Result<(), EvidenceError> {
         self.verify_subject_evidence_with(
             evidence,
             subject,
@@ -1670,7 +1666,7 @@ impl ImplementationHead {
         context: &Context,
         budget: Budget,
         verify_requirement: impl FnMut(&crate::ptc::Proof, Budget) -> Result<(), crate::ptc::ProofError>,
-    ) -> Result<(), crate::ptc::ProofError> {
+    ) -> Result<(), EvidenceError> {
         self.verify_subject_evidence_with_domains(
             evidence,
             subject,
@@ -1681,36 +1677,6 @@ impl ImplementationHead {
             None,
             verify_requirement,
         )
-    }
-    pub(super) fn verify_subject_evidence_with_domains(
-        &self,
-        evidence: &TypeEvidence,
-        subject: &Term,
-        interface_arguments: &[Term],
-        context: &Context,
-        budget: Budget,
-        domains: &BTreeMap<DeclarationId, Term>,
-        layouts: Option<&nir::program::Package>,
-        verify_requirement: impl FnMut(&crate::ptc::Proof, Budget) -> Result<(), crate::ptc::ProofError>,
-    ) -> Result<(), crate::ptc::ProofError> {
-        self.replay_subject_evidence(
-            evidence,
-            subject,
-            interface_arguments,
-            context,
-            budget,
-            domains,
-            layouts,
-            verify_requirement,
-        )
-        .map_err(replay::Failure::into_proof_error)
-    }
-}
-
-fn substitution_proof_error(error: nir::type_computations::Error) -> crate::ptc::ProofError {
-    match error {
-        nir::type_computations::Error::Budget => crate::ptc::ProofError::BudgetExhausted,
-        _ => crate::ptc::ProofError::Invalid,
     }
 }
 

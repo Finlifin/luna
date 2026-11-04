@@ -1,7 +1,7 @@
 //! Candidate-local Boolean requirements. Nested queries reuse Solver::active;
 //! their facts and index-scoped resolutions accompany the resulting proof.
 use super::*;
-use crate::implementation::TypeAssessment;
+use crate::implementation::{EvidenceError, TypeAssessment};
 use crate::ptc::{Proof, ProofError, TraitQuery, UnknownReason};
 
 #[derive(Debug)]
@@ -546,8 +546,8 @@ impl World<'_> {
         &self,
         resolution: &Resolution,
         budget: Budget,
-    ) -> Result<(), ProofError> {
-        self.verify_support_in_domain(resolution, budget, None)
+    ) -> Result<(), EvidenceError> {
+        self.verify_support_in_domain(resolution, &mut { budget }, None)
     }
 
     /// The root belongs to the inherent member index; nested facts still belong
@@ -557,8 +557,8 @@ impl World<'_> {
         index: &InherentIndex,
         resolution: &Resolution,
         budget: Budget,
-    ) -> Result<(), ProofError> {
-        self.verify_support_in_domain(resolution, budget, Some(index))
+    ) -> Result<(), EvidenceError> {
+        self.verify_support_in_domain(resolution, &mut { budget }, Some(index))
     }
 
     /// Replay the selected inherent head and its requirements without importing
@@ -570,14 +570,15 @@ impl World<'_> {
         subject: &Term,
         resolution: &Resolution,
         budget: Budget,
-    ) -> Result<(), ProofError> {
-        self.verify_inherent_condition_support(index, resolution, budget)?;
+    ) -> Result<(), EvidenceError> {
+        let mut budget = budget;
+        self.verify_support_in_domain(resolution, &mut budget, Some(index))?;
         let Selection::Selected(id) = resolution.types.selection else {
-            return Err(ProofError::Invalid);
+            return Err(ProofError::Invalid.into());
         };
         let Some(TypeAssessment::Applicable(evidence)) = resolution.types.assessments.get(&id)
         else {
-            return Err(ProofError::Invalid);
+            return Err(ProofError::Invalid.into());
         };
         index.verify_evidence_with(
             name,
@@ -586,15 +587,28 @@ impl World<'_> {
             self.context,
             budget,
             |proof, allowance| {
-                if self.context.verify_proof(proof, allowance).is_ok() {
-                    return Ok(());
-                }
-                for support in resolution.condition_support.get(&id).into_iter().flatten() {
-                    if support.context.verify_proof(proof, allowance).is_ok() {
-                        return Ok(());
+                let supports = resolution.condition_support.get(&id);
+                let mut allowance = allowance;
+                let contexts = std::iter::once(self.context).chain(
+                    supports
+                        .into_iter()
+                        .flatten()
+                        .map(|support| &support.context),
+                );
+                let mut failure = ProofError::Invalid;
+                for context in contexts {
+                    match context.verify_proof_metered(proof, &mut allowance) {
+                        Ok(()) => return Ok(()),
+                        Err(ProofError::BudgetExhausted) => failure = ProofError::BudgetExhausted,
+                        Err(ProofError::ArithmeticRange)
+                            if failure != ProofError::BudgetExhausted =>
+                        {
+                            failure = ProofError::ArithmeticRange
+                        }
+                        Err(_) => {}
                     }
                 }
-                Err(ProofError::Invalid)
+                Err(failure)
             },
         )
     }
@@ -602,88 +616,88 @@ impl World<'_> {
     fn verify_support_in_domain(
         &self,
         resolution: &Resolution,
-        budget: Budget,
+        budget: &mut Budget,
         inherent: Option<&InherentIndex>,
-    ) -> Result<(), ProofError> {
+    ) -> Result<(), EvidenceError> {
         let mut fuel = budget.steps;
-        let mut pending = vec![(resolution, 0usize)];
-        while let Some((resolution, depth)) = pending.pop() {
-            if depth >= budget.max_depth.min(128) || fuel == 0 {
-                return Err(ProofError::BudgetExhausted);
-            }
-            fuel -= 1;
-            let current = if depth == 0 {
-                inherent.map_or_else(
-                    || self.index.type_resolution_is_current(&resolution.types),
-                    |index| index.resolution_is_current(&resolution.types),
-                )
-            } else {
-                self.index.type_resolution_is_current(&resolution.types)
-            };
-            if !current || !resolution.scope.matches(self) {
-                return Err(ProofError::Invalid);
-            }
-            for support in resolution.condition_support.values().flatten() {
-                let mut expected = self.context.fork();
-                for fact in &support.facts {
-                    let atom = Formula::Trait(fact.query.clone());
-                    expected.assume(if fact.truth { atom } else { atom.negate() });
-                    if let Some(given) = &fact.given {
-                        if !fact.truth {
-                            return Err(ProofError::Invalid);
+        let result = (|| {
+            let mut pending = vec![(resolution, 0usize)];
+            while let Some((resolution, depth)) = pending.pop() {
+                if depth >= budget.max_depth.min(128) || fuel == 0 {
+                    return Err(ProofError::BudgetExhausted.into());
+                }
+                fuel -= 1;
+                let current = if depth == 0 {
+                    inherent.map_or_else(
+                        || self.index.type_resolution_is_current(&resolution.types),
+                        |index| index.resolution_is_current(&resolution.types),
+                    )
+                } else {
+                    self.index.type_resolution_is_current(&resolution.types)
+                };
+                if !current || !resolution.scope.matches(self) {
+                    return Err(ProofError::Invalid.into());
+                }
+                for support in resolution.condition_support.values().flatten() {
+                    let mut expected = self.context.fork();
+                    for fact in &support.facts {
+                        let atom = Formula::Trait(fact.query.clone());
+                        expected.assume(if fact.truth { atom } else { atom.negate() });
+                        if let Some(given) = &fact.given {
+                            if !fact.truth {
+                                return Err(ProofError::Invalid.into());
+                            }
+                            let mut allowance = Budget {
+                                steps: fuel,
+                                ..*budget
+                            };
+                            let found = self.given_metered(given, &mut allowance);
+                            fuel = allowance.steps;
+                            let found = found?;
+                            if found.is_none() {
+                                return Err(ProofError::Invalid.into());
+                            }
                         }
-                        let mut allowance = Budget {
+                        if let Some(nested) = &fact.resolution {
+                            pending.push((nested, depth + 1));
+                        }
+                    }
+                    let mut completed = std::collections::HashMap::new();
+                    for projection in &support.projections {
+                        let allowance = Budget {
                             steps: fuel,
-                            ..budget
+                            ..*budget
                         };
-                        let found = self.given_metered(given, &mut allowance);
-                        fuel = allowance.steps;
-                        let found = found.map_err(|error| match error {
-                            nir::NominalAdmissionError::Budget => ProofError::BudgetExhausted,
-                            _ => ProofError::Invalid,
-                        })?;
-                        if found.is_none() {
-                            return Err(ProofError::Invalid);
+                        let (normalized, remaining) = self.associated_type_view_cached(
+                            &projection.source,
+                            allowance,
+                            &mut completed,
+                        )?;
+                        fuel = remaining;
+                        if normalized.value != projection.value {
+                            return Err(ProofError::Invalid.into());
                         }
+                        expected.assume(Formula::equal(
+                            projection.source.clone(),
+                            projection.value.clone(),
+                        ));
                     }
-                    if let Some(nested) = &fact.resolution {
-                        pending.push((nested, depth + 1));
+                    if expected.assumptions() != support.context.assumptions() {
+                        return Err(ProofError::Invalid.into());
                     }
-                }
-                let mut completed = std::collections::HashMap::new();
-                for projection in &support.projections {
-                    let allowance = Budget {
+                    let mut allowance = Budget {
                         steps: fuel,
-                        ..budget
+                        ..*budget
                     };
-                    let (normalized, remaining) = self
-                        .associated_type_view_cached(&projection.source, allowance, &mut completed)
-                        .map_err(|error| match error {
-                            QueryError::Budget => ProofError::BudgetExhausted,
-                            _ => ProofError::Invalid,
-                        })?;
-                    fuel = remaining;
-                    if normalized.value != projection.value {
-                        return Err(ProofError::Invalid);
-                    }
-                    expected.assume(Formula::equal(
-                        projection.source.clone(),
-                        projection.value.clone(),
-                    ));
+                    let checked = expected.verify_proof_metered(&support.proof, &mut allowance);
+                    fuel = allowance.steps;
+                    checked?;
                 }
-                if expected.assumptions() != support.context.assumptions() {
-                    return Err(ProofError::Invalid);
-                }
-                expected.verify_proof(
-                    &support.proof,
-                    Budget {
-                        steps: fuel,
-                        ..budget
-                    },
-                )?;
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        budget.steps = fuel;
+        result
     }
 }
 

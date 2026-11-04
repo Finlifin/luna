@@ -2226,3 +2226,61 @@ fn root_clause_propagation_exports_replayable_theory_reasons() {
         Err(ptc::ProofError::Invalid)
     );
 }
+
+#[test]
+fn proof_replay_returns_work_on_success_failure_and_retry() {
+    use ptc::ProofError;
+    let mut context = Context::default();
+    context.assume(eq(variable(1), variable(2)));
+    context.assume(eq(variable(2), ty(P::Bool)));
+    let Outcome::Entailed(proof) = context.prove(eq(variable(1), ty(P::Bool)), Budget::default())
+    else {
+        panic!("transitive equality must have proof evidence");
+    };
+    let mut measured = Budget::default();
+    context.verify_proof_metered(&proof, &mut measured).unwrap();
+    let work = Budget::default().steps - measured.steps;
+    assert!(work > 0);
+    // Replay checks one fixed certificate; unlike search, it does not choose
+    // a different proof when the available allowance changes.
+    for steps in [0, 1, work - 1] {
+        let mut limited = Budget {
+            steps,
+            ..Budget::default()
+        };
+        assert_eq!(
+            context.verify_proof_metered(&proof, &mut limited),
+            Err(ProofError::BudgetExhausted)
+        );
+        assert!(limited.steps <= steps);
+    }
+    let mut shared = Budget {
+        steps: work * 2,
+        ..Budget::default()
+    };
+    context.verify_proof_metered(&proof, &mut shared).unwrap();
+    assert_eq!(shared.steps, work);
+    context.verify_proof_metered(&proof, &mut shared).unwrap();
+    assert_eq!(shared.steps, 0);
+    assert_eq!(
+        context.verify_proof_metered(&proof, &mut shared),
+        Err(ProofError::BudgetExhausted)
+    );
+    let mut retry = Budget::default();
+    let before = retry.steps;
+    assert_eq!(
+        Context::default().verify_proof_metered(&proof, &mut retry),
+        Err(ProofError::Invalid)
+    );
+    assert!(retry.steps > 0 && retry.steps < before);
+    let before = retry.steps;
+    context.verify_proof_metered(&proof, &mut retry).unwrap();
+    assert_eq!(before - retry.steps, work);
+    let mut forged = proof.clone();
+    forged.goal = eq(variable(1), ty(P::Char));
+    assert_eq!(
+        context.verify_proof_metered(&forged, &mut retry),
+        Err(ProofError::Invalid)
+    );
+    context.verify_proof_metered(&proof, &mut retry).unwrap();
+}

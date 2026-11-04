@@ -1666,6 +1666,34 @@ fn conditional_inherent_evidence_preserves_member_subject_and_both_indexes() {
     world
         .verify_inherent_evidence(&inherent, "read", &subject, &resolution, Budget::default())
         .unwrap();
+    let mut exhausted = 0;
+    let mut completed = 0;
+    for steps in (0..4000).step_by(13) {
+        use nir::NominalAdmissionError as QueryError;
+        use type_resolution::implementation::EvidenceError;
+        use type_resolution::ptc::ProofError;
+        match world.verify_inherent_evidence(
+            &inherent,
+            "read",
+            &subject,
+            &resolution,
+            Budget {
+                steps,
+                ..Budget::default()
+            },
+        ) {
+            Ok(()) => completed += 1,
+            Err(
+                EvidenceError::Query(QueryError::Budget)
+                | EvidenceError::Proof(ProofError::BudgetExhausted),
+            ) => exhausted += 1,
+            error => panic!("steps {steps}: {error:?}"),
+        }
+    }
+    assert!(exhausted > 0 && completed > 0);
+    world
+        .verify_inherent_evidence(&inherent, "read", &subject, &resolution, Budget::default())
+        .unwrap();
     assert!(
         world
             .verify_inherent_evidence(&inherent, "wrong", &subject, &resolution, Budget::default())

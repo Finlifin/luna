@@ -320,52 +320,68 @@ impl Context {
     /// Replay a refutation against this exact scope and its admitted contracts.
     /// This checks the tree, not merely whether a fresh search proves the goal.
     pub fn verify_proof(&self, proof: &Proof, budget: Budget) -> Result<(), ProofError> {
-        let max_depth = budget.max_depth.min(256);
+        self.verify_proof_metered(proof, &mut { budget })
+    }
+
+    /// Replay using the caller's remaining work, including rejection and
+    /// exhaustion. The proof and context remain immutable on every outcome.
+    pub fn verify_proof_metered(
+        &self,
+        proof: &Proof,
+        budget: &mut Budget,
+    ) -> Result<(), ProofError> {
         let mut steps = budget.steps;
-        for formula in self
-            .assumptions
-            .iter()
-            .chain(proof.assumptions.iter())
-            .chain(std::iter::once(&proof.goal))
-        {
-            if !within_limits(formula, max_depth, &mut steps) {
-                return Err(ProofError::BudgetExhausted);
-            }
-        }
-        if proof.scope != *self.scope
-            || proof.assumptions != *self.assumptions
-            || proof.congruence_heads != *self.congruence_heads
-            || proof.nominal_constructors != *self.nominal_constructors
-            || proof.tuple_heads != *self.tuple_heads
-        {
-            return Err(ProofError::Invalid);
-        }
-        let mut formulas = (*self.assumptions).clone();
-        formulas.push(proof.goal.clone().negate());
-        let formula = Formula::And(formulas);
-        let mut atoms = Vec::new();
-        let mut terms = Terms::default();
-        collect(&formula, &mut atoms, &mut terms, 0, max_depth, &self.scope).map_err(
-            |message| {
-                if message == "depth budget" {
-                    ProofError::BudgetExhausted
-                } else {
-                    ProofError::Invalid
+        let result = (|| {
+            let max_depth = budget.max_depth.min(256);
+            for formula in self
+                .assumptions
+                .iter()
+                .chain(proof.assumptions.iter())
+                .chain(std::iter::once(&proof.goal))
+            {
+                if !within_limits(formula, max_depth, &mut steps) {
+                    return Err(ProofError::BudgetExhausted);
                 }
-            },
-        )?;
-        let mut search = Search {
-            boolean: None,
-            theory_state: None,
-            learned: learning::Clauses::default(),
-            context: self,
-            formula: &formula,
-            atoms: &atoms,
-            terms: &terms,
-            steps,
-            max_depth,
-        };
-        search.check_tree(&proof.tree, &mut vec![None; atoms.len()], 0)
+            }
+            if proof.scope != *self.scope
+                || proof.assumptions != *self.assumptions
+                || proof.congruence_heads != *self.congruence_heads
+                || proof.nominal_constructors != *self.nominal_constructors
+                || proof.tuple_heads != *self.tuple_heads
+            {
+                return Err(ProofError::Invalid);
+            }
+            let mut formulas = (*self.assumptions).clone();
+            formulas.push(proof.goal.clone().negate());
+            let formula = Formula::And(formulas);
+            let mut atoms = Vec::new();
+            let mut terms = Terms::default();
+            collect(&formula, &mut atoms, &mut terms, 0, max_depth, &self.scope).map_err(
+                |message| {
+                    if message == "depth budget" {
+                        ProofError::BudgetExhausted
+                    } else {
+                        ProofError::Invalid
+                    }
+                },
+            )?;
+            let mut search = Search {
+                boolean: None,
+                theory_state: None,
+                learned: learning::Clauses::default(),
+                context: self,
+                formula: &formula,
+                atoms: &atoms,
+                terms: &terms,
+                steps,
+                max_depth,
+            };
+            let result = search.check_tree(&proof.tree, &mut vec![None; atoms.len()], 0);
+            steps = search.steps;
+            result
+        })();
+        budget.steps = steps;
+        result
     }
     /// Validate a concrete counterexample against this exact scope, without
     /// rerunning proof search or trusting the producer's Boolean assignment.

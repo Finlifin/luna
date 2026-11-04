@@ -2844,8 +2844,8 @@ implementation evidence replay 的域准入和关系提取保留 BudgetExhausted
 条件求解、候选 qualification 和世界命题保留独立 implementation 的正向证明路径。
 若前提查询未决，后续独立证明仍能建立目标；未选出候选则不能据此排除目标。
 关联成员、elaboration、materialization 和 Copy／Drop 调用者传播查询失败，不能继续
-走默认“不存在”分支。条件证据 replay 现在扣除 given 查询的实际开销，Budget 保持
-ProofError::BudgetExhausted；其他错误仍受既有 replay 错误类型的限制。
+走默认“不存在”分支。条件证据 replay 扣除 given 查询的实际开销，并通过 EvidenceError
+保留域查询和 PTC 证明各自的失败；资源失败不再合入无效证明。
 
 Qualification 的 Pending 载荷使用结构化查询错误，保留 Budget、Unresolved 与
 Invalid；dump 分别输出 budget-exhausted、unresolved、invalid。替换、given、投影和
@@ -2864,10 +2864,45 @@ eligibility 模块。结构视图查询与可接受形态析取证明保留各�
 依赖参数完成后仍先生成私有残余候选，再以原始声明重放其结果。重放内核区分域查询
 失败与 PTC 证据失败，候选恢复直接消费这个结果：BudgetExhausted 传回资源失败，
 ArithmeticRange 与域查询 Unresolved 保留未决，无效证据报告 Invalid；不再将所有
-重放错误格式化成 Pending，也不先把域查询未决压成无效证明。现有公共 proof replay
-接口仍只有 ProofError，其兼容适配层才将无法表达的 Unresolved 合入 Invalid。
-该旧公共接口及消费者尚待迁移，不能据内部候选路径的修复声称全部证据重放已统一。
-候选匹配的预算分区与 reservation 也仍存在。
+重放错误格式化成 Pending，也不先把域查询未决压成无效证明。
+
+implementation 的公开 head／type evidence 重放、InherentIndex 及条件支持重放
+统一返回 EvidenceError，分别保留 Query(NominalAdmissionError) 与 Proof(ProofError)。
+原先将 Unresolved 压成 Invalid 的兼容转换已删除，内部候选与公开消费者使用同一
+重放内核。只有真正检查单份 PTC 证明的回调继续返回 ProofError，不将域查询或
+implementation 世界检查伪装成 PTC 证明检查。错误 Display 使用 S-expression，
+区分来源和具体分类，诊断文本正确转义。
+
+PTC 的 verify_proof_metered 在成功、拒绝和耗尽时返还追踪到的余额；旧 verify_proof
+只作拥有预算的便利包装。固有方法重放先检查条件支持，再用余额检查选中头；多个
+支持上下文逐次共享一份证明额度，保留独立成功证明，并在没有成功时保留预算耗尽／
+算术范围失败。条件支持的每份 PTC 证明也扣除其实际工作，不反复使用原额度。
+候选匹配及头内各证明槽仍使用 reservation，公开 implementation 重放仍接收拥有
+的 Budget；这不等于整个世界证据检查已经全面按实际消耗向外返还余额。
+
+公开重放错误与证明计量迁移验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
+  --lib --test implementation --test inherent --test capabilities --test associated
+  --test implementation_phases --no-fail-fast`：215 项通过，退出 0；
+  `/tmp/luna-tools-91kse3s4/result.json`。
+- 同一入口 `test -p ptc -p type_resolution -p luna --lib --test solver
+  --test capabilities --test library_protocols --test library_meta_math
+  --test normal_form_methods --test comptime_receivers --test trait_domain_substitution
+  --test trait_query_failures --test sysroot_preludes --test nominal_value_parameters
+  --no-fail-fast`：683 项通过，退出 0；`/tmp/luna-tools-fq7fuwu6/result.json`。
+- 将早期及普通固有方法诊断接入 EvidenceError 的 Display 后，同一入口
+  `test -p luna --test normal_form_methods --test library_protocols
+  --test library_meta_math --no-fail-fast`：42 项通过，退出 0；
+  `/tmp/luna-tools-ne5dmh7k/result.json`。这些范围彼此重叠，不累加为独立用例数。
+- 13 个修改／新增 Rust 文件通过 scoped rustfmt check，退出 0；
+  `/tmp/luna-tools-tgg84kv9/result.json`。git diff --check 通过。
+
+公开 API 回归覆盖缺少／补齐 congruence 时的 Unresolved 与恢复、低预算分类、
+伪造证据拒绝和原证据重试；PTC 回归检查固定证明在成功、错误上下文、伪造目标和
+额度不足时都返还已追踪的余额。条件固有方法按额度扫描并验证恢复，真实 sysroot
+回归覆盖协议、meta.math、NF 方法和默认导入。计量仍针对现有结构及搜索步骤，
+不是完整 CPU／分配成本模型；关联投影失败的 owned-budget 边界仍未精确返还消耗。
 
 主体资格与重放迁移验证（工作目录 `/home/fin/luna`）：
 
@@ -2959,8 +2994,8 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
   DeclarationWorld 的构建与完成类型查询已共用各自调用者的余额，构建失败不发布
   半成品，归约结果按外层事务发布；其他便利入口自行建立的预算仍待迁移。
   不能据 metered Type/value view 的
-  实际扣款声称全部预算所有权已完成。proof replay 仍有合并 admission 错误的路径，
-  完整求解链的 Pending／资源／反例传播未完成。
+  实际扣款声称全部预算所有权已完成。implementation／条件支持重放的 admission
+  错误已通过 EvidenceError 公开保留；完整求解链的 Pending／资源／反例传播未完成。
   当前查询复用 NominalAdmissionError，并不意味着所有能力选择都属于值域检查；
   全链路查询协议仍须按所属层次完成统一。
 - 旧 layout／callable 可选观察器把 Unresolved 表示为 unavailable view，仍不能

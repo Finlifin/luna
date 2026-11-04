@@ -6,6 +6,8 @@ use crate::ptc::Budget;
 mod applicability;
 pub(crate) use applicability::equivalent_domains;
 mod coherence;
+mod evidence;
+pub use evidence::EvidenceError;
 mod inherent;
 pub use coherence::{CoherenceReport, PairAssessment};
 pub use inherent::{InherentHead, InherentIndex};

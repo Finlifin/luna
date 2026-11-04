@@ -186,12 +186,7 @@ impl Checker<'_, '_> {
         };
         index
             .verify_evidence(name, evidence, &subject, &context, Budget::default())
-            .map_err(|e| {
-                error(
-                    span,
-                    format!("inherent method evidence replay failed: {e:?}"),
-                )
-            })?;
+            .map_err(|e| error(span, format!("inherent method evidence replay failed: {e}")))?;
         let method = members[&selected];
         self.signature_owner = query_owner;
         self.context = context.clone();

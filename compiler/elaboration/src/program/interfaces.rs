@@ -1674,12 +1674,7 @@ impl Checker<'_, '_> {
                     &resolution,
                     Budget::default(),
                 )
-                .map_err(|e| {
-                    error(
-                        span,
-                        format!("inherent method evidence replay failed: {e:?}"),
-                    )
-                })?;
+                .map_err(|e| error(span, format!("inherent method evidence replay failed: {e}")))?;
                 Some((id, evidence.type_arguments.clone()))
             }
             crate::implementation::Selection::NoApplicableCandidate => None,
