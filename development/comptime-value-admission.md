@@ -2994,9 +2994,10 @@ TraitRequirement 交给当前 invocation 的类型查询服务。驱动的服务
 准入共用此边界；未绑定的普通输入义务仍在输入绑定后检查。已有代码实例缓存
 也不豁免重新检查 capability，失败不会发布新的代码实例或 InstantiateFunction 事件。
 
-名义值的被动 has_type 与构造路径仍依赖保留见证，尚未统一为主动准入／已准入值
-证据模型。本次没有把被动布尔类型观察改成可执行查询，也没有将查询成功塞入
-全局 assumed_interfaces；不能据此宣称所有 carrier 的能力交付均已完成。
+名义 Type 形成与 alias 主体准入也复用此主动能力检查，见下述边界。
+名义值的被动 has_type 仍依赖保留见证，尚未统一为主动准入／已准入值证据模型。
+没有把被动布尔类型观察改成可执行查询，也没有将查询成功塞入全局
+assumed_interfaces；不能据此宣称所有 carrier 的能力交付均已完成。
 
 该边界的验证工作目录 `/home/fin/luna`：
 
@@ -3015,6 +3016,42 @@ TraitRequirement 交给当前 invocation 的类型查询服务。驱动的服务
   最终按“不授予缺失能力”的契约接受这两类失败，未改变生产求解器或拒绝规则。
 - 五份修改 Rust 文件 scoped rustfmt check 退出 0；
   `/tmp/luna-tools-6y6fhig3/result.json`。未执行全 workspace/native 或性能基准。
+
+**名义 Type 与 alias 的主动准入。** nominal_plan 的公共契约路径涵盖 struct、enum、
+newtype 与透明 alias。完成实参绑定与域检查后，capability 通过同一个主动入口检查；
+alias 只有在义务满足后才能执行其主体。过去仅查保留表的实现会让动态泛型 alias
+形成失败，即使完整源码世界存在对应实现。真实 sysroot 回归中，同样约束的三个
+名义定义原已成功，透明 alias 返回 TypeContractUnresolved；修复消除了这条路径差异，
+没有改变 alias 的透明语义或名义类型身份。
+
+admission::admit_type 的源码名义契约替换改用有预算的 DeclarationSubstitution：
+建立替换、观察并复制 requirements／capabilities 都扣除 VM 调用方余额；两组准备
+完成后才调用契约求解器。预算不足保留 StepsExhausted，不转成缺失能力或非法 Type。
+IIR 与源码名义 Type 的能力检查均复用 check_capability_contract，保留现有正面见证
+快路径；无需为没有方法调用的能力提前生成 dispatch 主体。
+
+Type 形成成功不等于已有 record／variant／newtype 值能跨世界携带证明。后者仍需
+独立的值准入和证据生命周期设计；不能删掉 has_type 中的能力检查，也不能用一次
+成功查询污染全局假设来绕过缺口。本阶段只接通 Type 及 alias 主体的主动检查。
+
+该边界的局部证据（工作目录 `/home/fin/luna`）：
+
+- 修复前真实 sysroot 的四类定义回归在透明 alias 失败，退出 101；
+  `/tmp/luna-tools-qmr6hvof/result.json`。修复后同一正例退出 0；
+  `/tmp/luna-tools-1kcbt0zf/result.json`。
+- VM 的 admission::tests 两项通过，退出 0；
+  `/tmp/luna-tools-o4ioz80p/result.json`。大载荷契约低余额失败后可重试；alias 的
+  Unknown／Rejected 均扣除查询工作量且不执行主体，后续成功查询才执行主体。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna
+  --lib --test comptime_nominal_capabilities --test nominal_value_parameters
+  --test trait_phases --test normal_input_plans --test library_protocols --no-fail-fast
+  -- --skip clause_list_inputs_share_domain_scope_and_budget_validation`：977 项通过，
+  筛去既有列表诊断失败 1 项，退出 0；`/tmp/luna-tools-_u8wtvi1/result.json`。
+  真实 sysroot 四类定义均比较动态形成与直接形成的 Type；仅为 true 提供实现时，
+  动态 false 形成均拒绝或未决，不能获得能力。包含工作区原有资源分析修改。
+- 四份 Rust 文件 scoped rustfmt check 退出 0；
+  `/tmp/luna-tools-l4l4ahhn/result.json`。git diff --check 通过。
+  未执行全 workspace 或性能基准。
 
 implementation 的标量冲突预检、每个普通值参数的结构遍历、重复 binder 比较与
 后续 Type 匹配共用 head 分区的余额，不再为每个实参刷新额度。调用的显式输入

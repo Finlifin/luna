@@ -2,6 +2,9 @@
 //! authorization to duplicate resources or reuse an equality-sensitive query.
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 impl Interpreter<'_> {
     /// Ordinary and NF inputs must use the same receiving-world evidence.
     /// Keep typed query failures intact; budget exhaustion is not missing data.
@@ -310,11 +313,7 @@ impl Interpreter<'_> {
                         self.check_type_contract(predicate, source)?;
                     }
                     for predicate in capabilities {
-                        self.tick(None)?;
-                        self.check_type_contract(
-                            &nir::program::TypePredicate::Trait(predicate.clone()),
-                            source,
-                        )?;
+                        self.check_capability_contract(predicate, source)?;
                     }
                     for argument in arguments {
                         self.admit_type(argument, depth + 1)?;
@@ -383,25 +382,48 @@ impl Interpreter<'_> {
                         None,
                     )
                 })?;
-                let parameters = nir::declaration_parameters(parameters, domains)
-                    .map_err(|_| self.failure(ErrorKind::Type, None))?;
-                let requirements = requirements
-                    .iter()
-                    .map(|p| p.instantiate_parameters(&parameters, arguments))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| self.failure(ErrorKind::Type, None))?;
-                let capabilities = capabilities
-                    .iter()
-                    .map(|p| p.instantiate_parameters(&parameters, arguments))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| self.failure(ErrorKind::Type, None))?;
+                let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+                let mut remaining = before;
+                let contracts = (|| {
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        parameters,
+                        domains,
+                        arguments,
+                        &[],
+                        &mut remaining,
+                    )?;
+                    let requirements = requirements
+                        .iter()
+                        .map(|predicate| {
+                            substitution.instantiate_predicate_bounded(predicate, &mut remaining)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let capabilities = capabilities
+                        .iter()
+                        .map(|requirement| {
+                            substitution
+                                .instantiate_requirement_bounded(requirement, &mut remaining)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, nir::type_computations::Error>((requirements, capabilities))
+                })();
+                self.budget.steps -= (before - remaining) as u64;
+                let (requirements, capabilities) = contracts.map_err(|failure| {
+                    self.failure(
+                        if failure == nir::type_computations::Error::Budget {
+                            ErrorKind::StepsExhausted
+                        } else {
+                            ErrorKind::Type
+                        },
+                        None,
+                    )
+                })?;
                 for p in requirements {
                     self.tick(None)?;
                     self.check_type_contract(&p, source)?;
                 }
                 for p in capabilities {
-                    self.tick(None)?;
-                    self.check_type_contract(&nir::program::TypePredicate::Trait(p), source)?;
+                    self.check_capability_contract(&p, source)?;
                 }
                 for ty in arguments {
                     self.admit_type(ty, depth + 1)?;

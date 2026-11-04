@@ -295,8 +295,8 @@ impl Contract<'_> {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if !vm.capabilities_hold_parameters(&capabilities, &[], &[]) {
-            return Err(vm.failure(ErrorKind::TypeContractUnresolved, Some(expr.source)));
+        for capability in &capabilities {
+            vm.check_capability_contract(capability, expr.source)?;
         }
         if let K::CheckTypeAlias { body, .. } = &expr.kind {
             return if let Some(body) = body {
