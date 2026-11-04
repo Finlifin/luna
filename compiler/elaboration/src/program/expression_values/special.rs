@@ -728,32 +728,19 @@ impl Checker<'_, '_> {
                 {
                     let parameters = fields
                         .into_iter()
-                        .zip(&comptime_parameters)
-                        .map(|(field, staged)| {
+                        .map(|field| {
                             let K::TypeValue(ty) = field.kind else {
                                 unreachable!()
                             };
-                            Parameter {
-                                sort: if *staged {
-                                    if ty == p(P::Type) {
-                                        Sort::Type
-                                    } else {
-                                        Sort::ComptimeValue
-                                    }
-                                } else {
-                                    Sort::Runtime
-                                },
-                                ty,
-                            }
+                            ty
                         })
                         .collect();
-                    K::TypeValue(
-                        Term::Function {
-                            parameters,
-                            result: Box::new(p(P::Void)),
-                        }
-                        .with_comptime_phase(comptime),
-                    )
+                    K::TypeValue(self.computed_callable_type(
+                        parameters,
+                        &comptime_parameters,
+                        comptime,
+                        expr.span,
+                    )?)
                 } else {
                     K::FunctionType {
                         comptime,
@@ -781,14 +768,9 @@ impl Checker<'_, '_> {
                 let kind = if let (K::TypeValue(input), K::TypeValue(output)) =
                     (&signature.kind, &result.kind)
                 {
-                    K::TypeValue(
-                        input
-                            .clone()
-                            .with_callable_result(output.clone())
-                            .ok_or_else(|| {
-                                error(expr.span, "arrow input must be a function type")
-                            })?,
-                    )
+                    let input = self.copy_alias_type(input, expr.span)?;
+                    let output = self.copy_alias_type(output, expr.span)?;
+                    K::TypeValue(self.computed_callable_result(input, output, expr.span)?)
                 } else {
                     K::FunctionResultType {
                         signature: Box::new(signature),

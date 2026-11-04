@@ -32,6 +32,101 @@ pub(super) fn has_named_inputs(expr: &Expr<'_>) -> bool {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn computed_callable_type(
+        &mut self,
+        inputs: Vec<Term>,
+        staged: &[bool],
+        comptime: bool,
+        span: Span,
+    ) -> Result<Term, Error> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = nir::callable_types::from_outer(inputs, staged, comptime, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        result.map_err(|reason| error(span, reason.to_string()))
+    }
+
+    pub(super) fn computed_callable_result(
+        &mut self,
+        signature: Term,
+        result: Term,
+        span: Span,
+    ) -> Result<Term, Error> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = nir::callable_types::with_result_from_outer(signature, result, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        result.map_err(|reason| error(span, reason.to_string()))
+    }
+
+    /// Named callable-type parameters are abstract values in the active
+    /// telescope, not locals belonging to an interpreter invocation.
+    pub(super) fn callable_type_input_expression(
+        &mut self,
+        expr: &Expr<'_>,
+        binding: n::LocalId,
+        expected: Option<&Term>,
+    ) -> Result<Option<n::Expr>, Error> {
+        let Some(type_input) = self.callable_type_inputs.get(&binding) else {
+            return Ok(None);
+        };
+        let type_domain = p(P::Type);
+        let (symbol, domain) = if let Some(symbol) = type_input {
+            (symbol, &type_domain)
+        } else if let Some((symbol, domain)) = self.callable_value_inputs.get(&binding) {
+            (symbol, domain)
+        } else {
+            return Err(error(
+                expr.span,
+                if expected == Some(&type_domain) {
+                    "function type dependency requires an earlier explicit comptime Type parameter"
+                } else {
+                    "normal-form argument requires an explicit comptime value input in this function type"
+                },
+            ));
+        };
+        if expected == Some(&type_domain) && *domain != type_domain {
+            return Err(error(
+                expr.span,
+                "function type dependency requires an earlier explicit comptime Type parameter",
+            ));
+        }
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let copied = (|| {
+            let symbol = nir::copy_budget::clone_term(symbol, &mut fuel)?;
+            let domain = nir::copy_budget::clone_term(domain, &mut fuel)?;
+            Ok::<_, nir::copy_budget::CopyBudgetExhausted>((symbol, domain))
+        })();
+        self.required_steps -= (before - fuel) as u64;
+        let (symbol, ty) = copied.map_err(|failure| {
+            error(
+                expr.span,
+                match failure {
+                    nir::copy_budget::CopyBudgetExhausted::Steps => {
+                        "callable input copy budget exhausted"
+                    }
+                    nir::copy_budget::CopyBudgetExhausted::Depth => {
+                        "callable input copy depth exhausted"
+                    }
+                },
+            )
+        })?;
+        if let Some(expected) = expected {
+            self.require_expression(&ty, expected, expr.span)?;
+        }
+        let kind = if ty == type_domain {
+            K::TypeValue(symbol)
+        } else {
+            K::ComptimeValue(symbol)
+        };
+        Ok(Some(n::Expr {
+            source: source(expr.span),
+            ty,
+            kind,
+        }))
+    }
+
     pub(super) fn form_normal_form_callable_type<'hir>(
         &mut self,
         inputs: &[hir::common::TyParam<'hir>],

@@ -119,45 +119,56 @@ impl Interpreter<'_> {
     }
 
     pub(super) fn complete_type_constructor(
-        &self,
+        &mut self,
         kind: &Kind,
         mut inputs: Vec<Term>,
         source: SourceRange,
     ) -> Result<Value, Error> {
+        if let Kind::Function {
+            comptime,
+            parameters,
+        } = kind
+        {
+            let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let result = nir::callable_types::from_outer(inputs, parameters, *comptime, &mut fuel);
+            self.budget.steps -= (before - fuel) as u64;
+            return result.map(Value::Type).map_err(|error| {
+                self.failure(
+                    if matches!(error, nir::type_computations::Error::Budget) {
+                        ErrorKind::StepsExhausted
+                    } else {
+                        ErrorKind::Type
+                    },
+                    Some(source),
+                )
+            });
+        }
+        if let Kind::Result = kind {
+            let output = inputs
+                .pop()
+                .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+            let input = inputs
+                .pop()
+                .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+            let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let result = nir::callable_types::with_result_from_outer(input, output, &mut fuel);
+            self.budget.steps -= (before - fuel) as u64;
+            return result.map(Value::Type).map_err(|error| {
+                self.failure(
+                    if matches!(error, nir::type_computations::Error::Budget) {
+                        ErrorKind::StepsExhausted
+                    } else {
+                        ErrorKind::Type
+                    },
+                    Some(source),
+                )
+            });
+        }
         let failure = || self.failure(ErrorKind::Type, Some(source));
         let ty = match kind {
-            Kind::Function {
-                comptime,
-                parameters,
-            } => {
-                if parameters.len() != inputs.len() {
-                    return Err(failure());
-                }
-                let parameters = inputs
-                    .into_iter()
-                    .zip(parameters)
-                    .map(|(ty, staged)| nir::Parameter {
-                        sort: if !staged {
-                            nir::Sort::Runtime
-                        } else if ty == Term::Primitive(Primitive::Type) {
-                            nir::Sort::Type
-                        } else {
-                            nir::Sort::ComptimeValue
-                        },
-                        ty,
-                    })
-                    .collect();
-                Term::Function {
-                    parameters,
-                    result: Box::new(Term::Primitive(Primitive::Void)),
-                }
-                .with_comptime_phase(*comptime)
-            }
-            Kind::Result => {
-                let output = inputs.pop().ok_or_else(failure)?;
-                let input = inputs.pop().ok_or_else(failure)?;
-                input.with_callable_result(output).ok_or_else(failure)?
-            }
+            Kind::Function { .. } | Kind::Result => unreachable!(),
             Kind::Optional => Term::Optional(Box::new(inputs.pop().ok_or_else(failure)?)),
             Kind::Pointer => Term::Pointer(Box::new(inputs.pop().ok_or_else(failure)?)),
             Kind::Closure => {

@@ -429,3 +429,171 @@ fn static_spread_assembly_keeps_definition_time_formation_checks() {
     .expect("unused function must reject its statically invalid formation");
     assert!(failure.contains("type requirement"), "{failure}");
 }
+
+#[test]
+fn type_annotations_share_named_defaults_packets_and_collections_with_values() {
+    let package = sysroot::compile(
+        "
+        pure comptime fn Shape<T, .U: Type = bool> -> Type { T }
+        pure comptime fn Pack<...Es: meta.List<Type>> -> Type { bool }
+        typealias Named = Shape<.U = u8, bool>;
+        typealias Defaulted = Shape<u8>;
+        typealias Packet = Shape<...(bool,), .U = u8>;
+        typealias Collected = Pack<...do { [bool] }, ...do { [u8] }>;
+        typealias Whole = Pack<.Es = if true { [bool, u8] } else { [] }>;
+        comptime fn NamedValue() -> Type { Shape<.U = u8, bool> }
+        comptime fn DefaultValue() -> Type { Shape<u8> }
+        comptime fn CollectedValue() -> Type { Pack<bool, u8> }
+        comptime fn NamedAlias() -> Type { Named }
+        comptime fn DefaultAlias() -> Type { Defaulted }
+        comptime fn PacketAlias() -> Type { Packet }
+        comptime fn CollectedAlias() -> Type { Collected }
+        comptime fn WholeAlias() -> Type { Whole }
+        ",
+    )
+    .unwrap();
+    for (alias, reference) in [
+        ("NamedAlias", "NamedValue"),
+        ("PacketAlias", "NamedValue"),
+        ("DefaultAlias", "DefaultValue"),
+        ("CollectedAlias", "CollectedValue"),
+        ("WholeAlias", "CollectedValue"),
+    ] {
+        assert_eq!(
+            invoke_both(&package, alias),
+            invoke_both(&package, reference)
+        );
+    }
+    for position in [
+        "typealias Bad = Shape<.U = bool, .U = u8, bool>;",
+        "comptime fn Bad() -> Type { Shape<.U = bool, .U = u8, bool> }",
+    ] {
+        let error = sysroot::compile(&format!(
+            "pure comptime fn Shape<T, .U: Type = bool> -> Type {{ T }} {position}"
+        ))
+        .unwrap_err();
+        assert!(error.contains("duplicate normal-form argument"), "{error}");
+    }
+}
+
+#[test]
+fn annotated_and_computed_callbacks_keep_outer_and_named_binders() {
+    let package = sysroot::compile(
+        "
+        pure comptime fn Identity<T> -> Type { T }
+        pure comptime fn Indexed<T, count: usize> -> Type { T }
+        fn direct(comptime T: Type, callback: Identity<fn(T) -> T>) {}
+        fn observed(comptime T: Type, callback: Identity<fn(do { T }) -> do { T }>) {}
+        fn nested(comptime T: Type, callback: Identity<fn(fn(T) -> T) -> fn(T) -> T>) {}
+        typealias Named = fn(comptime T: Type, comptime count: usize,
+            value: Indexed<T, count>) -> Indexed<T, count>;
+        comptime fn NamedType() -> Type { Named }
+        comptime fn NamedExpression() -> Type {
+            fn(comptime T: Type, comptime count: usize,
+                value: Indexed<T, count>) -> Indexed<T, count>
+        }
+        comptime fn Domain() -> Type { bool }
+        comptime fn Constructed() -> Type { Identity<fn(Domain()) -> Domain()> }
+        comptime fn Literal() -> Type { Identity<fn(bool) -> bool> }
+        ",
+    )
+    .unwrap();
+    let signature = |name| {
+        &package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .signature
+    };
+    assert_eq!(signature("direct"), signature("observed"));
+    for name in ["direct", "observed", "nested"] {
+        signature(name).check_scope(&[]).unwrap();
+    }
+    assert_eq!(
+        invoke_both(&package, "NamedType"),
+        invoke_both(&package, "NamedExpression")
+    );
+    assert_eq!(
+        invoke_both(&package, "Constructed"),
+        invoke_both(&package, "Literal")
+    );
+    let Value::Type(named) = invoke_both(&package, "NamedType") else {
+        panic!()
+    };
+    named.check_scope(&[]).unwrap();
+    let nir::Term::Function { parameters, result } = named else {
+        panic!()
+    };
+    assert_eq!(parameters[0].sort, nir::Sort::Type);
+    assert_eq!(parameters[1].sort, nir::Sort::ComptimeValue);
+    assert_eq!(parameters[2].ty, *result);
+    let nir::Term::NormalForm { arguments, .. } = *result else {
+        panic!()
+    };
+    assert_eq!(
+        arguments,
+        vec![
+            nir::Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: nir::Sort::Type
+            },
+            nir::Term::Bound {
+                depth: 0,
+                index: 1,
+                sort: nir::Sort::ComptimeValue
+            },
+        ]
+    );
+    for source in [
+        "typealias Bad = fn(T: Type, callback: Identity<T>);",
+        "typealias Bad = fn(count: usize, value: Indexed<bool, count>);",
+    ] {
+        let error = sysroot::compile(&format!(
+            "pure comptime fn Identity<T> -> Type {{ T }}
+             pure comptime fn Indexed<T, count: usize> -> Type {{ T }} {source}"
+        ))
+        .unwrap_err();
+        assert!(error.contains("explicit comptime"), "{error}");
+    }
+}
+
+#[test]
+fn nested_nominal_inputs_retain_abstract_values_and_formation_obligations() {
+    let prefix = "
+        pure comptime fn Selected<enabled: bool> -> Type { bool }
+        pure comptime fn Wrap<T> -> Type { T }
+        struct Flag where enabled: bool {}
+        struct Checked where enabled: bool,
+            requires Selected<enabled> == Selected<true> {}
+        ";
+    let package = sysroot::compile(&format!(
+        "{prefix}
+        fn packet(value: Flag<enabled>) -> Tuple<Flag<enabled>, bool>
+        where enabled: bool
+        {{ (value, enabled) }}
+        fn forward(value: Checked<enabled>) -> Tuple<Checked<enabled>, bool>
+        where enabled: bool, requires Selected<enabled> == Selected<true>
+        {{ (value, enabled) }}
+        typealias Accepted = Wrap<Checked<true>>;
+        comptime fn Alias() -> Type {{ Accepted }}
+        comptime fn Expression() -> Type {{ Wrap<Checked<true>> }}
+        "
+    ))
+    .unwrap();
+    assert_eq!(
+        invoke_both(&package, "Alias"),
+        invoke_both(&package, "Expression")
+    );
+    for source in [
+        "typealias Bad = Wrap<Checked<false>>;",
+        "comptime fn Bad() -> Type { Wrap<Checked<false>> }",
+        "typealias Bad = Wrap<Flag<9>>;",
+    ] {
+        assert!(
+            sysroot::compile(&format!("{prefix}{source}")).is_err(),
+            "{source}"
+        );
+    }
+}

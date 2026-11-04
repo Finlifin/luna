@@ -3790,8 +3790,14 @@ impl Checker<'_, '_> {
         }
         match &expr.kind {
             H::ResolvedLocal(_, id) if self.callable_type_inputs.contains_key(&local(*id)) => {
-                self.callable_type_inputs[&local(*id)].clone().ok_or_else(|| error(expr.span,
-                    "function type dependency requires an earlier explicit comptime Type parameter"))
+                let value = self
+                    .callable_type_input_expression(expr, local(*id), Some(&p(P::Type)))?
+                    .expect("active callable input");
+                let K::TypeValue(ty) = value.kind else {
+                    return Err(error(expr.span,
+                        "function type dependency requires an earlier explicit comptime Type parameter"));
+                };
+                Ok(ty)
             }
             H::ResolvedLocal(_, id) if self.generator_data.contains_key(&local(*id)) => {
                 match self.generator_data.get(&local(*id)) {
@@ -3997,138 +4003,7 @@ impl Checker<'_, '_> {
                 if self.normal_parameters.contains_key(&owner) || matches!(&self.package.item(owner).unwrap().kind,
                     ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)
                 {
-                    self.ensure_signature(owner, expr.span)?;
-                    if !self.clause_has_collector(owner) {
-                        if let Some(arguments) = normal::literal_spreads(args) {
-                            let expanded = Expr {
-                                hir_id: expr.hir_id,
-                                span: expr.span,
-                                kind: H::NFApplication(head, &arguments),
-                            };
-                            return self.type_expr(&expanded);
-                        }
-                    }
-                    if (self.has_optional_type_clauses(owner)
-                        || self.normal_type_inputs_need_plan(owner, args)
-                        || (!self.clause_has_collector(owner)
-                            && args.iter().any(|a| matches!(a, Arg::Expand(_)))))
-                        && self.normal_parameters[&owner]
-                            .iter()
-                            .any(|(_, _, ty)| *ty != p(P::Type))
-                    {
-                        // Type annotations consume these inputs at comptime;
-                        // a bound runtime Splice protocol must not intercept a
-                        // packet producer while preparing the head application.
-                        let checked = self.with_staged_input(true, |this| {
-                            this.normal_type_expression(expr, owner, args, Some(&p(P::Type)))
-                        })?;
-                        let mut budget = comptime_runtime::Budget {
-                            steps: self.required_steps as usize,
-                            max_limbs: 4096,
-                        };
-                        let before = budget.steps;
-                        let known = self.known_normal_input(&checked, 0, &mut budget);
-                        self.required_steps -= (before - budget.steps) as u64;
-                        let known = match known {
-                            Some(known) => Some(known),
-                            None => self.required_normal_type_plan(expr, &checked)?,
-                        };
-                        if let Some(ty @ Term::NormalForm { .. }) = known {
-                            let Term::NormalForm { arguments, .. } = &ty else {
-                                unreachable!()
-                            };
-                            self.check_type_application(owner, arguments, expr.span)?;
-                            return Ok(ty);
-                        }
-                        let (comptime_interpretor::Value::Type(ty), _) =
-                            self.required_normal_input(expr, checked, Vec::new())?
-                        else {
-                            return Err(error(
-                                expr.span,
-                                "normal-form application did not produce Type",
-                            ));
-                        };
-                        return Ok(ty);
-                    }
-                    if self.has_optional_type_clauses(owner)
-                        || (args.iter().any(|arg| matches!(arg, Arg::Expand(_)))
-                            && self.normal_parameters[&owner]
-                                .iter()
-                                .all(|(_, _, ty)| *ty == p(P::Type)))
-                    {
-                        let arguments = self.type_clause_arguments(owner, args, None, expr.span)?;
-                        self.check_type_application(owner, &arguments, expr.span)?;
-                        return Ok(Term::NormalForm {
-                            head: declaration(self.package, &self.package_identities, owner),
-                            sort: Sort::Type,
-                            arguments,
-                        });
-                    }
-                    let parameters = self.normal_parameters[&owner].clone();
-                    let variadic = self.clause_has_collector(owner);
-                    let (routed, order) = self.normal_type_list_route(owner, args, expr.span)?;
-                    let args = routed.as_slice();
-                    if if variadic {
-                        args.len() < parameters.len() - 1
-                    } else {
-                        parameters.len() != args.len()
-                    } {
-                        return Err(error(expr.span, "normal-form argument count mismatch"));
-                    }
-                    let mut arguments = vec![None; parameters.len()];
-                    let mut type_arguments = Vec::new();
-                    for slot in order {
-                        let (_, _, ty) = &parameters[slot];
-                        if variadic && slot + 1 == parameters.len() {
-                            let ty = self.instantiate_input_types(
-                                ty,
-                                &self.type_parameters[&owner][..type_arguments.len()],
-                                &type_arguments,
-                                expr.span,
-                            )?;
-                            if let Some(input) =
-                                self.normal_type_list_supply(owner, &args[slot..], expr.span)?
-                            {
-                                arguments[slot] = Some(self.normal_value_argument(input, &ty)?);
-                            } else {
-                                arguments[slot] = Some(self.normal_collection_value_arguments(
-                                    &args[slot..], &ty, expr.span,
-                                )?);
-                            }
-                            continue;
-                        }
-                        let argument = &args[slot];
-                        let Arg::Positional(value) = argument else {
-                            return Err(error(
-                                expr.span,
-                                "normal-form arguments must be positional",
-                            ));
-                        };
-                        let argument = if *ty == p(P::Type) {
-                            let value = self.type_expr(value)?;
-                            type_arguments.push(value.clone());
-                            value
-                        } else {
-                            let ty = self.instantiate_input_types(
-                                ty,
-                                &self.type_parameters[&owner][..type_arguments.len()],
-                                &type_arguments,
-                                value.span,
-                            )?;
-                            self.normal_value_argument(value, &ty)?
-                        };
-                        arguments[slot] = Some(argument);
-                    }
-                    let arguments = arguments
-                        .into_iter()
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| error(expr.span, "incomplete normal-form input routing"))?;
-                    self.check_type_application(owner, &arguments, expr.span)?;
-                    return Ok(Term::NormalForm {
-                        head: declaration(self.package, &self.package_identities, owner),
-                        sort: Sort::Type,
-                        arguments,
-                    });
+                    return self.normal_type_annotation(expr, owner, args);
                 }
                 if let Some(ItemKind::TypeAlias(value, ..)) =
                     self.package.item(owner).map(|item| &item.kind)
@@ -4325,13 +4200,8 @@ impl Checker<'_, '_> {
                 if !matches!(input.callable_signature(), Term::Function { .. }) {
                     return Err(error(expr.span, "arrow input must be a function type"));
                 }
-                let output = self
-                    .type_expr(output)?
-                    .abstract_parameters(&[])
-                    .map_err(|e| error(output.span, e.to_string()))?;
-                input
-                    .with_callable_result(output)
-                    .ok_or_else(|| error(expr.span, "arrow input must be a function type"))
+                let output = self.type_expr(output)?;
+                self.computed_callable_result(input, output, expr.span)
             }
             H::ResolvedClauseParam(_, id) => {
                 let declaration = DeclarationId {

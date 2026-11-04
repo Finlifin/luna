@@ -363,6 +363,38 @@ impl<'h> Checker<'_, 'h> {
             .map(|(value, _)| value)
     }
 
+    /// Observe an immutable preparation prefix without executing producers.
+    /// Keep the original statements: an observed identity is not permission to
+    /// erase input evaluation. Unknown work ends the prefix rather than letting
+    /// later reads reuse evidence from before an unobserved mutation.
+    fn prepared_type_input_terms(
+        &mut self,
+        statements: &[n::Expr],
+        inputs: &[n::Expr],
+    ) -> Vec<Option<Term>> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut budget = comptime_runtime::Budget {
+            steps: before,
+            max_limbs: 4096,
+        };
+        let mut bindings = BTreeMap::new();
+        for statement in statements {
+            let K::Let { binding, value } = &statement.kind else {
+                break;
+            };
+            let Some(term) = self.known_normal_input_in(value, 0, &mut budget, &bindings) else {
+                break;
+            };
+            bindings.insert(*binding, std::sync::Arc::new(term));
+        }
+        let result = inputs
+            .iter()
+            .map(|input| self.known_normal_input_in(input, 0, &mut budget, &bindings))
+            .collect();
+        self.required_steps -= (before - budget.steps) as u64;
+        result
+    }
+
     /// Retain the prepared input values for a selected member of this instance.
     /// Local inputs refer to bindings in the returned expression's outer block.
     pub(super) fn prepared_type_instance(
@@ -485,99 +517,100 @@ impl<'h> Checker<'_, 'h> {
             self.alias_value_bindings = saved_bindings.clone();
             self.normal_default_bindings = saved_normal_bindings.clone();
             let mut prepared_arguments = arguments.clone();
-            let body = if let ItemKind::TypeAlias(value, ..) =
-                &self.package.item(owner).unwrap().kind
-            {
-                self.alias_value_expression(owner, value, arguments, span)?
-            } else {
-                let mut terms = Vec::new();
-                let mut deferred = BTreeSet::new();
-                for ((value, parameter), domain) in arguments.iter().zip(&parameters).zip(&domains)
-                {
-                    if let K::TypeValue(ty) = &value.kind {
-                        terms.push(ty.clone());
-                    } else {
-                        deferred.insert(*parameter);
-                        terms.push(Term::Rigid {
-                            declaration: *parameter,
-                            sort: if *domain == p(P::Type) {
-                                Sort::Type
-                            } else {
-                                Sort::ComptimeValue
-                            },
-                        });
-                    }
-                }
-                deferred.extend(
-                    self.nominal_captures(owner, span)?
-                        .into_iter()
-                        .filter(|id| {
-                            self.alias_value_bindings.contains_key(id)
-                                || self
-                                    .trait_input_domain(*id)
-                                    .is_some_and(|domain| domain != p(P::Type))
-                        }),
-                );
-                self.check_formation_application(
-                    owner,
-                    FormationInputs {
-                        terms: terms.clone(),
-                        deferred: deferred.clone(),
-                        environment: BTreeMap::new(),
-                    },
-                    span,
-                )?;
-                let normal_head = self.normal_parameters.contains_key(&owner);
-                let mut arguments = arguments;
-                if !normal_head {
-                    let captures = self.nominal_capture_expressions(owner, span)?;
-                    let captures = captures
-                        .into_iter()
-                        .map(|capture| self.bind_type_input(capture, &mut statements, span))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    // Member projection consumes the complete container
-                    // telescope, including its lexical environment. Reuse
-                    // these expressions; do not evaluate captures again.
-                    prepared_arguments.extend(captures.iter().cloned());
-                    terms.extend(captures.iter().filter_map(|capture| match &capture.kind {
-                        K::TypeValue(ty) => Some(ty.clone()),
-                        _ => None,
-                    }));
-                    arguments.extend(captures);
-                }
-                let kind = if normal_head {
-                    K::NormalFormType {
-                        plan: None,
-                        head: declaration(self.package, &self.package_identities, owner),
-                        arguments: arguments
-                            .into_iter()
-                            .map(n::NormalFormArgument::Value)
-                            .collect(),
-                    }
-                } else if deferred.is_empty() {
-                    K::TypeValue(Term::Nominal {
-                        declaration: declaration(self.package, &self.package_identities, owner),
-                        arguments: terms,
-                    })
+            let body =
+                if let ItemKind::TypeAlias(value, ..) = &self.package.item(owner).unwrap().kind {
+                    self.alias_value_expression(owner, value, arguments, span)?
                 } else {
-                    self.ensure_nominal(owner, span)?;
-                    K::NominalType {
-                        preparations: vec![],
-                        bindings: None,
-                        order: None,
-                        declaration: declaration(self.package, &self.package_identities, owner),
-                        arguments: arguments
+                    let mut terms = Vec::new();
+                    let mut deferred = BTreeSet::new();
+                    let observed = self.prepared_type_input_terms(&statements, &arguments);
+                    for ((known, parameter), domain) in
+                        observed.into_iter().zip(&parameters).zip(&domains)
+                    {
+                        if let Some(known) = known {
+                            terms.push(known);
+                        } else {
+                            deferred.insert(*parameter);
+                            terms.push(Term::Rigid {
+                                declaration: *parameter,
+                                sort: if *domain == p(P::Type) {
+                                    Sort::Type
+                                } else {
+                                    Sort::ComptimeValue
+                                },
+                            });
+                        }
+                    }
+                    deferred.extend(
+                        self.nominal_captures(owner, span)?
                             .into_iter()
-                            .map(n::NormalFormArgument::Value)
-                            .collect(),
+                            .filter(|id| {
+                                self.alias_value_bindings.contains_key(id)
+                                    || self
+                                        .trait_input_domain(*id)
+                                        .is_some_and(|domain| domain != p(P::Type))
+                            }),
+                    );
+                    self.check_formation_application(
+                        owner,
+                        FormationInputs {
+                            terms: terms.clone(),
+                            deferred: deferred.clone(),
+                            environment: BTreeMap::new(),
+                        },
+                        span,
+                    )?;
+                    let normal_head = self.normal_parameters.contains_key(&owner);
+                    let mut arguments = arguments;
+                    if !normal_head {
+                        let captures = self.nominal_capture_expressions(owner, span)?;
+                        let captures = captures
+                            .into_iter()
+                            .map(|capture| self.bind_type_input(capture, &mut statements, span))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        // Member projection consumes the complete container
+                        // telescope, including its lexical environment. Reuse
+                        // these expressions; do not evaluate captures again.
+                        prepared_arguments.extend(captures.iter().cloned());
+                        terms.extend(captures.iter().filter_map(|capture| match &capture.kind {
+                            K::TypeValue(ty) => Some(ty.clone()),
+                            _ => None,
+                        }));
+                        arguments.extend(captures);
+                    }
+                    let kind = if normal_head {
+                        K::NormalFormType {
+                            plan: None,
+                            head: declaration(self.package, &self.package_identities, owner),
+                            arguments: arguments
+                                .into_iter()
+                                .map(n::NormalFormArgument::Value)
+                                .collect(),
+                        }
+                    } else if deferred.is_empty() {
+                        K::TypeValue(Term::Nominal {
+                            declaration: declaration(self.package, &self.package_identities, owner),
+                            arguments: terms,
+                        })
+                    } else {
+                        self.ensure_nominal(owner, span)?;
+                        K::NominalType {
+                            preparations: vec![],
+                            bindings: None,
+                            order: None,
+                            declaration: declaration(self.package, &self.package_identities, owner),
+                            arguments: arguments
+                                .into_iter()
+                                .map(n::NormalFormArgument::Value)
+                                .collect(),
+                        }
+                    };
+                    n::Expr {
+                        source: source(span),
+                        ty: p(P::Type),
+                        kind,
                     }
                 };
-                n::Expr {
-                    source: source(span),
-                    ty: p(P::Type),
-                    kind,
-                }
-            };
             let ty = if statements.iter().any(|value| is_never(&value.ty)) {
                 p(P::Never)
             } else {

@@ -23,6 +23,7 @@ pub use trait_parameters::{
 
 pub mod phases;
 
+pub mod callable_types;
 pub mod function_parameters;
 pub mod normal_forms;
 

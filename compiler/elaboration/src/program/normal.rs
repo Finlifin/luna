@@ -232,14 +232,6 @@ impl Checker<'_, '_> {
             _ => None,
         }
     }
-    pub(super) fn normal_type_inputs_need_plan(&self, owner: OwnerId, inputs: &[Arg<'_>]) -> bool {
-        !self.clause_has_collector(owner)
-            || self.has_optional_type_clauses(owner)
-            || inputs
-                .iter()
-                .any(|input| !matches!(input, Arg::Positional(_)))
-    }
-
     pub(super) fn normal_type_list_route<'hir>(
         &self,
         owner: OwnerId,
@@ -391,47 +383,6 @@ impl Checker<'_, '_> {
         Ok(parameters.into_iter().collect())
     }
 
-    /// Form a collected ordinary value in the declaration environment. Element
-    /// domains come from the instantiated collector, including non-Type values.
-    pub(super) fn normal_collection_value_arguments(
-        &mut self,
-        inputs: &[Arg<'_>],
-        domain: &Term,
-        span: Span,
-    ) -> Result<Term, Error> {
-        let element = self
-            .list_element_type(domain)
-            .cloned()
-            .ok_or_else(|| error(span, "variadic input requires a bound meta.List<T>"))?;
-        let mut items = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            let (value, spread) = match input {
-                Arg::Positional(value) => (*value, false),
-                Arg::Expand(value) => (*value, true),
-                _ => return Err(error(span, "unsupported normal-form collection input")),
-            };
-            let ty = if spread { domain } else { &element };
-            let known = self.normal_value_argument(value, ty)?;
-            let value = n::Expr {
-                ty: self.copy_alias_type(ty, value.span)?,
-                source: source(value.span),
-                kind: K::ComptimeValue(known),
-            };
-            items.push(if spread {
-                n::NormalFormArgument::ListSpread(value)
-            } else {
-                n::NormalFormArgument::Value(value)
-            });
-        }
-        self.known_collected_list_in(&items, domain, &BTreeMap::new())
-            .ok_or_else(|| {
-                error(
-                    span,
-                    "normal-form collection requires completed input values",
-                )
-            })
-    }
-
     pub(super) fn normal_value_argument(
         &mut self,
         value: &Expr<'_>,
@@ -458,18 +409,13 @@ impl Checker<'_, '_> {
         if *ty == p(P::Type) {
             return self.type_expr(value);
         }
-        if let H::ResolvedLocal(_, id) = value.kind {
-            let binding = local(id);
-            if self.callable_type_inputs.contains_key(&binding) {
-                let Some((symbol, actual)) = self.callable_value_inputs.get(&binding) else {
-                    return Err(error(
-                        value.span,
-                        "normal-form argument requires an explicit comptime value input in this function type",
-                    ));
-                };
-                self.require(actual, ty, value.span)?;
-                return Ok(symbol.clone());
-            }
+        if let H::ResolvedLocal(_, id) = value.kind
+            && let Some(input) = self.callable_type_input_expression(value, local(id), Some(ty))?
+        {
+            return match input.kind {
+                K::TypeValue(symbol) | K::ComptimeValue(symbol) => Ok(symbol),
+                _ => unreachable!("callable telescope supplies abstract values"),
+            };
         }
         if let H::ResolvedFnParam(_, id) = value.kind {
             let binding = local(id);
@@ -817,6 +763,49 @@ impl Checker<'_, '_> {
         let mut arguments = inputs[..index].to_vec();
         arguments.push(Arg::Positional(&collected));
         self.finish_prepared_call(expr, callee, &arguments, Vec::new(), expected, None)
+    }
+
+    /// Type positions consume the same checked input plan as value positions.
+    /// Observation can retain abstract declaration inputs; invocation is only
+    /// required for computations that cannot supply static evidence.
+    pub(super) fn normal_type_annotation(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        inputs: &[Arg<'_>],
+    ) -> Result<Term, Error> {
+        // Input producers belong to comptime here. Runtime Splice must not
+        // intercept packet formation while checking a type annotation.
+        let checked = self.with_staged_input(true, |this| {
+            this.normal_type_expression(expr, owner, inputs, Some(&p(P::Type)))
+        })?;
+        let mut budget = comptime_runtime::Budget {
+            steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+            max_limbs: 4096,
+        };
+        let before = budget.steps;
+        let known = self.known_normal_input(&checked, 0, &mut budget);
+        self.required_steps -= (before - budget.steps) as u64;
+        let known = match known {
+            Some(known) => Some(known),
+            None => self.required_normal_type_plan(expr, &checked)?,
+        };
+        if let Some(ty @ Term::NormalForm { .. }) = known {
+            let Term::NormalForm { arguments, .. } = &ty else {
+                unreachable!()
+            };
+            self.check_type_application(owner, arguments, expr.span)?;
+            return Ok(ty);
+        }
+        let (comptime_interpretor::Value::Type(ty), _) =
+            self.required_normal_input(expr, checked, Vec::new())?
+        else {
+            return Err(error(
+                expr.span,
+                "normal-form application did not produce Type",
+            ));
+        };
+        Ok(ty)
     }
 
     pub(super) fn normal_type_expression(
@@ -1273,30 +1262,21 @@ impl Checker<'_, '_> {
                     return Err(Failure::Unavailable);
                 }
                 let mut types = Vec::with_capacity(parameters.len());
-                for (parameter, staged) in parameters.iter().zip(comptime_parameters) {
-                    let ty =
-                        self.observe_normal_input_in(parameter, depth + 1, budget, bindings)?;
-                    if ty.sort() != Sort::Type {
-                        return Err(Failure::Unavailable);
-                    }
-                    types.push(Parameter {
-                        sort: if *staged {
-                            if ty == p(P::Type) {
-                                Sort::Type
-                            } else {
-                                Sort::ComptimeValue
-                            }
-                        } else {
-                            Sort::Runtime
-                        },
-                        ty,
-                    });
+                for parameter in parameters {
+                    types.push(self.observe_normal_input_in(
+                        parameter,
+                        depth + 1,
+                        budget,
+                        bindings,
+                    )?);
                 }
-                Ok(Term::Function {
-                    parameters: types,
-                    result: Box::new(p(P::Void)),
-                }
-                .with_comptime_phase(*comptime))
+                nir::callable_types::from_outer(
+                    types,
+                    comptime_parameters,
+                    *comptime,
+                    &mut budget.steps,
+                )
+                .map_err(Failure::from)
             }
             K::FunctionResultType { signature, result } => {
                 let signature =
@@ -1308,9 +1288,8 @@ impl Checker<'_, '_> {
                 if result.sort() != Sort::Type {
                     return Err(Failure::Unavailable);
                 }
-                signature
-                    .with_callable_result(result)
-                    .ok_or(Failure::Unavailable)
+                nir::callable_types::with_result_from_outer(signature, result, &mut budget.steps)
+                    .map_err(Failure::from)
             }
             K::ClosureType {
                 environment,

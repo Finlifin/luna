@@ -4735,7 +4735,18 @@ fn normal_head_bounds_wait_for_preceding_value_parameter_domains() {
     let package = support::compile(source);
     luna::invocation::invoke(&package, "Build", 100_000).unwrap();
     let wrong = source.replace("Select<true,Host<true>>", "Select<true,Host<false>>");
-    let rejected = support::compile(&wrong);
+    // A prepared nominal identity is static evidence even when its ordinary
+    // value inputs are bound in a block. Reject this known false obligation.
+    let error = support::compile_with_protocols(&wrong, &Default::default()).unwrap_err();
+    assert!(error.contains("type requirement"), "{error}");
+    // An actual producer remains unexecuted at definition time; its obligation
+    // must still fail when the application is invoked.
+    let dynamic = source.replace(
+        "comptime fn Build()->Type {Select<true,Host<true>>}",
+        "comptime fn WrongHost()->Type {Host<false>}
+         comptime fn Build()->Type {Select<true,WrongHost()>}",
+    );
+    let rejected = support::compile(&dynamic);
     assert!(luna::invocation::invoke(&rejected, "Build", 100_000).is_err());
     let required = source.replace(
         "comptime fn Build()->Type {Select<true,Host<true>>}",

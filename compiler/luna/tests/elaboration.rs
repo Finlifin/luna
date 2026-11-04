@@ -6848,7 +6848,7 @@ fn normal_form_type_defaults_reject_bad_routing_and_preserve_opacity() {
         ),
         (
             "pure comptime fn Identity<.T:.Type'builtin=bool>->.Type'builtin {T} fn bad(value:Identity<.T=bool,.T=bool>) {}",
-            "duplicate type argument",
+            "duplicate normal-form argument",
         ),
         (
             "pure comptime fn Identity<.T:.Type'builtin=T>->.Type'builtin {T}",

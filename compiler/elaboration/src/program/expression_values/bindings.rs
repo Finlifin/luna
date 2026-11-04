@@ -42,6 +42,11 @@ impl Checker<'_, '_> {
                 return self.expr_context(&resolved, expected, partial);
             }
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
+                if let Some(value) =
+                    self.callable_type_input_expression(expr, local(*id), expected)?
+                {
+                    return Ok(value);
+                }
                 if let Some((symbol, domain)) = self.captured_staged_input(*id, expr.span)? {
                     if let Some(expected) = expected {
                         self.require_expression(&domain, expected, expr.span)?;
