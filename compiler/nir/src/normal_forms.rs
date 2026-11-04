@@ -972,6 +972,80 @@ impl Head {
         fuel: &mut usize,
         target: Option<crate::target::TargetData>,
     ) -> Result<(), ApplicationError> {
+        use crate::value_admission::{DomainQueries, Error};
+        let missing = |fuel: &usize, message: &str| {
+            if *fuel == 0 {
+                Error::Budget
+            } else {
+                Error::from(message)
+            }
+        };
+        self.check_arguments(
+            arguments,
+            frames,
+            fuel,
+            &mut DomainQueries {
+                layout: &mut |ty, variant, fuel| {
+                    if variant.is_none() {
+                        if let Term::NormalForm {
+                            head, arguments, ..
+                        } = ty
+                        {
+                            if is_tuple(*head) {
+                                crate::type_computations::charge_term(ty, fuel)?;
+                                return type_list_fields_with_layouts(arguments, &is_list)
+                                    .map(|fields| fields.to_vec())
+                                    .ok_or_else(|| {
+                                        Error::from("tuple representation evidence unavailable")
+                                    });
+                            }
+                        }
+                    }
+                    nominal_fields(ty, variant, fuel)
+                        .ok_or_else(|| missing(fuel, "nominal representation evidence unavailable"))
+                },
+                declared: &mut |value, domain, _| declared(value, domain),
+                collection: &mut |domain, fuel| {
+                    let Term::NormalForm {
+                        head,
+                        sort: Sort::Type,
+                        arguments,
+                    } = domain
+                    else {
+                        return Ok(None);
+                    };
+                    if !is_list(*head) {
+                        return Ok(None);
+                    }
+                    let [element] = arguments.as_slice() else {
+                        return Err("collection input domain is malformed".into());
+                    };
+                    if element.sort() != Sort::Type {
+                        return Err("collection element domain is not a Type".into());
+                    }
+                    crate::type_computations::charge_term(element, fuel)?;
+                    Ok(Some(element.clone()))
+                },
+                callable: &mut |value, frames, fuel| match callable_signature(value, frames, fuel) {
+                    Some(signature) => Ok(Some(signature)),
+                    None if *fuel == 0 => Err(Error::Budget),
+                    None => Ok(None),
+                },
+                target,
+            },
+        )
+    }
+
+    /// Check ordered NF inputs using the same receiving-world evidence service
+    /// as ordinary values. This never executes the head or grants formation
+    /// predicates; the caller retains those separate obligations.
+    pub fn check_arguments(
+        &self,
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+        queries: &mut crate::value_admission::DomainQueries<'_, '_>,
+    ) -> Result<(), ApplicationError> {
         let mut remaining = *fuel;
         let result = (|| {
             if arguments.len() != self.parameters.len() {
@@ -1032,81 +1106,15 @@ impl Head {
                     }
                     ApplicationError::InputDependency { index }
                 })?;
-                use crate::value_admission::{self, DomainQueries, Error};
-                let missing = |fuel: &usize, message: &str| {
-                    if *fuel == 0 {
-                        Error::Budget
-                    } else {
-                        Error::from(message)
-                    }
-                };
-                value_admission::validate(
-                    argument,
-                    &expected,
-                    frames,
-                    &mut remaining,
-                    &mut DomainQueries {
-                        layout: &mut |ty, variant, fuel| {
-                            if variant.is_none() {
-                                if let Term::NormalForm {
-                                    head, arguments, ..
-                                } = ty
-                                {
-                                    if is_tuple(*head) {
-                                        crate::type_computations::charge_term(ty, fuel)?;
-                                        return type_list_fields_with_layouts(arguments, &is_list)
-                                            .map(|fields| fields.to_vec())
-                                            .ok_or_else(|| {
-                                                Error::from(
-                                                    "tuple representation evidence unavailable",
-                                                )
-                                            });
-                                    }
-                                }
-                            }
-                            nominal_fields(ty, variant, fuel).ok_or_else(|| {
-                                missing(fuel, "nominal representation evidence unavailable")
-                            })
-                        },
-                        declared: &mut |value, domain, _| declared(value, domain),
-                        collection: &mut |domain, fuel| {
-                            let Term::NormalForm {
-                                head,
-                                sort: Sort::Type,
-                                arguments,
-                            } = domain
-                            else {
-                                return Ok(None);
-                            };
-                            if !is_list(*head) {
-                                return Ok(None);
-                            }
-                            let [element] = arguments.as_slice() else {
-                                return Err("collection input domain is malformed".into());
-                            };
-                            if element.sort() != Sort::Type {
-                                return Err("collection element domain is not a Type".into());
-                            }
-                            crate::type_computations::charge_term(element, fuel)?;
-                            Ok(Some(element.clone()))
-                        },
-                        callable: &mut |value, frames, fuel| match callable_signature(
-                            value, frames, fuel,
-                        ) {
-                            Some(signature) => Ok(Some(signature)),
-                            None if *fuel == 0 => Err(Error::Budget),
-                            None => Ok(None),
-                        },
-                        target,
-                    },
-                )
-                .map_err(|error| match error {
-                    Error::Budget => {
-                        remaining = 0;
-                        ApplicationError::Budget { index }
-                    }
-                    Error::Invalid(_) => ApplicationError::InputType { index },
-                })?;
+                use crate::value_admission::{self, Error};
+                value_admission::validate(argument, &expected, frames, &mut remaining, queries)
+                    .map_err(|error| match error {
+                        Error::Budget => {
+                            remaining = 0;
+                            ApplicationError::Budget { index }
+                        }
+                        Error::Invalid(_) => ApplicationError::InputType { index },
+                    })?;
                 prior.insert(parameter.declaration, index);
             }
             Ok(())
@@ -1114,6 +1122,28 @@ impl Head {
         *fuel = remaining;
         result
     }
+}
+
+/// Resolve both representation declarations through the receiving world's
+/// index. An isolated Tuple-role descriptor cannot authorize its list input.
+pub fn registered_tuple_fields<'a, 'world>(
+    ty: &'a Term,
+    lookup: impl Fn(DeclarationId) -> Option<&'world Head>,
+) -> Option<&'a [Term]> {
+    let Term::NormalForm { head, .. } = ty else {
+        return None;
+    };
+    let descriptor = lookup(*head)?;
+    let [parameter] = descriptor.parameters.as_slice() else {
+        return None;
+    };
+    let Term::NormalForm { head: list, .. } = &parameter.ty else {
+        return None;
+    };
+    if !lookup(*list)?.is_type_list_instance(&parameter.ty) {
+        return None;
+    }
+    descriptor.tuple_elements(ty)
 }
 
 /// Borrow tuple fields from a trusted representation contract. Legacy structural

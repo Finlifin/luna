@@ -297,37 +297,11 @@ impl<'a> DeclarationWorld<'a> {
                 })
                 .collect(),
         };
-        descriptor
-            .check_arguments_in_scope_with_callable_values_budgeted_in(
-                arguments,
-                |id| {
-                    self.normal_heads
-                        .get(&id)
-                        .is_some_and(|h| h.role == nir::normal_forms::Role::Tuple)
-                },
-                |id| {
-                    self.normal_heads
-                        .get(&id)
-                        .is_some_and(|h| h.role == nir::normal_forms::Role::TypeList)
-                },
-                |ty, variant, fuel| {
-                    nir::normal_forms::nominal_value_fields_budgeted(
-                        self.package,
-                        ty,
-                        variant,
-                        fuel,
-                    )
-                },
-                |_, _| false,
-                |value, frames, fuel| {
-                    self.callable_value_signature(value, frames, fuel)
-                        .map(std::borrow::Cow::Owned)
-                },
-                frames,
-                fuel,
-                self.package.target,
-            )
-            .ok()?;
+        self.with_admission_queries(|queries| {
+            descriptor.check_arguments(arguments, frames, fuel, queries)
+        })
+        .ok()?;
+
         let signature =
             nir::DeclarationSubstitution::bounded(parameters, &domains, arguments, frames, fuel)
                 .ok()?
@@ -338,6 +312,59 @@ impl<'a> DeclarationWorld<'a> {
                 .with_comptime_phase(comptime)
                 .with_unsafe_call_requirement(is_unsafe),
             None => signature,
+        })
+    }
+
+    /// Supply receiving-world representation evidence for ordinary and opaque
+    /// inputs without evaluating a head or a callable body. Predicate formation
+    /// remains the responsibility of the enclosing declaration check.
+    pub fn with_admission_queries<R>(
+        &self,
+        check: impl FnOnce(&mut nir::value_admission::DomainQueries<'_, '_>) -> R,
+    ) -> R {
+        use nir::value_admission::{DomainQueries, Error};
+        check(&mut DomainQueries {
+            layout: &mut |ty, variant, fuel| {
+                if variant.is_none() {
+                    if let Some(fields) = nir::normal_forms::registered_tuple_fields(ty, |id| {
+                        self.normal_heads.get(&id).copied()
+                    }) {
+                        nir::type_computations::charge_term(ty, fuel)?;
+                        return Ok(fields.to_vec());
+                    }
+                }
+                nir::normal_forms::nominal_value_fields_budgeted(self.package, ty, variant, fuel)
+                    .ok_or_else(|| {
+                        if *fuel == 0 {
+                            Error::Budget
+                        } else {
+                            "nominal representation evidence unavailable".into()
+                        }
+                    })
+            },
+            declared: &mut |_, _, _| false,
+            collection: &mut |domain, fuel| {
+                let Term::NormalForm { head, .. } = domain else {
+                    return Ok(None);
+                };
+                let Some(element) = self
+                    .normal_heads
+                    .get(head)
+                    .and_then(|h| h.list_element(domain))
+                else {
+                    return Ok(None);
+                };
+                nir::type_computations::charge_term(element, fuel)?;
+                Ok(Some(element.clone()))
+            },
+            callable: &mut |value, frames, fuel| match self
+                .callable_value_signature(value, frames, fuel)
+            {
+                Some(signature) => Ok(Some(std::borrow::Cow::Owned(signature))),
+                None if *fuel == 0 => Err(Error::Budget),
+                None => Ok(None),
+            },
+            target: self.package.target,
         })
     }
 

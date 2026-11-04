@@ -932,6 +932,7 @@ Type 子句在准备时已知；`count<.values = [1, 255], Byte()>()` 一类调�
   `/tmp/luna-tools-t65ep9ap/result.json`。该项期望 Type 错误，实际为带参数与 Value
   阶段原因的 FunctionInputRejected；用改动前 HEAD 源码单独执行仍为相同失败，
   退出 101，证据 `/tmp/luna-tools-wwaxjwl3/result.json`。未改动其预期。
+  后续在本文件第 21 节核对并修正错误类别断言；该用例已恢复到不跳过的 VM 检查中。
 - `-p luna --test normal_input_plans --test open_normal_input_plans --test nominal_staging
   --test nominal_value_parameters --test normal_form_domains --test comptime_clause_inputs
   --test ordinary_clause_collectors --no-fail-fast` 共 412 项通过、1 项失败、1 项 ignored，
@@ -1023,3 +1024,50 @@ tuple 返回 None，与本文件第 2 节区分表示和接纳的边界冲突；
 初次新测试误用了私有 `invoke_value`，编译失败（`/tmp/luna-tools-tuqp5sq4`）；
 改用既有公开 `invoke` 后执行以上检查，没有扩大 VM API。未运行全量测试，
 没有修改正式 docs 或工作区原有修改；本次交付是契约检查的纠偏，不是新增执行能力。
+
+## 21. NF 参数检查消费统一的接收世界查询
+
+`Head::check_arguments` 现在直接接收 `value_admission::DomainQueries`，NF 参数
+循环只负责按声明顺序代入域并准入值。布局、集合元素域、抽象值证据、callable
+签名和目标事实来自接收世界，不再在生产检查入口中通过 `is_tuple`／`is_list`
+布尔回调重新推断表示。原来的长参数适配层只向这个唯一循环转发；编译器生产
+调用方已全部迁出，尚有旧 NIR 测试使用便利接口，未宣称这些接口已经删除。
+
+VM 的普通调用与 NF 形成检查共用 `with_admission_queries`；源声明世界的 callable
+专门化和 materialization 共用另一组由 `DeclarationWorld` 提供的查询。IIR 从保留
+的实例、签名和头索引提供同一接口；描述工作量检查保留其原有 binder-domain
+证据。查询不执行 NF 头或函数正文，形成 predicate 仍在原调用方检查，表示成员
+资格不能替代形成契约。普通函数的参数准备与 NF 的依赖代入循环尚未合成完整
+ArgumentPlan，这次迁移不改变输入求值顺序或授予新的结果缓存权限。
+
+集合查询使用注册 Head 的完整元素域视图；元组查询通过
+`registered_tuple_fields` 同时核对元组头、其精确列表参数域及列表头注册证据。
+匹配的载荷或孤立的 Tuple 角色不足以授权布局。已有 TypeList／Tuple 表示元数据
+仍是后续迁移对象，本次没有把它们升级为语言中的特殊参数种类。
+
+查询接口保留显式 `Error::Budget`，即使宿主查询返回时调用者仍有剩余 fuel，也按
+预算失败处理，不转成类型不匹配。VM 已有的 typed callable 查询直接进入 NF 检查，
+不再先压成 Option 再靠零 fuel 猜测；其他旧观察服务仍在各自提供者内适配其 Option
+结果，这部分不能称为已完成的统一 typed 查询协议。
+
+原 `clause_list_inputs_share_domain_scope_and_budget_validation` 在改动前再次以
+`FunctionInputRejected { stage: Value, .. }` 与旧 `Type` 断言不符而失败，证据
+`/tmp/luna-tools-huvgcww2/result.json`。现在检查参数索引、声明身份、Value 阶段和
+非空原因；合法列表、作用域拒绝、错误元素与预算失败后的恢复断言均保留。没有
+为使该测试通过而把带来源的诊断退化成 Type。
+
+验证目录 `/home/fin/luna`，以下参数接在
+`python3 -B development/check.py --timeout 900 -- test` 后；最终均退出 0：
+
+| 参数 | 结果与证据目录 |
+| --- | --- |
+| `-p nir --test value_admission --test normal_inputs --test normal_callable_inputs --no-fail-fast` | 36 通过；`/tmp/luna-tools-8s_ciljc`。新增检查覆盖同一接收证据下的依赖域、缺失／错误 callable、预算与恢复，以及精确 tuple/list 注册证据。 |
+| `-p comptime_interpretor --lib` | 450 通过，无跳过；`/tmp/luna-tools-p02immv8`。 |
+| `-p type_resolution --test callable_world --no-fail-fast` | 3 通过；`/tmp/luna-tools-b7ayydti`。 |
+| `-p iir --test types --test comptime_lists --test callable_type_cores --test integer_formation --test float_formation --no-fail-fast` | 39 通过；`/tmp/luna-tools-0k28ng2b`。 |
+| `-p luna --test normal_form_domains --test nominal_staging --test invocation_value_templates --test library_list_hash --test library_type_equality --test comptime_iir_bytecode --no-fail-fast` | 43 通过；`/tmp/luna-tools-d4xj4r2k`。覆盖真实 sysroot 列表协议、Type 比较、NF 域及 source/IIR 调用。 |
+
+初次迁移 IIR 闭包时缺少参数类型标注，Rust 编译失败（`/tmp/luna-tools-i0e487ds`）；
+补齐借用类型后完成上述检查。较早的 VM／源码检查不替代最终证据。Rust 格式检查
+`/tmp/luna-tools-psp0ba5c` 退出 0，提交范围 diff 检查通过。未跑全 workspace、native
+或性能基准；正式 docs 及原有资源分析、library README 的修改保持原样。

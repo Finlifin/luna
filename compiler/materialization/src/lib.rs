@@ -2683,40 +2683,12 @@ impl Builder<'_> {
                         .iter()
                         .find(|h| h.declaration == *head)
                         .ok_or("IIR normal-form type has no head declaration")?;
-                    descriptor
-                        .check_arguments_in_scope_with_callable_values_budgeted_in(
-                            arguments,
-                            |head| {
-                                self.package.normal_forms.iter().any(|metadata| {
-                                    metadata.declaration == head
-                                        && metadata.role == nir::normal_forms::Role::Tuple
-                                })
-                            },
-                            |head| {
-                                self.package.normal_forms.iter().any(|metadata| {
-                                    metadata.declaration == head
-                                        && metadata.role == nir::normal_forms::Role::TypeList
-                                })
-                            },
-                            |ty, variant, fuel| {
-                                nir::normal_forms::nominal_value_fields_budgeted(
-                                    self.package,
-                                    ty,
-                                    variant,
-                                    fuel,
-                                )
-                            },
-                            |_, _| false,
-                            |value, frames, fuel| {
-                                self.world
-                                    .callable_value_signature(value, frames, fuel)
-                                    .map(std::borrow::Cow::Owned)
-                            },
-                            &[],
-                            &mut self.fuel,
-                            self.package.target,
-                        )
+                    self.world
+                        .with_admission_queries(|queries| {
+                            descriptor.check_arguments(arguments, &[], &mut self.fuel, queries)
+                        })
                         .map_err(|e| format!("IIR normal-form inputs: {e}"))?;
+
                     let parameters: Vec<_> = descriptor
                         .parameters
                         .iter()

@@ -3,6 +3,27 @@
 use super::*;
 
 impl Interpreter<'_> {
+    /// Ordinary and NF inputs must use the same receiving-world evidence.
+    /// Keep typed query failures intact; budget exhaustion is not missing data.
+    pub(super) fn with_admission_queries<R>(
+        &self,
+        check: impl FnOnce(&mut nir::value_admission::DomainQueries<'_, '_>) -> R,
+    ) -> R {
+        check(&mut nir::value_admission::DomainQueries {
+            layout: &mut |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+            declared: &mut |value, domain, _| {
+                matches!(value,
+                    Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
+                    if self.abstract_value_parameters.get(declaration) == Some(domain))
+            },
+            collection: &mut |domain, fuel| self.admitted_collection_domain(domain, fuel),
+            callable: &mut |value, frames, fuel| {
+                self.admitted_callable_signature(value, frames, fuel)
+            },
+            target: self.target,
+        })
+    }
+
     /// Registered head metadata supplies collection authority; payload shape
     /// alone cannot establish an element domain.
     pub(super) fn admitted_collection_domain(
@@ -57,16 +78,11 @@ impl Interpreter<'_> {
         fuel: &mut usize,
     ) -> Result<Vec<Term>, nir::NominalAdmissionError> {
         if variant.is_none() {
-            if let Term::NormalForm { head, .. } = ty {
-                if let Some(elements) = self
-                    .normal_forms
-                    .get(head)
-                    .and_then(|head| head.tuple_elements(ty))
-                {
-                    nir::type_computations::charge_term(ty, fuel)
-                        .map_err(nir::NominalAdmissionError::from)?;
-                    return Ok(elements.to_vec());
-                }
+            if let Some(elements) =
+                nir::normal_forms::registered_tuple_fields(ty, |id| self.normal_forms.get(&id))
+            {
+                nir::type_computations::charge_term(ty, fuel)?;
+                return Ok(elements.to_vec());
             }
         }
         self.normal_value_fields(ty, variant, fuel).ok_or_else(|| {
@@ -405,19 +421,9 @@ impl Interpreter<'_> {
                     .unwrap_or(usize::MAX)
                     .min(100_000);
                 let before = fuel;
-                let checked = metadata.check_arguments_in_scope_with_callable_values_budgeted_in(
-                    arguments,
-                    |head| {
-                        self.normal_forms
-                            .get(&head)
-                            .is_some_and(|head| head.role == nir::normal_forms::Role::Tuple)
-                    },
-                    |head| self.normal_forms.get(&head)
-                        .is_some_and(|head| head.role == nir::normal_forms::Role::TypeList),
-                    |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-                    |value, domain| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
-                    |value, frames, fuel| self.normal_value_callable_signature_view(value, frames, fuel),
-                    &[], &mut fuel, self.target);
+                let checked = self.with_admission_queries(|queries| {
+                    metadata.check_arguments(arguments, &[], &mut fuel, queries)
+                });
                 self.budget.steps -= (before - fuel) as u64;
                 checked.map_err(|_| {
                     self.failure(

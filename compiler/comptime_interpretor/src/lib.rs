@@ -6715,38 +6715,66 @@ fn scoped_term_value_work_with_callables_in<'signature>(
                     }
                 }
                 metadata
-                    .check_arguments_in_scope_with_callable_values_budgeted_in(
+                    .check_arguments(
                         arguments,
-                        |head| {
-                            heads
-                                .head(&head)
-                                .is_some_and(|head| head.role == nir::normal_forms::Role::Tuple)
-                        },
-                        |head| {
-                            heads
-                                .head(&head)
-                                .is_some_and(|head| head.role == nir::normal_forms::Role::TypeList)
-                        },
-                        &nominal_fields,
-                        |value, domain| match value {
-                            Term::Rigid {
-                                declaration,
-                                sort: nir::Sort::ComptimeValue,
-                            } => value_parameters.get(declaration) == Some(domain),
-                            Term::Bound {
-                                depth,
-                                index,
-                                sort: nir::Sort::ComptimeValue,
-                            } => bound_domains.get(&(*depth, *index)) == Some(domain),
-                            _ => false,
-                        },
-                        &callable_signature,
                         &frame_slice
                             .iter()
                             .map(|frame| frame.iter().map(|p| p.sort).collect())
                             .collect::<Vec<_>>(),
                         &mut fuel,
-                        target,
+                        &mut nir::value_admission::DomainQueries {
+                            layout: &mut |ty, variant, fuel| {
+                                if variant.is_none() {
+                                    if let Some(fields) =
+                                        nir::normal_forms::registered_tuple_fields(ty, |id| {
+                                            heads.head(&id)
+                                        })
+                                    {
+                                        nir::type_computations::charge_term(ty, fuel)?;
+                                        return Ok(fields.to_vec());
+                                    }
+                                }
+                                nominal_fields(ty, variant, fuel).ok_or_else(|| {
+                                    if *fuel == 0 {
+                                        nir::value_admission::Error::Budget
+                                    } else {
+                                        "nominal representation evidence unavailable".into()
+                                    }
+                                })
+                            },
+                            declared: &mut |value, domain, _| match value {
+                                Term::Rigid {
+                                    declaration,
+                                    sort: nir::Sort::ComptimeValue,
+                                } => value_parameters.get(declaration) == Some(domain),
+                                Term::Bound {
+                                    depth,
+                                    index,
+                                    sort: nir::Sort::ComptimeValue,
+                                } => bound_domains.get(&(*depth, *index)) == Some(domain),
+                                _ => false,
+                            },
+                            collection: &mut |domain, fuel| {
+                                let Term::NormalForm { head, .. } = domain else {
+                                    return Ok(None);
+                                };
+                                let Some(element) =
+                                    heads.head(head).and_then(|h| h.list_element(domain))
+                                else {
+                                    return Ok(None);
+                                };
+                                nir::type_computations::charge_term(element, fuel)?;
+                                Ok(Some(element.clone()))
+                            },
+                            callable: &mut |value, frames, fuel| match callable_signature(
+                                value, frames, fuel,
+                            ) {
+                                Some(signature) => Ok(Some(signature)),
+                                None if *fuel == 0 => Err(nir::value_admission::Error::Budget),
+                                None => Ok(None),
+                            },
+                            target,
+                        },
                     )
                     .ok()?;
                 work = work.checked_add(before - fuel)?;
@@ -7352,11 +7380,17 @@ mod normal_input_data_tests {
         let check = |input: Term, frames: &[Vec<nir::Sort>], fuel: &mut usize| {
             vm.validate_function_inputs_in_scope(&[parameter], &[input], frames, fuel)
         };
+        let assert_value_rejection = |result: Result<(), ErrorKind>| {
+            let Err(ErrorKind::FunctionInputRejected(reason)) = result else {
+                panic!("expected a value-domain rejection, got {result:?}");
+            };
+            assert_eq!(reason.index, 0);
+            assert_eq!(reason.parameter, parameter);
+            assert_eq!(reason.stage, InputAdmissionStage::Value);
+            assert!(!reason.reason.is_empty());
+        };
         for fields in [vec![], vec![Term::Primitive(Primitive::Bool)]] {
-            assert_eq!(
-                check(Term::TupleValue(fields.clone()), &[], &mut 10000),
-                Err(ErrorKind::Type)
-            );
+            assert_value_rejection(check(Term::TupleValue(fields.clone()), &[], &mut 10000));
             for input in [nominal(fields)] {
                 assert!(check(input.clone(), &[], &mut 10000).is_ok());
                 assert_eq!(
@@ -7383,7 +7417,7 @@ mod normal_input_data_tests {
             Term::TupleValue(vec![Term::Bool(true)]),
             nominal(vec![Term::Bool(true)]),
         ] {
-            assert_eq!(check(input, &[], &mut 10000), Err(ErrorKind::Type));
+            assert_value_rejection(check(input, &[], &mut 10000));
         }
     }
 

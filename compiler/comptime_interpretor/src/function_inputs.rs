@@ -101,27 +101,9 @@ impl Interpreter<'_> {
                         )
                     }
                 })?;
-            nir::value_admission::validate(
-                argument,
-                &domain,
-                frames,
-                fuel,
-                &mut nir::value_admission::DomainQueries {
-                    layout: &mut |ty, variant, fuel| {
-                        self.admitted_nominal_layout(ty, variant, fuel)
-                    },
-                    declared: &mut |value, domain, _| {
-                        matches!(value,
-                        Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
-                        if self.abstract_value_parameters.get(declaration) == Some(domain))
-                    },
-                    collection: &mut |domain, fuel| self.admitted_collection_domain(domain, fuel),
-                    callable: &mut |value, frames, fuel| {
-                        self.admitted_callable_signature(value, frames, fuel)
-                    },
-                    target: self.target,
-                },
-            )
+            self.with_admission_queries(|queries| {
+                nir::value_admission::validate(argument, &domain, frames, fuel, queries)
+            })
             .map_err(|failure| {
                 if matches!(failure, nir::value_admission::Error::Budget) {
                     ErrorKind::StepsExhausted

@@ -29,47 +29,47 @@ fn check(
     registered: bool,
     fuel: &mut usize,
 ) -> Result<(), Error> {
-    value_admission::validate(
-        value,
-        domain,
-        frames,
-        fuel,
-        &mut DomainQueries {
-            layout: &mut |_, _, _| Err("missing layout evidence".into()),
-            declared: &mut |value, domain, _| {
-                registered
-                    && *domain == p(P::Bool)
-                    && matches!(
-                        value,
-                        Term::Bound {
-                            sort: Sort::ComptimeValue,
-                            depth: 0,
-                            index: 0
-                        }
-                    )
-            },
-            collection: &mut |domain, fuel| {
-                if registered && *domain == list(signature()) {
-                    nir::type_computations::charge_term(&signature(), fuel)?;
-                    Ok(Some(signature()))
-                } else {
-                    Ok(None)
-                }
-            },
-            callable: &mut |value, _, _| {
-                Ok(match value {
-                    nir::CallableValueRef::Function {
-                        declaration,
-                        arguments,
-                    } if registered && declaration == id(20) && arguments.is_empty() => {
-                        Some(Cow::Owned(signature()))
+    with_queries(registered, |queries| {
+        value_admission::validate(value, domain, frames, fuel, queries)
+    })
+}
+
+fn with_queries<R>(registered: bool, check: impl FnOnce(&mut DomainQueries<'_, '_>) -> R) -> R {
+    check(&mut DomainQueries {
+        layout: &mut |_, _, _| Err("missing layout evidence".into()),
+        declared: &mut |value, domain, _| {
+            registered
+                && *domain == p(P::Bool)
+                && matches!(
+                    value,
+                    Term::Bound {
+                        sort: Sort::ComptimeValue,
+                        depth: 0,
+                        index: 0
                     }
-                    _ => None,
-                })
-            },
-            target: None,
+                )
         },
-    )
+        collection: &mut |domain, fuel| {
+            if registered && *domain == list(signature()) {
+                nir::type_computations::charge_term(&signature(), fuel)?;
+                Ok(Some(signature()))
+            } else {
+                Ok(None)
+            }
+        },
+        callable: &mut |value, _, _| {
+            Ok(match value {
+                nir::CallableValueRef::Function {
+                    declaration,
+                    arguments,
+                } if registered && declaration == id(20) && arguments.is_empty() => {
+                    Some(Cow::Owned(signature()))
+                }
+                _ => None,
+            })
+        },
+        target: None,
+    })
 }
 
 #[test]
@@ -178,4 +178,194 @@ fn records_keep_named_domains_across_nominal_and_nf_admission() {
         failure,
         nir::normal_forms::ApplicationError::Budget { index: 0 }
     );
+}
+
+#[test]
+fn nf_inputs_consume_the_same_collection_and_callable_evidence() {
+    use nir::normal_forms::{ApplicationError, Head, Kind, Parameter, Role};
+    let descriptor = Head {
+        declaration: id(30),
+        role: Role::Opaque,
+        collector: None,
+        requirements: vec![],
+        parameters: vec![
+            Parameter {
+                declaration: id(31),
+                binding: nir::program::LocalId {
+                    owner: 30,
+                    index: 0,
+                },
+                kind: Kind::Type,
+                ty: p(P::Type),
+            },
+            Parameter {
+                declaration: id(32),
+                binding: nir::program::LocalId {
+                    owner: 30,
+                    index: 1,
+                },
+                kind: Kind::Value,
+                ty: Term::Rigid {
+                    declaration: id(31),
+                    sort: Sort::Type,
+                },
+            },
+        ],
+    };
+    let domain = list(signature());
+    let value = |declaration| Term::NominalValue {
+        ty: Box::new(domain.clone()),
+        variant: None,
+        fields: vec![Term::FunctionValue {
+            declaration,
+            arguments: vec![],
+        }],
+    };
+    let run = |value, registered, fuel: &mut usize| {
+        with_queries(registered, |queries| {
+            descriptor.check_arguments(&[domain.clone(), value], &[], fuel, queries)
+        })
+    };
+    run(value(id(20)), true, &mut 10000).unwrap();
+    assert_eq!(
+        run(value(id(20)), false, &mut 10000),
+        Err(ApplicationError::InputType { index: 1 })
+    );
+    assert_eq!(
+        run(value(id(21)), true, &mut 10000),
+        Err(ApplicationError::InputType { index: 1 })
+    );
+    for allowance in 0..1000 {
+        let mut fuel = allowance;
+        match run(value(id(20)), true, &mut fuel) {
+            Err(ApplicationError::Budget { .. }) => {}
+            Ok(()) => break,
+            other => panic!("budget exhaustion became a domain rejection: {other:?}"),
+        }
+    }
+    run(value(id(20)), true, &mut 10000).unwrap();
+}
+
+#[test]
+fn nf_query_budget_errors_do_not_need_an_exhausted_fuel_sentinel() {
+    use nir::normal_forms::{ApplicationError, Head, Kind, Parameter, Role};
+    let descriptor = Head {
+        declaration: id(30),
+        role: Role::Opaque,
+        collector: None,
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: id(31),
+            binding: nir::program::LocalId {
+                owner: 30,
+                index: 0,
+            },
+            kind: Kind::Value,
+            ty: signature(),
+        }],
+    };
+    let input = Term::FunctionValue {
+        declaration: id(20),
+        arguments: vec![],
+    };
+    let mut fuel = 10000;
+    let error = with_queries(true, |queries| {
+        // A host query may report its own budget exhaustion while the caller
+        // still has fuel. The typed outcome, not a zero sentinel, is authority.
+        let mut exhausted = |_: nir::CallableValueRef<'_>, _: &[Vec<Sort>], fuel: &mut usize| {
+            assert!(*fuel > 0);
+            Err(Error::Budget)
+        };
+        let mut local = DomainQueries {
+            layout: &mut *queries.layout,
+            declared: &mut *queries.declared,
+            collection: &mut *queries.collection,
+            callable: &mut exhausted,
+            target: queries.target,
+        };
+        descriptor.check_arguments(std::slice::from_ref(&input), &[], &mut fuel, &mut local)
+    });
+    assert_eq!(error, Err(ApplicationError::Budget { index: 0 }));
+    assert_eq!(fuel, 0);
+    with_queries(true, |queries| {
+        descriptor
+            .check_arguments(&[input], &[], &mut 10000, queries)
+            .unwrap();
+    });
+}
+
+#[test]
+fn tuple_representation_requires_its_exact_registered_collection_domain() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role, registered_tuple_fields};
+    let list_head = Head {
+        declaration: id(10),
+        role: Role::TypeList,
+        collector: None,
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: id(11),
+            binding: nir::program::LocalId {
+                owner: 10,
+                index: 0,
+            },
+            kind: Kind::Type,
+            ty: p(P::Type),
+        }],
+    };
+    let tuple_head = Head {
+        declaration: id(30),
+        role: Role::Tuple,
+        collector: Some(0),
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: id(31),
+            binding: nir::program::LocalId {
+                owner: 30,
+                index: 0,
+            },
+            kind: Kind::Value,
+            ty: list(p(P::Type)),
+        }],
+    };
+    let ty = Term::NormalForm {
+        head: id(30),
+        sort: Sort::Type,
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(list(p(P::Type))),
+            variant: None,
+            fields: vec![p(P::Bool)],
+        }],
+    };
+    let check = |tuple: &Head, list: Option<&Head>| {
+        registered_tuple_fields(&ty, |id| {
+            if id == tuple.declaration {
+                Some(tuple)
+            } else {
+                list.filter(|list| list.declaration == id)
+            }
+        })
+        .map(<[Term]>::to_vec)
+    };
+    assert_eq!(check(&tuple_head, Some(&list_head)), Some(vec![p(P::Bool)]));
+    assert_eq!(check(&tuple_head, None), None);
+    for invalid in [
+        Head {
+            role: Role::Opaque,
+            ..list_head.clone()
+        },
+        Head {
+            declaration: id(12),
+            ..list_head.clone()
+        },
+        Head {
+            parameters: vec![],
+            ..list_head.clone()
+        },
+    ] {
+        assert_eq!(check(&tuple_head, Some(&invalid)), None);
+    }
+    let mut different_domain = tuple_head.clone();
+    different_domain.parameters[0].ty = list(p(P::Bool));
+    assert_eq!(check(&different_domain, Some(&list_head)), None);
+    assert_eq!(check(&tuple_head, Some(&list_head)), Some(vec![p(P::Bool)]));
 }
