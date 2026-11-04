@@ -1,5 +1,6 @@
 //! Bounded inspection of immutable match inputs. Unknown is distinct from
 //! mismatch: an undecidable earlier candidate cannot be skipped.
+use super::observation::Failure;
 use super::*;
 
 impl Checker<'_, '_> {
@@ -19,9 +20,11 @@ impl Checker<'_, '_> {
                  budget: &mut comptime_runtime::Budget,
                  bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| {
                     self.known_normal_input_in(expr, depth, budget, bindings)
+                        .ok_or(Failure::Unavailable)
                 },
         }
         .inspect(pattern, value, depth, budget, bindings)
+        .ok()
     }
 }
 
@@ -37,7 +40,7 @@ where
         usize,
         &mut comptime_runtime::Budget,
         &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-    ) -> Option<Term>,
+    ) -> Result<Term, Failure>,
 {
     pub(in crate::program) fn inspect(
         &mut self,
@@ -46,27 +49,28 @@ where
         depth: usize,
         budget: &mut comptime_runtime::Budget,
         bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-    ) -> Option<bool> {
-        if depth >= 128 || budget.consume(1).is_err() {
-            return None;
+    ) -> Result<bool, Failure> {
+        if depth >= 128 {
+            return Err(Failure::Depth);
         }
+        budget.consume(1)?;
         use n::Pattern as Pat;
         match pattern {
             Pat::OptionalAbsent => match value {
-                Term::OptionalValue { value, .. } => Some(value.is_none()),
-                _ => None,
+                Term::OptionalValue { value, .. } => Ok(value.is_none()),
+                _ => Err(Failure::Unavailable),
             },
             Pat::OptionalPresent(inner) => match value {
                 Term::OptionalValue {
                     value: Some(value), ..
                 } => self.inspect(inner, value, depth + 1, budget, bindings),
-                Term::OptionalValue { value: None, .. } => Some(false),
-                _ => None,
+                Term::OptionalValue { value: None, .. } => Ok(false),
+                _ => Err(Failure::Unavailable),
             },
-            Pat::CodeEvidence { .. } => None,
+            Pat::CodeEvidence { .. } => Err(Failure::Unavailable),
             Pat::ErrorResult { label, inner } => {
                 if value.has_pending_error_branch() {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
                 let Term::ErrorValue {
                     label: actual,
@@ -74,51 +78,51 @@ where
                     ..
                 } = value
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 match (label.as_ref(), actual.as_deref()) {
                     (None, None) => self.inspect(inner, value, depth + 1, budget, bindings),
                     (Some(a), Some(b)) if a == b => {
                         self.inspect(inner, value, depth + 1, budget, bindings)
                     }
-                    (None, Some(_)) | (Some(_), None) => Some(false),
-                    _ => None,
+                    (None, Some(_)) | (Some(_), None) => Ok(false),
+                    _ => Err(Failure::Unavailable),
                 }
             }
-            Pat::Observe { .. } | Pat::NominalType { .. } => None,
-            Pat::Wild => Some(true),
+            Pat::Observe { .. } | Pat::NominalType { .. } => Err(Failure::Unavailable),
+            Pat::Wild => Ok(true),
             Pat::Unit => match value {
-                Term::Unit => Some(true),
-                _ => None,
+                Term::Unit => Ok(true),
+                _ => Err(Failure::Unavailable),
             },
             Pat::Binding { binding, inner } => {
                 if !self.inspect(inner, value, depth + 1, budget, bindings)? {
-                    return Some(false);
+                    return Ok(false);
                 }
                 bindings.insert(
                     *binding,
-                    std::sync::Arc::new(clone_known_term(value, budget)?),
+                    std::sync::Arc::new(nir::copy_budget::clone_term(value, &mut budget.steps)?),
                 );
-                Some(true)
+                Ok(true)
             }
             Pat::Or(alternatives) => {
                 for alternative in alternatives {
-                    budget.consume(bindings.len().saturating_add(1)).ok()?;
+                    budget.consume(bindings.len().saturating_add(1))?;
                     let mut candidate = bindings.clone();
                     if self.inspect(alternative, value, depth + 1, budget, &mut candidate)? {
                         *bindings = candidate;
-                        return Some(true);
+                        return Ok(true);
                     }
                 }
-                Some(false)
+                Ok(false)
             }
             Pat::Guard { pattern, condition } => {
                 if !self.inspect(pattern, value, depth + 1, budget, bindings)? {
-                    return Some(false);
+                    return Ok(false);
                 }
                 match (self.evaluate)(condition, depth + 1, budget, bindings)? {
-                    Term::Bool(accepted) => Some(accepted),
-                    _ => None,
+                    Term::Bool(accepted) => Ok(accepted),
+                    _ => Err(Failure::Unavailable),
                 }
             }
             Pat::Then {
@@ -127,7 +131,7 @@ where
                 next,
             } => {
                 if !self.inspect(first, value, depth + 1, budget, bindings)? {
-                    return Some(false);
+                    return Ok(false);
                 }
                 let next_value = (self.evaluate)(next_value, depth + 1, budget, bindings)?;
                 self.inspect(next, &next_value, depth + 1, budget, bindings)
@@ -136,45 +140,56 @@ where
                 pattern,
                 bindings: remap,
             } => {
-                budget
-                    .consume(bindings.len().saturating_add(remap.len()))
-                    .ok()?;
+                budget.consume(bindings.len().saturating_add(remap.len()))?;
                 let ambient: BTreeSet<_> = bindings.keys().copied().collect();
                 if !self.inspect(pattern, value, depth + 1, budget, bindings)? {
-                    return Some(false);
+                    return Ok(false);
                 }
                 let mut sources = BTreeSet::new();
                 let mut targets = BTreeSet::new();
                 for (from, to) in remap {
                     if ambient.contains(from) || !sources.insert(*from) || !targets.insert(*to) {
-                        return None;
+                        return Err(Failure::Unavailable);
                     }
                 }
                 let remapped = remap
                     .iter()
-                    .map(|(from, to)| Some((*to, bindings.get(from)?.clone())))
-                    .collect::<Option<Vec<_>>>()?;
+                    .map(|(from, to)| {
+                        Ok((
+                            *to,
+                            bindings
+                                .get(from)
+                                .ok_or_else(|| Failure::Invalid("missing remap source".into()))?
+                                .clone(),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, Failure>>()?;
                 if targets.iter().any(|target| {
                     bindings.contains_key(target)
                         && !ambient.contains(target)
                         && !sources.contains(target)
                 }) {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
                 bindings.extend(remapped);
                 for source in sources.difference(&targets) {
                     bindings.remove(source);
                 }
-                Some(true)
+                Ok(true)
             }
             Pat::Tuple(patterns) | Pat::TypeTuple(patterns) => {
                 let values = match (pattern, value) {
                     (Pat::Tuple(_), Term::TupleValue(values))
                     | (Pat::TypeTuple(_), Term::Tuple(values)) => values,
-                    (Pat::TypeTuple(_), Term::NormalForm { .. }) => {
-                        self.tuple_head.as_ref()?.tuple_elements(value)?
+                    (Pat::TypeTuple(_), Term::NormalForm { .. }) => self
+                        .tuple_head
+                        .as_ref()
+                        .ok_or(Failure::Unavailable)?
+                        .tuple_elements(value)
+                        .ok_or(Failure::Unavailable)?,
+                    (Pat::TypeTuple(_), Term::Primitive(P::Unit)) => {
+                        return Err(Failure::Unavailable);
                     }
-                    (Pat::TypeTuple(_), Term::Primitive(P::Unit)) => return None,
                     (
                         Pat::TypeTuple(_),
                         Term::Primitive(_)
@@ -183,18 +198,18 @@ where
                         | Term::ComptimeFunction(_)
                         | Term::NormalFormFunction(..)
                         | Term::UnsafeFunction(_),
-                    ) => return Some(false),
-                    _ => return None,
+                    ) => return Ok(false),
+                    _ => return Err(Failure::Unavailable),
                 };
                 if patterns.len() != values.len() {
-                    return Some(false);
+                    return Ok(false);
                 }
                 for (pattern, value) in patterns.iter().zip(values) {
                     if !self.inspect(pattern, value, depth + 1, budget, bindings)? {
-                        return Some(false);
+                        return Ok(false);
                     }
                 }
-                Some(true)
+                Ok(true)
             }
             Pat::Record {
                 declaration,
@@ -211,54 +226,55 @@ where
                     fields: values,
                 } = value
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 let Term::Nominal {
                     declaration: actual,
                     ..
                 } = ty.as_ref()
                 else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 if actual != declaration {
-                    return Some(false);
+                    return Ok(false);
                 }
                 let expected_variant = match pattern {
-                    Pat::Variant { index, .. } => Some(u32::try_from(*index).ok()?),
+                    Pat::Variant { index, .. } => Some(
+                        u32::try_from(*index)
+                            .map_err(|_| Failure::Invalid("variant index overflow".into()))?,
+                    ),
                     _ => None,
                 };
                 if *variant != expected_variant {
-                    return Some(false);
+                    return Ok(false);
                 }
                 if fields.len() != values.len() {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
                 for (pattern, value) in fields.iter().zip(values) {
                     if !self.inspect(pattern, value, depth + 1, budget, bindings)? {
-                        return Some(false);
+                        return Ok(false);
                     }
                 }
-                Some(true)
+                Ok(true)
             }
             Pat::AnonymousRecord { names, fields } => {
                 let Term::RecordValue(values) = value else {
-                    return None;
+                    return Err(Failure::Unavailable);
                 };
                 if names.len() != fields.len() || fields.len() != values.len() {
-                    return None;
+                    return Err(Failure::Unavailable);
                 }
                 for ((name, pattern), (actual, value)) in names.iter().zip(fields).zip(values) {
-                    budget
-                        .consume(name.len().saturating_add(actual.len()).saturating_add(1))
-                        .ok()?;
+                    budget.consume(name.len().saturating_add(actual.len()).saturating_add(1))?;
                     if name != actual {
-                        return None;
+                        return Err(Failure::Unavailable);
                     }
                     if !self.inspect(pattern, value, depth + 1, budget, bindings)? {
-                        return Some(false);
+                        return Ok(false);
                     }
                 }
-                Some(true)
+                Ok(true)
             }
             Pat::NormalForm { head, arguments } => {
                 let (actual, values) = match value {
@@ -278,55 +294,45 @@ where
                     | Term::ComptimeFunction(_)
                     | Term::NormalFormFunction(..)
                     | Term::UnsafeFunction(_)
-                    | Term::Closure { .. } => return Some(false),
+                    | Term::Closure { .. } => return Ok(false),
                     // Bound/hole/rigid/associated subjects do not yet establish
                     // a head. Unknown must not allow a later arm to win.
-                    _ => return None,
+                    _ => return Err(Failure::Unavailable),
                 };
                 if head != actual {
-                    return Some(false);
+                    return Ok(false);
                 }
                 if arguments.len() != values.len() {
                     // A malformed instance is not a legitimate mismatch.
-                    return None;
+                    return Err(Failure::Invalid(
+                        "normal-form pattern arity mismatch".into(),
+                    ));
                 }
                 for (pattern, value) in arguments.iter().zip(values) {
                     if !self.inspect(pattern, value, depth + 1, budget, bindings)? {
-                        return Some(false);
+                        return Ok(false);
                     }
                 }
-                Some(true)
+                Ok(true)
             }
             Pat::Literal(literal) => {
-                let ty = match value {
-                    Term::Bool(_) => p(P::Bool),
-                    Term::Char(_) => p(P::Char),
-                    Term::String(_) => p(P::Str),
-                    Term::Symbol(_) => p(P::Symbol),
-                    Term::Integer(_) => p(P::Integer),
-                    Term::BitVec(bits) => p(P::BitVec(bits.width())),
-                    Term::Float(_) => p(P::Float),
-                    Term::Float16(_) => p(P::F16),
-                    Term::BFloat16(_) => p(P::Bf16),
-                    Term::Float32(_) => p(P::F32),
-                    Term::Float64(_) => p(P::F64),
-                    _ => return None,
-                };
-                let size = match literal {
-                    n::Literal::String(value)
-                    | n::Literal::Symbol(value)
-                    | n::Literal::Integer(value)
-                    | n::Literal::Float(value) => value.len(),
-                    n::Literal::BitVec { words, .. } => words.len(),
-                    _ => 1,
-                };
-                budget.consume(size).ok()?;
-                let expression = n::Expr {
-                    source: n::SourceRange { start: 0, end: 0 },
-                    ty,
-                    kind: K::Literal(literal.clone()),
-                };
-                let expected = (self.evaluate)(&expression, depth + 1, budget, bindings)?;
+                if !matches!(
+                    value,
+                    Term::Bool(_)
+                        | Term::Char(_)
+                        | Term::String(_)
+                        | Term::Symbol(_)
+                        | Term::Integer(_)
+                        | Term::BitVec(_)
+                        | Term::Float(_)
+                        | Term::Float16(_)
+                        | Term::BFloat16(_)
+                        | Term::Float32(_)
+                        | Term::Float64(_)
+                ) {
+                    return Err(Failure::Unavailable);
+                }
+                let expected = known_scalars::literal(literal, budget)?;
                 known_scalars::compare(value, &expected, n::IntegerOp::Equal, budget)
             }
         }
@@ -363,7 +369,7 @@ mod tests {
                     declaration: head,
                     sort: Sort::Type,
                 },
-                None,
+                Err(Failure::Unavailable),
             ),
             (
                 Term::Bound {
@@ -371,14 +377,14 @@ mod tests {
                     index: 0,
                     sort: Sort::Type,
                 },
-                None,
+                Err(Failure::Unavailable),
             ),
             (
                 Term::Hole {
                     index: 0,
                     sort: Sort::Type,
                 },
-                None,
+                Err(Failure::Unavailable),
             ),
             (
                 Term::NormalForm {
@@ -386,9 +392,11 @@ mod tests {
                     sort: Sort::Type,
                     arguments: vec![],
                 },
-                None,
+                Err(Failure::Invalid(
+                    "normal-form pattern arity mismatch".into(),
+                )),
             ),
-            (p(P::Bool), Some(true)),
+            (p(P::Bool), Ok(true)),
         ] {
             let mut bindings = BTreeMap::new();
             let mut budget = comptime_runtime::Budget {
@@ -401,13 +409,13 @@ mod tests {
                            _: usize,
                            _: &mut comptime_runtime::Budget,
                            _: &BTreeMap<n::LocalId, std::sync::Arc<Term>>|
-                 -> Option<Term> {
+                 -> Result<Term, Failure> {
                     panic!("head discrimination must not evaluate expressions")
                 },
             }
             .inspect(&pattern, &subject, 0, &mut budget, &mut bindings);
             assert_eq!(result, expected, "{subject}");
-            assert_eq!(bindings.contains_key(&id(9)), expected == Some(true));
+            assert_eq!(bindings.contains_key(&id(9)), expected == Ok(true));
         }
     }
 
@@ -441,15 +449,15 @@ mod tests {
                  _: usize,
                  budget: &mut comptime_runtime::Budget,
                  bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| {
-                    budget.consume(1).ok()?;
+                    budget.consume(1)?;
                     calls.push(expr.source.start);
                     assert_eq!(bindings.len(), 1);
                     assert!(bindings.contains_key(&id(expr.source.start)));
-                    Some(Term::Bool(expr.source.start == 2))
+                    Ok(Term::Bool(expr.source.start == 2))
                 },
         }
         .inspect(&pattern, &Term::Bool(false), 0, &mut budget, &mut values);
-        assert_eq!(matched, Some(true));
+        assert_eq!(matched, Ok(true));
         assert_eq!(calls, vec![1, 2]);
         assert_eq!(values.keys().copied().collect::<Vec<_>>(), vec![id(2)]);
     }
@@ -485,7 +493,9 @@ mod tests {
                     |_: &n::Expr,
                      _: usize,
                      _: &mut comptime_runtime::Budget,
-                     _: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| None,
+                     _: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| {
+                        Err(Failure::Unavailable)
+                    },
             }
             .inspect(
                 &pattern,
@@ -494,7 +504,7 @@ mod tests {
                 &mut budget,
                 &mut values,
             );
-            assert_eq!(matched, Some(true));
+            assert_eq!(matched, Ok(true));
             assert_eq!(
                 values
                     .into_iter()
@@ -533,7 +543,9 @@ mod tests {
                     |_: &n::Expr,
                      _: usize,
                      _: &mut comptime_runtime::Budget,
-                     _: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| None,
+                     _: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| {
+                        Err(Failure::Unavailable)
+                    },
             }
             .inspect(
                 &pattern,
@@ -542,7 +554,7 @@ mod tests {
                 &mut Default::default(),
                 &mut BTreeMap::new(),
             );
-            assert_eq!(result, None);
+            assert_eq!(result, Err(Failure::Unavailable));
         }
     }
     #[test]
@@ -593,7 +605,7 @@ mod tests {
                          _: usize,
                          _: &mut comptime_runtime::Budget,
                          _: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| {
-                            None
+                            Err(Failure::Unavailable)
                         },
                 }
                 .inspect(pattern, value, 0, budget, bindings)
@@ -608,7 +620,7 @@ mod tests {
                     &mut Default::default(),
                     &mut bindings
                 ),
-                Some(true)
+                Ok(true)
             );
             assert_eq!(bindings.get(&id(1)).map(|t| t.as_ref()), Some(&p(P::Bool)));
         }
@@ -652,7 +664,7 @@ mod tests {
                     &mut Default::default(),
                     &mut bindings
                 ),
-                None
+                Err(Failure::Unavailable)
             );
             assert!(!bindings.contains_key(&id(9)));
         }
@@ -669,7 +681,7 @@ mod tests {
                 &mut Default::default(),
                 &mut BTreeMap::new()
             ),
-            Some(false)
+            Ok(false)
         );
         let mut budget = comptime_runtime::Budget {
             steps: 0,
@@ -683,7 +695,7 @@ mod tests {
                 &mut budget,
                 &mut BTreeMap::new()
             ),
-            None
+            Err(Failure::Steps)
         );
         assert_eq!(
             inspect(
@@ -693,7 +705,171 @@ mod tests {
                 &mut Default::default(),
                 &mut BTreeMap::new()
             ),
-            Some(true)
+            Ok(true)
         );
+    }
+    fn no_evaluation(
+        _: &n::Expr,
+        _: usize,
+        _: &mut comptime_runtime::Budget,
+        _: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+    ) -> Result<Term, Failure> {
+        panic!("structural and literal patterns must not invoke expressions")
+    }
+
+    #[test]
+    fn literal_patterns_parse_directly_and_distinguish_invalid_from_mismatch() {
+        let mut inspector = PatternInspector {
+            tuple_head: None,
+            evaluate: no_evaluation,
+        };
+        for (literal, expected) in [
+            (n::Literal::Integer("1".into()), Ok(true)),
+            (n::Literal::Integer("2".into()), Ok(false)),
+            (
+                n::Literal::PendingInteger {
+                    spelling: "1".into(),
+                    negative: false,
+                },
+                Err(Failure::Unavailable),
+            ),
+        ] {
+            assert_eq!(
+                inspector.inspect(
+                    &n::Pattern::Literal(literal),
+                    &Term::Integer(comptime_runtime::Integer::from_u128(1)),
+                    0,
+                    &mut Default::default(),
+                    &mut BTreeMap::new()
+                ),
+                expected
+            );
+        }
+        assert!(matches!(
+            inspector.inspect(
+                &n::Pattern::Literal(n::Literal::Integer("oops".into())),
+                &Term::Integer(comptime_runtime::Integer::from_u128(1)),
+                0,
+                &mut Default::default(),
+                &mut BTreeMap::new()
+            ),
+            Err(Failure::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn failed_guard_cannot_select_fallback_or_publish_candidate_bindings() {
+        let guarded = n::Pattern::Guard {
+            pattern: Box::new(n::Pattern::Binding {
+                binding: id(1),
+                inner: Box::new(n::Pattern::Wild),
+            }),
+            condition: Box::new(n::Expr {
+                source: n::SourceRange { start: 0, end: 1 },
+                ty: p(P::Bool),
+                kind: K::Literal(n::Literal::Bool(true)),
+            }),
+        };
+        let pattern = n::Pattern::Or(vec![
+            guarded,
+            n::Pattern::Binding {
+                binding: id(2),
+                inner: Box::new(n::Pattern::Wild),
+            },
+        ]);
+        for failure in [
+            Failure::Unavailable,
+            Failure::Steps,
+            Failure::Depth,
+            Failure::Size,
+            Failure::Invalid("bad evidence".into()),
+        ] {
+            let mut bindings = BTreeMap::from([(id(0), std::sync::Arc::new(Term::Bool(false)))]);
+            let original = bindings.clone();
+            let mut calls = 0;
+            let result = PatternInspector {
+                tuple_head: None,
+                evaluate:
+                    |_: &n::Expr,
+                     _: usize,
+                     _: &mut comptime_runtime::Budget,
+                     scope: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| {
+                        calls += 1;
+                        assert!(scope.contains_key(&id(1)));
+                        Err(failure.clone())
+                    },
+            }
+            .inspect(
+                &pattern,
+                &Term::Bool(true),
+                0,
+                &mut Default::default(),
+                &mut bindings,
+            );
+            assert_eq!(result, Err(failure));
+            assert_eq!(calls, 1);
+            assert_eq!(bindings, original);
+        }
+        let mut bindings = BTreeMap::new();
+        let result = PatternInspector {
+            tuple_head: None,
+            evaluate: |_: &n::Expr,
+                       _: usize,
+                       _: &mut comptime_runtime::Budget,
+                       _: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| {
+                Ok(Term::Bool(true))
+            },
+        }
+        .inspect(
+            &pattern,
+            &Term::Bool(true),
+            0,
+            &mut Default::default(),
+            &mut bindings,
+        );
+        assert_eq!(result, Ok(true));
+        assert!(bindings.contains_key(&id(1)));
+        assert!(!bindings.contains_key(&id(2)));
+    }
+
+    #[test]
+    fn copy_and_depth_exhaustion_remain_limits_with_unspent_steps() {
+        let binding = |index| n::Pattern::Binding {
+            binding: id(index),
+            inner: Box::new(n::Pattern::Wild),
+        };
+        let pattern = n::Pattern::Or(vec![binding(1), binding(2)]);
+        let value = Term::ClosureContextValue(vec![Term::String("x".repeat(128).into())]);
+        let mut inspector = PatternInspector {
+            tuple_head: None,
+            evaluate: no_evaluation,
+        };
+        let mut short = comptime_runtime::Budget {
+            steps: 64,
+            ..Default::default()
+        };
+        let mut bindings = BTreeMap::new();
+        assert_eq!(
+            inspector.inspect(&pattern, &value, 0, &mut short, &mut bindings),
+            Err(Failure::Steps)
+        );
+        assert!(short.steps > 0);
+        assert!(bindings.is_empty());
+        assert_eq!(
+            inspector.inspect(&pattern, &value, 0, &mut Default::default(), &mut bindings),
+            Ok(true)
+        );
+        assert!(bindings.contains_key(&id(1)));
+        assert!(!bindings.contains_key(&id(2)));
+        let deep = (0..128).fold(n::Pattern::Wild, |inner, index| n::Pattern::Binding {
+            binding: id(index),
+            inner: Box::new(inner),
+        });
+        let mut budget = comptime_runtime::Budget::default();
+        assert_eq!(
+            inspector.inspect(&deep, &Term::Unit, 0, &mut budget, &mut BTreeMap::new()),
+            Err(Failure::Depth)
+        );
+        assert!(budget.steps > 0);
     }
 }

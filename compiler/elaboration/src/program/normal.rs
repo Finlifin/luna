@@ -1,7 +1,8 @@
 //! Opaque head inputs: a stable value or a declaration-side symbolic input.
 use super::*;
 pub(super) mod known_patterns;
-mod known_scalars;
+pub(super) mod known_scalars;
+pub(super) mod observation;
 mod values;
 
 /// Expand syntax before assigning dependent contexts. Evaluating a literal
@@ -1668,16 +1669,7 @@ impl Checker<'_, '_> {
                     .collect::<Option<Vec<_>>>()?,
             )),
             K::Unit => Some(Term::Unit),
-            K::Literal(n::Literal::Bool(value)) => Some(Term::Bool(*value)),
-            K::Literal(n::Literal::Char(value)) => Some(Term::Char(*value)),
-            K::Literal(n::Literal::Float(spelling)) => Some(Term::Float(
-                comptime_runtime::decimal::DecimalValue::parse_literal(spelling, budget).ok()?,
-            )),
-            K::Literal(n::Literal::Float32(bits)) => Some(Term::Float32(*bits)),
-            K::Literal(n::Literal::Float64(bits)) => Some(Term::Float64(*bits)),
-            K::Literal(n::Literal::BitVec { width, words }) => Some(Term::BitVec(
-                comptime_runtime::bitvec::BitVec::from_words(*width, words, budget).ok()?,
-            )),
+            K::Literal(literal) => known_scalars::literal(literal, budget).ok(),
             K::SymbolName(value) => {
                 if expr.ty != p(P::Str) || value.ty != p(P::Symbol) {
                     return None;
@@ -1688,31 +1680,6 @@ impl Checker<'_, '_> {
                     return None;
                 };
                 Some(Term::String(name))
-            }
-            K::Literal(n::Literal::Symbol(value)) => {
-                budget.consume(value.len()).ok()?;
-                Some(Term::Symbol(value.as_str().into()))
-            }
-            K::Literal(n::Literal::String(value)) => {
-                budget.consume(value.len()).ok()?;
-                Some(Term::String(value.as_str().into()))
-            }
-            K::Literal(n::Literal::SignedInteger(value)) => {
-                Some(Term::Integer(comptime_runtime::Integer::from_i128(*value)))
-            }
-            K::Literal(n::Literal::UnsignedInteger(value)) => {
-                Some(Term::Integer(comptime_runtime::Integer::from_u128(*value)))
-            }
-            K::Literal(n::Literal::Integer(value)) => {
-                let (digits, negative) = value
-                    .strip_prefix('-')
-                    .map_or((value.as_str(), false), |digits| (digits, true));
-                let value = comptime_runtime::Integer::parse_literal(digits, budget).ok()?;
-                Some(Term::Integer(if negative {
-                    value.negate(budget).ok()?
-                } else {
-                    value
-                }))
             }
             K::Not(value) => {
                 match self.known_normal_input_in(value, depth + 1, budget, bindings)? {
@@ -1836,7 +1803,9 @@ impl Checker<'_, '_> {
                     K::ScalarGreaterEqual(..) => n::IntegerOp::GreaterEqual,
                     _ => unreachable!(),
                 };
-                known_scalars::compare(&left, &right, op, budget).map(Term::Bool)
+                known_scalars::compare(&left, &right, op, budget)
+                    .ok()
+                    .map(Term::Bool)
             }
             K::FloatNegate(value) => Some(
                 match self.known_normal_input_in(value, depth + 1, budget, bindings)? {

@@ -455,3 +455,41 @@ Type 生产者才能完成接收域的用例，本节没有解决它。
 没有修改测试预期，也不把这两项既有失败记为本次通过。原工作区受保护修改保持不变。
 修改文件 rustfmt check 退出 0，证据 `/tmp/luna-tools-wp09l2u0/result.json`；
 `git diff --check` 通过。未执行全 workspace、native 或性能检查。
+
+
+## 15. Pattern 观察保留失败类别，必需选择消费实际原因
+
+`PatternInspector` 与标量比较不再以 `Option<bool>` 合并未知证据和失败。正常的
+`Ok(false)` 才允许尝试下一候选；`Unavailable`、Steps、Depth、Size 及 Invalid
+立即中止本次选择，不能据此令 fallback 获选。`Failure` 提供 S-expression Display，
+资源分类直接来自运算／复制服务的返回值，不从剩余 fuel 推断。
+
+pattern 绑定使用公共受限 Term 复制，因而复制载荷超预算时即使 fuel 仍非零也保留
+Steps；过深结构保留 Depth。Or 的候选环境仍独立复制，失败不提交局部绑定；guard
+与 Then 的计算仍通过原有求值回调按顺序执行，未知或失败不重放后续候选。
+畸形 NF 参数数、无效字面量／BitVec 表示保留非法证据结果，不能冒充正常不匹配。
+
+字面量读取移至共享的 `known_scalars::literal`。静态表达式观察、字面量 pattern 及
+inline 的字面量计算复用它；字面量 pattern 不再复制 literal 制造临时 Expr，也不再
+经一个能够 invocation 的回调解析。节点预算由外层负责，载荷预算由读取服务负责。
+IEEE unordered 比较仍为 false；unsupported 的半精度观察与缺接收域的 pending
+literal 仍不提供证据，没有借此变更语言的数值规则。
+
+必需的 `select_inline_pattern` 消费带类型的结果，分别报告证据不可得、步数耗尽、
+深度超限、值大小超限和非法证据；真实 invocation 错误继续保留原诊断和位置。
+可选静态表达式观察仍通过适配器放弃失败证据。尤其 `known_normal_input_in` 的
+任意 guard/Then 观察尚不能保留所有内部失败类别，不能把它的 None 重新命名后
+声称分类已经完成；本节只完成 pattern 自身、标量服务与必需 inline 选择的接线。
+NF contextual 参数树及整个通用观察协议仍待迁移。
+
+验证在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test`：
+`-p elaboration --lib program::normal::` 17 项通过，证据
+`/tmp/luna-tools-vbca9b12/result.json`；`-p luna --test inline_control pattern` 23 项
+通过，证据 `/tmp/luna-tools-16a150q6/result.json`；普通收集器、NF 域和 comptime
+子句三组 75 项通过、1 项既有 ignored，证据 `/tmp/luna-tools-ix4buvcb/result.json`。
+新增 `-p luna --test inline_pattern_observation` 从源码解析所得同一 HIR 寻找必需
+pattern 的预算失败边界，确认生产诊断，并用新预算重试及执行正确分支；1 项通过，
+证据 `/tmp/luna-tools-4tx2rw98/result.json`。上述命令均退出 0；没有扩大为全
+workspace、native 或性能验收，ignored 的动态 Type 生产者未由本次解决。
+修改 Rust 文件的 rustfmt check 退出 0，证据 `/tmp/luna-tools-mjo4anyo/result.json`；
+`git diff --check` 通过，原有工作区修改未改动，正式 docs 未修改。

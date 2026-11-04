@@ -157,6 +157,7 @@ impl Checker<'_, '_> {
             steps: before,
             max_limbs: 4096,
         };
+        use normal::observation::Failure;
         let mut failure = None;
         let matches = normal::known_patterns::PatternInspector {
             tuple_head: self.bound_tuple_metadata(),
@@ -165,17 +166,21 @@ impl Checker<'_, '_> {
                  depth,
                  budget: &mut comptime_runtime::Budget,
                  bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| {
-                    if matches!(expr.kind, K::Literal(_)) {
-                        return self.known_normal_input_in(expr, depth, budget, bindings);
+                    if depth >= 128 {
+                        return Err(Failure::Depth);
+                    }
+                    if let K::Literal(literal) = &expr.kind {
+                        budget.consume(1)?;
+                        return normal::known_scalars::literal(literal, budget);
                     }
                     self.required_steps = budget.steps as u64;
                     let result = self.invoke_inline_pattern_expression(expr, bindings, source);
                     budget.steps = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                     match result {
-                        Ok(value) => Some(value),
+                        Ok(value) => Ok(value),
                         Err(error) => {
                             failure = Some(error);
-                            None
+                            Err(Failure::Unavailable)
                         }
                     }
                 },
@@ -186,14 +191,23 @@ impl Checker<'_, '_> {
             return Err(error);
         }
         match matches {
-            Some(false) => return Ok(None),
-            None => {
-                return Err(error(
-                    source.span,
-                    "inline pattern selection requires supported immutable pattern evidence and sufficient budget",
-                ));
+            Ok(false) => return Ok(None),
+            Err(failure) => {
+                let message = match failure {
+                    Failure::Unavailable => {
+                        "inline pattern selection requires supported immutable pattern evidence"
+                            .into()
+                    }
+                    Failure::Steps => "inline pattern selection budget exhausted".into(),
+                    Failure::Depth => "inline pattern selection depth exceeded".into(),
+                    Failure::Size => "inline pattern selection value size limit exceeded".into(),
+                    Failure::Invalid(message) => {
+                        format!("invalid inline pattern evidence: {message}")
+                    }
+                };
+                return Err(error(source.span, message));
             }
-            Some(true) => {}
+            Ok(true) => {}
         }
         // Keep alternative-local slots while executing computations; only the
         // arm's declared exports may be delivered to its runtime body.
