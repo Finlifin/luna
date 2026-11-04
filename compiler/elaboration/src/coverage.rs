@@ -416,7 +416,7 @@ impl Engine<'_> {
                 arguments,
             } if self.enums.contains_key(declaration) => Some(
                 self.enums[declaration]
-                    .instantiate_variants_in_scope(arguments, self.context.scope())
+                    .instantiate_variant_fields(arguments, self.context.scope(), &mut self.steps)
                     .map_err(|_| ())?,
             ),
             _ => None,
@@ -427,7 +427,7 @@ impl Engine<'_> {
                 arguments,
             } if self.structs.contains_key(declaration) => Some(
                 self.structs[declaration]
-                    .instantiate_fields_in_scope(arguments, self.context.scope())
+                    .instantiate_stored_fields(arguments, self.context.scope(), &mut self.steps)
                     .map_err(|_| ())?,
             ),
             _ => None,
@@ -454,12 +454,7 @@ impl Engine<'_> {
             Term::Nominal { declaration, .. } if self.structs.contains_key(declaration) => {
                 branches.push((
                     Head::Record(*declaration),
-                    record_fields
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                        .map(|(_, ty)| ty)
-                        .collect(),
+                    record_fields.as_ref().unwrap().iter().collect(),
                 ));
             }
             Term::Primitive(Primitive::Never) => return Ok(true),
@@ -472,10 +467,7 @@ impl Engine<'_> {
                 let variants = instantiated.as_ref().unwrap();
                 self.spend(variants.len())?;
                 for (index, variant) in variants.iter().enumerate() {
-                    branches.push((
-                        Head::Variant(*declaration, index),
-                        variant.fields.iter().collect(),
-                    ));
+                    branches.push((Head::Variant(*declaration, index), variant.iter().collect()));
                 }
             }
             _ => branches.push((Head::Other, vec![])),
@@ -991,6 +983,108 @@ mod tests {
                     Coverage::Missing
                 },
                 "mask {mask}"
+            );
+        }
+    }
+
+    #[test]
+    fn nominal_matrix_bounds_expanded_fields_and_recovers() {
+        let parameter = DeclarationId {
+            package: 0,
+            local: 2,
+        };
+        let fields = vec![Term::Record(
+            (0..64)
+                .map(|i| {
+                    (
+                        format!("field{i}"),
+                        Term::Rigid {
+                            declaration: parameter,
+                            sort: nir::Sort::Type,
+                        },
+                    )
+                })
+                .collect(),
+        )];
+        let argument = Term::Record(
+            (0..32)
+                .map(|i| (format!("slot{i}"), Term::Primitive(Primitive::Bool)))
+                .collect(),
+        );
+        for is_enum in [false, true] {
+            let (mut enums, mut ty) = setup(fields.clone());
+            let definition = enums.get_mut(&id()).unwrap();
+            definition.type_parameters = vec![parameter];
+            definition.parameter_types = vec![Term::Primitive(Primitive::Type)];
+            let mut structs = BTreeMap::new();
+            if !is_enum {
+                structs.insert(
+                    id(),
+                    Struct {
+                        declaration: id(),
+                        name: "Record".into(),
+                        type_parameters: definition.type_parameters.clone(),
+                        parameter_types: definition.parameter_types.clone(),
+                        requirements: vec![],
+                        capabilities: vec![],
+                        fields: vec![("payload".into(), fields[0].clone())],
+                    },
+                );
+                enums.clear();
+            }
+            let Term::Nominal { arguments, .. } = &mut ty else {
+                unreachable!()
+            };
+            arguments.push(argument.clone());
+            let pattern = if is_enum {
+                product(vec![Pattern::Wild])
+            } else {
+                Pattern::Record {
+                    declaration: id(),
+                    fields: vec![Pattern::Wild],
+                }
+            };
+            let context = Context::default();
+            let query =
+                |steps| check_metered(&structs, &enums, &ty, &[&pattern], steps, &context, None);
+            let (result, used) = query(2000);
+            assert_eq!(
+                result,
+                Coverage::Unknown,
+                "expanded payloads must fit the matrix budget"
+            );
+            assert!(used <= 2000);
+            assert_eq!(query(100_000).0, Coverage::Exhaustive);
+            assert_eq!(
+                check_in_context(
+                    &structs,
+                    &enums,
+                    &Term::Nominal {
+                        declaration: id(),
+                        arguments: vec![Term::Primitive(Primitive::Bool)],
+                    },
+                    &[],
+                    100_000,
+                    &context
+                ),
+                Coverage::Missing
+            );
+            let open = Term::Nominal {
+                declaration: id(),
+                arguments: vec![Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: nir::Sort::Type,
+                }],
+            };
+            let scoped = Context::with_scope(vec![vec![nir::Sort::Type]]);
+            assert_eq!(
+                check_in_context(&structs, &enums, &open, &[&pattern], 100_000, &scoped),
+                Coverage::Exhaustive
+            );
+            assert_eq!(
+                check_in_context(&structs, &enums, &open, &[&pattern], 100_000, &context),
+                Coverage::Unknown
             );
         }
     }

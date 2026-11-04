@@ -354,9 +354,7 @@ impl Engine<'_> {
                     ..
                 },
             ) if declaration == actual => {
-                let Some(types) = self.complement_fields(&domain, None)? else {
-                    return Ok(None);
-                };
+                let types = self.complement_fields(&domain, None)?;
                 self.product(fields, &types, invert, depth, |fields| Pattern::Record {
                     declaration: *declaration,
                     fields,
@@ -404,9 +402,7 @@ impl Engine<'_> {
                 if *index >= count {
                     return Ok(None);
                 }
-                let Some(types) = self.complement_fields(&domain, Some(*index as u32))? else {
-                    return Ok(None);
-                };
+                let types = self.complement_fields(&domain, Some(*index as u32))?;
                 let Some(selected) =
                     self.product(fields, &types, invert, depth, |fields| Pattern::Variant {
                         declaration: *declaration,
@@ -425,9 +421,7 @@ impl Engine<'_> {
                     if other == *index {
                         continue;
                     }
-                    let Some(types) = self.complement_fields(&domain, Some(other as u32))? else {
-                        return Ok(None);
-                    };
+                    let types = self.complement_fields(&domain, Some(other as u32))?;
                     self.spend(types.len())?;
                     alternatives.push(Pattern::Variant {
                         declaration: *declaration,
@@ -443,31 +437,30 @@ impl Engine<'_> {
         }
     }
 
-    fn complement_fields(
-        &mut self,
-        ty: &Term,
-        variant: Option<u32>,
-    ) -> Result<Option<Vec<Term>>, ()> {
+    fn complement_fields(&mut self, ty: &Term, variant: Option<u32>) -> Result<Vec<Term>, ()> {
         let structs = self.structs;
         let enums = self.enums;
-        Ok(nir::normal_forms::nominal_value_fields_with_collections_in(
+        nir::normal_forms::query_nominal_value_fields_with(
             ty,
             variant,
             &mut self.steps,
             &|id, fuel| {
-                *fuel = fuel.checked_sub(1)?;
-                structs
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or(nir::NominalAdmissionError::Budget)?;
+                Ok(structs
                     .get(&id)
                     .map(nir::normal_forms::NominalValueDeclaration::Struct)
                     .or_else(|| {
                         enums
                             .get(&id)
                             .map(nir::normal_forms::NominalValueDeclaration::Enum)
-                    })
+                    }))
             },
             &|domain, fuel| (self.collection)(domain, fuel),
             self.target,
-        ))
+        )
+        .map_err(|_| ())
     }
 
     fn product(
@@ -703,6 +696,34 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn complement_layout_failure_is_unknown_not_missing_metadata() {
+        let (enums, ty) = setup();
+        let structs = BTreeMap::new();
+        let context = Context::default();
+        let collection = |_: &Term, _: &mut usize| Ok(None);
+        let mut engine = Engine {
+            collection: &collection,
+            target: None,
+            tuple_head: None,
+            structs: &structs,
+            enums: &enums,
+            context: &context,
+            steps: 2,
+            domains: HashMap::new(),
+        };
+        assert!(engine.complement_fields(&ty, Some(0)).is_err());
+        assert!(
+            engine.steps > 0,
+            "failed reservations may leave positive fuel"
+        );
+        engine.steps = 10_000;
+        assert_eq!(
+            engine.complement_fields(&ty, Some(0)).unwrap(),
+            vec![Term::Primitive(Primitive::Bool); 2]
+        );
     }
     fn negate(pattern: Pattern, ty: &Term) -> Pattern {
         let binding = LocalId { owner: 0, index: 9 };
@@ -1006,6 +1027,13 @@ mod tests {
         let (enums, ty) = setup();
         let positive = selected(7, &ty);
         let negative = negate(positive.clone(), &ty);
+        for steps in (0..512).step_by(7) {
+            assert_ne!(
+                check(&enums, &ty, &[&negative, &positive], steps),
+                Coverage::Missing,
+                "budget exhaustion cannot refute a pattern and its complement"
+            );
+        }
         assert_eq!(
             check(&enums, &ty, &[&negative, &positive], 4),
             Coverage::Unknown

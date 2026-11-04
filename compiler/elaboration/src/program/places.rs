@@ -112,18 +112,12 @@ impl Checker<'_, '_> {
                 }
                 if let Some(definition) = self.structs.get(declaration) {
                     definition
-                        .instantiate_fields(arguments)
+                        .instantiate_stored_fields(arguments, &[], fuel)
                         .map_err(|e| e.to_string())?
-                        .into_iter()
-                        .map(|(_, ty)| ty)
-                        .collect()
                 } else if let Some(definition) = self.enums.get(declaration) {
                     definition
-                        .instantiate_variants(arguments)
+                        .instantiate_stored_fields(arguments, &[], fuel)
                         .map_err(|e| e.to_string())?
-                        .into_iter()
-                        .flat_map(|variant| variant.fields)
-                        .collect()
                 } else {
                     return Ok(false);
                 }

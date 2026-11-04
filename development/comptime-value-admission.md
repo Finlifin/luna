@@ -1555,3 +1555,45 @@ NIR 新增检查覆盖捕获后缀、依赖域、契约与表示一致、NF 头�
 
 未运行全 workspace、native 或性能基准；正式 docs 和原有工作区修改保持不变。
 elaboration 的旧元数据观察仍未迁移，完整 LayoutPlan 与跨阶段共享预算仍未完成。
+
+
+## 29. 覆盖矩阵的字段观察与 Unknown 边界
+
+覆盖检查是已检查 runtime pattern 的矩阵分析，不是 PTC 命题。它可以使用已有
+Context 的类型域与 binder frames，但不能把 runtime guard 或内存状态提交给 PTC。
+名义 struct／enum 现在直接通过受限字段代入观察载荷，共享矩阵的 steps；不再
+复制随后丢弃的字段名称、变体名称和 shape。既有分支编号、匿名 record 标签匹配
+以及矩阵深度限制保持不变。
+
+否定模式的 `complement_fields` 改用带错误结果的选中载荷查询，不再把失败转为
+Option::None。该私有接口交付 `Result<Vec<Term>, ()>`：合法空载荷是空 Vec，
+查询失败使本次矩阵返回 Unknown；不根据剩余 fuel 是否为零猜测成功。collection
+域证据和 nominal 值参数准入仍由同一查询检查。未知的可执行 guard 继续走原来的
+保守覆盖逻辑，不因此获得 complement 证据。
+
+elaboration 的 readable-storage 形成检查也迁移到受限字段视图；它仍不授予 Copy
+或指针来源权限。既有局部观察预算和后续资源检查尚未变成全阶段统一预算协议。
+构造器、具名字段模式和 enum 成员解析仍有需要元数据的旧消费者，未在本轮退役。
+
+基线 `37612c1c` 中，64 次参数引用乘以 32 字段实参的矩阵在预算 2000 下仍展开并
+返回 Exhaustive；否定模式布局失败仍返回成功的 None。两项回归失败，
+`/tmp/luna-tools-57plwugk/result.json` 退出 101。迁移后预算失败为 Unknown，足额
+预算恢复 Exhaustive；正模式与其 complement 的组合在逐档预算检查中从不产生
+Missing。额外检查了正余额下预留失败、合法空载荷、开放 Type frame 及缺失 frame。
+
+新增测试最初要求大展开无模式矩阵在预算内得到 Missing，实际还触及原有矩阵
+深度限制，`/tmp/luna-tools-0gqjidu6/result.json` 退出 101。Missing 对照改用同一
+声明的较小实参；未放宽深度限制或将 Unknown 改判为 Missing。
+
+验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p elaboration --lib coverage:: -- --nocapture`：72 通过，退出 0；
+  `/tmp/luna-tools-172hctqw/result.json`。
+- 加入开放 frame 与逐档 complement 检查后，`-p elaboration --lib --no-fail-fast`：
+  168 通过，退出 0；`/tmp/luna-tools-754kd6in/result.json`。
+- `-p luna --test negated_nominal_patterns --test normal_patterns --test inline_pattern_observation
+  --test enum_groups --test newtypes --test nominal_value_parameters --test invocation_value_templates
+  --no-fail-fast`：621 通过，退出 0；`/tmp/luna-tools-0px1bo4d/result.json`。
+
+格式检查通过。未运行全 workspace、native 或性能基准；正式 docs、已有工作区
+修改与未迁移的构造器元数据入口保持原状。
