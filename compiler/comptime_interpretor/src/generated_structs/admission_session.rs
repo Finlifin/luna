@@ -54,6 +54,42 @@ impl<'world> DefinitionAdmissionSession<'world> {
         })
     }
 
+    /// Source publication supplies formation evidence on demand. It cannot
+    /// execute methods or initializers through this descriptor-only session.
+    pub fn new_with_type_solver(
+        package: &'world nir::program::Package,
+        solver: &'world BudgetedTypeSolver<'world>,
+        budget: &mut Budget,
+    ) -> Result<Self, Error> {
+        let reserved = *budget;
+        budget.steps = 0;
+        // Descriptors need declaration/layout admission, not a transitive
+        // execution table. This VM is private and never invokes source code;
+        // lacking proof evidence still rejects an unestablished formation.
+        let mut phase_allowance = reserved;
+        invocation_budget::charge_world_tables(package, &mut phase_allowance)?;
+        nir::phases::validate(package).map_err(|error| Error {
+            source: Some(error.source),
+            kind: ErrorKind::InvalidPhase(error),
+        })?;
+        let mut vm = Interpreter::with_assumptions_and_index(
+            package,
+            &[],
+            reserved,
+            None,
+            None,
+            SourceDispatch::Admission,
+        )?;
+        vm.comptime_only = true;
+        vm.type_solver = Some(TypeSolver::Budgeted(solver));
+        budget.steps = vm.remaining_steps();
+        Ok(Self {
+            vm,
+            identity: Arc::new(()),
+            revision: 0,
+        })
+    }
+
     /// Check in the combined world, then roll back the tentative entries. Only
     /// completed descriptors are retained; no execution frames or live inference
     /// state can enter this session. Every attempt borrows its caller's budget,

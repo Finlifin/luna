@@ -37,6 +37,81 @@ fn budget() -> Budget {
 }
 
 #[test]
+fn source_admission_obtains_metered_formation_evidence_and_recovers() {
+    use comptime_interpretor::ContractOutcome;
+    use nir::program::{Trait, TraitRequirement, TypePredicate};
+    let requirement = TypePredicate::Trait(TraitRequirement {
+        interface: id(10),
+        interface_arguments: vec![],
+        subject: boolean(),
+    });
+    let mut checked = batch(1, boolean()).to_vec();
+    checked[0].requirements.push(requirement.clone());
+    let world = Package {
+        traits: vec![Trait {
+            declaration: id(10),
+            self_parameter: id(11),
+            name: "Marker".into(),
+            comptime_only: false,
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            parents: vec![],
+            associated: vec![],
+            methods: vec![],
+        }],
+        structs: checked,
+        ..Default::default()
+    };
+    let calls = Cell::new(0);
+    let outcome = Cell::new(ContractOutcome::Unknown);
+    let solver = |predicate: &TypePredicate, remaining: &mut u64| {
+        assert_eq!(predicate, &requirement);
+        calls.set(calls.get() + 1);
+        *remaining = remaining.saturating_sub(7);
+        outcome.get()
+    };
+    let mut fuel = budget();
+    let mut session =
+        StructAdmissionSession::new_with_type_solver(&world, &solver, &mut fuel).unwrap();
+    assert_eq!(calls.get(), 0);
+    for answer in [ContractOutcome::Unknown, ContractOutcome::Rejected] {
+        outcome.set(answer);
+        let before = fuel.steps;
+        assert!(session.prepare(batch(2, nominal(1)), &mut fuel).is_err());
+        assert!(fuel.steps < before);
+        assert!(calls.get() > 0);
+        assert_eq!(
+            session.to_string(),
+            "(definition-admission-session (revision 0))"
+        );
+    }
+    outcome.set(ContractOutcome::Satisfied);
+    assert!(
+        session.prepare(batch(3, nominal(2)), &mut fuel).is_err(),
+        "failed formation must not publish a descriptor"
+    );
+    let receipt = session.prepare(batch(2, nominal(1)), &mut fuel).unwrap();
+    session.commit_with(receipt, || Ok::<_, ()>(())).unwrap();
+    assert!(session.prepare(batch(3, nominal(2)), &mut fuel).is_ok());
+    let calls_before = calls.get();
+    assert!(
+        session
+            .prepare(
+                batch(4, nominal(1)),
+                &mut Budget {
+                    steps: 0,
+                    ..budget()
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(calls.get(), calls_before);
+    assert!(session.prepare(batch(4, nominal(1)), &mut budget()).is_ok());
+}
+
+#[test]
 fn dropped_receipts_are_not_visible_and_committed_receipts_are() {
     let world = Package::default();
     let mut fuel = budget();

@@ -49,6 +49,7 @@ enum Candidate {
 /// The host must reserve identities, including those outside the baseline.
 pub struct CheckedDefinitionPublisher<'a> {
     baseline: &'a Package,
+    type_solver: Option<&'a comptime_interpretor::BudgetedTypeSolver<'a>>,
     published: RefCell<PublishedDefinitions>,
     diagnostic: RefCell<Option<String>>,
     admission: RefCell<Option<DefinitionAdmissionSession<'a>>>,
@@ -58,10 +59,20 @@ impl<'a> CheckedDefinitionPublisher<'a> {
     pub fn new(baseline: &'a Package) -> Self {
         Self {
             baseline,
+            type_solver: None,
             published: RefCell::new(PublishedDefinitions::default()),
             diagnostic: RefCell::new(None),
             admission: RefCell::new(None),
             representations: RefCell::new(None),
+        }
+    }
+    pub fn new_with_type_solver(
+        baseline: &'a Package,
+        solver: &'a comptime_interpretor::BudgetedTypeSolver<'a>,
+    ) -> Self {
+        Self {
+            type_solver: Some(solver),
+            ..Self::new(baseline)
         }
     }
     pub fn published_definition_count(&self) -> usize {
@@ -151,7 +162,14 @@ impl<'a> CheckedDefinitionPublisher<'a> {
             let candidate = {
                 let mut admission = self.admission.borrow_mut();
                 if admission.is_none() {
-                    *admission = Some(DefinitionAdmissionSession::new(self.baseline, budget)?);
+                    *admission = Some(match self.type_solver {
+                        Some(solver) => DefinitionAdmissionSession::new_with_type_solver(
+                            self.baseline,
+                            solver,
+                            budget,
+                        )?,
+                        None => DefinitionAdmissionSession::new(self.baseline, budget)?,
+                    });
                 }
                 let admission = admission.as_mut().unwrap();
                 match kind {

@@ -490,19 +490,19 @@ impl DeclarationWorld<'_> {
         &self,
         interface: &n::InterfaceInstance,
         subject: &Term,
-        budget: Budget,
-    ) -> Result<(Id, Vec<Term>), String> {
-        let resolution = crate::capabilities::World {
+        budget: &mut Budget,
+    ) -> Result<(Id, Vec<Term>), AdmissionError> {
+        let mut resolution = crate::capabilities::World {
             index: &self.index,
             implementations: &self.package.implementations,
             traits: &self.package.traits,
             assumptions: &self.assumptions,
             context: &self.context,
         }
-        .resolve_instance(interface, subject, budget)?
+        .resolve_instance_metered(interface, subject, budget)?
         .types;
         let Selection::Selected(id) = resolution.selection else {
-            return Err(format!(
+            return Err(AdmissionError::Unresolved(format!(
                 "dispatch selection is unresolved for {subject}: {}; candidates: {}",
                 resolution.selection,
                 resolution
@@ -511,12 +511,12 @@ impl DeclarationWorld<'_> {
                     .map(|(id, assessment)| format!("{id}: {assessment}"))
                     .collect::<Vec<_>>()
                     .join("; ")
-            ));
+            )));
         };
-        let Some(TypeAssessment::Applicable(evidence)) = resolution.assessments.get(&id) else {
+        let Some(TypeAssessment::Applicable(evidence)) = resolution.assessments.remove(&id) else {
             return Err("dispatch selection lacks evidence".into());
         };
-        Ok((id, evidence.type_arguments.clone()))
+        Ok((id, evidence.type_arguments))
     }
 
     /// Substitute a selected member's complete declaration-side contract.

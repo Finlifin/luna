@@ -261,13 +261,6 @@ impl fmt::Display for SignatureTask {
     }
 }
 
-pub(crate) enum ProofSolver<'a> {
-    Unmetered(&'a dyn Fn(&nir::program::TypePredicate) -> comptime_interpretor::ContractOutcome),
-    Budgeted(
-        &'a dyn Fn(&nir::program::TypePredicate, &mut u64) -> comptime_interpretor::ContractOutcome,
-    ),
-}
-
 /// One package and one committed inference world. No Clone/trial operation is
 /// offered: speculative inference does not roll back interpreter side effects.
 pub struct Session<'a> {
@@ -305,22 +298,6 @@ impl<'a> Session<'a> {
     ) -> Result<Self, Error> {
         Ok(Self::new(package, context, budget)?.with_struct_builder(builder))
     }
-    pub(crate) fn with_associated_resolver(
-        mut self,
-        resolver: &'a comptime_interpretor::AssociatedResolver<'a>,
-    ) -> Self {
-        self.interpreter = self.interpreter.with_associated_resolver(resolver);
-        self
-    }
-
-    pub(crate) fn with_method_resolver(
-        mut self,
-        resolver: &'a comptime_interpretor::MethodResolver<'a>,
-    ) -> Self {
-        self.interpreter = self.interpreter.with_method_resolver(resolver);
-        self
-    }
-
     pub(crate) fn with_newtype_builder(
         mut self,
         builder: &'a dyn Fn(
@@ -379,7 +356,7 @@ impl<'a> Session<'a> {
             assumptions,
             parameters,
             &[],
-            solver.map(ProofSolver::Unmetered),
+            solver,
             None,
         )
     }
@@ -390,7 +367,9 @@ impl<'a> Session<'a> {
         assumptions: &[nir::program::TraitRequirement],
         parameters: &[DeclarationId],
         value_parameters: &[(DeclarationId, Term)],
-        solver: Option<ProofSolver<'a>>,
+        solver: Option<
+            &'a dyn Fn(&nir::program::TypePredicate) -> comptime_interpretor::ContractOutcome,
+        >,
         pointer_copy: Option<&'a dyn Fn(&Term, &mut u64) -> bool>,
     ) -> Result<Self, Error> {
         if context.is_trial() {
@@ -405,10 +384,7 @@ impl<'a> Session<'a> {
         )
         .map_err(Error::Invocation)?;
         if let Some(solver) = solver {
-            interpreter = match solver {
-                ProofSolver::Unmetered(solver) => interpreter.with_type_solver(solver),
-                ProofSolver::Budgeted(solver) => interpreter.with_budgeted_type_solver(solver),
-            };
+            interpreter = interpreter.with_type_solver(solver);
         }
         if let Some(permission) = pointer_copy {
             interpreter = interpreter.with_budgeted_pointer_copy_permission(permission);
@@ -421,6 +397,50 @@ impl<'a> Session<'a> {
             pending: BTreeMap::new(),
             failed: BTreeSet::new(),
         })
+    }
+
+    /// Required source invocations use compiler selection services instead of
+    /// an eagerly materialized dispatch closure. The scheduler still owns only
+    /// committed computations and rejects speculative inference contexts.
+    pub(crate) fn new_resolving_in_scope(
+        package: &'a Package,
+        context: &InferenceContext,
+        budget: &mut Budget,
+        assumptions: &[nir::program::TraitRequirement],
+        parameters: &[DeclarationId],
+        value_parameters: &[(DeclarationId, Term)],
+        resolvers: comptime_interpretor::SourceResolvers<'a>,
+    ) -> Result<Self, Error> {
+        if context.is_trial() {
+            return Err(Error::SpeculativeContext);
+        }
+        let interpreter = Interpreter::for_comptime_resolving_in_budget(
+            package,
+            assumptions,
+            parameters,
+            value_parameters,
+            resolvers,
+            budget,
+        )
+        .map_err(Error::Invocation)?;
+        Ok(Self {
+            identity: crate::unique(),
+            package,
+            context: context.identity(),
+            interpreter,
+            pending: BTreeMap::new(),
+            failed: BTreeSet::new(),
+        })
+    }
+
+    pub(crate) fn with_pointer_copy(
+        mut self,
+        permission: &'a dyn Fn(&Term, &mut u64) -> bool,
+    ) -> Self {
+        self.interpreter = self
+            .interpreter
+            .with_budgeted_pointer_copy_permission(permission);
+        self
     }
     fn check_context(&self, context: &InferenceContext) -> Result<(), Error> {
         if context.is_trial() {

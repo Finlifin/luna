@@ -7,6 +7,257 @@ use comptime_interpretor::Value;
 use nir::{Primitive, Term};
 
 #[test]
+fn source_publication_checks_field_formation_in_the_declared_world() {
+    let source = "trait Marker {}
+        impl Marker for bool {}
+        struct Checked where T :- Marker { value: T }
+        comptime fn BuildChecked() -> Type {
+            var builder = meta.StructBuilder.new(.name = .Built);
+            builder.add_field(.item, Checked<bool>);
+            builder.Build()
+        }
+        typealias Built = BuildChecked();
+        fn run() -> bool {
+            let value = Built { item: Checked<bool> { value: true } };
+            value.item.value
+        }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let rejected = source.replace("impl Marker for bool {}", "impl Marker for u8 {}");
+    assert!(
+        sysroot::compile(&rejected).is_err(),
+        "absent formation evidence must not publish a field type"
+    );
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
+fn source_selection_is_demanded_and_concrete_methods_cannot_bypass_the_host() {
+    use comptime_interpretor::{Budget, ContractOutcome, ErrorKind, Interpreter, SourceResolvers};
+    use std::cell::Cell;
+    use type_resolution::{capabilities::World, dispatch::DeclarationWorld, ptc};
+
+    let mut package = sysroot::compile(
+        "pure comptime trait Service {
+            pure comptime fn accept() -> bool;
+            assoc enabled: bool;
+        }
+        comptime impl Service for bool {
+            pure comptime fn accept() -> bool { true }
+            assoc enabled: bool = true;
+        }
+        pure comptime fn inspect() -> bool {
+            bool.as(Service).accept() and bool.as(Service).enabled
+        }",
+    )
+    .unwrap();
+    package.dispatch_instances.clear();
+    let entry = package
+        .functions
+        .iter()
+        .find(|f| f.name == "inspect")
+        .unwrap()
+        .declaration;
+    let context = ptc::Context::from_package(&package).unwrap();
+    let (declarations, _) =
+        DeclarationWorld::new(&package, ptc::Budget::default(), Some((&context, &[]))).unwrap();
+    let world = World {
+        index: declarations.index(),
+        implementations: &package.implementations,
+        traits: &package.traits,
+        assumptions: &[],
+        context: &context,
+    };
+    let type_calls = Cell::new(0);
+    let method_calls = Cell::new(0);
+    let associated_calls = Cell::new(0);
+    let allow = Cell::new(false);
+    let solver = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
+        type_calls.set(type_calls.get() + 1);
+        let before = usize::try_from(*fuel).unwrap_or(usize::MAX);
+        let mut budget = ptc::Budget {
+            steps: before,
+            ..Default::default()
+        };
+        let result = world.check_predicate_metered(predicate, &mut budget);
+        *fuel -= (before - budget.steps) as u64;
+        match result {
+            Ok(ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,
+            Ok(ptc::Outcome::NotEntailed(_)) => ContractOutcome::Rejected,
+            _ => ContractOutcome::Unknown,
+        }
+    };
+    let methods = |callee: &nir::program::Expr, fuel: &mut u64| {
+        method_calls.set(method_calls.get() + 1);
+        if !allow.get() {
+            return Err(comptime_interpretor::Error {
+                kind: ErrorKind::UnmaterializedDispatch,
+                source: Some(callee.source),
+            });
+        }
+        let before = usize::try_from(*fuel).unwrap_or(usize::MAX);
+        let mut remaining = before;
+        let result = elaboration::materialization::resolve_method_identity_in_context(
+            &package,
+            callee,
+            &context,
+            &[],
+            &mut remaining,
+        );
+        *fuel -= (before - remaining) as u64;
+        result.map_err(|_| comptime_interpretor::Error {
+            kind: ErrorKind::UnmaterializedDispatch,
+            source: Some(callee.source),
+        })
+    };
+    let associated = |access: &nir::program::Expr, fuel: &mut u64| {
+        associated_calls.set(associated_calls.get() + 1);
+        elaboration::materialization::resolve_associated_value_for_invocation(&world, access, fuel)
+    };
+    let counts = || (type_calls.get(), method_calls.get(), associated_calls.get());
+    for permitted in [false, true] {
+        allow.set(permitted);
+        let before = counts();
+        let mut budget = Budget::default();
+        let initial = budget.steps;
+        let mut vm = Interpreter::for_comptime_resolving_in_budget(
+            &package,
+            &[],
+            &[],
+            &[],
+            SourceResolvers {
+                types: &solver,
+                methods: &methods,
+                associated: &associated,
+            },
+            &mut budget,
+        )
+        .unwrap();
+        assert_eq!(counts(), before, "construction must not demand selections");
+        assert!(budget.steps < initial);
+        let result = vm.invoke(entry, vec![]);
+        if permitted {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+            assert!(associated_calls.get() > before.2);
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::UnmaterializedDispatch);
+            assert_eq!(associated_calls.get(), before.2);
+        }
+        assert!(
+            method_calls.get() > before.1,
+            "declaring a concrete impl cannot bypass selection"
+        );
+        assert!(vm.remaining_steps() < budget.steps);
+    }
+    let before = counts();
+    let mut budget = Budget {
+        steps: 0,
+        ..Default::default()
+    };
+    let result = Interpreter::for_comptime_resolving_in_budget(
+        &package,
+        &[],
+        &[],
+        &[],
+        SourceResolvers {
+            types: &solver,
+            methods: &methods,
+            associated: &associated,
+        },
+        &mut budget,
+    );
+    assert!(matches!(
+        result,
+        Err(comptime_interpretor::Error {
+            kind: ErrorKind::StepsExhausted,
+            ..
+        })
+    ));
+    assert_eq!(budget.steps, 0);
+    assert_eq!(counts(), before);
+}
+
+#[test]
+fn materialized_method_selection_pays_for_its_capability_query() {
+    use nir::program as n;
+    use type_resolution::{
+        capabilities::World,
+        dispatch::DeclarationWorld,
+        ptc::{Budget, Context},
+    };
+    let mut source = String::from("trait Service { comptime fn accept() -> bool; }\n");
+    for index in 0..8 {
+        source.push_str(&format!("trait Gate{index} {{}}\n"));
+        if index > 0 {
+            source.push_str(&format!(
+                "impl Gate{} for T where T :- Gate{index} {{}}\n",
+                index - 1
+            ));
+        }
+    }
+    source.push_str("impl Gate7 for bool {}\nimpl Service for T where T :- Gate0 { comptime fn accept() -> bool { true } }\n");
+    let package = sysroot::compile(&source).unwrap();
+    let context = Context::from_package(&package).unwrap();
+    let contract = package
+        .traits
+        .iter()
+        .find(|item| item.name == "Service")
+        .unwrap();
+    let interface = n::InterfaceInstance {
+        declaration: contract.declaration,
+        arguments: vec![],
+    };
+    let subject = Term::Primitive(Primitive::Bool);
+    let callee = n::Expr {
+        source: n::SourceRange { start: 7, end: 11 },
+        ty: Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: vec![],
+            result: Box::new(subject.clone()),
+        })),
+        kind: n::ExprKind::TraitMethod {
+            interface: interface.declaration,
+            interface_arguments: vec![],
+            subject: subject.clone(),
+            member: contract.methods[0].declaration,
+            method_arguments: vec![],
+        },
+    };
+    let granted = 2_000_000;
+    let mut allowance = Budget {
+        steps: granted,
+        ..Default::default()
+    };
+    let declarations =
+        DeclarationWorld::new_metered(&package, &mut allowance, Some((&context, &[]))).unwrap();
+    let world = World {
+        index: declarations.index(),
+        implementations: &package.implementations,
+        traits: &package.traits,
+        assumptions: declarations.assumptions(),
+        context: declarations.context(),
+    };
+    world
+        .resolve_instance_metered(&interface, &subject, &mut allowance)
+        .unwrap();
+    // Every demanded method must construct its declaration world and select the
+    // implementation. Other formation and dependency work can only add cost.
+    let minimum = granted - allowance.steps;
+    let mut remaining = granted;
+    elaboration::materialization::resolve_method_identity_in_context(
+        &package,
+        &callee,
+        &context,
+        &[],
+        &mut remaining,
+    )
+    .unwrap();
+    assert!(
+        granted - remaining >= minimum,
+        "materialization charged {}, but construction and selection alone used {minimum}",
+        granted - remaining
+    );
+}
+
+#[test]
 fn invocation_contract_exhaustion_is_not_a_protocol_error_or_a_cached_result() {
     let package = sysroot::compile(
         "trait Marker {}

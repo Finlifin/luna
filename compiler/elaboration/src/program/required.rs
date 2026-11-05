@@ -2315,31 +2315,11 @@ impl Checker<'_, '_> {
                         )
                     })?;
             }
-            // Scope selection and caller forwarding are complete before the
-            // private dispatch world admits any symbolic ordinary value.
-            let mut dispatch_budget = crate::ptc::Budget::default();
-            dispatch_budget.steps = dispatch_budget
-                .steps
-                .min(usize::try_from(self.required_steps).unwrap_or(usize::MAX));
-            let before = dispatch_budget.steps;
-            let dispatch = crate::materialization::dispatch_instances_in_context(
-                &package,
-                &type_context,
-                &invocation_assumptions,
-                &abstract_value_parameters,
-                &live_methods,
-                &mut dispatch_budget,
-            );
-            self.required_steps -= (before - dispatch_budget.steps) as u64;
-            package.dispatch_instances = dispatch.map_err(|failure| {
-                error(
-                    expr.span,
-                    format!("required comptime dispatch preparation failed: {failure}"),
-                )
-            })?;
+            // This is checked source for an invocation, not a concrete dispatch
+            // closure. The private VM resolves demanded members in RequiredWorld;
+            // unrelated concrete implementations must not be selected here.
             // Equality observations of opaque caller Type inputs need their
-            // declaration facts. Dispatch preparation above still uses its
-            // own world; these facts are supplied only to this invocation.
+            // declaration facts. These facts are supplied only to this invocation.
             let invocation_type_context = if abstract_parameters.is_empty() {
                 &type_context
             } else {

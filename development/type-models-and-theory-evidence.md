@@ -152,6 +152,61 @@ theory 请求的宿主观察沿[既定状态协议](elaboration-state-and-public
 子句淘汰不能释放活跃赋值所需的证明；可以共享不可变 proof DAG，但不共享候选的可变解释。
 预算统计分别保留搜索、外部观察、模型构造与重放成本，不为子请求重新赠送整份额度。
 
+### 当前接线：materialization 查询共用剩余额度
+
+`Builder` 的接口选择、类型形成前提与 given 查询通过 `query_budget` 交出当前
+`fuel`，仅继承初始配置中的深度等限制，不再反复把初始 `steps` 赠送给求解器。
+正常或错误返回均结算实际余量，查询 unwind 时保留已预留的额度。staged invocation
+改用 VM 的 budgeted Type solver，证明工作从该次 invocation 的额度中支付。
+
+`DeclarationWorld::select_interface` 接收可变预算，直接传递 capability 查询的
+Budget／Unresolved／Invalid 类别并返回实际余量。选中的实参从已有证据移出，
+不再额外复制。该服务仍只返回选定实现身份，不授予程序规格或内存访问权限。
+
+修改前的真实 `Builder::prove_requirement` 回归显示成功证明后 `fuel` 完全未减少：
+`/tmp/luna-tools-vamgxrq0/result.json` 退出 101。此问题不同于预算耗尽的错误分类：
+materialization 顶层及 method resolver 仍存在 String 错误适配，尚未把所有失败类别
+贯通到 VM；本批未把这些适配器宣称为完整的结构化宿主响应协议。
+
+真实 sysroot 暴露了旧准备路径的额外耦合：每次 required invocation 都预选全部具体
+impl，staged input 又可重复构造同一类 dispatch 闭包。查询开始正确收费后，这些
+无关选择会耗尽调用者额度。这里不能用提高默认额度或免收查询成本解决。
+
+required／staged source invocation 现在通过 `SourceResolvers` 在同一冻结声明世界中
+按需取得类型命题、method identity 和 associated initializer。构造仍检查声明形状、
+参数域与 phase；不把“存在具体 impl 声明”直接装成可调用方法，也不预先遍历所有
+impl 的父 trait／capability 闭包。真正的成员需求仍由 compiler selection 证明这些
+关系，VM 再检查实际参数、公开签名、阶段及调用契约。该入口拒绝混入预选 dispatch 表，
+不把表中旧证据与当前宿主服务混用；旧的 closed-table 入口和 IIR 路径仍单独保留。
+
+definition publisher 的非执行准入也有明确来源：source publisher 提供同一世界的
+budgeted Type solver，描述符 session 只使用声明／layout 元数据与形成证明，不能调用
+method 或 initializer。带 trait 形成条件的字段仍须取得证明；Unknown／拒绝／超预算
+不发布候选，后续重试不继承失败状态。无 solver 的既有 publisher 保持 closed-table
+准入；不把“尚未取得证明”替换为默认通过。具体类型仍按通用机制处理。
+
+开发中专门增加了 `Checked<T :- Marker>` 作为 builder 字段的反例：移除全局执行表
+但遗漏 descriptor proof 接线时，`/tmp/luna-tools-yiibm6n7/result.json` 退出 1，报
+TypeContractUnresolved。据此把 source proof 服务贯通到 publisher，而不是删除字段
+形成检查。调用模板测试亦区分稳定源码与每次解析新建的 associated initializer：
+只要求同样热身状态下没有额外重复编译，不能把所有 initializer 都假定成持久代码身份。
+
+验证工作目录 `/home/fin/luna`，通过 `development/check.py --timeout 900 -- test ...`
+执行；各 `result.json` 保存完整命令与退出状态，`stdout.log` 保存逐组结果：
+
+- `/tmp/luna-tools-x0fr796g/result.json`：退出 0；builder_invocations、
+  invocation_value_templates、trait_query_failures 共 97 项通过，包含真实 sysroot
+  builder、带约束字段与 source selection 的拒绝／恢复。
+- `/tmp/luna-tools-w2uz6gjm/result.json`：退出 101；VM、elaboration、materialization、
+  type_resolution、luna 的相关 lib 和集成组共 1038 项通过、2 项失败。
+  source_reflection 的 `ordered_field_objects_keep_receiver_admission_and_recover_after_failure`
+  与 `explicit_symbol_codes_are_reflected_without_inventing_discriminants` 失败于 contextual
+  method classification；它们未被跳过或修改预期。
+- 对基线 `6d267e8f` 还原本批拥有的源码后，以相同 source_reflection 命令复测：
+  `/tmp/luna-tools-wnx6leq7/result.json` 退出 101，同样 15 项通过、同样 2 项失败，
+  位置与诊断一致。随后逐字节恢复本批源码；作者已有修改未纳入此基线切换。
+  这些失败是仍待处理的前端分类缺口，不计作本批通过证据。
+
 ## 7. 共享项和联合模型
 
 同一共享项采用共同的语义身份、sort、binder scope 和形成证据，不能由每个模块独立按

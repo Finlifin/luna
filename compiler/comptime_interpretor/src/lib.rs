@@ -885,8 +885,11 @@ mod contextual_code;
 mod declaration_index;
 mod layout_catalog;
 mod list_values;
+mod source_resolution;
 mod source_state;
 pub use list_values::{ListIntoIter, ListIter, ListValues};
+use source_resolution::SourceDispatch;
+pub use source_resolution::{BudgetedTypeSolver, SourceResolvers};
 mod method_catalog;
 pub use code_session::CodeSession;
 
@@ -1052,7 +1055,14 @@ impl<'a> Interpreter<'a> {
         assumptions: &[nir::program::TraitRequirement],
         budget: Budget,
     ) -> Result<Self, Error> {
-        Self::with_assumptions_and_index(package, assumptions, budget, None, None)
+        Self::with_assumptions_and_index(
+            package,
+            assumptions,
+            budget,
+            None,
+            None,
+            SourceDispatch::Closed,
+        )
     }
 
     fn with_assumptions_and_index(
@@ -1061,11 +1071,14 @@ impl<'a> Interpreter<'a> {
         mut budget: Budget,
         positions: Option<Arc<declaration_index::SourceIndexes>>,
         scope: Option<source_state::InvocationScope<'_>>,
+        dispatch: SourceDispatch<'a>,
     ) -> Result<Self, Error> {
+        let closed_dispatch = matches!(dispatch, SourceDispatch::Closed);
         // Only sessions without caller premises publish complete world indexes.
         // A caller with extra premises still needs its own implication checks.
-        let positions = positions
-            .filter(|index| scope.is_none() && std::ptr::eq(package, index.source.as_ref()));
+        let positions = positions.filter(|index| {
+            closed_dispatch && scope.is_none() && std::ptr::eq(package, index.source.as_ref())
+        });
         if assumptions.is_empty() {
             if let Some(index) = &positions {
                 return Self::from_source_indexes(package, budget, index.clone());
@@ -1318,6 +1331,7 @@ impl<'a> Interpreter<'a> {
                     })?;
             }
             if concrete
+                && closed_dispatch
                 && worlds
                     .insert(
                         (interface.clone(), implementation.subject.clone()),
@@ -1384,7 +1398,7 @@ impl<'a> Interpreter<'a> {
                 {
                     return Err(invalid());
                 }
-                if concrete {
+                if concrete && closed_dispatch {
                     let arguments = if member.default == Some(body) {
                         std::iter::once(implementation.subject.clone())
                             .chain(interface.arguments.iter().cloned())
@@ -1769,7 +1783,13 @@ impl<'a> Interpreter<'a> {
                 }
             }
         }
-        for (interface, subject) in worlds.keys().chain(assumed_interfaces.iter()) {
+        // Resolver-backed source execution checks parent/capability closure at
+        // demand. The legacy table path still requires a fully closed table.
+        for (interface, subject) in worlds
+            .keys()
+            .chain(assumed_interfaces.iter())
+            .filter(|_| !matches!(dispatch, SourceDispatch::Resolving(_)))
+        {
             let contract = traits[&interface.declaration];
             let parameters = contract
                 .binders_with_self_checked(&mut trait_parameter_fuel)
@@ -1889,6 +1909,11 @@ impl<'a> Interpreter<'a> {
             interpreter.authorize_abstract_value_parameters(scope.values)?;
         }
         interpreter.admit_dispatch_inputs(&package.dispatch_instances, &implementations)?;
+        if let SourceDispatch::Resolving(resolvers) = dispatch {
+            interpreter.type_solver = Some(TypeSolver::Budgeted(resolvers.types));
+            interpreter.method_resolver = Some(resolvers.methods);
+            interpreter.associated_resolver = Some(resolvers.associated);
+        }
         Ok(interpreter)
     }
     /// A phase-checked entrypoint for concrete first-order comptime functions.
@@ -1947,8 +1972,14 @@ impl<'a> Interpreter<'a> {
                 kind: ErrorKind::InvalidPhase(error),
             })?;
         }
-        let mut interpreter =
-            Self::with_assumptions_and_index(package, assumptions, budget, positions, scope)?;
+        let mut interpreter = Self::with_assumptions_and_index(
+            package,
+            assumptions,
+            budget,
+            positions,
+            scope,
+            SourceDispatch::Closed,
+        )?;
         interpreter.comptime_only = true;
         Ok(interpreter)
     }
@@ -1969,6 +2000,7 @@ impl<'a> Interpreter<'a> {
         budget.steps = interpreter.remaining_steps();
         Ok(interpreter)
     }
+
     /// Prepare a private open comptime world. Explicit caller scope is installed
     /// before dispatch input admission, and is never published as a shared index.
     /// Construction reserves the caller's allowance on failure, like the closed

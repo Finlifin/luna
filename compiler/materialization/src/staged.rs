@@ -134,29 +134,10 @@ impl Builder<'_> {
         };
         root.body = expression.clone();
         let entry = root.declaration;
-        let roots = [iir::InstanceKey {
-            declaration: entry,
-            arguments: vec![].into(),
-        }];
-        let prepared = build(
-            snapshot,
-            Budget {
-                steps: self.fuel,
-                ..self.budget
-            },
-            Roots::Dispatch(&roots),
-            BTreeSet::new(),
-            &[],
-            Some(DispatchContext {
-                types: self.world.context(),
-                assumptions: self.world.assumptions(),
-                value_parameters: &[],
-            }),
-            None,
-        )?;
-        snapshot.dispatch_instances = prepared.dispatch;
-        self.fuel = prepared.remaining;
-        let solver = |predicate: &n::TypePredicate| {
+        // The checked expression is source code, not a concrete IIR closure.
+        // Resolve each demanded member in the same immutable declaration world;
+        // rebuilding every concrete implementation here duplicates outer work.
+        let solver = |predicate: &n::TypePredicate, remaining: &mut u64| {
             let world = crate::capabilities::World {
                 index: self.world.index(),
                 implementations: &snapshot.implementations,
@@ -164,7 +145,13 @@ impl Builder<'_> {
                 assumptions: self.world.assumptions(),
                 context: self.world.context(),
             };
-            match world.check_predicate(predicate, self.budget) {
+            let before = usize::try_from(*remaining).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let result = query_budget::run(&mut fuel, self.budget, |budget| {
+                world.check_predicate_metered(predicate, budget)
+            });
+            *remaining -= (before - fuel) as u64;
+            match result {
                 Ok(crate::ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,
                 Ok(crate::ptc::Outcome::NotEntailed(_)) => ContractOutcome::Rejected,
                 _ => ContractOutcome::Unknown,
@@ -196,18 +183,25 @@ impl Builder<'_> {
                 source: Some(callee.source),
             })
         };
-        let mut interpreter = Interpreter::for_comptime_with_assumptions(
+        let mut invocation_budget = comptime_interpretor::Budget {
+            steps: std::mem::take(&mut self.fuel) as u64,
+            depth: 128,
+        };
+        let prepared = Interpreter::for_comptime_resolving_in_budget(
             snapshot,
             self.world.assumptions(),
-            comptime_interpretor::Budget {
-                steps: self.fuel as u64,
-                depth: 128,
+            &[],
+            &[],
+            comptime_interpretor::SourceResolvers {
+                types: &solver,
+                methods: &method_resolver,
+                associated: &associated_resolver,
             },
-        )
-        .map_err(|error| format!("staged comptime preparation: {error}"))?
-        .with_type_solver(&solver)
-        .with_method_resolver(&method_resolver)
-        .with_associated_resolver(&associated_resolver);
+            &mut invocation_budget,
+        );
+        self.fuel = usize::try_from(invocation_budget.steps).unwrap_or(usize::MAX);
+        let mut interpreter =
+            prepared.map_err(|error| format!("staged comptime preparation: {error}"))?;
         let value = interpreter.invoke(entry, vec![]);
         self.fuel = usize::try_from(interpreter.remaining_steps()).unwrap_or(usize::MAX);
         let value = value.map_err(|error| format!("staged comptime invocation: {error}"))?;

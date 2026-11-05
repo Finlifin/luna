@@ -80,6 +80,86 @@ fn implementation(subject: Term, result: Term) -> Implementation {
         associated: vec![(id(2), value(result))],
     }
 }
+
+#[test]
+fn declaration_selection_preserves_query_fuel_and_failure_categories() {
+    use nir::value_admission::Error;
+    use type_resolution::{
+        dispatch::DeclarationWorld,
+        implementation::{Selection, TypeAssessment},
+    };
+    let package = nir::program::Package {
+        traits: vec![contract()],
+        implementations: vec![implementation(ty(P::Bool), ty(P::U8))],
+        ..Default::default()
+    };
+    let (declarations, _) = DeclarationWorld::new(&package, Budget::default(), None).unwrap();
+    let world = World {
+        index: declarations.index(),
+        implementations: &package.implementations,
+        traits: &package.traits,
+        assumptions: declarations.assumptions(),
+        context: declarations.context(),
+    };
+    let interface = nir::program::InterfaceInstance {
+        declaration: id(1),
+        arguments: vec![],
+    };
+    let mut successes = 0;
+    let mut exhausted = 0;
+    for subject in [ty(P::Bool), ty(P::Char)] {
+        for steps in [0, 1, 8, 32, 128, 1024, 100_000] {
+            let mut expected_budget = Budget {
+                steps,
+                ..Default::default()
+            };
+            let expected =
+                world.resolve_instance_metered(&interface, &subject, &mut expected_budget);
+            let mut actual_budget = Budget {
+                steps,
+                ..Default::default()
+            };
+            let actual = declarations.select_interface(&interface, &subject, &mut actual_budget);
+            assert_eq!(actual_budget.steps, expected_budget.steps);
+            assert!(actual_budget.steps <= steps);
+            match expected {
+                Ok(resolution) => match resolution.types.selection {
+                    Selection::Selected(identity) => {
+                        successes += 1;
+                        let Some(TypeAssessment::Applicable(evidence)) =
+                            resolution.types.assessments.get(&identity)
+                        else {
+                            panic!("selected evidence");
+                        };
+                        assert_eq!(actual.unwrap(), (identity, evidence.type_arguments.clone()));
+                    }
+                    _ => assert!(matches!(actual, Err(Error::Unresolved(_)))),
+                },
+                Err(Error::Budget) => {
+                    exhausted += 1;
+                    assert!(matches!(actual, Err(Error::Budget)));
+                }
+                Err(error) => assert_eq!(actual.unwrap_err().to_string(), error.to_string()),
+            }
+        }
+    }
+    assert!(successes > 0 && exhausted > 0);
+    let mut budget = Budget::default();
+    let first = declarations
+        .select_interface(&interface, &ty(P::Bool), &mut budget)
+        .unwrap();
+    let after_first = budget.steps;
+    assert_eq!(
+        declarations
+            .select_interface(&interface, &ty(P::Bool), &mut budget)
+            .unwrap(),
+        first
+    );
+    assert!(
+        budget.steps < after_first,
+        "a new query still pays for its own selection"
+    );
+}
 fn query(
     traits: &[Trait],
     implementations: &[Implementation],
@@ -1012,7 +1092,7 @@ fn prepared_methods_preserve_default_binders_and_pending_contracts() {
             arguments: vec![],
         };
         let (selected, arguments) = world
-            .select_interface(&interface, &ty(P::Bool), budget)
+            .select_interface(&interface, &ty(P::Bool), &mut { budget })
             .unwrap();
         let instance = DispatchInstance {
             interface: id(1),

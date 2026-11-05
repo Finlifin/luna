@@ -273,6 +273,10 @@ fn type_input_dispatch_uses_source_methods_and_real_meta_cache_protocols() {
     uncached.invoke(inputs(true), &mut warm).unwrap();
     let work = 1_000_000 - warm.remaining();
     let warm_invocations = uncached.last_execution_stats().bytecode_invocations;
+    // Associated resolution returns a fresh initializer body per invocation.
+    // Its owned identity is not retained by the stable source-code session.
+    // Repeated execution may compile that body, but not the warmed source code.
+    let warm_compilations = uncached.last_execution_stats().bytecode_compilations;
     assert!(work > 1);
     assert!(warm_invocations > 0);
     for allowance in [0, 1, work / 2, work - 1] {
@@ -288,7 +292,10 @@ fn type_input_dispatch_uses_source_methods_and_real_meta_cache_protocols() {
                 uncached.last_execution_stats().bytecode_invocations,
                 warm_invocations
             );
-            assert_eq!(uncached.last_execution_stats().bytecode_compilations, 0);
+            assert_eq!(
+                uncached.last_execution_stats().bytecode_compilations,
+                warm_compilations
+            );
         }
         assert!(limited.remaining() <= allowance);
         assert_eq!(uncached.cached_results(), 0);

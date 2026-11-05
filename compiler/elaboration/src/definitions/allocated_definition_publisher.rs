@@ -26,6 +26,18 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
             diagnostic: RefCell::new(None),
         }
     }
+    pub fn new_with_type_solver(
+        baseline: &'a n::Package,
+        package: u64,
+        next: u32,
+        fuel: usize,
+        solver: &'a comptime_interpretor::BudgetedTypeSolver<'a>,
+    ) -> Self {
+        Self {
+            checked: CheckedDefinitionPublisher::new_with_type_solver(baseline, solver),
+            ..Self::new(baseline, package, next, fuel)
+        }
+    }
     pub fn remaining_structural_fuel(&self) -> usize {
         self.fuel.get()
     }

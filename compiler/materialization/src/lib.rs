@@ -9,6 +9,7 @@ mod conditional_calls;
 mod dead_tails;
 mod input_admission;
 mod mutable_callbacks;
+mod query_budget;
 mod recursive_factories;
 mod staged;
 mod template_factories;
@@ -685,14 +686,16 @@ fn build(
                 })?;
                 // A given obligation has no executable dispatch identity.
                 // Method/value demands still call interface() directly.
-                let given = crate::capabilities::World {
+                let world = crate::capabilities::World {
                     index: builder.world.index(),
                     implementations: &package.implementations,
                     traits: &package.traits,
                     assumptions: builder.world.assumptions(),
                     context: builder.world.context(),
-                }
-                .given(&capability, budget)?
+                };
+                let given = query_budget::run(&mut builder.fuel, builder.budget, |budget| {
+                    world.given_metered(&capability, budget)
+                })?
                 .is_some();
                 if !given {
                     builder.interface(capability.interface_instance(), capability.subject)?;
@@ -966,8 +969,9 @@ impl Builder<'_> {
             return Ok(*index);
         }
         let (id, implementation_arguments) =
-            self.world
-                .select_interface(&interface, &subject, self.budget)?;
+            query_budget::run(&mut self.fuel, self.budget, |budget| {
+                self.world.select_interface(&interface, &subject, budget)
+            })?;
         let implementation = self
             .package
             .implementations
@@ -1239,17 +1243,19 @@ impl Builder<'_> {
         Ok(())
     }
     fn prove_requirement(
-        &self,
+        &mut self,
         requirement: &n::TypePredicate,
     ) -> Result<crate::ptc::Outcome, nir::NominalAdmissionError> {
-        crate::capabilities::World {
+        let world = crate::capabilities::World {
             index: self.world.index(),
             implementations: &self.package.implementations,
             traits: &self.package.traits,
             assumptions: self.world.assumptions(),
             context: self.world.context(),
-        }
-        .check_predicate(requirement, self.budget)
+        };
+        query_budget::run(&mut self.fuel, self.budget, |budget| {
+            world.check_predicate_metered(requirement, budget)
+        })
     }
     fn formation_requirements_with_parameters(
         &mut self,

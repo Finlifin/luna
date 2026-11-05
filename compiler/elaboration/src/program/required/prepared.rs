@@ -34,6 +34,32 @@ impl RequiredWorld {
             context,
         }
     }
+
+    fn solve(
+        &self,
+        assumptions: &[n::TraitRequirement],
+        context: &crate::ptc::Context,
+        predicate: &n::TypePredicate,
+        remaining: &mut u64,
+    ) -> comptime_interpretor::ContractOutcome {
+        use comptime_interpretor::ContractOutcome;
+        let mut budget = crate::ptc::Budget {
+            steps: crate::ptc::Budget::default()
+                .steps
+                .min(usize::try_from(*remaining).unwrap_or(usize::MAX)),
+            ..Default::default()
+        };
+        let before = budget.steps;
+        let outcome = self
+            .capabilities(assumptions, context)
+            .check_predicate_metered(predicate, &mut budget);
+        *remaining -= (before - budget.steps) as u64;
+        match outcome {
+            Ok(crate::ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,
+            Ok(crate::ptc::Outcome::NotEntailed(_)) => ContractOutcome::Rejected,
+            _ => ContractOutcome::Unknown,
+        }
+    }
 }
 
 pub(in crate::program) struct PreparedRequired {
@@ -187,11 +213,17 @@ impl PreparedRequired {
         next_identity: &mut u32,
     ) -> Result<((Value, Term), crate::definitions::PublishedDefinitions), Error> {
         let world = Arc::clone(&self.world);
-        let publisher = crate::definitions::AllocatedDefinitionPublisher::new(
+        let context = self.context.clone();
+        let assumptions = self.invocation_assumptions.clone();
+        let solver = |predicate: &n::TypePredicate, fuel: &mut u64| {
+            world.solve(&assumptions, &context, predicate, fuel)
+        };
+        let publisher = crate::definitions::AllocatedDefinitionPublisher::new_with_type_solver(
             &world.package,
             package_identity,
             *next_identity,
             usize::MAX,
+            &solver,
         );
         let result = self.invoke_in_world(
             values
@@ -279,21 +311,7 @@ impl PreparedRequired {
                 restored = value;
                 (&restored, scoped_context.as_ref().unwrap())
             };
-            let world = world.capabilities(&invocation_assumptions, proof_context);
-            let mut proof_budget = crate::ptc::Budget {
-                steps: crate::ptc::Budget::default()
-                    .steps
-                    .min(usize::try_from(*remaining).unwrap_or(usize::MAX)),
-                ..Default::default()
-            };
-            let before = proof_budget.steps;
-            let outcome = world.check_predicate_metered(predicate, &mut proof_budget);
-            *remaining = remaining.saturating_sub((before - proof_budget.steps) as u64);
-            match outcome {
-                Ok(crate::ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,
-                Ok(crate::ptc::Outcome::NotEntailed(_)) => ContractOutcome::Rejected,
-                _ => ContractOutcome::Unknown,
-            }
+            world.solve(&invocation_assumptions, proof_context, predicate, remaining)
         };
         let copy_failure = std::cell::RefCell::new(None::<String>);
         let pointer_copy = |ty: &Term, remaining: &mut u64| {
@@ -359,17 +377,18 @@ impl PreparedRequired {
                 steps: *steps,
                 depth: 128,
             };
-            let session = Session::new_in_scope_with_pointer_copy(
+            let session = Session::new_resolving_in_scope(
                 &package,
                 &context,
                 &mut budget,
                 &invocation_assumptions,
                 &abstract_parameters,
                 &abstract_value_parameters,
-                Some(crate::type_computations::ProofSolver::Budgeted(
-                    &type_solver,
-                )),
-                Some(&pointer_copy),
+                comptime_interpretor::SourceResolvers {
+                    types: &type_solver,
+                    methods: &method_resolver,
+                    associated: &associated_resolver,
+                },
             );
             *steps = budget.steps;
             let mut session = session.map_err(|failure| {
@@ -378,9 +397,7 @@ impl PreparedRequired {
                     format!("required comptime preparation failed: {failure}"),
                 )
             })?;
-            session = session
-                .with_method_resolver(&method_resolver)
-                .with_associated_resolver(&associated_resolver);
+            session = session.with_pointer_copy(&pointer_copy);
             if builder.is_some() {
                 session = session
                     .with_struct_builder(&build)
@@ -434,11 +451,16 @@ impl PreparedRequired {
             steps: std::mem::take(steps),
             depth: 128,
         };
-        let prepared = Interpreter::for_comptime_in_scope_in_budget(
+        let prepared = Interpreter::for_comptime_resolving_in_budget(
             &package,
             &invocation_assumptions,
             &abstract_parameters,
             &abstract_value_parameters,
+            comptime_interpretor::SourceResolvers {
+                types: &type_solver,
+                methods: &method_resolver,
+                associated: &associated_resolver,
+            },
             &mut preparation_budget,
         );
         *steps = preparation_budget.steps;
@@ -450,10 +472,6 @@ impl PreparedRequired {
                 .with_enum_builder(&build_enum)
                 .with_newtype_builder(&build_newtype);
         }
-        interpreter = interpreter
-            .with_method_resolver(&method_resolver)
-            .with_associated_resolver(&associated_resolver);
-        interpreter = interpreter.with_budgeted_type_solver(&type_solver);
         interpreter = interpreter.with_budgeted_pointer_copy_permission(&pointer_copy);
         let value = interpreter.invoke_with_prepared_arguments(entry, inputs);
         *steps = interpreter.remaining_steps();
