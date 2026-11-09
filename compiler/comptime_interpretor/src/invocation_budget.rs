@@ -3,6 +3,8 @@ use crate::{Budget, Error, ErrorKind, Interpreter};
 use nir::program::{Package, TraitRequirement};
 
 #[cfg(test)]
+mod associated_tests;
+#[cfg(test)]
 mod phase_tests;
 
 /// Charge complete source phase validation to this constructor's allowance.

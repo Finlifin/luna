@@ -2463,6 +2463,53 @@ ordinary_collection_assembly_preserves_many_inline_spread_producers 已推进到
   `/tmp/luna-tools-aubo52_5/result.json` 退出 0，原行为组 16 项与新规模回归 1 项通过。
   未执行全量测试。
 
+### 关联成员的构造准备不得重新取得整份额度
+
+继续检查构造路径发现：显式 dispatch instance 中每个 associated initializer 的
+替换，以及每个 completed associated value 的双侧验证与替换复制，都从
+`budget.steps` 重新建立局部额度，完成后没有扣回构造余额。其他 trait 准备已经
+消耗了共享余额，因此这些局部额度既能重复使用已花费的预算，也让成功 VM 少报
+准备成本。initializer 替换与 value 复制的资源失败还被误报为 InvalidCallPlan。
+
+这两类 payload 现在直接借用构造过程的共享 fuel，最终与其他 trait 准备一起扣回
+VM 余额；不按成员重置。initializer、completed value 的 typed admission 错误
+保留 Budget／Unresolved／Invalid 分类；完成值替换复制区分步骤与深度耗尽。
+选择结果仍须与原 implementation 的对应 payload 一致，准备不会执行 initializer，
+不会把 trait 前提当作可执行 dispatch。构造失败仍不发布 VM 或 source index。
+
+新增回归从真实公开构造入口验证完成值与初始化程序两条路径、宽 payload 和多个
+成员：低于该确定性构造实际成本的额度全部拒绝且保留资源错误，足额重新构造成功，
+执行事件始终为空，源 Package 不变。另验证同类型但来自另一选择的 payload 仍被
+拒绝。这里没有任意 solver 的候选搜索，精确成本重放只用于这些固定构造 fixture；
+不推广为所有 PTC 查询的最小成功额度规则。
+
+证据（工作目录 `/home/fin/luna`）：
+
+- 新回归在旧实现上 `/tmp/luna-tools-1a0bbetr/result.json` 退出 101：按成功 VM
+  报告的构造消耗重新供应额度，竟然仍在关联值处 StepsExhausted。最初两次 fixture
+  编译失败是测试将 function parameter 错写成 Term／name 字段，已按现有 NIR
+  Parameter 的 sort/ty 表示修正，没有修改生产类型表示。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib invocation_budget -- --nocapture`：`/tmp/luna-tools-shq_p3jy/result.json`
+  退出 0，10 项通过。
+- 扩展不匹配选择拒绝与完整 phase 入口后，`test -p comptime_interpretor --lib
+  --no-fail-fast`：`/tmp/luna-tools-o19qpb31/result.json` 退出 0，522 项通过。
+- `test -p luna --test deferred_associated_values --test associated_signatures
+  --test phase_source_budget --test normal_input_plans --no-fail-fast`：
+  `/tmp/luna-tools-3ji03xwj/result.json` 退出 0，35 项通过，包含真实 sysroot 的冷
+  构造及展开实参。三个 Rust 文件 scoped rustfmt check 退出 0，
+  `/tmp/luna-tools-oq_tvvki/result.json`；git diff --check 通过。未运行全 workspace。
+
+本轮最初重查的旧 `comptime_given_premises_discharge_obligations_without_inventing_dispatch`
+断言仍不改动：`/tmp/luna-tools-4f5nruba/result.json` 退出 101，缺少前提时实际为
+TypeContractUnresolved，旧测试要求 InvalidCallPlan；有前提的 witness 成功及无
+dispatch 的 read/call 拒绝已执行通过。资源修复与这项历史诊断分歧分开，不为了
+通过旧断言把未证明改成非法调用。
+
+剩余边界：外围部分成员查找、类型比较与 metadata 替换仍沿用既有实现；本节仅
+消除上述有显式计费入口却未归还消耗的两条路径，不声称整个构造器已完成线性化、
+所有复制均已计费或全局 waiter 协议已经完成。
+
 ### Predicate shape：支持结论与资源失败分离
 
 程序谓词 shape 检查移入 NIR 的单一实现，两个入口均显式接收调用者 fuel，返回

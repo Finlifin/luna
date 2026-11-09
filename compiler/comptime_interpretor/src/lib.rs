@@ -1503,6 +1503,16 @@ impl<'a> Interpreter<'a> {
             }
         }
 
+        // Associated payload admission shares the constructor's remaining
+        // allowance. A fresh per-member limit would hide already spent work.
+        let associated_failure = |failure: nir::value_admission::Error, source| Error {
+            kind: match failure {
+                nir::value_admission::Error::Budget => ErrorKind::StepsExhausted,
+                nir::value_admission::Error::Unresolved(_) => ErrorKind::TypeContractUnresolved,
+                nir::value_admission::Error::Invalid(_) => ErrorKind::InvalidCallPlan,
+            },
+            source: Some(source),
+        };
         let mut instance_keys = HashSet::new();
         for instance in &package.dispatch_instances {
             if !instance_keys.insert((instance.interface_instance(), instance.subject.clone())) {
@@ -1574,14 +1584,15 @@ impl<'a> Interpreter<'a> {
                 if originals.next().is_some() {
                     return Err(invalid());
                 }
-                let mut fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
                 let specialized = original
                     .instantiate(
                         &input_binders(&implementation.type_parameters),
                         &instance.arguments,
-                        &mut fuel,
+                        &mut trait_parameter_fuel,
                     )
-                    .map_err(|_| invalid())?;
+                    .map_err(|failure| {
+                        associated_failure(failure, initializer.expression().source)
+                    })?;
                 if specialized != *initializer {
                     return Err(invalid());
                 }
@@ -1620,7 +1631,6 @@ impl<'a> Interpreter<'a> {
                 // Payloads are completed values or closed snapshot graphs.
                 // Reconstruction cannot invoke arbitrary code or capture the
                 // invoking function's lexical environment.
-                let mut value_fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
                 nir::completed_values::validate_with_collection_evidence_in(
                     value,
                     package.newtypes.iter(),
@@ -1633,18 +1643,9 @@ impl<'a> Interpreter<'a> {
                     &|ty, fuel| nir::normal_forms::list_element_budgeted(package, ty, fuel),
                     &|id, fuel| nir::completed_values::lookup_nominal(package, id, fuel),
                     package.target,
-                    &mut value_fuel,
+                    &mut trait_parameter_fuel,
                 )
-                .map_err(|failure| Error {
-                    kind: match failure {
-                        nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
-                        nir::NominalAdmissionError::Unresolved(_) => {
-                            ErrorKind::TypeContractUnresolved
-                        }
-                        nir::NominalAdmissionError::Invalid(_) => ErrorKind::InvalidCallPlan,
-                    },
-                    source: Some(value.source),
-                })?;
+                .map_err(|failure| associated_failure(failure, value.source))?;
                 nir::completed_values::validate_with_collection_evidence_in(
                     original,
                     package.newtypes.iter(),
@@ -1657,25 +1658,22 @@ impl<'a> Interpreter<'a> {
                     &|ty, fuel| nir::normal_forms::list_element_budgeted(package, ty, fuel),
                     &|id, fuel| nir::completed_values::lookup_nominal(package, id, fuel),
                     package.target,
-                    &mut value_fuel,
+                    &mut trait_parameter_fuel,
                 )
-                .map_err(|failure| Error {
-                    kind: match failure {
-                        nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
-                        nir::NominalAdmissionError::Unresolved(_) => {
-                            ErrorKind::TypeContractUnresolved
-                        }
-                        nir::NominalAdmissionError::Invalid(_) => ErrorKind::InvalidCallPlan,
-                    },
-                    source: Some(value.source),
-                })?;
+                .map_err(|failure| associated_failure(failure, value.source))?;
                 nir::copy_budget::charge_substitution(
                     original,
                     &input_binders(&implementation.type_parameters),
                     &instance.arguments,
-                    &mut value_fuel,
+                    &mut trait_parameter_fuel,
                 )
-                .map_err(|_| invalid())?;
+                .map_err(|failure| Error {
+                    kind: match failure {
+                        nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
+                        nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
+                    },
+                    source: Some(value.source),
+                })?;
                 if originals.next().is_some()
                     || original
                         .instantiate_parameters(
