@@ -2823,9 +2823,10 @@ impl Checker<'_, '_> {
         mut call: n::Expr,
         source: &Expr<'_>,
     ) -> Result<n::Expr, Error> {
-        // NF application is itself a comptime operation. Its inputs belong to
-        // the current invocation, not an earlier runtime-call staging boundary.
-        if matches!(&call.kind, K::Call { callee, .. } if callee.ty.is_normal_form_callable()) {
+        // A comptime call executes its inputs in the current invocation.
+        // Explicit comptime parameters do not create another staging boundary;
+        // freezing here would read caller storage before that invocation exists.
+        if matches!(&call.kind, K::Call { callee, .. } if callee.ty.is_comptime_callable()) {
             return Ok(call);
         }
         if self.in_required_comptime
@@ -3249,7 +3250,13 @@ impl Checker<'_, '_> {
         mut expression: n::Expr,
         source: &Expr<'_>,
     ) -> Result<n::Expr, Error> {
-        if self.in_required_comptime {
+        // Spread/collection producers share the callee's execution boundary
+        // with direct inputs. A comptime call must retain this whole packet,
+        // including caller-local writes and exits, for its invocation.
+        let comptime_call = matches!(&expression.kind,
+            K::CallPreparation { result: Some(call), .. }
+                if matches!(&call.kind, K::Call { callee, .. } if callee.ty.is_comptime_callable()));
+        if self.in_required_comptime || comptime_call {
             return Ok(expression);
         }
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);

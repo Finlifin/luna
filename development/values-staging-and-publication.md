@@ -252,6 +252,71 @@ runtime callable 的 required 参数准备消费同一参数包：只执行子�
 - 四个修改 Rust 文件的 scoped rustfmt 检查：
   `/tmp/luna-tools-ux2b2ddl/result.json`，退出 0。没有运行全 workspace 或性能基准。
 
+### 已接通：comptime 调用实参属于当前 invocation
+
+普通 comptime callable 的显式 comptime 参数不制造额外阶段。其参数生产者必须在
+本次 invocation 的调用方环境中执行，遵守源码求值顺序，保留对局部存储的读写和
+提前退出。`freeze_staged_call_inputs` 原来只对 normal-form callable 保留这一行为，
+普通 comptime 调用则错误地按 runtime 调用的预先冻结边界处理。现已统一按 callable
+的执行阶段区分；展开参数的 `CallPreparation` 同样整段留给当前 invocation。
+该修复不改变 NF 身份、Type 参数表示或 runtime 函数的 comptime 实参规则。
+
+```flurry
+comptime fn accept(comptime T: Type, comptime flag: bool, value: Integer) -> bool {
+    T == bool and flag and value == 123
+}
+
+comptime fn check() -> bool {
+    var trace: Integer = 0;
+    let result = accept(
+        do { trace = trace * 10 + 1; bool },
+        do { trace = trace * 10 + 2; true },
+        do { trace = trace * 10 + 3; trace }
+    );
+    result and trace == 123
+}
+```
+
+已完成的函数签名和实参域继续先检查；调用期准备不是跳过类型要求的许可。
+直接调用、保存的 callable 值和展开包都采用相同阶段边界。闭合实参也不能仅因为
+可以在定义检查期间计算就提前执行：`accept(produce())` 的 produce 仍逐次进入，
+代码复用不缓存其值。实参提前 return 时不进入 accept。runtime 参数不能通过
+此变更流入 comptime 调用或 runtime 函数的 comptime 实参。
+
+**仍未接通的另一层。** 本节末尾的关联选择正例还需要为 `T :- Flag` 取得实参身份。
+`prepare_call_types` 会把该依赖送到 `prepare_type_dependency`，后者在普通调用形成前
+强求实际值。这发生在本次修正的冻结边界之前。需继续将可观察身份、待执行生产者和
+待决契约分离；不能借 VM 也会检查契约而直接删除定义侧证明，也不能为了获取 Type
+而在调用方存储尚未建立时执行实参。原 ignored 正例保留，不宣称通用 ContextualExpr
+或依赖签名恢复已经完成。
+
+验证工作目录 `/home/fin/luna`，测试统一前缀为
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- 对直接实参边界临时恢复旧 `is_normal_form_callable` 判据，运行
+  `-p luna --test comptime_call_staging --no-fail-fast`：
+  `/tmp/luna-tools-u088sxk5/result.json` 退出 101，5 项新增正例失败，runtime
+  阶段边界检查通过。闭合生产者实际进入 0 次、预期 2 次，其余分别复现缺失调用方
+  输入或提前 return 的错误。对照后恢复已保存的源码字节。
+- 只完成直接输入修正、尚未修改展开准备时，运行同组的
+  `spread_producers_stay_in_the_callers_invocation -- --exact`：
+  `/tmp/luna-tools-ke_0o7x9/result.json` 退出 101。临时诊断
+  `/tmp/luna-tools-654ug138/result.json` 定位到 `freeze_staged_preparation`；
+  诊断代码已删除。
+- 最终运行 `-p luna --test comptime_call_staging --test comptime_staged_values
+  --test clause_staged_constants --test comptime_bytecode_defaults --test default_calls
+  --test contextual_spreads --test spread_control --test type_spreads
+  --test library_meta_objects --test library_protocols --test ordinary_callable_types
+  --test normal_input_plans --test open_normal_input_plans --no-fail-fast`：
+  `/tmp/luna-tools-0t8pjko7/result.json` 退出 0，272 项通过、1 项原有 ignored。
+  新增 7 项覆盖两种 VM、连续两次 invocation、调用事件次数和 runtime 拒绝。
+- 最终源码显式运行 `-p luna --test invocation_host_requests
+  explicit_comptime_type_arguments_can_use_the_active_callers_storage -- --ignored --exact`：
+  `/tmp/luna-tools-2m03lfnj/result.json` 退出 101，仍在 321..360 报缺失调用方输入，
+  确认上述 trait 依赖准备缺口未被本次执行阶段修正掩盖。
+- 两个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-gierdrt2/result.json`
+  退出 0；`git diff --check` 通过。未运行全 workspace 或性能基准，未改动正式 docs。
+
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
 
 当前实现的具体断点见
