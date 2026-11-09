@@ -1010,6 +1010,7 @@ pub struct Interpreter<'a> {
     // None records an ambiguous member identity across different interfaces.
     method_origins: Arc<HashMap<DeclarationId, Option<DeclarationId>>>,
     method_contracts: method_catalog::Contracts<'a>,
+    trait_declarations: declaration_index::Traits<'a>,
     implemented_interfaces: Arc<HashMap<(InterfaceInstance, Term), DeclarationId>>,
     assumed_interfaces: HashSet<(InterfaceInstance, Term)>,
     method_bodies:
@@ -1195,11 +1196,12 @@ impl<'a> Interpreter<'a> {
             .filter(|metadata| metadata.role == nir::normal_forms::Role::Tuple)
             .map(|metadata| (metadata.declaration, metadata))
             .collect::<BTreeMap<_, _>>();
-        let mut traits = BTreeMap::new();
+        let traits = declaration_index::Traits::new(
+            &package.traits,
+            positions.as_ref().map(|index| index.traits.clone()),
+            |interface| interface.declaration,
+        )?;
         for interface in &package.traits {
-            if traits.insert(interface.declaration, interface).is_some() {
-                return Err(invalid());
-            }
             let mut names = BTreeSet::new();
             let mut members = BTreeSet::new();
             for member in &interface.methods {
@@ -1285,7 +1287,7 @@ impl<'a> Interpreter<'a> {
         let assumed_interfaces =
             constructor_premises::expand(assumptions, &traits, &mut trait_parameter_fuel)?;
         let mut method_bodies = HashMap::new();
-        for interface in traits.values() {
+        for interface in &package.traits {
             if interface
                 .parents
                 .iter()
@@ -1802,7 +1804,9 @@ impl<'a> Interpreter<'a> {
             .chain(assumed_interfaces.iter())
             .filter(|_| !matches!(dispatch, SourceDispatch::Resolving(_)))
         {
-            let contract = traits[&interface.declaration];
+            let contract = traits
+                .get(&interface.declaration)
+                .expect("checked interface");
             let parameters = contract
                 .binders_with_self_checked(&mut trait_parameter_fuel)
                 .map_err(constructor_premises::failure)?;
@@ -1896,6 +1900,7 @@ impl<'a> Interpreter<'a> {
             },
             positions,
             source_state::Prepared {
+                trait_declarations: traits,
                 effect_declarations,
                 method_parameters,
                 declaration_parameter_sorts,

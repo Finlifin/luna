@@ -562,7 +562,7 @@ impl<'a> Interpreter<'a> {
                         })?;
                     self.check_type_contract(&requirement, body.source)?;
                 }
-                self.check_deferred_capabilities(
+                self.check_invocation_capabilities(
                     definition,
                     generic_arguments,
                     type_scope.as_ref(),

@@ -53,6 +53,7 @@ pub(super) type Functions<'a> = Declarations<'a, nir::program::Function>;
 pub(super) type RuntimeIdentities<'a> = Declarations<'a, nir::program::RuntimeFunctionIdentity>;
 
 pub(super) type Effects<'a> = Declarations<'a, nir::effects::Declaration>;
+pub(super) type Traits<'a> = Declarations<'a, nir::program::Trait>;
 
 /// Source indexes stay shared across invocations; published additions are local.
 pub(super) struct Newtypes<'a> {
@@ -195,6 +196,7 @@ pub(super) struct SourceIndexes {
     pub(super) functions: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) runtime_identities: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) effects: Arc<BTreeMap<DeclarationId, usize>>,
+    pub(super) traits: Arc<BTreeMap<DeclarationId, usize>>,
 }
 
 /// Shape admission needs declaration lookup, not ownership of a particular map.

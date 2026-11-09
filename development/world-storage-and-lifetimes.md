@@ -177,8 +177,8 @@ required 目录迁移阶段的检查工作目录 `/home/fin/luna`，统一使用
 兼容的 `selected(&Package, ...)` 入口为取得所有权会复制一次完整源码；初次将借用
 源码放进 checked session 也有这项成本，已经持有 snapshot 的路径不复制。捕获复制、
 Context 建立和各阶段预算尚未统一，不能将本迁移称为整体性能优化。ReferenceSession
-及进一步的实例化复用见第 1.4 节，staged 入口迁移见第 1.5 节。VM 执行索引和通用验证
-函数的其他 package／world 调用边界不在此声称全部关闭。
+及进一步的实例化复用见第 1.4 节，staged 入口与 VM session 迁移见第 1.5–1.6 节。
+通用验证函数的其他 package／world 调用边界不在此声称全部关闭。
 
 driver 资源 owner 迁移阶段在 `/home/fin/luna` 使用
 `python3 -B development/check.py --timeout 900 --` 检查，结果均退出 0：
@@ -225,7 +225,7 @@ checked 清理的内部入口改为接收 ProtocolContext，集中取得 source�
 改成缺失 callee 以及恢复原源码均分别检查，不能由已有图或过去的成功代替。
 
 这完成的是声明目录复用，不是 IIR 图缓存或完整增量编译。Context 与输入 phase
-检查仍按次执行；staged 快照的后续迁移见第 1.5 节，VM 执行索引尚未复用。将借用 package
+检查仍按次执行；staged 快照及 VM 索引的后续迁移见第 1.5–1.6 节。将借用 package
 转为长期 owner 的整包复制和阶段间预算仍待统一；尚无整体性能收益结论。
 
 本轮实例化接线的检查工作目录为 `/home/fin/luna`，命令通过
@@ -277,7 +277,7 @@ StepsExhausted。新的 detached 检查、复制和执行消费同一次 invocat
 phase，不能因此在 comptime 执行 quote 函数。
 
 这一步只去掉可变临时入口并接通声明目录复用。源码捕获仍复制整包，VM 执行索引
-和 PhaseContext 仍按次构造；尚未接入携带作用域前提的 CodeSession 复用。旧 package
+和 PhaseContext 在此阶段仍按次构造；携带作用域前提的 CodeSession 后续迁移见第 1.6 节。旧 package
 阶段检查仍有独立额度，整个准备过程的计费尚未统一。类型／资源正确性仍由上游
 保证，不能把 phase 检查解释为完整程序验证；没有据此宣称整体性能提升。
 
@@ -297,6 +297,69 @@ phase，不能因此在 comptime 执行 quote 函数。
 
 共 848 项通过；14 个修改的 Rust 文件通过 scoped rustfmt check，
 `/tmp/luna-tools-nmkjznud/result.json` 退出 0；`git diff --check` 通过。未运行全量回归或性能基准；既有工作区改动与正式 docs 保持原样。
+
+### 1.6 Staged VM 索引与当前调用权限分离
+
+按需源码入口拆成独立的声明准备与当前调用准入。前者验证精确 source package，
+建立没有调用者前提或抽象参数权限的基础 VM；该模式禁止预选 dispatch 表，因此
+声明准入不需要借用调用者前提来补齐表。后者每次重新展开当前 trait 前提（含父约束
+和 capability），授予当前 Type／普通 comptime 值参数的显式权限，并安装本次宿主
+证明、方法及关联项服务。这里的前提只授予已有证明，不生成方法实现。
+
+`for_comptime_resolving_in_scope_in_session` 只复用同一 Arc 所拥有的精确 package。
+无作用域的旧 session 入口委托该入口，非 session 构造也使用同一准备／准入边界。
+另一份内容相同、声明号相同的 package 必须重新验证；closed-table 与按需解析的
+索引仍使用不同槽位，不能因为共享源码就交换执行许可。
+
+SourceIndexes 新增 trait 声明位置目录，扩展前提时不重新扫描、复制整个 trait 表。
+目录只持有原声明位置，不保存前提集合；每个 VM 单独建立 assumed_interfaces 与
+abstract 参数权限。初次调用若因错误前提、冲突权限或预算不足失败，不发布部分
+索引；已经存在的完整目录可在失败后保留，但失败 VM 的权限不能进入下一次调用。
+构造失败继续遵守整份额度预留的旧契约，不伪造精确剩余工作量。
+
+materialization::staged::Snapshot 同时持有 DeclarationSnapshot 与同源 CodeSession。
+多次 staged 求值复用 VM 声明索引与有限代码缓存；每次仍创建新 VM、安装当前查询
+服务、检查当前表达式并冻结本次返回值。退出与错误恢复只交还不可变代码，不交还
+局部存储、返回值、活动推断状态或证明答案。匿名入口主体仍按本次代码建立 owner；
+此处没有增加按源码范围缓存任意表达式结果的捷径。
+
+本轮测试暴露并修复了既有的直接调用缺口：comptime 源码入口跳过函数值形成步骤，
+却假定闭合 capability 已在形成时验证。现在命名源码调用在输入绑定后核对这些义务，
+不能从缓存代码获得过去调用的权限。直接 invoke、空声明参数的 invoke_instantiated、
+以及 detached 表达式中的调用均走该检查；Missing／Unknown 与 Rejected 分开拒绝。
+普通参数依赖的义务仍在绑定后处理；已验证 IIR 的形成证据与 runtime 源码原有的
+形成检查保留，不把源码宿主查询强加给 concrete artifact。
+
+回归在同一 session 交替有／无前提，检查父约束扩展、每次宿主服务、真实代码复用、
+抽象参数权限撤销、冷／热失败后恢复、同号不同世界和逐预算切点。materialization
+回归含大量声明元数据，比较首次与后续实际 staged 求值的预算消费，并检查输出与
+局部绑定隔离。较少的准备计费是该边界的证据，不是整体 wall-clock 性能结论。
+
+尚未处理：整包源码捕获、detached PhaseContext 的重复构造、各阶段统一预算及跨编辑
+增量失效。required／其他消费者的准备路径仍各自审计；不能据 staged 接线完成宣称
+全部 VM 世界所有权或 M1–M7 目标完成。
+
+本阶段在 `/home/fin/luna` 经 `development/check.py --timeout 900 --` 执行：
+
+- `test -p comptime_interpretor -p materialization --lib --no-fail-fast`：退出 0，
+  514 + 30 项通过，`/tmp/luna-tools-ifauj3q4/result.json`。新回归覆盖 tree／bytecode
+  直接入口、热代码的前提撤销、抽象 Type 传送、错误准入不发布、预算不足与恢复，
+  以及实际 staged Builder 的准备费用和状态隔离。
+- `test -p luna -p materialization --test prepared_invocations --test scoped_dispatch_inputs
+  --test clause_staged_constants --test comptime_staged_values --test quote_functions
+  --test staged_aggregate_contracts --test invocation_value_templates --test builder_invocations
+  --test generated_definitions --test library_protocols --test trait_query_failures --no-fail-fast`：
+  退出 0，282 项通过，`/tmp/luna-tools-lz41k7sj/result.json`。含真实 sysroot、公开库
+  native 用例、按需方法服务和构造失败恢复；没有改写既有用例的语义预期。
+- `test -p luna --lib --test key_code_sessions --test staged_invocation_reuse --no-fail-fast`：
+  退出 0，86 + 4 + 4 项通过，`/tmp/luna-tools-t3dxt24o/result.json`。检查共享构造入口的
+  其他消费者，确保 Eq／Hash、缓存协议及普通调用仍区分代码复用与结果复用。
+
+本轮去重 920 项通过。最初新增测试捕获的 closed capability 缺口已由调用入口检查
+修复；抽象 Type 的预期改为既有 TypeParameter 值表示，未改变传值或准入语义。
+12 个 Rust 文件 scoped rustfmt check 退出 0，`/tmp/luna-tools-d83870x7/result.json`；
+`git diff --check` 通过。未运行全量回归或整体性能测试，正式 docs 与已有工作区改动
+保持原样。
 
 ## 2. 目标物理结构
 

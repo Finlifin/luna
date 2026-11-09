@@ -51,7 +51,7 @@ impl Interpreter<'_> {
     }
 
     #[inline(never)]
-    pub(super) fn check_deferred_capabilities(
+    pub(super) fn check_invocation_capabilities(
         &mut self,
         definition: &nir::program::Function,
         arguments: &[Term],
@@ -65,16 +65,24 @@ impl Interpreter<'_> {
                 &P::Trait(capability.clone()),
                 source,
             )?;
-            // Closed capabilities were checked against retained evidence or
-            // the host world at formation. Deferred obligations need binding.
-            if self
-                .bind_invocation_contract(&predicate, None, source, 0)?
-                .is_none()
-            {
-                let bound = self
-                    .bind_invocation_contract(&predicate, scope, source, 0)?
-                    .ok_or_else(|| self.failure(ErrorKind::TypeContractUnresolved, Some(source)))?;
-                self.check_type_contract(&bound, source)?;
+            match self.bind_invocation_contract(&predicate, None, source, 0)? {
+                Some(P::Trait(bound)) if self.comptime_only && self.graph.is_none() => {
+                    // Direct source entry has no prior formation receipt, and
+                    // shared code grants no evidence in this invocation scope.
+                    self.check_capability_contract(&bound, source)?;
+                }
+                Some(_) => {
+                    // Concrete IIR carries producer-side formation evidence;
+                    // runtime source admission checks its closed formation.
+                }
+                None => {
+                    let bound = self
+                        .bind_invocation_contract(&predicate, scope, source, 0)?
+                        .ok_or_else(|| {
+                            self.failure(ErrorKind::TypeContractUnresolved, Some(source))
+                        })?;
+                    self.check_type_contract(&bound, source)?;
+                }
             }
         }
         Ok(())

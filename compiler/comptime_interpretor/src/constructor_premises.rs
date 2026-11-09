@@ -1,10 +1,10 @@
 //! Expand caller-established trait premises under the constructor's allowance.
 //! These premises discharge obligations; they do not provide executable methods.
 use crate::{Error, ErrorKind};
-use nir::program::{InterfaceInstance, Trait, TraitRequirement};
-use nir::{DeclarationId, Term};
+use nir::Term;
+use nir::program::{InterfaceInstance, TraitRequirement};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 pub(super) fn failure(reason: nir::type_computations::Error) -> Error {
     Error {
@@ -25,7 +25,7 @@ fn reserve(count: usize, fuel: &mut usize) -> Result<(), Error> {
 
 pub(super) fn expand(
     assumptions: &[TraitRequirement],
-    traits: &BTreeMap<DeclarationId, &Trait>,
+    traits: &super::declaration_index::Traits<'_>,
     fuel: &mut usize,
 ) -> Result<HashSet<(InterfaceInstance, Term)>, Error> {
     use nir::type_computations::charge_term;
@@ -107,7 +107,9 @@ pub(super) fn expand(
 mod tests {
     use super::*;
     use crate::{Budget, Interpreter};
+    use nir::DeclarationId;
     use nir::program::Package;
+    use nir::program::Trait;
     use nir::{Primitive, Sort};
 
     fn id(local: u32) -> DeclarationId {
@@ -228,7 +230,9 @@ mod tests {
         // payload, not just the small source skeleton, must consume fuel.
         package.traits[1].parents[0].arguments = vec![Term::Tuple(vec![rigid(22); 32])];
         premise.interface_arguments = vec![Term::Tuple(vec![Term::Primitive(Primitive::Bool); 32])];
-        let traits = package.traits.iter().map(|t| (t.declaration, t)).collect();
+        let traits =
+            crate::declaration_index::Traits::new(&package.traits, None, |t| t.declaration)
+                .unwrap();
         let mut short = 256;
         assert_eq!(
             expand(std::slice::from_ref(&premise), &traits, &mut short)
@@ -265,7 +269,9 @@ mod tests {
             declaration: id(20),
             arguments: vec![rigid(22)],
         });
-        let traits = package.traits.iter().map(|t| (t.declaration, t)).collect();
+        let traits =
+            crate::declaration_index::Traits::new(&package.traits, None, |t| t.declaration)
+                .unwrap();
         assert_eq!(
             expand(std::slice::from_ref(&premise), &traits, &mut 10_000)
                 .unwrap()
@@ -302,7 +308,11 @@ mod tests {
             interface_arguments: vec![Term::Bool(true)],
             subject: Term::Primitive(Primitive::Bool),
         };
-        let traits = BTreeMap::from([(leaf.declaration, &leaf)]);
+        let traits =
+            crate::declaration_index::Traits::new(std::slice::from_ref(&leaf), None, |t| {
+                t.declaration
+            })
+            .unwrap();
         assert_eq!(
             expand(std::slice::from_ref(&premise), &traits, &mut 10_000)
                 .unwrap_err()
@@ -313,7 +323,11 @@ mod tests {
         // A bool domain receives an ordinary comptime value. This boundary
         // checks substitution scopes/sorts, not scalar admission or obligations.
         leaf.parameter_types = vec![Term::Primitive(Primitive::Bool)];
-        let traits = BTreeMap::from([(leaf.declaration, &leaf)]);
+        let traits =
+            crate::declaration_index::Traits::new(std::slice::from_ref(&leaf), None, |t| {
+                t.declaration
+            })
+            .unwrap();
         assert!(
             expand(std::slice::from_ref(&premise), &traits, &mut 10_000)
                 .unwrap()

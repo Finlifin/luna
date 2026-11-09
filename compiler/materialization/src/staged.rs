@@ -1,11 +1,12 @@
 //! Private required invocation during concrete staged-input preparation.
 use super::*;
-use comptime_interpretor::{ClosureIdentity, Interpreter, Value};
+use comptime_interpretor::{ClosureIdentity, CodeSession, Interpreter, Value};
 
 // Immutable source declarations outlive individual detached invocation bodies.
 // Each invocation still owns its VM, environment, phase checks and result graph.
 pub(super) struct Snapshot {
     source: DeclarationSnapshot,
+    code: CodeSession,
 }
 
 #[derive(Default)]
@@ -19,11 +20,11 @@ struct FrozenGraph {
 impl Builder<'_> {
     pub(super) fn invoke_staged_input(&mut self, expression: &n::Expr) -> Result<n::Expr, String> {
         self.tick(0)?;
-        let snapshot = match self.invocation_snapshot.take() {
+        let mut snapshot = match self.invocation_snapshot.take() {
             Some(snapshot) => snapshot,
             None => self.new_invocation_snapshot()?,
         };
-        let result = self.invoke_with_snapshot(expression, &snapshot);
+        let result = self.invoke_with_snapshot(expression, &mut snapshot);
         self.invocation_snapshot = Some(snapshot);
         result
     }
@@ -52,25 +53,27 @@ impl Builder<'_> {
         // No signature-only identity may erase a quote method precondition.
         snapshot.functions.append(&mut snapshot.quote_templates);
         snapshot.dispatch_instances.clear();
+        let snapshot = std::sync::Arc::new(snapshot);
         Ok(Snapshot {
-            source: DeclarationSnapshot::new(std::sync::Arc::new(snapshot)),
+            source: DeclarationSnapshot::new(snapshot.clone()),
+            code: CodeSession::new(snapshot),
         })
     }
 
     fn invoke_with_snapshot(
         &mut self,
         expression: &n::Expr,
-        scratch: &Snapshot,
+        retained: &mut Snapshot,
     ) -> Result<n::Expr, String> {
         iir::visit::expression(expression, &mut self.fuel, |_, _| Ok(()))?;
         crate::associated::charge_projection_copy(&expression.ty, &mut self.fuel)
             .map_err(|_| "staged result type budget exhausted")?;
-        let snapshot = scratch.source.package();
+        let snapshot = retained.source.package();
         // The checked expression is source code, not a concrete IIR closure.
         // Resolve each demanded member in the same immutable declaration world;
         // rebuilding every concrete implementation here duplicates outer work.
         let source_queries = SourceInvocationQueries::in_source(
-            DeclarationSource::Snapshot(&scratch.source),
+            DeclarationSource::Snapshot(&retained.source),
             self.world.context(),
             self.world.assumptions(),
         );
@@ -92,8 +95,9 @@ impl Builder<'_> {
             steps: std::mem::take(&mut self.fuel) as u64,
             depth: 128,
         };
-        let prepared = Interpreter::for_comptime_resolving_in_budget(
+        let prepared = Interpreter::for_comptime_resolving_in_scope_in_session(
             snapshot,
+            &mut retained.code,
             self.world.assumptions(),
             &[],
             &[],
@@ -107,7 +111,9 @@ impl Builder<'_> {
         self.fuel = usize::try_from(invocation_budget.steps).unwrap_or(usize::MAX);
         let mut interpreter =
             prepared.map_err(|error| format!("staged comptime preparation: {error}"))?;
-        let value = interpreter.invoke_comptime_expression(expression);
+        let value = interpreter.with_code_session(&mut retained.code, |vm| {
+            vm.invoke_comptime_expression(expression)
+        });
         self.fuel = usize::try_from(interpreter.remaining_steps()).unwrap_or(usize::MAX);
         let value = value.map_err(|error| format!("staged comptime invocation: {error}"))?;
         drop(interpreter);

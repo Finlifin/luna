@@ -36,6 +36,19 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Self, Error> {
         let reserved = *budget;
         budget.steps = 0;
+        let mut interpreter = Self::prepare_resolving_source(package, resolvers, reserved)?;
+        interpreter.admit_resolving_scope(assumptions, parameters, value_parameters)?;
+        budget.steps = interpreter.remaining_steps();
+        Ok(interpreter)
+    }
+
+    /// Source declarations carry no caller authority. This mode rejects closed
+    /// dispatch tables, so their admission cannot depend on invocation premises.
+    pub(super) fn prepare_resolving_source(
+        package: &'a Package,
+        resolvers: SourceResolvers<'a>,
+        reserved: Budget,
+    ) -> Result<Self, Error> {
         if !package.dispatch_instances.is_empty() {
             return Err(Error {
                 kind: ErrorKind::InvalidCallPlan,
@@ -47,17 +60,31 @@ impl<'a> Interpreter<'a> {
         nir::phases::validate(package).map_err(Error::phase)?;
         let mut interpreter = Self::with_assumptions_and_index(
             package,
-            assumptions,
+            &[],
             reserved,
             None,
-            Some(source_state::InvocationScope {
-                types: parameters,
-                values: value_parameters,
-            }),
+            None,
             SourceDispatch::Resolving(resolvers),
         )?;
         interpreter.comptime_only = true;
-        budget.steps = interpreter.remaining_steps();
         Ok(interpreter)
+    }
+
+    /// Rebuild authority for each fresh VM, even when declaration validation
+    /// and code are shared. A failed constructor never publishes this VM.
+    pub(super) fn admit_resolving_scope(
+        &mut self,
+        assumptions: &[nir::program::TraitRequirement],
+        parameters: &[DeclarationId],
+        value_parameters: &[(DeclarationId, Term)],
+    ) -> Result<(), Error> {
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut remaining = before;
+        let premises =
+            constructor_premises::expand(assumptions, &self.trait_declarations, &mut remaining);
+        self.budget.steps -= (before - remaining) as u64;
+        self.assumed_interfaces = premises?;
+        self.authorize_abstract_type_parameters(parameters)?;
+        self.authorize_abstract_value_parameters(value_parameters)
     }
 }

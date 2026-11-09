@@ -1,5 +1,7 @@
 //! Immutable-world code reuse across independently budgeted invocations.
 use super::*;
+#[cfg(test)]
+mod scoped_tests;
 
 /// Owns the exact source or graph snapshot whose compiled code may be reused. This is
 /// separate from result memoization: no invocation values or proof outcomes are
@@ -202,6 +204,7 @@ impl<'program> Interpreter<'program> {
                 functions: self.functions.positions.clone(),
                 runtime_identities: self.runtime_function_identities.positions.clone(),
                 effects: self.effect_declarations.positions.clone(),
+                traits: self.trait_declarations.positions.clone(),
             })
         });
         self.structs = layout_catalog::Catalog::from_base(indexes.structs.clone());
@@ -217,28 +220,43 @@ impl<'program> Interpreter<'program> {
         resolvers: SourceResolvers<'program>,
         budget: &mut Budget,
     ) -> Result<Self, Error> {
-        let CodeWorld::Source(source) = &session.world else {
-            return Self::for_comptime_resolving_in_budget(
-                package,
-                &[],
-                &[],
-                &[],
-                resolvers,
-                budget,
-            );
+        Self::for_comptime_resolving_in_scope_in_session(
+            package,
+            session,
+            &[],
+            &[],
+            &[],
+            resolvers,
+            budget,
+        )
+    }
+
+    /// Share only this source snapshot's declaration metadata. Premises and
+    /// abstract input authority are admitted separately for every fresh VM;
+    /// neither becomes evidence stored in the session or its code caches.
+    pub fn for_comptime_resolving_in_scope_in_session(
+        package: &'program Package,
+        session: &mut CodeSession,
+        assumptions: &[nir::program::TraitRequirement],
+        parameters: &[DeclarationId],
+        value_parameters: &[(DeclarationId, Term)],
+        resolvers: SourceResolvers<'program>,
+        budget: &mut Budget,
+    ) -> Result<Self, Error> {
+        let source = match &session.world {
+            CodeWorld::Source(source) if std::ptr::eq(package, source.as_ref()) => source.clone(),
+            _ => {
+                return Self::for_comptime_resolving_in_budget(
+                    package,
+                    assumptions,
+                    parameters,
+                    value_parameters,
+                    resolvers,
+                    budget,
+                );
+            }
         };
-        let source = source.clone();
-        if !std::ptr::eq(package, source.as_ref()) {
-            return Self::for_comptime_resolving_in_budget(
-                package,
-                &[],
-                &[],
-                &[],
-                resolvers,
-                budget,
-            );
-        }
-        let mut allowance = *budget;
+        let allowance = *budget;
         budget.steps = 0;
         let mut vm = match &session.resolving_indexes {
             Some(indexes) => {
@@ -249,15 +267,9 @@ impl<'program> Interpreter<'program> {
                 vm.associated_resolver = Some(resolvers.associated);
                 vm
             }
-            None => Self::for_comptime_resolving_in_budget(
-                package,
-                &[],
-                &[],
-                &[],
-                resolvers,
-                &mut allowance,
-            )?,
+            None => Self::prepare_resolving_source(package, resolvers, allowance)?,
         };
+        vm.admit_resolving_scope(assumptions, parameters, value_parameters)?;
         vm.retain_source_indexes(&source, &mut session.resolving_indexes)?;
         budget.steps = vm.remaining_steps();
         Ok(vm)

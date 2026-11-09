@@ -198,6 +198,7 @@ impl<'a> Interpreter<'a> {
             method_contracts: Default::default(),
             method_origins: Default::default(),
             assumed_interfaces: HashSet::new(),
+            trait_declarations: Default::default(),
             implemented_interfaces: indexes.implementations.clone(),
             method_bodies: Arc::new(HashMap::new()),
             resolved_method_bodies: HashMap::new(),

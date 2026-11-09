@@ -76,7 +76,19 @@ mod tests {
 
     #[test]
     fn staged_snapshot_reuses_declarations_without_retaining_entry_state() {
-        let package = n::Package::default();
+        let package = n::Package {
+            normal_forms: vec![nir::normal_forms::Head {
+                declaration: Id {
+                    package: 91,
+                    local: 1,
+                },
+                role: Default::default(),
+                collector: None,
+                parameters: vec![],
+                requirements: vec![n::TypePredicate::Bool(true); 1000],
+            }],
+            ..Default::default()
+        };
         let mut builder = builder(&package);
         let flag = |value| n::Expr {
             source: n::SourceRange { start: 10, end: 20 },
@@ -84,6 +96,7 @@ mod tests {
             kind: K::Literal(n::Literal::Bool(value)),
         };
         let binding = n::LocalId { owner: 1, index: 0 };
+        let mut cold_cost = None;
         for value in [true, false, true] {
             let body = n::Expr {
                 kind: K::Block {
@@ -105,6 +118,11 @@ mod tests {
             let before = builder.fuel;
             assert_eq!(builder.invoke_staged_input(&body).unwrap(), flag(value));
             assert!(builder.fuel < before);
+            let cost = before - builder.fuel;
+            match cold_cost {
+                None => cold_cost = Some(cost),
+                Some(cold) => assert!(cost < cold, "staged preparation must reuse source metadata"),
+            }
             assert!(builder.invocation_snapshot.is_some());
             let unbound = n::Expr {
                 kind: K::Local(binding),

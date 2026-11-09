@@ -7,6 +7,7 @@ pub(super) struct InvocationScope<'a> {
 }
 
 pub(super) struct Prepared<'a> {
+    pub(super) trait_declarations: declaration_index::Traits<'a>,
     pub(super) effect_declarations: declaration_index::Effects<'a>,
     pub(super) method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
     pub(super) declaration_parameter_sorts: Arc<BTreeMap<DeclarationId, nir::Sort>>,
@@ -80,6 +81,11 @@ impl<'a> Interpreter<'a> {
             source: None,
         })?;
         let prepared = Prepared {
+            trait_declarations: declaration_index::Traits::new(
+                &package.traits,
+                Some(index.traits.clone()),
+                |item| item.declaration,
+            )?,
             effect_declarations: declaration_index::Effects::new(
                 &package.effects,
                 Some(index.effects.clone()),
@@ -127,6 +133,7 @@ impl<'a> Interpreter<'a> {
         prepared: Prepared<'a>,
     ) -> Result<Self, Error> {
         let Prepared {
+            trait_declarations,
             effect_declarations,
             method_parameters,
             declaration_parameter_sorts,
@@ -200,6 +207,7 @@ impl<'a> Interpreter<'a> {
             assumed_interfaces,
             method_bodies,
             resolved_method_bodies: HashMap::new(),
+            trait_declarations,
             associated_values,
             associated_initializers,
             active_associated_initializers: HashSet::new(),
