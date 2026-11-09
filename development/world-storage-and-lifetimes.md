@@ -116,9 +116,23 @@ Arc，继续只复用代码；每次执行仍创建新 VM。缓存准入、资�
 重复调用复用这个代码身份，每次建立新 VM、匿名调用帧并重新检查阶段与权限，
 不能复用默认实参的结果或失败之前的局部状态。资源协议入口在执行前取得共享源码
 owner，VM 和协议查询借用同一个 package，不再在查询准备中暗中复制另一份源码。
-借用 Package 的资源入口仍需要一次 owned 捕获；旧 dispatch 表的清除仍可能导致
-另一条整包复制，尚未统一其准备预算。runtime／native 默认入口包装尚未迁移。
+借用 Package 的资源入口仍需要一次 owned 捕获，与旧 dispatch 表的投影现在共用
+一次声明捕获，消耗本次 invocation 额度；runtime／native 默认入口包装尚未迁移。
 实现与本阶段验证见[显式 invocation](values-staging-and-publication.md#当前显式-invocation-迁移统一源世界-vm)。
+
+`DeclarationSource::retain_declarations` 统一 staged、显式 invocation、结果缓存与
+Eq／Hash 准备的所有权边界。干净 snapshot 只收取句柄保留成本并共享完整目录；
+借用源或含 dispatch 的 snapshot 预检后取得仅含声明的私有源码，直接省略执行表，
+新目录保持 pending，不继承被投影来源的证明或执行选择。复制失败不安装部分源码，
+低额度调用之后可以重试。已有 owner 的缓存调用可用 `Invocation::prepare_in_source`
+避免兼容借用入口的复制；它与 Eq／Hash 的共享入口一样拒绝预选 dispatch。
+
+PreparedInvocation 构造只保活输入 Arc；若包含旧 dispatch，在首次 invoke 的额度内
+完成投影后替换 source 与代码 session。捕获失败保留原 owner；捕获成功而后续调用
+失败可以保留声明数据，但不能保留调用结果或许可。后续调用不再承担这次复制，丢弃
+的执行表也不因准备对象继续保活。单次 invocation 的捕获、默认参数准备与 VM 共用
+额度；缓存／Eq／Hash 的兼容准备仍采用每阶段各自的传入 budget.steps 上限，其捕获
+已受限，但整个准备过程的累计额度尚未接通。这个区别不能通过同名 budget 掩盖。
 
 最后一个 snapshot／CodeSession／源码 Arc 消费者释放后，目录和源码可分别回收；
 目录不含反向 owner 引用。S-expression dump 展开源码及 pending／完成的目录状态，
@@ -129,7 +143,27 @@ required 准备、发布器证明和其资源权限 owner 也已采用该目录�
 这仍是一份完整 Package 的共享目录，未实现分块或跨编辑的结构共享。luna driver
 资源 ProtocolContext 的后续接线见第 1.3 节；staged 入口独立于声明快照的迁移见第 1.5 节。
 PTC Context 的建立、required 和外围资源／协议准备预算仍有独立成本；接受 `&Package` 的
-兼容准备入口仍复制整包，其捕获成本尚未纳入统一预算。未测整体编译性能收益。
+兼容入口仍可能复制所保留的源码。上述四条路径已采用有界声明捕获，不代表其他捕获
+入口或整个准备过程已经统一预算。未测整体编译性能收益。
+
+共同声明捕获的验证在 `/home/fin/luna` 执行，命令前缀为
+`python3 -B development/check.py --timeout 900 -- test`：
+
+| 范围 | 结果与证据 |
+| --- | --- |
+| `-p type_resolution -p materialization -p luna --lib --test prepared_invocations --test key_code_sessions --test invocation_value_templates --test staged_invocation_reuse --no-fail-fast` | `/tmp/luna-tools-g9ssogsl/result.json` 退出 101，166 通过、2 项诊断断言失败 |
+| `-p materialization -p luna --lib --test prepared_invocations --test builder_invocations --test library_protocols --test comptime_memory --test comptime_bytecode_defaults --no-fail-fast` | `/tmp/luna-tools-wluqjghs/result.json` 退出 101，264 通过、同一新增默认入口断言仍失败 |
+| `-p luna --test prepared_invocations` | `/tmp/luna-tools-wkdmmokv/result.json` 退出 0，8 项通过 |
+
+staged 捕获的预算失败诊断统一为 source retention，Steps 原因仍保留；既有测试同步
+检查该原因。新增精确额度用例原先预期 VM 的 StepsExhausted，实际先由默认调用准备
+报告额度耗尽；断言改为检查实际负责边界的拒绝，未增加额度或改变生产行为。第二轮
+构建仍使用修正该新增断言之前的版本，最后只重跑受影响的 prepared 组。
+本阶段去重 304 项通过。覆盖完整目录共享、私有投影不继承目录、失败重试、准确额度
+不能重复消费、丢弃的大型执行表、源 owner 回收，以及真实 sysroot 的 Type 结果缓存、
+Eq／Hash 独立值权限、默认参数、builder 与值引用行为。十个 Rust 文件格式检查通过，
+`/tmp/luna-tools-ae_y0vfx/result.json` 退出 0；`git diff --check` 通过。
+未执行全 workspace 或性能压测；工作区已有资源分析、正式 docs 和库说明未修改。
 
 required 目录迁移阶段的检查工作目录 `/home/fin/luna`，统一使用
 `python3 -B development/check.py --timeout 900 --`；result 文件保留完整命令及输出：
@@ -327,7 +361,8 @@ DeclarationSnapshot 时直接保留该 owner，CodeSession 与三个查询服务
 准备和每次调用继续执行对应检查。借用入口仍需要取得源码所有权，含预选 dispatch
 的入口仍建立剥离该表的私有声明快照；两者保持 quote 表与完整契约，不改写原源码。
 
-需要私有所有权的入口改用 `nir::copy_budget::clone_declaration_source`。先在同一
+需要私有所有权的入口经 `DeclarationSource::retain_declarations` 共用
+`nir::copy_budget::clone_declaration_source`。先在同一
 额度内完成所有保留载荷的预检，再构造副本；直接省略预选 dispatch，既不遍历也不
 复制待丢弃的执行表。Package 用穷尽字段解构和显式构造，新增字段必须决定其保留
 与计费责任。函数与 quote 的默认值／契约、参数域、NF 元数据、trait 与 impl、

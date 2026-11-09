@@ -26,15 +26,12 @@ impl PreparedInvocation {
         entry: &str,
         identity: Option<u64>,
     ) -> Result<Self, String> {
-        let (prepared, invocation) = prepare_invocation(&package, entry, identity)?;
-        let prepared = match prepared {
-            std::borrow::Cow::Borrowed(_) => package.clone(),
-            std::borrow::Cow::Owned(package) => std::sync::Arc::new(package),
-        };
-        let code = comptime_interpretor::CodeSession::new(prepared.clone());
+        let function = entry::select(&package, entry, FunctionPhase::Comptime, identity)?;
+        let invocation = entry::Entry::new(function);
+        let code = comptime_interpretor::CodeSession::new(package.clone());
         Ok(Self {
             code,
-            source: DeclarationSnapshot::new(prepared),
+            source: DeclarationSnapshot::new(package),
             invocation,
             entry: entry.into(),
             last_stats: InvocationStats::default(),
@@ -44,6 +41,14 @@ impl PreparedInvocation {
         self.last_stats = InvocationStats::default();
         if fuel == 0 {
             return Err("invocation fuel must be positive".into());
+        }
+        let mut fuel = fuel;
+        if !self.source.package().dispatch_instances.is_empty() {
+            // Publish only a complete source projection. A failed capture leaves
+            // the original owner available for a later invocation with fuel.
+            let source = retain_source(DeclarationSource::Snapshot(&self.source), &mut fuel)?;
+            self.code = comptime_interpretor::CodeSession::new(source.package().clone());
+            self.source = source;
         }
         execute_prepared(
             DeclarationSource::Snapshot(&self.source),
@@ -133,15 +138,17 @@ pub(crate) fn invoke_selected_with_publisher(
     if fuel == 0 {
         return Err("invocation fuel must be positive".into());
     }
-    let (prepared, mut invocation) = prepare_invocation(package, entry, identity)?;
-    // Resource binding needs a retained source. Move an already-owned
-    // preparation into that owner; VM and query services borrow the same source.
+    let function = entry::select(package, entry, FunctionPhase::Comptime, identity)?;
+    let mut invocation = entry::Entry::new(function);
+    let mut fuel = fuel;
+    // Resource binding needs ownership; selected dispatch needs projection.
+    // Both use one capture, before VM and query services borrow that source.
     let retained;
-    let source = if protocols.is_some() {
-        retained = DeclarationSnapshot::new(std::sync::Arc::new(prepared.into_owned()));
+    let source = if protocols.is_some() || !package.dispatch_instances.is_empty() {
+        retained = retain_source(DeclarationSource::Borrowed(package), &mut fuel)?;
         DeclarationSource::Snapshot(&retained)
     } else {
-        DeclarationSource::Borrowed(prepared.as_ref())
+        DeclarationSource::Borrowed(package)
     };
     execute_prepared(
         source,
@@ -155,20 +162,15 @@ pub(crate) fn invoke_selected_with_publisher(
     )
 }
 
-fn prepare_invocation<'a>(
-    package: &'a Package,
-    entry: &str,
-    identity: Option<u64>,
-) -> Result<(std::borrow::Cow<'a, Package>, entry::Entry), String> {
-    let function = entry::select(package, entry, FunctionPhase::Comptime, identity)?;
-    let invocation = entry::Entry::new(function);
-    let mut prepared = std::borrow::Cow::Borrowed(package);
-    // A source invocation owns declarations, not a precomputed executable
-    // closure. Each demanded relationship is proved by the host services.
-    if !prepared.dispatch_instances.is_empty() {
-        prepared.to_mut().dispatch_instances.clear();
-    }
-    Ok((prepared, invocation))
+fn retain_source(
+    source: DeclarationSource<'_>,
+    fuel: &mut u64,
+) -> Result<DeclarationSnapshot, String> {
+    let mut remaining = usize::try_from(*fuel)
+        .map_err(|_| "source retention fuel does not fit the host counter")?;
+    let result = source.retain_declarations(&mut remaining);
+    *fuel = remaining as u64;
+    result.map_err(|error| format!("invocation source retention budget exhausted: {error:?}"))
 }
 
 #[allow(clippy::too_many_arguments)]

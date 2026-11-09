@@ -64,20 +64,18 @@ impl Protocol {
     /// Bind both operations and prove their declared type capabilities.
     /// Transitive method dependencies are selected at the actual invocation.
     /// The supplied package must have passed ordinary source contract checking.
+    /// Source capture has its own `budget.steps` bound, like the subsequent
+    /// protocol preparation stages; this is not a cumulative preparation meter.
     pub fn prepare(
         package: &Package,
         items: &LangItems,
         subject: &Term,
         budget: ptc::Budget,
     ) -> Result<Self, String> {
-        let mut frozen = package.clone();
-        frozen.dispatch_instances.clear();
-        Self::prepare_in_source(
-            DeclarationSnapshot::new(Arc::new(frozen)),
-            items,
-            subject,
-            budget,
-        )
+        let source = DeclarationSource::Borrowed(package)
+            .retain_declarations(&mut { budget.steps })
+            .map_err(|error| format!("key source retention budget exhausted: {error:?}"))?;
+        Self::prepare_in_source(source, items, subject, budget)
     }
 
     /// Reuse the owning source directory across protocol bindings. Each binding

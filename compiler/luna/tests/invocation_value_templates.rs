@@ -24,6 +24,83 @@ fn prepare(package: &Package, name: &str, arguments: Vec<Term>) -> luna::memoiza
     .unwrap()
 }
 
+#[test]
+fn memoized_preparation_bounds_source_capture_and_can_share_an_owned_source() {
+    use elaboration::materialization::{DeclarationSnapshot, DeclarationSource};
+    use luna::memoization::Invocation;
+    let package = sysroot::compile("pure comptime fn identity(flag:bool)->bool {flag}").unwrap();
+    let entry = id(&package, "identity");
+    let error = Invocation::prepare(
+        &package,
+        &Default::default(),
+        entry,
+        vec![],
+        8,
+        elaboration::ptc::Budget {
+            steps: 1,
+            ..Default::default()
+        },
+    )
+    .err()
+    .unwrap();
+    assert!(
+        error.contains("memoization source retention budget exhausted"),
+        "{error}"
+    );
+    let source = DeclarationSource::Borrowed(&package)
+        .retain_declarations(&mut 100_000)
+        .unwrap();
+    let weak = std::sync::Arc::downgrade(source.package());
+    let mut call = Invocation::prepare_in_source(
+        source.clone(),
+        &Default::default(),
+        entry,
+        vec![],
+        8,
+        Default::default(),
+    )
+    .unwrap();
+    drop(source);
+    for flag in [false, true, false] {
+        let result = call
+            .invoke(vec![Value::Bool(flag)], &mut Context::new(1_000_000))
+            .unwrap();
+        assert_eq!(*result.value, Value::Bool(flag));
+        assert!(!result.reused);
+    }
+    assert!(weak.upgrade().is_some());
+    drop(call);
+    assert!(weak.upgrade().is_none());
+
+    let mut dirty = package;
+    dirty
+        .dispatch_instances
+        .push(nir::program::DispatchInstance {
+            interface: entry,
+            interface_arguments: vec![],
+            subject: Term::Bool(false),
+            implementation: entry,
+            arguments: vec![],
+            methods: vec![],
+            associated: vec![],
+            associated_initializers: vec![],
+        });
+    let error = Invocation::prepare_in_source(
+        DeclarationSnapshot::new(std::sync::Arc::new(dirty)),
+        &Default::default(),
+        entry,
+        vec![],
+        8,
+        Default::default(),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        error.contains("must not contain preselected dispatch"),
+        "{error}"
+    );
+}
+
 const SOURCE: &str = "
     struct Key where tag: bool { value: bool }
     pure comptime trait Reading {

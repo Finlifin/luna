@@ -123,6 +123,75 @@ fn default_entries_with_resource_protocols_preserve_the_source() {
 }
 
 #[test]
+fn dispatch_projection_is_deferred_budgeted_and_never_authorizes_execution() {
+    use elaboration::materialization::DeclarationSource;
+    let mut package = support::compile("comptime fn run(.flag:bool=true)->bool {flag}");
+    package
+        .dispatch_instances
+        .push(nir::program::DispatchInstance {
+            interface: nir::DeclarationId {
+                package: 999,
+                local: 1,
+            },
+            interface_arguments: vec![nir::Term::Tuple(vec![nir::Term::Bool(false); 100_000])],
+            subject: nir::Term::Bool(false),
+            implementation: nir::DeclarationId {
+                package: 999,
+                local: 2,
+            },
+            arguments: vec![],
+            methods: vec![],
+            associated: vec![],
+            associated_initializers: vec![],
+        });
+    let original = package.to_string();
+    let package = Arc::new(package);
+    let mut fuel = 100_000;
+    DeclarationSource::Borrowed(&package)
+        .retain_declarations(&mut fuel)
+        .unwrap();
+    let capture_cost = 100_000 - fuel;
+    let weak = Arc::downgrade(&package);
+    let mut prepared = PreparedInvocation::new(package.clone(), "run", None).unwrap();
+    assert!(
+        Arc::strong_count(&package) > 1,
+        "construction retains the original source"
+    );
+    for _ in 0..2 {
+        let error = prepared.invoke((capture_cost - 1) as u64).unwrap_err();
+        assert!(
+            error.contains("source retention budget exhausted"),
+            "{error}"
+        );
+    }
+    // Capture consumes the whole allowance; call preparation cannot spend it again.
+    let error = prepared.invoke(capture_cost as u64).unwrap_err();
+    assert!(
+        error.contains("entry call preparation budget exhausted"),
+        "{error}"
+    );
+    assert_eq!(prepared.invoke(100_000).unwrap(), Value::Bool(true));
+    assert_eq!(prepared.invoke(100_000).unwrap(), Value::Bool(true));
+    assert_eq!(prepared.last_stats().bytecode_compilations, 0);
+    let error = luna::invocation::invoke(&package, "run", (capture_cost - 1) as u64).unwrap_err();
+    assert!(
+        error.contains("source retention budget exhausted"),
+        "{error}"
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(package.to_string(), original);
+    drop(package);
+    assert!(
+        weak.upgrade().is_none(),
+        "projection no longer owns the discarded execution table"
+    );
+    assert_eq!(prepared.invoke(100_000).unwrap(), Value::Bool(true));
+}
+
+#[test]
 fn source_invocation_preserves_type_dispatch_higher_order_values_and_fresh_frames() {
     let package = Arc::new(
         sysroot::compile(

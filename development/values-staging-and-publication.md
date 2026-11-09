@@ -937,9 +937,17 @@ VM 的 owned expression 入口复用同一个不可变表达式作为代码身�
 资源协议版本在建立 VM 前统一源码 owner，避免 VM 与查询服务分别持有两份复制品；
 builder 发布服务继续按本次调用绑定。
 
-此清理不覆盖 runtime／native 默认入口包装；源快照清除旧 dispatch 表的整包复制、
-借用 Package 的资源入口捕获，以及入口选择与外围上下文准备仍有尚未统一的预算。
-不能据此声称所有宿主准备已计费，也不能把独立调用表达式当作新的语言声明种类。
+显式入口的源码捕获也已改用共同的 `DeclarationSource::retain_declarations`：
+仅复制声明载荷，不先克隆整包再清空 dispatch。借用源若需要资源 owner 或移除旧
+dispatch，一次捕获即同时满足两者；捕获预检、默认调用准备和 VM 执行消费同一个
+invocation 额度。可复用入口在构造时保留原 Arc，将必要投影推迟到首次执行；完整
+投影成功后才替换 owner 与代码 session。失败捕获不安装半成品；后续执行失败允许
+保留已经完成的声明投影，不保留权限或执行结果。
+
+此清理不覆盖 runtime／native 默认入口包装；入口选择与外围上下文准备仍有尚未
+统一的预算。不能据此声称所有宿主准备已计费，也不能把独立调用表达式当作新的
+语言声明种类。共享来源、独立证明和缓存准备的预算边界见
+[声明目录与捕获](world-storage-and-lifetimes.md#12-保活源码的共享声明目录)。
 
 默认入口迁移的检查工作目录 `/home/fin/luna`，通过 `development/check.py` 执行：
 
@@ -1036,6 +1044,13 @@ IIR 专门化现已在下述后续迁移中删除。运行时 IIR、后端交付
 package、挑选伪造私有声明身份、移除 Type 实参并实例化整份 IIR。旧的
 `staged_preparations` 计数 API 一并删除；实际代码编译／执行统计仍由
 `last_execution_stats` 提供，结果缓存数仍由 `cached_results` 提供。
+
+缓存调用和 Eq／Hash 协议的借用准备也通过共同声明捕获，预检保留载荷后才复制，
+不遍历或复制将被丢弃的执行表。它们的捕获上限采用传入的 budget.steps，与已有
+各准备阶段一样分别受限，尚非所有准备工作的累计额度。结果缓存现在提供
+`prepare_in_source`，已有 DeclarationSnapshot 的消费者可以直接共享 owner；
+与协议的同名入口一样拒绝含预选 dispatch 的快照。共享源码不合并各 binding 的
+值接纳 token，不扩大 Type 结果缓存资格，也不复用调用的权限或结果检查。
 
 移除旧路径时观察到依赖注解主体每次重编译的问题，因此同步补齐 VM 的主体准备缓存。
 缓存按原声明或精确 owned body 身份定位，再比较完整 FunctionInputBinding，包括

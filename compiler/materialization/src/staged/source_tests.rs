@@ -117,7 +117,7 @@ fn borrowed_capture_meters_unrelated_declarations_without_penalizing_shared_owne
         .err()
         .expect("the copy includes unused declaration metadata");
     assert!(
-        failure.contains("staged source copy budget exhausted"),
+        failure.contains("staged source retention budget exhausted: Steps"),
         "{failure}"
     );
     assert_eq!(package, before);

@@ -31,6 +31,54 @@ fn prepare(package: &Package, subject: &Term) -> Protocol {
 }
 
 #[test]
+fn borrowed_key_capture_is_bounded_and_shared_sources_remain_separate_bindings() {
+    use elaboration::materialization::DeclarationSource;
+    let package = sysroot::compile("").unwrap();
+    let items = bindings(&package);
+    let subject = Term::Primitive(Primitive::Bool);
+    let error = Protocol::prepare(
+        &package,
+        &items,
+        &subject,
+        elaboration::ptc::Budget {
+            steps: 1,
+            ..Default::default()
+        },
+    )
+    .err()
+    .unwrap();
+    assert!(
+        error.contains("key source retention budget exhausted"),
+        "{error}"
+    );
+    let source = DeclarationSource::Borrowed(&package)
+        .retain_declarations(&mut 100_000)
+        .unwrap();
+    let weak = std::sync::Arc::downgrade(source.package());
+    let mut first =
+        Protocol::prepare_in_source(source.clone(), &items, &subject, Default::default()).unwrap();
+    let mut second =
+        Protocol::prepare_in_source(source.clone(), &items, &subject, Default::default()).unwrap();
+    drop(source);
+    let value = first
+        .admit(Value::Bool(true), &mut Context::new(1_000_000))
+        .unwrap();
+    let hash = first.hash(&value, &mut Context::new(1_000_000)).unwrap();
+    assert!(second.hash(&value, &mut Context::new(1_000_000)).is_err());
+    let other = second
+        .admit(Value::Bool(true), &mut Context::new(1_000_000))
+        .unwrap();
+    assert_eq!(
+        second.hash(&other, &mut Context::new(1_000_000)).unwrap(),
+        hash
+    );
+    drop(first);
+    assert!(weak.upgrade().is_some());
+    drop(second);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
 fn key_code_reuse_preserves_fresh_inputs_contracts_and_receiver_storage() {
     let package = sysroot::compile(
         "struct Key { value: bool, allowed: bool }

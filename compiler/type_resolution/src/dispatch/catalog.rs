@@ -86,6 +86,27 @@ impl<'a> DeclarationSource<'a> {
         }
     }
 
+    /// Retain declarations without importing selected execution dispatch. A
+    /// clean snapshot shares its exact owner and completed directory. Borrowed
+    /// sources or snapshots with dispatch are copied only after a bounded
+    /// preflight; a projected snapshot starts with an unprepared directory.
+    /// This is ownership transfer, not phase validation or calling authority.
+    pub fn retain_declarations(
+        self,
+        fuel: &mut usize,
+    ) -> Result<DeclarationSnapshot, nir::copy_budget::CopyBudgetExhausted> {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or(nir::copy_budget::CopyBudgetExhausted::Steps)?;
+        match self {
+            Self::Snapshot(snapshot) if snapshot.package().dispatch_instances.is_empty() => {
+                Ok(snapshot.clone())
+            }
+            _ => nir::copy_budget::clone_declaration_source(self.package(), fuel)
+                .map(|package| DeclarationSnapshot::new(Arc::new(package))),
+        }
+    }
+
     pub fn world(
         self,
         budget: &mut Budget,
@@ -184,5 +205,92 @@ impl std::fmt::Display for DeclarationSnapshot {
             None => f.write_str(" pending")?,
         }
         f.write_str("))")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nir::copy_budget::CopyBudgetExhausted;
+
+    #[test]
+    fn retention_shares_the_exact_owner_and_completed_directory() {
+        let source = DeclarationSnapshot::new(Arc::new(n::Package::default()));
+        source.prepare(&mut Budget::default()).unwrap();
+        assert!(source.0.metadata.get().is_some());
+        assert!(matches!(
+            DeclarationSource::Snapshot(&source).retain_declarations(&mut 0),
+            Err(CopyBudgetExhausted::Steps)
+        ));
+        let weak = Arc::downgrade(&source.0);
+        let mut fuel = 1;
+        let retained = DeclarationSource::Snapshot(&source)
+            .retain_declarations(&mut fuel)
+            .unwrap();
+        assert_eq!(fuel, 0);
+        assert!(Arc::ptr_eq(&source.0, &retained.0));
+        drop(source);
+        assert!(weak.upgrade().is_some());
+        drop(retained);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn projection_is_bounded_drops_dispatch_and_publishes_no_directory() {
+        let id = Id {
+            package: 1,
+            local: 1,
+        };
+        let package = n::Package {
+            function_parameters: vec![nir::function_parameters::Declaration {
+                declaration: id,
+                parameters: vec![id],
+                domains: vec![Term::Tuple(vec![Term::Bool(true); 2048])],
+            }],
+            dispatch_instances: vec![n::DispatchInstance {
+                interface: id,
+                interface_arguments: vec![Term::Tuple(vec![Term::Bool(false); 100_000])],
+                subject: Term::Bool(false),
+                implementation: id,
+                arguments: vec![],
+                methods: vec![],
+                associated: vec![],
+                associated_initializers: vec![],
+            }],
+            ..Default::default()
+        };
+        let original = package.clone();
+        let source = DeclarationSnapshot::new(Arc::new(package));
+        for input in [
+            DeclarationSource::Borrowed(source.package()),
+            DeclarationSource::Snapshot(&source),
+        ] {
+            assert!(matches!(
+                input.retain_declarations(&mut 128),
+                Err(CopyBudgetExhausted::Steps)
+            ));
+            let mut fuel = 10_000;
+            let retained = input.retain_declarations(&mut fuel).unwrap();
+            let cost = 10_000 - fuel;
+            assert!(cost > 2048);
+            assert!(!Arc::ptr_eq(&source.0, &retained.0));
+            assert!(retained.0.metadata.get().is_none());
+            assert!(retained.package().dispatch_instances.is_empty());
+            assert_eq!(
+                retained.package().function_parameters,
+                original.function_parameters
+            );
+            assert!(matches!(
+                input.retain_declarations(&mut (cost - 1)),
+                Err(CopyBudgetExhausted::Steps)
+            ));
+            let mut exact = cost;
+            assert_eq!(
+                input.retain_declarations(&mut exact).unwrap().package(),
+                retained.package()
+            );
+            assert_eq!(exact, 0);
+        }
+        assert_eq!(source.package().as_ref(), &original);
     }
 }

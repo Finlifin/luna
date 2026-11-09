@@ -1,5 +1,6 @@
 //! Checked declaration world shared by annotation queries and dispatch closure.
-//! This service never traverses or invokes function bodies.
+//! Queries never traverse or invoke function bodies. Source ownership capture
+//! separately preflights copied payloads without interpreting them.
 use crate::declaration_budget as construction;
 use crate::{
     implementation::{Index, Selection, TypeAssessment},

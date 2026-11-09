@@ -11,23 +11,9 @@ pub(super) struct Snapshot {
 
 impl Snapshot {
     fn capture(source: DeclarationSource<'_>, fuel: &mut usize) -> Result<Self, String> {
-        *fuel = fuel
-            .checked_sub(1)
-            .ok_or("staged source retention budget exhausted")?;
-        let package = source.package();
-        let source = match source {
-            DeclarationSource::Snapshot(snapshot) if package.dispatch_instances.is_empty() => {
-                snapshot.clone()
-            }
-            _ => {
-                // A borrowed source needs ownership for the code session. A
-                // closed dispatch source needs a separate declaration world:
-                // its preselected tables cannot authorize demand-driven calls.
-                let snapshot = nir::copy_budget::clone_declaration_source(package, fuel)
-                    .map_err(|error| format!("staged source copy budget exhausted: {error:?}"))?;
-                DeclarationSnapshot::new(std::sync::Arc::new(snapshot))
-            }
-        };
+        let source = source
+            .retain_declarations(fuel)
+            .map_err(|error| format!("staged source retention budget exhausted: {error:?}"))?;
         let code = CodeSession::new(source.package().clone());
         Ok(Self { source, code })
     }

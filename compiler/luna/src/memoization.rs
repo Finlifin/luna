@@ -102,6 +102,9 @@ impl KeyProtocol<Snapshot> for ExactInputs {
     }
 }
 impl Invocation {
+    /// Capture a declaration source within `budget.steps`, then prepare its
+    /// binding. As with the existing preparation stages, the capture bound is
+    /// per stage; invocation execution has a separate cumulative Context.
     pub fn prepare(
         package: &Package,
         items: &LangItems,
@@ -110,10 +113,29 @@ impl Invocation {
         capacity: usize,
         budget: ptc::Budget,
     ) -> Result<Self, String> {
-        let mut frozen = package.clone();
-        frozen.dispatch_instances.clear();
-        let source = DeclarationSnapshot::new(std::sync::Arc::new(frozen));
+        let source = DeclarationSource::Borrowed(package)
+            .retain_declarations(&mut { budget.steps })
+            .map_err(|error| format!("memoization source retention budget exhausted: {error:?}"))?;
+        Self::prepare_in_source(source, items, declaration, arguments, capacity, budget)
+    }
+
+    /// Reuse a declaration-only owner across callers. Preparation proves this
+    /// invocation's requirements; sharing a source grants no cache admission.
+    pub fn prepare_in_source(
+        source: DeclarationSnapshot,
+        items: &LangItems,
+        declaration: DeclarationId,
+        arguments: Vec<Term>,
+        capacity: usize,
+        budget: ptc::Budget,
+    ) -> Result<Self, String> {
         let package = source.package();
+        if !package.dispatch_instances.is_empty() {
+            return Err(
+                "memoization source snapshot must not contain preselected dispatch instances"
+                    .into(),
+            );
+        }
         let resources = match (items.get(LangItem::Copy), items.get(LangItem::Drop)) {
             (None, None) => None,
             (Some(LangItemDef::UserDef(copy)), Some(LangItemDef::UserDef(drop))) => {
