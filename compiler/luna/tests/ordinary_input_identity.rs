@@ -6,6 +6,10 @@ use elaboration::materialization::SourceInvocationQueries;
 mod sysroot;
 
 fn check_both(source: &str, entered: usize) {
+    check_events(source, &[("accept", entered)]);
+}
+
+fn check_events(source: &str, events: &[(&str, usize)]) {
     let package = sysroot::compile(source).unwrap();
     let id = |name: &str| {
         package
@@ -42,12 +46,119 @@ fn check_both(source: &str, entered: usize) {
                 Value::Bool(true),
                 "tree={tree}"
             );
-            assert_eq!(vm.events().iter().filter(|event| matches!(event, Event::EnterFunction(declaration) if *declaration == id("accept"))).count(), entered * invocation, "tree={tree}");
+            for (name, entered) in events {
+                assert_eq!(vm.events().iter().filter(|event| matches!(event, Event::EnterFunction(declaration) if *declaration == id(name))).count(), entered * invocation, "{name}, tree={tree}");
+            }
         }
     }
 }
 
 const FLAG: &str = "trait Flag {} impl Flag for bool {}";
+
+#[test]
+fn new_facts_after_effects_support_both_type_and_value_inputs() {
+    check_both(
+        &format!(
+            "{FLAG}
+        trait Enabled where flag: bool {{}}
+        impl Enabled<true> for bool {{}}
+        comptime fn accept(comptime T: Type, comptime flag: bool) -> bool
+        where requires T :- Flag and bool :- Enabled<flag>
+        {{ flag }}
+        comptime fn check() -> bool {{
+            var trace: Integer = 0;
+            let result = accept(
+                do {{ trace = trace * 10 + 1; let selected = bool; selected }},
+                do {{ trace = trace * 10 + 2; let selected = true; selected }}
+            );
+            result and trace == 12
+        }}
+    "
+        ),
+        1,
+    );
+}
+
+#[test]
+fn default_prefixes_execute_per_invocation_before_new_local_facts() {
+    check_events(&format!("{FLAG}
+        comptime fn mark() -> bool {{ true }}
+        comptime fn accept(comptime .T: Type = do {{ mark(); let selected = bool; selected }}) -> bool
+        where requires T :- Flag
+        {{ true }}
+        comptime fn check() -> bool {{ accept() }}
+    "), &[("accept", 1), ("mark", 1)]);
+}
+
+#[test]
+fn pattern_bindings_after_effects_share_the_ordinary_static_observer() {
+    check_both(
+        &format!(
+            "{FLAG}
+        comptime fn accept(comptime T: Type) -> bool
+        where requires T :- Flag
+        {{ true }}
+        comptime fn check() -> bool {{
+            var trace: Integer = 0;
+            let result = accept(do {{
+                trace = trace + 1;
+                let (selected, flag) = (bool, true);
+                if flag {{ selected }} else {{ char }}
+            }});
+            result and trace == 1
+        }}
+    "
+        ),
+        1,
+    );
+}
+
+#[test]
+fn default_expressions_observe_only_previously_supplied_input_facts() {
+    check_both(
+        "
+        trait Enabled where flag: bool {}
+        impl Enabled<true> for bool {}
+        comptime fn accept(comptime flag: bool, comptime .next: bool = do {
+            let result = not flag; result
+        }) -> bool
+        where requires bool :- Enabled<next>
+        { next }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let result = accept(do { trace = trace + 1; false });
+            result and trace == 1
+        }
+    ",
+        1,
+    );
+}
+
+#[test]
+fn effectful_prefixes_invalidate_old_facts_and_keep_shadowing_lexical() {
+    for body in [
+        "trace = trace + 1; var selected: Type = bool; selected = char; selected",
+        "trace = trace + 1; let selected = bool; do { let selected = char; selected }",
+    ] {
+        let failure = sysroot::compile(&format!(
+            "{FLAG}
+            comptime fn accept(comptime T: Type) -> bool
+            where requires T :- Flag
+            {{ true }}
+            comptime fn check() -> bool {{
+                var trace: Integer = 0;
+                accept(do {{ {body} }})
+            }}
+        "
+        ))
+        .unwrap_err();
+        assert!(
+            failure.contains("not available in this invocation")
+                || failure.contains("not established"),
+            "{failure}"
+        );
+    }
+}
 
 #[test]
 fn trait_evidence_preserves_source_order_and_nested_result_prefixes() {

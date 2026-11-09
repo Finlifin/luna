@@ -80,15 +80,25 @@ pub(super) fn term(
 
 impl Checker<'_, '_> {
     /// Observe identity while retaining the whole producer for execution.
-    /// Unlike completed-value reconstruction, a sequence's normal result can
-    /// be known without executing its prefix. A detached tail must not borrow
-    /// facts from locals that prefix could have introduced or changed.
-    pub(super) fn preserved_input_identity(
+    /// Facts describe earlier bound default inputs and new immutable locals.
+    /// Unknown work invalidates facts; it never invokes code to recover them.
+    pub(super) fn preserved_input_identity<'value>(
         &mut self,
         producer: &n::Expr,
+        initial: impl IntoIterator<Item = (n::LocalId, &'value Term)>,
         span: Span,
     ) -> Result<Option<Term>, Error> {
-        if let Some(identity) = self.checked_normal_input_in(producer, &BTreeMap::new(), span)? {
+        let mut facts = BTreeMap::new();
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let copied = initial.into_iter().try_for_each(|(binding, identity)| {
+            nir::type_computations::charge_term(identity, &mut fuel)?;
+            facts.insert(binding, std::sync::Arc::new(identity.clone()));
+            Ok::<_, nir::type_computations::Error>(())
+        });
+        self.required_steps -= (before - fuel) as u64;
+        copied.map_err(|failure| error(span, failure.to_string()))?;
+        if let Some(identity) = self.checked_normal_input_in(producer, &facts, span)? {
             return Ok(Some(identity));
         }
         let mut result = producer;
@@ -97,30 +107,71 @@ impl Checker<'_, '_> {
                 .required_steps
                 .checked_sub(1)
                 .ok_or_else(|| error(span, "input result observation budget exhausted"))?;
-            match &result.kind {
-                K::Block {
-                    result: Some(tail), ..
+            let (statements, tail) = match &result.kind {
+                K::Block { statements, result } | K::CallPreparation { statements, result } => {
+                    (statements, result)
                 }
-                | K::CallPreparation {
-                    result: Some(tail), ..
-                } => result = tail,
-                _ => break,
+                _ => {
+                    return if self.input_facts_cover(result, &facts, span)? {
+                        self.checked_normal_input_in(result, &facts, span)
+                    } else {
+                        Ok(None)
+                    };
+                }
+            };
+            for statement in statements {
+                if !self.input_facts_cover(statement, &facts, span)? {
+                    facts.clear();
+                    continue;
+                }
+                let observed = if matches!(statement.kind, K::Let { .. } | K::LetPattern { .. }) {
+                    let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                    let mut budget = comptime_runtime::Budget {
+                        steps: before,
+                        max_limbs: 4096,
+                    };
+                    let binding =
+                        self.observe_normal_binding(statement, 0, &mut budget, &mut facts);
+                    self.required_steps -= (before - budget.steps) as u64;
+                    normal::observation::optional(binding)
+                        .map_err(|failure| {
+                            error(
+                                span,
+                                format!("static binding observation failed: {failure}"),
+                            )
+                        })?
+                        .is_some()
+                } else {
+                    self.checked_normal_input_in(statement, &facts, span)?
+                        .is_some()
+                };
+                if !observed {
+                    // Unknown calls or writes can invalidate aliases as well as
+                    // their apparent operands. Keep no pre-effect local facts.
+                    facts.clear();
+                }
             }
+            let Some(tail) = tail else { return Ok(None) };
+            result = tail;
         }
-        if std::ptr::eq(result, producer) {
-            return Ok(None);
-        }
+    }
+
+    fn input_facts_cover(
+        &mut self,
+        expression: &n::Expr,
+        facts: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        span: Span,
+    ) -> Result<bool, Error> {
         let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let free = nir::free_bindings::collect(result, &mut fuel);
+        let free = nir::free_bindings::collect(expression, &mut fuel);
         self.required_steps -= (before - fuel) as u64;
-        if !free
-            .map_err(|failure| error(span, failure.to_string()))?
-            .is_empty()
-        {
-            return Ok(None);
-        }
-        self.checked_normal_input_in(result, &BTreeMap::new(), span)
+        let free = free.map_err(|failure| error(span, failure.to_string()))?;
+        self.required_steps = self
+            .required_steps
+            .checked_sub(free.len() as u64)
+            .ok_or_else(|| error(span, "input fact lookup budget exhausted"))?;
+        Ok(free.iter().all(|binding| facts.contains_key(binding)))
     }
 
     pub(super) fn observed_term_inputs(

@@ -324,12 +324,25 @@ comptime fn check() -> bool {
 写入、调用、失败与控制退出。观察不执行函数，不展开 normal-form 头，不安装选择，
 也不把返回的 Term 当成“源表达式已经执行”的凭证。
 
-完整结构无法直接观察时，可以沿 Block／CallPreparation 的正常结果寻找独立尾部。
-仅在尾部没有自由局部存储依赖时，才交给同一个结构观察器；不能把前缀执行前的
-变量事实带进尾部。例如 `do { trace = trace + 1; bool }` 正常完成时的身份是 bool，
+完整结构无法直接观察时，Block／CallPreparation 现在按源码顺序维护局部身份事实。
+每个被观察的表达式，其自由局部依赖必须全部由当前事实覆盖。无法静态观察的写入、
+调用或其他操作会清空旧事实，防止通过别名继续使用修改前的值；其后新建的不可变
+绑定可以重新提供事实。正常尾部交回同一个结构观察器，不执行前缀以获取信息。
+例如 `do { trace = trace + 1; let T = bool; T }` 正常完成时的身份是 bool，
 但 `do { selected = char; selected }` 不能借旧的 selected 值得到 bool。观察仍可能
 返回不可用；预算、深度、大小或证明失败直接传播，不伪装成缺值后再尝试 invocation。
 此处没有新增表达式解释器，也没有把 statement 的类型检查或义务裁掉。
+
+普通结构观察和保留生产者的观察共用 `observe_normal_binding`，以相同的值、模式及
+guard 检查处理 let；模式失败或未知不能被当成已建立绑定。默认表达式的初始事实
+来自前面已经供应的输入身份，并按预算复制，不能用调用方的任意 locals 补齐缺值。
+未知操作之后也禁止回退到 Checker 的旧局部事实表。局部事实只在本次观察内存活，
+不进入 CodeSession 或跨调用缓存；嵌套作用域使用真实 binder 身份区分同名变量。
+
+这替换了上一阶段只剥离序列、要求尾部完全没有自由局部变量的查询。旧查询遇到
+副作用之后新建的局部变量仍会退回 required invocation；对于含调用的默认表达式，
+甚至会在定义检查期间执行并冻结整个默认值。新路径保留生产者，默认值中的调用
+在每次实际 invocation 中发生，不因静态身份已经取得而省略。
 
 ```flurry
 trait Flag {}
@@ -384,6 +397,24 @@ comptime fn check() -> bool {
 - 四个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-51pyxap6/result.json`
   退出 0；`git diff --check` 通过。未运行全 workspace 或性能基准，原有受保护文件
   哈希未变，正式 docs 未修改。
+
+后续的顺序事实观察验收同样使用上述工作目录及测试入口：
+
+- 新用例在修改生产代码前运行 `-p luna --test ordinary_input_identity --no-fail-fast`，
+  `/tmp/luna-tools-09mdpnj9/result.json` 退出 101。副作用后的新局部 Type／bool
+  仍报缺少调用方输入；默认表达式中的 mark 在实际 invocation 中进入 0 次、预期
+  1 次，说明默认生产者已被定义侧求值替换。这两项分别定位信息丢失和执行时机错误。
+- 最终运行 `-p elaboration -p luna --lib --test ordinary_input_identity
+  --test invocation_host_requests --test comptime_call_staging --test default_calls
+  --test comptime_bytecode_defaults --test scoped_input_observation --test open_input_observation
+  --test clause_packet_preparation --test normal_input_plans --test type_spreads
+  --test library_meta_objects --test library_protocols --no-fail-fast`：
+  `/tmp/luna-tools-4ww73mb9/result.json` 退出 0，522 项通过。
+  新增场景包含模式绑定、新事实建立、旧事实撤销、词法遮蔽及默认表达式组合已供应输入；
+  两种 VM 的重复 invocation 都核对真实函数进入次数。
+- 四个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-_y_a0jtm/result.json`
+  退出 0；`git diff --check` 通过。未知操作目前保守撤销全部局部事实，不声称已实现
+  精确别名／效果分析或一般动态 contextual preparation；未运行全 workspace 或性能基准。
 
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
 

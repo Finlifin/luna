@@ -1082,6 +1082,43 @@ impl Checker<'_, '_> {
             .collect()
     }
 
+    /// Inspect an immutable binding with the ordinary static value and pattern
+    /// observers. Unavailable is not fallthrough evidence for a let-else.
+    pub(in crate::program) fn observe_normal_binding(
+        &self,
+        statement: &n::Expr,
+        depth: usize,
+        budget: &mut comptime_runtime::Budget,
+        bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+    ) -> Result<(), Failure> {
+        match &statement.kind {
+            K::Let { binding, value } => {
+                let value = self.observe_normal_input_in(value, depth + 1, budget, bindings)?;
+                bindings.insert(*binding, std::sync::Arc::new(value));
+            }
+            K::LetPattern {
+                pattern,
+                value,
+                guard,
+                ..
+            } => {
+                let value = self.observe_normal_input_in(value, depth + 1, budget, bindings)?;
+                if !self.observe_normal_pattern(pattern, &value, depth + 1, budget, bindings)? {
+                    return Err(Failure::Unavailable);
+                }
+                if let Some(guard) = guard {
+                    if self.observe_normal_input_in(guard, depth + 1, budget, bindings)?
+                        != Term::Bool(true)
+                    {
+                        return Err(Failure::Unavailable);
+                    }
+                }
+            }
+            _ => return Err(Failure::Unavailable),
+        }
+        Ok(())
+    }
+
     pub(in crate::program) fn observe_normal_input_in(
         &self,
         expr: &n::Expr,
@@ -1650,45 +1687,7 @@ impl Checker<'_, '_> {
                 let mut scoped = bindings.clone();
                 for statement in statements {
                     budget.consume(1)?;
-                    match &statement.kind {
-                        K::Let { binding, value } => {
-                            let value =
-                                self.observe_normal_input_in(value, depth + 1, budget, &scoped)?;
-                            scoped.insert(*binding, std::sync::Arc::new(value));
-                        }
-                        K::LetPattern {
-                            pattern,
-                            value,
-                            guard,
-                            ..
-                        } => {
-                            let value =
-                                self.observe_normal_input_in(value, depth + 1, budget, &scoped)?;
-                            // Any failure leaves the whole block unknown. In
-                            // particular a let-else transfer is not fallthrough.
-                            if !self.observe_normal_pattern(
-                                pattern,
-                                &value,
-                                depth + 1,
-                                budget,
-                                &mut scoped,
-                            )? {
-                                return Err(Failure::Unavailable);
-                            }
-                            if let Some(guard) = guard {
-                                if self.observe_normal_input_in(
-                                    guard,
-                                    depth + 1,
-                                    budget,
-                                    &scoped,
-                                )? != Term::Bool(true)
-                                {
-                                    return Err(Failure::Unavailable);
-                                }
-                            }
-                        }
-                        _ => return Err(Failure::Unavailable),
-                    }
+                    self.observe_normal_binding(statement, depth, budget, &mut scoped)?;
                 }
                 match result {
                     Some(result) => {

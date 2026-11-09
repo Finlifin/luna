@@ -809,7 +809,13 @@ impl Checker<'_, '_> {
             let observed = if matches!(value.kind, K::TypeValue(_) | K::Local(_)) {
                 None
             } else {
-                self.preserved_input_identity(&value, source.span)?
+                self.preserved_input_identity(
+                    &value,
+                    bindings
+                        .iter()
+                        .map(|(binding, _, identity)| (*binding, identity)),
+                    source.span,
+                )?
             };
             if !matches!(value.kind, K::TypeValue(_) | K::Local(_)) {
                 let unresolved = owner
