@@ -13,6 +13,7 @@ pub use coherence::{CoherenceReport, PairAssessment};
 pub use inherent::{InherentHead, InherentIndex};
 mod ownership;
 mod phases;
+mod source;
 pub use applicability::{HeadMatch, TypeAssessment, TypeEvidence, TypeResolution};
 use nir::{DeclarationId, Sort, Term};
 pub use ownership::{

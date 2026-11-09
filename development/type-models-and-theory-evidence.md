@@ -242,6 +242,41 @@ Invalid → UnmaterializedDispatch，并保留 callee source；不靠错误文�
   的调用次数与恢复；与前两组去重共 420 项。本批未重跑上述已确认的
   source_reflection 基线失败，也未宣称它们已经修复。
 
+### 已统一的源声明索引构造
+
+`Index::from_package_metered` 现在共同承接 declaration world、required comptime
+快照与 driver 的源索引构造。原来分散的布局复制、参数域登记与 impl 插入循环已删除；
+driver 的调用／缓存／键协议／资源协议／参考执行通过同一个薄错误适配器消费该入口。
+整份 package 的元数据预检、复制、候选插入与参数域登记使用同一可变额度，不再给
+每个 impl 或参数域重新分配默认额度。预算或非法声明导致失败时，局部部分索引丢弃；
+只有全部构造完成才返回索引，实际未用额度保留在调用者的 Budget 中。
+
+该索引只保留类型候选、普通 comptime 参数域和声明布局；不遍历程序契约、方法体或
+关联项 initializer，也不将候选收录当作 trait 成立的证明。固有 impl 不进入 trait
+候选集，但其参数域仍保留。DeclarationWorld 的 callable 索引与规范化查询状态仍由
+自身管理，并从共同索引读取参数域，避免再扫描一遍声明 telescope。
+
+目前 driver／required 的外层准备仍有各自的阶段预算，尚未全部计入活动 invocation；
+单次方法查询重建 declaration world 的成本也未在此阶段消除。这里统一的是整份源
+索引的实际构造与内部计费，不把它扩大为所有世界存储、生命周期和查询预算已统一。
+
+工作目录 `/home/fin/luna`，检查入口为 `development/check.py --timeout 900 -- test`；
+各 `result.json` 保存完整命令、退出结果和日志路径：
+
+- `/tmp/luna-tools-mqle2z5m/result.json`：退出 0，源索引构造、关联项、实现选择、
+  类型查询失败、prepared invocation 与键 session 共 135 项通过。
+- `/tmp/luna-tools-dpnrsx23/result.json`：扩大检查退出 101；相关 lib、生成 trait、
+  builder、普通 NF 输入、公开库协议、Once、列表／比较与 comptime 内存共 443 项通过；
+  resources 单组 67 项通过、298 项在 HIR lowering 失败，全部为未绑定的 bool。
+  这些 fixture 未启用 sysroot，写入入口也未调用已有 primitive 绑定辅助函数，
+  因此尚未触达资源分析。本批没有据此修改语言解析或资源预期。
+- 独立提交 `5ce879f3` 将 resources fixture 接入共同 primitive writer 后，
+  `/tmp/luna-tools-m0q22zos/result.json` 退出 0，原有 365 项资源断言全部通过。
+  当前相关覆盖去重共 943 项通过；未执行全量回归，也未重测此前记录的前端基线缺口。
+- 修改的八个 Rust 文件通过 scoped rustfmt check，
+  `/tmp/luna-tools-vjcfur9x/result.json` 退出 0；fixture 的模块排序随后由 rustfmt
+  完成，`/tmp/luna-tools-wsd9h_nt/result.json` 退出 0；`git diff --check` 通过。
+
 ## 7. 共享项和联合模型
 
 同一共享项采用共同的语义身份、sort、binder scope 和形成证据，不能由每个模块独立按

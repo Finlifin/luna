@@ -1751,43 +1751,11 @@ fn implementation_index(
     package: &n::Package,
     span: Span,
 ) -> Result<crate::implementation::Index, Error> {
-    let mut index = crate::implementation::Index::for_builtin_packages(
-        package.target,
-        package.builtin_implementation_packages.iter().copied(),
-    );
-    index.set_normal_form_metadata(package.normal_forms.clone());
-    index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
-    for (id, domain) in package
-        .declaration_parameter_domains(&mut 100_000)
-        .map_err(|message| error(span, message))?
-    {
-        index
-            .register_parameter_domain(id, domain)
-            .map_err(|message| error(span, message))?;
-    }
-    for implementation in &package.implementations {
-        if implementation.interface.is_none() {
-            continue;
-        }
-        index
-            .insert(
-                crate::implementation::ImplementationHead {
-                    parameter_types: implementation.parameter_types.clone(),
-                    declaration: implementation.declaration,
-                    interface: implementation.interface,
-                    interface_arguments: implementation.interface_arguments.clone(),
-                    subject: implementation.subject.clone(),
-                    type_parameters: implementation.type_parameters.clone(),
-                    requirements: implementation.requirements.clone(),
-                },
-                crate::ptc::Budget::default(),
+    crate::implementation::Index::from_package_metered(package, &mut crate::ptc::Budget::default())
+        .map_err(|failure| {
+            error(
+                span,
+                format!("required comptime implementation index: {failure}"),
             )
-            .map_err(|failure| {
-                error(
-                    span,
-                    format!("required comptime implementation index: {failure:?}"),
-                )
-            })?;
-    }
-    Ok(index)
+        })
 }

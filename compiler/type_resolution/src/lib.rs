@@ -468,4 +468,5 @@ pub mod input_identity;
 pub mod matching;
 pub mod obligations;
 
+mod declaration_budget;
 pub mod dispatch;

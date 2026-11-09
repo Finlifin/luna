@@ -1,6 +1,7 @@
 //! Preflight the declaration metadata retained by a query world's private index.
 //! This bounds copies; it is not formation evidence and never visits code bodies.
-use super::*;
+use nir::value_admission::Error as AdmissionError;
+use nir::{DeclarationId as Id, Term, program as n};
 
 pub(super) fn spend(fuel: &mut usize, amount: usize) -> Result<(), AdmissionError> {
     *fuel = fuel.checked_sub(amount).ok_or(AdmissionError::Budget)?;

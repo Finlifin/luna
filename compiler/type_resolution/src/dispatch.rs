@@ -1,13 +1,13 @@
 //! Checked declaration world shared by annotation queries and dispatch closure.
 //! This service never traverses or invokes function bodies.
+use crate::declaration_budget as construction;
 use crate::{
-    implementation::{ImplementationHead, Index, Selection, TypeAssessment},
+    implementation::{Index, Selection, TypeAssessment},
     ptc::{Budget, Context},
 };
 use nir::value_admission::Error as AdmissionError;
 use nir::{DeclarationId as Id, Term, program as n};
 use std::collections::{BTreeMap, HashMap};
-mod construction;
 mod inputs;
 mod methods;
 
@@ -60,43 +60,8 @@ impl<'a> DeclarationWorld<'a> {
                 }
             })?,
         };
-        construction::spend(
-            &mut budget.steps,
-            package.builtin_implementation_packages.len(),
-        )?;
-        construction::layouts(package, &mut budget.steps)?;
-        let mut index = Index::for_builtin_packages(
-            package.target,
-            package.builtin_implementation_packages.iter().copied(),
-        );
-        index.set_normal_form_metadata(package.normal_forms.clone());
-        index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
-
-        for implementation in &package.implementations {
-            construction::spend(&mut budget.steps, 1)?;
-            if implementation.interface.is_some() {
-                construction::implementation(implementation, &mut budget.steps)?;
-                index
-                    .insert_metered(
-                        ImplementationHead {
-                            parameter_types: implementation.parameter_types.clone(),
-                            declaration: implementation.declaration,
-                            interface: implementation.interface,
-                            interface_arguments: implementation.interface_arguments.clone(),
-                            subject: implementation.subject.clone(),
-                            type_parameters: implementation.type_parameters.clone(),
-                            requirements: implementation.requirements.clone(),
-                        },
-                        budget,
-                    )
-                    .map_err(|error| match error {
-                        crate::implementation::Error::BudgetExhausted => AdmissionError::Budget,
-                        error => AdmissionError::Invalid(format!("dispatch index: {error:?}")),
-                    })?;
-            }
-        }
+        let index = Index::from_package_metered(package, budget)?;
         let input_fuel = &mut budget.steps;
-        let domains = package.declaration_parameter_domains_checked(input_fuel)?;
         // Immutable declaration metadata is indexed once per world. No function
         // invocation result, predicate outcome or mutable state is cached here.
         let mut callable_functions = HashMap::new();
@@ -127,8 +92,9 @@ impl<'a> DeclarationWorld<'a> {
             }
         }
 
-        construction::spend(input_fuel, domains.len())?;
-        let declaration_parameter_sorts = domains
+        construction::spend(input_fuel, index.parameter_domains().len())?;
+        let declaration_parameter_sorts = index
+            .parameter_domains()
             .iter()
             .map(|(id, domain)| {
                 (
@@ -141,9 +107,6 @@ impl<'a> DeclarationWorld<'a> {
                 )
             })
             .collect();
-        for (id, domain) in domains {
-            index.register_parameter_domain_metered(id, domain, input_fuel)?;
-        }
         Ok(Self {
             normalized_types: HashMap::new(),
             package,
