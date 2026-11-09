@@ -66,7 +66,10 @@ Budget 与 Invalid 不获得此标记。成功形成 atom 只有增加新的前�
 旧用例预期。新回归检查三层前提的六种排列、两种 Type 参数来源、缺失与自举前提、
 无正前提的析取以及非法 sibling 优先报错。七个修改／新增 Rust 文件通过 scoped
 rustfmt check，`/tmp/luna-tools-k40wbfcs/result.json` 退出 0；git diff --check 通过。
-剩余批量预算失败须优先追踪 VM 构造与查询准备的共同成本，而非逐个调大测试额度。
+后续已定位并移除 runtime 闭包存储检查反复构建整包域表的成本，上述 16 项中
+15 项恢复，剩余一项推进到实际执行阶段，见
+[域表复用与成本测量](comptime-value-admission.md#runtime-闭包存储检查复用声明域)。
+不得将该后续修复计入本节签名前提形成的验证结果。
 
 ## 2. WorldRevision、可见范围与 coherence 分开
 

@@ -13,6 +13,7 @@ mod inspection_tests;
 use crate::member_types;
 mod parameters;
 mod storage_cache;
+mod storage_domains;
 mod storage_error;
 mod trait_index;
 mod worklist;
@@ -121,7 +122,10 @@ impl<'a> PhaseContext<'a> {
         Self {
             package,
             declarations,
-            storage_queries: storage_cache::StorageQueries::new(package),
+            storage_queries: storage_cache::StorageQueries::with_declarations(
+                package,
+                declarations,
+            ),
         }
     }
 
@@ -1706,6 +1710,24 @@ fn validate_runtime_storage_inner(
     resolve: NominalStorageResolver<'_>,
     fuel: &mut usize,
 ) -> Result<(), StorageError> {
+    validate_runtime_storage_with_domains(
+        ty,
+        package,
+        frames,
+        resolve,
+        &storage_domains::Domains::new(package),
+        fuel,
+    )
+}
+
+fn validate_runtime_storage_with_domains(
+    ty: &Term,
+    package: &Package,
+    frames: &[Vec<crate::Sort>],
+    resolve: NominalStorageResolver<'_>,
+    domains: &storage_domains::Domains<'_>,
+    fuel: &mut usize,
+) -> Result<(), StorageError> {
     crate::type_computations::charge_term(ty, fuel)?;
     if ty.sort() != crate::Sort::Type || ty.check_scope(frames).is_err() {
         return Err(StorageError::Invalid(
@@ -1719,6 +1741,7 @@ fn validate_runtime_storage_inner(
         &mut std::collections::HashSet::new(),
         0,
         resolve,
+        domains,
         fuel,
     ) {
         Ok(false) => Ok(()),
@@ -1736,6 +1759,7 @@ fn comptime_storage_resolved(
     seen: &mut std::collections::HashSet<(Term, Vec<Vec<crate::Sort>>)>,
     depth: usize,
     resolve: NominalStorageResolver<'_>,
+    domains: &storage_domains::Domains<'_>,
     fuel: &mut usize,
 ) -> Result<bool, StorageError> {
     use crate::{Primitive as P, Term as T};
@@ -1768,12 +1792,7 @@ fn comptime_storage_resolved(
                 T::Rigid {
                     declaration,
                     sort: crate::Sort::ComptimeValue,
-                } => {
-                    package
-                        .declaration_parameter_domains_checked(fuel)?
-                        .get(declaration)
-                        == Some(&T::ClosureContextType)
-                }
+                } => domains.get(declaration, fuel)? == Some(&T::ClosureContextType),
                 _ => false,
             };
             if !scoped {
@@ -1835,6 +1854,7 @@ fn comptime_storage_resolved(
                     seen,
                     depth + 1,
                     resolve,
+                    domains,
                     fuel,
                 )? {
                     return Ok(true);
@@ -1877,7 +1897,16 @@ fn comptime_storage_resolved(
         _ => vec![],
     };
     for child in &children {
-        if comptime_storage_resolved(child, package, frames, seen, depth + 1, resolve, fuel)? {
+        if comptime_storage_resolved(
+            child,
+            package,
+            frames,
+            seen,
+            depth + 1,
+            resolve,
+            domains,
+            fuel,
+        )? {
             return Ok(true);
         }
     }

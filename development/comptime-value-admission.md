@@ -2378,6 +2378,55 @@ phase 层统一报告为非法 unsafe 调用。非法操作保留具体源位置
 和用户已有工作区修改保持不变。
 
 
+### Runtime 闭包存储检查复用声明域
+
+phase 检查的 `Declarations` 已完成参数域表准入，但旧 runtime storage 路径在每次
+遇到 ContextualClosure 的 rigid context 时仍调用整包
+`declaration_parameter_domains_checked`。大量泛型回调会反复扫描、验证并复制同一
+世界的参数域。这是查询准备重复，不是用户函数复杂度，也不能靠扩大默认 VM 额度
+补偿。
+
+`StorageQueries` 现借用同一 PhaseContext 声明目录中的已完成域表；递归存储检查
+只作计费的域查询。公开独立存储检查没有已有目录时，使用绑定到同一不可变 Package
+的按需域表，一次检查内共享。只有整表完成才发布；预算耗尽或域冲突不保留半成品。
+成功、缺失查询均收费；相同 DeclarationId 在另一 Package 中仍须按其自己的域解释。
+原有 type/frame/phase 存储结果缓存继续独立，未将域表变成方法或函数体执行权限。
+
+同一真实 sysroot `fixed_inputs_and_defaults_share_the_contextual_plan` 输入的
+计费测量（不是墙钟基准）：
+
+| 冷构造阶段 | 修复前 | 修复后 |
+| --- | ---: | ---: |
+| Phase 声明目录与全部主体检查 | 528,182 | 70,194 |
+| VM 构造总计 | 535,347 | 77,359 |
+
+Phase 成本降低约 86.7%，构造总成本降低约 85.5%。修复前仅为测量临时给测试
+1,000,000 步，生产默认 100,000 步未改；修复后原默认额度即可完成构造与调用。
+所有临时打印和测量用额度均已移除。保留的新 sysroot 回归从默认额度冷构造并调用
+真正的 comptime 函数，不依赖前端留下 phase receipt 或预热结果。
+
+本阶段在 `/home/fin/luna` 通过 `python3 -B development/check.py --timeout 900
+-- test ...` 检查；result.json 保存完整参数：
+
+- 测量前 `/tmp/luna-tools-whbv_g1j` 退出 101，原用例在构造阶段耗尽；
+  `/tmp/luna-tools-cpm15ncy` 与 `/tmp/luna-tools-ps7fp9hu` 退出 0，临时观测分别
+  定位 phase 成本与重复上下文域表；`/tmp/luna-tools-pvkxv74h` 退出 0，确认同一
+  输入修复后的成本。
+- `/tmp/luna-tools-7_083kj2` 退出 101：luna lib 87、nir lib 47、normal_input_plans
+  15、open_normal_input_plans 5 项通过；剩余 1 项大规模展开在实际 invocation
+  耗尽，已不再卡在构造。原 16 项构造失败中的 15 项恢复，未改测试预期。
+- `/tmp/luna-tools-6tu8xzkh` 退出 0：luna lib 87、nir lib 50、ordinary_clause_collectors
+  30、trait_query_failures 9 与新冷构造回归 1 项通过；沿用 collector 的 1 项 ignore。
+  上轮另五项 collector／查询构造失败全部恢复。新增单元检查失败后重试、完整表的
+  计费命中与缺失、冲突不发布，以及同号不同世界的闭包域隔离。
+- `/tmp/luna-tools-p0m2c8fi` 退出 0，phase 集成组 44 项通过。
+
+本阶段去重 241 项通过，1 项仍失败，1 项已有 ignore；未执行全量测试。仍失败的
+ordinary_collection_assembly_preserves_many_inline_spread_producers 已推进到
+`vm.invoke` 的 `StepsExhausted`，需继续分析执行成本；不提高预算或删减展开用例。
+四个修改／新增 Rust 文件通过 scoped rustfmt check，
+`/tmp/luna-tools-regyrygm/result.json` 退出 0；git diff --check 通过。
+
 ### Predicate shape：支持结论与资源失败分离
 
 程序谓词 shape 检查移入 NIR 的单一实现，两个入口均显式接收调用者 fuel，返回
@@ -3490,7 +3539,8 @@ forwarding 用例保持原预期，现已进入 invocation 并通过。此修复
   退出 101，五项以相同位置与诊断复现；随后恢复本次源码。
 
 本阶段去重 208 项通过，10 项基线失败，2 项原有 ignore；未执行全量回归。
-StepsExhausted 路径仍待成本与准备复用审计，不通过放大默认额度隐藏失败。
+该轮五项 StepsExhausted 后续已通过域表复用恢复，见上文 runtime 闭包存储检查；
+未通过放大默认额度隐藏失败。这里保留当时的对照结果。
 两个修改／新增的 Rust 文件通过 scoped rustfmt check，
 `/tmp/luna-tools-egnvdarn/result.json` 退出 0；git diff --check 通过。
 

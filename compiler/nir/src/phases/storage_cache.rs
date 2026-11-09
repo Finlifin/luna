@@ -1,6 +1,9 @@
 //! Storage observations belong to one borrowed, immutable declaration world.
 //! A failed budget is not a reusable statement about a type's storage phase.
-use super::{Package, Sort, StorageError, Term, validate_runtime_storage_inner};
+use super::{
+    Package, Sort, StorageError, Term, storage_domains::Domains,
+    validate_runtime_storage_with_domains,
+};
 use std::collections::HashMap;
 
 type Entries = HashMap<Term, HashMap<Vec<Vec<Sort>>, Result<(), StorageError>>>;
@@ -14,14 +17,29 @@ pub(super) struct StorageQueries<'a> {
     package: &'a Package,
     runtime_entries: Entries,
     comptime_entries: Entries,
+    domains: Domains<'a>,
 }
 
 impl<'a> StorageQueries<'a> {
+    #[cfg(test)]
     pub(super) fn new(package: &'a Package) -> Self {
         Self {
             package,
             runtime_entries: HashMap::new(),
             comptime_entries: HashMap::new(),
+            domains: Domains::new(package),
+        }
+    }
+
+    pub(super) fn with_declarations(
+        package: &'a Package,
+        declarations: &'a super::declarations::Declarations,
+    ) -> Self {
+        Self {
+            package,
+            runtime_entries: HashMap::new(),
+            comptime_entries: HashMap::new(),
+            domains: Domains::admitted(package, declarations),
         }
     }
 
@@ -67,7 +85,14 @@ impl<'a> StorageQueries<'a> {
             return *result;
         }
         let result = match phase {
-            Phase::Runtime => validate_runtime_storage_inner(ty, self.package, frames, None, fuel),
+            Phase::Runtime => validate_runtime_storage_with_domains(
+                ty,
+                self.package,
+                frames,
+                None,
+                &self.domains,
+                fuel,
+            ),
             Phase::Comptime => {
                 super::comptime_storage::validate_resolved(ty, self.package, frames, None, fuel)
             }
