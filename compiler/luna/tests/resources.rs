@@ -1,4 +1,6 @@
 //! Source resource analysis: moves, captures, control flow and call preparation.
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
 #[path = "support/execution.rs"]
 mod tuple_support;
 use luna::{
@@ -1454,7 +1456,7 @@ fn compile_in_with_resources(
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, source).unwrap();
+    primitive_bindings::write_fixture(&path, source).unwrap();
     let artifact = frontend::compile_in_package_with_source_protocols(
         &Options {
             dispatch_fuel: None,
