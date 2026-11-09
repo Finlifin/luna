@@ -167,7 +167,7 @@ impl Checker<'_, '_> {
         if interface != requested
             && !self
                 .symbolic_interface_evidence(&subject, &requested)
-                .map_err(|e| error(span, e.to_string()))?
+                .map_err(|e| capability_query_error(span, e))?
         {
             let resolution = self
                 .resolve_trait_capability(&requested, &subject, Budget::default())
@@ -181,7 +181,7 @@ impl Checker<'_, '_> {
         }
         if self
             .symbolic_interface_evidence(&subject, &interface)
-            .map_err(|e| error(span, e.to_string()))?
+            .map_err(|e| capability_query_error(span, e))?
         {
             // Given evidence fixes the member's origin, not its selected value.
             // In particular, a default must not become an abstract equality.
@@ -219,7 +219,7 @@ impl Checker<'_, '_> {
             })
         {
             return Err(Error {
-                needs_capability: true,
+                retry_after_capability_progress: true,
                 ..error(
                     span,
                     "associated projection with ordinary Type inputs requires established trait evidence",
@@ -231,7 +231,7 @@ impl Checker<'_, '_> {
             .map_err(|message| error(span, message))?;
         let crate::implementation::Selection::Selected(selected) = resolution.selection else {
             return Err(Error {
-                needs_capability: true,
+                retry_after_capability_progress: true,
                 ..error(
                     span,
                     format!(

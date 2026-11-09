@@ -469,7 +469,16 @@ impl Checker<'_, '_> {
                 let checked = self.positive_type_requirements(owner, &value, &mut Vec::new(), 0);
                 self.checking_contract = saved_checking;
                 match checked {
-                    Ok(()) => progress = true,
+                    Ok(()) => {
+                        /*
+                         * Unknown remains an error in the current world. Only
+                         * newly established premises justify another attempt
+                         * at the deferred atoms; a duplicate or a successfully
+                         * parsed non-capability predicate supplies no progress.
+                         */
+                        progress |= self.capabilities.get(&owner).map_or(0, Vec::len)
+                            > capabilities.as_ref().map_or(0, Vec::len);
+                    }
                     Err(failure) => {
                         self.context = context;
                         match capabilities {
@@ -484,7 +493,7 @@ impl Checker<'_, '_> {
                         {
                             uses.truncate(len);
                         }
-                        if !failure.needs_capability {
+                        if !failure.retry_after_capability_progress {
                             return Err(failure);
                         }
                         waiting.get_or_insert(failure);

@@ -79,7 +79,9 @@ pub struct Error {
     pub notes: Vec<DiagnosticNote>,
     needs_context: bool,
     needs_tactic: bool,
-    needs_capability: bool,
+    // Signature preparation may retry this error only after other atoms add
+    // evidence or another call supplies inputs. It does not identify a waiter.
+    retry_after_capability_progress: bool,
     incompatible_context: bool,
 }
 impl std::fmt::Display for Error {
@@ -113,8 +115,14 @@ fn error(span: Span, message: impl Into<String>) -> Error {
         notes: Vec::new(),
         needs_context: false,
         needs_tactic: false,
-        needs_capability: false,
+        retry_after_capability_progress: false,
         incompatible_context: false,
+    }
+}
+fn capability_query_error(span: Span, cause: nir::NominalAdmissionError) -> Error {
+    Error {
+        retry_after_capability_progress: matches!(cause, nir::NominalAdmissionError::Unresolved(_)),
+        ..error(span, cause.to_string())
     }
 }
 // Only missing inference inputs are resumable. Semantic errors and solver
@@ -1437,7 +1445,7 @@ fn elaborate_candidate<'a, 'h>(
                 notes: Vec::new(),
                 needs_context: false,
                 needs_tactic: false,
-                needs_capability: false,
+                retry_after_capability_progress: false,
                 incompatible_context: false,
             }
         })?;
@@ -1507,7 +1515,7 @@ fn elaborate_candidate<'a, 'h>(
             notes: Vec::new(),
             needs_context: false,
             needs_tactic: false,
-            needs_capability: false,
+            retry_after_capability_progress: false,
             incompatible_context: false,
         }
     })?;

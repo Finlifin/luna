@@ -294,7 +294,7 @@ impl Checker<'_, '_> {
             )?;
         if !established && !deferred {
             return Err(Error {
-                needs_capability: true,
+                retry_after_capability_progress: true,
                 ..error(
                     span,
                     "declaration associated projection requires a given interface constraint",

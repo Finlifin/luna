@@ -1,6 +1,7 @@
 # Elaboration、VM 与发布的状态协议
 
-状态：实现设计，未落地。源码核对基线为 `873af90f`；本次只修改 development 文档。
+状态：目标协议设计，通用任务协议尚未落地；局部签名前提形成已有下述接线。
+初始源码核对基线为 `873af90f`，后续源码迁移按各节明确其实际范围。
 本文件细化 [全链路架构](architecture.md) 中的所有权，不新增源语言操作或等待语法。
 依赖如何分类、稳定查询如何复用见 [依赖观察](dependency-observations.md)。
 
@@ -18,6 +19,54 @@
 
 这些代码仍是生产实现。目标协议要接管实际调用者，不先删除失败保护，也不声称已有
 Waiting 字段就完成了正式文档中的局部依赖调度。
+
+### 1.1 签名前提形成的局部进展条件
+
+`ready_signature_capabilities_with_clauses` 仍是局部迭代器，不是下文的通用 task
+调度器。它形成显式声明的正前提；某个 atom 的 Type 投影可能依赖同一签名中另一个
+尚未形成的前提。例如先写 `A.Item.Item :- Allowed`，再写 `A.Item :- Source` 和
+`A :- Source`，不能因此要求声明者按求解顺序排列约束。
+
+关联投影的给定证据查询现在保留 Unresolved 的原因，并标记当前失败仅允许在
+capability 前提发生进展后重试。旧 `needs_capability` 已改名为
+`retry_after_capability_progress`，避免把任意 Unknown 解释成已找到输入生产者。
+Budget 与 Invalid 不获得此标记。成功形成 atom 只有增加新的前提才算本轮进展；
+重复前提和只完成解析的其他谓词不能凭空触发重试。
+
+失败尝试仍恢复该 owner 的 capability 表、PTC context 及 pending_type_uses 长度。
+当本轮有新前提时再尝试保留的 atom；没有进展且签名须完成时，返回原失败，不将其
+转成成功、前提不存在或默认实现。尚在准备参数前缀时保留 atom，后续真实参数供应
+可再次进入。缺失、自举和循环前提不能因为队列曾有其他成功项而被接纳。
+
+这是现有源码路径的修正，不是新的 waiter：没有给 Unknown 伪造 producer ticket，
+没有改变候选世界或方法选择；通用事务、精确依赖登记与跨重试累计全部查询成本仍待
+按后文实施。该循环恢复的三类状态也不能代表整个 Checker 已实现事务回退。
+
+验证工作目录 `/home/fin/luna`，统一通过 `python3 -B development/check.py
+--timeout 900 -- test ...`，result.json 保存完整命令与结果：
+
+- `/tmp/luna-tools-1osgorhz/result.json` 退出 101，诊断跟踪确认原顺序用例在
+  associated_projection → symbolic_interface_evidence → given 查询处返回
+  UnvalidatedModel，直接越过原有重试逻辑。临时跟踪已删除。
+- `/tmp/luna-tools-efr2exmj/result.json` 退出 0，原顺序用例通过；
+  `/tmp/luna-tools-ckil_t4v/result.json` 退出 0，7 项相关 execution 回归与新增
+  非法 atom 拒绝例通过。
+- `/tmp/luna-tools-an8c0yq1/result.json` 退出 101：associated_signatures 9 项、
+  trait_obligations 4 项和新增签名前提回归 2 项通过；首版非法 atom fixture 将整数
+  传给 bool 域，在数字字面量目标检查处被拒绝，未到预期的普通类型不匹配诊断。
+  已改为 Type 值传入 bool 域，拒绝预期不变，后一条记录确认通过。
+- `/tmp/luna-tools-no7ne8e8/result.json` 退出 101：cmtt_type_inputs 24 项、
+  deferred_associated_values 9 项、normal_input_plans 3 项与 open_normal_input_plans
+  2 项通过；后两组的另外 16 项在 VM 中报 StepsExhausted。
+- 将本次六个生产文件临时换为 HEAD `6bf6d3b4`，保留用户工作区修改，对照
+  `/tmp/luna-tools-e0tq_55u/result.json` 退出 101，后两组仍为 5 项通过、16 项失败。
+  逐项核对失败名称、位置与错误载荷相同，随后按字节及摘要恢复本次源码。
+
+本阶段去重 61 项通过，16 项基线预算失败；没有扩大默认 VM 额度、跳过准入或修改
+旧用例预期。新回归检查三层前提的六种排列、两种 Type 参数来源、缺失与自举前提、
+无正前提的析取以及非法 sibling 优先报错。七个修改／新增 Rust 文件通过 scoped
+rustfmt check，`/tmp/luna-tools-k40wbfcs/result.json` 退出 0；git diff --check 通过。
+剩余批量预算失败须优先追踪 VM 构造与查询准备的共同成本，而非逐个调大测试额度。
 
 ## 2. WorldRevision、可见范围与 coherence 分开
 

@@ -3494,8 +3494,10 @@ StepsExhausted 路径仍待成本与准备复用审计，不通过放大默认�
 两个修改／新增的 Rust 文件通过 scoped rustfmt check，
 `/tmp/luna-tools-egnvdarn/result.json` 退出 0；git diff --check 通过。
 
-五项仍存在的基线问题：ordinary_capability_dependencies_ignore_conjunct_and_bound_order
-在关联类型约束处报 UnvalidatedModel；comptime_given_premises_discharge_obligations_without_inventing_dispatch
+该轮的五项基线问题中，ordinary_capability_dependencies_ignore_conjunct_and_bound_order
+在关联类型约束处报 UnvalidatedModel 的问题现已修复，见
+[签名前提的局部进展条件](elaboration-state-and-publication.md#11-签名前提形成的局部进展条件)。
+其余问题仍保留：comptime_given_premises_discharge_obligations_without_inventing_dispatch
 实际报 TypeContractUnresolved，而旧断言要求 InvalidCallPlan；ordinary_type_list_annotation_inputs_report_the_phase_boundary
 实际报 required comptime input 不可用；ordinary_type_inputs_do_not_hide_selective_memory_writes
 与 ordinary_type_memory_summaries_forward_across_different_input_positions 在程序后置条件

@@ -16,7 +16,7 @@ fn diagnostic(failure: purity::Error) -> Error {
         notes: Vec::new(),
         needs_context: false,
         needs_tactic: false,
-        needs_capability: false,
+        retry_after_capability_progress: false,
         incompatible_context: false,
     }
 }

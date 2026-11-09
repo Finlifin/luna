@@ -412,7 +412,7 @@ impl Checker<'_, '_> {
                 .find(|(d, _, _)| *d == declaration)
                 .map(|(_, _, t)| t)
                 .ok_or_else(|| Error {
-                    needs_capability: self
+                    retry_after_capability_progress: self
                         .signature_owner
                         .is_some_and(|owner| self.active_signatures.contains(&owner)),
                     ..error(
