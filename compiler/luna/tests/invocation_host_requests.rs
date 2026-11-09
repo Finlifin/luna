@@ -162,7 +162,6 @@ fn source_selection(deferred: bool) {
 }
 
 #[test]
-#[ignore = "explicit comptime Type arguments still need invocation-local contextual preparation"]
 fn explicit_comptime_type_arguments_can_use_the_active_callers_storage() {
     assert_eq!(
         sysroot::run(

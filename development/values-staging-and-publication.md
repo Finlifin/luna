@@ -283,12 +283,12 @@ comptime fn check() -> bool {
 代码复用不缓存其值。实参提前 return 时不进入 accept。runtime 参数不能通过
 此变更流入 comptime 调用或 runtime 函数的 comptime 实参。
 
-**仍未接通的另一层。** 本节末尾的关联选择正例还需要为 `T :- Flag` 取得实参身份。
+**另一层的原断点。** 本节末尾的关联选择正例还需要为 `T :- Flag` 取得实参身份。
 `prepare_call_types` 会把该依赖送到 `prepare_type_dependency`，后者在普通调用形成前
 强求实际值。这发生在本次修正的冻结边界之前。需继续将可观察身份、待执行生产者和
 待决契约分离；不能借 VM 也会检查契约而直接删除定义侧证明，也不能为了获取 Type
-而在调用方存储尚未建立时执行实参。原 ignored 正例保留，不宣称通用 ContextualExpr
-或依赖签名恢复已经完成。
+而在调用方存储尚未建立时执行实参。下面的正常结果身份观察已解除该正例的断点；
+真正需要动态存储内容的输入仍不能据此取得身份，通用 ContextualExpr 尚未完成。
 
 验证工作目录 `/home/fin/luna`，测试统一前缀为
 `python3 -B development/check.py --timeout 900 -- test`：
@@ -312,10 +312,78 @@ comptime fn check() -> bool {
   新增 7 项覆盖两种 VM、连续两次 invocation、调用事件次数和 runtime 拒绝。
 - 最终源码显式运行 `-p luna --test invocation_host_requests
   explicit_comptime_type_arguments_can_use_the_active_callers_storage -- --ignored --exact`：
-  `/tmp/luna-tools-2m03lfnj/result.json` 退出 101，仍在 321..360 报缺失调用方输入，
-  确认上述 trait 依赖准备缺口未被本次执行阶段修正掩盖。
+  `/tmp/luna-tools-2m03lfnj/result.json` 退出 101，在该阶段仍于 321..360 报缺失调用方输入，
+  确认 trait 依赖准备与执行阶段修正属于两个独立问题。
 - 两个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-gierdrt2/result.json`
   退出 0；`git diff --check` 通过。未运行全 workspace 或性能基准，未改动正式 docs。
+
+### 已接通：普通输入的正常结果身份与生产者分离
+
+普通调用的依赖准备现在先使用有预算的静态身份观察，取得身份后仍把完整表达式
+放在原实参位置。身份用于既有参数域、返回域和 trait 契约检查；生产者负责实际的
+写入、调用、失败与控制退出。观察不执行函数，不展开 normal-form 头，不安装选择，
+也不把返回的 Term 当成“源表达式已经执行”的凭证。
+
+完整结构无法直接观察时，可以沿 Block／CallPreparation 的正常结果寻找独立尾部。
+仅在尾部没有自由局部存储依赖时，才交给同一个结构观察器；不能把前缀执行前的
+变量事实带进尾部。例如 `do { trace = trace + 1; bool }` 正常完成时的身份是 bool，
+但 `do { selected = char; selected }` 不能借旧的 selected 值得到 bool。观察仍可能
+返回不可用；预算、深度、大小或证明失败直接传播，不伪装成缺值后再尝试 invocation。
+此处没有新增表达式解释器，也没有把 statement 的类型检查或义务裁掉。
+
+```flurry
+trait Flag {}
+impl Flag for bool {}
+
+comptime fn accept(comptime T: Type, comptime .U: Type = T) -> bool
+where requires U :- Flag
+{
+    T == U
+}
+
+comptime fn check() -> bool {
+    var trace: Integer = 0;
+    let result = accept(do { trace = trace + 1; bool });
+    result and trace == 1
+}
+```
+
+默认参数转发同样分开身份与执行：U 复用 T 的身份来证明要求，实际默认表达式仍读取
+已经绑定的 T。原代码把显式实参的整个 producer 复制进默认表达式，导致重复执行，
+或者在默认值独立环境中读取不到调用方 trace；现在保留原 Local 读取。
+这是转发任意普通输入的规则，不给 Type、Tuple 或某个 trait 增加特例。
+
+已有契约证明和实参域检查继续执行。缺少 Flag 的 char、越界的 u8 字面量及前缀中的
+非法调用仍拒绝；前缀 return 则保留为控制转移，不因尾部身份已知而进入 callee。
+新源码用例还覆盖普通 bool 值参数作为 trait 实参、嵌套前缀、后续参数的依赖域、
+两种 VM 的连续 invocation 和实际函数进入次数。
+
+该观察只证明正常结果，不证明程序必定终止或必定成功。需要读取局部存储、调用
+未知生产者或恢复待定接收域才能取得身份的情况仍依赖后续 contextual preparation。
+既有检查顺序、自由变量身份、类型前提和源表达式执行位置不能因此丢弃。
+
+验证工作目录 `/home/fin/luna`，统一前缀
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p luna --test invocation_host_requests --no-fail-fast`：
+  `/tmp/luna-tools-ylq42ajl/result.json` 退出 0，原 ignored 正例及另外两项通过。
+  修改前的失败依据仍是上一节的 `/tmp/luna-tools-2m03lfnj/result.json`。
+- 新交叉用例首次运行 `/tmp/luna-tools-z3_l6jeu/result.json` 退出 101，默认转发实际
+  报 MissingBinding，来源为显式实参中的 trace 写入。另一个失败是新断言未匹配
+  已正确拒绝的整数越界诊断；仅校准诊断断言，没有改变拒绝预期。
+- 修复转发后，`-p luna --test ordinary_input_identity --test invocation_host_requests
+  --test default_calls --test comptime_bytecode_defaults --no-fail-fast`：
+  `/tmp/luna-tools-bhoh3w9z/result.json` 退出 0，63 项通过。
+- `-p elaboration -p luna --lib --test comptime_call_staging --test open_input_observation
+  --test scoped_input_observation --test ordinary_callable_types --test ordinary_clause_collectors
+  --test clause_packet_preparation --test normal_input_plans --test type_spreads
+  --test signature_capabilities --test predicate_calls --test library_meta_objects
+  --test library_protocols --test comptime_bytecode_types --test comptime_staged_values
+  --no-fail-fast`：`/tmp/luna-tools-knxyulkx/result.json` 退出 0，521 项通过、3 项既有 ignored。
+  未完成项仍涉及动态 callable 签名、collector 的待定域以及程序规格中的调用稳定性。
+- 四个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-51pyxap6/result.json`
+  退出 0；`git diff --check` 通过。未运行全 workspace 或性能基准，原有受保护文件
+  哈希未变，正式 docs 未修改。
 
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
 
@@ -870,13 +938,13 @@ CodeSession 仍重新选择，泛型初始化器的结果不进入代码缓存�
 匹配的语义上下文；借用与请求身份检查不等于完整 world revision／证明证书校验。
 runtime、IIR 和固定树模式不能借此接口取得源码 comptime 执行权限。
 
-另保留一个尚未支持的源码正例：显式 comptime Type 实参
-`enabled(do { trace = trace + 1; bool })` 应能使用当前调用方的存储。当前前端在
+该接口接通时还发现一个源码正例：显式 comptime Type 实参
+`enabled(do { trace = trace + 1; bool })` 应能使用当前调用方的存储。当时前端在
 321..360 报 `required comptime input (local 6 3) is not available in this invocation`，
-尚未到达新请求接口。该用例以说明原因的 ignored 正例留在
-`invocation_host_requests.rs`，没有改成预期拒绝；需继续完成调用内 contextual
-preparation，不能靠重放实参或提前求值来绕过。此次没有做旧提交对照，故只记录
-当前未完成行为，不把它归为已证明的基线失败。
+尚未到达新请求接口。该用例最初以说明原因的 ignored 正例留在
+`invocation_host_requests.rs`，没有改成预期拒绝；现已通过本章的正常结果身份观察
+解除 ignore。更一般的调用内 contextual preparation 仍未完成，不能靠重放实参或
+提前求值来绕过。当时未做旧提交对照，原日志只说明该阶段的未完成行为。
 
 本次验证工作目录为 `/home/fin/luna`，执行前缀
 `python3 -B development/check.py --timeout 900 -- test`：

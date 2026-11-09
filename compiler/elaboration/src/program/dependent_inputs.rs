@@ -793,17 +793,23 @@ impl Checker<'_, '_> {
                     .rewrite_types(&mut |ty| binding.substitute(ty))
                     .map_err(|e| error(source.span, e.to_string()))?;
                 value.rewrite_types(&mut |ty| self.callable_input_view(ty, source.span))?;
-                // A direct parameter default forwards an existing symbolic
-                // value; invoking it would require closing the caller frame.
+                // Forward identity evidence, but keep the default's read of
+                // its already bound parameter. Copying that input's producer
+                // would replay it in the default's different local environment.
                 if let K::Local(binding) = value.kind {
                     if let Some(dependency) = ids.iter().position(|id| *id == binding) {
                         forwarded_default = Some((
-                            prepared.values[dependency].as_ref().unwrap().clone(),
+                            value.clone(),
                             prepared.symbols[dependency].as_ref().unwrap().clone(),
                         ));
                     }
                 }
                 value
+            };
+            let observed = if matches!(value.kind, K::TypeValue(_) | K::Local(_)) {
+                None
+            } else {
+                self.preserved_input_identity(&value, source.span)?
             };
             if !matches!(value.kind, K::TypeValue(_) | K::Local(_)) {
                 let unresolved = owner
@@ -814,14 +820,7 @@ impl Checker<'_, '_> {
                 if unresolved.iter().any(|id| inputs.contains(id)) {
                     // Opaque heads and other structural Type values can retain
                     // rigids without invoking a computation over unknown inputs.
-                    let mut budget = comptime_runtime::Budget {
-                        steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-                        max_limbs: 4096,
-                    };
-                    let before = budget.steps;
-                    let structural = self.known_normal_input(&value, 0, &mut budget).is_some();
-                    self.required_steps -= (before - budget.steps) as u64;
-                    if !structural {
+                    if observed.is_none() {
                         return Err(context_error(
                             source.span,
                             "dependent Type computation awaits inferred type arguments",
@@ -831,6 +830,10 @@ impl Checker<'_, '_> {
             }
             let (value, symbol) = if let Some(forwarded) = forwarded_default {
                 forwarded
+            } else if let Some(identity) = observed {
+                // Identity evidence does not complete the producer. Its writes,
+                // calls and control transfers remain at the source input slot.
+                (value, identity)
             } else {
                 match &value.kind {
                     K::TypeValue(ty) => (value.clone(), ty.clone()),

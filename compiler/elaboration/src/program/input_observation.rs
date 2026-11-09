@@ -79,6 +79,50 @@ pub(super) fn term(
 }
 
 impl Checker<'_, '_> {
+    /// Observe identity while retaining the whole producer for execution.
+    /// Unlike completed-value reconstruction, a sequence's normal result can
+    /// be known without executing its prefix. A detached tail must not borrow
+    /// facts from locals that prefix could have introduced or changed.
+    pub(super) fn preserved_input_identity(
+        &mut self,
+        producer: &n::Expr,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        if let Some(identity) = self.checked_normal_input_in(producer, &BTreeMap::new(), span)? {
+            return Ok(Some(identity));
+        }
+        let mut result = producer;
+        loop {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(span, "input result observation budget exhausted"))?;
+            match &result.kind {
+                K::Block {
+                    result: Some(tail), ..
+                }
+                | K::CallPreparation {
+                    result: Some(tail), ..
+                } => result = tail,
+                _ => break,
+            }
+        }
+        if std::ptr::eq(result, producer) {
+            return Ok(None);
+        }
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let free = nir::free_bindings::collect(result, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        if !free
+            .map_err(|failure| error(span, failure.to_string()))?
+            .is_empty()
+        {
+            return Ok(None);
+        }
+        self.checked_normal_input_in(result, &BTreeMap::new(), span)
+    }
+
     pub(super) fn observed_term_inputs(
         &mut self,
         value: &Term,
