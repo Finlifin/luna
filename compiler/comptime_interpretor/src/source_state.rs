@@ -166,6 +166,12 @@ impl<'a> Interpreter<'a> {
             contextual_code_cache: Default::default(),
             prepared_instance_cache: Default::default(),
             declaration_world: Some(package),
+            phase_inspection: Some(
+                positions
+                    .as_ref()
+                    .map(|index| index.phase_inspection.clone())
+                    .unwrap_or_else(|| nir::phases::ExpressionInspection::new(package)),
+            ),
             reserved_source_declarations: Some(
                 positions
                     .as_ref()

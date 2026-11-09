@@ -1,4 +1,4 @@
-//! Borrowed member evidence for one immutable package. This is a phase index,
+//! Member positions for one immutable package. This is a phase index,
 //! not implementation selection or a proof of member type compatibility.
 use crate::{
     DeclarationId,
@@ -23,23 +23,23 @@ fn charge(fuel: &mut usize, amount: usize) -> Result<(), Error> {
     *fuel = fuel.checked_sub(amount).ok_or(Error::Budget)?;
     Ok(())
 }
-struct Entry<'a> {
-    contract: &'a Trait,
-    methods: BTreeMap<DeclarationId, &'a MethodContract>,
-    associated: BTreeMap<DeclarationId, &'a AssociatedContract>,
-    phases: BTreeMap<&'a str, TraitPhase>,
+struct Entry {
+    contract: usize,
+    methods: BTreeMap<DeclarationId, usize>,
+    associated: BTreeMap<DeclarationId, usize>,
 }
-pub(super) struct Index<'a> {
-    interfaces: BTreeMap<DeclarationId, Entry<'a>>,
-    methods: BTreeMap<DeclarationId, &'a MethodContract>,
+pub(super) struct Index {
+    interfaces: BTreeMap<DeclarationId, Entry>,
+    methods: BTreeMap<DeclarationId, (usize, usize)>,
 }
-impl<'a> Index<'a> {
-    pub(super) fn new(package: &'a Package, fuel: &mut usize) -> Result<Self, Error> {
+impl Index {
+    pub(super) fn new(package: &Package, fuel: &mut usize) -> Result<Self, Error> {
         use Error::Invalid;
         charge(fuel, package.traits.len())?;
         let mut interfaces = BTreeMap::new();
         let mut all_methods = BTreeMap::new();
-        for contract in &package.traits {
+        let mut phase_maps = Vec::with_capacity(package.traits.len());
+        for (contract_index, contract) in package.traits.iter().enumerate() {
             charge(fuel, contract.methods.len())?;
             charge(fuel, contract.associated.len())?;
             if contract.comptime_only
@@ -58,19 +58,24 @@ impl<'a> Index<'a> {
             }
             let mut methods = BTreeMap::new();
             let mut phases = BTreeMap::new();
-            for member in &contract.methods {
+            for (member_index, member) in contract.methods.iter().enumerate() {
                 charge(fuel, member.name.len())?;
-                if methods.insert(member.declaration, member).is_some() {
+                if methods.insert(member.declaration, member_index).is_some() {
                     return Err(Invalid("duplicate trait method identity"));
                 }
                 phases.insert(member.name.as_str(), member.phase);
                 // Preserve the former package-order lookup for retained method
                 // references; scoped uses still require their own interface.
-                all_methods.entry(member.declaration).or_insert(member);
+                all_methods
+                    .entry(member.declaration)
+                    .or_insert((contract_index, member_index));
             }
             let mut associated = BTreeMap::new();
-            for member in &contract.associated {
-                if associated.insert(member.declaration, member).is_some() {
+            for (member_index, member) in contract.associated.iter().enumerate() {
+                if associated
+                    .insert(member.declaration, member_index)
+                    .is_some()
+                {
                     return Err(Invalid("duplicate associated member identity"));
                 }
             }
@@ -78,22 +83,22 @@ impl<'a> Index<'a> {
                 .insert(
                     contract.declaration,
                     Entry {
-                        contract,
+                        contract: contract_index,
                         methods,
                         associated,
-                        phases,
                     },
                 )
                 .is_some()
             {
                 return Err(Invalid("duplicate trait phase identity"));
             }
+            phase_maps.push(phases);
         }
         charge(fuel, package.implementations.len())?;
         for definition in &package.implementations {
             let interface = definition.interface.and_then(|id| interfaces.get(&id));
             if definition.phases.runtime
-                && interface.is_some_and(|entry| entry.contract.comptime_only)
+                && interface.is_some_and(|entry| package.traits[entry.contract].comptime_only)
             {
                 return Err(Invalid("comptime-only trait has a runtime implementation"));
             }
@@ -106,8 +111,7 @@ impl<'a> Index<'a> {
                 charge(fuel, definition.methods.len())?;
                 for (name, _) in &definition.methods {
                     charge(fuel, name.len())?;
-                    if entry
-                        .phases
+                    if phase_maps[entry.contract]
                         .get(name.as_str())
                         .is_some_and(|phase| !definition.phases.contains(*phase))
                     {
@@ -123,8 +127,9 @@ impl<'a> Index<'a> {
             methods: all_methods,
         })
     }
-    pub(super) fn associated(
+    pub(super) fn associated<'a>(
         &self,
+        package: &'a Package,
         interface: DeclarationId,
         member: DeclarationId,
         fuel: &mut usize,
@@ -138,10 +143,14 @@ impl<'a> Index<'a> {
             .associated
             .get(&member)
             .ok_or(Error::Invalid("associated value has no member contract"))?;
-        Ok((entry.contract, member))
+        Ok((
+            &package.traits[entry.contract],
+            &package.traits[entry.contract].associated[*member],
+        ))
     }
-    pub(super) fn method(
+    pub(super) fn method<'a>(
         &self,
+        package: &'a Package,
         interface: DeclarationId,
         member: DeclarationId,
         fuel: &mut usize,
@@ -155,15 +164,22 @@ impl<'a> Index<'a> {
             .methods
             .get(&member)
             .ok_or(Error::Invalid("trait method has no member contract"))?;
-        Ok((entry.contract, member))
+        Ok((
+            &package.traits[entry.contract],
+            &package.traits[entry.contract].methods[*member],
+        ))
     }
-    pub(super) fn retained_method(
+    pub(super) fn retained_method<'a>(
         &self,
+        package: &'a Package,
         member: DeclarationId,
         fuel: &mut usize,
     ) -> Result<Option<&'a MethodContract>, Error> {
         charge(fuel, 1)?;
-        Ok(self.methods.get(&member).copied())
+        Ok(self
+            .methods
+            .get(&member)
+            .map(|(contract, member)| &package.traits[*contract].methods[*member]))
     }
 }
 
@@ -230,29 +246,50 @@ mod tests {
         let index = Index::new(&package, &mut 10_000).unwrap();
         let mut fuel = 1;
         assert!(std::ptr::eq(
-            index.method(id(0), id(3000), &mut fuel).unwrap().1,
+            index
+                .method(&package, id(0), id(3000), &mut fuel)
+                .unwrap()
+                .1,
             &package.traits[0].methods[0]
         ));
         assert_eq!(fuel, 0);
         assert!(matches!(
-            index.method(id(0), id(3000), &mut fuel),
+            index.method(&package, id(0), id(3000), &mut fuel),
             Err(Error::Budget)
         ));
         assert!(matches!(
-            index.method(id(1), id(3000), &mut 1),
+            index.method(&package, id(1), id(3000), &mut 1),
             Err(Error::Invalid("trait method has no member contract"))
         ));
-        assert!(index.retained_method(id(3000), &mut 1).unwrap().is_some());
-        assert!(index.retained_method(id(9999), &mut 1).unwrap().is_none());
+        assert!(
+            index
+                .retained_method(&package, id(3000), &mut 1)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            index
+                .retained_method(&package, id(9999), &mut 1)
+                .unwrap()
+                .is_none()
+        );
         let mut changed = package.clone();
         changed.traits[0].associated[0].ty = Term::Primitive(Primitive::Char);
         let other = Index::new(&changed, &mut 10_000).unwrap();
         assert_eq!(
-            index.associated(id(0), id(3001), &mut 1).unwrap().1.ty,
+            index
+                .associated(&package, id(0), id(3001), &mut 1)
+                .unwrap()
+                .1
+                .ty,
             Term::Primitive(Primitive::Bool)
         );
         assert_eq!(
-            other.associated(id(0), id(3001), &mut 1).unwrap().1.ty,
+            other
+                .associated(&changed, id(0), id(3001), &mut 1)
+                .unwrap()
+                .1
+                .ty,
             Term::Primitive(Primitive::Char)
         );
     }

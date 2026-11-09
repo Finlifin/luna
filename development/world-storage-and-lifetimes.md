@@ -277,7 +277,8 @@ StepsExhausted。新的 detached 检查、复制和执行消费同一次 invocat
 phase，不能因此在 comptime 执行 quote 函数。
 
 这一步只去掉可变临时入口并接通声明目录复用。源码捕获仍复制整包，VM 执行索引
-和 PhaseContext 在此阶段仍按次构造；携带作用域前提的 CodeSession 后续迁移见第 1.6 节。旧 package
+和 PhaseContext 在此阶段仍按次构造；携带作用域前提的 CodeSession 后续迁移见第 1.6 节，
+phase 声明目录复用见第 1.7 节。旧 package
 阶段检查仍有独立额度，整个准备过程的计费尚未统一。类型／资源正确性仍由上游
 保证，不能把 phase 检查解释为完整程序验证；没有据此宣称整体性能提升。
 
@@ -335,8 +336,9 @@ materialization::staged::Snapshot 同时持有 DeclarationSnapshot 与同源 Cod
 回归含大量声明元数据，比较首次与后续实际 staged 求值的预算消费，并检查输出与
 局部绑定隔离。较少的准备计费是该边界的证据，不是整体 wall-clock 性能结论。
 
-尚未处理：整包源码捕获、detached PhaseContext 的重复构造、各阶段统一预算及跨编辑
-增量失效。required／其他消费者的准备路径仍各自审计；不能据 staged 接线完成宣称
+detached phase 声明目录的后续复用见第 1.7 节，每次表达式检查仍建立独立上下文。
+尚未处理：整包源码捕获、各阶段统一预算及跨编辑增量失效。
+required／其他消费者的准备路径仍各自审计；不能据 staged 接线完成宣称
 全部 VM 世界所有权或 M1–M7 目标完成。
 
 本阶段在 `/home/fin/luna` 经 `development/check.py --timeout 900 --` 执行：
@@ -360,6 +362,47 @@ materialization::staged::Snapshot 同时持有 DeclarationSnapshot 与同源 Cod
 12 个 Rust 文件 scoped rustfmt check 退出 0，`/tmp/luna-tools-d83870x7/result.json`；
 `git diff --check` 通过。未运行全量回归或整体性能测试，正式 docs 与已有工作区改动
 保持原样。
+
+### 1.7 Phase 声明目录与表达式检查分离
+
+`nir::phases::ExpressionInspection` 将声明目录绑定到精确不可变源码。目录持有参数域、
+函数阶段、参数框架位置、quote 身份和 trait 成员位置；成员合同及参数框架仍从所属
+package 取得，不复制成另一份合同，也不保留指向外部临时数组的引用。
+普通借用 VM 在自身生命周期内复用目录；CodeSession 的 SourceIndexes 保活原 Arc，
+让后续新 VM 复用同一目录。`retain_in` 只接受原 package 的精确 owner，不能用内容
+相同或声明号相同的另一份源码延长位置的有效期。IIR VM 不获得源码表达式执行权限。
+
+目录惰性建立。首次准备在调用者 fuel 下完成声明检查，先预留成员位置表的容量成本，
+再按原有参数／合同遍历计费；失败不发布半成品。后续访问仍收费，但不重复遍历已经
+检查的声明元数据。完整目录可以在某个表达式失败后保留，这不等于保留失败表达式
+的执行许可。Display 使用 S-expression，显示 pending／ready 与所属源码，不输出地址。
+
+每次 `check` 都重新构造 PhaseContext、存储查询状态和 worklist，检查当前主体、签名、
+runtime/comptime 边界及 lexical unsafe。目录不缓存表达式结果、前提、unsafe 授权或
+程序验证结论。调用者仍负责类型和资源正确性；VM 的普通调用准入、执行帧和返回检查
+不变。测试检查热目录拒绝非法调用、低预算失败后恢复、精确 owner 生命周期、同号
+新世界隔离，以及 closed-table／resolving 两类 session 的真实生产入口。
+
+这消除了 detached 入口逐次重建声明目录的工作，未消除按表达式检查。完整 package
+阶段验证仍可单独建立目录，并沿用独立预算；整包捕获、所有准备阶段统一计费与跨编辑
+增量失效尚未完成。测试比较冷／热路径实际预算消费，不据此推断整体运行时间收益。
+
+本阶段工作目录 `/home/fin/luna`，均通过
+`python3 -B development/check.py --timeout 900 --` 执行并退出 0：
+
+- `test -p nir -p comptime_interpretor -p materialization --lib --no-fail-fast`：
+  42 + 516 + 30 项通过，`/tmp/luna-tools-2rn3dd7r/result.json`。
+- `test -p luna -p materialization --test clause_staged_constants
+  --test comptime_staged_values --test quote_functions --test staged_aggregate_contracts
+  --test builder_invocations --test generated_definitions --test prepared_invocations
+  --test invocation_value_templates --test key_code_sessions --test staged_invocation_reuse
+  --test scoped_dispatch_inputs --test library_protocols --no-fail-fast`：281 项通过，
+  `/tmp/luna-tools-id4yjzec/result.json`。含真实 sysroot 的 builder／公开库协议、
+  native 用例、quote、生成定义、作用域输入和连续 staged 求值。
+
+共 869 项通过；11 个 Rust 文件 scoped rustfmt check 退出 0，
+`/tmp/luna-tools-0_c_4d3o/result.json`；`git diff --check` 通过。
+未运行全量回归或性能基准。正式 docs 与已有用户改动保持原样。
 
 ## 2. 目标物理结构
 

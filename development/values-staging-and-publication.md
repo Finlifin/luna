@@ -1093,7 +1093,9 @@ runtime reference session 与 checked/native 清理构图也从所属来源复�
 独立进入普通调用帧；其 phase 检查与执行失败不会改写声明目录。staged VM 已接入
 同源 CodeSession，复用声明索引和代码，每次重新准入当前前提与抽象参数权限，
 详见[staged session 边界](world-storage-and-lifetimes.md#16-staged-vm-索引与当前调用权限分离)。
-跨编辑索引、detached phase 准备和统一预算仍未完成。
+detached phase 检查进一步从同源 owner 复用已完成的声明目录，每个表达式仍重新
+检查阶段和 unsafe 边界，详见[phase 目录边界](world-storage-and-lifetimes.md#17-phase-声明目录与表达式检查分离)。
+整包捕获、跨编辑索引与准备预算的统一仍未完成。
 
 
 每次操作仍构造新鲜 VM，安装原类型证明、方法／关联值和 Copy 证据服务，再检查本次

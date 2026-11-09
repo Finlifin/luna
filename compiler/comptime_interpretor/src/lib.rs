@@ -977,6 +977,7 @@ pub struct Interpreter<'a> {
     struct_builder:
         Option<&'a dyn Fn(&StructBuildRequest, &mut u64) -> Result<PreparedStructBuild<'a>, Error>>,
     declaration_world: Option<&'a Package>,
+    phase_inspection: Option<nir::phases::ExpressionInspection<'a>>,
     reserved_source_declarations: Option<Arc<declaration_index::ReservedDeclarations>>,
     target: Option<nir::target::TargetData>,
     effect_declarations: declaration_index::Effects<'a>,

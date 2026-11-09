@@ -5,6 +5,9 @@ use crate::{Primitive, Sort, Term, contracts::CallableProgram};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod comptime_storage;
+mod declarations;
+mod expression_inspection;
+pub use expression_inspection::ExpressionInspection;
 #[cfg(test)]
 mod inspection_tests;
 use crate::member_types;
@@ -93,7 +96,8 @@ fn machine_arithmetic_functions_with_budgets(
     declaration_fuel: &mut usize,
     inspection_fuel: &mut usize,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
-    let mut context = PhaseContext::new(package, declaration_fuel)?;
+    let declarations = declarations::Declarations::new(package, declaration_fuel)?;
+    let mut context = PhaseContext::new(package, &declarations);
     let mut machine_owners = BTreeSet::new();
     // Validation borrows method contracts. Only actual specialization needs
     // an owned summary, and that path has its own caller-supplied budget.
@@ -131,143 +135,35 @@ pub fn validate_comptime_expression(
     body: &Expr,
     fuel: &mut usize,
 ) -> Result<(), Error> {
-    let mut context = PhaseContext::new(package, fuel)?;
-    crate::type_computations::charge_term(&body.ty, fuel).map_err(|_| Error {
-        kind: ErrorKind::Budget,
-        source: body.source,
-        message: "expression signature budget exhausted",
-    })?;
-    let signature = Term::Function {
-        parameters: vec![],
-        result: Box::new(body.ty.clone()),
-    };
-    context.inspect(
-        CallableProgram::comptime_body(body, &signature),
-        fuel,
-        &mut BTreeSet::new(),
-    )
+    ExpressionInspection::new(package).check(body, fuel)
 }
 
 struct PhaseContext<'a> {
     package: &'a Package,
-    parameter_domains: BTreeMap<crate::DeclarationId, Term>,
-    trait_index: trait_index::Index<'a>,
-    functions: BTreeMap<crate::DeclarationId, (Phase, bool, bool)>,
-    parameter_frames: BTreeMap<crate::DeclarationId, &'a [crate::program::LocalId]>,
-    quote_ids: BTreeSet<crate::DeclarationId>,
-    staged_quote_ids: BTreeSet<crate::DeclarationId>,
+    declarations: &'a declarations::Declarations,
     storage_queries: storage_cache::StorageQueries<'a>,
 }
 impl<'a> PhaseContext<'a> {
-    fn new(package: &'a Package, declaration_fuel: &mut usize) -> Result<Self, Error> {
-        let parameter_domains = parameters::domains(package, declaration_fuel)
-            .map_err(parameters::Failure::into_diagnostic)?;
-        for definition in &package.enums {
-            definition
-                .validate_encoding_in(package.target)
-                .map_err(|message| Error {
-                    kind: ErrorKind::Invalid,
-                    source: SourceRange { start: 0, end: 0 },
-                    message,
-                })?;
-        }
-        let trait_index = trait_index::Index::new(package, declaration_fuel)
-            .map_err(|error| Error::member(SourceRange { start: 0, end: 0 }, error))?;
-        // Identity membership is queried for every retained callable. Index once:
-        // scanning function vectors here makes snapshot admission quadratic.
-        let body_ids: BTreeSet<_> = package.functions.iter().map(|f| f.declaration).collect();
-        let runtime_ids: BTreeSet<_> = package
-            .runtime_function_identities
-            .iter()
-            .map(|f| f.declaration)
-            .collect();
-        let mut quote_ids = BTreeSet::new();
-        let mut staged_quote_ids = BTreeSet::new();
-        for template in &package.quote_templates {
-            if template.phase != Phase::Runtime
-                || !quote_ids.insert(template.declaration)
-                || body_ids.contains(&template.declaration)
-                || runtime_ids.contains(&template.declaration)
-            {
-                return Err(Error {
-                    kind: ErrorKind::Invalid,
-                    source: template.body.source,
-                    message: "invalid or duplicate quote template identity",
-                });
-            }
-            let parameters = parameters::validate_frame(template, true, declaration_fuel)
-                .map_err(parameters::Failure::into_diagnostic)?;
-            if parameters
-                .iter()
-                .any(|parameter| parameter.sort != Sort::Runtime)
-            {
-                staged_quote_ids.insert(template.declaration);
-            }
-        }
-        let mut identity_ids = std::collections::BTreeSet::new();
-        for identity in &package.runtime_function_identities {
-            if !matches!(
-                identity.signature.callable_signature(),
-                Term::Function { .. }
-            ) || identity.signature.is_comptime_callable()
-                || !identity_ids.insert(identity.declaration)
-                || body_ids.contains(&identity.declaration)
-            {
-                return Err(Error {
-                    kind: ErrorKind::Invalid,
-                    source: SourceRange { start: 0, end: 0 },
-                    message: "invalid or duplicate runtime function identity",
-                });
-            }
-        }
-        crate::normal_forms::validate_in(package, declaration_fuel).map_err(|error| Error {
-            kind: match error {
-                crate::normal_forms::ValidationError::Budget
-                | crate::normal_forms::ValidationError::Newtype(
-                    crate::newtypes::ValidationError::Budget,
-                ) => ErrorKind::Budget,
-                _ => ErrorKind::Invalid,
-            },
-            source: SourceRange { start: 0, end: 0 },
-            message: error.message(),
-        })?;
-        for function in &package.functions {
-            parameters::validate_frame(function, false, declaration_fuel)
-                .map_err(parameters::Failure::into_diagnostic)?;
-        }
-        let functions: BTreeMap<_, _> = package
-            .functions
-            .iter()
-            .chain(&package.quote_templates)
-            .map(|f| {
-                (
-                    f.declaration,
-                    (f.phase, !f.preconditions.is_empty(), f.is_unsafe),
-                )
-            })
-            .chain(package.runtime_function_identities.iter().map(|f| {
-                (
-                    f.declaration,
-                    (Phase::Runtime, false, f.signature.is_unsafe_callable()),
-                )
-            }))
-            .collect();
-        let parameter_frames: BTreeMap<_, _> = package
-            .functions
-            .iter()
-            .chain(&package.quote_templates)
-            .map(|function| (function.declaration, function.parameters.as_slice()))
-            .collect();
-        Ok(Self {
+    fn new(package: &'a Package, declarations: &'a declarations::Declarations) -> Self {
+        Self {
             package,
-            parameter_domains,
-            trait_index,
-            functions,
-            parameter_frames,
-            quote_ids,
-            staged_quote_ids,
+            declarations,
             storage_queries: storage_cache::StorageQueries::new(package),
-        })
+        }
+    }
+
+    fn check_comptime(&mut self, body: &Expr, fuel: &mut usize) -> Result<(), Error> {
+        crate::type_computations::charge_term(&body.ty, fuel)
+            .map_err(|_| Error::budget(body.source, "expression signature budget exhausted"))?;
+        let signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(body.ty.clone()),
+        };
+        self.inspect(
+            CallableProgram::comptime_body(body, &signature),
+            fuel,
+            &mut BTreeSet::new(),
+        )
     }
 
     fn inspect(
@@ -278,14 +174,17 @@ impl<'a> PhaseContext<'a> {
     ) -> Result<(), Error> {
         let Self {
             package,
+            declarations,
+            storage_queries,
+        } = self;
+        let declarations::Declarations {
             parameter_domains,
             trait_index,
             functions,
             parameter_frames,
             quote_ids,
             staged_quote_ids,
-            storage_queries,
-        } = self;
+        } = *declarations;
         let ct = function.phase != Phase::Runtime;
         if !ct {
             storage_queries
@@ -683,7 +582,12 @@ impl<'a> PhaseContext<'a> {
                             subject,
                         } => {
                             let (contract, member) = trait_index
-                                .associated(interface.declaration, *member, inspection_fuel)
+                                .associated(
+                                    package,
+                                    interface.declaration,
+                                    *member,
+                                    inspection_fuel,
+                                )
                                 .map_err(|failure| Error::member(expr.source, failure))?;
                             if interface.arguments.len() != contract.type_parameters.len() {
                                 return Err(error(
@@ -719,7 +623,7 @@ impl<'a> PhaseContext<'a> {
                             subject,
                         } => {
                             let (contract, method) = trait_index
-                                .method(*interface, *member, inspection_fuel)
+                                .method(package, *interface, *member, inspection_fuel)
                                 .map_err(|failure| Error::member(expr.source, failure))?;
                             if contract.comptime_only && !ct {
                                 return Err(error(
@@ -847,11 +751,13 @@ impl<'a> PhaseContext<'a> {
                                     | K::Function(id)
                                     | K::FunctionInstance {
                                         declaration: id, ..
-                                    } => parameter_frames.get(id),
+                                    } => parameter_frames
+                                        .get(id)
+                                        .map(|frame| frame.parameters(package)),
                                     _ => None,
                                 };
                                 if target
-                                    .is_some_and(|target| *target != parameter_bindings.as_slice())
+                                    .is_some_and(|target| target != parameter_bindings.as_slice())
                                 {
                                     return Err(error(
                                         "call parameter bindings differ from target declaration",
@@ -1272,7 +1178,7 @@ impl<'a> PhaseContext<'a> {
                             subject,
                         } => {
                             let member = trait_index
-                                .retained_method(*declaration, inspection_fuel)
+                                .retained_method(package, *declaration, inspection_fuel)
                                 .map_err(|failure| Error::member(expr.source, failure))?;
                             let trait_target;
                             let target = if let Some(member) = member {

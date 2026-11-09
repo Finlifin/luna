@@ -1,6 +1,8 @@
 //! Immutable-world code reuse across independently budgeted invocations.
 use super::*;
 #[cfg(test)]
+mod phase_tests;
+#[cfg(test)]
 mod scoped_tests;
 
 /// Owns the exact source or graph snapshot whose compiled code may be reused. This is
@@ -147,11 +149,21 @@ impl<'program> Interpreter<'program> {
         retained: &mut Option<Arc<declaration_index::SourceIndexes>>,
     ) -> Result<(), Error> {
         if retained.is_none() {
-            self.charge_preparation(source.structs.len().saturating_add(source.enums.len()))?;
-        }
-        let indexes = retained.get_or_insert_with(|| {
-            Arc::new(declaration_index::SourceIndexes {
+            self.charge_preparation(
+                source
+                    .structs
+                    .len()
+                    .saturating_add(source.enums.len())
+                    .saturating_add(1),
+            )?;
+            let phase_inspection = self
+                .phase_inspection
+                .as_ref()
+                .and_then(|inspection| inspection.retain_in(source.clone()))
+                .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
+            *retained = Some(Arc::new(declaration_index::SourceIndexes {
                 source: source.clone(),
+                phase_inspection,
                 reserved_declarations: self
                     .reserved_source_declarations
                     .as_ref()
@@ -205,10 +217,12 @@ impl<'program> Interpreter<'program> {
                 runtime_identities: self.runtime_function_identities.positions.clone(),
                 effects: self.effect_declarations.positions.clone(),
                 traits: self.trait_declarations.positions.clone(),
-            })
-        });
+            }));
+        }
+        let indexes = retained.as_ref().expect("completed source indexes");
         self.structs = layout_catalog::Catalog::from_base(indexes.structs.clone());
         self.enums = layout_catalog::Catalog::from_base(indexes.enums.clone());
+        self.phase_inspection = Some(indexes.phase_inspection.clone());
         Ok(())
     }
 

@@ -314,6 +314,8 @@ package。runtime 实例化也从 DeclarationSource 复用目录；Context、规
 表达式，从保活声明的 Snapshot 共享目录；当前 Context 与前提仍逐次传入。staged
 VM 进一步复用同源 CodeSession 的声明索引；前提展开、抽象参数权限和宿主服务仍
 由每次构造重新准入，命名源码调用不能凭缓存代码跳过闭合 capability 检查。
+phase 声明目录也绑定同一源码 owner 复用，但表达式检查、存储查询与 unsafe 授权
+仍逐次建立；目录不携带本次类型命题证明，也不是完整 package 的验证收据。
 跨编辑的持久索引、分块源码和整体准备预算的统一仍未完成，不能把这些生产 owner 扩大为完整 WorldSnapshot 迁移。
 
 以下保留调用内作用域迁移时的证据；后续共享目录的当前检查见

@@ -10,12 +10,13 @@ impl Interpreter<'_> {
         if !self.comptime_only || self.graph.is_some() {
             return Err(self.failure(ErrorKind::PhaseMismatch, Some(body.source)));
         }
-        let package = self
-            .declaration_world
+        let inspection = self
+            .phase_inspection
+            .as_ref()
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(body.source)))?;
         let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let before = fuel;
-        let checked = nir::phases::validate_comptime_expression(package, body, &mut fuel);
+        let checked = inspection.check(body, &mut fuel);
         self.budget.steps -= (before - fuel) as u64;
         checked.map_err(Error::phase)?;
         self.charge_copy_work(Some(body.source), |fuel| {
