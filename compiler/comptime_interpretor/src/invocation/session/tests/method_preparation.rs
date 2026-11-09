@@ -279,7 +279,7 @@ fn method_preparation_is_owned_and_cancelled_at_every_driver_boundary() {
                 }
             }
             let state = session.to_string();
-            if matches!(session.request, Some(Request::Bytecode(_)))
+            if matches!(session.pending, Some(Pending::Bytecode(_)))
                 && session.vm.invocation_depth > 0
             {
                 assert_eq!(

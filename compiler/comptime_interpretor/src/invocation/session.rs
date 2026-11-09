@@ -34,15 +34,17 @@ impl Root<'_> {
     }
 }
 
-enum Request {
+enum Pending {
     Associated(associated_execution::Request),
+    AssociatedResponse(associated_execution::Response),
     Bytecode(bytecode::Preparation),
 }
 
-impl fmt::Display for Request {
+impl fmt::Display for Pending {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Associated(request) => write!(f, "{request}"),
+            Self::AssociatedResponse(response) => write!(f, "{response}"),
             Self::Bytecode(request) => write!(f, "{request}"),
         }
     }
@@ -52,7 +54,7 @@ pub(super) struct Session<'vm, 'a, 'r> {
     vm: &'vm mut Interpreter<'a>,
     root: Root<'r>,
     execution: Option<Execution<'a>>,
-    request: Option<Request>,
+    pending: Option<Pending>,
     stack: Vec<StackEntry<'a>>,
     result: Option<Completion>,
     terminal: bool,
@@ -64,7 +66,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             vm,
             root,
             execution: None,
-            request: None,
+            pending: None,
             stack: Vec::new(),
             result: None,
             terminal: false,
@@ -90,7 +92,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 });
             }
             associated_execution::Preparation::Request(request) => {
-                session.request = Some(Request::Associated(request));
+                session.pending = Some(Pending::Associated(request));
             }
         }
         session
@@ -129,7 +131,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 self.stack.is_empty()
                     && self.execution.is_none()
                     && self.result.is_none()
-                    && self.request.is_none()
+                    && self.pending.is_none()
             );
             if result.is_err() {
                 self.root.cancel();
@@ -144,14 +146,14 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             vm,
             root,
             execution,
-            request,
+            pending,
             stack,
             result,
             ..
         } = self;
-        if let Some(pending) = request.take() {
-            match pending {
-                Request::Bytecode(preparation) => {
+        if let Some(work) = pending.take() {
+            match work {
+                Pending::Bytecode(preparation) => {
                     let parent = stack
                         .last_mut()
                         .and_then(StackEntry::code)
@@ -164,20 +166,31 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                         });
                     }
                 }
-                Request::Associated(request) => match vm.resolve_associated_request(request) {
-                    Ok(activation) => {
-                        *execution = Some(Execution::Associated {
-                            activation,
-                            environment: Environment::default(),
-                        });
+                Pending::Associated(selection) => {
+                    // Host completion does not publish a selection. Retain the
+                    // answer for a separate admission transition so cancellation
+                    // can discard it without executing or installing its body.
+                    *pending = Some(Pending::AssociatedResponse(
+                        vm.resolve_associated_request(selection),
+                    ));
+                    return Ok(Poll::Pending);
+                }
+                Pending::AssociatedResponse(response) => {
+                    match vm.accept_associated_response(response) {
+                        Ok(activation) => {
+                            *execution = Some(Execution::Associated {
+                                activation,
+                                environment: Environment::default(),
+                            });
+                        }
+                        Err(error) => {
+                            *result = Some(Completion::Ordinary {
+                                flow: Err(error),
+                                defaults: None,
+                            });
+                        }
                     }
-                    Err(error) => {
-                        *result = Some(Completion::Ordinary {
-                            flow: Err(error),
-                            defaults: None,
-                        });
-                    }
-                },
+                }
             }
         }
         if let Some(mut active) = execution.take() {
@@ -321,7 +334,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             .expect("active execution");
         match vm.resume_frame(code, 1024) {
             Ok(bytecode::Progress::Prepare(preparation)) => {
-                *request = Some(Request::Bytecode(preparation));
+                *pending = Some(Pending::Bytecode(preparation));
             }
             Ok(bytecode::Progress::TypeInputPlan {
                 expression,
@@ -352,8 +365,8 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                             environment: Environment::default(),
                         })
                     }
-                    Ok(associated_execution::Preparation::Request(pending)) => {
-                        *request = Some(Request::Associated(pending));
+                    Ok(associated_execution::Preparation::Request(selection)) => {
+                        *pending = Some(Pending::Associated(selection));
                     }
                     Err(error) => {
                         *result = Some(Completion::Ordinary {
@@ -413,9 +426,10 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         if self.terminal {
             return;
         }
-        // Pending preparation has not called its host or started the callee.
-        // Discard it before draining errors so cancellation cannot perform it.
-        self.request = None;
+        // Requests have not called the host; returned answers have not been
+        // admitted or published. Discard both before draining errors. Host work
+        // already performed and its charged allowance are not rolled back.
+        self.pending = None;
         let error = self.vm.failure(ErrorKind::InvalidControlFlow, None);
         self.result = if let Some(active) = self.execution.take() {
             Some(self.vm.complete_execution(active, Err(error)))
@@ -479,8 +493,8 @@ impl fmt::Display for Session<'_, '_, '_> {
             f.write_str(" ")?;
             execution(f, value)?;
         }
-        f.write_str(") (request")?;
-        if let Some(request) = &self.request {
+        f.write_str(") (pending")?;
+        if let Some(request) = &self.pending {
             write!(f, " {request}")?;
         }
         f.write_str(") (completion")?;
@@ -511,6 +525,7 @@ impl fmt::Display for Session<'_, '_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod associated_responses;
     mod definition_preparation;
     mod method_preparation;
     use input_collection::InputPlan;
@@ -706,6 +721,7 @@ mod tests {
         let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
         let mut completed_polls = None;
         let mut pending_cancellations = 0;
+        let mut response_cancellations = 0;
         for limit in std::iter::once(usize::MAX).chain(0..64) {
             if completed_polls.is_some_and(|count| limit >= count) {
                 break;
@@ -752,13 +768,29 @@ mod tests {
                 }
                 session = Box::new(*session);
             }
-            if matches!(session.request, Some(Request::Associated(_))) {
+            if matches!(session.pending, Some(Pending::Associated(_))) {
                 pending_cancellations += 1;
                 assert!(
                     session
                         .to_string()
-                        .contains("(request (associated-request ")
+                        .contains("(pending (associated-request ")
                 );
+            }
+            let unadmitted = matches!(session.pending, Some(Pending::AssociatedResponse(_)))
+                .then(|| *calls.borrow().last().unwrap());
+            if let Some(member) = unadmitted {
+                response_cancellations += 1;
+                let key = (
+                    InterfaceInstance {
+                        declaration: id(1),
+                        arguments: vec![],
+                    },
+                    ty(Primitive::Bool),
+                    member,
+                );
+                assert!(!session.vm.associated_initializers.contains_key(&key));
+                assert!(!session.vm.associated_values.contains_key(&key));
+                assert!(!session.vm.active_associated_initializers.contains(&key));
             }
             let called = calls.borrow().clone();
             let remaining = session.vm.remaining_steps();
@@ -787,15 +819,21 @@ mod tests {
                 .unwrap(),
                 Flow::Value(Value::Bool(true))
             ));
+            let mut expected = vec![id(2), id(3), id(4), id(5)];
+            if let Some(member) = unadmitted {
+                let index = expected.iter().position(|value| *value == member).unwrap();
+                expected.insert(index, member);
+            }
             assert_eq!(
                 *calls.borrow(),
-                vec![id(2), id(3), id(4), id(5)],
-                "fresh execution only resolves selections missing after cancellation"
+                expected,
+                "fresh execution reselects an unadmitted response but retains published selections"
             );
             assert!(vm.active_associated_initializers.is_empty());
         }
         assert!(completed_polls.is_some());
         assert_eq!(pending_cancellations, 4);
+        assert_eq!(response_cancellations, 4);
     }
 
     #[test]
@@ -877,6 +915,8 @@ mod tests {
                     }
                 }
                 let called = calls.borrow().clone();
+                let unadmitted = matches!(session.pending, Some(Pending::AssociatedResponse(_)))
+                    .then(|| *called.last().unwrap());
                 let remaining = session.vm.remaining_steps();
                 session.cancel();
                 assert_eq!(*calls.borrow(), called);
@@ -892,7 +932,11 @@ mod tests {
                     vm.eval_associated_value(&access(2)).unwrap(),
                     Flow::Value(Value::Bool(true))
                 ));
-                let expected: Vec<_> = (if cached_root { 3 } else { 2 }..=5).map(id).collect();
+                let mut expected: Vec<_> = (if cached_root { 3 } else { 2 }..=5).map(id).collect();
+                if let Some(member) = unadmitted {
+                    let index = expected.iter().position(|value| *value == member).unwrap();
+                    expected.insert(index, member);
+                }
                 assert_eq!(*calls.borrow(), expected);
                 assert!(vm.active_associated_initializers.is_empty());
             }

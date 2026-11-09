@@ -16,6 +16,14 @@ pub(super) struct Request {
     result_type: Term,
 }
 
+/// A returned selection still needs VM admission. Keep the exact request and
+/// its observed result domain with the answer; neither is a catalogue entry.
+/// This owner is linear and stays inside the invocation session.
+pub(super) struct Response {
+    request: Request,
+    selection: Result<AssociatedSelection, Error>,
+}
+
 pub(super) struct Activation<'a> {
     pub(super) expression: invocation::Body<'a>,
     result_type: Term,
@@ -50,6 +58,17 @@ impl fmt::Display for Request {
     }
 }
 
+impl fmt::Display for Response {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(associated-response {} ", self.request)?;
+        match &self.selection {
+            Ok(selection) => write!(f, "{selection}")?,
+            Err(error) => write!(f, "(failed {})", nir::QuotedDisplay(&error.to_string()))?,
+        }
+        f.write_str(")")
+    }
+}
+
 impl fmt::Display for Activation<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -80,7 +99,10 @@ impl<'a> Interpreter<'a> {
         if !self.bytecode_invocation_available() {
             let active = match prepared {
                 Preparation::Ready(active) => active,
-                Preparation::Request(request) => self.resolve_associated_request(request)?,
+                Preparation::Request(request) => {
+                    let response = self.resolve_associated_request(request);
+                    self.accept_associated_response(response)?
+                }
             };
             // Keep fixed tree recursion out of the driver's native stack frame.
             // Initializers never inherit the caller's lexical environment.
@@ -159,23 +181,32 @@ impl<'a> Interpreter<'a> {
             .map(Preparation::Ready)
     }
 
-    pub(super) fn resolve_associated_request(
+    pub(super) fn resolve_associated_request(&mut self, request: Request) -> Response {
+        let source = request.access.source;
+        let selection = (|| {
+            let resolver = self
+                .associated_resolver
+                .filter(|_| self.comptime_only && self.graph.is_none())
+                .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
+            host_budget::checked(&mut self.budget.steps, Some(source), |remaining| {
+                resolver(&request.access, remaining)
+            })
+        })();
+        Response { request, selection }
+    }
+
+    pub(super) fn accept_associated_response(
         &mut self,
-        request: Request,
+        response: Response,
     ) -> Result<Activation<'a>, Error> {
+        let Response { request, selection } = response;
         let Request {
             access,
             key,
             result_type,
         } = request;
         let source = access.source;
-        let resolver = self
-            .associated_resolver
-            .filter(|_| self.comptime_only && self.graph.is_none())
-            .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
-        let selected = host_budget::checked(&mut self.budget.steps, Some(source), |remaining| {
-            resolver(&access, remaining)
-        })?;
+        let selected = selection?;
         let expression = selected.initializer.into_expression();
         nir::copy_budget::charge_expression(&expression, &mut self.budget.steps)
             .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;

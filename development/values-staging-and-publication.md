@@ -638,12 +638,21 @@ S-expression，显示动态序号、definition 准备及对应指令位置。当
 
 ### 已接通：关联选择请求与初始化器准入分离
 
-`associated_execution` 将关联访问分成 `Preparation::Request` 和已准入的
-`Activation`。请求保留选定的 subject、interface 参数、原始访问和本次已观察的
-结果域。字节码驱动将待处理请求保存在 Session 中，下一次推进才调用现有 resolver；
-取消先丢弃请求，再沿调用栈交付失败。因此请求尚未处理时，不会因取消而调用宿主，
-也没有需要释放的初始化器活动 key。已进入初始化器的 key 由 Activation 完成时
-释放，返回值仍经过共同值域检查。树解释同步消费同样的准备与准入接口。
+`associated_execution` 将关联访问分成 `Preparation::Request`、宿主已经返回但尚未
+准入的 `Response` 和已准入的 `Activation`。请求保留选定的 subject、interface
+参数、原始访问和本次已观察的结果域。Response 以不可复制的所有者同时保留原请求
+与选择结果或错误，不能把回答误作目录条目。
+
+字节码驱动将待处理请求保存在 Session 中，下一次推进调用现有 resolver，只保存
+返回的 Response；再下一次推进才执行准入。Session 的单一 `Pending` 枚举区分
+关联请求、关联响应与字节码准备，不用两张可各自修改的表拼凑对应关系。树解释也
+使用相同的选择／准入接口，但连续同步消费两个步骤。
+
+取消先丢弃待处理项，再沿调用栈交付失败。请求尚未处理时，不调用宿主；答案已经
+返回时，不检查或执行初始化器，也不写入 VM 目录。宿主已经发生的工作及已结算
+额度不回滚；新 invocation 可以重新查询这个尚未发布的选择，已发布的选择继续
+复用。已经进入初始化器的 key 由 Activation 完成时释放，返回值仍经过共同值域
+检查。一次会话恢复不重放调用方前缀，也不重跑已完成的 resolver。
 
 宿主响应的表达式在进入目录前支付复制工作、检查结果域并取得初始化权限；随后
 直接使用该 Activation，不再插入目录后重新取出并重复检查。此前首次选择会对主体
@@ -651,9 +660,29 @@ S-expression，显示动态序号、definition 准备及对应指令位置。当
 只观察一次选定主体的结果域，保存访问端已观察的结果域用于完成检查。后续独立访问
 仍重新观察，不缓存不纯程序结果，也不把 invocation initializer 改成常量。
 
-Request 和 Activation 都有 S-expression Display，Session dump 包含待处理请求。
-两者只属于当前 VM 的执行现场，不进入 CodeSession。已有 resolver 的禁止补充预算、
-阶段限制、响应域拒绝、初始化循环与错误恢复检查继续生效。
+Request、Response 和 Activation 都有 S-expression Display，Session dump 的
+`pending` 槽显示当前持有哪一步。它们只属于当前 VM 的执行现场，不进入 CodeSession。
+宿主返回错误同样由 Response 持有，下一次交付走原有失败传播；虚增额度的回答在
+宿主边界变为 StepsExhausted，不能借延迟准入补回额度。已有阶段限制、响应域拒绝、
+初始化循环与错误恢复检查继续生效。
+
+当前回归逐个取消四层关联链的请求／响应／执行前缀，分别核对未发布条目与活动 key，
+并区分重试时“重新查询未准入答案”和“复用已发布选择”。新增响应测试在完成值与
+需要 invocation 的选择两种情况下覆盖成功、错误域、宿主失败、虚增额度和剩余额度
+为零；在宿主返回后移动、取消或恢复会话，核对整数写入计数与新调用恢复。
+
+这次响应拆分的最终验证使用 `/home/fin/luna` 工作区：
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib`：`/tmp/luna-tools-ic7ca1ii/result.json`，退出 0，567 项通过。
+- `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test deferred_associated_values --test associated_signatures --test associated_purity
+  --test comptime_bytecode_traits --test library_protocols --test comptime_bytecode_types
+  --test builder_invocations --test ordinary_callable_types --no-fail-fast`：
+  `/tmp/luna-tools-t8fqqv_g/result.json`，退出 0，171 项通过、1 项 ignored。
+  暂挂项仍是上一节记录的 invocation-dependent callable signature 正例。
+- 五个修改／新增 Rust 文件的 scoped rustfmt 检查：
+  `/tmp/luna-tools-gsnn49gs/result.json`，退出 0；未运行全 workspace 或性能基准。
 
 主动 Type 观察的权限由 comptime 阶段及源世界边界决定，不再把“安装了 resolver”
 作为前提。具体关联访问统一经 Preparation 判断：快照已经保留初始化器时直接准入，

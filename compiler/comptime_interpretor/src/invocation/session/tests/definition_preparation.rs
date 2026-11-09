@@ -258,7 +258,7 @@ impl Host {
 fn await_definition(session: &mut Session<'_, '_, '_>) {
     for _ in 0..32 {
         assert!(matches!(session.poll().unwrap(), Poll::Pending));
-        if matches!(&session.request, Some(Request::Bytecode(request))
+        if matches!(&session.pending, Some(Pending::Bytecode(request))
             if request.to_string().contains("(prepare-definition-build "))
         {
             assert!(
