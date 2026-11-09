@@ -118,17 +118,22 @@ impl Interpreter<'_> {
     }
 }
 
-pub(super) fn same(a: &Term, b: &Term, values: &Values<'_>) -> bool {
+pub(super) fn same(
+    a: &Term,
+    b: &Term,
+    values: &Values<'_>,
+    fuel: &mut usize,
+) -> Result<bool, ErrorKind> {
+    // Even reflexive structural comparison must account for its traversal.
+    charge_copy(a, fuel)?;
+    charge_copy(b, fuel)?;
     if a == b {
-        return true;
+        return Ok(true);
     }
-    match (view(a, values), view(b, values)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
+    Ok(view(a, values, fuel)? == view(b, values, fuel)?)
 }
-pub(super) fn view(ty: &Term, values: &Values<'_>) -> Result<Term, ErrorKind> {
-    normalize(ty, values, &mut 100_000, 0)
+pub(super) fn view(ty: &Term, values: &Values<'_>, fuel: &mut usize) -> Result<Term, ErrorKind> {
+    normalize(ty, values, fuel, 0)
 }
 fn charge_copy(ty: &Term, fuel: &mut usize) -> Result<(), ErrorKind> {
     nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel).map_err(|error| match error {
@@ -444,6 +449,80 @@ fn normalize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Small fixtures supply explicit local observation allowances.
+    fn view(ty: &Term, values: &Values<'_>) -> Result<Term, ErrorKind> {
+        super::view(ty, values, &mut 100_000)
+    }
+    fn same(a: &Term, b: &Term, values: &Values<'_>) -> bool {
+        super::same(a, b, values, &mut 100_000).unwrap()
+    }
+
+    #[test]
+    fn passive_comparison_keeps_missing_evidence_and_limits_distinct() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let values = Values::default();
+        assert_eq!(
+            super::same(&boolean, &boolean, &values, &mut 0),
+            Err(ErrorKind::StepsExhausted)
+        );
+        assert_eq!(
+            super::same(&projection(2), &boolean, &values, &mut 1000),
+            Err(ErrorKind::UnmaterializedDispatch)
+        );
+        assert_eq!(
+            super::same(
+                &boolean,
+                &Term::Primitive(Primitive::Char),
+                &values,
+                &mut 1000
+            ),
+            Ok(false)
+        );
+        let selected = value(boolean.clone());
+        let values = Values::from([(key(2), &selected)]);
+        let mut fuel = 1000;
+        assert_eq!(
+            super::same(&projection(2), &boolean, &values, &mut fuel),
+            Ok(true)
+        );
+        let cost = 1000 - fuel;
+        let mut shared = cost;
+        assert_eq!(
+            super::same(&projection(2), &boolean, &values, &mut shared),
+            Ok(true)
+        );
+        assert_eq!(
+            super::same(&projection(2), &boolean, &values, &mut shared),
+            Err(ErrorKind::StepsExhausted)
+        );
+        assert_eq!(
+            super::same(&projection(2), &boolean, &values, &mut { cost }),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn passive_views_use_supplied_allowance_without_a_private_ceiling() {
+        let input = Term::Record(vec![(
+            "x".repeat(100_001),
+            Term::Primitive(Primitive::Bool),
+        )]);
+        let mut short = 100_000;
+        assert_eq!(
+            super::view(&input, &Values::default(), &mut short),
+            Err(ErrorKind::StepsExhausted)
+        );
+        assert!(
+            short > 0,
+            "failed width reservations retain a positive balance"
+        );
+        assert_eq!(
+            super::view(&input, &Values::default(), &mut 200_000).unwrap(),
+            input
+        );
+    }
+
     #[test]
     fn evaluating_selected_type_chains_consumes_invocation_budget() {
         let package = Package::default();

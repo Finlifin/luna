@@ -20,8 +20,21 @@ impl Interpreter<'_> {
             }
             Ok(())
         })?;
-        if self.capabilities_hold_parameters(std::slice::from_ref(requirement), &[], &[]) {
-            return Ok(());
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let retained = self.capabilities_hold_parameters(
+            std::slice::from_ref(requirement),
+            &[],
+            &[],
+            &mut fuel,
+        );
+        self.budget.steps -= (before - fuel) as u64;
+        match retained {
+            Ok(true) => return Ok(()),
+            // A missing passive selection still permits the ordinary bounded
+            // proof query. Resource failure must not start a second attempt.
+            Ok(false) | Err(ErrorKind::UnmaterializedDispatch) => {}
+            Err(kind) => return Err(self.failure(kind, Some(source))),
         }
         self.check_type_contract(&P::Trait(requirement.clone()), source)
     }

@@ -2510,6 +2510,57 @@ dispatch 的 read/call 拒绝已执行通过。资源修复与这项历史诊断
 消除上述有显式计费入口却未归还消耗的两条路径，不声称整个构造器已完成线性化、
 所有复制均已计费或全局 waiter 协议已经完成。
 
+### 被动 Type 观察共享额度并保留失败原因
+
+旧 selected_types::same 将任意 view 失败折成 false，view 则每次使用私有
+100,000 步。构造器因此可能把资源不足或缺少关联 Type 证据误报为不合法的选择；
+comptime 值形状检查虽有外层额度，投影和 callable 类型比较仍未消费它。
+
+这两个入口现在必须显式接收 fuel。same 返回 Result<bool, ErrorKind>：只有完成
+观察后的差异是 Ok(false)，缺少选择、错误载荷、步骤／深度耗尽各自保留。相同输入
+的结构比较也先计费；NF 头仍不展开，相同开放投影的反身相等不要求执行它。
+所有生产调用点已迁移，旧无预算 view/same 入口删除。
+
+构造器的初始化器类型、完成值类型与方法签名比较共用构造余额。值检查的局部状态
+保存剩余额度、首个 typed 失败和待检查名义域；comptime 边界先交还已消费的额度，
+再传播观察失败。只有形状和观察都成功才开始 discharge 待检查域。一次失败不会
+继续进行其他观察，也不会发表部分成功证据。
+
+retained capability 查询的替换与关联视图使用同一调用方 fuel。缺少已有选择可由
+主动调用方继续交给正常类型证明服务，预算或非法表示不能触发第二次尝试。被动
+观察本身仍不执行 initializer、不选择新实现、不把前提变成方法 dispatch，也不把
+观察值写入用户函数结果缓存。
+
+**剩余边界。** 旧 has_type 是只读 bool 探测接口，尚未全部迁移到带可变 invocation
+所有者的 typed 入口；这类探测为观察提供单次局部额度，仍只能拒绝而不能呈现具体
+失败。不额外对其中纯标量形状遍历增加宽度额度，超过 100,000 个标量的回归保留
+原行为。runtime check_value_type 仍使用该旧入口。名义域／字段和 callable 签名的
+若干旧 shape helper 仍有独立额度，本节未声称整个值准入已经共享全部工作。后续
+应迁移这些消费者及指针存储回调，不能重新给 selected view 增加默认额度。
+
+架构总览开头原“本阶段只设计、不修改源码”的旧状态已校正为分阶段实现；目标图
+仍不是整体已交付的证明。
+
+证据（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib --no-fail-fast`：初次接线 `/tmp/luna-tools-jrxgz2wg/result.json` 退出 0，
+  522 项通过；新增 typed 比较、缺失选择、累计成本与恢复、超旧上限的合法观察后，
+  `/tmp/luna-tools-_i75l571/result.json` 退出 0，526 项通过。
+- 六组 luna 集成，`test -p luna --test trait_obligations
+  --test deferred_associated_values --test associated_signatures --test normal_input_plans
+  --test phase_source_budget --test library_protocols --no-fail-fast`：
+  `/tmp/luna-tools-binp4du4/result.json` 退出 0，66 项通过。包含真实 sysroot 的
+  调用及 cold admission，library_protocols 读取仓库库声明进行协议集成，不将其
+  独自当作公开 sysroot 路径的证明。
+- 保留旧只读标量宽度行为并补充 retained 查询不自行调用 solver 的断言后，再跑
+  interpretor lib：`/tmp/luna-tools-bpvxb0o9/result.json` 退出 0，527 项通过。
+- 最后版本再跑 `test -p luna --test library_protocols --no-fail-fast`：
+  `/tmp/luna-tools-i320f2hq/result.json` 退出 0，27 项通过。六组中的其余五组未重复
+  执行；本阶段去重 593 项通过。
+- 六个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-6lpop22i/result.json`
+  退出 0，git diff --check 通过。未运行全 workspace 或性能基准。
+
 ### Predicate shape：支持结论与资源失败分离
 
 程序谓词 shape 检查移入 NIR 的单一实现，两个入口均显式接收调用者 fuel，返回

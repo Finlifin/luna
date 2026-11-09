@@ -1570,7 +1570,12 @@ impl<'a> Interpreter<'a> {
                     &initializer.expression().ty,
                     &expected,
                     &associated_values,
-                ) {
+                    &mut trait_parameter_fuel,
+                )
+                .map_err(|kind| Error {
+                    kind,
+                    source: Some(initializer.expression().source),
+                })? {
                     return Err(invalid());
                 }
                 if implementation.associated.iter().any(|(id, _)| id == member) {
@@ -1620,7 +1625,16 @@ impl<'a> Interpreter<'a> {
                         &member_inputs,
                     )
                     .map_err(|_| invalid())?;
-                if !selected_types::same(&value.ty, &member_type, &associated_values) {
+                if !selected_types::same(
+                    &value.ty,
+                    &member_type,
+                    &associated_values,
+                    &mut trait_parameter_fuel,
+                )
+                .map_err(|kind| Error {
+                    kind,
+                    source: Some(value.source),
+                })? {
                     return Err(invalid());
                 }
                 let mut originals = implementation
@@ -1778,7 +1792,10 @@ impl<'a> Interpreter<'a> {
                     &ty,
                     required.ordinary().map_err(|_| invalid())?,
                     &associated_values,
-                ) {
+                    &mut trait_parameter_fuel,
+                )
+                .map_err(|kind| Error { kind, source: None })?
+                {
                     return Err(invalid());
                 }
                 let key = (
@@ -3012,43 +3029,50 @@ impl<'a> Interpreter<'a> {
         }
         result
     }
+    /// Search retained evidence only. Missing selection can be delegated by an
+    /// active caller; it is not a disproved capability or permission to execute.
     fn capabilities_hold_parameters(
         &self,
         requirements: &[nir::program::TraitRequirement],
         parameters: &[nir::DeclarationParameter],
         arguments: &[Term],
-    ) -> bool {
-        requirements.iter().all(|requirement| {
-            requirement
+        fuel: &mut usize,
+    ) -> Result<bool, ErrorKind> {
+        for requirement in requirements {
+            for term in
+                std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
+            {
+                nir::copy_budget::charge_type_substitution(term, parameters, arguments, fuel)
+                    .map_err(|reason| match reason {
+                        nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
+                        nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
+                    })?;
+            }
+            let mut requirement = requirement
                 .instantiate_parameters(parameters, arguments)
-                .is_ok_and(|mut requirement| {
-                    if self.assumed_interfaces.contains(&(
-                        requirement.interface_instance(),
-                        requirement.subject.clone(),
-                    )) {
-                        return true;
-                    }
-                    let Ok(subject) =
-                        selected_types::view(&requirement.subject, &self.associated_values)
-                    else {
-                        return false;
-                    };
-                    requirement.subject = subject;
-                    for argument in &mut requirement.interface_arguments {
-                        let Ok(selected) = selected_types::view(argument, &self.associated_values)
-                        else {
-                            return false;
-                        };
-                        *argument = selected;
-                    }
-                    self.implemented_interfaces.contains_key(&(
-                        requirement.interface_instance(),
-                        requirement.subject.clone(),
-                    )) || self
-                        .assumed_interfaces
-                        .contains(&(requirement.interface_instance(), requirement.subject))
-                })
-        })
+                .map_err(|_| ErrorKind::Type)?;
+            if self.assumed_interfaces.contains(&(
+                requirement.interface_instance(),
+                requirement.subject.clone(),
+            )) {
+                continue;
+            }
+            requirement.subject =
+                selected_types::view(&requirement.subject, &self.associated_values, fuel)?;
+            for argument in &mut requirement.interface_arguments {
+                *argument = selected_types::view(argument, &self.associated_values, fuel)?;
+            }
+            if !self.implemented_interfaces.contains_key(&(
+                requirement.interface_instance(),
+                requirement.subject.clone(),
+            )) && !self
+                .assumed_interfaces
+                .contains(&(requirement.interface_instance(), requirement.subject))
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn integer_operation<T>(

@@ -1,8 +1,10 @@
 # 新一代全链路架构
 
-状态：重构设计，尚未实现。依据 [语言契约](language-contracts.md)，当前偏差见
-[审计](architecture-audit.md)。以下组件名为内部职责名，不要求按此数量创建 crate。
-本阶段先设计，不修改编译器、库或测试源码。
+状态：目标架构尚未整体完成，已进入分阶段实现与验证。依据
+[语言契约](language-contracts.md)，当前偏差见[审计](architecture-audit.md)。
+以下组件名为内部职责名，不要求按此数量创建 crate。局部实现与剩余边界以
+[状态与发布](elaboration-state-and-publication.md)、[值准入](comptime-value-admission.md)
+等专题的源码核对及验证记录为准；本图不代表完整管线已经接通。正式 `docs/` 保持不改。
 
 ## 1. 核心判断
 

@@ -6,50 +6,65 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-enum NominalChecks {
-    Retained,
-    Pending {
-        domains: Vec<Term>,
-        remaining: usize,
-        exhausted: bool,
-    },
+struct NominalChecks {
+    // None denotes a read-only probe requiring retained nominal evidence.
+    domains: Option<Vec<Term>>,
+    remaining: usize,
+    failure: Option<ErrorKind>,
 }
 impl NominalChecks {
     fn defers_contracts(&self) -> bool {
-        matches!(self, Self::Pending { .. })
+        self.domains.is_some()
+    }
+    fn observe<T>(
+        &mut self,
+        operation: impl FnOnce(&mut usize) -> Result<T, ErrorKind>,
+    ) -> Option<T> {
+        if self.failure.is_some() {
+            return None;
+        }
+        match operation(&mut self.remaining) {
+            Ok(value) => Some(value),
+            Err(failure) => {
+                self.failure = Some(failure);
+                None
+            }
+        }
     }
     fn visit(&mut self) -> bool {
-        let Self::Pending {
-            remaining,
-            exhausted,
-            ..
-        } = self
-        else {
-            return true;
-        };
-        if *remaining == 0 {
-            *exhausted = true;
-            return false;
+        // Retained probes previously had no per-value traversal allowance.
+        // Their local fuel bounds observations, not a new scalar width limit.
+        if self.domains.is_none() {
+            return self.failure.is_none();
         }
-        *remaining -= 1;
-        true
+        self.observe(|fuel| {
+            *fuel = fuel.checked_sub(1).ok_or(ErrorKind::StepsExhausted)?;
+            Ok(())
+        })
+        .is_some()
     }
     fn record_nominal(&mut self, ty: &Term) -> bool {
-        let Self::Pending {
-            domains,
-            remaining,
-            exhausted,
-        } = self
-        else {
+        if self.domains.is_none() {
             return true;
-        };
-        let charged = nir::type_computations::charge_term(ty, remaining);
-        if charged.is_err() {
-            *exhausted = true;
-        } else {
-            domains.push(ty.clone());
         }
-        charged.is_ok()
+        if self
+            .observe(|fuel| {
+                nir::type_computations::charge_term(ty, fuel).map_err(|_| ErrorKind::StepsExhausted)
+            })
+            .is_none()
+        {
+            return false;
+        }
+        self.domains.as_mut().unwrap().push(ty.clone());
+        true
+    }
+    fn same(
+        &mut self,
+        left: &Term,
+        right: &Term,
+        values: &associated_catalog::Catalog<'_>,
+    ) -> bool {
+        self.observe(|fuel| selected_types::same(left, right, values, fuel)) == Some(true)
     }
 }
 
@@ -70,34 +85,42 @@ impl Interpreter<'_> {
             };
         }
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let mut checks = NominalChecks::Pending {
-            domains: vec![],
+        let mut checks = NominalChecks {
+            domains: Some(vec![]),
             remaining: before,
-            exhausted: false,
+            failure: None,
         };
         let matched = self.has_type_at(value, ty, 0, &mut checks);
-        let NominalChecks::Pending {
+        let NominalChecks {
             domains,
             remaining,
-            exhausted,
-        } = checks
-        else {
-            unreachable!()
-        };
+            failure,
+        } = checks;
         self.budget.steps -= (before - remaining) as u64;
-        if exhausted {
-            return Err(self.failure(ErrorKind::StepsExhausted, source));
+        if let Some(kind) = failure {
+            return Err(self.failure(kind, source));
         }
         if !matched {
             return Err(self.failure(ErrorKind::Type, source));
         }
-        for domain in &domains {
+        for domain in &domains.expect("active shape obligations") {
             self.admit_type(domain, 0)?;
         }
         Ok(())
     }
     pub(super) fn has_type(&self, value: &Value, ty: &Term) -> bool {
-        self.has_type_at(value, ty, 0, &mut NominalChecks::Retained)
+        // Legacy read-only probes have no mutable invocation owner. Use one
+        // finite allowance for the entire probe, never one per projection.
+        self.has_type_at(
+            value,
+            ty,
+            0,
+            &mut NominalChecks {
+                domains: None,
+                remaining: 100_000,
+                failure: None,
+            },
+        )
     }
     fn has_type_at(
         &self,
@@ -138,6 +161,7 @@ impl Interpreter<'_> {
         }
 
         if depth >= 128 {
+            checks.failure = Some(ErrorKind::DepthExhausted);
             return false;
         }
         if let Value::Optional { ty: actual, value } = value {
@@ -203,7 +227,7 @@ impl Interpreter<'_> {
                     |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| self.admitted_collection_domain(domain, fuel), self.target)
                 .is_ok()
                     && d.parameter_binders().is_ok_and(|parameters| {
-                        checks.defers_contracts() || self.capabilities_hold_parameters(&d.capabilities, &parameters, arguments)
+                        checks.defers_contracts() || checks.observe(|fuel| self.capabilities_hold_parameters(&d.capabilities, &parameters, arguments, fuel)) == Some(true)
                     })
                     && d.representation_budgeted(arguments, &[], &mut 100_000)
                         .is_ok_and(|representation| {
@@ -212,11 +236,14 @@ impl Interpreter<'_> {
             });
         }
         if matches!(ty, Term::AssociatedType { .. }) {
-            return selected_types::view(ty, &self.associated_values)
-                .is_ok_and(|ty| self.has_type_at(value, &ty, depth + 1, checks));
+            return checks
+                .observe(|fuel| selected_types::view(ty, &self.associated_values, fuel))
+                .is_some_and(|ty| self.has_type_at(value, &ty, depth + 1, checks));
         }
         if matches!(ty, Term::Nominal { .. }) && !self.associated_values.is_empty() {
-            let Ok(selected) = selected_types::view(ty, &self.associated_values) else {
+            let Some(selected) =
+                checks.observe(|fuel| selected_types::view(ty, &self.associated_values, fuel))
+            else {
                 return false;
             };
             if selected != *ty {
@@ -279,7 +306,7 @@ impl Interpreter<'_> {
         }
         match (value, ty) {
             (Value::Pointer(pointer), Term::Pointer(inner)) => {
-                selected_types::same(&pointer.pointee, inner, &self.associated_values)
+                checks.same(&pointer.pointee, inner, &self.associated_values)
             }
             (
                 Value::Variant {
@@ -308,11 +335,9 @@ impl Interpreter<'_> {
                     |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| self.admitted_collection_domain(domain, fuel), self.target)
                             .is_ok()
                                 && definition.parameter_binders().is_ok_and(|parameters| {
-                                    checks.defers_contracts() || self.capabilities_hold_parameters(
-                                        &definition.capabilities,
-                                        &parameters,
-                                        arguments,
-                                    )
+                                    checks.defers_contracts() || checks.observe(|fuel| self.capabilities_hold_parameters(
+                                        &definition.capabilities, &parameters, arguments, fuel,
+                                    )) == Some(true)
                                 })
                         })
                         .and_then(|definition| {
@@ -443,11 +468,9 @@ impl Interpreter<'_> {
                     |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| self.admitted_collection_domain(domain, fuel), self.target)
                     .is_err()
                         || !s.parameter_binders().is_ok_and(|parameters| {
-                            checks.defers_contracts() || self.capabilities_hold_parameters(
-                                &s.capabilities,
-                                &parameters,
-                                arguments,
-                            )
+                            checks.defers_contracts() || checks.observe(|fuel| self.capabilities_hold_parameters(
+                                &s.capabilities, &parameters, arguments, fuel,
+                            )) == Some(true)
                         })
                     {
                         return false;
@@ -470,7 +493,7 @@ impl Interpreter<'_> {
             }
             (Value::Function(id), ty @ Term::NormalFormFunction(..)) => self.normal_forms.get(id)
                 .is_some_and(|head| head.callable_type().ok().as_ref().is_some_and(|actual|
-                    selected_types::same(actual, ty, &self.associated_values))),
+                    checks.same(actual, ty, &self.associated_values))),
             (Value::Function(id), ty @ (Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_))) => {
                 self.functions.get(id).is_some_and(|f| {
                     f.type_parameters.is_empty()
@@ -479,7 +502,7 @@ impl Interpreter<'_> {
                             || (f.requirements.is_empty() && f.capabilities.is_empty()))
                         && (f.phase == nir::program::FunctionPhase::Comptime) == ty.is_comptime_callable()
                         && f.is_unsafe == ty.is_unsafe_callable()
-                        && selected_types::same(
+                        && checks.same(
                             &f.signature,
                             ty.callable_signature(),
                             &self.associated_values,
@@ -495,7 +518,7 @@ impl Interpreter<'_> {
             ) => self
                 .normal_callable_signature_view(*declaration, arguments, &[], &mut 100_000)
                 .is_some_and(|signature| {
-                    selected_types::same(&signature, ty, &self.associated_values)
+                    checks.same(&signature, ty, &self.associated_values)
                 }),
             (Value::RuntimeTraitMethod(identity), ty) => {
                 let TraitMethodIdentity {
@@ -529,7 +552,7 @@ impl Interpreter<'_> {
                                     .instantiate_parameters(parameters, &arguments)
                                     .is_ok_and(|signature| {
                                         signature.ordinary().is_ok_and(|signature| {
-                                            selected_types::same(
+                                            checks.same(
                                                 signature,
                                                 ty,
                                                 &self.associated_values,
@@ -539,7 +562,7 @@ impl Interpreter<'_> {
                         })
             }
             (Value::Closure(closure), ty) => {
-                selected_types::same(&closure.ty, ty, &self.associated_values)
+                checks.same(&closure.ty, ty, &self.associated_values)
             }
             _ => false,
         }
