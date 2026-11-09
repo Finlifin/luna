@@ -1,6 +1,34 @@
 //! Shared clause packets, required input invocation, and staged comptime callables.
 use super::*;
 
+/// A checked packet keeps executable producers separate from static identities.
+/// Pending inputs can be supplied during invocation only when the consumer does
+/// not publish a callable signature that still depends on those identities.
+pub(super) struct CallableClausePacket {
+    expression: n::Expr,
+    identities: Vec<Term>,
+    pending: BTreeSet<DeclarationId>,
+    formation_deferred: bool,
+}
+
+impl std::fmt::Display for CallableClausePacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(callable-clause-packet (expression {}) (identities",
+            self.expression
+        )?;
+        for identity in &self.identities {
+            write!(f, " {identity}")?;
+        }
+        f.write_str(") (pending")?;
+        for parameter in &self.pending {
+            write!(f, " {parameter}")?;
+        }
+        write!(f, ") (formation-deferred {}))", self.formation_deferred)
+    }
+}
+
 impl Checker<'_, '_> {
     /// Definition-side evidence only: pending values retain declaration rigids.
     /// The invocation packet remains the authority for their actual snapshots.
@@ -24,14 +52,14 @@ impl Checker<'_, '_> {
             return None;
         }
         Some(
-            parameters
-                .iter()
+            self.input_binders(parameters)
+                .into_iter()
                 .zip(inputs)
-                .map(|(id, input)| match &input.kind {
+                .map(|(parameter, input)| match &input.kind {
                     K::TypeValue(ty) | K::ComptimeValue(ty) => ty.clone(),
                     _ => Term::Rigid {
-                        declaration: *id,
-                        sort: Sort::ComptimeValue,
+                        declaration: parameter.declaration,
+                        sort: parameter.sort,
                     },
                 })
                 .collect(),
@@ -101,9 +129,6 @@ impl Checker<'_, '_> {
         }
         let domains = self.callable_clause_domains(owner, &parameters, prefix, expr.span)?;
         let prefix_binders = self.input_binders(&parameters[..prefix.len()]);
-        if domains.iter().all(|domain| *domain == p(P::Type)) {
-            return Ok(None);
-        }
         let Some(signature) = self.known_callable_signature(owner) else {
             return Ok(None);
         };
@@ -124,10 +149,31 @@ impl Checker<'_, '_> {
         if !allow_optional {
             arguments::require_function_value_parameters(sig.params, expr.span)?;
         }
-        let (packet, symbols) =
+        let packet =
             self.prepare_callable_clause_packet(expr, owner, args, prefix, &parameters, &domains)?;
         let signature =
-            self.instantiate_input_types(&signature, &parameters, &symbols, expr.span)?;
+            self.instantiate_input_types(&signature, &parameters, &packet.identities, expr.span)?;
+        if packet
+            .pending
+            .iter()
+            .any(|parameter| signature.mentions_rigid(*parameter))
+        {
+            return Err(error(
+                expr.span,
+                "comptime callable signature still depends on an invocation-time clause input",
+            ));
+        }
+        if packet.pending.is_empty()
+            && !packet.formation_deferred
+            && matches!(&packet.expression.kind, K::Block { statements, .. } if statements.is_empty())
+        {
+            // Only an already checked static application can use the direct
+            // instance and declaration-side default substitution. An observed
+            // identity cannot erase producers or complete deferred contracts.
+            return self
+                .function_instance(expr, owner, packet.identities, expected, allow_optional)
+                .map(Some);
+        }
         let ty = self.callable_type(owner, signature);
         if let Some(expected) = expected {
             self.require(&ty, expected, expr.span)?;
@@ -137,7 +183,7 @@ impl Checker<'_, '_> {
             ty,
             kind: K::ComptimeFunctionInstance {
                 declaration: declaration(self.package, &self.package_identities, owner),
-                subject: Box::new(packet),
+                subject: Box::new(packet.expression),
             },
         }))
     }
@@ -153,7 +199,7 @@ impl Checker<'_, '_> {
         prefix: &[Term],
         parameters: &[DeclarationId],
         domains: &[Term],
-    ) -> Result<(n::Expr, Vec<Term>), Error> {
+    ) -> Result<CallableClausePacket, Error> {
         if parameters.len() != domains.len()
             || prefix.len() + self.type_clause_params(owner).len() != parameters.len()
         {
@@ -193,6 +239,7 @@ impl Checker<'_, '_> {
             self.in_required_comptime = true;
             let mut operands = Vec::new();
             let mut symbols = prefix.to_vec();
+            let mut pending = BTreeSet::new();
             for (slot, term) in prefix.iter().enumerate() {
                 self.alias_substitution
                     .insert(parameters[slot], std::sync::Arc::new(term.clone()));
@@ -237,36 +284,46 @@ impl Checker<'_, '_> {
                             .insert(parameters[slot], std::sync::Arc::new(ty.clone()));
                         self.alias_value_bindings.remove(&parameters[slot]);
                     }
-                    K::Local(binding) if domains[slot] != p(P::Type) => {
+                    K::Local(binding) => {
                         let identity = prepared.identities.get(&parameters[slot]);
+                        let is_type = domains[slot] == p(P::Type);
                         symbols.push(match identity {
                             Some(identity) => self.copy_clause_identity(identity, expr.span)?,
                             None => Term::Rigid {
                                 declaration: parameters[slot],
-                                sort: Sort::ComptimeValue,
+                                sort: if is_type {
+                                    Sort::Type
+                                } else {
+                                    Sort::ComptimeValue
+                                },
                             },
                         });
                         self.normal_default_bindings
                             .insert(parameters[slot], (*binding, value.ty.clone()));
-                        self.alias_value_bindings.remove(&parameters[slot]);
+                        if is_type {
+                            self.alias_value_bindings.insert(parameters[slot], *binding);
+                        } else {
+                            self.alias_value_bindings.remove(&parameters[slot]);
+                        }
                         if let Some(identity) = identity {
                             let identity = self.copy_clause_identity(identity, expr.span)?;
                             self.alias_substitution
                                 .insert(parameters[slot], std::sync::Arc::new(identity));
                         } else {
+                            pending.insert(parameters[slot]);
                             self.alias_substitution.remove(&parameters[slot]);
                         }
                     }
                     _ => {
                         return Err(error(
                             expr.span,
-                            "comptime callable signature requires a known Type clause input",
+                            "clause input was not retained as a prepared value",
                         ));
                     }
                 }
                 operands.push(value);
             }
-            Ok((operands, symbols, statements))
+            Ok((operands, symbols, statements, pending))
         })();
         self.locals = saved_locals;
         self.alias_substitution = saved_substitution;
@@ -275,20 +332,20 @@ impl Checker<'_, '_> {
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.in_required_comptime = saved_mode;
-        let (operands, symbols, statements) = prepared?;
-        self.check_formation_application(
-            owner,
-            FormationInputs {
-                terms: symbols.clone(),
-                deferred: parameters
-                    .iter()
-                    .zip(domains)
-                    .filter_map(|(id, domain)| (*domain != p(P::Type)).then_some(*id))
-                    .collect(),
-                environment: BTreeMap::new(),
-            },
-            expr.span,
-        )?;
+        let (operands, symbols, statements, pending) = prepared?;
+        let formation = FormationInputs {
+            terms: symbols.clone(),
+            deferred: parameters
+                .iter()
+                .zip(domains)
+                .filter_map(|(id, domain)| {
+                    (*domain != p(P::Type) || pending.contains(id)).then_some(*id)
+                })
+                .collect(),
+            environment: BTreeMap::new(),
+        };
+        let formation_deferred = !formation.deferred.is_empty();
+        self.check_formation_application(owner, formation, expr.span)?;
         // Named Type inputs may occur after their value inputs. Once routing
         // completes, validate every retained value against the completed domain
         // even if this function is never invoked.
@@ -297,8 +354,8 @@ impl Checker<'_, '_> {
             self.require(&operand.ty, &domain, expr.span)?;
         }
         let ty = Term::Tuple(operands.iter().map(|value| value.ty.clone()).collect());
-        Ok((
-            n::Expr {
+        Ok(CallableClausePacket {
+            expression: n::Expr {
                 source: source(expr.span),
                 ty: ty.clone(),
                 kind: K::Block {
@@ -310,8 +367,10 @@ impl Checker<'_, '_> {
                     })),
                 },
             },
-            symbols,
-        ))
+            identities: symbols,
+            pending,
+            formation_deferred,
+        })
     }
 
     fn callable_clause_domains(
@@ -382,7 +441,7 @@ impl Checker<'_, '_> {
                         &parameters,
                         &domains,
                     )
-                    .map(|(packet, _)| packet)
+                    .map(|packet| packet.expression)
             },
         )?;
         let (value, _) =
@@ -406,5 +465,44 @@ impl Checker<'_, '_> {
                 value => self.required_normal_term(value, expr.span),
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod packet_tests {
+    use super::*;
+
+    #[test]
+    fn callable_packet_dump_retains_producer_and_orders_pending_identities() {
+        let first = DeclarationId {
+            package: 1,
+            local: 2,
+        };
+        let last = DeclarationId {
+            package: 1,
+            local: 9,
+        };
+        let expression = n::Expr {
+            source: n::SourceRange { start: 3, end: 5 },
+            ty: p(P::Bool),
+            kind: K::Literal(n::Literal::Bool(true)),
+        };
+        let producer = expression.to_string();
+        let packet = CallableClausePacket {
+            expression,
+            identities: vec![Term::Rigid {
+                declaration: first,
+                sort: Sort::Type,
+            }],
+            pending: [last, first].into_iter().collect(),
+            formation_deferred: true,
+        };
+        assert_eq!(
+            packet.to_string(),
+            format!(
+                "(callable-clause-packet (expression {producer}) (identities {}) (pending {first} {last}) (formation-deferred true))",
+                packet.identities[0]
+            )
+        );
     }
 }

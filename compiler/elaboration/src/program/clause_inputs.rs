@@ -283,12 +283,13 @@ impl Checker<'_, '_> {
         evidence: &mut ClauseInputEvidence,
         span: Span,
     ) -> Result<Option<Term>, Error> {
+        let bindings = self.observed_expression_bindings(value, span)?;
         let mut budget = comptime_runtime::Budget {
             steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
             max_limbs: 4096,
         };
         let before = budget.steps;
-        let observed = self.observe_normal_input_in(value, 0, &mut budget, &BTreeMap::new());
+        let observed = self.observe_normal_input_in(value, 0, &mut budget, &bindings);
         self.required_steps -= (before - budget.steps) as u64;
         let known = match observed {
             Ok(value) => Some(value),

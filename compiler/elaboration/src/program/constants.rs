@@ -1909,6 +1909,43 @@ impl Checker<'_, '_> {
         result.map_err(|e: String| error(span, e))
     }
 
+    /// Supply existing immutable facts to a structural observation. This does
+    /// not promote ordinary locals to staged inputs or replace their producers.
+    pub(super) fn observed_expression_bindings(
+        &mut self,
+        expression: &n::Expr,
+        span: Span,
+    ) -> Result<BTreeMap<n::LocalId, std::sync::Arc<Term>>, Error> {
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let mut referenced = BTreeSet::new();
+        let result = (|| {
+            iir::visit::expression(expression, &mut fuel, |value, _| {
+                if let K::Local(binding) = value.kind {
+                    referenced.insert(binding);
+                }
+                Ok(())
+            })?;
+            let mut bindings = BTreeMap::new();
+            for binding in referenced {
+                if !self.locals.contains_key(&binding) || !self.immutable.contains(&binding) {
+                    continue;
+                }
+                let Some(value) = self.partial_staged_bindings.get(&binding) else {
+                    continue;
+                };
+                if let PartialStagedData::Known(value) = &value.data {
+                    let value = nir::copy_budget::clone_term(value, &mut fuel)
+                        .map_err(|failure| format!("local identity copy failed: {failure:?}"))?;
+                    bindings.insert(binding, std::sync::Arc::new(value));
+                }
+            }
+            Ok(bindings)
+        })();
+        self.required_steps -= (before - fuel) as u64;
+        result.map_err(|message: String| error(span, message))
+    }
+
     /// Completed construction data may supply a nested required invocation,
     /// without replacing the enclosing expression's ordinary local reads.
     pub(super) fn observed_generator_input(

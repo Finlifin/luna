@@ -132,13 +132,14 @@ ignored 用例，仍报 `191..201: list literal requires an element type context
 | 当前入口 | 已有能力 | 尚缺接线 |
 | --- | --- | --- |
 | `clause_inputs::prepared_clause_inputs_in_domains` | 保存 HIR 输入；静态域就绪后重排检查，最终仍按源码位置准备输入 | 无可用域时仍进入普通 `expr(None)`，没有可恢复的上下文检查请求 |
-| `dynamic_instances::prepare_callable_clause_packet` | 保存普通值 local 与静态身份，分别用于执行和实例描述 | Type 输入仍要求 `TypeValue`；直接放行 Type local 不能保证 callable 签名已完成 |
+| `dynamic_instances::prepare_callable_clause_packet` | Type／普通值 local 与静态身份分开保存；签名闭合时在 invocation 中形成 callable | 接收域或函数签名依赖未执行输入时，仍缺上下文检查与恢复 |
 | `input_collection::Frame` | NF／名义输入的源码顺序、已执行值、域唤醒、终止与清理 | 消费的仍是 `NormalFormArgument`，不持有普通前端区域或其检查义务 |
 | `invocation::session::Session` | 独占 VM 的完整驱动现场，可在内部推进边界保存、移动与取消 | 生产入口仍同步驱动；尚无对外宿主请求与普通前端检查响应 |
 | `PreparedRequired::invoke_in_world` | 独立准备世界、限定的类型前提、同步 builder 服务 | builder 的 `prepare` 回调不是通用的前端暂停／恢复协议 |
 
-其中 Type local 的限制来自源码审计，尚未绕过首个错误单独复现。字节码已有的
-`Suspended` 只表示内部驱动继续推进，不等于第 5 节的对外 `HostRequest`。
+Type local 的旧限制已用接收域和函数签名均完整的源码独立复现，并按下一节解除。
+原列表用例仍先失败于缺少接收域。字节码已有的 `Suspended` 只表示内部驱动继续
+推进，不等于第 5 节的对外 `HostRequest`。
 
 目标接口需要分别记录三个事实：表达式的检查进度、源码求值位置、接收域的观察。
 检查完成不代表已经执行，值已经产生也不代表已获准进入接收域。区域拥有源码身份、
@@ -167,6 +168,89 @@ ignored 用例，仍报 `191..201: list literal requires an element type context
 名义输入、依赖域闭包、失败恢复、提前退出、生产者次数与顺序；前面的列表用例只是
 其中最小的接线入口。
 
+### 已接通：签名闭合的普通 callable 可以保留待执行 Type 输入
+
+旧普通 callable 参数包只接受 `TypeValue` 形式的 Type 输入，却已经允许其他
+comptime 值由 local 保存。这把“值还没有执行”和“函数签名没有完成”混成一件事。
+独立复现不需要待定列表：下面的接收域分别是 Type 与 bool，函数签名是完整的
+`fn() -> bool`；它原来仍报 `comptime callable signature requires a known Type clause input`。
+
+```flurry
+comptime fn Byte() -> Type { u8 }
+
+comptime fn choose() -> bool
+where T, flag: bool
+{
+    flag and T == u8
+}
+
+fn run() -> bool {
+    const result = choose<Byte(), true>();
+    result
+}
+```
+
+现在生产路径使用 `CallableClausePacket` 分别持有源序表达式、可观察的身份和尚未
+静态取得身份的输入集合。需要 invocation 才能确定身份的 Type 通过已有 local 交付，
+描述端按声明 binder 保留 Type sort；普通值继续使用其原来的 sort。这个描述不是
+实际结果，也不是完成的 Type 猜测。
+默认 Type 引用先前输入时使用同一个值绑定；不再为了取得类型身份提前调用 producer。
+包的 S-expression dump 显示表达式、身份、有序的待决输入及形成检查是否仍被推迟。
+
+静态调用签名先代入已经取得的身份，再检查是否仍提及待确定身份的输入。只有签名已经
+完成，才生成既有 `ComptimeFunctionInstance`；仅 Type 子句与混合子句现在共用
+这条准备路径。输入全部静态、形成检查未推迟且没有待执行的准备语句时，仍生成直接
+`FunctionInstance`，保留声明默认参数的静态替换。不能仅因观察到结果身份就删掉
+生产者、提前完成仍待实际准入的契约，或改变执行阶段。
+normal-form 头由原来的 head 分支处理，未合并成普通函数求值，也未展开头来证明
+与其主体结果相同。
+
+身份观察按表达式引用取得当前作用域中不可变局部值已有的完整证据，保留有界遍历和
+复制预算。它可以使 `Indexed<.items = bits>` 这样的普通 NF 值完成调用签名，但不
+提前执行 initializer，也不把普通 let 提升为 staged 输入。可变 Type 输入仍从实际
+存储读取，形成 callable 后保存该次输入；之后修改原变量不改变已经形成的实例。
+
+值生产仍由既有 VM 按源码位置完成，随后走通用 function-instance 准入、形成契约
+与实例准备。构造 callable 但从不调用它，也必须检查实际 Type 的形成条件；例如
+要求 T == u8 而实际 producer 返回 u16，会在值逃逸之前报告 TypeContractRejected。
+提前 return 保留调用方控制流，不继续执行后续输入，也不发布 callable。已经形成
+的 callable 再次调用不重跑子句 producer；这依靠保存的真实输入，不是结果缓存。
+
+runtime callable 的 required 参数准备消费同一参数包：只执行子句，取得实际身份
+后才走 runtime 实例形成，不把 runtime 函数体交给 comptime 执行。所有源码验收
+使用真实 sysroot、公开 Type 与 meta 接口，没有拼装简化的内置包替代生产入口。
+
+**剩余边界。** 本次没有增加 ContextualExpr、前端 region 或外部 HostRequest。
+`count<.values = [1, 255], Byte()>()` 仍需要待定接收域的恢复；`identity<Byte(), true>`
+若最终函数类型是 `fn(T) -> T`，也仍需在 Type 真正取得后恢复签名检查。后者保留
+新的 ignored 正例，不能因为当前阶段拒绝它就宣称它在语言中非法。另有拒绝用例
+确认未完成的签名不会被当作无关的 `fn(bool) -> bool` 发布。
+
+工作目录 `/home/fin/luna` 的本次证据：
+
+- 新用例最初独立复现旧 Type local 拒绝，报告
+  `/tmp/luna-tools-813yum4k/result.json`，退出 101。扩大检查暴露的静态实例、
+  默认参数、局部 NF 身份及契约时机回归均已修复，未改动原测试预期。
+- 最终命令 `python3 -B development/check.py --timeout 900 -- test
+  -p elaboration -p luna --lib --test ordinary_callable_types
+  --test ordinary_clause_collectors --test comptime_bytecode_types
+  --test dynamic_trait_clauses --test normal_input_plans --test open_normal_input_plans
+  --test open_input_observation --test scoped_input_observation
+  --test clause_packet_preparation --test clause_source_dependencies
+  --test comptime_clause_inputs --test clause_staged_constants --test cmtt_type_inputs
+  --test comptime_bytecode_defaults --test function_template_inputs
+  --test function_template_local_definitions --no-fail-fast`：
+  `/tmp/luna-tools-xvzl1aax/result.json`，退出 0，483 项通过、3 项 ignored。
+  新增公开 sysroot 用例 13 项通过、1 项 ignored；其中可变 Type 快照、带生产者的
+  默认参数及局部 NF 身份用例分别在字节码与树执行器中验收。
+- 显式运行两个未完成正例：`python3 -B development/check.py --timeout 900 -- test
+  -p luna --test ordinary_callable_types --test ordinary_clause_collectors
+  --no-fail-fast -- --ignored`，`/tmp/luna-tools-mlqk7c3c/result.json`，退出 101。
+  分别仍报 `159..181: comptime callable signature still depends on an invocation-time
+  clause input` 与 `191..201: list literal requires an element type context`。
+  另一项默认值定义证明环境的既有 ignored 不属于本次缺口，未以通过计入。
+- 四个修改 Rust 文件的 scoped rustfmt 检查：
+  `/tmp/luna-tools-ux2b2ddl/result.json`，退出 0。没有运行全 workspace 或性能基准。
 
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
 
