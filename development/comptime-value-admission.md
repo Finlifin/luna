@@ -2561,6 +2561,55 @@ retained capability 查询的替换与关联视图使用同一调用方 fuel。�
 - 六个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-6lpop22i/result.json`
   退出 0，git diff --check 通过。未运行全 workspace 或性能基准。
 
+### 名义载荷与 callable 形状准备复用 typed 查询
+
+上一节之后，值形状检查内部仍为每个 struct／enum 实参校验、字段替换、newtype
+实参与 representation，以及函数实例／方法签名各给 100,000 步，再用 is_ok 或
+Option 丢掉失败原因。这既绕过外层剩余额度，也会拒绝调用者已明确供应更多额度的
+合法载荷；形状准备失败被错误呈现为 Type。
+
+这些路径现通过同一个局部准入适配器借用 NominalChecks 的余额，保留 Budget、
+Unresolved、Invalid 分别到 StepsExhausted、TypeContractUnresolved、Type。
+struct／enum 共用实参域检查与 binder／capability 准备；字段只使用
+instantiate_value_fields_checked。newtype 继续使用原有捕获顺序感知的实参校验
+和 representation_budgeted，不把名义类型改成表示类型的别名。保留前提的查询与
+主动边界最后的 formation 检查仍分开，不能凭字段形状授予类型契约。
+
+NF callable、函数实例及 runtime trait method 的形状准备复用
+admitted_callable_signature，删除本地重复的参数拼接、可选签名观察与替换。
+方法仍要求已有 dispatch，保留 phase 和程序前置条件的原检查；这里取得签名，
+不执行函数、不生成新实现选择。NF 头身份与普通 comptime 参数机制未改。
+
+回归使用三个普通泛型名义定义（struct／enum／newtype），载荷字段名的复制工作
+超过旧私有上限。低额度应是资源失败；足额成功并报告相应工作；两个载荷必须累计
+扣款；替换成错误字符载荷仍报 Type。另用 runtime 函数模板检查泛型签名：宽 Type
+实参足额后成功、bool 值冒充 Type 仍拒绝，准备期间无执行事件。
+
+剩余边界继续明确：旧只读 has_type 仍是局部额度加 bool 返回；Type description
+的旧工作观察、List 元素视图与长度上限，以及 IIR 已完成目录的观察路径尚未在本节
+迁移。这里不声称所有值检查的工作已经有统一所有者，也不将这些剩余实现限制写成
+语言规则。
+
+证据（工作目录 `/home/fin/luna`）：
+
+- 首轮接线 `python3 -B development/check.py --timeout 900 -- test
+  -p comptime_interpretor --lib --no-fail-fast`：
+  `/tmp/luna-tools-np4zox2x/result.json` 退出 0，527 项通过。
+- 新宽载荷测试 `/tmp/luna-tools-31inedht/result.json` 退出 0。仅临时换回 HEAD
+  `1c087e6a` 的 value_types.rs 后，`/tmp/luna-tools-1p1vgec6/result.json` 退出
+  101：同一合法 struct 在 10 步额度下报 Type，而非 StepsExhausted。测试和预期
+  均未改；随后按字节恢复本次文件，备份摘要与恢复后相同。
+- 补充泛型 callable 的额度、错误域与恢复后，解释器 lib 全组
+  `/tmp/luna-tools-yyq3doy0/result.json` 退出 0，529 项通过。
+- `test -p luna --test library_protocols --test deferred_associated_values
+  --test trait_obligations --test normal_input_plans --test ordinary_clause_collectors
+  --test sysroot_preludes --no-fail-fast`：`/tmp/luna-tools-f5fi448r/result.json`
+  退出 0，101 项通过，1 项既有 Type producer collector 用例继续显式忽略。包含
+  真实 sysroot 的 runtime／comptime 限定类型 trait、newtype builder 与反射 builder。
+  本阶段去重 630 项通过；未运行全 workspace 或性能基准。
+- 三个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-1v_wv3q9/result.json`
+  退出 0；git diff --check 通过。集成后仅调整了 matches 宏内的缩进。
+
 ### Predicate shape：支持结论与资源失败分离
 
 程序谓词 shape 检查移入 NIR 的单一实现，两个入口均显式接收调用者 fuel，返回

@@ -4,6 +4,7 @@ use std::cell::Cell;
 mod containers;
 mod observations;
 mod passive_views;
+mod shape_preparation;
 
 const SOURCE: SourceRange = SourceRange { start: 3, end: 8 };
 

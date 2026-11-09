@@ -13,6 +13,18 @@ struct NominalChecks {
     failure: Option<ErrorKind>,
 }
 impl NominalChecks {
+    fn admit<T>(
+        &mut self,
+        operation: impl FnOnce(&mut usize) -> Result<T, nir::NominalAdmissionError>,
+    ) -> Option<T> {
+        self.observe(|fuel| {
+            operation(fuel).map_err(|error| match error {
+                nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+                nir::NominalAdmissionError::Unresolved(_) => ErrorKind::TypeContractUnresolved,
+                nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
+            })
+        })
+    }
     fn defers_contracts(&self) -> bool {
         self.domains.is_some()
     }
@@ -69,6 +81,63 @@ impl NominalChecks {
 }
 
 impl Interpreter<'_> {
+    fn shape_nominal_arguments(
+        &self,
+        parameters: &[DeclarationId],
+        domains: &[Term],
+        arguments: &[Term],
+        checks: &mut NominalChecks,
+    ) -> bool {
+        checks
+            .admit(|fuel| {
+                nir::validate_declaration_arguments_with_collections_in(
+                    parameters,
+                    domains,
+                    arguments,
+                    fuel,
+                    |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                    |value, domain, _| {
+                        matches!(
+                            value,
+                            Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
+                                if self.abstract_value_parameters.get(declaration) == Some(domain)
+                        )
+                    },
+                    |domain, fuel| self.admitted_collection_domain(domain, fuel),
+                    self.target,
+                )
+            })
+            .is_some()
+    }
+
+    fn shape_nominal_capabilities(
+        &self,
+        parameters: &[DeclarationId],
+        domains: &[Term],
+        arguments: &[Term],
+        capabilities: &[nir::program::TraitRequirement],
+        checks: &mut NominalChecks,
+    ) -> bool {
+        // Argument admission has already checked this telescope. Preparing its
+        // binder directory still consumes work even when obligations are deferred.
+        let Some(binders) = checks.observe(|fuel| {
+            *fuel = fuel
+                .checked_sub(parameters.len())
+                .ok_or(ErrorKind::StepsExhausted)?;
+            for domain in domains {
+                nir::type_computations::charge_term(domain, fuel)
+                    .map_err(|_| ErrorKind::StepsExhausted)?;
+            }
+            nir::declaration_parameters(parameters, domains).map_err(|_| ErrorKind::Type)
+        }) else {
+            return false;
+        };
+        checks.defers_contracts()
+            || checks.observe(|fuel| {
+                self.capabilities_hold_parameters(capabilities, &binders, arguments, fuel)
+            }) == Some(true)
+    }
+
     /// Check a value at an active boundary. Pending domains are local to this
     /// attempt: shape success alone cannot authorize the value or publish proof.
     pub(super) fn check_value_type(
@@ -220,21 +289,47 @@ impl Interpreter<'_> {
                 });
             }
             return self.newtypes.get(declaration).is_some_and(|d| {
-                d.validate_completed_arguments_with_collections_in(
-                    arguments,
-                    &mut 100_000,
-                    |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| self.admitted_collection_domain(domain, fuel), self.target)
-                .is_ok()
-                    && d.parameter_binders().is_ok_and(|parameters| {
-                        checks.defers_contracts() || checks.observe(|fuel| self.capabilities_hold_parameters(&d.capabilities, &parameters, arguments, fuel)) == Some(true)
+                checks
+                    .admit(|fuel| {
+                        d.validate_completed_arguments_with_collections_in(
+                            arguments,
+                            fuel,
+                            |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                            |value, domain, _| {
+                                matches!(
+                                    value,
+                                    Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
+                                        if self.abstract_value_parameters.get(declaration) == Some(domain)
+                                )
+                            },
+                            |domain, fuel| self.admitted_collection_domain(domain, fuel),
+                            self.target,
+                        )
                     })
-                    && d.representation_budgeted(arguments, &[], &mut 100_000)
-                        .is_ok_and(|representation| {
+                    .is_some()
+                    && self.shape_nominal_capabilities(
+                        &d.type_parameters,
+                        &d.parameter_types,
+                        arguments,
+                        &d.capabilities,
+                        checks,
+                    )
+                    && checks
+                        .observe(|fuel| {
+                            d.representation_budgeted(arguments, &[], fuel)
+                                .map_err(|error| match error {
+                                    nir::newtypes::ConversionError::Budget => {
+                                        ErrorKind::StepsExhausted
+                                    }
+                                    _ => ErrorKind::Type,
+                                })
+                        })
+                        .is_some_and(|representation| {
                             self.has_type_at(value, &representation, depth + 1, checks)
                         })
             });
         }
+
         if matches!(ty, Term::AssociatedType { .. }) {
             return checks
                 .observe(|fuel| selected_types::view(ty, &self.associated_values, fuel))
@@ -320,63 +415,74 @@ impl Interpreter<'_> {
                     arguments,
                 },
             ) => {
-                declaration == expected
-                    && actual_arguments == arguments
-                    && self
-                        .enums
-                        .get(declaration)
-                        .filter(|definition| {
-                            nir::validate_declaration_arguments_with_collections_in(
-                                &definition.type_parameters,
-                                &definition.parameter_types,
-                                arguments,
-                                &mut 100_000,
-                                |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| self.admitted_collection_domain(domain, fuel), self.target)
-                            .is_ok()
-                                && definition.parameter_binders().is_ok_and(|parameters| {
-                                    checks.defers_contracts() || checks.observe(|fuel| self.capabilities_hold_parameters(
-                                        &definition.capabilities, &parameters, arguments, fuel,
-                                    )) == Some(true)
-                                })
-                        })
-                        .and_then(|definition| {
-                            nir::normal_forms::instantiate_value_fields(
-                                &definition.type_parameters,
-                                &definition.parameter_types,
-                                arguments,
-                                definition.variants.get(*index)?.fields.iter(),
-                                &mut 100_000,
-                            )
-                        })
-                        .is_some_and(|types| {
-                            fields.len() == types.len()
-                                && fields
-                                    .iter()
-                                    .zip(&types)
-                                    .all(|(value, ty)| self.has_type_at(value, ty, depth + 1, checks))
-                        })
+                if declaration != expected || actual_arguments != arguments {
+                    return false;
+                }
+                let Some(definition) = self.enums.get(declaration) else {
+                    return false;
+                };
+                let Some(variant) = definition.variants.get(*index) else {
+                    return false;
+                };
+                self.shape_nominal_arguments(
+                    &definition.type_parameters,
+                    &definition.parameter_types,
+                    arguments,
+                    checks,
+                ) && self.shape_nominal_capabilities(
+                    &definition.type_parameters,
+                    &definition.parameter_types,
+                    arguments,
+                    &definition.capabilities,
+                    checks,
+                ) && checks
+                    .admit(|fuel| {
+                        nir::normal_forms::instantiate_value_fields_checked(
+                            &definition.type_parameters,
+                            &definition.parameter_types,
+                            arguments,
+                            variant.fields.iter(),
+                            fuel,
+                        )
+                    })
+                    .is_some_and(|types| {
+                        fields.len() == types.len()
+                            && fields
+                                .iter()
+                                .zip(&types)
+                                .all(|(value, ty)| self.has_type_at(value, ty, depth + 1, checks))
+                    })
             }
             (Value::BitVec(value), Term::Primitive(Primitive::BitVec(width))) => {
                 value.width() == *width
             }
             (Value::Object(object), Term::Primitive(Primitive::Object)) => {
-                self.comptime_only && object.entries().iter().all(|entry| {
-                    let typed = entry.value();
-                    self.type_description_work(&typed.ty).is_some()
-                        && self.has_type_at(&typed.value, &typed.ty, depth + 1, checks)
-                })
+                self.comptime_only
+                    && object.entries().iter().all(|entry| {
+                        let typed = entry.value();
+                        self.type_description_work(&typed.ty).is_some()
+                            && self.has_type_at(&typed.value, &typed.ty, depth + 1, checks)
+                    })
             }
             (Value::List { ty: actual, values }, ty) => {
-                self.comptime_only && actual == ty && values.len() <= 100_000
+                self.comptime_only
+                    && actual == ty
+                    && values.len() <= 100_000
                     && self.list_element(ty).is_some_and(|element| {
                         // The summary stores only identical scalar discriminants.
                         // Resolve and check the current element domain normally;
                         // no equality, head formation or target decision is cached.
-                        if values.summary().is_some_and(|summary| summary.uniform_scalar.is_some()) {
-                            values.first().is_some_and(|value| self.has_type_at(value, element, depth + 1, checks))
+                        if values
+                            .summary()
+                            .is_some_and(|summary| summary.uniform_scalar.is_some())
+                        {
+                            values.first().is_some_and(|value| {
+                                self.has_type_at(value, element, depth + 1, checks)
+                            })
                         } else {
-                            values.iter().all(|value| self.has_type_at(value, element, depth + 1, checks))
+                            values
+                                .iter()
+                                .all(|value| self.has_type_at(value, element, depth + 1, checks))
                         }
                     })
             }
@@ -458,112 +564,108 @@ impl Interpreter<'_> {
                     arguments,
                 },
             ) if declaration == expected && actual_arguments == arguments => {
-                self.structs.get(declaration).is_some_and(|s| {
-                    if nir::validate_declaration_arguments_with_collections_in(
-                        &s.type_parameters,
-                        &s.parameter_types,
+                self.structs.get(declaration).is_some_and(|definition| {
+                    self.shape_nominal_arguments(
+                        &definition.type_parameters,
+                        &definition.parameter_types,
                         arguments,
-                        &mut 100_000,
-                        |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| self.admitted_collection_domain(domain, fuel), self.target)
-                    .is_err()
-                        || !s.parameter_binders().is_ok_and(|parameters| {
-                            checks.defers_contracts() || checks.observe(|fuel| self.capabilities_hold_parameters(
-                                &s.capabilities, &parameters, arguments, fuel,
-                            )) == Some(true)
+                        checks,
+                    ) && self.shape_nominal_capabilities(
+                        &definition.type_parameters,
+                        &definition.parameter_types,
+                        arguments,
+                        &definition.capabilities,
+                        checks,
+                    ) && checks
+                        .admit(|fuel| {
+                            nir::normal_forms::instantiate_value_fields_checked(
+                                &definition.type_parameters,
+                                &definition.parameter_types,
+                                arguments,
+                                definition.fields.iter().map(|(_, ty)| ty),
+                                fuel,
+                            )
                         })
-                    {
-                        return false;
-                    }
-                    nir::normal_forms::instantiate_value_fields(
-                        &s.type_parameters,
-                        &s.parameter_types,
-                        arguments,
-                        s.fields.iter().map(|(_, ty)| ty),
-                        &mut 100_000,
+                        .is_some_and(|types| {
+                            fields.len() == types.len()
+                                && fields.iter().zip(&types).all(|(value, ty)| {
+                                    self.has_type_at(value, ty, depth + 1, checks)
+                                })
+                        })
+                })
+            }
+            (Value::Function(id), ty @ Term::NormalFormFunction(..)) => checks
+                .admit(|fuel| {
+                    self.admitted_callable_signature(
+                        nir::CallableValueRef::Function {
+                            declaration: *id,
+                            arguments: &[],
+                        },
+                        &[],
+                        fuel,
                     )
-                    .is_some_and(|types| {
-                        types.len() == fields.len()
-                            && types
-                                .iter()
-                                .zip(fields)
-                                .all(|(ty, value)| self.has_type_at(value, ty, depth + 1, checks))
-                    })
                 })
-            }
-            (Value::Function(id), ty @ Term::NormalFormFunction(..)) => self.normal_forms.get(id)
-                .is_some_and(|head| head.callable_type().ok().as_ref().is_some_and(|actual|
-                    checks.same(actual, ty, &self.associated_values))),
-            (Value::Function(id), ty @ (Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_))) => {
-                self.functions.get(id).is_some_and(|f| {
-                    f.type_parameters.is_empty()
-                        && f.phase != nir::program::FunctionPhase::NormalForm
-                        && (self.comptime_only
-                            || (f.requirements.is_empty() && f.capabilities.is_empty()))
-                        && (f.phase == nir::program::FunctionPhase::Comptime) == ty.is_comptime_callable()
-                        && f.is_unsafe == ty.is_unsafe_callable()
-                        && checks.same(
-                            &f.signature,
-                            ty.callable_signature(),
-                            &self.associated_values,
-                        )
-                })
-            }
+                .flatten()
+                .is_some_and(|signature| checks.same(&signature, ty, &self.associated_values)),
+            (
+                Value::Function(id),
+                ty @ (Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)),
+            ) => self.functions.get(id).is_some_and(|f| {
+                f.type_parameters.is_empty()
+                    && f.phase != nir::program::FunctionPhase::NormalForm
+                    && (self.comptime_only
+                        || (f.requirements.is_empty() && f.capabilities.is_empty()))
+                    && (f.phase == nir::program::FunctionPhase::Comptime)
+                        == ty.is_comptime_callable()
+                    && f.is_unsafe == ty.is_unsafe_callable()
+                    && checks.same(
+                        &f.signature,
+                        ty.callable_signature(),
+                        &self.associated_values,
+                    )
+            }),
             (
                 Value::FunctionInstance {
                     declaration,
                     arguments,
                 },
                 ty,
-            ) => self
-                .normal_callable_signature_view(*declaration, arguments, &[], &mut 100_000)
-                .is_some_and(|signature| {
-                    checks.same(&signature, ty, &self.associated_values)
-                }),
+            ) => checks
+                .admit(|fuel| {
+                    self.admitted_callable_signature(
+                        nir::CallableValueRef::Function {
+                            declaration: *declaration,
+                            arguments,
+                        },
+                        &[],
+                        fuel,
+                    )
+                })
+                .flatten()
+                .is_some_and(|signature| checks.same(&signature, ty, &self.associated_values)),
             (Value::RuntimeTraitMethod(identity), ty) => {
                 let TraitMethodIdentity {
                     interface,
                     subject,
                     member,
-                    method_arguments,
+                    method_arguments: _,
                 } = identity.as_ref();
                 (self.method_bodies.contains_key(&(interface.clone(), subject.clone(), *member))
                     || self.resolved_method_bodies.contains_key(&(interface.clone(), subject.clone(), *member)))
                     && self
                         .method_contracts
                         .get(&(interface.declaration, *member))
-                        .is_some_and(|(parameters, contract)| {
-                            let arguments: Vec<_> = std::iter::once(subject.clone())
-                                .chain(interface.arguments.iter().cloned())
-                                .chain(method_arguments.iter().cloned())
-                                .collect();
-                            let ids: Vec<_> = parameters
-                                .iter()
-                                .map(|parameter| parameter.declaration)
-                                .collect();
-                            self.validate_function_inputs(&ids, &arguments, &mut 100_000)
-                                .is_ok()
-                                && !contract.signature.is_comptime_callable()
+                        .is_some_and(|(_, contract)| {
+                            !contract.signature.is_comptime_callable()
                                 && (contract.program.preconditions.is_empty()
                                     || (self.comptime_only && matches!(contract.signature.callable_signature(), Ok(Term::Function { parameters, .. })
                                         if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))))
-                                && contract
-                                    .signature
-                                    .instantiate_parameters(parameters, &arguments)
-                                    .is_ok_and(|signature| {
-                                        signature.ordinary().is_ok_and(|signature| {
-                                            checks.same(
-                                                signature,
-                                                ty,
-                                                &self.associated_values,
-                                            )
-                                        })
-                                    })
+                                && checks.admit(|fuel| self.admitted_callable_signature(
+                                    nir::CallableValueRef::Method(identity), &[], fuel,
+                                )).flatten().is_some_and(|signature| checks.same(&signature, ty, &self.associated_values))
                         })
             }
-            (Value::Closure(closure), ty) => {
-                checks.same(&closure.ty, ty, &self.associated_values)
-            }
+            (Value::Closure(closure), ty) => checks.same(&closure.ty, ty, &self.associated_values),
             _ => false,
         }
     }
