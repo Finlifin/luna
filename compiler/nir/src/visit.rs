@@ -30,6 +30,14 @@ pub fn expressions<'a>(
 ) -> Result<(), String> {
     walk(function, fuel, visit, true)
 }
+/// Preserve typed visitor and traversal failures across all function roots.
+pub fn expressions_checked<'a, E: From<Error>>(
+    function: &'a Function,
+    fuel: &mut usize,
+    visit: impl FnMut(&'a Expr, &mut usize) -> Result<(), E>,
+) -> Result<(), E> {
+    walk(function, fuel, visit, true)
+}
 /// Inspect original declaration/contract expressions without materializing a
 /// synthetic function. Root references are consumed lazily, in work-stack order.
 pub fn program_expressions<'a>(
@@ -247,12 +255,12 @@ pub fn expression_pruned_checked<'a, E: From<Error>>(
 ) -> Result<(), E> {
     walk_roots(std::iter::once(expression), fuel, visit, true, true)
 }
-fn walk<'a>(
+fn walk<'a, E: From<Error>>(
     function: &'a Function,
     fuel: &mut usize,
-    visit: impl FnMut(&'a Expr, &mut usize) -> Result<(), String>,
+    visit: impl FnMut(&'a Expr, &mut usize) -> Result<(), E>,
     include_defaults: bool,
-) -> Result<(), String> {
+) -> Result<(), E> {
     let roots = std::iter::once(&function.body)
         .chain(&function.preconditions)
         .chain(&function.postconditions)

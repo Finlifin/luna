@@ -2233,23 +2233,6 @@ impl<'a> Interpreter<'a> {
             .extend(additions.into_iter().map(|(id, ty)| (id, ty.clone())));
         Ok(())
     }
-    fn closed_type_description_work(&self, ty: &Term) -> Option<usize> {
-        if ty.sort() != nir::Sort::Type {
-            return None;
-        }
-        self.closed_term_description_work(ty)
-    }
-    fn closed_term_description_work(&self, ty: &Term) -> Option<usize> {
-        scoped_term_value_work_with_callables_in(
-            ty,
-            &self.normal_forms,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-            |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-            |value, frames, fuel| self.normal_value_callable_signature_view(value, frames, fuel),
-            self.target,
-        )
-    }
     // Optional observers retain their historical exhausted-fuel convention.
     // Admission consumes the typed query directly and never infers its error.
     fn normal_value_fields(

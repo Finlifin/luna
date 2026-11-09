@@ -2750,6 +2750,74 @@ optional representation observers 尚存，主要服务于闭合表示预检、r
   退出 0；git diff --check 通过，作者已有四个 tracked 修改摘要未变。
   未运行全 workspace 或墙钟性能基准。
 
+### 闭合描述、cleanup 索引与效应上下文保留失败原因
+
+闭合观察与 invocation 作用域观察现在使用同一个 typed 遍历，但明确供应不同的
+声明权限：闭合观察不给予任何抽象 Type／值参数权限，不能因当前 VM 曾授权参数就
+把它导出。Type 根仍要求 Type sort；实例和效应实参按普通 term 检查，可以是已完成
+的 comptime 值。描述检查不授予 Copy、不执行用户代码，也不替代布局形成或资源证明。
+
+query_descriptions 在一次调用内借用 VM 余额，支持成组描述的查询，所有退出路径
+扣回实际消费。closed_type_description_work／closed_term_description_work 已删除。
+闭合复制、immutable input 的接收域、cleanup instance key 和 effect operation／
+context 检查改走 typed 入口；实例实参复制使用 invocation 权限，并保留 callable
+查询的接收世界证据。资源错误不再混成 Type、RepresentationSizeLimit 或 InvalidCallPlan。
+非法开放描述仍是 Type；超过描述大小／深度与额度不足分别保留相应资源错误。
+
+cleanup effect 索引仍在私有表中准备签名和上下文，整批成功才替换索引。NIR 新增
+expressions_checked，并让其与原 expressions 共用同一个通用遍历；覆盖主体、前后
+条件及默认值，visitor 错误不经字符串擦除。遍历 Budget 转为 StepsExhausted，非法
+遍历／冲突签名保留 InvalidCallPlan，描述错误沿原类别返回。失败不发布部分索引。
+
+handler 资源上下文的准备失败发生在切换 suspended frame 或进入 handler 主体之前；
+effect loop 的描述失败也不会安装控制目标。成功路径仍核对精确 schedule、切换安装
+点的资源上下文，并在正常返回、失败或控制转移后恢复。原本拒绝的捕获 Copy、外部
+storage、comptime effect 执行等边界保持；新的描述入口不能代替这些权限检查。
+
+剩余边界：Value.scoped_representation_work 以及自由的 scoped_*_work、optional
+layout observer 仍服务于外围表示策略和兼容消费者，尚未全都返回 typed 错误。
+因此 immutable input 的载荷预检仍可能先产生旧诊断。现有代码中的大小／深度资源
+策略也尚未统一为显式 Limits 配置，不能把本节当作整个 VM 限额系统已完成。
+
+证据（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib -p nir --test closure_environment_visit --no-fail-fast`：
+  `/tmp/luna-tools-nh3hgeu0/result.json` 退出 0，解释器 546、NIR lib 50、遍历组 5，
+  共 601 项通过。
+- 将 lib、admission、cleanup、effects 四个生产路径暂换为 HEAD `98befa04`，
+  保留新回归及其测试注册：`/tmp/luna-tools-3_1we9ue/result.json` 退出 101，
+  原 541 项通过、新 5 项全部失败。覆盖闭合复制的错误分类、实例实参失败计费、
+  cleanup 私有索引失败、handler 与 loop 的上下文准备。随后按字节恢复，摘要一致。
+- `test -p comptime_interpretor --lib -p luna --test effect_contracts
+  --test effect_spreads --test effect_memory_transfers --test closure_local_handlers
+  --test conditional_capture_cleanup --test temporary_method_cleanup --test match_cleanup
+  --test drop --test library_protocols --no-fail-fast`：
+  `/tmp/luna-tools-2bk8efte/result.json` 退出 101。完整结束的目标 817 项通过；
+  closure_local_handlers 中一项拒绝诊断断言失败，drop 在固定 2 MiB 线程栈的
+  optional_inline_call_chains_preserve_defaults_contracts_and_owned_returns 中栈溢出。
+  中断的 drop 组不按整组成功计数。
+- 栈用例单独复现 `/tmp/luna-tools-2d81drr4/result.json` 仍退出 101。随后将本轮
+  全部六个生产文件精确换为 HEAD，分别执行两个失败用例：
+  `/tmp/luna-tools-knxh4_ay/result.json` 同样栈溢出；
+  `/tmp/luna-tools-rr50eqcm/result.json` 同样因 `handler lexical capture address
+  exposure requires a memory contract` 不匹配旧断言而失败。随后所有文件按字节
+  恢复，摘要一致。两项均为仍待修复的基线问题，没有扩大栈或修改测试预期。
+- 用 `test -p luna --test drop -- --skip
+  optional_inline_call_chains_preserve_defaults_contracts_and_owned_returns` 完成其余
+  用例：`/tmp/luna-tools-egd23ms_/result.json` 退出 101，995 项通过、1 项失败、
+  1 项上述栈用例显式过滤。新增发现的失败为
+  scheduled_handler_borrowed_copy_record_rejects_unproved_owner_layouts：准备阶段
+  接纳了旧用例预期拒绝的程序。再次把六个生产文件换为 HEAD 单独运行，
+  `/tmp/luna-tools-v4z1zpx_/result.json` 同样失败，随后完整恢复。本节没有据此
+  判定旧预期还是当前准入正确，需按资源契约另行审查；没有改写测试使其变绿。
+  本阶段去重 1,867 项通过，另有三项上述基线问题，其中栈用例会中断整组。
+- 已结束构建的测试二进制在直接诊断时不可用：
+  `/tmp/luna-tools-mr9mlbkw/result.json` 为 unavailable，GDB 的
+  `/tmp/luna-tools-vyn412yw` 也没有取得执行证据；未把 debugger 退出 0 当作通过。
+- 七个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-d5qns9gs/result.json`
+  退出 0；git diff --check 通过，作者已有四个 tracked 修改摘要未变。
+
 ### Predicate shape：支持结论与资源失败分离
 
 程序谓词 shape 检查移入 NIR 的单一实现，两个入口均显式接收调用者 fuel，返回

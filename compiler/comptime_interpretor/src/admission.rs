@@ -141,12 +141,7 @@ impl Interpreter<'_> {
             )
             .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
         self.integer_operation(None, |budget| budget.consume(work))?;
-        let work = self
-            .closed_type_description_work(ty)
-            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-        self.integer_operation(None, |budget| budget.consume(work))?;
-        ty.check_scope(&[])
-            .map_err(|_| self.failure(ErrorKind::Type, None))?;
+        self.check_closed_type_description(ty, None)?;
         self.admit_type(ty, 0)?;
         self.check_value_type(value, ty, None)?;
         self.admit_value_types(value, 0)

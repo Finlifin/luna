@@ -59,18 +59,26 @@ impl Interpreter<'_> {
             .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, source))?;
         Ok(())
     }
-    fn effect_operation_work(&self, operation: &Operation) -> Option<usize> {
-        operation.arguments.iter().try_fold(1usize, |sum, ty| {
-            sum.checked_add(self.closed_term_description_work(ty)?)
-        })
+    fn inspect_effect_operation(
+        &self,
+        operation: &Operation,
+        fuel: &mut usize,
+    ) -> Result<(), ErrorKind> {
+        type_descriptions::spend(fuel, 1)?;
+        for argument in &operation.arguments {
+            self.inspect_closed_term_description(argument, fuel)?;
+        }
+        Ok(())
     }
 
-    fn effect_cleanup_context_work(
+    fn inspect_effect_cleanup_context(
         &self,
         frame: Option<&iir::InstanceKey>,
         context: &[iir::cleanup::ContextKey],
-    ) -> Option<usize> {
-        let mut work = context.len().checked_add(1)?;
+        fuel: &mut usize,
+    ) -> Result<usize, ErrorKind> {
+        let before = *fuel;
+        type_descriptions::spend(fuel, context.len().saturating_add(1))?;
         for key in frame
             .into_iter()
             .chain(context.iter().filter_map(|context| match context {
@@ -78,12 +86,12 @@ impl Interpreter<'_> {
                 _ => None,
             }))
         {
-            work = work.checked_add(1)?;
+            type_descriptions::spend(fuel, 1)?;
             for argument in key.arguments.iter() {
-                work = work.checked_add(self.closed_term_description_work(argument)?)?;
+                self.inspect_closed_term_description(argument, fuel)?;
             }
         }
-        Some(work)
+        Ok(before - *fuel)
     }
 
     pub(super) fn check_effect_environment(
@@ -95,13 +103,12 @@ impl Interpreter<'_> {
         if row.len() != self.effect_state.environment.len() {
             return Err(self.failure(ErrorKind::InvalidEffectEnvironment, source));
         }
-        let work = row
-            .iter()
-            .try_fold(0usize, |sum, op| {
-                sum.checked_add(self.effect_operation_work(op)?)
-            })
-            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, source))?;
-        self.effect_charge(work, source)?;
+        self.query_descriptions(source, |this, fuel| {
+            for operation in row {
+                this.inspect_effect_operation(operation, fuel)?;
+            }
+            Ok(())
+        })?;
         for (operation, entry) in row.iter().zip(&self.effect_state.environment) {
             if operation != &entry.operation {
                 return Err(self.failure(ErrorKind::InvalidEffectEnvironment, source));
@@ -174,23 +181,18 @@ impl Interpreter<'_> {
                 }
                 let mut installed = Vec::new();
                 for (handler_index, handler) in handlers.iter().enumerate() {
-                    let work = self
-                        .effect_operation_work(&handler.operation)
-                        .and_then(|n| {
-                            n.checked_add(self.closed_type_description_work(&handler.signature)?)
-                        })
-                        .and_then(|n| n.checked_add(environment.len()))
-                        .and_then(|n| n.checked_add(previous.len()))
-                        .and_then(|n| {
-                            n.checked_add(self.effect_cleanup_context_work(
-                                self.cleanup_frame.as_ref(),
-                                &self.cleanup_context,
-                            )?)
-                        })
-                        .ok_or_else(|| {
-                            self.failure(ErrorKind::RepresentationSizeLimit, Some(expr.source))
-                        })?;
-                    self.effect_charge(work, Some(expr.source))?;
+                    self.query_descriptions(Some(expr.source), |this, fuel| {
+                        this.inspect_effect_operation(&handler.operation, fuel)?;
+                        this.inspect_closed_type_description(&handler.signature, fuel)?;
+                        type_descriptions::spend(fuel, environment.len())?;
+                        type_descriptions::spend(fuel, previous.len())?;
+                        this.inspect_effect_cleanup_context(
+                            this.cleanup_frame.as_ref(),
+                            &this.cleanup_context,
+                            fuel,
+                        )?;
+                        Ok(())
+                    })?;
                     for arm in &handler.arms {
                         let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
                         let before = fuel;
@@ -596,13 +598,13 @@ impl Interpreter<'_> {
         if activation.cleanup_context.len() >= self.budget.depth {
             return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
         }
-        let work = self
-            .effect_cleanup_context_work(
+        let work = self.query_descriptions(Some(source), |this, fuel| {
+            this.inspect_effect_cleanup_context(
                 activation.cleanup_frame.as_ref(),
                 &activation.cleanup_context,
+                fuel,
             )
-            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
-        self.effect_charge(work, Some(source))?;
+        })?;
         let mut context = activation.cleanup_context.clone();
         context.push(iir::cleanup::ContextKey::EffectHandler {
             installation: activation.installation,
@@ -640,10 +642,9 @@ impl Interpreter<'_> {
         source: SourceRange,
         evaluate: impl FnOnce(&mut Self) -> Result<Flow, Error>,
     ) -> Result<Flow, Error> {
-        let work = self
-            .effect_cleanup_context_work(None, &self.cleanup_context)
-            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
-        self.effect_charge(work, Some(source))?;
+        self.query_descriptions(Some(source), |this, fuel| {
+            this.inspect_effect_cleanup_context(None, &this.cleanup_context, fuel)
+        })?;
         let floor = self.effect_state.loops.len();
         self.effect_state.loops.push((
             self.effect_state.invocation,
@@ -735,10 +736,7 @@ impl Interpreter<'_> {
                 arguments, fields, ..
             } => {
                 for ty in arguments {
-                    let work = self.closed_term_description_work(ty).ok_or_else(|| {
-                        self.failure(ErrorKind::RepresentationSizeLimit, Some(source))
-                    })?;
-                    self.effect_charge(work, Some(source))?;
+                    self.check_closed_term_description(ty, Some(source))?;
                 }
                 for field in fields {
                     self.effect_copy_work(field, source, depth + 1)?;
@@ -762,10 +760,7 @@ impl Interpreter<'_> {
             }
             Value::FunctionInstance { arguments, .. } => {
                 for ty in arguments {
-                    let work = self.closed_term_description_work(ty).ok_or_else(|| {
-                        self.failure(ErrorKind::RepresentationSizeLimit, Some(source))
-                    })?;
-                    self.effect_charge(work, Some(source))?;
+                    self.check_closed_term_description(ty, Some(source))?;
                 }
             }
             Value::RuntimeTraitMethod(_) => {
@@ -790,6 +785,91 @@ impl Interpreter<'_> {
 mod resource_context_tests {
     use super::*;
     use iir::cleanup::{ContextKey, FunctionSchedule, Schedule};
+
+    #[test]
+    fn handler_context_budget_failure_keeps_the_suspended_owner_and_skips_the_body() {
+        let package = Package::default();
+        let mut activation = activation();
+        let mut installed = key(1);
+        installed.arguments = vec![Term::Record(vec![(
+            "x".repeat(512),
+            Term::Primitive(Primitive::Bool),
+        )])]
+        .into();
+        activation.cleanup_frame = Some(installed.clone());
+        let mut schedule = schedule(&activation);
+        schedule.functions[0].instance = installed.clone();
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        vm.cleanup_schedule = Some(&schedule);
+        vm.cleanup_frame = Some(key(9));
+        let source = activation.installation;
+        vm.budget.steps = 100;
+        let called = std::cell::Cell::new(false);
+        let error = vm
+            .with_effect_handler_resources(&activation, 0, source, |_| {
+                called.set(true);
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::StepsExhausted);
+        assert_eq!(error.source, Some(source));
+        assert!(!called.get());
+        assert!(vm.remaining_steps() > 0 && vm.remaining_steps() < 100);
+        assert_eq!(vm.cleanup_frame, Some(key(9)));
+        assert!(vm.cleanup_context.is_empty());
+        vm.budget.steps = 10_000;
+        vm.with_effect_handler_resources(&activation, 0, source, |vm| {
+            called.set(true);
+            assert_eq!(vm.cleanup_frame, Some(installed));
+            Ok(())
+        })
+        .unwrap();
+        assert!(called.get());
+        assert_eq!(vm.cleanup_frame, Some(key(9)));
+        assert!(vm.cleanup_context.is_empty());
+    }
+
+    #[test]
+    fn effect_loop_description_failure_does_not_install_a_target() {
+        let package = Package::default();
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let source = SourceRange { start: 1, end: 2 };
+        let identity = LocalId { owner: 1, index: 0 };
+        let mut callee = key(1);
+        callee.arguments = vec![Term::Record(vec![(
+            "x".repeat(512),
+            Term::Primitive(Primitive::Bool),
+        )])]
+        .into();
+        vm.cleanup_context.push(ContextKey::Function {
+            callee,
+            call: source,
+        });
+        let before = vm.cleanup_context.clone();
+        vm.budget.steps = 100;
+        let called = std::cell::Cell::new(false);
+        assert_eq!(
+            vm.with_effect_loop(identity, source, |_| {
+                called.set(true);
+                Ok(Flow::Value(Value::Unit))
+            })
+            .unwrap_err()
+            .kind,
+            ErrorKind::StepsExhausted
+        );
+        assert!(!called.get());
+        assert!(vm.remaining_steps() > 0 && vm.remaining_steps() < 100);
+        assert!(vm.effect_state.loops.is_empty());
+        assert_eq!(vm.cleanup_context, before);
+        vm.budget.steps = 10_000;
+        vm.with_effect_loop(identity, source, |vm| {
+            assert_eq!(vm.effect_state.loops.len(), 1);
+            Ok(Flow::Value(Value::Unit))
+        })
+        .unwrap();
+        assert!(vm.effect_state.loops.is_empty());
+        assert_eq!(vm.cleanup_context, before);
+    }
 
     fn key(local: u32) -> iir::InstanceKey {
         iir::InstanceKey {

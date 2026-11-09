@@ -12,8 +12,16 @@ impl Interpreter<'_> {
         if ty.sort() != nir::Sort::Type {
             return Err(ErrorKind::Type);
         }
+        self.inspect_term_description(ty, fuel)
+    }
+
+    pub(super) fn inspect_term_description(
+        &self,
+        term: &Term,
+        fuel: &mut usize,
+    ) -> Result<(), ErrorKind> {
         inspect(
-            ty,
+            term,
             &self.normal_forms,
             &self.abstract_type_parameters,
             &self.abstract_value_parameters,
@@ -24,20 +32,78 @@ impl Interpreter<'_> {
         )
     }
 
+    pub(super) fn inspect_closed_term_description(
+        &self,
+        term: &Term,
+        fuel: &mut usize,
+    ) -> Result<(), ErrorKind> {
+        inspect(
+            term,
+            &self.normal_forms,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            |ty, variant, fuel| self.query_normal_value_fields(ty, variant, fuel),
+            |value, frames, fuel| self.admitted_callable_signature(value, frames, fuel),
+            self.target,
+            fuel,
+        )
+    }
+
+    pub(super) fn inspect_closed_type_description(
+        &self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<(), ErrorKind> {
+        if ty.sort() != nir::Sort::Type {
+            return Err(ErrorKind::Type);
+        }
+        self.inspect_closed_term_description(ty, fuel)
+    }
+
+    /// Borrow the caller's allowance for one or more passive descriptions.
+    /// This never publishes evidence or authorizes execution or resource copying.
+    pub(super) fn query_descriptions<T>(
+        &mut self,
+        source: Option<SourceRange>,
+        query: impl FnOnce(&Self, &mut usize) -> Result<T, ErrorKind>,
+    ) -> Result<T, Error> {
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = query(self, &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        result.map_err(|kind| self.failure(kind, source))
+    }
+
     pub(super) fn check_type_description(
         &mut self,
         ty: &Term,
         source: Option<SourceRange>,
     ) -> Result<(), Error> {
-        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let result = self.inspect_type_description(ty, &mut fuel);
-        self.budget.steps -= (before - fuel) as u64;
-        result.map_err(|kind| self.failure(kind, source))
+        self.query_descriptions(source, |this, fuel| this.inspect_type_description(ty, fuel))
+    }
+
+    pub(super) fn check_closed_type_description(
+        &mut self,
+        ty: &Term,
+        source: Option<SourceRange>,
+    ) -> Result<(), Error> {
+        self.query_descriptions(source, |this, fuel| {
+            this.inspect_closed_type_description(ty, fuel)
+        })
+    }
+
+    pub(super) fn check_closed_term_description(
+        &mut self,
+        term: &Term,
+        source: Option<SourceRange>,
+    ) -> Result<(), Error> {
+        self.query_descriptions(source, |this, fuel| {
+            this.inspect_closed_term_description(term, fuel)
+        })
     }
 }
 
-fn spend(fuel: &mut usize, amount: usize) -> Result<(), ErrorKind> {
+pub(super) fn spend(fuel: &mut usize, amount: usize) -> Result<(), ErrorKind> {
     *fuel = fuel.checked_sub(amount).ok_or(ErrorKind::StepsExhausted)?;
     Ok(())
 }

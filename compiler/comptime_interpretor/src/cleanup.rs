@@ -1,6 +1,22 @@
 //! Reference execution of published cleanup operations on real owner storage.
 use super::*;
 use iir::cleanup::{Program, Step};
+#[cfg(test)]
+mod description_tests;
+struct CleanupInspectionError(ErrorKind);
+impl From<ErrorKind> for CleanupInspectionError {
+    fn from(kind: ErrorKind) -> Self {
+        Self(kind)
+    }
+}
+impl From<nir::visit::Error> for CleanupInspectionError {
+    fn from(error: nir::visit::Error) -> Self {
+        Self(match error {
+            nir::visit::Error::Budget(_) => ErrorKind::StepsExhausted,
+            nir::visit::Error::Invalid(_) => ErrorKind::InvalidCallPlan,
+        })
+    }
+}
 pub(super) struct PreparedFrame {
     pub(super) source: SourceRange,
     pub(super) values: Vec<(usize, SourceRange, Option<Storage>)>,
@@ -44,38 +60,28 @@ impl Interpreter<'_> {
             .graph
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
         let mut signatures = HashMap::new();
-        let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let before = fuel;
-        let checked = (|| -> Result<(), String> {
+        self.query_descriptions(None, |this, fuel| {
             for function in &graph.functions {
-                nir::visit::expressions(&function.function, &mut fuel, |expr, fuel| {
-                    let mut insert =
-                        |operation: &nir::effects::Operation, ty: &Term| -> Result<(), String> {
-                            let work = self
-                                .closed_type_description_work(ty)
-                                .ok_or("effect cleanup contract budget exhausted")?;
-                            *fuel = fuel
-                                .checked_sub(work + 1)
-                                .ok_or("effect cleanup contract budget exhausted")?;
-                            for argument in &operation.arguments {
-                                let work = self
-                                    .closed_term_description_work(argument)
-                                    .ok_or("effect cleanup contract budget exhausted")?;
-                                *fuel = fuel
-                                    .checked_sub(work)
-                                    .ok_or("effect cleanup contract budget exhausted")?;
-                            }
-                            if signatures
-                                .get(operation)
-                                .is_some_and(|previous| previous != ty)
-                            {
-                                return Err("conflicting effect cleanup contracts".into());
-                            }
-                            signatures
-                                .entry(operation.clone())
-                                .or_insert_with(|| ty.clone());
-                            Ok(())
-                        };
+                nir::visit::expressions_checked(&function.function, fuel, |expr, fuel| {
+                    let mut insert = |operation: &nir::effects::Operation,
+                                      ty: &Term|
+                     -> Result<(), CleanupInspectionError> {
+                        this.inspect_closed_type_description(ty, fuel)?;
+                        type_descriptions::spend(fuel, 1)?;
+                        for argument in &operation.arguments {
+                            this.inspect_closed_term_description(argument, fuel)?;
+                        }
+                        if signatures
+                            .get(operation)
+                            .is_some_and(|previous| previous != ty)
+                        {
+                            return Err(CleanupInspectionError(ErrorKind::InvalidCallPlan));
+                        }
+                        signatures
+                            .entry(operation.clone())
+                            .or_insert_with(|| ty.clone());
+                        Ok(())
+                    };
                     match &expr.kind {
                         K::EffectRequest {
                             operation,
@@ -89,13 +95,12 @@ impl Interpreter<'_> {
                         }
                         _ => {}
                     }
-                    Ok(())
-                })?;
+                    Ok::<(), CleanupInspectionError>(())
+                })
+                .map_err(|error| error.0)?;
             }
             Ok(())
-        })();
-        self.budget.steps -= (before - fuel) as u64;
-        checked.map_err(|_| self.failure(ErrorKind::InvalidCallPlan, None))?;
+        })?;
         let mut contexts = HashMap::new();
         for (operation, signature) in signatures {
             let Term::Function { parameters, result } = signature else {
@@ -363,20 +368,16 @@ impl<'a> Interpreter<'a> {
         &mut self,
         source: SourceRange,
     ) -> Result<Vec<&'a iir::cleanup::FunctionSchedule>, Error> {
-        let key = self
-            .cleanup_frame
-            .as_ref()
-            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
-        let work = key
-            .arguments
-            .iter()
-            .try_fold(1usize, |work, argument| {
-                work.checked_add(self.closed_term_description_work(argument)?)
-            })
-            .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
-        self.charge_preparation(work).map_err(|mut error| {
-            error.source = Some(source);
-            error
+        self.query_descriptions(Some(source), |this, fuel| {
+            let key = this
+                .cleanup_frame
+                .as_ref()
+                .ok_or(ErrorKind::InvalidCallPlan)?;
+            type_descriptions::spend(fuel, 1)?;
+            for argument in key.arguments.iter() {
+                this.inspect_closed_term_description(argument, fuel)?;
+            }
+            Ok(())
         })?;
         let count = self
             .cleanup_scopes
@@ -470,10 +471,7 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
     fn copy_type_work(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
-        let work = self
-            .closed_type_description_work(ty)
-            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
-        self.copy_work(work, source)
+        self.check_closed_type_description(ty, Some(source))
     }
     fn copy_invocation_type_work(
         &mut self,
@@ -501,20 +499,13 @@ impl<'a> Interpreter<'a> {
         arguments: &[Term],
         source: SourceRange,
     ) -> Result<(), Error> {
-        self.copy_work(arguments.len(), source)?;
-        for argument in arguments {
-            let work = scoped_term_value_work_with_evidence_in(
-                argument,
-                &self.normal_forms,
-                &self.abstract_type_parameters,
-                &self.abstract_value_parameters,
-                |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-                self.target,
-            )
-            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
-            self.copy_work(work, source)?;
-        }
-        Ok(())
+        self.query_descriptions(Some(source), |this, fuel| {
+            type_descriptions::spend(fuel, arguments.len())?;
+            for argument in arguments {
+                this.inspect_term_description(argument, fuel)?;
+            }
+            Ok(())
+        })
     }
     pub(super) fn copy_representation(
         &mut self,
@@ -1612,10 +1603,7 @@ impl<'a> Interpreter<'a> {
         for function in &schedule.functions {
             self.tick(None)?;
             for argument in function.instance.arguments.iter() {
-                let work = self
-                    .closed_term_description_work(argument)
-                    .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, None))?;
-                self.charge_preparation(work)?;
+                self.check_closed_term_description(argument, None)?;
             }
             scopes.entry(&function.instance).or_default().push(function);
             for site in &function.sites {
