@@ -2096,16 +2096,13 @@ impl Checker<'_, '_> {
                     })
                     .collect::<Result<_, _>>()?,
             };
-            let interface = requirement.interface_instance();
-            if self
-                .symbolic_interface_evidence(&requirement.subject, &interface)
-                .map_err(|e| error(span, e.to_string()))?
-            {
-                continue;
-            }
-            // This is an obligation, not method selection. The proposition
-            // solver retains scoped equality evidence while obtaining concrete
-            // implementation truth; raw head matching loses ordinary binders.
+            /*
+             * The proposition solver retains scoped equality evidence while
+             * obtaining implementation truth. This proves an obligation; it
+             * does not select a method body. Do not gate the query on a separate
+             * given lookup: an unresolved comparison with one caller premise
+             * cannot suppress independent implementation evidence.
+             */
             let assumptions = self.capability_assumptions();
             let outcome = crate::capabilities::World {
                 index: &self.implementation_index,

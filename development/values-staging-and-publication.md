@@ -1247,10 +1247,14 @@ Snapshot 的 owner 仍属于唯一 Protocol，两个 Protocol 即使来自同一
   contextual method classification 处失败。
 - 对本批五个 Rust 文件临时还原到基线 `1155bbce`，其余工作区保持不动，以相同
   测试入口只复测上述三项：`/tmp/luna-tools-uq7f8i42` 退出 101，三项均以相同位置
-  和诊断失败。随后逐字节恢复并核对本批源码；它们是未解决的基线缺口，未改测试预期。
+  和诊断失败。随后逐字节恢复并核对本批源码；它们在该迁移阶段仍是基线缺口，未改测试预期。
   本批相关检查去重共 921 项通过、3 项基线失败，未运行全量测试。
 - 五个修改的 Rust 文件通过 scoped rustfmt check，`/tmp/luna-tools-8e3fslsn`
   退出 0；`git diff --check` 通过。
+
+后续普通实参 trait 义务清理已修复 nested Type forwarding，原用例已直接通过，见
+[前提与独立证据](comptime-value-admission.md#普通实参-trait-义务不能以前提匹配作为门槛)。
+两项反射失败不在该修复范围内；上述日志仍只代表各自执行时的结果。
 
 以下保留先前键协议迁移中影响成本判据的对照，避免把预热差异误作值复制成本变化。
 工作目录 `/home/fin/luna`，以下参数接在

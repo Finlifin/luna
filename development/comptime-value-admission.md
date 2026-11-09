@@ -3426,6 +3426,7 @@ Qualification／invocation 迁移验证（工作目录 `/home/fin/luna`）：
   memoized_invocation_specializes_nested_type_forwarding -- --exact`，复现相同失败：
   `/tmp/luna-tools-hgbu7sb2/result.json`，退出 101。对照后逐字节恢复并核对开发源码；
   该基线不算本次通过或修复，也不调整用例预期。
+  这是当时的对照结果；该嵌套调用现已由下述普通实参 trait 义务修复。
 
 新回归覆盖嵌套深度失败后重试、失败原因顺序、非法前提、宽载荷预留失败后独立排除、
 调用者等式支持的封闭性，以及真实 sysroot 中多层 trait 约束经过 invocation 的失败
@@ -3452,7 +3453,55 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
 大预算运行的消耗不是最小成功阈值。域证明回归逐预算检查只能成功或返回 Budget，
 不能误报 Invalid／Unresolved，也不能增长余额，而非要求所有较小预算必须失败。
 
-当前尚未完成的边界：
+### 普通实参 trait 义务不能以前提匹配作为门槛
+
+`check_ordinary_capabilities` 已移除先调用 symbolic_interface_evidence、失败便
+提前退出的重复检查。完成普通参数替换后，义务直接交给现有 World.check_predicate；
+该入口在原调用者作用域内结合给定前提、继承关系与已验证的 implementation 证据。
+它只证明契约，不选择方法体，不产生 dispatch，也不把待证明义务加入调用者事实。
+
+具体反例：调用者有 `T :- Inspect`，主体分别转发 `leaf(T, value)` 和调用
+`leaf(u8, 7)`。前者可以使用给定证据；后者可以使用 `Inspect for u8`。
+把后一项强制解释为“先证明 T 等于 u8”会在 Type 域查询返回 UnvalidatedModel 时
+错误中断。独立实现证明允许完成该义务；缺少该证明时仍保留 Unknown 原因，不能
+把前提匹配未决当作不相等，也不能凭未知前提接受调用。
+
+真实 sysroot 回归覆盖普通 Type 参数与子句参数、runtime 与 comptime 调用、返回值
+的真假分支、缺少实现后重新编译、继承前提与独立具体实现。既有 nested Type
+forwarding 用例保持原预期，现已进入 invocation 并通过。此修复不改变 NF、值缓存
+资格或 PTC 模型语义；方法来源查询与其他前提探测入口仍须分别审计。
+
+验证工作目录 `/home/fin/luna`，统一使用 `python3 -B development/check.py
+--timeout 900 -- test ...`，完整命令保存在 result.json：
+
+- `/tmp/luna-tools-8_m5zi4w/result.json`：修复前单测退出 101；
+  `/tmp/luna-tools-i8x3u1hn/result.json`：修复后同一 nested Type forwarding 单测
+  退出 0，不再跳过该用例。
+- `/tmp/luna-tools-62mycjb8/result.json`：普通／scoped／memoized 等关联组退出
+  101，101 项通过，5 项失败；其中新 sysroot 回归 4 项均通过。
+- `/tmp/luna-tools-9vj89tn4/result.json`：只将本次 interfaces.rs 改动临时替换为
+  HEAD 内容，其余工作区保持不动，五项失败与原 nested Type forwarding 均复现，
+  退出 101。对照后按保存的字节与摘要恢复本次源码。
+- `/tmp/luna-tools-xz6ptklx/result.json`：capabilities、dynamic_trait_clauses、
+  trait_query_failures、predicate_calls、ordinary_clause_collectors 组退出 101，
+  107 项通过，5 项失败，2 项沿用已有 ignore。这五项均报 StepsExhausted：
+  四项 required collector／恢复用例，以及 source_selection_is_demanded_and_concrete_methods_cannot_bypass_the_host。
+  用同样方式只还原本次生产文件，对照 `/tmp/luna-tools-8np01l3d/result.json`
+  退出 101，五项以相同位置与诊断复现；随后恢复本次源码。
+
+本阶段去重 208 项通过，10 项基线失败，2 项原有 ignore；未执行全量回归。
+StepsExhausted 路径仍待成本与准备复用审计，不通过放大默认额度隐藏失败。
+两个修改／新增的 Rust 文件通过 scoped rustfmt check，
+`/tmp/luna-tools-egnvdarn/result.json` 退出 0；git diff --check 通过。
+
+五项仍存在的基线问题：ordinary_capability_dependencies_ignore_conjunct_and_bound_order
+在关联类型约束处报 UnvalidatedModel；comptime_given_premises_discharge_obligations_without_inventing_dispatch
+实际报 TypeContractUnresolved，而旧断言要求 InvalidCallPlan；ordinary_type_list_annotation_inputs_report_the_phase_boundary
+实际报 required comptime input 不可用；ordinary_type_inputs_do_not_hide_selective_memory_writes
+与 ordinary_type_memory_summaries_forward_across_different_input_positions 在程序后置条件
+证明处失败。没有改动这些预期或用户的内存验证工作区修改，不能将它们计为本次修复。
+
+### 当前尚未完成的边界
 
 - fresh phase pass 仍使用自己的默认额度，VM 随后再做结构检查；构造失败的
   for_comptime_in_budget 仍保守保留全部 reservation，尚非精确失败扣款。

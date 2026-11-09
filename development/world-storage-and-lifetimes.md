@@ -187,10 +187,12 @@ required 目录迁移阶段的检查工作目录 `/home/fin/luna`，统一使用
 
 先前可复用调用迁移的证据仍在 `/tmp/luna-tools-8saue3f2/result.json`、
 `/tmp/luna-tools-rez2nnq6/result.json` 和 `/tmp/luna-tools-55y018wp/result.json`，
-不计作本轮执行结果。已知 `memoized_invocation_specializes_nested_type_forwarding`
-前端失败本轮未重跑：此前 `/tmp/luna-tools-p1o2diml/result.json` 退出 101，在
+不计作本轮执行结果。`memoized_invocation_specializes_nested_type_forwarding`
+前端失败在该迁移阶段未重跑：此前 `/tmp/luna-tools-p1o2diml/result.json` 退出 101，在
 `1465..1484` 报 `Type domain equality: UnvalidatedModel`，与独立基线
-`/tmp/luna-tools-uq7f8i42/result.json` 一致；本轮不声称修复它。
+`/tmp/luna-tools-uq7f8i42/result.json` 一致。后续已移除普通实参 trait 义务之前的
+重复前提门槛并通过原用例，见[前提与独立证据](comptime-value-admission.md#普通实参-trait-义务不能以前提匹配作为门槛)；
+该修复不归入源码所有权迁移的成绩。
 
 ### 1.3 Driver 资源协议的源码所有权
 
