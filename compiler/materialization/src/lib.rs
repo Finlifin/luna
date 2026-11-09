@@ -8,10 +8,10 @@ mod captured_templates;
 mod conditional_calls;
 mod dead_tails;
 mod input_admission;
-mod method_selection;
 mod mutable_callbacks;
 mod query_budget;
-pub use method_selection::{SourceMethodQueries, resolve_method_for_invocation};
+mod source_queries;
+pub use source_queries::{SourceInvocationQueries, resolve_method_for_invocation};
 mod recursive_factories;
 mod staged;
 mod template_factories;
@@ -222,7 +222,7 @@ pub fn resolve_method_identity_in_context(
     assumptions: &[n::TraitRequirement],
     fuel: &mut usize,
 ) -> Result<n::MethodInstance, nir::NominalAdmissionError> {
-    SourceMethodQueries::new(package, context, assumptions).identity(callee, fuel)
+    SourceInvocationQueries::new(package, context, assumptions).identity(callee, fuel)
 }
 
 /// Normalize annotations on a private expansion candidate without invoking

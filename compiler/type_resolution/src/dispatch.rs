@@ -129,6 +129,18 @@ impl<'a> DeclarationWorld<'a> {
     ) -> Option<&'a n::RuntimeFunctionIdentity> {
         self.runtime_callables.get(&declaration).copied()
     }
+    /// A query view of this exact source, declaration index and premise scope.
+    /// It carries no executable contracts or persistent proof authority.
+    pub fn capabilities(&self) -> crate::capabilities::World<'_> {
+        crate::capabilities::World {
+            index: &self.index,
+            implementations: &self.package.implementations,
+            traits: &self.package.traits,
+            assumptions: &self.assumptions,
+            context: &self.context,
+        }
+    }
+
     pub fn index(&self) -> &Index {
         &self.index
     }

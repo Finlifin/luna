@@ -1,6 +1,6 @@
 //! Private required invocation during concrete staged-input preparation.
 use super::*;
-use comptime_interpretor::{ClosureIdentity, ContractOutcome, Interpreter, Value};
+use comptime_interpretor::{ClosureIdentity, Interpreter, Value};
 
 // Reuse checked code and metadata, never an interpreter, environment or result.
 // The scratch root and dispatch table are cleared between independent invocations.
@@ -137,40 +137,22 @@ impl Builder<'_> {
         // The checked expression is source code, not a concrete IIR closure.
         // Resolve each demanded member in the same immutable declaration world;
         // rebuilding every concrete implementation here duplicates outer work.
+        let source_queries =
+            SourceInvocationQueries::new(snapshot, self.world.context(), self.world.assumptions());
         let solver = |predicate: &n::TypePredicate, remaining: &mut u64| {
-            let world = crate::capabilities::World {
-                index: self.world.index(),
-                implementations: &snapshot.implementations,
-                traits: &snapshot.traits,
-                assumptions: self.world.assumptions(),
-                context: self.world.context(),
-            };
-            let before = usize::try_from(*remaining).unwrap_or(usize::MAX);
-            let mut fuel = before;
-            let result = query_budget::run(&mut fuel, self.budget, |budget| {
-                world.check_predicate_metered(predicate, budget)
-            });
-            *remaining -= (before - fuel) as u64;
-            match result {
-                Ok(crate::ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,
-                Ok(crate::ptc::Outcome::NotEntailed(_)) => ContractOutcome::Rejected,
-                _ => ContractOutcome::Unknown,
-            }
+            source_queries.check(
+                predicate,
+                Budget {
+                    steps: usize::MAX,
+                    ..self.budget
+                },
+                remaining,
+            )
         };
-        let associated_resolver = |access: &n::Expr, remaining: &mut u64| {
-            let world = crate::capabilities::World {
-                index: self.world.index(),
-                implementations: &snapshot.implementations,
-                traits: &snapshot.traits,
-                assumptions: self.world.assumptions(),
-                context: self.world.context(),
-            };
-            resolve_associated_value_for_invocation(&world, access, remaining)
-        };
-        let method_queries =
-            SourceMethodQueries::new(snapshot, self.world.context(), self.world.assumptions());
+        let associated_resolver =
+            |access: &n::Expr, remaining: &mut u64| source_queries.associated(access, remaining);
         let method_resolver =
-            |callee: &n::Expr, remaining: &mut u64| method_queries.resolve(callee, remaining);
+            |callee: &n::Expr, remaining: &mut u64| source_queries.resolve(callee, remaining);
         let mut invocation_budget = comptime_interpretor::Budget {
             steps: std::mem::take(&mut self.fuel) as u64,
             depth: 128,
@@ -194,7 +176,7 @@ impl Builder<'_> {
         self.fuel = usize::try_from(interpreter.remaining_steps()).unwrap_or(usize::MAX);
         let value = value.map_err(|error| format!("staged comptime invocation: {error}"))?;
         drop(interpreter);
-        drop(method_queries);
+        drop(source_queries);
         self.freeze_staged_value(value, &expression.ty, expression.source, 0)
     }
 

@@ -12,6 +12,27 @@ pub(super) fn run<T>(fuel: &mut usize, limits: Budget, query: impl FnOnce(&mut B
     result
 }
 
+/// Reserve before entering host code, including lazy metadata construction.
+/// Failed queries settle actual work; unwinding cannot restore the reservation.
+/// A per-query step limit does not discard the caller's unspent outer allowance.
+pub(super) fn invocation<T>(
+    remaining: &mut u64,
+    limits: Budget,
+    query: impl FnOnce(&mut Budget) -> T,
+) -> T {
+    let reserved = std::mem::take(remaining);
+    let granted = limits
+        .steps
+        .min(usize::try_from(reserved).unwrap_or(usize::MAX));
+    let mut budget = Budget {
+        steps: granted,
+        ..limits
+    };
+    let result = query(&mut budget);
+    *remaining = reserved - (granted - granted.min(budget.steps)) as u64;
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

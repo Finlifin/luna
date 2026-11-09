@@ -1081,10 +1081,11 @@ invocation、缓存 invocation、键方法使用同一个 demand method resolver
 验证。该复用不缓存类型命题答案、方法选择结果或用户 Eq／Hash 的执行结果。
 传统 closed-table 构造与显式 dispatch 构建目前仍供参考执行／集成检查使用，
 没有因三个生产入口迁移就宣布整个 materialization 子系统已退役。
-方法服务进一步采用[调用内查询状态](type-models-and-theory-evidence.md#调用内的方法查询状态)，
-同一次 invocation 不再逐个方法重建 declaration world。driver 准备阶段的独立预算、
-type／associated／method 服务之间的索引共享及跨调用稳定复用仍待继续合并；
-不能把执行闭包预选的删除或局部复用扩大为全部准备成本已经消除。
+三种服务共同使用[调用内声明查询状态](type-models-and-theory-evidence.md#调用内的统一声明查询状态)，
+同一次 invocation 的类型证明、方法及关联项查询使用同一份惰性构造的声明索引。
+公开 invocation 的额外索引已删除；required 发布器、资源协议、缓存键准入等外层
+准备仍有独立索引与预算。跨调用稳定复用和 owning snapshot 迁移仍待完成。
+
 
 每次操作仍构造新鲜 VM，安装原类型证明、方法／关联值和 Copy 证据服务，再检查本次
 输入与执行协议正文。CodeSession 仅复用源索引、已准备主体和字节码，不复用用户

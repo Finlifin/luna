@@ -176,15 +176,6 @@ fn execute_prepared(
     let preparation_budget = elaboration::ptc::Budget::default();
     let context = elaboration::ptc::Context::from_package(package)
         .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
-    let index = crate::implementation_world::index(&package, preparation_budget)
-        .map_err(|error| format!("invocation implementation index: {error}"))?;
-    let world = elaboration::capabilities::World {
-        index: &index,
-        implementations: &package.implementations,
-        traits: &package.traits,
-        assumptions: &[],
-        context: &context,
-    };
     let resources = protocols
         .map(|(copy, drop)| {
             crate::resources::ProtocolContext::selected(
@@ -219,18 +210,16 @@ fn execute_prepared(
         *copy_failure.borrow_mut() = evidence.err();
         allowed
     };
+    let source_queries =
+        elaboration::materialization::SourceInvocationQueries::new(package, &context, &[]);
     let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
-        crate::implementation_world::solve_metered(&world, predicate, preparation_budget, remaining)
+        source_queries.check(predicate, preparation_budget, remaining)
     };
     let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
-        elaboration::materialization::resolve_associated_value_for_invocation(
-            &world, access, remaining,
-        )
+        source_queries.associated(access, remaining)
     };
-    let method_queries =
-        elaboration::materialization::SourceMethodQueries::new(package, &context, &[]);
     let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
-        method_queries.resolve(callee, remaining)
+        source_queries.resolve(callee, remaining)
     };
     let mut budget = Budget {
         steps: fuel,

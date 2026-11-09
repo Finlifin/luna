@@ -872,3 +872,46 @@ fn source_inherent_queries_and_cached_type_views_keep_failure_boundaries() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn production_invocations_combine_type_method_and_associated_queries() {
+    let source = "pure comptime trait Service {
+            pure comptime fn accept() -> bool;
+            assoc enabled: bool;
+        }
+        comptime impl Service for bool {
+            pure comptime fn accept() -> bool { true }
+            assoc enabled: bool = true;
+        }
+        pure comptime fn checked(comptime T: Type) -> bool
+        where requires T :- Service
+        {
+            T.as(Service).accept() and T.as(Service).enabled
+        }
+        pure comptime fn inspect_query_scope() -> bool { checked(bool) }
+        fn run() -> bool {
+            const accepted = inspect_query_scope();
+            accepted
+        }";
+    // Required evaluation and the public driver consume the same source and
+    // real sysroot. The public code session survives failure, never its VM.
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let package = std::sync::Arc::new(sysroot::compile(source).unwrap());
+    assert_eq!(
+        luna::invocation::invoke(&package, "inspect_query_scope", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+    let mut prepared =
+        luna::invocation::PreparedInvocation::new(package, "inspect_query_scope", None).unwrap();
+    for _ in 0..2 {
+        assert!(prepared.invoke(1).is_err());
+        assert_eq!(prepared.invoke(1_000_000).unwrap(), Value::Bool(true));
+        assert!(prepared.last_stats().bytecode_invocations > 0);
+    }
+    let changed = source.replace("assoc enabled: bool = true", "assoc enabled: bool = false");
+    let changed = std::sync::Arc::new(sysroot::compile(&changed).unwrap());
+    let mut other =
+        luna::invocation::PreparedInvocation::new(changed, "inspect_query_scope", None).unwrap();
+    assert_eq!(other.invoke(1_000_000).unwrap(), Value::Bool(false));
+    assert_eq!(prepared.invoke(1_000_000).unwrap(), Value::Bool(true));
+}

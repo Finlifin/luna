@@ -295,6 +295,11 @@ impl PreparedRequired {
             }
             Some(context)
         };
+        let source_queries = crate::materialization::SourceInvocationQueries::new(
+            package,
+            invocation_type_context,
+            &invocation_assumptions,
+        );
         let type_solver = |predicate: &n::TypePredicate, remaining: &mut u64| {
             use comptime_interpretor::ContractOutcome;
             let restored;
@@ -311,7 +316,12 @@ impl PreparedRequired {
                 restored = value;
                 (&restored, scoped_context.as_ref().unwrap())
             };
-            world.solve(&invocation_assumptions, proof_context, predicate, remaining)
+            source_queries.check_in_context(
+                predicate,
+                proof_context,
+                crate::ptc::Budget::default(),
+                remaining,
+            )
         };
         let copy_failure = std::cell::RefCell::new(None::<String>);
         let pointer_copy = |ty: &Term, remaining: &mut u64| {
@@ -345,19 +355,10 @@ impl PreparedRequired {
             Some(reason) => format!("{message}; pointer Copy evidence: {reason}"),
             None => message,
         };
-        let associated_resolver = |access: &n::Expr, remaining: &mut u64| {
-            let world = world.capabilities(&invocation_assumptions, invocation_type_context);
-            crate::materialization::resolve_associated_value_for_invocation(
-                &world, access, remaining,
-            )
-        };
-        let method_queries = crate::materialization::SourceMethodQueries::new(
-            &package,
-            invocation_type_context,
-            &invocation_assumptions,
-        );
+        let associated_resolver =
+            |access: &n::Expr, remaining: &mut u64| source_queries.associated(access, remaining);
         let method_resolver =
-            |callee: &n::Expr, remaining: &mut u64| method_queries.resolve(callee, remaining);
+            |callee: &n::Expr, remaining: &mut u64| source_queries.resolve(callee, remaining);
         if result_type == p(P::Type) {
             // Required Type computations use the same committed scheduler as
             // saved residual calls. Source capture has already excluded any

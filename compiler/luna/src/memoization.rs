@@ -579,21 +579,19 @@ fn evaluate(
     context: &mut Context,
     cache_result: bool,
 ) -> Result<(Value, bool), Error<String>> {
-    let solver = |predicate: &TypePredicate, remaining: &mut u64| {
-        crate::implementation_world::solve_metered(world, predicate, budget, remaining)
-    };
-    let method_queries = elaboration::materialization::SourceMethodQueries::new(
+    let source_queries = elaboration::materialization::SourceInvocationQueries::new(
         package,
         world.context,
         world.assumptions,
     );
+    let solver = |predicate: &TypePredicate, remaining: &mut u64| {
+        source_queries.check(predicate, budget, remaining)
+    };
     let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
-        method_queries.resolve(callee, remaining)
+        source_queries.resolve(callee, remaining)
     };
     let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
-        elaboration::materialization::resolve_associated_value_for_invocation(
-            world, access, remaining,
-        )
+        source_queries.associated(access, remaining)
     };
     let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
     let mut vm_budget = Budget { steps, depth: 128 };

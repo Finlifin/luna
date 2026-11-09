@@ -205,8 +205,13 @@ impl Binding {
             traits: &self.package.traits,
             assumptions: &[],
         };
+        let source_queries = elaboration::materialization::SourceInvocationQueries::new(
+            &self.package,
+            &self.context,
+            &[],
+        );
         let solver = |predicate: &TypePredicate, remaining: &mut u64| {
-            crate::implementation_world::solve_metered(&world, predicate, self.budget, remaining)
+            source_queries.check(predicate, self.budget, remaining)
         };
         let copy_failure = std::cell::RefCell::new(None::<String>);
         let pointer_copy = |ty: &Term, remaining: &mut u64| {
@@ -234,18 +239,11 @@ impl Binding {
         };
         // Ordinary Type inputs become concrete only inside the invocation.
         // Resolve their method calls against this protocol's frozen source world.
-        let method_queries = elaboration::materialization::SourceMethodQueries::new(
-            &self.package,
-            &self.context,
-            &[],
-        );
         let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
-            method_queries.resolve(callee, remaining)
+            source_queries.resolve(callee, remaining)
         };
         let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
-            elaboration::materialization::resolve_associated_value_for_invocation(
-                &world, access, remaining,
-            )
+            source_queries.associated(access, remaining)
         };
         let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
         let mut allowance = Budget { steps, depth: 128 };
