@@ -258,10 +258,9 @@ impl Host {
 fn await_definition(session: &mut Session<'_, '_, '_>) {
     for _ in 0..32 {
         assert!(matches!(session.poll().unwrap(), Poll::Pending));
-        if matches!(
-            session.request,
-            Some(Request::Bytecode(bytecode::Preparation::Definition { .. }))
-        ) {
+        if matches!(&session.request, Some(Request::Bytecode(request))
+            if request.to_string().contains("(prepare-definition-build "))
+        {
             assert!(
                 session
                     .to_string()
@@ -368,53 +367,47 @@ fn definition_host_failure_and_unwind_restore_the_session_before_retry() {
 }
 
 #[test]
-fn definition_preparation_rejects_foreign_stale_and_replayed_requests() {
+fn definition_preparation_rejects_other_activations_of_the_same_code() {
     let package = world();
     let host = Host::new(Failure::None);
     let newtype = |request: &NewtypeBuildRequest, _: &mut u64| host.newtype(request);
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
         .with_newtype_builder(&newtype);
-    let (code, mut environment) = fixture(BuildKind::Newtype);
-    let mut frame = vm.start_frame(&code, &mut environment).unwrap();
+    let (code, environment) = fixture(BuildKind::Newtype);
+    let mut frame = vm.start_frame(&code, &mut environment.clone()).unwrap();
+    let mut foreign = vm.start_frame(&code, &mut environment.clone()).unwrap();
     let bytecode::Progress::Prepare(request) = vm.resume_frame(&mut frame, 100_000).unwrap() else {
         panic!("definition preparation")
     };
-    let bytecode::Preparation::Definition { instruction, .. } = &request else {
-        panic!("definition request")
+    let bytecode::Progress::Prepare(foreign_request) =
+        vm.resume_frame(&mut foreign, 100_000).unwrap()
+    else {
+        panic!("foreign definition preparation")
     };
-    let instruction = *instruction;
-    let (foreign, _) = fixture(BuildKind::Newtype);
-    for (code, instruction) in [(foreign, instruction), (code.clone(), instruction + 1)] {
-        assert_eq!(
-            vm.prepare_bytecode_request(
-                &mut frame,
-                bytecode::Preparation::Definition { code, instruction }
-            )
+    let before = frame.to_string();
+    assert_eq!(
+        vm.prepare_bytecode_request(&mut frame, foreign_request)
             .unwrap_err()
             .kind,
-            ErrorKind::InvalidControlFlow
-        );
-    }
+        ErrorKind::InvalidControlFlow
+    );
+    assert_eq!(
+        frame.to_string(),
+        before,
+        "reject before consuming operands or wait state"
+    );
     assert_eq!(host.preparations.get(), 0);
     vm.prepare_bytecode_request(&mut frame, request).unwrap();
     assert_eq!(host.preparations.get(), 1);
     assert_eq!(host.commits.get(), 1);
-    assert_eq!(
-        vm.prepare_bytecode_request(
-            &mut frame,
-            bytecode::Preparation::Definition { code, instruction }
-        )
-        .unwrap_err()
-        .kind,
-        ErrorKind::InvalidControlFlow
-    );
     assert!(matches!(
         Session::fragment(&mut vm, &mut frame).run().unwrap(),
         Some(Flow::Value(Value::Type(_)))
     ));
     assert_eq!(host.preparations.get(), 1);
     assert_eq!(host.commits.get(), 1);
+    foreign.cancel();
 }
 
 #[test]

@@ -379,3 +379,130 @@ fn failed_method_preparation_unwinds_the_caller_and_does_not_cache_a_response() 
         assert_eq!(calls.get(), 2);
     }
 }
+
+#[test]
+fn method_requests_reject_other_activations_before_entering_the_resolver() {
+    for direct in [false, true] {
+        let (package, _) = fixture(direct);
+        let code =
+            Arc::new(comptime_compiler::compile(&package.functions[0].body, &mut 10000).unwrap());
+        let calls = Cell::new(0);
+        let resolver = |_: &Expr, _: &mut u64| {
+            calls.set(calls.get() + 1);
+            Ok(MethodInstance {
+                member: id(3),
+                body: id(10),
+                arguments: vec![],
+                method_arguments: vec![],
+            })
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_method_resolver(&resolver);
+        let mut frame = vm.start_frame(&code, &mut Environment::new()).unwrap();
+        let mut foreign = vm.start_frame(&code, &mut Environment::new()).unwrap();
+        let bytecode::Progress::Prepare(request) = vm.resume_frame(&mut frame, 1000).unwrap()
+        else {
+            panic!("expected method preparation");
+        };
+        let bytecode::Progress::Prepare(foreign_request) =
+            vm.resume_frame(&mut foreign, 1000).unwrap()
+        else {
+            panic!("expected foreign method preparation");
+        };
+        let before = frame.to_string();
+        assert_eq!(
+            vm.prepare_bytecode_request(&mut frame, foreign_request)
+                .unwrap_err()
+                .kind,
+            ErrorKind::InvalidControlFlow
+        );
+        assert_eq!(frame.to_string(), before);
+        assert_eq!(calls.get(), 0);
+        vm.prepare_bytecode_request(&mut frame, request).unwrap();
+        assert_eq!(calls.get(), 1);
+        let Some(Flow::Value(value)) = Session::fragment(&mut vm, &mut frame).run().unwrap() else {
+            panic!("expected result");
+        };
+        assert_eq!(
+            value,
+            if direct {
+                Value::Bool(true)
+            } else {
+                Value::Function(id(10))
+            }
+        );
+        assert_eq!(calls.get(), 1);
+        foreign.cancel();
+    }
+}
+
+#[test]
+fn method_host_errors_and_unwinds_retire_the_frame_before_session_cleanup() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    for direct in [false, true] {
+        for unwind in [false, true] {
+            let (package, _) = fixture(direct);
+            let code = Arc::new(
+                comptime_compiler::compile(&package.functions[0].body, &mut 10000).unwrap(),
+            );
+            let calls = Cell::new(0);
+            let resolver = |_: &Expr, _: &mut u64| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    if unwind {
+                        panic!("host interrupted during preparation");
+                    }
+                    return Err(Error {
+                        kind: ErrorKind::Type,
+                        source: None,
+                    });
+                }
+                Ok(MethodInstance {
+                    member: id(3),
+                    body: id(10),
+                    arguments: vec![],
+                    method_arguments: vec![],
+                })
+            };
+            let mut vm = Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .with_method_resolver(&resolver);
+            let mut frame = vm.start_frame(&code, &mut Environment::new()).unwrap();
+            let bytecode::Progress::Prepare(request) = vm.resume_frame(&mut frame, 1000).unwrap()
+            else {
+                panic!("expected method preparation");
+            };
+            // Deliberately bypass Session::drop: the request boundary must retire
+            // a failed activation even before an enclosing driver cleans up.
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                vm.prepare_bytecode_request(&mut frame, request)
+            }));
+            if unwind {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap().unwrap_err().kind, ErrorKind::Type);
+            }
+            assert_eq!(calls.get(), 1);
+            assert_eq!(
+                vm.resume_frame(&mut frame, 1000).unwrap_err().kind,
+                ErrorKind::InvalidControlFlow
+            );
+            vm.budget = Budget::default();
+            let mut fresh = vm.start_frame(&code, &mut Environment::new()).unwrap();
+            let Some(Flow::Value(value)) = Session::fragment(&mut vm, &mut fresh).run().unwrap()
+            else {
+                panic!("expected fresh result");
+            };
+            assert_eq!(
+                value,
+                if direct {
+                    Value::Bool(true)
+                } else {
+                    Value::Function(id(10))
+                }
+            );
+            assert_eq!(calls.get(), 2);
+        }
+    }
+}

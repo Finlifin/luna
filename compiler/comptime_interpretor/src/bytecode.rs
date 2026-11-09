@@ -14,6 +14,7 @@ pub(super) struct Frame {
     terminal: bool,
     interface: Option<Box<interface::InterfaceCall>>,
     waiting: Option<Waiting>,
+    preparations: preparation::Authority,
     calls: BTreeMap<usize, PendingCall>,
     newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
     error_conversions: BTreeMap<usize, comptime_compiler::ErrorConversion>,
@@ -122,7 +123,7 @@ impl Frame {
 }
 
 enum Waiting {
-    Preparation,
+    Preparation(preparation::Ticket),
     Interface,
     Call(usize),
     Default {
@@ -243,7 +244,7 @@ impl fmt::Display for Frame {
         }
         write!(f, ") (waiting")?;
         match &self.waiting {
-            Some(Waiting::Preparation) => write!(f, " (preparation)")?,
+            Some(Waiting::Preparation(ticket)) => write!(f, " (preparation {ticket})")?,
             Some(Waiting::Interface) => write!(f, " (interface)")?,
             Some(Waiting::Plan {
                 destination,
@@ -1080,6 +1081,7 @@ impl<'a> Interpreter<'a> {
             terminal: false,
             interface: None,
             waiting: None,
+            preparations: preparation::Authority::default(),
             calls: BTreeMap::new(),
             newtype_conversions: BTreeMap::new(),
             error_conversions: BTreeMap::new(),
@@ -1210,11 +1212,10 @@ impl<'a> Interpreter<'a> {
                         // the implementation here would erase its contract and defaults.
                         frame.instance_methods.insert(*destination, instance);
                     } else {
-                        frame.waiting = Some(Waiting::Preparation);
-                        return Ok(Progress::Prepare(Preparation::Method {
+                        return frame.request_preparation(preparation::Operation::Method {
                             destination: *destination,
                             method: Arc::new(instance),
-                        }));
+                        });
                     }
                 }
                 Op::PreparePredicate { valid } => {
@@ -1278,11 +1279,10 @@ impl<'a> Interpreter<'a> {
                     // The operand has completed, but checked host publication
                     // belongs to the session. Retain its value in this frame
                     // until the owned request is serviced or cancelled.
-                    frame.waiting = Some(Waiting::Preparation);
-                    return Ok(Progress::Prepare(Preparation::Definition {
+                    return frame.request_preparation(preparation::Operation::Definition {
                         code: code.clone(),
                         instruction: frame.pc - 1,
-                    }));
+                    });
                 }
                 Op::CheckObservation(observation) => self.check_observation(observation, source)?,
                 Op::Observe {
@@ -2371,12 +2371,11 @@ impl<'a> Interpreter<'a> {
 
                 Op::BeginCall { callee, .. } => {
                     let dynamic_method = frame.instance_methods.remove(callee);
-                    frame.waiting = Some(Waiting::Preparation);
-                    return Ok(Progress::Prepare(Preparation::Call {
+                    return frame.request_preparation(preparation::Operation::Call {
                         code: code.clone(),
                         instruction: frame.pc - 1,
                         dynamic_method,
-                    }));
+                    });
                 }
                 Op::CheckCallArgument {
                     call,
@@ -2608,11 +2607,10 @@ impl<'a> Interpreter<'a> {
                     destination,
                     method,
                 } => {
-                    frame.waiting = Some(Waiting::Preparation);
-                    return Ok(Progress::Prepare(Preparation::Method {
+                    return frame.request_preparation(preparation::Operation::Method {
                         destination: *destination,
                         method: method.clone(),
-                    }));
+                    });
                 }
                 Op::EnterScope => frame.scopes.push(PatternScope::default()),
                 Op::LeaveScope => frame.leave_scope()?,

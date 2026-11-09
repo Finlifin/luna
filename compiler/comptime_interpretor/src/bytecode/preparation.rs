@@ -1,8 +1,67 @@
 //! Owned host preparation, driven between bytecode slices by the execution session.
 use super::*;
 
+// Allocation identity belongs only to this in-memory execution protocol. It is
+// never a Flurry identity, a cache key, or part of a persistent dump.
+#[derive(Default)]
+pub(super) struct Authority {
+    owner: Option<Arc<()>>,
+    generation: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Ticket {
+    owner: Arc<()>,
+    generation: u64,
+}
+
+impl Ticket {
+    fn matches(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner) && self.generation == other.generation
+    }
+}
+
+impl fmt::Display for Ticket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(generation {})", self.generation)
+    }
+}
+
+impl Authority {
+    fn issue(&mut self) -> Result<Ticket, Error> {
+        self.generation = self.generation.checked_add(1).ok_or(Error {
+            kind: ErrorKind::InvalidControlFlow,
+            source: None,
+        })?;
+        Ok(Ticket {
+            owner: self.owner.get_or_insert_with(|| Arc::new(())).clone(),
+            generation: self.generation,
+        })
+    }
+}
+
 #[derive(Debug)]
-pub(crate) enum Preparation {
+pub(crate) struct Preparation {
+    ticket: Ticket,
+    operation: Operation,
+}
+
+impl Frame {
+    pub(super) fn request_preparation(&mut self, operation: Operation) -> Result<Progress, Error> {
+        if self.terminal || self.waiting.is_some() {
+            return Err(Error {
+                kind: ErrorKind::InvalidControlFlow,
+                source: None,
+            });
+        }
+        let ticket = self.preparations.issue()?;
+        self.waiting = Some(Waiting::Preparation(ticket.clone()));
+        Ok(Progress::Prepare(Preparation { ticket, operation }))
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum Operation {
     Method {
         destination: usize,
         method: Arc<comptime_compiler::methods::Method>,
@@ -19,6 +78,14 @@ pub(crate) enum Preparation {
 }
 
 impl fmt::Display for Preparation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(preparation-request {} ", self.ticket)?;
+        self.operation.fmt(f)?;
+        f.write_str(")")
+    }
+}
+
+impl fmt::Display for Operation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Definition { instruction, .. } => {
@@ -54,11 +121,18 @@ impl Interpreter<'_> {
         frame: &mut Frame,
         request: Preparation,
     ) -> Result<(), Error> {
-        if frame.terminal || !matches!(frame.waiting, Some(Waiting::Preparation)) {
+        if frame.terminal
+            || !matches!(&frame.waiting, Some(Waiting::Preparation(ticket))
+                if ticket.matches(&request.ticket))
+        {
             return Err(self.failure(ErrorKind::InvalidControlFlow, None));
         }
-        match request {
-            Preparation::Definition { code, instruction } => {
+        // Claim before touching operands or calling the host. Errors and unwinds
+        // leave this activation terminal; retry requires a fresh execution frame.
+        frame.waiting = None;
+        frame.terminal = true;
+        match request.operation {
+            Operation::Definition { code, instruction } => {
                 if !Arc::ptr_eq(&frame.code, &code) || frame.pc.checked_sub(1) != Some(instruction)
                 {
                     return Err(self.failure(ErrorKind::InvalidControlFlow, None));
@@ -83,14 +157,14 @@ impl Interpreter<'_> {
                     instruction.source,
                 )?);
             }
-            Preparation::Method {
+            Operation::Method {
                 destination,
                 method,
             } => {
                 let value = self.bytecode_trait_method(method.view(), false)?;
                 frame.slots[destination] = Some(value);
             }
-            Preparation::Call {
+            Operation::Call {
                 code,
                 instruction,
                 dynamic_method,
@@ -106,7 +180,7 @@ impl Interpreter<'_> {
                 )?;
             }
         }
-        frame.waiting = None;
+        frame.terminal = false;
         Ok(())
     }
 
@@ -202,3 +276,6 @@ impl Interpreter<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

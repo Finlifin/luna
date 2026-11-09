@@ -366,7 +366,8 @@ Rust 控制流下的主动放弃与 Drop，不宣称进程崩溃或任意 panic 
 
 这里的 `Preparation` 是内部驱动工作，不是已验证的外部 HostRequest。其中的域观察、
 resolver 和函数实例准入仍同步执行；此处未承诺这些操作内部的暂停／恢复，也未完成
-前端 region、跨 world 响应或独立请求身份协议。树解释继续使用原来的同步选择服务。
+前端 region、跨 world 响应或对外请求身份协议。内部请求现在按下述帧归属与动态序号
+检查；树解释继续使用原来的同步选择服务。
 
 验证工作目录 `/home/fin/luna`：
 
@@ -382,16 +383,17 @@ resolver 和函数实例准入仍同步执行；此处未承诺这些操作内�
 ### 已接通：definition builder 在操作数完成后交出驱动请求
 
 struct／enum／newtype 的 `BuildDefinition` 不再在字节码片段中直接进入宿主。
-阶段与结果类型检查仍先于操作数求值；操作数完成后，指令推进 PC，把 owning
-`Preparation::Definition` 交给 Session。描述符值留在原帧的寄存器中，下一次驱动
-转换才取出它并调用原有 builder 服务。类型描述检查、宿主额度交接、返回定义与请求
+阶段与结果类型检查仍先于操作数求值；操作数完成后，指令推进 PC，把持有 definition
+操作的 `Preparation` 交给 Session。描述符值留在原帧的寄存器中，下一次驱动转换才
+取出它并调用原有 builder 服务。类型描述检查、宿主额度交接、返回定义与请求
 一致性、候选安装及 commit 仍走既有受检路径，没有另建发布旁路。
 
 因此取消这个暂停点可以保留已经发生的操作数写入，同时不进入宿主 prepare 或
 commit；恢复不会重新求值描述符。Session 请求持有代码对象与指令位置，消费时
-核对代码所有者、当前位置、操作种类和等待状态。已经交付、错误位置或另一代码
-对象的命令不能再次发布定义。请求 dump 使用 S-expression，显示 definition
-准备及对应指令位置。当前请求只由持有父帧的内部会话路由，不向外部提交者开放。
+除核对当前位置、操作种类外，统一检查下述帧归属与动态序号。已经交付、错误位置、
+另一代码对象或共享代码的另一帧的命令都不能再次发布定义。请求 dump 使用
+S-expression，显示动态序号、definition 准备及对应指令位置。当前请求只由持有
+父帧的内部会话路由，不向外部提交者开放。
 
 这是现有生产 builder 接入内部驱动的边界，不是上文的完整 HostRequest/response
 协议。prepare、接纳与 commit 内部仍同步执行；尚无 session/activation/动态序号
@@ -418,6 +420,59 @@ commit；恢复不会重新求值描述符。Session 请求持有代码对象与
   缺口未在本次修复，也没有改写其预期。
 - 四个修改 Rust 文件的 rustfmt 检查：`/tmp/luna-tools-lbclzdfh/result.json`，退出 0。
   未执行全 workspace、native 或性能基准。
+
+### 已接通：字节码准备请求绑定具体帧与执行序号
+
+共享 CodeObject 与相同 PC 只能定位静态指令，无法区分递归调用、不同 invocation
+以及循环中同一指令的多次执行。普通调用、trait 方法选择、definition builder 现在
+统一通过帧创建不可公开构造的 `Preparation`，包含私有 ticket 和操作内容；驱动只
+能把这个拥有的请求交回原帧，不能仅凭 code／PC 构造请求。
+
+每帧首次发出请求时建立一个 `Arc` 所有权标记，此后复用它并递增 `u64` 序号。
+标记只属于进程内执行协议，不是源语言值／类型身份，不进入缓存键或持久化数据；
+未发请求的帧不分配标记。ticket 保留标记的所有权，因此帧移动不改变身份，旧帧
+销毁后仍存活的请求也不会因分配地址重用而命中新帧。序号使用 checked increment，
+耗尽返回内部控制流错误，不回绕。请求与帧的 S-expression dump 只显示动态序号，
+不输出分配地址。
+
+消费请求先检查 terminal、等待状态、标记和序号。不匹配时不取操作数、不调用宿主、
+不消耗执行预算，也不破坏目标帧正在等待的合法请求。匹配后先移除等待记录并把帧
+置为 terminal，再进行原有准备；只有成功才恢复可执行状态。因此操作数已取出、
+宿主已执行但返回错误，或宿主 unwind 的情况下，失败帧不能继续运行或重新提交旧
+请求。恢复须使用新执行帧，不能重新启动已经有副作用的那次准备。Session 的清理
+继续负责外层调用栈、环境和 invocation 状态，不承担此边界的唯一防重放职责。
+
+这是内部执行请求的身份与一次性交付边界；它没有提供外部 response、world 依赖
+校验、前端 region 的恢复、PublicationBundle 或宿主副作用回滚。关联选择仍走自己
+的 owning 请求路径，尚未与此 ticket 统一；普通 callable 的待定域问题仍未接通。
+
+验证工作目录 `/home/fin/luna`：
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib preparation --no-fail-fast`：`/tmp/luna-tools-wiig4896/result.json` 退出 0，
+  35 项通过。覆盖共享代码的真实调用／方法／builder 请求误投、真实循环回到同一
+  指令后的旧请求、取消、帧移动、序号耗尽、错误 code／PC、宿主错误与 unwind 后
+  不依赖 Session 清理的帧封闭，以及新调用恢复。
+- 只临时撤掉 ticket 匹配，保留 code／PC 与等待状态检查，上述命令的
+  `/tmp/luna-tools-2vztubx5/result.json` 退出 101：四个新增回归失败，误投和过期
+  请求错误地成功。对照后源码逐字节恢复，未保留旁路。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  -p luna --lib --test comptime_bytecode_traits --test dynamic_trait_clauses
+  --test builder_invocations --test deferred_associated_values
+  --test library_meta_objects --test library_list_hash --test comptime_bytecode_defaults
+  --no-fail-fast`：`/tmp/luna-tools-3tm7ghh7/result.json` 退出 101，818 项通过、
+  1 项失败。VM 562 项、luna 库及调用／builder／meta 对象组通过；唯一失败为
+  `library_list_hash::error_result_protocols_use_matching_payload_branches`，在最后
+  重复 `run` 的调用处耗尽预算，`library_list_hash.rs:453`，来源范围 33279–33338。
+- 临时恢复 HEAD `1c235992` 的 `bytecode.rs` 与 `bytecode/preparation.rs`，仅运行
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test library_list_hash
+  error_result_protocols_use_matching_payload_branches -- --exact`：
+  `/tmp/luna-tools-123xgaq9/result.json` 退出 101，同样位置与 StepsExhausted。
+  这是修改前已有失败，成本与累计额度仍待单独分析，没有提高预算或改写预期。
+  对照后的两个执行源码已逐字节恢复；随后重跑 preparation 组，
+  `/tmp/luna-tools-f7hwqxol/result.json` 退出 0，35 项通过。
+- 五个修改／新增 Rust 文件的 rustfmt 检查：`/tmp/luna-tools-to2ql550/result.json`
+  退出 0。未运行全 workspace、native 或性能基准，不宣称完整运行时改造完成。
 
 ### 已接通：关联选择请求与初始化器准入分离
 
