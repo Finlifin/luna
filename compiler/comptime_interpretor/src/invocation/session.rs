@@ -511,6 +511,7 @@ impl fmt::Display for Session<'_, '_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod definition_preparation;
     mod method_preparation;
     use input_collection::InputPlan;
     use nir::normal_forms::{Head, Kind, Parameter, Role};

@@ -1274,14 +1274,15 @@ impl<'a> Interpreter<'a> {
                 Op::CheckDefinitionBuild(build) => {
                     self.check_definition_build(&build.output, source)?
                 }
-                Op::BuildDefinition {
-                    destination,
-                    value,
-                    build,
-                } => {
-                    let value = frame.slots[*value].take().ok_or_else(missing)?;
-                    frame.slots[*destination] =
-                        Some(self.complete_definition_build(build.as_ref(), value, source)?);
+                Op::BuildDefinition { .. } => {
+                    // The operand has completed, but checked host publication
+                    // belongs to the session. Retain its value in this frame
+                    // until the owned request is serviced or cancelled.
+                    frame.waiting = Some(Waiting::Preparation);
+                    return Ok(Progress::Prepare(Preparation::Definition {
+                        code: code.clone(),
+                        instruction: frame.pc - 1,
+                    }));
                 }
                 Op::CheckObservation(observation) => self.check_observation(observation, source)?,
                 Op::Observe {

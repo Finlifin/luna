@@ -301,8 +301,9 @@ native 递归深度与显式 invocation 深度由不同所有者管理。临时�
 本批九个 Rust 文件的 rustfmt 检查退出 0，`/tmp/luna-tools-qd8n8tkr/result.json`。
 
 原 `run_executions` 的局部调用栈、待启动计算和待交付结果已经迁入
-`invocation::session::Session`。生产中的字节码 invocation、借入 fragment、借入输入
+`invocation::session::Session`。生产中的字节码 invocation、关联初始化与借入输入
 计划都由该会话驱动，默认值、关联值、契约与嵌套类型计划仍使用同一调用栈。
+借入 fragment 的独立驱动目前仅由内部测试使用，不计为新的生产检查入口。
 类型观察等非字节码入口启动的关联初始化器也作为独立 associated root 进入该驱动。
 固定树模式的轻量入口保留，避免每层树解释都挂上字节码驱动栈帧。
 
@@ -377,6 +378,46 @@ resolver 和函数实例准入仍同步执行；此处未承诺这些操作内�
   退出 0，`/tmp/luna-tools-u7eugzo2/result.json`。内部测试覆盖每个严格执行前缀的
   取消、选择失败及新调用恢复；源码组覆盖直接／存储／动态 trait 调用、接口契约、
   默认参数及调用顺序，并运行真实 sysroot 的 builder、meta 对象与 List hash 接口。
+
+### 已接通：definition builder 在操作数完成后交出驱动请求
+
+struct／enum／newtype 的 `BuildDefinition` 不再在字节码片段中直接进入宿主。
+阶段与结果类型检查仍先于操作数求值；操作数完成后，指令推进 PC，把 owning
+`Preparation::Definition` 交给 Session。描述符值留在原帧的寄存器中，下一次驱动
+转换才取出它并调用原有 builder 服务。类型描述检查、宿主额度交接、返回定义与请求
+一致性、候选安装及 commit 仍走既有受检路径，没有另建发布旁路。
+
+因此取消这个暂停点可以保留已经发生的操作数写入，同时不进入宿主 prepare 或
+commit；恢复不会重新求值描述符。Session 请求持有代码对象与指令位置，消费时
+核对代码所有者、当前位置、操作种类和等待状态。已经交付、错误位置或另一代码
+对象的命令不能再次发布定义。请求 dump 使用 S-expression，显示 definition
+准备及对应指令位置。当前请求只由持有父帧的内部会话路由，不向外部提交者开放。
+
+这是现有生产 builder 接入内部驱动的边界，不是上文的完整 HostRequest/response
+协议。prepare、接纳与 commit 内部仍同步执行；尚无 session/activation/动态序号
+组成的外部 ticket，也没有普通前端 region 的检查响应。不能用代码对象加 PC 作为
+未来外部响应的身份凭据，或以这项迁移宣称普通 callable 的待定域已经可执行。
+树解释继续使用同一 builder 服务的同步入口；跨类型混合发布与 PublicationBundle
+仍待实现，已发生的程序或宿主外部副作用不回滚。
+
+验证工作目录 `/home/fin/luna`：
+
+- 仅恢复迁移前的 `bytecode.rs`，三种 builder 的暂停检查在首次 poll 已完成时
+  失败，`/tmp/luna-tools-z4ok7ym8/result.json` 退出 101；对照后逐字节恢复本次代码。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib`：`/tmp/luna-tools-4le0oho1/result.json` 退出 0，555 项通过。新增检查覆盖
+  三种 builder 在实际操作数执行后的取消／移动／恢复、宿主 prepare 和 commit
+  的错误／panic、新调用恢复、命令重放拒绝以及边界预算耗尽前不进入宿主。
+- 恢复对照后执行 `python3 -B development/check.py --timeout 900 -- test
+  -p comptime_interpretor -p luna --lib --test builder_invocations
+  --test generated_definitions --test reflected_definitions
+  --test function_template_local_definitions --test newtypes --test library_meta_objects
+  --no-fail-fast`：`/tmp/luna-tools-ubd_c488/result.json` 退出 0，999 项通过，
+  1 项既有 `generic_default_stability_needs_its_definition_proof_environment` 显式
+  忽略。覆盖真实 sysroot 的 builder、反射及 meta 对象接口；泛型默认值 P3 证明
+  缺口未在本次修复，也没有改写其预期。
+- 四个修改 Rust 文件的 rustfmt 检查：`/tmp/luna-tools-lbclzdfh/result.json`，退出 0。
+  未执行全 workspace、native 或性能基准。
 
 ### 已接通：关联选择请求与初始化器准入分离
 

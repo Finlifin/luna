@@ -1,4 +1,4 @@
-//! Owned call preparation, driven between bytecode slices by the execution session.
+//! Owned host preparation, driven between bytecode slices by the execution session.
 use super::*;
 
 #[derive(Debug)]
@@ -12,11 +12,18 @@ pub(crate) enum Preparation {
         instruction: usize,
         dynamic_method: Option<comptime_compiler::methods::Method>,
     },
+    Definition {
+        code: Arc<Program>,
+        instruction: usize,
+    },
 }
 
 impl fmt::Display for Preparation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Definition { instruction, .. } => {
+                write!(f, "(prepare-definition-build (instruction {instruction}))")
+            }
             Self::Method {
                 destination,
                 method,
@@ -51,6 +58,31 @@ impl Interpreter<'_> {
             return Err(self.failure(ErrorKind::InvalidControlFlow, None));
         }
         match request {
+            Preparation::Definition { code, instruction } => {
+                if !Arc::ptr_eq(&frame.code, &code) || frame.pc.checked_sub(1) != Some(instruction)
+                {
+                    return Err(self.failure(ErrorKind::InvalidControlFlow, None));
+                }
+                let instruction = &code.instructions()[instruction];
+                let Op::BuildDefinition {
+                    destination,
+                    value,
+                    build,
+                } = &instruction.op
+                else {
+                    return Err(
+                        self.failure(ErrorKind::InvalidControlFlow, Some(instruction.source))
+                    );
+                };
+                let value = frame.slots[*value].take().ok_or_else(|| {
+                    self.failure(ErrorKind::MissingBinding, Some(instruction.source))
+                })?;
+                frame.slots[*destination] = Some(self.complete_definition_build(
+                    build.as_ref(),
+                    value,
+                    instruction.source,
+                )?);
+            }
             Preparation::Method {
                 destination,
                 method,
