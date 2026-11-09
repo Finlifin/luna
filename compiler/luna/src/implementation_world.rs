@@ -1,11 +1,4 @@
-//! Structural declaration indexes and metered proofs for driver-owned worlds.
-use elaboration::{implementation::Index, ptc::Budget};
-use nir::program::Package;
-
-pub(crate) fn index(package: &Package, mut budget: Budget) -> Result<Index, String> {
-    Index::from_package_metered(package, &mut budget).map_err(String::from)
-}
-
+//! Metered type proofs for driver-owned declaration worlds.
 /// Spend proof work from the invocation's counter before interpreting its result.
 pub(crate) fn solve_metered(
     world: &elaboration::capabilities::World<'_>,

@@ -309,8 +309,9 @@ Unresolved、Invalid 的分类与源码位置。内部可变状态只承载同�
 同一 owner 取得索引。required 的发布器证明与实际调用也复用所属 snapshot 的目录，
 其资源权限使用另一份源码及其目录，不能与执行声明合并。luna driver 的资源
 ProtocolContext 也持有所属 snapshot，分析、执行与 host 查询不再通过它拼接外部
-package。staged scratch 会改写入口，继续使用调用内目录。跨编辑的持久索引、分块源码和整体准备预算的统一
-仍未完成，不能把这些生产 owner 扩大为完整 WorldSnapshot 迁移。
+package。runtime 实例化也从 DeclarationSource 复用目录；Context、规范化视图、展开
+与图验证仍按构建独立进行。staged scratch 会改写入口，继续使用调用内目录。
+跨编辑的持久索引、分块源码和整体准备预算的统一仍未完成，不能把这些生产 owner 扩大为完整 WorldSnapshot 迁移。
 
 以下保留调用内作用域迁移时的证据；后续共享目录的当前检查见
 [世界存储第 1.2 节](world-storage-and-lifetimes.md#12-保活源码的共享声明目录)。

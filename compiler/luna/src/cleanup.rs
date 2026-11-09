@@ -5,6 +5,7 @@ pub use method::{MethodCallCleanup, lower_method_call_cleanup};
 
 use elaboration::{
     capabilities::World,
+    materialization::DeclarationSource,
     ptc::Budget,
     verification::{
         drop::{self, AcquiredCleanup, CleanupStep},
@@ -241,25 +242,39 @@ pub fn prepare_source(
     fuel: &mut usize,
     budget: Budget,
 ) -> Result<Executable, String> {
-    prepare_source_impl(package, world, items, entry, fuel, budget, false)
+    prepare_source_impl(
+        DeclarationSource::Borrowed(package),
+        world,
+        items,
+        entry,
+        fuel,
+        budget,
+        false,
+    )
 }
 
 /// Resource-checked source execution also checks contracts exposed by staging.
 /// The public low-level planner remains usable to test rejection cleanup on
 /// deliberately malformed NIR, without claiming source verification.
 pub(crate) fn prepare_checked_source(
-    package: &Package,
-    world: &World<'_>,
-    items: &intrinsic::LangItems,
+    protocols: &crate::resources::ProtocolContext,
     entry: iir::InstanceKey,
     fuel: &mut usize,
     budget: Budget,
 ) -> Result<Executable, String> {
-    prepare_source_impl(package, world, items, entry, fuel, budget, true)
+    prepare_source_impl(
+        protocols.source(),
+        &protocols.world(),
+        &protocols.items,
+        entry,
+        fuel,
+        budget,
+        true,
+    )
 }
 
 fn prepare_source_impl(
-    package: &Package,
+    source: DeclarationSource<'_>,
     world: &World<'_>,
     items: &intrinsic::LangItems,
     entry: iir::InstanceKey,
@@ -267,6 +282,7 @@ fn prepare_source_impl(
     budget: Budget,
     validate_contracts: bool,
 ) -> Result<Executable, String> {
+    let package = source.package();
     use elaboration::verification::moves::{CleanupAction, CleanupReason};
     use iir::cleanup::{
         Action, Boundary, ContextKey, DiscardCleanup, FunctionSchedule, Schedule, Site, Target,
@@ -291,8 +307,8 @@ fn prepare_source_impl(
             .filter(|ty| !generated_layouts.contains(*ty))
             .cloned()
             .collect::<Vec<_>>();
-        let graph = elaboration::materialization::instantiate_with_types(
-            package,
+        let graph = elaboration::materialization::instantiate_with_types_in_source(
+            source,
             &roots,
             &source_types,
             Default::default(),

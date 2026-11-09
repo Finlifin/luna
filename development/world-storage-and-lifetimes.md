@@ -1,6 +1,6 @@
 # 世界存储、句柄与生命周期
 
-状态：整体目标仍未完成；required、可复用调用及 driver 资源上下文已按第 1.1–1.3 节接入源码 owner。
+状态：整体目标仍未完成；required、调用、driver 资源与实例化已按第 1.1–1.4 节接入源码目录。
 初始源码审计基线为 `7178e238`。
 本文细化[全链路架构](architecture.md)中的 WorldSnapshot 和 PublicationBundle，
 与[发布状态协议](elaboration-state-and-publication.md)、[依赖观察](dependency-observations.md)
@@ -10,7 +10,7 @@
 ## 1. 已有所有权保护不能因重构而丢失
 
 下列路径均以 `compiler/` 为根，记录初始静态审计。旧 middle::ty 已在源码清理中删除，
-第 1.1–1.3 节以外的世界存储迁移仍待实施；未运行 Miri、并发或内存压力验证。
+第 1.1–1.4 节以外的世界存储迁移仍待实施；未运行 Miri、并发或内存压力验证。
 
 | 入口 | 已存在的约束 | 需要进一步处理的问题 |
 | --- | --- | --- |
@@ -121,7 +121,7 @@ required 准备、发布器证明和其资源权限 owner 也已采用该目录�
 PTC Context 的建立、required 和外围资源／协议准备预算仍有独立成本；接受 `&Package` 的
 兼容准备入口仍复制整包，其捕获成本尚未纳入统一预算。未测整体编译性能收益。
 
-本轮 required 目录迁移的检查工作目录 `/home/fin/luna`，统一使用
+required 目录迁移阶段的检查工作目录 `/home/fin/luna`，统一使用
 `python3 -B development/check.py --timeout 900 --`；result 文件保留完整命令及输出：
 
 - `test -p elaboration -p materialization --lib --no-fail-fast`：退出 0，181 + 29 项通过，
@@ -176,11 +176,11 @@ PTC Context 的建立、required 和外围资源／协议准备预算仍有独�
 
 兼容的 `selected(&Package, ...)` 入口为取得所有权会复制一次完整源码；初次将借用
 源码放进 checked session 也有这项成本，已经持有 snapshot 的路径不复制。捕获复制、
-Context 建立和各阶段预算尚未统一，不能将本迁移称为整体性能优化。无资源协议的
-ReferenceSession 仍保管自己的 package／index，staged 临时入口与 VM 执行索引也尚待
-迁移；通用验证函数的其他 package／world 调用边界不在此声称全部关闭。
+Context 建立和各阶段预算尚未统一，不能将本迁移称为整体性能优化。ReferenceSession
+及进一步的实例化复用见第 1.4 节；staged 临时入口与 VM 执行索引尚待迁移。通用验证
+函数的其他 package／world 调用边界不在此声称全部关闭。
 
-本轮 driver 资源 owner 迁移在 `/home/fin/luna` 使用
+driver 资源 owner 迁移阶段在 `/home/fin/luna` 使用
 `python3 -B development/check.py --timeout 900 --` 检查，结果均退出 0：
 
 - `test -p luna --lib --test resources --test key_code_sessions --test library_protocols
@@ -197,6 +197,55 @@ ReferenceSession 仍保管自己的 package／index，staged 临时入口与 VM 
 本轮去重 597 项通过；八个修改／新增 Rust 文件通过 scoped rustfmt check，
 `/tmp/luna-tools-j6s8usej/result.json` 退出 0，`git diff --check` 通过。
 未执行全量回归、Miri 或性能基准；第 1.2 节所述前端既有失败本轮没有重跑。
+
+### 1.4 实例化与清理闭包复用源码目录
+
+`materialization::instantiate_in_source` 及带外部类型根的对应入口接受
+DeclarationSource；原 `&Package` 入口仍委托同一个构建实现，不保留另一套算法。
+Builder 从 source 取得精确 package 与 DeclarationWorld。Snapshot 复用已经完成的
+不可变目录，Borrowed 为本次构建建立目录；不允许将来源和目录分别传入。
+
+每次构建仍检查 NIR phase、建立独立 Context、前提、规范化视图和工作队列，执行
+当前 expansion 服务，再校验完整图。生成函数、展开来源、临时布局、runtime binding、
+实例去重集合和待发布结果不进入共享目录。热目录不能跳过用户代码展开、缺失主体
+检查或最终图验证；失败只丢弃本次候选图，不把半成品保存在源码 owner。
+
+runtime ReferenceSession 现在拥有 DeclarationSnapshot；其执行期类型证明及每次
+实例化从同一个 owner 取得目录，原独立 package／index 字段和 driver index 构造
+helper 已删除。效应 reference execution 同样从 ProtocolContext.source 进入实例化。
+
+checked 清理的内部入口改为接收 ProtocolContext，集中取得 source、world 和协议
+绑定。清理闭包增长的每一轮构图复用此目录，仍重新处理当前根、临时生成布局和
+收敛所需的资源事实；前一轮的 schedule 不作为新一轮证据发布。执行与 native
+消费者都接入该入口。公开低层 planner 继续接受调用者的借用世界，以支持独立
+清理规划和畸形 NIR 的拒绝检查；它不是已检查源码的执行许可。
+
+回归使用数百个声明，比较冷构造和热目录进入实际展开回调时剩余的预算，同时
+要求输出图一致、每次仍调用本次展开服务。换入口、展开错误、零预算、同号源码
+改成缺失 callee 以及恢复原源码均分别检查，不能由已有图或过去的成功代替。
+
+这完成的是声明目录复用，不是 IIR 图缓存或完整增量编译。Context 与输入 phase
+检查仍按次执行，mutable staged scratch 与 VM 执行索引仍未迁移。将借用 package
+转为长期 owner 的整包复制和阶段间预算仍待统一；尚无整体性能收益结论。
+
+本轮实例化接线的检查工作目录为 `/home/fin/luna`，命令通过
+`python3 -B development/check.py --timeout 900 --` 运行，结果均退出 0：
+
+- `test -p materialization -p luna --lib --test expansion_boundary
+  --test scoped_dispatch_inputs --test source_tests --no-fail-fast`：144 项通过，
+  `/tmp/luna-tools-vnqjdr4x/result.json`。包括共享目录构图、展开失败恢复、作用域输入
+  和多入口执行的独立状态。
+- `test -p luna --test execution --test host --no-fail-fast`，按 direct-passing、资源、
+  checked 指针／struct／enum／newtype 等入口过滤：58 + 45 项通过，
+  `/tmp/luna-tools-fhuqdfrm/result.json` 保存完整过滤参数。包含 LLVM/native 构建和
+  实际运行，检查 Copy、清理、效应传送与数据布局。
+- `test -p luna --test library_protocols --test conditional_capture_cleanup
+  --test temporary_method_cleanup --test match_cleanup --no-fail-fast`：42 项通过，
+  `/tmp/luna-tools-gxskyx_0/result.json`，覆盖公开库协议和清理依赖增长场景。
+
+本轮去重 289 项通过；七个修改的 Rust 文件通过 scoped rustfmt check，
+`/tmp/luna-tools-y_vc01ab/result.json` 退出 0；`git diff --check` 通过。
+未运行全量回归或整体性能基准，其他小节的历史结果不计作本轮执行。
 
 ## 2. 目标物理结构
 

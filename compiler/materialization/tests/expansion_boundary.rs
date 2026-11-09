@@ -136,6 +136,7 @@ fn fixture() -> (n::Package, iir::InstanceKey) {
 struct Provider {
     quotes: Cell<usize>,
     effects: Cell<usize>,
+    first_allowance: Cell<Option<usize>>,
     fail: bool,
     remaining_after_effects: Option<usize>,
 }
@@ -149,6 +150,9 @@ impl Expansion for Provider {
         _: &mut Vec<n::Enum>,
         fuel: &mut usize,
     ) -> Result<(), String> {
+        if self.first_allowance.get().is_none() {
+            self.first_allowance.set(Some(*fuel));
+        }
         self.quotes.set(self.quotes.get() + 1);
         *fuel = fuel.checked_sub(1).ok_or("provider fuel exhausted")?;
         *next = next.checked_add(1).ok_or("provider identity exhausted")?;
@@ -202,6 +206,125 @@ impl Expansion for Provider {
     ) -> Result<bool, String> {
         panic!("non-inline function must not request bound expansion")
     }
+}
+
+#[test]
+fn retained_source_reuses_the_directory_but_rebuilds_each_instance_graph() {
+    use materialization::{DeclarationSnapshot, DeclarationSource, instantiate_in_source};
+    use std::sync::Arc;
+    let (mut package, root) = fixture();
+    let prototype = package.functions[0].clone();
+    for local in 10..522 {
+        let mut function = prototype.clone();
+        function.declaration = id(local);
+        function.body.kind = n::ExprKind::Literal(n::Literal::Bool(false));
+        package.functions.push(function);
+    }
+    let source = DeclarationSnapshot::new(Arc::new(package));
+    source.prepare(&mut Budget::default()).unwrap();
+    let provider = Provider::default();
+    let borrowed = instantiate(
+        source.package(),
+        std::slice::from_ref(&root),
+        BTreeSet::new(),
+        Budget::default(),
+        &provider,
+    )
+    .unwrap();
+    let cold_allowance = provider.first_allowance.get().unwrap();
+    let before = source.to_string();
+    for _ in 0..2 {
+        let provider = Provider::default();
+        let graph = instantiate_in_source(
+            DeclarationSource::Snapshot(&source),
+            std::slice::from_ref(&root),
+            BTreeSet::new(),
+            Budget::default(),
+            &provider,
+        )
+        .unwrap();
+        assert!(provider.first_allowance.get().unwrap() > cold_allowance);
+        assert!(provider.quotes.get() > 0 && provider.effects.get() > 0);
+        assert_eq!(graph.to_string(), borrowed.to_string());
+    }
+    let failed = Provider {
+        fail: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        instantiate_in_source(
+            DeclarationSource::Snapshot(&source),
+            std::slice::from_ref(&root),
+            BTreeSet::new(),
+            Budget::default(),
+            &failed
+        )
+        .unwrap_err(),
+        "injected expansion failure"
+    );
+    assert_eq!(failed.quotes.get(), 1);
+    assert!(
+        instantiate_in_source(
+            DeclarationSource::Snapshot(&source),
+            std::slice::from_ref(&root),
+            BTreeSet::new(),
+            Budget {
+                steps: 0,
+                ..Default::default()
+            },
+            &Provider::default()
+        )
+        .is_err()
+    );
+    let other = iir::InstanceKey {
+        declaration: id(10),
+        arguments: vec![].into(),
+    };
+    let graph = instantiate_in_source(
+        DeclarationSource::Snapshot(&source),
+        std::slice::from_ref(&other),
+        BTreeSet::new(),
+        Budget::default(),
+        &Provider::default(),
+    )
+    .unwrap();
+    assert_eq!(graph.roots, vec![other.clone()]);
+    assert_eq!(graph.functions.len(), 1);
+    assert_eq!(graph.functions[0].key, other);
+    assert_eq!(source.to_string(), before);
+
+    // The same declaration number in edited source is a different input, even
+    // when a previous snapshot successfully published an executable graph.
+    let mut changed = Arc::clone(source.package());
+    Arc::make_mut(&mut changed).functions[0].body.kind = n::ExprKind::Call {
+        callee: Box::new(n::Expr {
+            source: n::SourceRange { start: 1, end: 2 },
+            ty: prototype.signature,
+            kind: n::ExprKind::Function(id(900)),
+        }),
+        arguments: vec![],
+        parameter_bindings: vec![],
+    };
+    let changed = DeclarationSnapshot::new(changed);
+    assert!(
+        instantiate_in_source(
+            DeclarationSource::Snapshot(&changed),
+            std::slice::from_ref(&root),
+            BTreeSet::new(),
+            Budget::default(),
+            &Provider::default()
+        )
+        .is_err()
+    );
+    let recovered = instantiate_in_source(
+        DeclarationSource::Snapshot(&source),
+        &[root],
+        BTreeSet::new(),
+        Budget::default(),
+        &Provider::default(),
+    )
+    .unwrap();
+    assert_eq!(recovered.to_string(), borrowed.to_string());
 }
 
 #[test]

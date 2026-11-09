@@ -101,3 +101,36 @@ pub fn instantiate_with_types(
         &SourceExpansion,
     )
 }
+
+/// Materialize from a retained declaration source without sharing graph state.
+pub fn instantiate_in_source(
+    source: DeclarationSource<'_>,
+    roots: &[iir::InstanceKey],
+    runtime_bindings: BTreeSet<nir::RuntimeId>,
+    budget: Budget,
+) -> Result<iir::Package, String> {
+    ::materialization::instantiate_in_source(
+        source,
+        roots,
+        runtime_bindings,
+        budget,
+        &SourceExpansion,
+    )
+}
+
+pub fn instantiate_with_types_in_source(
+    source: DeclarationSource<'_>,
+    roots: &[iir::InstanceKey],
+    types: &[nir::Term],
+    runtime_bindings: BTreeSet<nir::RuntimeId>,
+    budget: Budget,
+) -> Result<iir::Package, String> {
+    ::materialization::instantiate_with_types_in_source(
+        source,
+        roots,
+        types,
+        runtime_bindings,
+        budget,
+        &SourceExpansion,
+    )
+}

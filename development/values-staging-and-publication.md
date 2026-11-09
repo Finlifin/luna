@@ -1088,8 +1088,9 @@ invocation、缓存 invocation、键方法使用同一个 demand method resolver
 的声明目录；缓存键准入与调用不再各存一份索引。required 发布器证明、实际调用
 与其资源权限 owner 也已迁移；执行与资源源码仍分别拥有目录。luna driver 的资源
 ProtocolContext 已接入所属 snapshot，并与启用资源检查的调用查询共用目录。
-可变 staged scratch、无资源协议的 reference session、跨编辑索引和统一准备预算
-仍未完成。
+runtime reference session 与 checked/native 清理构图也从所属来源复用目录，每次仍
+建立独立候选图并完成验证。可变 staged scratch、VM 执行索引、跨编辑索引和统一
+准备预算仍未完成。
 
 
 每次操作仍构造新鲜 VM，安装原类型证明、方法／关联值和 Copy 证据服务，再检查本次

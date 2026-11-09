@@ -128,7 +128,7 @@ pub fn dispatch_instances(
     budget: Budget,
 ) -> Result<Vec<n::DispatchInstance>, String> {
     build(
-        package,
+        DeclarationSource::Borrowed(package),
         budget,
         Roots::All,
         BTreeSet::new(),
@@ -149,7 +149,7 @@ pub fn dispatch_instances_for_roots(
     budget: Budget,
 ) -> Result<Vec<n::DispatchInstance>, String> {
     build(
-        package,
+        DeclarationSource::Borrowed(package),
         budget,
         Roots::Dispatch(roots),
         BTreeSet::new(),
@@ -169,7 +169,7 @@ pub fn dispatch_instances_for_invocation(
     budget: Budget,
 ) -> Result<Vec<n::DispatchInstance>, String> {
     build(
-        package,
+        DeclarationSource::Borrowed(package),
         budget,
         Roots::Invocation(roots),
         BTreeSet::new(),
@@ -190,7 +190,7 @@ pub fn resolve_method_instance(
 ) -> Result<n::MethodInstance, String> {
     let mut selected = None;
     let result = build(
-        package,
+        DeclarationSource::Borrowed(package),
         Budget {
             steps: *fuel,
             ..Budget::default()
@@ -249,7 +249,7 @@ pub fn normalize_inline_annotations(
     fuel: &mut usize,
 ) -> Result<(), String> {
     let result = build(
-        package,
+        DeclarationSource::Borrowed(package),
         Budget {
             steps: *fuel,
             ..Budget::default()
@@ -280,7 +280,7 @@ pub fn resolve_quote_method_instance(
 ) -> Result<n::MethodInstance, String> {
     let mut selected = None;
     let result = build(
-        package,
+        DeclarationSource::Borrowed(package),
         Budget {
             steps: *fuel,
             ..Budget::default()
@@ -313,7 +313,7 @@ pub fn dispatch_instances_in_context(
     budget: &mut Budget,
 ) -> Result<Vec<n::DispatchInstance>, String> {
     let result = build(
-        package,
+        DeclarationSource::Borrowed(package),
         *budget,
         Roots::AllWithMethods(live_methods),
         BTreeSet::new(),
@@ -359,6 +359,38 @@ pub fn instantiate_with_types(
     budget: Budget,
     expansion: &dyn Expansion,
 ) -> Result<iir::Package, String> {
+    instantiate_with_types_in_source(
+        DeclarationSource::Borrowed(package),
+        roots,
+        types,
+        runtime_bindings,
+        budget,
+        expansion,
+    )
+}
+
+/// Reuse immutable declaration metadata; every materialization still owns its
+/// proof context, expansion state, work queue and transactional output graph.
+pub fn instantiate_in_source(
+    source: DeclarationSource<'_>,
+    roots: &[iir::InstanceKey],
+    runtime_bindings: BTreeSet<nir::RuntimeId>,
+    budget: Budget,
+    expansion: &dyn Expansion,
+) -> Result<iir::Package, String> {
+    instantiate_with_types_in_source(source, roots, &[], runtime_bindings, budget, expansion)
+}
+
+/// Retain external layout roots in the same source-bound materialization.
+pub fn instantiate_with_types_in_source(
+    source: DeclarationSource<'_>,
+    roots: &[iir::InstanceKey],
+    types: &[nir::Term],
+    runtime_bindings: BTreeSet<nir::RuntimeId>,
+    budget: Budget,
+    expansion: &dyn Expansion,
+) -> Result<iir::Package, String> {
+    let package = source.package();
     nir::phases::validate(package).map_err(|e| format!("IIR input phase: {}", e.message))?;
     let BuildResult {
         mut dispatch,
@@ -372,7 +404,7 @@ pub fn instantiate_with_types(
         mut type_cores,
         remaining: mut publication_fuel,
     } = build(
-        package,
+        source,
         budget,
         Roots::Iir(roots),
         runtime_bindings.clone(),
@@ -456,7 +488,7 @@ struct DispatchContext<'a> {
 }
 
 fn build(
-    package: &n::Package,
+    source: DeclarationSource<'_>,
     budget: Budget,
     roots: Roots<'_>,
     runtime_bindings: BTreeSet<nir::RuntimeId>,
@@ -464,6 +496,7 @@ fn build(
     context: Option<DispatchContext<'_>>,
     expansion: Option<&dyn Expansion>,
 ) -> Result<BuildResult, String> {
+    let package = source.package();
     let body_free_selection = matches!(roots, Roots::QuoteMethod(..));
     // NIR interpretation retains all unconditional concrete implementations.
     // Their parent/capability worlds must remain closed even when only a few
@@ -473,8 +506,7 @@ fn build(
         Roots::All | Roots::AllWithMethods(_) | Roots::Dispatch(_) | Roots::Invocation(_)
     );
     let mut construction_budget = budget;
-    let world = DeclarationWorld::new_metered(
-        package,
+    let world = source.world(
         &mut construction_budget,
         context.as_ref().map(|c| (c.types, c.assumptions)),
     )?;

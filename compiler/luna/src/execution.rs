@@ -1,5 +1,6 @@
 //! Bounded reference execution through the concrete instance graph.
 use comptime_interpretor::{Budget, Interpreter, Value};
+use elaboration::materialization::{DeclarationSnapshot, DeclarationSource};
 use nir::program::{FunctionPhase, Package};
 
 /// Fuel is a per-stage bound, like the existing instantiation CLI budget.
@@ -52,8 +53,8 @@ pub fn interpret_effects_with_protocols(
         declaration,
         arguments: vec![].into(),
     };
-    let graph = elaboration::materialization::instantiate(
-        &package,
+    let graph = elaboration::materialization::instantiate_in_source(
+        protocols.source(),
         std::slice::from_ref(&key),
         Default::default(),
         budget,
@@ -123,15 +124,14 @@ fn interpret_selected(
 
 /// A reusable immutable type world; each entry still owns its materialization
 /// and interpreter so no runtime values or spent budgets cross invocations.
-pub(crate) struct ReferenceSession<'a> {
-    package: std::borrow::Cow<'a, Package>,
+pub(crate) struct ReferenceSession {
+    source: DeclarationSnapshot,
     context: elaboration::ptc::Context,
-    index: elaboration::implementation::Index,
     fuel: u64,
     budget: elaboration::ptc::Budget,
 }
-impl<'a> ReferenceSession<'a> {
-    pub(crate) fn new(package: std::borrow::Cow<'a, Package>, fuel: u64) -> Result<Self, String> {
+impl ReferenceSession {
+    pub(crate) fn new(package: std::borrow::Cow<'_, Package>, fuel: u64) -> Result<Self, String> {
         if fuel == 0 {
             return Err("execution fuel must be positive".into());
         }
@@ -142,12 +142,13 @@ impl<'a> ReferenceSession<'a> {
         };
         let context = elaboration::ptc::Context::from_package(&package)
             .map_err(|error| format!("cannot prepare runtime type context: {error}"))?;
-        let index = crate::implementation_world::index(&package, budget)
-            .map_err(|error| format!("runtime implementation index: {error}"))?;
+        let source = DeclarationSnapshot::new(std::sync::Arc::new(package.into_owned()));
+        source
+            .prepare(&mut { budget })
+            .map_err(|error| format!("runtime declaration directory: {error}"))?;
         Ok(Self {
-            package,
+            source,
             context,
-            index,
             fuel,
             budget,
         })
@@ -158,24 +159,28 @@ impl<'a> ReferenceSession<'a> {
         declaration: nir::DeclarationId,
         entry: &str,
     ) -> Result<Value, String> {
-        let package = self.package.as_ref();
+        let source = DeclarationSource::Snapshot(&self.source);
         let key = iir::InstanceKey {
             declaration,
             arguments: vec![].into(),
         };
-        let graph = elaboration::materialization::instantiate(
-            package,
+        let graph = elaboration::materialization::instantiate_in_source(
+            source,
             std::slice::from_ref(&key),
             Default::default(),
             self.budget,
         )?;
-        let world = elaboration::capabilities::World {
-            index: &self.index,
-            implementations: &package.implementations,
-            traits: &package.traits,
-            assumptions: &[],
-            context: &self.context,
-        };
+        let world = self
+            .source
+            .capabilities(
+                &self.context,
+                &[],
+                &mut elaboration::ptc::Budget {
+                    steps: 0,
+                    ..Default::default()
+                },
+            )
+            .expect("ReferenceSession constructor completed its declaration directory");
         let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
             crate::implementation_world::solve_metered(
                 &world,
@@ -341,9 +346,7 @@ impl CheckedSession {
         let budget = self.budget;
         let mut steps = budget.steps;
         let executable = crate::cleanup::prepare_checked_source(
-            package,
-            &protocols.world(),
-            &protocols.items,
+            protocols,
             iir::InstanceKey {
                 declaration,
                 arguments: vec![].into(),

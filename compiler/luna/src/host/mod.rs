@@ -128,9 +128,7 @@ fn prepare_declaration_with_protocols(
         budget,
     )?;
     let executable = crate::cleanup::prepare_checked_source(
-        context.package(),
-        &context.world(),
-        &context.items,
+        &context,
         iir::InstanceKey {
             declaration,
             arguments: vec![].into(),
