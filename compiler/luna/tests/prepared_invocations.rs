@@ -45,6 +45,84 @@ fn prepared_default_type_inputs_preserve_checked_dispatch() {
 }
 
 #[test]
+fn default_entries_retain_the_original_source_and_release_it_after_use() {
+    let package = Arc::new(support::compile(
+        "comptime fn run(.first:bool=true,.second:bool=not first)->bool {
+            var local=second; local=not local; first and local
+        }",
+    ));
+    assert!(package.dispatch_instances.is_empty());
+    let original = package.to_string();
+    let weak = Arc::downgrade(&package);
+    let mut invocation = PreparedInvocation::new(package.clone(), "run", None).unwrap();
+    assert!(
+        Arc::strong_count(&package) > 1,
+        "entry preparation must retain the source, not a copy with an invented declaration"
+    );
+    assert!(invocation.invoke(1).is_err());
+    for round in 0..3 {
+        assert_eq!(invocation.invoke(100_000).unwrap(), Value::Bool(true));
+        if round > 0 {
+            assert_eq!(invocation.last_stats().bytecode_compilations, 0);
+        }
+        assert_eq!(package.to_string(), original);
+    }
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    drop(package);
+    assert!(weak.upgrade().is_some());
+    drop(invocation);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn default_entry_failure_does_not_become_cached_success_or_contaminate_another_source() {
+    let package = Arc::new(
+        sysroot::compile("comptime fn run(.value:Integer=1.div_trunc(0))->bool {true}").unwrap(),
+    );
+    let mut failed = PreparedInvocation::new(package, "run", None).unwrap();
+    for _ in 0..2 {
+        let error = failed.invoke(1_000_000).unwrap_err();
+        assert!(error.contains("DivisionByZero"), "{error}");
+    }
+    let package =
+        Arc::new(sysroot::compile("comptime fn run(.value:Integer=1)->bool {value==1}").unwrap());
+    let mut recovered = PreparedInvocation::new(package, "run", None).unwrap();
+    assert_eq!(recovered.invoke(1_000_000).unwrap(), Value::Bool(true));
+    let error = failed.invoke(1_000_000).unwrap_err();
+    assert!(error.contains("DivisionByZero"), "{error}");
+}
+
+#[test]
+fn default_entries_with_resource_protocols_preserve_the_source() {
+    let package = support::compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+         comptime fn run(.flag:bool=true)->bool {flag}",
+    );
+    let original = package.to_string();
+    assert!(
+        luna::invocation::invoke_with_protocols(&package, "run", "Missing", "Retire", 100_000,)
+            .is_err()
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            luna::invocation::invoke_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                100_000,
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(package.to_string(), original);
+    }
+}
+
+#[test]
 fn source_invocation_preserves_type_dispatch_higher_order_values_and_fresh_frames() {
     let package = Arc::new(
         sysroot::compile(

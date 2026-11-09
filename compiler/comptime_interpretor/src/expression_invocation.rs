@@ -7,6 +7,26 @@ impl Interpreter<'_> {
     /// invocation admission, result checking and caller restoration still apply.
     /// No local bindings or graph execution authority are imported by this API.
     pub fn invoke_comptime_expression(&mut self, body: &Expr) -> Result<Value, Error> {
+        self.check_comptime_expression(body)?;
+        self.charge_copy_work(Some(body.source), |fuel| {
+            let mut remaining = *fuel as u64;
+            let result = nir::copy_budget::charge_expression(body, &mut remaining);
+            *fuel = remaining as usize;
+            result
+        })?;
+        self.invoke_checked_expression(Arc::new(body.clone()))
+    }
+
+    /// Retain immutable expression code for repeated host calls without copying
+    /// it or inventing a declaration. Every call repeats phase/unsafe inspection
+    /// and creates fresh closure state; ownership is not execution permission.
+    pub fn invoke_comptime_expression_owned(&mut self, body: Arc<Expr>) -> Result<Value, Error> {
+        self.check_comptime_expression(&body)?;
+        self.tick(Some(body.source))?;
+        self.invoke_checked_expression(body)
+    }
+
+    fn check_comptime_expression(&mut self, body: &Expr) -> Result<(), Error> {
         if !self.comptime_only || self.graph.is_some() {
             return Err(self.failure(ErrorKind::PhaseMismatch, Some(body.source)));
         }
@@ -19,15 +39,14 @@ impl Interpreter<'_> {
         let checked = inspection.check(body, &mut fuel);
         self.budget.steps -= (before - fuel) as u64;
         checked.map_err(Error::phase)?;
-        self.charge_copy_work(Some(body.source), |fuel| {
-            let mut remaining = *fuel as u64;
-            let result = nir::copy_budget::charge_expression(body, &mut remaining);
-            *fuel = remaining as usize;
-            result
-        })?;
+        Ok(())
+    }
+
+    fn invoke_checked_expression(&mut self, body: Arc<Expr>) -> Result<Value, Error> {
         self.charge_copy_work(Some(body.source), |fuel| {
             nir::copy_budget::charge_type_substitution(&body.ty, &[], &[], fuel)
         })?;
+        let result_type = body.ty.clone();
         let function = Value::Closure(Arc::new(Closure {
             definition_source: Some(body.source),
             origin: None,
@@ -35,10 +54,10 @@ impl Interpreter<'_> {
             parameters: vec![],
             environment: Environment::new(),
             capture_order: vec![],
-            body: Arc::new(body.clone()),
+            body,
             ty: Term::ComptimeFunction(Box::new(Term::Function {
                 parameters: vec![],
-                result: Box::new(body.ty.clone()),
+                result: Box::new(result_type),
             })),
         }));
         self.invoke_value(function, vec![])
@@ -56,6 +75,53 @@ mod tests {
             ty: Term::Primitive(Primitive::Bool),
             kind: K::Literal(Literal::Bool(value)),
         }
+    }
+
+    #[test]
+    fn retained_expression_code_rechecks_phase_and_never_reuses_invocation_values() {
+        let package = Arc::new(Package::default());
+        let body = Arc::new(flag(true));
+        let mut session = CodeSession::new(package.clone());
+        for round in 0..2 {
+            let mut vm = Interpreter::for_comptime_in_session(
+                &package,
+                &mut session,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                vm.with_code_session(&mut session, |vm| {
+                    vm.invoke_comptime_expression_owned(body.clone())
+                })
+                .unwrap(),
+                Value::Bool(true)
+            );
+            if round > 0 {
+                assert_eq!(vm.bytecode_compilations(), 0);
+            }
+            let invalid = Arc::new(Expr {
+                kind: K::Local(LocalId {
+                    owner: 44,
+                    index: 1,
+                }),
+                ..flag(false)
+            });
+            assert!(vm.invoke_comptime_expression_owned(invalid).is_err());
+            assert_eq!(
+                vm.invoke_comptime_expression_owned(Arc::new(flag(false)))
+                    .unwrap(),
+                Value::Bool(false)
+            );
+        }
+        let mut runtime = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(
+            runtime
+                .invoke_comptime_expression_owned(body)
+                .unwrap_err()
+                .kind,
+            ErrorKind::PhaseMismatch
+        );
+        assert!(runtime.events().is_empty());
     }
 
     fn function(local: u32, phase: FunctionPhase, is_unsafe: bool) -> Function {

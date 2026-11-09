@@ -923,6 +923,41 @@ OpenDefinition/WorldView 已经落地。冻结入口、实际执行入口及 IIR
 不先构造执行闭包，也不混用表中选择和按需选择。代码 session 复用代码，调用值、局部
 存储、契约状态与 builder 服务仍在每次 invocation 中建立。
 
+默认参数入口已从合成声明迁移为独立调用表达式：准备入口保存原函数身份，在首次
+执行额度内构造普通 `ExprKind::Call`，按参数顺序装入默认表达式和原参数绑定，
+交给已有默认参数调用计划处理。查找、容器宽度、类型与表达式复制在分配前预检；
+完整代码才保留为 Arc，不给它编造 DeclarationId，也不为它修改 Package。
+无默认参数的零参数入口仍直接调用原声明。源码无旧 dispatch 表时，
+PreparedInvocation 现在连带默认参数的入口也直接保活调用方提供的 Arc。
+
+VM 的 owned expression 入口复用同一个不可变表达式作为代码身份，每次调用仍执行
+阶段／unsafe 检查，创建新的匿名闭包帧，保留默认参数求值顺序、提前返回和失败传播。
+借用 expression 的旧 API 继续预检后复制，再进入相同执行路径。代码准备成功而后续
+执行失败时可以保留代码；这不保存默认参数值、用户调用结果或任何调用许可。
+资源协议版本在建立 VM 前统一源码 owner，避免 VM 与查询服务分别持有两份复制品；
+builder 发布服务继续按本次调用绑定。
+
+此清理不覆盖 runtime／native 默认入口包装；源快照清除旧 dispatch 表的整包复制、
+借用 Package 的资源入口捕获，以及入口选择与外围上下文准备仍有尚未统一的预算。
+不能据此声称所有宿主准备已计费，也不能把独立调用表达式当作新的语言声明种类。
+
+默认入口迁移的检查工作目录 `/home/fin/luna`，通过 `development/check.py` 执行：
+
+- `test -p comptime_interpretor -p luna --lib --test prepared_invocations
+  --test comptime_bytecode_defaults --test builder_invocations --test library_protocols
+  --test subcommands --no-fail-fast`，`/tmp/luna-tools-7ljl1_bu/result.json` 退出 101：
+  742 项通过；新增失败重试 fixture 使用尚未实现舍入协议的 Integer `/`，在 elaboration
+  阶段被拒绝，未进入目标执行路径。此前无空格的相同 fixture 还触发了解析拒绝。
+- 将新增 fixture 改为真实 sysroot 的 `Integer.div_trunc`，补齐资源协议入口后，
+  `test -p luna --test prepared_invocations`，`/tmp/luna-tools-kz4q1p3a/result.json`
+  退出 0，7 项通过。验证默认参数异常重复传播、同号不同源隔离、原源码不变、低预算后
+  恢复、代码复用与 owner 最终释放；未改变生产预算或放宽既有语义断言。
+
+两次检查去重 744 项通过，覆盖 VM、driver、真实库协议、builder 和 CLI。
+四个修改的 Rust 文件通过 scoped rustfmt check，
+`/tmp/luna-tools-wt7_8ztt/result.json` 退出 0；`git diff --check` 通过。
+未执行全 workspace 测试或整体性能测量。
+
 带程序前提的独立 callable 转换仍遵循[函数值契约边界](../docs/functions/comptime_fn.md)：
 当前普通函数类型未携带该前提时拒绝转换。IIR 不提供擦除前提的许可，不能把这个拒绝
 误认成必须保留整条 comptime IIR 分流的理由。直接方法调用继续消费接口契约，合法的

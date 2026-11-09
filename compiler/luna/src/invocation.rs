@@ -1,4 +1,5 @@
 //! Explicit, bounded invocation of completed comptime declarations.
+mod entry;
 pub use crate::memoization::Invocation as MemoizedInvocation;
 use comptime_interpretor::{Budget, Interpreter, Value};
 use elaboration::materialization::{DeclarationSnapshot, DeclarationSource};
@@ -9,7 +10,7 @@ use nir::{DeclarationId, Term};
 /// Code is shared; values, mutable storage and evidence are fresh on each call.
 pub struct PreparedInvocation {
     source: DeclarationSnapshot,
-    declaration: DeclarationId,
+    invocation: entry::Entry,
     entry: String,
     code: comptime_interpretor::CodeSession,
     last_stats: InvocationStats,
@@ -25,7 +26,7 @@ impl PreparedInvocation {
         entry: &str,
         identity: Option<u64>,
     ) -> Result<Self, String> {
-        let (prepared, declaration) = prepare_invocation(&package, entry, identity)?;
+        let (prepared, invocation) = prepare_invocation(&package, entry, identity)?;
         let prepared = match prepared {
             std::borrow::Cow::Borrowed(_) => package.clone(),
             std::borrow::Cow::Owned(package) => std::sync::Arc::new(package),
@@ -34,7 +35,7 @@ impl PreparedInvocation {
         Ok(Self {
             code,
             source: DeclarationSnapshot::new(prepared),
-            declaration,
+            invocation,
             entry: entry.into(),
             last_stats: InvocationStats::default(),
         })
@@ -46,7 +47,7 @@ impl PreparedInvocation {
         }
         execute_prepared(
             DeclarationSource::Snapshot(&self.source),
-            self.declaration,
+            &mut self.invocation,
             &self.entry,
             None,
             fuel,
@@ -132,10 +133,19 @@ pub(crate) fn invoke_selected_with_publisher(
     if fuel == 0 {
         return Err("invocation fuel must be positive".into());
     }
-    let (prepared, declaration) = prepare_invocation(package, entry, identity)?;
+    let (prepared, mut invocation) = prepare_invocation(package, entry, identity)?;
+    // Resource binding needs a retained source. Move an already-owned
+    // preparation into that owner; VM and query services borrow the same source.
+    let retained;
+    let source = if protocols.is_some() {
+        retained = DeclarationSnapshot::new(std::sync::Arc::new(prepared.into_owned()));
+        DeclarationSource::Snapshot(&retained)
+    } else {
+        DeclarationSource::Borrowed(prepared.as_ref())
+    };
     execute_prepared(
-        DeclarationSource::Borrowed(prepared.as_ref()),
-        declaration,
+        source,
+        &mut invocation,
         entry,
         protocols,
         fuel,
@@ -149,21 +159,22 @@ fn prepare_invocation<'a>(
     package: &'a Package,
     entry: &str,
     identity: Option<u64>,
-) -> Result<(std::borrow::Cow<'a, Package>, DeclarationId), String> {
-    let (mut prepared, declaration) =
-        prepare_entry_in_package(package, entry, FunctionPhase::Comptime, identity)?;
+) -> Result<(std::borrow::Cow<'a, Package>, entry::Entry), String> {
+    let function = entry::select(package, entry, FunctionPhase::Comptime, identity)?;
+    let invocation = entry::Entry::new(function);
+    let mut prepared = std::borrow::Cow::Borrowed(package);
     // A source invocation owns declarations, not a precomputed executable
     // closure. Each demanded relationship is proved by the host services.
     if !prepared.dispatch_instances.is_empty() {
         prepared.to_mut().dispatch_instances.clear();
     }
-    Ok((prepared, declaration))
+    Ok((prepared, invocation))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn execute_prepared(
     source: DeclarationSource<'_>,
-    declaration: DeclarationId,
+    invocation: &mut entry::Entry,
     entry: &str,
     protocols: Option<(
         crate::resources::Selection<'_>,
@@ -183,8 +194,8 @@ fn execute_prepared(
             crate::resources::ProtocolContext::selected_in_source(
                 match source {
                     DeclarationSource::Snapshot(snapshot) => snapshot.clone(),
-                    DeclarationSource::Borrowed(package) => {
-                        DeclarationSnapshot::new(std::sync::Arc::new(package.clone()))
+                    DeclarationSource::Borrowed(_) => {
+                        return Err("resource invocation requires a retained source".into());
                     }
                 },
                 copy,
@@ -235,6 +246,7 @@ fn execute_prepared(
         steps: fuel,
         depth: 128,
     };
+    let call = invocation.call(package, &mut budget.steps)?;
     let resolvers = comptime_interpretor::SourceResolvers {
         types: &solver,
         methods: &method_resolver,
@@ -278,7 +290,10 @@ fn execute_prepared(
             .with_enum_builder(&enum_builder)
             .with_newtype_builder(&newtype_builder);
     }
-    let operation = |vm: &mut Interpreter<'_>| vm.invoke(declaration, vec![]);
+    let operation = |vm: &mut Interpreter<'_>| match call {
+        Some(call) => vm.invoke_comptime_expression_owned(call),
+        None => vm.invoke(invocation.declaration, vec![]),
+    };
     let result = match session {
         Some(session) => interpreter.with_code_session(session, operation),
         None => operation(&mut interpreter),
@@ -306,39 +321,7 @@ pub(crate) fn prepare_entry_in_package<'a>(
     phase: FunctionPhase,
     identity: Option<u64>,
 ) -> Result<(std::borrow::Cow<'a, Package>, nir::DeclarationId), String> {
-    let mut matches = package.functions.iter().filter(|function| {
-        function.name == entry && identity.is_none_or(|id| function.declaration.package == id)
-    });
-    let function = matches
-        .next()
-        .ok_or_else(|| format!("no function named '{entry}'"))?;
-    if matches.next().is_some() {
-        return Err(format!(
-            "function name '{entry}' is ambiguous; use a uniquely named wrapper"
-        ));
-    }
-    if function.phase != phase {
-        return Err(format!(
-            "'{entry}' is not a {} function",
-            if phase == FunctionPhase::Comptime {
-                "comptime"
-            } else {
-                "runtime"
-            }
-        ));
-    }
-    if !function.type_parameters.is_empty() {
-        return Err(format!(
-            "'{entry}' requires generic arguments; use a concrete wrapper"
-        ));
-    }
-    if (0..function.parameters.len())
-        .any(|index| !function.defaults.iter().any(|(slot, _)| *slot == index))
-    {
-        return Err(format!(
-            "'{entry}' requires arguments; use a zero-argument wrapper"
-        ));
-    }
+    let function = entry::select(package, entry, phase, identity)?;
     // Defaults belong to the ordinary call plan and its parameter scope, not
     // to the raw host invoke API. Reuse that plan for an optional-parameter entry.
     let (package, declaration) = if function.parameters.is_empty() {
