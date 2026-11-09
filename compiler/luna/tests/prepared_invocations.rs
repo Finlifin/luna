@@ -9,6 +9,94 @@ use luna::invocation::PreparedInvocation;
 use std::sync::Arc;
 
 #[test]
+fn entry_selection_has_a_caller_budget_and_recovers_after_exhaustion() {
+    let mut package = support::compile("comptime fn run()->bool {true}");
+    let function = package
+        .functions
+        .iter()
+        .find(|f| f.name == "run")
+        .unwrap()
+        .clone();
+    for slot in 0..64 {
+        let mut unrelated = function.clone();
+        unrelated.name = format!("unrelated_{slot}");
+        unrelated.declaration.local += 1000 + slot;
+        package.functions.push(unrelated);
+    }
+    let package = Arc::new(package);
+    let mut small = 1;
+    let error = PreparedInvocation::new_in_budget(package.clone(), "run", None, &mut small)
+        .err()
+        .unwrap();
+    assert!(
+        error.contains("entry selection budget exhausted"),
+        "{error}"
+    );
+    assert_eq!(small, 0);
+    let error = luna::invocation::invoke(&package, "run", 1).unwrap_err();
+    assert!(
+        error.contains("entry selection budget exhausted"),
+        "{error}"
+    );
+    let mut budget = 10_000;
+    PreparedInvocation::new_in_budget(package.clone(), "run", None, &mut budget).unwrap();
+    let cost = 10_000 - budget;
+    assert!(cost > package.functions.len() as u64);
+    let mut exact = cost;
+    let mut invocation =
+        PreparedInvocation::new_in_budget(package.clone(), "run", None, &mut exact).unwrap();
+    assert_eq!(exact, 0);
+    assert!(PreparedInvocation::new_in_budget(package, "run", None, &mut (cost - 1)).is_err());
+    assert_eq!(invocation.invoke(100_000).unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn wide_default_selection_is_linear_and_rejects_malformed_slots() {
+    use nir::Term;
+    let mut package = support::compile("comptime fn run(.flag:bool=true)->bool {true}");
+    let function = package
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "run")
+        .unwrap();
+    let parameter = function.parameters[0];
+    let value = function.defaults[0].1.clone();
+    let Term::Function { parameters, .. } = &mut function.signature else {
+        panic!("function signature")
+    };
+    *parameters = vec![parameters[0].clone(); 256];
+    function.parameters = (0..256)
+        .map(|slot| nir::program::LocalId {
+            index: parameter.index + slot,
+            ..parameter
+        })
+        .collect();
+    function.defaults = (0..256).map(|slot| (slot, value.clone())).collect();
+    let mut remaining = 2048;
+    let mut invocation =
+        PreparedInvocation::new_in_budget(Arc::new(package.clone()), "run", None, &mut remaining)
+            .unwrap();
+    assert!(
+        remaining > 0,
+        "selection must not scan all defaults for each parameter"
+    );
+    assert_eq!(invocation.invoke(100_000).unwrap(), Value::Bool(true));
+    let function = package
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "run")
+        .unwrap();
+    function.defaults[255].0 = 0;
+    let error = PreparedInvocation::new(Arc::new(package), "run", None)
+        .err()
+        .unwrap();
+    assert!(
+        error.contains("duplicate entry default parameter"),
+        "{error}"
+    );
+}
+
+#[test]
 fn prepared_calls_reuse_code_without_reusing_results_or_local_state() {
     let package = Arc::new(support::compile(
         "comptime fn run()->bool {
@@ -164,10 +252,11 @@ fn dispatch_projection_is_deferred_budgeted_and_never_authorizes_execution() {
             "{error}"
         );
     }
-    // Capture consumes the whole allowance; call preparation cannot spend it again.
+    // Capture consumes the whole allowance; type context preparation cannot reuse it.
     let error = prepared.invoke(capture_cost as u64).unwrap_err();
     assert!(
-        error.contains("entry call preparation budget exhausted"),
+        error.contains("cannot prepare invocation type context")
+            && error.contains("budget exhausted"),
         "{error}"
     );
     assert_eq!(prepared.invoke(100_000).unwrap(), Value::Bool(true));

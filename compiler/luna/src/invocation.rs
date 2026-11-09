@@ -26,7 +26,21 @@ impl PreparedInvocation {
         entry: &str,
         identity: Option<u64>,
     ) -> Result<Self, String> {
-        let function = entry::select(&package, entry, FunctionPhase::Comptime, identity)?;
+        Self::new_in_budget(package, entry, identity, &mut Budget::default().steps)
+    }
+
+    /// Select an entry using the caller's construction allowance. Later source
+    /// projection and execution consume the allowance supplied to `invoke`.
+    pub fn new_in_budget(
+        package: std::sync::Arc<Package>,
+        entry: &str,
+        identity: Option<u64>,
+        fuel: &mut u64,
+    ) -> Result<Self, String> {
+        let function = entry::select_in(&package, entry, FunctionPhase::Comptime, identity, fuel)?;
+        *fuel = fuel
+            .checked_sub(entry.len() as u64)
+            .ok_or("entry name retention budget exhausted")?;
         let invocation = entry::Entry::new(function);
         let code = comptime_interpretor::CodeSession::new(package.clone());
         Ok(Self {
@@ -138,9 +152,9 @@ pub(crate) fn invoke_selected_with_publisher(
     if fuel == 0 {
         return Err("invocation fuel must be positive".into());
     }
-    let function = entry::select(package, entry, FunctionPhase::Comptime, identity)?;
-    let mut invocation = entry::Entry::new(function);
     let mut fuel = fuel;
+    let function = entry::select_in(package, entry, FunctionPhase::Comptime, identity, &mut fuel)?;
+    let mut invocation = entry::Entry::new(function);
     // Resource binding needs ownership; selected dispatch needs projection.
     // Both use one capture, before VM and query services borrow that source.
     let retained;
@@ -189,11 +203,14 @@ fn execute_prepared(
 ) -> Result<Value, String> {
     let package = source.package();
     let preparation_budget = elaboration::ptc::Budget::default();
-    let context = elaboration::ptc::Context::from_package(package)
-        .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
+    let mut preparation = elaboration::ptc::Budget {
+        steps: usize::try_from(fuel)
+            .map_err(|_| "invocation fuel does not fit the host counter")?,
+        ..preparation_budget
+    };
     let resources = protocols
         .map(|(copy, drop)| {
-            crate::resources::ProtocolContext::selected_in_source(
+            crate::resources::ProtocolContext::selected_in_source_metered(
                 match source {
                     DeclarationSource::Snapshot(snapshot) => snapshot.clone(),
                     DeclarationSource::Borrowed(_) => {
@@ -202,10 +219,20 @@ fn execute_prepared(
                 },
                 copy,
                 Some(drop),
-                preparation_budget,
+                &mut preparation,
             )
         })
         .transpose()?;
+    let context;
+    let context = match &resources {
+        Some(resources) => resources.context(),
+        None => {
+            context =
+                elaboration::ptc::Context::from_package_metered(package, &mut preparation.steps)
+                    .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
+            &context
+        }
+    };
     let copy_failure = std::cell::RefCell::new(None::<String>);
     let pointer_copy = |ty: &Term, remaining: &mut u64| {
         let Some(resources) = &resources else {
@@ -234,7 +261,7 @@ fn execute_prepared(
         .as_ref()
         .map_or(source, |resources| resources.source());
     let source_queries =
-        elaboration::materialization::SourceInvocationQueries::in_source(source, &context, &[]);
+        elaboration::materialization::SourceInvocationQueries::in_source(source, context, &[]);
     let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
         source_queries.check(predicate, preparation_budget, remaining)
     };
@@ -245,7 +272,7 @@ fn execute_prepared(
         source_queries.resolve(callee, remaining)
     };
     let mut budget = Budget {
-        steps: fuel,
+        steps: preparation.steps as u64,
         depth: 128,
     };
     let call = invocation.call(package, &mut budget.steps)?;

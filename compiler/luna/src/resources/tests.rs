@@ -72,15 +72,42 @@ fn bound_resource_source_retains_its_directory_and_releases_the_last_owner() {
         .is_err()
     );
     assert!(source.to_string().ends_with("(metadata pending))"));
-    let binding = bind(source.clone(), Budget::default()).unwrap();
-    let sibling = bind(
+    let mut cold_budget = Budget::default();
+    let binding = ProtocolContext::selected_in_source_metered(
         source.clone(),
-        Budget {
-            steps: 0,
-            ..Default::default()
-        },
+        Selection::Identity(id(1)),
+        Some(Selection::Identity(id(3))),
+        &mut cold_budget,
     )
     .unwrap();
+    let cold_cost = Budget::default().steps - cold_budget.steps;
+    let mut warm_budget = Budget::default();
+    let sibling = ProtocolContext::selected_in_source_metered(
+        source.clone(),
+        Selection::Identity(id(1)),
+        Some(Selection::Identity(id(3))),
+        &mut warm_budget,
+    )
+    .unwrap();
+    let warm_cost = Budget::default().steps - warm_budget.steps;
+    assert!(
+        warm_cost > 0,
+        "selection and fresh type context still require work"
+    );
+    assert!(
+        warm_cost < cold_cost,
+        "only the immutable directory is shared"
+    );
+    assert!(
+        bind(
+            source.clone(),
+            Budget {
+                steps: 0,
+                ..Default::default()
+            }
+        )
+        .is_err()
+    );
     assert!(std::ptr::eq(binding.package(), sibling.package()));
     assert!(std::ptr::eq(binding.world().index, sibling.world().index));
     let context = Context::default();
@@ -131,6 +158,77 @@ fn bound_resource_source_retains_its_directory_and_releases_the_last_owner() {
     ));
     drop(sibling);
     assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn resource_preparation_uses_one_allowance_and_retries_without_partial_bindings() {
+    let package = Arc::new(fixture());
+    let source = DeclarationSnapshot::new(package.clone());
+    let mut budget = Budget::default();
+    let before = budget.steps;
+    ProtocolContext::selected_in_source_metered(
+        source.clone(),
+        Selection::Name("Duplicate"),
+        Some(Selection::Name("Retire")),
+        &mut budget,
+    )
+    .unwrap();
+    let cold_cost = before - budget.steps;
+    let fresh = DeclarationSnapshot::new(package);
+    let mut too_small = Budget {
+        steps: cold_cost - 1,
+        ..Default::default()
+    };
+    let error = ProtocolContext::selected_in_source_metered(
+        fresh.clone(),
+        Selection::Name("Duplicate"),
+        Some(Selection::Name("Retire")),
+        &mut too_small,
+    )
+    .err()
+    .unwrap();
+    assert!(error.contains("budget exhausted"), "{error}");
+    assert!(too_small.steps < cold_cost - 1);
+    // A complete directory can remain after a later binding failure. The next
+    // preparation must still perform selection, context and identity checks.
+    let mut retry = Budget::default();
+    let binding = ProtocolContext::selected_in_source_metered(
+        fresh.clone(),
+        Selection::Name("Duplicate"),
+        Some(Selection::Name("Retire")),
+        &mut retry,
+    )
+    .unwrap();
+    let warm_cost = Budget::default().steps - retry.steps;
+    assert!(warm_cost > 0 && warm_cost < cold_cost);
+    let mut exact = Budget {
+        steps: warm_cost,
+        ..Default::default()
+    };
+    let sibling = ProtocolContext::selected_in_source_metered(
+        fresh.clone(),
+        Selection::Name("Duplicate"),
+        Some(Selection::Name("Retire")),
+        &mut exact,
+    )
+    .unwrap();
+    assert_eq!(exact.steps, 0);
+    assert_eq!(binding.copy, sibling.copy);
+    assert!(std::ptr::eq(binding.world().index, sibling.world().index));
+    let mut exact = Budget {
+        steps: warm_cost,
+        ..Default::default()
+    };
+    assert!(
+        ProtocolContext::selected_in_source_metered(
+            fresh,
+            Selection::Name("Duplicate"),
+            Some(Selection::Name("Absent")),
+            &mut exact,
+        )
+        .is_err()
+    );
+    assert_eq!(binding.drop, Some(id(3)));
 }
 
 #[test]

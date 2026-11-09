@@ -42,17 +42,40 @@ pub(super) fn select<'a>(
     phase: FunctionPhase,
     identity: Option<u64>,
 ) -> Result<&'a nir::program::Function, String> {
-    let mut matches = package.functions.iter().filter(|function| {
-        function.name == entry && identity.is_none_or(|id| function.declaration.package == id)
-    });
-    let function = matches
-        .next()
-        .ok_or_else(|| format!("no function named '{entry}'"))?;
-    if matches.next().is_some() {
-        return Err(format!(
-            "function name '{entry}' is ambiguous; use a uniquely named wrapper"
-        ));
+    select_in(
+        package,
+        entry,
+        phase,
+        identity,
+        &mut Budget::default().steps,
+    )
+}
+
+pub(super) fn select_in<'a>(
+    package: &'a Package,
+    entry: &str,
+    phase: FunctionPhase,
+    identity: Option<u64>,
+    fuel: &mut u64,
+) -> Result<&'a nir::program::Function, String> {
+    let mut selected = None;
+    for function in &package.functions {
+        spend(fuel, 1)?;
+        if identity.is_some_and(|id| function.declaration.package != id)
+            || function.name.len() != entry.len()
+        {
+            continue;
+        }
+        spend(fuel, entry.len())?;
+        if function.name == entry {
+            if selected.replace(function).is_some() {
+                return Err(format!(
+                    "function name '{entry}' is ambiguous; use a uniquely named wrapper"
+                ));
+            }
+        }
     }
+    let function = selected.ok_or_else(|| format!("no function named '{entry}'"))?;
     if function.phase != phase {
         return Err(format!(
             "'{entry}' is not a {} function",
@@ -68,14 +91,30 @@ pub(super) fn select<'a>(
             "'{entry}' requires generic arguments; use a concrete wrapper"
         ));
     }
-    if (0..function.parameters.len())
-        .any(|index| !function.defaults.iter().any(|(slot, _)| *slot == index))
-    {
+    spend(fuel, function.parameters.len().saturating_mul(2))?;
+    spend(fuel, function.defaults.len())?;
+    let mut supplied = vec![false; function.parameters.len()];
+    for (slot, _) in &function.defaults {
+        let slot = supplied
+            .get_mut(*slot)
+            .ok_or("invalid entry default parameter")?;
+        if std::mem::replace(slot, true) {
+            return Err("duplicate entry default parameter".into());
+        }
+    }
+    if supplied.contains(&false) {
         return Err(format!(
             "'{entry}' requires arguments; use a zero-argument wrapper"
         ));
     }
     Ok(function)
+}
+
+fn spend(fuel: &mut u64, amount: usize) -> Result<(), String> {
+    *fuel = fuel
+        .checked_sub(amount as u64)
+        .ok_or("entry selection budget exhausted")?;
+    Ok(())
 }
 
 fn prepare_call(

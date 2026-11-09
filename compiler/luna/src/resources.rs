@@ -220,40 +220,42 @@ impl ProtocolContext {
         drop_protocol: Option<Selection<'_>>,
         budget: Budget,
     ) -> Result<Self, String> {
+        Self::selected_in_source_metered(source, copy_protocol, drop_protocol, &mut { budget })
+    }
+
+    /// Charge selection, declaration theory, directory and language bindings to
+    /// one allowance. Failure returns no protocol authority; completed immutable
+    /// directory metadata may remain shared by this exact source.
+    pub(crate) fn selected_in_source_metered(
+        source: DeclarationSnapshot,
+        copy_protocol: Selection<'_>,
+        drop_protocol: Option<Selection<'_>>,
+        budget: &mut Budget,
+    ) -> Result<Self, String> {
         let package = source.package();
-        let mut protocols = package.traits.iter().filter(|t| copy_protocol.matches(t));
-        let definition = protocols
-            .next()
-            .ok_or_else(|| format!("Copy protocol `{copy_protocol}` was not found"))?;
-        if protocols.next().is_some() {
-            return Err(format!("Copy protocol `{copy_protocol}` is ambiguous"));
-        }
+        let definition = select_protocol(package, copy_protocol, "Copy", &mut budget.steps)?;
         if !definition.type_parameters.is_empty() {
             return Err("Copy protocol must have no explicit type parameters".into());
         }
         let protocol = definition.declaration;
         let drop_protocol = drop_protocol
             .map(|name| {
-                let mut definitions = package.traits.iter().filter(|t| name.matches(t));
-                let definition = definitions
-                    .next()
-                    .ok_or_else(|| format!("Drop protocol `{name}` was not found"))?;
-                if definitions.next().is_some() {
-                    return Err(format!("Drop protocol `{name}` is ambiguous"));
-                }
-                Ok(definition.declaration)
+                select_protocol(package, name, "Drop", &mut budget.steps)
+                    .map(|definition| definition.declaration)
             })
             .transpose()?;
-        let context =
-            Context::from_package(package).map_err(|e| format!("resource type context: {e}"))?;
+        let context = Context::from_package_metered(package, &mut budget.steps)
+            .map_err(|e| format!("resource type context: {e}"))?;
         source
-            .prepare(&mut { budget })
+            .prepare(budget)
             .map_err(|error| format!("resource declaration directory: {error}"))?;
         let mut items = LangItems::new();
+        spend_binding(&items, package, &mut budget.steps)?;
         items
             .bind_source_traits(package, &[(LangItem::Copy, protocol)])
             .map_err(|e| format!("resource Copy binding: {e}"))?;
         if let Some(protocol) = drop_protocol {
+            spend_binding(&items, package, &mut budget.steps)?;
             items
                 .bind_source_traits(package, &[(LangItem::Drop, protocol)])
                 .map_err(|e| format!("resource Drop binding: {e}"))?;
@@ -269,6 +271,10 @@ impl ProtocolContext {
 
     pub(crate) fn package(&self) -> &Package {
         self.source.package()
+    }
+
+    pub(crate) fn context(&self) -> &Context {
+        &self.context
     }
 
     pub(crate) fn source(&self) -> elaboration::materialization::DeclarationSource<'_> {
@@ -287,6 +293,49 @@ impl ProtocolContext {
             )
             .expect("ProtocolContext construction completed its declaration directory")
     }
+}
+
+fn select_protocol<'a>(
+    package: &'a Package,
+    selection: Selection<'_>,
+    role: &str,
+    fuel: &mut usize,
+) -> Result<&'a nir::program::Trait, String> {
+    let mut selected = None;
+    for definition in &package.traits {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("resource protocol selection budget exhausted")?;
+        if let Selection::Name(name) = selection {
+            if name.len() != definition.name.len() {
+                continue;
+            }
+            *fuel = fuel
+                .checked_sub(name.len())
+                .ok_or("resource protocol selection budget exhausted")?;
+        }
+        if selection.matches(definition) {
+            if selected.replace(definition).is_some() {
+                return Err(format!("{role} protocol `{selection}` is ambiguous"));
+            }
+        }
+    }
+    selected.ok_or_else(|| format!("{role} protocol `{selection}` was not found"))
+}
+
+// bind_source_traits checks one identity by scanning the trait table, stages a
+// copy of the current bindings, then inserts one entry. Preflight that work
+// before its all-or-nothing registration; no protocol proof is performed here.
+fn spend_binding(items: &LangItems, package: &Package, fuel: &mut usize) -> Result<(), String> {
+    let work = package
+        .traits
+        .len()
+        .saturating_add(items.len())
+        .saturating_add(1);
+    *fuel = fuel
+        .checked_sub(work)
+        .ok_or("resource language binding budget exhausted")?;
+    Ok(())
 }
 
 impl fmt::Display for ProtocolContext {

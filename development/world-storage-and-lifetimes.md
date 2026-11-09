@@ -142,9 +142,10 @@ PreparedInvocation 构造只保活输入 Arc；若包含旧 dispatch，在首次
 required 准备、发布器证明和其资源权限 owner 也已采用该目录，见第 1.1 节。
 这仍是一份完整 Package 的共享目录，未实现分块或跨编辑的结构共享。luna driver
 资源 ProtocolContext 的后续接线见第 1.3 节；staged 入口独立于声明快照的迁移见第 1.5 节。
-PTC Context 的建立、required 和外围资源／协议准备预算仍有独立成本；接受 `&Package` 的
-兼容入口仍可能复制所保留的源码。上述四条路径已采用有界声明捕获，不代表其他捕获
-入口或整个准备过程已经统一预算。未测整体编译性能收益。
+显式 invocation 的入口选择、PTC Context 与资源准备现已接入调用剩余额度，见第 1.3 节。
+required、缓存／协议的外围准备仍有独立成本；接受 `&Package` 的兼容入口仍可能复制
+所保留的源码。上述四条路径已采用有界声明捕获，不代表其他捕获入口或所有准备过程
+已经统一预算。未测整体编译性能收益。
 
 共同声明捕获的验证在 `/home/fin/luna` 执行，命令前缀为
 `python3 -B development/check.py --timeout 900 -- test`：
@@ -209,6 +210,17 @@ required 目录迁移阶段的检查工作目录 `/home/fin/luna`，统一使用
 目录。资源世界只接纳显式选择的源码 trait 身份；热目录不会使一个同名普通 trait
 自动获得 Copy／Drop 资格，也不能跳过缺失或歧义检查。
 
+`selected_in_source_metered` 将 Copy／Drop 的选择扫描、名称比较、类型上下文构造、
+声明目录和 language-item 身份注册放入同一个可回传额度。原 by-value 入口委托它，
+不再只给目录计费而让其他准备工作游离在外。language-item 注册仍沿用原身份／种类
+检查，只是在扫描与私有复制之前预留其成本，不替代协议方法或程序资源契约的验证。
+热目录只节省完整目录重建；每次选择、上下文与绑定仍需额度，零额度不能重建资源
+上下文。后续绑定失败可以留下已完成的不可变目录，但不能发布半成品绑定。
+
+显式 invocation 在资源绑定完成后直接借用它的 Context，避免先为调用建立一份、
+再为资源准备一份相同声明理论。不启用资源时则使用 `Context::from_package_metered`。
+两条路径都只将剩余额度交给默认参数准备与 VM；资源权限和程序存储依然属于本次调用。
+
 源码快照可能包含闭合 dispatch 表，资源绑定不把该表作为证明；source invocation
 仍遵守自身入口对预选执行表的拒绝。这里没有让程序状态、内存或清理义务进入 PTC，
 只是让程序验证消费者借用来源一致的类型／trait 声明事实。
@@ -219,10 +231,29 @@ required 目录迁移阶段的检查工作目录 `/home/fin/luna`，统一使用
 诊断展开绑定、Context 及 source snapshot，不依赖指针地址。
 
 兼容的 `selected(&Package, ...)` 入口为取得所有权会复制一次完整源码；初次将借用
-源码放进 checked session 也有这项成本，已经持有 snapshot 的路径不复制。捕获复制、
-Context 建立和各阶段预算尚未统一，不能将本迁移称为整体性能优化。ReferenceSession
+源码放进 checked session 也有这项成本，已经持有 snapshot 的路径不复制。显式 comptime
+调用已将其声明捕获和资源上下文准备串在同一额度中；其他 driver 的兼容捕获、外围
+分析及缓存准备尚未全部接通累计预算，不能将本迁移称为整体性能优化。ReferenceSession
 及进一步的实例化复用见第 1.4 节，staged 入口与 VM session 迁移见第 1.5–1.6 节。
 通用验证函数的其他 package／world 调用边界不在此声称全部关闭。
+
+入口与资源准备预算接线的检查工作目录为 `/home/fin/luna`，统一通过
+`python3 -B development/check.py --timeout 900 -- test` 执行，两组均退出 0：
+
+- `-p luna --lib --test prepared_invocations --test comptime_bytecode_defaults
+  --test key_code_sessions --test invocation_value_templates --test comptime_memory
+  --no-fail-fast`：130 项通过，`/tmp/luna-tools-7w7inmpe/result.json`。
+- `-p luna --test resources --test library_protocols --test builder_invocations
+  --test source_tests --test subcommands --no-fail-fast`：500 项通过，
+  `/tmp/luna-tools-gpblvsfi/result.json`。
+
+本阶段去重 630 项通过。新增检查包含 256 个默认参数在有界线性准备后实际调用、
+重复默认槽位拒绝、选名预算回传与恢复、资源冷／热准备的不同成本、准确额度的成功
+及差一步失败。原热目录用零额度重建资源 Context 的断言已改为检查重建实际成本，
+并继续要求相同目录和独立资源证明；原默认入口在捕获后耗尽额度的断言现在由更早
+接入的类型上下文准备负责拒绝。没有增加生产额度或绕过语义检查。五个修改的 Rust
+文件通过 scoped rustfmt check，`/tmp/luna-tools-_fmvb_7u/result.json` 退出 0；
+`git diff --check` 通过。未执行全 workspace 测试或整体性能基准。
 
 driver 资源 owner 迁移阶段在 `/home/fin/luna` 使用
 `python3 -B development/check.py --timeout 900 --` 检查，结果均退出 0：
