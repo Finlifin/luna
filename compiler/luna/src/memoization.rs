@@ -582,8 +582,13 @@ fn evaluate(
     let solver = |predicate: &TypePredicate, remaining: &mut u64| {
         crate::implementation_world::solve_metered(world, predicate, budget, remaining)
     };
+    let method_queries = elaboration::materialization::SourceMethodQueries::new(
+        package,
+        world.context,
+        world.assumptions,
+    );
     let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
-        crate::invocation::resolve_method_for_invocation(package, world.context, callee, remaining)
+        method_queries.resolve(callee, remaining)
     };
     let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
         elaboration::materialization::resolve_associated_value_for_invocation(

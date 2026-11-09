@@ -351,15 +351,13 @@ impl PreparedRequired {
                 &world, access, remaining,
             )
         };
-        let method_resolver = |callee: &n::Expr, remaining: &mut u64| {
-            crate::materialization::resolve_method_for_invocation(
-                &package,
-                callee,
-                invocation_type_context,
-                &invocation_assumptions,
-                remaining,
-            )
-        };
+        let method_queries = crate::materialization::SourceMethodQueries::new(
+            &package,
+            invocation_type_context,
+            &invocation_assumptions,
+        );
+        let method_resolver =
+            |callee: &n::Expr, remaining: &mut u64| method_queries.resolve(callee, remaining);
         if result_type == p(P::Type) {
             // Required Type computations use the same committed scheduler as
             // saved residual calls. Source capture has already excluded any

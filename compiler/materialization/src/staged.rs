@@ -167,15 +167,10 @@ impl Builder<'_> {
             };
             resolve_associated_value_for_invocation(&world, access, remaining)
         };
-        let method_resolver = |callee: &n::Expr, remaining: &mut u64| {
-            resolve_method_for_invocation(
-                snapshot,
-                callee,
-                self.world.context(),
-                self.world.assumptions(),
-                remaining,
-            )
-        };
+        let method_queries =
+            SourceMethodQueries::new(snapshot, self.world.context(), self.world.assumptions());
+        let method_resolver =
+            |callee: &n::Expr, remaining: &mut u64| method_queries.resolve(callee, remaining);
         let mut invocation_budget = comptime_interpretor::Budget {
             steps: std::mem::take(&mut self.fuel) as u64,
             depth: 128,
@@ -198,6 +193,8 @@ impl Builder<'_> {
         let value = interpreter.invoke(entry, vec![]);
         self.fuel = usize::try_from(interpreter.remaining_steps()).unwrap_or(usize::MAX);
         let value = value.map_err(|error| format!("staged comptime invocation: {error}"))?;
+        drop(interpreter);
+        drop(method_queries);
         self.freeze_staged_value(value, &expression.ty, expression.source, 0)
     }
 

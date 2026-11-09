@@ -227,8 +227,10 @@ fn execute_prepared(
             &world, access, remaining,
         )
     };
+    let method_queries =
+        elaboration::materialization::SourceMethodQueries::new(package, &context, &[]);
     let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
-        resolve_method_for_invocation(package, &context, callee, remaining)
+        method_queries.resolve(callee, remaining)
     };
     let mut budget = Budget {
         steps: fuel,
@@ -296,23 +298,6 @@ fn execute_prepared(
         }
         message
     })
-}
-
-/// Resolve only the invocation-demanded method in the owning source world.
-/// Selection consumes the caller's budget; body execution remains in the VM.
-pub(crate) fn resolve_method_for_invocation(
-    package: &Package,
-    context: &elaboration::ptc::Context,
-    callee: &nir::program::Expr,
-    remaining: &mut u64,
-) -> Result<nir::program::MethodInstance, comptime_interpretor::Error> {
-    elaboration::materialization::resolve_method_for_invocation(
-        package,
-        callee,
-        context,
-        &[],
-        remaining,
-    )
 }
 
 /// Prepare the normal zero-supplied-argument call plan, preserving default scope.

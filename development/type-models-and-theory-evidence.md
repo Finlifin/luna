@@ -256,9 +256,9 @@ driver 的调用／缓存／键协议／资源协议／参考执行通过同一�
 候选集，但其参数域仍保留。DeclarationWorld 的 callable 索引与规范化查询状态仍由
 自身管理，并从共同索引读取参数域，避免再扫描一遍声明 telescope。
 
-目前 driver／required 的外层准备仍有各自的阶段预算，尚未全部计入活动 invocation；
-单次方法查询重建 declaration world 的成本也未在此阶段消除。这里统一的是整份源
-索引的实际构造与内部计费，不把它扩大为所有世界存储、生命周期和查询预算已统一。
+目前 driver／required 的外层准备仍有各自的阶段预算，尚未全部计入活动 invocation。
+整份源索引的实际构造与内部计费已统一；下面的调用内查询状态进一步消除逐个方法
+需求的重复构造，但这些迁移仍不等于所有世界存储、生命周期和查询预算已统一。
 
 工作目录 `/home/fin/luna`，检查入口为 `development/check.py --timeout 900 -- test`；
 各 `result.json` 保存完整命令、退出结果和日志路径：
@@ -276,6 +276,38 @@ driver 的调用／缓存／键协议／资源协议／参考执行通过同一�
 - 修改的八个 Rust 文件通过 scoped rustfmt check，
   `/tmp/luna-tools-vjcfur9x/result.json` 退出 0；fixture 的模块排序随后由 rustfmt
   完成，`/tmp/luna-tools-wsd9h_nt/result.json` 退出 0；`git diff --check` 通过。
+
+### 调用内的方法查询状态
+
+`SourceMethodQueries` 借用本次 invocation 的不可变 package、Context 与前提，
+首次方法需求到达时才构造 DeclarationWorld。未使用方法服务的调用不支付这份
+索引成本；后续需求共享已完成的声明索引和规范化 Type 视图。required、staged、
+公开 invocation、缓存 invocation 与键协议五处生产调用均持有这一局部状态，
+不再对每个方法需求重新构造世界；driver 的一次性转发包装已经删除。
+
+构造成功才安装 world，构造失败保留可重试的空状态。成员被拒绝可以保留此前已完成
+的元数据，但不保存失败选择或调用许可；每个需求仍检查接口形成条件和实现关系。
+没有把 VM 调用契约移动到查询服务，也不把用户方法的结果纳入该缓存。一次调用结束
+即释放查询状态；下一次调用、新前提或新快照建立自己的状态。staged 求值先结束 VM
+与查询借用，再进入可变的结果冻结步骤，不能在改写 snapshot 时保留旧查询世界。
+
+宿主入口先预留当前额度，正常／错误返回结算实际剩余量，unwind 不回填额度。
+内部可变状态只用于同步、非执行的声明查询；它不是可暂停 VM 或活动推断变量的共享
+容器。持久世界索引、与已有 type/associated 服务共用索引以及跨调用的稳定查询复用
+仍是后续工作，不能把这个局部复用视为完整的 owning snapshot 迁移。
+
+验证工作目录 `/home/fin/luna`，采用 `development/check.py --timeout 900 --`：
+
+- `check -p luna`：退出 0，`/tmp/luna-tools-ih_ozdsr/result.json`。
+- `/tmp/luna-tools-ojc_6o7d/result.json`：退出 0，luna／materialization lib、
+  prepared invocation、类型查询失败、键协议、staged 复用和调用值模板共 128 项通过。
+  新用例验证不同方法需求的元数据复用及非零选择成本、构造与查询失败后的恢复、
+  前提／同号不同源的隔离，以及 unwind 后不能取回已预留额度。
+- `/tmp/luna-tools-6qgzn8e1/result.json`：退出 0，elaboration／luna lib、
+  真实 sysroot builder、公开协议、列表 Hash／Eq、排序、两阶段 trait、生成 trait
+  与 staged 常量等 502 项通过。两组去重共 546 项，未运行全量回归。
+- 十个修改／新增 Rust 文件通过 scoped rustfmt check，
+  `/tmp/luna-tools-7l4cumt_/result.json` 退出 0；`git diff --check` 通过。
 
 ## 7. 共享项和联合模型
 

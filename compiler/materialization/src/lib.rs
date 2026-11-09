@@ -11,7 +11,7 @@ mod input_admission;
 mod method_selection;
 mod mutable_callbacks;
 mod query_budget;
-pub use method_selection::resolve_method_for_invocation;
+pub use method_selection::{SourceMethodQueries, resolve_method_for_invocation};
 mod recursive_factories;
 mod staged;
 mod template_factories;
@@ -222,17 +222,7 @@ pub fn resolve_method_identity_in_context(
     assumptions: &[n::TraitRequirement],
     fuel: &mut usize,
 ) -> Result<n::MethodInstance, nir::NominalAdmissionError> {
-    let mut budget = Budget {
-        steps: *fuel,
-        ..Budget::default()
-    };
-    let result = (|| {
-        let mut world =
-            DeclarationWorld::new_metered(package, &mut budget, Some((context, assumptions)))?;
-        world.method_identity(callee, &mut budget)
-    })();
-    *fuel = budget.steps;
-    result
+    SourceMethodQueries::new(package, context, assumptions).identity(callee, fuel)
 }
 
 /// Normalize annotations on a private expansion candidate without invoking

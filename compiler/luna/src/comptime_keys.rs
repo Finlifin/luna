@@ -234,13 +234,13 @@ impl Binding {
         };
         // Ordinary Type inputs become concrete only inside the invocation.
         // Resolve their method calls against this protocol's frozen source world.
+        let method_queries = elaboration::materialization::SourceMethodQueries::new(
+            &self.package,
+            &self.context,
+            &[],
+        );
         let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
-            crate::invocation::resolve_method_for_invocation(
-                &self.package,
-                &self.context,
-                callee,
-                remaining,
-            )
+            method_queries.resolve(callee, remaining)
         };
         let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
             elaboration::materialization::resolve_associated_value_for_invocation(

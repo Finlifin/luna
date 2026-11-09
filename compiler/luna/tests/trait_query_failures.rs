@@ -315,7 +315,7 @@ fn materialized_method_selection_pays_for_its_capability_query() {
     world
         .resolve_instance_metered(&interface, &subject, &mut allowance)
         .unwrap();
-    // Every demanded method must construct its declaration world and select the
+    // A cold method demand must construct its declaration world and select the
     // implementation. Other formation and dependency work can only add cost.
     let minimum = granted - allowance.steps;
     let mut remaining = granted;
