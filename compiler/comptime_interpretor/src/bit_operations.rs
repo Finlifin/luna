@@ -21,40 +21,107 @@ impl Interpreter<'_> {
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        let (operation, operands): (_, Vec<&Expr>) = match &expr.kind {
-            K::BitSlice { value, start, end } => (
+        match &expr.kind {
+            K::BitSlice { value, start, end } => self.eval_bit_operands(
                 B::Slice {
                     start: *start,
                     end: *end,
                 },
-                vec![value],
+                [value],
+                &expr.ty,
+                expr.source,
+                environment,
             ),
-            K::BitIndex(value, index) => (B::Index, vec![value, index]),
-            K::BitWindow { value, start, end } => (B::Window, vec![value, start, end]),
-            K::BitConcat(left, right) => (B::Concat, vec![left, right]),
-            K::BitEqual(left, right) => (B::Equal, vec![left, right]),
-            K::BitConvert(value) => (B::Convert, vec![value]),
-            K::TakeBits(value) => (B::Take, vec![value]),
+            K::BitIndex(value, index) => {
+                self.eval_bit_operands(B::Index, [value, index], &expr.ty, expr.source, environment)
+            }
+            K::BitWindow { value, start, end } => self.eval_bit_operands(
+                B::Window,
+                [value, start, end],
+                &expr.ty,
+                expr.source,
+                environment,
+            ),
+            K::BitConcat(left, right) => {
+                self.eval_bit_operands(B::Concat, [left, right], &expr.ty, expr.source, environment)
+            }
+            K::BitEqual(left, right) => {
+                self.eval_bit_operands(B::Equal, [left, right], &expr.ty, expr.source, environment)
+            }
+            K::BitConvert(value) => {
+                self.eval_bit_operands(B::Convert, [value], &expr.ty, expr.source, environment)
+            }
+            K::TakeBits(value) => {
+                self.eval_bit_operands(B::Take, [value], &expr.ty, expr.source, environment)
+            }
             _ => unreachable!("bit operation dispatcher"),
-        };
-        let mut values = Vec::new();
+        }
+    }
+
+    fn eval_bit_operands<const N: usize>(
+        &mut self,
+        operation: B,
+        operands: [&Expr; N],
+        output: &Term,
+        source: SourceRange,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let mut values = std::array::from_fn::<_, N, _>(|_| Value::Unit);
         for (index, operand) in operands.iter().enumerate() {
             let value = match self.eval(operand, environment)? {
                 Flow::Value(value) => value,
                 control => return Ok(control),
             };
-            values.push(self.prepare_bit_operand(
-                value,
-                operation.requires_bits(index),
-                expr.source,
-            )?);
+            values[index] =
+                self.prepare_bit_operand(value, operation.requires_bits(index), source)?;
         }
-        let types = operands
-            .iter()
-            .map(|operand| &operand.ty)
-            .collect::<Vec<_>>();
-        self.bit_values(operation, &types, &expr.ty, values, expr.source)
-            .map(Flow::Value)
+        self.bit_values(
+            operation,
+            &operands.map(|operand| &operand.ty),
+            output,
+            &mut values,
+            source,
+        )
+        .map(Flow::Value)
+    }
+
+    pub(super) fn bit_registers(
+        &mut self,
+        operation: B,
+        inputs: &[(usize, Term)],
+        output: &Term,
+        slots: &mut [Option<Value>],
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        match inputs {
+            [a] => self.bit_register_operands(operation, [a], output, slots, source),
+            [a, b] => self.bit_register_operands(operation, [a, b], output, slots, source),
+            [a, b, c] => self.bit_register_operands(operation, [a, b, c], output, slots, source),
+            _ => Err(self.failure(ErrorKind::InvalidCallPlan, Some(source))),
+        }
+    }
+
+    fn bit_register_operands<const N: usize>(
+        &mut self,
+        operation: B,
+        inputs: [&(usize, Term); N],
+        output: &Term,
+        slots: &mut [Option<Value>],
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let mut values = std::array::from_fn::<_, N, _>(|_| Value::Unit);
+        for ((slot, _), value) in inputs.iter().zip(&mut values) {
+            *value = slots[*slot]
+                .take()
+                .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(source)))?;
+        }
+        self.bit_values(
+            operation,
+            &inputs.map(|(_, ty)| ty),
+            output,
+            &mut values,
+            source,
+        )
     }
 
     pub(super) fn bit_values(
@@ -62,7 +129,7 @@ impl Interpreter<'_> {
         operation: B,
         types: &[&Term],
         output: &Term,
-        values: Vec<Value>,
+        values: &mut [Value],
         source: SourceRange,
     ) -> Result<Value, Error> {
         let count = match operation {
@@ -73,7 +140,11 @@ impl Interpreter<'_> {
         if values.len() != count || types.len() != count {
             return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
         }
-        let mut values = values.into_iter();
+        // Values are moved out of the caller's fixed-size operand buffer. This
+        // keeps one semantic kernel for tree execution and register code.
+        let mut values = values
+            .iter_mut()
+            .map(|value| std::mem::replace(value, Value::Unit));
         if matches!(operation, B::Take) {
             return self.take_bits_value(values.next().unwrap(), types[0], output, source);
         }
@@ -215,3 +286,6 @@ impl Interpreter<'_> {
         Ok(Value::BitVec(result))
     }
 }
+
+#[cfg(test)]
+mod tests;

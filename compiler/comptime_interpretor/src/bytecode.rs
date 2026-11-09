@@ -1412,13 +1412,13 @@ impl<'a> Interpreter<'a> {
                     inputs,
                     output,
                 } => {
-                    let values = inputs
-                        .iter()
-                        .map(|(slot, _)| frame.slots[*slot].take().ok_or_else(missing))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let types = inputs.iter().map(|(_, ty)| ty).collect::<Vec<_>>();
-                    frame.slots[*destination] =
-                        Some(self.bit_values(*operation, &types, output, values, source)?);
+                    frame.slots[*destination] = Some(self.bit_registers(
+                        *operation,
+                        inputs,
+                        output,
+                        &mut frame.slots,
+                        source,
+                    )?);
                 }
                 Op::BeginClosure {
                     closure,

@@ -40,3 +40,7 @@ harness = false
 [[bench]]
 name = "source_session"
 harness = false
+
+[[bench]]
+name = "bit_operands"
+harness = false

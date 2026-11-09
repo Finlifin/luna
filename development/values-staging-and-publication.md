@@ -228,6 +228,84 @@ comptime 值引用与 runtime 资源约束；描述器不执行主体。每次�
 世界依赖和验证结果。代码缓存可复用它，不共享某次 invocation 的帧或可变值。
 指令必须有完整 Display；原语操作通过明确绑定身份 dispatch，不按公共源码拼写识别。
 
+### 已清理：BitVec 固定元数操作的临时堆参数
+
+BitVec 取表示、转换、slice 是单参数；index、concat、equal、and／or 是双参数；
+window 是三参数。这是操作本身的固定元数，不依赖具体库名称或调用来源。此前
+字节码每次 `Bits` 执行都新建一个值 Vec 和一个类型引用 Vec；树解释另建表达式
+引用 Vec。保留的 CodeObject 参数目录可以共享，执行时仍反复构造这些临时容器。
+
+两条路径现在用固定长度数组准备操作数，交给同一个 `bit_values` 内核；内部只移动
+值，不克隆值来替代转移。寄存器载体保留先取齐操作数再检查结果的边界；树载体仍
+逐项求值、检查要求的 bits 表示，提前控制转移不执行后续操作数。BitVec and／or
+继续 eager，布尔 and／or 继续短路。宽度、索引、窗口端点、输出类型与预算检查
+仍在原语义内核中。没有改变 Type 身份、语言阶段、计费或 invocation 结果缓存。
+
+`compiler/comptime_interpretor/benches/bit_operands.rs` 保留可重跑的分配观察：
+单／双／三参数、1／32 次操作、树／字节码共 12 组，测量包含完整 invocation；
+世界创建、代码预热在计数前完成。返回值是 BitVec，不是允许结果缓存的 Type。
+使用同一 dev/test profile：
+
+```text
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench bit_operands
+```
+
+| 32 次操作／调用 | 旧分配次数／调用 | 新分配次数／调用 | 执行步数，前后相同 |
+| --- | ---: | ---: | ---: |
+| 字节码：slice | 145.01 | 81.01 | 338 |
+| 字节码：concat | 177.01 | 113.01 | 594 |
+| 字节码：window | 145.01 | 81.01 | 530 |
+| 树：slice | 173.01 | 77.01 | 270 |
+| 树：concat | 205.01 | 109.01 | 462 |
+| 树：window | 173.01 | 77.01 | 334 |
+
+这些是含调用环境、结果存储和事件记录的平均分配次数，不是 BitVec 本体零分配。
+12 组分别精确减少每次操作 2／3 次分配，执行额度全部不变。dev 时间仅作诊断，
+未测 release 中位数或端到端编译性能，不能由此宣称整机吞吐提高多少。
+
+验证工作目录 `/home/fin/luna`：
+
+- 同一基准在旧实现 `/tmp/luna-tools-mky46m9e/result.json` 与新实现
+  `/tmp/luna-tools-yxyifp2n/result.json` 均退出 0。逐组比较额度和分配差额的结果
+  在 `/tmp/luna-bit-operands-allocation-comparison.json`，全部符合上述关系。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib bit_operations --no-fail-fast`：`/tmp/luna-tools-obfktdj5/result.json` 退出 0，
+  4 项通过。覆盖不同元数与提前返回位置、错误表示先于后续操作数、端点错误后的
+  作用保留、错误后新执行恢复、非法参数包，以及两载体在 2 MiB 原生栈的嵌套执行。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  -p luna --lib --test comptime_bytecode_bits --test comptime_bit_places
+  --test pure_bitvec --test library_hash --test library_list_hash --test sysroot_preludes
+  --no-fail-fast`：`/tmp/luna-tools-zdzt8n0b/result.json` 退出 101，735 项通过，
+  1 项仍是下述已有累计预算失败。真实 sysroot 的文本／hash 接口组通过。
+- 五个修改／新增 Rust 文件的 rustfmt 检查：`/tmp/luna-tools-_942mtox/result.json`
+  退出 0。未执行全 workspace、native 或 release 性能测试。
+
+### 哈希恢复用例的额度调查：尚未改写测试配置
+
+`library_list_hash::error_result_protocols_use_matching_payload_branches` 的失败已在
+后文记录的请求所有权修改前复现。它共用一个 VM 顺序执行 run、good、bad、fail、run；
+临时把观察额度设为 1,000,000，记录每段真实消耗，随后逐字节恢复源码与测试：
+
+| 阶段 | 消耗步数 |
+| --- | ---: |
+| 构建世界 | 37,247 |
+| 首次 run | 35,766 |
+| good | 2,933 |
+| bad | 2,492 |
+| fail（DivisionByZero） | 832 |
+| 再次 run | 32,105 |
+| 总计 | 111,375 |
+
+证据 `/tmp/luna-tools-ogfnbfd6/result.json` 退出 0。这解释了默认 100,000 步下末次
+run 的 StepsExhausted；该观察未显示错误恢复重放或额外初始化，额度也不能在错误
+后偷偷补回。另一次逐指令观察 `/tmp/luna-tools-_8cyjqvo/result.json` 退出 0，统计
+已完成的非终止指令时，2,581 次 `Bits` 共计 13,009 步，2,748 次读取共计 8,021 步。
+这不是完整成本归因；调用准备、调用边界及终止指令不在该逐指令汇总内。
+
+当前保留原测试与原预算，不把临时观察额度提交为测试预期，也不通过少计费让它
+变绿。该用例的累计额度配置仍待处理；本次消除堆参数只减少实际分配，不宣称已经
+解决这个基线失败。两次观察的临时打印及预算修改均已移除。
+
 ## 5. 可恢复 VM 与宿主查询
 
 拟定协议形状：

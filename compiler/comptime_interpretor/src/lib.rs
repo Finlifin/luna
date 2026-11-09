@@ -4806,7 +4806,7 @@ impl<'a> Interpreter<'a> {
                             },
                             &[&a.ty, &b.ty],
                             &expr.ty,
-                            vec![Value::BitVec(left), Value::BitVec(right)],
+                            &mut [Value::BitVec(left), Value::BitVec(right)],
                             expr.source,
                         )?
                     }
