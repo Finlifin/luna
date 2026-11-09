@@ -192,7 +192,11 @@ impl input_collection::Source for Source<'_> {
     ) -> Result<(), Error> {
         Ok(())
     }
-    fn domain(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(Term, bool), Error> {
+    fn domain(
+        &self,
+        vm: &mut Interpreter<'_>,
+        slot: usize,
+    ) -> Result<input_collection::Domain, Error> {
         let metadata = vm
             .normal_forms
             .get(&self.head)
@@ -204,11 +208,17 @@ impl input_collection::Source for Source<'_> {
         vm.integer_operation(Some(self.source), |budget| {
             budget.consume(metadata.parameters.len())
         })?;
-        let unresolved = metadata
+        let awaiting = metadata
             .parameters
             .iter()
-            .any(|p| inputs.declarations.contains_key(&p.declaration));
-        Ok((expected, unresolved))
+            .enumerate()
+            .filter_map(|(index, parameter)| {
+                (!self.bindings.contains(index)
+                    && inputs.declarations.contains_key(&parameter.declaration))
+                .then_some(index)
+            })
+            .collect();
+        Ok(input_collection::Domain { expected, awaiting })
     }
 
     fn bind(

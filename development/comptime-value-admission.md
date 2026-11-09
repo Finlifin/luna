@@ -977,9 +977,22 @@ NF 与名义类型／typealias 的输入帧共用 `input_bindings::Bindings`。�
 | typealias | 在名义输入规则之上保留 alias 的输入类型检查，契约成功后才执行已专门化的透明主体 |
 
 输入先依源码位置执行。域未就绪时，帧保存已经产生的 staged 值和结构位置；后面的
-输入完成后，只补做域准备与值接纳，不重跑 producer。待定集合按需反复处理，直到
-没有新的完成项，因此完成一个输入可以继续唤醒另一层依赖。每轮扫描和域观察都
-消耗调用预算；这不是对全局调度线性复杂度的承诺。
+输入完成后，只补做域准备与值接纳，不重跑 producer。域观察返回期望类型以及它
+引用的未完成输入槽，不再把依赖压成单个 unresolved 布尔值。共同帧以输入槽建立
+反向订阅；只有被观察的输入完成才重新检查该域，无关输入和新的 staged 值不触发
+全量扫描。域只观察本 invocation 的已完成身份，不把任意 producer 副作用当成
+静态域身份变更。Source 仍负责完整域检查，依赖集合不是可绕过准入的证明。
+
+一个完成事件可以唤醒多个待定值，一个域也可以等待多个输入。部分依赖完成后
+重新观察并更新订阅；继续保持声明顺序的轮次，新唤醒的后续槽在本轮处理，前面的
+槽留待下一轮。循环依赖没有可触发的完成事件，最终仍报告缺失输入，不制造默认值。
+已供应的抽象身份仍受其原权限检查，不因保留相同声明编号就被当成尚待执行的输入。
+订阅登记、解除和通知使用调用预算，失败使本帧终止；已发生的副作用保留，计划局部
+由既有清理协议移除。Frame 的 S-expression 同时显示 awaiting 槽和 ready 集合。
+
+这只消除共同帧的无关域重扫。Source 内的参数扫描、代入、结构观察和值接纳仍有
+各自成本，反向订阅使用有序集合；不是全局线性复杂度、异步宿主等待或完整
+ArgumentPlan 已完成的声明。
 
 请求尚未接收完成时不能前进；语义失败或控制转移后帧终止，不接受再次执行。
 调用者清理只移除本计划拥有的绑定，保留外部环境。待定表达式及值不能跨 invocation
@@ -1018,30 +1031,31 @@ list 域诊断已在 §21 修正，并在 §38 单独复核；memoized value-ind
 
 工作目录 `/home/fin/luna` 的当前检查：
 
-- 扩大检查经 `python3 -B development/check.py --timeout 900 -- test
-  -p comptime_interpretor -p luna --lib --test normal_input_plans
-  --test open_normal_input_plans --test normal_form_domains
-  --test nominal_value_parameters --test nominal_staging --test dependent_list_collectors
-  --test library_protocols --test comptime_clause_inputs --test comptime_bytecode_lists
-  --test type_lists --test inline_pattern_observation --no-fail-fast` 执行：
-  `/tmp/luna-tools-sl2zam8f/result.json`，退出 0，1,036 项通过。这组没有执行上文的
-  ordinary callable 动态 Type producer 用例；不能以零 ignored 声称该缺口已解除。
-- 随后加入固定树模式的轻量驱动，并加强同编号 caller local 读取与深度恢复用例。
-  最终 `python3 -B development/check.py --timeout 900 -- test
-  -p comptime_interpretor --lib -- --nocapture`：
-  `/tmp/luna-tools-wclk8p2n/result.json`，退出 0，484 项通过。
-- 无计划输入的交叉检查覆盖 borrowed 树解释、owned 可恢复帧和直接字节码：保持
-  同一个 NF 头，先拒绝 256/u8，再在同 VM 接受 7/u8；既测试字面量，也测试读取与
-  head 绑定同编号的 caller local。环境不被覆盖或清理，避免只检查最终结果而漏掉
-  临时遮蔽。嵌套输入达到 depth 限制后可重新完成浅层构造。原多轮唤醒、动态 sort、
-  暂停帧移动、重复完成拒绝、预算失败、控制出口和形成契约用例继续保留。
-- 最终三组双引擎源码复核：
-  `python3 -B development/check.py --timeout 900 -- test -p luna
-  --test normal_form_domains --test open_normal_input_plans
-  --test comptime_bytecode_lists --no-fail-fast`，
-  `/tmp/luna-tools-mp5_lljr/result.json`，退出 0，14 项通过。
-- 三个修改 Rust 文件 rustfmt 检查：`/tmp/luna-tools-1wtz9uu9/result.json`，退出 0。
-  未运行全 workspace、native 或性能基准；不能据此声称 ContextualExpr 已统一。
+- 仅将调度循环换回旧的全量扫描（保留新域结果结构作为适配），四输入对照的域查询
+  序列为 `[1, 1, 2, 1, 3, 1, 0, 1]`，新的按依赖唤醒为 `[1, 2, 3, 0, 1]`。
+  `/tmp/luna-tools-j25uehtu/result.json` 退出 101，失败于无关域重复查询断言。
+  另将 NF 的等待判据换回“出现声明编号即未完成”，获授权同编号抽象 Type 的
+  用例返回 Type 错误：`/tmp/luna-tools-l3_q2kq7/result.json` 退出 101。
+  两次对照均仅替换所述生产逻辑，结束后逐字节恢复，未修改成功预期。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib -p luna --test ordinary_clause_collectors --test comptime_nominal_capabilities
+  --test comptime_clause_inputs --test normal_form_domains --test normal_input_plans
+  --test open_normal_input_plans --test dependent_list_collectors
+  --test nominal_value_parameters --test nominal_staging --test clause_packet_preparation
+  --test library_protocols --no-fail-fast`：`/tmp/luna-tools-h8rwonjc/result.json`
+  退出 0，1,098 项通过，1 项既有普通 callable 动态 Type producer 用例显式忽略。
+  包含真实 sysroot、公开库接口、默认值、子句顺序、提前返回和形成契约检查。
+- 新调度检查覆盖 NF/nominal、树/字节码两种执行：4/32 输入的无关完成不重查域，
+  23 个待定值共享一个晚到域、两个依赖分批就绪、传递完成、循环依赖保留拒绝、
+  登记/处理唤醒时预算失败后不可重放，以及新 invocation 的恢复。
+  多依赖 fixture 最初把声明域写成前向引用，按声明前后规则修正 fixture 后通过；
+  没有放宽头形成规则。获授权同编号抽象 Type 的补充检查单独通过，
+  `/tmp/luna-tools-2enq4axi/result.json` 退出 0；两次对照恢复后再执行
+  `-p comptime_interpretor --lib input_collection::tests`，5 项通过，
+  `/tmp/luna-tools-mm90kmbb/result.json` 退出 0。至此去重 1,099 项通过。
+- 四个修改 Rust 文件的 rustfmt 检查：`/tmp/luna-tools-zq7qsz3g/result.json`，
+  退出 0。未运行全 workspace、native 或墙钟性能基准；观察次数降低不等同于
+  完整调用准备的渐近复杂度或性能结论。
 
 ## 19. 可复用 invocation 保留普通 comptime 值参数
 

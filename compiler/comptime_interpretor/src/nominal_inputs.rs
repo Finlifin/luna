@@ -181,7 +181,11 @@ impl<'e> Source<'e> {
         self.specialized = Some(inputs);
         result
     }
-    fn domain(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(Term, bool), Error> {
+    fn domain(
+        &self,
+        vm: &mut Interpreter<'_>,
+        slot: usize,
+    ) -> Result<input_collection::Domain, Error> {
         let domain = self
             .domains
             .get(slot)
@@ -190,10 +194,17 @@ impl<'e> Source<'e> {
         let source = self.arguments()[slot].source();
         let inputs = vm.observe_input_dependencies(&expected, source)?;
         vm.integer_operation(Some(source), |budget| budget.consume(self.parameters.len()))?;
-        let unresolved = self.parameters.iter().enumerate().any(|(index, p)| {
-            !self.completed.contains(index) && inputs.declarations.contains_key(&p.declaration)
-        });
-        Ok((expected, unresolved))
+        let awaiting = self
+            .parameters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| {
+                (!self.completed.contains(index)
+                    && inputs.declarations.contains_key(&parameter.declaration))
+                .then_some(index)
+            })
+            .collect();
+        Ok(input_collection::Domain { expected, awaiting })
     }
     fn check_alias_input(
         &self,
@@ -258,7 +269,11 @@ impl input_collection::Source for Source<'_> {
     fn specialize(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error> {
         Source::specialize(self, vm, slot)
     }
-    fn domain(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(Term, bool), Error> {
+    fn domain(
+        &self,
+        vm: &mut Interpreter<'_>,
+        slot: usize,
+    ) -> Result<input_collection::Domain, Error> {
         Source::domain(self, vm, slot)
     }
     fn check_input(
@@ -491,7 +506,11 @@ mod tests {
                 .is_none()
         );
         assert!(environment.is_empty());
-        assert!(frame.to_string().contains("(pending (input 0))"));
+        assert!(
+            frame
+                .to_string()
+                .contains("(pending (input 0 (awaiting 1)))")
+        );
         let mut frame = Box::new(frame);
         assert!(
             vm.run_nominal_inputs(&mut frame, &mut environment)
@@ -590,9 +609,12 @@ mod tests {
                 .source
                 .bind(&mut vm, &mut environment, 2, value)
                 .unwrap();
-            let (domain, unresolved) = frame.source.domain(&mut vm, 1).unwrap();
+            let input_collection::Domain {
+                expected: domain,
+                awaiting,
+            } = frame.source.domain(&mut vm, 1).unwrap();
             assert_eq!(domain, rigid(1, nir::Sort::Type));
-            assert!(unresolved);
+            assert!(!awaiting.is_empty());
             frame
                 .source
                 .bind(&mut vm, &mut environment, 0, Value::Type(ty.clone()))
