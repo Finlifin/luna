@@ -918,8 +918,9 @@ OpenDefinition/WorldView 已经落地。冻结入口、实际执行入口及 IIR
 
 这条分流的历史前提是源 VM 尚不能按实际参数解析方法。现在该服务已存在，继续在
 入口根据可达语法扫描切换世界，会使同一种 comptime 调用受到两套准备责任约束。
-普通入口仍调用 `dispatch_instances_for_invocation` 准备可用 dispatch，并保留已接纳的
-实现关系见证；这不是执行 IIR materialization。代码 session 复用代码，调用值、局部
+普通入口已进一步删除 `dispatch_instances_for_invocation` 的准备与见证合并。
+私有源快照清除旧 dispatch 表，构造时一次安装类型证明、方法和关联项三个宿主服务；
+不先构造执行闭包，也不混用表中选择和按需选择。代码 session 复用代码，调用值、局部
 存储、契约状态与 builder 服务仍在每次 invocation 中建立。
 
 带程序前提的独立 callable 转换仍遵循[函数值契约边界](../docs/functions/comptime_fn.md)：
@@ -991,7 +992,7 @@ IIR 专门化现已在下述后续迁移中删除。运行时 IIR、后端交付
 ## 当前缓存 invocation 迁移：去掉 Type 输入专门化世界
 
 `memoization::Invocation` 现在也只持有一个源 package 与对应 CodeSession。准备阶段
-用 `dispatch_instances_for_invocation` 保留合法输入模板；执行时，声明实参与本次普通
+保留声明及合法输入模板，不再预选 transitive dispatch；执行时，声明实参与本次普通
 实参直接交给源 VM，方法和关联值通过现有 resolver 按实际输入选择。结果的成员资格
 与冻结准入由执行它的同一 VM 检查，不再为 IIR 返回值另建一个源 VM。
 
@@ -1068,6 +1069,21 @@ Execution 持有绑定到该精确 package 的 CodeSession 与最近 VM 操作�
 invocation、缓存 invocation、键方法使用同一个 demand method resolver，删除键路径
 重复维护的选择／计费适配逻辑。
 
+键协议准备仍选择并证明 Eq／Hash 自身的协议绑定，但不再通过
+`dispatch_instances_for_invocation` 遍历其后继调用。三类入口共同采用
+`for_comptime_resolving_in_session`；`CodeSession` 分开保存 closed-table 和按需
+源查询的成功构造索引。它们来自同一快照也不能混用：前者包含预选的实现与方法，
+后者不能凭这些表跳过当前宿主服务。共同的索引发布函数仅在完整构造与目录保留
+计费成功后安装索引，构造失败不发布部分状态。
+
+每次新 VM 重新安装本次宿主服务，已经选过的方法不跨 invocation 保留选择证据。
+精确不可变快照的声明验证、字段目录与代码仍可复用；同号声明的另一份快照须重新
+验证。该复用不缓存类型命题答案、方法选择结果或用户 Eq／Hash 的执行结果。
+传统 closed-table 构造与显式 dispatch 构建目前仍供参考执行／集成检查使用，
+没有因三个生产入口迁移就宣布整个 materialization 子系统已退役。
+每次方法需求重新构造 declaration world 的成本与 driver 准备阶段的独立预算仍待
+继续合并；本次消除的是执行闭包的预选，不把这些剩余准备成本隐去。
+
 每次操作仍构造新鲜 VM，安装原类型证明、方法／关联值和 Copy 证据服务，再检查本次
 输入与执行协议正文。CodeSession 仅复用源索引、已准备主体和字节码，不复用用户
 Eq／Hash 返回值、程序契约结论或接收者存储。构造失败保持原预算预留规则；执行失败
@@ -1086,6 +1102,30 @@ Snapshot 的 owner 仍属于唯一 Protocol，两个 Protocol 即使来自同一
 
 ### 验证
 
+源查询 session 迁移验证在 `/home/fin/luna` 通过
+`python3 -B development/check.py --timeout 900 -- test ...` 执行；完整参数、退出
+结果与日志分别保存在各目录的 `result.json`、`stdout.log`、`stderr.log`：
+
+- `/tmp/luna-tools-g9ra1__a`：初次入口迁移检查退出 0，609 项通过，包括 VM／luna
+  lib、调用值模板、prepared invocation、键代码 session 与类型查询失败边界。
+- `/tmp/luna-tools-5ywo6fmi`：加入 session 权限隔离和索引发布拒绝检查后退出 0，
+  805 项通过，覆盖真实 sysroot builder、名义形成条件、公开协议、列表／排序／Hash、
+  Tuple 与浮点，以及旧模式预热后新宿主拒绝、跨快照 phase 重检、失败恢复和代码复用。
+- `/tmp/luna-tools-t9fzd2s_`：缓存／键协议补充组退出 101，31 项通过，
+  `memoized_invocation_specializes_nested_type_forwarding` 在 elaboration 报
+  `1465..1484: Type domain equality: UnvalidatedModel`。
+- `/tmp/luna-tools-yp3rpgb7`：身份、内存、指针阶段、生成定义和反射组退出 101，
+  81 项通过；反射的 `ordered_field_objects_keep_receiver_admission_and_recover_after_failure`
+  与 `explicit_symbol_codes_are_reflected_without_inventing_discriminants` 仍在前端
+  contextual method classification 处失败。
+- 对本批五个 Rust 文件临时还原到基线 `1155bbce`，其余工作区保持不动，以相同
+  测试入口只复测上述三项：`/tmp/luna-tools-uq7f8i42` 退出 101，三项均以相同位置
+  和诊断失败。随后逐字节恢复并核对本批源码；它们是未解决的基线缺口，未改测试预期。
+  本批相关检查去重共 921 项通过、3 项基线失败，未运行全量测试。
+- 五个修改的 Rust 文件通过 scoped rustfmt check，`/tmp/luna-tools-8e3fslsn`
+  退出 0；`git diff --check` 通过。
+
+以下保留先前键协议迁移中影响成本判据的对照，避免把预热差异误作值复制成本变化。
 工作目录 `/home/fin/luna`，以下参数接在
 `python3 -B development/check.py --timeout 900 -- test -p luna` 后。
 

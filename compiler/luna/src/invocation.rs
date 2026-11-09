@@ -151,42 +151,11 @@ fn prepare_invocation<'a>(
 ) -> Result<(std::borrow::Cow<'a, Package>, DeclarationId), String> {
     let (mut prepared, declaration) =
         prepare_entry_in_package(package, entry, FunctionPhase::Comptime, identity)?;
-    let roots = [iir::InstanceKey {
-        declaration,
-        arguments: vec![].into(),
-    }];
-    let preparation_budget = elaboration::ptc::Budget::default();
-    let mut dispatch = elaboration::materialization::dispatch_instances_for_invocation(
-        prepared.as_ref(),
-        &roots,
-        preparation_budget,
-    )
-    .map_err(|error| format!("cannot prepare invocation dispatch: {error}"))?;
-    // The NIR world still contains its concrete implementation contracts.
-    // Keep their admitted relationship witnesses (including generic parents
-    // such as Once<T>), without installing unused executable method links.
-    let mut selected: std::collections::HashSet<_> = dispatch
-        .iter()
-        .map(|instance| {
-            (
-                instance.interface_instance(),
-                instance.subject.clone(),
-                instance.implementation,
-            )
-        })
-        .collect();
-    for original in &prepared.dispatch_instances {
-        if selected.insert((
-            original.interface_instance(),
-            original.subject.clone(),
-            original.implementation,
-        )) {
-            let mut witness = original.clone();
-            witness.methods.clear();
-            dispatch.push(witness);
-        }
+    // A source invocation owns declarations, not a precomputed executable
+    // closure. Each demanded relationship is proved by the host services.
+    if !prepared.dispatch_instances.is_empty() {
+        prepared.to_mut().dispatch_instances.clear();
     }
-    prepared.to_mut().dispatch_instances = dispatch;
     Ok((prepared, declaration))
 }
 
@@ -265,15 +234,26 @@ fn execute_prepared(
         steps: fuel,
         depth: 128,
     };
+    let resolvers = comptime_interpretor::SourceResolvers {
+        types: &solver,
+        methods: &method_resolver,
+        associated: &associated_resolver,
+    };
     let interpreter = match session.as_deref_mut() {
-        Some(session) => Interpreter::for_comptime_in_session(package, session, &mut budget),
-        None => Interpreter::for_comptime(package, budget),
+        Some(session) => {
+            Interpreter::for_comptime_resolving_in_session(package, session, resolvers, &mut budget)
+        }
+        None => Interpreter::for_comptime_resolving_in_budget(
+            package,
+            &[],
+            &[],
+            &[],
+            resolvers,
+            &mut budget,
+        ),
     };
     let mut interpreter = interpreter
         .map_err(|error| format!("cannot prepare comptime invocation: {error}"))?
-        .with_method_resolver(&method_resolver)
-        .with_associated_resolver(&associated_resolver)
-        .with_budgeted_type_solver(&solver)
         .with_budgeted_pointer_copy_permission(&pointer_copy);
     let builder = |request: &comptime_interpretor::StructBuildRequest, remaining: &mut u64| {
         publisher

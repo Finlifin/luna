@@ -214,16 +214,8 @@ impl Invocation {
         } else {
             vec![]
         };
-        let dispatch = elaboration::materialization::dispatch_instances_for_invocation(
-            package,
-            &[iir::InstanceKey {
-                declaration,
-                arguments: arguments.clone().into(),
-            }],
-            budget,
-        )?;
         let mut package = package.clone();
-        package.dispatch_instances = dispatch;
+        package.dispatch_instances.clear();
         let package = std::sync::Arc::new(package);
         let code_session = comptime_interpretor::CodeSession::new(package.clone());
         Ok(Self {
@@ -600,7 +592,16 @@ fn evaluate(
     };
     let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
     let mut vm_budget = Budget { steps, depth: 128 };
-    let prepared_vm = Interpreter::for_comptime_in_session(package, code_session, &mut vm_budget);
+    let prepared_vm = Interpreter::for_comptime_resolving_in_session(
+        package,
+        code_session,
+        comptime_interpretor::SourceResolvers {
+            types: &solver,
+            methods: &method_resolver,
+            associated: &associated_resolver,
+        },
+        &mut vm_budget,
+    );
     let copy_failure = std::cell::RefCell::new(None::<String>);
     let pointer_copy = |ty: &Term, remaining: &mut u64| {
         let Some((copy, drop)) = resources else {
@@ -626,11 +627,7 @@ fn evaluate(
         allowed
     };
     let mut vm = match prepared_vm {
-        Ok(vm) => vm
-            .with_method_resolver(&method_resolver)
-            .with_associated_resolver(&associated_resolver)
-            .with_budgeted_type_solver(&solver)
-            .with_budgeted_pointer_copy_permission(&pointer_copy),
+        Ok(vm) => vm.with_budgeted_pointer_copy_permission(&pointer_copy),
         Err(error) => {
             context.spend::<String>((steps - vm_budget.steps) as usize)?;
             return Err(evaluation_error(error, None));

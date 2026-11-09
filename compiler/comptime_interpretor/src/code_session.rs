@@ -8,6 +8,7 @@ pub struct CodeSession {
     world: CodeWorld,
     graph_indexes: Option<Arc<iir_execution::GraphIndexes>>,
     indexes: Option<Arc<declaration_index::SourceIndexes>>,
+    resolving_indexes: Option<Arc<declaration_index::SourceIndexes>>,
     compilation: comptime_compiler::CompilationSession,
     bytecode: bytecode::CodeCache,
     inputs: input_bodies::Cache,
@@ -25,6 +26,7 @@ impl CodeSession {
             world: CodeWorld::Source(package),
             graph_indexes: None,
             indexes: None,
+            resolving_indexes: None,
             compilation: Default::default(),
             bytecode: Default::default(),
             inputs: Default::default(),
@@ -41,6 +43,7 @@ impl CodeSession {
             world: CodeWorld::Graph(graph),
             graph_indexes: None,
             indexes: None,
+            resolving_indexes: None,
             compilation: Default::default(),
             bytecode: Default::default(),
             inputs: Default::default(),
@@ -129,27 +132,39 @@ impl<'program> Interpreter<'program> {
         budget.steps = 0;
         let mut vm =
             Self::for_comptime_with_index(package, &[], reserved, session.indexes.clone())?;
-        if session.indexes.is_none() {
-            vm.charge_preparation(package.structs.len().saturating_add(package.enums.len()))?;
+        vm.retain_source_indexes(&source, &mut session.indexes)?;
+        budget.steps = vm.remaining_steps();
+        Ok(vm)
+    }
+
+    /// Retain only the metadata produced by this construction mode. The caller
+    /// chooses a distinct slot for closed dispatch and resolver-backed source.
+    fn retain_source_indexes(
+        &mut self,
+        source: &Arc<Package>,
+        retained: &mut Option<Arc<declaration_index::SourceIndexes>>,
+    ) -> Result<(), Error> {
+        if retained.is_none() {
+            self.charge_preparation(source.structs.len().saturating_add(source.enums.len()))?;
         }
-        let indexes = session.indexes.get_or_insert_with(|| {
+        let indexes = retained.get_or_insert_with(|| {
             Arc::new(declaration_index::SourceIndexes {
                 source: source.clone(),
-                reserved_declarations: vm
+                reserved_declarations: self
                     .reserved_source_declarations
                     .as_ref()
                     .expect("source VM")
                     .clone(),
-                implementations: vm.implemented_interfaces.clone(),
-                methods: vm.method_bodies.clone(),
-                associated: vm.associated_values.positions.clone(),
-                initializers: vm.associated_initializers.positions.clone(),
-                method_contracts: vm.method_contracts.entries.clone(),
-                normal_forms: vm.normal_forms.positions.clone(),
-                newtypes: vm.newtypes.source.positions.clone(),
-                aliases: vm.alias_contracts.positions.clone(),
+                implementations: self.implemented_interfaces.clone(),
+                methods: self.method_bodies.clone(),
+                associated: self.associated_values.positions.clone(),
+                initializers: self.associated_initializers.positions.clone(),
+                method_contracts: self.method_contracts.entries.clone(),
+                normal_forms: self.normal_forms.positions.clone(),
+                newtypes: self.newtypes.source.positions.clone(),
+                aliases: self.alias_contracts.positions.clone(),
                 structs: Arc::new(
-                    package
+                    source
                         .structs
                         .iter()
                         .enumerate()
@@ -165,7 +180,7 @@ impl<'program> Interpreter<'program> {
                         .collect(),
                 ),
                 enums: Arc::new(
-                    package
+                    source
                         .enums
                         .iter()
                         .enumerate()
@@ -180,17 +195,70 @@ impl<'program> Interpreter<'program> {
                         })
                         .collect(),
                 ),
-                method_parameters: vm.method_parameters.clone(),
-                method_origins: vm.method_origins.clone(),
-                parameter_domains: vm.declaration_parameter_domains.clone(),
-                parameter_sorts: vm.declaration_parameter_sorts.clone(),
-                functions: vm.functions.positions.clone(),
-                runtime_identities: vm.runtime_function_identities.positions.clone(),
-                effects: vm.effect_declarations.positions.clone(),
+                method_parameters: self.method_parameters.clone(),
+                method_origins: self.method_origins.clone(),
+                parameter_domains: self.declaration_parameter_domains.clone(),
+                parameter_sorts: self.declaration_parameter_sorts.clone(),
+                functions: self.functions.positions.clone(),
+                runtime_identities: self.runtime_function_identities.positions.clone(),
+                effects: self.effect_declarations.positions.clone(),
             })
         });
-        vm.structs = layout_catalog::Catalog::from_base(indexes.structs.clone());
-        vm.enums = layout_catalog::Catalog::from_base(indexes.enums.clone());
+        self.structs = layout_catalog::Catalog::from_base(indexes.structs.clone());
+        self.enums = layout_catalog::Catalog::from_base(indexes.enums.clone());
+        Ok(())
+    }
+
+    /// Reuse source declaration metadata without importing closed-table method
+    /// evidence. Host services and invocation state are fresh on every call.
+    pub fn for_comptime_resolving_in_session(
+        package: &'program Package,
+        session: &mut CodeSession,
+        resolvers: SourceResolvers<'program>,
+        budget: &mut Budget,
+    ) -> Result<Self, Error> {
+        let CodeWorld::Source(source) = &session.world else {
+            return Self::for_comptime_resolving_in_budget(
+                package,
+                &[],
+                &[],
+                &[],
+                resolvers,
+                budget,
+            );
+        };
+        let source = source.clone();
+        if !std::ptr::eq(package, source.as_ref()) {
+            return Self::for_comptime_resolving_in_budget(
+                package,
+                &[],
+                &[],
+                &[],
+                resolvers,
+                budget,
+            );
+        }
+        let mut allowance = *budget;
+        budget.steps = 0;
+        let mut vm = match &session.resolving_indexes {
+            Some(indexes) => {
+                let mut vm = Self::from_source_indexes(package, allowance, indexes.clone())?;
+                vm.comptime_only = true;
+                vm.type_solver = Some(TypeSolver::Budgeted(resolvers.types));
+                vm.method_resolver = Some(resolvers.methods);
+                vm.associated_resolver = Some(resolvers.associated);
+                vm
+            }
+            None => Self::for_comptime_resolving_in_budget(
+                package,
+                &[],
+                &[],
+                &[],
+                resolvers,
+                &mut allowance,
+            )?,
+        };
+        vm.retain_source_indexes(&source, &mut session.resolving_indexes)?;
         budget.steps = vm.remaining_steps();
         Ok(vm)
     }
@@ -624,21 +692,66 @@ mod tests {
             }],
             ..Default::default()
         });
-        let ordinary = Interpreter::for_comptime(&source, Budget::default()).unwrap();
-        let construction = Budget::default().steps - ordinary.remaining_steps();
-        let mut session = CodeSession::new(source.clone());
-        let mut budget = Budget {
-            steps: construction,
-            depth: 128,
+        let types = |_: &nir::program::TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+        let methods = |_: &Expr, _: &mut u64| {
+            Err(Error {
+                kind: ErrorKind::UnmaterializedDispatch,
+                source: None,
+            })
         };
-        let error = Interpreter::for_comptime_in_session(&source, &mut session, &mut budget)
-            .err()
-            .expect("catalog ownership also consumes work");
-        assert_eq!(error.kind, ErrorKind::StepsExhausted);
-        assert_eq!(budget.steps, 0);
-        assert!(session.indexes.is_none());
-        Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
+        let associated = |_: &Expr, _: &mut u64| {
+            Err(Error {
+                kind: ErrorKind::UnmaterializedDispatch,
+                source: None,
+            })
+        };
+        let services = || SourceResolvers {
+            types: &types,
+            methods: &methods,
+            associated: &associated,
+        };
+        for resolving in [false, true] {
+            let ordinary = if resolving {
+                Interpreter::for_comptime_resolving_in_budget(
+                    &source,
+                    &[],
+                    &[],
+                    &[],
+                    services(),
+                    &mut Budget::default(),
+                )
+            } else {
+                Interpreter::for_comptime(&source, Budget::default())
+            }
             .unwrap();
-        assert!(session.indexes.is_some());
+            let construction = Budget::default().steps - ordinary.remaining_steps();
+            let mut session = CodeSession::new(source.clone());
+            let construct = |session: &mut CodeSession, budget: &mut Budget| {
+                if resolving {
+                    Interpreter::for_comptime_resolving_in_session(
+                        &source,
+                        session,
+                        services(),
+                        budget,
+                    )
+                } else {
+                    Interpreter::for_comptime_in_session(&source, session, budget)
+                }
+            };
+            let mut budget = Budget {
+                steps: construction,
+                depth: 128,
+            };
+            let error = construct(&mut session, &mut budget)
+                .err()
+                .expect("catalog ownership also consumes work");
+            assert_eq!(error.kind, ErrorKind::StepsExhausted);
+            assert_eq!(budget.steps, 0);
+            assert!(session.indexes.is_none());
+            assert!(session.resolving_indexes.is_none());
+            construct(&mut session, &mut Budget::default()).unwrap();
+            assert_eq!(session.indexes.is_some(), !resolving);
+            assert_eq!(session.resolving_indexes.is_some(), resolving);
+        }
     }
 }

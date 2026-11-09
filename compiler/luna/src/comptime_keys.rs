@@ -63,8 +63,8 @@ struct Binding {
     resources: Option<(nir::DeclarationId, nir::DeclarationId)>,
 }
 impl Protocol {
-    /// Bind both operations, prove type capabilities, and prepare their
-    /// transitive dispatch dependencies transactionally in a private package.
+    /// Bind both operations and prove their declared type capabilities.
+    /// Transitive method dependencies are selected at the actual invocation.
     /// The supplied package must have passed ordinary source contract checking.
     pub fn prepare(
         package: &Package,
@@ -125,18 +125,8 @@ impl Protocol {
                 }
             }
         }
-        let roots = [&eq, &hash].map(|m| iir::InstanceKey {
-            declaration: m.method.body,
-            arguments: m.method.arguments.clone().into(),
-        });
-        // Key methods execute in the comptime VM. Transitive helpers may have
-        // ordinary Type inputs (for example a generic container operation);
-        // retain those checked telescopes for binding at the actual call.
-        let dispatch = elaboration::materialization::dispatch_instances_for_invocation(
-            package, &roots, budget,
-        )?;
         let mut package = package.clone();
-        package.dispatch_instances = dispatch;
+        package.dispatch_instances.clear();
         let package = Arc::new(package);
         Ok(Self {
             execution: Execution {
@@ -260,17 +250,18 @@ impl Binding {
         let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
         let mut allowance = Budget { steps, depth: 128 };
         execution.stats = Default::default();
-        let prepared = Interpreter::for_comptime_in_session(
+        let prepared = Interpreter::for_comptime_resolving_in_session(
             &self.package,
             &mut execution.code,
+            comptime_interpretor::SourceResolvers {
+                types: &solver,
+                methods: &method_resolver,
+                associated: &associated_resolver,
+            },
             &mut allowance,
         );
         let mut interpreter = match prepared {
-            Ok(interpreter) => interpreter
-                .with_budgeted_type_solver(&solver)
-                .with_method_resolver(&method_resolver)
-                .with_associated_resolver(&associated_resolver)
-                .with_budgeted_pointer_copy_permission(&pointer_copy),
+            Ok(interpreter) => interpreter.with_budgeted_pointer_copy_permission(&pointer_copy),
             Err(error) => {
                 // Failed world construction retains its reservation, just as
                 // ordinary invocation does; retries cannot obtain free work.
