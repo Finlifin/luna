@@ -437,3 +437,38 @@ fn shared_closure_bodies_are_retained_but_owned_depth_still_has_a_limit() {
     );
     assert_eq!(Arc::strong_count(&shared), count);
 }
+
+#[test]
+fn declaration_comparison_enters_shared_code_that_source_capture_only_retains() {
+    let mut body = expr();
+    for _ in 0..180 {
+        body = n::Expr {
+            kind: n::ExprKind::Block {
+                statements: vec![],
+                result: Some(Box::new(body)),
+            },
+            ..expr()
+        };
+    }
+    let shared = n::Expr {
+        kind: n::ExprKind::Closure {
+            parameters: vec![],
+            captures: vec![],
+            body: Arc::new(body),
+        },
+        ..expr()
+    };
+    let mut contract = method();
+    contract.program.preconditions.push(shared);
+    let mut declaration = interface();
+    declaration.methods.push(contract);
+    let package = n::Package {
+        traits: vec![declaration],
+        ..Default::default()
+    };
+    assert!(clone_declaration_source(&package, &mut 100_000).is_ok());
+    assert_eq!(
+        charge_trait_metadata(&package.traits[0], &mut 100_000),
+        Err(Error::Depth)
+    );
+}

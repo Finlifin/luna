@@ -1,7 +1,9 @@
 //! Shared preflight for materialized constants and contextual input templates.
 use crate::{Term, program as n, program::ExprKind as K};
 mod package;
-pub use package::clone_declaration_source;
+pub use package::{
+    charge_implementation_metadata, charge_trait_metadata, clone_declaration_source,
+};
 
 // Quote expansion retains preparation, parameter and lexical cleanup scopes.
 // Its supported 32-frame chain can exceed 128 expression nodes in depth.

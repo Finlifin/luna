@@ -64,18 +64,18 @@ impl Protocol {
     /// Bind both operations and prove their declared type capabilities.
     /// Transitive method dependencies are selected at the actual invocation.
     /// The supplied package must have passed ordinary source contract checking.
-    /// Source capture has its own `budget.steps` bound, like the subsequent
-    /// protocol preparation stages; this is not a cumulative preparation meter.
+    /// Capture and both method preparations share one construction allowance.
     pub fn prepare(
         package: &Package,
         items: &LangItems,
         subject: &Term,
         budget: ptc::Budget,
     ) -> Result<Self, String> {
+        let mut remaining = budget.steps;
         let source = DeclarationSource::Borrowed(package)
-            .retain_declarations(&mut { budget.steps })
+            .retain_declarations(&mut remaining)
             .map_err(|error| format!("key source retention budget exhausted: {error:?}"))?;
-        Self::prepare_in_source(source, items, subject, budget)
+        Self::prepare_in_source_metered(source, items, subject, budget, &mut remaining)
     }
 
     /// Reuse the owning source directory across protocol bindings. Each binding
@@ -88,89 +88,138 @@ impl Protocol {
         subject: &Term,
         budget: ptc::Budget,
     ) -> Result<Self, String> {
-        let session = comptime_interpretor::CodeSession::new(source.package().clone());
-        Self::prepare_in_source_with_session(source, items, subject, budget, &session)
+        Self::prepare_in_source_metered(source, items, subject, budget, &mut { budget.steps })
     }
 
-    /// Share source admission across sibling protocols and the enclosing call,
-    /// while retaining this binding's separate values and executable code.
-    pub(crate) fn prepare_in_source_with_session(
+    /// Return actual construction work to the caller. `budget` separately
+    /// retains the per-query limits used by later method invocations.
+    pub fn prepare_in_source_metered(
         source: DeclarationSnapshot,
         items: &LangItems,
         subject: &Term,
         budget: ptc::Budget,
+        remaining: &mut usize,
+    ) -> Result<Self, String> {
+        let session = comptime_interpretor::CodeSession::new(source.package().clone());
+        Self::prepare_in_source_with_session_metered(
+            source, items, subject, budget, remaining, &session,
+        )
+    }
+
+    /// Share source admission across sibling protocols and the enclosing call,
+    /// while retaining this binding's separate values and executable code.
+    pub(crate) fn prepare_in_source_with_session_metered(
+        source: DeclarationSnapshot,
+        items: &LangItems,
+        subject: &Term,
+        budget: ptc::Budget,
+        remaining: &mut usize,
         session: &comptime_interpretor::CodeSession,
     ) -> Result<Self, String> {
-        let package = source.package();
-        if !package.dispatch_instances.is_empty() {
-            return Err(
-                "key source snapshot must not contain preselected dispatch instances".into(),
-            );
-        }
-
-        let resources = match (items.get(LangItem::Copy), items.get(LangItem::Drop)) {
-            (None, None) => None,
-            (Some(LangItemDef::UserDef(copy)), Some(LangItemDef::UserDef(drop))) => {
-                crate::resources::ProtocolContext::selected_in_source(
-                    source.clone(),
-                    crate::resources::Selection::Identity(copy),
-                    Some(crate::resources::Selection::Identity(drop)),
-                    budget,
-                )?;
-                Some((copy, drop))
-            }
-            _ => {
+        let mut work = ptc::Budget {
+            steps: budget.steps.min(*remaining),
+            ..budget
+        };
+        let before = work.steps;
+        let prepared = (|| {
+            let package = source.package();
+            if !package.dispatch_instances.is_empty() {
                 return Err(
-                    "key pointer transfers require paired source Copy and Drop bindings".into(),
+                    "key source snapshot must not contain preselected dispatch instances".into(),
                 );
             }
-        };
-        let context = ptc::Context::from_package(package)?;
-        let world = source
-            .capabilities(&context, &[], &mut { budget })
-            .map_err(|error| format!("key declaration index: {error}"))?;
-        let eq = crate::protocols::select_comptime_key(
-            package,
-            &world,
-            items,
-            subject,
-            Operation::Eq,
-            budget,
-        )?;
-        let hash = crate::protocols::select_comptime_key(
-            package,
-            &world,
-            items,
-            subject,
-            Operation::Hash,
-            budget,
-        )?;
-        for method in [&eq, &hash] {
-            for capability in &method.capabilities {
-                if !matches!(
-                    world.check_predicate(&TypePredicate::Trait(capability.clone()), budget)?,
-                    ptc::Outcome::Entailed(_)
-                ) {
-                    return Err("comptime key capability is not established".into());
+
+            let resource_binding = match (items.get(LangItem::Copy), items.get(LangItem::Drop)) {
+                (None, None) => None,
+                (Some(LangItemDef::UserDef(copy)), Some(LangItemDef::UserDef(drop))) => Some(
+                    crate::resources::ProtocolContext::selected_in_source_metered(
+                        source.clone(),
+                        crate::resources::Selection::Identity(copy),
+                        Some(crate::resources::Selection::Identity(drop)),
+                        &mut work,
+                    )?,
+                ),
+                _ => {
+                    return Err(
+                        "key pointer transfers require paired source Copy and Drop bindings".into(),
+                    );
+                }
+            };
+            let resources = resource_binding
+                .as_ref()
+                .map(|binding| (binding.copy, binding.drop.expect("paired protocols")));
+            let context = match &resource_binding {
+                Some(binding) => {
+                    work.steps = work
+                        .steps
+                        .checked_sub(1)
+                        .ok_or("key context retention budget exhausted")?;
+                    binding.context().clone()
+                }
+                None => ptc::Context::from_package_metered(package, &mut work.steps)
+                    .map_err(|error| format!("key type context: {error}"))?,
+            };
+            let world = source
+                .capabilities(&context, &[], &mut work)
+                .map_err(|error| format!("key declaration index: {error}"))?;
+            let eq = crate::protocols::select_comptime_key_metered(
+                package,
+                &world,
+                items,
+                subject,
+                Operation::Eq,
+                &mut work,
+            )?;
+            let hash = crate::protocols::select_comptime_key_metered(
+                package,
+                &world,
+                items,
+                subject,
+                Operation::Hash,
+                &mut work,
+            )?;
+            for method in [&eq, &hash] {
+                for capability in &method.capabilities {
+                    for term in
+                        std::iter::once(&capability.subject).chain(&capability.interface_arguments)
+                    {
+                        nir::copy_budget::charge_type_substitution(term, &[], &[], &mut work.steps)
+                            .map_err(|error| {
+                                format!("key capability copy budget exhausted: {error:?}")
+                            })?;
+                    }
+                    if !matches!(
+                        world.check_predicate_metered(
+                            &TypePredicate::Trait(capability.clone()),
+                            &mut work
+                        )?,
+                        ptc::Outcome::Entailed(_)
+                    ) {
+                        return Err("comptime key capability is not established".into());
+                    }
                 }
             }
-        }
-        Ok(Self {
-            execution: Execution {
-                code: session.fork_for_source(source.package().clone()),
-                stats: Default::default(),
-            },
-            binding: Binding {
-                owner: Arc::new(()),
-                subject: Arc::new(subject.clone()),
-                source,
-                context,
-                eq,
-                hash,
-                budget,
-                resources,
-            },
-        })
+            let subject = nir::copy_budget::clone_term(subject, &mut work.steps)
+                .map_err(|error| format!("key subject retention budget exhausted: {error:?}"))?;
+            Ok(Self {
+                execution: Execution {
+                    code: session.fork_for_source(source.package().clone()),
+                    stats: Default::default(),
+                },
+                binding: Binding {
+                    owner: Arc::new(()),
+                    subject: Arc::new(subject),
+                    source,
+                    context,
+                    eq,
+                    hash,
+                    budget,
+                    resources,
+                },
+            })
+        })();
+        *remaining -= before - work.steps;
+        prepared
     }
     /// Counters from the most recent VM admission or method execution.
     pub fn last_execution_stats(&self) -> crate::invocation::InvocationStats {

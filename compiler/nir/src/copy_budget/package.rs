@@ -4,6 +4,24 @@ use crate::{Term, code_interfaces as code, program as n};
 
 type Result<T = ()> = std::result::Result<T, Error>;
 
+/// Bound structural observation or copying of one declaration's metadata.
+/// Shared owners need no structural equality walk; distinct owners do.
+pub fn charge_trait_metadata(value: &n::Trait, fuel: &mut usize) -> Result {
+    Meter {
+        fuel,
+        follow_shared: true,
+    }
+    .interface(value)
+}
+
+pub fn charge_implementation_metadata(value: &n::Implementation, fuel: &mut usize) -> Result {
+    Meter {
+        fuel,
+        follow_shared: true,
+    }
+    .implementation(value)
+}
+
 /// Copy a source's owned declaration payloads after a complete preflight. The
 /// selected dispatch table is neither traversed nor copied: it belongs to a
 /// different execution view. This grants no phase, type or resource authority.
@@ -35,7 +53,10 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         alias_contracts,
         enums,
     } = package;
-    let mut meter = Meter(fuel);
+    let mut meter = Meter {
+        fuel,
+        follow_shared: false,
+    };
     meter.width(1)?;
     for count in [
         builtin_implementation_packages.len(),
@@ -137,37 +158,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         meter.interface(contract)?;
     }
     for implementation in implementations {
-        let n::Implementation {
-            phases: _,
-            parameter_types,
-            associated,
-            associated_initializers,
-            interface_arguments,
-            capabilities,
-            type_parameters,
-            requirements,
-            declaration: _,
-            subject,
-            interface: _,
-            methods,
-        } = implementation;
-        meter.width(type_parameters.len())?;
-        meter.terms(parameter_types)?;
-        meter.terms(interface_arguments)?;
-        meter.node(Node::Type(subject))?;
-        meter.contracts(requirements, capabilities)?;
-        meter.width(associated.len())?;
-        for (_, value) in associated {
-            meter.node(Node::Expr(value))?;
-        }
-        meter.width(associated_initializers.len())?;
-        for (_, initializer) in associated_initializers {
-            meter.node(Node::Expr(initializer.expression()))?;
-        }
-        meter.width(methods.len())?;
-        for (name, _) in methods {
-            meter.width(name.len())?;
-        }
+        meter.implementation(implementation)?;
     }
     for definition in structs {
         let n::Struct {
@@ -249,16 +240,19 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     })
 }
 
-struct Meter<'a>(&'a mut usize);
+struct Meter<'a> {
+    fuel: &'a mut usize,
+    follow_shared: bool,
+}
 impl Meter<'_> {
     fn width(&mut self, count: usize) -> Result {
-        *self.0 = self.0.checked_sub(count).ok_or(Error::Steps)?;
+        *self.fuel = self.fuel.checked_sub(count).ok_or(Error::Steps)?;
         Ok(())
     }
     fn node(&mut self, node: Node<'_>) -> Result {
-        let mut steps = *self.0 as u64;
-        let result = charge_node(node, &mut steps, false, None);
-        *self.0 = steps as usize;
+        let mut steps = *self.fuel as u64;
+        let result = charge_node(node, &mut steps, self.follow_shared, None);
+        *self.fuel = steps as usize;
         result
     }
     fn terms(&mut self, terms: &[Term]) -> Result {
@@ -280,6 +274,40 @@ impl Meter<'_> {
         }
         for requirement in requirements {
             self.node(Node::Requirement(requirement))?;
+        }
+        Ok(())
+    }
+    fn implementation(&mut self, implementation: &n::Implementation) -> Result {
+        let n::Implementation {
+            phases: _,
+            parameter_types,
+            associated,
+            associated_initializers,
+            interface_arguments,
+            capabilities,
+            type_parameters,
+            requirements,
+            declaration: _,
+            subject,
+            interface: _,
+            methods,
+        } = implementation;
+        self.width(type_parameters.len())?;
+        self.terms(parameter_types)?;
+        self.terms(interface_arguments)?;
+        self.node(Node::Type(subject))?;
+        self.contracts(requirements, capabilities)?;
+        self.width(associated.len())?;
+        for (_, value) in associated {
+            self.node(Node::Expr(value))?;
+        }
+        self.width(associated_initializers.len())?;
+        for (_, initializer) in associated_initializers {
+            self.node(Node::Expr(initializer.expression()))?;
+        }
+        self.width(methods.len())?;
+        for (name, _) in methods {
+            self.width(name.len())?;
         }
         Ok(())
     }

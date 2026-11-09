@@ -131,8 +131,9 @@ PreparedInvocation 构造只保活输入 Arc；若包含旧 dispatch，在首次
 完成投影后替换 source 与代码 session。捕获失败保留原 owner；捕获成功而后续调用
 失败可以保留声明数据，但不能保留调用结果或许可。后续调用不再承担这次复制，丢弃
 的执行表也不因准备对象继续保活。单次 invocation 的捕获、默认参数准备与 VM 共用
-额度；缓存／Eq／Hash 的兼容准备仍采用每阶段各自的传入 budget.steps 上限，其捕获
-已受限，但整个准备过程的累计额度尚未接通。这个区别不能通过同名 budget 掩盖。
+额度。缓存调用和 Eq／Hash 兼容准备现也把捕获、上下文、参数／契约处理及协议批次
+串在一份剩余额度内；相关接线与求解器内部仍有的限制见
+[缓存 invocation](values-staging-and-publication.md#当前缓存-invocation-迁移去掉-type-输入专门化世界)。
 
 最后一个 snapshot／CodeSession／源码 Arc 消费者释放后，目录和源码可分别回收；
 目录不含反向 owner 引用。S-expression dump 展开源码及 pending／完成的目录状态，
@@ -143,7 +144,7 @@ required 准备、发布器证明和其资源权限 owner 也已采用该目录�
 这仍是一份完整 Package 的共享目录，未实现分块或跨编辑的结构共享。luna driver
 资源 ProtocolContext 的后续接线见第 1.3 节；staged 入口独立于声明快照的迁移见第 1.5 节。
 显式 invocation 的入口选择、PTC Context 与资源准备现已接入调用剩余额度，见第 1.3 节。
-required、缓存／协议的外围准备仍有独立成本；接受 `&Package` 的兼容入口仍可能复制
+required 和其他 driver 的外围准备仍有独立成本；接受 `&Package` 的兼容入口仍可能复制
 所保留的源码。上述四条路径已采用有界声明捕获，不代表其他捕获入口或所有准备过程
 已经统一预算。未测整体编译性能收益。
 
@@ -233,7 +234,7 @@ required 目录迁移阶段的检查工作目录 `/home/fin/luna`，统一使用
 兼容的 `selected(&Package, ...)` 入口为取得所有权会复制一次完整源码；初次将借用
 源码放进 checked session 也有这项成本，已经持有 snapshot 的路径不复制。显式 comptime
 调用已将其声明捕获和资源上下文准备串在同一额度中；其他 driver 的兼容捕获、外围
-分析及缓存准备尚未全部接通累计预算，不能将本迁移称为整体性能优化。ReferenceSession
+分析及底层求解子查询尚未全部接通累计预算，不能将本迁移称为整体性能优化。ReferenceSession
 及进一步的实例化复用见第 1.4 节，staged 入口与 VM session 迁移见第 1.5–1.6 节。
 通用验证函数的其他 package／world 调用边界不在此声称全部关闭。
 

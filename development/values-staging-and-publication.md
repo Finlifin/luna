@@ -953,8 +953,8 @@ invocation 额度。可复用入口在构造时保留原 Arc，将必要投影�
 的入口选择成本；同样也不能拿保留的入口身份冒充新的执行许可。
 
 此清理不覆盖 runtime／native 默认入口包装；其共享选择器已受默认构造上限约束，
-但尚未与 runtime 构图的累计额度接通。结果缓存、Eq／Hash 和其他 driver 的外围准备
-仍有分阶段额度，不能据此声称所有宿主准备已统一。独立调用表达式不是新的语言
+但尚未与 runtime 构图的累计额度接通。结果缓存与 Eq／Hash 的准备接线见下节；
+其他 driver 的外围准备仍有分阶段额度，不能据此声称所有宿主准备已统一。独立调用表达式不是新的语言
 声明种类。共享来源、独立证明和缓存准备的预算边界见
 [声明目录与捕获](world-storage-and-lifetimes.md#12-保活源码的共享声明目录)。
 
@@ -1054,12 +1054,54 @@ package、挑选伪造私有声明身份、移除 Type 实参并实例化整份 
 `staged_preparations` 计数 API 一并删除；实际代码编译／执行统计仍由
 `last_execution_stats` 提供，结果缓存数仍由 `cached_results` 提供。
 
-缓存调用和 Eq／Hash 协议的借用准备也通过共同声明捕获，预检保留载荷后才复制，
-不遍历或复制将被丢弃的执行表。它们的捕获上限采用传入的 budget.steps，与已有
-各准备阶段一样分别受限，尚非所有准备工作的累计额度。结果缓存现在提供
-`prepare_in_source`，已有 DeclarationSnapshot 的消费者可以直接共享 owner；
-与协议的同名入口一样拒绝含预选 dispatch 的快照。共享源码不合并各 binding 的
-值接纳 token，不扩大 Type 结果缓存资格，也不复用调用的权限或结果检查。
+缓存调用和 Eq／Hash 协议的借用准备通过共同声明捕获，预检保留载荷后才复制，
+不遍历或复制将被丢弃的执行表。捕获、显式资源绑定、声明上下文与目录、入口查找、
+参数绑定、签名专门化、类型契约检查、多个输入的 Eq／Hash 准备及 schema 保留现在
+消费同一份构造额度，不再在每个阶段或每个协议处重领 budget.steps。两个准备对象
+都提供 `prepare_in_source_metered` 回传实际已记录工作；已有 owner 的路径不复制源码。
+构造额度与之后 invocation 使用的查询上限分别保管，准备刚好用尽额度不代表未来
+调用得到零额度，也不意味着未来调用免费。共享源码不合并各 binding 的值接纳 token，
+不扩大 Type 结果缓存资格，也不复用调用的权限或结果检查。
+
+Eq／Hash 方法选择提供 `select_metered`，入口扫描、index key、专门化载荷、类型
+证明及候选资格检查传递剩余额度。类型谓词仍进入类型证明，程序契约仅作为代码
+保留，选择成功不能执行或放行程序前提。MethodContract 直接按字段构造专门化结果，
+不再先克隆完整契约再覆盖 signature／program／requirements 等字段；函数的程序
+契约也直接从借用字段专门化，不先制造中间副本。
+
+package 与查询 world 引用相同声明时不做结构比较；不同声明对象仍保留完整相等
+核验，先检查其数据规模和深度。这里与源码捕获有一个区别：比较会观察共享 closure
+的主体，必须计入其深度和工作；捕获只保留 Arc 时不收费不存在的主体复制。
+共同 metadata preflight 已区分这两种操作，不能用“共享”跳过实际结构观察。
+
+动态形成的 Type 结果调用在准备新输入 schema 时，将全部协议准备作为一批，使用
+当前 executor Context 中的额度；成功和失败都先扣回已记录耗费，再消费结果。
+Hash 缺失等失败不会留下可用 schema 或结果，重试仍需重新完成该批协议。已完成的
+不可变目录可以共享，各次调用仍重新验证实际值及程序契约。
+
+这关闭的是 driver 准备阶段之间的额度重置。底层 capability resolution 仍按它现有
+的 metered 接口回传已跟踪工作，候选匹配内部还有独立子查询额度；普通调用的某些
+值依赖重绑定、schema 查询与其他 driver 捕获也仍待继续审计。因此不把本次接线
+称为编译器所有工作的精确总预算，也不改变候选选择、NF 身份或程序验证语义。
+
+缓存与键准备的累计额度验证在 `/home/fin/luna` 执行，命令统一通过
+`python3 -B development/check.py --timeout 900 -- test`：
+
+| 范围 | 结果与证据 |
+| --- | --- |
+| `-p nir -p luna --lib --test key_preparation_budget --test key_code_sessions --test invocation_value_templates --test staged_invocation_reuse --test comptime_memory --no-fail-fast` | `/tmp/luna-tools-0djwpopf/result.json` 退出 0，165 项通过 |
+| `-p luna --test key_preparation_budget --test execution --no-fail-fast -- comptime_key failed_dynamic_key_preparation` | `/tmp/luna-tools-har5vq52/result.json` 退出 101，既有 key 检查 9 项通过；新增动态恢复 fixture 缺少 Type Hash，恢复阶段失败 |
+| `-p luna --test key_preparation_budget --test execution --no-fail-fast -- failed_dynamic_key_preparation memoized --skip memoized_invocation_specializes_nested_type_forwarding` | `/tmp/luna-tools-1uaasrye/result.json` 退出 0，13 项通过；上述前端基线仍明确跳过 |
+
+新增 fixture 已显式声明自身的 Hash trait 及 Type／bool 实现，保留真实 sysroot Eq；
+没有给语言或库补造 Type Hash 的承诺。该用例检查失败准备的耗费扣入当前 Context、
+失败不安装结果、重试仍收费，以及补全协议后的首次执行与重复命中。其他新增检查
+覆盖 4,096 条主体类型契约共享额度、上下文用尽额度后不能重领 Eq／Hash 预算、多个
+输入协议和缓存恢复，以及结构比较必须进入共享代码的深度边界。
+本阶段去重 187 项通过，未执行全 workspace；上述跳过项仍是已记录的前端
+UnvalidatedModel 基线，不声称修复。十个 Rust 文件通过 scoped rustfmt check，
+`/tmp/luna-tools-sdq0itur/result.json` 退出 0；`git diff --check` 通过。
+工作区已有资源分析、正式 docs 和 library README 保持不变，未测整体性能收益。
 
 移除旧路径时观察到依赖注解主体每次重编译的问题，因此同步补齐 VM 的主体准备缓存。
 缓存按原声明或精确 owned body 身份定位，再比较完整 FunctionInputBinding，包括

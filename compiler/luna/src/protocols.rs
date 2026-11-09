@@ -316,6 +316,17 @@ pub fn select_comptime_key(
     operation: elaboration::key_protocols::Operation,
     budget: Budget,
 ) -> Result<elaboration::key_protocols::Selected, String> {
+    select_comptime_key_metered(package, world, items, ty, operation, &mut { budget })
+}
+
+pub fn select_comptime_key_metered(
+    package: &nir::program::Package,
+    world: &World<'_>,
+    items: &LangItems,
+    ty: &nir::Term,
+    operation: elaboration::key_protocols::Operation,
+    budget: &mut Budget,
+) -> Result<elaboration::key_protocols::Selected, String> {
     let item = match operation {
         elaboration::key_protocols::Operation::Eq => LangItem::Eq,
         elaboration::key_protocols::Operation::Hash => LangItem::Hash,
@@ -325,7 +336,7 @@ pub fn select_comptime_key(
             "{operation} language item is not bound to a source trait"
         ));
     };
-    elaboration::key_protocols::select(package, world, protocol, ty, operation, budget)
+    elaboration::key_protocols::select_metered(package, world, protocol, ty, operation, budget)
 }
 
 /// Recheck a conditional memory footprint in the same Drop world as cleanup.

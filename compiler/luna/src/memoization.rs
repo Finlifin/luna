@@ -102,9 +102,8 @@ impl KeyProtocol<Snapshot> for ExactInputs {
     }
 }
 impl Invocation {
-    /// Capture a declaration source within `budget.steps`, then prepare its
-    /// binding. As with the existing preparation stages, the capture bound is
-    /// per stage; invocation execution has a separate cumulative Context.
+    /// Capture and prepare one invocation under a shared construction allowance.
+    /// Later execution uses its own cumulative Context and retained query limits.
     pub fn prepare(
         package: &Package,
         items: &LangItems,
@@ -113,10 +112,19 @@ impl Invocation {
         capacity: usize,
         budget: ptc::Budget,
     ) -> Result<Self, String> {
+        let mut remaining = budget.steps;
         let source = DeclarationSource::Borrowed(package)
-            .retain_declarations(&mut { budget.steps })
+            .retain_declarations(&mut remaining)
             .map_err(|error| format!("memoization source retention budget exhausted: {error:?}"))?;
-        Self::prepare_in_source(source, items, declaration, arguments, capacity, budget)
+        Self::prepare_in_source_metered(
+            source,
+            items,
+            declaration,
+            arguments,
+            capacity,
+            budget,
+            &mut remaining,
+        )
     }
 
     /// Reuse a declaration-only owner across callers. Preparation proves this
@@ -129,147 +137,276 @@ impl Invocation {
         capacity: usize,
         budget: ptc::Budget,
     ) -> Result<Self, String> {
-        let package = source.package();
-        if !package.dispatch_instances.is_empty() {
-            return Err(
-                "memoization source snapshot must not contain preselected dispatch instances"
-                    .into(),
-            );
-        }
-        let resources = match (items.get(LangItem::Copy), items.get(LangItem::Drop)) {
-            (None, None) => None,
-            (Some(LangItemDef::UserDef(copy)), Some(LangItemDef::UserDef(drop))) => {
-                crate::resources::ProtocolContext::selected_in_source(
-                    source.clone(),
-                    crate::resources::Selection::Identity(copy),
-                    Some(crate::resources::Selection::Identity(drop)),
-                    budget,
-                )?;
-                Some((copy, drop))
-            }
-            _ => {
+        Self::prepare_in_source_metered(
+            source,
+            items,
+            declaration,
+            arguments,
+            capacity,
+            budget,
+            &mut { budget.steps },
+        )
+    }
+
+    /// Report construction work without reducing the independent query limits
+    /// retained for future invocations. Failed preparation publishes no cache.
+    pub fn prepare_in_source_metered(
+        source: DeclarationSnapshot,
+        items: &LangItems,
+        declaration: DeclarationId,
+        arguments: Vec<Term>,
+        capacity: usize,
+        budget: ptc::Budget,
+        remaining: &mut usize,
+    ) -> Result<Self, String> {
+        let mut work = ptc::Budget {
+            steps: budget.steps.min(*remaining),
+            ..budget
+        };
+        let before = work.steps;
+        let prepared = (|| {
+            let package = source.package();
+            if !package.dispatch_instances.is_empty() {
                 return Err(
-                    "memoized pointer transfers require paired source Copy and Drop bindings"
+                    "memoization source snapshot must not contain preselected dispatch instances"
                         .into(),
                 );
             }
-        };
-        let mut matches = package
-            .functions
-            .iter()
-            .filter(|f| f.declaration == declaration);
-        let function = matches.next().ok_or("memoized function is missing")?;
-        if matches.next().is_some() || function.phase != FunctionPhase::Comptime || !function.pure {
-            return Err("memoization requires one ordinary pure comptime function".into());
-        }
-        let mut binder_fuel = budget.steps;
-        let binders = package.declaration_binders(&function.type_parameters, &mut binder_fuel)?;
-        let signature = function
-            .signature
-            .instantiate_parameters(&binders, &arguments)
-            .map_err(|e| e.to_string())?;
-        let Term::Function { parameters, result } = &signature else {
-            return Err("memoized function signature is invalid".into());
-        };
-        signature.check_scope(&[]).map_err(|e| e.to_string())?;
-        let closed = parameters
-            .iter()
-            .map(|p| &p.ty)
-            .chain(std::iter::once(result.as_ref()))
-            .all(|ty| ty.check_scope(&[]).is_ok());
-        let context = ptc::Context::from_package(package)?;
-        let world = source
-            .capabilities(&context, &[], &mut { budget })
-            .map_err(|error| format!("memoization declaration index: {error}"))?;
-        let requirements = function.requirements.iter().cloned().chain(
-            function
-                .capabilities
+            let resource_binding = match (items.get(LangItem::Copy), items.get(LangItem::Drop)) {
+                (None, None) => None,
+                (Some(LangItemDef::UserDef(copy)), Some(LangItemDef::UserDef(drop))) => Some(
+                    crate::resources::ProtocolContext::selected_in_source_metered(
+                        source.clone(),
+                        crate::resources::Selection::Identity(copy),
+                        Some(crate::resources::Selection::Identity(drop)),
+                        &mut work,
+                    )?,
+                ),
+                _ => {
+                    return Err(
+                        "memoized pointer transfers require paired source Copy and Drop bindings"
+                            .into(),
+                    );
+                }
+            };
+            work.steps = work
+                .steps
+                .checked_sub(package.functions.len())
+                .ok_or("memoized entry lookup budget exhausted")?;
+            let mut matches = package
+                .functions
                 .iter()
-                .cloned()
-                .map(TypePredicate::Trait),
-        );
-        let mut deferred = Vec::new();
-        let mut admission = Context::new(budget.steps);
-        let frames = vec![parameters.iter().map(|p| p.sort).collect()];
-        for predicate in requirements {
-            let predicate = predicate
+                .filter(|f| f.declaration == declaration);
+            let function = matches.next().ok_or("memoized function is missing")?;
+            if matches.next().is_some()
+                || function.phase != FunctionPhase::Comptime
+                || !function.pure
+            {
+                return Err("memoization requires one ordinary pure comptime function".into());
+            }
+            let binders =
+                package.declaration_binders(&function.type_parameters, &mut work.steps)?;
+            nir::copy_budget::charge_type_substitution(
+                &function.signature,
+                &binders,
+                &arguments,
+                &mut work.steps,
+            )
+            .map_err(|error| format!("memoized signature budget exhausted: {error:?}"))?;
+            let signature = function
+                .signature
                 .instantiate_parameters(&binders, &arguments)
                 .map_err(|e| e.to_string())?;
-            let mut open = false;
-            map_requirement(
-                &predicate,
-                &mut |term| {
-                    term.check_scope(&frames)
-                        .map_err(|e| Error::Protocol(e.to_string()))?;
-                    open |= term.check_scope(&[]).is_err();
-                    Ok(term.clone())
-                },
-                &mut admission,
-                0,
-            )
-            .map_err(|e| format!("memoized contract admission: {e:?}"))?;
-            if open {
-                deferred.push(predicate);
-                continue;
-            }
-            if !matches!(
-                world.check_predicate(&predicate, budget)?,
-                ptc::Outcome::Entailed(_)
-            ) {
-                return Err("memoized function type contract is not established".into());
-            }
-        }
-        let cacheable = closed && **result == Term::Primitive(nir::Primitive::Type);
-        let code_session = comptime_interpretor::CodeSession::new(source.package().clone());
-        let protocols = if cacheable {
-            parameters
+            let Term::Function { parameters, result } = &signature else {
+                return Err("memoized function signature is invalid".into());
+            };
+            signature.check_scope(&[]).map_err(|e| e.to_string())?;
+            let closed = parameters
                 .iter()
-                .map(|p| {
-                    Protocol::prepare_in_source_with_session(
-                        source.clone(),
-                        items,
-                        &p.ty,
-                        budget,
-                        &code_session,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            vec![]
-        };
-        let schemas = if cacheable {
-            vec![Schema {
-                inputs: parameters.iter().map(|p| p.ty.clone()).collect(),
-                result: (**result).clone(),
-                protocols: (0..protocols.len()).collect(),
-            }]
-        } else {
-            vec![]
-        };
-        Ok(Self {
-            source,
-            code_session,
-            stats: Default::default(),
-            declaration,
-            arguments,
-            signature,
-            items: items.clone(),
-            resources,
-            schemas,
-            requirements: deferred,
-            capacity,
-            context,
-            protocols: ExactInputs(protocols),
-            cache: Cache::new(
-                Scope {
-                    definitions: 0,
-                    protocols: 0,
-                    target: 0,
-                },
+                .map(|p| &p.ty)
+                .chain(std::iter::once(result.as_ref()))
+                .all(|ty| ty.check_scope(&[]).is_ok());
+            let resources = resource_binding
+                .as_ref()
+                .map(|binding| (binding.copy, binding.drop.expect("paired protocols")));
+            let context = match &resource_binding {
+                Some(binding) => {
+                    work.steps = work
+                        .steps
+                        .checked_sub(1)
+                        .ok_or("memoized context retention budget exhausted")?;
+                    binding.context().clone()
+                }
+                None => ptc::Context::from_package_metered(package, &mut work.steps)
+                    .map_err(|error| format!("memoized type context: {error}"))?,
+            };
+            let world = source
+                .capabilities(&context, &[], &mut work)
+                .map_err(|error| format!("memoization declaration index: {error}"))?;
+            work.steps = work
+                .steps
+                .checked_sub(
+                    function
+                        .requirements
+                        .len()
+                        .saturating_add(function.capabilities.len()),
+                )
+                .ok_or("memoized requirement collection budget exhausted")?;
+            for predicate in &function.requirements {
+                nir::copy_budget::charge_predicate_substitution(
+                    predicate,
+                    &[],
+                    &[],
+                    &mut work.steps,
+                )
+                .map_err(|error| {
+                    format!("memoized requirement copy budget exhausted: {error:?}")
+                })?;
+            }
+            for capability in &function.capabilities {
+                for term in
+                    std::iter::once(&capability.subject).chain(&capability.interface_arguments)
+                {
+                    nir::copy_budget::charge_type_substitution(term, &[], &[], &mut work.steps)
+                        .map_err(|error| {
+                            format!("memoized capability copy budget exhausted: {error:?}")
+                        })?;
+                }
+            }
+            let requirements = function.requirements.iter().cloned().chain(
+                function
+                    .capabilities
+                    .iter()
+                    .cloned()
+                    .map(TypePredicate::Trait),
+            );
+            let mut deferred = Vec::new();
+            work.steps = work
+                .steps
+                .checked_sub(parameters.len())
+                .ok_or("memoized input frame budget exhausted")?;
+            let frames = vec![parameters.iter().map(|p| p.sort).collect()];
+            for predicate in requirements {
+                nir::copy_budget::charge_predicate_substitution(
+                    &predicate,
+                    &binders,
+                    &arguments,
+                    &mut work.steps,
+                )
+                .map_err(|error| {
+                    format!("memoized contract specialization budget exhausted: {error:?}")
+                })?;
+                let predicate = predicate
+                    .instantiate_parameters(&binders, &arguments)
+                    .map_err(|e| e.to_string())?;
+                nir::copy_budget::charge_predicate_substitution(
+                    &predicate,
+                    &[],
+                    &[],
+                    &mut work.steps,
+                )
+                .map_err(|error| {
+                    format!("memoized contract inspection budget exhausted: {error:?}")
+                })?;
+                let mut admission = Context::new(work.steps);
+                let mut open = false;
+                let inspected = map_requirement(
+                    &predicate,
+                    &mut |term| {
+                        term.check_scope(&frames)
+                            .map_err(|e| Error::Protocol(e.to_string()))?;
+                        open |= term.check_scope(&[]).is_err();
+                        Ok(term.clone())
+                    },
+                    &mut admission,
+                    0,
+                );
+                work.steps = admission.remaining();
+                inspected.map_err(|e| format!("memoized contract admission: {e:?}"))?;
+                if open {
+                    deferred.push(predicate);
+                    continue;
+                }
+                if !matches!(
+                    world.check_predicate_metered(&predicate, &mut work)?,
+                    ptc::Outcome::Entailed(_)
+                ) {
+                    return Err("memoized function type contract is not established".into());
+                }
+            }
+            let cacheable = closed && **result == Term::Primitive(nir::Primitive::Type);
+            let code_session = comptime_interpretor::CodeSession::new(source.package().clone());
+            let protocols = if cacheable {
+                parameters
+                    .iter()
+                    .map(|p| {
+                        Protocol::prepare_in_source_with_session_metered(
+                            source.clone(),
+                            items,
+                            &p.ty,
+                            budget,
+                            &mut work.steps,
+                            &code_session,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                vec![]
+            };
+            let schemas = if cacheable {
+                work.steps = work
+                    .steps
+                    .checked_sub(parameters.len().saturating_add(protocols.len()))
+                    .ok_or("memoized schema budget exhausted")?;
+                for ty in parameters
+                    .iter()
+                    .map(|p| &p.ty)
+                    .chain(std::iter::once(result.as_ref()))
+                {
+                    nir::copy_budget::charge_type_substitution(ty, &[], &[], &mut work.steps)
+                        .map_err(|error| {
+                            format!("memoized schema copy budget exhausted: {error:?}")
+                        })?;
+                }
+                vec![Schema {
+                    inputs: parameters.iter().map(|p| p.ty.clone()).collect(),
+                    result: (**result).clone(),
+                    protocols: (0..protocols.len()).collect(),
+                }]
+            } else {
+                vec![]
+            };
+            work.steps = work
+                .steps
+                .checked_sub(items.len())
+                .ok_or("memoized language bindings budget exhausted")?;
+            Ok(Self {
+                source,
+                code_session,
+                stats: Default::default(),
+                declaration,
+                arguments,
+                signature,
+                items: items.clone(),
+                resources,
+                schemas,
+                requirements: deferred,
                 capacity,
-            ),
-            budget,
-        })
+                context,
+                protocols: ExactInputs(protocols),
+                cache: Cache::new(
+                    Scope {
+                        definitions: 0,
+                        protocols: 0,
+                        target: 0,
+                    },
+                    capacity,
+                ),
+                budget,
+            })
+        })();
+        *remaining -= before - work.steps;
+        prepared
     }
     pub fn last_execution_stats(&self) -> crate::invocation::InvocationStats {
         self.stats
@@ -325,19 +462,23 @@ impl Invocation {
             (index as u32, inputs)
         } else {
             context.spend::<String>(types.len().saturating_add(1))?;
-            let mut prepared = types
+            let mut protocol_work = self.budget.steps.min(context.remaining());
+            let before = protocol_work;
+            let prepared = types
                 .iter()
                 .map(|ty| {
-                    Protocol::prepare_in_source_with_session(
+                    Protocol::prepare_in_source_with_session_metered(
                         self.source.clone(),
                         &self.items,
                         ty,
                         self.budget,
+                        &mut protocol_work,
                         &self.code_session,
                     )
                 })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(Error::Protocol)?;
+                .collect::<Result<Vec<_>, _>>();
+            context.spend::<String>(before - protocol_work)?;
+            let mut prepared = prepared.map_err(Error::Protocol)?;
             let inputs = values
                 .into_iter()
                 .zip(&mut prepared)

@@ -11,6 +11,7 @@ use nir::program::{
 };
 use nir::{DeclarationId, Parameter, Primitive, Sort, Term};
 use std::fmt;
+mod work;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
@@ -92,16 +93,48 @@ pub fn select(
     operation: Operation,
     budget: Budget,
 ) -> Result<Selected, String> {
+    select_metered(package, world, protocol, subject, operation, &mut {
+        budget
+    })
+}
+
+/// Carry remaining work across lookup, specialization, type proofs and candidate
+/// qualification. Selection never executes a program contract or key method.
+pub fn select_metered(
+    package: &Package,
+    world: &World<'_>,
+    protocol: DeclarationId,
+    subject: &Term,
+    operation: Operation,
+    budget: &mut Budget,
+) -> Result<Selected, String> {
     if budget.steps == 0
         || budget.max_depth == 0
-        || crate::implementation::Key::from_type(subject, budget).is_err()
+        || crate::implementation::Key::from_type_metered(subject, budget).is_err()
     {
         return Err("comptime key selection budget exhausted".into());
     }
+    work::spend(
+        budget,
+        package
+            .traits
+            .len()
+            .saturating_add(world.traits.len().saturating_mul(2)),
+    )?;
     let mut traits = package.traits.iter().filter(|t| t.declaration == protocol);
     let interface = traits
         .next()
         .ok_or("comptime key protocol is not a declared trait")?;
+    let counterpart = world.traits.iter().find(|t| t.declaration == protocol);
+    if let Some(counterpart) = counterpart {
+        if !std::ptr::eq(interface, counterpart) {
+            nir::copy_budget::charge_trait_metadata(interface, &mut budget.steps)
+                .and_then(|_| {
+                    nir::copy_budget::charge_trait_metadata(counterpart, &mut budget.steps)
+                })
+                .map_err(|error| format!("key interface comparison budget exhausted: {error:?}"))?;
+        }
+    }
     if traits.next().is_some()
         || world
             .traits
@@ -109,7 +142,7 @@ pub fn select(
             .filter(|t| t.declaration == protocol)
             .count()
             != 1
-        || world.traits.iter().find(|t| t.declaration == protocol) != Some(interface)
+        || counterpart.is_none_or(|other| !std::ptr::eq(interface, other) && other != interface)
     {
         return Err("comptime key protocol package and world disagree".into());
     }
@@ -119,6 +152,13 @@ pub fn select(
     // Two-phase interfaces retain their ordinary runtime operation names.
     // An explicit comptime entry is authoritative even when malformed: do not
     // recover a different member after its phase or signature check fails.
+    work::spend(
+        budget,
+        interface
+            .methods
+            .len()
+            .saturating_mul(2 * (operation.comptime_name().len() + 1)),
+    )?;
     let name = if interface
         .methods
         .iter()
@@ -147,6 +187,7 @@ pub fn select(
     let Term::Function { parameters, result } = signature.as_ref() else {
         return Err("invalid comptime key signature".into());
     };
+    work::charge_term(signature, budget)?;
     let self_type = Term::Rigid {
         declaration: interface.self_parameter,
         sort: Sort::Type,
@@ -172,43 +213,70 @@ pub fn select(
     {
         return Err("invalid comptime key protocol receiver, parameters or result".into());
     }
-    let binders = [interface.self_parameter];
-    let arguments = [subject.clone()];
-    let mut contract = member.clone();
-    contract.signature = member
-        .signature
-        .instantiate_types(&binders, &arguments)
-        .map_err(|e| e.to_string())?;
-    contract.program = member
-        .program
-        .instantiate_types(&binders, &arguments)
-        .map_err(|e| e.to_string())?;
-    contract.requirements = member
-        .requirements
-        .iter()
-        .map(|p| p.instantiate_types(&binders, &arguments))
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())?;
-    contract.capabilities = member
-        .capabilities
-        .iter()
-        .map(|p| p.instantiate_types(&binders, &arguments))
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())?;
+    let binders = [nir::DeclarationParameter {
+        declaration: interface.self_parameter,
+        sort: Sort::Type,
+    }];
+    work::charge_term(subject, budget)?;
+    let inputs = [subject.clone()];
+    work::spend(
+        budget,
+        member
+            .name
+            .len()
+            .saturating_add(member.parameter_bindings.len())
+            .saturating_add(member.requirements.len())
+            .saturating_add(member.capabilities.len()),
+    )?;
+    let contract = MethodContract {
+        phase: member.phase,
+        is_quote: member.is_quote,
+        pure: member.pure,
+        is_unsafe: member.is_unsafe,
+        type_arguments: vec![],
+        type_parameters: vec![],
+        capabilities: member
+            .capabilities
+            .iter()
+            .map(|r| work::requirement(r, &binders, &inputs, budget))
+            .collect::<Result<_, _>>()?,
+        program: work::program(
+            &member.program.preconditions,
+            &member.program.postconditions,
+            member.program.result_binding,
+            &member.program.entry_snapshots,
+            &binders,
+            &inputs,
+            budget,
+        )?,
+        parameter_bindings: member.parameter_bindings.clone(),
+        by_value_receiver: member.by_value_receiver,
+        by_reference_receiver: member.by_reference_receiver,
+        declaration: member.declaration,
+        name: member.name.clone(),
+        signature: nir::code_interfaces::MethodSignature::Callable(work::term(
+            member
+                .signature
+                .ordinary()
+                .map_err(|error| error.to_string())?,
+            &binders,
+            &inputs,
+            budget,
+        )?),
+        requirements: member
+            .requirements
+            .iter()
+            .map(|p| work::predicate(p, &binders, &inputs, budget))
+            .collect::<Result<_, _>>()?,
+        default: member.default,
+    };
     for requirement in interface.requirements.iter().chain(&member.requirements) {
-        let predicate = requirement
-            .instantiate_types(&binders, &arguments)
-            .map_err(|e| e.to_string())?;
-        if !matches!(
-            world
-                .context
-                .prove(Formula::from_predicate(&predicate), budget),
-            Outcome::Entailed(_)
-        ) {
+        let predicate = work::predicate(requirement, &binders, &inputs, budget)?;
+        if !work::prove(world, &predicate, budget)? {
             return Err("comptime key protocol type requirement is not established".into());
         }
     }
-    let selection = world.resolve(protocol, subject, budget)?;
+    let selection = world.resolve_instance_metered(&protocol.into(), subject, budget)?;
     let Selection::Selected(implementation) = selection.types.selection else {
         return Err(format!(
             "comptime key implementation is not concrete: {}",
@@ -226,6 +294,13 @@ pub fn select(
     ) {
         return Err("comptime key selection lacks capability evidence".into());
     }
+    work::spend(
+        budget,
+        package
+            .implementations
+            .len()
+            .saturating_add(world.implementations.len().saturating_mul(2)),
+    )?;
     let mut definitions = package
         .implementations
         .iter()
@@ -233,6 +308,21 @@ pub fn select(
     let definition = definitions
         .next()
         .ok_or("comptime key implementation is missing")?;
+    let counterpart = world
+        .implementations
+        .iter()
+        .find(|i| i.declaration == implementation);
+    if let Some(counterpart) = counterpart {
+        if !std::ptr::eq(definition, counterpart) {
+            nir::copy_budget::charge_implementation_metadata(definition, &mut budget.steps)
+                .and_then(|_| {
+                    nir::copy_budget::charge_implementation_metadata(counterpart, &mut budget.steps)
+                })
+                .map_err(|error| {
+                    format!("key implementation comparison budget exhausted: {error:?}")
+                })?;
+        }
+    }
     if definitions.next().is_some()
         || world
             .implementations
@@ -240,17 +330,20 @@ pub fn select(
             .filter(|i| i.declaration == implementation)
             .count()
             != 1
-        || world
-            .implementations
-            .iter()
-            .find(|i| i.declaration == implementation)
-            != Some(definition)
+        || counterpart.is_none_or(|other| !std::ptr::eq(definition, other) && other != definition)
     {
         return Err("comptime key implementation package and world disagree".into());
     }
     if !definition.phases.comptime {
         return Err("selected key implementation lacks comptime trait phase".into());
     }
+    work::spend(
+        budget,
+        definition
+            .methods
+            .len()
+            .saturating_mul(member.name.len() + 1),
+    )?;
     let mut bodies = definition
         .methods
         .iter()
@@ -263,22 +356,24 @@ pub fn select(
         return Err("comptime key method body is duplicated".into());
     }
     let arguments = if member.default == Some(body) {
-        vec![subject.clone()]
+        vec![work::term(subject, &[], &[], budget)?]
     } else {
-        evidence.type_arguments.clone()
+        work::spend(budget, evidence.type_arguments.len())?;
+        evidence
+            .type_arguments
+            .iter()
+            .map(|ty| work::term(ty, &[], &[], budget))
+            .collect::<Result<_, _>>()?
     };
+    work::spend(budget, package.functions.len())?;
     let mut functions = package.functions.iter().filter(|f| f.declaration == body);
     let function = functions.next().ok_or("comptime key function is missing")?;
     if functions.next().is_some() {
         return Err("comptime key function identity is duplicated".into());
     }
-    let mut binder_fuel = budget.steps;
     let method_binders =
-        package.declaration_binders(&function.type_parameters, &mut binder_fuel)?;
-    let signature = function
-        .signature
-        .instantiate_parameters(&method_binders, &arguments)
-        .map_err(|e| e.to_string())?;
+        package.declaration_binders(&function.type_parameters, &mut budget.steps)?;
+    let signature = work::term(&function.signature, &method_binders, &arguments, budget)?;
     let Ok(Term::ComptimeFunction(expected)) = contract.signature.ordinary() else {
         unreachable!()
     };
@@ -290,51 +385,59 @@ pub fn select(
         return Err("selected key body does not implement the comptime protocol signature".into());
     }
     for requirement in &function.requirements {
-        let predicate = requirement
-            .instantiate_parameters(&method_binders, &arguments)
-            .map_err(|e| e.to_string())?;
-        if !matches!(
-            world
-                .context
-                .prove(Formula::from_predicate(&predicate), budget),
-            Outcome::Entailed(_)
-        ) {
+        let predicate = work::predicate(requirement, &method_binders, &arguments, budget)?;
+        if !work::prove(world, &predicate, budget)? {
             return Err("comptime key body type requirement is not established".into());
         }
     }
-    let program = ProgramContract {
-        preconditions: function.preconditions.clone(),
-        postconditions: function.postconditions.clone(),
-        result_binding: function.result_binding,
-        entry_snapshots: function.entry_snapshots.clone(),
-    }
-    .instantiate_parameters(&method_binders, &arguments)
-    .map_err(|e| e.to_string())?;
-    let mut capabilities = contract.capabilities.clone();
+    let program = work::program(
+        &function.preconditions,
+        &function.postconditions,
+        function.result_binding,
+        &function.entry_snapshots,
+        &method_binders,
+        &arguments,
+        budget,
+    )?;
+    work::spend(
+        budget,
+        contract
+            .capabilities
+            .len()
+            .saturating_add(function.capabilities.len())
+            .saturating_add(interface.capabilities.len())
+            .saturating_add(interface.parents.len()),
+    )?;
+    let mut capabilities = contract
+        .capabilities
+        .iter()
+        .map(|r| work::requirement(r, &[], &[], budget))
+        .collect::<Result<Vec<_>, _>>()?;
     for capability in &function.capabilities {
-        capabilities.push(
-            capability
-                .instantiate_parameters(&method_binders, &arguments)
-                .map_err(|e| e.to_string())?,
-        );
+        capabilities.push(work::requirement(
+            capability,
+            &method_binders,
+            &arguments,
+            budget,
+        )?);
     }
     for capability in &interface.capabilities {
-        capabilities.push(
-            capability
-                .instantiate_types(&binders, &[subject.clone()])
-                .map_err(|e| e.to_string())?,
-        );
+        capabilities.push(work::requirement(capability, &binders, &inputs, budget)?);
     }
     for parent in &interface.parents {
-        let parent = parent
-            .instantiate_types(&binders, &[subject.clone()])
-            .map_err(|e| e.to_string())?;
+        work::spend(budget, parent.arguments.len())?;
         capabilities.push(TraitRequirement {
             interface: parent.declaration,
-            interface_arguments: parent.arguments,
-            subject: subject.clone(),
+            interface_arguments: parent
+                .arguments
+                .iter()
+                .map(|ty| work::term(ty, &binders, &inputs, budget))
+                .collect::<Result<_, _>>()?,
+            subject: work::term(subject, &[], &[], budget)?,
         });
     }
+    work::spend(budget, function.parameters.len())?;
+    work::charge_term(subject, budget)?;
     Ok(Selected {
         operation,
         protocol,
