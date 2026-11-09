@@ -1083,8 +1083,10 @@ invocation、缓存 invocation、键方法使用同一个 demand method resolver
 没有因三个生产入口迁移就宣布整个 materialization 子系统已退役。
 三种服务共同使用[调用内声明查询状态](type-models-and-theory-evidence.md#调用内的统一声明查询状态)，
 同一次 invocation 的类型证明、方法及关联项查询使用同一份惰性构造的声明索引。
-公开 invocation 的额外索引已删除；required 发布器、资源协议、缓存键准入等外层
-准备仍有独立索引与预算。跨调用稳定复用和 owning snapshot 迁移仍待完成。
+公开 invocation 的额外索引已删除。公开预备调用、缓存调用及 Eq／Hash 协议进一步
+从[保活源码的 owner](world-storage-and-lifetimes.md#12-保活源码的共享声明目录)复用跨调用
+的声明目录；缓存键准入与调用不再各存一份索引。required 发布器、资源 world 与
+可变 staged scratch 尚待迁移，跨编辑索引和统一准备预算仍未完成。
 
 
 每次操作仍构造新鲜 VM，安装原类型证明、方法／关联值和 Copy 证据服务，再检查本次

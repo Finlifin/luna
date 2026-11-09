@@ -1,6 +1,6 @@
 # 世界存储、句柄与生命周期
 
-状态：整体目标仍是设计；required 计算的声明快照所有权已按第 1.1 节接入生产。
+状态：整体目标仍未完成；required 的共享 owner 和可复用调用的源码目录已按第 1.1–1.2 节接入生产。
 初始源码审计基线为 `7178e238`。
 本文细化[全链路架构](architecture.md)中的 WorldSnapshot 和 PublicationBundle，
 与[发布状态协议](elaboration-state-and-publication.md)、[依赖观察](dependency-observations.md)
@@ -10,7 +10,7 @@
 ## 1. 已有所有权保护不能因重构而丢失
 
 下列路径均以 `compiler/` 为根，记录初始静态审计。旧 middle::ty 已在源码清理中删除，
-第 1.1 节以外的世界存储迁移仍待实施；未运行 Miri、并发或内存压力验证。
+第 1.1–1.2 节以外的世界存储迁移仍待实施；未运行 Miri、并发或内存压力验证。
 
 | 入口 | 已存在的约束 | 需要进一步处理的问题 |
 | --- | --- | --- |
@@ -50,8 +50,10 @@ builder 发布也以这同一快照建立发布服务，服务和 invocation 的
 权限查询把资源 package 的 implementations／traits 与可执行 package 的 index
 拼在一起；当可执行声明闭包没有保留某个 runtime Copy implementation 时，权限
 查询会漏掉资源世界已经具有的实现。现在初次准备同时完成资源世界构造，fork 共享
-它，Copy 查询从这个 owner 取得 package 和 index。类型前提与关联值查询也统一
-通过 RequiredWorld::capabilities 取得借用视图，调用点不再手工配对这些字段。
+它，Copy 查询从这个 owner 取得 package 和 index。required 发布器的证明服务也从
+RequiredWorld::capabilities 取得借用视图；实际 invocation 的三类查询进一步统一到
+[调用内作用域](type-models-and-theory-evidence.md#调用内的统一声明查询状态)，不再在调用点
+手工配对这些字段。该调用内目录尚未像第 1.2 节的 driver owner 一样跨调用保留。
 
 调用前提与类型 context 仍按本次 invocation 传入借用视图；它们不是资源快照中的
 全局事实。资源 dump 展开自身的 index 和 package，便于核对权限来源。新增回归
@@ -72,27 +74,66 @@ builder 发布也以这同一快照建立发布服务，服务和 invocation 的
 与上下文仍会复制；没有完成分块存储、跨编辑增量索引、稳定句柄或通用发布事务。
 不以此宣称 M1 的完整 WorldSnapshot 已实现，也没有测量整体编译性能收益。
 
-本切片的检查证据（工作目录 `/home/fin/luna`）：
+本切片的共享、释放、输入隔离和实际执行回归继续保留；本轮检查证据集中列在
+第 1.2 节。本轮 builder 用例已通过，不再将
+历史失败当作当前状态。未执行全 workspace 或内存压力验证。
 
-- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib
-  prepared --no-fail-fast`：16 通过、157 filtered，退出 0；
-  `/tmp/luna-tools-vbh4hq58/result.json`。
-- `python3 -B development/check.py --timeout 900 -- test -p luna
-  -p program_verification -p type_resolution --test prepared_invocations
-  --test invocation_value_templates --test staged_invocation_reuse
-  --test sysroot_preludes --test comptime_pointer_phase --test comptime_storage_domains
-  --test associated_resources --test capabilities --no-fail-fast`：
-  91 通过，退出 0；`/tmp/luna-tools-risp403w/result.json`。
+### 1.2 保活源码的共享声明目录
 
-- `python3 -B development/check.py --timeout 900 -- test -p luna
-  --test builder_invocations --no-fail-fast`：85 通过、1 失败，退出 101；
-  `/tmp/luna-tools-n6n4xgus/result.json`。失败仍为
-  enum_builder_edits_payloads_groups_and_runtime_patterns 在 HIR lowering
-  找不到 Symbol；此前以 `b2d402ae` 源码进行的精确对照也有同一失败，证据为
-  `/tmp/luna-tools-tnid5emr/result.json`。没有修改该 fixture 或其预期。
-- 修改源码的 rustfmt check 退出 0；`/tmp/luna-tools-qgovoepb/result.json`。
+`type_resolution::dispatch::DeclarationSnapshot` 同时保活不可变 `Arc<Package>` 与
+惰性建立的声明目录。目录包含 implementation Index、参数域对应的 sort，以及
+function／runtime callable／normal-form head 的 ID 到数组位置映射；不持有指向
+owner 内部的自引用。查询时从该 owner 的 package 取得借用，不能将目录另配一份
+同号但内容不同的源码，也不能通过公开 API 修改已登记的 package。
 
-未执行全 workspace 或性能基准；没有将既有 builder 失败计为通过。
+克隆 snapshot 共享 owner；从它导出的 Arc 再经 `Arc::make_mut` 修改会形成另一份
+源码，旧目录保持不变。新源码需要新 snapshot。构造目录按实际工作计费，只有完整
+构造及保留成功才安装；失败后再次构造不能享受半成品的折扣。完整目录的只读借用
+不复制表；建立新的 DeclarationWorld 计入目录句柄保留成本，并创建独立的 Context、
+前提和规范化状态。共享目录不签发调用许可，也不缓存用户函数、Eq／Hash 或命题结果。
+
+公开 PreparedInvocation、纯函数缓存 Invocation 和 Eq／Hash 的 Binding 已用这个
+owner 替代分别保管 package／index 的字段。CodeSession 从相同 owner 取得精确源码
+Arc，继续只复用代码；每次执行仍创建新 VM。缓存准入、资源协议查询视图和调用期的
+三个声明服务从各自的同一 source owner 取得索引，避免人工拼接不同来源的字段。
+同一个缓存调用为不同输入类型建立 Eq／Hash binding 时，也共享这个 owner，不再
+为每种协议复制 package 或另建目录。binding 的值接纳 token 仍分别建立：目录共享
+不允许协议 A 接受协议 B 的值快照，资源与用户契约也仍需各自检查。共享协议入口
+要求源码已移除预选 dispatch 表，并在准备阶段拒绝混入闭合执行表的快照；按需 VM
+仍保留同一拒绝，不把既有执行表当作声明证据。
+
+最后一个 snapshot／CodeSession／源码 Arc 消费者释放后，目录和源码可分别回收；
+目录不含反向 owner 引用。S-expression dump 展开源码及 pending／完成的目录状态，
+不输出地址。回归检查首个请求构造、跨调用共享索引、不同前提重检、同号新源隔离、
+预算失败后的完整重建、Weak 所见的最后引用释放，以及 dump 的嵌套和字符串转义。
+
+这仍是一份完整 Package 的共享目录，未实现分块或跨编辑的结构共享。required
+准备／发布与资源 owner 尚未采用它；staged scratch 改写临时入口，不能复用旧目录。
+PTC Context 的建立、外围资源／协议准备预算仍有独立成本；接受 `&Package` 的
+兼容准备入口仍复制整包，其捕获成本尚未纳入统一预算。未测整体编译性能收益。
+
+本批检查工作目录 `/home/fin/luna`，使用 `development/check.py --timeout 900 --`；
+各 result 文件包含完整命令和输出路径：
+
+- `check -p luna` 退出 0，`/tmp/luna-tools-ytimdd6b/result.json`。
+- `/tmp/luna-tools-8saue3f2/result.json`：退出 0，声明索引／关联查询、调用内与跨调用
+  目录、实际 invocation、键协议和 source failure 边界共 193 项通过。
+- `/tmp/luna-tools-rez2nnq6/result.json`：退出 0，elaboration／luna／materialization lib、
+  真实 sysroot builder、公开协议、List Hash／Eq、排序和 staged 常量等 530 项通过；
+  包含 snapshot dump 的结构、转义与稳定输出检查。
+- 进一步合并协议 owner 后，`/tmp/luna-tools-55y018wp/result.json` 退出 0，
+  键协议、Hash、列表 Hash 与类型查询 44 项通过。新增用例最初将闭合执行包误作
+  源码快照交入新入口（`/tmp/luna-tools-l1xkird_/result.json` 退出 101）；已在准备
+  入口补明确拒绝，并分别检验闭合表拒绝及源码目录共享后的协议隔离。
+- `test -p luna --test execution memoized --no-fail-fast`：12 通过、1 既有失败，
+  `/tmp/luna-tools-p1o2diml/result.json` 退出 101。失败仍为
+  `memoized_invocation_specializes_nested_type_forwarding` 在 elaboration 的
+  `1465..1484` 报 `Type domain equality: UnvalidatedModel`；与此前独立基线
+  `/tmp/luna-tools-uq7f8i42/result.json` 一致。未修改预期或将该失败计为通过。
+
+本批去重 624 项通过、上述 1 项既有失败；未执行全量回归、Miri 或整体性能基准。
+十一个修改／新增 Rust 文件通过 scoped rustfmt check，
+`/tmp/luna-tools-_tih9dl5/result.json` 退出 0；`git diff --check` 通过。
 
 ## 2. 目标物理结构
 
@@ -293,10 +334,10 @@ parts、NodeId 的会话编号、活动 TypeRef owner 或 runtime 对象的上�
 证明 exploit 或当前 CLI 必定触发。实现阶段要覆盖跨 owner 的拒绝、drop 后访问不可达、
 panic/cancel 期间回收及需要时的 Miri 检查；本轮不冒充完成这些验证。
 
-旧 middle::ty 仍由 Db 持有，interface/intrinsic 入口还有类型关联；不能因为旧 typeck/
-mir/codegen 未加入 workspace 就直接删除 middle 整层。先迁移查询 owner、接口和 intrinsic
-消费者，再移除不再承担职责的旧类型组件。compiler/hir、ast_lowering 与 middle 的实际
-依赖也要同步调整，不能留下新结构仍经旧上下文回流的循环。
+旧 middle::ty 及 interface／intrinsic 中的 TyCtxt 关联已退役；当前 middle 保留
+hir_package、hir_query 和 queries，仍服务于活动 HIR owner 与查询。不能因旧类型
+组件已删除而移除整个 middle。后续迁移继续同步 compiler/hir、ast_lowering 与
+middle 的真实消费者，防止新结构经旧上下文回流。
 
 ## 9. 实施切片和验收
 

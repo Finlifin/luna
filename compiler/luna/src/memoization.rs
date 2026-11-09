@@ -7,7 +7,11 @@
 use crate::comptime_keys::{Protocol, Snapshot};
 use comptime_executor::{Cache, Context, Error, KeyProtocol, Outcome, QueryId, Scope};
 use comptime_interpretor::{Budget, Interpreter, Value};
-use elaboration::{capabilities::World, implementation::Index, ptc};
+use elaboration::{
+    capabilities::World,
+    materialization::{DeclarationSnapshot, DeclarationSource},
+    ptc,
+};
 use intrinsic::{LangItem, LangItemDef, LangItems};
 use nir::{
     DeclarationId, Term,
@@ -15,7 +19,7 @@ use nir::{
 };
 
 pub struct Invocation {
-    package: std::sync::Arc<Package>,
+    source: DeclarationSnapshot,
     code_session: comptime_interpretor::CodeSession,
     stats: crate::invocation::InvocationStats,
     declaration: DeclarationId,
@@ -27,7 +31,6 @@ pub struct Invocation {
     requirements: Vec<TypePredicate>,
     capacity: usize,
     context: ptc::Context,
-    index: Index,
     protocols: ExactInputs,
     cache: Cache<Snapshot, Value>,
     budget: ptc::Budget,
@@ -149,15 +152,12 @@ impl Invocation {
             .chain(std::iter::once(result.as_ref()))
             .all(|ty| ty.check_scope(&[]).is_ok());
         let context = ptc::Context::from_package(package)?;
-        let index = crate::implementation_world::index(&package, budget)
-            .map_err(|error| format!("memoization implementation index: {error}"))?;
-        let world = World {
-            index: &index,
-            context: &context,
-            traits: &package.traits,
-            implementations: &package.implementations,
-            assumptions: &[],
-        };
+        let mut frozen = package.clone();
+        frozen.dispatch_instances.clear();
+        let source = DeclarationSnapshot::new(std::sync::Arc::new(frozen));
+        let world = source
+            .capabilities(&context, &[], &mut { budget })
+            .map_err(|error| format!("memoization declaration index: {error}"))?;
         let requirements = function.requirements.iter().cloned().chain(
             function
                 .capabilities
@@ -200,7 +200,7 @@ impl Invocation {
         let protocols = if cacheable {
             parameters
                 .iter()
-                .map(|p| Protocol::prepare(package, items, &p.ty, budget))
+                .map(|p| Protocol::prepare_in_source(source.clone(), items, &p.ty, budget))
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             vec![]
@@ -214,12 +214,9 @@ impl Invocation {
         } else {
             vec![]
         };
-        let mut package = package.clone();
-        package.dispatch_instances.clear();
-        let package = std::sync::Arc::new(package);
-        let code_session = comptime_interpretor::CodeSession::new(package.clone());
+        let code_session = comptime_interpretor::CodeSession::new(source.package().clone());
         Ok(Self {
-            package,
+            source,
             code_session,
             stats: Default::default(),
             declaration,
@@ -231,7 +228,6 @@ impl Invocation {
             requirements: deferred,
             capacity,
             context,
-            index,
             protocols: ExactInputs(protocols),
             cache: Cache::new(
                 Scope {
@@ -260,15 +256,12 @@ impl Invocation {
         // Gate before preparing Eq/Hash, snapshots or cache keys. A dependent
         // result is classified only after binding this invocation's inputs.
         if result_type != Term::Primitive(nir::Primitive::Type) {
-            let world = World {
-                index: &self.index,
-                context: &self.context,
-                traits: &self.package.traits,
-                implementations: &self.package.implementations,
-                assumptions: &[],
-            };
+            let world = self
+                .source
+                .capabilities(&self.context, &[], &mut { self.budget })
+                .map_err(|error| Error::Protocol(error.to_string()))?;
             let (value, _) = evaluate(
-                &self.package,
+                &self.source,
                 &mut self.code_session,
                 &mut self.stats,
                 &world,
@@ -303,7 +296,9 @@ impl Invocation {
             context.spend::<String>(types.len().saturating_add(1))?;
             let mut prepared = types
                 .iter()
-                .map(|ty| Protocol::prepare(&self.package, &self.items, ty, self.budget))
+                .map(|ty| {
+                    Protocol::prepare_in_source(self.source.clone(), &self.items, ty, self.budget)
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(Error::Protocol)?;
             let inputs = values
@@ -327,13 +322,10 @@ impl Invocation {
                 (0, inputs)
             }
         };
-        let world = World {
-            index: &self.index,
-            context: &self.context,
-            traits: &self.package.traits,
-            implementations: &self.package.implementations,
-            assumptions: &[],
-        };
+        let world = self
+            .source
+            .capabilities(&self.context, &[], &mut { self.budget })
+            .map_err(|error| Error::Protocol(error.to_string()))?;
         if let Some(mut protocols) = transient {
             let mut cache = Cache::new(
                 Scope {
@@ -344,7 +336,7 @@ impl Invocation {
                 0,
             );
             execute(
-                &self.package,
+                &self.source,
                 &mut self.code_session,
                 &mut self.stats,
                 &world,
@@ -361,7 +353,7 @@ impl Invocation {
             )
         } else {
             execute(
-                &self.package,
+                &self.source,
                 &mut self.code_session,
                 &mut self.stats,
                 &world,
@@ -434,13 +426,10 @@ impl Invocation {
         result.check_scope(&[]).map_err(|_| {
             Error::Protocol("memoized result still needs value-dependent binding".into())
         })?;
-        let world = World {
-            index: &self.index,
-            context: &self.context,
-            traits: &self.package.traits,
-            implementations: &self.package.implementations,
-            assumptions: &[],
-        };
+        let world = self
+            .source
+            .capabilities(&self.context, &[], &mut { self.budget })
+            .map_err(|error| Error::Protocol(error.to_string()))?;
         for requirement in &self.requirements {
             let predicate = map_requirement(
                 requirement,
@@ -514,7 +503,7 @@ impl std::fmt::Display for Invocation {
 }
 
 fn execute(
-    package: &Package,
+    source: &DeclarationSnapshot,
     code_session: &mut comptime_interpretor::CodeSession,
     stats: &mut crate::invocation::InvocationStats,
     world: &World<'_>,
@@ -548,7 +537,7 @@ fn execute(
             }
             let values = inputs.iter().map(|input| input.value().clone()).collect();
             evaluate(
-                package,
+                source,
                 code_session,
                 stats,
                 world,
@@ -566,7 +555,7 @@ fn execute(
 }
 
 fn evaluate(
-    package: &Package,
+    source: &DeclarationSnapshot,
     code_session: &mut comptime_interpretor::CodeSession,
     stats: &mut crate::invocation::InvocationStats,
     world: &World<'_>,
@@ -579,8 +568,9 @@ fn evaluate(
     context: &mut Context,
     cache_result: bool,
 ) -> Result<(Value, bool), Error<String>> {
-    let source_queries = elaboration::materialization::SourceInvocationQueries::new(
-        package,
+    let package = source.package();
+    let source_queries = elaboration::materialization::SourceInvocationQueries::in_source(
+        DeclarationSource::Snapshot(source),
         world.context,
         world.assumptions,
     );

@@ -7,7 +7,7 @@ use comptime_interpretor::Value;
 use luna::comptime_keys::Protocol;
 use nir::{Primitive, Term, program::Package};
 
-fn prepare(package: &Package, subject: &Term) -> Protocol {
+fn bindings(package: &Package) -> intrinsic::LangItems {
     let mut items = intrinsic::LangItems::new();
     for (item, name) in [
         (intrinsic::LangItem::Eq, "ComptimeEq"),
@@ -23,7 +23,11 @@ fn prepare(package: &Package, subject: &Term) -> Protocol {
             .bind_source_traits(package, &[(item, declaration)])
             .unwrap();
     }
-    Protocol::prepare(package, &items, subject, Default::default()).unwrap()
+    items
+}
+
+fn prepare(package: &Package, subject: &Term) -> Protocol {
+    Protocol::prepare(package, &bindings(package), subject, Default::default()).unwrap()
 }
 
 #[test]
@@ -228,4 +232,55 @@ fn warm_protocols_charge_execution_and_recover_after_budget_exhaustion() {
         assert_eq!(protocol.last_execution_stats().bytecode_compilations, 0);
         assert!(protocol.last_execution_stats().bytecode_invocations > 0);
     }
+}
+
+#[test]
+fn shared_declaration_sources_do_not_merge_protocol_value_authority() {
+    use elaboration::materialization::DeclarationSnapshot;
+    use std::sync::Arc;
+    let mut package = sysroot::compile("").unwrap();
+    let items = bindings(&package);
+    let subject = Term::Primitive(Primitive::Bool);
+    let closed = DeclarationSnapshot::new(Arc::new(package.clone()));
+    assert!(Protocol::prepare_in_source(closed, &items, &subject, Default::default()).is_err());
+    // Convert once before sharing the exact source with several bindings.
+    // A closed dispatch table cannot supply authority to resolving execution.
+    package.dispatch_instances.clear();
+    let package = Arc::new(package);
+    let weak = Arc::downgrade(&package);
+    let source = DeclarationSnapshot::new(package);
+    let mut first =
+        Protocol::prepare_in_source(source.clone(), &items, &subject, Default::default()).unwrap();
+    let mut second =
+        Protocol::prepare_in_source(source.clone(), &items, &subject, Default::default()).unwrap();
+    drop(source);
+    assert!(weak.upgrade().is_some());
+    let admitted = first
+        .admit(Value::Bool(true), &mut Context::new(1_000_000))
+        .unwrap();
+    let digest = first.hash(&admitted, &mut Context::new(1_000_000)).unwrap();
+    assert!(
+        second
+            .hash(&admitted, &mut Context::new(1_000_000))
+            .is_err()
+    );
+    let own = second
+        .admit(Value::Bool(true), &mut Context::new(1_000_000))
+        .unwrap();
+    assert_eq!(
+        second.hash(&own, &mut Context::new(1_000_000)).unwrap(),
+        digest
+    );
+    assert!(first.hash(&own, &mut Context::new(1_000_000)).is_err());
+    assert_eq!(
+        first.hash(&admitted, &mut Context::new(1_000_000)).unwrap(),
+        digest
+    );
+    drop(first);
+    assert!(weak.upgrade().is_some());
+    drop(second);
+    // Value snapshots retain the protocol token, not compiler source/code.
+    assert!(weak.upgrade().is_none());
+    assert_eq!(admitted.value(), &Value::Bool(true));
+    assert_eq!(own.value(), &Value::Bool(true));
 }

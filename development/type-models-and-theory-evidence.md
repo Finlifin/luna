@@ -293,8 +293,10 @@ driver 的调用／缓存／键协议／资源协议／参考执行通过同一�
 
 required 的抽象输入恢复可以为单次类型证明提供显式的 binder scope／Context，
 而不替换默认上下文、源声明或后续方法／关联项的前提。该证明不写入方法规范化缓存。
-一次调用结束即释放状态；下一次调用、新前提或新快照建立自己的状态。staged 求值
-先结束 VM 与查询借用，再进入可变的结果冻结步骤，不能在改写 snapshot 时保留旧世界。
+一次调用结束即释放规范化与选择状态；下一次调用、新前提或新快照建立自己的状态。
+已持有不可变源码的入口可共享[声明目录](world-storage-and-lifetimes.md#12-保活源码的共享声明目录)，
+其中不包含上述状态。staged 求值先结束 VM 与查询借用，再进入可变的结果冻结步骤，
+不能在改写 snapshot 时保留旧世界。
 
 三种宿主服务统一预留当前额度，包含惰性构造成本，正常／错误返回结算实际剩余量；
 单次证明的上限不会吞掉外层未用的额度。unwind 不回填预留额度。类型证明发生构造
@@ -302,12 +304,16 @@ required 的抽象输入恢复可以为单次类型证明提供显式的 binder 
 Unresolved、Invalid 的分类与源码位置。内部可变状态只承载同步、非执行的声明查询，
 不存活动推断变量、可暂停 VM 或资源证明。
 
-资源权限仍由程序验证层的对应服务检查；required 发布器、资源 world、缓存键接纳等
-外层阶段仍可能有各自索引与准备预算。跨调用复用、拥有源快照的持久索引及整体准备
-预算的统一仍未完成，不能把调用内三服务的接线扩大为完整 owning snapshot 迁移。
+资源权限仍由程序验证层的对应服务检查。公开预备调用、缓存调用和 Eq／Hash 协议
+现在从持有源码的 DeclarationSnapshot 共享不可变目录，缓存键接纳与实际调用也从
+同一 owner 取得索引。required 发布器、资源 world 仍有独立索引；staged scratch
+会改写入口，继续使用调用内目录。跨编辑的持久索引、分块源码和整体准备预算的统一
+仍未完成，不能把这些生产 owner 扩大为完整 WorldSnapshot 迁移。
 
-验证工作目录 `/home/fin/luna`，采用 `development/check.py --timeout 900 --`；
-以下 result 文件均包含完整命令及 stdout/stderr 路径：
+以下保留调用内作用域迁移时的证据；后续共享目录的当前检查见
+[世界存储第 1.2 节](world-storage-and-lifetimes.md#12-保活源码的共享声明目录)。
+工作目录 `/home/fin/luna`，采用 `development/check.py --timeout 900 --`；
+各 result 文件包含完整命令及 stdout/stderr 路径：
 
 - `check -p luna`：退出 0，`/tmp/luna-tools-_j31s_2f/result.json`。
 - `/tmp/luna-tools-v3lxvq7f/result.json`：elaboration／luna lib 264 项及

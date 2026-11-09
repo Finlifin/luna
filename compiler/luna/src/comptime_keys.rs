@@ -4,9 +4,8 @@
 use comptime_executor::{Context, Error, KeyProtocol};
 use comptime_interpretor::{Budget, Interpreter, Value};
 use elaboration::{
-    capabilities::World,
-    implementation::Index,
     key_protocols::{Operation, Selected},
+    materialization::{DeclarationSnapshot, DeclarationSource},
     ptc,
 };
 use intrinsic::{LangItem, LangItemDef, LangItems};
@@ -54,9 +53,8 @@ struct Execution {
 struct Binding {
     owner: Arc<()>,
     subject: Arc<Term>,
-    package: Arc<Package>,
+    source: DeclarationSnapshot,
     context: ptc::Context,
-    index: Index,
     eq: Selected,
     hash: Selected,
     budget: ptc::Budget,
@@ -72,6 +70,33 @@ impl Protocol {
         subject: &Term,
         budget: ptc::Budget,
     ) -> Result<Self, String> {
+        let mut frozen = package.clone();
+        frozen.dispatch_instances.clear();
+        Self::prepare_in_source(
+            DeclarationSnapshot::new(Arc::new(frozen)),
+            items,
+            subject,
+            budget,
+        )
+    }
+
+    /// Reuse the owning source directory across protocol bindings. Each binding
+    /// still owns a distinct value-admission token and fresh execution state.
+    /// The snapshot must contain source declarations, without a preselected
+    /// dispatch table, as required by demand-driven interpreter construction.
+    pub fn prepare_in_source(
+        source: DeclarationSnapshot,
+        items: &LangItems,
+        subject: &Term,
+        budget: ptc::Budget,
+    ) -> Result<Self, String> {
+        let package = source.package();
+        if !package.dispatch_instances.is_empty() {
+            return Err(
+                "key source snapshot must not contain preselected dispatch instances".into(),
+            );
+        }
+
         let resources = match (items.get(LangItem::Copy), items.get(LangItem::Drop)) {
             (None, None) => None,
             (Some(LangItemDef::UserDef(copy)), Some(LangItemDef::UserDef(drop))) => {
@@ -90,15 +115,9 @@ impl Protocol {
             }
         };
         let context = ptc::Context::from_package(package)?;
-        let index = crate::implementation_world::index(&package, budget)
-            .map_err(|error| format!("key implementation index: {error}"))?;
-        let world = World {
-            context: &context,
-            index: &index,
-            implementations: &package.implementations,
-            traits: &package.traits,
-            assumptions: &[],
-        };
+        let world = source
+            .capabilities(&context, &[], &mut { budget })
+            .map_err(|error| format!("key declaration index: {error}"))?;
         let eq = crate::protocols::select_comptime_key(
             package,
             &world,
@@ -125,20 +144,16 @@ impl Protocol {
                 }
             }
         }
-        let mut package = package.clone();
-        package.dispatch_instances.clear();
-        let package = Arc::new(package);
         Ok(Self {
             execution: Execution {
-                code: comptime_interpretor::CodeSession::new(package.clone()),
+                code: comptime_interpretor::CodeSession::new(source.package().clone()),
                 stats: Default::default(),
             },
             binding: Binding {
                 owner: Arc::new(()),
                 subject: Arc::new(subject.clone()),
-                package,
+                source,
                 context,
-                index,
                 eq,
                 hash,
                 budget,
@@ -198,15 +213,12 @@ impl Binding {
         context: &mut Context,
         action: impl FnOnce(&mut Interpreter<'_>) -> Result<R, comptime_interpretor::Error>,
     ) -> Result<R, Error<String>> {
-        let world = World {
-            context: &self.context,
-            index: &self.index,
-            implementations: &self.package.implementations,
-            traits: &self.package.traits,
-            assumptions: &[],
-        };
-        let source_queries = elaboration::materialization::SourceInvocationQueries::new(
-            &self.package,
+        let world = self
+            .source
+            .capabilities(&self.context, &[], &mut { self.budget })
+            .map_err(|error| Error::Protocol(error.to_string()))?;
+        let source_queries = elaboration::materialization::SourceInvocationQueries::in_source(
+            DeclarationSource::Snapshot(&self.source),
             &self.context,
             &[],
         );
@@ -221,7 +233,7 @@ impl Binding {
             let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
             let before = fuel;
             let evidence = elaboration::verification::copy::acquire(
-                &self.package,
+                self.source.package(),
                 &world,
                 copy,
                 drop,
@@ -249,7 +261,7 @@ impl Binding {
         let mut allowance = Budget { steps, depth: 128 };
         execution.stats = Default::default();
         let prepared = Interpreter::for_comptime_resolving_in_session(
-            &self.package,
+            self.source.package(),
             &mut execution.code,
             comptime_interpretor::SourceResolvers {
                 types: &solver,

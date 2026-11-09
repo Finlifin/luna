@@ -8,19 +8,17 @@ use crate::{
 use nir::value_admission::Error as AdmissionError;
 use nir::{DeclarationId as Id, Term, program as n};
 use std::collections::{BTreeMap, HashMap};
+mod catalog;
+pub use catalog::{DeclarationSnapshot, DeclarationSource};
 mod inputs;
 mod methods;
 
 pub struct DeclarationWorld<'a> {
     normalized_types: HashMap<Term, Term>,
     package: &'a n::Package,
-    index: Index,
+    metadata: std::sync::Arc<catalog::DeclarationMetadata>,
     context: Context,
     assumptions: Vec<n::TraitRequirement>,
-    declaration_parameter_sorts: BTreeMap<Id, nir::Sort>,
-    callable_functions: HashMap<Id, &'a n::Function>,
-    runtime_callables: HashMap<Id, &'a n::RuntimeFunctionIdentity>,
-    normal_heads: HashMap<Id, &'a nir::normal_forms::Head>,
 }
 impl<'a> DeclarationWorld<'a> {
     pub fn new(
@@ -41,6 +39,15 @@ impl<'a> DeclarationWorld<'a> {
         budget: &mut Budget,
         context: Option<(&Context, &[n::TraitRequirement])>,
     ) -> Result<Self, AdmissionError> {
+        Self::from_source_metered(DeclarationSource::Borrowed(package), budget, context)
+    }
+
+    fn from_source_metered(
+        source: DeclarationSource<'a>,
+        budget: &mut Budget,
+        context: Option<(&Context, &[n::TraitRequirement])>,
+    ) -> Result<Self, AdmissionError> {
+        let package = source.package();
         construction::requirements(
             context.map_or(&[], |(_, assumptions)| assumptions),
             &mut budget.steps,
@@ -60,80 +67,43 @@ impl<'a> DeclarationWorld<'a> {
                 }
             })?,
         };
-        let index = Index::from_package_metered(package, budget)?;
-        let input_fuel = &mut budget.steps;
-        // Immutable declaration metadata is indexed once per world. No function
-        // invocation result, predicate outcome or mutable state is cached here.
-        let mut callable_functions = HashMap::new();
-        let mut runtime_callables = HashMap::new();
-        let mut normal_heads = HashMap::new();
-        for function in &package.functions {
-            *input_fuel = input_fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
-            if callable_functions
-                .insert(function.declaration, function)
-                .is_some()
-            {
-                return Err("duplicate callable declaration".into());
-            }
-        }
-        for identity in &package.runtime_function_identities {
-            *input_fuel = input_fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
-            if runtime_callables
-                .insert(identity.declaration, identity)
-                .is_some()
-            {
-                return Err("duplicate runtime callable identity".into());
-            }
-        }
-        for head in &package.normal_forms {
-            *input_fuel = input_fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
-            if normal_heads.insert(head.declaration, head).is_some() {
-                return Err("duplicate normal-form callable identity".into());
-            }
-        }
-
-        construction::spend(input_fuel, index.parameter_domains().len())?;
-        let declaration_parameter_sorts = index
-            .parameter_domains()
-            .iter()
-            .map(|(id, domain)| {
-                (
-                    *id,
-                    if *domain == Term::Primitive(nir::Primitive::Type) {
-                        nir::Sort::Type
-                    } else {
-                        nir::Sort::ComptimeValue
-                    },
-                )
-            })
-            .collect();
+        let metadata = source.metadata(budget)?;
         Ok(Self {
             normalized_types: HashMap::new(),
             package,
-            index,
+            metadata,
             context,
             assumptions,
-            declaration_parameter_sorts,
-            callable_functions,
-            runtime_callables,
-            normal_heads,
         })
     }
     /// Borrow checked metadata without scanning or copying executable bodies.
     pub fn function_declaration(&self, declaration: Id) -> Option<&'a n::Function> {
-        self.callable_functions.get(&declaration).copied()
+        self.metadata
+            .callable_functions
+            .get(&declaration)
+            .map(|slot| &self.package.functions[*slot])
     }
     pub fn runtime_function_identity(
         &self,
         declaration: Id,
     ) -> Option<&'a n::RuntimeFunctionIdentity> {
-        self.runtime_callables.get(&declaration).copied()
+        self.metadata
+            .runtime_callables
+            .get(&declaration)
+            .map(|slot| &self.package.runtime_function_identities[*slot])
     }
+    fn normal_head(&self, declaration: Id) -> Option<&'a nir::normal_forms::Head> {
+        self.metadata
+            .normal_heads
+            .get(&declaration)
+            .map(|slot| &self.package.normal_forms[*slot])
+    }
+
     /// A query view of this exact source, declaration index and premise scope.
     /// It carries no executable contracts or persistent proof authority.
     pub fn capabilities(&self) -> crate::capabilities::World<'_> {
         crate::capabilities::World {
-            index: &self.index,
+            index: &self.metadata.index,
             implementations: &self.package.implementations,
             traits: &self.package.traits,
             assumptions: &self.assumptions,
@@ -142,7 +112,7 @@ impl<'a> DeclarationWorld<'a> {
     }
 
     pub fn index(&self) -> &Index {
-        &self.index
+        &self.metadata.index
     }
     pub fn context(&self) -> &Context {
         &self.context
@@ -162,6 +132,7 @@ impl<'a> DeclarationWorld<'a> {
             .iter()
             .map(|id| {
                 let domain = self
+                    .metadata
                     .index
                     .parameter_domains()
                     .get(id)
@@ -183,7 +154,7 @@ impl<'a> DeclarationWorld<'a> {
         fuel: &mut usize,
     ) -> Result<Option<Term>, AdmissionError> {
         *fuel = fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
-        if let Some(head) = self.normal_heads.get(&declaration) {
+        if let Some(head) = self.normal_head(declaration) {
             if !arguments.is_empty() {
                 return Err("normal-form callable identity cannot carry applied inputs".into());
             }
@@ -199,9 +170,9 @@ impl<'a> DeclarationWorld<'a> {
                 .map_err(|e| AdmissionError::Invalid(e.to_string()));
         }
         let (parameters, signature, qualifiers) =
-            if let Some(identity) = self.runtime_callables.get(&declaration) {
+            if let Some(identity) = self.runtime_function_identity(declaration) {
                 (&identity.type_parameters, &identity.signature, None)
-            } else if let Some(function) = self.callable_functions.get(&declaration) {
+            } else if let Some(function) = self.function_declaration(declaration) {
                 (
                     &function.type_parameters,
                     &function.signature,
@@ -359,13 +330,13 @@ impl<'a> DeclarationWorld<'a> {
         &self,
         check: impl FnOnce(&mut nir::value_admission::DomainQueries<'_, '_>) -> R,
     ) -> R {
-        use nir::value_admission::{DomainQueries, Error};
+        use nir::value_admission::DomainQueries;
         check(&mut DomainQueries {
             layout: &mut |ty, variant, fuel| {
                 if variant.is_none() {
-                    if let Some(fields) = nir::normal_forms::registered_tuple_fields(ty, |id| {
-                        self.normal_heads.get(&id).copied()
-                    }) {
+                    if let Some(fields) =
+                        nir::normal_forms::registered_tuple_fields(ty, |id| self.normal_head(id))
+                    {
                         nir::type_computations::charge_term(ty, fuel)?;
                         return Ok(fields.to_vec());
                     }
@@ -377,10 +348,7 @@ impl<'a> DeclarationWorld<'a> {
                 let Term::NormalForm { head, .. } = domain else {
                     return Ok(None);
                 };
-                let Some(element) = self
-                    .normal_heads
-                    .get(head)
-                    .and_then(|h| h.list_element(domain))
+                let Some(element) = self.normal_head(*head).and_then(|h| h.list_element(domain))
                 else {
                     return Ok(None);
                 };
@@ -401,6 +369,7 @@ impl<'a> DeclarationWorld<'a> {
             .map(|id| nir::DeclarationParameter {
                 declaration: *id,
                 sort: self
+                    .metadata
                     .declaration_parameter_sorts
                     .get(id)
                     .copied()
@@ -424,7 +393,7 @@ impl<'a> DeclarationWorld<'a> {
             ..budget
         };
         let prepared = crate::capabilities::World {
-            index: &self.index,
+            index: &self.metadata.index,
             implementations: &self.package.implementations,
             traits: &self.package.traits,
             assumptions: &self.assumptions,
@@ -470,7 +439,7 @@ impl DeclarationWorld<'_> {
         budget: &mut Budget,
     ) -> Result<(Id, Vec<Term>), AdmissionError> {
         let mut resolution = crate::capabilities::World {
-            index: &self.index,
+            index: &self.metadata.index,
             implementations: &self.package.implementations,
             traits: &self.package.traits,
             assumptions: &self.assumptions,

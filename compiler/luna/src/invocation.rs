@@ -1,13 +1,14 @@
 //! Explicit, bounded invocation of completed comptime declarations.
 pub use crate::memoization::Invocation as MemoizedInvocation;
 use comptime_interpretor::{Budget, Interpreter, Value};
+use elaboration::materialization::{DeclarationSnapshot, DeclarationSource};
 use nir::program::{FunctionPhase, Package};
 use nir::{DeclarationId, Term};
 
 /// Reusable preparation for one entry in an immutable compilation snapshot.
 /// Code is shared; values, mutable storage and evidence are fresh on each call.
 pub struct PreparedInvocation {
-    package: std::sync::Arc<Package>,
+    source: DeclarationSnapshot,
     declaration: DeclarationId,
     entry: String,
     code: comptime_interpretor::CodeSession,
@@ -32,7 +33,7 @@ impl PreparedInvocation {
         let code = comptime_interpretor::CodeSession::new(prepared.clone());
         Ok(Self {
             code,
-            package: prepared,
+            source: DeclarationSnapshot::new(prepared),
             declaration,
             entry: entry.into(),
             last_stats: InvocationStats::default(),
@@ -44,7 +45,7 @@ impl PreparedInvocation {
             return Err("invocation fuel must be positive".into());
         }
         execute_prepared(
-            &self.package,
+            DeclarationSource::Snapshot(&self.source),
             self.declaration,
             &self.entry,
             None,
@@ -133,7 +134,7 @@ pub(crate) fn invoke_selected_with_publisher(
     }
     let (prepared, declaration) = prepare_invocation(package, entry, identity)?;
     execute_prepared(
-        prepared.as_ref(),
+        DeclarationSource::Borrowed(prepared.as_ref()),
         declaration,
         entry,
         protocols,
@@ -161,7 +162,7 @@ fn prepare_invocation<'a>(
 
 #[allow(clippy::too_many_arguments)]
 fn execute_prepared(
-    package: &Package,
+    source: DeclarationSource<'_>,
     declaration: DeclarationId,
     entry: &str,
     protocols: Option<(
@@ -173,6 +174,7 @@ fn execute_prepared(
     mut session: Option<&mut comptime_interpretor::CodeSession>,
     stats: &mut InvocationStats,
 ) -> Result<Value, String> {
+    let package = source.package();
     let preparation_budget = elaboration::ptc::Budget::default();
     let context = elaboration::ptc::Context::from_package(package)
         .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
@@ -211,7 +213,7 @@ fn execute_prepared(
         allowed
     };
     let source_queries =
-        elaboration::materialization::SourceInvocationQueries::new(package, &context, &[]);
+        elaboration::materialization::SourceInvocationQueries::in_source(source, &context, &[]);
     let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
         source_queries.check(predicate, preparation_budget, remaining)
     };

@@ -23,6 +23,7 @@ use nir::program::{self as n, ExprKind as K, Pattern as P};
 use nir::{DeclarationId as Id, Term};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use type_resolution::dispatch::DeclarationWorld;
+pub use type_resolution::dispatch::{DeclarationSnapshot, DeclarationSource};
 
 // Interface defaults use interface parameter identities, independently of the
 // selected body's parameter names. Only their free references move to the body

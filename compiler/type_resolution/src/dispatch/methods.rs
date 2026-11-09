@@ -68,7 +68,7 @@ impl DeclarationWorld<'_> {
                 continue;
             }
             let world = World {
-                index: &self.index,
+                index: &self.metadata.index,
                 implementations: &self.package.implementations,
                 traits: &self.package.traits,
                 assumptions: &self.assumptions,

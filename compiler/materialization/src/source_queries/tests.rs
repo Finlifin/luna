@@ -436,3 +436,170 @@ fn identical_ids_in_changed_sources_do_not_share_associated_or_type_authority() 
         );
     }
 }
+
+#[test]
+fn retained_snapshots_share_metadata_across_fresh_invocation_scopes() {
+    use comptime_interpretor::ContractOutcome;
+    use std::sync::Arc;
+    let (mut package, method, access, predicate) = mixed_fixture();
+    package.newtypes[0].name = "retained\n\"source\"".into();
+    let package = Arc::new(package);
+    let weak = Arc::downgrade(&package);
+    let context = Context::from_package(&package).unwrap();
+    let snapshot = DeclarationSnapshot::new(package);
+    let pending_dump = snapshot.to_string();
+    assert!(pending_dump.starts_with("(declaration-snapshot (source ("));
+    assert!(pending_dump.contains(r#"retained\n\"source\""#));
+    assert!(pending_dump.ends_with("(metadata pending))"));
+    let sibling = snapshot.clone();
+    let first =
+        SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&snapshot), &context, &[]);
+    let mut cold = 100_000;
+    assert_eq!(
+        first.check(&predicate, Budget::default(), &mut cold),
+        ContractOutcome::Satisfied
+    );
+    let next =
+        SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&sibling), &context, &[]);
+    let mut warm = 100_000;
+    assert_eq!(
+        next.check(&predicate, Budget::default(), &mut warm),
+        ContractOutcome::Satisfied
+    );
+    assert!(cold < warm && warm < 100_000);
+    {
+        let first = first.world.borrow();
+        let next = next.world.borrow();
+        assert!(std::ptr::eq(
+            first.as_ref().unwrap().index(),
+            next.as_ref().unwrap().index()
+        ));
+    }
+    assert_eq!(next.resolve(&method, &mut warm).unwrap().body, id(6));
+    assert!(next.associated(&access, &mut warm).is_ok());
+    let completed_dump = snapshot.to_string();
+    assert!(completed_dump.contains("(metadata (implementation-index"));
+    assert_eq!(completed_dump, sibling.to_string());
+    drop(first);
+    drop(next);
+    drop(snapshot);
+    assert!(weak.upgrade().is_some());
+    // Only the directory survives. A new invocation still needs its own
+    // allowance and cannot inherit a prior successful method decision.
+    let next =
+        SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&sibling), &context, &[]);
+    assert_eq!(
+        next.resolve(&method, &mut 0).unwrap_err().kind,
+        ErrorKind::StepsExhausted
+    );
+    assert_eq!(next.resolve(&method, &mut 100_000).unwrap().body, id(6));
+    drop(next);
+    drop(sibling);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn retained_metadata_cannot_share_premises_or_changed_source_authority() {
+    use std::sync::Arc;
+    let (mut package, first, _) = fixture();
+    let mut parent = package.traits[0].clone();
+    parent.declaration = id(40);
+    parent.self_parameter = id(41);
+    parent.methods.clear();
+    parent.name = "Parent".into();
+    package.traits.push(parent);
+    package.traits[0].parents.push(n::InterfaceInstance {
+        declaration: id(40),
+        arguments: vec![],
+    });
+    let context = Context::from_package(&package).unwrap();
+    let snapshot = DeclarationSnapshot::new(Arc::new(package));
+    let assumptions = [n::TraitRequirement {
+        interface: id(40),
+        interface_arguments: vec![],
+        subject: ty(Primitive::Bool),
+    }];
+    let with_premise = SourceInvocationQueries::in_source(
+        DeclarationSource::Snapshot(&snapshot),
+        &context,
+        &assumptions,
+    );
+    let without_premise =
+        SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&snapshot), &context, &[]);
+    for _ in 0..2 {
+        assert_eq!(
+            with_premise.resolve(&first, &mut 100_000).unwrap().body,
+            id(6)
+        );
+        assert_eq!(
+            without_premise
+                .resolve(&first, &mut 100_000)
+                .unwrap_err()
+                .kind,
+            ErrorKind::TypeContractUnresolved
+        );
+    }
+    let mut changed = Arc::clone(snapshot.package());
+    Arc::make_mut(&mut changed).implementations[0].methods[0].1 = id(99);
+    let changed = DeclarationSnapshot::new(changed);
+    let other = SourceInvocationQueries::in_source(
+        DeclarationSource::Snapshot(&changed),
+        &context,
+        &assumptions,
+    );
+    assert_eq!(other.resolve(&first, &mut 100_000).unwrap().body, id(99));
+    assert_eq!(
+        with_premise.resolve(&first, &mut 100_000).unwrap().body,
+        id(6)
+    );
+    assert!(!std::ptr::eq(
+        with_premise.world.borrow().as_ref().unwrap().index(),
+        other.world.borrow().as_ref().unwrap().index(),
+    ));
+}
+
+#[test]
+fn failed_retained_construction_is_retryable_without_publishing_partial_metadata() {
+    use comptime_interpretor::ContractOutcome;
+    use std::sync::Arc;
+    let (package, method, _, predicate) = mixed_fixture();
+    let context = Context::from_package(&package).unwrap();
+    let snapshot = DeclarationSnapshot::new(Arc::new(package));
+    let queries =
+        SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&snapshot), &context, &[]);
+    for allowance in [0, 1, 128] {
+        assert_eq!(
+            queries.check(&predicate, Budget::default(), &mut { allowance }),
+            ContractOutcome::Unknown
+        );
+        assert!(queries.world.borrow().is_none());
+    }
+    let mut recovered = 100_000;
+    assert_eq!(
+        queries.resolve(&method, &mut recovered).unwrap().body,
+        id(6)
+    );
+    let independent = DeclarationSnapshot::new(snapshot.package().clone());
+    let independent_queries = SourceInvocationQueries::in_source(
+        DeclarationSource::Snapshot(&independent),
+        &context,
+        &[],
+    );
+    let mut cold = 100_000;
+    assert_eq!(
+        independent_queries
+            .resolve(&method, &mut cold)
+            .unwrap()
+            .body,
+        id(6)
+    );
+    assert_eq!(
+        recovered, cold,
+        "failed construction cannot leave a discounted partial directory"
+    );
+    let next =
+        SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&snapshot), &context, &[]);
+    let mut warm = 100_000;
+    assert_eq!(next.resolve(&method, &mut warm).unwrap().body, id(6));
+    assert!(warm > cold && warm < 100_000);
+}

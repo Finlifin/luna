@@ -10,7 +10,7 @@ mod tests;
 /// metadata and type views can be reused. Selection obligations are checked on
 /// every demand; executable call contracts remain the VM's responsibility.
 pub struct SourceInvocationQueries<'a> {
-    package: &'a n::Package,
+    source: DeclarationSource<'a>,
     context: &'a Context,
     assumptions: &'a [n::TraitRequirement],
     world: RefCell<Option<DeclarationWorld<'a>>>,
@@ -22,8 +22,16 @@ impl<'a> SourceInvocationQueries<'a> {
         context: &'a Context,
         assumptions: &'a [n::TraitRequirement],
     ) -> Self {
+        Self::in_source(DeclarationSource::Borrowed(package), context, assumptions)
+    }
+
+    pub fn in_source(
+        source: DeclarationSource<'a>,
+        context: &'a Context,
+        assumptions: &'a [n::TraitRequirement],
+    ) -> Self {
         Self {
-            package,
+            source,
             context,
             assumptions,
             world: RefCell::new(None),
@@ -41,11 +49,10 @@ impl<'a> SourceInvocationQueries<'a> {
         let mut world = self.world.borrow_mut();
         if world.is_none() {
             // Publish only a complete index. A failed first demand is retryable.
-            *world = Some(DeclarationWorld::new_metered(
-                self.package,
-                budget,
-                Some((self.context, self.assumptions)),
-            )?);
+            *world = Some(
+                self.source
+                    .world(budget, Some((self.context, self.assumptions)))?,
+            );
         }
         query(world.as_mut().unwrap(), budget)
     }
