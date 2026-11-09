@@ -20,7 +20,9 @@ impl Interpreter<'_> {
         let diverging = fields
             .iter()
             .any(|field| *field == Term::Primitive(Primitive::Never));
-        let element_type = self.list_element(&ty).cloned();
+        let element_type = self.query_admission(Some(source), |vm, fuel| {
+            vm.admitted_collection_domain(&ty, fuel)
+        })?;
         if (diverging && ty != Term::Primitive(Primitive::Never))
             || (!diverging && element_type.is_none())
             || fields.iter().any(|field| {
@@ -40,7 +42,15 @@ impl Interpreter<'_> {
         values: Vec<Value>,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        if self.list_element(ty).is_none() {
+        if values.len() > 100_000 {
+            return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
+        }
+        if self
+            .query_admission(Some(source), |vm, fuel| {
+                vm.admitted_collection_domain(ty, fuel)
+            })?
+            .is_none()
+        {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         let value = Value::List {

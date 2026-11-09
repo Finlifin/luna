@@ -143,17 +143,19 @@ impl Interpreter<'_> {
         let Term::NormalForm { head, .. } = ty else {
             return Err(self.failure(ErrorKind::Type, None));
         };
+        let element = self
+            .query_admission(None, |vm, fuel| vm.admitted_collection_domain(ty, fuel))?
+            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
         let metadata = self
             .normal_forms
             .get(head)
             .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-        let element = metadata
-            .list_element(ty)
-            .cloned()
-            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
         let fields = metadata
             .list_value_elements(ty, term)
             .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+        if fields.len() > 100_000 {
+            return Err(self.failure(ErrorKind::RepresentationSizeLimit, None));
+        }
         self.integer_operation(None, |budget| budget.consume(fields.len()))?;
         let values = fields
             .iter()
@@ -189,21 +191,8 @@ impl Interpreter<'_> {
                 },
             ) if actual.as_ref() == ty => {
                 self.integer_operation(None, |budget| budget.consume(fields.len()))?;
-                let mut fuel = usize::try_from(self.budget.steps)
-                    .unwrap_or(usize::MAX)
-                    .min(100_000);
-                let before = fuel;
-                let types = self.normal_value_fields(ty, *variant, &mut fuel);
-                self.budget.steps -= (before - fuel) as u64;
-                let types = types.ok_or_else(|| {
-                    self.failure(
-                        if fuel == 0 {
-                            ErrorKind::StepsExhausted
-                        } else {
-                            ErrorKind::Type
-                        },
-                        None,
-                    )
+                let types = self.query_admission(None, |vm, fuel| {
+                    vm.query_normal_value_fields(ty, *variant, fuel)
                 })?;
                 if fields.len() != types.len() {
                     return Err(self.failure(ErrorKind::Type, None));

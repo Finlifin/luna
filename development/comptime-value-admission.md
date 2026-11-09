@@ -2610,6 +2610,50 @@ admitted_callable_signature，删除本地重复的参数拼接、可选签名�
 - 三个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-1v_wv3q9/result.json`
   退出 0；git diff --check 通过。集成后仅调整了 matches 宏内的缩进。
 
+### 容器重建区分表示大小、查询额度和类型错误
+
+List 的 100,000 元素检查与普通 immutable representation 的展开工作限制属于现有
+资源策略，不是 List 的类型恒等规则，也不同于 invocation 可供应的步数。本节保留
+该大小限制，不通过删除它来让更大测试成功。形状检查、构造完成及规范值解码现在
+明确把超过元素上限报告为 RepresentationSizeLimit，避免在这些路径上变成 Type；
+构造准备和拼接原有资源分类保持。
+
+元素 Type 的观察与复制改用 admitted_collection_domain。形状检查借用自身的局部
+共享余额；构造准备、构造完成及解码通过 query_admission 借用 VM 余额。这个适配器
+只查询已有表示证据，成功或失败都扣回已花费的工作，保留 Budget／Unresolved／Invalid
+分类；不调用用户代码、不改变注册 head 的权限。空列表仍须取得接收世界的元素域，
+不能以没有 payload 为由把任意 NF 当成 List。
+
+名义值重建删除 `.min(100_000)` 及 optional layout 适配器，直接用同一个 metered
+入口调用 query_normal_value_fields。失败依据 typed 原因，不再以 `fuel == 0`
+猜测；调用方供应的额度可以支持更昂贵的合法字段准备。回归中的普通 struct 有
+40,000 个 bool 字段，值表示仍在既有展开大小限制以内，但字段查询工作超过旧私有
+查询上限。它足额解码成功，不表示可以绕过 immutable representation 大小检查。
+
+剩余边界：validate_immutable_input 等外围仍有 Option 形式的表示观察，把多种
+失败合在一起；Type description 及旧只读 has_type 的整体迁移仍待继续。不能据本节
+声称所有 host 输入的超限诊断已统一。List 的表示策略也尚未提升为显式配置的通用
+限额载体，后续应按资源种类设计，不能把所有 100,000 常量盲目替换为同一个预算。
+
+证据（工作目录 `/home/fin/luna`）：
+
+- 首次接线 `python3 -B development/check.py --timeout 900 -- test
+  -p comptime_interpretor --lib --no-fail-fast`：
+  `/tmp/luna-tools-peucpr1i/result.json` 退出 0，529 项通过。
+- 新 `collection_admission` 三项测试：`/tmp/luna-tools-29zmrupg/result.json`
+  退出 0，覆盖空列表元素观察、资源分类与恢复、未知 head 拒绝和大字段布局的完整
+  解码结果。
+- 只将本轮修改的 value_types.rs 与 normal_values/containers.rs 临时换为
+  HEAD `34f062bf`，其余代码与新测试不变：`/tmp/luna-tools-jwxtcqc3/result.json`
+  退出 101，三项均失败。分别是低预算空列表被接纳、超长列表报 Type，以及足额的
+  合法名义值仍因私有上限报 StepsExhausted。随后两文件按字节恢复，备份核验一致。
+- 最终 `test -p comptime_interpretor --lib -p luna --test library_protocols
+  --test normal_input_plans --test contextual_input_costs --test sysroot_preludes
+  --no-fail-fast`：`/tmp/luna-tools-i6oe1oi8/result.json` 退出 0，解释器 532、luna
+  lib 87、规模 1、库协议 27、实参计划 16、sysroot 15，共 678 项通过。
+- 六个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-q0lzqn38/result.json`
+  退出 0；git diff --check 通过。未执行全 workspace 或墙钟性能基准。
+
 ### Predicate shape：支持结论与资源失败分离
 
 程序谓词 shape 检查移入 NIR 的单一实现，两个入口均显式接收调用者 fuel，返回

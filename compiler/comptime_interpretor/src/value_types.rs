@@ -465,26 +465,32 @@ impl Interpreter<'_> {
                     })
             }
             (Value::List { ty: actual, values }, ty) => {
+                if values.len() > 100_000 {
+                    checks.failure = Some(ErrorKind::RepresentationSizeLimit);
+                    return false;
+                }
                 self.comptime_only
                     && actual == ty
-                    && values.len() <= 100_000
-                    && self.list_element(ty).is_some_and(|element| {
-                        // The summary stores only identical scalar discriminants.
-                        // Resolve and check the current element domain normally;
-                        // no equality, head formation or target decision is cached.
-                        if values
-                            .summary()
-                            .is_some_and(|summary| summary.uniform_scalar.is_some())
-                        {
-                            values.first().is_some_and(|value| {
-                                self.has_type_at(value, element, depth + 1, checks)
-                            })
-                        } else {
-                            values
-                                .iter()
-                                .all(|value| self.has_type_at(value, element, depth + 1, checks))
-                        }
-                    })
+                    && checks
+                        .admit(|fuel| self.admitted_collection_domain(ty, fuel))
+                        .flatten()
+                        .is_some_and(|element| {
+                            // The summary stores only identical scalar discriminants.
+                            // Resolve and check the current element domain normally;
+                            // no equality, head formation or target decision is cached.
+                            if values
+                                .summary()
+                                .is_some_and(|summary| summary.uniform_scalar.is_some())
+                            {
+                                values.first().is_some_and(|value| {
+                                    self.has_type_at(value, &element, depth + 1, checks)
+                                })
+                            } else {
+                                values.iter().all(|value| {
+                                    self.has_type_at(value, &element, depth + 1, checks)
+                                })
+                            }
+                        })
             }
             (Value::TypeParameter(id), Term::Primitive(Primitive::Type)) => {
                 self.abstract_type_parameters.contains(id)

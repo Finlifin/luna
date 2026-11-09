@@ -6,6 +6,30 @@ use super::*;
 mod tests;
 
 impl Interpreter<'_> {
+    /// Execute a passive representation query against the current world and
+    /// return its consumed allowance on every outcome. This grants no new
+    /// declaration evidence or permission to execute user code.
+    pub(super) fn query_admission<T>(
+        &mut self,
+        source: Option<SourceRange>,
+        query: impl FnOnce(&Self, &mut usize) -> Result<T, nir::NominalAdmissionError>,
+    ) -> Result<T, Error> {
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = query(self, &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        result.map_err(|failure| {
+            self.failure(
+                match failure {
+                    nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+                    nir::NominalAdmissionError::Unresolved(_) => ErrorKind::TypeContractUnresolved,
+                    nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
+                },
+                source,
+            )
+        })
+    }
+
     /// Ordinary and NF inputs must use the same receiving-world evidence.
     /// Keep typed query failures intact; budget exhaustion is not missing data.
     pub(super) fn with_admission_queries<R>(

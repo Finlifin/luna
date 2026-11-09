@@ -1,6 +1,7 @@
 use super::*;
 use std::cell::Cell;
 
+mod collection_admission;
 mod containers;
 mod observations;
 mod passive_views;
