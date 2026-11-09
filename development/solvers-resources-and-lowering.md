@@ -227,6 +227,45 @@ ordinary/direct passing 等策略各有可验证的边界，不能由后端喜�
 表示观察、固定/值相关布局及完整调用计划见[布局与调用 ABI](layout-and-call-abi.md)。
 它们分别消费类型、target 和环境证据，不用同一个 LLVM Ty 判定所有相等、访问和调用资格。
 
+### 8.1 资源分析的递归路径与宿主栈
+
+完全内联后的资源检查曾在固定 2 MiB 线程栈上溢出。分阶段插桩确认源码编译、
+实例化与 graph 检查均完成，崩溃发生在分析 `entry` 的拥有位置与值来源时，尚未
+进入 VM。它在分析深度约 58 时已经耗尽宿主栈，未达到既有深度上限；仅有递归
+计数并不能保证检查器正常返回预算诊断。复杂调用、闭包和写回分支的局部状态与
+简单绑定共享大型 Rust 函数栈帧，是这条递归路径的额外成本。
+
+`moves/operations.rs` 现在将调用、闭包、指针读写、位置写回与返回分别交给独立
+函数；递归分派不再为未选择的复杂分支保留栈空间。`moves/value_origins.rs` 同样
+分开 handler 安装、表示转换、构造、块与条件的来源处理。公共 `expr` 和
+`evaluate_value_origins` 包装仍负责交付 callable、variant 与 pointer guard 证据；
+求值顺序、临时作用域、退出清理、原预算扣费和递归深度计数均保留。表示透明边界
+仍先于指针处理，不能因模块拆分改变借用结果的解释。
+
+这是现有递归分析器的实现清理，不是全链路迭代工作机，也没有将深度上限变成
+Flurry 的语言限制。更深的有限程序仍可能触发现有分析额度；任意输入和所有辅助
+遍历的宿主栈有界性尚未证明。现有内联测试未扩大线程栈，未删减 contracts、默认
+实参、提前返回或清理顺序检查。所有临时诊断插桩已撤销。
+
+验证证据（工作目录 `/home/fin/luna`）：
+
+- 修改前单独复现的 `/tmp/luna-tools-0klc0occ/result.json` 与栈帧定位的
+  `/tmp/luna-tools-z4050a8h/result.json` 均退出 101，故障位于资源分析。
+  可选 GDB 诊断受 ptrace 限制，未取得 backtrace，不作为成功证据。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop
+  optional_inline_call_chains_preserve_defaults_contracts_and_owned_returns
+  -- --exact --nocapture`：`/tmp/luna-tools-e3vf988s/result.json` 退出 0。
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification`：
+  `/tmp/luna-tools-36s_rmna/result.json` 退出 0，128 项通过。新增固定 2 MiB 栈用例
+  检查嵌套绑定的 Copy 交付、无额外 move、预算耗尽、深度拒绝及新尝试结果一致。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop
+  --test closure_local_handlers -- --skip
+  scheduled_handler_borrowed_copy_record_rejects_unproved_owner_layouts --skip
+  outward_request_cannot_retire_the_storage_a_callback_will_read`：
+  `/tmp/luna-tools-8u6n660u/result.json` 退出 0，1,002 项通过，2 项已知基线问题
+  显式过滤。前者是准备成功与拒绝预期不符，后者是拒绝诊断断言不符，均未修复；
+  [原对照证据](comptime-value-admission.md)保留。未执行全 workspace 回归。
+
 ## 9. BitVec 与目标能力
 
 定义端 BitVec 宽度可为受约束的 comptime 整数项；具体实例必须确定。
