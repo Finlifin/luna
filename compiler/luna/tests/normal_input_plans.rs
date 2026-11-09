@@ -180,11 +180,21 @@ fn ready_domains_reject_invalid_values_in_every_branch() {
 }
 
 fn trace_both(package: &Package, name: &str, expected: &Value, calls: &[&str]) {
+    trace_both_in_budget(package, name, expected, calls, Budget::default());
+}
+
+fn trace_both_in_budget(
+    package: &Package,
+    name: &str,
+    expected: &Value,
+    calls: &[&str],
+    budget: Budget,
+) {
     for tree in [false, true] {
         let mut vm = if tree {
-            Interpreter::for_comptime_tree(package, Budget::default())
+            Interpreter::for_comptime_tree(package, budget)
         } else {
-            Interpreter::for_comptime(package, Budget::default())
+            Interpreter::for_comptime(package, budget)
         }
         .unwrap();
         assert_eq!(vm.invoke(id(package, name), vec![]).unwrap(), *expected);
@@ -394,7 +404,23 @@ fn ordinary_collection_assembly_preserves_many_inline_spread_producers() {
     let direct = invoke_both(&package, "Direct");
     let mut calls = vec!["Build"];
     calls.extend(std::iter::repeat_n("part", count));
-    trace_both(&package, "Build", &direct, &calls);
+    /*
+     * Cold source admission and execution now share one allowance. This
+     * workload measures about 79,000 construction steps plus 64,000 execution
+     * steps; its 192 calls and ordering contract need both costs covered.
+     * Production defaults remain unchanged. Scaling is checked separately in
+     * contextual_input_costs, rather than hiding nonlinear work with this limit.
+     */
+    trace_both_in_budget(
+        &package,
+        "Build",
+        &direct,
+        &calls,
+        Budget {
+            steps: 200_000,
+            ..Default::default()
+        },
+    );
 }
 
 #[test]

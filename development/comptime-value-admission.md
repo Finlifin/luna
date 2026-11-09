@@ -2423,9 +2423,45 @@ Phase 成本降低约 86.7%，构造总成本降低约 85.5%。修复前仅为�
 
 本阶段去重 241 项通过，1 项仍失败，1 项已有 ignore；未执行全量测试。仍失败的
 ordinary_collection_assembly_preserves_many_inline_spread_producers 已推进到
-`vm.invoke` 的 `StepsExhausted`，需继续分析执行成本；不提高预算或删减展开用例。
+`vm.invoke` 的 `StepsExhausted`，当时保留原额度与完整展开用例继续分析执行成本；
+后续测量与测试额度迁移见下节。
 四个修改／新增 Rust 文件通过 scoped rustfmt check，
 `/tmp/luna-tools-regyrygm/result.json` 退出 0；git diff --check 通过。
+
+### 大规模展开的共享额度迁移与规模回归
+
+继续测量上述 192 个 producer 的用例，失败发生于 contextual input 字节码编译，
+此时只有 Build 已进入，尚未执行 part。冷构造消耗 79,015 步；完整字节码调用
+消耗 64,237 步，树解释调用消耗 42,944 步。两者加上冷构造均超过默认 100,000
+步。不同输入规模的测量没有显示这条路径的计费工作存在平方增长：
+
+| producer 数量 | 字节码编译 | 字节码调用总工作（含编译） | 树解释调用工作 |
+| --- | ---: | ---: | ---: |
+| 24 | 1,499 | 7,909 | 5,180 |
+| 48 | 2,939 | 15,853 | 10,472 |
+| 96 | 5,819 | 31,885 | 21,200 |
+| 192 | 11,579 | 64,237 | 42,944 |
+
+因此本次调整的是旧测试对计费范围的假设：构造与调用已共享额度，大规模行为用例
+显式供应 200,000 步；生产默认额度不变，192 次调用、完整顺序和 Direct 的结果
+相等断言均保留。这里不把资源不足改判为成功，也没有为了默认额度通过而缩小源码。
+默认额度下冷 sysroot 构造与简单调用仍由 phase_source_budget 独立保护。
+
+新增 contextual_input_costs 使用真实 sysroot、同一包中的四个规模入口，每次使用
+新 VM。它分别测量调用总工作与字节码编译，检查输入翻倍时计费增幅不超过 2.3 倍，
+并验证每个 producer 实际执行一次。测量专用额度为 1,000,000 步；不把上述精确
+步数固定为契约。这是计费复杂度回归，不是墙钟或内存基准，不能证明未计费路径的
+复杂度，也不替代原有结果与顺序检查。
+
+证据（工作目录 `/home/fin/luna`）：
+
+- `/tmp/luna-tools-8dephcpw/result.json` 退出 101，原默认额度失败的调用栈与事件；
+  `/tmp/luna-tools-wxoa1h2e/result.json` 退出 0，临时规模测量。临时生产调试打印
+  已全部移除，生产 Rust 文件没有本次改动。
+- `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test normal_input_plans --test contextual_input_costs --no-fail-fast -- --nocapture`：
+  `/tmp/luna-tools-aubo52_5/result.json` 退出 0，原行为组 16 项与新规模回归 1 项通过。
+  未执行全量测试。
 
 ### Predicate shape：支持结论与资源失败分离
 
