@@ -94,20 +94,13 @@ fn source_selection_is_demanded_and_concrete_methods_cannot_bypass_the_host() {
                 source: Some(callee.source),
             });
         }
-        let before = usize::try_from(*fuel).unwrap_or(usize::MAX);
-        let mut remaining = before;
-        let result = elaboration::materialization::resolve_method_identity_in_context(
+        elaboration::materialization::resolve_method_for_invocation(
             &package,
             callee,
             &context,
             &[],
-            &mut remaining,
-        );
-        *fuel -= (before - remaining) as u64;
-        result.map_err(|_| comptime_interpretor::Error {
-            kind: ErrorKind::UnmaterializedDispatch,
-            source: Some(callee.source),
-        })
+            fuel,
+        )
     };
     let associated = |access: &nir::program::Expr, fuel: &mut u64| {
         associated_calls.set(associated_calls.get() + 1);
@@ -174,6 +167,90 @@ fn source_selection_is_demanded_and_concrete_methods_cannot_bypass_the_host() {
     ));
     assert_eq!(budget.steps, 0);
     assert_eq!(counts(), before);
+}
+
+#[test]
+fn source_method_identity_does_not_erase_invocation_contracts() {
+    use nir::program as n;
+    let mut package = sysroot::compile(
+        "trait Service {
+            pure comptime fn accept(value: bool) -> result: bool
+            where requires value, ensures result;
+        }
+        impl Service for bool {
+            pure comptime fn accept(input: bool) -> bool { true }
+        }
+        pure comptime fn run(value: bool) -> bool {
+            assumes value;
+            bool.as(Service).accept(value)
+        }",
+    )
+    .unwrap();
+    let entry = package
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "run")
+        .unwrap();
+    let declaration = entry.declaration;
+    let n::ExprKind::Block { statements, .. } = &mut entry.body.kind else {
+        panic!("run block")
+    };
+    // Remove the caller's proof to exercise the actual interface boundary.
+    statements.clear();
+    for (deny_type, deny_result) in [(false, false), (true, false), (false, true)] {
+        let mut source = package.clone();
+        if deny_type {
+            let service = source
+                .traits
+                .iter_mut()
+                .find(|t| t.name == "Service")
+                .unwrap();
+            service.methods[0]
+                .requirements
+                .push(n::TypePredicate::Bool(false));
+        }
+        if deny_result {
+            let body = source
+                .functions
+                .iter_mut()
+                .find(|f| f.name == "accept")
+                .unwrap();
+            body.body.kind = n::ExprKind::Literal(n::Literal::Bool(false));
+        }
+        let mut call = luna::memoization::Invocation::prepare(
+            &source,
+            &intrinsic::LangItems::new(),
+            declaration,
+            vec![],
+            8,
+            Default::default(),
+        )
+        .unwrap();
+        for value in [false, true, false, true] {
+            let result = call.invoke(vec![Value::Bool(value)], &mut Context::new(1_000_000));
+            if value && !deny_type && !deny_result {
+                assert_eq!(*result.unwrap().value, Value::Bool(true));
+            } else {
+                let expected = if deny_type {
+                    "TypeContractRejected"
+                } else {
+                    "ProgramContractRejected"
+                };
+                assert!(
+                    matches!(&result, Err(Error::Evaluation(reason)) if reason.contains(expected)),
+                    "value={value}, deny_type={deny_type}, deny_result={deny_result}: {:?}",
+                    result.as_ref().err()
+                );
+            }
+            // Entry/type rejection cannot execute the body. Exit rejection
+            // requires execution and must not be retained as a successful call.
+            assert_eq!(
+                call.last_execution_stats().bytecode_invocations,
+                if value && !deny_type { 2 } else { 1 }
+            );
+            assert_eq!(call.cached_results(), 0);
+        }
+    }
 }
 
 #[test]
@@ -255,6 +332,53 @@ fn materialized_method_selection_pays_for_its_capability_query() {
         "materialization charged {}, but construction and selection alone used {minimum}",
         granted - remaining
     );
+    use comptime_interpretor::ErrorKind;
+    let resolve = |expression: &n::Expr, fuel: &mut u64| {
+        elaboration::materialization::resolve_method_for_invocation(
+            &package,
+            expression,
+            &context,
+            &[],
+            fuel,
+        )
+    };
+    for steps in [0, 1, 8, 32, 128] {
+        let mut fuel = steps;
+        let failure = resolve(&callee, &mut fuel).unwrap_err();
+        assert_eq!(
+            failure.kind,
+            ErrorKind::StepsExhausted,
+            "{steps}: {failure}"
+        );
+        assert_eq!(failure.source, Some(callee.source));
+        assert!(fuel <= steps);
+    }
+    let mut invalid = callee.clone();
+    let n::ExprKind::TraitMethod { member, .. } = &mut invalid.kind else {
+        unreachable!()
+    };
+    *member = nir::DeclarationId {
+        package: u64::MAX,
+        local: 42,
+    };
+    let mut fuel = granted as u64;
+    assert_eq!(
+        resolve(&invalid, &mut fuel).unwrap_err().kind,
+        ErrorKind::UnmaterializedDispatch
+    );
+    assert!(fuel > 0 && fuel < granted as u64);
+    resolve(&callee, &mut fuel).unwrap();
+    let mut absent = callee.clone();
+    let n::ExprKind::TraitMethod { subject, .. } = &mut absent.kind else {
+        unreachable!()
+    };
+    *subject = Term::Primitive(Primitive::Char);
+    assert_eq!(
+        resolve(&absent, &mut fuel).unwrap_err().kind,
+        ErrorKind::TypeContractUnresolved
+    );
+    assert!(fuel > 0);
+    resolve(&callee, &mut fuel).unwrap();
 }
 
 #[test]

@@ -8,8 +8,10 @@ mod captured_templates;
 mod conditional_calls;
 mod dead_tails;
 mod input_admission;
+mod method_selection;
 mod mutable_callbacks;
 mod query_budget;
+pub use method_selection::resolve_method_for_invocation;
 mod recursive_factories;
 mod staged;
 mod template_factories;
@@ -219,34 +221,18 @@ pub fn resolve_method_identity_in_context(
     context: &Context,
     assumptions: &[n::TraitRequirement],
     fuel: &mut usize,
-) -> Result<n::MethodInstance, String> {
-    let mut selected = None;
-    let result = build(
-        package,
-        Budget {
-            steps: *fuel,
-            ..Budget::default()
-        },
-        Roots::MethodIdentity(callee, &mut selected),
-        BTreeSet::new(),
-        &[],
-        Some(DispatchContext {
-            types: context,
-            assumptions,
-            value_parameters: &[],
-        }),
-        None,
-    );
-    match result {
-        Ok(result) => {
-            *fuel = result.remaining;
-            selected.ok_or("method selection produced no identity".into())
-        }
-        Err(reason) => {
-            *fuel = 0;
-            Err(reason)
-        }
-    }
+) -> Result<n::MethodInstance, nir::NominalAdmissionError> {
+    let mut budget = Budget {
+        steps: *fuel,
+        ..Budget::default()
+    };
+    let result = (|| {
+        let mut world =
+            DeclarationWorld::new_metered(package, &mut budget, Some((context, assumptions)))?;
+        world.method_identity(callee, &mut budget)
+    })();
+    *fuel = budget.steps;
+    result
 }
 
 /// Normalize annotations on a private expansion candidate without invoking
@@ -455,7 +441,6 @@ enum Roots<'a> {
     Iir(&'a [iir::InstanceKey]),
     Method(&'a n::Expr, &'a mut Option<n::MethodInstance>),
     QuoteMethod(&'a n::Expr, &'a mut Option<n::MethodInstance>),
-    MethodIdentity(&'a n::Expr, &'a mut Option<n::MethodInstance>),
 }
 // The immutable type arena belongs to the entire materialization, including
 // the storage pass that runs after dependency discovery. Analysis-only callers
@@ -488,7 +473,7 @@ fn build(
     context: Option<DispatchContext<'_>>,
     expansion: Option<&dyn Expansion>,
 ) -> Result<BuildResult, String> {
-    let body_free_selection = matches!(roots, Roots::QuoteMethod(..) | Roots::MethodIdentity(..));
+    let body_free_selection = matches!(roots, Roots::QuoteMethod(..));
     // NIR interpretation retains all unconditional concrete implementations.
     // Their parent/capability worlds must remain closed even when only a few
     // function bodies are reachable. IIR instead owns its reachable world.
@@ -585,10 +570,7 @@ fn build(
                 .queue
                 .push_back(Task::Function(root.declaration, root.arguments.to_vec()));
         }
-    } else if let Roots::Method(callee, selected)
-    | Roots::QuoteMethod(callee, selected)
-    | Roots::MethodIdentity(callee, selected) = roots
-    {
+    } else if let Roots::Method(callee, selected) | Roots::QuoteMethod(callee, selected) = roots {
         let K::TraitMethod {
             interface,
             interface_arguments,

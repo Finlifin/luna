@@ -7,6 +7,8 @@ use type_resolution::{
     implementation::{ImplementationHead, Index},
     ptc::{Budget, Context},
 };
+#[path = "associated/method_queries.rs"]
+mod method_queries;
 
 fn id(local: u32) -> Id {
     Id { package: 1, local }

@@ -168,20 +168,13 @@ impl Builder<'_> {
             resolve_associated_value_for_invocation(&world, access, remaining)
         };
         let method_resolver = |callee: &n::Expr, remaining: &mut u64| {
-            let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
-            let before = fuel;
-            let result = resolve_method_identity_in_context(
+            resolve_method_for_invocation(
                 snapshot,
                 callee,
                 self.world.context(),
                 self.world.assumptions(),
-                &mut fuel,
-            );
-            *remaining -= (before - fuel) as u64;
-            result.map_err(|_| comptime_interpretor::Error {
-                kind: comptime_interpretor::ErrorKind::UnmaterializedDispatch,
-                source: Some(callee.source),
-            })
+                remaining,
+            )
         };
         let mut invocation_budget = comptime_interpretor::Budget {
             steps: std::mem::take(&mut self.fuel) as u64,

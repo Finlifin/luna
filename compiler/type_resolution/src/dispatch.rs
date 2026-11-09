@@ -8,6 +8,8 @@ use nir::value_admission::Error as AdmissionError;
 use nir::{DeclarationId as Id, Term, program as n};
 use std::collections::{BTreeMap, HashMap};
 mod construction;
+mod inputs;
+mod methods;
 
 pub struct DeclarationWorld<'a> {
     normalized_types: HashMap<Term, Term>,
@@ -519,17 +521,14 @@ impl DeclarationWorld<'_> {
         Ok((id, evidence.type_arguments))
     }
 
-    /// Substitute a selected member's complete declaration-side contract.
-    /// The caller must still discharge requirements and close capabilities,
-    /// signature types, predicate expressions and the selected body.
-    pub fn prepare_method(
+    fn method_inputs(
         &self,
         instance: &n::DispatchInstance,
         member: Id,
         method_arguments: &[Term],
         runtime: bool,
         fuel: &mut usize,
-    ) -> Result<(n::MethodInstance, n::MethodContract), String> {
+    ) -> Result<MethodInputs<'_>, AdmissionError> {
         let contract = self
             .package
             .traits
@@ -546,6 +545,22 @@ impl DeclarationWorld<'_> {
         }
         if template.type_parameters.len() != method_arguments.len() {
             return Err("dispatch method type argument count mismatch".into());
+        }
+        *fuel = fuel
+            .checked_sub(
+                contract
+                    .type_parameters
+                    .len()
+                    .saturating_add(template.type_parameters.len())
+                    .saturating_add(1),
+            )
+            .ok_or(AdmissionError::Budget)?;
+        for term in std::iter::once(&instance.subject)
+            .chain(&instance.interface_arguments)
+            .chain(method_arguments)
+            .chain(&instance.arguments)
+        {
+            nir::type_computations::charge_term(term, fuel)?;
         }
         let parameters: Vec<_> = contract
             .parameters_with_self()
@@ -577,6 +592,59 @@ impl DeclarationWorld<'_> {
             instance.arguments.clone()
         };
         body_arguments.extend(method_arguments.iter().cloned());
+        let method = n::MethodInstance {
+            member,
+            body,
+            arguments: body_arguments,
+            method_arguments: method_arguments.to_vec(),
+        };
+        Ok(MethodInputs {
+            template,
+            parameters,
+            parameter_domains,
+            arguments,
+            method,
+        })
+    }
+
+    /// Return code identity and substitutions without copying or visiting the
+    /// member's executable contracts. Actual call admission belongs to the VM.
+    pub fn prepare_method_identity(
+        &self,
+        instance: &n::DispatchInstance,
+        member: Id,
+        method_arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<n::MethodInstance, AdmissionError> {
+        let inputs = self.method_inputs(instance, member, method_arguments, false, fuel)?;
+        nir::DeclarationSubstitution::bounded(
+            &inputs.parameters,
+            &inputs.parameter_domains,
+            &inputs.arguments,
+            &[],
+            fuel,
+        )?;
+        Ok(inputs.method)
+    }
+
+    /// Substitute a selected member's complete declaration-side contract.
+    /// The caller must still discharge requirements and close capabilities,
+    /// signature types, predicate expressions and the selected body.
+    pub fn prepare_method(
+        &self,
+        instance: &n::DispatchInstance,
+        member: Id,
+        method_arguments: &[Term],
+        runtime: bool,
+        fuel: &mut usize,
+    ) -> Result<(n::MethodInstance, n::MethodContract), AdmissionError> {
+        let MethodInputs {
+            template,
+            parameters,
+            parameter_domains,
+            arguments,
+            method,
+        } = self.method_inputs(instance, member, method_arguments, runtime, fuel)?;
         let mut specialized = template.clone();
         specialized.type_arguments = method_arguments.to_vec();
         specialized.type_parameters.clear();
@@ -587,12 +655,10 @@ impl DeclarationWorld<'_> {
             &arguments,
             &[],
             fuel,
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         specialized.signature = template
             .signature
-            .try_map_types(|ty| substitution.instantiate_bounded(ty, fuel))
-            .map_err(|e| e.to_string())?;
+            .try_map_types(|ty| substitution.instantiate_bounded(ty, fuel))?;
         let frames = match template.signature.callable_signature() {
             Ok(Term::Function { parameters, .. }) => {
                 vec![parameters.iter().map(|p| p.sort).collect()]
@@ -605,24 +671,19 @@ impl DeclarationWorld<'_> {
             &arguments,
             &frames,
             fuel,
-        )
-        .map_err(|e| e.to_string())?;
-        specialized.program = template
-            .program
-            .instantiate_declaration_parameters(
-                &parameters,
-                &parameter_domains,
-                &arguments,
-                &frames,
-                fuel,
-            )
-            .map_err(|e| e.to_string())?;
+        )?;
+        specialized.program = template.program.instantiate_declaration_parameters(
+            &parameters,
+            &parameter_domains,
+            &arguments,
+            &frames,
+            fuel,
+        )?;
         specialized.requirements = template
             .requirements
             .iter()
             .map(|r| scoped.instantiate_predicate_bounded(r, fuel))
-            .collect::<Result<_, _>>()
-            .map_err(|e| e.to_string())?;
+            .collect::<Result<_, _>>()?;
         specialized.capabilities = template
             .capabilities
             .iter()
@@ -634,14 +695,16 @@ impl DeclarationWorld<'_> {
                 };
                 Ok(value)
             })
-            .collect::<Result<_, nir::type_computations::Error>>()
-            .map_err(|e| e.to_string())?;
-        let method = n::MethodInstance {
-            member,
-            body,
-            arguments: body_arguments,
-            method_arguments: method_arguments.to_vec(),
-        };
+            .collect::<Result<_, nir::type_computations::Error>>()?;
+
         Ok((method, specialized))
     }
+}
+
+struct MethodInputs<'a> {
+    template: &'a n::MethodContract,
+    parameters: Vec<Id>,
+    parameter_domains: Vec<Term>,
+    arguments: Vec<Term>,
+    method: n::MethodInstance,
 }

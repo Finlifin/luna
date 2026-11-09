@@ -165,8 +165,8 @@ Budget／Unresolved／Invalid 类别并返回实际余量。选中的实参从�
 
 修改前的真实 `Builder::prove_requirement` 回归显示成功证明后 `fuel` 完全未减少：
 `/tmp/luna-tools-vamgxrq0/result.json` 退出 101。此问题不同于预算耗尽的错误分类：
-materialization 顶层及 method resolver 仍存在 String 错误适配，尚未把所有失败类别
-贯通到 VM；本批未把这些适配器宣称为完整的结构化宿主响应协议。
+materialization 的完整图构建顶层仍有 String 错误适配；source method resolver
+已按下述独立查询贯通类别，但这尚不等于所有宿主入口都采用完整的结构化响应协议。
 
 真实 sysroot 暴露了旧准备路径的额外耦合：每次 required invocation 都预选全部具体
 impl，staged input 又可重复构造同一类 dispatch 闭包。查询开始正确收费后，这些
@@ -206,6 +206,41 @@ TypeContractUnresolved。据此把 source proof 服务贯通到 publisher，而�
   `/tmp/luna-tools-wnx6leq7/result.json` 退出 101，同样 15 项通过、同样 2 项失败，
   位置与诊断一致。随后逐字节恢复本批源码；作者已有修改未纳入此基线切换。
   这些失败是仍待处理的前端分类缺口，不计作本批通过证据。
+
+### Source method identity 与可执行契约分离
+
+方法身份查询已从 `Builder` 的 `Roots::MethodIdentity` 路径移出，后者删除。
+`DeclarationWorld::method_identity` 只关闭声明侧的接口形成条件、父 trait、
+接口与实现的 capability 前提，并按选定实现取得成员身份及参数替换。
+非根前提可以由当前世界的 given 证据支持；根方法仍必须选择实际实现，不能仅凭
+“满足 trait”就伪造可执行代码。查询访问集合与尚待处理的前提仅存活于本次请求。
+
+接口参数准入在 declaration world 与完整 materializer 之间共用同一实现，
+按声明域检查普通 comptime 值，不按具体 trait、Tuple 或列表名称分流。
+方法绑定共用 binder 构造，身份查询只检查替换的 telescope 与 scope，不复制或
+遍历成员签名中的程序表达式、pre/postcondition 或方法体。成员自身的类型条件、
+实际参数、公开签名、phase 与程序契约仍由 VM 的调用入口检查。
+因此选定一个方法并不等于准许调用，更不提供程序验证或内存访问证据。
+
+`resolve_method_identity_in_context` 在成功和失败时均结算实际剩余额度。
+required、staged 与 luna invocation 共用一个 VM 适配器，分别保留
+Budget → StepsExhausted、Unresolved → TypeContractUnresolved、
+Invalid → UnmaterializedDispatch，并保留 callee source；不靠错误文本或剩余
+额度猜测失败类型。传统完整 materialization、quote 与 closed-table 入口仍有
+各自的构建职责和 String 边界，本次没有把它们也声称为已退役。
+
+针对性证据覆盖大量可执行契约不增加身份查询工作、接口形成与父 trait 证据、
+预算不足／错误成员／缺失实现后的恢复，以及真实 sysroot 的调用路径。
+同一工作目录与检查入口下：
+
+- `/tmp/luna-tools-u_3_fg2g/result.json`：退出 0，方法／关联项查询、普通参数域、
+  VM trait 调用与动态 trait 子句等 66 项通过。
+- `/tmp/luna-tools-elvlr2qz/result.json`：退出 0，相关 lib、builder、prepared/staged
+  invocation、两阶段 trait、列表／排序／公开库协议与展开边界等 353 项通过。
+- `/tmp/luna-tools-_b6zecdn/result.json`：退出 0，更新后的 trait_query_failures
+  共 8 项通过，包含选定方法后仍执行类型条件及 pre/postcondition、拒绝前后
+  的调用次数与恢复；与前两组去重共 420 项。本批未重跑上述已确认的
+  source_reflection 基线失败，也未宣称它们已经修复。
 
 ## 7. 共享项和联合模型
 

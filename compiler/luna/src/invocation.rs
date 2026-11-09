@@ -326,20 +326,13 @@ pub(crate) fn resolve_method_for_invocation(
     callee: &nir::program::Expr,
     remaining: &mut u64,
 ) -> Result<nir::program::MethodInstance, comptime_interpretor::Error> {
-    let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
-    let before = fuel;
-    let result = elaboration::materialization::resolve_method_identity_in_context(
+    elaboration::materialization::resolve_method_for_invocation(
         package,
         callee,
         context,
         &[],
-        &mut fuel,
-    );
-    *remaining -= (before - fuel) as u64;
-    result.map_err(|_| comptime_interpretor::Error {
-        kind: comptime_interpretor::ErrorKind::UnmaterializedDispatch,
-        source: Some(callee.source),
-    })
+        remaining,
+    )
 }
 
 /// Prepare the normal zero-supplied-argument call plan, preserving default scope.
