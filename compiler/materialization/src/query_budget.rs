@@ -48,6 +48,7 @@ mod tests {
             quote_sources: vec![],
             retain_templates: false,
             package,
+            source: DeclarationSource::Borrowed(package),
             world,
             value_scope: Default::default(),
             queue: VecDeque::new(),

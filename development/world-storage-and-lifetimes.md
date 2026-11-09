@@ -303,31 +303,48 @@ StepsExhausted。新的 detached 检查、复制和执行消费同一次 invocat
 
 每次 staged 求值仍创建独立 VM，冻结本次结果，保留已有 closure 共享／循环检查。
 失败后保留的是不可变声明快照，不是半成品入口、局部存储或此前的返回值。
-旧 quote template 转入私有执行 package 的规则保持不变：保留 trait 合同与 runtime
-phase，不能因此在 comptime 执行 quote 函数。
+quote template 不再追加到普通 `functions` 表。VM 的声明准入另建只读模板位置表，
+用完整 Function 记录检查 trait 实现的阶段和参数；这张表不会进入执行函数目录。
+quote 成员及默认主体必须仍属于 quote 声明，普通 callable adapter 保持独立身份。
+闭合源码准备不会为 quote 成员建立可执行方法映射，显式 dispatch 表中的 quote
+目标也被拒绝。保留签名、默认值、前后置条件和类型要求，不以无主体 identity
+替代模板，更不依靠“comptime 恰好不能调用 runtime”来保护 quote 边界。
 
-这一步只去掉可变临时入口并接通声明目录复用。源码捕获仍复制整包，VM 执行索引
-和 PhaseContext 在此阶段仍按次构造；携带作用域前提的 CodeSession 后续迁移见第 1.6 节，
-phase 声明目录与源码构造预算的后续接线见第 1.7 节。
-类型／资源正确性仍由上游
-保证，不能把 phase 检查解释为完整程序验证；没有据此宣称整体性能提升。
+Builder 保留入口的 DeclarationSource。staged 捕获遇到不含预选 dispatch 的现有
+DeclarationSnapshot 时直接保留该 owner，CodeSession 与三个查询服务使用原来的
+精确源码及声明目录；保留句柄先消费一步预算。该路径不遍历函数来估算不存在的
+复制，也不复制 Package。保留 owner 本身不签发 phase、类型或资源证明；VM 首次
+准备和每次调用继续执行对应检查。借用入口仍需要取得源码所有权，含预选 dispatch
+的入口仍建立剥离该表的私有声明快照；两者保持 quote 表与完整契约，不改写原源码。
 
-本阶段检查工作目录为 `/home/fin/luna`，均经
-`python3 -B development/check.py --timeout 900 --` 执行并退出 0：
+源码分块与 dispatch 投影视图尚未实现：上述两个兼容入口仍复制整包，现有捕获
+预检只覆盖函数／表达式和签名，其他复制载荷的完整计费仍待迁移。共享 owner 的
+路径已消除这次复制，不能据此声称所有源码捕获均已修复。携带作用域前提的
+CodeSession 与 phase 目录的接线见第 1.6–1.7 节。类型／资源正确性仍由上游保证，
+不能把 phase 检查解释为完整程序验证；没有整体性能收益结论。
 
-- `test -p nir -p comptime_interpretor -p materialization --lib --no-fail-fast`：
-  39 + 510 + 30 项通过，`/tmp/luna-tools-8u84qqda/result.json`。覆盖借用主体与 dump、
-  detached phase 检查、tree／bytecode 两条执行路径、逐预算切点失败及恢复、
-  lexical unsafe、局部绑定隔离、返回类型拒绝与 Builder 的连续 staged 求值。
-- `test -p luna --test clause_staged_constants --test comptime_staged_values
-  --test quote_functions --test staged_aggregate_contracts --test invocation_value_templates
-  --test builder_invocations --test generated_definitions --test comptime_bytecode_defaults
-  --test library_protocols --no-fail-fast`：269 项通过，
-  `/tmp/luna-tools-f25ikm6p/result.json`。包括真实 sysroot builder／库协议、quote
-  展开、动态聚合与同名调用环境、源码和 IIR 路径；公开库组包含 native 实际运行。
+本轮声明／执行目录分离与 staged 源码保留的检查工作目录为 `/home/fin/luna`，
+统一通过 `python3 -B development/check.py --timeout 900 --` 执行：
 
-共 848 项通过；14 个修改的 Rust 文件通过 scoped rustfmt check，
-`/tmp/luna-tools-nmkjznud/result.json` 退出 0；`git diff --check` 通过。未运行全量回归或性能基准；既有工作区改动与正式 docs 保持原样。
+- `test -p materialization -p comptime_interpretor -p luna --lib
+  --test runtime_function_identities --test quote_functions --test staged_aggregate_contracts
+  --test library_protocols --no-fail-fast`：首次退出 101，849 项通过，新写的 quote VM
+  测试有 1 项错误分类预期不符，`/tmp/luna-tools-mvji8h2t/result.json`。普通 comptime
+  调用先经 phase gate，实际为 PhaseMismatch；现在同时要求该分类与显式实例调用的
+  UnknownFunction，直接验证模板没有执行主体，而不是只依赖阶段拦截。
+- `test -p luna --test quote_functions --test builder_invocations
+  --test comptime_staged_values --test materialization_budget --no-fail-fast`：退出 0，
+  108 + 86 + 2 + 1 项通过，`/tmp/luna-tools-rk2jf7bd/result.json`。包含冷／热源码 VM、
+  phase 与重复身份拒绝、quote dispatch 拒绝、借用／共享源构图等价及实际执行；
+  真实 sysroot builder 与清理重建也通过。
+- 六个修改／新增 Rust 文件通过 scoped rustfmt check，
+  `/tmp/luna-tools-_6yevfgp/result.json` 退出 0；`git diff --check` 通过。
+
+最终源码的独立检查合计 939 项通过；首次大组中的其他目标无需因新增测试的断言
+修正而重新构建。source_tests 另外直接检查 exact Arc 共享、零预算失败与恢复、
+最后引用回收、闭合 dispatch 投影隔离及完整 quote 元数据保留。早期编译检查发现
+测试 Builder 遗漏 source 字段、fixture 字面量构造错误，均已修正；没有更改生产
+预算或现有语义断言。未运行全量回归、Miri 或性能基准；现有工作区与 docs 未改动。
 
 ### 1.6 Staged VM 索引与当前调用权限分离
 

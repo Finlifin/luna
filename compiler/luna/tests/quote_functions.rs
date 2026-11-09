@@ -78,6 +78,152 @@ fn quote_functions_retain_their_own_runtime_category() {
 }
 
 #[test]
+fn source_vm_reads_quote_method_declarations_without_executable_authority() {
+    use comptime_interpretor::{Budget, CodeSession, ErrorKind, Interpreter, Value};
+    use std::sync::Arc;
+
+    let Artifact::Nir(package) = compile(
+        "trait Read {quote fn read(self)->bool;}
+         struct Flag {} impl Read for Flag {quote fn read(self)->bool {true}}
+         pure comptime fn ready()->bool {true}",
+        Emit::Nir,
+    )
+    .unwrap() else {
+        panic!("wrong stage")
+    };
+    let ready = package
+        .functions
+        .iter()
+        .find(|f| f.name == "ready")
+        .unwrap()
+        .declaration;
+    let quote = package.quote_templates[0].declaration;
+    let package = Arc::new(package);
+    let before = package.to_string();
+    let mut code = CodeSession::new(package.clone());
+    // A failed cold preparation cannot install partial source evidence.
+    let mut empty = Budget {
+        steps: 0,
+        depth: 128,
+    };
+    assert!(Interpreter::for_comptime_in_session(&package, &mut code, &mut empty).is_err());
+    for _ in 0..2 {
+        let mut budget = Budget::default();
+        let mut vm =
+            Interpreter::for_comptime_in_session(&package, &mut code, &mut budget).unwrap();
+        assert_eq!(
+            vm.invoke(quote, vec![]).unwrap_err().kind,
+            ErrorKind::PhaseMismatch
+        );
+        assert_eq!(
+            vm.invoke_instantiated(quote, vec![], vec![])
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnknownFunction
+        );
+        assert!(vm.events().is_empty());
+        assert_eq!(
+            vm.with_code_session(&mut code, |vm| vm.invoke(ready, vec![]))
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+    // Even the non-comptime constructor cannot execute retained templates.
+    let mut runtime = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        runtime
+            .invoke_instantiated(quote, vec![], vec![])
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnknownFunction
+    );
+    assert!(runtime.events().is_empty());
+    assert_eq!(package.to_string(), before);
+
+    let mut changed = package.as_ref().clone();
+    changed.functions.push(changed.quote_templates[0].clone());
+    assert!(Interpreter::new(&changed, Budget::default()).is_err());
+    changed.functions.pop();
+    changed.quote_templates[0].phase = nir::program::FunctionPhase::Comptime;
+    assert!(Interpreter::new(&changed, Budget::default()).is_err());
+    changed.quote_templates[0].phase = nir::program::FunctionPhase::Runtime;
+    changed.traits[0].methods[0].is_quote = false;
+    assert!(Interpreter::new(&changed, Budget::default()).is_err());
+    changed.traits[0].methods[0].is_quote = true;
+    let implementation = &changed.implementations[0];
+    changed
+        .dispatch_instances
+        .push(nir::program::DispatchInstance {
+            interface: changed.traits[0].declaration,
+            interface_arguments: vec![],
+            subject: implementation.subject.clone(),
+            implementation: implementation.declaration,
+            arguments: vec![],
+            methods: vec![nir::program::MethodInstance {
+                member: changed.traits[0].methods[0].declaration,
+                body: quote,
+                arguments: vec![],
+                method_arguments: vec![],
+            }],
+            associated: vec![],
+            associated_initializers: vec![],
+        });
+    assert!(Interpreter::new(&changed, Budget::default()).is_err());
+}
+
+#[test]
+fn staged_materialization_uses_retained_sources_without_changing_results() {
+    use elaboration::materialization::{DeclarationSnapshot, DeclarationSource};
+    use elaboration::ptc::Budget;
+    use std::sync::Arc;
+
+    let Artifact::Nir(package) = compile(
+        "trait Read {quote fn read(self)->bool;}
+         struct Flag {} impl Read for Flag {quote fn read(self)->bool {true}}
+         pure comptime fn ready()->bool {true}
+         quote fn choose(comptime flag:bool,value:bool)->bool {flag and value}
+         fn run()->bool {choose(ready(),Flag {}.as(Read).read())}",
+        Emit::Nir,
+    )
+    .unwrap() else {
+        panic!("wrong stage")
+    };
+    let entry = iir::InstanceKey {
+        declaration: package
+            .functions
+            .iter()
+            .find(|f| f.name == "run")
+            .unwrap()
+            .declaration,
+        arguments: vec![].into(),
+    };
+    let source = DeclarationSnapshot::new(Arc::new(package));
+    let before = source.package().to_string();
+    let construct = |input| {
+        elaboration::materialization::instantiate_with_types_in_source(
+            input,
+            std::slice::from_ref(&entry),
+            &[],
+            Default::default(),
+            Budget::default(),
+        )
+        .unwrap()
+    };
+    let borrowed = construct(DeclarationSource::Borrowed(source.package()));
+    for _ in 0..2 {
+        let retained = construct(DeclarationSource::Snapshot(&source));
+        assert_eq!(retained.to_string(), borrowed.to_string());
+        let mut vm =
+            comptime_interpretor::Interpreter::from_iir(&retained, Default::default()).unwrap();
+        assert_eq!(
+            vm.invoke_instance(&entry, vec![]).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+        assert_eq!(source.package().to_string(), before);
+    }
+}
+
+#[test]
 fn quote_comptime_combinations_cannot_change_function_phase() {
     for source in [
         "quote comptime fn bad()->bool {true}",

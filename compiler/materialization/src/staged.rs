@@ -9,6 +9,39 @@ pub(super) struct Snapshot {
     code: CodeSession,
 }
 
+impl Snapshot {
+    fn capture(source: DeclarationSource<'_>, fuel: &mut usize) -> Result<Self, String> {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("staged source retention budget exhausted")?;
+        let package = source.package();
+        let source = match source {
+            DeclarationSource::Snapshot(snapshot) if package.dispatch_instances.is_empty() => {
+                snapshot.clone()
+            }
+            _ => {
+                // A borrowed source needs ownership for the code session. A
+                // closed dispatch source needs a separate declaration world:
+                // its preselected tables cannot authorize demand-driven calls.
+                for function in package.functions.iter().chain(&package.quote_templates) {
+                    *fuel = fuel
+                        .checked_sub(1)
+                        .ok_or("staged snapshot budget exhausted")?;
+                    iir::visit::expressions(function, fuel, |_, _| Ok(()))?;
+                    crate::associated::charge_projection_copy(&function.signature, fuel)
+                        .map_err(|_| "staged snapshot type budget exhausted")?;
+                }
+                let mut snapshot = package.clone();
+                // Quote contracts remain in their own non-executable table.
+                snapshot.dispatch_instances.clear();
+                DeclarationSnapshot::new(std::sync::Arc::new(snapshot))
+            }
+        };
+        let code = CodeSession::new(source.package().clone());
+        Ok(Self { source, code })
+    }
+}
+
 #[derive(Default)]
 struct FrozenGraph {
     // Retaining each Arc makes identity stable until the whole snapshot finishes.
@@ -22,42 +55,11 @@ impl Builder<'_> {
         self.tick(0)?;
         let mut snapshot = match self.invocation_snapshot.take() {
             Some(snapshot) => snapshot,
-            None => self.new_invocation_snapshot()?,
+            None => Snapshot::capture(self.source, &mut self.fuel)?,
         };
         let result = self.invoke_with_snapshot(expression, &mut snapshot);
         self.invocation_snapshot = Some(snapshot);
         result
-    }
-
-    fn new_invocation_snapshot(&mut self) -> Result<Snapshot, String> {
-        // The source package is already checked. Preserve its implementation
-        // world in this private snapshot; publish only the frozen result.
-        for function in self
-            .package
-            .functions
-            .iter()
-            .chain(&self.package.quote_templates)
-        {
-            self.fuel = self
-                .fuel
-                .checked_sub(1)
-                .ok_or("staged snapshot budget exhausted")?;
-            iir::visit::expressions(function, &mut self.fuel, |_, _| Ok(()))?;
-            crate::associated::charge_projection_copy(&function.signature, &mut self.fuel)
-                .map_err(|_| "staged snapshot type budget exhausted")?;
-        }
-        let mut snapshot = self.package.clone();
-        // Retained quote bodies still implement trait members in this private
-        // world. Preserve their full contracts for interpreter validation;
-        // their runtime phase prevents invocation during comptime evaluation.
-        // No signature-only identity may erase a quote method precondition.
-        snapshot.functions.append(&mut snapshot.quote_templates);
-        snapshot.dispatch_instances.clear();
-        let snapshot = std::sync::Arc::new(snapshot);
-        Ok(Snapshot {
-            source: DeclarationSnapshot::new(snapshot.clone()),
-            code: CodeSession::new(snapshot),
-        })
     }
 
     fn invoke_with_snapshot(
@@ -761,3 +763,6 @@ pub(super) fn forward_template_aliases(
         Ok(true)
     })
 }
+
+#[cfg(test)]
+mod source_tests;

@@ -97,6 +97,7 @@ struct Builder<'a> {
     quote_sources: Vec<n::ExpansionSource>,
     retain_templates: bool,
     package: &'a n::Package,
+    source: DeclarationSource<'a>,
     world: DeclarationWorld<'a>,
     value_scope: input_admission::ValueScope,
     queue: VecDeque<Task>,
@@ -628,6 +629,7 @@ fn build(
             Roots::All | Roots::AllWithMethods(_) | Roots::Invocation(_)
         ),
         package,
+        source,
         world,
         value_scope,
         queue: VecDeque::new(),

@@ -1124,6 +1124,25 @@ impl<'a> Interpreter<'a> {
                 });
             }
         }
+        // Quote templates supply declaration contracts, never executable VM
+        // bodies. Keep this lookup private to source shape admission.
+        let quote_templates =
+            declaration_index::Declarations::new(&package.quote_templates, None, |template| {
+                template.declaration
+            })?;
+        for template in &package.quote_templates {
+            if template.phase != nir::program::FunctionPhase::Runtime
+                || functions.contains_key(&template.declaration)
+                || runtime_function_identities.contains_key(&template.declaration)
+            {
+                return Err(Error {
+                    kind: ErrorKind::InvalidCallPlan,
+                    source: None,
+                });
+            }
+        }
+        let method_definition =
+            |id: &DeclarationId| functions.get(id).or_else(|| quote_templates.get(id));
         let effect_declarations = declaration_index::Effects::new(
             &package.effects,
             positions.as_ref().map(|index| index.effects.clone()),
@@ -1230,8 +1249,9 @@ impl<'a> Interpreter<'a> {
                     return Err(invalid());
                 }
                 if member.default.is_some_and(|body| {
-                    !functions.contains_key(&body)
-                        && !runtime_function_identities.contains_key(&body)
+                    (method_definition(&body).is_none()
+                        && !runtime_function_identities.contains_key(&body))
+                        || member.is_quote != quote_templates.contains_key(&body)
                 }) {
                     return Err(invalid());
                 }
@@ -1359,7 +1379,7 @@ impl<'a> Interpreter<'a> {
             let mut supplied = BTreeMap::new();
             for (name, body) in &implementation.methods {
                 if supplied.insert(name, body).is_some()
-                    || (!functions.contains_key(body)
+                    || (method_definition(body).is_none()
                         && !runtime_function_identities.contains_key(body))
                 {
                     return Err(invalid());
@@ -1373,7 +1393,10 @@ impl<'a> Interpreter<'a> {
                     continue;
                 }
                 let body = **supplied.get(&member.name).ok_or_else(invalid)?;
-                let (phase, type_parameters) = if let Some(function) = functions.get(&body) {
+                if member.is_quote != quote_templates.contains_key(&body) {
+                    return Err(invalid());
+                }
+                let (phase, type_parameters) = if let Some(function) = method_definition(&body) {
                     (function.phase, &function.type_parameters)
                 } else {
                     (
@@ -1413,7 +1436,7 @@ impl<'a> Interpreter<'a> {
                 {
                     return Err(invalid());
                 }
-                if concrete && closed_dispatch {
+                if concrete && closed_dispatch && !member.is_quote {
                     let arguments = if member.default == Some(body) {
                         std::iter::once(implementation.subject.clone())
                             .chain(interface.arguments.iter().cloned())
@@ -1710,6 +1733,9 @@ impl<'a> Interpreter<'a> {
                     || method.body != expected_body
                     || method.arguments != expected_arguments
                 {
+                    return Err(invalid());
+                }
+                if member.is_quote || quote_templates.contains_key(&method.body) {
                     return Err(invalid());
                 }
                 let ty = if let Some(function) = functions.get(&method.body) {
