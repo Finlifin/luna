@@ -1,6 +1,8 @@
 //! One owner for the complete driver continuation and its exclusively borrowed VM.
-//! Poll boundaries are internal progress, not yet asynchronous host requests.
+//! Associated selections can leave the driver as owned host requests.
+use super::host::{AssociatedHostRequest, AssociatedHostResponse, RejectedHostResponse};
 use super::*;
+use crate::request_identity::{Authority, Ticket};
 use std::task::Poll;
 
 enum Root<'r> {
@@ -37,6 +39,7 @@ impl Root<'_> {
 enum Pending {
     Associated(associated_execution::Request),
     AssociatedResponse(associated_execution::Response),
+    Host { ticket: Ticket, granted: u64 },
     Bytecode(bytecode::Preparation),
 }
 
@@ -45,6 +48,9 @@ impl fmt::Display for Pending {
         match self {
             Self::Associated(request) => write!(f, "{request}"),
             Self::AssociatedResponse(response) => write!(f, "{response}"),
+            Self::Host { ticket, granted } => {
+                write!(f, "(awaiting-host {ticket} (granted {granted}))")
+            }
             Self::Bytecode(request) => write!(f, "{request}"),
         }
     }
@@ -55,6 +61,7 @@ pub(super) struct Session<'vm, 'a, 'r> {
     root: Root<'r>,
     execution: Option<Execution<'a>>,
     pending: Option<Pending>,
+    requests: Authority,
     stack: Vec<StackEntry<'a>>,
     result: Option<Completion>,
     terminal: bool,
@@ -67,6 +74,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             root,
             execution: None,
             pending: None,
+            requests: Authority::default(),
             stack: Vec::new(),
             result: None,
             terminal: false,
@@ -122,10 +130,37 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
     // Tree migration and synchronous preparation retain their existing budgets;
     // this is not a preemption or wall-clock latency guarantee.
     fn poll(&mut self) -> Result<Poll<Option<Flow>>, Error> {
+        self.poll_with_host(false)
+    }
+
+    pub(super) fn poll_external(&mut self) -> Result<Poll<Option<Flow>>, Error> {
+        self.poll_with_host(true)
+    }
+
+    fn poll_with_host(&mut self, external: bool) -> Result<Poll<Option<Flow>>, Error> {
         if self.terminal {
             return Err(self.vm.failure(ErrorKind::InvalidControlFlow, None));
         }
-        let result = self.step();
+        if self.waiting_for_host() {
+            return Ok(Poll::Pending);
+        }
+        if matches!(self.pending, Some(Pending::Associated(_))) {
+            if external {
+                return Ok(Poll::Pending);
+            }
+            let resolver = self.vm.associated_resolver;
+            let request = self.take_host_request()?.expect("associated request");
+            let response = request.resolve(|access, steps| {
+                resolver.ok_or(Error {
+                    kind: ErrorKind::UnmaterializedDispatch,
+                    source: Some(access.source),
+                })?(access, steps)
+            });
+            self.receive_host_response(response)
+                .map_err(|failure| failure.error().clone())?;
+            return Ok(Poll::Pending);
+        }
+        let result = self.step(external);
         if !matches!(result, Ok(Poll::Pending)) {
             debug_assert!(
                 self.stack.is_empty()
@@ -141,7 +176,65 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         result
     }
 
-    fn step(&mut self) -> Result<Poll<Option<Flow>>, Error> {
+    pub(super) fn waiting_for_host(&self) -> bool {
+        matches!(self.pending, Some(Pending::Host { .. }))
+    }
+
+    pub(super) fn remaining_steps(&self) -> u64 {
+        self.vm.remaining_steps()
+    }
+
+    pub(super) fn take_host_request(&mut self) -> Result<Option<AssociatedHostRequest<'a>>, Error> {
+        if self.terminal || !matches!(self.pending, Some(Pending::Associated(_))) {
+            return Ok(None);
+        }
+        let Some(world) = self.vm.declaration_world else {
+            self.cancel();
+            return Err(self.vm.failure(ErrorKind::InvalidControlFlow, None));
+        };
+        let ticket = match self.requests.issue() {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                self.cancel();
+                return Err(error);
+            }
+        };
+        let Some(Pending::Associated(request)) = self.pending.take() else {
+            unreachable!()
+        };
+        let granted = std::mem::take(&mut self.vm.budget.steps);
+        self.pending = Some(Pending::Host {
+            ticket: ticket.clone(),
+            granted,
+        });
+        Ok(Some(AssociatedHostRequest::new(
+            ticket, world, request, granted,
+        )))
+    }
+
+    pub(super) fn receive_host_response(
+        &mut self,
+        response: AssociatedHostResponse<'a>,
+    ) -> Result<(), RejectedHostResponse<'a>> {
+        let valid = !self.terminal
+            && self
+                .vm
+                .declaration_world
+                .is_some_and(|world| std::ptr::eq(world, response.world))
+            && matches!(&self.pending, Some(Pending::Host { ticket, .. }) if ticket.matches(&response.ticket));
+        if !valid {
+            return Err(RejectedHostResponse::new(response));
+        }
+        let Some(Pending::Host { granted, .. }) = self.pending.take() else {
+            unreachable!()
+        };
+        let (remaining, response) = response.settle(granted);
+        self.vm.budget.steps = remaining;
+        self.pending = Some(Pending::AssociatedResponse(response));
+        Ok(())
+    }
+
+    fn step(&mut self, external: bool) -> Result<Poll<Option<Flow>>, Error> {
         let Self {
             vm,
             root,
@@ -166,14 +259,8 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                         });
                     }
                 }
-                Pending::Associated(selection) => {
-                    // Host completion does not publish a selection. Retain the
-                    // answer for a separate admission transition so cancellation
-                    // can discard it without executing or installing its body.
-                    *pending = Some(Pending::AssociatedResponse(
-                        vm.resolve_associated_request(selection),
-                    ));
-                    return Ok(Poll::Pending);
+                Pending::Associated(_) | Pending::Host { .. } => {
+                    unreachable!("host work is driven before execution")
                 }
                 Pending::AssociatedResponse(response) => {
                     match vm.accept_associated_response(response) {
@@ -352,12 +439,13 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 }
             },
             Ok(bytecode::Progress::Associated { access, source }) => {
-                match vm.prepare_associated_value(
+                match vm.prepare_associated_for_driver(
                     &access.interface,
                     &access.subject,
                     access.member,
                     &access.ty,
                     source,
+                    external,
                 ) {
                     Ok(associated_execution::Preparation::Ready(activation)) => {
                         *execution = Some(Execution::Associated {
@@ -422,7 +510,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         Ok(Poll::Pending)
     }
 
-    fn cancel(&mut self) {
+    pub(super) fn cancel(&mut self) {
         if self.terminal {
             return;
         }
@@ -455,7 +543,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         // Deliver failure through the same restoration boundaries. No source
         // code, default or contract is executed while unwinding this error.
         if self.result.is_some() {
-            while matches!(self.step(), Ok(Poll::Pending)) {}
+            while matches!(self.step(false), Ok(Poll::Pending)) {}
         }
         debug_assert!(self.stack.is_empty() && self.execution.is_none() && self.result.is_none());
         self.root.cancel();

@@ -422,9 +422,11 @@ frame 保存 PC、局部槽、结果目的地、控制和清理进度；异常�
 ### 已接通：宿主调用的执行额度交接
 
 关联选择、方法选择、struct／enum／newtype builder 和带预算的 Type solver
-通过同一个 `host_budget` 边界交接额度：进入宿主前取走 VM 的剩余额度，宿主只操作
+通过共同的额度交接规则：进入宿主前取走 VM 的剩余额度，宿主只操作
 独立的 allowance；正常返回后再结算，包括返回错误的情况。宿主 unwind 时 VM 的
 剩余额度保持为零，不能继续使用未经结算的工作额度，也不能借 panic 绕过补额检查。
+同步服务使用 `host_budget`；下述公开关联请求把同样的额度所有权保存在请求中，
+直到原会话接收响应才结算。
 
 各服务保留原有响应规则：选择 resolver 试图补额时清零并报告 `StepsExhausted`，
 响应不进入选择目录；builder 和带预算 solver 将剩余额度限制在原授予量以内。
@@ -710,10 +712,9 @@ Request、Response 和 Activation 都有 S-expression Display，Session dump 的
 VM 全部 497 项、真实 sysroot 协议与其余关联／类型路径通过。两份 Rust 文件 scoped
 rustfmt 检查 `/tmp/luna-tools-kq3dzqic/result.json` 退出 0；未运行全 workspace。
 
-这仍是内部驱动边界：resolver 本身同步执行，subject／参数／结果域的观察仍可同步
-执行关联 Type 程序。尚未提供公共 HostRequest/response API、跨请求身份验证或前端
-region 的可恢复检查，不能把此处 Pending 宣称为完整宿主等待协议。它也不回滚已发生
-的宿主副作用。
+上述最初拆分只形成内部驱动边界；公开的关联请求接口及身份检查见本节末尾。
+subject／参数／结果域的观察仍可同步执行关联 Type 程序，前端 region 的可恢复检查
+尚未接通，也不回滚已发生的宿主副作用。
 
 验证使用 `/home/fin/luna` 工作区：
 
@@ -769,6 +770,68 @@ rustfmt 检查 `/tmp/luna-tools-o8ci7k_t/result.json` 退出 0。未运行全 wo
 
 这次统一的是初始化器主体的执行入口。关联 subject／参数／结果域准备仍同步，
 外层类型观察循环也未向前端暴露可恢复请求；不能据此宣称全链路异步宿主协议完成。
+
+### 已接通：源码 invocation 的公开关联请求接口
+
+`Interpreter::start_invocation` 采用普通调用准入，返回独占借用 VM 的
+`InvocationSession`。调用方通过 `poll` 取得内部进展、尚未回答的等待状态、拥有的
+`AssociatedHostRequest` 或最终值；`resume` 仅接收原请求生成的响应。luna 普通无参
+invocation 入口已经通过此接口交还关联选择请求，再用现有源码查询服务回答。
+可选／默认实参入口保留原表达式调用路径，其内部同步 Session 也使用同一请求交付
+和额度结算机制，不另维护一套简化响应准入。
+
+请求保留访问、已观察的结果域及不可变源 package 借用。session 身份与递增序号
+共同标识一次交付；复用同一源码、声明或 PC 不等于同一次请求。字节码准备与外部
+关联请求复用同一个内部身份实现，计数溢出拒绝，不绕回旧身份。响应交付先核对
+源 package 和请求身份，再修改待处理状态。误投、迟到或终止后的响应返回给调用方，
+不能消耗当前 waiter、恢复旧栈或改变当前额度；误投的合法响应仍可送回原会话。
+接收成功后仍须经过下一次 poll 的表达式准入，不能直接把宿主返回值写进目录。
+
+发出请求时移交 VM 全部剩余步数，等待中的 VM 余额为零。重复 poll 不调用宿主、
+不推进源程序、不扣新步骤。正常响应结算实际余额，虚增额度按原规则清零并失败。
+请求丢失或宿主 panic 后，没有可信余额可退还；调用方须取消或丢弃会话，迟到响应
+也不能补额。取消不执行源程序，不撤回已发生的宿主副作用。请求、响应和会话均有
+稳定 S-expression dump，诊断不输出内存地址或将临时身份当作语言身份。
+
+真实 sysroot 用例区分两种关联成员：闭合常量已在 elaboration 完成，读取时不再调用
+初始化函数；泛型初始化器保留程序，每次读取仍执行。两种用例都暂停嵌套调用、移动
+会话并重复查询等待状态；同一次 invocation 的重复读取复用选择，新 VM 即使复用
+CodeSession 仍重新选择，泛型初始化器的结果不进入代码缓存。前期测试误把闭合
+常量当作延迟初始化器，修正的是 fixture 的阶段假设，未改动前端常量求值规则。
+
+此接口只暴露线性执行主体到达的关联选择。初始调用准入、类型域观察、树执行退路、
+方法选择与 builder 等服务仍可同步调用宿主；未完成通用 ContextualExpr、前端 region
+挂起或全部宿主操作的消息化。宿主仍是可信编译器服务，须使用与请求源 package
+匹配的语义上下文；借用与请求身份检查不等于完整 world revision／证明证书校验。
+runtime、IIR 和固定树模式不能借此接口取得源码 comptime 执行权限。
+
+另保留一个尚未支持的源码正例：显式 comptime Type 实参
+`enabled(do { trace = trace + 1; bool })` 应能使用当前调用方的存储。当前前端在
+321..360 报 `required comptime input (local 6 3) is not available in this invocation`，
+尚未到达新请求接口。该用例以说明原因的 ignored 正例留在
+`invocation_host_requests.rs`，没有改成预期拒绝；需继续完成调用内 contextual
+preparation，不能靠重放实参或提前求值来绕过。此次没有做旧提交对照，故只记录
+当前未完成行为，不把它归为已证明的基线失败。
+
+本次验证工作目录为 `/home/fin/luna`，执行前缀
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p comptime_interpretor --lib`：573 项通过，退出 0，
+  `/tmp/luna-tools-1jwtwkwz/result.json`。包含等待、误投、迟到响应、取消、错误域、
+  补额拒绝、宿主 panic、嵌套调用状态和共同请求身份检查。
+- `-p luna --test invocation_host_requests --no-fail-fast`：2 项通过、上述 1 项 ignored，
+  退出 0，`/tmp/luna-tools-hxknpc4j/result.json`。
+- `-p luna --test deferred_associated_values --test associated_signatures
+  --test associated_purity --test comptime_bytecode_traits --test library_protocols
+  --test comptime_bytecode_types --test builder_invocations --test prepared_invocations
+  --test invocation_value_templates --no-fail-fast`：173 项通过，退出 0，
+  `/tmp/luna-tools-tq4v0ops/result.json`。
+- `-p luna --test invocation_host_requests
+  explicit_comptime_type_arguments_can_use_the_active_callers_storage -- --ignored --exact`：
+  退出 101，`/tmp/luna-tools-t18sl5dm/result.json`，单独确认上述前端缺口。
+- 11 个 Rust 文件 scoped rustfmt check 退出 0，
+  `/tmp/luna-tools-bkk_5umj/result.json`；`git diff --check` 通过。未运行全 workspace
+  或性能基准；已有 docs、资源分析和 library README 改动逐字节保持原样。
 
 ## 6. 缓存分别回答不同问题
 

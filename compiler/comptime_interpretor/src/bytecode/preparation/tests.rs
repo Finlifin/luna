@@ -141,7 +141,7 @@ fn repeated_instruction_requires_a_new_ticket_and_cancel_retires_it() {
         .unwrap();
     let second = request(&mut vm, &mut frame);
     assert_eq!(frame.pc, pc, "revisit the same instruction in a real loop");
-    assert_ne!(second.ticket.generation, stale.ticket.generation);
+    assert!(!second.ticket.matches(&stale.ticket));
     reject(&mut vm, &mut frame, stale);
     // Moving a frame changes neither its authority nor its current request.
     let mut frame = Box::new(frame);
@@ -228,7 +228,7 @@ fn generation_exhaustion_never_wraps_and_dumps_do_not_expose_owner_addresses() {
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let (code, mut environment) = fixture(false);
     let mut frame = vm.start_frame(&code, &mut environment).unwrap();
-    frame.preparations.generation = u64::MAX - 1;
+    frame.preparations.set_generation(u64::MAX - 1);
     let pending = request(&mut vm, &mut frame);
     let Operation::Call { instruction, .. } = pending.operation else {
         unreachable!()
@@ -244,6 +244,6 @@ fn generation_exhaustion_never_wraps_and_dumps_do_not_expose_owner_addresses() {
         frame.preparations.issue().unwrap_err().kind,
         ErrorKind::InvalidControlFlow
     );
-    assert_eq!(frame.preparations.generation, u64::MAX);
+    assert_eq!(frame.preparations.generation(), u64::MAX);
     vm.prepare_bytecode_request(&mut frame, pending).unwrap();
 }

@@ -1,6 +1,7 @@
 //! Invocation admission, owned frame state, delivery and caller restoration.
 //! These boundaries are shared by the migration interpreter and linear bodies.
 use super::*;
+pub(super) mod host;
 mod session;
 use session::Session;
 

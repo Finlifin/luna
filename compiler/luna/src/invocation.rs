@@ -321,7 +321,30 @@ fn execute_prepared(
     }
     let operation = |vm: &mut Interpreter<'_>| match call {
         Some(call) => vm.invoke_comptime_expression_owned(call),
-        None => vm.invoke(invocation.declaration, vec![]),
+        None => {
+            use comptime_interpretor::InvocationProgress;
+            let mut active =
+                vm.start_invocation(Value::Function(invocation.declaration), vec![])?;
+            loop {
+                match active.poll()? {
+                    InvocationProgress::Running => {}
+                    InvocationProgress::Associated(request) => {
+                        let response = request.resolve(&associated_resolver);
+                        active
+                            .resume(response)
+                            .map_err(|failure| failure.error().clone())?;
+                    }
+                    InvocationProgress::Complete(value) => break Ok(value),
+                    // This synchronous adapter immediately answers every request.
+                    InvocationProgress::Waiting => {
+                        break Err(comptime_interpretor::Error {
+                            kind: comptime_interpretor::ErrorKind::InvalidControlFlow,
+                            source: None,
+                        });
+                    }
+                }
+            }
+        }
     };
     let result = match session {
         Some(session) => interpreter.with_code_session(session, operation),

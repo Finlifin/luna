@@ -44,6 +44,10 @@ mod input_collection;
 mod input_dependencies;
 mod input_domains;
 mod invocation;
+pub use invocation::host::{
+    AssociatedHostRequest, AssociatedHostResponse, InvocationProgress, InvocationSession,
+    RejectedHostResponse,
+};
 mod invocation_contracts;
 mod list_append;
 mod list_index;
@@ -53,6 +57,7 @@ mod native_depth;
 mod nominal_inputs;
 mod nominal_plan;
 mod normal_inputs;
+mod request_identity;
 mod retained_contracts;
 use normal_inputs::InputKey;
 mod input_bindings;

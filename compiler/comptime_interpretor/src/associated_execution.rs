@@ -16,6 +16,19 @@ pub(super) struct Request {
     result_type: Term,
 }
 
+impl Request {
+    pub(super) fn access(&self) -> &Expr {
+        &self.access
+    }
+
+    pub(super) fn respond(self, selection: Result<AssociatedSelection, Error>) -> Response {
+        Response {
+            request: self,
+            selection,
+        }
+    }
+}
+
 /// A returned selection still needs VM admission. Keep the exact request and
 /// its observed result domain with the answer; neither is a catalogue entry.
 /// This owner is linear and stays inside the invocation session.
@@ -120,6 +133,18 @@ impl<'a> Interpreter<'a> {
         ty: &Term,
         source: SourceRange,
     ) -> Result<Preparation<'a>, Error> {
+        self.prepare_associated_for_driver(interface, subject, member, ty, source, false)
+    }
+
+    pub(super) fn prepare_associated_for_driver(
+        &mut self,
+        interface: &InterfaceInstance,
+        subject: &Term,
+        member: DeclarationId,
+        ty: &Term,
+        source: SourceRange,
+        external: bool,
+    ) -> Result<Preparation<'a>, Error> {
         let selected_subject = self.selected_type_view(subject, Some(source))?;
         let selected_arguments = interface
             .arguments
@@ -140,9 +165,12 @@ impl<'a> Interpreter<'a> {
         if !self.associated_values.contains_key(&key)
             && !self.associated_initializers.contains_key(&key)
         {
-            self.associated_resolver
-                .filter(|_| self.comptime_only && self.graph.is_none())
-                .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
+            if !self.comptime_only
+                || self.graph.is_some()
+                || (!external && self.associated_resolver.is_none())
+            {
+                return Err(self.failure(ErrorKind::UnmaterializedDispatch, Some(source)));
+            }
             self.charge_copy_work(Some(source), |fuel| {
                 for term in std::iter::once(&key.1)
                     .chain(&key.0.arguments)
