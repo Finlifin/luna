@@ -8,7 +8,7 @@ use std::fmt;
 
 #[derive(Clone, Copy)]
 pub struct CallableProgram<'a> {
-    pub(crate) declaration: DeclarationId,
+    pub(crate) declaration: Option<DeclarationId>,
     pub(crate) phase: FunctionPhase,
     pub(crate) is_unsafe: bool,
     pub(crate) signature: &'a Term,
@@ -26,7 +26,7 @@ pub struct CallableProgram<'a> {
 impl<'a> CallableProgram<'a> {
     pub fn function(function: &'a Function) -> Self {
         Self {
-            declaration: function.declaration,
+            declaration: Some(function.declaration),
             phase: function.phase,
             is_unsafe: function.is_unsafe,
             signature: &function.signature,
@@ -47,7 +47,7 @@ impl<'a> CallableProgram<'a> {
     pub fn method(method: &'a MethodContract) -> Result<Self, TypeError> {
         let signature = method.signature.ordinary()?;
         Ok(Self {
-            declaration: method.declaration,
+            declaration: Some(method.declaration),
             phase: if signature.is_comptime_callable() {
                 FunctionPhase::Comptime
             } else {
@@ -67,6 +67,26 @@ impl<'a> CallableProgram<'a> {
         })
     }
 
+    /// A detached, closed comptime body has no global declaration identity.
+    /// Its caller supplies a zero-argument signature for ordinary result checks.
+    pub(crate) fn comptime_body(body: &'a Expr, signature: &'a Term) -> Self {
+        Self {
+            declaration: None,
+            phase: FunctionPhase::Comptime,
+            is_unsafe: false,
+            signature,
+            type_parameters: &[],
+            parameters: &[],
+            body: Some(body),
+            source: body.source,
+            defaults: &[],
+            preconditions: &[],
+            postconditions: &[],
+            result_binding: None,
+            entry_snapshots: &[],
+        }
+    }
+
     /// Same root order as a Function traversal; consumers can reverse it to
     /// retain the existing work-stack order without collecting every root.
     pub fn roots(self) -> impl DoubleEndedIterator<Item = &'a Expr> {
@@ -80,10 +100,15 @@ impl<'a> CallableProgram<'a> {
 
 impl fmt::Display for CallableProgram<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(callable-program ")?;
+        match self.declaration {
+            Some(declaration) => write!(f, "{declaration}")?,
+            None => f.write_str("(anonymous)")?,
+        }
         write!(
             f,
-            "(callable-program {} (phase {}) (unsafe {}) (signature {})",
-            self.declaration, self.phase, self.is_unsafe, self.signature
+            " (phase {}) (unsafe {}) (signature {})",
+            self.phase, self.is_unsafe, self.signature
         )?;
         f.write_str(" (type-parameters")?;
         for parameter in self.type_parameters {
@@ -220,6 +245,27 @@ mod tests {
         assert!(dump.contains("(requires "));
         assert!(dump.contains("(ensures "));
         assert!(dump.ends_with("(body))"));
+    }
+
+    #[test]
+    fn detached_body_borrows_code_without_a_declaration_identity() {
+        let body = flag(90);
+        let signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(body.ty.clone()),
+        };
+        let view = CallableProgram::comptime_body(&body, &signature);
+        assert_eq!(view.declaration, None);
+        assert_eq!(view.phase, FunctionPhase::Comptime);
+        assert!(!view.is_unsafe);
+        assert!(std::ptr::eq(view.signature, &signature));
+        let roots: Vec<_> = view.roots().collect();
+        assert_eq!(roots.len(), 1);
+        assert!(std::ptr::eq(roots[0], &body));
+        assert!(
+            view.to_string()
+                .starts_with("(callable-program (anonymous) ")
+        );
     }
 
     #[test]

@@ -117,7 +117,7 @@ Arc，继续只复用代码；每次执行仍创建新 VM。缓存准入、资�
 
 required 准备、发布器证明和其资源权限 owner 也已采用该目录，见第 1.1 节。
 这仍是一份完整 Package 的共享目录，未实现分块或跨编辑的结构共享。luna driver
-资源 ProtocolContext 的后续接线见第 1.3 节；staged scratch 改写临时入口，不能复用旧目录。
+资源 ProtocolContext 的后续接线见第 1.3 节；staged 入口独立于声明快照的迁移见第 1.5 节。
 PTC Context 的建立、required 和外围资源／协议准备预算仍有独立成本；接受 `&Package` 的
 兼容准备入口仍复制整包，其捕获成本尚未纳入统一预算。未测整体编译性能收益。
 
@@ -177,7 +177,7 @@ required 目录迁移阶段的检查工作目录 `/home/fin/luna`，统一使用
 兼容的 `selected(&Package, ...)` 入口为取得所有权会复制一次完整源码；初次将借用
 源码放进 checked session 也有这项成本，已经持有 snapshot 的路径不复制。捕获复制、
 Context 建立和各阶段预算尚未统一，不能将本迁移称为整体性能优化。ReferenceSession
-及进一步的实例化复用见第 1.4 节；staged 临时入口与 VM 执行索引尚待迁移。通用验证
+及进一步的实例化复用见第 1.4 节，staged 入口迁移见第 1.5 节。VM 执行索引和通用验证
 函数的其他 package／world 调用边界不在此声称全部关闭。
 
 driver 资源 owner 迁移阶段在 `/home/fin/luna` 使用
@@ -225,7 +225,7 @@ checked 清理的内部入口改为接收 ProtocolContext，集中取得 source�
 改成缺失 callee 以及恢复原源码均分别检查，不能由已有图或过去的成功代替。
 
 这完成的是声明目录复用，不是 IIR 图缓存或完整增量编译。Context 与输入 phase
-检查仍按次执行，mutable staged scratch 与 VM 执行索引仍未迁移。将借用 package
+检查仍按次执行；staged 快照的后续迁移见第 1.5 节，VM 执行索引尚未复用。将借用 package
 转为长期 owner 的整包复制和阶段间预算仍待统一；尚无整体性能收益结论。
 
 本轮实例化接线的检查工作目录为 `/home/fin/luna`，命令通过
@@ -246,6 +246,57 @@ checked 清理的内部入口改为接收 ProtocolContext，集中取得 source�
 本轮去重 289 项通过；七个修改的 Rust 文件通过 scoped rustfmt check，
 `/tmp/luna-tools-y_vc01ab/result.json` 退出 0；`git diff --check` 通过。
 未运行全量回归或整体性能基准，其他小节的历史结果不计作本轮执行。
+
+### 1.5 Staged 入口与声明世界分离
+
+materialization 不再给私有 package 追加 `<staged-input>`，不再寻找空闲声明 ID，
+也不在每次求值前后改写、清空该函数的签名和主体。Snapshot 持有不可变
+DeclarationSnapshot；类型命题、方法与关联项查询从它取得目录，并仍使用当前
+Builder 的 Context 和前提。未完成的目录不能作为成功证据发布。
+
+`Interpreter::invoke_comptime_expression` 接收本次已经完成类型／资源检查的闭合
+表达式。它单独检查 phase 与 lexical unsafe 边界，再建立无声明身份、无捕获的
+comptime closure，通过普通 invocation admission、调用帧、返回值检查与状态恢复
+执行。它不是公开的免检查 eval，也不接受 runtime VM 或 IIR 图执行权限。
+临时 closure 的代码由本次 owner 保活，不借用某个真实声明的身份作为缓存键。
+
+NIR 的 CallableProgram 现在允许没有声明身份的主体；对应 dump 明确输出
+`(callable-program (anonymous) ...)`。共享 PhaseContext 检查逻辑同时服务声明主体
+和 detached 主体；匿名主体不获得 quote 身份，也不会把 machine owner 记录到
+伪造声明。完整 package 检查仍保留原有声明与主体的验证范围。
+
+Phase Error 保留 Budget／Invalid 分类；声明参数、成员目录、存储、默认参数、
+preparation 依赖、captured value 与 call safety 的资源失败不能退化为非法代码。
+preparation 遍历也保留类型化失败，不能靠字符串或“剩余 fuel 等于零”判断：宽度
+预留失败可能仍有余额。VM 的源码和生成定义入口统一将该 Budget 映射为
+StepsExhausted。新的 detached 检查、复制和执行消费同一次 invocation 的预算。
+
+每次 staged 求值仍创建独立 VM，冻结本次结果，保留已有 closure 共享／循环检查。
+失败后保留的是不可变声明快照，不是半成品入口、局部存储或此前的返回值。
+旧 quote template 转入私有执行 package 的规则保持不变：保留 trait 合同与 runtime
+phase，不能因此在 comptime 执行 quote 函数。
+
+这一步只去掉可变临时入口并接通声明目录复用。源码捕获仍复制整包，VM 执行索引
+和 PhaseContext 仍按次构造；尚未接入携带作用域前提的 CodeSession 复用。旧 package
+阶段检查仍有独立额度，整个准备过程的计费尚未统一。类型／资源正确性仍由上游
+保证，不能把 phase 检查解释为完整程序验证；没有据此宣称整体性能提升。
+
+本阶段检查工作目录为 `/home/fin/luna`，均经
+`python3 -B development/check.py --timeout 900 --` 执行并退出 0：
+
+- `test -p nir -p comptime_interpretor -p materialization --lib --no-fail-fast`：
+  39 + 510 + 30 项通过，`/tmp/luna-tools-8u84qqda/result.json`。覆盖借用主体与 dump、
+  detached phase 检查、tree／bytecode 两条执行路径、逐预算切点失败及恢复、
+  lexical unsafe、局部绑定隔离、返回类型拒绝与 Builder 的连续 staged 求值。
+- `test -p luna --test clause_staged_constants --test comptime_staged_values
+  --test quote_functions --test staged_aggregate_contracts --test invocation_value_templates
+  --test builder_invocations --test generated_definitions --test comptime_bytecode_defaults
+  --test library_protocols --no-fail-fast`：269 项通过，
+  `/tmp/luna-tools-f25ikm6p/result.json`。包括真实 sysroot builder／库协议、quote
+  展开、动态聚合与同名调用环境、源码和 IIR 路径；公开库组包含 native 实际运行。
+
+共 848 项通过；14 个修改的 Rust 文件通过 scoped rustfmt check，
+`/tmp/luna-tools-nmkjznud/result.json` 退出 0；`git diff --check` 通过。未运行全量回归或性能基准；既有工作区改动与正式 docs 保持原样。
 
 ## 2. 目标物理结构
 

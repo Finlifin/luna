@@ -267,6 +267,7 @@ fn malformed_default_plans_are_rejected_before_execution() {
         assert_eq!(
             error.kind,
             ErrorKind::InvalidPhase(nir::phases::Error {
+                kind: nir::phases::ErrorKind::Invalid,
                 source,
                 message: match fault {
                     1 => "explicit call argument follows a default argument",

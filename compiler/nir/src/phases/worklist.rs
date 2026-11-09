@@ -22,6 +22,7 @@ impl<'a> Worklist<'a> {
 
     fn charge(fuel: &mut usize, count: usize, source: SourceRange) -> Result<(), Error> {
         *fuel = fuel.checked_sub(count).ok_or(Error {
+            kind: super::ErrorKind::Budget,
             source,
             message: "phase traversal budget exhausted",
         })?;

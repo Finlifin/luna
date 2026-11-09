@@ -68,10 +68,7 @@ impl<'world> DefinitionAdmissionSession<'world> {
         // lacking proof evidence still rejects an unestablished formation.
         let mut phase_allowance = reserved;
         invocation_budget::charge_world_tables(package, &mut phase_allowance)?;
-        nir::phases::validate(package).map_err(|error| Error {
-            source: Some(error.source),
-            kind: ErrorKind::InvalidPhase(error),
-        })?;
+        nir::phases::validate(package).map_err(Error::phase)?;
         let mut vm = Interpreter::with_assumptions_and_index(
             package,
             &[],

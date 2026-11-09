@@ -44,10 +44,7 @@ impl<'a> Interpreter<'a> {
         }
         let mut phase_allowance = reserved;
         invocation_budget::charge_world_tables(package, &mut phase_allowance)?;
-        nir::phases::validate(package).map_err(|error| Error {
-            source: Some(error.source),
-            kind: ErrorKind::InvalidPhase(error),
-        })?;
+        nir::phases::validate(package).map_err(Error::phase)?;
         let mut interpreter = Self::with_assumptions_and_index(
             package,
             assumptions,

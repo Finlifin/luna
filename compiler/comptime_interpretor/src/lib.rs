@@ -35,6 +35,7 @@ mod function_instances;
 pub use function_inputs::{FunctionInputRejection, InputAdmissionStage};
 mod iir_execution;
 use iir_execution::ConcreteNominal;
+mod expression_invocation;
 mod host_budget;
 mod immutable_storage;
 mod input_bodies;
@@ -801,6 +802,17 @@ pub enum ErrorKind {
 pub struct Error {
     pub kind: ErrorKind,
     pub source: Option<SourceRange>,
+}
+impl Error {
+    fn phase(error: nir::phases::Error) -> Self {
+        Self {
+            source: Some(error.source),
+            kind: match error.kind {
+                nir::phases::ErrorKind::Budget => ErrorKind::StepsExhausted,
+                nir::phases::ErrorKind::Invalid => ErrorKind::InvalidPhase(error),
+            },
+        }
+    }
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1967,10 +1979,7 @@ impl<'a> Interpreter<'a> {
             // charging still occurs once in with_assumptions_and_index.
             let mut phase_allowance = budget;
             invocation_budget::charge_world_tables(package, &mut phase_allowance)?;
-            nir::phases::validate(package).map_err(|error| Error {
-                source: Some(error.source),
-                kind: ErrorKind::InvalidPhase(error),
-            })?;
+            nir::phases::validate(package).map_err(Error::phase)?;
         }
         let mut interpreter = Self::with_assumptions_and_index(
             package,

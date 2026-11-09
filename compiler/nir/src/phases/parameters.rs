@@ -28,16 +28,22 @@ pub(super) fn domains(
         .declaration_parameter_domains_checked(fuel)
         .map_err(|error| match error {
             crate::type_computations::Error::Budget => Failure::Budget(super::Error {
+                kind: super::ErrorKind::Budget,
                 source,
                 message: "declaration parameter domain analysis budget exhausted",
             }),
             _ => Failure::Invalid(super::Error {
+                kind: super::ErrorKind::Invalid,
                 source,
                 message: "invalid declaration parameter domains",
             }),
         })?;
     crate::type_aliases::validate_in(&package.alias_contracts, fuel).map_err(|error| {
         let diagnostic = super::Error {
+            kind: match error {
+                crate::type_aliases::ValidationError::Budget => super::ErrorKind::Budget,
+                _ => super::ErrorKind::Invalid,
+            },
             source,
             message: error.message(),
         };
@@ -72,12 +78,14 @@ pub(super) fn validate_frame<'a>(
     let source = function.body.source;
     let fail = |index: usize| {
         Failure::Invalid(super::Error {
+            kind: super::ErrorKind::Invalid,
             source,
             message: messages[index],
         })
     };
     let budget = || {
         Failure::Budget(super::Error {
+            kind: super::ErrorKind::Budget,
             source,
             message: "function parameter frame validation budget exhausted",
         })
@@ -111,19 +119,22 @@ pub(super) fn validate_frame<'a>(
     }
     for (slot, value) in &function.defaults {
         let free = crate::free_bindings::collect(value, fuel).map_err(|reason| {
-            let diagnostic = |message| super::Error {
+            let diagnostic = |kind, message| super::Error {
+                kind,
                 source: value.source,
                 message,
             };
             match reason {
                 crate::free_bindings::Error::Budget(_) | crate::free_bindings::Error::Depth(_) => {
                     Failure::Budget(diagnostic(
+                        super::ErrorKind::Budget,
                         "function default binding analysis budget exhausted",
                     ))
                 }
-                crate::free_bindings::Error::Invalid(_) => {
-                    Failure::Invalid(diagnostic("invalid function default binding scope"))
-                }
+                crate::free_bindings::Error::Invalid(_) => Failure::Invalid(diagnostic(
+                    super::ErrorKind::Invalid,
+                    "invalid function default binding scope",
+                )),
             }
         })?;
         if free.iter().any(|binding| {
@@ -132,6 +143,7 @@ pub(super) fn validate_frame<'a>(
                 .is_none_or(|position| position >= slot)
         }) {
             return Err(Failure::Invalid(super::Error {
+                kind: super::ErrorKind::Invalid,
                 source: value.source,
                 message: "function default references an unavailable parameter binding",
             }));
@@ -154,12 +166,14 @@ impl<'a> InspectionFrame<'a> {
     ) -> Result<Self, Failure> {
         let budget = || {
             Failure::Budget(super::Error {
+                kind: super::ErrorKind::Budget,
                 source: function.source,
                 message: "function inspection frame budget exhausted",
             })
         };
         let invalid = |message| {
             Failure::Invalid(super::Error {
+                kind: super::ErrorKind::Invalid,
                 source: function.source,
                 message,
             })

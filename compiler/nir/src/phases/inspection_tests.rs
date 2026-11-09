@@ -38,6 +38,52 @@ fn run(package: &Package, fuel: &mut usize) -> Result<BTreeSet<crate::Declaratio
 }
 
 #[test]
+fn detached_inspection_shares_fuel_and_preserves_failure_categories() {
+    let package = Package {
+        functions: vec![function(1, Phase::Comptime)],
+        ..Default::default()
+    };
+    let body = Expr {
+        kind: K::Block {
+            statements: vec![flag(); 100],
+            result: Some(Box::new(flag())),
+        },
+        ..flag()
+    };
+    let mut remaining = 10_000;
+    validate_comptime_expression(&package, &body, &mut remaining).unwrap();
+    let cost = 10_000 - remaining;
+    let mut reserved_width = false;
+    for allowance in 0..cost {
+        let mut fuel = allowance;
+        let failure = validate_comptime_expression(&package, &body, &mut fuel).unwrap_err();
+        assert_eq!(
+            failure.kind,
+            ErrorKind::Budget,
+            "allowance={allowance}: {failure:?}"
+        );
+        reserved_width |= fuel > 0;
+    }
+    assert!(
+        reserved_width,
+        "failed width reservations can leave unspent fuel"
+    );
+    validate_comptime_expression(&package, &body, &mut cost.clone()).unwrap();
+    let invalid = Expr {
+        kind: K::ComptimeValue(Term::Symbol("symbol".into())),
+        ..flag()
+    };
+    assert_eq!(
+        validate_comptime_expression(&package, &invalid, &mut 10_000)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Invalid
+    );
+    validate_comptime_expression(&package, &body, &mut 10_000).unwrap();
+    assert_eq!(package.functions.len(), 1);
+}
+
+#[test]
 fn opaque_metadata_consumes_the_phase_declaration_allowance() {
     let package = Package {
         normal_forms: vec![crate::normal_forms::Head {

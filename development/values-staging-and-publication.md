@@ -1089,8 +1089,9 @@ invocation、缓存 invocation、键方法使用同一个 demand method resolver
 与其资源权限 owner 也已迁移；执行与资源源码仍分别拥有目录。luna driver 的资源
 ProtocolContext 已接入所属 snapshot，并与启用资源检查的调用查询共用目录。
 runtime reference session 与 checked/native 清理构图也从所属来源复用目录，每次仍
-建立独立候选图并完成验证。可变 staged scratch、VM 执行索引、跨编辑索引和统一
-准备预算仍未完成。
+建立独立候选图并完成验证。staged 求值也已使用不可变声明快照，待执行表达式
+独立进入普通调用帧；其 phase 检查与执行失败不会改写声明目录。VM 执行索引、
+跨编辑索引和统一准备预算仍未完成，详见[staged 入口边界](world-storage-and-lifetimes.md#15-staged-入口与声明世界分离)。
 
 
 每次操作仍构造新鲜 VM，安装原类型证明、方法／关联值和 Copy 证据服务，再检查本次

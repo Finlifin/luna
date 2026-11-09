@@ -18,8 +18,61 @@ use worklist::{Work, Worklist};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
+    pub kind: ErrorKind,
     pub source: SourceRange,
     pub message: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    Budget,
+    Invalid,
+}
+
+impl Error {
+    fn invalid(source: SourceRange, message: &'static str) -> Self {
+        Self {
+            kind: ErrorKind::Invalid,
+            source,
+            message,
+        }
+    }
+
+    fn budget(source: SourceRange, message: &'static str) -> Self {
+        Self {
+            kind: ErrorKind::Budget,
+            source,
+            message,
+        }
+    }
+
+    fn storage(source: SourceRange, failure: StorageError) -> Self {
+        match failure {
+            StorageError::Budget => Self::budget(source, failure.message()),
+            StorageError::Invalid(message) => Self::invalid(source, message),
+        }
+    }
+
+    fn member(source: SourceRange, failure: trait_index::Error) -> Self {
+        match failure {
+            trait_index::Error::Budget => Self::budget(source, failure.message()),
+            trait_index::Error::Invalid(message) => Self::invalid(source, message),
+        }
+    }
+
+    fn captured(source: SourceRange, failure: crate::comptime_values::Error) -> Self {
+        match failure {
+            crate::comptime_values::Error::Budget => Self::budget(source, failure.message()),
+            crate::comptime_values::Error::Invalid(message) => Self::invalid(source, message),
+        }
+    }
+
+    fn preparation(source: SourceRange, failure: crate::preparation::Error) -> Self {
+        match failure {
+            crate::preparation::Error::Budget => Self::budget(source, failure.message()),
+            crate::preparation::Error::Invalid(message) => Self::invalid(source, message),
+        }
+    }
 }
 
 pub fn validate(package: &Package) -> Result<(), Error> {
@@ -40,99 +93,8 @@ fn machine_arithmetic_functions_with_budgets(
     declaration_fuel: &mut usize,
     inspection_fuel: &mut usize,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
-    let mut machine_owners = std::collections::BTreeSet::new();
-    let parameter_domains = parameters::domains(package, declaration_fuel)
-        .map_err(parameters::Failure::into_diagnostic)?;
-    for definition in &package.enums {
-        definition
-            .validate_encoding_in(package.target)
-            .map_err(|message| Error {
-                source: SourceRange { start: 0, end: 0 },
-                message,
-            })?;
-    }
-    let trait_index =
-        trait_index::Index::new(package, declaration_fuel).map_err(|error| Error {
-            source: SourceRange { start: 0, end: 0 },
-            message: error.message(),
-        })?;
-    // Identity membership is queried for every retained callable. Index once:
-    // scanning function vectors here makes snapshot admission quadratic.
-    let body_ids: BTreeSet<_> = package.functions.iter().map(|f| f.declaration).collect();
-    let runtime_ids: BTreeSet<_> = package
-        .runtime_function_identities
-        .iter()
-        .map(|f| f.declaration)
-        .collect();
-    let mut quote_ids = BTreeSet::new();
-    let mut staged_quote_ids = BTreeSet::new();
-    for template in &package.quote_templates {
-        if template.phase != Phase::Runtime
-            || !quote_ids.insert(template.declaration)
-            || body_ids.contains(&template.declaration)
-            || runtime_ids.contains(&template.declaration)
-        {
-            return Err(Error {
-                source: template.body.source,
-                message: "invalid or duplicate quote template identity",
-            });
-        }
-        let parameters = parameters::validate_frame(template, true, declaration_fuel)
-            .map_err(parameters::Failure::into_diagnostic)?;
-        if parameters
-            .iter()
-            .any(|parameter| parameter.sort != Sort::Runtime)
-        {
-            staged_quote_ids.insert(template.declaration);
-        }
-    }
-    let mut identity_ids = std::collections::BTreeSet::new();
-    for identity in &package.runtime_function_identities {
-        if !matches!(
-            identity.signature.callable_signature(),
-            Term::Function { .. }
-        ) || identity.signature.is_comptime_callable()
-            || !identity_ids.insert(identity.declaration)
-            || body_ids.contains(&identity.declaration)
-        {
-            return Err(Error {
-                source: SourceRange { start: 0, end: 0 },
-                message: "invalid or duplicate runtime function identity",
-            });
-        }
-    }
-    crate::normal_forms::validate_in(package, declaration_fuel).map_err(|error| Error {
-        source: SourceRange { start: 0, end: 0 },
-        message: error.message(),
-    })?;
-    for function in &package.functions {
-        parameters::validate_frame(function, false, declaration_fuel)
-            .map_err(parameters::Failure::into_diagnostic)?;
-    }
-    let functions: BTreeMap<_, _> = package
-        .functions
-        .iter()
-        .chain(&package.quote_templates)
-        .map(|f| {
-            (
-                f.declaration,
-                (f.phase, !f.preconditions.is_empty(), f.is_unsafe),
-            )
-        })
-        .chain(package.runtime_function_identities.iter().map(|f| {
-            (
-                f.declaration,
-                (Phase::Runtime, false, f.signature.is_unsafe_callable()),
-            )
-        }))
-        .collect();
-    let parameter_frames: BTreeMap<_, _> = package
-        .functions
-        .iter()
-        .chain(&package.quote_templates)
-        .map(|function| (function.declaration, function.parameters.as_slice()))
-        .collect();
-    let mut storage_queries = storage_cache::StorageQueries::new(package);
+    let mut context = PhaseContext::new(package, declaration_fuel)?;
+    let mut machine_owners = BTreeSet::new();
     // Validation borrows method contracts. Only actual specialization needs
     // an owned summary, and that path has its own caller-supplied budget.
     let programs = || {
@@ -148,30 +110,193 @@ fn machine_arithmetic_functions_with_budgets(
                     .flat_map(|t| &t.methods)
                     .map(|method| {
                         CallableProgram::method(method).map_err(|_| Error {
+                            kind: ErrorKind::Invalid,
                             source: SourceRange { start: 0, end: 0 },
                             message: "invalid trait program contract signature",
                         })
                     }),
             )
     };
-    // Each work item carries its execution context. Staged inputs/defaults do
-    // not change the owner's declaration phase or require cloned summary bodies.
     for function in programs() {
-        let function = function?;
+        context.inspect(function?, inspection_fuel, &mut machine_owners)?;
+    }
+    Ok(machine_owners)
+}
+
+/// Check a closed invocation body against an already checked source world.
+/// This checks its phase and unsafe-call boundary, not typing or resource safety.
+/// The body has no declaration identity and is never registered in the package.
+pub fn validate_comptime_expression(
+    package: &Package,
+    body: &Expr,
+    fuel: &mut usize,
+) -> Result<(), Error> {
+    let mut context = PhaseContext::new(package, fuel)?;
+    crate::type_computations::charge_term(&body.ty, fuel).map_err(|_| Error {
+        kind: ErrorKind::Budget,
+        source: body.source,
+        message: "expression signature budget exhausted",
+    })?;
+    let signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(body.ty.clone()),
+    };
+    context.inspect(
+        CallableProgram::comptime_body(body, &signature),
+        fuel,
+        &mut BTreeSet::new(),
+    )
+}
+
+struct PhaseContext<'a> {
+    package: &'a Package,
+    parameter_domains: BTreeMap<crate::DeclarationId, Term>,
+    trait_index: trait_index::Index<'a>,
+    functions: BTreeMap<crate::DeclarationId, (Phase, bool, bool)>,
+    parameter_frames: BTreeMap<crate::DeclarationId, &'a [crate::program::LocalId]>,
+    quote_ids: BTreeSet<crate::DeclarationId>,
+    staged_quote_ids: BTreeSet<crate::DeclarationId>,
+    storage_queries: storage_cache::StorageQueries<'a>,
+}
+impl<'a> PhaseContext<'a> {
+    fn new(package: &'a Package, declaration_fuel: &mut usize) -> Result<Self, Error> {
+        let parameter_domains = parameters::domains(package, declaration_fuel)
+            .map_err(parameters::Failure::into_diagnostic)?;
+        for definition in &package.enums {
+            definition
+                .validate_encoding_in(package.target)
+                .map_err(|message| Error {
+                    kind: ErrorKind::Invalid,
+                    source: SourceRange { start: 0, end: 0 },
+                    message,
+                })?;
+        }
+        let trait_index = trait_index::Index::new(package, declaration_fuel)
+            .map_err(|error| Error::member(SourceRange { start: 0, end: 0 }, error))?;
+        // Identity membership is queried for every retained callable. Index once:
+        // scanning function vectors here makes snapshot admission quadratic.
+        let body_ids: BTreeSet<_> = package.functions.iter().map(|f| f.declaration).collect();
+        let runtime_ids: BTreeSet<_> = package
+            .runtime_function_identities
+            .iter()
+            .map(|f| f.declaration)
+            .collect();
+        let mut quote_ids = BTreeSet::new();
+        let mut staged_quote_ids = BTreeSet::new();
+        for template in &package.quote_templates {
+            if template.phase != Phase::Runtime
+                || !quote_ids.insert(template.declaration)
+                || body_ids.contains(&template.declaration)
+                || runtime_ids.contains(&template.declaration)
+            {
+                return Err(Error {
+                    kind: ErrorKind::Invalid,
+                    source: template.body.source,
+                    message: "invalid or duplicate quote template identity",
+                });
+            }
+            let parameters = parameters::validate_frame(template, true, declaration_fuel)
+                .map_err(parameters::Failure::into_diagnostic)?;
+            if parameters
+                .iter()
+                .any(|parameter| parameter.sort != Sort::Runtime)
+            {
+                staged_quote_ids.insert(template.declaration);
+            }
+        }
+        let mut identity_ids = std::collections::BTreeSet::new();
+        for identity in &package.runtime_function_identities {
+            if !matches!(
+                identity.signature.callable_signature(),
+                Term::Function { .. }
+            ) || identity.signature.is_comptime_callable()
+                || !identity_ids.insert(identity.declaration)
+                || body_ids.contains(&identity.declaration)
+            {
+                return Err(Error {
+                    kind: ErrorKind::Invalid,
+                    source: SourceRange { start: 0, end: 0 },
+                    message: "invalid or duplicate runtime function identity",
+                });
+            }
+        }
+        crate::normal_forms::validate_in(package, declaration_fuel).map_err(|error| Error {
+            kind: match error {
+                crate::normal_forms::ValidationError::Budget
+                | crate::normal_forms::ValidationError::Newtype(
+                    crate::newtypes::ValidationError::Budget,
+                ) => ErrorKind::Budget,
+                _ => ErrorKind::Invalid,
+            },
+            source: SourceRange { start: 0, end: 0 },
+            message: error.message(),
+        })?;
+        for function in &package.functions {
+            parameters::validate_frame(function, false, declaration_fuel)
+                .map_err(parameters::Failure::into_diagnostic)?;
+        }
+        let functions: BTreeMap<_, _> = package
+            .functions
+            .iter()
+            .chain(&package.quote_templates)
+            .map(|f| {
+                (
+                    f.declaration,
+                    (f.phase, !f.preconditions.is_empty(), f.is_unsafe),
+                )
+            })
+            .chain(package.runtime_function_identities.iter().map(|f| {
+                (
+                    f.declaration,
+                    (Phase::Runtime, false, f.signature.is_unsafe_callable()),
+                )
+            }))
+            .collect();
+        let parameter_frames: BTreeMap<_, _> = package
+            .functions
+            .iter()
+            .chain(&package.quote_templates)
+            .map(|function| (function.declaration, function.parameters.as_slice()))
+            .collect();
+        Ok(Self {
+            package,
+            parameter_domains,
+            trait_index,
+            functions,
+            parameter_frames,
+            quote_ids,
+            staged_quote_ids,
+            storage_queries: storage_cache::StorageQueries::new(package),
+        })
+    }
+
+    fn inspect(
+        &mut self,
+        function: CallableProgram<'_>,
+        inspection_fuel: &mut usize,
+        machine_owners: &mut BTreeSet<crate::DeclarationId>,
+    ) -> Result<(), Error> {
+        let Self {
+            package,
+            parameter_domains,
+            trait_index,
+            functions,
+            parameter_frames,
+            quote_ids,
+            staged_quote_ids,
+            storage_queries,
+        } = self;
         let ct = function.phase != Phase::Runtime;
         if !ct {
             storage_queries
                 .check_runtime(function.signature, &[], inspection_fuel)
-                .map_err(|failure| Error {
-                    source: function.source,
-                    message: failure.message(),
-                })?;
+                .map_err(|failure| Error::storage(function.source, failure))?;
         }
         let inspection = parameters::InspectionFrame::new(function, inspection_fuel)
             .map_err(parameters::Failure::into_diagnostic)?;
         let caller_frames = &inspection.frames;
         let frozen = &inspection.frozen;
-        let fail = |source, message| Error { source, message };
+        let fail = Error::invalid;
         let mut work = Worklist::new(function.source);
         work.extend(
             function
@@ -181,7 +306,7 @@ fn machine_arithmetic_functions_with_budgets(
             inspection_fuel,
         )?;
         if !function.preconditions.is_empty() || !function.postconditions.is_empty() {
-            machine_owners.insert(function.declaration);
+            machine_owners.extend(function.declaration);
             if function.phase == Phase::NormalForm {
                 return Err(fail(
                     function.source,
@@ -191,7 +316,7 @@ fn machine_arithmetic_functions_with_budgets(
             for condition in function.preconditions.iter().chain(function.postconditions) {
                 if !crate::program::checkable_predicate(condition, inspection_fuel).map_err(
                     |_| {
-                        fail(
+                        Error::budget(
                             condition.source,
                             "program predicate inspection budget exhausted",
                         )
@@ -343,17 +468,18 @@ fn machine_arithmetic_functions_with_budgets(
                                     | K::BitWritePointer { .. }
                             ))
                     {
-                        machine_owners.insert(function.declaration);
+                        machine_owners.extend(function.declaration);
                     }
                     if !ct {
                         storage_queries
                             .check_runtime(&expr.ty, caller_frames, inspection_fuel)
-                            .map_err(|failure| fail(expr.source, failure.message()))?;
+                            .map_err(|failure| Error::storage(expr.source, failure))?;
                         if !machine
                             && matches!(expr.kind, K::IntegerNegate(_) | K::IntegerBinary { .. })
                             && !deferred_integer
                         {
                             return Err(Error {
+                                kind: ErrorKind::Invalid,
                                 source: expr.source,
                                 message: "comptime Integer operation requires evaluation and Splice before runtime",
                             });
@@ -478,7 +604,9 @@ fn machine_arithmetic_functions_with_budgets(
                                         "quote template cannot escape as a runtime function value",
                                     ));
                                 }
-                                if !quote_ids.contains(&function.declaration)
+                                if !function
+                                    .declaration
+                                    .is_some_and(|declaration| quote_ids.contains(&declaration))
                                     && !staged_quote_ids.contains(id)
                                 {
                                     return Err(error(
@@ -515,7 +643,7 @@ fn machine_arithmetic_functions_with_budgets(
                                 ));
                             }
                             if target.1 {
-                                machine_owners.insert(function.declaration);
+                                machine_owners.extend(function.declaration);
                                 // Runtime staged identities are specialized back
                                 // to their declaration before executable calls;
                                 // specialization retains the declaration contract.
@@ -556,7 +684,7 @@ fn machine_arithmetic_functions_with_budgets(
                         } => {
                             let (contract, member) = trait_index
                                 .associated(interface.declaration, *member, inspection_fuel)
-                                .map_err(|failure| error(failure.message()))?;
+                                .map_err(|failure| Error::member(expr.source, failure))?;
                             if interface.arguments.len() != contract.type_parameters.len() {
                                 return Err(error(
                                     "associated value interface argument count mismatch",
@@ -570,13 +698,12 @@ fn machine_arithmetic_functions_with_budgets(
                                 caller_frames,
                                 inspection_fuel,
                             )
-                            .map_err(|failure| {
-                                error(match failure {
-                                    crate::type_computations::Error::Budget => {
-                                        "associated value contract inspection budget exhausted"
-                                    }
-                                    _ => "associated value contract substitution failed",
-                                })
+                            .map_err(|failure| match failure {
+                                crate::type_computations::Error::Budget => Error::budget(
+                                    expr.source,
+                                    "associated value contract inspection budget exhausted",
+                                ),
+                                _ => error("associated value contract substitution failed"),
                             })?;
                             if ty != expr.ty {
                                 return Err(error(
@@ -593,7 +720,7 @@ fn machine_arithmetic_functions_with_budgets(
                         } => {
                             let (contract, method) = trait_index
                                 .method(*interface, *member, inspection_fuel)
-                                .map_err(|failure| error(failure.message()))?;
+                                .map_err(|failure| Error::member(expr.source, failure))?;
                             if contract.comptime_only && !ct {
                                 return Err(error(
                                     "comptime-only trait method requires comptime context",
@@ -605,7 +732,7 @@ fn machine_arithmetic_functions_with_budgets(
                                 ));
                             }
                             if !method.program.is_empty() {
-                                machine_owners.insert(function.declaration);
+                                machine_owners.extend(function.declaration);
                                 let retained_template = !method.signature.is_comptime_callable()
                                     && matches!(method.signature.callable_signature(), Ok(Term::Function { parameters, .. })
                                         if parameters.iter().any(|p| p.sort != Sort::Runtime));
@@ -633,13 +760,12 @@ fn machine_arithmetic_functions_with_budgets(
                                 caller_frames,
                                 inspection_fuel,
                             )
-                            .map_err(|failure| {
-                                error(match failure {
-                                    crate::type_computations::Error::Budget => {
-                                        "trait method contract inspection budget exhausted"
-                                    }
-                                    _ => "trait method contract substitution failed",
-                                })
+                            .map_err(|failure| match failure {
+                                crate::type_computations::Error::Budget => Error::budget(
+                                    expr.source,
+                                    "trait method contract inspection budget exhausted",
+                                ),
+                                _ => error("trait method contract substitution failed"),
                             })?;
                             if signature != expr.ty {
                                 return Err(error(
@@ -761,15 +887,18 @@ fn machine_arithmetic_functions_with_budgets(
                                             inspection_fuel,
                                         )
                                         .map_err(|reason| {
-                                            error(match reason {
+                                            match reason {
                                                 crate::free_bindings::Error::Budget(_)
                                                 | crate::free_bindings::Error::Depth(_) => {
-                                                    "call default binding analysis budget exhausted"
+                                                    Error::budget(
+                                                        expr.source,
+                                                        "call default binding analysis budget exhausted",
+                                                    )
                                                 }
                                                 crate::free_bindings::Error::Invalid(_) => {
-                                                    "invalid call default binding scope"
+                                                    error("invalid call default binding scope")
                                                 }
-                                            })
+                                            }
                                         })?;
                                         if !free.is_subset(&available) {
                                             return Err(error(
@@ -1121,12 +1250,12 @@ fn machine_arithmetic_functions_with_budgets(
                         | K::EnsurePredicate(condition)
                         | K::CheckPredicate(condition) => {
                             if matches!(expr.kind, K::RequirePredicate(_) | K::EnsurePredicate(_)) {
-                                machine_owners.insert(function.declaration);
+                                machine_owners.extend(function.declaration);
                             }
                             if expr.ty != Term::Primitive(Primitive::Void)
                                 || !crate::program::checkable_predicate(condition, inspection_fuel)
                                     .map_err(|_| {
-                                        fail(
+                                        Error::budget(
                                             condition.source,
                                             "program predicate inspection budget exhausted",
                                         )
@@ -1144,7 +1273,7 @@ fn machine_arithmetic_functions_with_budgets(
                         } => {
                             let member = trait_index
                                 .retained_method(*declaration, inspection_fuel)
-                                .map_err(|failure| error(failure.message()))?;
+                                .map_err(|failure| Error::member(expr.source, failure))?;
                             let trait_target;
                             let target = if let Some(member) = member {
                                 trait_target = (
@@ -1174,7 +1303,7 @@ fn machine_arithmetic_functions_with_budgets(
                                 ));
                             }
                             if target.1 {
-                                machine_owners.insert(function.declaration);
+                                machine_owners.extend(function.declaration);
                                 if !_callee {
                                     return Err(error(
                                         "function value would erase program preconditions; callable program contracts are not implemented",
@@ -1294,7 +1423,10 @@ fn machine_arithmetic_functions_with_budgets(
                             *inspection_fuel = inspection_fuel
                                 .checked_sub(selections.len())
                                 .ok_or_else(|| {
-                                    error("bit selection validation budget exhausted")
+                                    Error::budget(
+                                        expr.source,
+                                        "bit selection validation budget exhausted",
+                                    )
                                 })?;
                             let Term::Pointer(storage) = &pointer.ty else {
                                 return Err(error("bit writeback requires a pointer"));
@@ -1326,7 +1458,10 @@ fn machine_arithmetic_functions_with_budgets(
                             *inspection_fuel = inspection_fuel
                                 .checked_sub(selections.len())
                                 .ok_or_else(|| {
-                                    error("bit selection validation budget exhausted")
+                                    Error::budget(
+                                        expr.source,
+                                        "bit selection validation budget exhausted",
+                                    )
                                 })?;
                             if let Some(message) = crate::program::bit_update_error_in(
                                 storage_type,
@@ -1412,11 +1547,8 @@ fn machine_arithmetic_functions_with_budgets(
                                             &value.ty,
                                             inspection_fuel,
                                         )
-                                        .map_err(|_| {
-                                            fail(
-                                                statement.source,
-                                                "invalid or excessive preparation binding pattern",
-                                            )
+                                        .map_err(|failure| {
+                                            Error::preparation(statement.source, failure)
                                         })?
                                         .ok_or_else(|| {
                                             fail(
@@ -1463,12 +1595,7 @@ fn machine_arithmetic_functions_with_budgets(
                                 expr,
                                 inspection_fuel,
                             )
-                            .map_err(|_| {
-                                fail(
-                                    expr.source,
-                                    "invalid or excessive staged preparation dependencies",
-                                )
-                            })?
+                            .map_err(|failure| Error::preparation(expr.source, failure))?
                             .map(|(indices, _)| indices)
                             .unwrap_or_default();
                             work.extend(
@@ -1557,7 +1684,7 @@ fn machine_arithmetic_functions_with_budgets(
                                 parameters,
                                 inspection_fuel,
                             )
-                            .map_err(|error| fail(expr.source, error.message()))?;
+                            .map_err(|error| Error::captured(expr.source, error))?;
                         }
                         K::ComptimeValue(value) => {
                             crate::comptime_values::validate_in(
@@ -1566,7 +1693,7 @@ fn machine_arithmetic_functions_with_budgets(
                                 package.target,
                                 inspection_fuel,
                             )
-                            .map_err(|error| fail(expr.source, error.message()))?;
+                            .map_err(|error| Error::captured(expr.source, error))?;
                         }
                         K::TypeValue(_)
                         | K::Literal(_)
@@ -1588,26 +1715,25 @@ fn machine_arithmetic_functions_with_budgets(
             {
                 storage_queries
                     .check_comptime(domain, caller_frames, inspection_fuel)
-                    .map_err(|error| Error {
-                        source: function.source,
-                        message: error.message(),
-                    })?;
+                    .map_err(|error| Error::storage(function.source, error))?;
             }
         }
         crate::call_safety::validate_program(function, inspection_fuel).map_err(
             |error| match error {
                 crate::call_safety::Error::Budget(_) => Error {
+                    kind: ErrorKind::Budget,
                     source: function.source,
                     message: "call safety validation budget exhausted",
                 },
                 crate::call_safety::Error::Invalid { source, message } => Error {
+                    kind: ErrorKind::Invalid,
                     source: source.unwrap_or(function.source),
                     message,
                 },
             },
         )?;
+        Ok(())
     }
-    Ok(machine_owners)
 }
 
 // Inspect stored fields, not nominal type arguments: a phantom Integer argument

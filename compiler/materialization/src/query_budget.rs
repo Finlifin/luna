@@ -75,6 +75,69 @@ mod tests {
     }
 
     #[test]
+    fn staged_snapshot_reuses_declarations_without_retaining_entry_state() {
+        let package = n::Package::default();
+        let mut builder = builder(&package);
+        let flag = |value| n::Expr {
+            source: n::SourceRange { start: 10, end: 20 },
+            ty: Term::Primitive(nir::Primitive::Bool),
+            kind: K::Literal(n::Literal::Bool(value)),
+        };
+        let binding = n::LocalId { owner: 1, index: 0 };
+        for value in [true, false, true] {
+            let body = n::Expr {
+                kind: K::Block {
+                    statements: vec![n::Expr {
+                        ty: Term::Primitive(nir::Primitive::Void),
+                        kind: K::Let {
+                            binding,
+                            value: Box::new(flag(value)),
+                        },
+                        ..flag(true)
+                    }],
+                    result: Some(Box::new(n::Expr {
+                        kind: K::Local(binding),
+                        ..flag(true)
+                    })),
+                },
+                ..flag(value)
+            };
+            let before = builder.fuel;
+            assert_eq!(builder.invoke_staged_input(&body).unwrap(), flag(value));
+            assert!(builder.fuel < before);
+            assert!(builder.invocation_snapshot.is_some());
+            let unbound = n::Expr {
+                kind: K::Local(binding),
+                ..flag(true)
+            };
+            assert!(
+                builder
+                    .invoke_staged_input(&unbound)
+                    .unwrap_err()
+                    .contains("MissingBinding")
+            );
+            assert!(builder.invocation_snapshot.is_some());
+        }
+        builder.fuel = 1;
+        assert!(builder.invoke_staged_input(&flag(false)).is_err());
+        builder.fuel = 100_000;
+        assert_eq!(
+            builder.invoke_staged_input(&flag(false)).unwrap(),
+            flag(false)
+        );
+        let description = n::Expr {
+            ty: Term::Primitive(nir::Primitive::Type),
+            kind: K::TypeValue(Term::Primitive(nir::Primitive::Char)),
+            ..flag(true)
+        };
+        assert_eq!(
+            builder.invoke_staged_input(&description).unwrap(),
+            description
+        );
+        assert!(package.functions.is_empty());
+    }
+
+    #[test]
     fn repeated_formation_queries_share_the_remaining_allowance() {
         let package = n::Package::default();
         let mut builder = builder(&package);

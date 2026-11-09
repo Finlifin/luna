@@ -2,27 +2,10 @@
 use super::*;
 use comptime_interpretor::{ClosureIdentity, Interpreter, Value};
 
-// Reuse checked code and metadata, never an interpreter, environment or result.
-// The scratch root and dispatch table are cleared between independent invocations.
+// Immutable source declarations outlive individual detached invocation bodies.
+// Each invocation still owns its VM, environment, phase checks and result graph.
 pub(super) struct Snapshot {
-    package: n::Package,
-    entry_index: usize,
-}
-
-impl Snapshot {
-    fn clear(&mut self) {
-        self.package.dispatch_instances.clear();
-        let entry = &mut self.package.functions[self.entry_index];
-        entry.signature = Term::Function {
-            parameters: vec![],
-            result: Box::new(Term::Primitive(nir::Primitive::Void)),
-        };
-        entry.body = n::Expr {
-            kind: K::Unit,
-            ty: Term::Primitive(nir::Primitive::Void),
-            source: n::SourceRange { start: 0, end: 0 },
-        };
-    }
+    source: DeclarationSnapshot,
 }
 
 #[derive(Default)]
@@ -36,12 +19,11 @@ struct FrozenGraph {
 impl Builder<'_> {
     pub(super) fn invoke_staged_input(&mut self, expression: &n::Expr) -> Result<n::Expr, String> {
         self.tick(0)?;
-        let mut snapshot = match self.invocation_snapshot.take() {
+        let snapshot = match self.invocation_snapshot.take() {
             Some(snapshot) => snapshot,
             None => self.new_invocation_snapshot()?,
         };
-        let result = self.invoke_with_snapshot(expression, &mut snapshot);
-        snapshot.clear();
+        let result = self.invoke_with_snapshot(expression, &snapshot);
         self.invocation_snapshot = Some(snapshot);
         result
     }
@@ -69,76 +51,29 @@ impl Builder<'_> {
         // their runtime phase prevents invocation during comptime evaluation.
         // No signature-only identity may erase a quote method precondition.
         snapshot.functions.append(&mut snapshot.quote_templates);
-        let mut entry = Id {
-            package: u64::MAX,
-            local: u32::MAX,
-        };
-        while snapshot.functions.iter().any(|f| f.declaration == entry)
-            || snapshot
-                .runtime_function_identities
-                .iter()
-                .any(|f| f.declaration == entry)
-        {
-            entry.local = entry
-                .local
-                .checked_sub(1)
-                .ok_or("no staged invocation identity available")?;
-        }
-        let entry_index = snapshot.functions.len();
-        snapshot.functions.push(n::Function {
-            declaration: entry,
-            name: "<staged-input>".into(),
-            phase: n::FunctionPhase::Comptime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            signature: Term::Function {
-                parameters: vec![],
-                result: Box::new(Term::Primitive(nir::Primitive::Void)),
-            },
-            parameters: vec![],
-            type_parameters: vec![],
-            body: n::Expr {
-                kind: K::Unit,
-                ty: Term::Primitive(nir::Primitive::Void),
-                source: n::SourceRange { start: 0, end: 0 },
-            },
-            defaults: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            capabilities: vec![],
-            requirements: vec![],
-        });
         snapshot.dispatch_instances.clear();
         Ok(Snapshot {
-            package: snapshot,
-            entry_index,
+            source: DeclarationSnapshot::new(std::sync::Arc::new(snapshot)),
         })
     }
 
     fn invoke_with_snapshot(
         &mut self,
         expression: &n::Expr,
-        scratch: &mut Snapshot,
+        scratch: &Snapshot,
     ) -> Result<n::Expr, String> {
         iir::visit::expression(expression, &mut self.fuel, |_, _| Ok(()))?;
         crate::associated::charge_projection_copy(&expression.ty, &mut self.fuel)
             .map_err(|_| "staged result type budget exhausted")?;
-        let snapshot = &mut scratch.package;
-        let root = &mut snapshot.functions[scratch.entry_index];
-        root.signature = Term::Function {
-            parameters: vec![],
-            result: Box::new(expression.ty.clone()),
-        };
-        root.body = expression.clone();
-        let entry = root.declaration;
+        let snapshot = scratch.source.package();
         // The checked expression is source code, not a concrete IIR closure.
         // Resolve each demanded member in the same immutable declaration world;
         // rebuilding every concrete implementation here duplicates outer work.
-        let source_queries =
-            SourceInvocationQueries::new(snapshot, self.world.context(), self.world.assumptions());
+        let source_queries = SourceInvocationQueries::in_source(
+            DeclarationSource::Snapshot(&scratch.source),
+            self.world.context(),
+            self.world.assumptions(),
+        );
         let solver = |predicate: &n::TypePredicate, remaining: &mut u64| {
             source_queries.check(
                 predicate,
@@ -172,7 +107,7 @@ impl Builder<'_> {
         self.fuel = usize::try_from(invocation_budget.steps).unwrap_or(usize::MAX);
         let mut interpreter =
             prepared.map_err(|error| format!("staged comptime preparation: {error}"))?;
-        let value = interpreter.invoke(entry, vec![]);
+        let value = interpreter.invoke_comptime_expression(expression);
         self.fuel = usize::try_from(interpreter.remaining_steps()).unwrap_or(usize::MAX);
         let value = value.map_err(|error| format!("staged comptime invocation: {error}"))?;
         drop(interpreter);

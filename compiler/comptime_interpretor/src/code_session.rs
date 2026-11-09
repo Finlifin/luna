@@ -442,6 +442,7 @@ mod tests {
                     &changed, &mut failed, &mut Budget::default(),
                 ).err().unwrap().kind,
                 ErrorKind::InvalidPhase(nir::phases::Error {
+                    kind: nir::phases::ErrorKind::Invalid,
                     source: changed.functions[0].body.source,
                     message: "invalid function parameter default slot",
                 }),
@@ -457,6 +458,7 @@ mod tests {
                 .unwrap()
                 .kind,
                 ErrorKind::InvalidPhase(nir::phases::Error {
+                    kind: nir::phases::ErrorKind::Invalid,
                     source: changed.functions[0].body.source,
                     message: "invalid function parameter default slot",
                 }),
@@ -474,6 +476,7 @@ mod tests {
                 .unwrap()
                 .kind,
                 ErrorKind::InvalidPhase(nir::phases::Error {
+                    kind: nir::phases::ErrorKind::Invalid,
                     source: changed.functions[0].body.source,
                     message: "invalid function parameter default slot",
                 }),
