@@ -96,3 +96,34 @@ fn borrowed_and_closed_sources_capture_separate_declaration_worlds() {
     );
     assert!(projected.source.package().functions.is_empty());
 }
+
+#[test]
+fn borrowed_capture_meters_unrelated_declarations_without_penalizing_shared_owners() {
+    let mut package = source();
+    package.structs.push(n::Struct {
+        declaration: Id {
+            package: 1,
+            local: 9,
+        },
+        name: "Metadata".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        fields: vec![("field".repeat(1000), Term::Primitive(nir::Primitive::Bool))],
+    });
+    let before = package.clone();
+    let failure = Snapshot::capture(DeclarationSource::Borrowed(&package), &mut 100)
+        .err()
+        .expect("the copy includes unused declaration metadata");
+    assert!(
+        failure.contains("staged source copy budget exhausted"),
+        "{failure}"
+    );
+    assert_eq!(package, before);
+    let copied = Snapshot::capture(DeclarationSource::Borrowed(&package), &mut 10_000).unwrap();
+    assert_eq!(copied.source.package().as_ref(), &package);
+    let owner = DeclarationSnapshot::new(Arc::new(package));
+    let retained = Snapshot::capture(DeclarationSource::Snapshot(&owner), &mut 1).unwrap();
+    assert!(Arc::ptr_eq(owner.package(), retained.source.package()));
+}

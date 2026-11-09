@@ -1093,7 +1093,8 @@ runtime reference session 与 checked/native 清理构图也从所属来源复�
 独立进入普通调用帧；其 phase 检查与执行失败不会改写声明目录。已有声明快照且
 没有预选 dispatch 时，staged 捕获直接保留原 owner，不再复制整包；quote 模板留在
 独立声明表，VM 读取完整契约但不给予执行主体。借用及剥离闭合 dispatch 的入口
-仍有整包复制，详见[staged 来源边界](world-storage-and-lifetimes.md#15-staged-入口与声明世界分离)。staged VM 已接入
+仍复制保留的声明，但已接入完整载荷预检，并在构造副本时直接省略 dispatch；
+详见[staged 来源边界](world-storage-and-lifetimes.md#15-staged-入口与声明世界分离)。staged VM 已接入
 同源 CodeSession，复用声明索引和代码，每次重新准入当前前提与抽象参数权限，
 详见[staged session 边界](world-storage-and-lifetimes.md#16-staged-vm-索引与当前调用权限分离)。
 detached phase 检查进一步从同源 owner 复用已完成的声明目录，每个表达式仍重新

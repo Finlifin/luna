@@ -317,34 +317,39 @@ DeclarationSnapshot 时直接保留该 owner，CodeSession 与三个查询服务
 准备和每次调用继续执行对应检查。借用入口仍需要取得源码所有权，含预选 dispatch
 的入口仍建立剥离该表的私有声明快照；两者保持 quote 表与完整契约，不改写原源码。
 
-源码分块与 dispatch 投影视图尚未实现：上述两个兼容入口仍复制整包，现有捕获
-预检只覆盖函数／表达式和签名，其他复制载荷的完整计费仍待迁移。共享 owner 的
-路径已消除这次复制，不能据此声称所有源码捕获均已修复。携带作用域前提的
-CodeSession 与 phase 目录的接线见第 1.6–1.7 节。类型／资源正确性仍由上游保证，
-不能把 phase 检查解释为完整程序验证；没有整体性能收益结论。
+需要私有所有权的入口改用 `nir::copy_budget::clone_declaration_source`。先在同一
+额度内完成所有保留载荷的预检，再构造副本；直接省略预选 dispatch，既不遍历也不
+复制待丢弃的执行表。Package 用穷尽字段解构和显式构造，新增字段必须决定其保留
+与计费责任。函数与 quote 的默认值／契约、参数域、NF 元数据、trait 与 impl、
+关联初始化器、上下文代码签名、enum 编码、运行实例及清理路径均计入预算。
+源码、目标、来源、身份游标和完整契约保持原值；谓词只作为数据复制，不求值、不
+展开 opaque 头，也不把程序规格送入 PTC。
 
-本轮声明／执行目录分离与 staged 源码保留的检查工作目录为 `/home/fin/luna`，
-统一通过 `python3 -B development/check.py --timeout 900 --` 执行：
+表达式与类型沿用通用 copy preflight，分别保持 Steps／Depth 失败；预算是复制和
+保守结构预检的工作额度，不是精确分配字节数。普通 Expr::clone 保留共享 closure
+body 的 Arc，只检查实际复制的捕获初始化器、参数和类型部分；共享本身不签发该
+body 的执行许可。所有复制都在完整预检之后发生，失败不返回部分 Package。原有
+source owner 快路径仍只保留句柄，不因兼容入口需要复制而重收其载荷成本。
 
-- `test -p materialization -p comptime_interpretor -p luna --lib
-  --test runtime_function_identities --test quote_functions --test staged_aggregate_contracts
-  --test library_protocols --no-fail-fast`：首次退出 101，849 项通过，新写的 quote VM
-  测试有 1 项错误分类预期不符，`/tmp/luna-tools-mvji8h2t/result.json`。普通 comptime
-  调用先经 phase gate，实际为 PhaseMismatch；现在同时要求该分类与显式实例调用的
-  UnknownFunction，直接验证模板没有执行主体，而不是只依赖阶段拦截。
-- `test -p luna --test quote_functions --test builder_invocations
-  --test comptime_staged_values --test materialization_budget --no-fail-fast`：退出 0，
-  108 + 86 + 2 + 1 项通过，`/tmp/luna-tools-rk2jf7bd/result.json`。包含冷／热源码 VM、
-  phase 与重复身份拒绝、quote dispatch 拒绝、借用／共享源构图等价及实际执行；
-  真实 sysroot builder 与清理重建也通过。
-- 六个修改／新增 Rust 文件通过 scoped rustfmt check，
-  `/tmp/luna-tools-_6yevfgp/result.json` 退出 0；`git diff --check` 通过。
+源码分块与借用的 dispatch 投影视图尚未实现：两个兼容入口仍复制所保留的声明
+数据，只是这次捕获已经有完整预检且不再复制被丢弃的 dispatch。其他子系统的
+Package 捕获不因新增此入口而自动完成预算迁移。共享 owner 路径已消除这次复制，
+不能据此声称所有源码捕获均已修复。携带作用域前提的 CodeSession 与 phase 目录
+接线见第 1.6–1.7 节。类型／资源正确性仍由上游保证；没有整体性能收益结论。
 
-最终源码的独立检查合计 939 项通过；首次大组中的其他目标无需因新增测试的断言
-修正而重新构建。source_tests 另外直接检查 exact Arc 共享、零预算失败与恢复、
-最后引用回收、闭合 dispatch 投影隔离及完整 quote 元数据保留。早期编译检查发现
-测试 Builder 遗漏 source 字段、fixture 字面量构造错误，均已修正；没有更改生产
-预算或现有语义断言。未运行全量回归、Miri 或性能基准；现有工作区与 docs 未改动。
+本轮完整捕获预检的检查工作目录为 `/home/fin/luna`，通过
+`python3 -B development/check.py --timeout 900 -- test -p nir -p materialization -p luna
+--lib --test copy_budget --test expansion_boundary --test quote_functions
+--test staged_aggregate_contracts --test library_protocols --test materialization_budget
+--no-fail-fast` 执行，退出 0，366 项通过；
+`/tmp/luna-tools-k02oo0pz/result.json` 保存完整命令及输出。覆盖宽载荷在额度不足时
+拒绝、准确额度恢复、深度限制、保留共享 closure、丢弃 dispatch 与原源码隔离，
+以及实际 staged 捕获对未使用声明的计费。原有真实 sysroot 协议、quote 展开、
+聚合资源和清理重建保持通过，没有提高生产预算或修改已有语义断言。
+五个修改／新增 Rust 文件通过 scoped rustfmt check，
+`/tmp/luna-tools-txw2m7bd/result.json` 退出 0；`git diff --check` 通过。
+最初测试编译的 fixture 使用了不存在的 Budget 构造器和错误的 Term 载荷类型，
+已按实际表示修正；没有修改既有用例。未执行全量回归、Miri 或性能基准。
 
 ### 1.6 Staged VM 索引与当前调用权限分离
 

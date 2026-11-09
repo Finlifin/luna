@@ -23,17 +23,8 @@ impl Snapshot {
                 // A borrowed source needs ownership for the code session. A
                 // closed dispatch source needs a separate declaration world:
                 // its preselected tables cannot authorize demand-driven calls.
-                for function in package.functions.iter().chain(&package.quote_templates) {
-                    *fuel = fuel
-                        .checked_sub(1)
-                        .ok_or("staged snapshot budget exhausted")?;
-                    iir::visit::expressions(function, fuel, |_, _| Ok(()))?;
-                    crate::associated::charge_projection_copy(&function.signature, fuel)
-                        .map_err(|_| "staged snapshot type budget exhausted")?;
-                }
-                let mut snapshot = package.clone();
-                // Quote contracts remain in their own non-executable table.
-                snapshot.dispatch_instances.clear();
+                let snapshot = nir::copy_budget::clone_declaration_source(package, fuel)
+                    .map_err(|error| format!("staged source copy budget exhausted: {error:?}"))?;
                 DeclarationSnapshot::new(std::sync::Arc::new(snapshot))
             }
         };
