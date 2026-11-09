@@ -58,26 +58,21 @@ impl Interpreter<'_> {
                 Term::String(value) | Term::Symbol(value) => value.len(),
                 Term::BitVec(value) => value.words().len(),
                 Term::TupleValue(values) => values.len(),
-                Term::OptionalValue { ty, value } => self
-                    .type_description_work(ty)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, None))?
-                    .saturating_add(usize::from(value.is_some())),
-                Term::ErrorValue { ty, label, .. } => {
-                    let mut work = self
-                        .type_description_work(ty)
-                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                    if let Some(label) = label {
-                        work = work.saturating_add(
-                            self.type_description_work(label)
-                                .ok_or_else(|| self.failure(ErrorKind::Type, None))?,
-                        );
-                    }
-                    work.saturating_add(1)
+                Term::OptionalValue { ty, value } => {
+                    self.check_type_description(ty, None)?;
+                    usize::from(value.is_some())
                 }
-                Term::NominalValue { ty, fields, .. } => fields.len().saturating_add(
-                    self.type_description_work(ty)
-                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?,
-                ),
+                Term::ErrorValue { ty, label, .. } => {
+                    self.check_type_description(ty, None)?;
+                    if let Some(label) = label {
+                        self.check_type_description(label, None)?;
+                    }
+                    1
+                }
+                Term::NominalValue { ty, fields, .. } => {
+                    self.check_type_description(ty, None)?;
+                    fields.len()
+                }
                 _ => 0,
             }
         };

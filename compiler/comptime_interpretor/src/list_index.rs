@@ -37,10 +37,7 @@ impl Interpreter<'_> {
         ty: &Term,
         source: SourceRange,
     ) -> Result<usize, Error> {
-        let work = self
-            .type_description_work(ty)
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        self.integer_operation(Some(source), |budget| budget.consume(work))?;
+        self.check_type_description(ty, Some(source))?;
         match value {
             Value::List { ty: stored, values }
                 if stored == ty && self.list_element(ty).is_some() =>

@@ -43,10 +43,7 @@ impl Interpreter<'_> {
                     return Err(self.failure(ErrorKind::Type, None));
                 }
                 for argument in arguments {
-                    let work = self
-                        .type_description_work(argument)
-                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                    self.integer_operation(None, |budget| budget.consume(work))?;
+                    self.check_type_description(argument, None)?;
                 }
                 self.admit_function_inputs(
                     &function.type_parameters,
@@ -146,10 +143,7 @@ impl Interpreter<'_> {
                         .check_scope(&[])
                         .map_err(|_| self.failure(ErrorKind::Type, None))?;
                     if argument.sort() == nir::Sort::Type {
-                        let work = self
-                            .type_description_work(argument)
-                            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                        self.integer_operation(None, |budget| budget.consume(work))?;
+                        self.check_type_description(argument, None)?;
                     }
                 }
                 let expression = Expr {

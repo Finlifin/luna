@@ -33,14 +33,8 @@ impl Interpreter<'_> {
         right: Term,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        let work = self
-            .type_description_work(&left)
-            .and_then(|a| {
-                self.type_description_work(&right)
-                    .and_then(|b| a.checked_add(b))
-            })
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        self.integer_operation(Some(source), |budget| budget.consume(work))?;
+        self.check_type_description(&left, Some(source))?;
+        self.check_type_description(&right, Some(source))?;
         let predicate = nir::program::TypePredicate::Equal(left, right);
         if predicate.trivial_truth() == Some(true) {
             return Ok(Value::Bool(true));

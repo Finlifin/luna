@@ -2216,10 +2216,7 @@ impl<'a> Interpreter<'a> {
         self.integer_operation(None, |budget| budget.consume(parameters.len()))?;
         let mut additions = BTreeMap::new();
         for (declaration, ty) in parameters {
-            let work = self
-                .type_description_work(ty)
-                .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-            self.integer_operation(None, |budget| budget.consume(work))?;
+            self.check_type_description(ty, None)?;
             if self.abstract_type_parameters.contains(declaration)
                 || *ty == Term::Primitive(Primitive::Type)
                 || self
@@ -2235,23 +2232,6 @@ impl<'a> Interpreter<'a> {
         self.abstract_value_parameters
             .extend(additions.into_iter().map(|(id, ty)| (id, ty.clone())));
         Ok(())
-    }
-    fn type_description_work(&self, ty: &Term) -> Option<usize> {
-        if ty.sort() != nir::Sort::Type {
-            return None;
-        }
-        self.term_description_work(ty)
-    }
-    fn term_description_work(&self, ty: &Term) -> Option<usize> {
-        scoped_term_value_work_with_callables_in(
-            ty,
-            &self.normal_forms,
-            &self.abstract_type_parameters,
-            &self.abstract_value_parameters,
-            |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-            |value, frames, fuel| self.normal_value_callable_signature_view(value, frames, fuel),
-            self.target,
-        )
     }
     fn closed_type_description_work(&self, ty: &Term) -> Option<usize> {
         if ty.sort() != nir::Sort::Type {

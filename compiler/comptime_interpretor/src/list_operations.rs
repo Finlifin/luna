@@ -188,10 +188,7 @@ impl Interpreter<'_> {
             .unwrap_or_else(|| storage.as_deref().unwrap_or(local));
         // Comparing the nominal List<T> identity can itself inspect a
         // large T. Meter that description without walking list elements.
-        let work = self
-            .type_description_work(ty)
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(value_source)))?;
-        self.integer_operation(Some(value_source), |budget| budget.consume(work))?;
+        self.check_type_description(ty, Some(value_source))?;
         let length = match value {
             Value::List { ty: stored, values }
                 if stored == ty && self.list_element(stored).is_some() =>

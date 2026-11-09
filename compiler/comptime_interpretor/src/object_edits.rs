@@ -121,9 +121,9 @@ impl Interpreter<'_> {
             O::Append | O::Replace => {
                 let value = packet.next().ok_or_else(failure)?;
                 let ty = &domains[2];
-                let work = self.type_description_work(ty).ok_or_else(failure)?;
+                self.check_type_description(ty, Some(source))?;
                 self.integer_operation(Some(source), |budget| {
-                    budget.consume(work.saturating_add(entries.len()).saturating_add(1))
+                    budget.consume(entries.len().saturating_add(1))
                 })?;
                 self.check_value_type(&value, ty, Some(source))?;
                 let value = ObjectValue {

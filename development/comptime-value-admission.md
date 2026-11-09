@@ -2702,6 +2702,54 @@ NIR Head.check_arguments 原先在两处收到 Budget 后强制将余额清零�
   退出 0，git diff --check 通过；作者已有四个 tracked 修改的 SHA-256 未变。
   本阶段合计 721 项通过、1 项既有忽略；未运行全 workspace 或墙钟性能基准。
 
+### 主动 Type 操作不再先免费估算再收费
+
+上一节的 typed 遍历已覆盖主要准入边界，但操作层仍有一组
+`type_description_work -> Option<usize>` 调用：先在私有额度内完成观察，只有成功
+才从 invocation 扣费。合法描述在调用方余额不足时可以反复失败而不支付观察工作；
+表示或深度超限则仍被折为 Type。这个接口及其无剩余调用者的 scoped
+term_description_work 包装现已删除，不保留第二套主动观察协议。
+
+授权抽象值域、Type 相等、对象条目构造／查询／编辑、列表索引及局部长度观察、
+反射、Type pattern、限定值／对象／callable 解码、效应签名准入及 invocation
+表示复制统一调用 check_type_description。每个描述直接使用 VM 余额，两个描述的
+比较顺序消费同一份额度；标量 payload、名称、容器宽度等原本独立的费用仍保留。
+Type 相等中的资源失败不是 false，仍在调用 theory solver 前失败；NF 头不展开。
+
+观察不改变发布边界。抽象值域先检查整批，再一次性扩展授权表；第二项失败不留下
+第一项的新权限，冲突声明也不覆盖旧域。Type pattern 只有字段处理成功才推进游标，
+通配字段仍支付它原本必须进行的描述检查。对象编辑继续构造完成结果后交付，查询
+和 Type 解码失败均不返回部分结果。回归同时检查错误位置、余额、重试与已有状态。
+
+剩余边界：closed_type_description_work／closed_term_description_work 及自由的
+optional representation observers 尚存，主要服务于闭合表示预检、runtime cleanup
+和效应描述汇总；此阶段没有把这些限额和错误处理冒称为已统一。ClosureSnapshot
+解码原有的参数域能力也未借此次计费迁移扩展，仍需按通用冻结值协议继续整理。
+
+证据（工作目录 `/home/fin/luna`）：
+
+- 首次 `python3 -B development/check.py --timeout 900 -- test
+  -p comptime_interpretor --lib --no-fail-fast`：
+  `/tmp/luna-tools-_l2guzpq/result.json` 退出 0，541 项通过。
+- 只把本次 14 个生产文件临时换为 HEAD `fb53f568`，保留新测试和测试注册：
+  `/tmp/luna-tools-yv4rrifu/result.json` 退出 101，operation_tests 五项全部失败，
+  均未扣回失败描述观察的工作。随后从
+  `/tmp/luna-active-description-baseline-tyex3ijh` 按字节恢复，SHA-256 全部一致。
+- `test -p comptime_interpretor --lib --test callable_reflection -p luna
+  --test library_type_equality --test library_meta_objects --test comptime_object_storage
+  --test comptime_object_contracts --test comptime_list_operations --test normal_patterns
+  --test reflected_definitions --test library_protocols --no-fail-fast`：
+  `/tmp/luna-tools-qx5fakv_/result.json` 退出 0，807 项通过。包含真实 sysroot 的
+  meta.Object、List、Type 相等、反射 builder、捕获状态和 pattern 协议。
+- 复核时把对象 lookup 的单步费用保持为 integer_operation.consume(1)，避免
+  以 tick 额外提前检查调用深度。之后执行 `test -p comptime_interpretor --lib
+  -p luna --test library_meta_objects --test comptime_object_storage
+  --test comptime_object_contracts --no-fail-fast`：
+  `/tmp/luna-tools-xtcnzrlr/result.json` 退出 0，668 项通过，均在上述 807 项中。
+- 16 个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-qec4gxiy/result.json`
+  退出 0；git diff --check 通过，作者已有四个 tracked 修改摘要未变。
+  未运行全 workspace 或墙钟性能基准。
+
 ### Predicate shape：支持结论与资源失败分离
 
 程序谓词 shape 检查移入 NIR 的单一实现，两个入口均显式接收调用者 fuel，返回

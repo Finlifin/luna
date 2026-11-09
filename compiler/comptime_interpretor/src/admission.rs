@@ -616,10 +616,7 @@ impl Interpreter<'_> {
                             &operation.arguments,
                         )
                         .map_err(|_| self.failure(ErrorKind::Type, None))?;
-                    let work = self
-                        .type_description_work(&signature)
-                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                    self.integer_operation(None, |budget| budget.consume(work))?;
+                    self.check_type_description(&signature, None)?;
                     signature
                         .check_scope(&[])
                         .map_err(|_| self.failure(ErrorKind::Type, None))?;

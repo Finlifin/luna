@@ -24,20 +24,14 @@ impl Interpreter<'_> {
         if !self.comptime_only {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
-        let work = self
-            .type_description_work(requested)
-            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-        self.integer_operation(None, |budget| {
-            budget.consume(work.saturating_add(key.len()).saturating_add(1))
-        })?;
+        self.check_type_description(requested, None)?;
+        self.integer_operation(None, |budget| budget.consume(key.len().saturating_add(1)))?;
         self.admit_type(requested, 0)?;
         let mut selected = None;
         for entry in object.entries() {
             let typed = entry.value();
-            let work = self
-                .type_description_work(&typed.ty)
-                .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-            self.integer_operation(None, |budget| budget.consume(work.saturating_add(1)))?;
+            self.check_type_description(&typed.ty, None)?;
+            self.integer_operation(None, |budget| budget.consume(1))?;
             self.admit_type(&typed.ty, 0)?;
             let source = SourceRange { start: 0, end: 0 };
             self.check_comptime_domain(&typed.ty, source)?;
@@ -99,11 +93,9 @@ impl Interpreter<'_> {
         name: Option<&str>,
         source: SourceRange,
     ) -> Result<(), Error> {
-        let work = self
-            .type_description_work(ty)
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        self.check_type_description(ty, Some(source))?;
         self.integer_operation(Some(source), |budget| {
-            budget.consume(work.saturating_add(name.map_or(0, str::len)))
+            budget.consume(name.map_or(0, str::len))
         })
     }
 

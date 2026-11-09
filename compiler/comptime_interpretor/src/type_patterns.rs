@@ -132,10 +132,7 @@ impl<'a> Interpreter<'a> {
                 if arguments.len() != fields {
                     return Err(self.failure(ErrorKind::Type, None));
                 }
-                let work = self
-                    .type_description_work(ty)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                self.integer_operation(None, |budget| budget.consume(work))?;
+                self.check_type_description(ty, None)?;
                 self.effect_charge(metadata.parameters.len(), None)?;
                 metadata
                     .parameters
@@ -202,10 +199,7 @@ impl<'a> Interpreter<'a> {
                     .type_pattern_tuple(input)?
                     .and_then(|types| types.get(index))
                     .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                let work = self
-                    .type_description_work(ty)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                self.integer_operation(None, |budget| budget.consume(work))?;
+                self.check_type_description(ty, None)?;
                 if wild {
                     None
                 } else {

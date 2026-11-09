@@ -83,10 +83,7 @@ impl Interpreter<'_> {
 
     fn reflection_type(&mut self, ty: &Term) -> Result<Term, Error> {
         let ty = self.selected_type_view(ty, None)?;
-        let work = self
-            .type_description_work(&ty)
-            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-        self.integer_operation(None, |budget| budget.consume(work))?;
+        self.check_type_description(&ty, None)?;
         self.admit_type(&ty, 0)?;
         Ok(ty)
     }

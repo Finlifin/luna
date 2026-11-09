@@ -484,10 +484,7 @@ impl<'a> Interpreter<'a> {
         if !invocation {
             return self.copy_type_work(ty, source);
         }
-        let work = self
-            .type_description_work(ty)
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        self.copy_work(work, source)
+        self.check_type_description(ty, Some(source))
     }
 
     fn copy_instance_arguments(

@@ -103,12 +103,8 @@ impl Interpreter<'_> {
                 for entry in fields {
                     let (key, domain, value) = nir::objects::entry_parts(entry)
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                    let work = self
-                        .type_description_work(domain)
-                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                    self.integer_operation(None, |budget| {
-                        budget.consume(work.saturating_add(key.map_or(0, str::len)))
-                    })?;
+                    self.check_type_description(domain, None)?;
+                    self.integer_operation(None, |budget| budget.consume(key.map_or(0, str::len)))?;
                     let value = ObjectValue {
                         ty: domain.clone(),
                         value: self.normal_pattern_value_at(

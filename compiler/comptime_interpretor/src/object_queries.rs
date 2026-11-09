@@ -357,24 +357,15 @@ impl Interpreter<'_> {
                 }
             }
             Q::EntryType => {
-                let work = self
-                    .type_description_work(&entry.value().ty)
-                    .ok_or_else(failure)?;
-                self.integer_operation(Some(source), |budget| budget.consume(work))?;
+                self.check_type_description(&entry.value().ty, Some(source))?;
                 Value::Type(entry.value().ty.clone())
             }
             Q::Value => {
                 let Term::Optional(target) = ty else {
                     return Err(failure());
                 };
-                let work = self
-                    .type_description_work(target)
-                    .and_then(|left| {
-                        self.type_description_work(&entry.value().ty)
-                            .and_then(|right| left.checked_add(right))
-                    })
-                    .ok_or_else(failure)?;
-                self.integer_operation(Some(source), |budget| budget.consume(work))?;
+                self.check_type_description(target, Some(source))?;
+                self.check_type_description(&entry.value().ty, Some(source))?;
                 let value = if entry.value().ty == **target {
                     self.check_value_type(&entry.value().value, target, Some(source))?;
                     Some(Box::new(
