@@ -100,8 +100,8 @@ impl Protocol {
         let resources = match (items.get(LangItem::Copy), items.get(LangItem::Drop)) {
             (None, None) => None,
             (Some(LangItemDef::UserDef(copy)), Some(LangItemDef::UserDef(drop))) => {
-                crate::resources::ProtocolContext::selected(
-                    package,
+                crate::resources::ProtocolContext::selected_in_source(
+                    source.clone(),
                     crate::resources::Selection::Identity(copy),
                     Some(crate::resources::Selection::Identity(drop)),
                     budget,

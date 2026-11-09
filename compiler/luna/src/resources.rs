@@ -2,7 +2,7 @@
 //! Successful analysis does not lower Drop or certify complete program safety.
 use elaboration::{
     capabilities::World,
-    implementation::Index,
+    materialization::DeclarationSnapshot,
     ptc::{Budget, Context},
     verification::moves::Report,
 };
@@ -11,7 +11,10 @@ use nir::{
     DeclarationId,
     program::{FunctionPhase, Package},
 };
-use std::fmt;
+use std::{fmt, sync::Arc};
+
+#[cfg(test)]
+mod tests;
 
 /// A source selector is resolved once; downstream execution preserves its identity.
 #[derive(Clone, Copy, Debug)]
@@ -149,7 +152,13 @@ pub(crate) fn analyze_selected(
     let binding = ProtocolContext::selected(package, copy_protocol, drop_protocol, budget)?;
     let protocol = binding.copy;
     let drop_protocol = binding.drop;
-    let world = binding.world(package);
+    let package = binding.package();
+    let function = package
+        .functions
+        .iter()
+        .find(|candidate| candidate.declaration == function.declaration)
+        .expect("bound source retains the selected entry");
+    let world = binding.world();
     let items = &binding.items;
     let report = if drop_protocol.is_some() {
         crate::protocols::analyze_cleanup(package, &world, items, function, steps, budget)
@@ -172,9 +181,10 @@ pub(crate) struct ProtocolContext {
     pub copy: DeclarationId,
     pub drop: Option<DeclarationId>,
     context: Context,
-    index: Index,
+    source: DeclarationSnapshot,
 }
 impl ProtocolContext {
+    #[cfg(test)]
     pub fn new(
         package: &Package,
         copy_protocol: &str,
@@ -194,6 +204,23 @@ impl ProtocolContext {
         drop_protocol: Option<Selection<'_>>,
         budget: Budget,
     ) -> Result<Self, String> {
+        Self::selected_in_source(
+            DeclarationSnapshot::new(Arc::new(package.clone())),
+            copy_protocol,
+            drop_protocol,
+            budget,
+        )
+    }
+
+    /// Retain the exact declarations used to bind the language protocols.
+    /// Other invocation services can share the directory, but not proof facts.
+    pub(crate) fn selected_in_source(
+        source: DeclarationSnapshot,
+        copy_protocol: Selection<'_>,
+        drop_protocol: Option<Selection<'_>>,
+        budget: Budget,
+    ) -> Result<Self, String> {
+        let package = source.package();
         let mut protocols = package.traits.iter().filter(|t| copy_protocol.matches(t));
         let definition = protocols
             .next()
@@ -219,8 +246,9 @@ impl ProtocolContext {
             .transpose()?;
         let context =
             Context::from_package(package).map_err(|e| format!("resource type context: {e}"))?;
-        let index = crate::implementation_world::index(&package, budget)
-            .map_err(|error| format!("resource implementation index: {error}"))?;
+        source
+            .prepare(&mut { budget })
+            .map_err(|error| format!("resource declaration directory: {error}"))?;
         let mut items = LangItems::new();
         items
             .bind_source_traits(package, &[(LangItem::Copy, protocol)])
@@ -235,17 +263,42 @@ impl ProtocolContext {
             copy: protocol,
             drop: drop_protocol,
             context,
-            index,
+            source,
         })
     }
 
-    pub fn world<'a>(&'a self, package: &'a Package) -> World<'a> {
-        World {
-            index: &self.index,
-            implementations: &package.implementations,
-            traits: &package.traits,
-            assumptions: &[],
-            context: &self.context,
+    pub(crate) fn package(&self) -> &Package {
+        self.source.package()
+    }
+
+    pub(crate) fn source(&self) -> elaboration::materialization::DeclarationSource<'_> {
+        elaboration::materialization::DeclarationSource::Snapshot(&self.source)
+    }
+
+    pub fn world(&self) -> World<'_> {
+        self.source
+            .capabilities(
+                &self.context,
+                &[],
+                &mut Budget {
+                    steps: 0,
+                    ..Default::default()
+                },
+            )
+            .expect("ProtocolContext construction completed its declaration directory")
+    }
+}
+
+impl fmt::Display for ProtocolContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(resource-protocol-context (copy {}) (drop", self.copy)?;
+        if let Some(drop) = self.drop {
+            write!(f, " {drop}")?;
         }
+        write!(
+            f,
+            ") (bindings {}) (context {}) (source {}))",
+            self.items, self.context, self.source
+        )
     }
 }

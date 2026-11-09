@@ -38,13 +38,16 @@ pub fn interpret_effects_with_protocols(
     };
     let (package, declaration) =
         crate::invocation::prepare_entry_in_package(package, entry, FunctionPhase::Runtime, None)?;
-    let protocols = crate::resources::ProtocolContext::new(
-        &package,
-        copy_protocol,
-        Some(drop_protocol),
+    let protocols = crate::resources::ProtocolContext::selected_in_source(
+        elaboration::materialization::DeclarationSnapshot::new(std::sync::Arc::new(
+            package.into_owned(),
+        )),
+        crate::resources::Selection::Name(copy_protocol),
+        Some(crate::resources::Selection::Name(drop_protocol)),
         budget,
     )?;
-    let world = protocols.world(&package);
+    let package = protocols.package();
+    let world = protocols.world();
     let key = iir::InstanceKey {
         declaration,
         arguments: vec![].into(),
@@ -285,16 +288,15 @@ pub(crate) fn interpret_protocols_selected(
 
 /// Immutable package preparation shared across independent test executions.
 /// Graph acquisition, cleanup, interpreter state and budgets remain per entry.
-pub(crate) struct CheckedSession<'a> {
-    package: std::borrow::Cow<'a, Package>,
+pub(crate) struct CheckedSession {
     protocols: crate::resources::ProtocolContext,
     fuel: u64,
     budget: elaboration::ptc::Budget,
 }
 
-impl<'a> CheckedSession<'a> {
+impl CheckedSession {
     pub(crate) fn new(
-        mut package: std::borrow::Cow<'a, Package>,
+        mut package: std::borrow::Cow<'_, Package>,
         copy_protocol: crate::resources::Selection<'_>,
         drop_protocol: crate::resources::Selection<'_>,
         fuel: u64,
@@ -314,14 +316,15 @@ impl<'a> CheckedSession<'a> {
             elaboration::program::inlining::expand(package.to_mut(), &mut optimization_fuel)
                 .map_err(|error| format!("cannot prepare optional inlining: {error}"))?;
         }
-        let protocols = crate::resources::ProtocolContext::selected(
-            &package,
+        let protocols = crate::resources::ProtocolContext::selected_in_source(
+            elaboration::materialization::DeclarationSnapshot::new(std::sync::Arc::new(
+                package.into_owned(),
+            )),
             copy_protocol,
             Some(drop_protocol),
             budget,
         )?;
         Ok(Self {
-            package,
             protocols,
             fuel,
             budget,
@@ -333,13 +336,13 @@ impl<'a> CheckedSession<'a> {
         declaration: nir::DeclarationId,
         entry: &str,
     ) -> Result<Value, String> {
-        let package = self.package.as_ref();
+        let package = self.protocols.package();
         let protocols = &self.protocols;
         let budget = self.budget;
         let mut steps = budget.steps;
         let executable = crate::cleanup::prepare_checked_source(
             package,
-            &protocols.world(package),
+            &protocols.world(),
             &protocols.items,
             iir::InstanceKey {
                 declaration,
@@ -349,7 +352,7 @@ impl<'a> CheckedSession<'a> {
             budget,
         )
         .map_err(|e| format!("cannot prepare resource-checked execution: {e}"))?;
-        let world = protocols.world(package);
+        let world = protocols.world();
         // Installed aggregate values need explicit Copy delivery evidence;
         // their representation alone does not authorize repeated requests.
         let effect_values =

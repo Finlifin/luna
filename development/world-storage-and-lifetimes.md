@@ -1,6 +1,6 @@
 # 世界存储、句柄与生命周期
 
-状态：整体目标仍未完成；required 的共享 owner 和可复用调用的源码目录已按第 1.1–1.2 节接入生产。
+状态：整体目标仍未完成；required、可复用调用及 driver 资源上下文已按第 1.1–1.3 节接入源码 owner。
 初始源码审计基线为 `7178e238`。
 本文细化[全链路架构](architecture.md)中的 WorldSnapshot 和 PublicationBundle，
 与[发布状态协议](elaboration-state-and-publication.md)、[依赖观察](dependency-observations.md)
@@ -10,7 +10,7 @@
 ## 1. 已有所有权保护不能因重构而丢失
 
 下列路径均以 `compiler/` 为根，记录初始静态审计。旧 middle::ty 已在源码清理中删除，
-第 1.1–1.2 节以外的世界存储迁移仍待实施；未运行 Miri、并发或内存压力验证。
+第 1.1–1.3 节以外的世界存储迁移仍待实施；未运行 Miri、并发或内存压力验证。
 
 | 入口 | 已存在的约束 | 需要进一步处理的问题 |
 | --- | --- | --- |
@@ -117,7 +117,7 @@ Arc，继续只复用代码；每次执行仍创建新 VM。缓存准入、资�
 
 required 准备、发布器证明和其资源权限 owner 也已采用该目录，见第 1.1 节。
 这仍是一份完整 Package 的共享目录，未实现分块或跨编辑的结构共享。luna driver
-的独立资源 ProtocolContext 尚未迁移；staged scratch 改写临时入口，不能复用旧目录。
+资源 ProtocolContext 的后续接线见第 1.3 节；staged scratch 改写临时入口，不能复用旧目录。
 PTC Context 的建立、required 和外围资源／协议准备预算仍有独立成本；接受 `&Package` 的
 兼容准备入口仍复制整包，其捕获成本尚未纳入统一预算。未测整体编译性能收益。
 
@@ -145,6 +145,58 @@ PTC Context 的建立、required 和外围资源／协议准备预算仍有独�
 前端失败本轮未重跑：此前 `/tmp/luna-tools-p1o2diml/result.json` 退出 101，在
 `1465..1484` 报 `Type domain equality: UnvalidatedModel`，与独立基线
 `/tmp/luna-tools-uq7f8i42/result.json` 一致；本轮不声称修复它。
+
+### 1.3 Driver 资源协议的源码所有权
+
+`luna::resources::ProtocolContext` 不再独立保存 implementation Index，然后由
+`world(package)` 接受另一份 package。它现在持有 DeclarationSnapshot、从同一源码
+建立的 Context 与显式绑定的 Copy／Drop 声明身份；只有完整目录和协议绑定都成功
+才交付上下文。`world()` 从该 owner 借用 implementations、traits、index 和 Context，
+调用者不能通过这个接口替换权限来源。`package()` 返回同一 owner 中的只读源码。
+
+资源分析、Copy transfer、效应值传送、checked runtime session 和 native 清理计划
+已使用这个接口。CheckedSession 将优化后的源码移入 owner，不再另外保存一份 Cow；
+后续测试入口只共享已准备源码，各自建立实例图、清理计划和解释器。失败、预算、
+程序存储与 Drop 执行仍属于各次调用，目录共享不签发资源安全证明。
+
+`selected_in_source` 接受已经存在的 snapshot。缓存调用及 Eq／Hash 协议的资源
+绑定因此复用自己的目录，不再为验证 Copy／Drop 再建 implementation Index。
+显式 comptime invocation 若启用资源检查，其类型、方法与关联项服务也使用这个
+目录。资源世界只接纳显式选择的源码 trait 身份；热目录不会使一个同名普通 trait
+自动获得 Copy／Drop 资格，也不能跳过缺失或歧义检查。
+
+源码快照可能包含闭合 dispatch 表，资源绑定不把该表作为证明；source invocation
+仍遵守自身入口对预选执行表的拒绝。这里没有让程序状态、内存或清理义务进入 PTC，
+只是让程序验证消费者借用来源一致的类型／trait 声明事实。
+
+回归分别检查：资源查询与其他声明查询借用同一个索引；原源码 Arc 经 copy-on-write
+移除实现后，新旧同号世界给出不同 Copy 分类；冷构造失败可以重试，热目录中的
+零预算资源查询仍不能取得 Copy；最后一个 owner 释放后源码回收。S-expression
+诊断展开绑定、Context 及 source snapshot，不依赖指针地址。
+
+兼容的 `selected(&Package, ...)` 入口为取得所有权会复制一次完整源码；初次将借用
+源码放进 checked session 也有这项成本，已经持有 snapshot 的路径不复制。捕获复制、
+Context 建立和各阶段预算尚未统一，不能将本迁移称为整体性能优化。无资源协议的
+ReferenceSession 仍保管自己的 package／index，staged 临时入口与 VM 执行索引也尚待
+迁移；通用验证函数的其他 package／world 调用边界不在此声称全部关闭。
+
+本轮 driver 资源 owner 迁移在 `/home/fin/luna` 使用
+`python3 -B development/check.py --timeout 900 --` 检查，结果均退出 0：
+
+- `test -p luna --lib --test resources --test key_code_sessions --test library_protocols
+  --test trait_query_failures --no-fail-fast`：491 项通过，包含真实 sysroot 公开协议、
+  Copy／Drop 分析、host 方法清理和新的快照隔离回归；
+  `/tmp/luna-tools-6637mekl/result.json`。
+- `test -p luna --test execution --test host --no-fail-fast` 加 direct-passing、checked
+  pointer、资源入口、bound tuple、quote callable 和 splice cleanup 过滤，共 58 + 35
+  项通过；完整过滤列表在 `/tmp/luna-tools-_hj8kunv/result.json`。覆盖解释执行与
+  LLVM/native 消费者，不以仅构造 Context 证明端到端接线。
+- `test -p luna --test source_tests --no-fail-fast`：13 项通过，验证多测试入口共享准备
+  后的失败、预算、清理隔离和 native 恢复；`/tmp/luna-tools-e86jpo1_/result.json`。
+
+本轮去重 597 项通过；八个修改／新增 Rust 文件通过 scoped rustfmt check，
+`/tmp/luna-tools-j6s8usej/result.json` 退出 0，`git diff --check` 通过。
+未执行全量回归、Miri 或性能基准；第 1.2 节所述前端既有失败本轮没有重跑。
 
 ## 2. 目标物理结构
 

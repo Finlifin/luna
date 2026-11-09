@@ -307,8 +307,9 @@ Unresolved、Invalid 的分类与源码位置。内部可变状态只承载同�
 资源权限仍由程序验证层的对应服务检查。公开预备调用、缓存调用和 Eq／Hash 协议
 现在从持有源码的 DeclarationSnapshot 共享不可变目录，缓存键接纳与实际调用也从
 同一 owner 取得索引。required 的发布器证明与实际调用也复用所属 snapshot 的目录，
-其资源权限使用另一份源码及其目录，不能与执行声明合并。luna driver 的独立资源
-ProtocolContext 尚待迁移；staged scratch 会改写入口，继续使用调用内目录。跨编辑的持久索引、分块源码和整体准备预算的统一
+其资源权限使用另一份源码及其目录，不能与执行声明合并。luna driver 的资源
+ProtocolContext 也持有所属 snapshot，分析、执行与 host 查询不再通过它拼接外部
+package。staged scratch 会改写入口，继续使用调用内目录。跨编辑的持久索引、分块源码和整体准备预算的统一
 仍未完成，不能把这些生产 owner 扩大为完整 WorldSnapshot 迁移。
 
 以下保留调用内作用域迁移时的证据；后续共享目录的当前检查见

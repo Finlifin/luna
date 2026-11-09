@@ -180,8 +180,13 @@ fn execute_prepared(
         .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
     let resources = protocols
         .map(|(copy, drop)| {
-            crate::resources::ProtocolContext::selected(
-                package,
+            crate::resources::ProtocolContext::selected_in_source(
+                match source {
+                    DeclarationSource::Snapshot(snapshot) => snapshot.clone(),
+                    DeclarationSource::Borrowed(package) => {
+                        DeclarationSnapshot::new(std::sync::Arc::new(package.clone()))
+                    }
+                },
                 copy,
                 Some(drop),
                 preparation_budget,
@@ -196,8 +201,8 @@ fn execute_prepared(
         let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
         let before = fuel;
         let evidence = elaboration::verification::copy::acquire(
-            package,
-            &resources.world(package),
+            resources.package(),
+            &resources.world(),
             resources.copy,
             resources.drop.expect("paired protocols"),
             ty,
@@ -212,6 +217,9 @@ fn execute_prepared(
         *copy_failure.borrow_mut() = evidence.err();
         allowed
     };
+    let source = resources
+        .as_ref()
+        .map_or(source, |resources| resources.source());
     let source_queries =
         elaboration::materialization::SourceInvocationQueries::in_source(source, &context, &[]);
     let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {

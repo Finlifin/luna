@@ -79,7 +79,7 @@ fn interface_resource_query_retains_callback_premises() {
             Default::default(),
         )
         .unwrap();
-        let world = context.world(&package);
+        let world = context.world();
         let query = |inputs: &[CallableParameter], fuel| {
             crate::protocols::analyze_method_cleanup_with_context(
                 &package,
@@ -204,7 +204,7 @@ fn interface_resource_query_preserves_affine_callback_for_implementation_check()
         .unwrap();
         let result = crate::protocols::analyze_method_cleanup_with_context(
             &package,
-            &context.world(&package),
+            &context.world(),
             &context.items,
             callee,
             100000,
@@ -236,7 +236,7 @@ fn interface_resource_query_preserves_affine_callback_for_implementation_check()
         // its body. Discharge that child exactly as the schedule publisher does.
         let checked = crate::protocols::analyze_cleanup_with_borrowed_code_context(
             &package,
-            &context.world(&package),
+            &context.world(),
             &context.items,
             body,
             100000,
@@ -422,7 +422,7 @@ fn generated_interface_schedule_unwinds_result_and_caller_once() {
         .unwrap();
         let executable = crate::cleanup::prepare_source(
             &package,
-            &context.world(&package),
+            &context.world(),
             &context.items,
             iir::InstanceKey {
                 declaration: run.declaration,
@@ -590,7 +590,7 @@ fn closure_failure_unwinds_persistent_capture_state_once() {
                     .unwrap();
                     let executable = crate::cleanup::prepare_source(
                         &package,
-                        &context.world(&package),
+                        &context.world(),
                         &context.items,
                         iir::InstanceKey {
                             declaration: run.declaration,
@@ -979,7 +979,7 @@ fn interface_invocation_resource_report_keeps_entry_and_result_owners_separate()
     .unwrap();
     let evidence = crate::protocols::analyze_method_cleanup(
         &package,
-        &context.world(&package),
+        &context.world(),
         &context.items,
         &callee,
         100000,
@@ -994,7 +994,7 @@ fn interface_invocation_resource_report_keeps_entry_and_result_owners_separate()
     assert!(
         crate::protocols::analyze_method_cleanup(
             &package,
-            &context.world(&package),
+            &context.world(),
             &context.items,
             &callee,
             0,
@@ -1273,7 +1273,7 @@ fn closure_cleanup_definitions_require_unique_concrete_evidence() {
     .unwrap();
     let executable = crate::cleanup::prepare_source(
         &package,
-        &context.world(&package),
+        &context.world(),
         &context.items,
         iir::InstanceKey {
             declaration: run.declaration,
@@ -1478,7 +1478,7 @@ fn specialized_call_failures_preserve_prepared_and_callee_cleanup_order() {
                 .unwrap();
                 let executable = crate::cleanup::prepare_source(
                     &package,
-                    &context.world(&package),
+                    &context.world(),
                     &context.items,
                     iir::InstanceKey {
                         declaration: run.declaration,

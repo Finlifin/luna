@@ -110,11 +110,15 @@ impl Invocation {
         capacity: usize,
         budget: ptc::Budget,
     ) -> Result<Self, String> {
+        let mut frozen = package.clone();
+        frozen.dispatch_instances.clear();
+        let source = DeclarationSnapshot::new(std::sync::Arc::new(frozen));
+        let package = source.package();
         let resources = match (items.get(LangItem::Copy), items.get(LangItem::Drop)) {
             (None, None) => None,
             (Some(LangItemDef::UserDef(copy)), Some(LangItemDef::UserDef(drop))) => {
-                crate::resources::ProtocolContext::selected(
-                    package,
+                crate::resources::ProtocolContext::selected_in_source(
+                    source.clone(),
                     crate::resources::Selection::Identity(copy),
                     Some(crate::resources::Selection::Identity(drop)),
                     budget,
@@ -152,9 +156,6 @@ impl Invocation {
             .chain(std::iter::once(result.as_ref()))
             .all(|ty| ty.check_scope(&[]).is_ok());
         let context = ptc::Context::from_package(package)?;
-        let mut frozen = package.clone();
-        frozen.dispatch_instances.clear();
-        let source = DeclarationSnapshot::new(std::sync::Arc::new(frozen));
         let world = source
             .capabilities(&context, &[], &mut { budget })
             .map_err(|error| format!("memoization declaration index: {error}"))?;

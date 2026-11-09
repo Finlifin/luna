@@ -128,8 +128,8 @@ fn prepare_declaration_with_protocols(
         budget,
     )?;
     let executable = crate::cleanup::prepare_checked_source(
-        &package,
-        &context.world(&package),
+        context.package(),
+        &context.world(),
         &context.items,
         iir::InstanceKey {
             declaration,
