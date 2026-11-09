@@ -60,7 +60,7 @@ fn command_help(name: &str) -> Result<String, String> {
             "dump <input.fl> [--emit ast|hir|nir|iir|llvm|asm|attributes|merged-attributes]\n  Defaults to nir. --entry <name> (default main) applies to iir, llvm and asm."
         }
         "comptime" => {
-            "comptime <input.fl> --entry <name> [--definition-fuel <steps>]\n  Invoke a comptime function and print its result."
+            "comptime <input.fl> --entry <name> [--definition-fuel <steps>]\n  Invoke a comptime function and print its result.\n  --fuel includes source phase preparation and execution (default 2100000)."
         }
         "interpret" => {
             "interpret <input.fl> [--entry <name>]\n  Reference-execute a runtime entry (default main) and print its value."

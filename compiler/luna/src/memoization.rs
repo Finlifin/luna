@@ -198,10 +198,19 @@ impl Invocation {
             }
         }
         let cacheable = closed && **result == Term::Primitive(nir::Primitive::Type);
+        let code_session = comptime_interpretor::CodeSession::new(source.package().clone());
         let protocols = if cacheable {
             parameters
                 .iter()
-                .map(|p| Protocol::prepare_in_source(source.clone(), items, &p.ty, budget))
+                .map(|p| {
+                    Protocol::prepare_in_source_with_session(
+                        source.clone(),
+                        items,
+                        &p.ty,
+                        budget,
+                        &code_session,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             vec![]
@@ -215,7 +224,6 @@ impl Invocation {
         } else {
             vec![]
         };
-        let code_session = comptime_interpretor::CodeSession::new(source.package().clone());
         Ok(Self {
             source,
             code_session,
@@ -298,7 +306,13 @@ impl Invocation {
             let mut prepared = types
                 .iter()
                 .map(|ty| {
-                    Protocol::prepare_in_source(self.source.clone(), &self.items, ty, self.budget)
+                    Protocol::prepare_in_source_with_session(
+                        self.source.clone(),
+                        &self.items,
+                        ty,
+                        self.budget,
+                        &self.code_session,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(Error::Protocol)?;

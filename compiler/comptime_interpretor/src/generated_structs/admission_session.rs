@@ -61,14 +61,12 @@ impl<'world> DefinitionAdmissionSession<'world> {
         solver: &'world BudgetedTypeSolver<'world>,
         budget: &mut Budget,
     ) -> Result<Self, Error> {
-        let reserved = *budget;
+        let mut reserved = *budget;
         budget.steps = 0;
         // Descriptors need declaration/layout admission, not a transitive
         // execution table. This VM is private and never invokes source code;
         // lacking proof evidence still rejects an unestablished formation.
-        let mut phase_allowance = reserved;
-        invocation_budget::charge_world_tables(package, &mut phase_allowance)?;
-        nir::phases::validate(package).map_err(Error::phase)?;
+        let inspection = invocation_budget::prepare_phase_inspection(package, &mut reserved)?;
         let mut vm = Interpreter::with_assumptions_and_index(
             package,
             &[],
@@ -77,6 +75,7 @@ impl<'world> DefinitionAdmissionSession<'world> {
             None,
             SourceDispatch::Admission,
         )?;
+        vm.phase_inspection = Some(inspection);
         vm.comptime_only = true;
         vm.type_solver = Some(TypeSolver::Budgeted(solver));
         budget.steps = vm.remaining_steps();

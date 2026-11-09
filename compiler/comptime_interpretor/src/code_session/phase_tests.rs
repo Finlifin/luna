@@ -56,6 +56,7 @@ fn fresh_session_vms_reuse_phase_declarations_and_recheck_each_expression() {
     for resolving in [false, true] {
         let mut session = CodeSession::new(source.clone());
         let mut cold_cost = 0;
+        let mut entry_cost = None;
         for (index, value) in [true, false, true].into_iter().enumerate() {
             let mut vm = if resolving {
                 Interpreter::for_comptime_resolving_in_session(
@@ -72,6 +73,7 @@ fn fresh_session_vms_reuse_phase_declarations_and_recheck_each_expression() {
                 Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
             }
             .unwrap();
+            let preparation_cost = Budget::default().steps - vm.remaining_steps();
             let before = vm.remaining_steps();
             assert_eq!(
                 vm.invoke_comptime_expression(&flag(value)).unwrap(),
@@ -79,13 +81,20 @@ fn fresh_session_vms_reuse_phase_declarations_and_recheck_each_expression() {
             );
             let cost = before - vm.remaining_steps();
             if index == 0 {
-                cold_cost = cost;
+                cold_cost = preparation_cost;
             } else {
                 assert!(
-                    cost < cold_cost,
+                    preparation_cost < cold_cost,
                     "fresh VMs must inherit only the source directory"
                 );
             }
+            if let Some(previous) = entry_cost {
+                assert_eq!(
+                    cost, previous,
+                    "the first body already has prepared metadata"
+                );
+            }
+            entry_cost = Some(cost);
             let target = &source.functions[99];
             let invalid = Expr {
                 kind: K::Call {
@@ -120,7 +129,7 @@ fn fresh_session_vms_reuse_phase_declarations_and_recheck_each_expression() {
 }
 
 #[test]
-fn borrowed_vm_keeps_local_phase_directory_without_caching_failed_preparation() {
+fn borrowed_vm_keeps_constructor_metadata_without_caching_expression_results() {
     let source = package();
     let mut vm = Interpreter::for_comptime(&source, Budget::default()).unwrap();
     vm.budget.steps = 1;
@@ -133,7 +142,7 @@ fn borrowed_vm_keeps_local_phase_directory_without_caching_failed_preparation() 
             .as_ref()
             .unwrap()
             .to_string()
-            .contains("(declarations pending)")
+            .contains("(declarations ready)")
     );
     vm.budget.steps = 100_000;
     assert_eq!(
@@ -146,5 +155,5 @@ fn borrowed_vm_keeps_local_phase_directory_without_caching_failed_preparation() 
         vm.invoke_comptime_expression(&flag(false)).unwrap(),
         Value::Bool(false)
     );
-    assert!(before - vm.remaining_steps() < cost);
+    assert_eq!(before - vm.remaining_steps(), cost);
 }

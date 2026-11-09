@@ -38,6 +38,66 @@ fn run(package: &Package, fuel: &mut usize) -> Result<BTreeSet<crate::Declaratio
 }
 
 #[test]
+fn package_and_detached_checks_share_only_declarations_and_one_allowance() {
+    let package = Package {
+        functions: vec![function(1, Phase::Comptime), function(2, Phase::Runtime)],
+        ..Default::default()
+    };
+    let mut fuel = 10_000;
+    let inspection = Inspection::new(&package);
+    inspection.check_package(&mut fuel).unwrap();
+    let cold = 10_000 - fuel;
+    for allowance in 0..cold {
+        assert_eq!(
+            Inspection::new(&package)
+                .check_package(&mut allowance.clone())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Budget,
+        );
+    }
+    let mut exact = cold;
+    Inspection::new(&package).check_package(&mut exact).unwrap();
+    assert_eq!(exact, 0);
+    fuel = 10_000;
+    inspection.check_package(&mut fuel).unwrap();
+    let warm = 10_000 - fuel;
+    assert!(warm > 1 && warm < cold);
+    assert_eq!(
+        inspection.check_package(&mut (warm - 1)).unwrap_err().kind,
+        ErrorKind::Budget
+    );
+    inspection.check_package(&mut warm.clone()).unwrap();
+    fuel = 10_000;
+    inspection.check(&flag(), &mut fuel).unwrap();
+    let entry = 10_000 - fuel;
+    assert!(entry < warm);
+    assert_eq!(
+        Inspection::new(&package)
+            .check(&flag(), &mut entry.clone())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Budget,
+    );
+
+    let mut invalid = package;
+    invalid.functions[1].body = Expr {
+        kind: K::ComptimeValue(Term::Symbol("wrong domain".into())),
+        ..flag()
+    };
+    let inspection = Inspection::new(&invalid);
+    // A valid detached body does not certify any declaration body.
+    inspection.check(&flag(), &mut 10_000).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            inspection.check_package(&mut 10_000).unwrap_err().kind,
+            ErrorKind::Invalid
+        );
+        inspection.check(&flag(), &mut entry.clone()).unwrap();
+    }
+}
+
+#[test]
 fn detached_inspection_shares_fuel_and_preserves_failure_categories() {
     let package = Package {
         functions: vec![function(1, Phase::Comptime)],
@@ -176,6 +236,11 @@ fn captured_values_do_not_receive_a_fresh_allowance_per_expression() {
         error.message,
         "captured comptime value validation budget exhausted"
     );
+    // Explicit caller fuel replaces the default standalone cap; it is neither
+    // split into fresh per-function allowances nor silently limited to it.
+    Inspection::new(&package)
+        .check_package(&mut 10_000_000)
+        .unwrap();
     let K::Block { statements, .. } = &mut package.functions[0].body.kind else {
         unreachable!()
     };

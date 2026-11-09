@@ -170,7 +170,7 @@ impl<'a> Interpreter<'a> {
                 positions
                     .as_ref()
                     .map(|index| index.phase_inspection.clone())
-                    .unwrap_or_else(|| nir::phases::ExpressionInspection::new(package)),
+                    .unwrap_or_else(|| nir::phases::Inspection::new(package)),
             ),
             reserved_source_declarations: Some(
                 positions

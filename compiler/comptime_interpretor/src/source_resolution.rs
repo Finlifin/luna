@@ -47,7 +47,7 @@ impl<'a> Interpreter<'a> {
     pub(super) fn prepare_resolving_source(
         package: &'a Package,
         resolvers: SourceResolvers<'a>,
-        reserved: Budget,
+        mut reserved: Budget,
     ) -> Result<Self, Error> {
         if !package.dispatch_instances.is_empty() {
             return Err(Error {
@@ -55,9 +55,7 @@ impl<'a> Interpreter<'a> {
                 source: None,
             });
         }
-        let mut phase_allowance = reserved;
-        invocation_budget::charge_world_tables(package, &mut phase_allowance)?;
-        nir::phases::validate(package).map_err(Error::phase)?;
+        let inspection = invocation_budget::prepare_phase_inspection(package, &mut reserved)?;
         let mut interpreter = Self::with_assumptions_and_index(
             package,
             &[],
@@ -66,6 +64,7 @@ impl<'a> Interpreter<'a> {
             None,
             SourceDispatch::Resolving(resolvers),
         )?;
+        interpreter.phase_inspection = Some(inspection);
         interpreter.comptime_only = true;
         Ok(interpreter)
     }

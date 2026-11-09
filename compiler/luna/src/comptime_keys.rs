@@ -90,6 +90,19 @@ impl Protocol {
         subject: &Term,
         budget: ptc::Budget,
     ) -> Result<Self, String> {
+        let session = comptime_interpretor::CodeSession::new(source.package().clone());
+        Self::prepare_in_source_with_session(source, items, subject, budget, &session)
+    }
+
+    /// Share source admission across sibling protocols and the enclosing call,
+    /// while retaining this binding's separate values and executable code.
+    pub(crate) fn prepare_in_source_with_session(
+        source: DeclarationSnapshot,
+        items: &LangItems,
+        subject: &Term,
+        budget: ptc::Budget,
+        session: &comptime_interpretor::CodeSession,
+    ) -> Result<Self, String> {
         let package = source.package();
         if !package.dispatch_instances.is_empty() {
             return Err(
@@ -146,7 +159,7 @@ impl Protocol {
         }
         Ok(Self {
             execution: Execution {
-                code: comptime_interpretor::CodeSession::new(source.package().clone()),
+                code: session.fork_for_source(source.package().clone()),
                 stats: Default::default(),
             },
             binding: Binding {

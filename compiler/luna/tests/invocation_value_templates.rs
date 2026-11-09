@@ -153,10 +153,27 @@ fn type_results_use_real_meta_key_protocols_with_comptime_value_inputs() {
         Default::default(),
     )
     .unwrap();
+    let mut phase_fuel = 1_000_000;
+    nir::phases::Inspection::new(&package)
+        .check_package(&mut phase_fuel)
+        .unwrap();
+    let phase_cost = 1_000_000 - phase_fuel;
+    assert!(
+        call.invoke(vec![Value::Bool(false)], &mut Context::new(phase_cost - 1))
+            .is_err()
+    );
+    assert_eq!(call.cached_results(), 0);
     for (flag, reused) in [(false, false), (true, false), (false, true), (true, true)] {
-        let outcome = call
-            .invoke(vec![Value::Bool(flag)], &mut Context::new(1_000_000))
-            .unwrap();
+        let mut budget = Context::new(1_000_000);
+        let outcome = call.invoke(vec![Value::Bool(flag)], &mut budget).unwrap();
+        if !flag && !reused {
+            let cost = 1_000_000 - budget.remaining();
+            assert!(cost >= phase_cost, "cold phase traversal must be paid");
+            assert!(
+                cost < 2 * phase_cost,
+                "key admission and invocation share source preparation"
+            );
+        }
         assert_eq!(
             *outcome.value,
             Value::Type(Term::Primitive(if flag {

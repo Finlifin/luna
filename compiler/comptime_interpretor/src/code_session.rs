@@ -1,5 +1,6 @@
 //! Immutable-world code reuse across independently budgeted invocations.
 use super::*;
+use std::sync::OnceLock;
 #[cfg(test)]
 mod phase_tests;
 #[cfg(test)]
@@ -11,8 +12,8 @@ mod scoped_tests;
 pub struct CodeSession {
     world: CodeWorld,
     graph_indexes: Option<Arc<iir_execution::GraphIndexes>>,
-    indexes: Option<Arc<declaration_index::SourceIndexes>>,
-    resolving_indexes: Option<Arc<declaration_index::SourceIndexes>>,
+    indexes: Arc<OnceLock<Arc<declaration_index::SourceIndexes>>>,
+    resolving_indexes: Arc<OnceLock<Arc<declaration_index::SourceIndexes>>>,
     compilation: comptime_compiler::CompilationSession,
     bytecode: bytecode::CodeCache,
     inputs: input_bodies::Cache,
@@ -29,8 +30,30 @@ impl CodeSession {
         Self {
             world: CodeWorld::Source(package),
             graph_indexes: None,
-            indexes: None,
-            resolving_indexes: None,
+            indexes: Default::default(),
+            resolving_indexes: Default::default(),
+            compilation: Default::default(),
+            bytecode: Default::default(),
+            inputs: Default::default(),
+            defaults: Default::default(),
+            contextual: Default::default(),
+            instances: Default::default(),
+        }
+    }
+
+    /// Start an independent code cache for a source consumer. Only completed
+    /// declaration preparation is shared, including preparation published after
+    /// this fork. A different source owner starts a completely fresh family.
+    /// Values, invocation premises and compiled-code state are never copied.
+    pub fn fork_for_source(&self, package: Arc<Package>) -> Self {
+        if !matches!(&self.world, CodeWorld::Source(source) if Arc::ptr_eq(source, &package)) {
+            return Self::new(package);
+        }
+        Self {
+            world: CodeWorld::Source(package),
+            graph_indexes: None,
+            indexes: self.indexes.clone(),
+            resolving_indexes: self.resolving_indexes.clone(),
             compilation: Default::default(),
             bytecode: Default::default(),
             inputs: Default::default(),
@@ -46,8 +69,8 @@ impl CodeSession {
         Self {
             world: CodeWorld::Graph(graph),
             graph_indexes: None,
-            indexes: None,
-            resolving_indexes: None,
+            indexes: Default::default(),
+            resolving_indexes: Default::default(),
             compilation: Default::default(),
             bytecode: Default::default(),
             inputs: Default::default(),
@@ -135,8 +158,8 @@ impl<'program> Interpreter<'program> {
         let reserved = *budget;
         budget.steps = 0;
         let mut vm =
-            Self::for_comptime_with_index(package, &[], reserved, session.indexes.clone())?;
-        vm.retain_source_indexes(&source, &mut session.indexes)?;
+            Self::for_comptime_with_index(package, &[], reserved, session.indexes.get().cloned())?;
+        vm.retain_source_indexes(&source, &session.indexes)?;
         budget.steps = vm.remaining_steps();
         Ok(vm)
     }
@@ -146,9 +169,9 @@ impl<'program> Interpreter<'program> {
     fn retain_source_indexes(
         &mut self,
         source: &Arc<Package>,
-        retained: &mut Option<Arc<declaration_index::SourceIndexes>>,
+        retained: &OnceLock<Arc<declaration_index::SourceIndexes>>,
     ) -> Result<(), Error> {
-        if retained.is_none() {
+        if retained.get().is_none() {
             self.charge_preparation(
                 source
                     .structs
@@ -161,7 +184,7 @@ impl<'program> Interpreter<'program> {
                 .as_ref()
                 .and_then(|inspection| inspection.retain_in(source.clone()))
                 .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
-            *retained = Some(Arc::new(declaration_index::SourceIndexes {
+            let _ = retained.set(Arc::new(declaration_index::SourceIndexes {
                 source: source.clone(),
                 phase_inspection,
                 reserved_declarations: self
@@ -219,7 +242,7 @@ impl<'program> Interpreter<'program> {
                 traits: self.trait_declarations.positions.clone(),
             }));
         }
-        let indexes = retained.as_ref().expect("completed source indexes");
+        let indexes = retained.get().expect("completed source indexes");
         self.structs = layout_catalog::Catalog::from_base(indexes.structs.clone());
         self.enums = layout_catalog::Catalog::from_base(indexes.enums.clone());
         self.phase_inspection = Some(indexes.phase_inspection.clone());
@@ -272,7 +295,7 @@ impl<'program> Interpreter<'program> {
         };
         let allowance = *budget;
         budget.steps = 0;
-        let mut vm = match &session.resolving_indexes {
+        let mut vm = match session.resolving_indexes.get() {
             Some(indexes) => {
                 let mut vm = Self::from_source_indexes(package, allowance, indexes.clone())?;
                 vm.comptime_only = true;
@@ -284,7 +307,7 @@ impl<'program> Interpreter<'program> {
             None => Self::prepare_resolving_source(package, resolvers, allowance)?,
         };
         vm.admit_resolving_scope(assumptions, parameters, value_parameters)?;
-        vm.retain_source_indexes(&source, &mut session.resolving_indexes)?;
+        vm.retain_source_indexes(&source, &session.resolving_indexes)?;
         budget.steps = vm.remaining_steps();
         Ok(vm)
     }
@@ -359,7 +382,7 @@ mod tests {
         let mut session = CodeSession::new(source.clone());
         Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
             .unwrap();
-        let evidence = session.indexes.clone().unwrap();
+        let evidence = session.indexes.get().cloned().unwrap();
         let vm = Interpreter::for_comptime_with_index(
             &source,
             std::slice::from_ref(&premise),
@@ -456,7 +479,7 @@ mod tests {
         let mut session = CodeSession::new(source.clone());
         Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
             .unwrap();
-        let evidence = session.indexes.clone().unwrap();
+        let evidence = session.indexes.get().cloned().unwrap();
         // Same declaration IDs and bodies, but an invalid parameter frame.
         let mut changed = source.as_ref().clone();
         changed.functions[0].defaults.push((0, body));
@@ -473,7 +496,7 @@ mod tests {
                     message: "invalid function parameter default slot",
                 }),
             );
-            assert!(failed.indexes.is_none());
+            assert!(failed.indexes.get().is_none());
             assert_eq!(
                 Interpreter::for_comptime_in_session(
                     &changed,
@@ -513,7 +536,7 @@ mod tests {
                 .unwrap();
         assert!(recovered.comptime_only);
         assert!(recovered.events().is_empty());
-        assert!(Arc::ptr_eq(&evidence, session.indexes.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(&evidence, session.indexes.get().unwrap()));
         assert!(Arc::ptr_eq(&source, &evidence.source));
         let premise = nir::program::TraitRequirement {
             interface: DeclarationId {
@@ -701,7 +724,7 @@ mod tests {
         );
         assert!(Arc::ptr_eq(
             &index,
-            &session.indexes.as_ref().unwrap().functions
+            &session.indexes.get().unwrap().functions
         ));
     }
     #[test]
@@ -776,11 +799,11 @@ mod tests {
                 .expect("catalog ownership also consumes work");
             assert_eq!(error.kind, ErrorKind::StepsExhausted);
             assert_eq!(budget.steps, 0);
-            assert!(session.indexes.is_none());
-            assert!(session.resolving_indexes.is_none());
+            assert!(session.indexes.get().is_none());
+            assert!(session.resolving_indexes.get().is_none());
             construct(&mut session, &mut Budget::default()).unwrap();
-            assert_eq!(session.indexes.is_some(), !resolving);
-            assert_eq!(session.resolving_indexes.is_some(), resolving);
+            assert_eq!(session.indexes.get().is_some(), !resolving);
+            assert_eq!(session.resolving_indexes.get().is_some(), resolving);
         }
     }
 }

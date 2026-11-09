@@ -5,6 +5,11 @@ mod help;
 mod subcommands;
 pub use help::{HELP, USAGE};
 
+// Source phase preparation used to have two unreported million-step allowances
+// in addition to the action's 100,000 steps. Make that default envelope explicit
+// as one total budget; an explicit --fuel remains the exact caller limit.
+pub const DEFAULT_COMPTIME_FUEL: u64 = 2_100_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emit {
     Hir,
@@ -967,7 +972,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
             protocols: copy_protocol.zip(drop_protocol),
             options,
             entry,
-            fuel: fuel.unwrap_or(100_000),
+            fuel: fuel.unwrap_or(DEFAULT_COMPTIME_FUEL),
         },
         None => Command::Compile(options),
     })
@@ -1168,6 +1173,12 @@ mod invocation_tests {
         assert_eq!(options.emit, Emit::Nir);
         assert_eq!(entry, "BuildType");
         assert_eq!(fuel, 123);
+        let Command::Invoke { fuel, .. } =
+            parse(["comptime", "input.fl", "--entry", "BuildType"].map(OsString::from)).unwrap()
+        else {
+            panic!("expected invocation")
+        };
+        assert_eq!(fuel, DEFAULT_COMPTIME_FUEL);
         for args in [
             vec!["a.fl", "--fuel", "20"],
             vec!["a.fl", "--invoke-comptime"],

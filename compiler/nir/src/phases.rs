@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod comptime_storage;
 mod declarations;
-mod expression_inspection;
-pub use expression_inspection::ExpressionInspection;
+mod inspection;
+pub use inspection::Inspection;
 #[cfg(test)]
 mod inspection_tests;
 use crate::member_types;
@@ -97,34 +97,7 @@ fn machine_arithmetic_functions_with_budgets(
     inspection_fuel: &mut usize,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
     let declarations = declarations::Declarations::new(package, declaration_fuel)?;
-    let mut context = PhaseContext::new(package, &declarations);
-    let mut machine_owners = BTreeSet::new();
-    // Validation borrows method contracts. Only actual specialization needs
-    // an owned summary, and that path has its own caller-supplied budget.
-    let programs = || {
-        package
-            .functions
-            .iter()
-            .chain(&package.quote_templates)
-            .map(|function| Ok(CallableProgram::function(function)))
-            .chain(
-                package
-                    .traits
-                    .iter()
-                    .flat_map(|t| &t.methods)
-                    .map(|method| {
-                        CallableProgram::method(method).map_err(|_| Error {
-                            kind: ErrorKind::Invalid,
-                            source: SourceRange { start: 0, end: 0 },
-                            message: "invalid trait program contract signature",
-                        })
-                    }),
-            )
-    };
-    for function in programs() {
-        context.inspect(function?, inspection_fuel, &mut machine_owners)?;
-    }
-    Ok(machine_owners)
+    PhaseContext::new(package, &declarations).check_package(inspection_fuel)
 }
 
 /// Check a closed invocation body against an already checked source world.
@@ -135,7 +108,7 @@ pub fn validate_comptime_expression(
     body: &Expr,
     fuel: &mut usize,
 ) -> Result<(), Error> {
-    ExpressionInspection::new(package).check(body, fuel)
+    Inspection::new(package).check(body, fuel)
 }
 
 struct PhaseContext<'a> {
@@ -150,6 +123,36 @@ impl<'a> PhaseContext<'a> {
             declarations,
             storage_queries: storage_cache::StorageQueries::new(package),
         }
+    }
+
+    fn check_package(&mut self, fuel: &mut usize) -> Result<BTreeSet<crate::DeclarationId>, Error> {
+        let mut machine_owners = BTreeSet::new();
+        // Method contracts remain borrowed; inspection grants no specialization
+        // or execution authority and never persists a body-validation receipt.
+        let programs = self
+            .package
+            .functions
+            .iter()
+            .chain(&self.package.quote_templates)
+            .map(|function| Ok(CallableProgram::function(function)))
+            .chain(
+                self.package
+                    .traits
+                    .iter()
+                    .flat_map(|t| &t.methods)
+                    .map(|method| {
+                        CallableProgram::method(method).map_err(|_| {
+                            Error::invalid(
+                                SourceRange { start: 0, end: 0 },
+                                "invalid trait program contract signature",
+                            )
+                        })
+                    }),
+            );
+        for function in programs {
+            self.inspect(function?, fuel, &mut machine_owners)?;
+        }
+        Ok(machine_owners)
     }
 
     fn check_comptime(&mut self, body: &Expr, fuel: &mut usize) -> Result<(), Error> {

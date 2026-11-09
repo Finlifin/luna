@@ -278,8 +278,8 @@ phase，不能因此在 comptime 执行 quote 函数。
 
 这一步只去掉可变临时入口并接通声明目录复用。源码捕获仍复制整包，VM 执行索引
 和 PhaseContext 在此阶段仍按次构造；携带作用域前提的 CodeSession 后续迁移见第 1.6 节，
-phase 声明目录复用见第 1.7 节。旧 package
-阶段检查仍有独立额度，整个准备过程的计费尚未统一。类型／资源正确性仍由上游
+phase 声明目录与源码构造预算的后续接线见第 1.7 节。
+类型／资源正确性仍由上游
 保证，不能把 phase 检查解释为完整程序验证；没有据此宣称整体性能提升。
 
 本阶段检查工作目录为 `/home/fin/luna`，均经
@@ -365,7 +365,7 @@ required／其他消费者的准备路径仍各自审计；不能据 staged 接�
 
 ### 1.7 Phase 声明目录与表达式检查分离
 
-`nir::phases::ExpressionInspection` 将声明目录绑定到精确不可变源码。目录持有参数域、
+`nir::phases::Inspection` 将声明目录绑定到精确不可变源码。目录持有参数域、
 函数阶段、参数框架位置、quote 身份和 trait 成员位置；成员合同及参数框架仍从所属
 package 取得，不复制成另一份合同，也不保留指向外部临时数组的引用。
 普通借用 VM 在自身生命周期内复用目录；CodeSession 的 SourceIndexes 保活原 Arc，
@@ -377,32 +377,69 @@ package 取得，不复制成另一份合同，也不保留指向外部临时数
 检查的声明元数据。完整目录可以在某个表达式失败后保留，这不等于保留失败表达式
 的执行许可。Display 使用 S-expression，显示 pending／ready 与所属源码，不输出地址。
 
+源码 VM 构造现在通过同一 Inspection 完成 package 阶段验证，并将已完成声明目录
+交给 VM；首次 detached 表达式不再重新检查整份声明元数据。普通闭合构造、带显式
+作用域的构造、resolver-backed 构造及 DefinitionAdmissionSession 均消费当前构造
+预算，随后建表和准入只能使用余额。原先复制一份预算做顶层长度预检、在独立固定
+额度内遍历全部主体、再恢复原预算继续构造的路径已删除。函数主体、默认值、合同及
+trait 方法使用同一份检查额度，不向每个 callable 发放新的额度。
+
+Inspection 自身只保存目录；`check_package` 每次遍历全部主体，不把一次 detached
+检查视为全包验证。CodeSession 仍只在 phase、建表与当前 scope 准入全部成功后
+发布 SourceIndexes；冷构造在 phase 中失败时不能留下可复用索引。已成功的精确
+源码索引可以免除后续构造的重复验证，当前表达式及调用权限仍按次检查。
+构造失败继续保留外层预算预留，成功才返还余额；没有借本次改动伪造失败的精确成本。
+
+显式计费暴露了缓存调用内部的重复冷构造：真实 sysroot 的 547 个函数在单次阶段检查
+消费 524,580 步，原先参数协议与函数执行各检查一遍，首次 Type 缓存调用共消费
+1,062,326 步（诊断测量 `/tmp/luna-tools-5lj3oj6v/stderr.log`，没有计作性能基准）。
+`CodeSession::fork_for_source` 现让同一精确 owner 的消费者共享只发布一次的完整
+源码准入槽；closed/resolving 槽保持分离。fork 时尚未准备的槽也能在成功发布后共享，
+但代码缓存、值准入 token、前提和局部 VM 状态各自独立。另一份同内容源码重新准备。
+memoized invocation 的参数 Eq／Hash 协议与主体执行使用这一共享族，包括后来建立
+的输入 schema；不能把缓存键的值准入结论传给函数或另一个协议。
+
+CLI comptime 的默认总 `--fuel` 改为 2,100,000，将此前两份各百万步的独立 phase
+上限和十万步 action 默认额度显式纳入一个总额度。显式 `--fuel` 不增加任何隐含
+补贴，其他 CLI action 和低层 VM 的默认值不因此改变。这个默认策略不承诺所有
+源码都能执行，也不解除预算失败；它避免默认公开入口在开始计入检查成本后无法
+处理已有完整 sysroot。help 与选项测试同步说明新边界。
+
 每次 `check` 都重新构造 PhaseContext、存储查询状态和 worklist，检查当前主体、签名、
 runtime/comptime 边界及 lexical unsafe。目录不缓存表达式结果、前提、unsafe 授权或
 程序验证结论。调用者仍负责类型和资源正确性；VM 的普通调用准入、执行帧和返回检查
 不变。测试检查热目录拒绝非法调用、低预算失败后恢复、精确 owner 生命周期、同号
 新世界隔离，以及 closed-table／resolving 两类 session 的真实生产入口。
 
-这消除了 detached 入口逐次重建声明目录的工作，未消除按表达式检查。完整 package
-阶段验证仍可单独建立目录，并沿用独立预算；整包捕获、所有准备阶段统一计费与跨编辑
-增量失效尚未完成。测试比较冷／热路径实际预算消费，不据此推断整体运行时间收益。
+这消除了 detached 入口逐次重建声明目录的工作，未消除按表达式检查。独立 NIR
+`validate`／machine-arithmetic 查询仍保留默认声明／主体额度，materialization 等
+非 VM 消费者尚未全部迁移。VM 建表中部分 metadata 检查也仍重复，整包捕获与跨编辑
+增量失效尚未完成；不能把这一预算接线称为全编译流程统一计费。测试比较冷／热路径
+实际预算消费，不据此推断整体运行时间收益。
 
-本阶段工作目录 `/home/fin/luna`，均通过
+本阶段工作目录 `/home/fin/luna`，最终经
 `python3 -B development/check.py --timeout 900 --` 执行并退出 0：
 
-- `test -p nir -p comptime_interpretor -p materialization --lib --no-fail-fast`：
-  42 + 516 + 30 项通过，`/tmp/luna-tools-2rn3dd7r/result.json`。
-- `test -p luna -p materialization --test clause_staged_constants
-  --test comptime_staged_values --test quote_functions --test staged_aggregate_contracts
-  --test builder_invocations --test generated_definitions --test prepared_invocations
-  --test invocation_value_templates --test key_code_sessions --test staged_invocation_reuse
-  --test scoped_dispatch_inputs --test library_protocols --no-fail-fast`：281 项通过，
-  `/tmp/luna-tools-id4yjzec/result.json`。含真实 sysroot 的 builder／公开库协议、
-  native 用例、quote、生成定义、作用域输入和连续 staged 求值。
+- `test -p nir -p comptime_interpretor -p materialization -p luna --lib
+  --test invocation_value_templates --test builder_invocations --test key_code_sessions
+  --test staged_invocation_reuse --test prepared_invocations --test subcommands --no-fail-fast`：
+  789 项通过，`/tmp/luna-tools-mft7pkib/result.json`。含逐预算切点、失败后恢复、
+  fork 的权限／代码隔离、同源目录共享及真实 sysroot 的公开 Type 缓存协议。
+  原有两个 Type 缓存用例保留百万步额度；新增检查要求冷调用付出整包检查成本，
+  且参数协议和主体合计不重复付出两份 phase 成本。
+- `test -p nir -p luna -p materialization -p comptime_interpretor --test phases
+  --test clause_staged_constants --test comptime_staged_values --test quote_functions
+  --test staged_aggregate_contracts --test generated_definitions --test scoped_dispatch_inputs
+  --test library_protocols --test instance_budget --test struct_admission_session --no-fail-fast`：
+  243 项通过，`/tmp/luna-tools-g4aszkal/result.json`。含 NIR 现有阶段规则、definition
+  准入、真实 sysroot 公开库协议及 native 用例、quote 和连续 staged 求值。
 
-共 869 项通过；11 个 Rust 文件 scoped rustfmt check 退出 0，
-`/tmp/luna-tools-0_c_4d3o/result.json`；`git diff --check` 通过。
-未运行全量回归或性能基准。正式 docs 与已有用户改动保持原样。
+最终去重 1,032 项通过；18 个 Rust 文件 scoped rustfmt check 退出 0，
+`/tmp/luna-tools-4wjvqzwx/result.json`；`git diff --check` 通过。
+初轮集成 `/tmp/luna-tools-36pby9ez/result.json` 退出 101，298 项通过、3 项因预算耗尽
+失败；通过同源准入共享和明确 CLI 默认总额度修复，没有减免 phase 工作或提高原有
+Type 缓存用例的额度。诊断用临时 probe 已移除。未运行全量回归或性能基准，正式
+`docs/` 和已有用户改动保持原样。
 
 ## 2. 目标物理结构
 

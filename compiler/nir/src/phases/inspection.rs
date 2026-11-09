@@ -1,4 +1,4 @@
-//! Share declaration positions without retaining per-expression permissions.
+//! Share declaration positions across package and detached body inspection.
 use super::{Error, Expr, Package, PhaseContext, declarations::Declarations};
 use std::sync::{Arc, OnceLock};
 
@@ -13,12 +13,12 @@ enum Source<'a> {
 /// nothing. Every body receives fresh traversal, storage and unsafe checks.
 /// This does not certify package typing, resource safety or arbitrary bodies.
 #[derive(Clone)]
-pub struct ExpressionInspection<'a> {
+pub struct Inspection<'a> {
     source: Source<'a>,
     declarations: Arc<OnceLock<Declarations>>,
 }
 
-impl<'a> ExpressionInspection<'a> {
+impl<'a> Inspection<'a> {
     pub fn new(package: &'a Package) -> Self {
         Self {
             source: Source::Borrowed(package),
@@ -35,17 +35,37 @@ impl<'a> ExpressionInspection<'a> {
 
     /// Transfer source lifetime responsibility only to its exact existing
     /// owner. Matching declaration IDs or equal package content is insufficient.
-    pub fn retain_in(&self, source: Arc<Package>) -> Option<ExpressionInspection<'static>> {
-        std::ptr::eq(self.package(), source.as_ref()).then(|| ExpressionInspection {
+    pub fn retain_in(&self, source: Arc<Package>) -> Option<Inspection<'static>> {
+        std::ptr::eq(self.package(), source.as_ref()).then(|| Inspection {
             source: Source::Owned(source),
             declarations: self.declarations.clone(),
         })
     }
 
     pub fn check(&self, body: &Expr, fuel: &mut usize) -> Result<(), Error> {
-        *fuel = fuel.checked_sub(1).ok_or_else(|| {
-            Error::budget(body.source, "phase declaration access budget exhausted")
-        })?;
+        let declarations = self.declarations(body.source, fuel)?;
+        PhaseContext::new(self.package(), declarations).check_comptime(body, fuel)
+    }
+
+    /// Inspect all declaration bodies, defaults and contracts using the same
+    /// allowance as metadata preparation. Completed metadata may be reused by
+    /// later detached bodies; a successful package check is not cached here.
+    pub fn check_package(
+        &self,
+        fuel: &mut usize,
+    ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
+        let declarations = self.declarations(super::SourceRange { start: 0, end: 0 }, fuel)?;
+        PhaseContext::new(self.package(), declarations).check_package(fuel)
+    }
+
+    fn declarations(
+        &self,
+        source: super::SourceRange,
+        fuel: &mut usize,
+    ) -> Result<&Declarations, Error> {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or_else(|| Error::budget(source, "phase declaration access budget exhausted"))?;
         let package = self.package();
         if self.declarations.get().is_none() {
             let declarations = Declarations::new(package, fuel)?;
@@ -53,16 +73,15 @@ impl<'a> ExpressionInspection<'a> {
             // This reader still pays for its work; no partial result is stored.
             let _ = self.declarations.set(declarations);
         }
-        let declarations = self.declarations.get().expect("completed phase directory");
-        PhaseContext::new(package, declarations).check_comptime(body, fuel)
+        Ok(self.declarations.get().expect("completed phase directory"))
     }
 }
 
-impl std::fmt::Display for ExpressionInspection<'_> {
+impl std::fmt::Display for Inspection<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(expression-inspection (declarations {}) (source {}))",
+            "(phase-inspection (declarations {}) (source {}))",
             if self.declarations.get().is_some() {
                 "ready"
             } else {
@@ -161,7 +180,7 @@ mod tests {
     #[test]
     fn shared_declaration_preparation_is_metered_and_failures_remain_local() {
         let source = source();
-        let inspection = ExpressionInspection::new(&source);
+        let inspection = Inspection::new(&source);
         let mut short = 2;
         assert_eq!(
             inspection.check(&flag(), &mut short).unwrap_err().kind,
@@ -197,7 +216,7 @@ mod tests {
         );
         assert!(inspection.declarations.get().is_some());
         inspection.check(&flag(), &mut warm_cost.clone()).unwrap();
-        let cold = ExpressionInspection::new(&source);
+        let cold = Inspection::new(&source);
         assert_eq!(
             cold.check(&flag(), &mut warm_cost.clone())
                 .unwrap_err()
@@ -213,9 +232,9 @@ mod tests {
         let weak = Arc::downgrade(&source);
         let body = call(&source.functions[0]);
         let retained = {
-            let inspection = ExpressionInspection::new(&source);
+            let inspection = Inspection::new(&source);
             let pending = inspection.to_string();
-            assert!(pending.starts_with("(expression-inspection (declarations pending)"));
+            assert!(pending.starts_with("(phase-inspection (declarations pending)"));
             assert!(pending.contains("\\\"name\\\"\\nnext"));
             inspection.check(&body, &mut 100_000).unwrap();
             let copied = Arc::new(source.as_ref().clone());
@@ -227,7 +246,7 @@ mod tests {
         changed.functions[0].body.kind = K::Local(changed.functions[0].parameters[0]);
         let changed = Arc::new(changed);
         assert!(retained.retain_in(changed.clone()).is_none());
-        let other = ExpressionInspection::new(&changed);
+        let other = Inspection::new(&changed);
         assert_eq!(
             other.check(&body, &mut 100_000).unwrap_err().message,
             "call parameter bindings differ from target declaration"
@@ -238,7 +257,7 @@ mod tests {
         assert!(
             retained
                 .to_string()
-                .starts_with("(expression-inspection (declarations ready)")
+                .starts_with("(phase-inspection (declarations ready)")
         );
         drop(retained);
         assert!(weak.upgrade().is_none());
@@ -253,7 +272,7 @@ mod tests {
             kind: K::UnsafeScope(Box::new(unsafe_call.clone())),
             ..flag()
         };
-        let inspection = ExpressionInspection::new(&source);
+        let inspection = Inspection::new(&source);
         inspection.check(&authorized, &mut 100_000).unwrap();
         assert_eq!(
             inspection.check(&unsafe_call, &mut 1000).unwrap_err().kind,
@@ -264,7 +283,7 @@ mod tests {
         changed.functions[0].is_unsafe = false;
         changed.functions[0].phase = FunctionPhase::Runtime;
         let runtime_call = call(&changed.functions[0]);
-        let other = ExpressionInspection::new(&changed);
+        let other = Inspection::new(&changed);
         assert_eq!(
             other
                 .check(&runtime_call, &mut 100_000)

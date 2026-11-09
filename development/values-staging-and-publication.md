@@ -1095,7 +1095,13 @@ runtime reference session 与 checked/native 清理构图也从所属来源复�
 详见[staged session 边界](world-storage-and-lifetimes.md#16-staged-vm-索引与当前调用权限分离)。
 detached phase 检查进一步从同源 owner 复用已完成的声明目录，每个表达式仍重新
 检查阶段和 unsafe 边界，详见[phase 目录边界](world-storage-and-lifetimes.md#17-phase-声明目录与表达式检查分离)。
-整包捕获、跨编辑索引与准备预算的统一仍未完成。
+源码 VM 的全包 phase 检查已消费同一次构造预算，并将目录交给首次表达式检查；
+闭合、按需解析和 definition builder 准入入口使用同一计费边界。整包捕获、跨编辑
+索引与非 VM 准备流程的预算统一仍未完成。
+
+同一 memoized invocation 的参数协议和主体执行现在从 CodeSession 派生独立代码
+session，共享精确来源的完整准入槽，避免每个协议重复冷验证整包。首次准备仍在
+当前调用额度内执行；失败不发布，当前值准入、前提和用户 Eq／Hash 结果不共享。
 
 
 每次操作仍构造新鲜 VM，安装原类型证明、方法／关联值和 Copy 证据服务，再检查本次

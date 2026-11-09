@@ -83,6 +83,104 @@ fn unavailable<T>(_: &Expr, _: &mut u64) -> Result<T, Error> {
 }
 
 #[test]
+fn source_forks_share_only_completed_admission_and_keep_code_and_permissions_local() {
+    let package = source();
+    let mut parent = CodeSession::new(package.clone());
+    let mut sibling = parent.fork_for_source(package.clone());
+    let solver = |_: &nir::program::TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    let services = || SourceResolvers {
+        types: &solver,
+        methods: &unavailable,
+        associated: &unavailable,
+    };
+    assert!(
+        Interpreter::for_comptime_resolving_in_scope_in_session(
+            &package,
+            &mut parent,
+            &[premise(999)],
+            &[],
+            &[],
+            services(),
+            &mut Budget::default()
+        )
+        .is_err()
+    );
+    assert!(sibling.resolving_indexes.get().is_none());
+    let mut vm = Interpreter::for_comptime_resolving_in_scope_in_session(
+        &package,
+        &mut parent,
+        &[premise(2)],
+        &[],
+        &[],
+        services(),
+        &mut Budget::default(),
+    )
+    .unwrap();
+    let first = vm
+        .with_code_session(&mut parent, |vm| vm.invoke(id(3), vec![]))
+        .unwrap();
+    assert_eq!(first, Value::Bool(true));
+    assert!(vm.bytecode_compilations() > 0);
+    assert!(Arc::ptr_eq(
+        parent.resolving_indexes.get().unwrap(),
+        sibling.resolving_indexes.get().unwrap()
+    ));
+    assert!(
+        sibling.indexes.get().is_none(),
+        "closed and resolving modes stay separate"
+    );
+
+    let mut without = Interpreter::for_comptime_resolving_in_session(
+        &package,
+        &mut sibling,
+        services(),
+        &mut Budget::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        without.invoke(id(3), vec![]).unwrap_err().kind,
+        ErrorKind::TypeContractUnresolved
+    );
+    let mut authorized = Interpreter::for_comptime_resolving_in_scope_in_session(
+        &package,
+        &mut sibling,
+        &[premise(2)],
+        &[],
+        &[],
+        services(),
+        &mut Budget::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        authorized
+            .with_code_session(&mut sibling, |vm| vm.invoke(id(3), vec![]))
+            .unwrap(),
+        Value::Bool(true)
+    );
+    assert!(
+        authorized.bytecode_compilations() > 0,
+        "the sibling did not inherit compiled code"
+    );
+
+    let copied = Arc::new(package.as_ref().clone());
+    let foreign = parent.fork_for_source(copied);
+    assert!(foreign.indexes.get().is_none());
+    assert!(foreign.resolving_indexes.get().is_none());
+    drop(parent);
+    drop(vm);
+    drop(without);
+    drop(authorized);
+    let survivor = Interpreter::for_comptime_resolving_in_session(
+        &package,
+        &mut sibling,
+        services(),
+        &mut Budget::default(),
+    )
+    .unwrap();
+    assert!(survivor.remaining_steps() > 0);
+}
+
+#[test]
 fn direct_source_entries_check_closed_capabilities_without_a_formation_receipt() {
     let package = source();
     let mode = std::cell::Cell::new(ContractOutcome::Unknown);
@@ -262,7 +360,7 @@ fn abstract_authority_is_fresh_and_failed_construction_cannot_publish_it() {
             ErrorKind::Type
         );
         assert_eq!(budget.steps, 0);
-        assert_eq!(selected.resolving_indexes.is_some(), warm);
+        assert_eq!(selected.resolving_indexes.get().is_some(), warm);
         let vm = Interpreter::for_comptime_resolving_in_session(
             &package,
             selected,

@@ -2,6 +2,24 @@
 use crate::{Budget, Error, ErrorKind, Interpreter};
 use nir::program::{Package, TraitRequirement};
 
+#[cfg(test)]
+mod phase_tests;
+
+/// Charge complete source phase validation to this constructor's allowance.
+/// The owner keeps only completed declaration metadata, never body permissions.
+pub(super) fn prepare_phase_inspection<'a>(
+    package: &'a Package,
+    budget: &mut Budget,
+) -> Result<nir::phases::Inspection<'a>, Error> {
+    let inspection = nir::phases::Inspection::new(package);
+    let before = usize::try_from(budget.steps).unwrap_or(usize::MAX);
+    let mut fuel = before;
+    let result = inspection.check_package(&mut fuel);
+    budget.steps -= (before - fuel) as u64;
+    result.map_err(Error::phase)?;
+    Ok(inspection)
+}
+
 /// Reserve top-level world traversal and indexing before allocating VM tables.
 /// Nested type, contract and substitution work keeps its separate existing cost.
 pub(super) fn charge_world_tables(package: &Package, budget: &mut Budget) -> Result<(), Error> {
@@ -305,38 +323,39 @@ mod tests {
     fn fresh_constructors_charge_opaque_metadata_and_do_not_publish_failures() {
         let package = opaque_package();
         let before = package.to_string();
-        let vm = Interpreter::for_comptime(
-            &package,
-            Budget {
+        for comptime in [false, true] {
+            let construct = |budget| {
+                if comptime {
+                    Interpreter::for_comptime(&package, budget)
+                } else {
+                    Interpreter::new(&package, budget)
+                }
+            };
+            let vm = construct(Budget {
                 steps: 10_000,
                 depth: 128,
-            },
-        )
-        .unwrap();
-        let cost = 10_000 - vm.remaining_steps();
-        assert!(cost > 100);
-        for steps in 0..cost {
-            for result in [
-                Interpreter::new(&package, Budget { steps, depth: 128 }),
-                Interpreter::for_comptime(&package, Budget { steps, depth: 128 }),
-            ] {
+            })
+            .unwrap();
+            let cost = 10_000 - vm.remaining_steps();
+            assert!(cost > 100);
+            for steps in 0..cost {
                 assert_eq!(
-                    result.err().expect("insufficient constructor fuel").kind,
+                    construct(Budget { steps, depth: 128 })
+                        .err()
+                        .expect("insufficient constructor fuel")
+                        .kind,
                     ErrorKind::StepsExhausted,
                     "steps {steps}"
                 );
             }
-        }
-        let vm = Interpreter::for_comptime(
-            &package,
-            Budget {
+            let vm = construct(Budget {
                 steps: cost,
                 depth: 128,
-            },
-        )
-        .unwrap();
-        assert_eq!(vm.remaining_steps(), 0);
-        assert!(vm.events().is_empty());
+            })
+            .unwrap();
+            assert_eq!(vm.remaining_steps(), 0);
+            assert!(vm.events().is_empty());
+        }
         assert_eq!(package.to_string(), before);
     }
 

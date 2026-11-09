@@ -177,7 +177,7 @@ pub(super) struct SourceIndexes {
     // Published only after successful comptime preparation. Owning the exact
     // snapshot makes the phase-validation evidence immune to address reuse.
     pub(super) source: Arc<Package>,
-    pub(super) phase_inspection: nir::phases::ExpressionInspection<'static>,
+    pub(super) phase_inspection: nir::phases::Inspection<'static>,
     pub(super) reserved_declarations: Arc<ReservedDeclarations>,
     pub(super) implementations: Arc<HashMap<(InterfaceInstance, Term), DeclarationId>>,
     pub(super) methods:
