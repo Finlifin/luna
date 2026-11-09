@@ -471,20 +471,22 @@ impl Interpreter<'_> {
                     .normal_forms
                     .get(head)
                     .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                let mut fuel = usize::try_from(self.budget.steps)
-                    .unwrap_or(usize::MAX)
-                    .min(100_000);
+                let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
                 let before = fuel;
                 let checked = self.with_admission_queries(|queries| {
                     metadata.check_arguments(arguments, &[], &mut fuel, queries)
                 });
                 self.budget.steps -= (before - fuel) as u64;
-                checked.map_err(|_| {
+                checked.map_err(|error| {
                     self.failure(
-                        if fuel == 0 {
-                            ErrorKind::StepsExhausted
-                        } else {
-                            ErrorKind::Type
+                        match error {
+                            nir::normal_forms::ApplicationError::Budget { .. } => {
+                                ErrorKind::StepsExhausted
+                            }
+                            nir::normal_forms::ApplicationError::Unresolved { .. } => {
+                                ErrorKind::TypeContractUnresolved
+                            }
+                            _ => ErrorKind::Type,
                         },
                         None,
                     )

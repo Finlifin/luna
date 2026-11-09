@@ -46,8 +46,8 @@ impl Interpreter<'_> {
             return Err(self.failure(ErrorKind::Type, None));
         }
         let work = if *ty == Term::Primitive(Primitive::Type) {
-            self.type_description_work(term)
-                .ok_or_else(|| self.failure(ErrorKind::Type, None))?
+            self.check_type_description(term, None)?;
+            0
         } else {
             match term {
                 Term::Integer(value) => value.bit_len().div_ceil(32),

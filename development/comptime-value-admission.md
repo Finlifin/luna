@@ -2654,6 +2654,54 @@ List 的 100,000 元素检查与普通 immutable representation 的展开工作�
 - 六个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-q0lzqn38/result.json`
   退出 0；git diff --check 通过。未执行全 workspace 或墙钟性能基准。
 
+### Type 描述检查与 NF 输入保留资源失败
+
+主动 Type 检查不再先用独立的 100,000 步 optional 观察器估算，再按成功结果收费。
+遍历实现移入 type_descriptions，描述观察、NF 输入域准备、名义布局与 callable
+查询共同使用调用者余额，成功和失败都扣回实际消费。Type 常量、NF 构造完成、
+Type 解码以及值形状中的 Type／Object 描述已经接入；观察保持被动，不执行用户
+函数，不展开 NF 头，也不替代后续 formation／capability 准入。
+
+描述自身的展开大小和深度仍受既有资源策略限制，但查询工作不再增大描述大小。
+超过表示大小、超过遍历深度、额度不足、缺失选择及非法描述分别保留错误原因。
+Type 常量遇到资源失败立即返回，不再通过选择另一个 Type 视图重新尝试。回归中
+一个很小的 NF 描述需要 150,000 步宿主查询；足额调用成功，额度不足返回
+StepsExhausted，而不是把它判断为大于 100,000 的类型表示。
+
+NIR Head.check_arguments 原先在两处收到 Budget 后强制将余额清零。现在 typed
+接口保留失败预约后尚未消费的额度；错误类别由 ApplicationError 承载。同步修正
+解释器 admit_type 的 NF 分支：删除私有查询上限，读取 Budget／Unresolved／其他
+错误，不再通过 `fuel == 0` 推断。其他生产调用者已核对，保留类型化错误或直接
+终止并格式化该错误。旧的 optional layout 适配器仍可在明确的兼容边界使用哨兵，
+不把它回流为 typed 接口的契约。
+
+剩余边界：旧 type_description_work／closed_type_description_work 调用者尚未全部
+迁移，包括部分不可变表示扫描、cleanup、反射及对象操作。它们共享此次提取的唯一
+遍历实现，通过显式兼容入口继续返回 Option；不能据此宣称整个 VM 已无 optional
+观察或所有资源限制都已有独立错误类别。NIR 普通 value admission 的递归上限仍
+属于其 Budget 错误，不是本节 Type 描述遍历的 DepthExhausted。
+
+证据（工作目录 `/home/fin/luna`）：
+
+- 提取及主动接线后的原解释器 lib 组：`/tmp/luna-tools-ko69xzkl/result.json`
+  退出 0，532 项通过。新增查询回归后，
+  `/tmp/luna-tools-ehvt563l/result.json` 退出 101：533 项通过，两个失败均为
+  Budget 被 Head.check_arguments 强制清零；错误类别和足额查询结果均符合预期。
+  随后修正 typed 边界和实际调用者，不删除失败余额断言。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib -p nir --test normal_inputs --test normal_callable_inputs --test value_admission
+  --no-fail-fast`：`/tmp/luna-tools-jixufim4/result.json` 退出 0，解释器 536、NIR
+  lib 50、三个输入组 37，共 623 项通过。包含主动 NF 准入的低额度失败、正余额
+  保留、足额重试及错误域拒绝；原 NIR 哨兵测试改为核对回调实际余额。
+- `test -p luna --test normal_input_plans --test contextual_input_costs
+  --test sysroot_preludes --test library_protocols --test ordinary_clause_collectors
+  --test deferred_associated_values --no-fail-fast`：
+  `/tmp/luna-tools-_se25934/result.json` 退出 0，98 项通过，1 项既有调用时 Type
+  producer 用例继续显式忽略。包含真实 sysroot、库协议、输入次序及线性规模回归。
+- 八个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-9k_xroi5/result.json`
+  退出 0，git diff --check 通过；作者已有四个 tracked 修改的 SHA-256 未变。
+  本阶段合计 721 项通过、1 项既有忽略；未运行全 workspace 或墙钟性能基准。
+
 ### Predicate shape：支持结论与资源失败分离
 
 程序谓词 shape 检查移入 NIR 的单一实现，两个入口均显式接收调用者 fuel，返回

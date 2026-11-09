@@ -328,11 +328,14 @@ fn nf_query_budget_errors_do_not_need_an_exhausted_fuel_sentinel() {
         arguments: vec![],
     };
     let mut fuel = 10000;
+    let mut query_balance = None;
     let error = with_queries(true, |queries| {
         // A host query may report its own budget exhaustion while the caller
         // still has fuel. The typed outcome, not a zero sentinel, is authority.
         let mut exhausted = |_: nir::CallableValueRef<'_>, _: &[Vec<Sort>], fuel: &mut usize| {
             assert!(*fuel > 0);
+            *fuel -= 7;
+            query_balance = Some(*fuel);
             Err(Error::Budget)
         };
         let mut local = DomainQueries {
@@ -345,7 +348,8 @@ fn nf_query_budget_errors_do_not_need_an_exhausted_fuel_sentinel() {
         descriptor.check_arguments(std::slice::from_ref(&input), &[], &mut fuel, &mut local)
     });
     assert_eq!(error, Err(ApplicationError::Budget { index: 0 }));
-    assert_eq!(fuel, 0);
+    assert_eq!(Some(fuel), query_balance);
+    assert!(fuel > 0 && fuel < 10000 - 7);
     with_queries(true, |queries| {
         descriptor
             .check_arguments(&[input], &[], &mut 10000, queries)

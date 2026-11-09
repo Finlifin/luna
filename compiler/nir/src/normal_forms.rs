@@ -519,6 +519,8 @@ impl Head {
     /// Check ordered NF inputs using the same receiving-world evidence service
     /// as ordinary values. This never executes the head or grants formation
     /// predicates; the caller retains those separate obligations.
+    /// Failed reservations preserve the remaining allowance; callers must use
+    /// the typed error rather than infer exhaustion from a zero balance.
     pub fn check_arguments(
         &self,
         arguments: &[Term],
@@ -581,7 +583,6 @@ impl Head {
                 })()
                 .map_err(|error| {
                     if matches!(error, crate::type_computations::Error::Budget) {
-                        remaining = 0;
                         return ApplicationError::Budget { index };
                     }
                     ApplicationError::InputDependency { index }
@@ -589,10 +590,7 @@ impl Head {
                 use crate::value_admission::{self, Error};
                 value_admission::validate(argument, &expected, frames, &mut remaining, queries)
                     .map_err(|error| match error {
-                        Error::Budget => {
-                            remaining = 0;
-                            ApplicationError::Budget { index }
-                        }
+                        Error::Budget => ApplicationError::Budget { index },
                         Error::Invalid(_) => ApplicationError::InputType { index },
                         Error::Unresolved(reason) => ApplicationError::Unresolved { index, reason },
                     })?;

@@ -15,6 +15,7 @@ mod closure_identity;
 mod code_values;
 mod immutable_cloning;
 mod literal_values;
+mod type_descriptions;
 mod value_types;
 pub use closure_identity::ClosureIdentity;
 mod scoped_restore;
@@ -3290,10 +3291,7 @@ impl<'a> Interpreter<'a> {
             sort: nir::Sort::Type,
             arguments,
         };
-        let work = self
-            .type_description_work(&ty)
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        self.integer_operation(Some(source), |budget| budget.consume(work))?;
+        self.check_type_description(&ty, Some(source))?;
         let Term::NormalForm {
             arguments: values, ..
         } = &ty
@@ -3744,16 +3742,20 @@ impl<'a> Interpreter<'a> {
         if !self.abstract_value_parameters.is_empty() {
             self.admit_type(ty, 0)?;
         }
-        if let Some(work) = self.type_description_work(ty) {
-            self.integer_operation(Some(source), |budget| budget.consume(work))?;
-            return Ok(Value::Type(ty.clone()));
+        match self.check_type_description(ty, Some(source)) {
+            Ok(()) => return Ok(Value::Type(ty.clone())),
+            Err(error)
+                if matches!(
+                    error.kind,
+                    ErrorKind::Type
+                        | ErrorKind::UnmaterializedDispatch
+                        | ErrorKind::TypeContractUnresolved
+                ) => {}
+            Err(error) => return Err(error),
         }
         let ty = self.selected_type_view(ty, Some(source))?;
-        let work = self
-            .type_description_work(&ty)
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        self.integer_operation(Some(source), |budget| budget.consume(work))?;
-        Ok(Value::Type(ty.clone()))
+        self.check_type_description(&ty, Some(source))?;
+        Ok(Value::Type(ty))
     }
 
     #[inline(never)]
@@ -6072,307 +6074,35 @@ fn scoped_term_value_work_with_callables_in<'signature>(
     ) -> Option<std::borrow::Cow<'signature, Term>>,
     target: Option<nir::target::TargetData>,
 ) -> Option<usize> {
-    // A leaf needs neither a heap traversal stack nor an empty shared frame.
-    // Allocate pending nodes only for children, and shared binder frames only
-    // when entering a function telescope. Logical work charges stay unchanged.
-    let mut pending = Vec::new();
-    let mut first = Some((ty, 0usize, None::<std::rc::Rc<Vec<&[nir::Parameter]>>>));
-    let mut work = 0usize;
-    while let Some((ty, depth, frames)) = first.take().or_else(|| pending.pop()) {
-        let frame_slice = frames.as_deref().map_or(&[][..], Vec::as_slice);
-        work += 1;
-        if depth > 128 || work > 100_000 {
-            return None;
-        }
-        // A concatenation is a pending list operation, not a completed
-        // value identity. Even literal-only parts must first pass through the
-        // canonical constructor/substitution that produces an immutable list value.
-        if matches!(ty, Term::ListConcat { .. }) {
-            return None;
-        }
-        let scalar_work = match ty {
-            Term::Integer(integer) => integer.bit_len().div_ceil(32),
-            Term::Float(value) => value
-                .digits()
-                .len()
-                .saturating_add(value.exponent().bit_len().div_ceil(32)),
-            Term::String(value) | Term::Symbol(value) => value.len(),
-            Term::BitVec(value) => value.words().len(),
-            Term::Record(fields) | Term::RecordValue(fields) => fields
-                .iter()
-                .try_fold(0usize, |sum, (name, _)| sum.checked_add(name.len()))?,
-            _ => 0,
-        };
-        work = work.checked_add(scalar_work)?;
-        if work > 100_000 {
-            return None;
-        }
-        let children = match ty {
-            Term::MethodValue(method) => 1usize
-                .saturating_add(method.interface.arguments.len())
-                .saturating_add(method.method_arguments.len()),
-            Term::OptionalValue { value, .. } => 1 + usize::from(value.is_some()),
-            Term::ErrorValue { .. } => 3,
-            Term::ListConcat { parts: fields, .. } | Term::NominalValue { fields, .. } => {
-                fields.len().saturating_add(1)
-            }
-            Term::Record(fields) | Term::RecordValue(fields) => fields.len(),
-            Term::Tuple(items)
-            | Term::ClosureContextValue(items)
-            | Term::TupleValue(items)
-            | Term::ClosureSnapshot {
-                arguments: items, ..
-            }
-            | Term::FunctionValue {
-                arguments: items, ..
-            }
-            | Term::Nominal {
-                arguments: items, ..
-            }
-            | Term::NormalForm {
-                arguments: items, ..
-            } => items.len(),
-            Term::ErrorResult { errors, .. } => errors.len().saturating_add(1),
-            Term::Computation { effects, .. } => {
-                work = work.checked_add(effects.len())?;
-                effects
-                    .iter()
-                    .try_fold(1usize, |sum, op| sum.checked_add(op.arguments.len()))?
-            }
-            Term::Closure { environment, .. } => environment.len().saturating_add(1),
-            Term::ContextualClosure { .. } => 2,
-            Term::Function { parameters, .. } => parameters.len().saturating_add(1),
-            Term::Optional(_)
-            | Term::Pointer(_)
-            | Term::ComptimeFunction(_)
-            | Term::NormalFormFunction(..)
-            | Term::UnsafeFunction(_) => 1,
-            _ => 0,
-        };
-        if work.saturating_add(pending.len()).saturating_add(children) > 100_000 {
-            return None;
-        }
-        if let Term::NormalForm {
-            head,
-            sort,
-            arguments,
-        } = ty
-        {
-            if let Some(metadata) = heads.head(head) {
-                if *sort != nir::Sort::Type {
-                    return None;
-                }
-                let mut fuel = 100_000usize.checked_sub(work)?;
-                let before = fuel;
-                let mut bound_domains = BTreeMap::new();
-                for (frame_depth, frame) in frame_slice.iter().rev().enumerate() {
-                    fuel = fuel.checked_sub(frame.len().saturating_add(1))?;
-                    for (index, parameter) in frame.iter().enumerate() {
-                        if parameter.sort != nir::Sort::ComptimeValue {
-                            continue;
-                        }
-                        nir::type_computations::charge_term(&parameter.ty, &mut fuel).ok()?;
-                        let mut domain = parameter.ty.clone();
-                        for _ in 0..frame_depth {
-                            nir::type_computations::charge_term(&domain, &mut fuel).ok()?;
-                            domain = domain.abstract_parameters(&[]).ok()?;
-                        }
-                        bound_domains.insert((frame_depth as u32, index), domain);
-                    }
-                }
-                metadata
-                    .check_arguments(
-                        arguments,
-                        &frame_slice
-                            .iter()
-                            .map(|frame| frame.iter().map(|p| p.sort).collect())
-                            .collect::<Vec<_>>(),
-                        &mut fuel,
-                        &mut nir::value_admission::DomainQueries {
-                            layout: &mut |ty, variant, fuel| {
-                                if variant.is_none() {
-                                    if let Some(fields) =
-                                        nir::normal_forms::registered_tuple_fields(ty, |id| {
-                                            heads.head(&id)
-                                        })
-                                    {
-                                        nir::type_computations::charge_term(ty, fuel)?;
-                                        return Ok(fields.to_vec());
-                                    }
-                                }
-                                nominal_fields(ty, variant, fuel).ok_or_else(|| {
-                                    if *fuel == 0 {
-                                        nir::value_admission::Error::Budget
-                                    } else {
-                                        "nominal representation evidence unavailable".into()
-                                    }
-                                })
-                            },
-                            declared: &mut |value, domain, _| {
-                                Ok(match value {
-                                    Term::Rigid {
-                                        declaration,
-                                        sort: nir::Sort::ComptimeValue,
-                                    } => value_parameters.get(declaration) == Some(domain),
-                                    Term::Bound {
-                                        depth,
-                                        index,
-                                        sort: nir::Sort::ComptimeValue,
-                                    } => bound_domains.get(&(*depth, *index)) == Some(domain),
-                                    _ => false,
-                                })
-                            },
-                            collection: &mut |domain, fuel| {
-                                let Term::NormalForm { head, .. } = domain else {
-                                    return Ok(None);
-                                };
-                                let Some(element) =
-                                    heads.head(head).and_then(|h| h.list_element(domain))
-                                else {
-                                    return Ok(None);
-                                };
-                                nir::type_computations::charge_term(element, fuel)?;
-                                Ok(Some(element.clone()))
-                            },
-                            callable: &mut |value, frames, fuel| match callable_signature(
-                                value, frames, fuel,
-                            ) {
-                                Some(signature) => Ok(Some(signature)),
-                                None if *fuel == 0 => Err(nir::value_admission::Error::Budget),
-                                None => Ok(None),
-                            },
-                            target,
-                        },
+    // Compatibility for callers that still request an optional work estimate.
+    // Only this adapter interprets the legacy optional-query fuel sentinel.
+    let mut fuel = 100_000;
+    type_descriptions::inspect(
+        ty,
+        heads,
+        parameters,
+        value_parameters,
+        |ty, variant, fuel| {
+            nominal_fields(ty, variant, fuel).ok_or_else(|| {
+                if *fuel == 0 {
+                    nir::NominalAdmissionError::Budget
+                } else {
+                    nir::NominalAdmissionError::Invalid(
+                        "nominal representation evidence unavailable".into(),
                     )
-                    .ok()?;
-                work = work.checked_add(before - fuel)?;
-            }
-        }
-        match ty {
-            Term::MethodValue(method) => {
-                pending.extend(method.terms().map(|term| (term, depth + 1, frames.clone())));
-            }
-            Term::OptionalValue { ty, value } => {
-                pending.push((ty, depth + 1, frames.clone()));
-                if let Some(value) = value {
-                    pending.push((value, depth + 1, frames.clone()));
                 }
-            }
-            Term::ErrorValue { ty, label, value } => {
-                pending.push((ty, depth + 1, frames.clone()));
-                if let Some(label) = label {
-                    pending.push((label, depth + 1, frames.clone()));
-                }
-                pending.push((value, depth + 1, frames.clone()));
-            }
-            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
-                pending.push((ty, depth + 1, frames.clone()));
-                pending.extend(
-                    fields
-                        .iter()
-                        .map(|field| (field, depth + 1, frames.clone())),
-                );
-            }
-            Term::Record(fields) | Term::RecordValue(fields) => {
-                pending.extend(fields.iter().map(|(_, ty)| (ty, depth + 1, frames.clone())));
-            }
-            Term::Rigid {
-                declaration,
-                sort: nir::Sort::Type,
-            } if parameters.contains(declaration) => {}
-            Term::Rigid {
-                declaration,
-                sort: nir::Sort::ComptimeValue,
-            } if value_parameters.contains_key(declaration) => {}
-            Term::AssociatedType { .. }
-            | Term::Rigid { .. }
-            | Term::Runtime(_)
-            | Term::Value { .. }
-            | Term::Hole { .. } => {
-                return None;
-            }
-            Term::Tuple(items)
-            | Term::ClosureContextValue(items)
-            | Term::TupleValue(items)
-            | Term::ClosureSnapshot {
-                arguments: items, ..
-            }
-            | Term::FunctionValue {
-                arguments: items, ..
-            }
-            | Term::Nominal {
-                arguments: items, ..
-            }
-            | Term::NormalForm {
-                arguments: items, ..
-            } => {
-                pending.extend(items.iter().map(|t| (t, depth + 1, frames.clone())));
-            }
-            Term::ErrorResult { errors, result } => {
-                pending.push((result, depth + 1, frames.clone()));
-                pending.extend(errors.iter().map(|ty| (ty, depth + 1, frames.clone())));
-            }
-            Term::Computation { effects, result } => {
-                pending.push((result, depth + 1, frames.clone()));
-                for operation in effects {
-                    pending.extend(
-                        operation
-                            .arguments
-                            .iter()
-                            .map(|t| (t, depth + 1, frames.clone())),
-                    );
-                }
-            }
-            Term::Closure {
-                environment,
-                signature,
-            } => {
-                pending.extend(environment.iter().map(|t| (t, depth + 1, frames.clone())));
-                pending.push((signature, depth + 1, frames.clone()));
-            }
-            Term::ContextualClosure { context, signature } => {
-                pending.push((context, depth + 1, frames.clone()));
-                pending.push((signature, depth + 1, frames.clone()));
-            }
-            Term::Optional(inner)
-            | Term::Pointer(inner)
-            | Term::ComptimeFunction(inner)
-            | Term::NormalFormFunction(inner, _)
-            | Term::UnsafeFunction(inner) => pending.push((inner, depth + 1, frames.clone())),
-            Term::Function { parameters, result } => {
-                work = work.checked_add(frame_slice.len().saturating_add(1))?;
-                if work > 100_000 {
-                    return None;
-                }
-                let mut nested = frame_slice.to_vec();
-                nested.push(parameters);
-                let frames = Some(std::rc::Rc::new(nested));
-                pending.extend(
-                    parameters
-                        .iter()
-                        .map(|p| (&p.ty, depth + 1, frames.clone())),
-                );
-                pending.push((result, depth + 1, frames.clone()));
-            }
-            Term::Primitive(_)
-            | Term::ClosureContextType
-            | Term::Bound { .. }
-            | Term::Unit
-            | Term::Bool(_)
-            | Term::Char(_)
-            | Term::BitVec(_)
-            | Term::Float16(_)
-            | Term::BFloat16(_)
-            | Term::Float32(_)
-            | Term::Float64(_)
-            | Term::String(_)
-            | Term::Symbol(_)
-            | Term::Integer(_)
-            | Term::Float(_) => {}
-        }
-    }
-    ty.check_scope(&[]).ok()?;
-    Some(work)
+            })
+        },
+        |value, frames, fuel| match callable_signature(value, frames, fuel) {
+            Some(signature) => Ok(Some(signature)),
+            None if *fuel == 0 => Err(nir::NominalAdmissionError::Budget),
+            None => Ok(None),
+        },
+        target,
+        &mut fuel,
+    )
+    .ok()?;
+    Some(100_000 - fuel)
 }
 
 #[cfg(test)]

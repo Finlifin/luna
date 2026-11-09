@@ -460,7 +460,9 @@ impl Interpreter<'_> {
                 self.comptime_only
                     && object.entries().iter().all(|entry| {
                         let typed = entry.value();
-                        self.type_description_work(&typed.ty).is_some()
+                        checks
+                            .observe(|fuel| self.inspect_type_description(&typed.ty, fuel))
+                            .is_some()
                             && self.has_type_at(&typed.value, &typed.ty, depth + 1, checks)
                     })
             }
@@ -495,9 +497,9 @@ impl Interpreter<'_> {
             (Value::TypeParameter(id), Term::Primitive(Primitive::Type)) => {
                 self.abstract_type_parameters.contains(id)
             }
-            (Value::Type(value), Term::Primitive(Primitive::Type)) => {
-                self.type_description_work(value).is_some()
-            }
+            (Value::Type(value), Term::Primitive(Primitive::Type)) => checks
+                .observe(|fuel| self.inspect_type_description(value, fuel))
+                .is_some(),
             (Value::Float(_), Term::Primitive(Primitive::Float))
             | (Value::Integer(_), Term::Primitive(Primitive::Integer))
             | (Value::Float16(_), Term::Primitive(Primitive::F16))
