@@ -438,6 +438,45 @@ fn identical_ids_in_changed_sources_do_not_share_associated_or_type_authority() 
 }
 
 #[test]
+fn explicit_directory_preparation_is_atomic_and_shared_with_invocation_queries() {
+    use std::sync::Arc;
+    let (package, method, _, _) = mixed_fixture();
+    let context = Context::from_package(&package).unwrap();
+    let snapshot = DeclarationSnapshot::new(Arc::new(package));
+    for allowance in [0, 1] {
+        let mut budget = Budget {
+            steps: allowance,
+            ..Default::default()
+        };
+        assert!(matches!(
+            snapshot.prepare(&mut budget),
+            Err(nir::NominalAdmissionError::Budget)
+        ));
+        assert!(snapshot.to_string().ends_with("(metadata pending))"));
+    }
+    let mut budget = Budget::default();
+    snapshot.prepare(&mut budget).unwrap();
+    assert!(budget.steps < Budget::default().steps);
+    let mut empty = Budget {
+        steps: 0,
+        ..Default::default()
+    };
+    snapshot.prepare(&mut empty).unwrap();
+    let proof = snapshot.capabilities(&context, &[], &mut empty).unwrap();
+    let queries =
+        SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&snapshot), &context, &[]);
+    assert_eq!(
+        queries.resolve(&method, &mut 0).unwrap_err().kind,
+        ErrorKind::StepsExhausted
+    );
+    assert_eq!(queries.resolve(&method, &mut 100_000).unwrap().body, id(6));
+    assert!(std::ptr::eq(
+        proof.index,
+        queries.world.borrow().as_ref().unwrap().index()
+    ));
+}
+
+#[test]
 fn retained_snapshots_share_metadata_across_fresh_invocation_scopes() {
     use comptime_interpretor::ContractOutcome;
     use std::sync::Arc;

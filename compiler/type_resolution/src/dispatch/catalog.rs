@@ -25,6 +25,12 @@ impl DeclarationSnapshot {
         &self.0.package
     }
 
+    /// Complete the immutable directory before publishing a prepared owner.
+    /// Failure leaves the snapshot unprepared and permits a later retry.
+    pub fn prepare(&self, budget: &mut Budget) -> Result<(), AdmissionError> {
+        self.ensure_metadata(budget).map(|_| ())
+    }
+
     /// Borrow one source-bound implementation view. Premises stay with the
     /// caller and never enter the retained directory.
     pub fn capabilities<'a>(

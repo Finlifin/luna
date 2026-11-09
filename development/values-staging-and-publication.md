@@ -1085,8 +1085,10 @@ invocation、缓存 invocation、键方法使用同一个 demand method resolver
 同一次 invocation 的类型证明、方法及关联项查询使用同一份惰性构造的声明索引。
 公开 invocation 的额外索引已删除。公开预备调用、缓存调用及 Eq／Hash 协议进一步
 从[保活源码的 owner](world-storage-and-lifetimes.md#12-保活源码的共享声明目录)复用跨调用
-的声明目录；缓存键准入与调用不再各存一份索引。required 发布器、资源 world 与
-可变 staged scratch 尚待迁移，跨编辑索引和统一准备预算仍未完成。
+的声明目录；缓存键准入与调用不再各存一份索引。required 发布器证明、实际调用
+与其资源权限 owner 也已迁移；执行与资源源码仍分别拥有目录。luna driver 的独立
+资源 ProtocolContext 和可变 staged scratch 尚待迁移，跨编辑索引和统一准备预算
+仍未完成。
 
 
 每次操作仍构造新鲜 VM，安装原类型证明、方法／关联值和 Copy 证据服务，再检查本次

@@ -2,6 +2,7 @@
 //! owned preparation result, not a Type or an inference-variable snapshot.
 use super::restore::{restore_required_packet, restore_required_type_input};
 use super::*;
+use crate::materialization::{DeclarationSnapshot, DeclarationSource};
 use comptime_interpretor::InvocationValue;
 use std::sync::Arc;
 mod inputs;
@@ -9,16 +10,24 @@ mod inputs;
 /// Own the declarations and their derived index together. Once published into
 /// a preparation, this world is immutable; invocation state lives elsewhere.
 pub(super) struct RequiredWorld {
-    package: n::Package,
-    implementation_index: crate::implementation::Index,
+    source: DeclarationSnapshot,
 }
 impl RequiredWorld {
     pub(super) fn new(package: n::Package, span: Span) -> Result<Arc<Self>, Error> {
-        let implementation_index = implementation_index(&package, span)?;
-        Ok(Arc::new(Self {
-            package,
-            implementation_index,
-        }))
+        let source = DeclarationSnapshot::new(Arc::new(package));
+        source
+            .prepare(&mut crate::ptc::Budget::default())
+            .map_err(|failure| {
+                error(
+                    span,
+                    format!("required comptime declaration directory: {failure}"),
+                )
+            })?;
+        Ok(Arc::new(Self { source }))
+    }
+
+    fn package(&self) -> &n::Package {
+        self.source.package()
     }
 
     fn capabilities<'a>(
@@ -26,13 +35,16 @@ impl RequiredWorld {
         assumptions: &'a [n::TraitRequirement],
         context: &'a crate::ptc::Context,
     ) -> crate::capabilities::World<'a> {
-        crate::capabilities::World {
-            index: &self.implementation_index,
-            implementations: &self.package.implementations,
-            traits: &self.package.traits,
-            assumptions,
-            context,
-        }
+        self.source
+            .capabilities(
+                context,
+                assumptions,
+                &mut crate::ptc::Budget {
+                    steps: 0,
+                    ..Default::default()
+                },
+            )
+            .expect("RequiredWorld constructor completed the declaration directory")
     }
 
     fn solve(
@@ -80,7 +92,7 @@ pub(in crate::program) struct PreparedRequired {
 
 impl PreparedRequired {
     pub(in crate::program) fn definition_identity_cursor(&self) -> u32 {
-        self.world.package.definition_identity_cursor
+        self.world.package().definition_identity_cursor
     }
 
     /// Observe the carried invocation inputs and code without consulting a
@@ -116,7 +128,7 @@ impl PreparedRequired {
         // The preparation has already selected its callable closure. Inspect
         // the contracts/defaults carried with those functions as well as their
         // signatures and bodies; do not scan the surrounding declaration world.
-        for function in &self.world.package.functions {
+        for function in &self.world.package().functions {
             if !input_observation::function(function, steps, span)?.is_disjoint(&declarations) {
                 return Ok(true);
             }
@@ -219,7 +231,7 @@ impl PreparedRequired {
             world.solve(&assumptions, &context, predicate, fuel)
         };
         let publisher = crate::definitions::AllocatedDefinitionPublisher::new_with_type_solver(
-            &world.package,
+            world.package(),
             package_identity,
             *next_identity,
             usize::MAX,
@@ -252,7 +264,7 @@ impl PreparedRequired {
         builder: Option<&dyn crate::definitions::StructBuildService>,
     ) -> Result<(Value, Term), Error> {
         let world = Arc::clone(&self.world);
-        let package = &world.package;
+        let package = world.package();
         let build = |request: &comptime_interpretor::StructBuildRequest, fuel: &mut u64| {
             builder
                 .expect("configured builder service")
@@ -295,8 +307,8 @@ impl PreparedRequired {
             }
             Some(context)
         };
-        let source_queries = crate::materialization::SourceInvocationQueries::new(
-            package,
+        let source_queries = crate::materialization::SourceInvocationQueries::in_source(
+            DeclarationSource::Snapshot(&world.source),
             invocation_type_context,
             &invocation_assumptions,
         );
@@ -335,7 +347,7 @@ impl PreparedRequired {
             let before = fuel;
             let world = resources.capabilities(&invocation_assumptions, invocation_type_context);
             let evidence = crate::verification::copy::acquire(
-                &resources.package,
+                resources.package(),
                 &world,
                 *copy,
                 *drop,
@@ -532,14 +544,14 @@ impl std::fmt::Display for PreparedRequired {
         }
         write!(
             f,
-            ") (in-signature {}) (context {}) (implementation-index {}) (program {})",
-            self.in_signature, self.context, self.world.implementation_index, self.world.package
+            ") (in-signature {}) (context {}) (source {})",
+            self.in_signature, self.context, self.world.source
         )?;
         if let Some((copy, drop, world)) = &self.copy_authority {
             write!(
                 f,
-                " (copy-authority (copy {copy}) (drop {drop}) (implementation-index {}) (program {}))",
-                world.implementation_index, world.package
+                " (copy-authority (copy {copy}) (drop {drop}) (source {}))",
+                world.source
             )?;
         }
         write!(f, ")")
@@ -551,10 +563,11 @@ mod tests {
     use super::*;
 
     impl PreparedRequired {
-        fn package_mut(&mut self) -> &mut n::Package {
-            &mut Arc::get_mut(&mut self.world)
-                .expect("unique test fixture")
-                .package
+        fn edit_package(&mut self, edit: impl FnOnce(&mut n::Package)) {
+            assert_eq!(Arc::strong_count(&self.world), 1, "unique test fixture");
+            let mut package = self.world.package().clone();
+            edit(&mut package);
+            self.world = RequiredWorld::new(package, Span::default()).unwrap();
         }
     }
 
@@ -623,24 +636,26 @@ mod tests {
             owner: 11,
             index: 0,
         };
-        let function = &mut prepared.package_mut().functions[0];
-        function.parameters = vec![binding];
-        function.signature = Term::Function {
-            parameters: vec![nir::Parameter {
-                sort: Sort::ComptimeValue,
-                ty: p(P::Bool),
-            }],
-            result: Box::new(p(P::Bool)),
-        };
-        function.body.kind = K::Local(binding);
+        prepared.edit_package(|package| {
+            let function = &mut package.functions[0];
+            function.parameters = vec![binding];
+            function.signature = Term::Function {
+                parameters: vec![nir::Parameter {
+                    sort: Sort::ComptimeValue,
+                    ty: p(P::Bool),
+                }],
+                result: Box::new(p(P::Bool)),
+            };
+            function.body.kind = K::Local(binding);
+        });
         prepared.inputs = vec![(binding, p(P::Bool), None)];
         let owner = Arc::downgrade(&prepared.world);
         let mut first = prepared.fork();
         let mut second = prepared.fork();
         assert!(Arc::ptr_eq(&prepared.world, &first.world));
         assert!(std::ptr::eq(
-            &first.world.implementation_index,
-            &second.world.implementation_index
+            first.world.capabilities(&[], &first.context).index,
+            second.world.capabilities(&[], &second.context).index
         ));
         assert!(
             first
@@ -674,11 +689,109 @@ mod tests {
     }
 
     #[test]
+    fn prepared_invocations_reuse_the_directory_without_reusing_proof_authority() {
+        use comptime_interpretor::ContractOutcome;
+        for type_result in [false, true] {
+            let mut prepared = literal_preparation(type_result);
+            prepared.edit_package(|package| {
+                let prototype = package.functions[0].clone();
+                for local in 100..2148 {
+                    let mut function = prototype.clone();
+                    function.declaration.local = local;
+                    package.functions.push(function);
+                }
+            });
+            // VM execution indexes are still prepared per invocation. Measure
+            // that independent cost before adding a declaration proof demand.
+            let mut baseline = 100_000;
+            prepared
+                .fork()
+                .invoke(&mut baseline, Span::default())
+                .unwrap();
+            let allowance = 100_000 - baseline + 1000;
+            prepared.edit_package(|package| {
+                package.functions[0].requirements =
+                    vec![n::TypePredicate::Equal(p(P::Bool), p(P::Bool))];
+            });
+            let source = DeclarationSource::Snapshot(&prepared.world.source);
+            let context = &prepared.context;
+            // A fresh scope only retains the completed directory. Rebuilding
+            // this declaration set cannot fit within the same allowance.
+            let scope = source
+                .world(
+                    &mut crate::ptc::Budget {
+                        steps: 1,
+                        ..Default::default()
+                    },
+                    Some((context, &[])),
+                )
+                .unwrap();
+            assert!(std::ptr::eq(
+                scope.index(),
+                prepared.world.capabilities(&[], context).index
+            ));
+            assert!(
+                DeclarationSource::Borrowed(prepared.world.package())
+                    .world(
+                        &mut crate::ptc::Budget {
+                            steps: 1000,
+                            ..Default::default()
+                        },
+                        Some((context, &[])),
+                    )
+                    .is_err()
+            );
+
+            let bound = Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: Sort::Type,
+            };
+            let predicate = n::TypePredicate::Equal(bound.clone(), p(P::Bool));
+            let mut with_premise = context.theory_in_scope(vec![vec![Sort::Type]]);
+            with_premise.assume(crate::ptc::Formula::equal(bound, p(P::Bool)));
+            let queries =
+                crate::materialization::SourceInvocationQueries::in_source(source, context, &[]);
+            for _ in 0..2 {
+                assert_eq!(
+                    prepared
+                        .world
+                        .solve(&[], &with_premise, &predicate, &mut 100_000),
+                    ContractOutcome::Satisfied
+                );
+                assert_eq!(
+                    queries.check(&predicate, crate::ptc::Budget::default(), &mut 100_000),
+                    ContractOutcome::Unknown
+                );
+            }
+            drop(queries);
+            drop(scope);
+            assert!(prepared.fork().invoke(&mut 0, Span::default()).is_err());
+            for _ in 0..2 {
+                let mut remaining = allowance;
+                let actual = prepared
+                    .fork()
+                    .invoke(&mut remaining, Span::default())
+                    .unwrap();
+                let expected = if type_result {
+                    Value::Type(p(P::U8))
+                } else {
+                    Value::Bool(true)
+                };
+                assert_eq!(actual.0, expected);
+                assert!(remaining < allowance);
+            }
+        }
+    }
+
+    #[test]
     fn prepared_worlds_keep_same_numbered_declarations_separate() {
         let span = Span::default();
         let first = literal_preparation(false);
         let mut second = literal_preparation(false);
-        second.package_mut().functions[0].body.kind = K::Literal(n::Literal::Bool(false));
+        second.edit_package(|package| {
+            package.functions[0].body.kind = K::Literal(n::Literal::Bool(false));
+        });
         assert_eq!(first.entry, second.entry);
         assert!(!Arc::ptr_eq(&first.world, &second.world));
         for _ in 0..3 {
@@ -702,7 +815,7 @@ mod tests {
         let drop = id(31);
         let subject = Term::Record(vec![("flag".into(), p(P::Bool))]);
         let mut prepared = literal_preparation(false);
-        let mut package = prepared.world.package.clone();
+        let mut package = prepared.world.package().clone();
         package.traits.push(n::Trait {
             declaration: copy,
             self_parameter: id(32),
@@ -799,7 +912,7 @@ mod tests {
         ));
         let dump = prepared.to_string();
         assert!(dump.contains(&format!(
-            "(copy-authority (copy {copy}) (drop {drop}) (implementation-index"
+            "(copy-authority (copy {copy}) (drop {drop}) (source (declaration-snapshot"
         )));
         assert_eq!(dump, prepared.to_string());
         assert_eq!(
@@ -870,40 +983,50 @@ mod tests {
                     interface_arguments: vec![term],
                 })
             },
-            |p, term| p.package_mut().functions[0].signature = term,
-            |p, term| p.package_mut().functions[0].body.kind = K::StagedValue(term),
+            |p, term| p.edit_package(|package| package.functions[0].signature = term),
             |p, term| {
-                p.package_mut().functions[0]
-                    .requirements
-                    .push(n::TypePredicate::Not(Box::new(n::TypePredicate::Equal(
-                        term,
-                        Term::Primitive(P::Bool),
-                    ))))
+                p.edit_package(|package| package.functions[0].body.kind = K::StagedValue(term))
+            },
+            |p, term| {
+                p.edit_package(|package| {
+                    package.functions[0]
+                        .requirements
+                        .push(n::TypePredicate::Not(Box::new(n::TypePredicate::Equal(
+                            term,
+                            Term::Primitive(P::Bool),
+                        ))))
+                })
             },
             |p, term| {
                 let entry = p.entry;
-                p.package_mut().functions[0]
-                    .capabilities
-                    .push(n::TraitRequirement {
+                p.edit_package(|package| {
+                    package.functions[0].capabilities.push(n::TraitRequirement {
                         subject: term,
                         interface: entry,
                         interface_arguments: vec![],
                     })
+                });
             },
             |p, term| {
-                let mut predicate = p.package_mut().functions[0].body.clone();
-                predicate.kind = K::TypeValue(term);
-                p.package_mut().functions[0].preconditions.push(predicate);
+                p.edit_package(|package| {
+                    let mut predicate = package.functions[0].body.clone();
+                    predicate.kind = K::TypeValue(term);
+                    package.functions[0].preconditions.push(predicate);
+                })
             },
             |p, term| {
-                let mut predicate = p.package_mut().functions[0].body.clone();
-                predicate.kind = K::TypeValue(term);
-                p.package_mut().functions[0].postconditions.push(predicate);
+                p.edit_package(|package| {
+                    let mut predicate = package.functions[0].body.clone();
+                    predicate.kind = K::TypeValue(term);
+                    package.functions[0].postconditions.push(predicate);
+                })
             },
             |p, term| {
-                let mut default = p.package_mut().functions[0].body.clone();
-                default.kind = K::TypeValue(term);
-                p.package_mut().functions[0].defaults.push((0, default));
+                p.edit_package(|package| {
+                    let mut default = package.functions[0].body.clone();
+                    default.kind = K::TypeValue(term);
+                    package.functions[0].defaults.push((0, default));
+                })
             },
         ];
         for (index, place) in placements.iter().enumerate() {
@@ -939,12 +1062,14 @@ mod tests {
             sort: Sort::Type,
         });
         prepared.scoped_arguments.push(p(P::U8));
-        let function = &mut prepared.package_mut().functions[0];
-        function.type_parameters.push(input);
-        function.capabilities.push(n::TraitRequirement {
-            subject: p(P::Bool),
-            interface: input,
-            interface_arguments: vec![],
+        prepared.edit_package(|package| {
+            let function = &mut package.functions[0];
+            function.type_parameters.push(input);
+            function.capabilities.push(n::TraitRequirement {
+                subject: p(P::Bool),
+                interface: input,
+                interface_arguments: vec![],
+            });
         });
         assert!(
             !prepared
@@ -977,17 +1102,19 @@ mod tests {
             local: 90,
         };
         let mut prepared = literal_preparation(true);
-        let mut body = prepared.package_mut().functions[0].body.clone();
+        let mut body = prepared.world.package().functions[0].body.clone();
         body.kind = K::StagedValue(Term::Rigid {
             declaration: input,
             sort: Sort::Type,
         });
         let body = std::sync::Arc::new(body);
-        prepared.package_mut().functions[0].body.kind = K::Closure {
-            parameters: vec![],
-            captures: vec![],
-            body: body.clone(),
-        };
+        prepared.edit_package(|package| {
+            package.functions[0].body.kind = K::Closure {
+                parameters: vec![],
+                captures: vec![],
+                body: body.clone(),
+            };
+        });
         let before = prepared.to_string();
         let mut exhausted = 6;
         assert!(
@@ -1002,7 +1129,7 @@ mod tests {
                 .uses_declaration_inputs(&[input], &mut 1000, Span::default())
                 .unwrap()
         );
-        let K::Closure { body: observed, .. } = &prepared.package_mut().functions[0].body.kind
+        let K::Closure { body: observed, .. } = &prepared.world.package().functions[0].body.kind
         else {
             panic!()
         };
@@ -1017,16 +1144,18 @@ mod tests {
         for type_result in [false, true] {
             let make = || {
                 let mut prepared = literal_preparation(type_result);
-                prepared.package_mut().functions[0].requirements = vec![n::TypePredicate::And(
-                    (0..64)
-                        .map(|_| {
-                            n::TypePredicate::Not(Box::new(n::TypePredicate::Equal(
-                                p(P::Bool),
-                                p(P::U8),
-                            )))
-                        })
-                        .collect(),
-                )];
+                prepared.edit_package(|package| {
+                    package.functions[0].requirements = vec![n::TypePredicate::And(
+                        (0..64)
+                            .map(|_| {
+                                n::TypePredicate::Not(Box::new(n::TypePredicate::Equal(
+                                    p(P::Bool),
+                                    p(P::U8),
+                                )))
+                            })
+                            .collect(),
+                    )];
+                });
                 prepared
             };
             let mut baseline = 100_000;
@@ -1068,27 +1197,29 @@ mod tests {
                     sort: Sort::ComptimeValue,
                 }),
             )];
-            let function = &mut prepared.package_mut().functions[0];
-            function.parameters = vec![binding];
-            function.signature = Term::Function {
-                parameters: vec![Parameter {
-                    sort: Sort::Runtime,
-                    ty: p(P::Bool),
-                }],
-                result: Box::new(p(P::Type)),
-            };
-            if observe {
-                let result = function.body.clone();
-                function.body.kind = K::If {
-                    condition: Box::new(n::Expr {
-                        source: result.source,
+            prepared.edit_package(|package| {
+                let function = &mut package.functions[0];
+                function.parameters = vec![binding];
+                function.signature = Term::Function {
+                    parameters: vec![Parameter {
+                        sort: Sort::Runtime,
                         ty: p(P::Bool),
-                        kind: K::Local(binding),
-                    }),
-                    then_branch: Box::new(result.clone()),
-                    else_branch: Some(Box::new(result)),
+                    }],
+                    result: Box::new(p(P::Type)),
                 };
-            }
+                if observe {
+                    let result = function.body.clone();
+                    function.body.kind = K::If {
+                        condition: Box::new(n::Expr {
+                            source: result.source,
+                            ty: p(P::Bool),
+                            kind: K::Local(binding),
+                        }),
+                        then_branch: Box::new(result.clone()),
+                        else_branch: Some(Box::new(result)),
+                    };
+                }
+            });
             let mut steps = 10_000;
             let result = prepared.invoke(&mut steps, Span::default());
             assert!(steps < 10_000);
@@ -1112,28 +1243,30 @@ mod tests {
             index: 0,
         };
         let mut prepared = literal_preparation(true);
-        let function = &mut prepared.package_mut().functions[0];
-        function.parameters = vec![binding];
-        function.signature = Term::Function {
-            parameters: vec![Parameter {
-                sort: Sort::Runtime,
-                ty: p(P::Bool),
-            }],
-            result: Box::new(p(P::Type)),
-        };
-        let output = function.body.clone();
-        function.body.kind = K::If {
-            condition: Box::new(n::Expr {
-                source: output.source,
-                ty: p(P::Bool),
-                kind: K::Local(binding),
-            }),
-            then_branch: Box::new(output.clone()),
-            else_branch: Some(Box::new(output)),
-        };
+        prepared.edit_package(|package| {
+            let function = &mut package.functions[0];
+            function.parameters = vec![binding];
+            function.signature = Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Runtime,
+                    ty: p(P::Bool),
+                }],
+                result: Box::new(p(P::Type)),
+            };
+            let output = function.body.clone();
+            function.body.kind = K::If {
+                condition: Box::new(n::Expr {
+                    source: output.source,
+                    ty: p(P::Bool),
+                    kind: K::Local(binding),
+                }),
+                then_branch: Box::new(output.clone()),
+                else_branch: Some(Box::new(output)),
+            };
+        });
         let mut context = crate::InferenceContext::default();
         let mut session = Session::new_in_scope_with_pointer_copy(
-            &prepared.world.package,
+            prepared.world.package(),
             &context,
             &mut Budget {
                 steps: 10_000,
@@ -1233,34 +1366,36 @@ mod tests {
                 index: 0,
             };
             let result_type = prepared.result_type.clone();
-            let function = &mut prepared.package_mut().functions[0];
-            function.parameters = vec![binding];
-            function.signature = Term::Function {
-                parameters: vec![Parameter {
-                    sort: Sort::Runtime,
-                    ty: p(P::Bool),
-                }],
-                result: Box::new(result_type),
-            };
-            let result = function.body.clone();
-            function.body.kind = K::Block {
-                statements: vec![n::Expr {
-                    source: result.source,
-                    ty: p(P::Void),
-                    kind: K::Assign {
-                        place: n::Place {
-                            root: binding,
-                            fields: vec![],
+            prepared.edit_package(|package| {
+                let function = &mut package.functions[0];
+                function.parameters = vec![binding];
+                function.signature = Term::Function {
+                    parameters: vec![Parameter {
+                        sort: Sort::Runtime,
+                        ty: p(P::Bool),
+                    }],
+                    result: Box::new(result_type),
+                };
+                let result = function.body.clone();
+                function.body.kind = K::Block {
+                    statements: vec![n::Expr {
+                        source: result.source,
+                        ty: p(P::Void),
+                        kind: K::Assign {
+                            place: n::Place {
+                                root: binding,
+                                fields: vec![],
+                            },
+                            value: Box::new(n::Expr {
+                                source: result.source,
+                                ty: p(P::Bool),
+                                kind: K::Literal(n::Literal::Bool(false)),
+                            }),
                         },
-                        value: Box::new(n::Expr {
-                            source: result.source,
-                            ty: p(P::Bool),
-                            kind: K::Literal(n::Literal::Bool(false)),
-                        }),
-                    },
-                }],
-                result: Some(Box::new(result)),
-            };
+                    }],
+                    result: Some(Box::new(result)),
+                };
+            });
             prepared.inputs = vec![(binding, p(P::Bool), None)];
             let owner = comptime_interpretor::Storage::new(Value::Bool(true));
             let mut steps = 10_000;
@@ -1306,16 +1441,18 @@ mod tests {
             owner: 11,
             index: 0,
         };
-        let function = &mut prepared.package_mut().functions[0];
-        function.parameters = vec![binding];
-        function.signature = Term::Function {
-            parameters: vec![Parameter {
-                sort: Sort::ComptimeValue,
-                ty: p(P::Bool),
-            }],
-            result: Box::new(p(P::Bool)),
-        };
-        function.body.kind = K::Local(binding);
+        prepared.edit_package(|package| {
+            let function = &mut package.functions[0];
+            function.parameters = vec![binding];
+            function.signature = Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::ComptimeValue,
+                    ty: p(P::Bool),
+                }],
+                result: Box::new(p(P::Bool)),
+            };
+            function.body.kind = K::Local(binding);
+        });
         prepared.inputs = vec![(binding, p(P::Bool), None)];
         (prepared, binding)
     }
@@ -1451,29 +1588,31 @@ mod tests {
             kind,
             source: n::SourceRange { start: 0, end: 1 },
         };
-        let function = &mut prepared.package_mut().functions[0];
-        function.parameters = vec![choice, ty];
-        function.signature = Term::Function {
-            parameters: vec![
-                Parameter {
-                    sort: Sort::ComptimeValue,
-                    ty: p(P::Bool),
+        prepared.edit_package(|package| {
+            let function = &mut package.functions[0];
+            function.parameters = vec![choice, ty];
+            function.signature = Term::Function {
+                parameters: vec![
+                    Parameter {
+                        sort: Sort::ComptimeValue,
+                        ty: p(P::Bool),
+                    },
+                    Parameter {
+                        sort: Sort::Type,
+                        ty: p(P::Type),
+                    },
+                ],
+                result: Box::new(p(P::Type)),
+            };
+            function.body = expr(
+                p(P::Type),
+                K::If {
+                    condition: Box::new(expr(p(P::Bool), K::Local(choice))),
+                    then_branch: Box::new(expr(p(P::Type), K::Local(ty))),
+                    else_branch: Some(Box::new(expr(p(P::Type), K::TypeValue(p(P::Char))))),
                 },
-                Parameter {
-                    sort: Sort::Type,
-                    ty: p(P::Type),
-                },
-            ],
-            result: Box::new(p(P::Type)),
-        };
-        function.body = expr(
-            p(P::Type),
-            K::If {
-                condition: Box::new(expr(p(P::Bool), K::Local(choice))),
-                then_branch: Box::new(expr(p(P::Type), K::Local(ty))),
-                else_branch: Some(Box::new(expr(p(P::Type), K::TypeValue(p(P::Char))))),
-            },
-        );
+            );
+        });
         prepared.inputs = vec![(choice, p(P::Bool), None), (ty, p(P::Type), None)];
         for (flag, expected) in [(true, P::U8), (false, P::Char)] {
             let values = vec![
@@ -1499,16 +1638,18 @@ mod tests {
                 owner: 11,
                 index: 0,
             };
-            let function = &mut prepared.package_mut().functions[0];
-            function.parameters = vec![binding];
-            function.signature = Term::Function {
-                parameters: vec![Parameter {
-                    sort: Sort::Type,
-                    ty: p(P::Type),
-                }],
-                result: Box::new(p(P::Type)),
-            };
-            function.body.kind = K::Local(binding);
+            prepared.edit_package(|package| {
+                let function = &mut package.functions[0];
+                function.parameters = vec![binding];
+                function.signature = Term::Function {
+                    parameters: vec![Parameter {
+                        sort: Sort::Type,
+                        ty: p(P::Type),
+                    }],
+                    result: Box::new(p(P::Type)),
+                };
+                function.body.kind = K::Local(binding);
+            });
             prepared.inputs = vec![(binding, p(P::Type), None)];
             let mut steps = 1000;
             let (value, result) = prepared
@@ -1582,7 +1723,7 @@ mod tests {
             } else {
                 read()
             };
-            let mut factory = prepared.package_mut().clone();
+            let mut factory = prepared.world.package().clone();
             factory.functions[0].signature = Term::Function {
                 parameters: vec![],
                 result: Box::new(callback_type.clone()),
@@ -1607,29 +1748,31 @@ mod tests {
             );
             let mut producer = Interpreter::for_comptime(&factory, Budget::default()).unwrap();
             let callback = producer.invoke(prepared.entry, vec![]).unwrap();
-            let function = &mut prepared.package_mut().functions[0];
-            function.parameters = vec![selector, frozen];
-            function.signature = Term::Function {
-                parameters: vec![
-                    Parameter {
-                        sort: Sort::ComptimeValue,
-                        ty: callback_type.clone(),
+            prepared.edit_package(|package| {
+                let function = &mut package.functions[0];
+                function.parameters = vec![selector, frozen];
+                function.signature = Term::Function {
+                    parameters: vec![
+                        Parameter {
+                            sort: Sort::ComptimeValue,
+                            ty: callback_type.clone(),
+                        },
+                        Parameter {
+                            sort: Sort::ComptimeValue,
+                            ty: p(P::Bool),
+                        },
+                    ],
+                    result: Box::new(result_type.clone()),
+                };
+                function.body = expr(
+                    result_type.clone(),
+                    K::Call {
+                        callee: Box::new(expr(callback_type.clone(), K::Local(selector))),
+                        arguments: vec![],
+                        parameter_bindings: vec![],
                     },
-                    Parameter {
-                        sort: Sort::ComptimeValue,
-                        ty: p(P::Bool),
-                    },
-                ],
-                result: Box::new(result_type.clone()),
-            };
-            function.body = expr(
-                result_type.clone(),
-                K::Call {
-                    callee: Box::new(expr(callback_type.clone(), K::Local(selector))),
-                    arguments: vec![],
-                    parameter_bindings: vec![],
-                },
-            );
+                );
+            });
             prepared.inputs = vec![
                 (selector, callback_type, None),
                 (frozen, p(P::Bool), Some(Term::Bool(true))),
@@ -1744,17 +1887,4 @@ mod tests {
         assert_eq!(depth, 0);
         assert!(!quoted && !escaped);
     }
-}
-
-fn implementation_index(
-    package: &n::Package,
-    span: Span,
-) -> Result<crate::implementation::Index, Error> {
-    crate::implementation::Index::from_package_metered(package, &mut crate::ptc::Budget::default())
-        .map_err(|failure| {
-            error(
-                span,
-                format!("required comptime implementation index: {failure}"),
-            )
-        })
 }

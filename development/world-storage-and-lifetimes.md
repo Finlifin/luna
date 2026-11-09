@@ -32,9 +32,10 @@
 ### 1.1 Required 计算的共享声明快照
 
 `compiler/elaboration/src/program/required/prepared.rs` 的 RequiredWorld 把已检查的
-NIR Package 与从它构造的 implementation Index 放在同一 owner 中。构造函数消费
-package，索引建立成功才返回 Arc；字段保持模块私有，生产入口不能分别替换声明
-或索引。它是准备计算的声明世界，不是第 10 节尚待实现的待发布 PreparedWorld。
+NIR Package 封装到 DeclarationSnapshot 中。构造函数消费 package，通过 prepare
+完成第 1.2 节的共享目录后才返回 Arc；失败不会发布 RequiredWorld。字段保持模块私有，
+生产入口不能分别替换声明或索引。它是准备计算的声明世界，不是第 10 节尚待实现的
+待发布 PreparedWorld。
 
 PreparedRequired 持有这个 owner，其输入赋值、scope substitution、调用前提及
 context 仍属于具体准备结果。fork 共享声明世界，复制本次调用的供应状态；不再
@@ -53,11 +54,13 @@ builder 发布也以这同一快照建立发布服务，服务和 invocation 的
 它，Copy 查询从这个 owner 取得 package 和 index。required 发布器的证明服务也从
 RequiredWorld::capabilities 取得借用视图；实际 invocation 的三类查询进一步统一到
 [调用内作用域](type-models-and-theory-evidence.md#调用内的统一声明查询状态)，不再在调用点
-手工配对这些字段。该调用内目录尚未像第 1.2 节的 driver owner 一样跨调用保留。
+手工配对这些字段。调用内查询通过 DeclarationSource::Snapshot 保留同一个目录，
+不再为每次 required invocation 重建；发布器证明也借用这个目录。执行与资源声明
+分别拥有自己的 snapshot，不能因为两者都使用同一个 owner 类型而合并权限。
 
 调用前提与类型 context 仍按本次 invocation 传入借用视图；它们不是资源快照中的
-全局事实。资源 dump 展开自身的 index 和 package，便于核对权限来源。新增回归
-检查同一 Copy 实现仅存在于资源世界时，两份世界各自给出正确分类、其他 subject
+全局事实。资源 dump 展开自身的 source snapshot，包含 index 和 package，便于核对
+权限来源。回归检查同一 Copy 实现仅存在于资源世界时，两份世界各自给出正确分类、其他 subject
 不取得该权限、资源不足后可重试，以及派生调用共享同一资源 owner。
 
 共享声明不缓存计算结果。每次 invocation 仍按自己的输入、预算与 live graph 执行；
@@ -67,8 +70,12 @@ RequiredWorld::capabilities 取得借用视图；实际 invocation 的三类查�
 
 回归覆盖相同 owner／索引共享、失败输入路由的原子性、派生调用不同输入的独立结果、
 不同快照中同号声明的不同结果，以及 Weak 观察的最后引用释放。原有 live closure
-连续调用和 builder 公开接口检查继续覆盖实际执行。测试夹具只在唯一 owner 时允许
-修改函数片段；生产没有可变访问器或 Arc::make_mut 旁路。
+连续调用和 builder 公开接口检查继续覆盖实际执行。测试夹具编辑 package 副本后
+重新建立 RequiredWorld，不能保留修改前的索引；生产没有可变访问器或 Arc::make_mut
+旁路。目录共享回归构造两千多个声明，先测量无额外证明需求的调用成本，再只增加
+不足以冷建目录的证明额度；Type 和普通值 invocation 均须在该总额度内重试并完成。
+这单独保留了 VM 执行索引的准备成本，不宣称它也已跨调用复用。单次证明加入的前提
+不会进入另一查询。
 
 当前仍是单份完整 package 的共享所有权。初次准备分别收集可执行与资源声明并建立各自索引，输入供应
 与上下文仍会复制；没有完成分块存储、跨编辑增量索引、稳定句柄或通用发布事务。
@@ -88,9 +95,10 @@ owner 内部的自引用。查询时从该 owner 的 package 取得借用，不�
 
 克隆 snapshot 共享 owner；从它导出的 Arc 再经 `Arc::make_mut` 修改会形成另一份
 源码，旧目录保持不变。新源码需要新 snapshot。构造目录按实际工作计费，只有完整
-构造及保留成功才安装；失败后再次构造不能享受半成品的折扣。完整目录的只读借用
-不复制表；建立新的 DeclarationWorld 计入目录句柄保留成本，并创建独立的 Context、
-前提和规范化状态。共享目录不签发调用许可，也不缓存用户函数、Eq／Hash 或命题结果。
+构造及保留成功才安装；失败后再次构造不能享受半成品的折扣。显式 prepare 可以在
+发布准备结果前完成同一目录，不需要伪造 Context 或证明请求；重复 prepare 和完整
+目录的只读借用不复制表，也不收取新的构造成本。建立新的 DeclarationWorld 计入
+目录句柄保留成本，并创建独立的 Context、前提和规范化状态。共享目录不签发调用许可，也不缓存用户函数、Eq／Hash 或命题结果。
 
 公开 PreparedInvocation、纯函数缓存 Invocation 和 Eq／Hash 的 Binding 已用这个
 owner 替代分别保管 package／index 的字段。CodeSession 从相同 owner 取得精确源码
@@ -107,33 +115,36 @@ Arc，继续只复用代码；每次执行仍创建新 VM。缓存准入、资�
 不输出地址。回归检查首个请求构造、跨调用共享索引、不同前提重检、同号新源隔离、
 预算失败后的完整重建、Weak 所见的最后引用释放，以及 dump 的嵌套和字符串转义。
 
-这仍是一份完整 Package 的共享目录，未实现分块或跨编辑的结构共享。required
-准备／发布与资源 owner 尚未采用它；staged scratch 改写临时入口，不能复用旧目录。
-PTC Context 的建立、外围资源／协议准备预算仍有独立成本；接受 `&Package` 的
+required 准备、发布器证明和其资源权限 owner 也已采用该目录，见第 1.1 节。
+这仍是一份完整 Package 的共享目录，未实现分块或跨编辑的结构共享。luna driver
+的独立资源 ProtocolContext 尚未迁移；staged scratch 改写临时入口，不能复用旧目录。
+PTC Context 的建立、required 和外围资源／协议准备预算仍有独立成本；接受 `&Package` 的
 兼容准备入口仍复制整包，其捕获成本尚未纳入统一预算。未测整体编译性能收益。
 
-本批检查工作目录 `/home/fin/luna`，使用 `development/check.py --timeout 900 --`；
-各 result 文件包含完整命令和输出路径：
+本轮 required 目录迁移的检查工作目录 `/home/fin/luna`，统一使用
+`python3 -B development/check.py --timeout 900 --`；result 文件保留完整命令及输出：
 
-- `check -p luna` 退出 0，`/tmp/luna-tools-ytimdd6b/result.json`。
-- `/tmp/luna-tools-8saue3f2/result.json`：退出 0，声明索引／关联查询、调用内与跨调用
-  目录、实际 invocation、键协议和 source failure 边界共 193 项通过。
-- `/tmp/luna-tools-rez2nnq6/result.json`：退出 0，elaboration／luna／materialization lib、
-  真实 sysroot builder、公开协议、List Hash／Eq、排序和 staged 常量等 530 项通过；
-  包含 snapshot dump 的结构、转义与稳定输出检查。
-- 进一步合并协议 owner 后，`/tmp/luna-tools-55y018wp/result.json` 退出 0，
-  键协议、Hash、列表 Hash 与类型查询 44 项通过。新增用例最初将闭合执行包误作
-  源码快照交入新入口（`/tmp/luna-tools-l1xkird_/result.json` 退出 101）；已在准备
-  入口补明确拒绝，并分别检验闭合表拒绝及源码目录共享后的协议隔离。
-- `test -p luna --test execution memoized --no-fail-fast`：12 通过、1 既有失败，
-  `/tmp/luna-tools-p1o2diml/result.json` 退出 101。失败仍为
-  `memoized_invocation_specializes_nested_type_forwarding` 在 elaboration 的
-  `1465..1484` 报 `Type domain equality: UnvalidatedModel`；与此前独立基线
-  `/tmp/luna-tools-uq7f8i42/result.json` 一致。未修改预期或将该失败计为通过。
+- `test -p elaboration -p materialization --lib --no-fail-fast`：退出 0，181 + 29 项通过，
+  `/tmp/luna-tools-n2nyv2bd/result.json`。
+- `test -p luna --test builder_invocations --test library_protocols
+  --test clause_staged_constants --test comptime_staged_values --test trait_domain_substitution
+  --test trait_query_failures --test staged_invocation_reuse --no-fail-fast`：退出 0，
+  真实 sysroot builder、公开协议、staged 与类型查询共 131 项通过，
+  `/tmp/luna-tools-yro__7c9/result.json`。
+- 三个修改的 Rust 文件通过 scoped rustfmt check，
+  `/tmp/luna-tools-9rwofz81/result.json` 退出 0；`git diff --check` 通过。
 
-本批去重 624 项通过、上述 1 项既有失败；未执行全量回归、Miri 或整体性能基准。
-十一个修改／新增 Rust 文件通过 scoped rustfmt check，
-`/tmp/luna-tools-_tih9dl5/result.json` 退出 0；`git diff --check` 通过。
+本轮去重 341 项通过。最初的新增预算用例遗漏了独立 VM 执行索引的初始化成本，
+`/tmp/luna-tools-wxvr5j9c/result.json` 为 209 通过、该 1 项失败；已改为先测无额外
+证明需求的调用成本，再检查新增证明额度不足以重建目录，未提高生产预算或绕过检查。
+未执行全量回归、Miri 或整体性能基准。
+
+先前可复用调用迁移的证据仍在 `/tmp/luna-tools-8saue3f2/result.json`、
+`/tmp/luna-tools-rez2nnq6/result.json` 和 `/tmp/luna-tools-55y018wp/result.json`，
+不计作本轮执行结果。已知 `memoized_invocation_specializes_nested_type_forwarding`
+前端失败本轮未重跑：此前 `/tmp/luna-tools-p1o2diml/result.json` 退出 101，在
+`1465..1484` 报 `Type domain equality: UnvalidatedModel`，与独立基线
+`/tmp/luna-tools-uq7f8i42/result.json` 一致；本轮不声称修复它。
 
 ## 2. 目标物理结构
 
