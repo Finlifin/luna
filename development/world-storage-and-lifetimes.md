@@ -205,7 +205,7 @@ DeclarationSource；原 `&Package` 入口仍委托同一个构建实现，不保
 Builder 从 source 取得精确 package 与 DeclarationWorld。Snapshot 复用已经完成的
 不可变目录，Borrowed 为本次构建建立目录；不允许将来源和目录分别传入。
 
-每次构建仍检查 NIR phase、建立独立 Context、前提、规范化视图和工作队列，执行
+每次构建建立独立 Context、前提、规范化视图和工作队列，执行
 当前 expansion 服务，再校验完整图。生成函数、展开来源、临时布局、runtime binding、
 实例去重集合和待发布结果不进入共享目录。热目录不能跳过用户代码展开、缺失主体
 检查或最终图验证；失败只丢弃本次候选图，不把半成品保存在源码 owner。
@@ -220,32 +220,62 @@ checked 清理的内部入口改为接收 ProtocolContext，集中取得 source�
 消费者都接入该入口。公开低层 planner 继续接受调用者的借用世界，以支持独立
 清理规划和畸形 NIR 的拒绝检查；它不是已检查源码的执行许可。
 
+`InstantiationSession` 将只读 DeclarationSource 与已完成的 NIR phase 检查绑定。
+第一次构图在当前预算内完成全包阶段验证；后续根集合变化复用该结构性事实，仍收费
+访问并重建当前图。phase 失败不标记成功；phase 成功而后续展开／发布失败时可以保留
+这一源码事实，但不保留候选图、资源事实或展开结果。新源码需要新 session，即便
+声明号相同；借用期阻止原源码被修改。Display 显示所属源码与 pending／checked 状态。
+
+带 `&mut Budget` 的构图入口把输入 phase、目录准备、展开、发布复制和最终图验证
+接到同一额度；成功返回余额，失败或 unwind 保留预留额度，不返回部分图。旧按值
+接口委托这一入口。cleanup 的重建循环持有同一 InstantiationSession 和同一构图
+额度，发现更多析构函数根后不能重新得到初始额度。构图和资源规划仍是 driver 明确
+分开的阶段：构图消费其 Budget，规划消费自己的 fuel；runtime 执行也保留原来的
+独立阶段额度。本次没有把 per-stage 接口改成整个编译流程共用一个总计数器。
+
+最终发布在复制根、runtime binding、展开来源和 normal-form 元数据前预留相应工作。
+NF 参数域和完整类型命题载荷都计入复制成本，不展开头、不求值其中的命题。可执行
+目标与 template storage 目标合并为一个按完整实例身份查询的临时索引，替换逐方法
+扫描所有 template 表；保留／剔除仍比较声明及全部实参。过滤前完成预算检查，最终
+IIR 验证仍是交付条件；这个索引不提供类型相等、方法选择或资源证明。
+
 回归使用数百个声明，比较冷构造和热目录进入实际展开回调时剩余的预算，同时
 要求输出图一致、每次仍调用本次展开服务。换入口、展开错误、零预算、同号源码
 改成缺失 callee 以及恢复原源码均分别检查，不能由已有图或过去的成功代替。
 
-这完成的是声明目录复用，不是 IIR 图缓存或完整增量编译。Context 与输入 phase
-检查仍按次执行；staged 快照及 VM 索引的后续迁移见第 1.5–1.6 节。将借用 package
-转为长期 owner 的整包复制和阶段间预算仍待统一；尚无整体性能收益结论。
+这完成的是声明目录／source phase 复用及构图预算接线，不是 IIR 图缓存或完整增量
+编译。Context、根闭包、实例展开与资源检查仍按次执行；staged 快照及 VM 索引的
+后续迁移见第 1.5–1.7 节。将借用 package 转为长期 owner 的整包复制、其他阶段的
+工作计费和跨编辑失效仍未完成；尚无整体性能收益结论。
 
-本轮实例化接线的检查工作目录为 `/home/fin/luna`，命令通过
-`python3 -B development/check.py --timeout 900 --` 运行，结果均退出 0：
+本轮构图预算与发布边界的检查工作目录为 `/home/fin/luna`，命令通过
+`python3 -B development/check.py --timeout 900 --` 运行：
 
-- `test -p materialization -p luna --lib --test expansion_boundary
-  --test scoped_dispatch_inputs --test source_tests --no-fail-fast`：144 项通过，
-  `/tmp/luna-tools-vnqjdr4x/result.json`。包括共享目录构图、展开失败恢复、作用域输入
-  和多入口执行的独立状态。
-- `test -p luna --test execution --test host --no-fail-fast`，按 direct-passing、资源、
-  checked 指针／struct／enum／newtype 等入口过滤：58 + 45 项通过，
-  `/tmp/luna-tools-fhuqdfrm/result.json` 保存完整过滤参数。包含 LLVM/native 构建和
-  实际运行，检查 Copy、清理、效应传送与数据布局。
-- `test -p luna --test library_protocols --test conditional_capture_cleanup
-  --test temporary_method_cleanup --test match_cleanup --no-fail-fast`：42 项通过，
-  `/tmp/luna-tools-gxskyx_0/result.json`，覆盖公开库协议和清理依赖增长场景。
+- `test -p luna -p materialization --lib --test expansion_boundary
+  --test scoped_dispatch_inputs --test materialization_budget --test library_protocols
+  --test conditional_capture_cleanup --test temporary_method_cleanup --test quote_functions
+  --test staged_aggregate_contracts --test native_optional --no-fail-fast`：退出 0，
+  313 项通过，`/tmp/luna-tools-cjctikis/result.json`。覆盖全部构图预算截断点、
+  phase 失败／展开失败后的恢复、热 session 换根与同号新源码隔离，以及真实 sysroot
+  协议、quote、聚合资源与 native 可选值路径。
+- `test -p luna --test drop
+  late_quote_cleanup_rebuilds_layouts_when_destructors_add_generic_roots -- --exact`：
+  退出 0，1 项通过，`/tmp/luna-tools-n94iy6so/result.json`。验证析构函数新增泛型根
+  后仍重建正确布局；新增 materialization_budget 用例另行验证重建不能重领预算。
+- 六个修改／新增 Rust 文件通过 scoped rustfmt check，
+  `/tmp/luna-tools-p8g2vw1k/result.json` 退出 0；`git diff --check` 通过。
 
-本轮去重 289 项通过；七个修改的 Rust 文件通过 scoped rustfmt check，
-`/tmp/luna-tools-y_vc01ab/result.json` 退出 0；`git diff --check` 通过。
-未运行全量回归或整体性能基准，其他小节的历史结果不计作本轮执行。
+最终去重 314 项通过。实现期间曾把构图开销扣入资源规划 fuel，导致公开库路径
+预算耗尽；已按 driver 原有 per-stage 契约恢复两个阶段各自计费，同时保留构图各轮
+共享余额。没有提高 runtime 默认预算或修改现有测试额度来掩盖问题。
+
+额外检查发现 `closure_local_handlers` 中
+`outward_request_cannot_retire_the_storage_a_callback_will_read` 的诊断断言失败：
+实际先报告 `handler lexical capture address exposure requires a memory contract`。
+临时用 HEAD 的三个生产实现文件运行同一精确测试，仍以同一诊断退出 101，证据为
+`/tmp/luna-tools-l2lncmwl/result.json`；其他用户工作区文件保持原样，之后已按保存的
+SHA-256 恢复本轮实现。该基线问题未修复，也未改断言或弱化资源检查。
+未运行全量回归、Miri 或整体性能基准；其他小节的历史结果不计作本轮执行。
 
 ### 1.5 Staged 入口与声明世界分离
 
@@ -412,8 +442,9 @@ runtime/comptime 边界及 lexical unsafe。目录不缓存表达式结果、前
 新世界隔离，以及 closed-table／resolving 两类 session 的真实生产入口。
 
 这消除了 detached 入口逐次重建声明目录的工作，未消除按表达式检查。独立 NIR
-`validate`／machine-arithmetic 查询仍保留默认声明／主体额度，materialization 等
-非 VM 消费者尚未全部迁移。VM 建表中部分 metadata 检查也仍重复，整包捕获与跨编辑
+`validate`／machine-arithmetic 查询仍保留默认声明／主体额度；materialization 的
+后续构图预算接线见第 1.4 节，其他非 VM 消费者尚未全部迁移。
+VM 建表中部分 metadata 检查也仍重复，整包捕获与跨编辑
 增量失效尚未完成；不能把这一预算接线称为全编译流程统一计费。测试比较冷／热路径
 实际预算消费，不据此推断整体运行时间收益。
 

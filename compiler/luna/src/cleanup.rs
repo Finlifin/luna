@@ -295,6 +295,11 @@ fn prepare_source_impl(
     let mut generated_layouts = std::collections::HashSet::new();
     let mut cleanup_accesses: Vec<(iir::InstanceKey, Vec<nir::program::RuntimeCleanupAccess>)> =
         vec![];
+    let mut instantiation = elaboration::materialization::InstantiationSession::new(source);
+    // Graph construction and resource planning are distinct bounded stages.
+    // Rebuilding for new destructor roots consumes the same graph allowance;
+    // it must not receive a fresh budget on each pass through the loop.
+    let mut construction_budget = budget;
 
     loop {
         *fuel = fuel
@@ -307,12 +312,12 @@ fn prepare_source_impl(
             .filter(|ty| !generated_layouts.contains(*ty))
             .cloned()
             .collect::<Vec<_>>();
-        let graph = elaboration::materialization::instantiate_with_types_in_source(
-            source,
+        let graph = elaboration::materialization::instantiate_with_types_in_session(
+            &mut instantiation,
             &roots,
             &source_types,
             Default::default(),
-            budget,
+            &mut construction_budget,
         )?;
         graph.validate_cleanup_control(fuel)?;
         let generated = graph

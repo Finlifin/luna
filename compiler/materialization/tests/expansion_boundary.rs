@@ -328,6 +328,207 @@ fn retained_source_reuses_the_directory_but_rebuilds_each_instance_graph() {
 }
 
 #[test]
+fn complete_graph_construction_consumes_one_allowance_and_publishes_only_on_success() {
+    use materialization::{DeclarationSource, instantiate_with_types_in_source_in_budget};
+    let (package, root) = fixture();
+    let original = package.to_string();
+    let mut budget = Budget::default();
+    let initial = budget.steps;
+    let provider = Provider::default();
+    let graph = instantiate_with_types_in_source_in_budget(
+        DeclarationSource::Borrowed(&package),
+        std::slice::from_ref(&root),
+        &[],
+        BTreeSet::new(),
+        &mut budget,
+        &provider,
+    )
+    .unwrap();
+    let cost = initial - budget.steps;
+    let mut phase_fuel = initial;
+    nir::phases::Inspection::new(&package)
+        .check_package(&mut phase_fuel)
+        .unwrap();
+    assert!(cost > initial - phase_fuel);
+    assert!(provider.first_allowance.get().unwrap() < phase_fuel);
+    for steps in 0..cost {
+        let mut budget = Budget {
+            steps,
+            ..Default::default()
+        };
+        assert!(
+            instantiate_with_types_in_source_in_budget(
+                DeclarationSource::Borrowed(&package),
+                std::slice::from_ref(&root),
+                &[],
+                BTreeSet::new(),
+                &mut budget,
+                &Provider::default(),
+            )
+            .is_err(),
+            "allowance {steps} must cover final publication too"
+        );
+        assert_eq!(budget.steps, 0);
+    }
+    let mut exact = Budget {
+        steps: cost,
+        ..Default::default()
+    };
+    let recovered = instantiate_with_types_in_source_in_budget(
+        DeclarationSource::Borrowed(&package),
+        std::slice::from_ref(&root),
+        &[],
+        BTreeSet::new(),
+        &mut exact,
+        &Provider::default(),
+    )
+    .unwrap();
+    assert_eq!(exact.steps, 0);
+    assert_eq!(graph.to_string(), recovered.to_string());
+    assert_eq!(package.to_string(), original);
+
+    let failed = Provider {
+        fail: true,
+        ..Default::default()
+    };
+    let mut budget = Budget::default();
+    assert_eq!(
+        instantiate_with_types_in_source_in_budget(
+            DeclarationSource::Borrowed(&package),
+            std::slice::from_ref(&root),
+            &[],
+            BTreeSet::new(),
+            &mut budget,
+            &failed,
+        )
+        .unwrap_err(),
+        "injected expansion failure"
+    );
+    assert_eq!(budget.steps, 0);
+
+    let mut invalid = package.clone();
+    invalid.functions[0].body.kind = n::ExprKind::ComptimeValue(Term::Symbol("bad domain".into()));
+    let provider = Provider::default();
+    let mut budget = Budget::default();
+    assert!(
+        instantiate_with_types_in_source_in_budget(
+            DeclarationSource::Borrowed(&invalid),
+            &[root],
+            &[],
+            BTreeSet::new(),
+            &mut budget,
+            &provider,
+        )
+        .unwrap_err()
+        .starts_with("IIR input phase:")
+    );
+    assert_eq!(budget.steps, 0);
+    assert_eq!(provider.quotes.get(), 0);
+}
+
+#[test]
+fn graph_session_retains_phase_evidence_but_rebuilds_outputs_and_recovers() {
+    use materialization::{DeclarationSource, InstantiationSession};
+    let (package, root) = fixture();
+    let mut session = InstantiationSession::new(DeclarationSource::Borrowed(&package));
+    assert!(
+        session
+            .to_string()
+            .starts_with("(instantiation-session (phase pending)")
+    );
+    assert!(
+        session
+            .instantiate(
+                &[root.clone()],
+                &[],
+                BTreeSet::new(),
+                &mut Budget {
+                    steps: 1,
+                    ..Default::default()
+                },
+                &Provider::default()
+            )
+            .is_err()
+    );
+    assert!(session.to_string().contains("(phase pending)"));
+    let mut cold = Budget::default();
+    let graph = session
+        .instantiate(
+            &[root.clone()],
+            &[],
+            BTreeSet::new(),
+            &mut cold,
+            &Provider::default(),
+        )
+        .unwrap();
+    assert!(
+        session
+            .to_string()
+            .starts_with("(instantiation-session (phase checked)")
+    );
+    let provider = Provider::default();
+    let mut warm = Budget::default();
+    let again = session
+        .instantiate(&[root.clone()], &[], BTreeSet::new(), &mut warm, &provider)
+        .unwrap();
+    assert!(warm.steps > cold.steps);
+    assert!(provider.quotes.get() > 0);
+    assert_eq!(graph.to_string(), again.to_string());
+    let mut failed = Budget::default();
+    assert!(
+        session
+            .instantiate(
+                &[iir::InstanceKey {
+                    declaration: id(999),
+                    arguments: vec![].into()
+                }],
+                &[],
+                BTreeSet::new(),
+                &mut failed,
+                &Provider::default()
+            )
+            .is_err()
+    );
+    assert_eq!(failed.steps, 0);
+    let recovered = session
+        .instantiate(
+            &[root.clone()],
+            &[],
+            BTreeSet::new(),
+            &mut Budget::default(),
+            &Provider::default(),
+        )
+        .unwrap();
+    assert_eq!(graph.to_string(), recovered.to_string());
+    let empty = session
+        .instantiate(
+            &[],
+            &[],
+            BTreeSet::new(),
+            &mut Budget::default(),
+            &Provider::default(),
+        )
+        .unwrap();
+    assert!(empty.functions.is_empty() && empty.roots.is_empty());
+    let mut changed = package.clone();
+    changed.functions[0].body.kind = n::ExprKind::ComptimeValue(Term::Symbol("bad domain".into()));
+    let mut changed = InstantiationSession::new(DeclarationSource::Borrowed(&changed));
+    assert!(
+        changed
+            .instantiate(
+                &[root],
+                &[],
+                BTreeSet::new(),
+                &mut Budget::default(),
+                &Provider::default()
+            )
+            .unwrap_err()
+            .starts_with("IIR input phase:")
+    );
+    assert!(changed.to_string().contains("(phase pending)"));
+}
+
+#[test]
 fn dispatch_closes_transitive_calls_without_a_source_provider() {
     let (mut package, root) = fixture();
     assert!(dispatch_instances_for_roots(&package, &[root.clone()], Budget::default()).is_ok());

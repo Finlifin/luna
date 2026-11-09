@@ -9,6 +9,7 @@ mod conditional_calls;
 mod dead_tails;
 mod input_admission;
 mod mutable_callbacks;
+mod publication;
 mod query_budget;
 mod source_queries;
 pub use source_queries::{SourceInvocationQueries, resolve_method_for_invocation};
@@ -387,72 +388,151 @@ pub fn instantiate_with_types_in_source(
     roots: &[iir::InstanceKey],
     types: &[nir::Term],
     runtime_bindings: BTreeSet<nir::RuntimeId>,
-    budget: Budget,
+    mut budget: Budget,
     expansion: &dyn Expansion,
 ) -> Result<iir::Package, String> {
-    let package = source.package();
-    nir::phases::validate(package).map_err(|e| format!("IIR input phase: {}", e.message))?;
-    let BuildResult {
-        mut dispatch,
-        functions,
-        nominals,
-        interfaces,
-        expansion_sources,
-        effect_contracts,
-        callable_identities,
-        frozen_methods,
-        mut type_cores,
-        remaining: mut publication_fuel,
-    } = build(
+    instantiate_with_types_in_source_in_budget(
         source,
-        budget,
-        Roots::Iir(roots),
-        runtime_bindings.clone(),
+        roots,
         types,
-        None,
-        Some(expansion),
-    )?;
-    let templates = captured_templates::storage(
-        &functions,
-        &frozen_methods,
-        package,
-        &dispatch,
-        &mut type_cores,
-        &mut publication_fuel,
-    )?;
-    // A selected interface may have conditionally available or simply unused
-    // methods. Publish executable links only for demanded concrete bodies.
-    let demanded: HashSet<_> = functions
-        .iter()
-        .map(|f| (&f.key.declaration, f.key.arguments.as_ref()))
-        .collect();
-    for interface in &mut dispatch {
-        interface.methods.retain(|m| {
-            demanded.contains(&(&m.body, m.arguments.as_slice()))
-                || templates.iter().any(|table| {
-                    table.targets().iter().any(|key| {
-                        key.declaration == m.body
-                            && key.arguments.as_ref() == m.arguments.as_slice()
-                    })
-                })
-        });
-    }
-    let output = iir::Package {
-        target: package.target,
-        expansion_sources,
-        effect_contracts,
-        roots: roots.to_vec(),
-        functions,
-        templates,
-        dispatch,
         runtime_bindings,
-        nominals,
-        interfaces,
-        normal_forms: package.normal_forms.clone(),
-        callable_identities,
-    };
-    output.validate(&mut publication_fuel)?;
-    Ok(output)
+        &mut budget,
+        expansion,
+    )
+}
+
+/// One construction allowance covers input phase checks, dependency discovery,
+/// expansion, retained metadata and final graph validation. Failed construction
+/// reserves the granted allowance and never returns a partial graph.
+pub fn instantiate_with_types_in_source_in_budget(
+    source: DeclarationSource<'_>,
+    roots: &[iir::InstanceKey],
+    types: &[nir::Term],
+    runtime_bindings: BTreeSet<nir::RuntimeId>,
+    budget: &mut Budget,
+    expansion: &dyn Expansion,
+) -> Result<iir::Package, String> {
+    InstantiationSession::new(source).instantiate(roots, types, runtime_bindings, budget, expansion)
+}
+
+/// Repeated graph construction in one immutable source. Only completed source
+/// phase validation survives a call; roots, contexts, resources and output
+/// graphs are rebuilt for each request. The borrow keeps the source unchanged.
+pub struct InstantiationSession<'a> {
+    source: DeclarationSource<'a>,
+    phase_checked: bool,
+}
+
+impl<'a> InstantiationSession<'a> {
+    pub fn new(source: DeclarationSource<'a>) -> Self {
+        Self {
+            source,
+            phase_checked: false,
+        }
+    }
+
+    pub fn instantiate(
+        &mut self,
+        roots: &[iir::InstanceKey],
+        types: &[nir::Term],
+        runtime_bindings: BTreeSet<nir::RuntimeId>,
+        budget: &mut Budget,
+        expansion: &dyn Expansion,
+    ) -> Result<iir::Package, String> {
+        let mut construction_budget = *budget;
+        budget.steps = 0;
+        let source = self.source;
+        let package = source.package();
+        construction_budget.steps = construction_budget
+            .steps
+            .checked_sub(1)
+            .ok_or("IIR phase evidence access budget exhausted")?;
+        if !self.phase_checked {
+            nir::phases::Inspection::new(package)
+                .check_package(&mut construction_budget.steps)
+                .map_err(|e| format!("IIR input phase: {}", e.message))?;
+            // This certifies only source phase structure, even if later graph
+            // construction fails. No instance graph or caller evidence is retained.
+            self.phase_checked = true;
+        }
+        construction_budget.steps = construction_budget
+            .steps
+            .checked_sub(runtime_bindings.len())
+            .ok_or("IIR runtime binding copy budget exhausted")?;
+        let BuildResult {
+            mut dispatch,
+            functions,
+            nominals,
+            interfaces,
+            expansion_sources,
+            effect_contracts,
+            callable_identities,
+            frozen_methods,
+            mut type_cores,
+            remaining: mut publication_fuel,
+        } = build(
+            source,
+            construction_budget,
+            Roots::Iir(roots),
+            runtime_bindings.clone(),
+            types,
+            None,
+            Some(expansion),
+        )?;
+        let templates = captured_templates::storage(
+            &functions,
+            &frozen_methods,
+            package,
+            &dispatch,
+            &mut type_cores,
+            &mut publication_fuel,
+        )?;
+        // A selected interface may have conditionally available or simply unused
+        // methods. Publish executable links only for demanded concrete bodies.
+        publication::retain_demanded_methods(
+            &functions,
+            &templates,
+            &mut dispatch,
+            &mut publication_fuel,
+        )?;
+        publication_fuel = publication_fuel
+            .checked_sub(roots.len())
+            .ok_or("IIR root copy budget exhausted")?;
+        let normal_forms =
+            publication::copy_normal_forms(&package.normal_forms, &mut publication_fuel)?;
+        let output = iir::Package {
+            target: package.target,
+            expansion_sources,
+            effect_contracts,
+            roots: roots.to_vec(),
+            functions,
+            templates,
+            dispatch,
+            runtime_bindings,
+            nominals,
+            interfaces,
+            normal_forms,
+            callable_identities,
+        };
+        output.validate(&mut publication_fuel)?;
+        budget.steps = publication_fuel;
+        Ok(output)
+    }
+}
+
+impl std::fmt::Display for InstantiationSession<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(instantiation-session (phase {}) (source {}))",
+            if self.phase_checked {
+                "checked"
+            } else {
+                "pending"
+            },
+            self.source.package()
+        )
+    }
 }
 
 enum Roots<'a> {
@@ -517,7 +597,12 @@ fn build(
     )?;
     let inline_effects = if matches!(roots, Roots::Iir(_)) {
         input_fuel = input_fuel
-            .checked_sub(package.effects.len())
+            .checked_sub(
+                package
+                    .effects
+                    .len()
+                    .saturating_add(package.expansion_sources.len()),
+            )
             .ok_or("materialized inline effect index budget exhausted")?;
         package
             .effects

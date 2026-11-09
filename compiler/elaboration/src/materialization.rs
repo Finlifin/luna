@@ -134,3 +134,33 @@ pub fn instantiate_with_types_in_source(
         &SourceExpansion,
     )
 }
+
+/// Synchronize the enclosing construction stage with complete graph production.
+pub fn instantiate_with_types_in_source_in_budget(
+    source: DeclarationSource<'_>,
+    roots: &[iir::InstanceKey],
+    types: &[nir::Term],
+    runtime_bindings: BTreeSet<nir::RuntimeId>,
+    budget: &mut Budget,
+) -> Result<iir::Package, String> {
+    ::materialization::instantiate_with_types_in_source_in_budget(
+        source,
+        roots,
+        types,
+        runtime_bindings,
+        budget,
+        &SourceExpansion,
+    )
+}
+
+pub use ::materialization::InstantiationSession;
+
+pub fn instantiate_with_types_in_session(
+    session: &mut InstantiationSession<'_>,
+    roots: &[iir::InstanceKey],
+    types: &[nir::Term],
+    runtime_bindings: BTreeSet<nir::RuntimeId>,
+    budget: &mut Budget,
+) -> Result<iir::Package, String> {
+    session.instantiate(roots, types, runtime_bindings, budget, &SourceExpansion)
+}
