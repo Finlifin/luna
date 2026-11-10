@@ -730,7 +730,7 @@ impl Checker<'_, '_> {
             // telescope of their own. Explicit member inputs were rejected
             // above; do not route them through nominal parameter metadata.
             let member_inputs = if constant || contextual_alias {
-                Vec::new()
+                super::clause_inputs::PreparedClauseInputs::default()
             } else {
                 self.prepared_nominal_inputs_in_domains(
                     owner,

@@ -142,7 +142,7 @@ impl<'h> Checker<'_, 'h> {
         args: &[Arg<'_>],
         statements: &mut Vec<n::Expr>,
         span: Span,
-    ) -> Result<Vec<(Option<hir::common::Ident>, n::Expr)>, Error> {
+    ) -> Result<super::clause_inputs::PreparedClauseInputs, Error> {
         let declared_domains = self.trait_domains(owner)?;
         // A recursive use of this declaration has a fresh input telescope.
         // Only lexical captures may specialize its domains before routing the
@@ -166,10 +166,9 @@ impl<'h> Checker<'_, 'h> {
         statements: &mut Vec<n::Expr>,
         span: Span,
         domains: &[Term],
-    ) -> Result<Vec<(Option<hir::common::Ident>, n::Expr)>, Error> {
+    ) -> Result<super::clause_inputs::PreparedClauseInputs, Error> {
         let parameters = self.type_parameters[&owner].clone();
         self.prepared_clause_inputs_in_domains(owner, args, statements, span, domains, &parameters)
-            .map(|prepared| prepared.inputs)
     }
 
     pub(super) fn prepared_packet_fields(
@@ -316,7 +315,7 @@ impl<'h> Checker<'_, 'h> {
     pub(super) fn prepared_type_member_expression(
         &mut self,
         owner: OwnerId,
-        inputs: Vec<(Option<hir::common::Ident>, n::Expr)>,
+        inputs: super::clause_inputs::PreparedClauseInputs,
         statements: Vec<n::Expr>,
         span: Span,
         expected: Option<&Term>,
@@ -331,7 +330,7 @@ impl<'h> Checker<'_, 'h> {
         args: &[Arg<'_>],
         span: Span,
         expected: Option<&Term>,
-        prepared: Option<(Vec<(Option<hir::common::Ident>, n::Expr)>, Vec<n::Expr>)>,
+        prepared: Option<(super::clause_inputs::PreparedClauseInputs, Vec<n::Expr>)>,
     ) -> Result<(n::Expr, Vec<n::Expr>), Error> {
         let clauses = self.type_clause_params(owner);
         let parameters = self.type_parameters[&owner].clone();
@@ -356,7 +355,8 @@ impl<'h> Checker<'_, 'h> {
             } else {
                 self.prepared_nominal_inputs(owner, args, &mut statements, span)?
             };
-            for (name, value) in inputs {
+            let mut identities = inputs.identities;
+            for (name, value) in inputs.inputs {
                 let slot = Self::type_input_slot(&clauses, name, &mut positional, span)?;
                 let cell = values
                     .get_mut(slot)
@@ -370,32 +370,28 @@ impl<'h> Checker<'_, 'h> {
             self.in_required_comptime = true;
             let mut arguments = Vec::new();
             for (slot, value) in values.into_iter().enumerate() {
-                let value = if let Some(value) = value {
-                    value
+                let (value, identity) = if let Some(value) = value {
+                    (value, identities.remove(&parameters[slot]))
                 } else {
                     let hir::clause::ClauseParamKind::Optional(_, _, default) = clauses[slot].kind
                     else {
                         return Err(error(span, "type argument count mismatch"));
                     };
-                    if self.active_type_defaults.len() >= 64
-                        || !self.active_type_defaults.insert((owner, slot))
-                    {
-                        return Err(error(span, "cyclic or excessively deep type default"));
-                    }
-                    let domain = self.substituted_trait_domain(&domains[slot], span)?;
-                    let dependent = self
-                        .alias_value_bindings
-                        .keys()
-                        .any(|id| domain.mentions_rigid(*id));
-                    let value = self.expr(default, (!dependent).then_some(&domain));
-                    self.active_type_defaults.remove(&(owner, slot));
-                    self.bind_type_input(value?, &mut statements, span)?
+                    self.prepared_clause_default(
+                        owner,
+                        slot,
+                        default,
+                        &domains[slot],
+                        &mut statements,
+                        span,
+                    )?
                 };
                 match &value.kind {
                     K::TypeValue(ty) => {
                         self.alias_substitution
                             .insert(parameters[slot], std::sync::Arc::new(ty.clone()));
                         self.alias_value_bindings.remove(&parameters[slot]);
+                        self.normal_default_bindings.remove(&parameters[slot]);
                     }
                     K::Local(binding) => {
                         if value.ty == p(P::Type) {
@@ -406,7 +402,12 @@ impl<'h> Checker<'_, 'h> {
                                 .insert(parameters[slot], (*binding, value.ty.clone()));
                             self.alias_value_bindings.remove(&parameters[slot]);
                         }
-                        self.alias_substitution.remove(&parameters[slot]);
+                        if let Some(identity) = identity {
+                            self.alias_substitution
+                                .insert(parameters[slot], std::sync::Arc::new(identity));
+                        } else {
+                            self.alias_substitution.remove(&parameters[slot]);
+                        }
                     }
                     _ => unreachable!(),
                 }
@@ -544,6 +545,68 @@ impl<'h> Checker<'_, 'h> {
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.in_required_comptime = saved_mode;
+        result
+    }
+
+    /// Defaults use the declaration telescope, after all explicit producers.
+    /// Observe only supplied input facts; a known identity never substitutes
+    /// for execution of the checked default or its earlier input bindings.
+    pub(super) fn prepared_clause_default(
+        &mut self,
+        owner: OwnerId,
+        slot: usize,
+        default: &Expr<'_>,
+        domain: &Term,
+        statements: &mut Vec<n::Expr>,
+        span: Span,
+    ) -> Result<(n::Expr, Option<Term>), Error> {
+        if self.active_type_defaults.len() >= 64 || !self.active_type_defaults.insert((owner, slot))
+        {
+            return Err(error(span, "cyclic or excessively deep type default"));
+        }
+        let result = (|| {
+            let domain = self.substituted_trait_domain(domain, span)?;
+            let dependent = self
+                .alias_value_bindings
+                .keys()
+                .chain(self.normal_default_bindings.keys())
+                .any(|id| domain.mentions_rigid(*id));
+            let checked = self.expr(default, (!dependent).then_some(&domain))?;
+            self.required_steps = self
+                .required_steps
+                .checked_sub(
+                    (self.normal_default_bindings.len() + self.alias_value_bindings.len()) as u64,
+                )
+                .ok_or_else(|| error(span, "default input fact budget exhausted"))?;
+            let mut facts = BTreeMap::new();
+            for (parameter, (binding, _)) in &self.normal_default_bindings {
+                if let Some(identity) = self.alias_substitution.get(parameter) {
+                    facts.insert(*binding, std::sync::Arc::clone(identity));
+                }
+            }
+            for (parameter, binding) in &self.alias_value_bindings {
+                if let Some(identity) = self.alias_substitution.get(parameter) {
+                    facts.insert(*binding, std::sync::Arc::clone(identity));
+                }
+            }
+            let identity = self.preserved_input_identity(
+                &checked,
+                facts
+                    .iter()
+                    .map(|(binding, identity)| (*binding, identity.as_ref())),
+                span,
+            )?;
+            let mut value = self.bind_type_input(checked, statements, span)?;
+            if value.ty == p(P::Type)
+                && let Some(identity) = &identity
+            {
+                // Keep the bound producer above. The packet can expose its
+                // identity to consumers without replaying its source code.
+                value.kind = K::TypeValue(self.copy_clause_identity(identity, span)?);
+            }
+            Ok((value, identity))
+        })();
+        self.active_type_defaults.remove(&(owner, slot));
         result
     }
 

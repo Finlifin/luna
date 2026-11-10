@@ -3,6 +3,7 @@ use super::*;
 
 /// Static identities assist dependent domain checking without replacing the
 /// source-ordered producers or the ordinary values retained in their slots.
+#[derive(Default)]
 pub(super) struct PreparedClauseInputs {
     pub inputs: Vec<(Option<hir::common::Ident>, n::Expr)>,
     pub identities: BTreeMap<DeclarationId, Term>,
@@ -440,25 +441,34 @@ impl Checker<'_, '_> {
         let mut preparations: Vec<Vec<n::Expr>> = (0..args.len()).map(|_| Vec::new()).collect();
         let mut waiting = Vec::new();
         let mut evidence = ClauseInputEvidence::default();
-        let mut domain_dependencies = BTreeSet::new();
+        let mut identity_dependencies = BTreeSet::new();
         for domain in domains {
             let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
             let mut fuel = before;
             let charged = nir::type_computations::charge_term(domain, &mut fuel);
             self.required_steps -= (before - fuel) as u64;
             charged.map_err(|failure| error(span, failure.to_string()))?;
-            domain_dependencies.extend(
+            identity_dependencies.extend(
                 domain
                     .rigid_parameters()
                     .map_err(|failure| error(span, failure.to_string()))?
                     .into_keys(),
             );
         }
+        // Defaults consume earlier values even when their declared domain is
+        // simply Type. Observe those source dependencies through the same
+        // lexical closure query used by ordinary default preparation.
+        for clause in &clauses {
+            if let hir::clause::ClauseParamKind::Optional(_, _, default) = clause.kind {
+                identity_dependencies
+                    .extend(self.expression_declaration_dependencies(owner, default)?);
+            }
+        }
         evidence.pending = parameters
             .iter()
             .zip(domains)
             .filter_map(|(parameter, domain)| {
-                (*domain == p(P::Type) || domain_dependencies.contains(parameter))
+                (*domain == p(P::Type) || identity_dependencies.contains(parameter))
                     .then_some(*parameter)
             })
             .collect::<BTreeSet<_>>();
@@ -576,7 +586,7 @@ impl Checker<'_, '_> {
                         Err(failure) => Err(failure.clone()),
                     };
                     let known = if domains[slot] == p(P::Type)
-                        || domain_dependencies.contains(&parameters[slot])
+                        || identity_dependencies.contains(&parameters[slot])
                     {
                         self.record_clause_input_identity(
                             observed,
@@ -660,9 +670,9 @@ impl Checker<'_, '_> {
                 continue;
             }
             let value = self.expr(input, Some(&input_domain))?;
-            let needed_for_domain = domain_dependencies.contains(&parameters[slot]);
+            let identity_needed = identity_dependencies.contains(&parameters[slot]);
             let known = if domains[slot] == p(P::Type)
-                || (needed_for_domain && (Some(slot) != collector_slot || name.is_some()))
+                || (identity_needed && (Some(slot) != collector_slot || name.is_some()))
             {
                 self.observe_clause_input_identity(&value, parameters[slot], &mut evidence, span)?
             } else {
@@ -736,7 +746,7 @@ impl Checker<'_, '_> {
                 })?;
             let known = if !pending.spread
                 && (domains[pending.slot] == p(P::Type)
-                    || (domain_dependencies.contains(&parameters[pending.slot])
+                    || (identity_dependencies.contains(&parameters[pending.slot])
                         && (Some(pending.slot) != collector_slot || pending.name.is_some())))
             {
                 self.observe_clause_input_identity(

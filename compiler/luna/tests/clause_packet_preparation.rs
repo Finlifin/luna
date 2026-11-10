@@ -251,3 +251,147 @@ fn observed_clause_domains_still_reject_wrong_values_and_stale_local_facts() {
         "{failure}"
     );
 }
+
+#[test]
+fn default_clause_identity_completes_signatures_without_preexecuting_defaults() {
+    check(
+        "
+        comptime fn mark() -> bool { true }
+        comptime fn identity(value: T) -> T
+        where .T: Type = do { mark(); let kind = u8; kind }
+        { value }
+        comptime fn check() -> bool {
+            let first = identity<>;
+            let second = identity<>;
+            first(7) == 7 and first(8) == 8 and second(9) == 9
+        }
+    ",
+        &["check", "mark", "mark", "identity", "identity", "identity"],
+    );
+}
+
+#[test]
+fn default_clause_dependencies_reuse_values_after_explicit_inputs() {
+    check(
+        "
+        comptime fn mark() -> bool { true }
+        comptime fn identity(value: U) -> U
+        where T, .U: Type = do { mark(); T }
+        { value }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let selected = identity<do { trace = trace + 1; u8 }>;
+            selected(7) == 7 and trace == 1
+        }
+    ",
+        &["check", "mark", "identity"],
+    );
+}
+
+#[test]
+fn nominal_defaults_supply_later_default_domains_without_erasing_producers() {
+    check(
+        "
+        comptime fn mark() -> bool { true }
+        newtype Marker<.T: Type = do { mark(); u8 }, .value: T = 7> = bool;
+        newtype Forwarded<.T: Type = do { mark(); u8 }, .U: Type = T> = bool;
+        comptime fn check() -> bool {
+            let first = Marker<>;
+            let second = Marker<>;
+            let forwarded = Forwarded<>;
+            first == Marker<.T = u8, .value = 7> and first == second
+                and forwarded == Forwarded<.T = u8, .U = u8>
+        }
+    ",
+        &["check", "mark", "mark", "mark"],
+    );
+}
+
+#[test]
+fn defaults_use_ordinary_value_dependencies_from_explicit_inputs() {
+    check(
+        "
+        comptime fn mark() -> bool { true }
+        comptime fn identity(value: T) -> T
+        where Es: meta.List<Type>, .T: Type = Tuple<.Es = Es>
+        { value }
+        newtype Marker<Es: meta.List<Type>, .T: Type = Tuple<.Es = Es>, .value: ?T = null> = bool;
+        comptime fn check() -> bool {
+            let selected = identity<do { mark(); [u8, bool] }>;
+            let (number, flag) = selected((7, true));
+            let marker = Marker<do { mark(); [u8, bool] }>;
+            number == 7 and flag and marker == Marker<[u8, bool]>
+        }
+    ",
+        &["check", "mark", "identity", "mark"],
+    );
+}
+
+#[test]
+fn clause_defaults_follow_explicit_producers_and_explicit_supply_skips_them() {
+    check(
+        "
+        comptime fn first() -> bool { true }
+        comptime fn last() -> bool { true }
+        comptime fn default_mark() -> bool { true }
+        comptime fn override_mark() -> bool { true }
+        comptime fn identity(value: T) -> T
+        where flag: bool, .T: Type = do { default_mark(); u8 }, tag: bool
+        { value }
+        comptime fn check() -> bool {
+            let a = identity<first(), last()>;
+            let b = identity<.T = do { override_mark(); u8 }, first(), last()>;
+            a(7) == 7 and b(8) == 8
+        }
+    ",
+        &[
+            "check",
+            "first",
+            "last",
+            "default_mark",
+            "override_mark",
+            "first",
+            "last",
+            "identity",
+            "identity",
+        ],
+    );
+}
+
+#[test]
+fn default_identity_does_not_erase_failure_or_publish_unavailable_types() {
+    for body in [
+        "Unknown()",
+        "do { var selected: Type = u8; selected = bool; selected }",
+    ] {
+        let failure = sysroot::compile(&format!(
+            "
+            comptime fn Unknown() -> Type {{ u8 }}
+            comptime fn identity(value: T) -> T where .T: Type = {body} {{ value }}
+            comptime fn check() -> bool {{
+                let selected: comptime fn(u8) -> u8 = identity<>;
+                true
+            }}
+        "
+        ))
+        .unwrap_err();
+        assert!(
+            failure.contains("signature still depends on an invocation-time clause input"),
+            "{failure}"
+        );
+    }
+    let failure = sysroot::compile(
+        "
+        comptime fn mark() -> bool { true }
+        comptime fn identity(value: T) -> T
+        where .T: Type = do { mark(); u8 }
+        { value }
+        comptime fn check() -> bool { identity<>(256) == 0 }
+    ",
+    )
+    .unwrap_err();
+    assert!(
+        failure.contains("does not fit the requested fixed-width representation"),
+        "{failure}"
+    );
+}

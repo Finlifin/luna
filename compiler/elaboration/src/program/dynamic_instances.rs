@@ -215,7 +215,7 @@ impl Checker<'_, '_> {
         let prepared = (|| {
             let clauses = self.type_clause_params(owner);
             let mut statements = Vec::new();
-            let prepared = self.prepared_clause_inputs_in_domains(
+            let mut prepared = self.prepared_clause_inputs_in_domains(
                 owner,
                 args,
                 &mut statements,
@@ -257,25 +257,22 @@ impl Checker<'_, '_> {
             }
             for (own_slot, supplied) in supplied.into_iter().enumerate() {
                 let slot = prefix.len() + own_slot;
-                let value = if let Some(value) = supplied {
-                    value
+                let (value, identity) = if let Some(value) = supplied {
+                    (value, prepared.identities.remove(&parameters[slot]))
                 } else {
                     let hir::clause::ClauseParamKind::Optional(_, _, default) =
                         clauses[own_slot].kind
                     else {
                         return Err(error(expr.span, "type argument count mismatch"));
                     };
-                    if self.active_type_defaults.len() >= 64
-                        || !self.active_type_defaults.insert((owner, own_slot))
-                    {
-                        return Err(error(expr.span, "cyclic or excessively deep type default"));
-                    }
-                    let value = (|| {
-                        let domain = self.substituted_trait_domain(&domains[slot], expr.span)?;
-                        self.expr(default, Some(&domain))
-                    })();
-                    self.active_type_defaults.remove(&(owner, own_slot));
-                    self.bind_type_input(value?, &mut statements, expr.span)?
+                    self.prepared_clause_default(
+                        owner,
+                        own_slot,
+                        default,
+                        &domains[slot],
+                        &mut statements,
+                        expr.span,
+                    )?
                 };
                 match &value.kind {
                     K::TypeValue(ty) => {
@@ -283,9 +280,10 @@ impl Checker<'_, '_> {
                         self.alias_substitution
                             .insert(parameters[slot], std::sync::Arc::new(ty.clone()));
                         self.alias_value_bindings.remove(&parameters[slot]);
+                        self.normal_default_bindings.remove(&parameters[slot]);
                     }
                     K::Local(binding) => {
-                        let identity = prepared.identities.get(&parameters[slot]);
+                        let identity = identity.as_ref();
                         let is_type = domains[slot] == p(P::Type);
                         symbols.push(match identity {
                             Some(identity) => self.copy_clause_identity(identity, expr.span)?,
