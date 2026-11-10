@@ -416,6 +416,45 @@ comptime fn check() -> bool {
   退出 0；`git diff --check` 通过。未知操作目前保守撤销全部局部事实，不声称已实现
   精确别名／效果分析或一般动态 contextual preparation；未运行全 workspace 或性能基准。
 
+### 已接通：NF 输入复用保留生产者的身份观察
+
+NF 输入计划的域依赖、展开包字段、交错集合临时绑定及最终输入身份现在使用上述
+共同观察。原始表达式仍保存在 routed input、preparation 或 argument 中；观察结果
+只提供后续域与形成条件的静态证据。没有改变源码求值顺序、默认值的绑定复用或
+invocation 中的准入，也没有给 Tuple／List 增加独立规则。
+
+旧入口把 `do { mark(); let selected = u8; selected }` 的整个结果视为未知，导致
+依赖它的列表落入旧 contextual 参数树。即使域已能静态确定，未执行分支中的
+`[256]` 也没有按 u8 检查。现在这类列表交回普通表达式检查，所有分支都检查元素域，
+实际 invocation 仍在原槽位运行 mark。观察到包字段身份也不省略展开包生产者；
+提前 return 仍跳过后面的输入，集合临时绑定保留各次调用。
+
+类型标注与 `required_normal_type_plan` 的完成值入口刻意保留严格结构观察：它们
+可能直接用结果替换源表达式，不能使用只证明正常结果的宽松观察。静态身份可知
+不等于已经完成 required invocation；此处没有声称动态接收域或 ContextualExpr
+已经全面接通。
+
+验证工作目录 `/home/fin/luna`：
+
+- 修改前运行 `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test normal_input_plans observed_domains --no-fail-fast`，
+  `/tmp/luna-tools-ljfz1cb4/result.json` 退出 101。两项分别证明已知域仍生成旧参数树、
+  未执行分支中的越界值被接受。
+- 首轮修复验证 `-p luna --test normal_input_plans --test ordinary_input_identity
+  --no-fail-fast`，相同检查入口，`/tmp/luna-tools-sipzizn0/result.json` 退出 0，
+  32 项通过。两种 VM 核对来源副作用、默认值和包展开的提前退出。
+- 扩展检查使用同一入口，参数为 `-p elaboration -p luna --lib
+  --test normal_input_plans --test open_normal_input_plans --test ordinary_input_identity
+  --test type_spreads --test clause_packet_preparation --test nominal_staging
+  --test dependent_list_collectors --test library_meta_objects --test library_protocols
+  --no-fail-fast`。`/tmp/luna-tools-vgj3gvsl/result.json` 退出 101：475 项通过，
+  唯一失败是新增形成约束测试的诊断文字断言；实际已正确拒绝不匹配的输入。
+  校准断言后仅重跑受影响的 `-p luna --test normal_input_plans --no-fail-fast`，
+  `/tmp/luna-tools-i2cnncbm/result.json` 退出 0，20 项全部通过；生产实现未再改变。
+- 两个修改 Rust 文件的 scoped rustfmt check：
+  `/tmp/luna-tools-ifw5p_3m/result.json` 退出 0。未运行全 workspace 或性能基准。
+  正式 docs 与工作区原有修改保持不变。
+
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
 
 当前实现的具体断点见

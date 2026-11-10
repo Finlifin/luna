@@ -119,6 +119,123 @@ fn fixed_inputs_and_defaults_share_the_contextual_plan() {
 }
 
 #[test]
+fn observed_domains_retain_effectful_producers_in_their_source_slots() {
+    let package = sysroot::compile(
+        "
+        pure comptime fn Packet<T, ...values: meta.List<T>> -> Type { bool }
+        comptime fn mark() -> bool { true }
+        comptime fn Direct() -> Type { Packet<u8, 1, 255> }
+        comptime fn Build() -> Type {
+            Packet<.values = if true { [1, 255] } else { [] },
+                do { mark(); let selected = u8; selected }>
+        }
+        comptime fn Twice() -> Type { Build(); Build() }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let actual = Packet<do { trace = trace * 10 + 1; u8 },
+                do { trace = trace * 10 + 2; 1 }, 255>;
+            actual == Packet<u8, 1, 255> and trace == 12
+        }
+    ",
+    )
+    .unwrap();
+    assert_ordinary_reordered_inputs(&package, "Build");
+    let direct = invoke_both(&package, "Direct");
+    trace_both(&package, "Build", &direct, &["Build", "mark"]);
+    trace_both(
+        &package,
+        "Twice",
+        &direct,
+        &["Twice", "Build", "mark", "Build", "mark"],
+    );
+    trace_both(&package, "check", &Value::Bool(true), &["check"]);
+}
+
+#[test]
+fn observed_domains_check_unexecuted_branches_before_invocation() {
+    for value in [
+        "if true { [1] } else { [256] }",
+        "if true { [1] } else { [false] }",
+    ] {
+        let source = format!(
+            "
+            pure comptime fn Packet<T, ...values: meta.List<T>> -> Type {{ bool }}
+            comptime fn mark() -> bool {{ true }}
+            comptime fn Bad() -> Type {{
+                Packet<.values = {value}, do {{ mark(); u8 }}>
+            }}
+        "
+        );
+        assert!(sysroot::compile(&source).is_err(), "accepted {source}");
+    }
+}
+
+#[test]
+fn observed_packet_fields_and_defaults_retain_their_producers() {
+    let package = sysroot::compile(
+        "
+        pure comptime fn Packet<T, tag: bool, ...values: meta.List<T>> -> Type { bool }
+        pure comptime fn Defaulted<T, .U: Type = T, .value: ?U = null> -> Type { bool }
+        comptime fn mark() -> bool { true }
+        comptime fn Direct() -> Type { Packet<u8, true, 1, 255> }
+        comptime fn Build() -> Type {
+            Packet<...do { mark(); (u8, true) }, 1, 255>
+        }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let actual = Defaulted<do { trace = trace + 1; u8 }>;
+            actual == Defaulted<u8> and trace == 1
+        }
+        comptime fn Exit() -> Type {
+            Packet<...do { return Direct(); (u8, true) },
+                do { mark(); 1 }, 255>
+        }
+    ",
+    )
+    .unwrap();
+    let direct = invoke_both(&package, "Direct");
+    trace_both(&package, "Build", &direct, &["Build", "mark"]);
+    trace_both(&package, "check", &Value::Bool(true), &["check"]);
+    trace_both(&package, "Exit", &direct, &["Exit", "Direct"]);
+}
+
+#[test]
+fn observed_collection_temporaries_keep_formation_checks_and_effects() {
+    let prefix = "
+        pure comptime fn Packet<...values: meta.List<u8>> -> Type { bool }
+        pure comptime fn Checked<T, .tag: bool = true, ...values: meta.List<u8>> -> Type
+        where requires T == Packet<.values = values>
+        {
+            T
+        }
+        comptime fn mark() -> bool { true }
+    ";
+    let package = sysroot::compile(&format!(
+        "{prefix}
+        comptime fn Direct() -> Type {{ Checked<Packet<1, 2>, 1, 2> }}
+        comptime fn Build() -> Type {{
+            Checked<Packet<1, 2>, do {{ mark(); 1 }}, .tag = mark(), 2>
+        }}
+    "
+    ))
+    .unwrap();
+    let direct = invoke_both(&package, "Direct");
+    trace_both(&package, "Build", &direct, &["Build", "mark", "mark"]);
+    let failure = sysroot::compile(&format!(
+        "{prefix}
+        comptime fn Bad() -> Type {{
+            Checked<Packet<1, 2>, do {{ mark(); 1 }}, .tag = mark(), 3>
+        }}
+    "
+    ))
+    .unwrap_err();
+    assert!(
+        failure.contains("type requirement is not satisfied"),
+        "{failure}"
+    );
+}
+
+#[test]
 fn dynamic_domains_do_not_move_or_replay_input_effects() {
     let package = sysroot::compile(
         "

@@ -2872,7 +2872,13 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<n::Expr, Error> {
         let binding = self.spread_binding(span)?;
-        let known = self.checked_normal_input_in(&value, known_bindings, span)?;
+        let known = self.preserved_input_identity(
+            &value,
+            known_bindings
+                .iter()
+                .map(|(binding, term)| (*binding, term.as_ref())),
+            span,
+        )?;
         if let Some(known) = known {
             known_bindings.insert(binding, std::sync::Arc::new(known));
         }
@@ -2963,7 +2969,13 @@ impl Checker<'_, '_> {
             let Some(RoutedNormalInput::Prepared(value)) = &routed[previous] else {
                 continue;
             };
-            let known = self.checked_normal_input_in(value, bindings, span)?;
+            let known = self.preserved_input_identity(
+                value,
+                bindings
+                    .iter()
+                    .map(|(binding, term)| (*binding, term.as_ref())),
+                span,
+            )?;
             if let Some(value) = known {
                 known_parameters.push(parameters[previous].0);
                 known_values.push(value);
@@ -3075,7 +3087,7 @@ impl Checker<'_, '_> {
             let mut order = Vec::new();
             let mut routing = clause_inputs::ClauseInputRouting::new(&clauses, inputs);
             let mut pending_collection = Vec::new();
-            let mut prepared_bindings = BTreeMap::new();
+            let mut prepared_bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>> = BTreeMap::new();
             for (input_index, input) in inputs.iter().enumerate() {
                 if let Arg::Expand(packet) = input {
                     if list_spreads.contains(&input_index) {
@@ -3131,8 +3143,13 @@ impl Checker<'_, '_> {
                         &positional_types,
                         packet.span,
                     )?;
-                    let observed =
-                        self.checked_normal_input_in(&value, &prepared_bindings, packet.span)?;
+                    let observed = self.preserved_input_identity(
+                        &value,
+                        prepared_bindings
+                            .iter()
+                            .map(|(binding, term)| (*binding, term.as_ref())),
+                        packet.span,
+                    )?;
                     let mut observed_fields = match observed {
                         Some(Term::TupleValue(values)) if values.len() == fields.len() => {
                             Some(values.into_iter())
@@ -3514,9 +3531,13 @@ impl Checker<'_, '_> {
                         self.checked_collected_list_in(items, &ty, &prepared_bindings, span)?
                     }
                     _ => match value.expression() {
-                        Some(value) => {
-                            self.checked_normal_input_in(value, &prepared_bindings, span)?
-                        }
+                        Some(value) => self.preserved_input_identity(
+                            value,
+                            prepared_bindings
+                                .iter()
+                                .map(|(binding, term)| (*binding, term.as_ref())),
+                            span,
+                        )?,
                         None => None,
                     },
                 };
