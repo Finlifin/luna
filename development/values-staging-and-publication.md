@@ -455,6 +455,49 @@ invocation 中的准入，也没有给 Tuple／List 增加独立规则。
   `/tmp/luna-tools-ifw5p_3m/result.json` 退出 0。未运行全 workspace 或性能基准。
   正式 docs 与工作区原有修改保持不变。
 
+### 已接通：普通子句与展开包共享身份观察内核
+
+普通 callable／名义输入的显式子句准备原来只调用严格结构观察；展开包只保存字段
+类型和局部绑定，完全没有把已知字段身份交给域依赖。结果是已知 u8 的输入仍留下
+pending 标记，普通 callable 签名被拒绝，等待它的列表也失去元素上下文。
+
+现在 `observe_preserved_input_in` 是普通参数、NF 和显式子句共同的正常结果观察
+内核。它拥有本次查询的事实表与预算，返回区分 Unavailable、资源限制、结构及证明
+失败的结果；严格入口继续将真实失败报告为错误，子句等待者则沿用已有失败记录，
+在后续检查需要该域时报告原因。没有把预算耗尽改成未知，也没有因静态观察失败
+提前运行生产者。自由绑定分析的失败同样保留资源／深度／非法结构分类。
+
+展开包只观察一次，字段身份按参数路由交给同一个证据登记入口。Type 和被后续域
+引用的普通 comptime 值均可提供证据；普通列表值作为 Tuple 输入也使用这条规则，
+没有为 `meta.List<Type>` 增加参数种类。没有待决身份时跳过额外观察。实际包仍由
+一个 LetPattern 解构，空包、提前 return、默认值和调用次数继续属于原求值位置。
+
+已知身份可以完成 callable 的参数／返回类型；保存形成后的 callable 再次调用，
+不重跑子句和展开包生产者。未知调用结果和可变存储仍不是静态身份，不能把它们
+发布成无关的具体函数类型。该合流没有完成一般动态接收域恢复，也没有迁移所有
+名义默认值和成员投影的身份消费路径。
+
+验证工作目录 `/home/fin/luna`，检查入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- 修改前 `-p luna --test clause_packet_preparation observed_ --no-fail-fast`，
+  `/tmp/luna-tools-5qpaaul4/result.json` 退出 101，三个独立源码均失败：两个报
+  invocation-time 输入导致签名未完成，一个报列表缺少元素上下文。
+- 合流后 `-p luna --test clause_packet_preparation --test ordinary_input_identity
+  --test normal_input_plans --no-fail-fast`，`/tmp/luna-tools-t3bkk4wc/result.json`
+  退出 0，40 项通过，包含两种 VM 的实际调用顺序与重复调用。
+- 扩展检查参数为 `-p elaboration -p luna --lib --test clause_packet_preparation
+  --test ordinary_callable_types --test ordinary_clause_collectors --test normal_input_plans
+  --test open_normal_input_plans --test ordinary_input_identity --test scoped_input_observation
+  --test type_spreads --test nominal_value_parameters --test library_meta_objects
+  --test library_protocols --no-fail-fast`。`/tmp/luna-tools-uejrlt5x/result.json`
+  退出 101，822 项通过、2 项既有 ignored；唯一失败是新增越界诊断断言漏写一个
+  单词，实际正确拒绝。校准断言后只重跑 `-p luna --test clause_packet_preparation
+  --no-fail-fast`，`/tmp/luna-tools-c2gsa4i6/result.json` 退出 0，10 项通过；
+  生产实现没有再次改变。两项 ignored 仍是实际 invocation 才能取得的域与签名。
+- 四个修改 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-40_dcz_m/result.json`
+  退出 0；未执行全 workspace 或性能基准，正式 docs 与原有修改哈希不变。
+
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
 
 当前实现的具体断点见

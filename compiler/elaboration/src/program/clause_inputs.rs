@@ -289,8 +289,18 @@ impl Checker<'_, '_> {
             max_limbs: 4096,
         };
         let before = budget.steps;
-        let observed = self.observe_normal_input_in(value, 0, &mut budget, &bindings);
+        let observed = self.observe_preserved_input_in(value, bindings, &mut budget);
         self.required_steps -= (before - budget.steps) as u64;
+        self.record_clause_input_identity(observed, parameter, evidence, span)
+    }
+
+    fn record_clause_input_identity(
+        &mut self,
+        observed: Result<Term, normal::observation::Failure>,
+        parameter: DeclarationId,
+        evidence: &mut ClauseInputEvidence,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
         let known = match observed {
             Ok(value) => Some(value),
             Err(normal::observation::Failure::Unavailable) => None,
@@ -518,6 +528,26 @@ impl Checker<'_, '_> {
                     &positional_domains,
                     input.span,
                 )?;
+                let observed = if evidence.pending.is_empty() {
+                    Err(normal::observation::Failure::Unavailable)
+                } else {
+                    let bindings = self.observed_expression_bindings(&packet, input.span)?;
+                    let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                    let mut budget = comptime_runtime::Budget {
+                        steps: before,
+                        max_limbs: 4096,
+                    };
+                    let observed = self.observe_preserved_input_in(&packet, bindings, &mut budget);
+                    self.required_steps -= (before - budget.steps) as u64;
+                    observed
+                };
+                let mut observed_fields = match observed {
+                    Ok(Term::TupleValue(values)) if values.len() == fields.len() => {
+                        Ok(values.into_iter())
+                    }
+                    Ok(_) => Err(normal::observation::Failure::Unavailable),
+                    Err(failure) => Err(failure),
+                };
                 let mut pattern = Vec::with_capacity(fields.len());
                 for field in fields {
                     let slot = Self::type_input_slot(&clauses, None, &mut positional, span)?;
@@ -539,9 +569,24 @@ impl Checker<'_, '_> {
                     if !evidence.blocks(&domain) {
                         self.require(&field, &domain, input.span)?;
                     }
-                    if domains[slot] == p(P::Type) {
-                        evidence.pending.insert(parameters[slot]);
-                    }
+                    let observed = match &mut observed_fields {
+                        Ok(fields) => fields
+                            .next()
+                            .ok_or(normal::observation::Failure::Unavailable),
+                        Err(failure) => Err(failure.clone()),
+                    };
+                    let known = if domains[slot] == p(P::Type)
+                        || domain_dependencies.contains(&parameters[slot])
+                    {
+                        self.record_clause_input_identity(
+                            observed,
+                            parameters[slot],
+                            &mut evidence,
+                            input.span,
+                        )?
+                    } else {
+                        None
+                    };
                     let binding = self.spread_binding(input.span)?;
                     self.locals.insert(binding, field.clone());
                     pattern.push(n::Pattern::Binding {
@@ -554,7 +599,10 @@ impl Checker<'_, '_> {
                         value: n::Expr {
                             source: packet.source,
                             ty: field,
-                            kind: K::Local(binding),
+                            kind: match known.filter(|_| domains[slot] == p(P::Type)) {
+                                Some(identity) => K::TypeValue(identity),
+                                None => K::Local(binding),
+                            },
                         },
                         spread: false,
                     });

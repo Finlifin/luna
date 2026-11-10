@@ -1,6 +1,7 @@
 //! Bounded, read-only observations of checked declaration inputs. These do not
 //! establish stage availability, scope admission, or permission to invoke code.
 use super::*;
+use normal::observation::{self, Failure};
 
 fn structural_limit(limit: nir::copy_budget::CopyBudgetExhausted, span: Span) -> Error {
     error(
@@ -98,52 +99,66 @@ impl Checker<'_, '_> {
         });
         self.required_steps -= (before - fuel) as u64;
         copied.map_err(|failure| error(span, failure.to_string()))?;
-        if let Some(identity) = self.checked_normal_input_in(producer, &facts, span)? {
-            return Ok(Some(identity));
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut budget = comptime_runtime::Budget {
+            steps: before,
+            max_limbs: 4096,
+        };
+        let observed = self.observe_preserved_input_in(producer, facts, &mut budget);
+        self.required_steps -= (before - budget.steps) as u64;
+        observation::optional(observed).map_err(|failure| {
+            error(
+                span,
+                format!("input identity observation failed: {failure}"),
+            )
+        })
+    }
+
+    /// The caller retains the producer. Keep the classified result so a domain
+    /// waiter can report why observation failed without treating it as absence.
+    /// Ownership of facts prevents one query from publishing prefix mutations
+    /// into another query's lexical evidence.
+    pub(super) fn observe_preserved_input_in(
+        &self,
+        producer: &n::Expr,
+        mut facts: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        budget: &mut comptime_runtime::Budget,
+    ) -> Result<Term, Failure> {
+        if let Some(identity) =
+            observation::optional(self.observe_normal_input_in(producer, 0, budget, &facts))?
+        {
+            return Ok(identity);
         }
         let mut result = producer;
         loop {
-            self.required_steps = self
-                .required_steps
-                .checked_sub(1)
-                .ok_or_else(|| error(span, "input result observation budget exhausted"))?;
+            budget.consume(1)?;
             let (statements, tail) = match &result.kind {
                 K::Block { statements, result } | K::CallPreparation { statements, result } => {
                     (statements, result)
                 }
                 _ => {
-                    return if self.input_facts_cover(result, &facts, span)? {
-                        self.checked_normal_input_in(result, &facts, span)
+                    return if input_facts_cover(result, &facts, budget)? {
+                        self.observe_normal_input_in(result, 0, budget, &facts)
                     } else {
-                        Ok(None)
+                        Err(Failure::Unavailable)
                     };
                 }
             };
             for statement in statements {
-                if !self.input_facts_cover(statement, &facts, span)? {
+                if !input_facts_cover(statement, &facts, budget)? {
                     facts.clear();
                     continue;
                 }
                 let observed = if matches!(statement.kind, K::Let { .. } | K::LetPattern { .. }) {
-                    let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                    let mut budget = comptime_runtime::Budget {
-                        steps: before,
-                        max_limbs: 4096,
-                    };
-                    let binding =
-                        self.observe_normal_binding(statement, 0, &mut budget, &mut facts);
-                    self.required_steps -= (before - budget.steps) as u64;
-                    normal::observation::optional(binding)
-                        .map_err(|failure| {
-                            error(
-                                span,
-                                format!("static binding observation failed: {failure}"),
-                            )
-                        })?
-                        .is_some()
+                    observation::optional(
+                        self.observe_normal_binding(statement, 0, budget, &mut facts),
+                    )?
+                    .is_some()
                 } else {
-                    self.checked_normal_input_in(statement, &facts, span)?
-                        .is_some()
+                    observation::optional(
+                        self.observe_normal_input_in(statement, 0, budget, &facts),
+                    )?
+                    .is_some()
                 };
                 if !observed {
                     // Unknown calls or writes can invalidate aliases as well as
@@ -151,27 +166,11 @@ impl Checker<'_, '_> {
                     facts.clear();
                 }
             }
-            let Some(tail) = tail else { return Ok(None) };
+            let Some(tail) = tail else {
+                return Err(Failure::Unavailable);
+            };
             result = tail;
         }
-    }
-
-    fn input_facts_cover(
-        &mut self,
-        expression: &n::Expr,
-        facts: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-        span: Span,
-    ) -> Result<bool, Error> {
-        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let free = nir::free_bindings::collect(expression, &mut fuel);
-        self.required_steps -= (before - fuel) as u64;
-        let free = free.map_err(|failure| error(span, failure.to_string()))?;
-        self.required_steps = self
-            .required_steps
-            .checked_sub(free.len() as u64)
-            .ok_or_else(|| error(span, "input fact lookup budget exhausted"))?;
-        Ok(free.iter().all(|binding| facts.contains_key(binding)))
     }
 
     pub(super) fn observed_term_inputs(
@@ -214,4 +213,14 @@ impl Checker<'_, '_> {
     ) -> Result<BTreeSet<DeclarationId>, Error> {
         term(value, &mut self.required_steps, span)
     }
+}
+
+fn input_facts_cover(
+    expression: &n::Expr,
+    facts: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+    budget: &mut comptime_runtime::Budget,
+) -> Result<bool, Failure> {
+    let free = nir::free_bindings::collect(expression, &mut budget.steps)?;
+    budget.consume(free.len())?;
+    Ok(free.iter().all(|binding| facts.contains_key(binding)))
 }

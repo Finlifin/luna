@@ -131,3 +131,123 @@ fn packet_context_does_not_override_producer_requirements_or_field_domains() {
         .replace("T == Tuple<u8, bool>", "T == Tuple<bool, u8>");
     assert!(sysroot::compile(&wrong_requirement).is_err());
 }
+
+#[test]
+fn observed_clause_producers_complete_signatures_and_keep_execution_order() {
+    check(
+        "
+        comptime fn identity(value: T) -> T where T, flag: bool { value }
+        newtype Marker<T, value: T> = bool;
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let selected = identity<
+                do { trace = trace * 10 + 1; let kind = u8; kind },
+                do { trace = trace * 10 + 2; true }
+            >;
+            let marker = Marker<do { trace = trace * 10 + 3; u8 }, 7>;
+            selected(7) == 7 and selected(8) == 8
+                and marker == Marker<u8, 7> and trace == 123
+        }
+    ",
+        &["check", "identity", "identity"],
+    );
+}
+
+#[test]
+fn observed_packet_fields_complete_signatures_without_replaying_packets() {
+    check(
+        "
+        comptime fn mark() -> bool { true }
+        comptime fn identity(value: T) -> T where T, flag: bool { value }
+        comptime fn check() -> bool {
+            let selected = identity<...do { mark(); (u8, true) }>;
+            selected(7) == 7 and selected(8) == 8
+        }
+    ",
+        &["check", "mark", "identity", "identity"],
+    );
+}
+
+#[test]
+fn observed_clause_domains_check_pending_collections_in_source_order() {
+    check(
+        "
+        comptime fn count() -> Integer where T, ...values: meta.List<T> {
+            values.length()
+        }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let result = count<
+                .values = do { trace = trace * 10 + 1; [1, 255] },
+                do { trace = trace * 10 + 2; u8 }
+            >();
+            result == 2 and trace == 12
+        }
+    ",
+        &["check", "count"],
+    );
+}
+
+#[test]
+fn ordinary_value_packet_fields_supply_dependent_domains() {
+    check(
+        "
+        comptime fn mark() -> bool { true }
+        comptime fn accept() -> bool
+        where Es: meta.List<Type>, flag: bool, value: Tuple<.Es = Es>
+        { flag }
+        comptime fn check() -> bool {
+            accept<...do { mark(); ([u8, bool], true) }, (7, true)>()
+        }
+    ",
+        &["check", "mark", "accept"],
+    );
+}
+
+#[test]
+fn static_packet_identity_does_not_erase_early_return() {
+    check(
+        "
+        comptime fn identity(value: T) -> T where T, flag: bool { value }
+        comptime fn later() -> u8 { 7 }
+        comptime fn check() -> bool {
+            identity<...do { return true; (u8, true) }>(later()) == 7
+        }
+    ",
+        &["check"],
+    );
+}
+
+#[test]
+fn observed_clause_domains_still_reject_wrong_values_and_stale_local_facts() {
+    let failure = sysroot::compile(
+        "
+        comptime fn mark() -> bool { true }
+        comptime fn count() -> Integer where T, ...values: meta.List<T> { values.length() }
+        comptime fn check() -> bool {
+            count<.values = if true { [1] } else { [256] }, do { mark(); u8 }>() == 1
+        }
+    ",
+    )
+    .unwrap_err();
+    assert!(
+        failure.contains("does not fit the requested fixed-width representation"),
+        "{failure}"
+    );
+    let failure = sysroot::compile(
+        "
+        comptime fn identity(value: T) -> T where T, flag: bool { value }
+        comptime fn check() -> bool {
+            var kind: Type = u8;
+            let selected: comptime fn(u8) -> u8 =
+                identity<...do { kind = bool; (kind, true) }>;
+            true
+        }
+    ",
+    )
+    .unwrap_err();
+    assert!(
+        failure.contains("signature still depends on an invocation-time clause input"),
+        "{failure}"
+    );
+}
