@@ -30,6 +30,7 @@ mod builtin_bindings;
 mod clause_inputs;
 mod cmtt;
 mod constants;
+mod declaration_inputs;
 mod defaults;
 mod dependent_inputs;
 mod derivation;

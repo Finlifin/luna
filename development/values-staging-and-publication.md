@@ -553,6 +553,51 @@ Es 是否需要身份。名义输入及成员准备保留完整 PreparedClauseIn
   五个 Rust 文件 scoped rustfmt check 在 `/tmp/luna-tools-x4156x56/result.json`
   退出 0。未运行全 workspace 或性能基准。
 
+### 已接通：NF、名义类型与透明别名共用输入规划
+
+`declaration_inputs.rs` 接管原 NF 的输入计划构造，并供 contextual 名义类型与透明
+别名使用。名义路径原有的具名路由、展开包、默认输入、域检查和身份收集循环已删除。
+共同入口接受声明 binder 的身份、sort 和域，不通过注册临时 NF 头或识别库名称来
+复用能力；它返回原位生产者、准备语句、执行次序、绑定及形成检查所需的身份证据。
+`PreparedDeclarationInputs` 的 Display 用 S-expression 展示这些关系和形成环境。
+
+最终形成保持各自职责。NF 保留不透明头；名义入口取得自己的描述与捕获；透明别名
+保留形成契约及主体。共同计划不在内部提前调用某个头的主体，也不替消费者省略
+形成检查。名义捕获继续在自身输入之前绑定，准备语句的位置随之调整；成员显式
+输入使用调用方环境，默认输入使用所选声明环境，并只绑定其前面的声明输入。
+
+域就绪判断检查完整域中的 symbolic 参数，查询有预算，失败不视为就绪。仅检查
+当前声明的参数集合不够：例如输入 T 的已知身份本身是外层 U，代入后的域仍依赖 U。
+这些输入继续保留待检查结构；静态域真正完整时才交给普通表达式检查。因此名义／
+别名未执行分支也会检查越界值，展开包的已知结果上下文能传给生产者；源码顺序、
+动态域的等待以及提前 return 均保留。
+
+此处统一的是检查和执行计划的构造，尚未退役 NormalFormArgument 的待定表达式树，
+也没有完成普通 callable 的动态签名恢复或全部 ArgumentPlan。共同入口给后续替换
+提供单一接线点，不能把文件提取与循环删除宣称为整个 ContextualExpr 已实现。
+
+验证工作目录 `/home/fin/luna`，检查入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- 修改前 `-p luna --test declaration_input_plans --no-fail-fast`，
+  `/tmp/luna-tools-qtgf8wen/result.json` 退出 101：越界分支被接受，依赖结果上下文
+  的包生产者报未解出的推断变量。失败输出中的完整 Package 过大，测试已改为仅报告
+  被接受的情况，不再在失败时倾倒整个 sysroot。
+- 首轮合流 `/tmp/luna-tools-ss05vi7c/result.json` 暴露四项外层 Type 参数回归，
+  原因是代入后的域引用了输入参数集合以外的 binder。完整域检查修复后，运行
+  `-p elaboration -p luna --lib --test declaration_input_plans --test normal_input_plans
+  --test nominal_value_parameters --test open_normal_input_plans --no-fail-fast`，
+  `/tmp/luna-tools-iglwcagp/result.json` 退出 0，608 项通过。
+  真实 sysroot 用例对三个形成入口分别验证静态分支、包上下文、源序、动态域和早退。
+- 最终扩展参数 `-p elaboration -p luna --lib --test declaration_input_plans
+  --test normal_input_plans --test nominal_value_parameters --test open_normal_input_plans
+  --test type_spreads --test nominal_staging --test default_calls --test clause_packet_preparation
+  --test comptime_clause_inputs --test dynamic_trait_clauses --test library_meta_objects
+  --test library_protocols --no-fail-fast`，`/tmp/luna-tools-jhttx_kb/result.json`
+  退出 0，887 项通过。五个修改 Rust 文件的 scoped rustfmt check 在
+  `/tmp/luna-tools-ro2un3i_/result.json` 退出 0。正式 docs 与原有修改哈希不变；
+  未执行全 workspace 或性能基准。
+
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
 
 当前实现的具体断点见

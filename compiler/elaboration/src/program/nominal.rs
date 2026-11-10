@@ -287,233 +287,25 @@ impl Checker<'_, '_> {
             self.context = caller.context.clone();
         }
         let result = (|| {
-            let clauses = self.type_clause_params(owner);
-            let mut positional = 0;
-            let mut slots = Vec::new();
-            let mut supplied = BTreeSet::new();
-            let mut inputs = vec![None; parameters.len()];
-            let mut prepared_inputs = vec![None; parameters.len()];
-            let mut preparations = Vec::new();
-            let positional_domains = clauses
-                .iter()
+            let telescope = self
+                .declaration_binders(owner)
+                .into_iter()
                 .zip(&domains)
-                .filter_map(|(clause, domain)| {
-                    (!matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
-                        .then_some(domain.clone())
-                })
+                .map(|(binder, domain)| (binder.declaration, binder.sort, domain.clone()))
                 .collect::<Vec<_>>();
-            for (index, arg) in args.iter().enumerate() {
-                if let Arg::Expand(input) = arg {
-                    let packet = self.expr(input, None)?;
-                    let fields = self.prepared_packet_fields(
-                        &packet,
-                        args,
-                        index,
-                        &positional_domains,
-                        input.span,
-                    )?;
-                    let before = slots.len();
-                    let mut pattern = Vec::new();
-                    for field in fields {
-                        let slot = Self::type_input_slot(&clauses, None, &mut positional, span)?;
-                        if slot >= parameters.len() || !supplied.insert(slot) {
-                            return Err(error(span, "duplicate or excess type argument"));
-                        }
-                        let binding = self.spread_binding(input.span)?;
-                        self.locals.insert(binding, field.clone());
-                        pattern.push(n::Pattern::Binding {
-                            binding,
-                            inner: Box::new(n::Pattern::Wild),
-                        });
-                        prepared_inputs[slot] = Some(n::Expr {
-                            source: packet.source,
-                            ty: field,
-                            kind: K::Local(binding),
-                        });
-                        slots.push(slot);
-                    }
-                    preparations.push(n::NormalFormPreparation {
-                        before,
-                        expression: n::Expr {
-                            source: packet.source,
-                            ty: if is_never(&packet.ty) {
-                                p(P::Never)
-                            } else {
-                                p(P::Void)
-                            },
-                            kind: K::LetPattern {
-                                pattern: n::Pattern::Tuple(pattern),
-                                value: Box::new(packet),
-                                guard: None,
-                                otherwise: None,
-                            },
-                        },
-                    });
-                    continue;
-                }
-                let (name, input) = match arg {
-                    Arg::Named(name, input) => (Some(*name), *input),
-                    Arg::Positional(input) => (None, *input),
-                    _ => unreachable!(),
-                };
-                let slot = Self::type_input_slot(&clauses, name, &mut positional, span)?;
-                if slot >= parameters.len() || !supplied.insert(slot) {
-                    return Err(error(span, "duplicate or excess type argument"));
-                }
-                slots.push(slot);
-                inputs[slot] = Some(input);
-            }
-            let has_defaults = slots.len() != parameters.len();
-            for slot in 0..parameters.len() {
-                if !supplied.contains(&slot) {
-                    slots.push(slot);
-                }
-            }
-            let mut bindings = if has_defaults || alias.is_some() {
-                Some(
-                    (0..parameters.len())
-                        .map(|_| self.spread_binding(span))
-                        .collect::<Result<Vec<_>, _>>()?,
-                )
-            } else {
-                None
+            let defaults = InputEnvironment {
+                substitution: &saved_aliases,
+                bindings: &saved_values,
+                normal_bindings: &saved_normal,
+                context: &saved_context,
             };
-            let binders = self.declaration_binders(owner);
-            let mut known_parameters = Vec::new();
-            let mut known_values = Vec::new();
-            let mut arguments = (0..parameters.len()).map(|_| None).collect::<Vec<_>>();
-            let mut terms = binders
-                .iter()
-                .map(|binder| Term::Rigid {
-                    declaration: binder.declaration,
-                    sort: binder.sort,
-                })
-                .collect::<Vec<_>>();
-            let mut unresolved = parameters.iter().copied().collect::<BTreeSet<_>>();
-            let mut deferred = BTreeSet::new();
-            for &slot in &slots {
-                let explicit = supplied.contains(&slot);
-                let input = if prepared_inputs[slot].is_some() {
-                    None
-                } else if let Some(input) = inputs[slot] {
-                    Some(input)
-                } else {
-                    let hir::clause::ClauseParamKind::Optional(_, _, default) = clauses[slot].kind
-                    else {
-                        return Err(error(span, "type argument count mismatch"));
-                    };
-                    if caller.is_some() {
-                        self.alias_substitution = saved_aliases.clone();
-                        self.alias_value_bindings = saved_values.clone();
-                        self.normal_default_bindings = saved_normal.clone();
-                        self.context = saved_context.clone();
-                    }
-                    self.signature_owner = Some(owner);
-                    self.context = self.binder_context(owner);
-                    self.in_required_comptime = true;
-                    // Only preceding declaration inputs enter a default's lexical scope.
-                    for previous in 0..slot {
-                        let id = parameters[previous];
-                        self.alias_substitution.remove(&id);
-                        self.alias_value_bindings.remove(&id);
-                        self.normal_default_bindings.remove(&id);
-                        if domains[previous] == p(P::Type) {
-                            if !unresolved.contains(&id) {
-                                let known = self.copy_alias_type(&terms[previous], span)?;
-                                self.alias_substitution
-                                    .insert(id, std::sync::Arc::new(known));
-                            } else {
-                                self.alias_value_bindings
-                                    .insert(id, bindings.as_ref().unwrap()[previous]);
-                            }
-                        } else {
-                            // Preserve known value indices while elaborating later
-                            // default types. The local still owns evaluation of
-                            // the input; this substitution only records identity.
-                            if !unresolved.contains(&id) {
-                                let known = self.copy_alias_type(&terms[previous], span)?;
-                                self.alias_substitution
-                                    .insert(id, std::sync::Arc::new(known));
-                            }
-                            let domain = self.instantiate_trait_domain(
-                                &domains[previous],
-                                &known_parameters,
-                                &known_values,
-                                span,
-                            )?;
-                            self.normal_default_bindings
-                                .insert(id, (bindings.as_ref().unwrap()[previous], domain));
-                        }
-                    }
-                    Some(default)
-                };
-                let domain = self.instantiate_trait_domain(
-                    &domains[slot],
-                    &known_parameters,
-                    &known_values,
-                    span,
-                )?;
-                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let before = fuel;
-                let dependent =
-                    nir::type_computations::has_rigid_parameters_bounded(&domain, &mut fuel);
-                self.required_steps -= (before - fuel) as u64;
-                let dependent = dependent.map_err(|e| {
-                    error(span, format!("nominal input domain inspection failed: {e}"))
-                })?;
-                if !explicit
-                    && (self.active_type_defaults.len() >= 64
-                        || !self.active_type_defaults.insert((owner, slot)))
-                {
-                    return Err(error(span, "cyclic or excessively deep type default"));
-                }
-                let checked = if let Some(value) = prepared_inputs[slot].take() {
-                    if !dependent {
-                        self.require_expression(&value.ty, &domain, span)?;
-                    }
-                    Ok(n::NormalFormArgument::Value(value))
-                } else if dependent {
-                    self.dependent_normal_argument(input.unwrap(), 0)
-                } else {
-                    self.expr(input.unwrap(), Some(&domain))
-                        .map(n::NormalFormArgument::Value)
-                };
-                if !explicit {
-                    self.active_type_defaults.remove(&(owner, slot));
-                }
-                let argument = checked?;
-                let mut budget = comptime_runtime::Budget {
-                    steps: self.required_steps as usize,
-                    max_limbs: 4096,
-                };
-                let before = budget.steps;
-                let known = argument
-                    .expression()
-                    .and_then(|value| self.known_normal_input(value, 0, &mut budget));
-                self.required_steps -= (before - budget.steps) as u64;
-                if let Some(bindings) = &bindings {
-                    self.locals.insert(
-                        bindings[slot],
-                        argument
-                            .expression()
-                            .map_or_else(|| domain.clone(), |value| value.ty.clone()),
-                    );
-                }
-                let term = if let Some(known) = known {
-                    unresolved.remove(&parameters[slot]);
-                    known_parameters.push(binders[slot]);
-                    known_values.push(self.copy_alias_type(&known, span)?);
-                    known
-                } else {
-                    deferred.insert(parameters[slot]);
-                    Term::Rigid {
-                        declaration: parameters[slot],
-                        sort: binders[slot].sort,
-                    }
-                };
-                terms[slot] = term;
-                arguments[slot] = Some(argument);
-            }
+            let prepared =
+                self.planned_declaration_inputs(owner, args, span, &telescope, Some(&defaults))?;
+            let n::NormalFormInputPlan {
+                order: mut slots,
+                mut preparations,
+                mut bindings,
+            } = prepared.plan;
             self.locals = saved_locals.clone();
             self.normal_default_bindings = saved_normal.clone();
             self.alias_substitution = saved_aliases.clone();
@@ -524,28 +316,15 @@ impl Checker<'_, '_> {
             if alias.is_some() {
                 self.ensure_alias_formation_contract(owner, span)?;
             }
-            self.check_formation_application(
-                owner,
-                FormationInputs {
-                    terms,
-                    deferred,
-                    environment: BTreeMap::new(),
-                },
-                span,
-            )?;
-            let mut arguments = arguments
-                .into_iter()
-                .map(Option::unwrap)
-                .collect::<Vec<_>>();
+            self.check_formation_application(owner, prepared.formation, span)?;
+            let mut arguments = prepared.arguments;
             arguments.extend(
                 self.nominal_capture_expressions(owner, span)?
                     .into_iter()
                     .map(n::NormalFormArgument::Value),
             );
-            if let Some(bindings) = &mut bindings {
-                for _ in parameters.len()..arguments.len() {
-                    bindings.push(self.spread_binding(span)?);
-                }
+            for _ in parameters.len()..arguments.len() {
+                bindings.push(self.spread_binding(span)?);
             }
             // Captures have already been evaluated by the enclosing instance.
             // Bind them before checking defaults whose domains mention them;
@@ -557,7 +336,6 @@ impl Checker<'_, '_> {
             slots = (parameters.len()..arguments.len()).chain(slots).collect();
             let mut alias_body = None;
             if let Some(alias) = alias {
-                let bindings = bindings.as_ref().unwrap();
                 let own_inputs = parameters
                     .iter()
                     .enumerate()
@@ -603,7 +381,7 @@ impl Checker<'_, '_> {
                     .into_iter()
                     .filter_map(|source| source_indices.iter().position(|index| *index == source))
                     .collect();
-                let original_bindings = bindings.unwrap();
+                let original_bindings = bindings;
                 let bindings = source_indices
                     .iter()
                     .map(|index| original_bindings[*index])
@@ -624,7 +402,7 @@ impl Checker<'_, '_> {
             } else {
                 K::NominalType {
                     preparations,
-                    bindings,
+                    bindings: Some(bindings),
                     order: Some(slots),
                     declaration: declaration(self.package, &self.package_identities, owner),
                     arguments,
