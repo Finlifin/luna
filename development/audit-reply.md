@@ -224,6 +224,15 @@ HIR 与检查 continuation 归前端，实际存储和执行位置归原 invocat
 通过移动交接绑定，并保留原控制出口。设计明确了完整根入口的迁移、身份／许可、
 尚未取得的值、域响应及冻结边界；这部分尚未实现，没有把失败测试改成拒绝预期。
 
+在 `363d477a` 继续核对生产源码，明确了这条接线的四个实施障碍：声明输入的串行
+Progress 尚未分开检查就绪与执行次序；块作用域仍由同步闭包持有；Frame 完成只
+归还入口 imported 绑定，不交付片段新建局部；字节码编译只接受本段登记的循环
+目标，不能直接承接外部 break／continue。相应的规则 continuation、词法状态借用、
+LocalId 交接、外部控制出口及实际 Type receipt 的消费已写入
+[实施细化](elaboration-state-and-publication.md#实施细化普通检查规则必须交付-continuation)。
+明确要求同步入口驱动同一检查规则，避免增加第三套局部求值器。本轮为静态源码核对
+和设计修改，没有新增 Rust API、运行测试或宣称两个 ignored 正例已恢复。
+
 这几步是 M1–M3 的前置清理，不是整条恢复架构完成。后续主干仍是
 [待定域的普通调用](refactoring-plan.md#下一条纵向交付待定域的普通调用)，并用真实
 sysroot 的 meta.List／builder／comptime 方法作消费者。不能继续只在已知域的静态

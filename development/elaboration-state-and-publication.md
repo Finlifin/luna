@@ -595,6 +595,149 @@ callable 的两个等待点。只增加 public request enum 或可手工构造�
 `list literal requires an element type context`。没有改变其预期或解除 ignore。
 本次是接口与迁移设计收敛，不声称实现了源 activation。
 
+#### 实施细化：普通检查规则必须交付 continuation
+
+在 `363d477a` 核对上述入口，尚有四处不能靠增加一个 Pending 变体解决的依赖：
+
+| 当前路径 | 同步假设 | 迁移时必须交出的状态 |
+| --- | --- | --- |
+| `program.rs::expr_context`／`expr_context_adapted` | 子表达式返回完整 Expr 后才做目标域适配 | 当前规则、expected／partial context、已检查子结果、尚未兑现的适配；恢复不能重新选择一次转换 |
+| `block_regions.rs::check_block_region` | `in_block_scope` 闭包在同一 Rust 栈帧内完成所有语句和尾值 | 语句位置、局部声明域、diverges、staged pattern 结果、尾值及绑定完成任务；等待不等于退出词法域 |
+| `declaration_inputs.rs::Progress` | 一个 cursor 同时表示“下个检查输入”和源码调度位置 | 独立的检查就绪集合、每项域依赖、结果位置及原执行次序；后序 Type 可以被检查，但不能因此提前执行 |
+| `required.rs::prepare_required_root_with_live_inputs` | `build` 返回完整根后才收集自由绑定和建立世界 | 独立于完整根的源输入描述及受限可见世界；后续每段所需绑定增量检查，不能先捕获所有外围值 |
+
+采用显式规则 continuation，不再让 Rust 调用栈兼任待定区域的唯一所有者。它保存
+检查算法的局部进度，而非再保存一套有自己求值语义的表达式树：源语法仍由 HIR
+snapshot 持有，已完成子结果由区域的受检结果表持有，continuation 引用二者。
+字面量、调用、块、分支等规则必须共享现有检查责任，不把 NF 参数旧分派复制一份。
+
+一条规则的推进协议如下，名称仅描述实现职责：
+
+```text
+CheckTask(region, hir-node, lexical-scope, expected-observation, rule-state)
+  -> NeedChild(child-task, result-slot, continuation)
+   | NeedObservation(key, generation, continuation)
+   | Checked(result-slot, ordinary-code, domain-evidence)
+   | Failed(diagnostic)
+
+CheckRegion
+  tasks + ready-queue + child-results + observations + lexical-scopes
+  invocation-owner + source-execution-dependencies
+```
+
+`Checked` 不等于“表达式已执行”。它既可能是可编译的完整子树，也可能是一个父规则
+所需的类型／形成检查结果。域尚未成立的部分仍是 CheckTask；不能在 Expr.ty 中放
+一个未获准 rigid 或 Any，再让通用 NIR 消费者以为整个表达式已完成。
+
+同步兼容入口应驱动**同一规则实现**直至完成：只在不需要外部输入的子树返回现有
+`Result<Expr, Error>`。不能同时保留完整递归检查器，又新增一个“支持少数输入形状”
+的区域检查器。迁移中尚未改造的规则可以作为不可挂起的叶调用；它若遇到真实待决项，
+必须返回明确的迁移缺口，不能退回树解释器、反复 probe 或解释错误字符串。
+
+领域检查和执行依赖使用不同的边：`NeedDomain`、`NeedValue`、`NeedCheckedCode`
+描述所需信息；`AfterExecution` 与 `SelectedBy` 描述次序及控制许可。调度器可以推进
+所有检查依赖已满足的任务，VM 只能执行控制许可和前序效果已满足的代码。没有就绪
+任务时先检查未收回的宿主请求、预算和未迁移规则；只有完整依赖中的闭环才报循环。
+当前 `active_required` 的 32 层保护不能直接复用为区域依赖循环证明。
+
+#### 实施细化：词法状态与值存储不共用快照
+
+现有 `Checker` 同时持有声明服务、推断状态和词法字段。区域暂停时，仅保存
+`HirId` 与 expected 不够；继续运行别的任务会改变它稍后读到的环境。迁移按以下
+职责拆分，不先把整个 Checker clone 成一个 Region：
+
+- 声明身份、HIR snapshot、稳定签名与已提交实现目录由会话服务持有，按世界版本观察。
+  `active_signatures`／`active_required` 等活动检查登记属于任务，不随快照发布。
+- 局部类型、immutable、input facts、alias substitution、callee-delivery context、
+  control 和 capture 边界归词法 scope／当前规则。一个任务每次借用检查服务时安装
+  自己的 scope，退出推进步骤时归还；等待保留 scope，真正离开块才裁剪局部事实。
+- PTC Context 和候选事务归相应推断区域；记录 observation 的前提和版本。程序状态、
+  内存与资源规格仍由程序验证层负责，不因为调度依赖统一就塞进 PTC。
+- 可变 generator cell 与 VM slot 的实际内容归 execution owner。检查结果只保存
+  受限的域／身份观察；不能把 `generator_data`、`generator_cells` 与另一份 VM
+  environment 一起克隆，然后靠恢复快照“合并”真实执行。
+
+首批拆分要覆盖 required 入口当前手工保存的 control、captures、phase、numeric
+defaults、pending type uses、locals、default bindings、supplied inputs 和 immutable。
+每组状态都有显式安装／归还责任；取消与错误沿同一出口归还。代码缓存、声明目录
+或其它区域取得的结果不能把这个借用时的环境隐式当成自己的环境。
+
+`checking_attempts::Probe` 仍只能回滚未提交的内部探测。一次源 activation 已执行
+的写入不受该快照保护，后续类型检查失败也不许重放或假称外部效果被撤销。候选未
+确定时，不执行候选专属的用户计算来“试试看”；把所需计算登记为依赖，并按普通
+候选选择契约判定何时获得执行许可。
+
+#### 实施细化：片段边界必须同时带绑定和控制接口
+
+`bytecode::Frame::start_frame` 将入口环境中存在的 LocalId 移入对应寄存器，
+`restore_environment` 只归还这些 imported 槽。片段中新建的 LocalId 不因此成为
+下一段的输入；完成一段后丢弃其 Frame 会丢掉尚在源词法域中的局部值。Program 的
+寄存器编号又是每段局部编号，不能直接把旧 slots 或 PatternScope 搬到另一个 Program。
+
+采用显式绑定交接表：每段声明需要的 LocalId、输入域、访问／移动方式、输出绑定、
+所属源作用域和退出后责任；寄存器编号仅由该段自己的编译结果解释。新建绑定只有
+在它实际初始化完成后才交付，尚无值、被移走、仍活跃的值引用分别保留状态。对重复
+输出、错域、错 scope、过期执行位置的交接，先验证再移动，失败不能只归还一半。
+
+切点先限定为**该段内部模式作用域已闭合**的边界；源块的外层 scope 由 activation
+持有，片段完成不退出它。内部模式若在 guard／子调用中暂停，原 Frame 继续存活，
+不调用 `restore_environment`。只有达到已声明的交接点，才一次性取回 imported 和
+exported 绑定；真正的源 scope 退出再处理局部责任。这样不必把私有寄存器作用域
+解释成跨 Program 的公共词法作用域，也没有免除未来更细切点的正确性要求。
+
+控制出口同样要在编译片段前声明。当前 `comptime_compiler::compile_root` 的
+break／continue 只接受本次编译遍历中登记的 loop，外部目标报 InvalidControl；
+return 则经 `Op::Finish { explicit: true }` 保留为 `Flow::Return`。因此不能只把
+原函数的一段抽出来交给现有 compile，就声称它仍能跳回外层循环。
+
+目标接口区分本段内部跳转与指向源 activation 的外部出口。内部循环仍降为 Jump；
+合法的外部 break／continue 携带经过检查的源控制目标和需退出的源 scope，由原
+activation 接收。未经声明的目标仍拒绝。return 也由原函数 owner 接收，不能由
+片段的便利包装吞成普通 Value。最初未实现的出口必须限制在片段准入处，而非执行
+到一半才静默回退。代数效应 resume 的 continuation 也不能仅凭一个 loop id 接收。
+
+#### 实施细化：两个正例的逐步数据流
+
+`count<.values = [1, 255], Byte()>()` 的检查任务先形成两个参数位置及来源，登记
+values 的域依赖 T，同时检查 Byte 调用及其 Type 结果契约。这个阶段不调用 Byte。
+列表字面量的未定组装仍属于源检查任务，不先生成一个带假元素域的 Value。
+到达执行许可位置后，Byte 在原 activation 中执行；其真实 Type 经准入交回 T 的
+观察位置，再恢复字面量范围检查、集合组装、参数形成与 count 的调用准备。
+
+源码顺序示例中的 `trace` 写入必须先成为独立受检片段，完成写入后才允许调度下一
+执行位置。若较早输入还有读取、用户调用、失败检查、所有权交付或域相关转换，
+它们不能被归类为“只是尚未组装”而跳过。例如先读取一个可变字段再等待 T，必须
+保存读取时依法取得的值，不能在后序参数写入后重新读取；没有合法读取／保留规则
+时继续等待。不能把源码表达式的 pure 标记当作取消这条顺序边的依据。
+
+`identity<Byte(), true>(9)` 在 callee 检查位置等待实例签名。Byte 的完成值只提交
+给这次调用的 T，原 pending packet 的 producer 随执行 receipt 标为已完成，不再
+由 `ComptimeFunctionInstance.subject` 执行第二遍。完成参数域和形成检查后发布
+本次 callable，再用 u8 检查 9。若 Type 结果错误或返回的域不接受 9，调用终止；
+不先创建可调用实例再期待 VM 后补签名。声明主体的 NF 身份规则保持不变。
+
+#### 实施细化：退役条件和验收定位
+
+| 验收情形 | 必须保留的证据 | 失败时先查的边界 |
+| --- | --- | --- |
+| 两个现有 ignored 正例 | 实际 Type 生产者一次执行；输入范围／签名在其后完成 | 检查 continuation → Type 准入 → 原输入位置 |
+| 前后输入都修改或读取同一值 | 源顺序、读取时的值、相同可变存储 owner | 执行依赖与绑定交接，不能靠重新观察补结果 |
+| 较早输入提前 return／失败 | 后继 Type 生产者、默认值和主体均未执行 | Flow 外部出口与待执行任务取消 |
+| 前缀建立局部，后缀读取或通过 self 更新 | 新绑定 export、原 cell 身份与词法存活范围 | Frame → activation → 下一 Frame 的移动交接 |
+| 同一源码递归／循环进入两次 | 不同 activation 与执行序号；旧响应不消费新等待者 | 动态身份，不能仅用 HirId／PC |
+| 模式 guard 中挂起，随后失败 | 原模式作用域仍在，实际失败路径清理一次 | Frame 保留与作用域出口，不是普通片段完成 |
+| 未选分支含可静态判定的错误 | 该分支仍按语言要求检查，副作用未执行 | 检查与执行分离，不能以本次未运行免检 |
+
+第一批替换 `expr_context`、块规则、声明输入准备、callable packet、required 根和
+VM 片段入口的共同路径。旧同步入口作为同一规则驱动的适配器保留；普通 callable
+正例与这些边界验收通过才解除 ignore。随后 NF／名义输入迁入同一规则和交接协议，
+退役 `InputChecking` 分流及 NormalFormArgument 中的执行树。活动 continuation 不
+进入稳定 NIR；需要延迟到实例化的源码规则必须按冻结协议保存稳定描述和契约，并在
+实例化创建新任务。未迁移路径保留明确边界，不能为了删除旧枚举而丢掉其真实消费者。
+
+本小节是基于当前生产入口的实施设计，不是新增的可用 API；未新增占位状态机或
+改写失败正例。源码与库实现状态未因这些设计细化改变。
+
 ## 5. Observe、登记与发布
 
 ObservationKey 包含语义主体、所请求 facet、作用域/视图和当前前提；它与 task key 不同。

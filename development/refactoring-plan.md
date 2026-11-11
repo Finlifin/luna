@@ -145,6 +145,12 @@ activation 在同一存储中执行已获准片段并交回控制结果；callab
 实际 Type 响应。完整根仍走已有快路径。不能为每个片段合成一个新函数／新 invocation，
 也不能将活动 HIR 句柄塞进稳定 NIR 或代码缓存来获得一个看似可运行的入口。
 
+实施分解见[普通检查 continuation](elaboration-state-and-publication.md#实施细化普通检查规则必须交付-continuation)
+及其后的词法、绑定和控制交接协议。同步检查入口改为驱动同一规则的适配器，不能
+另留一套只支持少数输入形状的检查器。当前串行 Progress、块检查闭包、完整根准备
+和只归还 imported 绑定的 Frame 都需一起迁移；代码能被编译成一个 fragment 本身
+不证明新建局部、原控制出口和一次性 producer 已被保留。
+
 这一纵向交付必须同时做到：
 
 1. 待定域、已观察的身份、已经执行的值分别存储并可 dump；未知不能伪装成 Any、
