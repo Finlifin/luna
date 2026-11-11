@@ -71,8 +71,8 @@ impl Checker<'_, '_> {
         let (contexts, partial_contexts, stages) = if let Some(context) = context {
             let types = context.iter().map(|(ty, _)| ty.clone()).collect::<Vec<_>>();
             let stages = context.iter().map(|(_, stage)| *stage).collect::<Vec<_>>();
-            let (contexts, partial_contexts) = self
-                .spread_input_packet_contexts_with_widths(collected, &types, expr.span, &widths)?;
+            let (contexts, partial_contexts) =
+                self.spread_input_packet_contexts(collected, &types, expr.span, &widths)?;
             (
                 contexts,
                 partial_contexts,
@@ -442,7 +442,7 @@ impl Checker<'_, '_> {
         )?;
         let widths = self.checked_packet_widths(&packets, expr.span)?;
         let (packet_contexts, partial_contexts) = if let Some(types) = &context {
-            self.spread_input_packet_contexts_with_widths(
+            self.spread_input_packet_contexts(
                 args,
                 &types.iter().map(|(ty, _)| ty.clone()).collect::<Vec<_>>(),
                 expr.span,

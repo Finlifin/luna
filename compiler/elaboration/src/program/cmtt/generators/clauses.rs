@@ -39,26 +39,6 @@ impl Checker<'_, '_> {
         evidence: &[Option<Term>],
         partial: &[crate::calls::InputContext],
         expected: Option<&Term>,
-        span: Span,
-    ) -> Result<crate::calls::CallCandidate, Error> {
-        self.generator_call_candidate_with_result_context(
-            owner, parameters, plan, pending, deferred, completed, base, evidence, partial,
-            expected, None, span,
-        )
-    }
-
-    pub(in crate::program::cmtt) fn generator_call_candidate_with_result_context(
-        &mut self,
-        owner: OwnerId,
-        parameters: &[DeclarationId],
-        plan: &mut [Term],
-        pending: &[(usize, Vec<DeclarationId>)],
-        deferred: &[usize],
-        completed: &mut CompletedDefaults,
-        base: &crate::calls::Scheme,
-        evidence: &[Option<Term>],
-        partial: &[crate::calls::InputContext],
-        expected: Option<&Term>,
         expected_context: Option<&crate::calls::InputContext>,
         span: Span,
     ) -> Result<crate::calls::CallCandidate, Error> {

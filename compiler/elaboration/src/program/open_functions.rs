@@ -5732,7 +5732,7 @@ impl Checker<'_, '_> {
         let types = inputs.into_iter().map(|(ty, _)| ty).collect::<Vec<_>>();
         let widths = self.checked_packet_widths(&packets, expr.span)?;
         let (contexts, partial_contexts) =
-            self.spread_input_packet_contexts_with_widths(args, &types, expr.span, &widths)?;
+            self.spread_input_packet_contexts(args, &types, expr.span, &widths)?;
         self.required_steps = self
             .required_steps
             .checked_sub(self.open_loop_transfers.len() as u64)

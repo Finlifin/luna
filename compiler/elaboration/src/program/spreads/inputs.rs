@@ -242,38 +242,6 @@ impl Checker<'_, '_> {
         }
     }
 
-    pub(in crate::program) fn infer_spread_inputs(
-        &mut self,
-        scheme: &crate::calls::Scheme,
-        actual: Vec<Option<Term>>,
-        args: &[Arg<'_>],
-        declarations: Option<&[hir::common::FnParam<'_>]>,
-        offset: usize,
-        expected: Option<&Term>,
-        partial: Option<&crate::calls::CallableContext>,
-        structural: Option<&crate::calls::InputContext>,
-        settled_widths: Option<&BTreeMap<usize, usize>>,
-        span: Span,
-        checked: &mut PreparedInputs,
-    ) -> Result<crate::calls::CallCandidate, Error> {
-        self.infer_spread_evidence(
-            scheme,
-            &[],
-            actual,
-            args,
-            declarations,
-            offset,
-            expected,
-            partial,
-            structural,
-            settled_widths,
-            span,
-            checked,
-            false,
-            &BTreeMap::new(),
-        )
-    }
-
     fn infer_spread_evidence(
         &mut self,
         scheme: &crate::calls::Scheme,

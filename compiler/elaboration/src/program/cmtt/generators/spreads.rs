@@ -18,10 +18,6 @@ struct Packet<'h> {
     values: Option<Vec<Option<(Argument, Term)>>>,
 }
 impl SpreadPlan<'_> {
-    pub(in crate::program::cmtt) fn width(&self, packet: usize) -> usize {
-        self.packets[packet].width
-    }
-
     pub(in crate::program::cmtt) fn field_type(&self, id: n::LocalId) -> Option<&Term> {
         let (packet, element) = self.fields.get(&id)?;
         self.packets.get(*packet)?.types.as_ref()?.get(*element)

@@ -183,3 +183,32 @@ Session::fragment、run_fragment 与该根的显式 cancel 同样仅在测试构
 首次编译发现 bytecode_compilation 测试仍需访问迁移后的 InputFrame.run，已修正
 测试模块可见性；最终结果来自修正后的源码。验证包含原有资源分析工作区修改。
 修改文件的格式检查 `/tmp/luna-tools-ue_e6r_r/result.json` 退出 0。
+
+## 7. Contextual 调用保留一个完整上下文入口
+
+CMTT generator、pattern generator 和展开参数已使用能接收完整上下文的入口，
+旧的省略上下文包装没有生产或测试消费者。现删除九个无消费者的方法，保留原有
+检查实现，并将实际调用者改用规范名称：
+
+| 边界 | 当前入口与显式输入 | 退役内容 |
+| --- | --- | --- |
+| generator 候选 | `generator_call_candidate` 同时接收结果类型与结构上下文 | 自动补 None 的旧同名包装 |
+| pattern 调用 | `invoke_pattern_generator`／`invoke_pattern_properties` 接收 subject 与 interface context | 三层不带 interface context 的便利包装 |
+| 展开参数 | `spread_input_packet_contexts` 接收已检查 packet 宽度；推导保留 `infer_routed_packet_inputs` | 空宽度包装、partial context 转换包装及无调用的 infer_spread_inputs |
+| 只读元数据 | 保留正在使用的字段类型、来源观察与完整 trait 域查询 | 无调用的 SpreadPlan.width 与 interface_parameter_binders |
+
+完整上下文仍可显式传 None；这次不增加推导规则、不提前执行 packet 或默认值，
+也不改变 quote／pattern 的类型、phase 或身份。旧包装均为内部可见性，不存在
+仓库外可调用的 Rust 公共 API。源码检查覆盖整个 compiler，当前实现和回归均没有
+借用旧包装；不能据此宣布 CMTT、参数计划或前端可恢复检查整体完成。
+
+验证目录 `/home/fin/luna`，统一入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p elaboration --lib -p luna --test cmtt --test cmtt_methods --test cmtt_type_inputs --test quote_functions --test effect_spreads --test function_template_inputs --test ordinary_callable_types --no-fail-fast`：
+  1,237 项通过、1 项原有 ignore，`/tmp/luna-tools-slft4kds/result.json` 退出 0。
+- `-p luna --test contextual_spreads --test spread_control --test type_spreads --no-fail-fast`：
+  114 项通过，`/tmp/luna-tools-khwo7ray/result.json` 退出 0，覆盖部分结果上下文、
+  方法／属性路由、输入次序、默认值和提前退出。未修改测试或语义预期。
+
+源码格式检查 `/tmp/luna-tools-oxx4gx0n/result.json` 退出 0。上述为包含原有资源分析
+修改的工作区验证，未运行全 workspace 或性能基准。

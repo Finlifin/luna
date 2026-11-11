@@ -190,7 +190,7 @@ impl Checker<'_, '_> {
         let mut hinted = if parameters.is_empty() {
             None
         } else {
-            let candidate = self.generator_call_candidate_with_result_context(
+            let candidate = self.generator_call_candidate(
                 owner,
                 &parameters,
                 &mut type_plan,
@@ -277,7 +277,7 @@ impl Checker<'_, '_> {
                 }
             }
             if learned {
-                let candidate = self.generator_call_candidate_with_result_context(
+                let candidate = self.generator_call_candidate(
                     owner,
                     &parameters,
                     &mut type_plan,
@@ -591,7 +591,7 @@ impl Checker<'_, '_> {
                 evidence[route.parameter] = Some(ty);
             }
             if !parameters.is_empty() {
-                let candidate = self.generator_call_candidate_with_result_context(
+                let candidate = self.generator_call_candidate(
                     owner,
                     &parameters,
                     &mut type_plan,
@@ -708,7 +708,7 @@ impl Checker<'_, '_> {
             .filter(|slot| values[*slot].is_none())
             .max()
         {
-            let candidate = self.generator_call_candidate_with_result_context(
+            let candidate = self.generator_call_candidate(
                 owner,
                 &parameters,
                 &mut type_plan,
@@ -752,7 +752,7 @@ impl Checker<'_, '_> {
         } else {
             // This tuple is an internal inference product, never a Flurry Tuple
             // constructor or an erased code value. Context evidence stays in values.
-            let mut candidate = self.generator_call_candidate_with_result_context(
+            let mut candidate = self.generator_call_candidate(
                 owner,
                 &parameters,
                 &mut type_plan,

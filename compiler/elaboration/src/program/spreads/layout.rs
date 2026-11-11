@@ -11,15 +11,6 @@ enum PreservedInput {
 }
 
 impl Checker<'_, '_> {
-    pub(in crate::program) fn spread_input_packet_contexts(
-        &mut self,
-        args: &[Arg<'_>],
-        types: &[crate::calls::InputContext],
-        span: Span,
-    ) -> Result<(Vec<Option<Term>>, Vec<Option<crate::calls::InputContext>>), Error> {
-        self.spread_input_packet_contexts_with_widths(args, types, span, &BTreeMap::new())
-    }
-
     pub(in crate::program) fn checked_packet_widths(
         &self,
         packets: &BTreeMap<usize, n::Expr>,
@@ -34,7 +25,7 @@ impl Checker<'_, '_> {
         Ok(widths)
     }
 
-    pub(in crate::program) fn spread_input_packet_contexts_with_widths(
+    pub(in crate::program) fn spread_input_packet_contexts(
         &mut self,
         args: &[Arg<'_>],
         types: &[crate::calls::InputContext],
@@ -73,26 +64,6 @@ impl Checker<'_, '_> {
             }
         }
         Ok((complete, partial))
-    }
-
-    // Keep a partial structural context when only some packet domains are
-    // known. Inference state stays outside Term and never enters typed NIR.
-    pub(in crate::program) fn spread_partial_packet_contexts(
-        &mut self,
-        args: &[Arg<'_>],
-        types: &[Option<Term>],
-        span: Span,
-    ) -> Result<(Vec<Option<Term>>, Vec<Option<crate::calls::InputContext>>), Error> {
-        use crate::calls::InputContext as C;
-        self.spread_input_packet_contexts(
-            args,
-            &types
-                .iter()
-                .cloned()
-                .map(|ty| ty.map_or(C::Unknown, C::Known))
-                .collect::<Vec<_>>(),
-            span,
-        )
     }
 
     pub(in crate::program) fn spread_packet_contexts(

@@ -91,20 +91,16 @@ impl Checker<'_, '_> {
                 .get(&local(*id))
                 .cloned()
                 .ok_or_else(|| error(value.span, "expected a pattern code argument")),
-            H::Application(callee, args) => self.invoke_pattern_generator_in_context(
+            H::Application(callee, args) => self.invoke_pattern_generator(
                 callee,
                 args,
                 subject_hint,
                 interface_context,
                 value.span,
             ),
-            H::ExtendedApplication(callee, args) => self.invoke_pattern_properties_in_context(
-                value,
-                callee,
-                args,
-                subject_hint,
-                interface_context,
-            ),
+            H::ExtendedApplication(callee, args) => {
+                self.invoke_pattern_properties(value, callee, args, subject_hint, interface_context)
+            }
             H::CodePatternQuote(..) => self.pattern_generator_value(value, interface, 0),
             _ => self.pattern_generator_value_inferred(
                 value,

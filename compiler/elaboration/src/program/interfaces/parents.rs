@@ -209,18 +209,6 @@ impl Checker<'_, '_> {
         }
         Ok(unique)
     }
-    pub(crate) fn interface_parameter_binders(
-        &self,
-        interface: &n::InterfaceInstance,
-        span: Span,
-    ) -> Result<Vec<nir::DeclarationParameter>, Error> {
-        self.checked_traits
-            .iter()
-            .find(|t| t.declaration == interface.declaration)
-            .ok_or_else(|| error(span, "unknown interface"))?
-            .binders_with_self(&mut 100_000)
-            .map_err(|e| error(span, e))
-    }
     pub(crate) fn interface_substitution(
         &self,
         interface: &n::InterfaceInstance,

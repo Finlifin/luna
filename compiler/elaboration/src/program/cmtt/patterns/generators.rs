@@ -694,36 +694,7 @@ impl Checker<'_, '_> {
         Ok((signature, result?))
     }
 
-    pub(in crate::program::cmtt) fn invoke_pattern_generator(
-        &mut self,
-        callee: &Expr<'_>,
-        arguments: &[Arg<'_>],
-        span: Span,
-    ) -> Result<Arc<PatternCode>, Error> {
-        self.invoke_pattern_generator_expected(callee, arguments, None, span)
-    }
-
     pub(in crate::program::cmtt) fn invoke_pattern_properties(
-        &mut self,
-        site: &Expr<'_>,
-        callee: &Expr<'_>,
-        arguments: &[Arg<'_>],
-        expected_subject: Option<&Term>,
-    ) -> Result<Arc<PatternCode>, Error> {
-        self.invoke_pattern_properties_in_context(site, callee, arguments, expected_subject, None)
-    }
-
-    pub(in crate::program::cmtt) fn invoke_pattern_generator_expected(
-        &mut self,
-        callee: &Expr<'_>,
-        arguments: &[Arg<'_>],
-        expected_subject: Option<&Term>,
-        span: Span,
-    ) -> Result<Arc<PatternCode>, Error> {
-        self.invoke_pattern_generator_in_context(callee, arguments, expected_subject, None, span)
-    }
-
-    pub(in crate::program::cmtt) fn invoke_pattern_properties_in_context(
         &mut self,
         site: &Expr<'_>,
         callee: &Expr<'_>,
@@ -836,7 +807,7 @@ impl Checker<'_, '_> {
         })
     }
 
-    pub(in crate::program::cmtt) fn invoke_pattern_generator_in_context(
+    pub(in crate::program::cmtt) fn invoke_pattern_generator(
         &mut self,
         callee: &Expr<'_>,
         arguments: &[Arg<'_>],
@@ -1803,15 +1774,10 @@ impl Checker<'_, '_> {
                     definition.map(|interface| &interface.outputs),
                 )?
             }
-            H::ExtendedApplication(callee, arguments) => self
-                .invoke_pattern_properties_in_context(
-                    value,
-                    callee,
-                    arguments,
-                    subject,
-                    input_context,
-                )?,
-            H::Application(callee, arguments) => self.invoke_pattern_generator_in_context(
+            H::ExtendedApplication(callee, arguments) => {
+                self.invoke_pattern_properties(value, callee, arguments, subject, input_context)?
+            }
+            H::Application(callee, arguments) => self.invoke_pattern_generator(
                 callee,
                 arguments,
                 subject,
