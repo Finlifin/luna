@@ -901,7 +901,51 @@ LocalId 到寄存器的映射。请求是 invocation 内部数据，不是缓存
 这些是保留既有 moves/effects.rs 修改的工作区结果；未运行全 workspace、性能或
 源区域 Type 等待的 ignored 用例，没有修改它们的语义预期。
 
-#### 实施细化：两个正例的逐步数据流
+#### 实施补充：声明接口与可执行主体不能共用完成状态
+
+当前调用路径还有一个早于 Type 响应的发布边界。`program.rs` 的普通函数循环先
+调用 function_body，取得完整 Expr 后才构造 `nir::program::Function`；Function 的
+body 字段没有待决形式。VM 的 `invocation.rs::prepare_invocation` 则从 functions
+表直接取得该 body，随后准备环境、契约和字节码。`RequiredWorld` 又只持有已经
+形成的 NIR 声明快照。因此“等 Type 返回后继续参数检查”不能仅增加在现有 VM
+session 的请求枚举上：尚未完成的源主体根本到不了这个 session。
+
+这里必须区分三个完成点，而不是将未完成主体装成占位 Function：
+
+| 产物／活动状态 | 可对消费者承诺 | 尚不能承诺 |
+| --- | --- | --- |
+| 声明接口与稳定源码模板 | 身份、参数望远镜、阶段、已形成的接口及明确保留的检查义务；模板绑定原源码快照 | 已有可执行 body，或所有调用点的依赖签名已完成 |
+| 源主体检查任务 | 当前 scope、检查后继、取得的域观察、当前 invocation 的执行许可及结果位置 | 可进入稳定 NIR、CodeSession 或供另一 invocation 直接复用 |
+| 完成的 Function／代码片段 | 已满足相应阶段与安全检查的 NIR、绑定接口、控制接口及所需声明世界 | 获得运行未选分支、重放前缀或改变源定义身份的许可 |
+
+稳定模板属于源码服务；使用声明身份与 owning source snapshot 查找，不能把当前
+Checker、临时 HIR 引用或 VM cell 作为 Function.body 的新分支冻结。模板中的源码
+描述与接口证据可以长期保留，活动规则与已执行值不能。进入具体调用时创建新的任务
+和 activation；若需要依赖域，只向该 activation 的源任务交付观察，完成后再产生
+真正的受检片段。NIR Function 继续表示受检产物，不以 Any／rigid 假类型替代缺失主体。
+
+检查模式与执行许可也须分开。现行正式语义规定 comptime 函数仍有定义检查与具体
+调用，comptime 环境采用 loose；normalization 可以完成当时要求完成且输入具备的
+计算。由此不能推导“看到 comptime 标记就立刻执行”，也不能禁止 normalization 中
+所有必需计算。源任务必须带明示的检查／执行原因：只描述定义、当前必需计算、或
+已经进入的调用。许可来自相应规则、形成义务及控制前序，不能由缓存命中或一个
+函数的 Type 结果签名推导。参见正式
+[normalization 与 instantiation](../docs/comptime/normalization-and-instantiation.md)。
+
+实施时同时更改两端：前端的函数收集与 required 根准备允许返回稳定模板或活动任务；
+VM 的声明准入读取接口，主体取得另走源码服务。在执行获准后保留同一个 activation，
+等待受检代码到达，不能重新 begin_invocation，也不能为每段代码合成函数。方法、
+默认值与契约仍走原身份和域检查，已完成的 NIR 函数保持现有快路径。源码服务无法
+提供某种模板时明确返回未迁移边界；不能转而直接解释 HIR，或将所有函数延迟到第一次
+调用而免除定义端检查。只有语义允许延迟的义务可以进入稳定模板。
+
+新增验收必须包括“尚未调用的 comptime 定义”与“已经进入 required 根”的区别：前者
+不因检查整个包就执行普通函数体副作用；可即时判定的非法操作仍被拒绝。后者在前序
+效果与形成义务允许后执行生产者一次，并恢复原 callee／实参规则。相同源码进入两个
+invocation 时建立独立状态；只共享稳定模板、接口与合法代码，不能共享执行 receipt。
+这补充了前述源 activation 设计，并未实现新的模板发布或主体请求 API。
+
+#### 实施细化：两个正例的逐步数据流（执行交接）
 
 `count<.values = [1, 255], Byte()>()` 的检查任务先形成两个参数位置及来源，登记
 values 的域依赖 T，同时检查 Byte 调用及其 Type 结果契约。这个阶段不调用 Byte。

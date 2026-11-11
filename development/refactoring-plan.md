@@ -132,6 +132,7 @@ where T, flag: bool
 | `invocation/host.rs::InvocationSession` | 独占执行现场、关联／方法选择与定义准备请求、线性响应及取消 | 一般前端表达式检查仍需接入；不把同步回调或另起一次求值当成恢复 |
 | `invocation/session.rs::Session::fragment` | 已建字节码帧的驱动及其子调用；输入准备通过帧绑定契约整体移动导出值 | 源 activation 接收后继受检片段，保留环境、原控制出口及一次性执行位置；不能仅公开原借用入口 |
 | `required.rs` / `required/prepared.rs` | 完整根 Expr 的准备、冻结声明目录、单次输入及代码缓存所有者 | 在完整根形成前启动源区域；世界可共享，活动前端区域、等待者及本次值不得冻结到代码缓存 |
+| `program.rs` 的函数收集 / VM `prepare_invocation` | 当前只接收已有完整 Expr 主体的 Function | 分开声明接口、稳定源码模板、活动主体任务和可执行产物；保持原 activation 等待代码，不提前执行定义或发布假主体 |
 
 先使用已有 HIR 身份、telescope、声明输入计划和 VM activation；不建立第二份
 可修改的值表或以 AST 地址为键的全局等待表。具体所有权和响应提交沿
@@ -151,6 +152,9 @@ activation 在同一存储中执行已获准片段并交回控制结果；callab
 schedule，但仍缺恢复任务；帧导出已经从特殊输入完成逻辑迁到显式绑定交接，仍缺
 源作用域与执行许可。块检查闭包、完整根准备和源 activation 必须继续一起迁移；
 能编译或导出一个 fragment 本身不证明原控制出口和一次性 producer 已被保留。
+主体尚未形成时的发布责任见
+[声明接口与可执行主体](elaboration-state-and-publication.md#实施补充声明接口与可执行主体不能共用完成状态)。
+这需要同时迁移函数收集与 VM 主体取得，不能只在完整 NIR 上增加一个宿主请求。
 
 这一纵向交付必须同时做到：
 

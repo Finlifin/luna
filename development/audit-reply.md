@@ -445,6 +445,23 @@ invocation_budget 被名字过滤器全部筛去，不计为已验证，其后�
 `/tmp/luna-tools-_oviwmxx/result.json` 退出 0。结果来自保留作者及 formatter agent
 已有修改的工作区；本次未修改或纳入这些文件，没有运行全 workspace 检查。
 
+### 待决域主线：补清声明与主体的发布边界
+
+沿两项主线正例追踪发现，当前函数收集必须先取得完整 NIR Expr，VM 准入也直接
+取得完整 Function.body。增加 VM 请求本身不能让尚未完成的源主体进入调用。
+已在[声明接口与可执行主体](elaboration-state-and-publication.md#实施补充声明接口与可执行主体不能共用完成状态)
+区分稳定接口／源码模板、活动源任务、完成的可执行产物，并将函数收集和主体取得
+列为同一迁移范围。定义检查、normalization 中的必需计算与 invocation 执行许可
+分别保持；不能用延迟所有函数检查、假主体或直接解释 HIR 代替接线。
+这部分是实施设计，尚无模板发布或主体请求 API。
+
+本轮仍显式运行了两个 ignored 正例，工作目录 `/home/fin/luna`：
+`python3 -B development/check.py --timeout 900 -- test -p luna --test ordinary_callable_types --test ordinary_clause_collectors --no-fail-fast -- --ignored`。
+`/tmp/luna-tools-q2vw7una/result.json` 退出 101；依赖签名仍报
+`comptime callable signature still depends on an invocation-time clause input`，
+待决列表域仍报 `list literal requires an element type context`。
+未改动用例、ignore 或语义预期；预算修复及回归通过不能替代这一缺口的实现。
+
 ## 4. 本次证据与限制
 
 工作目录 `/home/fin/luna`；所有检查通过 `development/check.py --timeout 900 -- test`。
