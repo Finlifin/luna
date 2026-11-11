@@ -22,6 +22,7 @@ members = [
     "compiler/materialization",
     "compiler/program_verification",
     "compiler/luna", "compiler/nir", "compiler/comptime_executor", "compiler/comptime_interpretor", "compiler/comptime_runtime", "compiler/comptime_compiler", "compiler/iir",
+    "compiler/fmt",
 ]
 resolver = "2"
 
