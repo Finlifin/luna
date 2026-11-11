@@ -277,17 +277,15 @@ impl Checker<'_, '_> {
         })
     }
 
-    // Observe routed declaration dependencies without invoking input code.
-    // Checking may visit a later source input to obtain a static domain; the
-    // checked expression stays in its original slot and executes there once.
+    // Check domain dependencies without invoking input code. A later source
+    // input can become checked first, but Progress retains its execution slot.
     fn declaration_input_domain(
         &mut self,
         slot: usize,
         parameters: &[(DeclarationId, Sort, Term)],
         routed: &mut [Option<RoutedDeclarationInput<'_, '_>>],
-        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-        completed: &[DeclarationId],
-        completed_values: &[Term],
+        bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        progress: &mut progress::Progress,
         span: Span,
     ) -> Result<DeclarationInputDomain, Error> {
         let domain = &parameters[slot].2;
@@ -304,58 +302,91 @@ impl Checker<'_, '_> {
                 );
             }
         }
-        self.required_steps = self
-            .required_steps
-            .checked_sub(completed.len() as u64)
-            .ok_or_else(|| error(span, "input domain completion budget exhausted"))?;
-        let mut known_parameters = completed.to_vec();
-        let mut known_values = completed_values
-            .iter()
-            .map(|value| self.copy_alias_type(value, span))
-            .collect::<Result<Vec<_>, _>>()?;
         for previous in 0..slot {
-            if known_parameters.contains(&parameters[previous].0)
+            if progress.is_prepared(previous)
                 || !needed.contains_key(&parameters[previous].0)
+                || !matches!(
+                    routed[previous],
+                    Some(RoutedDeclarationInput::Source(_) | RoutedDeclarationInput::Prepared(_))
+                )
             {
                 continue;
             }
-            if let Some(RoutedDeclarationInput::Source(input)) = &routed[previous] {
-                let expected = self.instantiate_input_types(
-                    &parameters[previous].2,
-                    &known_parameters,
-                    &known_values,
-                    span,
-                )?;
-                if self.declaration_domain_pending(
-                    &parameters[previous].2,
-                    parameters,
-                    &known_parameters,
-                    span,
-                )? {
-                    continue;
-                }
-                let value = self.expr(input, Some(&expected))?;
-                routed[previous] = Some(RoutedDeclarationInput::Prepared(value));
-            }
-            let Some(RoutedDeclarationInput::Prepared(value)) = &routed[previous] else {
+            if self.declaration_domain_pending(
+                &parameters[previous].2,
+                parameters,
+                progress.observed_parameters(),
+                span,
+            )? {
                 continue;
+            }
+            let expected = self.instantiate_input_types(
+                &parameters[previous].2,
+                progress.observed_parameters(),
+                progress.observed_values(),
+                span,
+            )?;
+            let value = match routed[previous].take().expect("routed dependency") {
+                RoutedDeclarationInput::Source(input) => self.expr(input, Some(&expected))?,
+                RoutedDeclarationInput::Prepared(value) => {
+                    self.require_expression(&value.ty, &expected, span)?;
+                    value
+                }
+                RoutedDeclarationInput::Collected(_) => unreachable!("fixed dependency input"),
             };
-            let known = self.preserved_input_identity(
-                value,
+            let identity = self.preserved_input_identity(
+                &value,
                 bindings
                     .iter()
                     .map(|(binding, term)| (*binding, term.as_ref())),
                 span,
             )?;
-            if let Some(value) = known {
-                known_parameters.push(parameters[previous].0);
-                known_values.push(value);
-            }
+            let ty = value.ty.clone();
+            self.record_declaration_input(
+                progress,
+                previous,
+                n::NormalFormArgument::Value(value),
+                identity,
+                ty,
+                bindings,
+                span,
+            )?;
         }
-        let pending =
-            self.declaration_domain_pending(domain, parameters, &known_parameters, span)?;
-        let ty = self.instantiate_input_types(domain, &known_parameters, &known_values, span)?;
+        let pending = self.declaration_domain_pending(
+            domain,
+            parameters,
+            progress.observed_parameters(),
+            span,
+        )?;
+        let ty = self.instantiate_input_types(
+            domain,
+            progress.observed_parameters(),
+            progress.observed_values(),
+            span,
+        )?;
         Ok(DeclarationInputDomain { ty, pending })
+    }
+
+    fn record_declaration_input(
+        &mut self,
+        progress: &mut progress::Progress,
+        slot: usize,
+        value: n::NormalFormArgument,
+        identity: Option<Term>,
+        ty: Term,
+        bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        span: Span,
+    ) -> Result<(), Error> {
+        let known = identity
+            .as_ref()
+            .map(|known| self.copy_alias_type(known, span).map(std::sync::Arc::new))
+            .transpose()?;
+        progress.record(slot, value, identity, &mut self.required_steps, span)?;
+        if let Some(known) = known {
+            bindings.insert(progress.binding(slot), known);
+        }
+        self.locals.insert(progress.binding(slot), ty);
+        Ok(())
     }
 
     /// Prepare explicit inputs in source order, then omitted inputs in their
@@ -658,6 +689,22 @@ impl Checker<'_, '_> {
                 }
                 order.push(slot);
             }
+            // Routing fixes execution order before any dependency-driven checks.
+            // Nonempty collection elements occupy the final collected slot; their
+            // earlier effects remain in preparations at their source positions.
+            if !pending_collection.is_empty() {
+                order.push(collector.expect("collected inputs have a collector"));
+            }
+            let bindings = (0..parameters.len())
+                .map(|_| self.spread_binding(span))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut progress = progress::Progress::new(
+                parameters,
+                bindings,
+                order,
+                &mut self.required_steps,
+                span,
+            )?;
             // A contiguous source suffix can execute inside the final
             // collection. Earlier inputs need preparations at their original
             // positions, including around zero-width packet producers.
@@ -679,9 +726,8 @@ impl Checker<'_, '_> {
                     slot,
                     parameters,
                     &mut routed,
-                    &prepared_bindings,
-                    &[],
-                    &[],
+                    &mut prepared_bindings,
+                    &mut progress,
                     span,
                 )?)
             };
@@ -762,18 +808,7 @@ impl Checker<'_, '_> {
             if !collected.is_empty() {
                 let slot = collector.expect("collected inputs have a collector");
                 routed[slot] = Some(RoutedDeclarationInput::Collected(collected));
-                order.push(slot);
             }
-            let bindings = (0..parameters.len())
-                .map(|_| self.spread_binding(span))
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut progress = progress::Progress::new(
-                parameters,
-                bindings,
-                order,
-                &mut self.required_steps,
-                span,
-            )?;
             while let Some(slot) = progress.current() {
                 if routed[slot].is_none()
                     && matches!(
@@ -824,9 +859,8 @@ impl Checker<'_, '_> {
                         slot,
                         parameters,
                         &mut routed,
-                        &prepared_bindings,
-                        progress.observed_parameters(),
-                        progress.observed_values(),
+                        &mut prepared_bindings,
+                        &mut progress,
                         span,
                     )?;
                     dependent = domain.pending;
@@ -993,17 +1027,16 @@ impl Checker<'_, '_> {
                         None => None,
                     },
                 };
-                if let Some(known) = &identity {
-                    prepared_bindings.insert(
-                        progress.binding(slot),
-                        std::sync::Arc::new(self.copy_alias_type(known, span)?),
-                    );
-                }
-                self.locals.insert(
-                    progress.binding(slot),
-                    value.expression().map(|expr| expr.ty.clone()).unwrap_or(ty),
-                );
-                progress.record(slot, value, identity, &mut self.required_steps, span)?;
+                let ty = value.expression().map(|expr| expr.ty.clone()).unwrap_or(ty);
+                self.record_declaration_input(
+                    &mut progress,
+                    slot,
+                    value,
+                    identity,
+                    ty,
+                    &mut prepared_bindings,
+                    span,
+                )?;
             }
             self.signature_owner = saved_owner;
             self.context = saved_context.clone();

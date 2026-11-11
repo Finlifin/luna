@@ -262,3 +262,30 @@ fn immutable_input_evidence_completes_signatures_without_unfolding_heads() {
         ",
     );
 }
+
+#[test]
+fn dependency_checks_preserve_source_effects_and_skip_unreached_type_producers() {
+    check_both(
+        "
+        comptime fn count() -> Integer where T, ...values: meta.List<T> {
+            values.length()
+        }
+        comptime fn ordered() -> bool {
+            var trace: Integer = 0;
+            let selected = count<
+                .values = do { trace = trace * 10 + 1; [1, 255] },
+                do { trace = trace * 10 + 2; u8 }
+            >;
+            selected() == 2 and selected() == 2 and trace == 12
+        }
+        comptime fn exits() -> bool {
+            let selected = count<
+                .values = do { return true; [1, 255] },
+                do { let poison = 1.div_trunc(0); u8 }
+            >;
+            false
+        }
+        comptime fn check() -> bool { ordered() and exits() }
+        ",
+    );
+}

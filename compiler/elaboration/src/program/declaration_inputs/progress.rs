@@ -17,8 +17,8 @@ struct Slot {
 pub(super) struct Progress {
     slots: Vec<Slot>,
     schedule: Vec<usize>,
-    cursor: usize,
-    prepared_order: Vec<usize>,
+    checked_prefix: usize,
+    checked_order: Vec<usize>,
     observed_parameters: Vec<DeclarationId>,
     observed_values: Vec<Term>,
 }
@@ -63,8 +63,8 @@ impl Progress {
                 })
                 .collect(),
             schedule: explicit,
-            cursor: 0,
-            prepared_order: Vec::new(),
+            checked_prefix: 0,
+            checked_order: Vec::new(),
             observed_parameters: Vec::new(),
             observed_values: Vec::new(),
         })
@@ -77,8 +77,10 @@ impl Progress {
         &self.observed_values
     }
 
+    // This is the first unfinished check in source order, not an execution PC.
+    // Dependencies may complete checks beyond this prefix without running them.
     pub fn current(&self) -> Option<usize> {
-        self.schedule.get(self.cursor).copied()
+        self.schedule.get(self.checked_prefix).copied()
     }
     pub fn binding(&self, slot: usize) -> n::LocalId {
         self.slots[slot].binding
@@ -101,8 +103,11 @@ impl Progress {
         fuel: &mut u64,
         span: Span,
     ) -> Result<(), Error> {
-        if self.current() != Some(slot) || self.is_prepared(slot) {
-            return Err(error(span, "declaration input preparation is out of order"));
+        let Some(input) = self.slots.get(slot) else {
+            return Err(error(span, "declaration input preparation is out of range"));
+        };
+        if input.prepared.is_some() {
+            return Err(error(span, "declaration input was already prepared"));
         }
         *fuel = fuel
             .checked_sub(1)
@@ -122,8 +127,10 @@ impl Progress {
             self.observed_values.push(value.clone());
         }
         self.slots[slot].prepared = Some(Prepared { producer, identity });
-        self.prepared_order.push(slot);
-        self.cursor += 1;
+        self.checked_order.push(slot);
+        while self.current().is_some_and(|next| self.is_prepared(next)) {
+            self.checked_prefix += 1;
+        }
         Ok(())
     }
 
@@ -156,7 +163,7 @@ impl Progress {
         Ok(PreparedDeclarationInputs {
             arguments,
             plan: n::NormalFormInputPlan {
-                order: self.prepared_order,
+                order: self.schedule,
                 preparations,
                 bindings,
             },
@@ -173,14 +180,14 @@ impl std::fmt::Display for Progress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(declaration-input-progress (cursor {}) (schedule",
-            self.cursor
+            "(declaration-input-progress (checked-prefix {}) (schedule",
+            self.checked_prefix
         )?;
         for slot in &self.schedule {
             write!(f, " {slot}")?;
         }
-        f.write_str(") (prepared-order")?;
-        for slot in &self.prepared_order {
+        f.write_str(") (checked-order")?;
+        for slot in &self.checked_order {
             write!(f, " {slot}")?;
         }
         f.write_str(") (slots")?;
@@ -234,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn preparation_retains_producers_and_default_order_until_complete() {
+    fn dependency_checks_retain_source_producers_and_execution_order() {
         let (parameters, bindings) = inputs();
         let span = Span::default();
         let mut progress =
@@ -243,11 +250,30 @@ mod tests {
         let pending = progress.to_string();
         assert!(
             progress
-                .record(0, producer("wrong"), None, &mut 100, span)
+                .record(3, producer("wrong"), None, &mut 100, span)
                 .is_err()
         );
         assert_eq!(progress.to_string(), pending);
         assert_eq!(progress.current(), Some(2));
+        // A later source slot can finish checking before the current slot.
+        // It must neither advance execution nor change the published schedule.
+        progress
+            .record(
+                0,
+                producer("producer-needs-invocation"),
+                None,
+                &mut 100,
+                span,
+            )
+            .unwrap();
+        assert_eq!(progress.current(), Some(2));
+        let pending = progress.to_string();
+        assert!(
+            progress
+                .record(0, producer("duplicate"), None, &mut 100, span)
+                .is_err()
+        );
+        assert_eq!(progress.to_string(), pending);
         let identity = Term::String("observed".into());
         assert!(
             progress
@@ -273,23 +299,13 @@ mod tests {
             .unwrap();
         assert_eq!(progress.identity(2), Some(&identity));
         assert_eq!(progress.observed_parameters, vec![parameters[2].0]);
-        assert_eq!(progress.current(), Some(0));
-        progress
-            .record(
-                0,
-                producer("producer-needs-invocation"),
-                None,
-                &mut 100,
-                span,
-            )
-            .unwrap();
         assert_eq!(progress.current(), Some(1));
         progress
             .record(1, producer("default"), None, &mut 100, span)
             .unwrap();
         assert_eq!(progress.current(), None);
         let dump = progress.to_string();
-        assert!(dump.contains("(schedule 2 0 1) (prepared-order 2 0 1)"));
+        assert!(dump.contains("(schedule 2 0 1) (checked-order 0 2 1)"));
         assert!(dump.contains("(identity pending)"));
         assert!(dump.contains("quote\\\"\\n"), "{dump}");
         let prepared = progress.finish(vec![], span).unwrap();

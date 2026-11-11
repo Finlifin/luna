@@ -238,6 +238,20 @@ LocalId 交接、外部控制出口及实际 Type receipt 的消费已写入
 sysroot 的 meta.List／builder／comptime 方法作消费者。不能继续只在已知域的静态
 分支增加观察技巧，避开真实 Type 生产者、执行顺序和前端区域所有权。
 
+后续已把 Progress 的检查完成次序与源码执行 schedule 分开，并接入现有域依赖
+检查和收集器路径。提前检查的显式 producer 直接移入同一个 owner，身份观察与
+局部域在记录成功后交付；不再到源位置后克隆该 producer、重复观察并把检查顺序
+当成执行顺序。默认值和 packet preparations 仍使用原调度位置，dump 分别列出
+checked-order 与 schedule。这是现有生产准备逻辑的迁移，没有新增另一套表达式
+求值器或将同步回调标成可恢复任务。
+
+3 项局部检查与 222 项真实消费者集成检查通过；新增用例检查后序 Type 提前检查时
+副作用顺序、保存 callable 后不重放及早退取消后继求值。2 项普通调用 Type 等待
+正例仍 ignored，本轮没有重跑或解除。完整命令与证据见
+[声明输入准备](elaboration-state-and-publication.md#已接入声明输入准备有独立的进度所有者)。
+仍须接通前端 continuation、原 invocation 的实际 Type 响应及一次性执行 receipt；
+当前 checked-prefix 只表示准备前缀，绝非已经执行的前缀。
+
 资源与库线仍保留独立缺口。运行时文本接口须以真实 sysroot、标准资源检查及正常
 调用贯通，不能用手拼片段、直降 builtin 或跳过来源检查证明库可用。
 

@@ -126,7 +126,7 @@ where T, flag: bool
 
 | 现有生产入口 | 当前已经保留 | 本次需要贯通的交接 |
 | --- | --- | --- |
-| `declaration_inputs.rs` | 路由、源码求值顺序、默认值、前置域与形成义务；Progress 独占 producer、身份及准备位置 | `InputChecking::Typed` 不再迫使待定域立即产出完整 Expr；普通检查器保留可恢复区域 |
+| `declaration_inputs.rs` | 路由、源码求值顺序、默认值、前置域与形成义务；Progress 独占 producer、身份，检查完成次序与源码 schedule 已分离 | `InputChecking::Typed` 不再迫使待定域立即产出完整 Expr；普通检查器保留可恢复区域 |
 | `dynamic_instances.rs` | packet 的实际表达式、已观察身份及 pending 参数分别保存 | pending 参数影响签名时保留尚未发布的调用准备，不能把 rigid 当作已完成 callable 类型 |
 | `type_computations.rs::Session` | committed 推断世界、单输出发布许可、可恢复 invocation 及已有签名任务 | 形成的 Type 结果需回到其源表达式区域，关联原参数位置、词法环境及真实生产者 |
 | `invocation/host.rs::InvocationSession` | 独占执行现场、关联／方法选择与定义准备请求、线性响应及取消 | 一般前端表达式检查仍需接入；不把同步回调或另起一次求值当成恢复 |
@@ -147,8 +147,9 @@ activation 在同一存储中执行已获准片段并交回控制结果；callab
 
 实施分解见[普通检查 continuation](elaboration-state-and-publication.md#实施细化普通检查规则必须交付-continuation)
 及其后的词法、绑定和控制交接协议。同步检查入口改为驱动同一规则的适配器，不能
-另留一套只支持少数输入形状的检查器。当前串行 Progress、块检查闭包、完整根准备
-和只归还 imported 绑定的 Frame 都需一起迁移；代码能被编译成一个 fragment 本身
+另留一套只支持少数输入形状的检查器。Progress 已允许依赖项先完成检查并保留源码
+schedule，但仍缺恢复任务；块检查闭包、完整根准备和只归还 imported 绑定的 Frame
+也需一起迁移。代码能被编译成一个 fragment 本身
 不证明新建局部、原控制出口和一次性 producer 已被保留。
 
 这一纵向交付必须同时做到：

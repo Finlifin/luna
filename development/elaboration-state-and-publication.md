@@ -373,16 +373,24 @@ ownership 保存和恢复机制。特别地，无声明目录的内部回退可�
 ### 已接入：声明输入准备有独立的进度所有者
 
 `declaration_inputs::progress::Progress` 接管原准备循环中的 producer、身份、局部绑定、
-准备顺序及域替换前缀。显式输入按路由后的源码顺序处理，省略输入随后按声明顺序
-处理；当前位置只有在产物记录成功后才前进。空收集器与默认值使用相同记录入口。
-尚未准备完不能发布输入计划，重复／越序记录拒绝，预算不足不会留下半个身份前缀。
-新增身份复制在写入前计费，失败消耗的预算不退还。
+准备结果及已观察的域替换输入。路由先固定执行 schedule：显式输入保留源码顺序，
+省略输入随后按声明顺序。检查可因域依赖先完成后序输入，不能因此改变 schedule；
+checked-prefix 仅表示源码顺序中已连续准备的前缀，不是 VM 的执行位置。所有槽位
+准备完成后才发布计划，重复／越界记录拒绝，预算不足不会留下半个身份前缀。
+身份复制在写入前计费，失败消耗的预算不退还。
 
 这里保存的是准备进度，并非已经执行的实参。producer 与可选的静态身份分别保留；
 未知身份继续作为 deferred 形成输入，不能凭 rigid 占位宣称域已经完成。最终计划
-按声明顺序返回参数，但按准备顺序保留求值位置；typed 消费者仍须取得普通 NIR
-表达式，身份观察不能抹掉原 producer 或授予执行资格。S-expression dump 显示
-调度、当前位置、已准备项及待定身份。
+按声明顺序返回参数，按原 schedule 保留求值位置，不能用检查完成顺序重排。
+typed 消费者仍须取得普通 NIR 表达式，身份观察不能抹掉原 producer 或授予执行资格。
+S-expression dump 分别显示 schedule、checked-order、checked-prefix 和各项身份。
+这里的 checked 表示准备结果已交付；旧 contextual producer 仍可能有待完成的域。
+
+域依赖检查直接把已经检查的显式 producer 移入 Progress，不再暂存一份、在轮到源
+位置后再克隆并重新观察。收集器的域依赖使用同一个入口；prepared_bindings 与局部
+域只在记录成功后更新。静态身份一旦取得可以供后续检查使用，但未知身份仍保留
+实际 producer，不在这个入口调用 VM。packet 展开等更早的路由产物仍需自己的临时
+位置；这次改变没有声称全部源码检查都已迁成任务队列。
 
 生产准备循环已使用该 owner，不过它仍在同步调用内存活：路由后的 HIR、检查环境、
 展开输入准备以及实际 invocation 没有因此成为可挂起区域。现有 NormalFormArgument
@@ -393,10 +401,26 @@ ownership 保存和恢复机制。特别地，无声明目录的内部回退可�
 
 - `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test ordinary_clause_collectors --test ordinary_callable_types --test clause_packet_preparation --test clause_source_dependencies --test normal_input_plans --test open_normal_input_plans --test default_calls --test builder_invocations --no-fail-fast`：
   `/tmp/luna-tools-402xn3ie/result.json`，退出 0，511 项通过、2 项既有 ignored。
-  新增局部测试覆盖越序、预算失败后继续、未完成计划拒绝、身份与 producer 分离及
+  当时的局部测试覆盖串行越序拒绝、预算失败后继续、未完成计划拒绝、身份与 producer 分离及
   dump 转义；现有真实 sysroot 用例检查默认值、收集器、输入顺序和 builder 消费者。
 - 两个修改的 Rust 文件通过 scoped rustfmt 检查，
   `/tmp/luna-tools-89agc13r/result.json` 退出 0。未运行全 workspace 或性能基准。
+
+分离检查次序后的验证仍在 `/home/fin/luna`：
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib
+  program::declaration_inputs --no-fail-fast`：3 项通过，退出 0，
+  `/tmp/luna-tools-c22cddy2/result.json`。局部测试现在允许后序输入先完成检查，
+  检查重复／越界拒绝和预算恢复，并确认 typed 产物仍按原 schedule 执行。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test
+  ordinary_clause_collectors --test ordinary_callable_types --test clause_packet_preparation
+  --test clause_source_dependencies --test normal_input_plans --test open_normal_input_plans
+  --test default_calls --test builder_invocations --no-fail-fast`：222 项通过、2 项既有
+  ignored，退出 0，`/tmp/luna-tools-zy_crm7s/result.json`。新增真实 sysroot 用例
+  在两个现有执行入口检查后序 Type 的检查不会重排副作用、保存的 callable 不重放
+  实参，以及较早输入 return 会跳过后序 Type 生产者；后者包含未运行的除零操作。
+  尚未运行这两个 ignored 正例，也没有以本轮结果声称恢复 Type 请求已接通。
+- scoped rustfmt 退出 0，`/tmp/luna-tools-d_xboq2d/result.json`；未运行全量回归。
 
 以上是保留作者既有资源检查修改的工作区验证；该修改、formatter、正式 docs 和
 library 的既有修改均未纳入本次提交。
@@ -603,7 +627,7 @@ callable 的两个等待点。只增加 public request enum 或可手工构造�
 | --- | --- | --- |
 | `program.rs::expr_context`／`expr_context_adapted` | 子表达式返回完整 Expr 后才做目标域适配 | 当前规则、expected／partial context、已检查子结果、尚未兑现的适配；恢复不能重新选择一次转换 |
 | `block_regions.rs::check_block_region` | `in_block_scope` 闭包在同一 Rust 栈帧内完成所有语句和尾值 | 语句位置、局部声明域、diverges、staged pattern 结果、尾值及绑定完成任务；等待不等于退出词法域 |
-| `declaration_inputs.rs::Progress` | 一个 cursor 同时表示“下个检查输入”和源码调度位置 | 独立的检查就绪集合、每项域依赖、结果位置及原执行次序；后序 Type 可以被检查，但不能因此提前执行 |
+| `declaration_inputs.rs::Progress` | 原串行 cursor；后续已分离 schedule／checked-order 并接入前置域检查 | 仍须补齐可恢复检查任务及每项域依赖；已有结果位置和源码顺序不能被执行调度覆盖 |
 | `required.rs::prepare_required_root_with_live_inputs` | `build` 返回完整根后才收集自由绑定和建立世界 | 独立于完整根的源输入描述及受限可见世界；后续每段所需绑定增量检查，不能先捕获所有外围值 |
 
 采用显式规则 continuation，不再让 Rust 调用栈兼任待定区域的唯一所有者。它保存
