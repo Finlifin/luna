@@ -825,6 +825,29 @@ fn sysroot_reflection_uses_receiver_domains_without_unfolding_type_identity() {
 }
 
 #[test]
+fn generic_type_receivers_keep_negative_evidence_separate_from_reflection_admission() {
+    let source = "struct Row { field: bool }
+        comptime fn field_count() -> Integer
+        where T, requires T != Type
+        {
+            T.struct_fields().length()
+        }
+        comptime fn good() -> bool { field_count<Row>() == 1 }
+        comptime fn bad() -> Integer { field_count<bool>() }";
+    let package = sysroot::compile(source).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "good", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+    let failure = luna::invocation::invoke(&package, "bad", 1_000_000).unwrap_err();
+    assert!(failure.contains("interpretation Type at"), "{failure}");
+    let failure = sysroot::compile(&source.replace(", requires T != Type", ""))
+        .err()
+        .expect("unknown subject identity must not refute the Type implementation");
+    assert!(failure.contains("classification is unsettled"), "{failure}");
+}
+
+#[test]
 #[ignore = "enum constructor probing demands a live NF receiver before ordinary method routing"]
 fn computed_normal_form_receiver_keeps_live_clause_inputs() {
     let package = sysroot::compile(

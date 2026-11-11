@@ -153,44 +153,31 @@ impl InherentIndex {
             Budget,
         ) -> (TypeAssessment, Applicability),
     ) -> Result<TypeResolution, Error> {
-        let mut candidates = self.index.candidates(
+        self.index.resolve_in_domain_with_search_budget(
             None,
             &[],
             subject,
-            Budget {
-                steps: budget.steps / 2,
-                ..budget
+            context,
+            &mut { budget },
+            |candidates| {
+                candidates
+                    .declarations
+                    .retain(|id| self.heads[id].members.contains(name));
+                // A member name fixes this domain without inventing a trait.
+                candidates.fixed_interface = true;
             },
-        )?;
-        candidates
-            .declarations
-            .retain(|id| self.heads[id].members.contains(name));
-        // The member domain is fixed even though no trait identity exists.
-        candidates.fixed_interface = true;
-        let allowance = Budget {
-            steps: (budget.steps - budget.steps / 2) / candidates.declarations.len().max(1),
-            ..budget
-        };
-        let mut assessments = BTreeMap::new();
-        let selection = self.index.select(&candidates, |head| {
-            let matched = head.match_subject_types_with_domains(
-                subject,
-                &[],
-                context,
-                allowance,
-                &self.index.parameter_domains,
-                Some(&self.index.nominal_layouts),
-            );
-            let (assessment, state) = assess(head.declaration, matched, allowance);
-            assessments.insert(head.declaration, assessment);
-            state
-        });
-        Ok(TypeResolution {
-            index_identity: self.index.identity,
-            index_revision: self.index.revision,
-            selection,
-            assessments,
-        })
+            |head, allowance| {
+                let matched = head.match_subject_types_with_domains(
+                    subject,
+                    &[],
+                    context,
+                    allowance,
+                    &self.index.parameter_domains,
+                    Some(&self.index.nominal_layouts),
+                );
+                assess(head.declaration, matched, allowance)
+            },
+        )
     }
     pub fn verify_evidence(
         &self,

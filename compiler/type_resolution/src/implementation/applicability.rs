@@ -3,7 +3,9 @@
 mod domain_staging;
 mod eligibility;
 mod replay;
-use super::{Applicability, Error, EvidenceError, ImplementationHead, Index, Selection};
+use super::{
+    Applicability, Candidates, Error, EvidenceError, ImplementationHead, Index, Selection,
+};
 use crate::InferenceTerm as I;
 use crate::obligations::{Engine, State};
 use crate::ptc::{Budget, Context, Formula, Outcome, Proof};
@@ -1466,6 +1468,39 @@ impl Index {
         subject: &Term,
         context: &Context,
         budget: &mut Budget,
+        assess: impl FnMut(&ImplementationHead, Budget) -> (TypeAssessment, Applicability),
+    ) -> Result<TypeResolution, Error> {
+        self.resolve_in_domain_with_search_budget(
+            Some(interface),
+            arguments,
+            subject,
+            context,
+            budget,
+            |candidates| {
+                // Stable rigid arguments identify one symbolic interface
+                // instance. Full matching must still prove their relations.
+                if arguments
+                    .iter()
+                    .all(|argument| argument.check_scope(&[]).is_ok())
+                {
+                    candidates.fixed_interface = true;
+                }
+            },
+            assess,
+        )
+    }
+
+    /// A trait instance or inherent member restricts the candidate domain;
+    /// search, proved exclusions and precision selection share one pipeline.
+    /// The domain callback may only restrict candidates from this index.
+    pub(in crate::implementation) fn resolve_in_domain_with_search_budget(
+        &self,
+        interface: Option<DeclarationId>,
+        arguments: &[Term],
+        subject: &Term,
+        context: &Context,
+        budget: &mut Budget,
+        restrict: impl FnOnce(&mut Candidates),
         mut assess: impl FnMut(&ImplementationHead, Budget) -> (TypeAssessment, Applicability),
     ) -> Result<TypeResolution, Error> {
         let mut search_budget = Budget {
@@ -1473,19 +1508,10 @@ impl Index {
             max_depth: budget.max_depth,
         };
         let reserved = search_budget.steps;
-        let searched =
-            self.candidates_metered(Some(interface), arguments, subject, &mut search_budget);
+        let searched = self.candidates_metered(interface, arguments, subject, &mut search_budget);
         budget.steps = budget.steps.saturating_sub(reserved - search_budget.steps);
         let mut candidates = searched?;
-        // Stable rigid arguments identify one symbolic interface instance.
-        // Unlike a raw structural search, this path proves each candidate's
-        // complete argument relation before permitting selection.
-        if arguments
-            .iter()
-            .all(|argument| argument.check_scope(&[]).is_ok())
-        {
-            candidates.fixed_interface = true;
-        }
+        restrict(&mut candidates);
         // The structural index deliberately retains opaque candidates. Prove
         // closed-head exclusions before dividing fuel among unresolved heads;
         // unrelated scalar implementations must not consume inference slots.

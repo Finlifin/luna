@@ -1,7 +1,7 @@
 use nir::program::TypePredicate;
 use nir::{DeclarationId as Id, Primitive as P, Sort, Term};
 use type_resolution::implementation::{
-    ImplementationHead, InherentHead, InherentIndex, Selection, TypeAssessment,
+    ImplementationHead, Index, InherentHead, InherentIndex, Selection, TypeAssessment,
 };
 use type_resolution::ptc::{Budget, Context, Formula};
 fn id(local: u32) -> Id {
@@ -33,6 +33,160 @@ fn context() -> Context {
     let mut c = Context::default();
     c.admit_nominal_constructor(id(10));
     c
+}
+
+#[test]
+fn trait_and_inherent_domains_refute_closed_heads_before_subject_eligibility() {
+    let concrete = Term::Primitive(P::Bool);
+    let mut inherent = InherentIndex::for_builtin_packages(None, [0]);
+    inherent
+        .insert(
+            head(20, concrete.clone(), vec![], &["read"]),
+            Budget::default(),
+        )
+        .unwrap();
+    let mut traits = Index::for_builtin_packages(None, [0]);
+    traits
+        .insert(
+            ImplementationHead {
+                declaration: id(20),
+                subject: concrete.clone(),
+                interface: Some(id(100)),
+                interface_arguments: vec![],
+                parameter_types: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+            },
+            Budget::default(),
+        )
+        .unwrap();
+    for subject in [
+        var(90),
+        Term::NormalForm {
+            head: id(91),
+            sort: Sort::Type,
+            arguments: vec![var(92)],
+        },
+    ] {
+        let resolve = |context: &Context| {
+            [
+                inherent.resolve_types("read", &subject, context, Budget::default()),
+                traits.resolve_types(id(100), &[], &subject, context, Budget::default()),
+            ]
+        };
+        let unknown = Context::default();
+        for result in resolve(&unknown) {
+            assert!(matches!(
+                result.unwrap().selection,
+                Selection::Deferred { .. }
+            ));
+        }
+        let mut different = unknown.fork();
+        different.assume(Formula::equal(subject.clone(), concrete.clone()).negate());
+        for result in resolve(&different) {
+            let result = result.unwrap();
+            assert_eq!(result.selection, Selection::NoApplicableCandidate);
+            let TypeAssessment::Excluded(proof) = &result.assessments[&id(20)] else {
+                panic!("a closed-head exclusion must retain its proof");
+            };
+            assert_eq!(
+                proof.goal,
+                Formula::equal(concrete.clone(), subject.clone()).negate()
+            );
+            different.verify_proof(proof, Budget::default()).unwrap();
+            assert!(unknown.verify_proof(proof, Budget::default()).is_err());
+        }
+        // A separate query can supply positive equality. Earlier exclusion
+        // evidence is neither cached as a fact nor reused for the new premise.
+        let mut equal = unknown.fork();
+        equal.assume(Formula::equal(subject.clone(), concrete.clone()));
+        for (position, result) in resolve(&equal).into_iter().enumerate() {
+            let result = result.unwrap();
+            assert_eq!(result.selection, Selection::Selected(id(20)));
+            let TypeAssessment::Applicable(evidence) = &result.assessments[&id(20)] else {
+                panic!("selection requires applicable evidence");
+            };
+            if position == 0 {
+                inherent
+                    .verify_evidence("read", evidence, &subject, &equal, Budget::default())
+                    .unwrap();
+                assert!(
+                    inherent
+                        .verify_evidence("read", evidence, &subject, &unknown, Budget::default())
+                        .is_err()
+                );
+            } else {
+                traits
+                    .head(id(20))
+                    .unwrap()
+                    .verify_type_evidence(evidence, &subject, &[], &equal, Budget::default())
+                    .unwrap();
+                assert!(
+                    traits
+                        .head(id(20))
+                        .unwrap()
+                        .verify_type_evidence(evidence, &subject, &[], &unknown, Budget::default())
+                        .is_err()
+                );
+            }
+        }
+        for result in resolve(&unknown) {
+            assert!(matches!(
+                result.unwrap().selection,
+                Selection::Deferred { .. }
+            ));
+        }
+    }
+}
+
+#[test]
+fn inherent_closed_exclusion_remains_proof_backed_across_budget_boundaries() {
+    let mut index = InherentIndex::for_builtin_packages(None, [0]);
+    let concrete = Term::Primitive(P::Bool);
+    index
+        .insert(
+            head(20, concrete.clone(), vec![], &["read"]),
+            Budget::default(),
+        )
+        .unwrap();
+    let subject = var(90);
+    let mut context = Context::default();
+    context.assume(Formula::equal(subject.clone(), concrete).negate());
+    let mut incomplete = 0;
+    let mut excluded = 0;
+    for steps in [0, 1, 8, 32, 128, 512, 2048, 8192, 100_000] {
+        match index.resolve_types(
+            "read",
+            &subject,
+            &context,
+            Budget {
+                steps,
+                ..Budget::default()
+            },
+        ) {
+            Err(type_resolution::implementation::Error::BudgetExhausted) => incomplete += 1,
+            Ok(result) if matches!(result.selection, Selection::Deferred { .. }) => {
+                incomplete += 1;
+            }
+            Ok(result) => {
+                assert_eq!(result.selection, Selection::NoApplicableCandidate);
+                let TypeAssessment::Excluded(proof) = &result.assessments[&id(20)] else {
+                    panic!("an incomplete query cannot exclude the candidate");
+                };
+                context.verify_proof(proof, Budget::default()).unwrap();
+                excluded += 1;
+            }
+            Err(failure) => panic!("unexpected failure at {steps} steps: {failure:?}"),
+        }
+    }
+    assert!(incomplete > 0 && excluded > 0);
+    assert_eq!(
+        index
+            .resolve_types("read", &subject, &context, Budget::default())
+            .unwrap()
+            .selection,
+        Selection::NoApplicableCandidate
+    );
 }
 #[test]
 fn inherent_selection_filters_names_before_precision() {

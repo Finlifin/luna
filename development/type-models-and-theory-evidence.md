@@ -299,6 +299,49 @@ driver 的调用／缓存／键协议／资源协议／参考执行通过同一�
   `/tmp/luna-tools-vjcfur9x/result.json` 退出 0；fixture 的模块排序随后由 rustfmt
   完成，`/tmp/luna-tools-wsd9h_nt/result.json` 退出 0；`git diff --check` 通过。
 
+### Trait 与固有成员共用候选查询
+
+类型索引的 resolve_in_domain_with_search_budget 共同承接 trait 实例与固有成员的
+候选搜索、已证明排除、剩余额度分配、精度选择及索引身份记录。trait 入口固定完整
+接口实例；固有入口按成员名收窄候选，不伪造 trait 身份。两个入口保留各自的完整
+头匹配及能力兑现，删除固有入口重复的搜索／选择循环和独立的半额预算分配。
+
+固定实现头若已被当前类型前提证明与查询主体不相等，可以先排除；不必先求出
+该主体是否允许用户 impl。此前只有 trait 查询走这一步，固有方法会先在主体资格
+处返回 Pending，从而挡住已有反证的排除。每次排除仍保留可重放的 PTC 证明，
+未知／超预算不构成排除，量化头仍通过原有新鲜变量匹配，不反演 opaque NF。
+搜索实际未用额度与反证后剩余额度由共同路径分配，未提高默认预算。
+
+真实 sysroot 的例子是一个含 `requires T != Type` 的 comptime helper：
+其 `T.struct_fields()` 调用可以排除 represented T 上的 `impl Type` 候选，再通过
+普通 Type 值的接收者方法反射。传 Row 成功；传 bool 仍在反射准入时报 Type 错误。
+移除不等前提则恢复未决，不能沿用前次查询证据。该约束是验证候选排除的用例，
+不是给反射 API 新增的语言要求，也不把 PTC 用作字段布局或程序状态验证器。
+
+局部回归同时运行 trait／固有查询，覆盖 rigid 与 opaque NF 主体的无前提、负前提、
+正前提及撤回，检查排除证明和选择证据的重放；预算扫描要求未完成时不能伪造排除。
+成员域、precision、世界修订、未知候选与既有调用资格检查继续由原有契约约束。
+
+这没有修复枚举构造探测过早取得 live NF 输入的独立缺口。直接把 receiver_call
+挪到 variant_target 前会改变同名成员的选择并重复准备实参；后续应让调用类别观察
+与实际参数准备共享结果，再退役那条急切 type_expr 路径，而不是吞掉它的失败。
+
+验证目录 `/home/fin/luna`，入口 `development/check.py --timeout 900 -- test`；
+完整命令、退出结果及逐组输出在各目录的 result.json / stdout.log / stderr.log：
+
+- `/tmp/luna-tools-pprqndqq`：implementation、inherent、capabilities 共 156 项通过，
+  退出 0，包含负前提撤回、正证据重放与低预算恢复。
+- `/tmp/luna-tools-s2pgjxab`：真实 sysroot 泛型反射正例及非法主体拒绝通过，退出 0。
+  两份生产文件临时还原到 `f98c782e` 后，`/tmp/luna-tools-hq05a6ye` 在相同源码
+  130..145 报主体资格未决，退出 101；随后逐字节恢复本批源码。
+- 最终 `/tmp/luna-tools-iprrmp6f`：相关 lib、关联项、两阶段实现、receiver 来源、
+  NF 方法、公开库协议、反射与失败恢复共 393 通过，退出 101。
+  cmtt_methods 的两项既有失败与[上一阶段基线](values-staging-and-publication.md#计算型-type-接收者的类别观察)
+  位置及诊断一致；另明确保留并跳过 1 项 live-NF 枚举探测回归，没有修改其预期。
+  反射组为 19 通过、1 ignored，包含新增的撤回负前提拒绝检查。
+- 四份修改的 Rust 文件 scoped rustfmt check 退出 0：`/tmp/luna-tools-udjr58s_`；
+  git diff --check 通过。未运行全 workspace、性能或并发压力测试。
+
 ### 调用内的统一声明查询状态
 
 `SourceInvocationQueries` 借用本次 invocation 的不可变 package、Context 与前提，
