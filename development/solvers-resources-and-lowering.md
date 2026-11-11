@@ -94,6 +94,43 @@ assumes 的条件求值次数、稳定性及有限完成另行检查，成功路
 
 verified 的高级证明扩展保持接口边界，本阶段不设计大型验证库。
 
+### 4.1 可选检查消除的私有事务
+
+已证明的程序谓词检查可以消除拒绝动作，但保留条件求值及其顺序、次数和副作用。
+这条优化属于程序验证层，不向 PTC 提交程序状态。无法证明、预算不足或改写后检查
+失败时，使用已经通过前端检查的原函数；不能把优化 Unknown 当作接受非法程序的理由。
+
+`program_verification::optimization` 现在复用 `nir::visit` 的有界结构遍历，删除
+自己维护的递归表达式／模式遍历。结构访问次序不代表源程序执行次序；事实仍由 flow
+分析按实际控制流建立。包级入口与 purity 消费同一个准备入口：
+
+1. 有界扫描函数体；没有 CheckPredicate 时不复制函数。
+2. 用共享 copy_budget 预先计量整个 Function 的拥有载荷，包括签名、名称、契约及
+   后续闭包 copy-on-write。通过后才复制并分离共享闭包体。
+3. 在这棵私有树上建立 flow 事实并证明、重放检查证据；同一节点多次访问必须全部
+   支持消除。只将对应 CheckPredicate 改为保留条件的 Discard。
+4. 对完整候选重新分析，通过后才发布；中途失败丢弃私有候选，保留原函数。
+
+flow 的 proof site 仍是当前树的临时地址键。先分离闭包，再记录 site；改写不得移动
+尚未消费的节点或重新 clone 其树。它不进入持久缓存、跨版本引用或可序列化身份。
+这次清理没有建立全局 NodeId，也没有证明所有程序分析器的地址使用和宿主栈有界性。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution
+  --test frontend_cli --no-fail-fast elision`：6 项通过，退出 0；
+  `/tmp/luna-tools-err235ok/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test runtime_purity
+  --test optional_purity --test call_local_facts --no-fail-fast`：73 项通过，退出 0；
+  `/tmp/luna-tools-y69d69ch/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution
+  -- --exact <直接调用 elide_proven_checks 的 26 个测试名>`：26 项通过，退出 0；
+  `/tmp/luna-tools-cap6jk33/result.json` 保存完整命令，stdout.log 保存逐项结果。
+  包含共享闭包、可变捕获、写回、别名失效、循环和条件求值；与首轮 5 项有重叠。
+
+新增用例验证长函数元数据也占复制预算：低预算保留原函数，更充足的新尝试正常消除。
+这些是带工作区既有 moves/effects.rs 修改的针对性结果，不是纯 HEAD 或全量验收。
+
 ## 5. 统一资源描述，区分具体含义
 
 资源证据采用逻辑路径、物理位置、分支 guard、时间/存储版本和责任所有者的组合。

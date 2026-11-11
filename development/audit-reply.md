@@ -283,6 +283,32 @@ derive 的旧例只使用独立源码，不依赖迁移的库：它执行 `stora
 指针。`--test derivation --no-fail-fast` 78 项通过，证据
 `/tmp/luna-tools-bhk7ztwk/result.json`（退出 0，工作目录与命令前缀同上）。
 
+### 地址键结论的纠正与检查消除器清理
+
+11 月 11 日晚报 2.3 将程序验证层的地址键概括为“使有序集合的遍历顺序直接取决于
+宿主堆内存分配器地址”，这个结论不能由转型计数推出。核对当前源码及报告基线
+`a00e221f` 的 `memory.rs`：expression_results、callable_results、aggregate 表和
+closure_nodes 以地址作 HashMap 查找键；局部代码候选使用首次访问时的
+`local_code.len()` 序号，closure_nodes 保存这些序号。stable_writes 的地址集合用于
+成员检查。这不是本轮修复后的性质，报告基线就已有确定性候选序号及相关注释。
+
+不能据此反向宣称全部地址键都安全：树的移动、clone、COW、释放及跨查询复用仍需要
+逐项检查生命周期；持久身份不能直接使用地址。修复应针对实际消费者和失效边界，
+不以替换全部 `as usize` 的数量作为架构完成度。
+
+核对中实际清理的是 `optimization.rs` 的重复递归遍历：现在扫描、闭包分离和改写
+都调用 NIR 公共有界遍历，删除独立的表达式／模式遍历。同时修正包级入口在计量前
+clone 整个函数的问题；它与 purity 共用复制前检查，没有待处理谓词时也不再 clone。
+保留条件求值、每次访问均需证明、共享闭包隔离和整函数失败回退。proof site 仅用于
+已分离私有树上的本次事务，没有冒充跨树稳定身份。
+
+针对性检查为首轮 6 项、纯度／调用事实 73 项，以及所有直接调用检查消除器的
+execution 用例 26 项，均退出 0；前后两轮 execution 用例有重叠，不累加为独立覆盖。
+新增回归检查函数元数据的复制计量与低预算后的新尝试恢复。命令、日志和范围见
+[检查消除的私有事务](solvers-resources-and-lowering.md#41-可选检查消除的私有事务)。
+这不解决普通调用的待定 Type 域、运行时文本来源或完整统一 VM；未修改 formatter、
+报告原文及正式 docs，既有 moves/effects.rs 工作区改动仍单独保留。
+
 ## 4. 本次证据与限制
 
 工作目录 `/home/fin/luna`；所有检查通过 `development/check.py --timeout 900 -- test`。

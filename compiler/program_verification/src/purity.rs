@@ -4421,20 +4421,15 @@ impl<'a> Analysis<'a> {
         }
         let function = if !self.finite && has_checks {
             let mut limits = crate::Limits::default();
-            if nir::copy_budget::charge_function_substitution(&function, &[], &[], &mut self.fuel)
-                .is_err()
-            {
-                self.fuel = 0;
-                return false;
-            }
             limits.arithmetic.steps = self.fuel;
-            let simplified = crate::optimization::elide_function_checks(
-                self.package,
-                function.clone(),
-                &mut limits,
-            );
+            let simplified =
+                crate::optimization::elide_function_checks(self.package, &function, &mut limits);
             self.fuel = limits.arithmetic.steps;
-            simplified.map(|(function, _)| function).unwrap_or(function)
+            simplified
+                .ok()
+                .flatten()
+                .map(|(function, _)| function)
+                .unwrap_or(function)
         } else {
             function
         };

@@ -20048,6 +20048,28 @@ fn proven_check_elision_budget_exhaustion_never_publishes_partial_rewrites() {
 }
 
 #[test]
+fn proven_check_elision_accounts_for_copied_function_metadata() {
+    use elaboration::verification::{self as v, optimization};
+    let mut baseline = compile("fn known() { assumes true; }");
+    baseline.functions[0].name = "long_name".repeat(2048);
+    let mut limited = baseline.clone();
+    let mut budget = v::Limits::default();
+    budget.arithmetic.steps = 1024;
+    let report = optimization::elide_proven_checks(&mut limited, &mut budget);
+    assert!(report.eliminated.is_empty());
+    assert_eq!(report.fallback_functions, 1);
+    assert_eq!(limited, baseline);
+    assert!(budget.arithmetic.steps < 1024);
+
+    // The metadata size is a work charge, not a permanent semantic rejection.
+    let report = optimization::elide_proven_checks(&mut limited, &mut v::Limits::default());
+    assert_eq!(report.eliminated.len(), 1);
+    assert_eq!(report.fallback_functions, 0);
+    assert_eq!(limited.functions[0].name, baseline.functions[0].name);
+    v::flow::validate_machine_operations(&limited).unwrap();
+}
+
+#[test]
 fn proven_check_elision_does_not_confuse_identical_source_ranges() {
     use elaboration::verification::{self as v, optimization};
     use nir::program::{ExprKind as K, SourceRange};
