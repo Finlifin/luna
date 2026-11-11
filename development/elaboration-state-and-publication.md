@@ -153,6 +153,33 @@ PTC 构造器权限；后一个描述超预算时，早先条目已可见，impl
 修改，未执行全 workspace。原布局索引同步仍可能复制整个布局集合；完整成本模型、
 一般 DefinitionTransaction 及待决 Type／源主体恢复没有因此完成。
 
+### 已接入：晚生成描述交付给后续 IR
+
+接收成功还不代表最终 NIR 包完整。初始描述快照取得之后，主体、默认值与模板中的
+required invocation 仍可生成定义。原收尾只补收 struct 和内部 scalar packet enum，
+遗漏普通 enum 与 newtype；局部 `const Flag = Wrapper()` 后执行
+`true.as(Flag).as(bool)`，会在实例化阶段报 `IIR nominal type has no declaration`。
+修复前真实 sysroot 回归 `/tmp/luna-tools-f212gyj3/result.json` 退出 101。
+
+现在三类描述共用按声明身份去重的交付规则，保留包内先前条目，并在契约、纯度和
+quote 分析前补齐 checker 已接收的描述。内部 scalar packet 只另记传输角色，
+不再获得另一条 enum 描述收集路径。此处不重新调用 builder、不修改生成身份，
+也不以布局代替类型身份。
+
+本次另发现局部 Type 常量的显式成员构造仍有缺口：
+`const Event = EventType(); let value = Event.data(true);` 在前端报
+`field projection requires a supported struct`，证据为
+`/tmp/luna-tools-y3aii0eo/result.json`。带目标域的
+`let value: Event = .data(true);` 用于独立检查 enum 描述交付；这不是对前一种
+语言用法的拒绝规则。该成员解析缺口、quote 内待决 Type，以及一般候选探测的
+生成定义所有权仍须后续处理，不能从这次修复推定完整回滚或活动源任务已经接通。
+
+验证目录 `/home/fin/luna`：
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test required_definition_publication --test builder_invocations --test cmtt_storage_world --test cmtt_phase_boundaries --test test_templates --test quote_functions --test inline_pattern_observation --no-fail-fast`，
+`/tmp/luna-tools-wcicoi_g/result.json` 退出 0，639 项通过；新增用例经真实 sysroot
+检查 newtype 转换、enum 构造与匹配，以及已有／晚生成混合描述的身份、反射和执行。
+工作区保留已有资源分析修改，未执行全 workspace 或 LLVM 原生验收。
+
 ## 4. Region 与 task 状态
 
 Region 状态：`Open → Closing → Complete | Failed | Cancelled`。

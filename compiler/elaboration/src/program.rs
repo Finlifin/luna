@@ -1318,28 +1318,32 @@ fn elaborate_candidate<'a, 'h>(
     // Required invocations in bodies, defaults and templates can publish types
     // after the initial layout snapshot. Consumers below need their complete
     // descriptions for contract, purity and quote analysis, not just emission.
-    let mut emitted_structs: BTreeSet<_> = output
-        .structs
-        .iter()
-        .map(|definition| definition.declaration)
-        .collect();
-    for (id, definition) in &checker.structs {
-        if emitted_structs.insert(*id) {
-            output.structs.push(definition.clone());
+    fn append_descriptions<'a, T: Clone + 'a>(
+        output: &mut Vec<T>,
+        descriptions: impl IntoIterator<Item = &'a T>,
+        identity: impl Fn(&T) -> DeclarationId,
+    ) {
+        let mut emitted: BTreeSet<_> = output.iter().map(&identity).collect();
+        for description in descriptions {
+            if emitted.insert(identity(description)) {
+                output.push(description.clone());
+            }
         }
     }
-    // Body lowering can create private scalar observation packets after the
-    // source declaration layouts were collected above.
-    for declaration in &checker.computed_scalar_packets {
-        if !output
-            .enums
-            .iter()
-            .any(|item| item.declaration == *declaration)
-        {
-            output.enums.push(checker.enums[declaration].clone());
-        }
-        output.internal_return_packets.insert(*declaration);
-    }
+    append_descriptions(&mut output.structs, checker.structs.values(), |item| {
+        item.declaration
+    });
+    append_descriptions(&mut output.enums, checker.enums.values(), |item| {
+        item.declaration
+    });
+    append_descriptions(&mut output.newtypes, checker.newtypes.values(), |item| {
+        item.declaration
+    });
+    // Internal scalar packets use the same description publication boundary;
+    // their return-transport role is metadata, not a separate enum emission path.
+    output
+        .internal_return_packets
+        .extend(checker.computed_scalar_packets.iter().copied());
     // Staged declaration values can remain in checked default descriptions and
     // invocation inputs even though only concrete residual bodies are emitted.
     // Identity metadata admits their phase; it never authorizes execution.

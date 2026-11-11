@@ -35,3 +35,110 @@ fn required_builders_deliver_cross_kind_layouts_to_reflection_and_dispatch() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn body_required_newtypes_reach_runtime_conversion() {
+    assert_eq!(
+        sysroot::run(
+            "
+            comptime fn Wrapper() -> Type {
+                meta.NewtypeBuilder.new(bool, .name = .LateGenerated).Build()
+            }
+            fn run() -> bool {
+                const Flag = Wrapper();
+                true.as(Flag).as(bool)
+            }
+        "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn body_required_enums_reach_runtime_construction_and_matching() {
+    assert_eq!(
+        sysroot::run(
+            "
+            comptime fn EventType() -> Type {
+                let draft = meta.EnumBuilder.new(.name = .LateEvent);
+                draft.add_unit(.idle);
+                draft.add_tuple(.data, [bool]);
+                draft.Build()
+            }
+            fn run() -> bool {
+                const Event = EventType();
+                let value: Event = .data(true);
+                value match { .idle => false, .data(flag) => flag }
+            }
+        "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn late_mixed_descriptions_preserve_prior_definitions_and_fresh_identities() {
+    let package = sysroot::compile("
+        struct Existing { flag: bool }
+        enum Original { ready }
+        newtype Baseline = bool;
+        comptime fn Wrapper() -> Type {
+            meta.NewtypeBuilder.new(bool, .name = .LateWrapper).Build()
+        }
+        typealias Early = Wrapper();
+        comptime fn Record() -> Type {
+            let draft = meta.StructBuilder.new(.name = .LateRecord);
+            draft.add_field(.flag, Wrapper());
+            draft.Build()
+        }
+        comptime fn EventType() -> Type {
+            let draft = meta.EnumBuilder.new(.name = .LateChoice);
+            draft.add_tuple(.some, [Record()]);
+            draft.Build()
+        }
+        fn run() -> bool {
+            const First = EventType();
+            const Second = EventType();
+            const distinct = First != Second;
+            const inspect = First.enum_variant_field_types()[0][0].struct_field_types()[0].NewtypeRepresentation() == bool;
+            distinct and inspect and true.as(Early).as(bool)
+        }
+    ").unwrap();
+    let all = package
+        .structs
+        .iter()
+        .map(|item| item.declaration)
+        .chain(package.enums.iter().map(|item| item.declaration))
+        .chain(package.newtypes.iter().map(|item| item.declaration))
+        .collect::<Vec<_>>();
+    let unique = all
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        all.len(),
+        unique.len(),
+        "description publication must not duplicate identities"
+    );
+    for name in ["Existing", "LateRecord"] {
+        assert!(
+            package.structs.iter().any(|item| item.name == name),
+            "{name}"
+        );
+    }
+    for name in ["Original", "LateChoice"] {
+        assert!(package.enums.iter().any(|item| item.name == name), "{name}");
+    }
+    for name in ["Baseline", "LateWrapper"] {
+        assert!(
+            package.newtypes.iter().any(|item| item.name == name),
+            "{name}"
+        );
+    }
+    let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
