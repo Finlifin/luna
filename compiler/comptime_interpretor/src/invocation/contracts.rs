@@ -72,6 +72,7 @@ impl Interpreter<'_> {
         }
         match &mut frame.progress {
             Progress::Entry(_) => {
+                self.prepare_invocation_body(frame)?;
                 frame.progress = Progress::Body;
                 if let Some(origin) = frame.origin {
                     self.events.push(Event::EnterFunction(origin));

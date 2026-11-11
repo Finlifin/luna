@@ -522,6 +522,32 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Entry contracts have succeeded. Complete executable body preparation
+    /// once, without replacing the activation or its argument storage.
+    fn prepare_invocation_body(&mut self, frame: &mut InvocationFrame<'_>) -> Result<(), Error> {
+        let independent = if let Some(scope) = &frame.type_scope {
+            let (body, independent) = match &frame.body {
+                Body::Package(body) => {
+                    let declaration = match &frame.function {
+                        Value::Function(id) => Some(*id),
+                        _ => None,
+                    };
+                    self.prepare_input_body(body, scope, declaration)?
+                }
+                Body::Owned(body) => self.prepare_owned_input_body(body, scope)?,
+            };
+            frame.body = Body::Owned(body);
+            independent
+        } else {
+            true
+        };
+        frame.stable_code = match &frame.function {
+            Value::Function(id) if independent => Some(*id),
+            _ => None,
+        };
+        Ok(())
+    }
+
     fn prepare_invocation(
         &mut self,
         function: Value,
@@ -632,16 +658,6 @@ impl<'a> Interpreter<'a> {
         } else {
             self.effect_state.environment.clear();
         }
-        let (specialized_body, independent_body) = if let Some(scope) = &type_scope {
-            let (prepared, independent) = match &function {
-                Value::Closure(closure) => self.prepare_owned_input_body(&closure.body, scope)?,
-                Value::Function(id) => self.prepare_input_body(body, scope, Some(*id))?,
-                _ => self.prepare_input_body(body, scope, None)?,
-            };
-            (Some(prepared), independent)
-        } else {
-            (None, false)
-        };
         let origin = match &function {
             Value::Function(id) => Some(*id),
             Value::Closure(closure) => closure.origin,
@@ -656,20 +672,15 @@ impl<'a> Interpreter<'a> {
                 environment.insert(snapshot.binding, value);
             }
         }
-        let stable_code = match &function {
-            Value::Function(id) if specialized_body.is_none() || independent_body => Some(*id),
-            _ => None,
-        };
-        let body = if let Some(body) = specialized_body {
-            Body::Owned(body)
-        } else {
-            match &function {
-                Value::Function(id) => {
-                    Body::Package(&self.functions.get(id).expect("admitted function").body)
-                }
-                Value::Closure(closure) => Body::Owned(closure.body.clone()),
-                _ => unreachable!("callable admitted before binding"),
+        // Retain the checked source until entry contracts have completed.
+        // Binding inputs and admitting a signature do not prepare executable
+        // body code; that transition belongs to this same activation.
+        let body = match &function {
+            Value::Function(id) => {
+                Body::Package(&self.functions.get(id).expect("admitted function").body)
             }
+            Value::Closure(closure) => Body::Owned(closure.body.clone()),
+            _ => unreachable!("callable admitted before binding"),
         };
         Ok(InvocationFrame {
             function,
@@ -678,7 +689,7 @@ impl<'a> Interpreter<'a> {
             result_type,
             type_scope,
             origin,
-            stable_code,
+            stable_code: None,
             progress: contracts::Progress::Entry(0),
             condition: None,
         })

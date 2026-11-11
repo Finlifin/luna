@@ -489,6 +489,29 @@ invocation_budget 被名字过滤器全部筛去，不计为已验证，其后�
 共同规则仍同步交付完整主体。这减少一处必须同时迁移的重复实现，**不代表**稳定
 源码模板、活动源任务、VM 主体请求或两个 ignored 待决域正例已经接通。
 
+### VM 主体准备移到入口契约之后
+
+沿主体交接检查发现，prepare_invocation 在入口程序契约执行前就按普通调用输入
+重绑定整个主体，并可写入主体准备缓存。现由同一 activation 的 Entry → Body
+转换完成这一工作；参数、签名、类型契约、结果域及入口快照仍先按原规则准入。
+入口拒绝或取消不做这次主体准备，准备失败沿原调用恢复路径退出。包内主体和 owned
+closure 共用此顺序，缓存命中不能替代入口契约，不会重新 begin_invocation。
+
+两个新增用例覆盖宽主体、低预算、两种 VM 载体、包内／owned 主体、入口取消、准备
+失败后重新调用及不同 Type 绑定。将两个生产文件暂还原到 f616ccc8、保留新增用例后，
+`/tmp/luna-tools-am4kbplh/result.json` 退出 101：入口拒绝已产生主体缓存，宽主体的
+调用在可取消的入口状态建立前耗尽预算。随后恢复修复；没有改动其他工作区文件。
+
+最终相关回归（工作目录 `/home/fin/luna`）：
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib -p luna --test required_input_scopes --test staged_invocation_reuse --test invocation_value_templates --test comptime_bytecode_defaults --test effect_contracts --test invocation_host_requests --test type_invocation_sessions --test conditional_capture_cleanup --test temporary_method_cleanup --no-fail-fast`，
+734 项通过，`/tmp/luna-tools-u67cj76a/result.json` 退出 0。涵盖真实 sysroot required
+调用、宿主请求、代码复用及清理；未运行全 workspace 或性能基准。新增测试最初的
+Function 路径拼写、连续独立调用未重新提供测试预算的问题已修正，未放宽拒绝预期。
+
+本次只移动普通调用输入的主体重绑定。声明参数实例化和其他准入工作仍可能在入口
+契约前发生；保留的仍是完整受检 NIR，不是未完成 HIR。源码模板、源任务与 VM 主体
+请求仍待接通，两项待决 Type 正例没有因此获得实现。
+
 ## 4. 本次证据与限制
 
 工作目录 `/home/fin/luna`；所有检查通过 `development/check.py --timeout 900 -- test`。

@@ -201,6 +201,170 @@ mod tests {
         .prepare_function_inputs(&[Some(Term::Primitive(input))])
         .unwrap()
     }
+
+    fn guarded_type_body(width: usize) -> Package {
+        let parameter = |index| LocalId { owner: 1, index };
+        let signature = Term::Function {
+            parameters: vec![
+                nir::Parameter {
+                    sort: nir::Sort::Type,
+                    ty: Term::Primitive(Primitive::Type),
+                },
+                nir::Parameter {
+                    sort: nir::Sort::Runtime,
+                    ty: Term::Primitive(Primitive::Bool),
+                },
+            ],
+            result: Box::new(Term::Primitive(Primitive::Type)),
+        };
+        let result = body(Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: nir::Sort::Type,
+        });
+        Package {
+            functions: vec![nir::program::Function {
+                declaration: id(1),
+                name: "Guarded".into(),
+                phase: nir::program::FunctionPhase::Comptime,
+                signature,
+                parameters: vec![parameter(0), parameter(1)],
+                body: Expr {
+                    source: result.source,
+                    ty: result.ty.clone(),
+                    kind: K::Block {
+                        statements: vec![
+                            Expr {
+                                source: result.source,
+                                ty: Term::Primitive(Primitive::Void),
+                                kind: K::Unit,
+                            };
+                            width
+                        ],
+                        result: Some(Box::new(result)),
+                    },
+                },
+                preconditions: vec![Expr {
+                    source: SourceRange { start: 3, end: 4 },
+                    ty: Term::Primitive(Primitive::Bool),
+                    kind: K::Local(parameter(1)),
+                }],
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                type_parameters: vec![],
+                defaults: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejected_entry_does_not_spend_or_publish_dependent_body_preparation() {
+        for width in [0, 4096] {
+            let package = guarded_type_body(width);
+            for (tree, owned) in [(false, false), (true, false), (false, true), (true, true)] {
+                let callable = if owned {
+                    let function = &package.functions[0];
+                    Value::Closure(Arc::new(Closure {
+                        definition_source: None,
+                        origin: Some(function.declaration),
+                        instance_arguments: None,
+                        parameters: function.parameters.clone(),
+                        capture_order: vec![],
+                        environment: Environment::default(),
+                        body: Arc::new(function.body.clone()),
+                        ty: Term::ComptimeFunction(Box::new(function.signature.clone())),
+                    }))
+                } else {
+                    Value::Function(id(1))
+                };
+                let mut vm = if tree {
+                    Interpreter::for_comptime_tree(&package, Budget::default())
+                } else {
+                    Interpreter::for_comptime(&package, Budget::default())
+                }
+                .unwrap();
+                vm.budget.steps = 500;
+                vm.effect_state.invocation = 41;
+                let failure = vm
+                    .invoke_value(
+                        callable.clone(),
+                        vec![
+                            Value::Type(Term::Primitive(Primitive::U8)),
+                            Value::Bool(false),
+                        ],
+                    )
+                    .unwrap_err();
+                assert_eq!(failure.kind, ErrorKind::ProgramContractRejected);
+                assert_eq!(failure.source, Some(SourceRange { start: 3, end: 4 }));
+                assert!(vm.input_body_cache.entries.is_empty());
+                assert!(vm.input_body_cache.owned.is_empty());
+                assert!(!vm.events().contains(&Event::EnterFunction(id(1))));
+                assert_eq!(vm.invocation_depth, 0);
+                assert_eq!(vm.effect_state.invocation, 41);
+                for input in [Primitive::U8, Primitive::Bool, Primitive::U8] {
+                    vm.budget = Budget::default();
+                    assert_eq!(
+                        vm.invoke_value(
+                            callable.clone(),
+                            vec![Value::Type(Term::Primitive(input)), Value::Bool(true)],
+                        )
+                        .unwrap(),
+                        Value::Type(Term::Primitive(input)),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cancelled_entry_and_failed_body_preparation_restore_the_same_caller() {
+        let package = guarded_type_body(4096);
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let arguments = || {
+            vec![
+                Value::Type(Term::Primitive(Primitive::Bool)),
+                Value::Bool(true),
+            ]
+        };
+        vm.budget.steps = 500;
+        vm.effect_state.invocation = 41;
+        let session = vm
+            .start_invocation(Value::Function(id(1)), arguments())
+            .unwrap();
+        assert!(session.to_string().contains("(entry (next 0))"));
+        drop(session);
+        assert!(vm.input_body_cache.entries.is_empty());
+        assert_eq!(vm.invocation_depth, 0);
+        assert_eq!(vm.effect_state.invocation, 41);
+        vm.budget.steps = 500;
+        assert_eq!(
+            vm.invoke(id(1), arguments()).unwrap_err().kind,
+            ErrorKind::StepsExhausted,
+        );
+        assert!(vm.input_body_cache.entries.is_empty());
+        assert_eq!(vm.invocation_depth, 0);
+        assert_eq!(vm.effect_state.invocation, 41);
+        vm.budget = Budget::default();
+        assert_eq!(
+            vm.invoke(id(1), arguments()).unwrap(),
+            Value::Type(Term::Primitive(Primitive::Bool)),
+        );
+        assert_eq!(
+            vm.events()
+                .iter()
+                .filter(|event| **event == Event::EnterFunction(id(1)))
+                .count(),
+            1,
+        );
+    }
+
     #[test]
     fn independent_code_is_shared_and_dependent_code_tracks_the_binding() {
         let package = Package::default();
