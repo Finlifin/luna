@@ -247,6 +247,10 @@ fn transported_runtime_methods_preserve_clause_domains_and_nested_storage() {
             }}"
         );
         assert_eq!(sysroot::run(&source), Value::Bool(selected));
+        let ordinary = source
+            .replace("struct Callback", "fn make() -> bool.as(Factory<bool>).Item where enabled: bool { enabled } struct Callback")
+            .replace("const callback = bool.as(Factory<bool>).make", "const callback = make");
+        assert_eq!(sysroot::run(&ordinary), Value::Bool(selected));
     }
 }
 

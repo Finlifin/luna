@@ -2031,3 +2031,164 @@ fn deferred_method_selection_is_transactional_and_comptime_only() {
     );
     assert_eq!(rejected.remaining_steps(), 0);
 }
+
+#[test]
+fn live_method_inputs_resolve_in_the_receiving_world_before_entry() {
+    use std::cell::Cell;
+    let callable = signature(Term::Primitive(Primitive::Bool));
+    let nested = Term::Tuple(vec![Term::Tuple(vec![callable.clone()])]);
+    let mut world = trait_package();
+    world.runtime_function_identities[0].signature = callable.clone();
+    world.traits[0].methods[0].signature = callable.into();
+    world
+        .function_parameters
+        .push(nir::function_parameters::Declaration {
+            declaration: id(2),
+            parameters: vec![id(3)],
+            domains: vec![Term::Primitive(Primitive::Bool)],
+        });
+    world
+        .dispatch_instances
+        .push(nir::program::DispatchInstance {
+            interface: id(4),
+            interface_arguments: vec![],
+            subject: Term::Primitive(Primitive::Bool),
+            implementation: id(6),
+            arguments: vec![],
+            methods: vec![],
+            associated: vec![],
+            associated_initializers: vec![],
+        });
+    let binding = nir::program::LocalId { owner: 1, index: 0 };
+    world.functions[0].signature = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::Runtime,
+            ty: nested.clone(),
+        }],
+        result: Box::new(nested.clone()),
+    };
+    world.functions[0].parameters = vec![binding];
+    world.functions[0].body = Expr {
+        source: SourceRange { start: 1, end: 2 },
+        ty: nested.clone(),
+        kind: K::Local(binding),
+    };
+    let value = |argument| {
+        Value::Tuple(vec![Value::Tuple(vec![Value::RuntimeTraitMethod(
+            Box::new(nir::TraitMethodIdentity {
+                interface: id(4).into(),
+                subject: Term::Primitive(Primitive::Bool),
+                member: id(5),
+                method_arguments: vec![argument],
+            }),
+        )])])
+    };
+    for tree in [false, true] {
+        let calls = Cell::new(0);
+        let invalid_body = Cell::new(true);
+        let resolver = |callee: &Expr, fuel: &mut u64| {
+            *fuel = fuel.saturating_sub(1);
+            calls.set(calls.get() + 1);
+            let K::TraitMethod {
+                method_arguments, ..
+            } = &callee.kind
+            else {
+                panic!("public method query");
+            };
+            Ok(nir::program::MethodInstance {
+                member: id(5),
+                method_arguments: method_arguments.clone(),
+                body: if invalid_body.get() { id(98) } else { id(2) },
+                arguments: method_arguments.clone(),
+            })
+        };
+        let make_vm = |package| {
+            if tree {
+                Interpreter::for_comptime_tree(package, Budget::default())
+            } else {
+                Interpreter::for_comptime(package, Budget::default())
+            }
+        };
+        let mut vm = make_vm(&world).unwrap().with_method_resolver(&resolver);
+        // A malformed value fails before selection or entry execution.
+        assert_eq!(
+            vm.invoke_with_typed_values(id(1), vec![(nested.clone(), value(Term::Char('x')))])
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+        assert_eq!(calls.get(), 0);
+        assert!(vm.events().is_empty());
+        let valid = value(Term::Bool(true));
+        assert_eq!(
+            vm.invoke_with_typed_values(id(1), vec![(nested.clone(), valid.clone())])
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnknownFunction
+        );
+        assert_eq!(calls.get(), 1);
+        assert!(vm.events().is_empty());
+        invalid_body.set(false);
+        let wrong_domain = Term::Tuple(vec![Term::Tuple(vec![signature(Term::Primitive(
+            Primitive::Char,
+        ))])]);
+        assert_eq!(
+            vm.invoke_with_typed_values(id(1), vec![(wrong_domain, valid.clone())])
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type,
+        );
+        assert!(vm.events().is_empty());
+
+        for flag in [true, false, true] {
+            let supplied = value(Term::Bool(flag));
+            assert_eq!(
+                vm.invoke_with_typed_values(id(1), vec![(nested.clone(), supplied.clone())])
+                    .unwrap(),
+                supplied
+            );
+        }
+        assert_eq!(
+            calls.get(),
+            2,
+            "failed selection must not enter the dispatch cache"
+        );
+        assert!(!vm.events().iter().any(|event| matches!(event,
+            comptime_interpretor::Event::EnterFunction(declaration) if *declaration == id(2))));
+
+        // Another VM must establish its own selection and contract evidence.
+        let mut fresh = make_vm(&world).unwrap().with_method_resolver(&resolver);
+        assert_eq!(
+            fresh
+                .invoke_with_typed_values(id(1), vec![(nested.clone(), valid.clone())])
+                .unwrap(),
+            valid
+        );
+        assert_eq!(calls.get(), 3);
+        let mut exhausted = make_vm(&world).unwrap().with_method_resolver(&resolver);
+        exhausted
+            .charge_preparation((exhausted.remaining_steps() - 8) as usize)
+            .unwrap();
+        assert_eq!(
+            exhausted
+                .invoke_with_typed_values(id(1), vec![(nested.clone(), valid.clone())])
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted,
+        );
+        assert_eq!(calls.get(), 3);
+        assert!(exhausted.events().is_empty());
+        let mut changed = world.clone();
+        changed.traits[0].methods[0].requirements = vec![nir::program::TypePredicate::Bool(false)];
+        let mut rejected = make_vm(&changed).unwrap().with_method_resolver(&resolver);
+        assert_eq!(
+            rejected
+                .invoke_with_typed_values(id(1), vec![(nested.clone(), valid)])
+                .unwrap_err()
+                .kind,
+            ErrorKind::TypeContractRejected
+        );
+        assert_eq!(calls.get(), 3);
+        assert!(rejected.events().is_empty());
+    }
+}

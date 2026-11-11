@@ -1,4 +1,4 @@
-//! Shared value shape checking with explicit nominal formation obligations.
+//! Shared value shape checking with explicit formation and callable obligations.
 //! Passive observations require retained evidence. Active boundaries discharge
 //! their private pending obligations in the receiving world before accepting.
 use super::*;
@@ -6,13 +6,19 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-struct NominalChecks {
-    // None denotes a read-only probe requiring retained nominal evidence.
-    domains: Option<Vec<Term>>,
+enum ValueObligation {
+    Nominal(Term),
+    RuntimeMethod(TraitMethodIdentity),
+    CallableType { signature: Term, expected: Term },
+}
+
+struct ValueChecks {
+    // None denotes a read-only probe requiring retained evidence.
+    obligations: Option<Vec<ValueObligation>>,
     remaining: usize,
     failure: Option<ErrorKind>,
 }
-impl NominalChecks {
+impl ValueChecks {
     fn admit<T>(
         &mut self,
         operation: impl FnOnce(&mut usize) -> Result<T, nir::NominalAdmissionError>,
@@ -26,7 +32,7 @@ impl NominalChecks {
         })
     }
     fn defers_contracts(&self) -> bool {
-        self.domains.is_some()
+        self.obligations.is_some()
     }
     fn observe<T>(
         &mut self,
@@ -46,7 +52,7 @@ impl NominalChecks {
     fn visit(&mut self) -> bool {
         // Retained probes previously had no per-value traversal allowance.
         // Their local fuel bounds observations, not a new scalar width limit.
-        if self.domains.is_none() {
+        if self.obligations.is_none() {
             return self.failure.is_none();
         }
         self.observe(|fuel| {
@@ -56,7 +62,7 @@ impl NominalChecks {
         .is_some()
     }
     fn record_nominal(&mut self, ty: &Term) -> bool {
-        if self.domains.is_none() {
+        if self.obligations.is_none() {
             return true;
         }
         if self
@@ -67,9 +73,77 @@ impl NominalChecks {
         {
             return false;
         }
-        self.domains.as_mut().unwrap().push(ty.clone());
+        self.obligations
+            .as_mut()
+            .unwrap()
+            .push(ValueObligation::Nominal(ty.clone()));
         true
     }
+    fn record_method(&mut self, method: &TraitMethodIdentity) -> bool {
+        if !self.defers_contracts() {
+            return true;
+        }
+        if self
+            .observe(|fuel| {
+                for term in method.terms() {
+                    nir::type_computations::charge_term(term, fuel)
+                        .map_err(|_| ErrorKind::StepsExhausted)?;
+                }
+                Ok(())
+            })
+            .is_none()
+        {
+            return false;
+        }
+        self.obligations
+            .as_mut()
+            .unwrap()
+            .push(ValueObligation::RuntimeMethod(method.clone()));
+        true
+    }
+
+    fn callable_matches(
+        &mut self,
+        signature: &Term,
+        expected: &Term,
+        values: &associated_catalog::Catalog<'_>,
+    ) -> bool {
+        if self.failure.is_some() {
+            return false;
+        }
+        // Retained evidence settles ordinary signatures without allocating a
+        // pending task. Only a missing associated view needs active observation;
+        // budget failures and known mismatches must not trigger a second query.
+        match selected_types::same(signature, expected, values, &mut self.remaining) {
+            Ok(equal) => return equal,
+            Err(ErrorKind::UnmaterializedDispatch) if self.defers_contracts() => {}
+            Err(failure) => {
+                self.failure = Some(failure);
+                return false;
+            }
+        }
+        if self
+            .observe(|fuel| {
+                for term in [signature, expected] {
+                    nir::type_computations::charge_term(term, fuel)
+                        .map_err(|_| ErrorKind::StepsExhausted)?;
+                }
+                Ok(())
+            })
+            .is_none()
+        {
+            return false;
+        }
+        self.obligations
+            .as_mut()
+            .unwrap()
+            .push(ValueObligation::CallableType {
+                signature: signature.clone(),
+                expected: expected.clone(),
+            });
+        true
+    }
+
     fn same(
         &mut self,
         left: &Term,
@@ -86,7 +160,7 @@ impl Interpreter<'_> {
         parameters: &[DeclarationId],
         domains: &[Term],
         arguments: &[Term],
-        checks: &mut NominalChecks,
+        checks: &mut ValueChecks,
     ) -> bool {
         checks
             .admit(|fuel| {
@@ -116,7 +190,7 @@ impl Interpreter<'_> {
         domains: &[Term],
         arguments: &[Term],
         capabilities: &[nir::program::TraitRequirement],
-        checks: &mut NominalChecks,
+        checks: &mut ValueChecks,
     ) -> bool {
         // Argument admission has already checked this telescope. Preparing its
         // binder directory still consumes work even when obligations are deferred.
@@ -154,14 +228,14 @@ impl Interpreter<'_> {
             };
         }
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let mut checks = NominalChecks {
-            domains: Some(vec![]),
+        let mut checks = ValueChecks {
+            obligations: Some(vec![]),
             remaining: before,
             failure: None,
         };
         let matched = self.has_type_at(value, ty, 0, &mut checks);
-        let NominalChecks {
-            domains,
+        let ValueChecks {
+            obligations,
             remaining,
             failure,
         } = checks;
@@ -172,8 +246,25 @@ impl Interpreter<'_> {
         if !matched {
             return Err(self.failure(ErrorKind::Type, source));
         }
-        for domain in &domains.expect("active shape obligations") {
-            self.admit_type(domain, 0)?;
+        for obligation in obligations.expect("active shape obligations") {
+            match obligation {
+                ValueObligation::Nominal(domain) => self.admit_type(&domain, 0)?,
+                ValueObligation::RuntimeMethod(method) => {
+                    self.admit_runtime_method_identity(&method)?;
+                }
+                ValueObligation::CallableType {
+                    signature,
+                    expected,
+                } => {
+                    if !self.observe_same_type(
+                        &signature,
+                        &expected,
+                        source.unwrap_or(SourceRange { start: 0, end: 0 }),
+                    )? {
+                        return Err(self.failure(ErrorKind::Type, source));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -184,8 +275,8 @@ impl Interpreter<'_> {
             value,
             ty,
             0,
-            &mut NominalChecks {
-                domains: None,
+            &mut ValueChecks {
+                obligations: None,
                 remaining: 100_000,
                 failure: None,
             },
@@ -196,7 +287,7 @@ impl Interpreter<'_> {
         value: &Value,
         ty: &Term,
         depth: usize,
-        checks: &mut NominalChecks,
+        checks: &mut ValueChecks,
     ) -> bool {
         if !checks.visit() {
             return false;
@@ -614,7 +705,9 @@ impl Interpreter<'_> {
                     )
                 })
                 .flatten()
-                .is_some_and(|signature| checks.same(&signature, ty, &self.associated_values)),
+                .is_some_and(|signature| {
+                    checks.callable_matches(&signature, ty, &self.associated_values)
+                }),
             (
                 Value::Function(id),
                 ty @ (Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)),
@@ -626,7 +719,7 @@ impl Interpreter<'_> {
                     && (f.phase == nir::program::FunctionPhase::Comptime)
                         == ty.is_comptime_callable()
                     && f.is_unsafe == ty.is_unsafe_callable()
-                    && checks.same(
+                    && checks.callable_matches(
                         &f.signature,
                         ty.callable_signature(),
                         &self.associated_values,
@@ -650,7 +743,9 @@ impl Interpreter<'_> {
                     )
                 })
                 .flatten()
-                .is_some_and(|signature| checks.same(&signature, ty, &self.associated_values)),
+                .is_some_and(|signature| {
+                    checks.callable_matches(&signature, ty, &self.associated_values)
+                }),
             (Value::RuntimeTraitMethod(identity), ty) => {
                 let TraitMethodIdentity {
                     interface,
@@ -658,7 +753,10 @@ impl Interpreter<'_> {
                     member,
                     method_arguments: _,
                 } = identity.as_ref();
-                (self.method_bodies.contains_key(&(interface.clone(), subject.clone(), *member))
+                // An active boundary obtains method evidence in this world.
+                // A cold dispatch table is not evidence against membership.
+                (checks.defers_contracts()
+                    || self.method_bodies.contains_key(&(interface.clone(), subject.clone(), *member))
                     || self.resolved_method_bodies.contains_key(&(interface.clone(), subject.clone(), *member)))
                     && self
                         .method_contracts
@@ -670,10 +768,15 @@ impl Interpreter<'_> {
                                         if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))))
                                 && checks.admit(|fuel| self.admitted_callable_signature(
                                     nir::CallableValueRef::Method(identity), &[], fuel,
-                                )).flatten().is_some_and(|signature| checks.same(&signature, ty, &self.associated_values))
+                                )).flatten().is_some_and(|signature| {
+                                    checks.record_method(identity)
+                                        && checks.callable_matches(&signature, ty, &self.associated_values)
+                                })
                         })
             }
-            (Value::Closure(closure), ty) => checks.same(&closure.ty, ty, &self.associated_values),
+            (Value::Closure(closure), ty) => {
+                checks.callable_matches(&closure.ty, ty, &self.associated_values)
+            }
             _ => false,
         }
     }

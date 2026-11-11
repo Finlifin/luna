@@ -1992,6 +1992,48 @@ RuntimeTraitMethod 是公共 interface 身份及其 receiver／trait／method �
 正式 docs 及已有用户修改保持原样。
 
 
+### 跨 VM callable 输入的主动准入
+
+方法身份可以经过 comptime 局部值、容器及 quote 传递，但接收 VM 不继承发送 VM 的
+方法选择缓存。原 `check_value_type` 先要求方法已经出现在 dispatch 表，又用只读
+关联类型目录比较签名；于是同一合法值在发送端通过，在新 VM 中却因尚未选择方法
+或尚未取得 associated Type 而失败。完整签名重建不能替代接收边界的这两项义务。
+
+当前 `ValueChecks` 区分形状观察与主动准入。只读观察仍要求已有证据；主动边界先
+检查 callable 来源、参数分区、声明域和 phase，再保留有预算的当前调用义务。方法
+义务使用接收世界的选择服务，检查选定主体及公共契约，不能直接搬用发送端的 body。
+只有形状检查和全部义务成功，目标函数才可执行；失败的选择不填入方法缓存。
+
+普通函数、函数实例、闭包和方法共用 callable 签名比较。已有目录能证明相等或
+不等时立即结束，不分配待办。缺少 associated Type 视图才交给主动观察；预算失败
+保留为失败，不启动另一轮独立额度。观察使用当前 invocation 的 Type 查询，NF 头
+不展开；方法返回的关联类型不因此永久改写成实现的具体类型。这里的 Type 查询可能
+执行合法的 comptime initializer，但不会执行所传递的 runtime 方法主体。
+
+所有未决义务及载荷复制使用同一剩余额度；没有把动态选择记录缓存到共享 CodeSession。
+新的 VM、改变契约的源码世界和失败后的重试分别走接收端检查。该迁移仍沿用现有
+同步 VM 查询，不等于可恢复调度器及完整 TypeRef／证据协议已经落地。
+
+工作目录 `/home/fin/luna`，本阶段通过 `development/check.py --timeout 900 -- test`
+执行，完整命令及结果保存在各目录 `result.json`：
+
+- `/tmp/luna-tools-4dwlhcob`：luna lib、CMTT methods／Type inputs、normal-form
+  methods、source reflection、公开 library protocols 与名义值参数共 634 项通过，
+  退出 0。原 `transported_runtime_methods_preserve_clause_domains_and_nested_storage`
+  用例恢复通过，并增加带 bool 子句的普通函数走相同 const／容器／quote 路径。
+- `/tmp/luna-tools-0i56xiua`：VM lib 573、runtime function identities 46、immutable
+  normal inputs 13、normal values 18 项通过，退出 0。新增用例分别用 tree／bytecode
+  VM 检查嵌套 live 输入、非法参数与接收域、失败选择后重试、交替实参、换世界重选、
+  撤回契约后拒绝、低预算拒绝及 entry／runtime 主体均不提前执行。
+- `/tmp/luna-tools-_8w7murl`：三个修改的 Rust 文件 scoped rustfmt check 退出 0；
+  `git diff --check` 通过。未运行全 workspace 或性能基准。
+
+定位记录 `/tmp/luna-tools-f464g8pk`、`/tmp/luna-tools-jsoec_kj` 显示新 VM 的 live
+输入校验在目标 entry 执行前失败；中途只补方法选择后，`/tmp/luna-tools-7b7ny080`
+进一步暴露未取得关联 Type 的签名比较。最终修复同时接通两类义务，临时诊断已删除。
+
+
+
 ## 34. IIR callable 查询与代码复制视图
 
 IIR 的 `iir_callable` 在取得函数定义、计算实例键 hash 或查询本地实例缓存之前，
@@ -2085,6 +2127,7 @@ comptime 值准入和 call-safety 的独立额度；当前存储适配器也仍�
   `/tmp/luna-tools-lc782jus/result.json`。
 
 格式检查通过；未运行全 workspace 或性能基准。正式 docs 与原有工作区修改未动。
+
 
 
 ### 绑定分析的错误边界

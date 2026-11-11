@@ -732,6 +732,7 @@ trait 的分支，没有把 trait 方法伪装成已选中的 impl 方法。
 剩余 `transported_runtime_methods_preserve_clause_domains_and_nested_storage` 仍在
 `550..578` 报 `required comptime evaluation failed: interpretation Type`，与上一阶段
 `/tmp/luna-tools-stgm4rkr` 相同；本阶段没有宣称其 runtime 方法存储链路已修复。
+后续已修复这一跨 VM 存储路径，见[callable 输入的主动准入](comptime-value-admission.md#跨-vm-callable-输入的主动准入)。
 
 
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
@@ -1525,8 +1526,8 @@ cmtt_methods 的 indexed-code-signature 用例在修改前即于 139..143 报未
 把尚未取得的关联 Type 视图当成不相等。随后定位的默认值用例也已通过
 [required residual 作用域修复](dependency-observations.md#57-required-residual-保留声明值的词法作用域)
 恢复：失败实际发生于声明签名形成时丢掉抽象值权限，并非调用推断结果错误。
-indexed-code-signature 仍未修复。具体机制、证据与新发现的
-runtime 方法传递问题见[代码实例的签名观察](comptime-value-admission.md#签名观察与发布补充验证)；
+indexed-code-signature 已由后续[统一父声明输入](#已接通contextual-签名与普通值检查共用父声明输入)
+修复。此前机制、证据与发现的 runtime 方法传递问题见[代码实例的签名观察](comptime-value-admission.md#签名观察与发布补充验证)；
 该传递问题已通过[恢复公共方法签名](comptime-value-admission.md#公共方法身份的重建)修复。
 
 新增源码回归逐预算寻找 expr／pattern／data 分类的资源边界，随后在同一 HIR 上以
