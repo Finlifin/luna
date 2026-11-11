@@ -131,6 +131,42 @@ flow 的 proof site 仍是当前树的临时地址键。先分离闭包，再记
 新增用例验证长函数元数据也占复制预算：低预算保留原函数，更充足的新尝试正常消除。
 这些是带工作区既有 moves/effects.rs 修改的针对性结果，不是纯 HEAD 或全量验收。
 
+### 4.2 共享遍历的准备成本
+
+`nir::visit` 的表达式读遍历与私有改写遍历现在共用受预算约束的工作栈。
+只在节点出栈时扣费并不足够：此前一个很宽的表达式、模式或 contextual 参数就能
+在下一次扣费前，把全部子节点引用加入 Vec。现在入栈前检查剩余节点额度，并计入
+已有的待访问兄弟节点；已知宽度超额时不枚举，未知宽度的流只读取到首个超额项。
+不使用迭代器的巨大上界预留 Vec 容量。节点实际访问仍扣一次，准备检查不重复扣费。
+
+捕获、调用实参、匹配臂及 handler 项还需要独立结构计量：其中某些项没有表达式
+子节点，不能依靠过滤后的输出数量限制扫描。位选择和匿名模式标签保留原有计量。
+完全排除的函数默认值或 handler 作用域直接选择空切片，不通过 filter 扫描再丢弃。
+回调主动剪枝时不展开或计量其后代；成功访问的结构顺序保持不变，不代表执行顺序。
+
+这是遍历准备成本的边界，不是所有内存分配的统一预算。Vec 的容量仍可按常数倍增长；
+表达式拥有载荷、回调内的分配、共享闭包体的 copy-on-write 和其他独立 visitor
+另有责任。改写入口仍要求调用者管理复制前检查，失败后的私有部分结果必须丢弃；
+不能因为工作栈有界就直接发布半次改写。
+
+验证工作目录 `/home/fin/luna`，统一使用
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --lib visit:: --no-fail-fast`：新增 7 项通过，退出 0，
+  `/tmp/luna-tools-fvm7zv18/result.json`。包含实际迭代次数检查、宽表达式／模式／
+  contextual 输入、空捕获／默认实参／handler、剪枝、作用域排除及重试访问顺序。
+- `-p nir -p elaboration -p program_verification -p luna --lib
+  --test required_input_scopes --test ordinary_callable_types --test ordinary_clause_collectors
+  --test runtime_purity --test optional_purity --test call_local_facts --no-fail-fast`：
+  598 项通过、2 项既有 ignored，退出 0，`/tmp/luna-tools-g_0b8zho/result.json`；
+  包含前述新增用例。两个待定 Type 域用例没有改动，不能据此声称该能力已接通。
+- `-p luna --test execution -- --exact <直接调用 elide_proven_checks 的 26 个测试名>`：
+  26 项通过，退出 0，`/tmp/luna-tools-u6w9ixim/result.json` 保存完整命令；覆盖
+  预算失败回退、共享闭包、别名失效和条件求值，不复跑整个 execution 集。
+
+scoped rustfmt 退出 0，`/tmp/luna-tools-v25d0m2a/result.json`。未运行全 workspace
+测试或性能测量；验证仍包含工作区原有 moves/effects.rs 修改，未将该文件纳入提交。
+
 ## 5. 统一资源描述，区分具体含义
 
 资源证据采用逻辑路径、物理位置、分支 guard、时间/存储版本和责任所有者的组合。
