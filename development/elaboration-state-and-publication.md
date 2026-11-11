@@ -568,6 +568,60 @@ pending producer、VM 可变存储或候选等待者，也不进入 RequiredWorl
 这是含作者既有资源分析修改的工作区验收，没有执行全 workspace、LLVM/native 或
 性能基准；正式 docs、library 现有修改与另一开发者的 formatter 均未改写或纳入提交。
 
+### Type 生产者的 invocation 与发布边界
+
+此前 Type 计算队列保存了输入等待者，但就绪后的 `resume_prepared` 一次性调用 VM，
+不能将主体或普通函数契约中的关联选择交回队列外的驱动者。现在 `Session::start`
+沿用有界依赖预检，再返回独占的 `Invocation`；等待输入或已有终态直接返回 `Settled`。
+活动句柄拥有该输出的 Pending、失败集合和推断上下文借用，不把执行现场序列化进
+Type、残余调用或 code cache。其 Display 显示输出身份及内部执行阶段。
+
+`poll` 区分 Running、Waiting、Associated 和 Settled。Associated 请求使用已有
+VM session ticket、源世界和预算所有权；等待期间再次 poll 不重发请求、不执行前缀。
+宿主响应经原 VM 接收检查恢复同一个 activation。仅当 VM 完成、返回值确为 Type
+或合法 Type binder，并完成有界结果传递后，才向输出 meta 赋值并保存 Complete。
+后续观察终态不再次执行生产者。公开的 `new_resolving_in_scope` 使用 retained source
+及选择服务，避免为使用该协议先急切物化整个 dispatch 世界。
+
+取消、Drop、宿主错误、执行或发布预算耗尽都会终结本次计算；依赖它的生产者沿原
+需求边失败，不产生占位 Type。取消不退还尚在宿主响应中的额度；旧答案交给已终结
+句柄或另一会话时原样拒绝，不消费接收方当前等待者。新的独立会话有独立预算，
+不能借重试给原会话补充额度。失败前未耗尽额度的会话仍能处理独立计算。
+
+源码 required Type 路径已通过 `resume_with_code_session` 使用这一驱动：代码会话
+覆盖执行的完整生命周期，关联选择在 VM 外处理，完成后才发布结果。参数冻结、
+prepared value 准入和结果发布与旧同步接口共用；Live 值保留图与域信息，所有 Live
+输入先通过准入，随后才执行 Normal 输入工厂。没有因接入会话而改成全量 Term 化。
+
+边界仍然明确：旧 `resume`／依赖批量驱动保留同步入口；输入工厂、类型准入、方法
+解析和 builder 服务还没有全部变成可恢复请求。这个句柄独占 inference context，
+不能在暂停中运行其他推断任务；required 的便利驱动仍同步处理宿主请求至完成。
+一般源码检查 Region、实际输入生产者与待定 callable 签名之间的双向交接尚未实现，
+两个既有普通调用正例仍 ignored。此次没有提前求值 Type 生产者、重跑调用 AST，
+也没有放宽原正例或更改正式 docs。
+
+真实 sysroot 的 `type_invocation_sessions` 验证 Type 源码前缀只执行一次、关联
+初始化器在恢复后执行一次、等待保持现场、终态不重放、取消传播、迟到响应拒绝、
+宿主失败／耗尽，以及 Live 输入等待和域拒绝后的独立工作。直接源码案例另覆盖
+required Type 调用到运行时值的路径；这些不是整个普通 callable 恢复能力的验收。
+
+验证工作目录为 `/home/fin/luna`，Cargo 均使用
+`python3 -B development/check.py --timeout 900 -- test`，输出锚点为各日志的
+`test result:`；以下结果均退出 0：
+
+- `-p comptime_interpretor -p elaboration --lib --no-fail-fast`：
+  `/tmp/luna-tools-pyrcgb9v/result.json`，VM 580 项、elaboration 193 项通过。
+  随后仅清理 elaboration 已无消费者的同步 code-session 分支，VM 文件未再改变。
+- 最终 `-p elaboration --lib --test type_computation_demands --test delivered_types --test invocation_budget --no-fail-fast`：
+  `/tmp/luna-tools-ewat3vcl/result.json`，212 项通过。
+- 最终 `-p luna --test type_invocation_sessions --test invocation_host_requests --test builder_invocations --test prepared_invocations --test ordinary_callable_types --test ordinary_clause_collectors --test required_input_scopes --test deferred_associated_values --test staged_invocation_reuse --test default_calls --test cmtt --test cmtt_type_inputs --test library_protocols --no-fail-fast`：
+  `/tmp/luna-tools-x41aigbo/result.json`，13 组共 860 项通过、两项既有正例 ignored。
+- 七个修改 Rust 文件的限定范围 `rustfmt --check`：
+  `/tmp/luna-tools-a1o1zqsd/result.json`；`git diff --check` 通过。
+
+本轮保留了作者的资源分析修改，是工作区验证；没有执行全 workspace、性能基准或
+纯 HEAD 验收。`compiler/fmt`、正式 docs 和既有库文档改动不属于本次提交范围。
+
 ## 8. 宿主请求与候选、取消的组合
 
 候选内允许的计算必须可隔离且可安全重放。pure 承诺用于相应纯计算，不自动使定义发布

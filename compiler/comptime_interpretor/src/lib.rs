@@ -5833,6 +5833,14 @@ impl Interpreter<'_> {
         function: DeclarationId,
         arguments: Vec<(Term, InvocationValue)>,
     ) -> Result<Value, Error> {
+        let values = self.prepare_invocation_arguments(arguments)?;
+        self.invoke(function, values)
+    }
+
+    fn prepare_invocation_arguments(
+        &mut self,
+        arguments: Vec<(Term, InvocationValue)>,
+    ) -> Result<Vec<Value>, Error> {
         for (ty, value) in &arguments {
             if let InvocationValue::Live(value) = value {
                 let mut fuel = usize::try_from(self.remaining_steps()).unwrap_or(usize::MAX);
@@ -5867,14 +5875,13 @@ impl Interpreter<'_> {
                 }
             }
         }
-        let values = arguments
+        arguments
             .into_iter()
             .map(|(ty, value)| match value {
                 InvocationValue::Live(value) => Ok(value),
                 InvocationValue::Normal(term) => self.normal_pattern_value(&term, &ty),
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        self.invoke(function, values)
+            .collect()
     }
 
     /// Invoke with typed, canonical normal-form inputs. Reuse the checked

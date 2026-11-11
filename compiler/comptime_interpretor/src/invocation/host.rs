@@ -97,7 +97,12 @@ impl<'world> AssociatedHostRequest<'world> {
     }
 }
 
-impl AssociatedHostResponse<'_> {
+impl<'world> AssociatedHostResponse<'world> {
+    /// Return an undeliverable response intact without touching any VM waiter.
+    pub fn reject(self) -> RejectedHostResponse<'world> {
+        RejectedHostResponse::new(self)
+    }
+
     pub(super) fn settle(self, granted: u64) -> (u64, associated_execution::Response) {
         let (remaining, selection) = if self.remaining > granted {
             (
@@ -133,6 +138,20 @@ impl<'world> RejectedHostResponse<'world> {
 }
 
 impl<'world> Interpreter<'world> {
+    /// Start with the same domain admission and graph transport as synchronous
+    /// prepared invocation. Argument factories and admission are still synchronous.
+    pub fn start_prepared_invocation<'vm>(
+        &'vm mut self,
+        function: DeclarationId,
+        arguments: Vec<(Term, InvocationValue)>,
+    ) -> Result<InvocationSession<'vm, 'world>, Error> {
+        if self.graph.is_some() || !self.bytecode_invocation_available() {
+            return Err(self.failure(ErrorKind::PhaseMismatch, None));
+        }
+        let values = self.prepare_invocation_arguments(arguments)?;
+        self.start_invocation(Value::Function(function), values)
+    }
+
     /// Begin ordinary source comptime invocation admission, then return its
     /// owned driver. Admission may use configured synchronous semantic services.
     /// Associated selections in declaration contracts and linear bodies can
@@ -188,6 +207,10 @@ impl<'world> InvocationSession<'_, 'world> {
     }
     pub fn remaining_steps(&self) -> u64 {
         self.session.remaining_steps()
+    }
+    /// Charge bounded consumer work before publishing an invocation result.
+    pub fn charge_preparation(&mut self, steps: usize) -> Result<(), Error> {
+        self.session.charge_preparation(steps)
     }
 }
 

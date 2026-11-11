@@ -12,6 +12,8 @@ use std::{
 };
 
 mod demand;
+mod execution;
+pub use execution::{Invocation, Progress as InvocationProgress, Start as InvocationStart};
 
 const DEFAULT_SCHEDULING_STEPS: usize = 100_000;
 
@@ -42,6 +44,7 @@ pub enum Error {
     SpeculativeContext,
     UnknownComputation,
     ConsumedInputs,
+    Cancelled,
     InvalidTarget,
     Arity,
     Inference(InferenceError),
@@ -412,10 +415,11 @@ impl<'a> Session<'a> {
         })
     }
 
-    /// Required source invocations use compiler selection services instead of
-    /// an eagerly materialized dispatch closure. The scheduler still owns only
-    /// committed computations and rejects speculative inference contexts.
-    pub(crate) fn new_resolving_in_scope(
+    /// Source invocations use compiler selection services instead of an eagerly
+    /// materialized dispatch closure. With `start`, body and contract associated
+    /// selections leave as owned requests; admission services remain synchronous.
+    /// The scheduler owns committed computations and rejects speculative contexts.
+    pub fn new_resolving_in_scope(
         package: &'a Package,
         context: &InferenceContext,
         code: &mut comptime_interpretor::CodeSession,
@@ -1111,7 +1115,7 @@ impl<'a> Session<'a> {
             }
             waiting.retain(|input| !matches!(self.state(*input), Some(State::Complete(_))));
             if matches!(
-                self.resume_prepared(context, computation.output, waiting, None)?,
+                self.resume_prepared(context, computation.output, waiting)?,
                 State::Failed(_)
             ) {
                 failed_dependency = true;
@@ -1141,19 +1145,62 @@ impl<'a> Session<'a> {
         output: MetaId,
         fuel: &mut usize,
     ) -> Result<&State, Error> {
-        self.resume_one(context, output, fuel, None)
+        self.resume_one(context, output, fuel)
     }
 
-    /// Reuse immutable code only while executing a ready computation. The
-    /// scheduler continues to own waiting inputs, failures and output authority.
+    /// Start one ready producer with an exclusively owned invocation progress.
+    /// A dependency wait invokes nothing; dropping active execution cancels it.
+    pub fn start<'s>(
+        &'s mut self,
+        context: &'s mut InferenceContext,
+        output: MetaId,
+        fuel: &mut usize,
+    ) -> Result<InvocationStart<'s, 'a>, Error> {
+        let Some(waiting) = self.prepare_resume(context, output, fuel)? else {
+            return Ok(InvocationStart::Settled(&self.pending[&output].state));
+        };
+        if !waiting.is_empty() {
+            self.pending.get_mut(&output).unwrap().state = State::Waiting(waiting);
+            return Ok(InvocationStart::Settled(&self.pending[&output].state));
+        }
+        Ok(execution::begin(
+            &mut self.interpreter,
+            context,
+            self.pending.get_mut(&output).unwrap(),
+            &mut self.failed,
+            output,
+        ))
+    }
+
+    /// Production required Type invocation drives owned host requests outside
+    /// the VM while retaining code-session ownership and publication authority.
     pub(crate) fn resume_with_code_session(
         &mut self,
         context: &mut InferenceContext,
         output: MetaId,
         code: &mut comptime_interpretor::CodeSession,
+        mut resolve: impl FnMut(
+            &nir::program::Expr,
+            &mut u64,
+        ) -> Result<
+            comptime_interpretor::AssociatedSelection,
+            comptime_interpretor::Error,
+        >,
     ) -> Result<&State, Error> {
         let mut fuel = DEFAULT_SCHEDULING_STEPS;
-        self.resume_one(context, output, &mut fuel, Some(code))
+        let Some(waiting) = self.prepare_resume(context, output, &mut fuel)? else {
+            return Ok(&self.pending[&output].state);
+        };
+        let pending = self.pending.get_mut(&output).unwrap();
+        if !waiting.is_empty() {
+            pending.state = State::Waiting(waiting);
+        } else {
+            let failed = &mut self.failed;
+            self.interpreter.with_code_session(code, |vm| {
+                execution::drive(vm, context, pending, failed, output, &mut resolve);
+            });
+        }
+        Ok(&self.pending[&output].state)
     }
 
     fn is_waiting(&self, output: MetaId) -> Result<bool, Error> {
@@ -1173,16 +1220,15 @@ impl<'a> Session<'a> {
         Ok(&pending.state)
     }
 
-    fn resume_one(
+    fn prepare_resume(
         &mut self,
         context: &mut InferenceContext,
         output: MetaId,
         fuel: &mut usize,
-        code: Option<&mut comptime_interpretor::CodeSession>,
-    ) -> Result<&State, Error> {
+    ) -> Result<Option<BTreeSet<MetaId>>, Error> {
         self.check_context(context)?;
         if !self.is_waiting(output)? {
-            return Ok(&self.pending[&output].state);
+            return Ok(None);
         }
         let mut plan = match self.plan_demand(context, output, fuel) {
             Ok(plan) => plan,
@@ -1190,13 +1236,30 @@ impl<'a> Session<'a> {
                 error @ (Error::DependencyCycle(_)
                 | Error::Inference(InferenceError::AlreadyAssigned(_))),
             ) => {
-                return self.fail_demand(output, error);
+                self.fail_demand(output, error)?;
+                return Ok(None);
             }
             Err(error) => return Err(error),
         };
         let computation = plan.order.pop().expect("waiting root is planned last");
         debug_assert_eq!(computation.output, output);
-        self.resume_prepared(context, output, computation.inputs, code)
+        if let Some(dependency) = computation.inputs.intersection(&self.failed).next() {
+            self.fail_demand(output, Error::DependencyFailed(*dependency))?;
+            return Ok(None);
+        }
+        Ok(Some(computation.inputs))
+    }
+
+    fn resume_one(
+        &mut self,
+        context: &mut InferenceContext,
+        output: MetaId,
+        fuel: &mut usize,
+    ) -> Result<&State, Error> {
+        let Some(waiting) = self.prepare_resume(context, output, fuel)? else {
+            return Ok(&self.pending[&output].state);
+        };
+        self.resume_prepared(context, output, waiting)
     }
 
     fn resume_prepared(
@@ -1204,7 +1267,6 @@ impl<'a> Session<'a> {
         context: &mut InferenceContext,
         output: MetaId,
         waiting: BTreeSet<MetaId>,
-        code: Option<&mut comptime_interpretor::CodeSession>,
     ) -> Result<&State, Error> {
         let pending = self
             .pending
@@ -1225,62 +1287,18 @@ impl<'a> Session<'a> {
             if !waiting.is_empty() {
                 return Ok(State::Waiting(waiting));
             }
-            let mut fuel =
-                usize::try_from(self.interpreter.remaining_steps()).unwrap_or(usize::MAX);
-            let before = fuel;
-            let mut invoke = |vm: &mut Interpreter<'_>| match &mut pending.inputs {
-                PendingInputs::Symbolic(inputs) => {
-                    let arguments = inputs
-                        .iter()
-                        .map(|input| {
-                            Ok((
-                                context.freeze_metered(&input.ty, &mut fuel)?,
-                                context.freeze_metered(&input.value, &mut fuel)?,
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, InferenceError>>();
-                    vm.charge_preparation(before - fuel)
-                        .map_err(Error::Invocation)?;
-                    vm.invoke_with_normal_arguments(pending.target, arguments?)
-                        .map_err(Error::Invocation)
-                }
-                PendingInputs::Prepared { domains, values } => {
-                    let domains = domains
-                        .iter()
-                        .map(|ty| context.freeze_metered(ty, &mut fuel))
-                        .collect::<Result<Vec<_>, _>>();
-                    vm.charge_preparation(before - fuel)
-                        .map_err(Error::Invocation)?;
-                    let domains = domains?;
-                    let values = values.take().ok_or(Error::ConsumedInputs)?;
-                    vm.invoke_with_prepared_arguments(
-                        pending.target,
-                        domains.into_iter().zip(values).collect(),
-                    )
-                    .map_err(Error::Invocation)
-                }
-            };
-            let value = match code {
-                Some(code) => self.interpreter.with_code_session(code, invoke),
-                None => invoke(&mut self.interpreter),
-            }?;
-            let ty = match value {
-                Value::Type(ty) => ty,
-                Value::TypeParameter(declaration) => Term::Rigid {
-                    declaration,
-                    sort: Sort::Type,
-                },
-                _ => return Err(Error::NotAType),
-            };
-            let mut fuel =
-                usize::try_from(self.interpreter.remaining_steps()).unwrap_or(usize::MAX);
-            let before = fuel;
-            let bounded = nir::type_computations::charge_term(&ty, &mut fuel);
-            self.interpreter
-                .charge_preparation(before - fuel)
+            let arguments = execution::arguments(&mut self.interpreter, pending, context)?;
+            let value = self
+                .interpreter
+                .invoke_with_prepared_arguments(pending.target, arguments)
                 .map_err(Error::Invocation)?;
-            bounded.map_err(|_| Error::Inference(InferenceError::Budget))?;
-            context.assign(output, InferenceTerm::Stable(ty.clone()))?;
+            let ty = execution::publish(
+                context,
+                output,
+                value,
+                self.interpreter.remaining_steps(),
+                |work| self.interpreter.charge_preparation(work),
+            )?;
             Ok(State::Complete(ty))
         })();
         pending.state = match result {

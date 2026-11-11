@@ -470,17 +470,21 @@ impl PreparedRequired {
                         format!("required type computation could not be queued: {failure}"),
                     )
                 })?;
-            let result =
-                match session.resume_with_code_session(&mut context, output, code.session()) {
-                    Ok(State::Complete(ty)) => Ok(Value::Type(ty.clone())),
-                    Ok(State::Failed(failure)) => {
-                        Err(format!("required comptime evaluation failed: {failure}"))
-                    }
-                    Err(failure) => Err(format!("required comptime evaluation failed: {failure}")),
-                    Ok(State::Waiting(_)) => {
-                        Err("required type computation has unresolved inputs".into())
-                    }
-                };
+            let result = match session.resume_with_code_session(
+                &mut context,
+                output,
+                code.session(),
+                &associated_resolver,
+            ) {
+                Ok(State::Complete(ty)) => Ok(Value::Type(ty.clone())),
+                Ok(State::Failed(failure)) => {
+                    Err(format!("required comptime evaluation failed: {failure}"))
+                }
+                Err(failure) => Err(format!("required comptime evaluation failed: {failure}")),
+                Ok(State::Waiting(_)) => {
+                    Err("required type computation has unresolved inputs".into())
+                }
+            };
             *steps = session.remaining_steps();
             let value = result.map_err(|message| error(span, with_copy_failure(message)))?;
             let Value::Type(ty) = value else {

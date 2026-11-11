@@ -180,6 +180,10 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         matches!(self.pending, Some(Pending::Host { .. }))
     }
 
+    pub(super) fn charge_preparation(&mut self, steps: usize) -> Result<(), Error> {
+        self.vm.charge_preparation(steps)
+    }
+
     pub(super) fn remaining_steps(&self) -> u64 {
         self.vm.remaining_steps()
     }
