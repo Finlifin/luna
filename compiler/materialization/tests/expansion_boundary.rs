@@ -92,6 +92,97 @@ fn nominal_publication_charges_metadata_and_recovers_after_failure() {
         }
     }
 }
+#[test]
+fn nominal_formation_uses_instantiated_parameter_domains() {
+    let universe = Term::Primitive(Primitive::Type);
+    let boolean = Term::Primitive(Primitive::Bool);
+    let domain = Term::Rigid {
+        declaration: id(11),
+        sort: nir::Sort::Type,
+    };
+    for kind in 0..3 {
+        let mut package = n::Package::default();
+        let parameters = vec![id(11), id(12)];
+        let domains = vec![universe.clone(), domain.clone()];
+        let requirements = vec![n::TypePredicate::Equal(domain.clone(), universe.clone())];
+        match kind {
+            0 => package.structs.push(n::Struct {
+                declaration: id(10),
+                name: "Key".into(),
+                type_parameters: parameters,
+                parameter_types: domains,
+                capabilities: vec![],
+                requirements,
+                fields: vec![],
+            }),
+            1 => package.enums.push(n::Enum {
+                declaration: id(10),
+                name: "Key".into(),
+                type_parameters: parameters,
+                parameter_types: domains,
+                capabilities: vec![],
+                requirements,
+                groups: vec![],
+                encoding: None,
+                symbol_encoding: None,
+                is_intrinsic: false,
+                variants: vec![n::Variant {
+                    name: "key".into(),
+                    shape: n::VariantShape::Unit,
+                    fields: vec![],
+                }],
+            }),
+            _ => package.newtypes.push(nir::newtypes::Newtype {
+                declaration: id(10),
+                name: "Key".into(),
+                type_parameters: parameters,
+                parameter_types: domains,
+                capture_count: 0,
+                requirements,
+                capabilities: vec![],
+                representation: boolean.clone(),
+            }),
+        }
+        let materialize = |arguments, steps| {
+            let ty = Term::Nominal {
+                declaration: id(10),
+                arguments,
+            };
+            let mut budget = Budget::default();
+            budget.steps = steps;
+            materialization::instantiate_with_types(
+                &package,
+                &[],
+                &[ty],
+                BTreeSet::new(),
+                budget,
+                &Provider::default(),
+            )
+        };
+        // Domain admission alone succeeds here, but the formation predicate does not.
+        let invalid = vec![boolean.clone(), Term::Bool(true)];
+        let error = materialize(invalid, 1_000_000).err().unwrap();
+        assert!(
+            error.contains("formation requirement"),
+            "kind={kind}: {error}"
+        );
+        // A Type value is not admitted when the instantiated domain is bool.
+        assert!(materialize(vec![boolean.clone(), boolean.clone()], 1_000_000).is_err());
+        let inputs = vec![universe.clone(), boolean.clone()];
+        let error = materialize(inputs.clone(), 1).err().unwrap();
+        assert!(error.contains("budget"), "kind={kind}: {error}");
+        let graph = materialize(inputs.clone(), 1_000_000).unwrap();
+        assert_eq!(graph.nominals.len(), 1);
+        assert_eq!(
+            graph.nominals[0].ty,
+            Term::Nominal {
+                declaration: id(10),
+                arguments: inputs,
+            }
+        );
+    }
+}
+
 fn fixture() -> (n::Package, iir::InstanceKey) {
     let boolean = Term::Primitive(Primitive::Bool);
     let function = n::Function {

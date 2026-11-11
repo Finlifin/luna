@@ -1,6 +1,7 @@
 //! Opaque head inputs: a stable value or a declaration-side symbolic input.
 use super::*;
 use observation::Failure;
+mod arguments;
 pub(super) mod known_patterns;
 pub(super) mod known_scalars;
 pub(super) mod observation;
@@ -881,121 +882,6 @@ impl Checker<'_, '_> {
             .ok()
     }
 
-    fn observe_normal_arguments(
-        &self,
-        head: DeclarationId,
-        arguments: &[n::NormalFormArgument],
-        plan: Option<&n::NormalFormInputPlan>,
-        depth: usize,
-        budget: &mut comptime_runtime::Budget,
-        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-    ) -> Result<Vec<Term>, Failure> {
-        budget.consume(arguments.len().saturating_add(bindings.len()))?;
-        if let Some(plan) = plan {
-            if !plan.preparations.is_empty()
-                || !plan.valid(arguments.len())
-                || plan.bindings.iter().any(|id| bindings.contains_key(id))
-            {
-                return Err(Failure::Unavailable);
-            }
-        }
-        // The signature is the source of a collection's domain, including an
-        // empty collection. Never infer that domain from the first element.
-        let mut parameters = None;
-        if arguments
-            .iter()
-            .any(|argument| matches!(argument, n::NormalFormArgument::List { .. }))
-        {
-            budget.consume(1)?;
-            parameters = self
-                .source_declarations
-                .owner(head)
-                .and_then(|owner| self.normal_parameters.get(&owner))
-                .map(Vec::as_slice);
-        }
-        if parameters.is_some_and(|inputs| inputs.len() != arguments.len()) {
-            return Err(Failure::Unavailable);
-        }
-        let order: Vec<_> =
-            plan.map_or_else(|| (0..arguments.len()).collect(), |plan| plan.order.clone());
-        let mut scoped = bindings.clone();
-        let mut values = vec![None; arguments.len()];
-        let mut ids = Vec::new();
-        let mut domains = Vec::new();
-        let mut completed = Vec::new();
-        let mut pending = order;
-        while !pending.is_empty() {
-            let before = pending.len();
-            let mut deferred = Vec::new();
-            for slot in pending {
-                let domain = if let Some(parameters) = parameters {
-                    Some(
-                        nir::DeclarationSubstitution::bounded(
-                            &ids,
-                            &domains,
-                            &completed,
-                            &[],
-                            &mut budget.steps,
-                        )
-                        .and_then(|substitution| {
-                            substitution.instantiate_bounded(&parameters[slot].2, &mut budget.steps)
-                        })?,
-                    )
-                } else {
-                    None
-                };
-                if matches!(arguments[slot], n::NormalFormArgument::List { .. }) {
-                    if let (Some(parameters), Some(domain)) = (parameters, domain.as_ref()) {
-                        budget.consume(
-                            parameters.len().saturating_mul(ids.len().saturating_add(1)),
-                        )?;
-                        let mut waiting = false;
-                        for (id, _, _) in parameters {
-                            if !ids.contains(id) {
-                                nir::type_computations::charge_term(domain, &mut budget.steps)?;
-                                if domain.mentions_rigid(*id) {
-                                    waiting = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if waiting {
-                            deferred.push(slot);
-                            continue;
-                        }
-                    }
-                }
-                let value = collect_known_normal_argument(
-                    &arguments[slot],
-                    domain.as_ref(),
-                    self.protocols.meta_list,
-                    budget,
-                    |value, budget| self.observe_normal_input_in(value, depth + 1, budget, &scoped),
-                )?;
-                if let Some(plan) = plan {
-                    scoped.insert(
-                        plan.bindings[slot],
-                        std::sync::Arc::new(copy_observed_term(&value, budget)?),
-                    );
-                }
-                if let (Some(parameters), Some(domain)) = (parameters, domain) {
-                    ids.push(parameters[slot].0);
-                    domains.push(domain);
-                    completed.push(copy_observed_term(&value, budget)?);
-                }
-                values[slot] = Some(value);
-            }
-            if deferred.len() == before {
-                return Err(Failure::Unavailable);
-            }
-            pending = deferred;
-        }
-        values
-            .into_iter()
-            .map(|value| value.ok_or(Failure::Unavailable))
-            .collect()
-    }
-
     /// Inspect an immutable binding with the ordinary static value and pattern
     /// observers. Unavailable is not fallthrough evidence for a let-else.
     pub(in crate::program) fn observe_normal_binding(
@@ -1096,10 +982,10 @@ impl Checker<'_, '_> {
                 arguments,
                 plan,
             } => {
-                let arguments = self.observe_normal_arguments(
+                let arguments = self.observe_declaration_arguments(
                     *head,
                     arguments,
-                    plan.as_ref(),
+                    arguments::Plan::normal(plan.as_ref()),
                     depth,
                     budget,
                     bindings,
@@ -1107,6 +993,30 @@ impl Checker<'_, '_> {
                 Ok(Term::NormalForm {
                     head: *head,
                     sort: Sort::Type,
+                    arguments,
+                })
+            }
+            K::NominalType {
+                declaration,
+                arguments,
+                preparations,
+                bindings: input_bindings,
+                order,
+            } => {
+                let arguments = self.observe_declaration_arguments(
+                    *declaration,
+                    arguments,
+                    arguments::Plan {
+                        preparations,
+                        bindings: input_bindings.as_deref(),
+                        order: order.as_deref(),
+                    },
+                    depth,
+                    budget,
+                    bindings,
+                )?;
+                Ok(Term::Nominal {
+                    declaration: *declaration,
                     arguments,
                 })
             }

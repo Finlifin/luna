@@ -607,11 +607,70 @@ formatter 由另一 agent 负责，本次未修改或纳入提交；正式 docs 
 443 项通过、2 项失败、1 项旧 ignore，`/tmp/luna-tools-xv6vk95h/result.json` 退出 101。
 包括真实 sysroot 的列表、builder、两阶段方法、math、迭代器及相关 trait 查询；
 没有运行全 workspace。两个失败为 `shipped_meta_object_preserves_type_valued_indices_in_normal_inputs`
-和 `shipped_meta_object_values_dispatch_type_indexed_traits`，仍缺调用期 Type 完成后的签名恢复。
+和 `shipped_meta_object_values_dispatch_type_indexed_traits`。当时依据诊断将它们归为
+调用期 Type 签名恢复缺失；后续检查实际输入计划证明此归因不准确，见下节。
 仅将本次两个生产文件暂还原到 cbde5271，运行
 `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_meta_object -- --nocapture`，
 `/tmp/luna-tools-zveh15kp/result.json` 同样退出 101，两个源码位置和诊断完全相同。
 随后按保存的哈希逐字节恢复修复，不改这些用例的预期或 ignore。
+
+### 名义类型输入身份观察与依赖域替换
+
+两个 Object 旧失败的输入计划实际包含已形成的 `Key<Type, bool>`，其 NIR 节点为
+NominalType。正常结果身份观察此前只接收 NormalFormType，遗漏名义类型，因而把
+可静态观察的身份误报为 invocation-time 待定输入。临时记录真实计划的运行
+`/tmp/luna-tools-6ijhnafi/result.json` 退出 101，定位后移除了诊断打印。
+
+名义类型与 NF 现共用声明输入观察：依照原计划的顺序与绑定身份观察普通输入，
+contextual 输入从声明参数域取得上下文。观察保留声明身份、域依赖和预算，不运行
+输入生产者，不展开 NF 头，不跳过形成条件；含独立 preparation 的计划仍保守返回
+不可用。执行计划原样交给实际 invocation。通用用户函数用例同时检查具名乱序、
+依赖默认值、前缀副作用只发生一次，以及不同类型索引不能互换。
+
+更强的 opaque 索引与形成条件用例另暴露 materialization 的旧固定 sort 替换：
+`where T, value: T` 在 T 实例化为 Type 后，value 是普通 Type 值；形成条件分支仍用
+声明时的 ComptimeValue sort 拒绝它。名义定义的字段和 capability 已使用依赖参数域
+替换，现将形成条件归并到同一 DeclarationSubstitution；普通 callable 的 capability
+也使用相同机制，NF 从头的参数域构造替换。输入准入、形成条件证明与 NF 身份均保留，
+并未准许任意值越过 sort 或域检查。
+
+扩展回归还发现本次初稿引入两项 staged trait 回归。prepare_method 已经在成员签名
+frame 中替换契约，形成检查不能再次用空 frame 对该契约做无输入替换。现将“依赖
+参数替换”和“检查已经替换的形成条件”分开：保留既有 frame 所属关系，不删除形成
+检查，也不以更宽松的 sort 代替域证据。
+
+这两个修复仍是静态身份与已有实例化路径的接线。它们不能从未知调用中产生 Type，
+也不提供一般源码检查挂起、VM activation 恢复或待定 collector 域的恢复。
+
+本阶段工作目录 `/home/fin/luna`；命令统一使用
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p materialization --no-fail-fast`：54 项通过，
+  `/tmp/luna-tools-bawallba/result.json` 退出 0。包括三种名义定义的参数域准入、
+  形成条件拒绝、预算失败及后续重新物化；后续 scoped 契约修正后的集成复核见下项。
+- `-p elaboration --lib -p luna --test ordinary_callable_types --test ordinary_clause_collectors
+  --test sysroot_preludes --test normal_form_domains --test normal_input_plans
+  --test nominal_value_parameters --test ordinary_input_identity --no-fail-fast`：
+  `/tmp/luna-tools-z4l8x82x/result.json` 退出 101，705 项通过、11 项失败、2 项原 ignore。
+  其中共享观察器的预算／绑定检查、全部 sysroot prelude 和新的 callable 正反例通过。
+- 仅将本阶段两个生产入口暂还原到 `803e53cc`，执行
+  `-p luna --test nominal_value_parameters --no-fail-fast`：
+  `/tmp/luna-tools-ol48zymo/result.json` 退出 101，299 项通过、9 项失败。
+  这九项诊断与修改后逐项相同，涉及动态父域、别名上下文和默认值输入；其余两项是
+  本次引入的 staged trait 空 frame 回归。恢复本阶段两个文件时逐字节核对备份，
+  修复该回归后 `-p luna --test nominal_value_parameters staged_trait -- --nocapture`
+  通过，`/tmp/luna-tools-1slofcpy/result.json` 退出 0。
+- 最终执行 `-p materialization -p luna --test expansion_boundary --test scoped_dispatch_inputs
+  --test nominal_value_parameters --test ordinary_callable_types --test ordinary_clause_collectors
+  --test sysroot_preludes --no-fail-fast -- --include-ignored`：
+  `/tmp/luna-tools-9fq0zt8q/result.json` 退出 101，380 项通过、11 项已知失败。
+  九项名义参数失败仍与基线一致；另外两项是主动启用的旧 ignored 正例，动态签名仍报
+  `159..181: comptime callable signature still depends on an invocation-time clause input`，
+  待定 collector 域仍报 `191..201: list literal requires an element type context`。
+  未修改这两项的预期或 ignore。两个 Object 用例、staged trait 回归及物化对照通过。
+- 五个 Rust 文件的 scoped rustfmt check：`/tmp/luna-tools-n7mo9da4/result.json`
+  退出 0；`git diff --check` 通过。未运行全 workspace、LLVM 或性能基准；验证包含
+  工作区原有资源分析改动，不宣称为纯 HEAD 验收。formatter 与其他受保护文件不纳入提交。
 
 ## 4. 本次证据与限制
 

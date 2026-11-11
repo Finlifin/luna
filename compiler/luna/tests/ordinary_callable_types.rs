@@ -27,6 +27,48 @@ fn check_both(source: &str) {
 }
 
 #[test]
+fn nominal_type_inputs_form_callables_without_executing_the_input_plan() {
+    let source = "
+        struct Key where T, value: T, .other: T = value { payload: bool }
+        comptime fn identity(value: T) -> T where T { value }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let selected = identity<do {
+                trace = trace * 10 + 1;
+                Key<.other = bool, Type, bool>
+            }>;
+            let first = selected(Key<Type, bool> { payload: true });
+            let second = selected(Key<Type, bool> { payload: false });
+            first.payload and not second.payload and trace == 1
+        }
+    ";
+    check_both(source);
+    let wrong = source.replace(
+        "let second = selected(Key<Type, bool>",
+        "let second = selected(Key<Type, u8>",
+    );
+    assert!(sysroot::compile(&wrong).is_err());
+}
+
+#[test]
+fn nominal_type_input_observation_preserves_opaque_indices_and_formation() {
+    let source = "
+        pure comptime fn Opaque<T> -> Type { T }
+        struct Key where T, value: T, requires T == Type { payload: bool }
+        comptime fn identity(value: T) -> T where T { value }
+        comptime fn check() -> bool {
+            let selected = identity<Key<Type, Opaque<u8>>>;
+            selected(Key<Type, Opaque<u8>> { payload: true }).payload
+        }
+    ";
+    check_both(source);
+    let unfolded = source.replace("selected(Key<Type, Opaque<u8>>", "selected(Key<Type, u8>");
+    assert!(sysroot::compile(&unfolded).is_err());
+    let invalid = source.replace("Key<Type, Opaque<u8>>", "Key<bool, true>");
+    assert!(sysroot::compile(&invalid).is_err());
+}
+
+#[test]
 fn computed_types_with_independent_clause_domains_form_closed_callables() {
     assert_eq!(
         sysroot::run(

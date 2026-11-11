@@ -1260,7 +1260,11 @@ impl Builder<'_> {
         if self.instances.is_some() {
             self.normalize_method_contract(&mut specialized)?;
         }
-        self.formation_requirements_with_parameters(&specialized.requirements, &[], &[])?;
+        // prepare_method has already instantiated these predicates in the
+        // member signature's frame. Do not recheck them in an empty frame.
+        for requirement in &specialized.requirements {
+            self.formation_requirement(requirement)?;
+        }
         for capability in &specialized.capabilities {
             self.queue.push_back(Task::Interface(
                 capability.interface_instance(),
@@ -1349,51 +1353,32 @@ impl Builder<'_> {
             world.check_predicate_metered(requirement, budget)
         })
     }
-    fn formation_requirements_with_parameters(
+    fn formation_requirements(
         &mut self,
         requirements: &[n::TypePredicate],
-        parameters: &[nir::DeclarationParameter],
-        arguments: &[Term],
+        substitution: &nir::DeclarationSubstitution<'_>,
     ) -> Result<(), String> {
-        if self.instances.is_none() {
-            for requirement in requirements {
-                nir::copy_budget::charge_predicate_substitution(
-                    requirement,
-                    parameters,
-                    arguments,
-                    &mut self.fuel,
-                )
-                .map_err(|e| format!("formation substitution budget: {e:?}"))?;
-                self.predicate_dependencies(
-                    &requirement
-                        .instantiate_parameters(parameters, arguments)
-                        .map_err(|e| e.to_string())?,
-                    0,
-                )?;
-            }
-            return Ok(());
-        }
         for requirement in requirements {
-            self.tick(0)?;
-            nir::copy_budget::charge_predicate_substitution(
-                requirement,
-                parameters,
-                arguments,
-                &mut self.fuel,
-            )
-            .map_err(|e| format!("formation substitution budget: {e:?}"))?;
-            let requirement = requirement
-                .instantiate_parameters(parameters, arguments)
+            let requirement = substitution
+                .instantiate_predicate_bounded(requirement, &mut self.fuel)
                 .map_err(|e| e.to_string())?;
-            let requirement = self.normalized_predicate(&requirement, 0)?;
-            if !matches!(
-                self.prove_requirement(&requirement)?,
-                crate::ptc::Outcome::Entailed(_)
-            ) {
-                return Err(format!(
-                    "IIR type formation requirement is not established: {requirement}"
-                ));
-            }
+            self.formation_requirement(&requirement)?;
+        }
+        Ok(())
+    }
+    fn formation_requirement(&mut self, requirement: &n::TypePredicate) -> Result<(), String> {
+        self.tick(0)?;
+        if self.instances.is_none() {
+            return self.predicate_dependencies(requirement, 0);
+        }
+        let requirement = self.normalized_predicate(requirement, 0)?;
+        if !matches!(
+            self.prove_requirement(&requirement)?,
+            crate::ptc::Outcome::Entailed(_)
+        ) {
+            return Err(format!(
+                "IIR type formation requirement is not established: {requirement}"
+            ));
         }
         Ok(())
     }
@@ -2520,15 +2505,21 @@ impl Builder<'_> {
                     )?);
                 }
                 if let Some(function) = self.world.function_declaration(*declaration) {
-                    let binders = self.input_binders(&function.type_parameters);
-                    self.formation_requirements_with_parameters(
-                        &function.requirements,
-                        &binders,
+                    let domains = self
+                        .world
+                        .input_domains(&function.type_parameters, &mut self.fuel)?;
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        &function.type_parameters,
+                        &domains,
                         arguments,
-                    )?;
+                        &[],
+                        &mut self.fuel,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    self.formation_requirements(&function.requirements, &substitution)?;
                     for capability in &function.capabilities {
-                        let bound = capability
-                            .instantiate_parameters(&binders, arguments)
+                        let bound = substitution
+                            .instantiate_requirement_bounded(capability, &mut self.fuel)
                             .map_err(|e| e.to_string())?;
                         self.queue
                             .push_back(Task::Interface(bound.interface_instance(), bound.subject));
@@ -2568,12 +2559,15 @@ impl Builder<'_> {
                             self.package.target,
                         )?;
                     }
-                    let parameters = s.parameter_binders().map_err(|e| e.to_string())?;
-                    self.formation_requirements_with_parameters(
-                        &s.requirements,
-                        &parameters,
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        &s.type_parameters,
+                        &s.parameter_types,
                         arguments,
-                    )?;
+                        &[],
+                        &mut self.fuel,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    self.formation_requirements(&s.requirements, &substitution)?;
                     let fields = if self.instances.is_some() {
                         let mut definition = s
                             .instantiate_definition_bounded(arguments, &[], &mut self.fuel)
@@ -2605,14 +2599,6 @@ impl Builder<'_> {
                             .map_err(|e| e.to_string())?
                     };
 
-                    let substitution = nir::DeclarationSubstitution::bounded(
-                        &s.type_parameters,
-                        &s.parameter_types,
-                        arguments,
-                        &[],
-                        &mut self.fuel,
-                    )
-                    .map_err(|e| e.to_string())?;
                     for cap in &s.capabilities {
                         let cap = substitution
                             .instantiate_requirement_bounded(cap, &mut self.fuel)
@@ -2648,12 +2634,15 @@ impl Builder<'_> {
                             self.package.target,
                         )?;
                     }
-                    let parameters = e.parameter_binders().map_err(|e| e.to_string())?;
-                    self.formation_requirements_with_parameters(
-                        &e.requirements,
-                        &parameters,
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        &e.type_parameters,
+                        &e.parameter_types,
                         arguments,
-                    )?;
+                        &[],
+                        &mut self.fuel,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    self.formation_requirements(&e.requirements, &substitution)?;
                     let fields = if self.instances.is_some() {
                         let mut definition = e
                             .instantiate_definition_bounded(arguments, &[], &mut self.fuel)
@@ -2688,14 +2677,6 @@ impl Builder<'_> {
                             .map_err(|e| e.to_string())?
                     };
 
-                    let substitution = nir::DeclarationSubstitution::bounded(
-                        &e.type_parameters,
-                        &e.parameter_types,
-                        arguments,
-                        &[],
-                        &mut self.fuel,
-                    )
-                    .map_err(|e| e.to_string())?;
                     for cap in &e.capabilities {
                         let cap = substitution
                             .instantiate_requirement_bounded(cap, &mut self.fuel)
@@ -2732,12 +2713,15 @@ impl Builder<'_> {
                             self.package.target,
                         )?;
                     }
-                    let parameters = n.parameter_binders().map_err(|e| e.to_string())?;
-                    self.formation_requirements_with_parameters(
-                        &n.requirements,
-                        &parameters,
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        &n.type_parameters,
+                        &n.parameter_types,
                         arguments,
-                    )?;
+                        &[],
+                        &mut self.fuel,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    self.formation_requirements(&n.requirements, &substitution)?;
                     let representation = if self.instances.is_some() {
                         let mut definition = n
                             .instantiate_definition_bounded(arguments, &[], &mut self.fuel)
@@ -2764,14 +2748,6 @@ impl Builder<'_> {
                         n.representation_budgeted(arguments, &[], &mut self.fuel)
                             .map_err(|e| e.to_string())?
                     };
-                    let substitution = nir::DeclarationSubstitution::bounded(
-                        &n.type_parameters,
-                        &n.parameter_types,
-                        arguments,
-                        &[],
-                        &mut self.fuel,
-                    )
-                    .map_err(|e| e.to_string())?;
                     for cap in &n.capabilities {
                         let cap = substitution
                             .instantiate_requirement_bounded(cap, &mut self.fuel)
@@ -2800,22 +2776,32 @@ impl Builder<'_> {
                         })
                         .map_err(|e| format!("IIR normal-form inputs: {e}"))?;
 
+                    self.fuel = self
+                        .fuel
+                        .checked_sub(descriptor.parameters.len())
+                        .ok_or("normal-form parameter budget exhausted")?;
                     let parameters: Vec<_> = descriptor
                         .parameters
                         .iter()
-                        .map(|p| nir::DeclarationParameter {
-                            declaration: p.declaration,
-                            sort: match p.kind {
-                                nir::normal_forms::Kind::Type => nir::Sort::Type,
-                                nir::normal_forms::Kind::Value => nir::Sort::ComptimeValue,
-                            },
-                        })
+                        .map(|p| p.declaration)
                         .collect();
-                    self.formation_requirements_with_parameters(
-                        &descriptor.requirements,
+                    let domains = descriptor
+                        .parameters
+                        .iter()
+                        .map(|p| {
+                            nir::copy_budget::clone_term(&p.ty, &mut self.fuel)
+                                .map_err(|e| format!("normal-form domain copy budget: {e:?}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let substitution = nir::DeclarationSubstitution::bounded(
                         &parameters,
+                        &domains,
                         arguments,
-                    )?;
+                        &[],
+                        &mut self.fuel,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    self.formation_requirements(&descriptor.requirements, &substitution)?;
                 }
                 children.extend(arguments.iter().cloned());
             }
