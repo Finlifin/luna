@@ -634,3 +634,19 @@ fn pending_clause_type_observations_keep_opaque_head_identity() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn supplied_generic_domains_keep_optional_collection_contexts() {
+    assert_eq!(
+        run("comptime fn count() -> Integer
+        where T, ...values: meta.List<?T>
+        {
+            values.length()
+        }
+        comptime fn check(value: T) -> bool where T {
+            count<T, value>() == 1 and count<.values = [value], T>() == 1
+        }
+        fn run() -> bool { const result = check<bool>(true); result }"),
+        Value::Bool(true)
+    );
+}

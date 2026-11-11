@@ -800,3 +800,73 @@ fn unobserved_invocations_keep_failure_and_dead_branch_behavior() {
         );
     }
 }
+
+#[test]
+fn caller_generic_domains_contextualize_collected_optional_values() {
+    let package = sysroot::compile(
+        "pure comptime fn Packet<T, ...values: meta.List<?T>> -> Type { bool }
+        comptime fn Direct(value: T) -> Type where T { Packet<T, value> }
+        comptime fn Named(value: T) -> Type where T { Packet<.values = [value], T> }
+        comptime fn Collected() -> Type { Direct<bool>(true) }
+        comptime fn Reordered() -> Type { Named<bool>(true) }
+        comptime fn Expected() -> Type { Packet<bool, true> }",
+    )
+    .unwrap();
+    let expected = invoke_both(&package, "Expected");
+    assert_eq!(invoke_both(&package, "Collected"), expected);
+    assert_eq!(invoke_both(&package, "Reordered"), expected);
+    assert_ordinary_reordered_inputs(&package, "Named");
+}
+
+#[test]
+fn caller_generic_domains_contextualize_nominal_optional_inputs() {
+    let package = sysroot::compile(
+        "struct Stamp where T, .value: ?T = null { flag: bool }
+        comptime fn Direct(value: T) -> Type where T { Stamp<T, .value = value> }
+        comptime fn Named(value: T) -> Type where T { Stamp<.value = value, T> }
+        comptime fn Positional() -> Type { Direct<bool>(true) }
+        comptime fn Reordered() -> Type { Named<bool>(true) }
+        comptime fn Expected() -> Type { Stamp<bool, .value = true> }",
+    )
+    .unwrap();
+    let expected = invoke_both(&package, "Expected");
+    assert_eq!(invoke_both(&package, "Positional"), expected);
+    assert_eq!(invoke_both(&package, "Reordered"), expected);
+}
+
+#[test]
+fn recursive_input_domains_substitute_caller_binders_once() {
+    let package = sysroot::compile(
+        "struct Stamp where T, .value: ?T = null { flag: bool }
+        comptime fn Relay(stop: bool) -> Type
+        where A, B, .left: ?A = null, .right: ?B = null
+        {
+            if stop { Stamp<A, .value = left> }
+            else { Relay<B, .right = left, A, .left = right>(true) }
+        }
+        comptime fn Reordered() -> Type { Relay<bool, u8, .left = true, .right = 9>(false) }
+        comptime fn Expected() -> Type { Stamp<u8, .value = 9> }",
+    )
+    .unwrap();
+    assert_eq!(
+        invoke_both(&package, "Reordered"),
+        invoke_both(&package, "Expected")
+    );
+}
+
+#[test]
+fn supplied_generic_domains_do_not_authorize_unrelated_payloads() {
+    for body in ["Stamp<T, .value = true>", "Stamp<.value = true, T>"] {
+        let source = format!(
+            "struct Stamp where T, .value: ?T = null {{ flag: bool }}
+            comptime fn Invalid() -> Type where T {{ {body} }}"
+        );
+        let failure = sysroot::compile(&source)
+            .err()
+            .expect("unrelated payload must fail at definition checking");
+        assert!(
+            failure.contains("type mismatch") || failure.contains("optional operation"),
+            "{source}: {failure}"
+        );
+    }
+}

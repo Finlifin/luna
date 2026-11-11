@@ -262,7 +262,8 @@ Type 发布只移除已经完成的等待项；失败沿原边传播，无关兄
   `-p luna --test error_surface generic_comptime_error_inputs_resume_with_completed_success_domains -- --exact`：
   `/tmp/luna-tools-uagymjto/result.json` 退出 101，在相同 313..325 调用处、内部
   174..179 位置报相同 `TypeContractRejected`。这是仍待修复的泛型 comptime
-  错误限定类型准入问题；本次未修复。对照后按摘要恢复本次源码，保留作者原有修改。
+  错误限定类型准入问题；该控制状态阶段未修复，后续处理见下节。对照后按摘要恢复
+  本次源码，保留作者原有修改。
 - `-p luna --test library_protocols --test ordinary_callable_types --test closure_environment_parameters --test spread_control --test inline_control --no-fail-fast`：
   `/tmp/luna-tools-3ag0fquk/result.json`，退出 0，319 项通过；一项原有源码待定
   签名用例仍 ignored。真实 sysroot 接口、闭包环境及循环／展开路径均参与检查。
@@ -271,6 +272,50 @@ Type 发布只移除已经完成的等待项；失败沿原边传播，无关兄
 
 修改的 Rust 文件格式检查 `/tmp/luna-tools-g__5tg4l/result.json` 退出 0；
 `git diff --check` 通过。未运行全 workspace 或性能基准，未改动正式 docs。
+
+### 已接入：已知泛型域与未供应输入分开
+
+`03908c64` 后追踪上述错误限定类型失败，实际拒绝条件是把 `!bool bool` 与
+`![bool,char] bool` 要求为相等。根因在源码输入规划：仅因为参数域含 rigid，便绕过
+普通带上下文的表达式检查。调用者已经有效的泛型参数因此被错认成 callee 尚未供应
+的输入，定义时应形成的转换缺失，直到 VM 检查域相等时才失败。
+
+`declaration_inputs` 现在对原始 callee 参数域收集声明依赖，与本次调用尚未取得
+稳定身份的参数求交；只有交集非空才算 pending。参数域已就绪不要求它闭合：来自
+调用者的泛型 Type／值可以继续保持抽象，并使用调用者已有的检查上下文。已取得的
+身份仍不取代源表达式；实际执行位置、次数、默认值环境和输入副作用保持原有计划。
+
+域观察返回 caller-scoped 类型及 pending 状态，并合并已观察的输入身份；调用方
+不再对观察结果重复套用同一替换。依赖判定发生在替换前，避免递归调用中 callee
+和 caller 复用声明 ID 时，把已供应的 caller 参数重新当成另一个待供应项。
+观察状态有 S-expression Display，依赖扫描与新增值复制计入现有检查预算。
+
+合法的错误结果、可选值及收集元素走普通表达式转换，VM 没有新增补救转换，也没有
+按具体 NF／名义类型／List 定义分支。相反，抽象 T 不授权把任意 bool 当作 T 使用：
+新的拒绝例证明旧实现会接受这样的未调用泛型定义，现在在定义检查阶段拒绝。
+这仍不是任意生产者执行后的前端恢复协议，两个既有普通 callable 待定用例仍 ignored。
+
+验证目录 `/home/fin/luna`，命令均经 `development/check.py --timeout 900 -- test`：
+
+- 临时还原唯一生产文件为 `03908c64`，保留新测试，运行
+  `-p luna --test normal_input_plans generic_domains`：
+  `/tmp/luna-tools-5t_3l0c4/result.json` 退出 101。两个合法输入在 VM 报
+  TypeContractUnresolved，非法泛型载荷却编译成功。随后按摘要恢复本轮源码。
+- `-p luna --test normal_input_plans --test ordinary_clause_collectors --test error_surface --no-fail-fast`：
+  `/tmp/luna-tools-timkx462/result.json` 退出 0，176 项通过，一项原有用例 ignored。
+  包含原失败、名义与 NF 输入、变参、具名乱序、递归换参、错误拒绝及实际副作用顺序。
+- `-p luna --test builder_invocations --test cmtt_type_inputs --test source_reflection --no-fail-fast`：
+  `/tmp/luna-tools-ckhx5zl5/result.json` 退出 0，130 项通过。
+- 同一生产代码下，library_protocols 27 项及 open_normal_input_plans 五项在
+  `/tmp/luna-tools-p0eblqsp/result.json` 通过，ordinary_callable_types 13 项及一个
+  原有 ignored 在 `/tmp/luna-tools-8nep0n44/result.json` 通过。这两次组合命令整体
+  退出 101，原因是当时新 fixture 的声明／具名参数语法及诊断断言错误；修正后的
+  新用例由前述最终 176 项覆盖，没有改变既有用例预期。
+
+三个 Rust 文件格式检查 `/tmp/luna-tools-ezcbplta/result.json` 退出 0，
+`git diff --check` 通过；未运行全 workspace 或性能基准。工作期间外部新增 fmt
+workspace 成员；同步的 Cargo.lock 仅增该成员条目，和外部 Cargo.toml 修改一起留在
+工作区，不属于本次语义修正提交。正式 docs 与作者原有源码修改保持不变。
 
 ## 5. Observe、登记与发布
 

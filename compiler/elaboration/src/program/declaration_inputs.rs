@@ -177,13 +177,50 @@ impl std::fmt::Display for PendingDeclarationCollection<'_, '_> {
     }
 }
 
+/// A caller-scoped domain can remain generic while all of this call's
+/// dependencies are supplied. Pending refers to callee inputs, not rigidity.
+struct DeclarationInputDomain {
+    ty: Term,
+    pending: bool,
+}
+impl std::fmt::Display for DeclarationInputDomain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(declaration-input-domain (pending {}) (type {}))",
+            self.pending, self.ty
+        )
+    }
+}
+
 impl Checker<'_, '_> {
-    fn declaration_domain_pending(&mut self, domain: &Term, span: Span) -> Result<bool, Error> {
+    // Inspect the original callee domain before substitution. A supplied
+    // caller parameter may have the same declaration identity as another
+    // callee input in a recursive call; it is not another pending dependency.
+    fn declaration_domain_pending(
+        &mut self,
+        domain: &Term,
+        parameters: &[(DeclarationId, Sort, Term)],
+        completed: &[DeclarationId],
+        span: Span,
+    ) -> Result<bool, Error> {
         let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let pending = nir::type_computations::has_rigid_parameters_bounded(domain, &mut fuel);
+        let pending = (|| {
+            fuel = fuel
+                .checked_sub(parameters.len() + completed.len())
+                .ok_or(nir::type_computations::Error::Budget)?;
+            let completed = completed.iter().copied().collect::<BTreeSet<_>>();
+            let mut referenced = BTreeSet::new();
+            nir::type_computations::rigid_declarations_bounded(domain, &mut fuel, &mut referenced)?;
+            Ok(parameters
+                .iter()
+                .any(|(id, _, _)| referenced.contains(id) && !completed.contains(id)))
+        })();
         self.required_steps -= (before - fuel) as u64;
-        pending.map_err(|failure| error(span, format!("input domain inspection failed: {failure}")))
+        pending.map_err(|failure: nir::type_computations::Error| {
+            error(span, format!("input domain inspection failed: {failure}"))
+        })
     }
 
     fn prepare_declaration_collection_input(
@@ -251,8 +288,10 @@ impl Checker<'_, '_> {
         parameters: &[(DeclarationId, Sort, Term)],
         routed: &mut [Option<RoutedDeclarationInput<'_, '_>>],
         bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        completed: &[DeclarationId],
+        completed_values: &[Term],
         span: Span,
-    ) -> Result<Term, Error> {
+    ) -> Result<DeclarationInputDomain, Error> {
         let domain = &parameters[slot].2;
         let mut needed = domain
             .rigid_parameters()
@@ -267,10 +306,19 @@ impl Checker<'_, '_> {
                 );
             }
         }
-        let mut known_parameters = Vec::new();
-        let mut known_values = Vec::new();
+        self.required_steps = self
+            .required_steps
+            .checked_sub(completed.len() as u64)
+            .ok_or_else(|| error(span, "input domain completion budget exhausted"))?;
+        let mut known_parameters = completed.to_vec();
+        let mut known_values = completed_values
+            .iter()
+            .map(|value| self.copy_alias_type(value, span))
+            .collect::<Result<Vec<_>, _>>()?;
         for previous in 0..slot {
-            if !needed.contains_key(&parameters[previous].0) {
+            if known_parameters.contains(&parameters[previous].0)
+                || !needed.contains_key(&parameters[previous].0)
+            {
                 continue;
             }
             if let Some(RoutedDeclarationInput::Source(input)) = &routed[previous] {
@@ -280,7 +328,12 @@ impl Checker<'_, '_> {
                     &known_values,
                     span,
                 )?;
-                if self.declaration_domain_pending(&expected, span)? {
+                if self.declaration_domain_pending(
+                    &parameters[previous].2,
+                    parameters,
+                    &known_parameters,
+                    span,
+                )? {
                     continue;
                 }
                 let value = self.expr(input, Some(&expected))?;
@@ -301,7 +354,10 @@ impl Checker<'_, '_> {
                 known_values.push(value);
             }
         }
-        self.instantiate_input_types(domain, &known_parameters, &known_values, span)
+        let pending =
+            self.declaration_domain_pending(domain, parameters, &known_parameters, span)?;
+        let ty = self.instantiate_input_types(domain, &known_parameters, &known_values, span)?;
+        Ok(DeclarationInputDomain { ty, pending })
     }
 
     /// Prepare explicit inputs in source order, then omitted inputs in their
@@ -466,7 +522,7 @@ impl Checker<'_, '_> {
                         use crate::calls::InputContext as C;
                         let pending = fields
                             .iter()
-                            .map(|ty| self.declaration_domain_pending(ty, span))
+                            .map(|ty| self.declaration_domain_pending(ty, parameters, &[], span))
                             .collect::<Result<Vec<_>, _>>()?;
                         if pending.iter().any(|pending| *pending) {
                             let fields = fields
@@ -626,6 +682,8 @@ impl Checker<'_, '_> {
                     parameters,
                     &mut routed,
                     &prepared_bindings,
+                    &[],
+                    &[],
                     span,
                 )?)
             };
@@ -635,16 +693,16 @@ impl Checker<'_, '_> {
                     .as_ref()
                     .expect("observed collection domain");
                 let expected = if pending.spread {
-                    domain
+                    &domain.ty
                 } else {
-                    self.list_element_type(domain).ok_or_else(|| {
+                    self.list_element_type(&domain.ty).ok_or_else(|| {
                         error(
                             pending.input.span,
                             "variadic input requires a bound meta.List<T>",
                         )
                     })?
                 };
-                let dependent = self.declaration_domain_pending(expected, span)?;
+                let dependent = domain.pending;
                 let at_tail = pending.source_index >= tail_start;
                 let value = if dependent && !pending.spread && checking == InputChecking::Contextual
                 {
@@ -749,29 +807,34 @@ impl Checker<'_, '_> {
                     evaluation_order.push(slot);
                     continue;
                 }
-                let mut ty = self.instantiate_input_types(
+                let mut dependent = self.declaration_domain_pending(
                     &parameters[slot].2,
+                    parameters,
                     &known_parameters,
-                    &known_types,
                     span,
                 )?;
-                if matches!(&routed[slot], Some(RoutedDeclarationInput::Source(_)))
-                    && self.declaration_domain_pending(&ty, span)?
+                let ty = if matches!(&routed[slot], Some(RoutedDeclarationInput::Source(_)))
+                    && dependent
                 {
                     let domain = self.declaration_input_domain(
                         slot,
                         parameters,
                         &mut routed,
                         &prepared_bindings,
-                        span,
-                    )?;
-                    ty = self.instantiate_input_types(
-                        &domain,
                         &known_parameters,
                         &known_types,
                         span,
                     )?;
-                }
+                    dependent = domain.pending;
+                    domain.ty
+                } else {
+                    self.instantiate_input_types(
+                        &parameters[slot].2,
+                        &known_parameters,
+                        &known_types,
+                        span,
+                    )?
+                };
                 let explicit = routed[slot].as_ref();
                 let input = match explicit {
                     Some(RoutedDeclarationInput::Source(input)) => Some(*input),
@@ -852,9 +915,7 @@ impl Checker<'_, '_> {
                         "cyclic or excessively deep normal-form default",
                     ));
                 }
-                let dependent = self.declaration_domain_pending(&ty, span);
                 let checked = (|| {
-                    let dependent = dependent?;
                     let checked = if let Some(RoutedDeclarationInput::Collected(items)) = explicit {
                         if (!dependent || checking == InputChecking::Typed)
                             && items.iter().all(|item| {
