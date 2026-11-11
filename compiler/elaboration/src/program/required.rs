@@ -2495,7 +2495,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<n::Function, Error> {
         let item = self.package.item(owner).unwrap();
-        let ItemKind::Fn(sig, body_id) = &item.kind else {
+        let ItemKind::Fn(sig, _) = &item.kind else {
             return Err(error(span, "required comptime call needs a function body"));
         };
         if !sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head {
@@ -2514,7 +2514,6 @@ impl Checker<'_, '_> {
         })?;
         let saved_owner = self.signature_owner.replace(owner);
         let saved_locals = std::mem::take(&mut self.locals);
-        let saved_type_bindings = self.input_facts.types.clone();
         let saved_captures = std::mem::take(&mut self.captures);
         let saved_control = std::mem::take(&mut self.control);
         let saved_immutable = std::mem::take(&mut self.immutable);
@@ -2522,60 +2521,10 @@ impl Checker<'_, '_> {
         let saved_contract = std::mem::replace(&mut self.checking_contract, false);
         let saved_defaults = std::mem::replace(&mut self.numeric_defaults, true);
         self.context = self.definition_context(owner);
-        let result = (|| {
-            let Term::Function { parameters, result } = &signature else {
-                unreachable!()
-            };
-            for (index, (param, ty)) in sig.params.iter().zip(parameters).enumerate() {
-                self.locals.insert(local(param.hir_id), ty.ty.clone());
-                if ty.sort == Sort::Type {
-                    self.input_facts.types.insert(
-                        local(param.hir_id),
-                        Term::Bound {
-                            depth: 0,
-                            index,
-                            sort: Sort::Type,
-                        },
-                    );
-                }
-            }
-            self.control.result = Some((**result).clone());
-            let body = self
-                .package
-                .body(*body_id)
-                .ok_or_else(|| error(span, "required comptime body is missing"))?;
-            let preconditions = self.program_preconditions(owner)?;
-            let result_binding = sig.return_binding.map(local);
-            let (postconditions, entry_snapshots) =
-                self.program_postconditions(owner, result_binding, result)?;
-            let value = self.expr(body.value, Some(result))?;
-            Ok(n::Function {
-                declaration: declaration(self.package, &self.package_identities, owner),
-                name: item.ident.name.as_str().into(),
-                phase: n::FunctionPhase::Comptime,
-                inline: sig.modifiers.is_inline,
-                pure: sig.modifiers.is_pure,
-                is_unsafe: sig.modifiers.is_unsafe,
-                preconditions,
-                postconditions,
-                entry_snapshots,
-                result_binding,
-                type_parameters: self.type_parameters[&owner].clone(),
-                requirements: self.requirements.get(&owner).cloned().unwrap_or_default(),
-                capabilities: self.capabilities.get(&owner).cloned().unwrap_or_default(),
-                signature,
-                parameters: sig.params.iter().map(|p| local(p.hir_id)).collect(),
-                // Call plans carry the defaults actually used, with the
-                // appropriate substitutions and parameter frame. Template
-                // defaults are checked later for the final package; forcing
-                // them here adds dependencies to explicitly supplied inputs.
-                defaults: vec![],
-                body: value,
-            })
-        })();
+        let result =
+            self.check_source_function(owner, signature, function_bodies::Defaults::CallPlan, span);
         self.signature_owner = saved_owner;
         self.locals = saved_locals;
-        self.input_facts.types = saved_type_bindings;
         self.captures = saved_captures;
         self.control = saved_control;
         self.immutable = saved_immutable;

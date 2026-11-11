@@ -2,7 +2,33 @@
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
-use comptime_interpretor::Value;
+use comptime_interpretor::{Budget, Interpreter, Value};
+
+fn check_required_and_published(source: &str) -> nir::program::Package {
+    let package = sysroot::compile(source).unwrap();
+    let entry = package
+        .functions
+        .iter()
+        .find(|function| function.name == "check")
+        .unwrap()
+        .declaration;
+    for tree in [false, true] {
+        let mut vm = if tree {
+            Interpreter::for_comptime_tree(&package, Budget::default())
+        } else {
+            Interpreter::for_comptime(&package, Budget::default())
+        }
+        .unwrap();
+        assert_eq!(vm.invoke(entry, vec![]).unwrap(), Value::Bool(true));
+    }
+    let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    package
+}
 
 const SOURCE: &str = "
     struct Flag where enabled: bool {}
@@ -106,4 +132,71 @@ fn observed_clause_identities_do_not_erase_input_effects() {
         ),
         Value::Bool(true)
     );
+}
+
+#[test]
+fn required_and_published_bodies_agree_on_type_inputs_and_defaults() {
+    check_required_and_published(
+        "
+        comptime fn Pass(value: Type) -> Type { value }
+        comptime fn digits(a: Integer, .b: Integer = a + 1) -> Integer {
+            a * 10 + b
+        }
+        comptime fn check() -> bool {
+            let types: meta.List<Type> = [Pass(u8), Pass(bool), Pass(u8)];
+            var trace: Integer = 0;
+            let supplied = digits(
+                do { trace = trace * 10 + 1; 2 },
+                .b = do { trace = trace * 10 + 2; 9 }
+            );
+            types.length() == 3 and types[0] == u8 and types[1] == bool
+                and types[2] == u8 and digits(3) == 34
+                and supplied == 29 and trace == 12
+        }
+        fn run() -> bool { const result = check(); result }
+    ",
+    );
+}
+
+#[test]
+fn required_and_published_bodies_keep_entry_and_result_contracts() {
+    let source = "
+        comptime fn keep(value: u8) -> result: u8
+        where requires value <= 10, ensures result == value'old
+        {
+            let original = value;
+            value = 0;
+            original
+        }
+        comptime fn check() -> bool { keep(9) == 9 and keep(7) == 7 }
+        fn run() -> bool { const result = check(); result }
+    ";
+    let package = check_required_and_published(source);
+    let function = package
+        .functions
+        .iter()
+        .find(|function| function.name == "keep")
+        .unwrap();
+    assert!(!function.preconditions.is_empty());
+    assert!(!function.postconditions.is_empty());
+    assert!(!function.entry_snapshots.is_empty());
+    for tree in [false, true] {
+        let mut vm = if tree {
+            Interpreter::for_comptime_tree(&package, Budget::default())
+        } else {
+            Interpreter::for_comptime(&package, Budget::default())
+        }
+        .unwrap();
+        assert!(
+            vm.invoke(function.declaration, vec![Value::UnsignedInteger(11)])
+                .is_err()
+        );
+        assert_eq!(
+            vm.invoke(function.declaration, vec![Value::UnsignedInteger(9)])
+                .unwrap(),
+            Value::UnsignedInteger(9)
+        );
+    }
+    assert!(sysroot::compile(&source.replace("keep(9)", "keep(11)")).is_err());
+    assert!(sysroot::compile(&source.replace("original\n", "0\n")).is_err());
 }

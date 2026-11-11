@@ -13,6 +13,7 @@ mod effects;
 mod error_handlers;
 mod expression_values;
 mod extended;
+mod function_bodies;
 mod function_templates;
 mod function_types;
 mod inline_control;
@@ -1013,8 +1014,8 @@ fn elaborate_candidate<'a, 'h>(
                 }
                 checker.ensure_signature(owner, item.span)?;
                 checker.check_type_defaults(owner)?;
-                if let ItemKind::Fn(_, body) = item.kind {
-                    functions.push((owner, item, sig, body));
+                if let ItemKind::Fn(..) = item.kind {
+                    functions.push((owner, item, sig));
                 }
             }
             ItemKind::Effect(_, _) => {
@@ -1056,7 +1057,7 @@ fn elaborate_candidate<'a, 'h>(
             }
         }
     }
-    checker.prepare_staged_forwarders(functions.iter().map(|(owner, _, _, _)| *owner))?;
+    checker.prepare_staged_forwarders(functions.iter().map(|(owner, _, _)| *owner))?;
     // Finish contracts not already requested by required comptime computations.
     // Formation obligations are delayed, not assumed: declarations may refer
     // forward to other constrained types. Contract operands themselves must be
@@ -1277,7 +1278,7 @@ fn elaborate_candidate<'a, 'h>(
     for owner in checker.data_consumers.keys().copied().collect::<Vec<_>>() {
         checker.check_data_consumer(owner)?;
     }
-    for (owner, item, sig, body_id) in functions {
+    for (owner, item, sig) in functions {
         if checker.open_functions.contains_key(&owner) {
             continue;
         }
@@ -1285,76 +1286,15 @@ fn elaborate_candidate<'a, 'h>(
         checker.context = checker.definition_context(owner);
         checker.locals.clear();
         let signature = checker.signatures[&owner].clone();
-        let Term::Function { parameters, result } = &signature else {
-            unreachable!()
-        };
-        for (param, ty) in sig.params.iter().zip(parameters) {
-            checker.locals.insert(local(param.hir_id), ty.ty.clone());
-        }
-        if let Some(parameters) = checker.normal_parameters.get(&owner) {
-            for (_, binding, ty) in parameters.iter().filter(|(_, _, ty)| *ty != p(P::Type)) {
-                checker.locals.insert(*binding, ty.clone());
-            }
-        }
-        checker.control.result = Some((**result).clone());
-        let body = package
-            .body(body_id)
-            .ok_or_else(|| error(item.span, "missing function body"))?;
-        let preconditions = checker.program_preconditions(owner)?;
-        let result_binding = sig.return_binding.map(local);
-        let (postconditions, entry_snapshots) =
-            checker.program_postconditions(owner, result_binding, result)?;
-        let previous_code = checker.in_code_body;
-        let previous_holes = std::mem::take(&mut checker.quote_holes);
-        checker.in_code_body = sig.modifiers.is_quote;
-        let value = checker.function_body(owner, body.value, result);
-        checker.in_code_body = previous_code;
-        checker.quote_holes = previous_holes;
-        let value = value?;
+        let mut function = checker.check_source_function(
+            owner,
+            signature,
+            function_bodies::Defaults::Definition,
+            item.span,
+        )?;
         if sig.modifiers.is_function_template && !sig.modifiers.is_pure {
             continue;
         }
-        let mut function = n::Function {
-            phase: if sig.modifiers.is_normal_form_head {
-                n::FunctionPhase::NormalForm
-            } else if sig.modifiers.is_comptime {
-                n::FunctionPhase::Comptime
-            } else {
-                n::FunctionPhase::Runtime
-            },
-            inline: sig.modifiers.is_inline,
-            pure: sig.modifiers.is_pure,
-            is_unsafe: sig.modifiers.is_unsafe,
-            preconditions,
-            postconditions,
-            entry_snapshots,
-            result_binding,
-            capabilities: checker
-                .capabilities
-                .get(&owner)
-                .cloned()
-                .unwrap_or_default(),
-            requirements: checker.definition_requirements(owner),
-            type_parameters: checker.type_parameters[&owner].clone(),
-            declaration: declaration(package, package_identities, owner),
-            name: item.ident.name.as_str().into(),
-            signature,
-            parameters: if sig.modifiers.is_normal_form_head {
-                checker.normal_parameters[&owner]
-                    .iter()
-                    .filter(|(_, _, ty)| *ty != p(P::Type))
-                    .map(|(_, binding, _)| *binding)
-                    .collect()
-            } else {
-                sig.params.iter().map(|x| local(x.hir_id)).collect()
-            },
-            body: value,
-            defaults: checker.defaults[&owner]
-                .iter()
-                .enumerate()
-                .filter_map(|(i, value)| value.clone().map(|value| (i, value)))
-                .collect(),
-        };
         if sig.modifiers.is_function_template {
             let inputs = checker.abstract_code_inputs(&function.body, item.span)?;
             let Term::Function { parameters, .. } = &mut function.signature else {

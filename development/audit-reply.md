@@ -462,6 +462,33 @@ invocation_budget 被名字过滤器全部筛去，不计为已验证，其后�
 待决列表域仍报 `list literal requires an element type context`。
 未改动用例、ignore 或语义预期；预算修复及回归通过不能替代这一缺口的实现。
 
+### 主体检查入口合并，尚未接通待决主体
+
+普通包收集原先经 function_body 检查模板／效应上下文，而 required 依赖另用 expr
+检查主体，并重复组装参数及 Function 元数据。现由两者共同调用
+`function_bodies.rs::check_source_function`：普通 Type 参数的 bound 身份、前后置条件、
+入口快照、主体与声明要求使用同一规则。required 仍只接收真正的 comptime 函数，
+不能执行 runtime 函数或 NF 头。默认值的区别保留：最终包携带定义默认值，required
+的实际 call plan 携带使用的默认值，不因收集依赖而强制展开未使用默认值。
+
+两项新增真实 sysroot 对照分别覆盖 Type 参数／列表、默认值与显式输入的效果顺序，
+以及参数被写入后的入口快照、前后置契约、失败后再次调用。每份源码既进入 required
+求值，也将完整包中的同一函数交给两种现有 VM 载体调用。
+
+验证工作目录 `/home/fin/luna`，命令前缀均为
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p elaboration --lib -p luna --test ordinary_callable_types --test ordinary_clause_collectors --test required_input_scopes --test builder_invocations --test cmtt_methods --test effects --no-fail-fast`：
+  616 项通过、2 项 ignored；`/tmp/luna-tools-7vqvsu2v/result.json` 退出 0。
+- `-p luna --test required_input_scopes --test function_template_inputs --test function_template_local_definitions --test quote_functions --test cmtt_phase_boundaries --test comptime_bytecode_defaults --test effect_contracts --test inline_pattern_observation --no-fail-fast`：
+  184 项通过、1 项 ignored；`/tmp/luna-tools-atlc64z4/result.json` 退出 0，包含新增对照。
+
+两组存在重叠，不将其相加作为独立测试数。初轮编译的元组调用点／借用错误及新增
+测试的 VM 值变体拼写错误已修复；上述结果来自修正后的检查。保留工作区外部修改，
+未运行全 workspace。外围声明作用域仍由现有调用者建立，Type 证据仍使用保存／恢复，
+共同规则仍同步交付完整主体。这减少一处必须同时迁移的重复实现，**不代表**稳定
+源码模板、活动源任务、VM 主体请求或两个 ignored 待决域正例已经接通。
+
 ## 4. 本次证据与限制
 
 工作目录 `/home/fin/luna`；所有检查通过 `development/check.py --timeout 900 -- test`。

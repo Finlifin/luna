@@ -903,12 +903,19 @@ LocalId 到寄存器的映射。请求是 invocation 内部数据，不是缓存
 
 #### 实施补充：声明接口与可执行主体不能共用完成状态
 
-当前调用路径还有一个早于 Type 响应的发布边界。`program.rs` 的普通函数循环先
-调用 function_body，取得完整 Expr 后才构造 `nir::program::Function`；Function 的
-body 字段没有待决形式。VM 的 `invocation.rs::prepare_invocation` 则从 functions
+当前调用路径还有一个早于 Type 响应的发布边界。普通函数收集与 required 依赖准备
+共用 `function_bodies.rs::check_source_function`，经 function_body 取得完整 Expr
+后才构造 `nir::program::Function`；Function 的 body 字段没有待决形式。
+VM 的 `invocation.rs::prepare_invocation` 则从 functions
 表直接取得该 body，随后准备环境、契约和字节码。`RequiredWorld` 又只持有已经
 形成的 NIR 声明快照。因此“等 Type 返回后继续参数检查”不能仅增加在现有 VM
 session 的请求枚举上：尚未完成的源主体根本到不了这个 session。
+
+共同入口已经合并参数绑定、普通 Type 输入的 bound 身份、前后置条件与入口快照、
+模板／效应感知的主体检查，以及完成 Function 的元数据。required 不再直接调用 expr
+另建一份主体。两种产物仍有必要区别：最终声明携带已检查的默认值描述，required
+依赖由实际 call plan 携带使用到的默认值，不在依赖收集时强制准备未使用默认值。
+外围声明作用域仍由调用者建立；这个同步规则尚未交付可挂起任务或新的执行许可。
 
 这里必须区分三个完成点，而不是将未完成主体装成占位 Function：
 
