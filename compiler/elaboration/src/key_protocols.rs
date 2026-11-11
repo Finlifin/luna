@@ -31,12 +31,6 @@ impl Operation {
             Self::Hash => 1,
         }
     }
-    fn comptime_name(self) -> &'static str {
-        match self {
-            Self::Eq => "comptime_eq",
-            Self::Hash => "comptime_hash",
-        }
-    }
 }
 impl fmt::Display for Operation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -149,26 +143,20 @@ pub fn select_metered(
     if !interface.type_parameters.is_empty() {
         return Err("comptime key protocol has explicit type parameters".into());
     }
-    // Two-phase interfaces retain their ordinary runtime operation names.
-    // An explicit comptime entry is authoritative even when malformed: do not
-    // recover a different member after its phase or signature check fails.
+    // The selected trait identity supplies the phase-specific protocol. Method
+    // spelling is shared with runtime interfaces; prefixed names are ordinary
+    // unrelated members and cannot override or repair this contract.
     work::spend(
         budget,
         interface
             .methods
             .len()
-            .saturating_mul(2 * (operation.comptime_name().len() + 1)),
+            .saturating_mul(operation.name().len() + 1),
     )?;
-    let name = if interface
+    let mut methods = interface
         .methods
         .iter()
-        .any(|member| member.name == operation.comptime_name())
-    {
-        operation.comptime_name()
-    } else {
-        operation.name()
-    };
-    let mut methods = interface.methods.iter().filter(|m| m.name == name);
+        .filter(|m| m.name == operation.name());
     let member = methods
         .next()
         .ok_or("comptime key protocol method is missing")?;

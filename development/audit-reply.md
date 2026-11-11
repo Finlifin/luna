@@ -232,6 +232,12 @@ sysroot 的 meta.List／builder／comptime 方法作消费者。不能继续只�
 资源与库线仍保留独立缺口。运行时文本接口须以真实 sysroot、标准资源检查及正常
 调用贯通，不能用手拼片段、直降 builtin 或跳过来源检查证明库可用。
 
+报告 6.3 指出的键协议旧名称回退已移除：选择器按受信任的 trait 身份选择 `eq`／
+`hash`，不再优先查找带 `comptime_` 前缀的成员。真实 sysroot 检查证明旧名称不能
+抢占实现、补齐缺失成员或绕过阶段检查；原比较 fixture 改为独立 runtime／comptime
+trait。相关缓存调用、预算失败恢复与协议检查共 15 项通过，证据
+`/tmp/luna-tools-e2i_h2fz/result.json`。这不补齐 Type 的 Hash 实现或改变缓存准入范围。
+
 ## 4. 本次证据与限制
 
 工作目录 `/home/fin/luna`；所有检查通过 `development/check.py --timeout 900 -- test`。

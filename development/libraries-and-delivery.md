@@ -40,6 +40,16 @@ builtin.Tuple 的签名引用 meta.List，meta 又使用基础 Type；这是分�
 查找先确定名称来源及 phase 优先级，再进行普通实现选择；不能只给名字加 comptime_ 前缀。
 当前 meta 的 ComptimeEq/Hash/Ord 和可选/错误协议可作为真实迁移案例。
 
+缓存键选择器 `key_protocols::select_metered` 已删除优先查找 `comptime_eq`／
+`comptime_hash` 的旧分支。受信任的 trait 身份决定所用协议，成员固定为 `eq`／`hash`；
+缺少成员、阶段不符及重复声明继续拒绝，另一个带前缀的方法不能补位。前缀名称本身
+仍可用于普通用户方法，只是不再获得协议特权。孤立比较 fixture 同步改用两个 trait。
+真实 sysroot 回归覆盖同名旧成员不能抢占、旧成员不能补齐接口、不能绕过 canonical
+成员的 phase 检查，以及 Type 结果缓存的命中与失败恢复。
+工作目录 `/home/fin/luna`，执行
+`python3 -B development/check.py --timeout 900 -- test -p luna --test key_protocol_members --test key_preparation_budget --test library_comptime_comparison --test invocation_value_templates --no-fail-fast`，
+`/tmp/luna-tools-e2i_h2fz/result.json` 退出 0，15 项通过。没有运行全 workspace。
+
 当前存放位置不覆盖第 8 节的作者决定：跨两阶段的公共协议和 elaboration 协议以 builtin
 为提供者。迁移时将协议声明归到对应 builtin 职责模块，meta 保留 comptime 数据实现及
 必要再导出；不能在两个包复制声明来制造两个同名接口。runtime trait 与 pure comptime

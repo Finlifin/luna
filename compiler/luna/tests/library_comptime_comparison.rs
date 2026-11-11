@@ -9,14 +9,16 @@ fn source() -> String {
     format!(
         r#"
         {}
+        use builtin.u8;
         trait Hash {{
-            fn hash(self)->.u8'builtin;
-            ^{{comptime_phase:true}}
-            comptime fn comptime_hash(self)->.u8'builtin;
+            fn hash(self)->u8;
         }}
-        impl Hash for bool {{fn hash(self)->.u8'builtin {{0}}}}
-        comptime impl Hash for bool {{
-            comptime fn comptime_hash(self)->.u8'builtin {{if self {{1}} else {{0}}}}
+        pure comptime trait ComptimeHash {{
+            comptime fn hash(self)->u8;
+        }}
+        impl Hash for bool {{fn hash(self)->u8 {{0}}}}
+        comptime impl ComptimeHash for bool {{
+            comptime fn hash(self)->u8 {{if self {{1}} else {{0}}}}
         }}
         comptime fn compare()->bool {{
             true.as(ComptimeEq).eq(true) and true.as(ComptimeEq).ne(false)
@@ -31,7 +33,7 @@ fn prepare(package: &nir::program::Package) -> Result<luna::comptime_keys::Proto
     let mut items = intrinsic::LangItems::new();
     let bindings = [
         (intrinsic::LangItem::Eq, "ComptimeEq"),
-        (intrinsic::LangItem::Hash, "Hash"),
+        (intrinsic::LangItem::Hash, "ComptimeHash"),
     ]
     .map(|(item, name)| {
         (
@@ -88,7 +90,7 @@ fn library_comptime_equality_covers_fixed_and_target_integer_widths() {
         "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128", "usize", "isize",
     ] {
         let text = format!(
-            "{} comptime fn check()->bool {{let left:.{ty}'builtin=1;let right:.{ty}'builtin=2;left.as(ComptimeEq).eq(left) and left.as(ComptimeEq).ne(right)}}",
+            "{} comptime fn check()->bool {{let left:builtin.{ty}=1;let right:builtin.{ty}=2;left.as(ComptimeEq).eq(left) and left.as(ComptimeEq).ne(right)}}",
             source()
         );
         for width in [32, 64] {
@@ -109,15 +111,15 @@ fn library_comptime_equality_covers_fixed_and_target_integer_widths() {
 }
 
 #[test]
-fn explicit_comptime_key_member_cannot_fall_back_after_phase_failure() {
+fn canonical_comptime_key_member_must_pass_phase_and_uniqueness_checks() {
     let mut package = support::compile(&source());
-    for name in ["ComptimeEq", "Hash"] {
+    for name in ["ComptimeEq", "ComptimeHash"] {
         let mut invalid = package.clone();
         let interface = invalid.traits.iter_mut().find(|t| t.name == name).unwrap();
         interface
             .methods
             .iter_mut()
-            .find(|m| m.name == "eq" || m.name == "comptime_hash")
+            .find(|m| m.name == "eq" || m.name == "hash")
             .unwrap()
             .phase = nir::program::TraitPhase::Runtime;
         assert!(
