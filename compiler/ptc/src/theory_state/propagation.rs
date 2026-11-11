@@ -49,7 +49,6 @@ impl Search<'_> {
         let mut traits = BTreeMap::new();
         let mut kinds = Vec::new();
         let mut integers = Vec::new();
-        let mut pending_integer = false;
         let mut pending = Vec::new();
         for (index, (atom, value)) in self.atoms.iter().zip(assignment).enumerate() {
             charge(fuel, 1)?;
@@ -96,8 +95,9 @@ impl Search<'_> {
                     Query::Kind(root, query.kind)
                 }
                 Atom::IntLe(atom) => {
-                    integers.push((index, atom, *value));
-                    pending_integer |= value.is_none();
+                    if value.is_none() {
+                        integers.push((index, atom));
+                    }
                     continue;
                 }
             };
@@ -145,9 +145,11 @@ impl Search<'_> {
                 return self.explain_unit(assignment, index, value, fuel);
             }
         }
-        if pending_integer {
-            let (index, proof, support) =
-                crate::integer::propagate_explained(&integers, fuel).ok()??;
+        if !integers.is_empty() {
+            let (index, proof, support) = state
+                .integers
+                .explain(&integers, self.atoms, assignment, fuel)
+                .ok()??;
             return Some(Unit {
                 index,
                 value: proof.value,

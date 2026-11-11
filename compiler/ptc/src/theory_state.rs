@@ -288,7 +288,7 @@ impl Search<'_> {
                     if let (Atom::IntLe(atom), Some(value)) =
                         (&self.atoms[index], assignment[index])
                     {
-                        state.integers.admit(atom, value, &mut self.steps)?;
+                        state.integers.admit(index, atom, value, &mut self.steps)?;
                     }
                 }
             }

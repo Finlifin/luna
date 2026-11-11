@@ -2,6 +2,7 @@
 //! never a source overflow rule: any exhausted arithmetic capacity is Unknown.
 use super::UnknownReason;
 mod proof;
+mod propagation;
 mod state;
 use nir::DeclarationId;
 pub use proof::IntegerBoundProof;
@@ -54,11 +55,7 @@ fn tick(steps: &mut usize) -> Result<(), UnknownReason> {
 struct Graph {
     variables: BTreeMap<DeclarationId, usize>,
     edges: Vec<(usize, usize, i128)>,
-    sources: Vec<usize>,
-}
-struct Paths {
-    distances: Vec<Option<i128>>,
-    predecessors: Vec<Option<usize>>,
+    sources: Vec<(usize, bool)>,
 }
 
 impl IntLe {
@@ -106,7 +103,7 @@ impl Graph {
             let Some(value) = value else { continue };
             let (from, to, bound) = atom.directed(value)?;
             edges.push((index(from), index(to), bound));
-            sources.push(source);
+            sources.push((source, value));
         }
 
         Ok(Self {
@@ -118,39 +115,6 @@ impl Graph {
     fn index(&self, term: &IntegerTerm) -> usize {
         term.variable.map_or(0, |id| self.variables[&id])
     }
-    fn shortest(&self, source: usize, steps: &mut usize) -> Result<Paths, UnknownReason> {
-        let count = self.variables.len() + 1;
-        *steps = steps
-            .checked_sub(count.saturating_mul(2))
-            .ok_or(UnknownReason::BudgetExhausted)?;
-        let mut distances: Vec<Option<i128>> = vec![None; count];
-        let mut predecessors = vec![None; count];
-        distances[source] = Some(0);
-        for _ in 1..count {
-            let mut changed = false;
-            for (edge, &(from, to, bound)) in self.edges.iter().enumerate() {
-                tick(steps)?;
-                let Some(distance) = distances[from] else {
-                    continue;
-                };
-                let candidate = distance
-                    .checked_add(bound)
-                    .ok_or(UnknownReason::ArithmeticRange)?;
-                if distances[to].is_none_or(|previous| candidate < previous) {
-                    distances[to] = Some(candidate);
-                    predecessors[to] = Some(edge);
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        Ok(Paths {
-            distances,
-            predecessors,
-        })
-    }
 }
 impl fmt::Display for Graph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -161,6 +125,10 @@ impl fmt::Display for Graph {
         write!(f, ") (edges")?;
         for (from, to, bound) in &self.edges {
             write!(f, " (edge {from} {to} {bound})")?;
+        }
+        write!(f, ") (sources")?;
+        for (index, truth) in &self.sources {
+            write!(f, " (atom {index} {truth})")?;
         }
         write!(f, "))")
     }
@@ -177,65 +145,25 @@ pub(super) fn propagate(
         .map(|unit| unit.map(|(index, proof, _)| (index, proof.value)))
 }
 
+#[cfg(test)]
 pub(super) fn propagate_explained(
     literals: &[(usize, &IntLe, Option<bool>)],
     steps: &mut usize,
-) -> Result<Option<(usize, IntegerBoundProof, std::collections::BTreeSet<usize>)>, UnknownReason> {
+) -> Result<Option<propagation::Explained>, UnknownReason> {
     let graph = Graph::new(
         literals.iter().map(|(_, atom, value)| (*atom, *value)),
         steps,
     )?;
-    let mut paths = BTreeMap::new();
-    for &(index, atom, value) in literals {
-        tick(steps)?;
-        if value.is_some() {
-            continue;
-        }
-        for truth in [true, false] {
-            let (from, to, bound) = atom.directed(truth)?;
-            let (from, to) = (graph.index(from), graph.index(to));
-            if !paths.contains_key(&from) {
-                paths.insert(from, graph.shortest(from, steps)?);
-            }
-            if paths[&from].distances[to].is_some_and(|distance| distance <= bound) {
-                let mut cursor = to;
-                let mut path = Vec::new();
-                let mut support = std::collections::BTreeSet::from([index]);
-                while cursor != from {
-                    tick(steps)?;
-                    // Defensive cycle guard; consistent shortest paths need
-                    // at most one visit per vertex.
-                    if path.len() >= graph.variables.len() + 1 {
-                        return Ok(None);
-                    }
-                    let Some(edge) = paths[&from].predecessors[cursor] else {
-                        return Ok(None);
-                    };
-                    let (source_index, literal, value) = literals[graph.sources[edge]];
-                    let Some(value) = value else {
-                        return Ok(None);
-                    };
-                    path.push((literal.clone(), value));
-                    support.insert(source_index);
-                    cursor = graph.edges[edge].0;
-                }
-                *steps = steps
-                    .checked_sub(path.len())
-                    .ok_or(UnknownReason::BudgetExhausted)?;
-                path.reverse();
-                let proof = IntegerBoundProof {
-                    path: path.into(),
-                    conclusion: std::sync::Arc::new(atom.clone()),
-                    value: truth,
-                };
-                if proof.check_bound(steps)? {
-                    return Ok(Some((index, proof, support)));
-                }
-                return Ok(None);
-            }
-        }
-    }
-    Ok(None)
+    graph.explain(
+        literals
+            .iter()
+            .filter_map(|&(index, atom, value)| value.is_none().then_some((index, atom))),
+        |source, truth| {
+            let (index, atom, value) = literals[source];
+            (value == Some(truth)).then_some((index, atom))
+        },
+        steps,
+    )
 }
 
 /// All vertices start at distance zero, equivalently a fresh super-source has
