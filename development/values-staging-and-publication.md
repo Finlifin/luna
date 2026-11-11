@@ -1494,7 +1494,7 @@ runtime 方法传递问题见[代码实例的签名观察](comptime-value-admiss
 仍会产生 Deferred 并阻断调用。这里未决的是无关候选，不能用它否定已经确定的
 公共接口，也不能通过吞掉所有 Deferred 来修复。
 
-contextual_method_owner 现先复用 context_member_interface，遵守既有约束、父 trait
+contextual_method_category 先复用 context_member_interface，遵守既有约束、父 trait
 来源、歧义检查和 comptime 来源优先级。公共声明决定 expr／pattern／data consumer
 类别；普通方法或关联值继续走普通调用。只有没有该来源时才进入固有方法查询，
 该查询的真正未决与失败仍向上传递。分类不执行实现、默认值或实参。
@@ -1512,7 +1512,7 @@ contextual_method_owner 现先复用 context_member_interface，遵守既有约�
 这里只观察类别：同一声明的不同接口实参并未因此成为同一来源，实际调用仍通过
 完整 InterfaceInstance 和 inherited_member_source 检查来源、替换及证据。
 
-显式、隐式及固有路径取得声明后，共用 contextual_declaration_owner 判断其签名。
+显式、隐式及固有路径取得声明后，共用 contextual_declaration_category 判断其签名。
 已知普通成员返回没有 contextual 类别；所需 trait 契约或成员声明缺失则报错。
 这避免把观察所需数据不可用误当成“普通成员”的确定答案。
 
@@ -1533,6 +1533,47 @@ trait 的优先级。既有泛型名义值 trait 实参转发用例保持原有�
   筛去上述 1 项既有未实现用例，退出 0；`/tmp/luna-tools-ib0a7k7v/result.json`。
 - 四份修改的 Rust 文件 scoped rustfmt check 退出 0；
   `/tmp/luna-tools-__km3ko3/result.json`。git diff --check 通过。
+
+### 计算型 Type 接收者的类别观察
+
+普通 receiver 调用与 CMTT 分类现在共用 computed_type_receiver_domain，按既有规则
+先观察计算表达式的 Type 域，再考虑所表示类型的静态成员。此前普通调用已支持
+这条路径，分类却跳过它：`Identity<Row>.struct_fields()` 被错误地送往
+Identity<Row> 的固有实现查询，并因主体资格未决而在调用前失败。这里不应该
+推断 Identity<Row> 等于 Row，也不应把 Pending 当成没有候选。
+
+成员类别显式区分“已知普通成员”“contextual 成员”和“没有成员”。只有最后一种
+允许继续其他查询路径；选定普通 Type 接收者方法后，分类直接交还普通调用。
+缺失声明、歧义与未决适用性仍报错，诊断包含主体、成员及候选未决原因。
+分类成功不授予调用权限，实际调用仍检查签名、phase、实参及反射准入。
+
+原有两个反射失败已恢复：程序可以编译，在实际反射不透明 NF 时报告 Type 错误，
+同一 VM 随后仍能成功反射合法 struct。真实 sysroot 回归在树解释与字节码路径中
+检查调用、块及分支生产者恰好执行一次，并检查拒绝后的恢复。
+
+另外保留未完成回归 computed_normal_form_receiver_keeps_live_clause_inputs：
+`Identity<counter.Selected()>.struct_fields()` 应先执行普通 NF 参数，再由反射拒绝
+不透明身份；目前枚举构造探测 enum_member_reference 在方法解析之前调用 type_expr，
+经 normal_type_annotation / required_normal_type_plan 提前要求局部值，报
+required comptime input unavailable。临时调用栈诊断仅用于定位，未留在生产代码。
+此问题需要后续统一调用类别观察与实际输入准备；不能用吞掉错误、展开 NF 或假造
+已完成输入来绕过。该用例标为 ignored 并单独运行确认失败，不计作通过或能力交付。
+
+验证工作目录 `/home/fin/luna`，命令通过 `development/check.py --timeout 900 -- test`
+执行，完整参数及输出在各目录的 result.json、stdout.log 和 stderr.log：
+
+- `/tmp/luna-tools-ao76nwm_`：反射 18 通过；CMTT 方法 159 通过、2 失败，退出 101。
+  临时还原本批两份生产文件到 `2d15c6ce` 后，`/tmp/luna-tools-hagpgjrq` 同样
+  159 通过、同样 2 项失败，位置与诊断一致；随后逐字节恢复本批源码。
+  失败为 indexed-code-signature 与 runtime 方法经聚合传递，未修改其预期。
+- `/tmp/luna-tools-_qlmo82r`：cmtt_type_inputs、contextual_spreads、library_meta_objects、
+  library_protocols、normal_form_methods、quote_functions 六组共 215 通过。
+  此时反射组新增 live-NF 输入反例仍失败，整个命令退出 101，不宣称全组成功。
+- 最终 `/tmp/luna-tools-tkmrlk_p` 显式使用 `--include-ignored`：反射 18 通过，
+  上述 live-NF 反例 1 失败，退出 101。基线 `2d15c6ce` 单独执行该反例的
+  `/tmp/luna-tools-eroqlcit` 同样在 393..421 报局部输入不可用，退出 101。
+- 三份修改的 Rust 文件 scoped rustfmt check 退出 0：`/tmp/luna-tools-ripe1etq`；
+  git diff --check 通过。没有运行全 workspace 或性能测试。
 
 首次扩展运行 `/tmp/luna-tools-4b93ojd9/result.json` 退出 101：新增来源优先级用例
 误将普通 trait 的 runtime-phase 成员实现放在 comptime impl 中，被阶段检查拒绝。

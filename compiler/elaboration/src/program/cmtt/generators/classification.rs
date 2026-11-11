@@ -8,6 +8,22 @@ enum QuotedKind {
     Expression,
     Pattern,
 }
+
+// A selected ordinary declaration is a completed category observation. It
+// must not be confused with absence, which permits another lookup route.
+enum MethodCategory {
+    Ordinary,
+    Contextual(OwnerId),
+}
+
+impl MethodCategory {
+    fn owner(self) -> Option<OwnerId> {
+        match self {
+            Self::Ordinary => None,
+            Self::Contextual(owner) => Some(owner),
+        }
+    }
+}
 impl QuotedKind {
     fn annotation(self, value: &Expr<'_>) -> bool {
         matches!(
@@ -302,6 +318,12 @@ impl Checker<'_, '_> {
                 .transpose()
                 .map(Option::flatten);
         }
+        if let Some(domain) = self.computed_type_receiver_domain(base)?
+            && let Some(category) =
+                self.contextual_method_category(&domain, name.name.as_str(), head.span)?
+        {
+            return Ok(category.owner());
+        }
         if let Some(owner) = self.computed_code_method_hint(base, head.hir_id)? {
             return Ok(Some(owner));
         }
@@ -313,7 +335,9 @@ impl Checker<'_, '_> {
         let Some(subject) = subject else {
             return Ok(None);
         };
-        self.contextual_method_owner(&subject, name.name.as_str(), head.span)
+        Ok(self
+            .contextual_method_category(&subject, name.name.as_str(), head.span)?
+            .and_then(MethodCategory::owner))
     }
 
     // Classification only: never execute a type producer, defaults or arguments.
@@ -342,19 +366,21 @@ impl Checker<'_, '_> {
         if !matches!(item.kind, ItemKind::Struct(_) | ItemKind::Enum(_)) || !parameters.is_empty() {
             return Ok(None);
         }
-        self.contextual_method_owner(
-            &self.nominal_self_type(container),
-            name.name.as_str(),
-            callee.span,
-        )
+        Ok(self
+            .contextual_method_category(
+                &self.nominal_self_type(container),
+                name.name.as_str(),
+                callee.span,
+            )?
+            .and_then(MethodCategory::owner))
     }
 
-    fn contextual_method_owner(
+    fn contextual_method_category(
         &self,
         subject: &Term,
         name: &str,
         span: Span,
-    ) -> Result<Option<OwnerId>, Error> {
+    ) -> Result<Option<MethodCategory>, Error> {
         use crate::implementation::Selection;
         // Capability sources precede inherent lookup in ordinary method calls.
         // Their public declaration determines the category even when the
@@ -367,9 +393,11 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(span, "contextual method source lacks its trait contract"))?;
             let Some(method) = contract.methods.iter().find(|method| method.name == name) else {
                 // Associated values use ordinary value/call elaboration.
-                return Ok(None);
+                return Ok(Some(MethodCategory::Ordinary));
             };
-            return self.contextual_declaration_owner(method.declaration, span);
+            return self
+                .contextual_declaration_category(method.declaration, span)
+                .map(Some);
         }
         let resolution = self
             .resolve_inherent_capability(name, subject, Budget::default())
@@ -385,7 +413,23 @@ impl Checker<'_, '_> {
             other => {
                 return Err(error(
                     span,
-                    format!("contextual method classification is unsettled: {other}"),
+                    format!(
+                        "contextual method classification is unsettled for {subject}.{name}: {other}{}",
+                        resolution
+                            .types
+                            .assessments
+                            .iter()
+                            .filter_map(|(id, assessment)| {
+                                match assessment {
+                                    crate::implementation::TypeAssessment::Pending(reason)
+                                    | crate::implementation::TypeAssessment::Invalid(reason) => {
+                                        Some(format!("; {id}: {reason}"))
+                                    }
+                                    _ => None,
+                                }
+                            })
+                            .collect::<String>()
+                    ),
                 ));
             }
         };
@@ -404,7 +448,7 @@ impl Checker<'_, '_> {
             .iter()
             .find(|(member, _)| member == name)
             .ok_or_else(|| error(span, "selected contextual method lacks its member body"))?;
-        self.contextual_declaration_owner(*body, span)
+        self.contextual_declaration_category(*body, span).map(Some)
     }
 
     // A known declaration with no contextual signature is ordinary data;
@@ -414,6 +458,14 @@ impl Checker<'_, '_> {
         member: DeclarationId,
         span: Span,
     ) -> Result<Option<OwnerId>, Error> {
+        Ok(self.contextual_declaration_category(member, span)?.owner())
+    }
+
+    fn contextual_declaration_category(
+        &self,
+        member: DeclarationId,
+        span: Span,
+    ) -> Result<MethodCategory, Error> {
         let owner = self
             .package
             .owners()
@@ -422,9 +474,15 @@ impl Checker<'_, '_> {
                     .then_some(owner)
             })
             .ok_or_else(|| error(span, "contextual method declaration is unavailable"))?;
-        Ok((self.is_code_generator(owner)
-            || self.is_pattern_generator(owner)
-            || self.is_data_consumer(owner))
-        .then_some(owner))
+        Ok(
+            if self.is_code_generator(owner)
+                || self.is_pattern_generator(owner)
+                || self.is_data_consumer(owner)
+            {
+                MethodCategory::Contextual(owner)
+            } else {
+                MethodCategory::Ordinary
+            },
+        )
     }
 }

@@ -1509,6 +1509,36 @@ impl Checker<'_, '_> {
             if self.type_input_bindings.contains_key(&local(*id)))
     }
 
+    fn is_computed_method_subject(value: &Expr<'_>) -> bool {
+        matches!(
+            value.kind,
+            H::NFApplication(..)
+                | H::Projection(..)
+                | H::Block(_)
+                | H::If(..)
+                | H::When(_)
+                | H::Match(..)
+                | H::Application(..)
+                | H::ExtendedApplication(..)
+        )
+    }
+
+    // Ordinary calls and contextual classification must observe the same
+    // receiver domain before considering methods of the represented Type.
+    // This does not evaluate the receiver or establish a method's applicability.
+    pub(super) fn computed_type_receiver_domain(
+        &mut self,
+        value: &Expr<'_>,
+    ) -> Result<Option<Term>, Error> {
+        if Self::is_computed_method_subject(value)
+            && self.local_field_domain(value)? == Some(p(P::Type))
+        {
+            Ok(Some(p(P::Type)))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub(super) fn static_method(
         &mut self,
         value: &Expr<'_>,
@@ -2291,31 +2321,14 @@ impl Checker<'_, '_> {
         // A projected associated Type is a static subject, even though the
         // syntax-only type-head predicate cannot classify its member type.
         // Resolve it before treating the Type value as a runtime receiver.
-        let computed_subject = |kind: &H<'_>| {
-            matches!(
-                kind,
-                H::NFApplication(..)
-                    | H::Projection(..)
-                    | H::Block(_)
-                    | H::If(..)
-                    | H::When(_)
-                    | H::Match(..)
-                    | H::Application(..)
-                    | H::ExtendedApplication(..)
-            )
-        };
         let projected_subject = match &view.kind {
-            H::Cast(base, _) => computed_subject(&base.kind),
-            kind => computed_subject(kind),
+            H::Cast(base, _) => Self::is_computed_method_subject(base),
+            _ => Self::is_computed_method_subject(view),
         };
         // A computed Type receiver can select a method from its known domain
         // without evaluating its identity. Retain the expression for ordinary
         // call preparation, including invocation-time inputs and side effects.
-        let mut domain_method = if projected_subject
-            && !matches!(view.kind, H::Cast(..))
-            && self.local_field_domain(view)? == Some(p(P::Type))
-        {
-            let domain = p(P::Type);
+        let mut domain_method = if let Some(domain) = self.computed_type_receiver_domain(view)? {
             let interface =
                 self.context_member_interface(&domain, name.name.as_str(), expr.span)?;
             self.selected_method(domain, interface, name.name.as_str(), expr.span)?

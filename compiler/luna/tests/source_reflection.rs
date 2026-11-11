@@ -2,6 +2,9 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+#[path = "support/sysroot_execution.rs"]
+#[allow(dead_code)]
+mod sysroot;
 use comptime_interpretor::Value;
 
 fn compile(source: &str) -> Result<nir::program::Package, String> {
@@ -750,6 +753,115 @@ fn ordered_field_objects_keep_receiver_admission_and_recover_after_failure() {
         assert_eq!(
             vm.invoke(support::id(&package, "good"), vec![]).unwrap(),
             Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn sysroot_reflection_uses_receiver_domains_without_unfolding_type_identity() {
+    let package = sysroot::compile(
+        "struct Row { field: bool }
+        pure comptime fn Identity<T> -> Type { T }
+        struct Counter { calls: Integer }
+        impl Counter {
+            comptime fn Selected(self) -> Type {
+                self.calls = self.calls + 1;
+                Row
+            }
+        }
+        comptime fn good() -> bool {
+            let counter = Counter { calls: 0 };
+            let a = counter.Selected().struct_fields();
+            let b = (do { counter.Selected() }).struct_fields();
+            let c = (if true { counter.Selected() } else { bool }).struct_fields();
+            counter.calls == 3 and a.length() == 1 and b.length() == 1
+                and c.length() == 1 and (a.key(0) matches .field?)
+                and (c.value<Type>(0) match { value? => value == bool, null => false, })
+        }
+        comptime fn bad() -> meta.Object { Identity<Row>.struct_fields() }",
+    )
+    .unwrap();
+    let context = elaboration::ptc::Context::from_package(&package).unwrap();
+    let queries =
+        elaboration::materialization::SourceInvocationQueries::new(&package, &context, &[]);
+    let solver = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
+        queries.check(predicate, Default::default(), fuel)
+    };
+    let methods = |callee: &nir::program::Expr, fuel: &mut u64| queries.resolve(callee, fuel);
+    let associated = |access: &nir::program::Expr, fuel: &mut u64| queries.associated(access, fuel);
+    for tree in [false, true] {
+        let budget = comptime_interpretor::Budget::default();
+        let mut vm = if tree {
+            comptime_interpretor::Interpreter::for_comptime_tree(&package, budget)
+        } else {
+            comptime_interpretor::Interpreter::for_comptime(&package, budget)
+        }
+        .unwrap()
+        .with_budgeted_type_solver(&solver)
+        .with_method_resolver(&methods)
+        .with_associated_resolver(&associated);
+        for name in ["good", "bad", "good"] {
+            let before = support::calls(&package, &vm).len();
+            let result = vm.invoke(support::id(&package, name), vec![]);
+            if name != "good" {
+                assert_eq!(
+                    result.unwrap_err().kind,
+                    comptime_interpretor::ErrorKind::Type,
+                    "tree={tree}"
+                );
+            } else {
+                assert_eq!(result.unwrap(), Value::Bool(true), "tree={tree}");
+            }
+            assert_eq!(
+                support::calls(&package, &vm)[before..]
+                    .iter()
+                    .filter(|name| *name == "Selected")
+                    .count(),
+                if name == "good" { 3 } else { 0 },
+                "{name}: tree={tree}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "enum constructor probing demands a live NF receiver before ordinary method routing"]
+fn computed_normal_form_receiver_keeps_live_clause_inputs() {
+    let package = sysroot::compile(
+        "struct Row { field: bool }
+        pure comptime fn Identity<T> -> Type { T }
+        struct Counter { calls: Integer }
+        impl Counter {
+            comptime fn Selected(self) -> Type {
+                self.calls = self.calls + 1;
+                Row
+            }
+        }
+        comptime fn bad_computed() -> meta.Object {
+            let counter = Counter { calls: 0 };
+            Identity<counter.Selected()>.struct_fields()
+        }",
+    )
+    .unwrap();
+    for tree in [false, true] {
+        let budget = comptime_interpretor::Budget::default();
+        let mut vm = if tree {
+            comptime_interpretor::Interpreter::for_comptime_tree(&package, budget)
+        } else {
+            comptime_interpretor::Interpreter::for_comptime(&package, budget)
+        }
+        .unwrap();
+        let failure = vm
+            .invoke(support::id(&package, "bad_computed"), vec![])
+            .unwrap_err();
+        assert_eq!(failure.kind, comptime_interpretor::ErrorKind::Type);
+        assert_eq!(
+            support::calls(&package, &vm)
+                .iter()
+                .filter(|name| *name == "Selected")
+                .count(),
+            1,
+            "tree={tree}"
         );
     }
 }

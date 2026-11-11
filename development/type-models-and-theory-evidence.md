@@ -225,7 +225,9 @@ TypeContractUnresolved。据此把 source proof 服务贯通到 publisher，而�
 - 对基线 `6d267e8f` 还原本批拥有的源码后，以相同 source_reflection 命令复测：
   `/tmp/luna-tools-wnx6leq7/result.json` 退出 101，同样 15 项通过、同样 2 项失败，
   位置与诊断一致。随后逐字节恢复本批源码；作者已有修改未纳入此基线切换。
-  这些失败是仍待处理的前端分类缺口，不计作本批通过证据。
+  这些失败在该批次仍是前端分类缺口，不计作本批通过证据；后续已通过
+  [统一计算型接收者的类别观察](values-staging-and-publication.md#计算型-type-接收者的类别观察)
+  修复，未改变 NF 身份或候选资格规则。
 
 ### Source method identity 与可执行契约分离
 
