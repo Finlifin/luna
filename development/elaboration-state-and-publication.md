@@ -322,6 +322,54 @@ generator 签名及 required 参数供应仍有各自的局部操作，没有据
 未运行全 workspace 或性能基准；作者原有资源检查改动仍在工作区，以上不是纯 HEAD
 验收。正式 docs、formatter 和其他已有修改未纳入本次交付。
 
+### 已接入：探测、提交与 quote 产物保留分开
+
+`checking_attempts` 用 `Commit / Probe / RetainCode` 代替含糊的 `commit: bool`。
+普通参数和回调检查在成功后提交；分支、投影、namespace 和生成器提示只取观察结果；
+quote 主体成功后保留生成的代码及构造效果，但不向外泄漏其词法绑定与控制证据。
+失败尝试恢复输入事实、局部检查环境、pattern pending、quote hole 和生成器存储；
+成功 Probe 也恢复这些内容。预算不因恢复而退还。
+
+此前 `checking_attempt(false)` 只恢复局部表，却保留了生成器接收者的实际存储写入。
+真实 sysroot 用例中，`wrap(if true { ~<state.build()> } else { null })` 为发现可选
+类型而探测分支，随后再正式检查；`build` 向 List 追加的结果因此被重复保留。
+`cmtt_storage_world` 的新用例在 `855ba17a` 生产基线上返回 `Bool(false)`，而语义
+要求单次 splice 的构造效果只提交一次。另一个用例覆盖 splice 后尚未确定的 null
+尾表达式，以及其他实参提供上下文后的重试。
+
+恢复对象同时保留 `generator_data` 的检查快照和 `generator_cells` 的原始身份。
+`OwnedGraphCheckpoint::capture_retained` 是内部回退操作：保存现有表示和 ownership
+树，不执行用户代码、不调用 Copy/Clone、不授予新的类型／phase／transport 准入。
+它按实际 Clone 复制的结构预付计费，保留 Arc 代码、闭包、列表及存储身份；图遍历
+另外找到这些载荷内的 owned cells。runtime 指针的借用目标不属于回退对象。
+恢复时先取得所有 cell 锁，再原子安装保存的内容与部分移动责任状态。
+
+原 VM `checkpoint_owned_graph` 继续使用受验证的表示观察入口；两种入口共用图发现、
+ownership 保存和恢复机制。特别地，无声明目录的内部回退可以保存一个既有 nominal
+载荷，但这不使它通过 VM 的类型或存储准入。不能把该检查点当作冻结值、公开反射或
+跨世界传输证书。
+
+初版在每次探测前重建完整声明目录，引入了真实预算回归；已改为上述与保存表示规模
+相关的内部回退。完整检查器快照、外部不纯效果事务以及可恢复 HIR 区域仍未实现；
+不能将内部存储恢复描述成任意用户副作用都可回滚。普通调用的两个待定 Type 域正例
+仍保持原 ignore，后续须保存源检查进度并接收实际生产者结果。
+
+验证工作目录 `/home/fin/luna`，全部通过 `development/check.py` 执行：
+
+- `-p luna --test cmtt_storage_world optional_branch_probes_do_not_repeat_generator_receiver_effects -- --exact`：
+  `/tmp/luna-tools-kcao2180/result.json` 退出 101，在未改生产代码时得到 `Bool(false)`；
+  修复后 `/tmp/luna-tools-ew2bbrft/result.json` 退出 0。
+- 初版相关回归 `/tmp/luna-tools-nexypetb/result.json` 退出 101：
+  `transported_runtime_methods_preserve_clause_domains_and_nested_storage` 报
+  `generator storage world capture exhausted: Steps`。保留预算和预期，修复表示保存
+  的职责后该用例恢复；未将此回归归咎于基线。
+- `-p comptime_interpretor --lib memory:: --no-fail-fast`：
+  `/tmp/luna-tools-k33n_o5p/result.json` 退出 0，27 项通过。新增检查覆盖别名、
+  部分移动责任、借用目标、所有预算截断、深度限制及不产生类型准入证据。
+- `-p comptime_interpretor -p elaboration -p luna --lib --test cmtt_storage_world --test cmtt --test cmtt_methods --test ordinary_clause_collectors --test ordinary_callable_types --no-fail-fast`：
+  `/tmp/luna-tools-gwnms93_/result.json` 退出 0，1,679 项通过、2 项既有 ignored。
+  原 VM 验证、CMTT 方法与真实 sysroot 源码路径一起检查，没有运行全 workspace。
+
 ### 已接入：已知泛型域与未供应输入分开
 
 `03908c64` 后追踪上述错误限定类型失败，实际拒绝条件是把 `!bool bool` 与

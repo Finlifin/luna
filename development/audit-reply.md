@@ -200,6 +200,16 @@ CMTT 存储服务另修复了入口快照使用空声明世界的问题：真实
 [输入事实的回滚与词法边界](elaboration-state-and-publication.md#已接入输入事实有共同的回滚与词法边界)。
 这不是已经完成源码检查 Region，也没有把所有 Checker 字段重新打包成快照。
 
+继续核对普通调用的检查边界时，复现了成功探测仍提交生成器存储写入的问题。
+`checking_attempts` 现明确区分提交、只探测与保留 quote 产物：失败／探测恢复原有
+cell 身份、内容和 ownership，成功 quote 仍保留构造效果。内部回退不重新执行
+整包域准入；VM 的受验证观察入口仍保留。初版完整声明目录快照导致一个既有方法
+传输用例耗尽预算，已按保存的表示规模处理，而非提高额度或跳过既有源值检查。
+具体职责与剩余边界见
+[探测与产物保留](elaboration-state-and-publication.md#已接入探测提交与-quote-产物保留分开)。
+最终相关检查 `/tmp/luna-tools-gwnms93_/result.json` 退出 0，1,679 项通过、
+2 项既有 ignored；普通调用的待定 Type 域仍未接通。
+
 这几步是 M1–M3 的前置清理，不是整条恢复架构完成。后续主干仍是
 [待定域的普通调用](refactoring-plan.md#下一条纵向交付待定域的普通调用)，并用真实
 sysroot 的 meta.List／builder／comptime 方法作消费者。不能继续只在已知域的静态

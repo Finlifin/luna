@@ -1002,7 +1002,9 @@ impl Checker<'_, '_> {
         }
         match &value.kind {
             H::Lit(_) => Ok(self
-                .checking_attempt(false, false, |this| this.expr(value, None))?
+                .checking_attempt(value.span, false, CheckingDisposition::Probe, |this| {
+                    this.expr(value, None)
+                })?
                 .map(|checked| checked.ty)),
             H::Tuple(fields) => {
                 let mut types = Vec::with_capacity(fields.len());
@@ -1292,7 +1294,9 @@ impl Checker<'_, '_> {
             return Ok(None);
         }
         let checked =
-            self.checking_attempt(false, false, |this| this.expr(argument, Some(domain)))?;
+            self.checking_attempt(argument.span, false, CheckingDisposition::Probe, |this| {
+                this.expr(argument, Some(domain))
+            })?;
         let mut budget = comptime_runtime::Budget {
             steps: self.required_steps as usize,
             max_limbs: 4096,

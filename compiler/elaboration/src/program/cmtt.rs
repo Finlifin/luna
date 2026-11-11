@@ -421,15 +421,20 @@ impl Checker<'_, '_> {
             // Definition checking admits pattern interface evidence;
             // the quoted body is retained only after actual invocation.
             checker.pattern_quote_pending = Some(false);
-            checker.checking_attempt(true, false, |checker| {
-                if interface.is_none()
-                    && let Some(context) = result_context
-                {
-                    checker.input_context_expression(body, context)
-                } else {
-                    checker.expr(body, interface.map(|interface| &interface.result))
-                }
-            })
+            checker.checking_attempt(
+                value.span,
+                true,
+                CheckingDisposition::RetainCode,
+                |checker| {
+                    if interface.is_none()
+                        && let Some(context) = result_context
+                    {
+                        checker.input_context_expression(body, context)
+                    } else {
+                        checker.expr(body, interface.map(|interface| &interface.result))
+                    }
+                },
+            )
         });
         let body = checked?.ok_or_else(|| {
             error(

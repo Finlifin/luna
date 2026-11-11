@@ -716,9 +716,12 @@ impl Checker<'_, '_> {
                         });
                         continue;
                     }
-                    match self.checking_attempt(false, true, |checker| {
-                        checker.expr(pending.input, None)
-                    })? {
+                    match self.checking_attempt(
+                        pending.input.span,
+                        false,
+                        CheckingDisposition::Commit,
+                        |checker| checker.expr(pending.input, None),
+                    )? {
                         Some(value) => value,
                         None => match self.dependent_normal_argument(pending.input, 0)? {
                             argument @ (n::NormalFormArgument::Integer { .. }

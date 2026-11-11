@@ -29,7 +29,9 @@ mod bit_indices;
 mod block_regions;
 pub mod build_context;
 mod builtin_bindings;
+mod checking_attempts;
 mod clause_inputs;
+use checking_attempts::Disposition as CheckingDisposition;
 mod cmtt;
 mod constants;
 mod declaration_inputs;
@@ -5707,82 +5709,35 @@ impl Checker<'_, '_> {
         allow_defaults: bool,
         input_context: Option<&crate::calls::InputContext>,
     ) -> Result<Option<n::Expr>, Error> {
-        self.checking_attempt(allow_defaults, true, |checker| {
-            if expected.is_none()
-                && matches!(
-                    input_context,
-                    Some(
-                        crate::calls::InputContext::Optional(_)
-                            | crate::calls::InputContext::Tuple(_)
-                            | crate::calls::InputContext::NormalTuple { .. }
-                            | crate::calls::InputContext::Record(_)
-                            | crate::calls::InputContext::Nominal { .. }
-                            | crate::calls::InputContext::Callable(_)
+        self.checking_attempt(
+            input.span,
+            allow_defaults,
+            CheckingDisposition::Commit,
+            |checker| {
+                if expected.is_none()
+                    && matches!(
+                        input_context,
+                        Some(
+                            crate::calls::InputContext::Optional(_)
+                                | crate::calls::InputContext::Tuple(_)
+                                | crate::calls::InputContext::NormalTuple { .. }
+                                | crate::calls::InputContext::Record(_)
+                                | crate::calls::InputContext::Nominal { .. }
+                                | crate::calls::InputContext::Callable(_)
+                        )
                     )
-                )
-            {
-                match input_context {
-                    Some(input_context) => checker.input_context_expression(input, input_context),
-                    None => checker.expr_context(input, expected, partial),
+                {
+                    match input_context {
+                        Some(input_context) => {
+                            checker.input_context_expression(input, input_context)
+                        }
+                        None => checker.expr_context(input, expected, partial),
+                    }
+                } else {
+                    checker.expr_context(input, expected, partial)
                 }
-            } else {
-                checker.expr_context(input, expected, partial)
-            }
-        })
-    }
-
-    /// Speculative branches share the argument transaction but never publish
-    /// their local bindings, captures or return evidence, even on success.
-    fn checking_attempt(
-        &mut self,
-        allow_defaults: bool,
-        commit: bool,
-        check: impl FnOnce(&mut Self) -> Result<n::Expr, Error>,
-    ) -> Result<Option<n::Expr>, Error> {
-        let saved = (
-            self.locals.clone(),
-            self.code_values.clone(),
-            self.pattern_codes.clone(),
-            self.aliases.clone(),
-            self.control.clone(),
-            self.captures.clone(),
-            self.immutable.clone(),
-            self.context.clone(),
-            self.field_defaults.clone(),
-            self.active_defaults.clone(),
-            self.input_facts.clone(),
-        );
-        let pending_len = self.pending_type_uses.as_ref().map(Vec::len);
-        let old_defaults = std::mem::replace(&mut self.numeric_defaults, allow_defaults);
-        let pattern_pending = self.pattern_quote_pending;
-        let attempt = check(self);
-        if attempt.is_err() {
-            self.pattern_quote_pending = pattern_pending;
-        }
-        self.numeric_defaults = old_defaults;
-        if !commit || attempt.is_err() {
-            if let (Some(pending), Some(len)) = (&mut self.pending_type_uses, pending_len) {
-                pending.truncate(len);
-            }
-            (
-                self.locals,
-                self.code_values,
-                self.pattern_codes,
-                self.aliases,
-                self.control,
-                self.captures,
-                self.immutable,
-                self.context,
-                self.field_defaults,
-                self.active_defaults,
-                self.input_facts,
-            ) = saved;
-        }
-        match attempt {
-            Ok(value) => Ok(Some(value)),
-            Err(failure) if failure.needs_context => Ok(None),
-            Err(failure) => Err(failure),
-        }
+            },
+        )
     }
 
     fn optional_branch_context(
@@ -5814,7 +5769,9 @@ impl Checker<'_, '_> {
                     })?;
                 let probing = std::mem::replace(&mut self.probing_optional_branch, true);
                 let attempt =
-                    self.checking_attempt(defaults, false, |checker| check(checker, index));
+                    self.checking_attempt(span, defaults, CheckingDisposition::Probe, |checker| {
+                        check(checker, index)
+                    });
                 self.probing_optional_branch = probing;
                 if let Some(value) = attempt? {
                     if !is_never(&value.ty)
@@ -7020,17 +6977,23 @@ impl Checker<'_, '_> {
             let result_context = partial.and_then(|context| context.result_context.as_deref());
             let mut body = if result_type.is_none() {
                 let mut return_hint = None;
-                let attempted = self.checking_attempt(self.numeric_defaults, true, |checker| {
-                    let checked = checker.computation_body_with_input(body, None, result_context);
-                    if matches!(&checked, Err(failure) if failure.needs_context) {
-                        return_hint = checker
-                            .control
-                            .return_observations
-                            .as_ref()
-                            .and_then(|returns| returns.iter().find(|ty| !is_never(ty)).cloned());
-                    }
-                    checked
-                })?;
+                let attempted =
+                    self.checking_attempt(
+                        body.span,
+                        self.numeric_defaults,
+                        CheckingDisposition::Commit,
+                        |checker| {
+                            let checked =
+                                checker.computation_body_with_input(body, None, result_context);
+                            if matches!(&checked, Err(failure) if failure.needs_context) {
+                                return_hint =
+                                    checker.control.return_observations.as_ref().and_then(
+                                        |returns| returns.iter().find(|ty| !is_never(ty)).cloned(),
+                                    );
+                            }
+                            checked
+                        },
+                    )?;
                 match attempted {
                     Some(body) => body,
                     None => {

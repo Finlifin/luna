@@ -1,6 +1,7 @@
 //! Interpreter storage identity. Pointers retain weak targets, not owners. The
 //! source memory verifier remains responsible for proving accesses statically.
 use super::{ErrorKind, Value};
+mod checkpoint;
 use nir::{DeclarationId, Term};
 use std::{
     collections::BTreeMap,
@@ -753,47 +754,16 @@ impl super::Interpreter<'_> {
         &mut self,
         roots: &[Value],
     ) -> Result<OwnedGraphCheckpoint, super::Error> {
-        let mut cells = BTreeMap::new();
-        for root in roots {
-            root.visit_owned_graph(&mut self.budget.steps, &mut |value, _| {
-                if let Value::Storage(storage) = value {
-                    cells
-                        .entry(Arc::as_ptr(&storage.0) as usize)
-                        .or_insert_with(|| storage.clone());
-                }
-                Ok(())
-            })
-            .map_err(|kind| self.failure(kind, None))?;
-        }
-        let mut entries = Vec::new();
-        for storage in cells.into_values() {
-            // Reserve restoration work before storing each snapshot. Even an
-            // exhausted invocation can subsequently restore its owned state.
-            self.charge_preparation(2)?;
-            let responsibility = storage
-                .1
-                .try_lock()
-                .map_err(|_| self.failure(ErrorKind::InvalidPointer, None))?;
-            let mut pending = vec![(&*responsibility, 0usize)];
-            while let Some((node, depth)) = pending.pop() {
-                self.tick(None)?;
-                if depth >= 128 {
-                    return Err(self.failure(ErrorKind::DepthExhausted, None));
-                }
-                self.charge_preparation(node.children.len())?;
-                pending.extend(node.children.values().map(|child| (child, depth + 1)));
-            }
-            let value = storage
-                .0
-                .try_lock()
-                .map_err(|_| self.failure(ErrorKind::InvalidPointer, None))?;
-            let saved = self.checkpoint_representation(
-                &value,
-                nir::program::SourceRange { start: 0, end: 0 },
-            )?;
-            entries.push((storage.clone(), saved, responsibility.clone()));
-        }
-        Ok(OwnedGraphCheckpoint { entries })
+        let mut fuel = std::mem::take(&mut self.budget.steps);
+        let result = checkpoint::capture(roots, &mut fuel, |value, fuel| {
+            self.budget.steps = *fuel;
+            let copied = self
+                .checkpoint_representation(value, nir::program::SourceRange { start: 0, end: 0 });
+            *fuel = self.budget.steps;
+            copied.map_err(|failure| failure.kind)
+        });
+        self.budget.steps = fuel;
+        result.map_err(|kind| self.failure(kind, None))
     }
 }
 

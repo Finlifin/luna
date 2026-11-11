@@ -122,7 +122,9 @@ impl Checker<'_, '_> {
                 // not demand a comptime invocation. A Type result still goes
                 // through required evaluation when its identity is needed.
                 call_domain = self
-                    .checking_attempt(true, false, |checker| checker.expr(root, None))?
+                    .checking_attempt(root.span, true, CheckingDisposition::Probe, |checker| {
+                        checker.expr(root, None)
+                    })?
                     .map(|checked| checked.ty);
                 call_domain.as_ref()
             }
@@ -338,7 +340,9 @@ impl Checker<'_, '_> {
         // required invocation or trying to capture unexecuted local values.
         // The ordinary projection retains the producer and its effects.
         Ok(self
-            .checking_attempt(true, false, |checker| checker.expr(base, None))?
+            .checking_attempt(base.span, true, CheckingDisposition::Probe, |checker| {
+                checker.expr(base, None)
+            })?
             .map(|checked| checked.ty))
     }
 

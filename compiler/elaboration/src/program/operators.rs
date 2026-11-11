@@ -378,9 +378,10 @@ impl Checker<'_, '_> {
             return self.logical_expression_step(expr, expected, None);
         }
         let first = pending.pop().unwrap();
-        let attempted = self.checking_attempt(false, true, |checker| {
-            checker.logical_expression_step(first, expected, None)
-        })?;
+        let attempted =
+            self.checking_attempt(first.span, false, CheckingDisposition::Commit, |checker| {
+                checker.logical_expression_step(first, expected, None)
+            })?;
         let Some(mut checked) = attempted else {
             return self.logical_expression_step(expr, expected, None);
         };

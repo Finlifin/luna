@@ -99,9 +99,10 @@ impl Checker<'_, '_> {
         base: &Expr<'_>,
         reversed_names: &[String],
     ) -> Result<Option<Term>, Error> {
-        let Some(checked) = self.checking_attempt(true, false, |checker| {
-            checker.with_staged_input(true, |checker| checker.expr(base, Some(&p(P::Type))))
-        })?
+        let Some(checked) =
+            self.checking_attempt(base.span, true, CheckingDisposition::Probe, |checker| {
+                checker.with_staged_input(true, |checker| checker.expr(base, Some(&p(P::Type))))
+            })?
         else {
             return Ok(None);
         };
