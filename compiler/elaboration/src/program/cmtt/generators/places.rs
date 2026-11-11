@@ -6,15 +6,41 @@ use super::*;
 impl Checker<'_, '_> {
     /// Storage observations need the same nominal and representation world as
     /// invocation. An empty package cannot validate captured payload domains.
-    pub(super) fn generator_storage_world(&self) -> n::Package {
-        n::Package {
+    pub(super) fn generator_storage_world(&mut self, span: Span) -> Result<n::Package, Error> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let checked = (|| {
+            nir::copy_budget::charge_representation_metadata(
+                self.structs.values(),
+                self.newtypes.values(),
+                self.enums.values(),
+                &mut fuel,
+            )?;
+            for (owner, parameters) in &self.normal_parameters {
+                nir::copy_budget::charge_normal_form_payload(
+                    parameters.iter().map(|(_, _, domain)| domain),
+                    self.requirements.get(owner).map_or(&[], Vec::as_slice),
+                    self.capabilities.get(owner).map_or(&[], Vec::as_slice),
+                    &mut fuel,
+                )?;
+            }
+            Ok::<_, nir::copy_budget::CopyBudgetExhausted>(())
+        })();
+        self.required_steps -= (before - fuel) as u64;
+        checked.map_err(|failure| {
+            error(
+                span,
+                format!("generator storage world capture exhausted: {failure:?}"),
+            )
+        })?;
+        Ok(n::Package {
             target: self.target,
             normal_forms: self.normal_form_metadata(),
             structs: self.structs.values().cloned().collect(),
             newtypes: self.newtypes.values().cloned().collect(),
             enums: self.enums.values().cloned().collect(),
             ..Default::default()
-        }
+        })
     }
 
     pub(in crate::program) fn read_generator_cell(
@@ -22,7 +48,7 @@ impl Checker<'_, '_> {
         cell: &GeneratorCell,
         span: Span,
     ) -> Result<comptime_interpretor::Value, Error> {
-        let package = self.generator_storage_world();
+        let package = self.generator_storage_world(span)?;
         storage_observation::with_storage_vm(
             &package,
             &mut self.required_steps,
@@ -41,7 +67,7 @@ impl Checker<'_, '_> {
         roots: &[comptime_interpretor::Value],
         span: Span,
     ) -> Result<comptime_interpretor::OwnedGraphCheckpoint, Error> {
-        let package = self.generator_storage_world();
+        let package = self.generator_storage_world(span)?;
         storage_observation::with_storage_vm(
             &package,
             &mut self.required_steps,

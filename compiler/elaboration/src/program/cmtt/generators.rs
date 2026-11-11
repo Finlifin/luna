@@ -1396,7 +1396,7 @@ impl Checker<'_, '_> {
                 entry.insert(*id, (value.clone(), cell));
             }
             if entry.values().any(|(_, cell)| cell.is_some()) {
-                let package = self.generator_storage_world();
+                let package = self.generator_storage_world(span)?;
                 // One private batch observes the same declaration world and
                 // allowance. No entry is returned until every copy succeeds.
                 storage_observation::with_storage_vm(

@@ -22,6 +22,52 @@ pub fn charge_implementation_metadata(value: &n::Implementation, fuel: &mut usiz
     .implementation(value)
 }
 
+/// Preflight the borrowed nominal part of a representation world. No owned
+/// package or descriptor clone is needed to account for names, contracts,
+/// fields, variants and encodings. This grants no storage or type authority.
+pub fn charge_representation_metadata<'a>(
+    structs: impl IntoIterator<Item = &'a n::Struct>,
+    newtypes: impl IntoIterator<Item = &'a crate::newtypes::Newtype>,
+    enums: impl IntoIterator<Item = &'a n::Enum>,
+    fuel: &mut usize,
+) -> Result {
+    let mut meter = Meter {
+        fuel,
+        follow_shared: false,
+    };
+    meter.width(1)?;
+    for definition in structs {
+        meter.width(1)?;
+        meter.structure(definition)?;
+    }
+    for definition in newtypes {
+        meter.width(1)?;
+        meter.newtype(definition)?;
+    }
+    for definition in enums {
+        meter.width(1)?;
+        meter.enumeration(definition)?;
+    }
+    Ok(())
+}
+
+/// Charge a head assembled from borrowed input domains and predicates before
+/// copying those payloads. Capabilities become ordinary trait predicates in
+/// the resulting head, so both forms use the same structural copy visitor.
+pub fn charge_normal_form_payload<'a>(
+    domains: impl IntoIterator<Item = &'a Term>,
+    predicates: &[n::TypePredicate],
+    capabilities: &[n::TraitRequirement],
+    fuel: &mut usize,
+) -> Result {
+    let mut meter = Meter {
+        fuel,
+        follow_shared: false,
+    };
+    meter.width(1)?;
+    meter.normal_form_payload(domains, predicates, capabilities)
+}
+
 /// Copy a source's owned declaration payloads after a complete preflight. The
 /// selected dispatch table is neither traversed nor copied: it belongs to a
 /// different execution view. This grants no phase, type or resource authority.
@@ -135,24 +181,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         meter.node(Node::Type(signature))?;
     }
     for head in normal_forms {
-        let crate::normal_forms::Head {
-            collector: _,
-            role: _,
-            declaration: _,
-            parameters,
-            requirements,
-        } = head;
-        meter.width(parameters.len())?;
-        for parameter in parameters {
-            let crate::normal_forms::Parameter {
-                declaration: _,
-                binding: _,
-                kind: _,
-                ty,
-            } = parameter;
-            meter.node(Node::Type(ty))?;
-        }
-        meter.contracts(requirements, &[])?;
+        meter.head(head)?;
     }
     for contract in traits {
         meter.interface(contract)?;
@@ -161,41 +190,10 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         meter.implementation(implementation)?;
     }
     for definition in structs {
-        let n::Struct {
-            parameter_types,
-            capabilities,
-            requirements,
-            type_parameters,
-            declaration: _,
-            name,
-            fields,
-        } = definition;
-        meter.width(name.len())?;
-        meter.width(type_parameters.len())?;
-        meter.terms(parameter_types)?;
-        meter.contracts(requirements, capabilities)?;
-        meter.width(fields.len())?;
-        for (name, ty) in fields {
-            meter.width(name.len())?;
-            meter.node(Node::Type(ty))?;
-        }
+        meter.structure(definition)?;
     }
     for definition in newtypes {
-        let crate::newtypes::Newtype {
-            declaration: _,
-            name,
-            type_parameters,
-            parameter_types,
-            capture_count: _,
-            requirements,
-            capabilities,
-            representation,
-        } = definition;
-        meter.width(name.len())?;
-        meter.width(type_parameters.len())?;
-        meter.terms(parameter_types)?;
-        meter.contracts(requirements, capabilities)?;
-        meter.node(Node::Type(representation))?;
+        meter.newtype(definition)?;
     }
     for contract in alias_contracts {
         let crate::type_aliases::Contract {
@@ -275,6 +273,82 @@ impl Meter<'_> {
         for requirement in requirements {
             self.node(Node::Requirement(requirement))?;
         }
+        Ok(())
+    }
+    fn head(&mut self, head: &crate::normal_forms::Head) -> Result {
+        let crate::normal_forms::Head {
+            declaration: _,
+            collector: _,
+            role: _,
+            parameters,
+            requirements,
+        } = head;
+        self.normal_form_payload(
+            parameters.iter().map(|parameter| {
+                let crate::normal_forms::Parameter {
+                    declaration: _,
+                    binding: _,
+                    kind: _,
+                    ty,
+                } = parameter;
+                ty
+            }),
+            requirements,
+            &[],
+        )
+    }
+    fn normal_form_payload<'a>(
+        &mut self,
+        domains: impl IntoIterator<Item = &'a Term>,
+        predicates: &[n::TypePredicate],
+        capabilities: &[n::TraitRequirement],
+    ) -> Result {
+        for domain in domains {
+            self.width(1)?;
+            self.node(Node::Type(domain))?;
+        }
+        // Assembled heads wrap each capability in a Trait predicate. Account
+        // for that additional node before cloning the requirement payload.
+        self.width(capabilities.len())?;
+        self.contracts(predicates, capabilities)
+    }
+    fn structure(&mut self, definition: &n::Struct) -> Result {
+        let n::Struct {
+            parameter_types,
+            capabilities,
+            requirements,
+            type_parameters,
+            declaration: _,
+            name,
+            fields,
+        } = definition;
+        self.width(name.len())?;
+        self.width(type_parameters.len())?;
+        self.terms(parameter_types)?;
+        self.contracts(requirements, capabilities)?;
+        self.width(fields.len())?;
+        for (name, ty) in fields {
+            self.width(name.len())?;
+            self.node(Node::Type(ty))?;
+        }
+        Ok(())
+    }
+    fn newtype(&mut self, definition: &crate::newtypes::Newtype) -> Result {
+        let crate::newtypes::Newtype {
+            declaration: _,
+            name,
+            type_parameters,
+            parameter_types,
+            capture_count: _,
+            requirements,
+            capabilities,
+            representation,
+        } = definition;
+        self.width(name.len())?;
+        self.width(type_parameters.len())?;
+        self.terms(parameter_types)?;
+        self.contracts(requirements, capabilities)?;
+        self.node(Node::Type(representation))?;
         Ok(())
     }
     fn implementation(&mut self, implementation: &n::Implementation) -> Result {

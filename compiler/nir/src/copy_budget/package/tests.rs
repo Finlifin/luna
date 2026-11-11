@@ -371,6 +371,119 @@ fn declaration_capture_charges_owned_payloads_and_preserves_opaque_data() {
 }
 
 #[test]
+fn borrowed_representation_capture_accounts_for_every_retained_payload() {
+    let mut tested = 0;
+    for (label, package) in packages() {
+        if package.structs.is_empty() && package.newtypes.is_empty() && package.enums.is_empty() {
+            continue;
+        }
+        tested += 1;
+        let charge = |fuel: &mut usize| {
+            charge_representation_metadata(
+                &package.structs,
+                &package.newtypes,
+                &package.enums,
+                fuel,
+            )
+        };
+        assert_eq!(charge(&mut 128), Err(Error::Steps), "{label}");
+        let mut fuel = 100_000;
+        charge(&mut fuel).unwrap();
+        let cost = 100_000 - fuel;
+        assert!(cost > 2048, "{label}");
+        assert_eq!(charge(&mut (cost - 1)), Err(Error::Steps), "{label}");
+        let mut exact = cost;
+        charge(&mut exact).unwrap();
+        assert_eq!(exact, 0, "{label}");
+        // Whole-package capture and the borrowed representation view use the
+        // same rules, including variant encodings and names, without needing
+        // an owned intermediate Package for the latter.
+        let mut whole = cost;
+        assert_eq!(
+            clone_declaration_source(&package, &mut whole).unwrap(),
+            package,
+            "{label}"
+        );
+        assert_eq!(whole, 0, "{label}");
+    }
+    assert!(tested >= 4);
+}
+
+#[test]
+fn assembled_head_capture_charges_domains_and_synthesized_trait_predicates() {
+    let domains = [Term::Tuple(vec![boolean(); 2048])];
+    let predicates = [n::TypePredicate::Equal(boolean(), boolean())];
+    let capabilities = [n::TraitRequirement {
+        subject: boolean(),
+        interface: id(8),
+        interface_arguments: vec![Term::String("argument".repeat(512).into())],
+    }];
+    let charge =
+        |fuel: &mut usize| charge_normal_form_payload(&domains, &predicates, &capabilities, fuel);
+    assert_eq!(charge(&mut 128), Err(Error::Steps));
+    let mut fuel = 100_000;
+    charge(&mut fuel).unwrap();
+    let cost = 100_000 - fuel;
+    let package = n::Package {
+        normal_forms: vec![crate::normal_forms::Head {
+            collector: None,
+            role: Default::default(),
+            declaration: id(1),
+            parameters: vec![crate::normal_forms::Parameter {
+                declaration: id(2),
+                binding: n::LocalId { owner: 1, index: 2 },
+                kind: crate::normal_forms::Kind::Value,
+                ty: domains[0].clone(),
+            }],
+            requirements: predicates
+                .iter()
+                .cloned()
+                .chain(capabilities.iter().cloned().map(n::TypePredicate::Trait))
+                .collect(),
+        }],
+        ..Default::default()
+    };
+    let mut whole = cost + 1; // The Package node is separate from the head.
+    assert_eq!(
+        clone_declaration_source(&package, &mut whole).unwrap(),
+        package
+    );
+    assert_eq!(whole, 0);
+    assert_eq!(charge(&mut (cost - 1)), Err(Error::Steps));
+    let mut exact = cost;
+    charge(&mut exact).unwrap();
+    assert_eq!(exact, 0);
+}
+
+#[test]
+fn representation_capture_keeps_depth_failures_distinct_from_steps() {
+    let mut deep = boolean();
+    for _ in 0..200 {
+        deep = Term::Optional(Box::new(deep));
+    }
+    let mut definition = crate::newtypes::Newtype {
+        declaration: id(1),
+        name: "Wrapped".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        capture_count: 0,
+        requirements: vec![],
+        capabilities: vec![],
+        representation: deep,
+    };
+    let mut fuel = 100_000;
+    assert_eq!(
+        charge_representation_metadata([], [&definition], [], &mut fuel),
+        Err(Error::Depth)
+    );
+    assert!(fuel > 0 && fuel < 100_000);
+    // Replacing the excessive shape allows a fresh capture without inheriting
+    // any partially prepared metadata or an invalid cached rejection.
+    definition.representation = boolean();
+    charge_representation_metadata([], [&definition], [], &mut fuel).unwrap();
+}
+
+#[test]
 fn selected_dispatch_is_not_copied_or_treated_as_source_authority() {
     let mut package = n::Package::default();
     package.dispatch_instances.push(n::DispatchInstance {

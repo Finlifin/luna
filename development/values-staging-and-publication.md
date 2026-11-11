@@ -1596,16 +1596,22 @@ CMTT 的存储读取、可变图检查点与 `old` 入口快照共用一处 VM �
 
 这只统一既有 CMTT 存储操作的服务入口。它不是整个 Checker 的事务，不允许通过
 回滚 cell 撤销外部副作用，也不把 quote 的有效构造误当作可以丢弃的候选试探。
-当前仍需构建临时表示世界，元数据捕获的完整计费与稳定世界共享尚未迁移；一般 HIR
-区域的恢复及统一 ContextualExpr 仍是独立缺口。
+临时表示世界现在先借用描述符完成复制预检，再构造拥有数据的 Package。名义字段、
+名称、类型载荷、约束、变体及编码与完整声明捕获共用 NIR 的计量规则；NF 输入域和
+合并成 Trait predicate 的 capability 也在复制前收费。拒绝时保留 Steps／Depth 原因，
+已经消耗的额度不退回，且不会将部分世界交给 VM。计量不展开 NF，不授予新存储权限。
+当前仍需按次构建临时表示世界，尚未共享稳定版本；一般 HIR 区域的恢复及统一
+ContextualExpr 仍是独立缺口。
 
 检查工作目录 `/home/fin/luna`：
-`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test cmtt_storage_world --test cmtt_methods --test cmtt --test comptime_object_storage --test library_meta_objects --test comptime_memory --no-fail-fast`
-退出 0，1,098 项通过，证据 `/tmp/luna-tools-a6j8t_jo/result.json`；结果锚点为同目录
+`python3 -B development/check.py --timeout 900 -- test -p nir --lib -p elaboration -p luna --test cmtt_storage_world --test cmtt --test cmtt_methods --test library_meta_objects --test builder_invocations --no-fail-fast`
+退出 0，1,220 项通过，证据 `/tmp/luna-tools-it58a2wj/result.json`；结果锚点为同目录
 `stdout.log` 中 `test result:`。新增单元检查覆盖准备失败后耗尽保留额度、普通错误的
 余量结算、unwind、不丢失活动 cell 身份及旧值复制的独立存储。源码检查使用真实
 sysroot，包含 List／Object 接收者更新、旧值与当前值分离及错误后置条件拒绝。
-四个修改的 Rust 文件定向格式检查通过，证据 `/tmp/luna-tools-3ezfkpe4/result.json`。
+元数据复制检查另覆盖宽载荷、枚举编码、NF 约束、精确额度、额度不足及深度失败后
+重试，并核对借用视图与完整声明捕获的费用一致。五个修改的 Rust 文件定向格式
+检查通过，证据 `/tmp/luna-tools-85649xnt/result.json`。
 未运行全 workspace 或性能基准；保留工作区原有资源检查修改，并非纯 HEAD 验收。
 
 ### 方法分类与公共来源一致
