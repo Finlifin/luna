@@ -16,6 +16,11 @@ fn nested_expression_child() {
         _ => Emit::Nir,
     };
     let source = match case.as_str() {
+        "blocks" => format!(
+            "fn run()->bool {{{}true{}}}",
+            "do {".repeat(32),
+            "}".repeat(32)
+        ),
         "not" => format!(
             "fn run()->bool {{{}true{}}}",
             "not (".repeat(32),
@@ -128,6 +133,7 @@ fn nested_expression_child() {
 #[test]
 fn nested_scalar_operators_survive_frontend_and_execution() {
     for case in [
+        "blocks",
         "not",
         "and",
         "or",

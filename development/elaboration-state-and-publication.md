@@ -996,6 +996,51 @@ LocalId 到寄存器的映射。请求是 invocation 内部数据，不是缓存
 这些是保留既有 moves/effects.rs 修改的工作区结果；未运行全 workspace、性能或
 源区域 Type 等待的 ignored 用例，没有修改它们的语义预期。
 
+#### 已接入：普通块的显式子检查驱动
+
+普通 `block_context` 现由 `block_regions/driver.rs` 的 Frame 栈推进。Frame 拥有
+Progress、词法父环境和块表达式的交付边界；语句完成和尾值完成是不同后继，子结果
+只交回当前等待它的父帧。相邻嵌套普通块不再递归调用整个表达式分派器。每次进入帧
+消耗共享检查预算，空块和只有尾值的嵌套也不能无界分配帧。
+
+尾值规则分为准备、检查子表达式和消费受检结果，仍共用原先的不可达尾值检查、部分
+输入上下文、隐式错误成功值、结果域要求和绑定收尾。普通块把完整目标域传给尾值，
+不再走可选／错误结果的值级探测；这两类适配仍由真正产生值的子表达式负责。
+unsafe 和部分结构输入的专用规则仍沿既有入口，不按普通块的形状绕过它们。
+
+嵌套块的 callee 位置和 effect 结果交付随帧保留。正常完成先收尾本块绑定、恢复父
+词法环境，再向父规则交付；诊断失败逐层退出仍活跃的帧，保留外层写入造成的事实
+失效，不把词法退出变成事务回滚。Frame、交付边界和尾值请求均有 S-expression dump，
+父作用域与受检前缀分别显示。
+
+这是同一同步检查器内部的实际 continuation 接线，不是完整 CheckRegion：目标上下文
+仍借用本次调用，当前活动词法状态仍装在 Checker 中，非块子规则仍通过原同步入口
+完成。它不提供外部等待、取消、源码 activation 或 VM 片段执行许可。后续必须将这套
+帧连同活动上下文交给区域所有者，并迁移调用检查的后继，不能把有帧栈本身当作两个
+动态调用正例已完成。旧 NormalFormArgument 的 contextual 块仍复用 Progress／绑定
+收尾，但尚未成为普通表达式区域任务。
+
+工作目录 `/home/fin/luna`，检查命令统一使用
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p luna --test contextual_input_regions --test contextual_delivery --test required_input_scopes
+  --test inline_pattern_observation --no-fail-fast`：35 项通过，
+  `/tmp/luna-tools-chqpd02o/result.json` 退出 0。覆盖共享预算截断、作用域输入、三层
+  optional 与 error 交付、comptime 值引用接收者和提前 return。
+- 复查拒绝例发现 `private` 是关键字，旧用例和新嵌套用例此前在解析时已失败；改成
+  `hidden_value`，补入同名局部在块内正常使用的正例。最终诊断确为块外名称无法解析，
+  不再将语法错误算作词法可见性证据；这项名称解析证据也不冒充 driver 取消验收。
+- 最终执行 `-p elaboration --lib -p luna --test contextual_input_regions --test contextual_delivery
+  --test nesting --test ordinary_callable_types --test ordinary_clause_collectors
+  --test comptime_call_staging --no-fail-fast`：372 项通过、3 项既有 ignore，
+  `/tmp/luna-tools-do5dck95/result.json` 退出 0。nesting 新增 32 层普通块，与原有
+  标量／开放表达式一起在 AST、HIR、NIR 及实际执行中验收；正常测试线程栈未放大。
+  两个动态域正例依旧 ignored，本轮未复跑，不以其它通过项宣称它们已完成。
+  另一 ignore 是 nesting 的子进程专用入口，已由父测试实际调用。
+- 七个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-z6jbfvb1/result.json`
+  退出 0；`git diff --check` 通过。验证保留工作区原有资源分析修改；未运行全
+  workspace、LLVM 或性能基准。formatter、正式 docs 和其他已有改动均不纳入提交。
+
 #### 实施补充：声明接口与可执行主体不能共用完成状态
 
 当前调用路径还有一个早于 Type 响应的发布边界。普通函数收集与 required 依赖准备

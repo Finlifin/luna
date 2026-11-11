@@ -3,6 +3,7 @@
 //! neither path executes a producer while preparing this region.
 use super::*;
 use constants::StagedPatternSnapshot;
+mod driver;
 mod tails;
 pub(super) use tails::{ContextualTail, OrdinaryTail};
 

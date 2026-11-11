@@ -32,6 +32,9 @@ fn nested_destinations_preserve_contextual_values_calls_and_control_exits() {
         "
         typealias Delivered = !bool ???u8;
         comptime fn literal() -> Delivered { 7 }
+        comptime fn nested() -> Delivered { do { do { 7 } } }
+        comptime fn nested_early() -> Delivered { do { do { return 9; 7 } } }
+        comptime fn nested_void() -> !bool void { do { do {} } }
         comptime fn empty() -> ?u8 { null }
         comptime fn absence() -> Delivered { empty() }
         comptime fn early() -> Delivered {
@@ -68,7 +71,12 @@ fn nested_destinations_preserve_contextual_values_calls_and_control_exits() {
                 .unwrap()
                 .declaration
         };
-        for (name, expected) in [("literal", 7), ("early", 9)] {
+        for (name, expected) in [
+            ("literal", 7),
+            ("early", 9),
+            ("nested", 7),
+            ("nested_early", 9),
+        ] {
             let value = vm.invoke(id(name), vec![]).unwrap();
             assert_eq!(
                 payload(value, 3),
@@ -76,6 +84,10 @@ fn nested_destinations_preserve_contextual_values_calls_and_control_exits() {
                 "{name}, tree={tree}"
             );
         }
+        assert_eq!(
+            payload(vm.invoke(id("nested_void"), vec![]).unwrap(), 0),
+            Value::Unit
+        );
         let value = vm.invoke(id("absence"), vec![]).unwrap();
         assert!(matches!(
             payload(value, 2),

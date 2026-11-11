@@ -1,6 +1,7 @@
 //! Destination-specific tail checking; binding completion belongs to the region.
 use super::*;
 
+#[derive(Clone, Copy)]
 pub(in crate::program) struct OrdinaryTail<'a> {
     pub expected: Option<&'a Term>,
     pub partial: Option<&'a crate::calls::CallableContext>,
@@ -22,46 +23,11 @@ impl Tail for OrdinaryTail<'_> {
         block: &hir::Block<'_>,
         diverges: bool,
     ) -> Result<Self::Checked, Error> {
-        let mut value = block
-            .expr
-            .map(|value| {
-                // A diverging block cannot deliver this tail. Independently typed
-                // tails need no result domain, but literals and open callables may
-                // still require context. Spread layouts retain their own checks.
-                if diverges
-                    && checker.runtime_value_context()
-                    && checker.preparing_spread.is_none()
-                    && self.input.is_none()
-                    && let Some(checked) = checker.argument_attempt(value, None, None)?
-                {
-                    return Ok(checked);
-                }
-                match self.input {
-                    Some(input) if self.expected.is_none() => {
-                        checker.input_context_expression(value, input)
-                    }
-                    _ => checker.expr_context(value, self.expected, self.partial),
-                }
-            })
-            .transpose()?
-            .map(Box::new);
-        if value.is_none() && !diverges {
-            value = checker
-                .implicit_error_success(self.expected, block.span)?
-                .map(Box::new);
-        }
-        let ty = if diverges {
-            p(P::Never)
-        } else {
-            value
-                .as_ref()
-                .map(|value| value.ty.clone())
-                .unwrap_or(p(P::Void))
+        let value = match self.prepare(checker, block, diverges)? {
+            TailCheck::Checked(value) => value,
+            TailCheck::Child => Some(self.check_expression(checker, block.expr.unwrap())?),
         };
-        if let Some(expected) = self.expected {
-            checker.require(&ty, expected, block.span)?;
-        }
-        Ok(OrdinaryResult { ty, value })
+        self.complete(checker, block, diverges, value)
     }
 
     fn references(
@@ -85,6 +51,83 @@ impl Tail for OrdinaryTail<'_> {
                 result: checked.value,
             },
         }
+    }
+}
+
+pub(super) enum TailCheck {
+    Checked(Option<n::Expr>),
+    Child,
+}
+impl std::fmt::Display for TailCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Child => f.write_str("(tail-check child)"),
+            Self::Checked(Some(value)) => write!(f, "(tail-check (checked {value}))"),
+            Self::Checked(None) => f.write_str("(tail-check (checked void))"),
+        }
+    }
+}
+impl OrdinaryTail<'_> {
+    pub(super) fn prepare(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        block: &hir::Block<'_>,
+        diverges: bool,
+    ) -> Result<TailCheck, Error> {
+        let Some(value) = block.expr else {
+            return Ok(TailCheck::Checked(None));
+        };
+        // Unreachable tails still receive ordinary checking; an independently
+        // typed tail need not be forced into the block's result destination.
+        if diverges
+            && checker.runtime_value_context()
+            && checker.preparing_spread.is_none()
+            && self.input.is_none()
+            && let Some(checked) = checker.argument_attempt(value, None, None)?
+        {
+            return Ok(TailCheck::Checked(Some(checked)));
+        }
+        Ok(TailCheck::Child)
+    }
+
+    pub(super) fn check_expression(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        value: &Expr<'_>,
+    ) -> Result<n::Expr, Error> {
+        match self.input {
+            Some(input) if self.expected.is_none() => {
+                checker.input_context_expression(value, input)
+            }
+            _ => checker.expr_context(value, self.expected, self.partial),
+        }
+    }
+
+    pub(super) fn complete(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        block: &hir::Block<'_>,
+        diverges: bool,
+        value: Option<n::Expr>,
+    ) -> Result<OrdinaryResult, Error> {
+        let mut value = value.map(Box::new);
+        if value.is_none() && !diverges {
+            value = checker
+                .implicit_error_success(self.expected, block.span)?
+                .map(Box::new);
+        }
+        let ty = if diverges {
+            p(P::Never)
+        } else {
+            value
+                .as_ref()
+                .map(|value| value.ty.clone())
+                .unwrap_or(p(P::Void))
+        };
+        if let Some(expected) = self.expected {
+            checker.require(&ty, expected, block.span)?;
+        }
+        Ok(OrdinaryResult { ty, value })
     }
 }
 

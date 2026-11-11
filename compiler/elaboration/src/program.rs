@@ -4906,7 +4906,7 @@ impl Checker<'_, '_> {
         partial: Option<&crate::calls::CallableContext>,
         input_context: Option<&crate::calls::InputContext>,
     ) -> Result<n::Expr, Error> {
-        self.check_block_region(
+        self.check_ordinary_block_region(
             block,
             block_regions::OrdinaryTail {
                 expected,
@@ -7778,6 +7778,11 @@ impl Checker<'_, '_> {
         // frame used by error-result and optional destinations.
         // Primitive identities cannot denote optional types.
         match expected {
+            // Blocks always deliver the whole destination to their tail. They
+            // never use the value-level optional/error adaptation probe.
+            _ if matches!(expr.kind, H::Block(_)) => {
+                self.expr_context_unadapted(expr, expected, partial)
+            }
             Some(target) if !matches!(target, Term::Primitive(_)) => {
                 self.check_delivery(expr, target, partial)
             }

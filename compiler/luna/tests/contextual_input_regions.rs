@@ -200,7 +200,7 @@ fn nested_lexical_exit_keeps_outer_writes_in_ordinary_and_pending_blocks() {
 fn block_exit_does_not_skip_checks_or_export_a_private_binding() {
     for source in [
         "comptime fn bad() -> bool { return true; let invalid: bool = 7; false }",
-        "comptime fn bad() -> bool { let unused = do { let private = true; private }; private }",
+        "comptime fn bad() -> bool { let unused = do { let hidden_value = true; hidden_value }; hidden_value }",
     ] {
         assert!(sysroot::compile(source).is_err(), "accepted {source}");
     }
@@ -212,4 +212,48 @@ fn block_exit_does_not_skip_checks_or_export_a_private_binding() {
     ",
         &["check", "leave"],
     );
+}
+
+#[test]
+fn ordinary_block_frames_keep_callee_delivery_shadowing_and_receiver_storage() {
+    check_both(
+        "
+        struct Counter { count: Integer }
+        impl Counter {
+            comptime fn next(self) -> u8 { self.count += 1; 7 }
+        }
+        comptime fn identity(value: T) -> T where T { value }
+        comptime fn check() -> bool {
+            var counter = Counter { count: 0 };
+            let value = (do { do { identity<u8> } })(do { do { counter.next() } });
+            var outer = false;
+            let shadow = do { let outer = true; do { outer } };
+            do { do { outer = true; } };
+            shadow and outer and value == 7 and counter.count == 1
+        }
+        ",
+        &["check", "next", "identity"],
+    );
+}
+
+#[test]
+fn nested_block_exits_preserve_definition_checks_and_skip_unexecuted_calls() {
+    check_both(
+        "comptime fn check() -> bool { do { do { let hidden_value = true; hidden_value } } }",
+        &["check"],
+    );
+    check_both(
+        "
+        comptime fn mark() -> bool { false }
+        comptime fn leave() -> bool { do { do { return true; mark() } }; false }
+        comptime fn check() -> bool { leave() }
+        ",
+        &["check", "leave"],
+    );
+    for source in [
+        "comptime fn bad() -> bool { do { do { return true; let invalid: bool = 7; false } } }",
+        "comptime fn bad() -> bool { do { do { let hidden_value = true; } }; hidden_value }",
+    ] {
+        assert!(sysroot::compile(source).is_err(), "accepted {source}");
+    }
 }
