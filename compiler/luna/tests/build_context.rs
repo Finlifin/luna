@@ -208,23 +208,80 @@ fn dumps_are_stable_escaped_and_balanced() {
     );
 }
 
-fn primitive_library() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/builtin/primitives.fl")
+const SUPPORTING_LIBRARIES: [(u32, u64, &str); 3] =
+    [(11, 400, "builtin"), (12, 500, "meta"), (13, 600, "attrs")];
+
+fn supporting_libraries(builtin: &std::path::Path) -> Vec<SourcePackage> {
+    SUPPORTING_LIBRARIES
+        .into_iter()
+        .map(|(resolution_id, identity, name)| SourcePackage {
+            resolution_id,
+            identity,
+            name: name.into(),
+            entry: if name == "builtin" {
+                builtin.to_path_buf()
+            } else {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("../../library/{name}/lib.fl"))
+            },
+        })
+        .collect()
 }
-fn with_primitives(mut args: Vec<String>) -> Vec<String> {
-    args.extend([
-        "--package".into(),
-        "11".into(),
-        "400".into(),
-        "builtin".into(),
-        primitive_library().to_string_lossy().into_owned(),
-    ]);
-    for requester in ["3", "9"] {
+
+fn supporting_dependencies(requesters: &[u32]) -> Vec<resolve::DependencyEdge> {
+    requesters
+        .iter()
+        .flat_map(|&requester| {
+            SUPPORTING_LIBRARIES
+                .into_iter()
+                .filter_map(move |(provider, _, alias)| {
+                    (requester != provider).then_some(resolve::DependencyEdge {
+                        requester,
+                        alias: alias.into(),
+                        provider,
+                    })
+                })
+        })
+        .collect()
+}
+
+fn math_bindings(package: &str, module: &str) -> Vec<(nir::intrinsics::Operation, String)> {
+    nir::intrinsics::Operation::ALL
+        .iter()
+        .map(|op| {
+            (
+                *op,
+                format!("{package}.numeric.{module}.target.Scalar.{}", op.name()),
+            )
+        })
+        .collect()
+}
+
+fn with_libraries(mut args: Vec<String>, builtin: &std::path::Path) -> Vec<String> {
+    for package in supporting_libraries(builtin) {
+        args.extend([
+            "--package".into(),
+            package.resolution_id.to_string(),
+            package.identity.to_string(),
+            package.name,
+            package.entry.to_string_lossy().into_owned(),
+            "--builtin-impl-package".into(),
+            package.resolution_id.to_string(),
+        ]);
+    }
+    for edge in supporting_dependencies(&[3, 9, 11, 12, 13]) {
         args.extend([
             "--dependency".into(),
-            requester.into(),
-            "builtin".into(),
-            "11".into(),
+            edge.requester.to_string(),
+            edge.alias,
+            edge.provider.to_string(),
+        ]);
+    }
+    args.extend(["--meta-list-type".into(), "meta.List".into()]);
+    for (operation, path) in math_bindings("meta", "scalar_math") {
+        args.extend([
+            "--comptime-intrinsic".into(),
+            format!("{}={path}", operation.name()),
         ]);
     }
     args
@@ -247,6 +304,28 @@ impl SourceFixture {
         )
         .unwrap();
         Self(dir)
+    }
+    fn builtin_entry(&self) -> std::path::PathBuf {
+        // Build-origin checks also run without a code-generation target. Retain
+        // the shipped binding/comparison dependency closure here; full sysroot
+        // target and metadata tests below separately cover the runtime library.
+        let directory = self.0.join("builtin");
+        std::fs::create_dir_all(&directory).unwrap();
+        let entry = directory.join("lib.fl");
+        std::fs::write(
+            &entry,
+            concat!(
+                "mod primitives {\n",
+                include_str!("../../../library/builtin/primitives.fl"),
+                "\n} pub use primitives.*;\n",
+                include_str!("../../../library/builtin/numeric/comparison.fl"),
+                "\npub mod compiler {\n",
+                include_str!("../../../library/builtin/bindings.fl"),
+                "\n}\n",
+            ),
+        )
+        .unwrap();
+        entry
     }
     fn compile(&self, modes: &[(u64, &str)]) -> Result<luna::frontend::Artifact, String> {
         let mut protocols = elaboration::program::Protocols::default();
@@ -299,24 +378,24 @@ impl SourceFixture {
                 provider: 7,
             },
         ];
-        packages.push(SourcePackage {
-            resolution_id: 11,
-            identity: 400,
-            name: "builtin".into(),
-            entry: primitive_library(),
-        });
-        dependencies.extend([3, 7, 9].map(|requester| resolve::DependencyEdge {
-            requester,
-            alias: "builtin".into(),
-            provider: 11,
-        }));
+        packages.extend(supporting_libraries(&self.builtin_entry()));
+        dependencies.extend(supporting_dependencies(&[3, 7, 9, 11, 12, 13]));
+        let mut protocols = protocols.clone();
+        protocols
+            .builtin_implementation_packages
+            .extend([300, 400, 500, 600]);
+        let comptime_intrinsics = math_bindings("meta", "scalar_math");
         luna::packages::compile_with_definitions(
             &packages,
             &dependencies,
             3,
             None,
-            protocols,
-            Default::default(),
+            &protocols,
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("meta.List"),
+                comptime_intrinsics: &comptime_intrinsics,
+                ..Default::default()
+            },
             target,
             &mut 100_000,
             &mut |_, _, _| Ok(()),
@@ -495,26 +574,29 @@ fn package_cli_and_stream_transport_mode_and_invalidate_reuse() {
         "",
     );
     let build = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl");
-    let base = with_primitives(vec![
-        "--package".to_string(),
-        "3".into(),
-        "100".into(),
-        "app".into(),
-        fixture.0.join("app.fl").to_str().unwrap().into(),
-        "--package".into(),
-        "9".into(),
-        "300".into(),
-        "build".into(),
-        build.to_str().unwrap().into(),
-        "--dependency".into(),
-        "3".into(),
-        "build".into(),
-        "9".into(),
-        "--primary".into(),
-        "3".into(),
-        "--emit".into(),
-        "nir".into(),
-    ]);
+    let base = with_libraries(
+        vec![
+            "--package".to_string(),
+            "3".into(),
+            "100".into(),
+            "app".into(),
+            fixture.0.join("app.fl").to_str().unwrap().into(),
+            "--package".into(),
+            "9".into(),
+            "300".into(),
+            "build".into(),
+            build.to_str().unwrap().into(),
+            "--dependency".into(),
+            "3".into(),
+            "build".into(),
+            "9".into(),
+            "--primary".into(),
+            "3".into(),
+            "--emit".into(),
+            "nir".into(),
+        ],
+        &fixture.builtin_entry(),
+    );
     let mut frames = String::new();
     for mode in [
         Some("debug"),
@@ -954,26 +1036,29 @@ fn resident_target_inputs_recompile_changes_and_recover_after_missing_config() {
         "",
     );
     let build = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl");
-    let base = with_primitives(vec![
-        "--package".to_string(),
-        "3".into(),
-        "100".into(),
-        "app".into(),
-        fixture.0.join("app.fl").to_str().unwrap().into(),
-        "--package".into(),
-        "9".into(),
-        "300".into(),
-        "build".into(),
-        build.to_str().unwrap().into(),
-        "--dependency".into(),
-        "3".into(),
-        "build".into(),
-        "9".into(),
-        "--primary".into(),
-        "3".into(),
-        "--emit".into(),
-        "nir".into(),
-    ]);
+    let base = with_libraries(
+        vec![
+            "--package".to_string(),
+            "3".into(),
+            "100".into(),
+            "app".into(),
+            fixture.0.join("app.fl").to_str().unwrap().into(),
+            "--package".into(),
+            "9".into(),
+            "300".into(),
+            "build".into(),
+            build.to_str().unwrap().into(),
+            "--dependency".into(),
+            "3".into(),
+            "build".into(),
+            "9".into(),
+            "--primary".into(),
+            "3".into(),
+            "--emit".into(),
+            "nir".into(),
+        ],
+        &fixture.builtin_entry(),
+    );
     let mut frames = String::new();
     for feature in [
         Some("true"),
@@ -1449,26 +1534,29 @@ fn metadata_wire_stream_invalidates_and_recovers_without_stale_fallback() {
         "",
     );
     let build = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl");
-    let base = with_primitives(vec![
-        "--package".to_string(),
-        "3".into(),
-        "100".into(),
-        "app".into(),
-        fixture.0.join("app.fl").to_str().unwrap().into(),
-        "--package".into(),
-        "9".into(),
-        "300".into(),
-        "build".into(),
-        build.to_str().unwrap().into(),
-        "--dependency".into(),
-        "3".into(),
-        "build".into(),
-        "9".into(),
-        "--primary".into(),
-        "3".into(),
-        "--emit".into(),
-        "nir".into(),
-    ]);
+    let base = with_libraries(
+        vec![
+            "--package".to_string(),
+            "3".into(),
+            "100".into(),
+            "app".into(),
+            fixture.0.join("app.fl").to_str().unwrap().into(),
+            "--package".into(),
+            "9".into(),
+            "300".into(),
+            "build".into(),
+            build.to_str().unwrap().into(),
+            "--dependency".into(),
+            "3".into(),
+            "build".into(),
+            "9".into(),
+            "--primary".into(),
+            "3".into(),
+            "--emit".into(),
+            "nir".into(),
+        ],
+        &fixture.builtin_entry(),
+    );
 
     let encoded = |value| {
         encode_hex(&[Input {

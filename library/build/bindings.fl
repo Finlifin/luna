@@ -1,14 +1,13 @@
-use builtin.{Symbol, Type, str};
+use builtin.{Symbol, str};
+pub use meta.Object;
 use info.target.Target;
 use info.package.PackageMetadata;
 
 {-
-    Compiler-facing build inputs and Object operations. Public info modules
+    Compiler-facing build inputs. Public info modules
     re-export these identities; forwarding a binding must preserve the source
     definition's contextual package ownership.
 -}
-pub typealias Object = .Object'builtin;
-pub const object_get: comptime fn(comptime T: Type, Object, Symbol) -> ?T = .object_get'builtin;
 pub const mode: Symbol = .build_mode'builtin;
 pub const target: Target = .build_target'builtin;
 pub const package_metadata: comptime fn(str) -> PackageMetadata =

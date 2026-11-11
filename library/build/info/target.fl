@@ -1,5 +1,5 @@
 use builtin.{bool, Symbol, Integer};
-use bindings.{Object, object_get};
+use bindings.Object;
 
 {-
     An immutable snapshot of the source package's host pipeline target. These
@@ -19,7 +19,7 @@ pub struct TargetFeatures {
 impl TargetFeatures {
     -- Missing is null; an explicitly disabled feature is false?.
     pub pure comptime fn get(self, name: Symbol) -> ?bool {
-        object_get(bool, self.entries, name)
+        self.entries.get<bool>(name)
     }
 }
 

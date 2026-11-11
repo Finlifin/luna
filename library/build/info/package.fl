@@ -1,5 +1,5 @@
 use builtin.{Symbol, Type};
-use bindings.{Object, object_get};
+use bindings.Object;
 
 pub struct PackageMetadata {
     features: MetadataFeatures,
@@ -12,7 +12,7 @@ pub struct MetadataFeatures {
 impl MetadataFeatures {
     -- Missing fields and mismatched domains return null.
     pub pure comptime fn get(self, name: Symbol, comptime T: Type) -> ?T {
-        object_get(T, self.entries, name)
+        self.entries.get<T>(name)
     }
 }
 

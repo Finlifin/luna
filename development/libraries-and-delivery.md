@@ -159,6 +159,16 @@ meta 的布局观察、attrs.abi 和 builtin 的目标数值接口需通过真�
 Object 绑定。目标应由 attrs 导入既有绑定，不在调用点和各包重复声明原始 builtin。
 跨包签名的相互引用通过声明准备解决，不以复制绑定作为规避 bootstrap 的手段。
 
+build 已复用 `meta.Object` 与其固有 `get` 方法，删除本包重复的 Object／object_get
+原始绑定；mode、target 和 package_metadata 仍保留原声明来源。目标 feature 与包
+metadata 的 typed lookup 经过普通方法实例化，保持缺失、关闭和域不匹配的区别。
+`build_context`／`build_metadata` 共 47 项通过，含真实 sysroot 的 O0／O3 执行，
+证据 `/tmp/luna-tools-2m6haxur/result.json`（工作目录 `/home/fin/luna`，命令
+`python3 -B development/check.py --timeout 900 -- test -p luna --test build_context --test build_metadata --no-fail-fast`，
+退出 0）。源归属 fixture 加载真实 meta／attrs／build 与 builtin 绑定和比较定义，
+保留无 codegen target、32 位与冲突布局检查；完整运行时库由上述 sysroot 用例覆盖。
+这不表示 attrs 的重复绑定或其他库缺口已消除。
+
 ## 10. 编译器服务绑定不授予库定义特殊语言规则
 
 [language-items.conf](../library/language-items.conf)与

@@ -238,6 +238,16 @@ sysroot 的 meta.List／builder／comptime 方法作消费者。不能继续只�
 trait。相关缓存调用、预算失败恢复与协议检查共 15 项通过，证据
 `/tmp/luna-tools-e2i_h2fz/result.json`。这不补齐 Type 的 Hash 实现或改变缓存准入范围。
 
+报告 6.2 的重复绑定已在 build 落实一处清理：复用 `meta.Object` 的身份和公开
+`get` 方法，删除 Object／object_get 的包内重复绑定，保持三个 build 输入的原始
+声明与包来源。原源归属 fixture 仅提供原语，现补入真实 meta／attrs 依赖以及
+builtin 绑定和比较定义；不为测试臆造 target，也不模拟 Object 查询。
+`build_context` 和 `build_metadata` 共 47 项通过，包含真实 sysroot 的 O0／O3
+执行、错域／缺失、别名来源和驻留配置失效恢复。证据
+`/tmp/luna-tools-2m6haxur/result.json`（退出 0），完整命令及范围见
+[库接线现状](libraries-and-delivery.md#9-当前生产入口与迁移接线)。attrs 的重复
+Object 绑定仍待清理，不把本包完成扩大成全部集中绑定已收敛。
+
 ## 4. 本次证据与限制
 
 工作目录 `/home/fin/luna`；所有检查通过 `development/check.py --timeout 900 -- test`。
