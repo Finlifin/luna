@@ -1,6 +1,6 @@
-//! Query-local reversible equality closure. Checkers and conflict minimization
-//! deliberately use fresh classes rather than this search acceleration state.
-use super::{Search, TheoryModel, UnknownReason};
+//! Query-local reversible equality closure and integer potentials. Checkers and
+//! conflict minimization use fresh theory state rather than this acceleration.
+use super::{Atom, Search, TheoryModel, UnknownReason, integer};
 mod propagation;
 use std::{collections::BTreeSet, fmt};
 
@@ -79,9 +79,11 @@ impl fmt::Display for Classes {
 struct Layer {
     atoms: Vec<usize>,
     checkpoint: usize,
+    integers: integer::Checkpoint,
 }
 pub(super) struct State {
     classes: Classes,
+    integers: integer::State,
     // Each admitted atom has exactly one introduction layer, not one copy in
     // every later layer. Pending atoms have not yet earned retained evidence.
     facts: Vec<Option<(bool, usize)>>,
@@ -97,6 +99,7 @@ fn charge(fuel: &mut usize, work: usize) -> Result<(), UnknownReason> {
 impl State {
     fn new(
         count: usize,
+        atoms: &[Atom],
         assignment: &[Option<bool>],
         fuel: &mut usize,
     ) -> Result<Self, UnknownReason> {
@@ -106,6 +109,7 @@ impl State {
         )?;
         Ok(Self {
             classes: Classes::new(count),
+            integers: integer::State::new(atoms, fuel)?,
             facts: vec![None; assignment.len()],
             layers: Vec::new(),
             pending: assignment
@@ -145,12 +149,18 @@ impl State {
         } else {
             self.layers[cut - 1].checkpoint
         };
-        // Reserve the complete rollback before changing admitted facts/classes.
+        let integers = if cut == 0 {
+            integer::Checkpoint::default()
+        } else {
+            self.layers[cut - 1].integers
+        };
+        // Reserve rollback before changing facts, classes or integer potentials.
         // On interruption only extra pending notifications may have been added.
         for layer in &self.layers[cut..] {
             charge(fuel, layer.atoms.len().saturating_add(1))?;
         }
         charge(fuel, self.classes.checkpoint() - checkpoint)?;
+        charge(fuel, self.integers.rollback_work(integers))?;
         while self.layers.len() > cut {
             let layer = self.layers.pop().unwrap();
             for atom in layer.atoms {
@@ -159,6 +169,7 @@ impl State {
             }
         }
         self.classes.rollback(checkpoint);
+        self.integers.rollback(integers);
         Ok(())
     }
     // Caller reserves pending traversal and snapshot work before publication.
@@ -177,16 +188,19 @@ impl State {
             self.layers.push(Layer {
                 atoms,
                 checkpoint: self.classes.checkpoint(),
+                integers: self.integers.checkpoint(),
             });
         } else {
-            self.layers.last_mut().unwrap().checkpoint = self.classes.checkpoint();
+            let last = self.layers.last_mut().unwrap();
+            last.checkpoint = self.classes.checkpoint();
+            last.integers = self.integers.checkpoint();
         }
         self.pending.clear();
     }
 }
 impl fmt::Display for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(theory-state {} (facts", self.classes)?;
+        write!(f, "(theory-state {} {} (facts", self.classes, self.integers)?;
         for (atom, fact) in self.facts.iter().enumerate() {
             if let Some((value, layer)) = fact {
                 write!(f, " (atom {atom} {value} (layer {layer}))")?;
@@ -194,7 +208,11 @@ impl fmt::Display for State {
         }
         write!(f, ") (layers")?;
         for layer in &self.layers {
-            write!(f, " (layer (checkpoint {}) (atoms", layer.checkpoint)?;
+            write!(
+                f,
+                " (layer (checkpoint {}) {} (atoms",
+                layer.checkpoint, layer.integers
+            )?;
             for atom in &layer.atoms {
                 write!(f, " {atom}")?;
             }
@@ -228,7 +246,12 @@ impl Search<'_> {
     ) -> Result<Check, UnknownReason> {
         let mut state = match (self.theory_state.take(), changed) {
             (Some(state), Some(_)) => state,
-            _ => State::new(self.terms.nodes.len(), assignment, &mut self.steps)?,
+            _ => State::new(
+                self.terms.nodes.len(),
+                self.atoms,
+                assignment,
+                &mut self.steps,
+            )?,
         };
         let prepared = state.prepare(assignment, changed, &mut self.steps);
         if let Err(error) = prepared {
@@ -236,6 +259,7 @@ impl Search<'_> {
             return Err(error);
         }
         let checkpoint = state.classes.checkpoint();
+        let integers = state.integers.checkpoint();
         // Building roots, dependency vectors and a first dirty frontier costs
         // at least four linear passes. Small catalogs are cheaper to scan.
         let count = self.terms.nodes.len();
@@ -252,43 +276,52 @@ impl Search<'_> {
         } else {
             Err(UnknownReason::BudgetExhausted)
         };
-        let result = baseline.and_then(|baseline| {
-            self.theory_with_classes(assignment, &mut state.classes, baseline)
-        });
-        let result = match result {
-            Ok(Some(evidence)) => {
-                let cost = state
-                    .pending
-                    .len()
-                    .saturating_mul(2)
-                    .saturating_add(1)
-                    .saturating_add(if capture_model {
-                        self.terms.nodes.len().saturating_mul(2)
-                    } else {
-                        0
-                    });
-                if let Some(remaining) = self.steps.checked_sub(cost) {
-                    self.steps = remaining;
-                    state.commit(assignment);
-                    Ok(if capture_model {
-                        Check::Model(TheoryModel {
-                            classes: state.classes.snapshot(),
-                            kinds: evidence.kinds,
-                            integers: evidence.integers,
-                        })
-                    } else {
-                        Check::Consistent
-                    })
-                } else {
-                    state.classes.rollback(checkpoint);
-                    Err(UnknownReason::BudgetExhausted)
+        let result = (|| {
+            let Some(kinds) =
+                self.type_theory_with_classes(assignment, &mut state.classes, baseline?)?
+            else {
+                return Ok(Check::Conflict);
+            };
+            for &index in &state.pending {
+                charge(&mut self.steps, 1)?;
+                if state.facts[index].is_none() {
+                    if let (Atom::IntLe(atom), Some(value)) =
+                        (&self.atoms[index], assignment[index])
+                    {
+                        state.integers.admit(atom, value, &mut self.steps)?;
+                    }
                 }
             }
-            other => {
-                state.classes.rollback(checkpoint);
-                other.map(|_| Check::Conflict)
+            if !state.integers.stabilize(integers, &mut self.steps)? {
+                return Ok(Check::Conflict);
             }
-        };
+            let cost = state
+                .pending
+                .len()
+                .saturating_mul(2)
+                .saturating_add(1)
+                .saturating_add(if capture_model {
+                    self.terms.nodes.len().saturating_mul(2)
+                } else {
+                    0
+                });
+            charge(&mut self.steps, cost)?;
+            let result = if capture_model {
+                Check::Model(TheoryModel {
+                    classes: state.classes.snapshot(),
+                    kinds,
+                    integers: state.integers.model(&mut self.steps)?,
+                })
+            } else {
+                Check::Consistent
+            };
+            state.commit(assignment);
+            Ok(result)
+        })();
+        if matches!(result, Err(_) | Ok(Check::Conflict)) {
+            state.classes.rollback(checkpoint);
+            state.integers.rollback(integers);
+        }
         self.theory_state = Some(state);
         result
     }
@@ -298,10 +331,143 @@ impl Search<'_> {
 mod tests {
     use super::*;
     #[test]
+    fn integer_layers_match_fresh_search_and_bounded_models_across_retractions() {
+        use crate::{Context, Formula, IntLe, IntegerTerm, Terms, collect, learning};
+        use nir::{DeclarationId, Sort, Term};
+        use std::collections::BTreeMap;
+        let x = DeclarationId {
+            package: 107,
+            local: 0,
+        };
+        let y = DeclarationId {
+            package: 107,
+            local: 1,
+        };
+        let variable = |id, offset| IntegerTerm::variable(id, offset);
+        let bounds = [
+            IntLe {
+                left: variable(x, 0),
+                right: variable(y, 0),
+            },
+            IntLe {
+                left: variable(y, 1),
+                right: variable(x, 0),
+            },
+            IntLe {
+                left: variable(x, 0),
+                right: IntegerTerm::constant(0),
+            },
+            IntLe {
+                left: IntegerTerm::constant(0),
+                right: variable(y, 0),
+            },
+            IntLe {
+                left: variable(y, 0),
+                right: IntegerTerm::constant(1),
+            },
+        ];
+        let mut atoms: Vec<_> = bounds.iter().cloned().map(Atom::IntLe).collect();
+        // A type-only notification must neither lose nor duplicate integer edges.
+        let ty = Term::Rigid {
+            declaration: DeclarationId {
+                package: 107,
+                local: 2,
+            },
+            sort: Sort::Type,
+        };
+        let formula = Formula::equal(ty.clone(), ty);
+        let mut terms = Terms::default();
+        collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
+        assert_eq!(atoms.len(), 6);
+        let context = Context::default();
+        let mut search = Search {
+            boolean: None,
+            theory_state: None,
+            learned: learning::Clauses::default(),
+            context: &context,
+            formula: &formula,
+            atoms: &atoms,
+            terms: &terms,
+            steps: 100000,
+            max_depth: 128,
+        };
+        let check = |search: &mut Search<'_>, assignment: &[Option<bool>]| {
+            search.steps = 100000;
+            let warm = search.theory_cached(assignment).unwrap();
+            let fresh = search.theory(assignment).unwrap();
+            assert_eq!(warm.is_some(), fresh.is_some(), "{assignment:?}");
+            let exists = (-4..=4).any(|a| {
+                (-4..=4).any(|b| {
+                    let values = BTreeMap::from([(x, a), (y, b)]);
+                    bounds.iter().zip(assignment).all(|(atom, value)| {
+                        value.is_none_or(|value| atom.evaluate(&values) == Some(value))
+                    })
+                })
+            });
+            assert_eq!(warm.is_some(), exists, "{assignment:?}");
+            if let Some(model) = warm {
+                for (atom, value) in bounds.iter().zip(assignment) {
+                    if let Some(value) = value {
+                        assert_eq!(atom.evaluate(&model.integers), Some(*value));
+                    }
+                }
+            }
+        };
+        for code in (0..243).chain((0..243).rev()) {
+            let mut cursor = code;
+            let mut assignment: Vec<_> = (0..5)
+                .map(|_| {
+                    let value = [None, Some(false), Some(true)][cursor % 3];
+                    cursor /= 3;
+                    value
+                })
+                .collect();
+            assignment.push((code % 2 == 0).then_some(true));
+            check(&mut search, &assignment);
+        }
+        let prefix = [Some(true), Some(false), None, Some(true), None, None];
+        let extension = [
+            Some(true),
+            Some(false),
+            Some(false),
+            Some(true),
+            Some(false),
+            Some(true),
+        ];
+        for budget in 0..256 {
+            check(&mut search, &prefix);
+            search.steps = budget;
+            let _ = search.theory_cached(&extension);
+            check(&mut search, &prefix);
+            check(&mut search, &extension);
+        }
+        search.steps = 100000;
+        search.theory_cached(&extension).unwrap();
+        let retained = search.theory_state.as_ref().unwrap().integers.to_string();
+        let mut type_only = extension;
+        type_only[5] = None;
+        search
+            .theory_cached_changes(&type_only, Some(&BTreeSet::from([5])), false)
+            .unwrap();
+        assert_eq!(
+            search.theory_state.as_ref().unwrap().integers.to_string(),
+            retained
+        );
+        search.steps = 100000;
+        search
+            .theory_cached_changes(&type_only, Some(&BTreeSet::new()), false)
+            .unwrap();
+        let warm_cost = 100000 - search.steps;
+        search.steps = 100000;
+        search.theory(&type_only).unwrap();
+        assert!(warm_cost < 100000 - search.steps);
+    }
+
+    #[test]
     fn sparse_layers_rollback_atomically_and_readmit_unchanged_facts() {
         for budget in 0..12 {
             let mut assignment = vec![None; 4096];
-            let mut state = State::new(4, &assignment, &mut 100000).unwrap();
+            let mut state = State::new(4, &[], &assignment, &mut 100000).unwrap();
             for atom in 0..3 {
                 assignment[atom] = Some(true);
                 state

@@ -64,6 +64,30 @@ NF 专用表达式、普通表达式及 invocation fallback 的重复职责确�
 生产路径不存在。下一步是带合法实现世界的联合模型与证据交付，不是删掉 Trait
 拦截后把未经解释的模型当解，也不是默认扩大隐式推导范围。
 
+报告第 4.2 节关于整数差分理论每次重建的判断，在 `4be43a06` 基线仍成立。
+本次已将 `integer::State` 接入搜索的理论层：保留差分边、邻接表和可行势函数，
+只从新增边的源点启动有轮数界限的 Bellman–Ford 传播；没有新整数事实时不重复
+松弛。每层同时记录 EUF 和整数检查点，回跳预留撤销预算后恢复边与势函数；
+失败或预算中断撤销本次未提交更新，后续重试不沿用半成品。整数赋值只在导出
+模型时物化。新增状态及检查点均有 S-expression Display。
+
+这只是查询内一致性检查的增量化。整数传播理由仍由独立路径生成，冲突最小化、
+proof replay 和 witness 检查继续使用独立求解／验证；行、Trait、Kind 的重算、
+Tseitin 辅变量的独立状态、跨查询学习和合法 trait 模型交付没有因此完成。
+也没有增加原子、扩展数学整数理论范围，或将程序状态规格交给 PTC。
+
+工作目录 `/home/fin/luna`，本次执行：
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc --no-fail-fast`：
+  `/tmp/luna-tools-9rt1yakk/result.json`，退出 0，245 项通过。
+  新增用例比较 243 种部分赋值的正反遍历与独立求解、有限整数模型枚举；
+  覆盖预算切断重试、已存在边的再传播、负环撤销和算术容量失败恢复。
+  原有 CDCL 正负整数理由与独立证明重放用例同时通过。
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --no-fail-fast`：
+  `/tmp/luna-tools-zmwd2p51/result.json`，退出 0，396 项消费者回归通过。
+
+初次编译的内部状态重导出可见性设置过窄，已修正；没有修改语义预期。
+
 ### List、Tuple 和跨阶段值转换的数量直接代表特权数量
 
 `Role::TypeList`／`Role::Tuple` 仍参与值域准入，NormalFormArgument 仍存在，

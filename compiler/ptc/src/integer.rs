@@ -2,8 +2,11 @@
 //! never a source overflow rule: any exhausted arithmetic capacity is Unknown.
 use super::UnknownReason;
 mod proof;
+mod state;
 use nir::DeclarationId;
 pub use proof::IntegerBoundProof;
+pub(super) use state::Checkpoint;
+pub(super) use state::State;
 use std::{collections::BTreeMap, fmt};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

@@ -1435,10 +1435,6 @@ struct Model {
     bound_types: BTreeMap<TypeBinder, Term>,
     integers: BTreeMap<DeclarationId, i128>,
 }
-struct TheoryEvidence {
-    kinds: Vec<(usize, TypeKind, bool)>,
-    integers: BTreeMap<DeclarationId, i128>,
-}
 struct TheoryModel {
     classes: Classes,
     kinds: Vec<(usize, TypeKind, bool)>,
@@ -1568,21 +1564,34 @@ impl Search<'_> {
         assignment: &[Option<bool>],
     ) -> Result<Option<TheoryModel>, UnknownReason> {
         let mut classes = Classes::new(self.terms.nodes.len());
-        self.theory_with_classes(assignment, &mut classes, None)
-            .map(|evidence| {
-                evidence.map(|evidence| TheoryModel {
-                    classes,
-                    kinds: evidence.kinds,
-                    integers: evidence.integers,
-                })
-            })
+        let Some(kinds) = self.type_theory_with_classes(assignment, &mut classes, None)? else {
+            return Ok(None);
+        };
+        let integers = integer::solve(
+            self.atoms
+                .iter()
+                .zip(assignment)
+                .filter_map(|(atom, value)| {
+                    if let Atom::IntLe(atom) = atom {
+                        Some((atom, *value))
+                    } else {
+                        None
+                    }
+                }),
+            &mut self.steps,
+        )?;
+        Ok(integers.map(|integers| TheoryModel {
+            classes,
+            kinds,
+            integers,
+        }))
     }
-    fn theory_with_classes(
+    fn type_theory_with_classes(
         &mut self,
         assignment: &[Option<bool>],
         classes: &mut Classes,
         baseline: Option<Vec<usize>>,
-    ) -> Result<Option<TheoryEvidence>, UnknownReason> {
+    ) -> Result<Option<Vec<(usize, TypeKind, bool)>>, UnknownReason> {
         let mut agenda = if let Some(roots) = baseline {
             let mut has_rows = false;
             for term in &self.terms.nodes {
@@ -1764,20 +1773,7 @@ impl Search<'_> {
             }
             kinds.push((root, query.kind, *value));
         }
-        let integers = integer::solve(
-            self.atoms
-                .iter()
-                .zip(assignment)
-                .filter_map(|(atom, value)| {
-                    if let Atom::IntLe(atom) = atom {
-                        Some((atom, *value))
-                    } else {
-                        None
-                    }
-                }),
-            &mut self.steps,
-        )?;
-        Ok(integers.map(|integers| TheoryEvidence { integers, kinds }))
+        Ok(Some(kinds))
     }
 }
 fn evaluate_kind_with_heads(
