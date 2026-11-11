@@ -39,16 +39,25 @@ impl Drop for RequiredCode<'_> {
 }
 
 impl RequiredWorld {
-    pub(super) fn new(package: n::Package, span: Span) -> Result<Arc<Self>, Error> {
+    pub(super) fn new(
+        package: n::Package,
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<Arc<Self>, Error> {
         let source = DeclarationSnapshot::new(Arc::new(package));
-        source
-            .prepare(&mut crate::ptc::Budget::default())
-            .map_err(|failure| {
-                error(
-                    span,
-                    format!("required comptime declaration directory: {failure}"),
-                )
-            })?;
+        let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+        let mut budget = crate::ptc::Budget {
+            steps: before,
+            ..Default::default()
+        };
+        let prepared = source.prepare(&mut budget);
+        *steps -= (before - budget.steps) as u64;
+        prepared.map_err(|failure| {
+            error(
+                span,
+                format!("required comptime declaration directory: {failure}"),
+            )
+        })?;
         Ok(Arc::new(Self {
             source,
             code: Mutex::new(None),
@@ -619,7 +628,7 @@ mod tests {
             assert_eq!(Arc::strong_count(&self.world), 1, "unique test fixture");
             let mut package = self.world.package().clone();
             edit(&mut package);
-            self.world = RequiredWorld::new(package, Span::default()).unwrap();
+            self.world = RequiredWorld::new(package, &mut 100_000, Span::default()).unwrap();
         }
     }
 
@@ -664,7 +673,7 @@ mod tests {
             ..Default::default()
         };
         PreparedRequired {
-            world: RequiredWorld::new(package, Span::default()).unwrap(),
+            world: RequiredWorld::new(package, &mut 100_000, Span::default()).unwrap(),
             entry,
             inputs: vec![],
             result_type,
@@ -678,6 +687,60 @@ mod tests {
             in_signature: false,
             copy_authority: None,
         }
+    }
+
+    #[test]
+    fn world_directory_uses_the_callers_budget_before_publication() {
+        let preparation = literal_preparation(false);
+        let package = preparation.world.package();
+        let span = Span::default();
+        let mut available = 100_000;
+        let world = RequiredWorld::new(package.clone(), &mut available, span).unwrap();
+        let cost = 100_000 - available;
+        assert!(cost > 0);
+        for allowance in [0, cost - 1] {
+            let mut remaining = allowance;
+            let failure = RequiredWorld::new(package.clone(), &mut remaining, span)
+                .err()
+                .unwrap();
+            assert!(failure.message.contains("budget"), "{failure}");
+            assert!(remaining <= allowance);
+        }
+        let mut exact = cost;
+        let retry = RequiredWorld::new(package.clone(), &mut exact, span).unwrap();
+        assert_eq!(exact, 0);
+        assert_eq!(retry.package(), world.package());
+        assert!(retry.code.lock().unwrap().is_none());
+        // Reading already prepared metadata neither constructs a new directory
+        // nor consumes an unrelated default allowance.
+        let context = crate::ptc::Context::default();
+        retry.capabilities(&[], &context);
+        // A second world (including a resource-authority world) shares the same
+        // caller allowance, rather than being granted another default budget.
+        assert!(RequiredWorld::new(package.clone(), &mut exact, span).is_err());
+        assert_eq!(exact, 0);
+    }
+
+    #[test]
+    fn invalid_world_metadata_spends_work_without_publishing_a_directory() {
+        let preparation = literal_preparation(false);
+        let mut package = preparation.world.package().clone();
+        package.functions.push(package.functions[0].clone());
+        let mut remaining = 100_000;
+        let failure = RequiredWorld::new(package, &mut remaining, Span::default())
+            .err()
+            .unwrap();
+        assert!(
+            failure.message.contains("duplicate callable declaration"),
+            "{failure}"
+        );
+        assert!(remaining < 100_000);
+        RequiredWorld::new(
+            preparation.world.package().clone(),
+            &mut remaining,
+            Span::default(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1023,7 +1086,7 @@ mod tests {
         });
         // The executable closure does not retain this runtime implementation;
         // resource authority does. Their indexes must follow their own source.
-        prepared.world = RequiredWorld::new(package.clone(), span).unwrap();
+        prepared.world = RequiredWorld::new(package.clone(), &mut 100_000, span).unwrap();
         package.implementations.push(n::Implementation {
             declaration: id(33),
             subject: subject.clone(),
@@ -1038,7 +1101,7 @@ mod tests {
             requirements: vec![],
             methods: vec![],
         });
-        let resources = RequiredWorld::new(package, span).unwrap();
+        let resources = RequiredWorld::new(package, &mut 100_000, span).unwrap();
         prepared.copy_authority = Some((copy, drop, resources.clone()));
         let sibling = prepared.fork();
         assert!(Arc::ptr_eq(
@@ -2026,7 +2089,8 @@ mod tests {
             arguments: vec![frozen_types(vec![p(P::Bool), p(P::U8)])],
         };
         let prepared = PreparedRequired {
-            world: RequiredWorld::new(n::Package::default(), Span::default()).unwrap(),
+            world: RequiredWorld::new(n::Package::default(), &mut 100_000, Span::default())
+                .unwrap(),
             entry: declaration,
             inputs: vec![(
                 n::LocalId {

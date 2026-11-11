@@ -2452,11 +2452,11 @@ impl Checker<'_, '_> {
                             enums: package.enums.clone(),
                             ..Default::default()
                         };
-                        prepared::RequiredWorld::new(resources, expr.span)
+                        prepared::RequiredWorld::new(resources, &mut self.required_steps, expr.span)
                             .map(|world| (copy, drop, world))
                     })
                     .transpose()?,
-                world: prepared::RequiredWorld::new(package, expr.span)?,
+                world: prepared::RequiredWorld::new(package, &mut self.required_steps, expr.span)?,
                 entry,
                 inputs,
                 result_type,

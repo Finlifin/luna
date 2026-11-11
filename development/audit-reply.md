@@ -420,6 +420,31 @@ ignore。这里仍使用保留作者已有修改的工作区，不是纯 HEAD �
 没有跨 VM Type 响应、取消协议或新的稳定世界载荷。边界及证据见
 [块的语句进度与词法退出责任](elaboration-state-and-publication.md#已接入块的语句进度与词法退出责任)。
 
+### required 声明目录使用调用者预算
+
+沿源 activation 的准备路径发现：`RequiredWorld::new` 每次以独立的 PTC 默认预算
+调用 DeclarationSnapshot.prepare，实际目录建立成本没有从 required_steps 扣除。
+执行世界与资源证据世界都会经过这个入口，因此仅计量后续 VM 调用不构成完整预算。
+现已由调用者传入额度，成功和失败均结算实际准备成本，目录完整建立后才发布世界。
+已准备目录的读取和同一世界的代码缓存复用保持；没有把资源证据与执行声明混为一份。
+
+新检查覆盖零预算、精确预算及少一步、同一额度连续准备两个世界、非法重复声明和
+失败后的新尝试。包组装与其上游所有复制的成本不是本次修复的覆盖范围；本次只关闭
+目录准备自行领取默认额度的漏洞，也没有接通源主体挂起／恢复。
+
+局部验证（工作目录 `/home/fin/luna`）：
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib program::required::prepared::tests --test invocation_budget --no-fail-fast`，
+24 项 prepared 检查通过，`/tmp/luna-tools-hsjprfb_/result.json` 退出 0；同一命令的
+invocation_budget 被名字过滤器全部筛去，不计为已验证，其后另行运行无该过滤器的检查。
+
+无名字过滤器的相关回归：
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib --test invocation_budget -p luna --test required_input_scopes --test staged_invocation_reuse --test inline_pattern_observation --test library_comptime_comparison --test builder_invocations --test ordinary_callable_types --test ordinary_clause_collectors --no-fail-fast`，
+465 项通过、2 项仍 ignored，`/tmp/luna-tools-y4fb1689/result.json` 退出 0。
+这包含真实 sysroot 的内置包比较、builder 与普通调用回归，不表示两个待决域正例已完成。
+两个修改的 Rust 文件经 scoped rustfmt 检查通过，
+`/tmp/luna-tools-_oviwmxx/result.json` 退出 0。结果来自保留作者及 formatter agent
+已有修改的工作区；本次未修改或纳入这些文件，没有运行全 workspace 检查。
+
 ## 4. 本次证据与限制
 
 工作目录 `/home/fin/luna`；所有检查通过 `development/check.py --timeout 900 -- test`。
