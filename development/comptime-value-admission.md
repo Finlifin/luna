@@ -2085,6 +2085,11 @@ PhaseMismatch，实际重复声明被拒绝并返回携带 `duplicate function d
 
 ## 35. Phase 存储缓存与构造预算的后续边界
 
+本节前半保留各条迁移的局部证据；其中“本批／后续”均指当时阶段。
+VM 构造、声明域及失败分类的当前汇总见
+[当前接线](#vm-构造与声明域准入当前接线)，剩余缺口与最新复查见
+[当前尚未完成的边界](#当前尚未完成的边界)。不要把早期独立额度的描述套回现实现。
+
 phase validator 原来先 clone 类型和 frames 组成缓存键，再调用带内部固定额度的
 bool 存储观察；错误都折叠成 inspection limit。现已删除这条 bool 包装入口，生产
 遍历使用绑定到一个不可变 Package 借用的 `RuntimeStorageQueries`，复用
@@ -3162,897 +3167,197 @@ record label 测试的资源／语义混淆。最终检查已覆盖相应修正�
 
 ### VM 构造与声明域准入：当前接线
 
-构造器的资源失败必须保持为 StepsExhausted，非法元数据、作用域、sort 或值域仍
-拒绝为 InvalidCallPlan。失败的批次预留可能留下正余额；不能根据余额是否为零
-猜测错误类别。构造期间没有用户执行事件，不发布部分索引或前提闭包。
-
-**元数据与快照。** 新世界通过 `normal_forms::validate_in` 检查 NF／newtype
-结构并支付构造额度，外层和 newtype 内层的 Budget 均保留分类。
-SourceIndexes 持有原 Arc 快照，只能在精确 Package 身份匹配时复用结构证明；
-同内容副本、修改后的世界及同号声明不能借用。caller premises 不属于结构证明，
-仍须单独检查。公开 for_comptime_in_session 目前只传空 premises；非空 premises
-与索引组合由内部构造器回归覆盖，尚未新增公开的带前提 session API。
-
-**前提闭包。** `constructor_premises::expand` 借用初始 premises，先预留队列批次，
-再在键复制／哈希和替换输入复制前检查嵌套 Term。父 trait 与 capability 通过
-Trait::input_substitution 及 DeclarationSubstitution 的 bounded 接口展开；重复
-替换载荷按展开结果计费。队列、声明参数域与后续 binder 检查共用同一份余额，
-成功后将剩余额度交给执行器。去重与原有 64 层展开上限保留，前提不提供方法体。
-即使叶节点没有后续边，也检查 Self／实参的作用域与 sort；普通 comptime 值仍按
-其声明域使用。这项结构检查不替代 scalar range、requirements 或方法可用性。
-
-**trait 值域准入。** Trait 的 validate_arguments 系列现在直接返回共享的
-NominalAdmissionError（value_admission::Error），保留 Budget、Unresolved 与 Invalid。
-Unresolved 表示接收世界尚未完成某个前提检查，既不是域反例，也不授权接纳。
-参数 binder、Term 预检、声明替换和布局查询不再先转换成 String。
-声明域查找仍按声明身份取得独立证据，不以待验证的参数槽反推实际域；冲突、
-缺失与不匹配证据继续拒绝。VM 的具体 implementation 检查消费这个分类，资源
-耗尽不再变成 InvalidCallPlan。
-
-**嵌套查询。** DomainQueries::declared 与 trait Type 域关系回调均返回
-Result<bool, AdmissionError>。scalar、record、optional、nominal 及 record 内
-nominal 的声明查询和关系检查都传播错误；Ok(false) 仅表示没有匹配的证据，
-不是预算失败。Type 关系不建立值索引相等，也不展开 NF 头。已经无调用者的
-validate_symbolic_value 与 validate_record_index 私有包装已删除。
-
-**Type 域证明。** equivalent_domains 仅对 Type 操作数查询 PTC：Entailed 返回
-Ok(true)，NotEntailed 返回 Ok(false)，表示当前前提不足以保证必检域要求，不能
-据此添加否定等式。BudgetExhausted 保持 Budget，其他 Unknown 保留原因为
-Unresolved，IllFormed 为 Invalid。调用使用同一余额并在每种结果后同步；失败的
-预检仍可能留下正余额。未注册 NF congruence 的 UnvalidatedModel 不被当作域反例，
-也不以展开 NF 主体求解。
-
-implementation 头的直接值输入及嵌套 symbolic 字段均使用这一可失败查询。
-其参数作用域和 sort 已由 DeclarationSubstitution 检查，值本身直接进入共享
-value_admission 内核，退役该路径重复构造单参数声明并经过布尔 evidence 包装的
-做法。Budget／Unresolved 在候选形成处保持 TypeAssessment::Pending；不能从
-一次失败查询永久排除候选。实际回归覆盖缺少 congruence 时 Pending，补齐同一
-世界中的证据后重新匹配成功。
-
-**条件 trait 形成。** capability 的 condition_fact 返回 typed admission 结果，
-域准入、参数替换或前提证明的 Budget 不再转换成 IllFormed；Unresolved 通过
-UnknownReason::UnresolvedPrerequisite 保留诊断原因，真正非法输入才保持
-IllFormed。条件事实查询直接返回 `Result<ConditionFact, NominalAdmissionError>`，
-不再用 `Option` 容纳被吞掉的 nested resolution 失败；递归、形成前提未建立和
-输入闭合性未决都保留原因。查询只使用分给自己的额度，成功、失败和未决后均将
-未用额度归还外层；形成要求使用 prove_metered，证明工作不再由新的临时 Budget 隐藏。
-
-未完成的条件事实不进入候选的局部 Context，也不能用缺失事实的反模型排除候选。
-其余独立事实仍可继续证明目标；若已有独立的 Entailed 结果，不因一个未决的析取
-分支而拒绝。没有这样的证明时，保留实际未决原因。HeadMatch 的正／反要求查询
-仍分别执行，但最终 Pending 现在带有要求位置与两侧的 Unknown 原因，不再统一
-改写成一句无原因的“requirements are unsettled”。正式 Type 命题、程序验证与
-NF 头不展开的边界保持。
-
-回归覆盖缺失 NF congruence 导致条件候选 Pending、补充证据后选择并 replay
-成功，以及另一个已建立的析取分支独立完成证明。形成检查还验证重复前提证明的
-成本、子查询额度上限、语义拒绝、资源失败与后续重试。
-
-**世界查询与闭合性。** World 的直接 resolve／resolve_instance、decide_trait、
-prove_proposition 与 check_predicate 系列返回同一个 typed admission 错误。
-声明域、替换、索引查询的预算失败不先转成字符串；递归能力义务及未决的父 trait
-阶段检查是 Unresolved，明确的阶段不匹配仍是 Invalid。elaboration 的 trait 查询
-与 materialization 的要求查询保留该类型直到各自的诊断出口。
-
-闭合性观察使用 `closed_trait_inputs_metered`，共享余额串行检查各输入与子结构，
-Key 构造和结构视图按实际报告的工作扣款；删除固定切片的保守整份扣款包装。
-`Ok(false)` 表示确实观察到开放结构；预算不足为 Budget，视图无法完成为 Unresolved。
-已形成 trait 的开放／未决查询仍产生 Pending decision，并通过 pending_reason 和
-S-expression dump 保留原因。预算失败不会伪装成普通的开放输入。
-
-世界命题求解不会把 Pending decision 或未完成查询当成负事实，也不会用缺失事实的
-反模型交付 NotEntailed；没有独立证明时返回带原因的 Unknown。其他已确立事实仍可
-独立证明析取目标，证明只属于当前 world／context，不写回原始 Context。
-非 metered 的 check_predicate 直接委托 metered 入口，直接证明与世界查询不再分别
-获得完整的新额度。条件与世界命题共用最终结果整理：最后的证明若已耗尽，保留
-BudgetExhausted，不被更早的语义 Pending 覆盖。此处不引入完整联合模型搜索，
-也不改变 PTC 只处理类型命题的边界。
-
-memoization 的 bound contract 消费者将 typed Budget 与 Outcome 的 BudgetExhausted
-映射到 executor 的资源错误，而不是 Protocol；其他拒绝仍保留具体原因。真实 sysroot
-回归在不足额度和不满足 trait 的输入上检查零主体执行、无缓存写入及后续合法重试。
-该用例返回 bool，按既定规则不进入 Type 结果缓存，不声称覆盖 TypeHash 或完整缓存协议。
-
-回归覆盖逐预算的形成／闭合检查、非法输入与未决前提的分类、递归失败后的 active
-集合和重试、正反目标均不得由循环证明、两种析取顺序的独立证明，以及真实闭合输入
-的有效否定证据。已有 opaque NF 视图仍不展开头，Pending 的原因可直接观察。
-
-世界查询这条接线的验证（工作目录 `/home/fin/luna`）：
-
-- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
-  --lib --test capabilities --no-fail-fast`：69 项通过，退出 0；
-  `/tmp/luna-tools-jfa9vzwv/result.json`。
-- 同一入口 `test -p type_resolution -p luna`，选择 `implementation_phases`、
-  `associated`、`projection_copy_budget`、`trait_domain_substitution`、
-  `dynamic_trait_clauses`、`normal_input_plans`、`library_list_equality`、
-  `sysroot_preludes`、`associated_signatures`、`prepared_invocations`、
-  `trait_query_failures`，附 `--no-fail-fast`：101 项通过，退出 0；
-  `/tmp/luna-tools-ns8b3x6o/result.json`。
-- 同一入口 `test -p luna --test execution
-  memoized_invocation_checks_dependent_type_contracts_before_caching -- --exact`：
-  1 项通过，退出 0；`/tmp/luna-tools-r1hdnoen/result.json`。
-- 改动的十个 Rust 文件经 `development/command.py --timeout 120 -- rustfmt
-  --check --edition 2024 --config skip_children=true` 检查，退出 0；
-  `/tmp/luna-tools-zrf1o7nt/result.json`。
-
-**关联 Type 投影与调用视图。** Type projection、normalization／view、projected
-resolution 与 prerequisite_type 使用 typed admission 错误。递归查询未决、循环投影
-是 Unresolved；非法 origin／member／sort 是 Invalid；结构复制、替换和形成证明的
-资源失败保持 Budget，不根据剩余额度或诊断文本猜测分类。条件求解不再通过
-`if let Ok` 吞掉投影失败；其独立证明／未完成反模型规则与 trait 事实相同。
-projection support replay 同样将 Budget 保留为 ProofError::BudgetExhausted。
-
-Type 与普通关联值共用 check_associated_formation：有界检查 predicate 结构，再由
-DeclarationSubstitution 的 bounded 接口检查实际替换载荷，最后按同一余额证明形成
-要求和能力。删除两段各自枚举谓词、预留固定份额并另做证明的代码；既有形成遍历
-深度上限保持。普通关联值的 payload／initializer 检查仍执行，不能用 Type 视图代替
-完整值准入。
-
-Normalizer 先在查询私有状态完成，成功或失败都把实际余额传回 metered 入口；失败
-不再无条件清空调用者预算。宿主的 selection callback 借用同一活动查询栈，但本次
-工作由局部 normalizer 计费；回调临时使用获配额度并归还宿主计数器，normalizer
-结束时只扣一次。这样避免递归 selection 先扣宿主、返回后又扣局部总消耗。
-shared completed cache 仍只在整次归约成功后扩展，失败前已完成的前缀不发布。
-NF 只遍历输入而不展开头；definition-side given 视图与 IIR 的严格闭合要求不合并。
-
-普通调用的 TypeView 错误与 refine_type_views 回调也保留该分类。elaboration 的
-callable_input_view_metered 不再先制造源码诊断、再拆出 message 传回求解器；最终
-call_inference_error／带 span 的便捷入口负责渲染。候选在所有观察成功后才发布新
-等式，Budget、Unresolved、Invalid 都不能提交部分参数视图。
-
-回归比较同一投影的嵌套 selection 与顺序查询消耗，验证递归工作只扣一次；注入
-三类失败并增加固定工作量，验证外层扣款差额准确且保留正余额。另检查错误成员后
-合法重试、缓存前缀回滚、深度限制、NF 不展开及调用候选失败后的原类型。
-
-调用集成测试不再假定大预算下观测到的消耗是最小成功额度。诊断运行中，完整热
-调用消耗 4804 步；提供 4803 步时消耗 4768 步，仍执行三次字节码调用、返回 u8，
-且没有复用结果。PTC 的冲突解释与学习精简按剩余额度分配工作，精简不足时保留
-原有有效证据，因此成功所需额度不由一次运行的消耗确定。测试保留 0／1 步拒绝，
-其余探测额度若成功则检查正确结果、完整执行、无结果复用和无缓存写入；每次都
-检查不超支及随后正常额度恢复。生产预算和语义检查未放宽。诊断证据为
-`/tmp/luna-tools-mvnqsa_k/result.json`（旧断言退出 101）。
-
-本次接线验证（工作目录 `/home/fin/luna`）：
-
-- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
-  --lib --test associated --test calls --test capabilities
-  --test projection_copy_budget --no-fail-fast`：最终 149 项通过，退出 0；
-  `/tmp/luna-tools-eho931yy/result.json`。
-- 同一入口 `test -p luna`，选择 `associated_signatures`、
-  `deferred_associated_values`、`normal_input_plans`、`open_normal_input_plans`、
-  `prepared_invocations`、`invocation_value_templates`、`dynamic_trait_clauses`、
-  `trait_domain_substitution`、`sysroot_preludes`、`scoped_comptime_callables`、
-  `library_list_equality`，附 `--no-fail-fast`：93 通过、上述旧额度断言 1 失败，
-  退出 101；`/tmp/luna-tools-aq3laqs5/result.json`。修正断言后重跑
-  `test -p luna --test invocation_value_templates`：4 项通过，退出 0；
-  `/tmp/luna-tools-b1j8xco6/result.json`。其余十组未重复执行。
-- 同一入口 `check -p type_resolution -p luna --tests`：退出 0；
-  `/tmp/luna-tools-s6uoxnw_/result.json`。此后仅将两个输入上下文耗尽分支
-  从字符串改为 Budget，并由上述最终 type_resolution 测试覆盖编译。
-- 本次十六个 Rust 文件通过 `development/command.py --timeout 120 -- rustfmt
-  --check --edition 2024 --config skip_children=true`，退出 0；
-  `/tmp/luna-tools-v24wvrxz/result.json`。
-
-**普通关联值与 initializer 的接收边界。** completed_values 的结构遍历、字面量、
-捕获值、newtype 转换、error transport 和名义字段替换现在传播 typed admission
-错误。名义声明 lookup 返回 Result<Option<_>>：成功查完没有声明才是 None；遍历
-耗尽是 Budget，重复身份是 Invalid。集合域回调也保留其失败类型，不再将资源不足
-或未决布局转成无布局。字段替换直接使用 instantiate_value_fields_checked，删除
-先变成 Option 再猜测原因的调用。tuple 的既有可选布局观察器尚未在此统一迁移。
-
-AssociatedInitializer 的自由绑定分析、捕获 initializer 检查和表达式遍历使用同一
-typed 错误。深度／步骤失败保持 Budget；runtime 调用和捕获调用者 local 仍非法。
-这是检查初始化程序能否被保留，不证明其已经执行或成为 completed value。
-elaboration 对完成值检查的 Budget／Unresolved 直接报告，不能据此改走待执行
-initializer；确实不是完成值的程序继续经过原有 phase／闭合检查。
-
-World 的 resolve_associated_value_plan_metered 统一选择完成值或初始化计划。
-形成检查、实现选择、替换、完成类型视图和最终 payload 检查在每条返回路径交还
-实际余额；内部缓存只属于本次查询，失败不会发布结果。旧的仅成功返回余额的
-plan_budgeted 和内部 value_budgeted 入口退役。materialization 的三处需求统一走
-同一个适配入口，保留外围字符串诊断，但不再丢失失败前已发生的扣款。
-
-invocation 的宿主选择回调不再遇到任何失败就清空余额并统一报
-UnmaterializedDispatch。Budget 映射为 StepsExhausted，Unresolved 映射为
-TypeContractUnresolved，Invalid 保持 UnmaterializedDispatch；均保留访问来源。
-VM 构造对已完成关联值的校验同样区分资源／未决／非法。这不表示 VM 构造的
-全部预算已统一：其外围 reservation 和独立 phase pass 仍是下述剩余边界。
-
-真实 sysroot 的逐额度回归还暴露了两个上游丢失点：trait binder 的旧字符串包装，
-以及将候选额度不足写为普通 Pending 文本的 TypeAssessment。关联 Type/value
-现在使用 binders_with_self_checked；TypeAssessment 增加 BudgetExhausted 状态，
-输入遍历、参数／替换、普通值关系、候选推断与 requirement 证明中已确定的资源
-失败保留该状态。它在选择层仍是 pending，不能充当反例；若某个独立证据已完成
-排除或选择，保留该结论；若 Deferred 选择含资源失败，则 World 向调用者返回
-Budget。dump 使用 `(pending (budget-exhausted))`。结构资格观察、qualification
-等尚有未统一的内部原因，不能据此声称所有候选 Pending 都已保留完整失败链。
-
-这条关联值接线的验证（工作目录 `/home/fin/luna`）：
-
-- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution
-  -p luna --test completed_values --test associated_initializers --test associated
-  --test projection_copy_budget --test trait_query_failures --test implementation
-  --test capabilities --no-fail-fast`：`/tmp/luna-tools-2lsh4gau/result.json`，
-  183 通过、6 个旧资源状态断言失败，退出 101；其中 NIR 的 26 项和真实 sysroot
-  查询边界的 2 项全部通过。资源断言随后改为要求 BudgetExhausted，而不是放宽为
-  任意 Pending；真正未决参数仍要求 Pending。
-- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
-  --no-fail-fast`：355 通过、receiver_sources 的两处同类旧断言失败，退出 101；
-  `/tmp/luna-tools-5kokc8r5/result.json`。修正后同一入口
-  `test -p type_resolution --lib --test receiver_sources --no-fail-fast`：29 项通过，
-  退出 0；`/tmp/luna-tools-b5grbvrh/result.json`。该组包含新增的独立反证测试：
-  在注入资源失败后，另一个 requirement 的有效反证仍可排除候选。
-- 同一入口 `test -p luna`，选择 `associated_signatures`、
-  `deferred_associated_values`、`trait_query_failures`、`normal_input_plans`、
-  `open_normal_input_plans`、`prepared_invocations`、`invocation_value_templates`、
-  `dynamic_trait_clauses`、`sysroot_preludes`、`library_list_hash`、
-  `library_list_equality`，附 `--no-fail-fast`：88 项通过，退出 0；
-  `/tmp/luna-tools-k_pv0e88/result.json`。
-- 同一入口 `test -p comptime_interpretor --lib associated --no-fail-fast`：
-  19 项通过，退出 0；`/tmp/luna-tools-hjluzwr8/result.json`。
-- 本次 18 个 Rust 文件的 scoped rustfmt check：退出 0；
-  `/tmp/luna-tools-pxm5v8x7/result.json`。git diff --check 通过。
-
-NIR 新回归区分声明缺失／重复／耗尽，注入三类集合证据失败并验证 17 步工作差额，
-扫描 newtype 和 initializer 额度并检查失败后恢复。sysroot 回归比较直接选择与宿主
-回调的同一查询（包括 initializer 形成）的余额和分类，再通过真实 invocation
-验证布尔结果、执行事件与无结果缓存。Luna 的 type_resolution dev-dependency 仅供
-该生产边界测试使用，不为测试复制世界构造逻辑。
-
-**DeclarationWorld 的归约事务。** 查询层先由 prepare_normalized_types 在局部状态
-计算结果和待发布子投影；它只借用当前世界缓存，不写入。normalized_type 收到归约
-结果后完成根结果的保留复制检查，随后一次性扩展子投影缓存和根缓存。以前严格
-normalization 的缓存入口已经发布子结果，外层复制仍可能失败，形成“失败查询
-留下成功子缓存”的边界错位；现在外层事务拥有最后发布权。
-
-归约成功或失败都交回预算余额；normalized_type 使用 typed admission 错误。
-materialization 在已有字符串诊断边界渲染，但不改写余额。normalize_concrete_type
-现在贯通构建与归约的 typed admission 结果，两阶段都交回追踪到的剩余额度，
-构建失败不再人为清零，允许调用者继续独立检查。
-
-**DeclarationWorld 的构建事务。** new_metered 接收调用者的可变预算，Context 的
-NF／newtype 验证与构造器注册、每个 implementation 的所有权及索引键检查、声明
-参数域收集与注册都从同一余额扣款。Index 的 insert_metered 和参数域注册先完成
-检查再更新索引；失败不改变贡献集合、参数域或 revision。整份世界在私有局部状态
-中建立，全部成功后才返回，构建失败不留下可供查询的半成品。
-
-世界保留的前提、NF 头、nominal 布局及 implementation head 在复制前按结构和
-载荷预检，包含字段名、枚举编码及字符串数据。函数声明仍从源包借用，既不复制
-也不遍历函数体；增大 body 不会增加这里的元数据复制开销。预检不是形成证明，
-不替代后续域检查，也不执行或展开 NF 函数体。
-
-materialization 的生产入口使用 new_metered，继续从构建余额处理输入。
-DeclarationWorld::new、Index::insert 等已有便利入口委托同一实现，但保留其拥有
-预算／字符串诊断的旧接口；Context 的独立便利入口仍提供默认验证额度。其他调用方
-自行建立的预算尚未因此统一。此处计量结构工作与保留载荷，不声称逐条计量排序、
-hash 或分配的 CPU 指令，也尚未完成 stable world 的分块共享与增量复用。
-
-事务回归使用同一个声明世界的底层归约找到“子结果完成、根保留失败”的实际额度，
-不假设大额度观测消耗是最小成功阈值。失败后重试与全新世界具有相同开销；成功后
-重复查询才获得缓存收益。另检查非法输入、语义未决、已有缓存保留、正余额与恢复。
-
-本次归约事务验证（工作目录 `/home/fin/luna`）：
-
-- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
-  --lib --test associated --test callable_world --test projection_copy_budget
-  --no-fail-fast`：49 项通过，退出 0；`/tmp/luna-tools-l6xerovt/result.json`。
-- 补充同世界探测及明确错误分类检查后，同一入口 `test -p type_resolution -p luna`，
-  选择 `associated`、`associated_signatures`、`deferred_associated_values`、
-  `trait_query_failures`、`normal_input_plans`、`prepared_invocations`、
-  `invocation_value_templates`、`library_list_equality`、`sysroot_preludes`，附
-  `--no-fail-fast`：86 项通过，退出 0；`/tmp/luna-tools-kmwty6y6/result.json`。
-  associated 的 26 项与上一条范围重叠，不累加为独立用例。
-- 四个修改的 Rust 文件通过 scoped rustfmt check，退出 0；
-  `/tmp/luna-tools-10wgpspg/result.json`。git diff --check 通过。
-
-构建事务迁移的验证（工作目录 `/home/fin/luna`）：
-
-- `python3 -B development/check.py --timeout 900 -- check -p type_resolution
-  -p luna --tests`：退出 0；`/tmp/luna-tools-mbloika0/result.json`。
-- 同一入口 `test -p type_resolution --lib --test world_construction
-  --test callable_world --test associated --test implementation --test capabilities
-  --no-fail-fast`：188 项通过，退出 0；`/tmp/luna-tools-_64qogyo/result.json`。
-- 同一入口 `test -p ptc -p luna --test type_inputs --test nominal_models
-  --test associated_signatures --test deferred_associated_values
-  --test trait_query_failures --test normal_input_plans --test prepared_invocations
-  --test invocation_value_templates --test sysroot_preludes --test library_list_equality
-  --no-fail-fast`：81 项通过，退出 0；`/tmp/luna-tools-3uqmbpuy/result.json`。
-- 八个修改／新增 Rust 文件的 scoped rustfmt check：退出 0；
-  `/tmp/luna-tools-bk1b81wm/result.json`。git diff --check 通过。
-
-新增回归覆盖重复注册不发布、域冲突保留原值、批量 implementation 共用额度、
-失败后恢复、宽载荷预检与函数体借用。这里的确定性构建不做证明搜索，可用实际
-消耗检查精确额度；该断言不推广到 PTC 的自适应证明路径。生产预算未增大，
-未运行全 workspace 或性能基准。
-
-**Given 前提查询。** World／Solver 的 given 系列接口现在返回
-`Result<Option<TraitRequirement>, NominalAdmissionError>`：只有 `Ok(None)` 表示
-已完成查询但没有见证。输入／域非法、预算不足、关系未决分别保留 Invalid、Budget、
-Unresolved。独立的后续前提仍可给出有效见证；一次未决查找不能替代否定证据。
-
-查询移入独立的 given 模块，直接借用 world、上下文与根前提，不再为只读查找构造
-ResolutionScope 快照。输入载荷、见证复制、去重键和继承替换共用调用者的额度；
-子查询只消费获分配的额度，并在所有结果上扣除实际消耗。完整 telescope 可以构造
-Type 比较，未完成的 runtime telescope 仍保留原 sort frame，不伪造类型上下文。
-
-普通值参数先比较结构和已知标量差异，只有相同结构中的 Type 叶节点交给 PTC。
-NIR 提供共享额度的 index_type_relations_budgeted，遍历不足不会冒充无 Type 关系；
-given 不再将 Symbol、record 等普通值作为 Type 等式提交。调用候选、implementation
-重复参数匹配和 evidence replay 也已迁移到同一可失败接口；旧的
-index_type_relations 可选包装和 index_values_definitely_differ 布尔包装已删除，
-不再有内部自带额度或将耗尽转换成无匹配／未发现差异的公共捷径。
-
-**接口来源的输入身份。** Given 所用的输入比较已抽出为
-type_resolution/input_identity::equivalent，成员来源去重也使用这一入口。
-它比较已准入的输入：精确值身份、已知标量／结构差异、同结构中的 Type 关系，
-以及原调用 telescope 下的 Type 证明；不执行 invocation，不赋值推断变量，
-不把普通数据等式变成 PTC 命题。false 只表示当前身份要求不成立，不是可发布的
-否定 Type 事实。Budget、Unresolved、Invalid 均作为查询失败传播到调用方。
-
-原 same_interface 对每个实参另开证明额度，并将所有非 Entailed 结果压成 false。
-现显式视角、声明期关联投影、泛型 capability 来源和可见 trait 发现都传播失败；
-实参复制预检、普通值遍历与 Type 证明共用传入余额。继承与可见来源查询沿用已有
-搜索预算，声明及上下文入口仍有各自的查询额度，尚未完成全 checker 的预算统一。
-
-来源的阶段筛选先于语义去重。继承遍历只按精确接口键防止重复访问，保留各成员
-来源；隐式调用先选定有效阶段层，再比较该层的完整接口实例。否则低优先级层中
-两个未知值索引会阻断已确定的 pure comptime 来源。显式视角没有这层优先级竞争，
-仍须比较所有实际继承来源；诊断不会把未决身份标记为已确定的来源歧义。
-
-新增单测检查 Type 叶子仅使用当前上下文、已知普通值差异、未知值身份、非法 Type
-作用域，以及预算消耗和恢复。源码回归覆盖直接／父接口约束中的阶段优先级，并在
-去掉优先来源后要求保留 unresolved 身份诊断。它不为通过而增加生产预算。
-声明期主体匹配仍有独立的旧证明路径；此次只迁移完整接口的参数身份比较，不能
-据此宣称所有来源查询均已纳入统一的可暂停任务协议。
-
-该回归最初使用泛型 Ordinary／Child 实现，前端通过后直接 comptime invocation
-报 InvalidCallPlan。追踪定位到 function_instance_value 对 capability 的见证检查：
-未调用成员的泛型接口实例没有进入 VM 的 implemented_interfaces。将三个修改的
-接口模块恢复为 `d873c5e3` 内容后，相同源码仍在同一位置失败，
-`/tmp/luna-tools-2bksb0fw/result.json` 退出 101；追踪证据为
-`/tmp/luna-tools-m07op6hn/result.json`，临时诊断与基线替换均已逐字节恢复。
-独立复现保存在 [comptime-unused-generic-capability.fl](repros/comptime-unused-generic-capability.fl)，
-预期仍是成功返回 true；该阶段未修复该见证交付缺口，随后由下述主动准入查询接通。
-来源优先级回归改用具体实现，
-保留泛型函数中的两个未知值索引，分别验证来源选择与未决失败，不把 VM 缺口当作
-合法拒绝或削弱函数的 capability 检查。
-
-本次验证工作目录 `/home/fin/luna`：
-
-- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p luna
-  --lib --test capabilities --test associated --test receiver_sources --test trait_phases
-  --test trait_domain_substitution --test trait_query_failures --test associated_signatures
-  --test nominal_value_parameters --test cmtt_methods --test library_protocols
-  --no-fail-fast -- --skip code_method_parent_value_clauses_form_indexed_code_signatures`：
-  786 项通过，筛去 1 项已确认未实现的 indexed code signature 用例，退出 0；
-  `/tmp/luna-tools-06l0dj8m/result.json`。包含工作区原有资源分析修改。
-- 七份修改／新增 Rust 文件 scoped rustfmt check 退出 0；
-  `/tmp/luna-tools-tuqwokn1/result.json`。git diff --check 通过。
-
-未执行全 workspace、native 或性能基准；该阶段未覆盖泛型见证交付复现。
-
-**调用值准入与能力查询。** 已准备 dispatch 表只提供保留的正面见证，不枚举
-整个源码世界的全部能力。原 function_instance_value／admit_callable_identity 对
-闭合 capability 只查此表，因而把未使用成员的泛型 Ordinary 实例当成非法调用计划。
-动态子句在 VM 内形成实参包时尤其容易暴露这一缺口；提前遍历所有泛型方法主体
-或只识别常量 tuple 包都不能解决通用需求。
-
-主动函数／方法准入现复用 invocation_contracts::check_capability_contract：
-扣除输入观察和复制的工作量，已有保留／假设见证可直接满足；否则将绑定后的
-TraitRequirement 交给当前 invocation 的类型查询服务。驱动的服务关联完整冻结
-实现世界，按调用方余额选择并证明能力。没有服务或查询未决时仍拒绝，不能由
-源码声明目录制造见证；Rejected 与 Unknown 保持各自 TypeContract 诊断。
-
-这个查询不安装 dispatch、不遍历实现主体，也不授权运行方法。实际方法调用
-继续经过公共契约、phase、选择与程序规格检查。函数值形成及携带方法身份的值
-准入共用此边界；未绑定的普通输入义务仍在输入绑定后检查。已有代码实例缓存
-也不豁免重新检查 capability，失败不会发布新的代码实例或 InstantiateFunction 事件。
-
-名义 Type 形成与 alias 主体准入也复用此主动能力检查，见下述边界。
-名义值的被动 has_type 仍依赖保留见证；已迁移的主动值边界使用下述局部义务检查。
-没有把被动布尔类型观察改成可执行查询，也没有将查询成功塞入全局
-assumed_interfaces；尚无统一的可复用值证据，不能宣称所有 carrier 均已迁移。
-
-该边界的验证工作目录 `/home/fin/luna`：
-
-- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna
-  --lib --test trait_phases --test comptime_bytecode_traits --test trait_query_failures
-  --test library_protocols --test cmtt_methods --no-fail-fast -- --skip
-  code_method_parent_value_clauses_form_indexed_code_signatures --skip
-  clause_list_inputs_share_domain_scope_and_budget_validation`：823 项通过，
-  筛去既有 indexed code signature 未实现及列表诊断基线两项，退出 0；
-  `/tmp/luna-tools-ngpy7ef9/result.json`。VM 单测覆盖失败不发布、余额扣除、恢复、
-  已缓存实例仍查询义务以及不安装方法主体。
-- 扩展的 invocation_checks_unused_generic_capabilities_in_the_source_world 精确测试
-  退出 0；`/tmp/luna-tools-mx2kco1l/result.json`。原复现、父接口、动态计算子句实参
-  均返回 true；移除 Ordinary 实现后调用失败。首次负例要求 Rejected，而当前
-  世界模型验证返回 Unresolved，`/tmp/luna-tools-6btj1q75/result.json` 退出 101；
-  最终按“不授予缺失能力”的契约接受这两类失败，未改变生产求解器或拒绝规则。
-- 五份修改 Rust 文件 scoped rustfmt check 退出 0；
-  `/tmp/luna-tools-6y6fhig3/result.json`。未执行全 workspace/native 或性能基准。
-
-**名义 Type 与 alias 的主动准入。** nominal_plan 的公共契约路径涵盖 struct、enum、
-newtype 与透明 alias。完成实参绑定与域检查后，capability 通过同一个主动入口检查；
-alias 只有在义务满足后才能执行其主体。过去仅查保留表的实现会让动态泛型 alias
-形成失败，即使完整源码世界存在对应实现。真实 sysroot 回归中，同样约束的三个
-名义定义原已成功，透明 alias 返回 TypeContractUnresolved；修复消除了这条路径差异，
-没有改变 alias 的透明语义或名义类型身份。
-
-admission::admit_type 的源码名义契约替换改用有预算的 DeclarationSubstitution：
-建立替换、观察并复制 requirements／capabilities 都扣除 VM 调用方余额；两组准备
-完成后才调用契约求解器。预算不足保留 StepsExhausted，不转成缺失能力或非法 Type。
-IIR 与源码名义 Type 的能力检查均复用 check_capability_contract，保留现有正面见证
-快路径；无需为没有方法调用的能力提前生成 dispatch 主体。
-
-Type 形成成功不等于已有 record／variant／newtype 值能跨世界携带证明。
-主动值边界通过下述接收世界重验取得当前许可；被动观察中的能力检查仍保留，
-可复用证据的生命周期尚未实现。
-
-该边界的局部证据（工作目录 `/home/fin/luna`）：
-
-- 修复前真实 sysroot 的四类定义回归在透明 alias 失败，退出 101；
-  `/tmp/luna-tools-qmr6hvof/result.json`。修复后同一正例退出 0；
-  `/tmp/luna-tools-1kcbt0zf/result.json`。
-- VM 的 admission::tests 两项通过，退出 0；
-  `/tmp/luna-tools-o4ioz80p/result.json`。大载荷契约低余额失败后可重试；alias 的
-  Unknown／Rejected 均扣除查询工作量且不执行主体，后续成功查询才执行主体。
-- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna
-  --lib --test comptime_nominal_capabilities --test nominal_value_parameters
-  --test trait_phases --test normal_input_plans --test library_protocols --no-fail-fast
-  -- --skip clause_list_inputs_share_domain_scope_and_budget_validation`：977 项通过，
-  筛去既有列表诊断失败 1 项，退出 0；`/tmp/luna-tools-_u8wtvi1/result.json`。
-  真实 sysroot 四类定义均比较动态形成与直接形成的 Type；仅为 true 提供实现时，
-  动态 false 形成均拒绝或未决，不能获得能力。包含工作区原有资源分析修改。
-- 四份 Rust 文件 scoped rustfmt check 退出 0；
-  `/tmp/luna-tools-l4l4ahhn/result.json`。git diff --check 通过。
-  未执行全 workspace 或性能基准。
-
-**名义值的接收世界重验。** 静态 Packet 实例的构造与传递原本能够成功，但当普通
-comptime 布尔输入被绑定为泛型子句实参时，合法的 Packet 值在构造处返回 Type。
-此前形成 Type 的主动查询不能解决后续 has_type 只查保留表的问题。复现保持相同
-泛型实现与值操作，只改变实参的供应时机；没有给测试补具体实现或额外的方法调用。
-
-value_types 从 VM 主文件分离完整的既有结构遍历。被动模式沿用保留能力检查；
-主动模式在遍历中收集待检名义域，按 VM 余额计入节点访问及域快照复制，然后调用
-admit_type。形状不匹配时不启动这些待检查询，查询失败不会发布或保留许可。
-关联投影先取得结构匹配使用的已选视图，只收集实际使用的名义域；替换前的投影
-不能再作为第二份义务交给不接受未完成投影的 Type 准入。
-名义构造准备还会在字段求值前检查域的形成契约，以免错误路径先产生字段副作用。
-
-已接入的边界包括 record／variant 构造、普通输入绑定、调用返回、不可变输入验证、
-冻结值恢复、newtype 转换、optional 与错误结果载荷、字段读取、host prepared live
-输入、Object 条目、闭包捕获、关联值结果、动态子句值包及枚举标签名称读取。
-字段读取在取得独立值后释放借用，再做主动检查。
-runtime／具体 IIR 的既有被动行为保持原路径；本次不改变仿射复制权限，不把活动
-引用变成可冻结值。
-
-当前 effects::eval_effect 在入口拒绝 comptime，其参数、handler 结果及 direct-passing
-槽检查服务于 runtime/IIR 执行；不能仅因它们调用 has_type 就纳入本次 comptime
-迁移，也不由此推导语言永久禁止 comptime effect。runtime 指针读写同样保留原有
-被动检查。剩余专用观察须先核对阶段、真实输入域与发布时点，不能机械地在持锁
-回调中启动可执行观察。共享结构遍历中的
-旧布局查询仍有独立额度，尚未全部合入调用方余额；当前新增的待检收集与主动契约
-查询使用调用方余额，不代表整个结构检查器已完成预算重构。
-
-该边界的复现与验证（工作目录 `/home/fin/luna`）：
-
-- 原有静态值构造和传递通过，`/tmp/luna-tools-drmh4sbf/result.json` 退出 0。
-  动态子句实参版本在名义 record 构造处返回 Type，
-  `/tmp/luna-tools-spfiss7u/result.json` 退出 101；接通主动值检查后同一用例通过，
-  `/tmp/luna-tools-561tb0iw/result.json` 退出 0。直接在普通输入的依赖结果上取字段
-  还会遇到独立的 invocation-time type elaboration 缺口；当前复现通过泛型函数内
-  的字段访问隔离此缺口，没有将那条未实现路径视为完成。
-- 最初的主动值局部测试三项通过，`/tmp/luna-tools-a__fd2q_/result.json` 退出 0：
-  查询成功不改变被动观察或全局假设；后续拒绝／未决仍失败；嵌套形状失败不查询，
-  低余额失败可重试；冻结名义值在不同接收世界重新检查能力。
-- 扩展的五组集成与两个库单测目标共 982 项通过，筛去既有列表诊断失败 1 项；
-  `/tmp/luna-tools-eg8ejnfa/result.json` 退出 0。覆盖动态 struct／enum／newtype 值的
-  构造、参数传递和返回，以及两条执行路径上形成失败先于字段副作用。
-  随后补充关联视图回归发现待检域收集过早，
-  `/tmp/luna-tools-13byckxp/result.json` 退出 101；已将收集移到实际类型视图确定之后。
-- 修复关联视图后的命令：`python3 -B development/check.py --timeout 900 -- test
-  -p comptime_interpretor -p luna --lib --test comptime_nominal_capabilities
-  --test associated_signatures --test nominal_value_parameters --test normal_input_plans
-  --test library_protocols --test trait_phases --no-fail-fast -- --skip
-  clause_list_inputs_share_domain_scope_and_budget_validation`：992 项通过，筛去同一既有
-  列表诊断失败 1 项，退出 0；`/tmp/luna-tools-7id6xhff/result.json`。
-- 最后对齐字节码错误转换的输入检查后，运行 `python3 -B development/check.py
-  --timeout 900 -- test -p comptime_interpretor -p luna --lib --test error_result_flow
-  --test error_surface --test optional_purity --no-fail-fast -- --skip
-  clause_list_inputs_share_domain_scope_and_budget_validation`：699 项通过，筛去同一项，
-  退出 0；`/tmp/luna-tools-19efo3j6/result.json`。新增双路径 optional／错误结果名义
-  载荷回归通过。这两轮数量有重叠，不相加作为独立覆盖数量。
-- 十三份 Rust 文件 scoped rustfmt check 退出 0，
-  `/tmp/luna-tools-30hm57q4/result.json`；git diff --check 通过。
-  集成检查包含工作区已有资源分析修改；其内容及已有 docs/library 修改未纳入本次
-  改动。未运行全 workspace 或性能基准。
-
-**Object 与捕获发布。** Object 的构造、按名／按序号读取以及 append／replace 载荷
-检查已接入主动值检查。未决或拒绝的能力不折叠成字段缺失、类型不匹配或 null。
-按名查找仍检查所有条目，包括被后续同名条目遮蔽的值；命中策略与原始条目顺序
-保持既有契约。对象编辑仍生成独立结果，失败不修改调用方已有快照。
-
-树解释与字节码的捕获装配共用 check_closure_capture：先核对捕获描述与闭包环境
-签名，再检查实际值；通过后才能放入私有捕获存储。CreateClosure 仍在全部捕获
-完成后产生。失败不发布闭包或保存能力许可；重新构造重新检查。已执行的捕获
-初始化行为不因此回滚，原有捕获次序、准备值清理和运行时移动规则保持不变。
-
-位置写回审计确认，Object／List 通过 validate_container_replacement 已接通
-validate_immutable_input，在替换前检查新值和旧值；这条路径没有再造新的验证器。
-实际存储许可、引用路径重新验证与最终 replace 仍由 value_reference 管理。
-一般位置的声明域检查不因本次覆盖了容器替换就被视为全部完成。
-
-复现与局部证据（工作目录 `/home/fin/luna`）：
-
-- 真实 sysroot 中动态 Packet 值的闭包捕获和 Object.set／get 快照用例原均在
-  invocation 返回 Type，`/tmp/luna-tools-tvd8rj7n/result.json` 退出 101；迁移后同一
-  两项通过，`/tmp/luna-tools-f38lttge/result.json` 退出 0。未添加具体 impl 或方法
-  调用来预热实现表。
-- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
-  --lib value_types::tests::containers -- --nocapture`：3 项通过，退出 0；
-  `/tmp/luna-tools-nd2qf3rf/result.json`。覆盖双路径捕获失败不发布、成功重试、
-  Object 查询／编辑保留失败、引用写回失败与预算耗尽保留旧值及独立快照。
-- 相关回归命令：`python3 -B development/check.py --timeout 900 -- test
-  -p comptime_interpretor -p luna --lib --test comptime_nominal_capabilities
-  --test comptime_bytecode_closures --test comptime_bytecode_references
-  --test comptime_object_storage --test comptime_object_contracts --test library_meta_objects
-  --test closure_environment_parameters --test library_protocols --no-fail-fast -- --skip
-  clause_list_inputs_share_domain_scope_and_budget_validation`：659 项通过、2 项失败，
-  筛去既有列表诊断失败 1 项，退出 101；`/tmp/luna-tools-n4ikv4st/result.json`。
-  两项失败位于 library_meta_objects，不能将这轮命令称为全通过。
-- 暂时用 `dc9536e9` 的五份生产文件作对照，运行 library_meta_objects 的 object_range
-  过滤组，同样 1 项通过、2 项失败，退出 101；`/tmp/luna-tools-upe970md/result.json`。
-  对照后逐字节恢复本次修改。共享示例缺少 Symbol／Integer 绑定，以及总字节码
-  调用次数依赖库包装层数，是两个既有测试问题。`02bb91e0` 补齐已有绑定的导入，
-  将后者改为检查用户入口只执行一次、返回条目的名称／域／值及顺序；拒绝例保持。
-  修复后同组三项通过，退出 0；`/tmp/luna-tools-ksuwl14a/result.json`。
-- 八份修改／新增 Rust 文件 scoped rustfmt check 退出 0，
-  `/tmp/luna-tools-xehbrzed/result.json`；git diff --check 通过。上述编译器／库回归
-  包含工作区原有资源分析修改；其内容及已有 docs/library 修改保持原样。
-  未运行全 workspace 或性能基准。
-
-**结果观察与子句值包。** 关联值完成时先释放 active initializer 标记，再通过主动
-值检查接受结果；未决、拒绝或形状错误不能留下初始化中的状态。动态子句参数在
-编码为普通 comptime 项之前检查实际接收域。枚举标签读取在取得名称、保留残余
-之前检查值的名义形成契约。三者均不从 dispatch 表缺项推导非法类型，也不发布
-全局能力许可。
-
-真实源码的关联值案例原已通过，不能将该案例称为修复前失败；局部构造的缺少
-保留见证但具备接收世界查询服务的值，才验证此完成入口的主动检查。动态枚举的
-标签名称用例则确实在修复前返回 Type。两条解释路径共用观察完成逻辑。
-
-**本阶段结束时的缺口；后续 dispatch 接线见第 36 节。**
-dynamic_nominal_clause_values_keep_their_formation_contracts 保留成功预期，当前显式
-ignore，原因是源码还未进入 VM 就在 required comptime dispatch 准备中失败：
-`interface value input normalization requires domain evidence`。
-调用形状是 `selected<flag, Packet<flag, Subject> { value: true }>()`，其中 flag 为
-外层泛型函数的布尔子句输入；Packet 的约束由通用 Enabled<flag> 实现满足。
-若先保存到局部 packet 再供应子句，还会触发 required comptime input unavailable。
-不能将这两种失败改成语言拒绝规则，也不能用本次 VM 局部通过宣称全链路完成。
-
-后续接线必须让 required invocation 将**当前合法作用域**中的值 binder 与声明域
-交给私有 dispatch 准备。现有 dispatch_instances_in_context 仅接收类型 Context 与
-trait 前提；Builder::normalized_interface_input 接受闭合结构值，却没有用于符号
-普通值的作用域证据。应复用值域准入服务并按调用方预算检查受权 binder，区分私有
-开放快照与最终严格 IIR。不能仅放行 is_symbolic_index_value，不能把声明目录中所有
-参数都当作当前可见输入，也不能将普通值域义务塞入 PTC 类型命题。所需作用域应
-来自 required 输入和稳定依赖，不能从待编码的未验证值反向制造权限。
-
-结果观察边界的验证（工作目录 `/home/fin/luna`）：
-
-- 三个 VM 局部用例在迁移前均把未决能力变为 Type，
-  `/tmp/luna-tools-d46rv9hq/result.json` 退出 101。关联值的真实源码正例在迁移前
-  已通过，`/tmp/luna-tools-7l42ytt_/result.json` 退出 0；动态枚举标签读取在迁移前
-  返回 Type，`/tmp/luna-tools-ghruccd8/result.json` 退出 101。
-- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
-  -p luna --lib --test comptime_nominal_capabilities --test deferred_associated_values
-  --test associated_signatures --test dynamic_trait_clauses --test normal_input_plans
-  --test symbols --test library_protocols --no-fail-fast -- --skip
-  clause_list_inputs_share_domain_scope_and_budget_validation`：672 项通过，1 项上述
-  符号域证据缺口显式 ignored，1 项既有列表诊断失败被筛除，退出 0；
-  `/tmp/luna-tools-ncb3zbgx/result.json`。局部用例检查未决／拒绝诊断、初始化标记
-  释放、后续成功重试、冻结前检查，以及标签读取的树／字节码一致性。
-- 当前代码显式运行 `python3 -B development/check.py --timeout 900 -- test -p luna
-  --test comptime_nominal_capabilities dynamic_nominal_clause_values_keep_their_formation_contracts
-  -- --exact --ignored --nocapture`，仍在私有 dispatch 准备中缺少域证据，退出 101；
-  `/tmp/luna-tools-7eqrd4gz/result.json`。此项没有算入通过数量，VM 子句包局部通过
-  不替代源码端到端支持。
-- 六份 Rust 文件 scoped rustfmt check 退出 0，
-  `/tmp/luna-tools-zlo4avox/result.json`；git diff --check 通过。回归包含工作区原有
-  资源分析修改；已有 docs/library 修改未动。未执行全 workspace 或性能基准。
-
-implementation 的标量冲突预检、每个普通值参数的结构遍历、重复 binder 比较与
-后续 Type 匹配共用 head 分区的余额，不再为每个实参刷新额度。调用的显式输入
-约束在试探副本中完成：结构关系提取、Type 匹配及唤醒均沿用余额；失败不发布
-试探状态。Type 输入路径同样不再在匹配后重复使用原预算。
-
-implementation evidence replay 的域准入和关系提取保留 BudgetExhausted；
-每个没有精确返回消耗的 proof replay 仍预留一份额度，但这些预留现在从描述检查
-与替换的余额中扣除，二者不再同时花同一份预算。已完成的结构不匹配仍拒绝。
-回归逐额度检查普通 record 重复输入与 replay，允许成功或资源失败，禁止因资源
-不足而得到非法输入／不适用；调用测试还检查失败后的原值与后续重试。
-
-条件求解、候选 qualification 和世界命题保留独立 implementation 的正向证明路径。
-若前提查询未决，后续独立证明仍能建立目标；未选出候选则不能据此排除目标。
-关联成员、elaboration、materialization 和 Copy／Drop 调用者传播查询失败，不能继续
-走默认“不存在”分支。条件证据 replay 扣除 given 查询的实际开销，并通过 EvidenceError
-保留域查询和 PTC 证明各自的失败；资源失败不再合入无效证明。
-
-Qualification 的 Pending 载荷使用结构化查询错误，保留 Budget、Unresolved 与
-Invalid；dump 分别输出 budget-exhausted、unresolved、invalid。替换、given、投影和
-嵌套选择不再先转成字符串，后遇到的普通未决也不会覆盖先前的预算耗尽或非法输入。
-候选仍先完成各前提的判断：另一独立前提若确定为假，可以排除整个合取，不因更早的
-未决或资源失败而强行保留候选。选择仍为 Deferred 时才向外传播保留的资源／非法
-失败；纯粹的递归未决保留为 Pending，不制造正面或负面证据。
-
-implementation 的主体资格检查已从 applicability 拆出为同一生产入口使用的
-eligibility 模块。结构视图查询与可接受形态析取证明保留各自失败原因；备选证明的
-`Result<Option<Proof>, ...>` 中，None 只表示搜索完成但没有证明，不能再吸收额度
-耗尽。结构视图失败后，独立析取证明仍可以交付资格；两条路径都没完成时，资源
-失败不能退化为普通 Pending。已知 closure 主体仍由原规则排除，抽象主体缺少证据
-仍保持未决，NF 身份不因取得结构视图而被展开或替换。
-
-依赖参数完成后仍先生成私有残余候选，再以原始声明重放其结果。重放内核区分域查询
-失败与 PTC 证据失败，候选恢复直接消费这个结果：BudgetExhausted 传回资源失败，
-ArithmeticRange 与域查询 Unresolved 保留未决，无效证据报告 Invalid；不再将所有
-重放错误格式化成 Pending，也不先把域查询未决压成无效证明。
-
-implementation 的公开 head／type evidence 重放、InherentIndex 及条件支持重放
-统一返回 EvidenceError，分别保留 Query(NominalAdmissionError) 与 Proof(ProofError)。
-原先将 Unresolved 压成 Invalid 的兼容转换已删除，内部候选与公开消费者使用同一
-重放内核。只有真正检查单份 PTC 证明的回调继续返回 ProofError，不将域查询或
-implementation 世界检查伪装成 PTC 证明检查。错误 Display 使用 S-expression，
-区分来源和具体分类，诊断文本正确转义。
-
-PTC 的 verify_proof_metered 在成功、拒绝和耗尽时返还追踪到的余额；旧 verify_proof
-只作拥有预算的便利包装。固有方法重放先检查条件支持，再用余额检查选中头；多个
-支持上下文逐次共享一份证明额度，保留独立成功证明，并在没有成功时保留预算耗尽／
-算术范围失败。条件支持的每份 PTC 证明也扣除其实际工作，不反复使用原额度。
-候选匹配及头内各证明槽仍使用 reservation，公开 implementation 重放仍接收拥有
-的 Budget；这不等于整个世界证据检查已经全面按实际消耗向外返还余额。
-
-公开重放错误与证明计量迁移验证（工作目录 `/home/fin/luna`）：
-
-- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
-  --lib --test implementation --test inherent --test capabilities --test associated
-  --test implementation_phases --no-fail-fast`：215 项通过，退出 0；
-  `/tmp/luna-tools-91kse3s4/result.json`。
-- 同一入口 `test -p ptc -p type_resolution -p luna --lib --test solver
-  --test capabilities --test library_protocols --test library_meta_math
-  --test normal_form_methods --test comptime_receivers --test trait_domain_substitution
-  --test trait_query_failures --test sysroot_preludes --test nominal_value_parameters
-  --no-fail-fast`：683 项通过，退出 0；`/tmp/luna-tools-fq7fuwu6/result.json`。
-- 将早期及普通固有方法诊断接入 EvidenceError 的 Display 后，同一入口
-  `test -p luna --test normal_form_methods --test library_protocols
-  --test library_meta_math --no-fail-fast`：42 项通过，退出 0；
-  `/tmp/luna-tools-ne5dmh7k/result.json`。这些范围彼此重叠，不累加为独立用例数。
-- 13 个修改／新增 Rust 文件通过 scoped rustfmt check，退出 0；
-  `/tmp/luna-tools-tgg84kv9/result.json`。git diff --check 通过。
-
-公开 API 回归覆盖缺少／补齐 congruence 时的 Unresolved 与恢复、低预算分类、
-伪造证据拒绝和原证据重试；PTC 回归检查固定证明在成功、错误上下文、伪造目标和
-额度不足时都返还已追踪的余额。条件固有方法按额度扫描并验证恢复，真实 sysroot
-回归覆盖协议、meta.math、NF 方法和默认导入。计量仍针对现有结构及搜索步骤，
-不是完整 CPU／分配成本模型。
-
-带缓存的定义侧关联类型视图统一使用 associated_type_view_cached_metered，成功和失败
-均通过调用者 Budget 返回已追踪的余额。条件支持重放与 materialization 的 staging
-视图在传播失败之前保存余额；原来只在成功时返回 `(view, remaining)` 的入口已删除。
-归约仍先放进查询私有缓存，整个视图成功才合入调用者缓存；失败不能发布已经完成的
-子投影，也不能删除此前成功提交的视图。定义侧可保留的抽象投影仍不进入 strict
-normalization 或作为完成的 IIR 证据使用。
-
-主体资格与重放迁移验证（工作目录 `/home/fin/luna`）：
-
-- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
-  --lib --test implementation --test capabilities --test associated --test inherent
-  --test implementation_phases --no-fail-fast`：215 项通过，退出 0；
-  `/tmp/luna-tools-1lp7yi7g/result.json`。
-- 同一入口 `test -p luna --test trait_domain_substitution --test dynamic_trait_clauses
-  --test nominal_value_parameters --test normal_form_inference --test library_list_equality
-  --test library_type_equality --test sysroot_preludes --test trait_query_failures
-  --no-fail-fast`：348 项通过，退出 0；`/tmp/luna-tools-vfens9vt/result.json`。
-- 拆出重放内核前还运行了包含 `library_meta_math`、luna 单元组及上述部分组的
-  588 项检查，退出 0；`/tmp/luna-tools-a0maw17i/result.json`。其覆盖与最终两条
-  大量重叠，不累加为独立用例，也不替代最终内核的检查。
-- 五个修改／新增 Rust 文件通过 scoped rustfmt check，退出 0；
-  `/tmp/luna-tools-l6pb7enb/result.json`。git diff --check 通过。
-
-预算扫描检查同一合法主体在各个额度上只能成功或资源失败，每份成功证据都重新
-对原声明验证；另覆盖无资格证据、禁止的 closure 主体，以及视图耗尽后独立析取
-证明成功。重放回归撤去／补齐 congruence 证据以区分 Unresolved 与成功，修改证明
-列表确认无效证据不能发布，并验证资源失败后的恢复。生产预算未增大。
-
-qualification 的封闭输入检查复用世界命题的 closed_inputs_metered，使用同一余额，
-不再给每个结构键刷新预算或将检查失败转换成“开放”。调用者已证明的结构等式可以
-建立封闭性；没有关系证据时仍不能从抽象主体推导不存在实现，也不展开 NF 的函数体。
-固有方法选择采用同一失败检查。World::resolve_inherent 与 elaboration 的查询适配器
-直接保留 QueryError：索引资源失败转为 Budget，未确定的关系保持 Unresolved，非法
-查询保持 Invalid；不再先格式化成字符串。递归资格仍通过 Deferred／Pending 保存，
-不能解释成成员不存在。该入口与头匹配仍有独立额度，尚未完成统一预算所有权。
-CMTT 的方法分类、expr/pattern producer 与数据消费者入口已改为可失败观察，查询
-错误及未决选择不能再退化为普通数据类别；其静态类型 hint 内部尚有可选观察边界，
-且分类未决尚未接入 waiter。具体接线见[staging 分类](values-staging-and-publication.md#8-cmtt-的值与操作)。
-
-固有查询与缓存视图边界验证（工作目录 `/home/fin/luna`）：
-
-- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --lib
-  --test associated --test capabilities --test inherent --no-fail-fast`：115 项通过，
-  退出 0；`/tmp/luna-tools-cfuyjyqz/result.json`。
-- 同一入口 `test -p luna --test trait_query_failures --test normal_form_methods
-  --test library_protocols --test library_meta_math --test deferred_associated_values
-  --test associated_signatures --no-fail-fast`：64 项通过，退出 0；
-  `/tmp/luna-tools-yj4w915q/result.json`。
-- 加强重放失败分类断言后，同一入口 `test -p materialization -p type_resolution
-  -p luna --lib --test expansion_boundary --test cmtt_phase_boundaries
-  --test cmtt_type_inputs --no-fail-fast`：153 项通过，退出 0；
-  `/tmp/luna-tools-7j6ytzwg/result.json`。其中 type_resolution 单元组与首条重叠。
-- 八个修改的 Rust 文件通过 scoped rustfmt check，退出 0；
-  `/tmp/luna-tools-ml6aoggx/result.json`。git diff --check 通过。
-
-检查涵盖固有查询的索引／递归深度资源失败、非法资格前提、递归 Pending、真正无候选
-及重试；视图覆盖冷／热缓存、先完成子投影后失败、保留已提交条目及低额度扫描。
-伪造支持条目的重放测试比较直接视图查询与跨证据边界的余额，要求深度资源错误与
-非法成员错误均保留分类和消耗。真实 sysroot 用例执行带多层 trait 前提的固有方法，
-并检查关联项返回 meta.List<bool> 时保留 NF 头，失败不污染缓存。
-
-invocation 的 VM 创建／执行结果也保留资源分类：StepsExhausted 与 DepthExhausted
-转换为执行器的 BudgetExhausted，其他执行错误在现有诊断边界渲染。缓存的
-query_pure_admitted 回调直接返回执行器错误，避免再次包进 Evaluation 字符串；
-键形成、输入复制、求值与结果准入失败都不会发布缓存结果。无结果缓存的普通返回
-路径复用同一求值适配器。简单 query_pure 包装仍把调用者给出的普通求值错误包装为
-Evaluation，它不是接收 VM 分类错误的入口。
-
-Qualification／invocation 迁移验证（工作目录 `/home/fin/luna`）：
-
-- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
-  -p comptime_executor -p luna --lib --test capabilities --test associated
-  --test inherent --test implementation_phases --test cache --test trait_query_failures
-  --test associated_signatures --test deferred_associated_values --test normal_input_plans
-  --test sysroot_preludes --test library_list_equality --test library_once --test trait_phases
-  --test prepared_invocations --test invocation_value_templates --no-fail-fast`：
-  355 项通过，退出 0；`/tmp/luna-tools-yx5xxm7s/result.json`。
-- 九个修改／新增 Rust 文件通过 scoped rustfmt check，退出 0；
-  `/tmp/luna-tools-q5rmfj2g/result.json`。git diff --check 通过。
-- 补充 `test -p luna --test execution memoized --no-fail-fast`：12 项通过，
-  1 项失败，退出 101；`/tmp/luna-tools-uuwynjcn/result.json`。失败用例
-  memoized_invocation_specializes_nested_type_forwarding 在 elaboration 的
-  1465..1484 报 Type domain equality: UnvalidatedModel，尚未进入本次 invocation
-  适配器。将四个已修改生产文件临时换回 `75926c2e` 内容、保留其余工作区，执行
-  同一入口 `test -p luna --test execution
-  memoized_invocation_specializes_nested_type_forwarding -- --exact`，复现相同失败：
-  `/tmp/luna-tools-hgbu7sb2/result.json`，退出 101。对照后逐字节恢复并核对开发源码；
-  该基线不算本次通过或修复，也不调整用例预期。
-  这是当时的对照结果；该嵌套调用现已由下述普通实参 trait 义务修复。
-
-新回归覆盖嵌套深度失败后重试、失败原因顺序、非法前提、宽载荷预留失败后独立排除、
-调用者等式支持的封闭性，以及真实 sysroot 中多层 trait 约束经过 invocation 的失败
-分类、拒绝与恢复。源码回归最初暴露 VM 的 StepsExhausted 被转成 Evaluation 字符串；
-修复执行器边界后才通过，未增大预算或接受字符串匹配作为替代分类。
-
-回归区分非法作用域、真实无匹配、宽载荷耗尽与重试；覆盖缺少 NF congruence 时
-保留 Pending、独立给定证据及 implementation 证明、补齐关系证据后成功、损坏继承
-边不能导致假阴性，以及普通 record 值内 Type 关系与标量差异。两个旧的完整
-function telescope 比较会产生 UnvalidatedModel，现明确要求 Unresolved，不能将
-当前求解器尚不能验证的模型写成“已查完但没有前提”。
-
-NF 的 ApplicationError::Unresolved 保留失败的参数位置和原因；dispatch 转回
-共享准入错误时不丢失该分类。执行侧 typed admission 消费者将其映射为
-TypeContractUnresolved，区别于 StepsExhausted 和类型错误。NF 未完成检查不会
-人为清空尚余预算，后续有证据的独立检查可以成功。
-
-回归检验不同 inherited premises 的替换、重复循环终止、叶节点、非法接口与
-参数、宽输入和重复替换载荷；fresh 构造及具体 implementation 准入在每个不足
-额度上返回资源错误，精确额度成功，失败后重试保持原世界且无执行事件。
-嵌套值准入还逐级扫描不足额度，并在有正余额时注入查询资源错误和语义错误，
-验证原分类传播；关系不成立仍拒绝，独立关系证据成立才接受。
-PTC 会按当前预算为传播与学习分配额度，较小预算可能走更便宜的证明路径；因此
-大预算运行的消耗不是最小成功阈值。域证明回归逐预算检查只能成功或返回 Budget，
-不能误报 Invalid／Unresolved，也不能增长余额，而非要求所有较小预算必须失败。
+以下是 `75c70197` 的接线整理，不是新的语言规则。原逐轮修复日志、对照基线和
+中间失败保留在该提交的本文件中；这里按职责描述现状，避免把后来已修复的问题
+继续列为当前缺口。完整值传送协议仍未实现。
+
+**构造、快照与预算。** `invocation_budget::prepare_phase_inspection` 将完整 source
+phase 检查计入构造器传入的额度；fresh VM 不再为这次检查另开默认额度。
+NF／newtype 元数据、世界表和前提展开也使用构造额度。SourceIndexes 持有原 Arc
+快照，只在精确 Package 身份匹配、适用作用域满足时复用完成的 phase 证据；
+同内容副本、修改后的世界及同号声明不能借用。caller premises 不属于 phase 证明。
+
+构造中的步骤失败保持 StepsExhausted，非法元数据／sort／作用域保持相应拒绝。
+批次预留失败可能留下正余额，不能根据余额是否为零猜错误类别。构造失败不发布
+部分索引或前提闭包，也没有用户主体执行事件。`for_comptime_in_budget` 成功交回
+余额，失败保守保留全部 reservation；这不是精确失败计费。返回 VM 后的执行余额
+仍需调用者同步，不是共享可变计数器。
+
+`constructor_premises::expand` 先支付队列、键和替换载荷成本，再沿父 trait 与
+capability 展开。队列、参数域、binder 检查共用余额；重复替换按展开载荷计费，
+去重和 64 层展开上限保留。即使叶节点没有后续边也检查 Self／实参的作用域与 sort。
+前提只提供类型义务证据，不提供方法体，也不替代值域／range 或形成要求检查。
+
+**查询失败分类。** Trait 参数、声明域、普通值关系与世界查询使用共享的
+`NominalAdmissionError`，直到各自诊断出口才渲染。其含义和消费边界如下：
+
+| 结果 | 含义 | 调用方必须保留的边界 |
+| --- | --- | --- |
+| Budget | 资源不足，检查未完成 | 不改写为无匹配、非法域或反例；不因尚余预算而改分类 |
+| Unresolved | 当前世界尚不能完成所需关系或前提检查 | 不授予调用权限，也不生成否定事实 |
+| Invalid | 已识别的非法输入、域或形成信息 | 与资源不足、合法开放输入分开 |
+| `Ok(false)` | 当前查询完成但未满足该项要求 | 不是通用的不相等证明，不能直接发布为否定 Type 事实 |
+| `Ok(None)` | 该可选查询完成但没有见证／声明 | 仅在相应 API 的完整检查后成立，不能吸收上述错误 |
+
+`DomainQueries::declared` 与域关系回调返回可失败结果，嵌套 scalar、record、optional
+和 nominal 逐级传播。`equivalent_domains` 只将 Type 操作数交给 PTC：Entailed 为
+true，NotEntailed 为 false，BudgetExhausted 为 Budget，其余 Unknown 保留为
+Unresolved，IllFormed 为 Invalid。NF 头不展开，普通值等式不转换成类型命题。
+缺少 congruence 的 UnvalidatedModel 不构成域反例。
+
+条件事实、直接／projected trait 查询、世界命题、类型投影、qualification 和
+inherent 查询已保留这些分类。未完成事实不进入局部 Context；不能以缺失事实的
+模型排除候选。独立合取前提的反证仍可排除候选，独立析取证明仍可证明目标。
+选择最终仍 Deferred 时，保留 BudgetExhausted 或实际 Pending 原因，不能把一次
+未决查找变成永久无匹配。普通开放结构与闭合性观察耗尽也分别表示。
+
+**预算与事务归属。** metered 查询串行消费调用方余额，在成功和失败后交回已追踪
+的未用额度；嵌套查询不再次取得原始整份额度。成本是结构、保留载荷和搜索步骤，
+不是完整 CPU／分配成本。确定性构造可以检查精确额度边界；PTC 会按额度调整传播
+和学习，较小额度可能找到更便宜的证明。大额度运行的消耗不等于最小成功阈值，
+不能据此要求所有更小额度失败。
+
+`DeclarationWorld::new_metered` 在私有状态构造 Context、implementation 索引及
+声明参数域，检查完成才交付世界。索引插入失败不改变贡献集合、参数域或 revision。
+元数据复制前检查结构和载荷；函数声明从源包借用，不为建立目录复制或遍历主体。
+这与完整 VM 的 phase 检查是不同职责，不能据此省略后者的主体检查。
+
+归约经 `prepare_normalized_types` 得到结果和私有子投影缓存。`normalized_type`
+先完成根结果的保留复制检查，再一起发布根与子投影；外层失败不能留下子缓存。
+定义侧 `associated_type_view_cached_metered` 同样只在整次视图成功后合入调用者
+缓存，失败保留此前已提交条目。定义侧允许的抽象投影不充当严格闭合 IIR 的证据。
+
+**Given 与接口输入身份。** given 查询返回可失败的可选见证，借用原世界和前提，
+输入、继承替换、去重键及见证复制共用额度。`input_identity::equivalent` 为 given
+与成员来源去重提供同一规则：精确值身份、已知结构／标量差异，以及同结构 Type
+叶节点在原 telescope 下的关系证明。它不执行 invocation、不赋值推断变量、不做
+实现选择。runtime telescope 保持其 sort frame，不伪造成类型上下文。
+
+来源的 phase 筛选先于语义去重；继承遍历只按精确接口键去重，保留成员来源。
+隐式调用按当前阶段选择来源，comptime 优先 pure comptime trait；显式视角仍检查
+全部相关来源。未决身份关系不能直接报告歧义。旧 `index_type_relations` 可选包装
+和 `index_values_definitely_differ` 布尔包装已退役，需要关系的消费者使用可失败、
+共享额度的入口，不能把遍历耗尽当作没有关系。
+
+**主动能力准入。** dispatch 表只保留正面见证，不是源世界能力的完整枚举。
+`check_capability_contract` 先有界检查保留证据，缺少见证时通过既有类型查询服务
+证明义务；资源失败不启动第二次尝试。没有服务或仍未决时返回 TypeContractUnresolved，
+不能凭表缺项拒绝合法类型，也不能凭没有反例准入。查询不安装 dispatch 或运行方法体。
+
+普通 callable 输入、函数／方法身份、名义 Type 与 alias 的形成共用此边界；尚依赖
+普通输入的义务在绑定后检查。alias 主体只能在形成准入后处理，已有代码实例缓存
+不能代替当前调用的能力检查。执行器的源世界查询与私有开放调用作用域见第 36、37 节。
+
+**实际值的接收边界。** comptime 的 `check_value_type` 先按选定投影视图检查实际
+形状，在局部收集名义形成义务；形状失败不发起能力查询。释放结构观察的借用后，
+再用调用方余额检查收集的义务，不把局部成功写成全局能力许可。
+
+该入口已覆盖 record／variant 构造、普通输入与结果、冻结恢复、newtype、optional／
+error payload、字段读取、host 活动值、Object、闭包捕获、关联值、子句值包及枚举
+标签。名义构造先检查形成契约再执行字段表达式。runtime／IIR 的被动存储检查、
+运行时指针与效应槽仍属其原阶段，不能仅因使用 has_type 就判定为 comptime 绕过，
+也不能由此推出语言永久禁止 comptime effect。
+
+Object 查询检查全部条目，包括被后续同名条目遮蔽的值，保留命中规则和条目次序；
+编辑失败保留已有快照。Object／List 写回复用 validate_container_replacement 与
+validate_immutable_input，最终位置许可与 replace 由 value_reference 负责，不再造
+容器验证器，也不引入 comptime 指针。
+
+树解释和字节码共用 `check_closure_capture`，先核对捕获描述／环境签名，再检查
+实际值。全部捕获完成才发布 CreateClosure；失败不发布闭包或能力许可，但此前
+已执行的初始化行为不回滚。关联值完成先释放 active initializer 标记，再检查结果；
+拒绝或未决不能留下“初始化中”状态。子句值编码及枚举标签观察也先检查接收域。
+
+**完成值与初始化计划。** completed_values 的声明查找、载荷遍历和字段替换保留
+typed 失败。AssociatedInitializer 检查自由绑定、捕获与程序是否可保留，不证明它
+已执行。完成值检查遇到 Budget／Unresolved 不能退回 initializer 来掩盖失败；确实
+属于未执行程序的输入继续经过原 phase／闭合检查。
+
+`resolve_associated_value_plan_metered` 共用形成、选择、替换、视图和载荷准入的
+余额；私有缓存不在失败时发布。宿主选择回调将 Budget 映射为 StepsExhausted，
+Unresolved 映射为 TypeContractUnresolved，Invalid 保留 UnmaterializedDispatch，
+并保留来源。外围构造 reservation 仍受前述限制。
+
+**候选资格与证据重放。** eligibility 与 applicability 各负其责；结构视图与独立
+资格证明均保留失败原因，任一合法独立证明可以完成资格，未完成不能伪装成反例。
+私有残余候选仍按原始声明重放，成功才提交匹配结果。
+
+公开 implementation、inherent 和条件支持重放使用
+`EvidenceError { Query(NominalAdmissionError), Proof(ProofError) }` 区分域查询与
+证明检查。Budget 保持资源失败，Unresolved／ArithmeticRange 保持未决，无效证据
+保持 Invalid；Display 使用带正确转义的 S-expression。`verify_proof_metered`
+在成功、拒绝和耗尽时返还余额，支持上下文逐次共用证明额度。头匹配及部分证明槽
+仍使用 reservation，不宣称全链路均精确扣款。
+
+**执行与结果缓存。** VM 创建／执行的 StepsExhausted、DepthExhausted 转换为
+executor 的 BudgetExhausted。`query_pure_admitted` 直接接收执行器错误，不能再次
+包装成 Evaluation 文本；简单 `query_pure` 的普通错误包装不用于此 typed 边界。
+键形成、输入复制、求值、结果准入失败均不发布结果缓存；无缓存返回路径也保留
+分类。结果缓存仍只接纳满足资格的纯 Type 结果 invocation，不给 bool 等普通结果
+添加缓存资格，更不把稳定代码缓存当作结果或权限缓存。
 
 ### 普通实参 trait 义务不能以前提匹配作为门槛
 
-`check_ordinary_capabilities` 已移除先调用 symbolic_interface_evidence、失败便
-提前退出的重复检查。完成普通参数替换后，义务直接交给现有 World.check_predicate；
-该入口在原调用者作用域内结合给定前提、继承关系与已验证的 implementation 证据。
-它只证明契约，不选择方法体，不产生 dispatch，也不把待证明义务加入调用者事实。
+`check_ordinary_capabilities` 在普通参数替换后直接调用原作用域的 World.check_predicate，
+不再先要求 symbolic_interface_evidence 匹配成功。调用者有 `T :- Inspect` 时，
+`leaf(T, value)` 可用给定前提，`leaf(u8, 7)` 可用独立的 `Inspect for u8`；后者不要求
+先证明 T 等于 u8。未决前提匹配不是不相等，独立实现也不因它未决而失效。
 
-具体反例：调用者有 `T :- Inspect`，主体分别转发 `leaf(T, value)` 和调用
-`leaf(u8, 7)`。前者可以使用给定证据；后者可以使用 `Inspect for u8`。
-把后一项强制解释为“先证明 T 等于 u8”会在 Type 域查询返回 UnvalidatedModel 时
-错误中断。独立实现证明允许完成该义务；缺少该证明时仍保留 Unknown 原因，不能
-把前提匹配未决当作不相等，也不能凭未知前提接受调用。
-
-真实 sysroot 回归覆盖普通 Type 参数与子句参数、runtime 与 comptime 调用、返回值
-的真假分支、缺少实现后重新编译、继承前提与独立具体实现。既有 nested Type
-forwarding 用例保持原预期，现已进入 invocation 并通过。此修复不改变 NF、值缓存
-资格或 PTC 模型语义；方法来源查询与其他前提探测入口仍须分别审计。
-
-验证工作目录 `/home/fin/luna`，统一使用 `python3 -B development/check.py
---timeout 900 -- test ...`，完整命令保存在 result.json：
-
-- `/tmp/luna-tools-8_m5zi4w/result.json`：修复前单测退出 101；
-  `/tmp/luna-tools-i8x3u1hn/result.json`：修复后同一 nested Type forwarding 单测
-  退出 0，不再跳过该用例。
-- `/tmp/luna-tools-62mycjb8/result.json`：普通／scoped／memoized 等关联组退出
-  101，101 项通过，5 项失败；其中新 sysroot 回归 4 项均通过。
-- `/tmp/luna-tools-9vj89tn4/result.json`：只将本次 interfaces.rs 改动临时替换为
-  HEAD 内容，其余工作区保持不动，五项失败与原 nested Type forwarding 均复现，
-  退出 101。对照后按保存的字节与摘要恢复本次源码。
-- `/tmp/luna-tools-xz6ptklx/result.json`：capabilities、dynamic_trait_clauses、
-  trait_query_failures、predicate_calls、ordinary_clause_collectors 组退出 101，
-  107 项通过，5 项失败，2 项沿用已有 ignore。这五项均报 StepsExhausted：
-  四项 required collector／恢复用例，以及 source_selection_is_demanded_and_concrete_methods_cannot_bypass_the_host。
-  用同样方式只还原本次生产文件，对照 `/tmp/luna-tools-8np01l3d/result.json`
-  退出 101，五项以相同位置与诊断复现；随后恢复本次源码。
-
-本阶段去重 208 项通过，10 项基线失败，2 项原有 ignore；未执行全量回归。
-该轮五项 StepsExhausted 后续已通过域表复用恢复，见上文 runtime 闭包存储检查；
-未通过放大默认额度隐藏失败。这里保留当时的对照结果。
-两个修改／新增的 Rust 文件通过 scoped rustfmt check，
-`/tmp/luna-tools-egnvdarn/result.json` 退出 0；git diff --check 通过。
-
-该轮的五项基线问题中，ordinary_capability_dependencies_ignore_conjunct_and_bound_order
-在关联类型约束处报 UnvalidatedModel 的问题现已修复，见
-[签名前提的局部进展条件](elaboration-state-and-publication.md#11-签名前提形成的局部进展条件)。
-其余问题仍保留：comptime_given_premises_discharge_obligations_without_inventing_dispatch
-实际报 TypeContractUnresolved，而旧断言要求 InvalidCallPlan；ordinary_type_list_annotation_inputs_report_the_phase_boundary
-实际报 required comptime input 不可用；ordinary_type_inputs_do_not_hide_selective_memory_writes
-与 ordinary_type_memory_summaries_forward_across_different_input_positions 在程序后置条件
-证明处失败。没有改动这些预期或用户的内存验证工作区修改，不能将它们计为本次修复。
+这里只证明调用契约，不选择方法体，不将待证明义务加入事实，不改变 NF 身份或
+缓存资格。真实 sysroot 回归涵盖普通／子句 Type 输入、runtime／comptime 调用、
+继承前提和独立具体实现。嵌套 Type 转发的旧失败现已通过，见下方本轮复查。
 
 ### 当前尚未完成的边界
 
-- fresh phase pass 仍使用自己的默认额度，VM 随后再做结构检查；构造失败的
-  for_comptime_in_budget 仍保守保留全部 reservation，尚非精确失败扣款。
-- 后续关联项／方法签名与 world capability 的部分实例化尚未有界。
-- 直接／projected trait resolution、世界命题、条件事实、Type 投影及普通关联值的
-  payload／initializer 校验、qualification 及 inherent 查询公开入口已保留 typed
-  失败。TypeAssessment 的部分内部原因和 CMTT 静态类型 hint 内部仍有 String 或
-  可选结果边界；分类查询的等待／恢复协议尚未接通。
-  DeclarationWorld 的构建与完成类型查询已共用各自调用者的余额，构建失败不发布
-  半成品，归约结果按外层事务发布；其他便利入口自行建立的预算仍待迁移。
-  不能据 metered Type/value view 的
-  实际扣款声称全部预算所有权已完成。implementation／条件支持重放的 admission
-  错误已通过 EvidenceError 公开保留；完整求解链的 Pending／资源／反例传播未完成。
-  当前查询复用 NominalAdmissionError，并不意味着所有能力选择都属于值域检查；
-  全链路查询协议仍须按所属层次完成统一。
-- 旧 layout／callable 可选观察器把 Unresolved 表示为 unavailable view，仍不能
-  保留具体原因；typed admission 直接消费完整错误。后续须迁移这些观察器及其
-  消费者，不能把本次新增分类说成所有描述观察都已无损。
-- nominal 的既有公开 evidence 包装仍接收总布尔关系，再适配到共享内核；
-  需要可失败域查询的消费者必须直接走 fallible DomainQueries。各公开包装的
-  后续迁移以及旧 index shape 布尔观察仍待处理；本文涉及的两个值关系包装已退役。
+- 统一 AdmittedValue／TransferPlan 尚未成为全链路协议；以上是现有入口的接线。
+- 构造失败 reservation、部分关联项／方法签名和 world capability 实例化、便利
+  入口自有预算仍待迁移。fresh VM 的 phase 检查已计入构造额度，不再列作缺口。
+- TypeAssessment 部分内部原因、CMTT hint 与旧 layout／callable 可选观察器仍可能
+  丢失具体原因；分类查询的等待／恢复协议未完成。需要可失败域查询的消费者必须
+  使用 fallible DomainQueries，不能经旧布尔 evidence 包装吞掉失败。
+- 上述接线不接通尚未执行的 Type 生产者。依赖签名与待决接收域仍需保留前端检查
+  状态，并由原 invocation 继续执行；普通值成功案例不替代这项验收。
+- 此前迭代器的 bool lowering 和 flat_map 栈溢出是旧基线问题，本轮未复跑；既不
+  宣称已修复，也不把旧日志直接当作当前失败。历史证据见 `75c70197` 的本节。
 
-验证证据见下；历史中间版本的逐轮日志由 git 保留，不作为当前实现状态。
+**回归入口。** 下列是维护这些契约的现有测试，不表示本轮全部重跑：
 
-值关系提取、域准入与 replay 迁移的既有证据如下（工作目录 `/home/fin/luna`）：
+| 边界 | 测试入口及重点 |
+| --- | --- |
+| 构造与快照 | comptime_interpretor 的 `invocation_budget::phase_tests`：所有 source 构造路径支付 phase 工作；失败不发布 session 证据 |
+| 世界构建与归约 | type_resolution 的 `world_construction`、`associated`：累计额度、私有子缓存、根保留失败及恢复 |
+| 失败分类与独立证明 | type_resolution 的 `capabilities`、`implementation`、`receiver_sources`：Budget／Unresolved／Invalid、资格排除、原证据重放及后续恢复 |
+| 接收世界与活动值 | comptime_interpretor 的 `value_types::tests::containers`；luna 的 `comptime_nominal_capabilities`、`comptime_object_storage`、`comptime_bytecode_closures` |
+| 真实 sysroot 查询 | luna 的 `trait_query_failures`：关联选择实际余额、嵌套能力耗尽、inherent 查询及缓存视图失败 |
 
-- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p nir
-  --test calls --test implementation --test trait_parameters --no-fail-fast`：
-  173 通过，退出 0；`/tmp/luna-tools-yr8odl4w/result.json`。
-- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p luna
-  --test capabilities --test implementation_phases --test callable_world
-  --test projection_copy_budget --test trait_domain_substitution
-  --test dynamic_trait_clauses --test normal_input_plans --test library_list_equality
-  --test sysroot_preludes --test associated_signatures --no-fail-fast`：
-  128 通过，退出 0；`/tmp/luna-tools-9miggq_w/result.json`。
-- 最后删除已无生产消费者的布尔包装后，执行
-  `python3 -B development/check.py --timeout 900 -- test -p nir
-  --test trait_parameters --test error_results --no-fail-fast`：57 通过，退出 0；
-  `/tmp/luna-tools-jufluuwt/result.json`。其中 trait_parameters 与首条范围重叠，
-  不累加为独立测试数量。源码搜索确认两个旧调用入口均无残留。
-- 修改文件的 rustfmt check：退出 0；`/tmp/luna-tools-xnr0r_4d/result.json`。
+**本轮旧问题复查。** 工作目录 `/home/fin/luna`，代码基线 `75c70197`，包含既有
+`program_verification/src/moves/effects.rs` 工作区修改，未改动它或以下测试预期。
 
-仍存在的迭代器基线阻塞：iteration 的三个用例在 HIR lowering 找不到 bool，
-library_iteration 的 flat_map_short_circuit_cleans_inner_and_outer_remainders
-栈溢出。此前以 `727522d7` 涉及源码作对照，保留既有工作区修改，复现同样失败；
-对照证据为 `/tmp/luna-tools-dv40cakg/result.json` 和
-`/tmp/luna-tools-n31xwqtz/result.json`，均退出 101。这批未重新执行这些无关失败，
-也未将其标为通过或修复。
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna \
+  --test execution --test comptime_nominal_capabilities --no-fail-fast -- \
+  comptime_given_premises_discharge_obligations_without_inventing_dispatch \
+  ordinary_type_list_annotation_inputs_report_the_phase_boundary \
+  ordinary_type_inputs_do_not_hide_selective_memory_writes \
+  ordinary_type_memory_summaries_forward_across_different_input_positions \
+  dynamic_nominal_clause_values_keep_their_formation_contracts \
+  memoized_invocation_specializes_nested_type_forwarding
+```
 
-未跑全 workspace 或性能基准。正式 docs、moves/effects.rs 与 library/README.md
-此前的工作区修改保持原字节内容；测试断言的调整与证据见上文，生产预算未增大。
+`/tmp/luna-tools-gydv7gpd/result.json` 退出 101，2 项通过、4 项失败，无 ignored：
+
+| 用例 | 本轮结果与边界 |
+| --- | --- |
+| `dynamic_nominal_clause_values_keep_their_formation_contracts` | 通过；旧私有 dispatch 域证据缺口已由第 36、37 节接通，不再是 ignored 用例 |
+| `memoized_invocation_specializes_nested_type_forwarding` | 通过；普通实参义务不再受重复前提匹配阻断 |
+| `comptime_given_premises_discharge_obligations_without_inventing_dispatch` | 失败于诊断断言：实际 TypeContractUnresolved，预期 InvalidCallPlan；此前有前提可消解义务、没有方法体仍拒绝执行的断言已通过。不能把诊断差异计为新功能完成 |
+| `ordinary_type_list_annotation_inputs_report_the_phase_boundary` | `239..256`：required comptime input 不可用 |
+| `ordinary_type_inputs_do_not_hide_selective_memory_writes` | `161..167`：程序后置条件未证明 |
+| `ordinary_type_memory_summaries_forward_across_different_input_positions` | `254..260`：程序后置条件未证明 |
+
+后三项是实际功能路径的失败，继续保留成功预期；诊断断言也未在本轮修改。
+未执行全 workspace、迭代器复查或性能基准。这里的两项通过不证明完整值准入、
+调用期类型恢复或全链路新架构完成。
 
 ## 36. 私有 dispatch 的声明域准入与调用作用域
 
