@@ -1754,70 +1754,62 @@ impl Checker<'_, '_> {
         }
         if let H::Match(value, arms) = &input.kind {
             let value = self.expr(value, None)?;
-            let saved = self.locals.clone();
-            let result = (|| {
-                let mut checked = Vec::new();
-                for arm in *arms {
-                    self.locals = saved.clone();
-                    let pattern = self.pattern(&arm.pat, &value.ty)?;
-                    let guard = arm
-                        .guard
-                        .map(|guard| self.expr(guard, Some(&p(P::Bool))))
-                        .transpose()?;
-                    let body = self.dependent_normal_argument(arm.body, depth + 1)?;
-                    checked.push(n::NormalMatchArm {
+            let mut checked = Vec::new();
+            for arm in *arms {
+                checked.push(self.in_block_scope(|this| {
+                    let pattern = this.match_arm_pattern(arm, &value)?;
+                    let body = this.under_matched_pattern_type_facts(
+                        &pattern,
+                        &value,
+                        arm.body.span,
+                        |this| this.dependent_normal_argument(arm.body, depth + 1),
+                    )?;
+                    Ok(n::NormalMatchArm {
                         pattern,
-                        guard,
+                        guard: None,
                         body,
-                    });
-                }
-                let patterns: Vec<_> = checked
-                    .iter()
-                    .filter(|arm| arm.guard.is_none())
-                    .map(|arm| &arm.pattern)
-                    .collect();
-                let exhaustive = self.patterns_exhaustive(&patterns, &value.ty);
-                if exhaustive != crate::coverage::Coverage::Exhaustive {
-                    return Err(error(
-                        input.span,
-                        if exhaustive == crate::coverage::Coverage::Unknown {
-                            "match coverage budget exhausted; add an unguarded fallback pattern"
-                        } else {
-                            "non-exhaustive match; add an unguarded fallback pattern"
-                        },
-                    ));
-                }
-                Ok(n::NormalFormArgument::Match {
-                    source: source(input.span),
-                    value,
-                    arms: checked,
-                })
-            })();
-            self.locals = saved;
-            return result;
+                    })
+                })?);
+            }
+            let patterns: Vec<_> = checked.iter().map(|arm| &arm.pattern).collect();
+            self.require_match_coverage(&patterns, &value.ty, input.span)?;
+            return Ok(n::NormalFormArgument::Match {
+                source: source(input.span),
+                value,
+                arms: checked,
+            });
         }
         if let H::When(arms) = &input.kind {
             let fallback = arms.iter().position(|arm| arm.cond.is_none());
             if fallback.is_some_and(|index| index + 1 != arms.len()) {
                 return Err(error(input.span, "when fallback must be the final arm"));
             }
-            // A when without fallback has a discarded result, not a value
-            // awaiting this input's expected type.
+            // A when without fallback discards its result.
             if fallback.is_none() {
                 return self.expr(input, None).map(n::NormalFormArgument::Value);
             }
-            let saved = self.locals.clone();
-            let result = (|| {
+            return self.in_block_scope(|this| {
                 let mut branches = Vec::new();
                 for arm in *arms {
-                    self.locals = saved.clone();
                     let condition = arm
                         .cond
-                        .map(|value| self.expr(value, Some(&p(P::Bool))))
+                        .map(|value| this.expr(value, Some(&p(P::Bool))))
                         .transpose()?;
-                    let body = self.dependent_normal_argument(arm.body, depth + 1)?;
-                    // Every arm owns its local declarations even when its
-                    // source body was not written as an explicit block.
+                    let check = |this: &mut Self| {
+                        this.in_block_scope(|this| {
+                            this.dependent_normal_argument(arm.body, depth + 1)
+                        })
+                    };
+                    let body = match &condition {
+                        Some(condition) => {
+                            this.under_type_condition(condition, true, arm.body.span, check)?
+                        }
+                        None => check(this)?,
+                    };
+                    if let Some(condition) = &condition {
+                        this.assume_type_condition(condition, false, arm.body.span)?;
+                    }
+                    // Each source arm owns its runtime locals as well.
                     let body = n::NormalFormArgument::Block {
                         source: source(arm.span),
                         statements: Vec::new(),
@@ -1836,16 +1828,21 @@ impl Checker<'_, '_> {
                     };
                 }
                 Ok(tail)
-            })();
-            self.locals = saved;
-            return result;
+            });
         }
         if let H::If(condition, yes, Some(no)) = &input.kind {
+            let condition = self.expr(condition, Some(&p(P::Bool)))?;
+            let then_input = self.under_type_condition(&condition, true, input.span, |this| {
+                this.dependent_normal_block(yes, depth + 1)
+            })?;
+            let else_input = self.under_type_condition(&condition, false, input.span, |this| {
+                this.dependent_normal_argument(no, depth + 1)
+            })?;
             return Ok(n::NormalFormArgument::If {
                 source: source(input.span),
-                condition: self.expr(condition, Some(&p(P::Bool)))?,
-                then_input: Box::new(self.dependent_normal_block(yes, depth + 1)?),
-                else_input: Box::new(self.dependent_normal_argument(no, depth + 1)?),
+                condition,
+                then_input: Box::new(then_input),
+                else_input: Box::new(else_input),
             });
         }
         if let H::Block(block) = &input.kind {
@@ -1884,26 +1881,33 @@ impl Checker<'_, '_> {
         if depth >= 128 {
             return Err(error(block.span, "contextual input nesting limit exceeded"));
         }
-        let saved = self.locals.clone();
-        let result = (|| {
-            let statements = block
-                .stmts
-                .iter()
-                .map(|statement| self.expr(statement, None))
-                .collect::<Result<Vec<_>, _>>()?;
+        self.check_block_region(block, |this, mut statements, _, staged_patterns| {
             let result = block
                 .expr
-                .map(|value| self.dependent_normal_argument(value, depth + 1))
+                .map(|value| this.dependent_normal_argument(value, depth + 1))
                 .transpose()?
                 .map(Box::new);
+            let mut fuel = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
+            let before = fuel;
+            let references = if this.block_binding_liveness_needed(&statements, &staged_patterns) {
+                result
+                    .as_deref()
+                    .map(|tail| nir::preparation::argument_references(tail, &mut fuel))
+                    .transpose()
+            } else {
+                Ok(None)
+            };
+            this.required_steps -= (before - fuel) as u64;
+            let references = references
+                .map_err(|failure| error(block.span, failure.to_string()))?
+                .unwrap_or_default();
+            this.finish_block_bindings(&mut statements, &references, block, &staged_patterns)?;
             Ok(n::NormalFormArgument::Block {
                 source: source(block.span),
                 statements,
                 result,
             })
-        })();
-        self.locals = saved;
-        result
+        })
     }
 }
 

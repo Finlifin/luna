@@ -118,6 +118,40 @@ return，并拒绝越界字面量、错误字段、宽度和不成立的生产�
 - 五个修改 Rust 文件的 rustfmt 检查：`/tmp/luna-tools-9ph1yr7i/result.json`，退出 0。
   未运行全 workspace、native 或性能基准；两组测试有重叠，不相加作为独立用例数。
 
+### 已接通：待定参数复用普通块与分支检查
+
+待定参数中的块现已与普通块共用 `block_regions::check_block_region`：
+语句按源序检查，正常完成的类型事实进入后续语句，staged pattern 与别名使用同一套
+活跃性及完成规则，退出时恢复 locals、代码值、pattern code、类型前提和局部输入表。
+例如 `if T != bool { return ...; }` 后的 `let flag: bool = value`，不能仅因该块是
+尚未取得列表接收域的参数而丢失 `T == bool`。这些是类型命题的分支事实，不把普通
+程序状态或内存规格转交 PTC。
+
+待定 `if`／`when` 使用普通条件事实服务；`when` 后续 arm 保留前序条件为假的事实。
+待定 `match` 使用普通 pattern／guard 检查和覆盖检查，每个 arm 独立恢复局部状态。
+尾部活跃性通过 NIR 的共同有界 visitor 观察，包含 pattern 内的 guard／计算；
+不再为 NF、名义类型和别名的只读遍历先无界展开两份 expressions／patterns 列表。
+没有 staged 绑定需要完成时，不额外扫描尾部；需要时共享一次引用集合，并对集合复制计费。
+
+这仅替换块与分支的重复前端规则。`NormalFormArgument` 仍承载尚未完成的接收域，
+VM 的 contextual domain preparation 和组装路径也仍存在；不代表完整 ContextualExpr、
+可恢复前端请求或普通 callable 的 invocation-time 签名检查已经接通。
+
+源码验收 `compiler/luna/tests/contextual_input_regions.rs` 使用真实 sysroot，覆盖
+块内 continuation、if／when／match 及 guard 的类型事实、混合模式绑定，并比较两种
+VM 的完整用户函数调用序列。拒绝例检查事实不能进入兄弟分支或块外；NIR 单元测试
+另查 pattern guard 引用不会遗漏，以及无 typed 叶子的结构仍消耗遍历预算。
+清理前的 continuation 正例失败于 `expected bool, found rigid T`，证据
+`/tmp/luna-tools-8nc51lxs/result.json`；清理后该组四项通过，证据
+`/tmp/luna-tools-v25fyryq/result.json`，退出 0。
+
+最终受影响检查在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test`
+运行 nir／elaboration／luna 的库测试与 15 个相关集成组，完整命令及退出 0 记录位于
+`/tmp/luna-tools-k6tqjia1/result.json`，各组结果锚点为同目录 `stdout.log` 的
+`test result:`。八个修改 Rust 文件的格式检查退出 0，证据
+`/tmp/luna-tools-wlo4pvdv/result.json`。未运行全 workspace 或性能基准；这些结果使用
+保留作者已有资源分析改动的工作区，不声称为隔离的纯 HEAD 验证。
+
 ### Invocation 才能取得的域：必须同时接通检查与执行
 
 普通调用的现有正例 `pending_clause_domains_can_wait_for_a_type_producer`

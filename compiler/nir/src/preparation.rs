@@ -38,25 +38,41 @@ fn charge(fuel: &mut usize, count: usize) -> Result<(), Error> {
     *fuel = fuel.checked_sub(count).ok_or(Error::Budget)?;
     Ok(())
 }
+fn record_reference(expr: &Expr, result: &mut BTreeSet<LocalId>) {
+    match &expr.kind {
+        K::Local(binding) => {
+            result.insert(*binding);
+        }
+        K::Closure { captures, .. } => {
+            for capture in captures {
+                if capture.value.is_none() {
+                    result.insert(capture.binding);
+                }
+            }
+        }
+        K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. } => {
+            result.insert(place.root);
+        }
+        _ => {}
+    }
+}
+
 pub fn references(expr: &Expr, fuel: &mut usize) -> Result<BTreeSet<LocalId>, Error> {
     let mut result = BTreeSet::new();
     crate::visit::expression_checked(expr, fuel, |expr, _| {
-        match &expr.kind {
-            K::Local(binding) => {
-                result.insert(*binding);
-            }
-            K::Closure { captures, .. } => {
-                for capture in captures {
-                    if capture.value.is_none() {
-                        result.insert(capture.binding);
-                    }
-                }
-            }
-            K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. } => {
-                result.insert(place.root);
-            }
-            _ => {}
-        }
+        record_reference(expr, &mut result);
+        Ok::<_, Error>(())
+    })?;
+    Ok(result)
+}
+
+pub fn argument_references(
+    argument: &crate::program::NormalFormArgument,
+    fuel: &mut usize,
+) -> Result<BTreeSet<LocalId>, Error> {
+    let mut result = BTreeSet::new();
+    crate::visit::argument_checked(argument, fuel, |expr, _| {
+        record_reference(expr, &mut result);
         Ok::<_, Error>(())
     })?;
     Ok(result)
@@ -216,6 +232,54 @@ pub(crate) fn pattern_bindings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_input_liveness_includes_pattern_observations_and_charges_structure() {
+        use crate::program::{NormalFormArgument as A, NormalMatchArm, SourceRange};
+        let source = SourceRange { start: 0, end: 1 };
+        let binding = LocalId { owner: 3, index: 9 };
+        let input = A::Match {
+            source,
+            value: Expr {
+                source,
+                ty: Term::Primitive(crate::Primitive::Bool),
+                kind: K::Literal(crate::program::Literal::Bool(true)),
+            },
+            arms: vec![NormalMatchArm {
+                pattern: Pattern::Guard {
+                    pattern: Box::new(Pattern::Wild),
+                    condition: Box::new(Expr {
+                        source,
+                        ty: Term::Primitive(crate::Primitive::Bool),
+                        kind: K::Local(binding),
+                    }),
+                },
+                guard: None,
+                body: A::Integer {
+                    source,
+                    spelling: "1".into(),
+                    negative: false,
+                },
+            }],
+        };
+        assert_eq!(argument_references(&input, &mut 0), Err(Error::Budget));
+        assert_eq!(
+            argument_references(&input, &mut 100).unwrap(),
+            BTreeSet::from([binding])
+        );
+        let empty = A::List {
+            source,
+            items: vec![A::Tuple {
+                source,
+                items: vec![],
+            }],
+        };
+        assert_eq!(argument_references(&empty, &mut 1), Err(Error::Budget));
+        assert_eq!(
+            argument_references(&empty, &mut 2).unwrap(),
+            BTreeSet::new()
+        );
+    }
 
     #[test]
     fn preparation_limits_remain_distinct_from_invalid_binding_shapes() {

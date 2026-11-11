@@ -2284,7 +2284,7 @@ impl Checker<'_, '_> {
     pub(super) fn materialize_mixed_staged_patterns(
         &mut self,
         statements: &mut Vec<n::Expr>,
-        tail: Option<&n::Expr>,
+        tail_references: &BTreeSet<n::LocalId>,
         source: &hir::Block<'_>,
         initialized: &BTreeMap<usize, StagedPatternSnapshot>,
     ) -> Result<(), Error> {
@@ -2301,7 +2301,8 @@ impl Checker<'_, '_> {
             .filter(|(_, snapshot)| !snapshot.parts.is_empty())
             .map(|(index, _)| *index)
             .collect();
-        let removed = self.consumed_staged_aliases(statements, tail, source.span, &preserved)?;
+        let removed =
+            self.consumed_staged_aliases(statements, tail_references, source.span, &preserved)?;
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = fuel;
         let used = (|| {
@@ -2323,10 +2324,11 @@ impl Checker<'_, '_> {
                 }
                 references.insert(index, used);
             }
-            if let Some(tail) = tail {
-                for binding in nir::preparation::references(tail, &mut fuel)? {
-                    *counts.entry(binding).or_default() += 1;
-                }
+            fuel = fuel
+                .checked_sub(tail_references.len())
+                .ok_or("staged pattern liveness budget exhausted")?;
+            for binding in tail_references {
+                *counts.entry(*binding).or_default() += 1;
             }
             let mut pending = Vec::new();
             let mut waiters: BTreeMap<n::LocalId, Vec<usize>> = BTreeMap::new();
@@ -2544,10 +2546,11 @@ impl Checker<'_, '_> {
     pub(super) fn erase_consumed_staged_aliases(
         &mut self,
         statements: &mut Vec<n::Expr>,
-        tail: Option<&n::Expr>,
+        tail_references: &BTreeSet<n::LocalId>,
         span: Span,
     ) -> Result<(), Error> {
-        let removed = self.consumed_staged_aliases(statements, tail, span, &BTreeSet::new())?;
+        let removed =
+            self.consumed_staged_aliases(statements, tail_references, span, &BTreeSet::new())?;
         let mut index = 0;
         statements.retain(|_| {
             let keep = !removed.contains(&index);
@@ -2560,7 +2563,7 @@ impl Checker<'_, '_> {
     fn consumed_staged_aliases(
         &mut self,
         statements: &[n::Expr],
-        tail: Option<&n::Expr>,
+        tail_references: &BTreeSet<n::LocalId>,
         span: Span,
         preserved: &BTreeSet<usize>,
     ) -> Result<BTreeSet<usize>, Error> {
@@ -2574,10 +2577,10 @@ impl Checker<'_, '_> {
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = fuel;
         let result = (|| {
-            let mut used = match tail {
-                Some(value) => nir::preparation::references(value, &mut fuel)?,
-                None => BTreeSet::new(),
-            };
+            fuel = fuel
+                .checked_sub(tail_references.len())
+                .ok_or("staged alias erasure budget exhausted")?;
+            let mut used = tail_references.clone();
             let mut removed = BTreeSet::new();
             let mut metadata = None;
             for (index, statement) in statements.iter().enumerate().rev() {

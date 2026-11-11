@@ -2,6 +2,25 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    pub(in crate::program) fn require_match_coverage(
+        &mut self,
+        patterns: &[&n::Pattern],
+        ty: &Term,
+        span: Span,
+    ) -> Result<(), Error> {
+        match self.patterns_exhaustive(patterns, ty) {
+            crate::coverage::Coverage::Exhaustive => Ok(()),
+            crate::coverage::Coverage::Unknown => Err(error(
+                span,
+                "match exhaustiveness could not be proved within supported analysis and budget; add an unguarded fallback pattern",
+            )),
+            _ => Err(error(
+                span,
+                "non-exhaustive match; add an unguarded fallback pattern",
+            )),
+        }
+    }
+
     pub(in crate::program) fn match_expr(
         &mut self,
         expr: &Expr<'_>,
@@ -203,17 +222,7 @@ impl Checker<'_, '_> {
                 .filter(|arm| arm.guard.is_none())
                 .map(|arm| &arm.pattern)
                 .collect();
-            let exhaustive = self.patterns_exhaustive(&patterns, &value.ty);
-            if exhaustive != crate::coverage::Coverage::Exhaustive {
-                return Err(error(
-                    expr.span,
-                    if exhaustive == crate::coverage::Coverage::Unknown {
-                        "match exhaustiveness could not be proved within supported analysis and budget; add an unguarded fallback pattern"
-                    } else {
-                        "non-exhaustive match; add an unguarded fallback pattern"
-                    },
-                ));
-            }
+            self.require_match_coverage(&patterns, &value.ty, expr.span)?;
             if inline_input.is_some() {
                 let index =
                     selected.ok_or_else(|| error(expr.span, "inline match has no selected arm"))?;

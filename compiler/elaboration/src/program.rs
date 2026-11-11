@@ -25,6 +25,7 @@ mod spreads;
 mod tactics;
 use arguments::route_arguments;
 mod bit_indices;
+mod block_regions;
 pub mod build_context;
 mod builtin_bindings;
 mod clause_inputs;
@@ -5077,49 +5078,7 @@ impl Checker<'_, '_> {
         partial: Option<&crate::calls::CallableContext>,
         input_context: Option<&crate::calls::InputContext>,
     ) -> Result<n::Expr, Error> {
-        let saved = self.locals.clone();
-        let saved_code = self.code_values.clone();
-        let saved_patterns = self.pattern_codes.clone();
-        let saved_context = self.context.clone();
-        let saved_staged: BTreeSet<_> = self
-            .specialization_inputs
-            .iter()
-            .map(|(binding, _, _)| *binding)
-            .collect();
-        let saved_types: BTreeSet<_> = self.type_input_bindings.keys().copied().collect();
-        let saved_partial_values: BTreeSet<_> =
-            self.partial_staged_bindings.keys().copied().collect();
-        let saved_values: BTreeSet<_> = self.value_input_bindings.keys().copied().collect();
-        let result = (|| {
-            let mut statements = Vec::new();
-            let mut staged_patterns = BTreeMap::new();
-            let mut diverges = false;
-            for statement in block.stmts {
-                let value = self.expr(statement, None)?;
-                if let K::LetPattern {
-                    pattern,
-                    value: input,
-                    ..
-                } = &value.kind
-                {
-                    if let Some(inputs) =
-                        self.completed_pattern_inputs(pattern, input, statement.span)?
-                    {
-                        staged_patterns.insert(statements.len(), inputs);
-                    }
-                }
-                diverges |= is_never(&value.ty);
-                if !diverges {
-                    self.assume_statement_type_facts(&value, statement.span)?;
-                    if self
-                        .signature_owner
-                        .is_some_and(|owner| self.open_functions.contains_key(&owner))
-                    {
-                        self.assume_open_continuation(statement)?;
-                    }
-                }
-                statements.push(value);
-            }
+        self.check_block_region(block, |this, mut statements, diverges, staged_patterns| {
             let mut tail = block
                 .expr
                 .map(|value| {
@@ -5129,25 +5088,25 @@ impl Checker<'_, '_> {
                     // A spread producer still has a declared field layout to
                     // check, even when its runtime evaluation cannot finish.
                     if diverges
-                        && self.runtime_value_context()
-                        && self.preparing_spread.is_none()
+                        && this.runtime_value_context()
+                        && this.preparing_spread.is_none()
                         && input_context.is_none()
                     {
-                        if let Some(checked) = self.argument_attempt(value, None, None)? {
+                        if let Some(checked) = this.argument_attempt(value, None, None)? {
                             return Ok(checked);
                         }
                     }
                     match input_context {
                         Some(input_context) if expected.is_none() => {
-                            self.input_context_expression(value, input_context)
+                            this.input_context_expression(value, input_context)
                         }
-                        _ => self.expr_context(value, expected, partial),
+                        _ => this.expr_context(value, expected, partial),
                     }
                 })
                 .transpose()?
                 .map(Box::new);
             if tail.is_none() && !diverges {
-                tail = self
+                tail = this
                     .implicit_error_success(expected, block.span)?
                     .map(Box::new);
             }
@@ -5157,16 +5116,14 @@ impl Checker<'_, '_> {
                 tail.as_ref().map(|x| x.ty.clone()).unwrap_or(p(P::Void))
             };
             if let Some(expected) = expected {
-                self.require(&ty, expected, block.span)?;
+                this.require(&ty, expected, block.span)?;
             }
-            self.materialize_mixed_staged_patterns(
-                &mut statements,
-                tail.as_deref(),
-                block,
-                &staged_patterns,
-            )?;
-            self.erase_consumed_staged_aliases(&mut statements, tail.as_deref(), block.span)?;
-            self.stabilize_error_let_bindings(&mut statements, block.span)?;
+            let references = if this.block_binding_liveness_needed(&statements, &staged_patterns) {
+                this.block_tail_references(tail.as_deref(), block.span)?
+            } else {
+                BTreeSet::new()
+            };
+            this.finish_block_bindings(&mut statements, &references, block, &staged_patterns)?;
             Ok(n::Expr {
                 ty,
                 source: source(block.span),
@@ -5175,20 +5132,7 @@ impl Checker<'_, '_> {
                     result: tail,
                 },
             })
-        })();
-        self.specialization_inputs
-            .retain(|(binding, _, _)| saved_staged.contains(binding));
-        self.type_input_bindings
-            .retain(|binding, _| saved_types.contains(binding));
-        self.partial_staged_bindings
-            .retain(|binding, _| saved_partial_values.contains(binding));
-        self.value_input_bindings
-            .retain(|binding, _| saved_values.contains(binding));
-        self.locals = saved;
-        self.code_values = saved_code;
-        self.pattern_codes = saved_patterns;
-        self.context = saved_context;
-        result
+        })
     }
     /// Receiver transport follows declaration syntax, including explicit UFCS.
     /// An ordinary first parameter remains a value even when named similarly.

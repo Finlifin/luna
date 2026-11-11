@@ -280,27 +280,95 @@ fn walk<'a, E: From<Error>>(
         include_defaults,
     )
 }
+enum Node<'a> {
+    Expr(&'a Expr),
+    Pattern(&'a P),
+    Argument(&'a crate::program::NormalFormArgument),
+}
+
+/// Inspect a pending input with the ordinary expression/pattern visitor.
+/// Structural placeholders consume fuel even when they contain no typed leaf.
+pub fn argument_checked<'a, E: From<Error>>(
+    argument: &'a crate::program::NormalFormArgument,
+    fuel: &mut usize,
+    mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<(), E>,
+) -> Result<(), E> {
+    walk_nodes(
+        std::iter::once(Node::Argument(argument)),
+        fuel,
+        |expr, fuel| visit(expr, fuel).map(|_| true),
+        true,
+        true,
+    )
+}
+
 fn walk_roots<'a, E: From<Error>>(
     roots: impl DoubleEndedIterator<Item = &'a Expr>,
+    fuel: &mut usize,
+    visit: impl FnMut(&'a Expr, &mut usize) -> Result<bool, E>,
+    include_defaults: bool,
+    include_closure_bodies: bool,
+) -> Result<(), E> {
+    walk_nodes(
+        roots.map(Node::Expr),
+        fuel,
+        visit,
+        include_defaults,
+        include_closure_bodies,
+    )
+}
+
+fn walk_nodes<'a, E: From<Error>>(
+    roots: impl DoubleEndedIterator<Item = Node<'a>>,
     fuel: &mut usize,
     mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<bool, E>,
     include_defaults: bool,
     include_closure_bodies: bool,
 ) -> Result<(), E> {
-    enum Node<'a> {
-        Expr(&'a Expr),
-        Pattern(&'a P),
-    }
     // Keep root order without allocating one slot per contract/default. The
     // same lazy root stream serves ordinary functions and borrowed summaries.
     let mut roots = roots.rev();
     let mut work = Vec::new();
-    while let Some(node) = work.pop().or_else(|| roots.next().map(Node::Expr)) {
+    while let Some(node) = work.pop().or_else(|| roots.next()) {
         if *fuel == 0 {
             return Err(Error::Budget("IIR traversal budget exhausted").into());
         }
         *fuel -= 1;
         match node {
+            Node::Argument(argument) => {
+                use crate::program::NormalFormArgument as A;
+                match argument {
+                    A::ListSpread(value) | A::Value(value) => work.push(Node::Expr(value)),
+                    A::Unit { .. } | A::Null { .. } | A::Integer { .. } => {}
+                    A::If {
+                        condition,
+                        then_input,
+                        else_input,
+                        ..
+                    } => {
+                        work.push(Node::Expr(condition));
+                        work.push(Node::Argument(then_input));
+                        work.push(Node::Argument(else_input));
+                    }
+                    A::Block {
+                        statements, result, ..
+                    } => {
+                        work.extend(statements.iter().map(Node::Expr));
+                        work.extend(result.as_deref().map(Node::Argument));
+                    }
+                    A::List { items, .. } | A::Tuple { items, .. } => {
+                        work.extend(items.iter().map(Node::Argument))
+                    }
+                    A::Match { value, arms, .. } => {
+                        work.push(Node::Expr(value));
+                        for arm in arms {
+                            work.push(Node::Pattern(&arm.pattern));
+                            work.extend(arm.guard.iter().map(Node::Expr));
+                            work.push(Node::Argument(&arm.body));
+                        }
+                    }
+                }
+            }
             Node::Pattern(pattern) => match pattern {
                 P::Then { first, value, next } => {
                     work.push(Node::Pattern(first));
@@ -384,18 +452,7 @@ fn walk_roots<'a, E: From<Error>>(
                                 .flat_map(|p| &p.preparations)
                                 .map(|p| Node::Expr(&p.expression)),
                         );
-                        work.extend(
-                            arguments
-                                .iter()
-                                .flat_map(|a| a.patterns())
-                                .map(Node::Pattern),
-                        );
-                        work.extend(
-                            arguments
-                                .iter()
-                                .flat_map(|a| a.expressions())
-                                .map(Node::Expr),
-                        );
+                        work.extend(arguments.iter().map(Node::Argument));
                     }
                     K::NominalType {
                         arguments,
@@ -403,18 +460,7 @@ fn walk_roots<'a, E: From<Error>>(
                         ..
                     } => {
                         work.extend(preparations.iter().map(|p| Node::Expr(&p.expression)));
-                        work.extend(
-                            arguments
-                                .iter()
-                                .flat_map(|a| a.patterns())
-                                .map(Node::Pattern),
-                        );
-                        work.extend(
-                            arguments
-                                .iter()
-                                .flat_map(|a| a.expressions())
-                                .map(Node::Expr),
-                        );
+                        work.extend(arguments.iter().map(Node::Argument));
                     }
                     K::ClosureType {
                         environment,
@@ -430,18 +476,7 @@ fn walk_roots<'a, E: From<Error>>(
                         ..
                     } => {
                         work.extend(preparations.iter().map(|p| Node::Expr(&p.expression)));
-                        work.extend(
-                            arguments
-                                .iter()
-                                .flat_map(|a| a.patterns())
-                                .map(Node::Pattern),
-                        );
-                        work.extend(
-                            arguments
-                                .iter()
-                                .flat_map(|a| a.expressions())
-                                .map(Node::Expr),
-                        );
+                        work.extend(arguments.iter().map(Node::Argument));
                         if let Some(body) = body {
                             work.push(Node::Expr(body));
                         }
