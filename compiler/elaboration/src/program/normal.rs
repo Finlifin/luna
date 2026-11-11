@@ -351,67 +351,16 @@ impl Checker<'_, '_> {
                 },
             ));
         }
-        if let H::ResolvedClauseParam(_, id) = value.kind {
-            let declaration = DeclarationId {
-                package: semantic_package(&self.package_identities, id.pkg),
-                local: id.index,
-            };
-            if let Some(input) = self.definition_input(declaration, value.span)? {
-                self.require_expression(&input.ty, ty, value.span)?;
-                return match input.kind {
-                    K::TypeValue(term) | K::ComptimeValue(term) => Ok(term),
-                    _ => Err(error(value.span, "definition input is not a frozen value")),
-                };
+        if matches!(value.kind, H::ResolvedClauseParam(..)) {
+            // Symbolic inputs use the same contextual conversions as ordinary
+            // expressions. Observing a checked identifier preserves its scope;
+            // it does not require a concrete invocation-time value.
+            let checked = self.expr(value, Some(ty))?;
+            if let Some(identity) = self.preserved_input_identity(&checked, [], value.span)? {
+                return Ok(identity);
             }
-            if self.forbidden_default_inputs.contains(&declaration) {
-                return Err(error(
-                    value.span,
-                    "trait default references itself or a later parameter",
-                ));
-            }
-            if let Some(actual) = self
-                .trait_input_domain(declaration)
-                .filter(|ty| *ty != p(P::Type))
-            {
-                let actual = self.substituted_trait_domain(&actual, value.span)?;
-                self.require(&actual, ty, value.span)?;
-                return Ok(self
-                    .alias_substitution
-                    .get(&declaration)
-                    .map(|term| (**term).clone())
-                    .unwrap_or(Term::Rigid {
-                        declaration,
-                        sort: Sort::ComptimeValue,
-                    }));
-            }
-            let actual = self
-                .normal_parameters
-                .values()
-                .chain(self.normal_input_prefixes.values())
-                .flatten()
-                .find(|(d, _, _)| *d == declaration)
-                .map(|(_, _, t)| t)
-                .ok_or_else(|| Error {
-                    retry_after_capability_progress: self
-                        .signature_owner
-                        .is_some_and(|owner| self.active_signatures.contains(&owner)),
-                    ..error(
-                        value.span,
-                        "normal-form value argument is not an available declaration input",
-                    )
-                })?;
-            self.require(actual, ty, value.span)
-                .map_err(|mut failure| {
-                    failure.message = format!(
-                        "normal-form value argument type mismatch: {}",
-                        failure.message
-                    );
-                    failure
-                })?;
-            return Ok(Term::Rigid {
-                declaration,
-                sort: Sort::ComptimeValue,
-            });
+            let (result, _) = self.required_normal_input(value, checked, Vec::new())?;
+            return self.required_normal_term(result, value.span);
         }
         // Preserve declaration inputs inside aggregates instead of attempting
         // to execute them before their enclosing definition is instantiated.

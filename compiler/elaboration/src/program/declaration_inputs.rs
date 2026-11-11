@@ -204,23 +204,20 @@ impl Checker<'_, '_> {
         completed: &[DeclarationId],
         span: Span,
     ) -> Result<bool, Error> {
-        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let pending = (|| {
-            fuel = fuel
-                .checked_sub(parameters.len() + completed.len())
-                .ok_or(nir::type_computations::Error::Budget)?;
-            let completed = completed.iter().copied().collect::<BTreeSet<_>>();
-            let mut referenced = BTreeSet::new();
-            nir::type_computations::rigid_declarations_bounded(domain, &mut fuel, &mut referenced)?;
-            Ok(parameters
+        self.required_steps = self
+            .required_steps
+            .checked_sub(completed.len() as u64)
+            .ok_or_else(|| error(span, "input domain completion budget exhausted"))?;
+        let completed = completed.iter().copied().collect::<BTreeSet<_>>();
+        input_observation::pending_domain_inputs(
+            domain,
+            parameters
                 .iter()
-                .any(|(id, _, _)| referenced.contains(id) && !completed.contains(id)))
-        })();
-        self.required_steps -= (before - fuel) as u64;
-        pending.map_err(|failure: nir::type_computations::Error| {
-            error(span, format!("input domain inspection failed: {failure}"))
-        })
+                .map(|(id, _, _)| (*id, completed.contains(id))),
+            &mut self.required_steps,
+            span,
+        )
+        .map(|pending| !pending.is_empty())
     }
 
     fn prepare_declaration_collection_input(

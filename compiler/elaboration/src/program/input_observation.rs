@@ -79,6 +79,28 @@ pub(super) fn term(
     Ok(inputs)
 }
 
+/// Dependencies are measured in the original callee domain. After substitution,
+/// equally numbered caller binders no longer identify unsupplied callee inputs.
+/// The result is an input dependency set, not permission to execute a producer.
+pub(super) fn pending_domain_inputs(
+    domain: &Term,
+    inputs: impl IntoIterator<Item = (DeclarationId, bool)>,
+    steps: &mut u64,
+    span: Span,
+) -> Result<BTreeSet<DeclarationId>, Error> {
+    let referenced = term(domain, steps, span)?;
+    let mut pending = BTreeSet::new();
+    for (id, supplied) in inputs {
+        *steps = steps
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "input domain dependency budget exhausted"))?;
+        if !supplied && referenced.contains(&id) {
+            pending.insert(id);
+        }
+    }
+    Ok(pending)
+}
+
 impl Checker<'_, '_> {
     /// Observe identity while retaining the whole producer for execution.
     /// Facts describe earlier bound default inputs and new immutable locals.
@@ -226,4 +248,66 @@ fn input_facts_cover(
     let free = nir::free_bindings::collect(expression, &mut budget.steps)?;
     budget.consume(free.len())?;
     Ok(free.iter().all(|binding| facts.contains_key(binding)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(local: u32) -> DeclarationId {
+        DeclarationId { package: 1, local }
+    }
+
+    fn domain() -> Term {
+        Term::OptionalValue {
+            ty: Box::new(Term::Optional(Box::new(Term::Rigid {
+                declaration: id(1),
+                sort: Sort::Type,
+            }))),
+            value: Some(Box::new(Term::Rigid {
+                declaration: id(2),
+                sort: Sort::ComptimeValue,
+            })),
+        }
+    }
+
+    #[test]
+    fn pending_domains_intersect_references_with_unsupplied_callee_inputs() {
+        let observed = pending_domain_inputs(
+            &domain(),
+            [(id(3), false), (id(1), true), (id(2), false)],
+            &mut 1000,
+            rustc_span::DUMMY_SP,
+        )
+        .unwrap();
+        assert_eq!(observed, [id(2)].into_iter().collect());
+        assert!(
+            pending_domain_inputs(
+                &domain(),
+                [(id(3), false), (id(2), true)],
+                &mut 1000,
+                rustc_span::DUMMY_SP,
+            )
+            .unwrap()
+            .is_empty(),
+            "caller input 1 is not part of this callee telescope"
+        );
+    }
+
+    #[test]
+    fn pending_domain_observation_never_turns_budget_failure_into_readiness() {
+        let inputs = [(id(1), true), (id(2), false)];
+        for budget in [0, 1, 3] {
+            let mut remaining = budget;
+            assert!(
+                pending_domain_inputs(&domain(), inputs, &mut remaining, rustc_span::DUMMY_SP)
+                    .is_err()
+            );
+            assert!(remaining <= budget);
+        }
+        assert_eq!(
+            pending_domain_inputs(&domain(), inputs, &mut 1000, rustc_span::DUMMY_SP).unwrap(),
+            [id(2)].into_iter().collect()
+        );
+    }
 }

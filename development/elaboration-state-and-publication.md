@@ -295,6 +295,26 @@ Type 发布只移除已经完成的等待项；失败沿原边传播，无关兄
 新的拒绝例证明旧实现会接受这样的未调用泛型定义，现在在定义检查阶段拒绝。
 这仍不是任意生产者执行后的前端恢复协议，两个既有普通 callable 待定用例仍 ignored。
 
+同一依赖观察现由 `input_observation::pending_domain_inputs` 提供给声明与 trait 输入。
+trait 的标量、具名参数及展开包都在原始 callee 域中识别待供应项，再使用替换后的
+caller 域检查值。否则 `Swapped<B, .tag = value, A>` 中 caller 的 B 会被误认成
+callee 尚未供应的 B；调整具名参数位置不应改变合法性或实际执行顺序。
+
+`normal_value_argument_at` 的符号子句参数不再自行查多张侧表并要求域直接相等，
+而是复用普通 `expr` 检查及上下文转换。静态身份观察保留符号值；需要 invocation
+时交付已经检查的表达式，不重新检查或重放源 AST。真实 sysroot 用例覆盖 trait
+自身引用、换参、具名乱序、可选与错误结果转换，以及不相关泛型域的拒绝。
+此处删除了该符号分支的平行检查规则，尚未删除整个 NormalFormArgument。
+
+上述 trait 扩展在 `/home/fin/luna` 经同一检查入口验证：
+
+- `-p elaboration --lib`：`/tmp/luna-tools-rplpwgyc/result.json` 退出 0，189 项通过，
+  包括依赖交集及预算耗尽不得视作域就绪的回归。
+- `-p luna --test trait_domain_substitution --test trait_obligations --test trait_phases --test normal_form_domains --test cmtt_type_inputs --test cmtt_methods --no-fail-fast`：
+  `/tmp/luna-tools-9ofq6e01/result.json` 退出 0，270 项通过。
+- 同一生产代码的输入规划、trait 动态子句及普通收集器检查见
+  `/tmp/luna-tools-4uo0xbs0/result.json`，退出 0；原有待定域用例仍 ignored。
+
 验证目录 `/home/fin/luna`，命令均经 `development/check.py --timeout 900 -- test`：
 
 - 临时还原唯一生产文件为 `03908c64`，保留新测试，运行

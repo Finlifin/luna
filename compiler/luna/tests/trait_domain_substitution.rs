@@ -4,6 +4,9 @@
 #[allow(dead_code)]
 mod support;
 use comptime_interpretor::Value;
+#[path = "support/sysroot_execution.rs"]
+#[allow(dead_code)]
+mod sysroot;
 
 #[test]
 fn dependent_domains_remain_distinct_in_a_large_generic_declaration_world() {
@@ -49,4 +52,57 @@ fn run()->bool {
     let invalid = source.replace("Leaf<bool,false>", "Leaf<bool,'x'>");
     let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(failure.contains("type mismatch"), "{failure}");
+}
+
+#[test]
+fn self_referenced_trait_inputs_keep_caller_binders_after_substitution() {
+    for arguments in ["B, A, .tag = value", "B, .tag = value, A"] {
+        let source = format!(
+            "trait Swapped where A, B, .tag: ?A = null {{
+                fn require_swapped() -> bool
+                where value: B, requires bool :- Swapped<{arguments}>
+                {{ true }}
+            }}
+            impl Swapped<bool, u8> for bool {{}}
+            impl Swapped<u8, bool, .tag = 9> for bool {{}}
+            fn run() -> bool {{ bool.as(Swapped<bool, u8>).require_swapped<9>() }}"
+        );
+        assert_eq!(sysroot::run(&source), Value::Bool(true), "{arguments}");
+    }
+}
+
+#[test]
+fn self_referenced_trait_inputs_reject_unrelated_caller_domains() {
+    for arguments in ["B, A, .tag = value", "B, .tag = value, A"] {
+        let source = format!(
+            "trait Swapped where A, B, .tag: ?A = null {{
+                fn require_swapped()
+                where value: A, requires bool :- Swapped<{arguments}>;
+            }}"
+        );
+        let failure = support::compile_with_protocols(&source, &Default::default())
+            .err()
+            .expect("A cannot supply an optional B for arbitrary A and B");
+        assert!(
+            failure.contains("type mismatch") || failure.contains("optional operation"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn symbolic_trait_inputs_use_error_result_conversions_in_the_caller_scope() {
+    for arguments in ["B, A, .tag = value", "B, .tag = value, A"] {
+        let source = format!(
+            "trait Swapped where A, B, .tag: !bool A = error false {{
+                fn require_swapped() -> bool
+                where value: B, requires bool :- Swapped<{arguments}>
+                {{ true }}
+            }}
+            impl Swapped<bool, u8> for bool {{}}
+            impl Swapped<u8, bool, .tag = 9> for bool {{}}
+            fn run() -> bool {{ bool.as(Swapped<bool, u8>).require_swapped<9>() }}"
+        );
+        assert_eq!(sysroot::run(&source), Value::Bool(true), "{arguments}");
+    }
 }

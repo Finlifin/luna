@@ -521,9 +521,17 @@ impl Checker<'_, '_> {
                                 subject,
                                 value.span,
                             )?;
-                            if parameters.iter().enumerate().any(|(index, parameter)| {
-                                supplied[index].is_none() && domain.mentions_rigid(*parameter)
-                            }) {
+                            if !input_observation::pending_domain_inputs(
+                                &domains[*slot],
+                                parameters
+                                    .iter()
+                                    .zip(&supplied)
+                                    .map(|(id, value)| (*id, value.is_some())),
+                                &mut self.required_steps,
+                                value.span,
+                            )?
+                            .is_empty()
+                            {
                                 ready = false;
                                 break;
                             }
@@ -611,11 +619,18 @@ impl Checker<'_, '_> {
             // A supplied value is checked in the caller environment, against
             // the domain instantiated by inputs already evaluated in source
             // order. Do not reorder effectful argument computations.
+            let unresolved_domain = !input_observation::pending_domain_inputs(
+                domain,
+                parameters
+                    .iter()
+                    .zip(&supplied)
+                    .map(|(id, value)| (*id, value.is_some())),
+                &mut self.required_steps,
+                value.span,
+            )?
+            .is_empty();
             let domain =
                 self.supplied_trait_domain(owner, domain, &supplied, &prefix, subject, value.span)?;
-            let unresolved_domain = parameters.iter().enumerate().any(|(index, parameter)| {
-                supplied[index].is_none() && domain.mentions_rigid(*parameter)
-            });
             // Bare numeric literals have intrinsic conversion only: no call,
             // capture, or user literal protocol can execute here. Keep their
             // spelling until the domain is known instead of fixing Integer or
