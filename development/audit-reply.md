@@ -225,8 +225,8 @@ HIR 与检查 continuation 归前端，实际存储和执行位置归原 invocat
 尚未取得的值、域响应及冻结边界；这部分尚未实现，没有把失败测试改成拒绝预期。
 
 在 `363d477a` 继续核对生产源码，明确了这条接线的四个实施障碍：声明输入的串行
-Progress 尚未分开检查就绪与执行次序；块作用域仍由同步闭包持有；Frame 完成只
-归还入口 imported 绑定，不交付片段新建局部；字节码编译只接受本段登记的循环
+Progress 尚未分开检查就绪与执行次序；块作用域仍由同步闭包持有；通用源片段尚未
+交付新绑定与作用域接口；字节码编译只接受本段登记的循环
 目标，不能直接承接外部 break／continue。相应的规则 continuation、词法状态借用、
 LocalId 交接、外部控制出口及实际 Type receipt 的消费已写入
 [实施细化](elaboration-state-and-publication.md#实施细化普通检查规则必须交付-continuation)。
@@ -251,6 +251,21 @@ checked-order 与 schedule。这是现有生产准备逻辑的迁移，没有新
 [声明输入准备](elaboration-state-and-publication.md#已接入声明输入准备有独立的进度所有者)。
 仍须接通前端 continuation、原 invocation 的实际 Type 响应及一次性执行 receipt；
 当前 checked-prefix 只表示准备前缀，绝非已经执行的前缀。
+
+继续核对时发现先前设计文字遗漏了现有导出路径：`InputFinish::Preparation` 本来
+就在成功后将 exports 追加到 imported 再归还环境，不能说 VM 完全不能导出局部值。
+已纠正这一表述，并把已有生产路径迁入帧自身的绑定交接：执行前解析 LocalId、检查
+冲突及预算，正常完成且内部作用域闭合后整体交付。错域检查仍由原消费者负责；
+这里验证绑定存在和交接状态，不把寄存器存在当成类型证明。
+
+新接口消除了将导出伪装成导入的约定，也避免把寄存器表与实际 Frame 分开持有。
+错误和非局部控制只归还原输入及其真实写入，不发布一半输出；源作用域、外部控制
+出口和 Type 响应仍待前端接线，未将这次内部迁移写成完整 source activation。
+生产入口、边界及证据见
+[帧绑定导出](elaboration-state-and-publication.md#已接入帧持有显式绑定导出)。
+局部 7 项通过；随后 VM 与调用方检查 755 项通过、2 项既有 ignored，退出 0，
+证据 `/tmp/luna-tools-r52uh6us/result.json`，其中包含首轮局部用例。没有执行全
+workspace 或解除普通调用 Type 等待的 ignore，也没有改动另一代理的 formatter。
 
 资源与库线仍保留独立缺口。运行时文本接口须以真实 sysroot、标准资源检查及正常
 调用贯通，不能用手拼片段、直降 builtin 或跳过来源检查证明库可用。

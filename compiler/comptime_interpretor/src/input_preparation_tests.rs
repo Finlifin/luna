@@ -284,3 +284,127 @@ fn normal_plan_cleans_exported_bindings_and_executes_trailing_empty_packets() {
         }
     }
 }
+
+#[test]
+fn fragment_exports_reject_invalid_names_before_taking_the_environment() {
+    let package = Package::default();
+    let prep = preparation(tuple(vec![boolean(true), boolean(false)]));
+    let code = Arc::new(comptime_compiler::compile(&prep.expression, &mut 10000).unwrap());
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let original = Environment::from([(local(0), Value::Bool(false))]);
+    for names in [vec![local(1), local(1)], vec![local(0)], vec![local(99)]] {
+        let mut environment = original.clone();
+        let request = bindings::Exports::new(&mut vm, names, &environment, SOURCE);
+        let result = request
+            .and_then(|request| vm.start_frame_with_exports(&code, &mut environment, request));
+        assert!(result.is_err());
+        assert_eq!(environment, original);
+    }
+    let mut environment = original;
+    let request = bindings::Exports::new(&mut vm, vec![local(1)], &environment, SOURCE).unwrap();
+    assert!(
+        request
+            .to_string()
+            .starts_with("(requested-exports (source 1 2)")
+    );
+    // Request preparation does not reserve a caller binding. Recheck the
+    // actual environment before moving it, even if the code is already cached.
+    environment.insert(local(1), Value::Bool(false));
+    let original = environment.clone();
+    assert_eq!(
+        vm.start_frame_with_exports(&code, &mut environment, request)
+            .err()
+            .unwrap()
+            .kind,
+        ErrorKind::Type
+    );
+    assert_eq!(environment, original);
+}
+
+#[test]
+fn fragment_exports_publish_atomically_only_at_closed_completion() {
+    let package = Package::default();
+    let prep = preparation(tuple(vec![boolean(true), boolean(false)]));
+    for fault in 0..4 {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut environment = Environment::from([(local(0), Value::Bool(false))]);
+        let InputFrame { mut code, finish } = vm
+            .start_input_preparation(&prep, &mut environment)
+            .unwrap()
+            .unwrap();
+        assert!(environment.is_empty());
+        assert!(code.to_string().contains("(bound-exports (source 1 2)"));
+        let flow = vm.run_fragment(&mut code);
+        assert!(matches!(flow, Ok(Flow::Value(Value::Unit))));
+        assert!(code.scopes.is_empty());
+        let output = code
+            .code
+            .locals()
+            .iter()
+            .find(|(binding, _)| *binding == local(2))
+            .unwrap()
+            .1;
+        let expected = match fault {
+            0 => {
+                code.slots[output] = None;
+                ErrorKind::MissingBinding
+            }
+            1 => {
+                code.scopes.push(PatternScope::default());
+                ErrorKind::InvalidControlFlow
+            }
+            2 => {
+                code.terminal = false;
+                ErrorKind::InvalidControlFlow
+            }
+            3 => {
+                code.environment.insert(local(2), Value::Bool(true));
+                ErrorKind::Type
+            }
+            _ => unreachable!(),
+        };
+        let result = finish.complete(&mut vm, code, flow);
+        let failure = result.flow.unwrap_err();
+        assert_eq!(failure.kind, expected);
+        assert_eq!(failure.source, Some(SOURCE));
+        assert_eq!(result.environment.get(&local(0)), Some(&Value::Bool(true)));
+        assert!(!result.environment.contains_key(&local(1)));
+        if fault == 3 {
+            assert_eq!(result.environment.get(&local(2)), Some(&Value::Bool(true)));
+        } else {
+            assert!(!result.environment.contains_key(&local(2)));
+        }
+    }
+}
+
+#[test]
+fn fragment_handoff_moves_storage_without_replacing_its_identity() {
+    let package = Package::default();
+    let prep = preparation(tuple(vec![boolean(true), boolean(false)]));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut environment = Environment::from([(local(0), Value::Bool(false))]);
+    let InputFrame { mut code, finish } = vm
+        .start_input_preparation(&prep, &mut environment)
+        .unwrap()
+        .unwrap();
+    let flow = vm.run_fragment(&mut code);
+    assert!(matches!(flow, Ok(Flow::Value(Value::Unit))));
+    let slot = code
+        .code
+        .locals()
+        .iter()
+        .find(|(binding, _)| *binding == local(1))
+        .unwrap()
+        .1;
+    // The frame handoff must transport internal storage, not freeze or copy
+    // its payload. Domain and ownership admission belong to other boundaries.
+    let storage = Storage::new(code.slots[slot].take().unwrap());
+    code.slots[slot] = Some(Value::Storage(storage.clone()));
+    let result = finish.complete(&mut vm, code, flow);
+    assert!(matches!(result.flow, Ok(Flow::Value(Value::Unit))));
+    assert_eq!(
+        result.environment.get(&local(1)),
+        Some(&Value::Storage(storage))
+    );
+    assert_eq!(result.environment.get(&local(2)), Some(&Value::Bool(false)));
+}

@@ -2,6 +2,7 @@
 //! interpretation keep their existing paths. No opcode recursively evaluates NIR.
 use super::*;
 use comptime_compiler::{Op, Program};
+mod bindings;
 #[path = "bytecode_interface.rs"]
 mod interface;
 mod preparation;
@@ -11,6 +12,7 @@ pub(super) struct Frame {
     code: Arc<Program>,
     environment: Environment,
     imported: Vec<(LocalId, usize)>,
+    exports: Option<bindings::BoundExports>,
     terminal: bool,
     interface: Option<Box<interface::InterfaceCall>>,
     waiting: Option<Waiting>,
@@ -242,6 +244,10 @@ impl fmt::Display for Frame {
         for (binding, slot) in &self.imported {
             write!(f, " ({binding} {slot})")?;
         }
+        write!(f, ") (binding-exports")?;
+        if let Some(exports) = &self.exports {
+            write!(f, " {exports}")?;
+        }
         write!(f, ") (waiting")?;
         match &self.waiting {
             Some(Waiting::Preparation(ticket)) => write!(f, " (preparation {ticket})")?,
@@ -337,10 +343,6 @@ pub(super) struct InputFrame {
 }
 pub(super) enum InputFinish {
     Ready,
-    Preparation {
-        exports: Vec<(LocalId, usize)>,
-        source: SourceRange,
-    },
     Staged {
         shape: Arc<comptime_compiler::normal_types::Shape>,
         depth: usize,
@@ -359,17 +361,6 @@ impl fmt::Display for InputFinish {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ready => write!(f, "(input-finish ready)"),
-            Self::Preparation { exports, source } => {
-                write!(
-                    f,
-                    "(input-finish preparation (source {} {}) (exports",
-                    source.start, source.end
-                )?;
-                for (binding, slot) in exports {
-                    write!(f, " ({binding} %{slot})")?;
-                }
-                write!(f, "))")
-            }
             Self::Staged {
                 shape,
                 depth,
@@ -397,15 +388,6 @@ impl InputFinish {
         let mut staged = None;
         match self {
             Self::Ready => {}
-            Self::Preparation { exports, source } => {
-                if matches!(&flow, Ok(Flow::Value(_))) {
-                    if exports.iter().any(|(_, slot)| code.slots[*slot].is_none()) {
-                        flow = Err(vm.failure(ErrorKind::MissingBinding, Some(source)));
-                    } else {
-                        code.imported.extend(exports);
-                    }
-                }
-            }
             Self::Staged {
                 shape,
                 depth,
@@ -424,9 +406,10 @@ impl InputFinish {
                 }
             }
         }
+        let (flow, environment) = code.complete_environment(flow);
         InputResult {
             flow,
-            environment: code.restore_environment(),
+            environment,
             staged,
         }
     }
@@ -978,30 +961,15 @@ impl<'a> Interpreter<'a> {
         let bindings = preparation
             .local_bindings()
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        if bindings
-            .iter()
-            .any(|binding| environment.contains_key(binding))
-            || bindings.iter().collect::<BTreeSet<_>>().len() != bindings.len()
-        {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        let exports = bindings::Exports::new(self, bindings, environment, source)?;
         let Some(code) = self.invocation_code(&preparation.expression, None)? else {
             return Ok(None);
         };
-        let mut exports = Vec::with_capacity(bindings.len());
-        for binding in bindings {
-            self.tick(Some(source))?;
-            let index = code
-                .locals()
-                .binary_search_by_key(&binding, |(id, _)| *id)
-                .map_err(|_| self.failure(ErrorKind::MissingBinding, Some(source)))?;
-            exports.push((binding, code.locals()[index].1));
-        }
-        let code = self.start_frame(&code, environment)?;
+        let code = self.start_frame_with_exports(&code, environment, exports)?;
         self.bytecode_input_preparations += 1;
         Ok(Some(InputFrame {
             code,
-            finish: InputFinish::Preparation { exports, source },
+            finish: InputFinish::Ready,
         }))
     }
 
@@ -1074,6 +1042,7 @@ impl<'a> Interpreter<'a> {
             code: code.clone(),
             environment: std::mem::take(environment),
             imported: Vec::new(),
+            exports: None,
             terminal: false,
             interface: None,
             waiting: None,

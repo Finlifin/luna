@@ -694,9 +694,11 @@ defaults、pending type uses、locals、default bindings、supplied inputs 和 i
 #### 实施细化：片段边界必须同时带绑定和控制接口
 
 `bytecode::Frame::start_frame` 将入口环境中存在的 LocalId 移入对应寄存器，
-`restore_environment` 只归还这些 imported 槽。片段中新建的 LocalId 不因此成为
-下一段的输入；完成一段后丢弃其 Frame 会丢掉尚在源词法域中的局部值。Program 的
-寄存器编号又是每段局部编号，不能直接把旧 slots 或 PatternScope 搬到另一个 Program。
+`restore_environment` 归还这些 imported 槽。此前 `InputFinish::Preparation` 已有
+特殊导出路径：成功时把指定 exports 追加到 imported，再恢复环境。因此不能笼统
+称现有 VM 不会导出新绑定；真正缺少的是源区域对任意后继片段的绑定／作用域契约。
+这条已有生产路径现已迁入帧自身的交接接口，详见下节。Program 的寄存器编号仍是
+每段局部编号，不能直接把旧 slots 或 PatternScope 搬到另一个 Program。
 
 采用显式绑定交接表：每段声明需要的 LocalId、输入域、访问／移动方式、输出绑定、
 所属源作用域和退出后责任；寄存器编号仅由该段自己的编译结果解释。新建绑定只有
@@ -719,6 +721,45 @@ return 则经 `Op::Finish { explicit: true }` 保留为 `Flow::Return`。因此�
 activation 接收。未经声明的目标仍拒绝。return 也由原函数 owner 接收，不能由
 片段的便利包装吞成普通 Value。最初未实现的出口必须限制在片段准入处，而非执行
 到一半才静默回退。代数效应 resume 的 continuation 也不能仅凭一个 loop id 接收。
+
+#### 已接入：帧持有显式绑定导出
+
+`bytecode/bindings.rs` 接管已有输入准备片段的导出逻辑；没有建立另一个执行器。
+请求保存 LocalId 与来源，创建时拒绝重复或与调用者已有绑定冲突；开始执行前再次
+检查实际环境，并将名字解析到这次 Program 的寄存器。全部检查及帧分配预算通过后
+才移动环境，失败时调用者仍持有原环境。请求不授予类型或所有权准入，代码的域检查
+仍由现有前端和 VM 负责。
+
+解析结果由实际执行的 Frame 持有，不再放在可脱离代码的 InputFinish 中。完成时：
+
+- 正常值出口要求 Frame 已终结、没有待响应请求且内部模式作用域已闭合。
+- 所有导出槽都必须有值，环境中也不能出现同名新绑定；先整体验证，再移动任何输出。
+- 输入准备完成后的新绑定直接移入环境，原输入继续按 imported 归还；导出不伪装
+  成导入，也不复制／冻结存储或执行源语言的 Copy、Clone。
+- 错误、return 等非正常值出口不发布新绑定，但归还实际已变更的原输入；没有回滚
+  真实副作用。取消路径仍保留原有 Frame 和 session 的清理责任。
+
+requested-exports、bound-exports 和帧 dump 均为 S-expression，后者展示本段
+LocalId 到寄存器的映射。请求是 invocation 内部数据，不是缓存 key、持久 IR 或
+跨 activation 的许可；后续源区域仍须交付 scope、域及执行 receipt。这里也没有
+允许跨未闭合模式作用域切段，或把 return／外部循环控制转成普通 Value。
+
+验证工作目录 `/home/fin/luna`：
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib bytecode::input_preparation_tests --no-fail-fast`：7 项通过，退出 0，
+  `/tmp/luna-tools-m6w3d2e0/result.json`。包括所有预算截断、提前返回、生产者错误、
+  名字冲突、缺失输出、未闭合作用域、未终结帧、环境冲突及存储身份保持。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib -p luna --test clause_packet_preparation --test ordinary_clause_collectors
+  --test ordinary_callable_types --test comptime_receivers --test comptime_storage_domains
+  --no-fail-fast`：755 项通过、2 项既有 ignored，退出 0，
+  `/tmp/luna-tools-r52uh6us/result.json`。覆盖 VM 的暂停／恢复／取消、调用输入计划
+  及真实 sysroot 的参数展开、收集器和两阶段存储消费者；包含首轮 7 项局部检查。
+- scoped rustfmt 退出 0，`/tmp/luna-tools-ljbba8vg/result.json`。
+
+这些是保留既有 moves/effects.rs 修改的工作区结果；未运行全 workspace、性能或
+源区域 Type 等待的 ignored 用例，没有修改它们的语义预期。
 
 #### 实施细化：两个正例的逐步数据流
 
