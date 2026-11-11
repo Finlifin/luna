@@ -128,6 +128,31 @@ WorldRevision 描述物理数据版本；visibility_frontier 描述当前语义�
 某字段同时放了稳定和活动数据时应拆其语义，不是简单包进一个更大的 Context。
 struct 中没列出的字段仍需逐一归属；本表是拆分依据，不是穷尽迁移清单。
 
+### 已接入：required invocation 的整批定义接收
+
+VM 内完成 builder 发布，不等于调用者 Checker 已接收其描述。此前
+`invoke_required_publishing` 逐个支付复制成本并写入 struct／enum／newtype 表及
+PTC 构造器权限；后一个描述超预算时，早先条目已可见，implementation 布局索引
+却尚未同步。由此不能把单次 VM 发布成功当作跨层事务已经完成。
+
+现在生产入口交给 `required/publication.rs::Receiver`：先用同一调用方余额完成
+全部描述的传输预检，再安装定义表、构造器权限及布局索引。失败不修改这些接收方
+状态，已经消耗的工作不退款；builder 已保留的身份编号也不回退。生成描述仍先由
+原 builder admission 校验，接收器不重复求值、不重新分配身份，也不创建第二套
+形成规则。这里保证可返回错误的接收失败原子性，不回滚此前用户执行的外部行为。
+
+局部回归跨多个 batch 和三种定义逐额度截断，检查已有条目、构造器权限、索引版本
+及完整布局保持原样，再以足额接收同一组不可变描述；空发布零额度可完成。抽出
+原逻辑但尚未调整顺序时，同一回归确实发现第一条 struct 泄漏：
+`/tmp/luna-tools-n5aymb7q/result.json` 退出 101。真实 sysroot 用例通过公开 builder
+组合生成三种相互引用的定义，required 调用后继续反射并经 trait 方法执行。
+
+最终验证目录 `/home/fin/luna`：
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test required_definition_publication --test builder_invocations --test required_input_scopes --no-fail-fast`，
+`/tmp/luna-tools-f1eem7h5/result.json` 退出 0，400 项通过。验证含已有资源分析工作区
+修改，未执行全 workspace。原布局索引同步仍可能复制整个布局集合；完整成本模型、
+一般 DefinitionTransaction 及待决 Type／源主体恢复没有因此完成。
+
 ## 4. Region 与 task 状态
 
 Region 状态：`Open → Closing → Complete | Failed | Cancelled`。

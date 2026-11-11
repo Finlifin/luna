@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 mod dependencies;
 pub(super) mod inputs;
 pub(super) mod prepared;
+mod publication;
 mod restore;
 mod scope;
 pub(super) use dependencies::{function_references, references};
@@ -1248,85 +1249,14 @@ impl Checker<'_, '_> {
             identity,
             &mut self.next_definition_identity,
         )?;
-        if definitions.structs.is_empty()
-            && definitions.enums.is_empty()
-            && definitions.newtypes.is_empty()
-        {
-            return Ok(result);
+        publication::Receiver {
+            context: &mut self.context,
+            structs: &mut self.structs,
+            enums: &mut self.enums,
+            newtypes: &mut self.newtypes,
+            implementation_index: &mut self.implementation_index,
         }
-        for batch in definitions.structs {
-            for definition in batch.iter() {
-                let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let mut fuel = before;
-                let copied = (|| {
-                    fuel = fuel
-                        .checked_sub(
-                            definition
-                                .name
-                                .len()
-                                .saturating_add(definition.fields.len()),
-                        )
-                        .ok_or(())?;
-                    for (name, ty) in &definition.fields {
-                        fuel = fuel.checked_sub(name.len()).ok_or(())?;
-                        nir::type_computations::charge_term(ty, &mut fuel).map_err(|_| ())?;
-                    }
-                    Ok::<_, ()>(())
-                })();
-                self.required_steps -= (before - fuel) as u64;
-                copied
-                    .map_err(|_| error(span, "generated struct registration budget exhausted"))?;
-                self.context
-                    .admit_nominal_constructor(definition.declaration);
-                self.structs
-                    .insert(definition.declaration, definition.clone());
-            }
-        }
-        for batch in definitions.enums {
-            for definition in batch.iter() {
-                let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let mut fuel = before;
-                let copied = comptime_interpretor::EnumBuildRequest::charge_descriptor(
-                    &definition.name,
-                    &definition.groups,
-                    &definition.variants,
-                    definition.encoding.as_ref(),
-                    definition.symbol_encoding.as_ref(),
-                    &mut fuel,
-                );
-                self.required_steps -= (before - fuel) as u64;
-                copied.map_err(|_| error(span, "generated enum registration budget exhausted"))?;
-                self.context
-                    .admit_nominal_constructor(definition.declaration);
-                self.enums
-                    .insert(definition.declaration, definition.clone());
-            }
-        }
-        for batch in definitions.newtypes {
-            for definition in batch.iter() {
-                let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let mut fuel = before;
-                let copied = (|| {
-                    fuel = fuel
-                        .checked_sub(definition.name.len().saturating_add(1))
-                        .ok_or(())?;
-                    nir::type_computations::charge_term(&definition.representation, &mut fuel)
-                        .map_err(|_| ())
-                })();
-                self.required_steps -= (before - fuel) as u64;
-                copied
-                    .map_err(|_| error(span, "generated newtype registration budget exhausted"))?;
-                self.context
-                    .admit_nominal_constructor(definition.declaration);
-                self.newtypes
-                    .insert(definition.declaration, definition.clone());
-            }
-        }
-        self.implementation_index.sync_nominal_layouts(
-            self.structs.values(),
-            self.enums.values(),
-            self.newtypes.values(),
-        );
+        .register(&definitions, &mut self.required_steps, span)?;
         Ok(result)
     }
 
