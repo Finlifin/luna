@@ -4906,62 +4906,16 @@ impl Checker<'_, '_> {
         partial: Option<&crate::calls::CallableContext>,
         input_context: Option<&crate::calls::InputContext>,
     ) -> Result<n::Expr, Error> {
-        self.check_block_region(block, |this, mut statements, diverges, staged_patterns| {
-            let mut tail = block
-                .expr
-                .map(|value| {
-                    // This block cannot deliver its tail. Check an independently
-                    // typed tail without imposing the block's result domain;
-                    // keep contextual inference for literals/open callables.
-                    // A spread producer still has a declared field layout to
-                    // check, even when its runtime evaluation cannot finish.
-                    if diverges
-                        && this.runtime_value_context()
-                        && this.preparing_spread.is_none()
-                        && input_context.is_none()
-                    {
-                        if let Some(checked) = this.argument_attempt(value, None, None)? {
-                            return Ok(checked);
-                        }
-                    }
-                    match input_context {
-                        Some(input_context) if expected.is_none() => {
-                            this.input_context_expression(value, input_context)
-                        }
-                        _ => this.expr_context(value, expected, partial),
-                    }
-                })
-                .transpose()?
-                .map(Box::new);
-            if tail.is_none() && !diverges {
-                tail = this
-                    .implicit_error_success(expected, block.span)?
-                    .map(Box::new);
-            }
-            let ty = if diverges {
-                p(P::Never)
-            } else {
-                tail.as_ref().map(|x| x.ty.clone()).unwrap_or(p(P::Void))
-            };
-            if let Some(expected) = expected {
-                this.require(&ty, expected, block.span)?;
-            }
-            let references = if this.block_binding_liveness_needed(&statements, &staged_patterns) {
-                this.block_tail_references(tail.as_deref(), block.span)?
-            } else {
-                BTreeSet::new()
-            };
-            this.finish_block_bindings(&mut statements, &references, block, &staged_patterns)?;
-            Ok(n::Expr {
-                ty,
-                source: source(block.span),
-                kind: K::Block {
-                    statements,
-                    result: tail,
-                },
-            })
-        })
+        self.check_block_region(
+            block,
+            block_regions::OrdinaryTail {
+                expected,
+                partial,
+                input: input_context,
+            },
+        )
     }
+
     /// Receiver transport follows declaration syntax, including explicit UFCS.
     /// An ordinary first parameter remains a value even when named similarly.
     fn comptime_receiver_arguments(

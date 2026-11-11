@@ -1824,33 +1824,7 @@ impl Checker<'_, '_> {
         if depth >= 128 {
             return Err(error(block.span, "contextual input nesting limit exceeded"));
         }
-        self.check_block_region(block, |this, mut statements, _, staged_patterns| {
-            let result = block
-                .expr
-                .map(|value| this.dependent_normal_argument(value, depth + 1))
-                .transpose()?
-                .map(Box::new);
-            let mut fuel = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
-            let before = fuel;
-            let references = if this.block_binding_liveness_needed(&statements, &staged_patterns) {
-                result
-                    .as_deref()
-                    .map(|tail| nir::preparation::argument_references(tail, &mut fuel))
-                    .transpose()
-            } else {
-                Ok(None)
-            };
-            this.required_steps -= (before - fuel) as u64;
-            let references = references
-                .map_err(|failure| error(block.span, failure.to_string()))?
-                .unwrap_or_default();
-            this.finish_block_bindings(&mut statements, &references, block, &staged_patterns)?;
-            Ok(n::NormalFormArgument::Block {
-                source: source(block.span),
-                statements,
-                result,
-            })
-        })
+        self.check_block_region(block, block_regions::ContextualTail { depth })
     }
 }
 

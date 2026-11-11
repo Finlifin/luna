@@ -696,7 +696,7 @@ callable 的两个等待点。只增加 public request enum 或可手工构造�
 | 当前路径 | 同步假设 | 迁移时必须交出的状态 |
 | --- | --- | --- |
 | `program.rs::expr_context`／`delivery.rs` | 目标域适配已保存显式后继；一般子表达式检查仍是同步调用 | 将现有后继接到区域的子结果槽，补齐 expected／partial context 的待定观察；恢复不能重新选择一次转换 |
-| `block_regions.rs::check_block_region` | 语句进度、受检前缀与词法退出责任已有独立状态；子检查和尾值仍同步 | 将活动词法状态与尾值检查一并交给可恢复区域；等待不等于退出词法域 |
+| `block_regions.rs::check_block_region` | 语句进度、尾值规则、受检前缀与词法退出责任已有独立状态；子检查仍同步 | 将活动词法状态和子结果交给可恢复区域；等待不等于退出词法域 |
 | `declaration_inputs.rs::Progress` | 原串行 cursor；后续已分离 schedule／checked-order 并接入前置域检查 | 仍须补齐可恢复检查任务及每项域依赖；已有结果位置和源码顺序不能被执行调度覆盖 |
 | `required.rs::prepare_required_root_with_live_inputs` | `build` 返回完整根后才收集自由绑定和建立世界 | 独立于完整根的源输入描述及受限可见世界；后续每段所需绑定增量检查，不能先捕获所有外围值 |
 
@@ -793,10 +793,18 @@ optional、错误结果、null、提前 return、分支及可变接收者仅求�
 这限制了既有快照路径的成本，尚未消除随可见局部数量增长的复制开销。
 
 词法父环境、语句进度、输入边界和分期模式证据提供 S-expression dump。这里的 HIR
-引用仍借用同一次检查的源码包；不能发布到稳定世界。一般子检查、尾值检查和作用域
-装卸仍由同步入口驱动，尚不支持交错调度、取消外部请求或跨 Type 等待恢复。后续必须
-连同当前活动词法状态、tail continuation 及源 activation 迁移，不能将保存外层环境
-误当成保存了完整 Checker，也不能在挂起时执行 leave。
+引用仍借用同一次检查的源码包；不能发布到稳定世界。尾值规则由
+`block_regions/tails.rs` 的 OrdinaryTail／ContextualTail 提供，保存在 Progress 中，
+不再由调用方的 FnOnce 闭包持有。其后继状态包含目标域、部分 callable／输入上下文
+或 contextual 深度；TailChild 状态阻止重复分派。受检尾值与最终块产物分别有类型，
+后继消费已检查结果，共用引用计费、混合分期绑定物化、别名清除与错误结果绑定稳定化。
+普通块的 NoReturn、隐式错误成功值及 spread 输入规则均保留在原有检查责任内。
+
+一般子检查、尾值规则和作用域装卸仍由同一个同步入口驱动；目标上下文仍借用当前
+调用，尚不支持交错调度、取消外部请求或跨 Type 等待恢复。后续必须连同当前活动
+词法状态、这些后继所依赖的上下文所有权及源 activation 迁移，不能将保存外层环境
+误当成保存了完整 Checker，也不能在挂起时执行 leave。该整理没有新增执行入口，
+没有扩展 NormalFormArgument，也没有解除普通调用的两个待决域 ignore。
 
 验证在 `/home/fin/luna`，命令前缀为
 `python3 -B development/check.py --timeout 900 -- test`：
@@ -823,6 +831,21 @@ optional、错误结果、null、提前 return、分支及可变接收者仅求�
 
 上述分组有重叠，不累加为独立覆盖；两个普通 callable 待定域正例仍未完成。检查
 使用保留作者已有修改的工作区，未执行全 workspace 或性能测量。
+
+尾值规则迁入 Progress 后，在同一目录使用相同检查前缀复核：
+
+- `-p elaboration --lib -p luna --test contextual_input_regions --test contextual_delivery --test required_input_scopes --test ordinary_callable_types --test ordinary_clause_collectors --no-fail-fast`：
+  366 项通过、两个原有待决域用例 ignored，`/tmp/luna-tools-dyf063nx/result.json`
+  退出 0。覆盖外层写入、块退出、混合分期绑定、尾值目标和实际 sysroot 调用。
+- `-p elaboration --lib --test invocation_budget -p luna --test contextual_spreads --test inline_pattern_observation --test nesting --no-fail-fast`：
+  339 项通过，但 nesting fixture 在 AST 阶段因传入 build target 而拒绝，
+  `/tmp/luna-tools-kdcxu_gj/result.json` 退出 101。更早的未修改 fixture 在 HIR
+  阶段因未加载 sysroot、无法解析 bool 而失败，证据为
+  `/tmp/luna-tools-t77m7w6u/result.json`；两次均未到达块检查。fixture 的真实 sysroot
+  迁移另行处理，不计作本阶段通过。后续对照只暂还原本次三个块检查生产文件，
+  保留修正后的 fixture 及一元探测修复，仍在 open-arithmetic 的 NIR 阶段栈溢出：
+  `/tmp/luna-tools-z9j59br7/result.json` 退出 101。三个文件已经逐字节恢复；该原有
+  标量描述路径问题须独立修复，不能以增加线程栈或降低嵌套深度隐藏。
 
 #### 已接入：required 世界的依赖发现共用结构遍历
 

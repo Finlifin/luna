@@ -3,6 +3,28 @@
 //! neither path executes a producer while preparing this region.
 use super::*;
 use constants::StagedPatternSnapshot;
+mod tails;
+pub(super) use tails::{ContextualTail, OrdinaryTail};
+
+/// The destination rule survives statement checking as data. Its checked child
+/// and final output stay distinct; finishing never checks the source a second
+/// time. Borrowed contexts still belong to the current synchronous source region.
+pub(super) trait Tail: std::fmt::Display {
+    type Checked;
+    type Output;
+
+    fn check(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        block: &hir::Block<'_>,
+        diverges: bool,
+    ) -> Result<Self::Checked, Error>;
+    fn references(
+        checked: &Self::Checked,
+        fuel: &mut usize,
+    ) -> Result<BTreeSet<n::LocalId>, nir::preparation::Error>;
+    fn finish(self, checked: Self::Checked, statements: Vec<n::Expr>, span: Span) -> Self::Output;
+}
 
 /// The parent lexical environment, not a checking transaction. Leaving a
 /// block restores bindings and premises but keeps invalidated outer inputs.
@@ -88,26 +110,29 @@ enum Phase {
     Statements,
     Child,
     Tail,
+    TailChild,
 }
 
 /// Owned statement results survive between child checks. Source references
 /// borrow this HIR snapshot; they are never published in stable code or worlds.
-struct Progress<'b, 'h> {
+struct Progress<'b, 'h, T> {
     block: &'b hir::Block<'h>,
     phase: Phase,
     statements: Vec<n::Expr>,
     staged_patterns: BTreeMap<usize, StagedPatternSnapshot>,
     diverges: bool,
+    tail: T,
 }
 
-impl<'b, 'h> Progress<'b, 'h> {
-    fn new(block: &'b hir::Block<'h>) -> Self {
+impl<'b, 'h, T: Tail> Progress<'b, 'h, T> {
+    fn new(block: &'b hir::Block<'h>, tail: T) -> Self {
         Self {
             block,
             phase: Phase::Statements,
             statements: Vec::new(),
             staged_patterns: BTreeMap::new(),
             diverges: false,
+            tail,
         }
     }
 
@@ -160,14 +185,52 @@ impl<'b, 'h> Progress<'b, 'h> {
         self.phase = Phase::Statements;
         Ok(())
     }
+
+    fn request_tail(&mut self) -> Result<&T, Error> {
+        if !matches!(self.phase, Phase::Tail) {
+            return Err(error(self.block.span, "block tail check is not ready"));
+        }
+        self.phase = Phase::TailChild;
+        Ok(&self.tail)
+    }
+
+    fn finish(
+        self,
+        checker: &mut Checker<'_, '_>,
+        checked: T::Checked,
+    ) -> Result<T::Output, Error> {
+        if !matches!(self.phase, Phase::TailChild) {
+            return Err(error(self.block.span, "block has no pending tail result"));
+        }
+        let mut fuel = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let references =
+            if checker.block_binding_liveness_needed(&self.statements, &self.staged_patterns) {
+                T::references(&checked, &mut fuel)
+            } else {
+                Ok(BTreeSet::new())
+            };
+        checker.required_steps -= (before - fuel) as u64;
+        let references =
+            references.map_err(|failure| error(self.block.span, failure.to_string()))?;
+        let mut statements = self.statements;
+        checker.finish_block_bindings(
+            &mut statements,
+            &references,
+            self.block,
+            &self.staged_patterns,
+        )?;
+        Ok(self.tail.finish(checked, statements, self.block.span))
+    }
 }
 
-impl std::fmt::Display for Progress<'_, '_> {
+impl<T: Tail> std::fmt::Display for Progress<'_, '_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let phase = match self.phase {
             Phase::Statements => "statements",
             Phase::Child => "child",
             Phase::Tail => "tail",
+            Phase::TailChild => "tail-child",
         };
         write!(
             f,
@@ -183,7 +246,7 @@ impl std::fmt::Display for Progress<'_, '_> {
         for (index, inputs) in &self.staged_patterns {
             write!(f, " (statement {index} {inputs})")?;
         }
-        f.write_str("))")
+        write!(f, ") (tail {}))", self.tail)
     }
 }
 
@@ -208,7 +271,13 @@ mod tests {
             expr: None,
             span: Span::default(),
         };
-        let mut progress = Progress::new(&block);
+        let mut progress = Progress::new(&block, ContextualTail { depth: 4 });
+        assert!(
+            progress
+                .to_string()
+                .contains("(tail (contextual-tail (depth 4)))")
+        );
+        assert!(progress.request_tail().is_err());
         assert!(progress.to_string().contains("(phase statements) (next 0)"));
         assert_eq!(progress.next().unwrap().unwrap().hir_id, id);
         assert!(progress.to_string().contains("(phase child) (next 0)"));
@@ -221,13 +290,20 @@ mod tests {
             stmts: &[],
             ..block
         };
-        let mut finished = Progress::new(&empty);
+        let mut finished = Progress::new(&empty, ContextualTail { depth: 4 });
         assert!(finished.next().unwrap().is_none());
         assert!(finished.to_string().contains("(phase tail) (next 0)"));
         assert!(
             finished.next().is_err(),
             "tail-ready state cannot restart statements"
         );
+        finished.request_tail().unwrap();
+        assert!(finished.to_string().contains("(phase tail-child)"));
+        assert!(
+            finished.request_tail().is_err(),
+            "tail must not be dispatched twice"
+        );
+        assert!(finished.next().is_err());
     }
 }
 
@@ -257,18 +333,13 @@ impl Checker<'_, '_> {
         result
     }
 
-    pub(super) fn check_block_region<R>(
+    pub(super) fn check_block_region<T: Tail>(
         &mut self,
         block: &hir::Block<'_>,
-        finish: impl FnOnce(
-            &mut Self,
-            Vec<n::Expr>,
-            bool,
-            BTreeMap<usize, StagedPatternSnapshot>,
-        ) -> Result<R, Error>,
-    ) -> Result<R, Error> {
+        tail: T,
+    ) -> Result<T::Output, Error> {
         self.in_block_scope(block.span, |this| {
-            let mut progress = Progress::new(block);
+            let mut progress = Progress::new(block, tail);
             while let Some(statement) = progress.next()? {
                 this.required_steps = this
                     .required_steps
@@ -277,28 +348,10 @@ impl Checker<'_, '_> {
                 let value = this.expr(statement, None)?;
                 progress.accept(this, value)?;
             }
-            finish(
-                this,
-                progress.statements,
-                progress.diverges,
-                progress.staged_patterns,
-            )
+            let diverges = progress.diverges;
+            let checked = progress.request_tail()?.check(this, block, diverges)?;
+            progress.finish(this, checked)
         })
-    }
-
-    pub(super) fn block_tail_references(
-        &mut self,
-        tail: Option<&n::Expr>,
-        span: Span,
-    ) -> Result<BTreeSet<n::LocalId>, Error> {
-        let Some(tail) = tail else {
-            return Ok(BTreeSet::new());
-        };
-        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let before = fuel;
-        let references = nir::preparation::references(tail, &mut fuel);
-        self.required_steps -= (before - fuel) as u64;
-        references.map_err(|failure| error(span, failure.to_string()))
     }
 
     pub(super) fn finish_block_bindings(
