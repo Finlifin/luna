@@ -104,7 +104,7 @@ impl Checker<'_, '_> {
         let saved_immutable = self.immutable.clone();
         let saved_context = self.context.clone();
         let saved_data = self.generator_data.clone();
-        let saved_partial: BTreeSet<_> = self.partial_staged_bindings.keys().copied().collect();
+        let input_boundary = self.input_facts.lexical_boundary();
         let saved_environment = self.effect_environment.clone();
         let saved_resume = self.effect_resume_result.clone();
         let first = self.next_temporary_binding;
@@ -293,8 +293,7 @@ impl Checker<'_, '_> {
         self.immutable = saved_immutable;
         self.context = saved_context;
         self.generator_data = saved_data;
-        self.partial_staged_bindings
-            .retain(|binding, _| saved_partial.contains(binding));
+        self.input_facts.leave_lexical(&input_boundary);
         self.effect_environment = saved_environment;
         self.effect_resume_result = saved_resume;
         checked

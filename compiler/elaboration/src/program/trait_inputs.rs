@@ -286,12 +286,12 @@ impl Checker<'_, '_> {
         let saved_bindings = std::mem::take(&mut self.normal_default_bindings);
         let saved_aliases = std::mem::take(&mut self.alias_substitution);
         let saved_forbidden = self.forbidden_default_inputs.clone();
-        let saved_required_inputs = std::mem::take(&mut self.required_input_scope);
+        let saved_required_inputs = std::mem::take(&mut self.input_facts.supplied);
         let saved_immutable = self.immutable.clone();
         let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
         self.context = self.definition_context(owner);
         let result = (|| {
-            self.required_input_scope = self.required_input_scope.child(
+            self.input_facts.supplied = self.input_facts.supplied.child(
                 &[],
                 &[],
                 &mut self.required_steps,
@@ -364,7 +364,7 @@ impl Checker<'_, '_> {
         self.alias_substitution = saved_aliases;
         self.forbidden_default_inputs = saved_forbidden;
         self.in_required_comptime = saved_mode;
-        self.required_input_scope = saved_required_inputs;
+        self.input_facts.supplied = saved_required_inputs;
         self.immutable = saved_immutable;
         result
     }
@@ -380,7 +380,7 @@ impl Checker<'_, '_> {
             declaration: parameter,
             sort: Sort::ComptimeValue,
         };
-        self.required_input_scope.supply(
+        self.input_facts.supplied.supply(
             binding,
             domain,
             &value,

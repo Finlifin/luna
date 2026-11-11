@@ -378,9 +378,10 @@ impl Checker<'_, '_> {
                         value
                     } else {
                         let value = if input.sort == Sort::Type {
-                            self.type_input_bindings.get(&local(binding)).cloned()
+                            self.input_facts.types.get(&local(binding)).cloned()
                         } else {
-                            self.value_input_bindings
+                            self.input_facts
+                                .values
                                 .get(&local(binding))
                                 .map(|(value, _)| value.clone())
                         };

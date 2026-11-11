@@ -5,6 +5,9 @@ use comptime_interpretor::{ClosureIdentity, Value};
 mod observations;
 use observations::ObservationScope;
 
+#[cfg(test)]
+mod input_fact_tests;
+
 #[derive(Default)]
 struct Materialization {
     // Nominal generator fields use the same recursive data boundary as tuples.
@@ -1340,7 +1343,7 @@ impl Checker<'_, '_> {
                 return Ok(value.clone());
             }
             if self.locals.contains_key(&binding)
-                && let Some(value) = self.partial_staged_bindings.get(&binding)
+                && let Some(value) = self.input_facts.partial.get(&binding)
             {
                 return Ok(value.clone());
             }
@@ -1862,7 +1865,8 @@ impl Checker<'_, '_> {
         let before = fuel;
         let result = self.known_staged_pattern_bindings(pattern, value, 0, &mut fuel);
         self.required_steps -= (before - fuel) as u64;
-        self.partial_staged_bindings
+        self.input_facts
+            .partial
             .extend(result.map_err(|e| error(span, e))?.1);
         Ok(())
     }
@@ -1932,7 +1936,8 @@ impl Checker<'_, '_> {
                     )
                 })?;
                 let previous = self
-                    .partial_staged_bindings
+                    .input_facts
+                    .partial
                     .insert(*binding, PartialStagedValue::known(copied));
                 let newly_immutable = self.immutable.insert(*binding);
                 saved.push((*binding, previous, newly_immutable));
@@ -1943,9 +1948,9 @@ impl Checker<'_, '_> {
         // storage must keep their ordinary observation invalidations.
         for (binding, previous, newly_immutable) in saved {
             if let Some(previous) = previous {
-                self.partial_staged_bindings.insert(binding, previous);
+                self.input_facts.partial.insert(binding, previous);
             } else {
-                self.partial_staged_bindings.remove(&binding);
+                self.input_facts.partial.remove(&binding);
             }
             if newly_immutable {
                 self.immutable.remove(&binding);
@@ -1978,7 +1983,8 @@ impl Checker<'_, '_> {
                 }
                 let mut remaining = fuel as u64;
                 let supplied = self
-                    .required_input_scope
+                    .input_facts
+                    .supplied
                     .lookup(binding, &mut remaining, span);
                 fuel = remaining as usize;
                 if let Some((_, value)) = supplied.map_err(|failure| failure.message)? {
@@ -1990,7 +1996,7 @@ impl Checker<'_, '_> {
                     bindings.insert(binding, std::sync::Arc::new(value));
                     continue;
                 }
-                let Some(value) = self.partial_staged_bindings.get(&binding) else {
+                let Some(value) = self.input_facts.partial.get(&binding) else {
                     continue;
                 };
                 if let PartialStagedData::Known(value) = &value.data {
@@ -2016,8 +2022,7 @@ impl Checker<'_, '_> {
             return None;
         }
         let domain = self.locals.get(&binding)?;
-        let PartialStagedData::Known(value) = &self.partial_staged_bindings.get(&binding)?.data
-        else {
+        let PartialStagedData::Known(value) = &self.input_facts.partial.get(&binding)?.data else {
             return None;
         };
         nir::type_computations::charge_term(domain, &mut budget.steps).ok()?;
@@ -2033,7 +2038,7 @@ impl Checker<'_, '_> {
         if self.locals.get(&binding) != Some(&p(P::Type)) {
             return Ok(None);
         }
-        let Some(value) = self.partial_staged_bindings.get(&binding) else {
+        let Some(value) = self.input_facts.partial.get(&binding) else {
             return Ok(None);
         };
         let PartialStagedData::Known(ty) = &value.data else {
@@ -2063,7 +2068,7 @@ impl Checker<'_, '_> {
             .and_then(|value| self.known_staged_pattern_bindings(pattern, &value, 0, &mut fuel));
         self.required_steps -= (before - fuel) as u64;
         for (binding, value) in bindings.map_err(|e| error(span, e))?.1 {
-            self.partial_staged_bindings.insert(binding, value.clone());
+            self.input_facts.partial.insert(binding, value.clone());
             let PartialStagedData::Known(symbol) = &value.data else {
                 continue;
             };
@@ -2079,15 +2084,17 @@ impl Checker<'_, '_> {
                 .cloned()
                 .ok_or_else(|| error(span, "staged alias binding has no domain"))?;
             if ty == p(P::Type) {
-                self.type_input_bindings.insert(binding, symbol.clone());
+                self.input_facts.types.insert(binding, symbol.clone());
             } else {
-                self.value_input_bindings
+                self.input_facts
+                    .values
                     .insert(binding, (symbol.clone(), ty.clone()));
             }
-            self.derived_staged_bindings.insert(binding);
-            self.specialization_inputs
+            self.input_facts.derived.insert(binding);
+            self.input_facts
+                .specialized
                 .retain(|(id, _, _)| *id != binding);
-            self.specialization_inputs.push((binding, ty, symbol));
+            self.input_facts.specialized.push((binding, ty, symbol));
         }
         Ok(())
     }
@@ -2122,9 +2129,9 @@ impl Checker<'_, '_> {
             dependencies
         };
         if dependencies.iter().any(|input| {
-            !self.value_input_bindings.contains_key(input)
-                && !self.type_input_bindings.contains_key(input)
-                && !self.derived_staged_bindings.contains(input)
+            !self.input_facts.values.contains_key(input)
+                && !self.input_facts.types.contains_key(input)
+                && !self.input_facts.derived.contains(input)
         }) {
             return Ok(());
         }
@@ -2154,12 +2161,13 @@ impl Checker<'_, '_> {
                 _ => {}
             }
         }
-        self.derived_staged_bindings.extend(bindings);
+        self.input_facts.derived.extend(bindings);
         // Retain a completed input's value identity for immutable aliases.
         // Unavailable declaration-side Bound inputs remain provenance only.
         if let K::Local(input) = origin.kind {
             if let Some((_, ty, symbol)) = self
-                .specialization_inputs
+                .input_facts
+                .specialized
                 .iter()
                 .find(|(id, _, _)| *id == input)
                 .cloned()
@@ -2187,15 +2195,17 @@ impl Checker<'_, '_> {
                         .cloned()
                         .ok_or_else(|| error(span, "staged alias binding has no domain"))?;
                     if ty == p(P::Type) {
-                        self.type_input_bindings.insert(binding, symbol.clone());
+                        self.input_facts.types.insert(binding, symbol.clone());
                     } else {
-                        self.value_input_bindings
+                        self.input_facts
+                            .values
                             .insert(binding, (symbol.clone(), ty.clone()));
                     }
-                    self.derived_staged_bindings.insert(binding);
-                    self.specialization_inputs
+                    self.input_facts.derived.insert(binding);
+                    self.input_facts
+                        .specialized
                         .retain(|(id, _, _)| *id != binding);
-                    self.specialization_inputs.push((binding, ty, symbol));
+                    self.input_facts.specialized.push((binding, ty, symbol));
                 }
             }
         }
@@ -2208,7 +2218,7 @@ impl Checker<'_, '_> {
         value: &n::Expr,
         span: Span,
     ) -> Result<Option<StagedPatternSnapshot>, Error> {
-        if self.in_required_comptime || self.specialization_inputs.is_empty() {
+        if self.in_required_comptime || self.input_facts.specialized.is_empty() {
             return Ok(None);
         }
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
@@ -2227,7 +2237,8 @@ impl Checker<'_, '_> {
                 return Ok(None);
             };
             let Some((_, ty, mut symbol)) = self
-                .specialization_inputs
+                .input_facts
+                .specialized
                 .iter()
                 .find(|(id, _, _)| *id == binding)
                 .map(|(id, ty, symbol)| (id, ty, symbol))
@@ -2626,7 +2637,7 @@ impl Checker<'_, '_> {
         span: Span,
         preserved: &BTreeSet<usize>,
     ) -> Result<BTreeSet<usize>, Error> {
-        if self.specialization_inputs.is_empty() || !statements.iter().any(|statement| matches!(
+        if self.input_facts.specialized.is_empty() || !statements.iter().any(|statement| matches!(
             &statement.kind,
             K::Let { value, .. } | K::LetPattern { value, guard: None, otherwise: None, .. }
                 if matches!(value.kind, K::Local(_) | K::Field { .. } | K::AnonymousField { .. })
@@ -2697,7 +2708,8 @@ impl Checker<'_, '_> {
                     ) && bindings.iter().all(|binding| {
                         !used.contains(binding)
                             && self
-                                .specialization_inputs
+                                .input_facts
+                                .specialized
                                 .iter()
                                 .any(|(id, _, _)| id == binding)
                     }) {
@@ -2739,19 +2751,10 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn check_failure_branch(&mut self, body: &Expr<'_>) -> Result<n::Expr, Error> {
-        if self.specialization_inputs.is_empty()
-            && self.partial_staged_bindings.is_empty()
-            && self.required_input_scope.is_empty()
-        {
+        if self.input_facts.is_empty() {
             return self.expr(body, None);
         }
-        let saved = (
-            self.specialization_inputs.clone(),
-            self.type_input_bindings.clone(),
-            self.partial_staged_bindings.clone(),
-            self.value_input_bindings.clone(),
-            self.required_input_scope.clone(),
-        );
+        let saved = self.input_facts.clone();
         let checked = self.expr(body, None);
         let isolated = (|| {
             let value = match &checked {
@@ -2785,13 +2788,7 @@ impl Checker<'_, '_> {
             Ok::<_, Error>(transfers.is_subset(&loops))
         })();
         if isolated.as_ref().is_ok_and(|isolated| *isolated) || isolated.is_err() {
-            (
-                self.specialization_inputs,
-                self.type_input_bindings,
-                self.partial_staged_bindings,
-                self.value_input_bindings,
-                self.required_input_scope,
-            ) = saved;
+            self.input_facts = saved;
         }
         isolated?;
         checked
@@ -2806,9 +2803,9 @@ impl Checker<'_, '_> {
         // Checking either cannot invalidate the enclosing runtime input snapshot;
         // construction observations still need invalidation inside that store.
         let staged = self.in_required_comptime || self.in_staged_input;
-        if self.partial_staged_bindings.is_empty()
-            && self.required_input_scope.is_empty()
-            && (staged || self.specialization_inputs.is_empty())
+        if self.input_facts.partial.is_empty()
+            && self.input_facts.supplied.is_empty()
+            && (staged || self.input_facts.specialized.is_empty())
         {
             return Ok(());
         }
@@ -2839,9 +2836,9 @@ impl Checker<'_, '_> {
                     // A call can mutate construction storage through aliases.
                     // Only observation snapshots are invalidated here.
                     *fuel = fuel
-                        .checked_sub(self.partial_staged_bindings.len())
+                        .checked_sub(self.input_facts.partial.len())
                         .ok_or("construction observation invalidation budget exhausted")?;
-                    invalidated.extend(self.partial_staged_bindings.keys().copied());
+                    invalidated.extend(self.input_facts.partial.keys().copied());
                 }
                 K::Closure { captures, .. } => {
                     for capture in captures {
@@ -2860,32 +2857,8 @@ impl Checker<'_, '_> {
         });
         self.required_steps -= (before - fuel) as u64;
         result.map_err(|failure| error(span, failure))?;
-        self.required_input_scope
-            .invalidate(&invalidated, &mut self.required_steps, span)?;
-        invalidated.retain(|binding| {
-            self.specialization_inputs
-                .iter()
-                .any(|(id, _, _)| id == binding)
-                || self.partial_staged_bindings.contains_key(binding)
-        });
-        self.partial_staged_bindings
-            .retain(|binding, _| !invalidated.contains(binding));
-        // Invocation-time observations are invalidated even during staged
-        // computation; the enclosing runtime input snapshot remains available.
-        if staged {
-            return Ok(());
-        }
-        self.specialization_inputs
-            .retain(|(binding, _, _)| !invalidated.contains(binding));
-        self.value_input_bindings
-            .retain(|binding, _| !invalidated.contains(binding));
-        self.type_input_bindings
-            .retain(|binding, _| !invalidated.contains(binding));
-        // Provenance is not a completed value. Keep it on lexical IR ids so
-        // ordinary staged calls can defer to materialization, which checks
-        // intervening writes/escapes. Required type formation must instead use
-        // the completed evidence removed above and cannot reuse a stale value.
-        Ok(())
+        self.input_facts
+            .invalidate(invalidated, staged, &mut self.required_steps, span)
     }
 
     pub(super) fn freeze_staged_call_inputs(
@@ -3047,7 +3020,7 @@ impl Checker<'_, '_> {
                 }
                 K::Local(binding)
                     if staged_bindings.contains(binding)
-                        || self.derived_staged_bindings.contains(binding) =>
+                        || self.input_facts.derived.contains(binding) =>
                 {
                     deferred = true
                 }
@@ -3087,7 +3060,7 @@ impl Checker<'_, '_> {
                         if let Some(value) = &capture.value {
                             pending.push(value);
                         } else if staged_bindings.contains(&capture.binding)
-                            || self.derived_staged_bindings.contains(&capture.binding)
+                            || self.input_facts.derived.contains(&capture.binding)
                             || (is_default && deferred_bindings.contains(&capture.binding))
                         {
                             deferred = true;

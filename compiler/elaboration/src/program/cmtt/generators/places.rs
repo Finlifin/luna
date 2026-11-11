@@ -693,7 +693,7 @@ impl Checker<'_, '_> {
         })();
         self.in_required_comptime = mode;
         if !self.checking_code_generator {
-            self.partial_staged_bindings.clear();
+            self.input_facts.partial.clear();
         }
         self.generator_data = previous;
         if self.checking_code_generator {

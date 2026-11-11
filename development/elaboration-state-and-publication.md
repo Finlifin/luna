@@ -273,6 +273,55 @@ Type 发布只移除已经完成的等待项；失败沿原边传播，无关兄
 修改的 Rust 文件格式检查 `/tmp/luna-tools-g__5tg4l/result.json` 退出 0；
 `git diff --check` 通过。未运行全 workspace 或性能基准，未改动正式 docs。
 
+### 已接入：输入事实有共同的回滚与词法边界
+
+`Checker` 的六组输入证据现归 `input_facts::State`：普通 Type 绑定、带域值绑定、
+特化输入、部分观察、派生来源和 required supplied scope。它们仍有各自的含义，
+集中所有权不允许用“观察到身份”替代“值已经供应”，也不把 provenance 当成执行权。
+共享的失效操作先屏蔽 supplied 快照，再按原 phase 规则删除部分观察及完成值；
+派生来源保留，用于后续物化核对实际存储，而不能继续读取已经失效的值。
+
+原 `checking_attempt` 只枚举五组事实，遗漏后来加入的 required scope；失败分支又
+保存了 scope 却漏掉派生来源。现在试探失败、不提交的试探及隔离的失败分支恢复
+整个 owner。预算、声明需求和已经发生的 invocation 行为不随分析快照回滚。
+成功试探的 pattern-code 查询标记仍按原调用协议交付，不把它误当作局部输入事实。
+
+块和迭代的退出采用另一套明确操作：进入时保留各类证据的词法绑定集合，退出时
+删除内部绑定，保留外层快照在区域内遭到的失效。不能直接恢复完整快照，否则会
+复活写入／捕获之后不再可靠的外层值。原循环边界只裁剪 partial；普通循环、展开
+循环及 comptime 范围循环现在共用完整词法边界，派生来源也不再积累已离开区域的
+绑定。展开迭代重复使用同一边界，外层失效跨迭代保留，不重复复制整个事实状态。
+
+开放函数检查沿已有契约继承 Type/value 绑定及 supplied scope，清空调用方的活动
+特化／部分观察／派生来源；退出后整体恢复调用方 owner。模板绑定临时覆盖、
+generator 签名及 required 参数供应仍有各自的局部操作，没有据此宣称所有 Region
+入口已统一。新的 S-expression dump 分开显示完整观察、partial、来源和供应 scope。
+
+这项交付替换的是生产检查器中的分散输入状态及三种边界处理，不是可恢复源码
+表达式本身。VM 活动值、推断输出许可、候选义务和源码检查进度仍有独立所有者；
+两个待定 callable 正例继续保留，不能由这次回滚清理推导其已经实现。
+
+本阶段验证（工作目录 `/home/fin/luna`，均通过
+`python3 -B development/check.py --timeout 900 -- test`）：
+
+- `-p elaboration --lib -p luna --test scoped_input_observation --test required_input_scopes --no-fail-fast`：
+  `/tmp/luna-tools-6u3qftz2/result.json`，退出 0，295 项通过。新增单元检查覆盖完整
+  supplied 回滚、词法退出不复活外层证据、开放函数隔离、失效预算及嵌套 dump；
+  源码检查覆盖可选分支试探后的默认值与错误依赖类型拒绝。
+- `-p luna --test cmtt --test cmtt_methods --test cmtt_phase_boundaries --test comptime_staged_values --test staged_aggregate_contracts --test comptime_inline_loops --test iterator_protocol --test library_protocols --test default_calls --test ordinary_callable_types --test ordinary_clause_collectors --test scoped_comptime_callables --test scoped_comptime_aggregates --test type_invocation_sessions --no-fail-fast`：
+  `/tmp/luna-tools-soelh8gs/result.json`，退出 101，962 项通过、1 项失败、2 项既有
+  ignored。失败为 `descriptor_contracts_do_not_infer_factory_injectivity` 对
+  `unknown` 字样的断言；源程序仍被拒绝，诊断为 `not-entailed`。
+- 将本次 23 个生产文件临时换回 `2c6c3beb`，单独运行
+  `-p luna --test scoped_comptime_aggregates descriptor_contracts_do_not_infer_factory_injectivity -- --exact`：
+  `/tmp/luna-tools-arfdceqd/result.json`，退出 101，失败位置及完整诊断相同。
+  对照后按 `/tmp/luna-input-facts-baseline/restore.json` 的 SHA256 确认本次源码
+  已完整恢复。该既有断言失败保留，没有修改测试预期来消除它。
+
+26 个本次 Rust 文件的格式检查 `/tmp/luna-tools-hjspvr60/result.json` 退出 0。
+未运行全 workspace 或性能基准；作者原有资源检查改动仍在工作区，以上不是纯 HEAD
+验收。正式 docs、formatter 和其他已有修改未纳入本次交付。
+
 ### 已接入：已知泛型域与未供应输入分开
 
 `03908c64` 后追踪上述错误限定类型失败，实际拒绝条件是把 `!bool bool` 与

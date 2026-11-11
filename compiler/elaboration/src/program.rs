@@ -38,6 +38,7 @@ mod dependent_inputs;
 mod derivation;
 mod dynamic_instances;
 mod enum_groups;
+mod input_facts;
 mod interfaces;
 mod iteration;
 mod lexical_inputs;
@@ -450,7 +451,6 @@ fn elaborate_with_attributes(
         open_loop_transfers: BTreeMap::new(),
         pending_default_stability: Vec::new(),
         pending_predicate_stability: Vec::new(),
-        specialization_inputs: Vec::new(),
         active_signatures: BTreeSet::new(),
         refinement_subjects: Vec::new(),
         pending_refinements: Vec::new(),
@@ -487,16 +487,12 @@ fn elaborate_with_attributes(
         type_parameters: BTreeMap::new(),
         normal_parameters: BTreeMap::new(),
         normal_input_prefixes: BTreeMap::new(),
-        type_input_bindings: BTreeMap::new(),
-        partial_staged_bindings: BTreeMap::new(),
         lexical_input_domains: BTreeMap::new(),
         lexical_input_plans: BTreeMap::new(),
         lexical_source_protocols: lexical_inputs::SourceProtocolIndex::new(package),
         lexical_dependency_steps: 1_000_000,
         callable_type_inputs: BTreeMap::new(),
         callable_value_inputs: BTreeMap::new(),
-        value_input_bindings: BTreeMap::new(),
-        derived_staged_bindings: BTreeSet::new(),
         open_staged_locals: BTreeSet::new(),
         open_member_locals: BTreeSet::new(),
         signature_prefixes: BTreeMap::new(),
@@ -561,8 +557,8 @@ fn elaborate_with_attributes(
         active_type_defaults: BTreeSet::new(),
         default_uses: BTreeMap::new(),
         contract_uses: BTreeMap::new(),
+        input_facts: Default::default(),
         required_steps: *invocation_steps,
-        required_input_scope: Default::default(),
         in_required_comptime: false,
         in_staged_input: false,
         preparing_spread: None,
@@ -1613,7 +1609,6 @@ struct Checker<'a, 'h> {
     open_loop_transfers: BTreeMap<n::LocalId, open_functions::LoopTransfers>,
     pending_default_stability: Vec<purity::StableObservation>,
     pending_predicate_stability: Vec<purity::StableObservation>,
-    specialization_inputs: Vec<(n::LocalId, Term, Term)>,
     active_signatures: BTreeSet<OwnerId>,
     refinement_subjects: Vec<Term>,
     pending_refinements: Vec<refinements::Pending>,
@@ -1650,20 +1645,12 @@ struct Checker<'a, 'h> {
     // Active signature prefixes are not completed head metadata and must never
     // be copied into required-invocation packages.
     normal_input_prefixes: BTreeMap<OwnerId, Vec<(DeclarationId, n::LocalId, Term)>>,
-    // Ordinary Type inputs live in the function telescope, independently of
-    // declaration-level generic parameters and their nominal identities.
-    type_input_bindings: BTreeMap<n::LocalId, Term>,
-    partial_staged_bindings: BTreeMap<n::LocalId, std::sync::Arc<constants::PartialStagedValue>>,
     lexical_input_domains: BTreeMap<DeclarationId, Term>,
     lexical_input_plans: BTreeMap<OwnerId, lexical_inputs::LexicalInputPlan>,
     lexical_source_protocols: lexical_inputs::SourceProtocolIndex<'a, 'h>,
     lexical_dependency_steps: usize,
     callable_type_inputs: BTreeMap<n::LocalId, Option<Term>>,
     callable_value_inputs: BTreeMap<n::LocalId, (Term, Term)>,
-    // Ordinary comptime values retain both their bound identity and domain.
-    // Runtime parameters are never registered as static normal-form inputs.
-    value_input_bindings: BTreeMap<n::LocalId, (Term, Term)>,
-    derived_staged_bindings: BTreeSet<n::LocalId>,
     // Description-only provenance; never authorizes executable code capture.
     open_staged_locals: BTreeSet<n::LocalId>,
     // Pending member results, not Type identities or permission evidence.
@@ -1743,7 +1730,7 @@ struct Checker<'a, 'h> {
         BTreeMap<(OwnerId, usize), Vec<(Option<OwnerId>, bool, OwnerId, FormationInputs, Span)>>,
     contract_uses: BTreeMap<OwnerId, Vec<(Option<OwnerId>, bool, OwnerId, FormationInputs, Span)>>,
     required_steps: u64,
-    required_input_scope: required::inputs::Scope,
+    input_facts: input_facts::State,
     in_required_comptime: bool,
     in_staged_input: bool,
     preparing_spread: Option<n::SourceRange>,
@@ -2271,7 +2258,7 @@ impl Checker<'_, '_> {
                     parameters.len()
                 };
                 if parameter_type.sort == Sort::Type {
-                    self.type_input_bindings.insert(
+                    self.input_facts.types.insert(
                         local(parameter.hir_id),
                         Term::Bound {
                             depth: 0,
@@ -2281,7 +2268,7 @@ impl Checker<'_, '_> {
                     );
                 }
                 if parameter_type.sort == Sort::ComptimeValue {
-                    self.value_input_bindings.insert(
+                    self.input_facts.values.insert(
                         local(parameter.hir_id),
                         (
                             Term::Bound {
@@ -2372,11 +2359,14 @@ impl Checker<'_, '_> {
             self.lexical_input_plans.remove(&owner);
             self.pending_refinements
                 .retain(|pending| pending.owner != owner);
-            self.type_input_bindings
+            self.input_facts
+                .types
                 .retain(|binding, _| binding.owner != owner.def_id.raw());
-            self.partial_staged_bindings
+            self.input_facts
+                .partial
                 .retain(|binding, _| binding.owner != owner.def_id.raw());
-            self.value_input_bindings
+            self.input_facts
+                .values
                 .retain(|binding, _| binding.owner != owner.def_id.raw());
             match saved_capabilities {
                 Some(capabilities) => {
@@ -3741,13 +3731,13 @@ impl Checker<'_, '_> {
                 }
             }
             H::ResolvedLocal(_, id)
-                if self.derived_staged_bindings.contains(&local(*id))
+                if self.input_facts.derived.contains(&local(*id))
                     && self.locals.get(&local(*id)) == Some(&p(P::Type))
-                    && self.type_input_bindings.contains_key(&local(*id)) =>
+                    && self.input_facts.types.contains_key(&local(*id)) =>
             {
                 // A checked const field can have a complete Type identity even
                 // when another field still depends on invocation-time inputs.
-                let ty = &self.type_input_bindings[&local(*id)];
+                let ty = &self.input_facts.types[&local(*id)];
                 let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                 let before = fuel;
                 let charged = nir::type_computations::charge_term(ty, &mut fuel);
@@ -3766,7 +3756,8 @@ impl Checker<'_, '_> {
                 let in_signature = self.signature_owner.is_some_and(|owner| {
                     owner == id.owner && self.active_signatures.contains(&owner)
                 });
-                self.type_input_bindings
+                self.input_facts
+                    .types
                     .get(&binding)
                     .filter(|_| {
                         in_signature
@@ -5759,11 +5750,7 @@ impl Checker<'_, '_> {
             self.context.clone(),
             self.field_defaults.clone(),
             self.active_defaults.clone(),
-            self.specialization_inputs.clone(),
-            self.type_input_bindings.clone(),
-            self.partial_staged_bindings.clone(),
-            self.value_input_bindings.clone(),
-            self.derived_staged_bindings.clone(),
+            self.input_facts.clone(),
         );
         let pending_len = self.pending_type_uses.as_ref().map(Vec::len);
         let old_defaults = std::mem::replace(&mut self.numeric_defaults, allow_defaults);
@@ -5788,11 +5775,7 @@ impl Checker<'_, '_> {
                 self.context,
                 self.field_defaults,
                 self.active_defaults,
-                self.specialization_inputs,
-                self.type_input_bindings,
-                self.partial_staged_bindings,
-                self.value_input_bindings,
-                self.derived_staged_bindings,
+                self.input_facts,
             ) = saved;
         }
         match attempt {
@@ -6970,8 +6953,8 @@ impl Checker<'_, '_> {
             // Signature inputs can be read before a runtime locals frame exists.
             // Snapshot their binding identities for capture routing; the normal
             // expression path still checks their domain, phase and availability.
-            outer.extend(self.type_input_bindings.keys().copied());
-            outer.extend(self.value_input_bindings.keys().copied());
+            outer.extend(self.input_facts.types.keys().copied());
+            outer.extend(self.input_facts.values.keys().copied());
         }
         self.captures.push(CaptureFrame {
             comptime,

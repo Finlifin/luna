@@ -97,14 +97,14 @@ impl Checker<'_, '_> {
                 bindings.push((local(*binding), *sort, symbol.clone(), domain));
             }
             for (binding, sort, symbol, domain) in bindings {
-                let ty = self.type_input_bindings.remove(&binding);
-                let value = self.value_input_bindings.remove(&binding);
+                let ty = self.input_facts.types.remove(&binding);
+                let value = self.input_facts.values.remove(&binding);
                 let local = self.locals.insert(binding, domain.clone());
                 saved_bindings.push((binding, ty, value, local));
                 if sort == Sort::Type {
-                    self.type_input_bindings.insert(binding, symbol);
+                    self.input_facts.types.insert(binding, symbol);
                 } else {
-                    self.value_input_bindings.insert(binding, (symbol, domain));
+                    self.input_facts.values.insert(binding, (symbol, domain));
                 }
             }
             let arguments = self.type_clause_arguments(target, inputs, None, span)?;
@@ -114,11 +114,12 @@ impl Checker<'_, '_> {
         self.signature_owner = saved_owner;
         self.context = saved_context;
         for (binding, ty, value, local) in saved_bindings {
-            self.type_input_bindings.remove(&binding);
-            self.value_input_bindings.remove(&binding);
+            self.input_facts.types.remove(&binding);
+            self.input_facts.values.remove(&binding);
             self.locals.remove(&binding);
-            self.type_input_bindings.extend(ty.map(|ty| (binding, ty)));
-            self.value_input_bindings
+            self.input_facts.types.extend(ty.map(|ty| (binding, ty)));
+            self.input_facts
+                .values
                 .extend(value.map(|value| (binding, value)));
             self.locals.extend(local.map(|ty| (binding, ty)));
         }

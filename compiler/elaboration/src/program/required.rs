@@ -69,7 +69,7 @@ impl Checker<'_, '_> {
             if !inputs
                 .locals
                 .iter()
-                .all(|id| self.type_input_bindings.contains_key(id))
+                .all(|id| self.input_facts.types.contains_key(id))
                 || self.program_requirement(&atom)?
             {
                 continue;
@@ -93,7 +93,7 @@ impl Checker<'_, '_> {
 
     fn contract_parameter_is_type(&self, value: &Expr<'_>) -> bool {
         match value.kind {
-            H::ResolvedFnParam(_, id) => self.type_input_bindings.contains_key(&local(id)),
+            H::ResolvedFnParam(_, id) => self.input_facts.types.contains_key(&local(id)),
             H::ResolvedClauseParam(_, id) => self
                 .trait_input_domain(DeclarationId {
                     package: semantic_package(&self.package_identities, id.pkg),
@@ -164,8 +164,8 @@ impl Checker<'_, '_> {
         let saved_checking = std::mem::replace(&mut self.checking_contract, true);
         let saved_pending = self.pending_type_uses.replace(Vec::new());
         let saved_capabilities = self.capabilities.get(&owner).cloned();
-        let saved_type_inputs = self.type_input_bindings.clone();
-        let saved_value_inputs = self.value_input_bindings.clone();
+        let saved_type_inputs = self.input_facts.types.clone();
+        let saved_value_inputs = self.input_facts.values.clone();
         // A required invocation can request this contract after a nested
         // signature check restored its caller's input environment. Rebuild
         // declaration inputs from checked domains, never from that caller.
@@ -202,10 +202,10 @@ impl Checker<'_, '_> {
                         sort,
                     };
                     if sort == Sort::Type {
-                        self.type_input_bindings.insert(binding, symbol);
+                        self.input_facts.types.insert(binding, symbol);
                     } else if sort == Sort::ComptimeValue {
                         if let Some(domain) = domain {
-                            self.value_input_bindings.insert(binding, (symbol, domain));
+                            self.input_facts.values.insert(binding, (symbol, domain));
                         }
                     }
                 }
@@ -305,8 +305,8 @@ impl Checker<'_, '_> {
             Ok(requirements)
         })();
         let uses = std::mem::replace(&mut self.pending_type_uses, saved_pending).unwrap();
-        self.type_input_bindings = saved_type_inputs;
-        self.value_input_bindings = saved_value_inputs;
+        self.input_facts.types = saved_type_inputs;
+        self.input_facts.values = saved_value_inputs;
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.checking_contract = saved_checking;
@@ -432,8 +432,8 @@ impl Checker<'_, '_> {
                 } else {
                     let inputs = self.source_expression_inputs(owner, &value)?;
                     inputs.locals.iter().all(|id| {
-                        self.type_input_bindings.contains_key(id)
-                            || self.value_input_bindings.contains_key(id)
+                        self.input_facts.types.contains_key(id)
+                            || self.input_facts.values.contains_key(id)
                     }) && inputs.declarations.iter().all(|id| {
                         !check_clauses
                             || self.type_clause_params(owner).iter().any(|parameter| {
@@ -1465,13 +1465,13 @@ impl Checker<'_, '_> {
         let signature_start = self.signature_type_uses.len();
         let saved_value_locals = self.locals.clone();
         let saved_value_bindings = self.normal_default_bindings.clone();
-        let saved_input_scope = self.required_input_scope.clone();
+        let saved_input_scope = self.input_facts.supplied.clone();
         let saved_input_immutable = self.immutable.clone();
         let result = (|| {
             let mut inputs = inputs;
             // Nested checks may use supplied input evidence from this region,
             // while pending defaults and live storage remain unavailable.
-            self.required_input_scope = self.required_input_scope.child(
+            self.input_facts.supplied = self.input_facts.supplied.child(
                 &inputs,
                 live,
                 &mut self.required_steps,
@@ -1529,7 +1529,7 @@ impl Checker<'_, '_> {
                     abstract_value_parameters.push((id, domain.clone()));
                 }
                 // Publish the completed prefix before forming the next domain.
-                self.required_input_scope.supply(
+                self.input_facts.supplied.supply(
                     binding,
                     &domain,
                     &value,
@@ -1586,14 +1586,14 @@ impl Checker<'_, '_> {
                 specialized?;
             }
             let result_type = root.ty.clone();
-            for input in &self.specialization_inputs {
+            for input in &self.input_facts.specialized {
                 if !inputs.iter().any(|(id, _, _)| *id == input.0) {
                     inputs.push(input.clone());
                 }
             }
             if !self.checking_code_generator
                 && !self.generator_data.is_empty()
-                && !self.partial_staged_bindings.is_empty()
+                && !self.input_facts.partial.is_empty()
             {
                 let mut budget = comptime_runtime::Budget {
                     steps: self.required_steps as usize,
@@ -1621,7 +1621,7 @@ impl Checker<'_, '_> {
             // Retain only referenced outer inputs, including dependencies in
             // type annotations. This transports existing evidence; it does not
             // evaluate a producer to fill a missing capture.
-            if !self.required_input_scope.is_empty() {
+            if !self.input_facts.supplied.is_empty() {
                 let mut capture_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                 let before = capture_fuel;
                 let free = nir::free_bindings::collect(&root, &mut capture_fuel);
@@ -1634,7 +1634,7 @@ impl Checker<'_, '_> {
                     {
                         continue;
                     }
-                    if let Some((domain, Some(value))) = self.required_input_scope.lookup(
+                    if let Some((domain, Some(value))) = self.input_facts.supplied.lookup(
                         binding,
                         &mut self.required_steps,
                         expr.span,
@@ -1680,7 +1680,7 @@ impl Checker<'_, '_> {
                     .map_err(|message| error(expr.span, message));
                 self.required_steps -= (before - fuel) as u64;
                 let free = free?;
-                for (binding, symbol) in &self.type_input_bindings {
+                for (binding, symbol) in &self.input_facts.types {
                     if binding.owner != owner.def_id.raw() {
                         continue;
                     }
@@ -2467,7 +2467,7 @@ impl Checker<'_, '_> {
         }
         self.locals = saved_value_locals;
         self.normal_default_bindings = saved_value_bindings;
-        self.required_input_scope = saved_input_scope;
+        self.input_facts.supplied = saved_input_scope;
         self.immutable = saved_input_immutable;
         self.control = saved_control;
         self.captures = saved_captures;
@@ -2502,7 +2502,7 @@ impl Checker<'_, '_> {
         })?;
         let saved_owner = self.signature_owner.replace(owner);
         let saved_locals = std::mem::take(&mut self.locals);
-        let saved_type_bindings = self.type_input_bindings.clone();
+        let saved_type_bindings = self.input_facts.types.clone();
         let saved_captures = std::mem::take(&mut self.captures);
         let saved_control = std::mem::take(&mut self.control);
         let saved_immutable = std::mem::take(&mut self.immutable);
@@ -2517,7 +2517,7 @@ impl Checker<'_, '_> {
             for (index, (param, ty)) in sig.params.iter().zip(parameters).enumerate() {
                 self.locals.insert(local(param.hir_id), ty.ty.clone());
                 if ty.sort == Sort::Type {
-                    self.type_input_bindings.insert(
+                    self.input_facts.types.insert(
                         local(param.hir_id),
                         Term::Bound {
                             depth: 0,
@@ -2563,7 +2563,7 @@ impl Checker<'_, '_> {
         })();
         self.signature_owner = saved_owner;
         self.locals = saved_locals;
-        self.type_input_bindings = saved_type_bindings;
+        self.input_facts.types = saved_type_bindings;
         self.captures = saved_captures;
         self.control = saved_control;
         self.immutable = saved_immutable;

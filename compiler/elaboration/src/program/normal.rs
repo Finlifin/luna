@@ -323,7 +323,8 @@ impl Checker<'_, '_> {
                     && (self.active_signatures.contains(&owner) || self.checking_contract)
             });
             if let Some((symbol, actual)) = self
-                .value_input_bindings
+                .input_facts
+                .values
                 .get(&binding)
                 .filter(|_| in_signature || self.locals.contains_key(&binding))
             {
@@ -1648,10 +1649,10 @@ impl Checker<'_, '_> {
                     {
                         return copy_observed_term(value, budget);
                     }
-                    if let Some((symbol, _)) = self.value_input_bindings.get(binding) {
+                    if let Some((symbol, _)) = self.input_facts.values.get(binding) {
                         return copy_observed_term(symbol, budget);
                     }
-                    if let Some(symbol) = self.type_input_bindings.get(binding) {
+                    if let Some(symbol) = self.input_facts.types.get(binding) {
                         return copy_observed_term(symbol, budget);
                     }
                 }

@@ -68,7 +68,7 @@ impl Checker<'_, '_> {
         };
         let mut subject = if self.is_type_head(base)
             || self.local_field_domain(base)? == Some(p(P::Type))
-            || matches!(&base.kind, H::ResolvedFnParam(_, id) if self.type_input_bindings.contains_key(&local(*id)))
+            || matches!(&base.kind, H::ResolvedFnParam(_, id) if self.input_facts.types.contains_key(&local(*id)))
         {
             self.type_expr(base)?
         } else if let H::Projection(view, field) = &base.kind {

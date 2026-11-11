@@ -160,7 +160,7 @@ impl Checker<'_, '_> {
             return Err(error(span, "cyclic code generator signature"));
         }
         let saved = std::mem::take(&mut self.locals);
-        let saved_type_inputs = std::mem::take(&mut self.type_input_bindings);
+        let saved_type_inputs = std::mem::take(&mut self.input_facts.types);
         let saved_owner = self.signature_owner.replace(owner);
         let saved_context = self.context.clone();
         self.context = self.nominal_context();
@@ -316,7 +316,7 @@ impl Checker<'_, '_> {
                     && matches!(&input, Input::Data(ty) if *ty == p(P::Type))
                 {
                     let binder = self.fresh_generator_type_binder(owner, parameter.span)?;
-                    self.type_input_bindings.insert(
+                    self.input_facts.types.insert(
                         local(parameter.hir_id),
                         Term::Rigid {
                             declaration: binder.declaration,
@@ -402,7 +402,7 @@ impl Checker<'_, '_> {
             })
         })();
         self.locals = saved;
-        self.type_input_bindings = saved_type_inputs;
+        self.input_facts.types = saved_type_inputs;
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.active_signatures.remove(&owner);
@@ -427,12 +427,12 @@ impl Checker<'_, '_> {
         let caller_scope = self.call_inference_domains();
         let outer = (
             self.context.clone(),
-            std::mem::take(&mut self.type_input_bindings),
-            std::mem::take(&mut self.partial_staged_bindings),
-            std::mem::take(&mut self.value_input_bindings),
+            std::mem::take(&mut self.input_facts.types),
+            std::mem::take(&mut self.input_facts.partial),
+            std::mem::take(&mut self.input_facts.values),
             self.default_input_scope.take(),
             self.default_input_owner.take(),
-            std::mem::take(&mut self.specialization_inputs),
+            std::mem::take(&mut self.input_facts.specialized),
             self.effect_environment.take(),
         );
         let aliases = std::mem::take(&mut self.alias_substitution);
@@ -479,12 +479,12 @@ impl Checker<'_, '_> {
         ) = saved;
         (
             self.context,
-            self.type_input_bindings,
-            self.partial_staged_bindings,
-            self.value_input_bindings,
+            self.input_facts.types,
+            self.input_facts.partial,
+            self.input_facts.values,
             self.default_input_scope,
             self.default_input_owner,
-            self.specialization_inputs,
+            self.input_facts.specialized,
             self.effect_environment,
         ) = outer;
         self.alias_substitution = aliases;
@@ -2369,7 +2369,7 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(span, "generator schema invalidation budget exhausted"))?;
         // Structural observations carry no alias proof. Invalidate them with
         // the materialized schema snapshots at writes, calls and escapes.
-        self.partial_staged_bindings.clear();
+        self.input_facts.partial.clear();
         for value in self.generator_data.values_mut() {
             if value.as_ref().is_some_and(|value| {
                 matches!(

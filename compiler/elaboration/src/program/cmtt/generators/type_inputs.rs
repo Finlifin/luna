@@ -172,10 +172,12 @@ impl Checker<'_, '_> {
         value: Option<Term>,
     ) {
         if let Some(value) = value {
-            self.type_input_bindings.insert(binding, value.clone());
-            self.specialization_inputs
+            self.input_facts.types.insert(binding, value.clone());
+            self.input_facts
+                .specialized
                 .retain(|(id, _, _)| *id != binding);
-            self.specialization_inputs
+            self.input_facts
+                .specialized
                 .push((binding, p(P::Type), value));
         }
     }

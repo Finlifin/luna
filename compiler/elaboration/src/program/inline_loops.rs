@@ -31,8 +31,8 @@ impl Checker<'_, '_> {
                 || staged.contains(&binding)
                 || self.open_staged_locals.contains(&binding)
                 || self.generator_data.contains_key(&binding)
-                || self.type_input_bindings.contains_key(&binding)
-                || self.value_input_bindings.contains_key(&binding)
+                || self.input_facts.types.contains_key(&binding)
+                || self.input_facts.values.contains_key(&binding)
             {
                 continue;
             }
@@ -194,8 +194,7 @@ impl Checker<'_, '_> {
             (current, count)
         };
         let saved_locals = self.locals.clone();
-        let saved_partial_values: BTreeSet<_> =
-            self.partial_staged_bindings.keys().copied().collect();
+        let input_boundary = self.input_facts.lexical_boundary();
         let saved_data = self.generator_data.clone();
         let saved_immutable = self.immutable.clone();
         let saved_context = self.context.clone();
@@ -209,8 +208,7 @@ impl Checker<'_, '_> {
             // nested inline conditions that have no selected iteration.
             for index in 0..count.max(1) {
                 self.locals = saved_locals.clone();
-                self.partial_staged_bindings
-                    .retain(|binding, _| saved_partial_values.contains(binding));
+                self.input_facts.leave_lexical(&input_boundary);
                 self.generator_data = saved_data.clone();
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
@@ -352,8 +350,7 @@ impl Checker<'_, '_> {
         })();
         self.control.loops.pop();
         self.locals = saved_locals;
-        self.partial_staged_bindings
-            .retain(|binding, _| saved_partial_values.contains(binding));
+        self.input_facts.leave_lexical(&input_boundary);
         self.generator_data = saved_data;
         self.immutable = saved_immutable;
         self.context = saved_context;
@@ -405,8 +402,7 @@ impl Checker<'_, '_> {
         }
         self.required_steps -= elements.len() as u64;
         let saved_locals = self.locals.clone();
-        let saved_partial_values: BTreeSet<_> =
-            self.partial_staged_bindings.keys().copied().collect();
+        let input_boundary = self.input_facts.lexical_boundary();
         let saved_data = self.generator_data.clone();
         let saved_immutable = self.immutable.clone();
         let saved_context = self.context.clone();
@@ -438,8 +434,7 @@ impl Checker<'_, '_> {
             let mut iterations = Vec::new();
             for (index, (ty, temporary)) in elements.iter().zip(&storage).enumerate() {
                 self.locals = saved_locals.clone();
-                self.partial_staged_bindings
-                    .retain(|binding, _| saved_partial_values.contains(binding));
+                self.input_facts.leave_lexical(&input_boundary);
                 self.generator_data = saved_data.clone();
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
@@ -664,8 +659,7 @@ impl Checker<'_, '_> {
         })();
         self.control.loops.pop();
         self.locals = saved_locals;
-        self.partial_staged_bindings
-            .retain(|binding, _| saved_partial_values.contains(binding));
+        self.input_facts.leave_lexical(&input_boundary);
         self.generator_data = saved_data;
         self.immutable = saved_immutable;
         self.context = saved_context;

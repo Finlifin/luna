@@ -1015,8 +1015,8 @@ impl Checker<'_, '_> {
         let staged_alias = !binding.mutable
             && matches!(root.kind,
                 H::ResolvedFnParam(_, id) | H::ResolvedLocal(_, id)
-                if self.value_input_bindings.contains_key(&local(id))
-                    || self.type_input_bindings.contains_key(&local(id))
+                if self.input_facts.values.contains_key(&local(id))
+                    || self.input_facts.types.contains_key(&local(id))
                     || self.open_staged_locals.contains(&local(id)));
         let actual = self.with_staged_input(self.in_staged_input || binding.comptime, |this| {
             this.describe_open_expression(init, locals, returns, annotation.as_ref(), depth + 1)
@@ -2057,15 +2057,12 @@ impl Checker<'_, '_> {
         let saved_numeric = std::mem::replace(&mut self.numeric_defaults, true);
         let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
         let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
-        let saved_inputs = std::mem::take(&mut self.specialization_inputs);
-        let saved_derived = std::mem::take(&mut self.derived_staged_bindings);
+        let inputs = self.input_facts.for_open_body();
+        let saved_inputs = std::mem::replace(&mut self.input_facts, inputs);
         let saved_default_scope = self.default_input_scope.take();
         let saved_default_owner = self.default_input_owner.take();
         let saved_effects = self.effect_environment.take();
         let saved_resume = self.effect_resume_result.take();
-        let saved_type_bindings = self.type_input_bindings.clone();
-        let saved_partial_values = std::mem::take(&mut self.partial_staged_bindings);
-        let saved_value_bindings = self.value_input_bindings.clone();
         self.context = self.definition_context(owner);
         let result = check(self);
         self.ordinary_behavior_inputs = saved_behavior_inputs;
@@ -2089,15 +2086,11 @@ impl Checker<'_, '_> {
         self.numeric_defaults = saved_numeric;
         self.in_staged_input = saved_staged;
         self.in_required_comptime = saved_required;
-        self.specialization_inputs = saved_inputs;
-        self.derived_staged_bindings = saved_derived;
+        self.input_facts = saved_inputs;
         self.default_input_scope = saved_default_scope;
         self.default_input_owner = saved_default_owner;
         self.effect_environment = saved_effects;
         self.effect_resume_result = saved_resume;
-        self.type_input_bindings = saved_type_bindings;
-        self.partial_staged_bindings = saved_partial_values;
-        self.value_input_bindings = saved_value_bindings;
         result
     }
 
@@ -2248,7 +2241,7 @@ impl Checker<'_, '_> {
                     this.locals.insert(local(parameter.hir_id), ty.clone());
                 }
                 if *sort == Sort::Type {
-                    this.type_input_bindings.insert(
+                    this.input_facts.types.insert(
                         local(parameter.hir_id),
                         Term::Bound {
                             depth: 0,
@@ -2452,8 +2445,8 @@ impl Checker<'_, '_> {
                         "required comptime computation cannot read a runtime parameter",
                     ));
                 }
-                if !self.type_input_bindings.contains_key(&binding)
-                    && !self.value_input_bindings.contains_key(&binding)
+                if !self.input_facts.types.contains_key(&binding)
+                    && !self.input_facts.values.contains_key(&binding)
                 {
                     if self.open_staged_locals.contains(&binding) {
                         let ty = self
@@ -3339,8 +3332,8 @@ impl Checker<'_, '_> {
                 if self.in_staged_input
                     && matches!(expr.kind, H::ResolvedLocal(..))
                     && !self.open_staged_locals.contains(&local(*id))
-                    && !self.type_input_bindings.contains_key(&local(*id))
-                    && !self.value_input_bindings.contains_key(&local(*id))
+                    && !self.input_facts.types.contains_key(&local(*id))
+                    && !self.input_facts.values.contains_key(&local(*id))
                     && !self.signature_owner.and_then(|owner| self.package.item(owner)).is_some_and(|item|
                         matches!(&item.kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime))
                 {
@@ -3807,8 +3800,8 @@ impl Checker<'_, '_> {
                 let staged = self.in_staged_input
                     || matches!(root.kind,
                     H::ResolvedFnParam(_, id) | H::ResolvedLocal(_, id)
-                    if self.value_input_bindings.contains_key(&local(id))
-                        || self.type_input_bindings.contains_key(&local(id))
+                    if self.input_facts.values.contains_key(&local(id))
+                        || self.input_facts.types.contains_key(&local(id))
                         || self.open_staged_locals.contains(&local(id)));
                 let description =
                     self.describe_open_expression(receiver, locals, returns, None, depth + 1)?;
@@ -6682,12 +6675,14 @@ impl Checker<'_, '_> {
                 if let Some(value) = &live[index] {
                     graph.push((binding, domain.clone(), value.clone()));
                 } else if let Some(symbol) = &symbols[index] {
-                    this.specialization_inputs
+                    this.input_facts
+                        .specialized
                         .push((binding, domain.clone(), symbol.clone()));
                     if *domain == p(P::Type) {
-                        this.type_input_bindings.insert(binding, symbol.clone());
+                        this.input_facts.types.insert(binding, symbol.clone());
                     } else {
-                        this.value_input_bindings
+                        this.input_facts
+                            .values
                             .insert(binding, (symbol.clone(), domain.clone()));
                     }
                 }
@@ -6741,7 +6736,7 @@ impl Checker<'_, '_> {
                         let binding = local(parameter.hir_id);
                         this.locals.insert(binding, domain.clone());
                         if let Some(symbol) = symbol {
-                            this.specialization_inputs.push((
+                            this.input_facts.specialized.push((
                                 binding,
                                 domain.clone(),
                                 symbol.clone(),
@@ -6749,9 +6744,10 @@ impl Checker<'_, '_> {
                             if *sort == Sort::Type
                                 || (sig.modifiers.is_comptime && *domain == p(P::Type))
                             {
-                                this.type_input_bindings.insert(binding, symbol.clone());
+                                this.input_facts.types.insert(binding, symbol.clone());
                             } else if *sort != Sort::Runtime || sig.modifiers.is_comptime {
-                                this.value_input_bindings
+                                this.input_facts
+                                    .values
                                     .insert(binding, (symbol.clone(), domain.clone()));
                             }
                         }
@@ -8647,12 +8643,14 @@ impl Checker<'_, '_> {
                 if let Some(value) = &live[index] {
                     graph.push((binding, domain.ty.clone(), value.clone()));
                 } else if let Some(value) = &symbols[index] {
-                    this.specialization_inputs
+                    this.input_facts
+                        .specialized
                         .push((binding, domain.ty.clone(), value.clone()));
                     if domain.ty == p(P::Type) {
-                        this.type_input_bindings.insert(binding, value.clone());
+                        this.input_facts.types.insert(binding, value.clone());
                     } else {
-                        this.value_input_bindings
+                        this.input_facts
+                            .values
                             .insert(binding, (value.clone(), domain.ty.clone()));
                     }
                 }
@@ -8738,12 +8736,14 @@ impl Checker<'_, '_> {
                 };
                 this.locals.insert(binding, domain.clone());
                 if let Some(value) = &symbols[index] {
-                    this.specialization_inputs
+                    this.input_facts
+                        .specialized
                         .push((binding, domain.clone(), value.clone()));
                     if *sort == Sort::Type {
-                        this.type_input_bindings.insert(binding, value.clone());
+                        this.input_facts.types.insert(binding, value.clone());
                     } else {
-                        this.value_input_bindings
+                        this.input_facts
+                            .values
                             .insert(binding, (value.clone(), domain.clone()));
                     }
                 }
@@ -8905,10 +8905,11 @@ impl Checker<'_, '_> {
                 let ty = &parameters[slot].ty;
                 this.locals.insert(binding, ty.clone());
                 if let Some(value) = &symbols[slot] {
-                    this.specialization_inputs
+                    this.input_facts
+                        .specialized
                         .push((binding, ty.clone(), value.clone()));
                     if parameters[slot].sort == Sort::Type {
-                        this.type_input_bindings.insert(binding, value.clone());
+                        this.input_facts.types.insert(binding, value.clone());
                         // The instance binds this declaration's ordinary Type
                         // input. Preserve that equality for its original
                         // capability facts as well as expression substitution.
@@ -8921,7 +8922,8 @@ impl Checker<'_, '_> {
                             value.clone(),
                         ));
                     } else {
-                        this.value_input_bindings
+                        this.input_facts
+                            .values
                             .insert(binding, (value.clone(), ty.clone()));
                     }
                 }

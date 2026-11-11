@@ -71,7 +71,7 @@ impl Checker<'_, '_> {
         let saved_immutable = self.immutable.clone();
         let saved_context = self.context.clone();
         let saved_data = self.generator_data.clone();
-        let saved_partial: BTreeSet<_> = self.partial_staged_bindings.keys().copied().collect();
+        let input_boundary = self.input_facts.lexical_boundary();
         self.control.loops.push(identity);
         let result = (|| {
             self.immutable.extend(pattern_binding_ids(pat));
@@ -180,8 +180,7 @@ impl Checker<'_, '_> {
         self.immutable = saved_immutable;
         self.context = saved_context;
         self.generator_data = saved_data;
-        self.partial_staged_bindings
-            .retain(|binding, _| saved_partial.contains(binding));
+        self.input_facts.leave_lexical(&input_boundary);
         result
     }
 }

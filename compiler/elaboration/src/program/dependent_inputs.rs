@@ -55,10 +55,10 @@ impl Checker<'_, '_> {
         {
             return None;
         }
-        if let Some(symbol) = self.type_input_bindings.get(&binding) {
+        if let Some(symbol) = self.input_facts.types.get(&binding) {
             return Some((symbol.clone(), p(P::Type)));
         }
-        self.value_input_bindings.get(&binding).cloned()
+        self.input_facts.values.get(&binding).cloned()
     }
 
     /// Collect evidence from inputs whose types do not read the ordinary call
@@ -844,14 +844,14 @@ impl Checker<'_, '_> {
                 match &value.kind {
                     K::TypeValue(ty) => (value.clone(), ty.clone()),
                     K::Local(binding)
-                        if route.is_some() && self.type_input_bindings.contains_key(binding) =>
+                        if route.is_some() && self.input_facts.types.contains_key(binding) =>
                     {
-                        (value.clone(), self.type_input_bindings[binding].clone())
+                        (value.clone(), self.input_facts.types[binding].clone())
                     }
                     K::Local(binding)
-                        if route.is_some() && self.value_input_bindings.contains_key(binding) =>
+                        if route.is_some() && self.input_facts.values.contains_key(binding) =>
                     {
-                        (value.clone(), self.value_input_bindings[binding].0.clone())
+                        (value.clone(), self.input_facts.values[binding].0.clone())
                     }
                     K::Local(binding) => {
                         // A prepared container input is supplied by the enclosing

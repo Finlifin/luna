@@ -201,7 +201,7 @@ impl Checker<'_, '_> {
         };
         if !self.locals.contains_key(&local(binding))
             || self.locals.get(&local(binding)) == Some(&p(P::Type))
-            || !self.partial_staged_bindings.contains_key(&local(binding))
+            || !self.input_facts.partial.contains_key(&local(binding))
         {
             return Ok(None);
         }

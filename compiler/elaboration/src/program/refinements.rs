@@ -481,7 +481,7 @@ impl Checker<'_, '_> {
 
     fn refinement_type_operand(&self, expr: &Expr<'_>) -> bool {
         match &expr.kind {
-            H::ResolvedFnParam(_, id) => self.type_input_bindings.contains_key(&local(*id)),
+            H::ResolvedFnParam(_, id) => self.input_facts.types.contains_key(&local(*id)),
             H::ResolvedClauseParam(_, id) => {
                 let declaration = DeclarationId {
                     package: semantic_package(&self.package_identities, id.pkg),

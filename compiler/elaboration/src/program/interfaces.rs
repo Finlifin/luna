@@ -1506,7 +1506,7 @@ impl Checker<'_, '_> {
     pub(super) fn is_static_method_subject(&self, value: &Expr<'_>) -> bool {
         self.is_type_head(value)
             || matches!(&value.kind,H::ResolvedFnParam(_,id)
-            if self.type_input_bindings.contains_key(&local(*id)))
+            if self.input_facts.types.contains_key(&local(*id)))
     }
 
     fn is_computed_method_subject(value: &Expr<'_>) -> bool {

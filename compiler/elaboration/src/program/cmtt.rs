@@ -470,8 +470,8 @@ impl Checker<'_, '_> {
             })?;
             if *ty == p(P::Type)
                 || matches!(ty, Term::ComptimeFunction(_) | Term::NormalFormFunction(..))
-                || self.type_input_bindings.contains_key(&id)
-                || self.value_input_bindings.contains_key(&id)
+                || self.input_facts.types.contains_key(&id)
+                || self.input_facts.values.contains_key(&id)
             {
                 return Err(error(
                     value.span,
@@ -609,8 +609,7 @@ impl Checker<'_, '_> {
                     "splice is missing a required runtime binding; names do not supply identity",
                 )
             })?;
-            if self.type_input_bindings.contains_key(&to)
-                || self.value_input_bindings.contains_key(&to)
+            if self.input_facts.types.contains_key(&to) || self.input_facts.values.contains_key(&to)
             {
                 return Err(error(
                     site.span,

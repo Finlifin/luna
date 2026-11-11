@@ -50,3 +50,27 @@ fn defaults_keep_outer_type_dependencies_inside_callable_annotations() {
     ";
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn optional_branch_probes_preserve_supplied_inputs_for_later_defaults() {
+    let source = "
+        struct Flag where enabled: bool {}
+        comptime fn keep(value: ?T) -> ?T where T { value }
+        comptime fn Inspect(
+            comptime flag: bool,
+            .T: Type = do {
+                let maybe = keep(if flag { null } else { || flag });
+                if flag { bool } else { u8 }
+            },
+            .witness: Flag<flag> = (Flag<flag>{})
+        ) -> Type { T }
+        fn run() -> bool {
+            const first = Inspect(true);
+            const second = Inspect(false);
+            first == bool and second == u8
+        }
+    ";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let invalid = source.replace("= (Flag<flag>{})", "= (Flag<not flag>{})");
+    assert!(sysroot::compile(&invalid).is_err());
+}

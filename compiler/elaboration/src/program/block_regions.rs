@@ -11,7 +11,7 @@ impl Checker<'_, '_> {
         initialized: &BTreeMap<usize, StagedPatternSnapshot>,
     ) -> bool {
         !initialized.is_empty()
-            || (!self.specialization_inputs.is_empty()
+            || (!self.input_facts.specialized.is_empty()
                 && statements.iter().any(|statement| matches!(
                     &statement.kind,
                     K::Let { value, .. } | K::LetPattern { value, guard: None, otherwise: None, .. }
@@ -27,24 +27,9 @@ impl Checker<'_, '_> {
         let saved_code = self.code_values.clone();
         let saved_patterns = self.pattern_codes.clone();
         let saved_context = self.context.clone();
-        let saved_staged: BTreeSet<_> = self
-            .specialization_inputs
-            .iter()
-            .map(|(binding, _, _)| *binding)
-            .collect();
-        let saved_types: BTreeSet<_> = self.type_input_bindings.keys().copied().collect();
-        let saved_partial_values: BTreeSet<_> =
-            self.partial_staged_bindings.keys().copied().collect();
-        let saved_values: BTreeSet<_> = self.value_input_bindings.keys().copied().collect();
+        let boundary = self.input_facts.lexical_boundary();
         let result = check(self);
-        self.specialization_inputs
-            .retain(|(binding, _, _)| saved_staged.contains(binding));
-        self.type_input_bindings
-            .retain(|binding, _| saved_types.contains(binding));
-        self.partial_staged_bindings
-            .retain(|binding, _| saved_partial_values.contains(binding));
-        self.value_input_bindings
-            .retain(|binding, _| saved_values.contains(binding));
+        self.input_facts.leave_lexical(&boundary);
         self.locals = saved;
         self.code_values = saved_code;
         self.pattern_codes = saved_patterns;
