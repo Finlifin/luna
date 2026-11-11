@@ -179,6 +179,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn run_fragment(&mut self, frame: &mut bytecode::Frame) -> Result<Flow, Error> {
         Session::fragment(self, frame)
             .run()?

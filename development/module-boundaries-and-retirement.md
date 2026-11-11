@@ -158,3 +158,28 @@ python3 -B development/check.py --timeout 180 -- test -p middle --test query_inp
   多包入口与提供者泛型调用通过；报告 `/tmp/luna-tools-q7ys3_j9/result.json`。
 
 这些检查验证本次退役的消费者闭包；不代表全部架构迁移或历史已知失败已修复。
+
+## 6. 执行测试驱动与生产调度分离
+
+沿实际调用关系核对，`evaluate_contextual_argument`、`evaluate_input_preparation`、
+`stage_normal_argument` 及其同步 InputFrame.run 都只被测试使用；生产消费者已由
+`input_collection::Frame::next` 选择输入帧，交给 invocation session 驱动与完成。
+原入口混在生产 impl 中，容易被误认为第二条仍需迁移的运行路径。
+
+这些比较驱动与原有 execute_code 已移入 cfg(test) 的 `execution_test_support`；
+多余的 try_stage_bytecode 包装删除。它们继续调用真正的帧准备、解释、完成和环境
+恢复操作，原测试未删除，也没有把语义实现复制成测试替身。借入根帧的
+Session::fragment、run_fragment 与该根的显式 cancel 同样仅在测试构建存在。
+生产 session 仍拥有并释放自身执行栈，所有输入准备和宿主请求仍经过原生产入口。
+
+借用式 fragment 的暂停／恢复测试能验证共用 driver 的状态转换，不能单独证明
+前端已能交付待决源码片段。本次是生产／测试边界清理，不是前端源 activation
+接线，也没有删除仍在使用的树解释器或 NormalFormArgument 表示。
+
+验证目录 `/home/fin/luna`，执行
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib -p luna --test invocation_host_requests --test type_invocation_sessions --test staged_invocation_reuse --test invocation_value_templates --test normal_input_plans --test ordinary_clause_collectors --no-fail-fast`：
+`/tmp/luna-tools-l9volhbp/result.json` 退出 0，762 项通过、1 项原有 ignore。
+包含 VM 单元比较及真实前端入口；未更改测试预期，未运行全 workspace。
+首次编译发现 bytecode_compilation 测试仍需访问迁移后的 InputFrame.run，已修正
+测试模块可见性；最终结果来自修正后的源码。验证包含原有资源分析工作区修改。
+修改文件的格式检查 `/tmp/luna-tools-ue_e6r_r/result.json` 退出 0。

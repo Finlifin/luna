@@ -13,6 +13,8 @@ mod bytecode;
 mod cleanup;
 mod closure_identity;
 mod code_values;
+#[cfg(test)]
+mod execution_test_support;
 mod immutable_cloning;
 mod literal_values;
 mod type_descriptions;

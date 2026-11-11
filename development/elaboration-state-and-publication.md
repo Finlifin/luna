@@ -518,10 +518,13 @@ workspace 成员；同步的 Cargo.lock 仅增该成员条目，和外部 Cargo.
 
 以下是尚未实现的接口决定，核对基线为 `b613147b`。单有输入 Progress 不足以恢复
 普通调用；目前 `prepare_required_root_with_live_inputs` 的 `build` 必须先返回完整
-`n::Expr`，之后才能构造 required 世界并 invocation。`Session::fragment` 虽能暂停
-子调用，却借用已建立的 `bytecode::Frame`；它没有源区域身份、待定接收域或后继代码
+`n::Expr`，之后才能构造 required 世界并 invocation。仅供测试的 `Session::fragment`
+虽能暂停子调用，却借用已建立的 `bytecode::Frame`；它没有源区域身份、待定接收域或后继代码
 交付入口。`InvocationSession` 对外则从一次已获准的函数调用开始。这三个入口都不能
 直接承接“正在检查一个尚无完整结果类型的调用”。
+
+该借用式根及同步输入测试驱动现已由 cfg(test) 隔离，生产消费者仍是拥有执行帧的
+invocation／plan session；具体边界见[执行测试驱动](module-boundaries-and-retirement.md#6-执行测试驱动与生产调度分离)。
 
 因此下一条接线引入 **源 activation**：前端持有 HIR 与检查任务，VM 持有本次源区域
 的实际存储、已执行前缀及控制出口。它不成为新的源语言函数，不通过合成函数包装

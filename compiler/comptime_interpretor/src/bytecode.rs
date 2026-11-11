@@ -44,6 +44,9 @@ struct PatternScope {
 }
 
 impl Frame {
+    // Production sessions own and drop cancelled code frames. Only the test
+    // driver lends a root frame back to its caller after cancellation.
+    #[cfg(test)]
     pub(super) fn cancel(&mut self) {
         self.terminal = true;
         self.waiting = None;
@@ -412,12 +415,6 @@ impl InputFinish {
             environment,
             staged,
         }
-    }
-}
-impl InputFrame {
-    fn run(mut self, vm: &mut Interpreter<'_>) -> InputResult {
-        let flow = vm.run_fragment(&mut self.code);
-        self.finish.complete(vm, self.code, flow)
     }
 }
 
@@ -822,18 +819,6 @@ impl<'a> Interpreter<'a> {
         Ok(Some(program))
     }
 
-    #[cfg(test)]
-    pub(super) fn execute_code(
-        &mut self,
-        code: &Arc<Program>,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let mut frame = self.start_frame(code, environment)?;
-        let result = self.run_fragment(&mut frame);
-        *environment = frame.restore_environment();
-        result
-    }
-
     /// Staged input fragments actually started, including failed evaluations.
     pub fn bytecode_staged_inputs(&self) -> usize {
         self.bytecode_staged_inputs
@@ -859,27 +844,6 @@ impl<'a> Interpreter<'a> {
                 depth: self.depth,
                 source: input.source(),
             },
-        }))
-    }
-
-    pub(super) fn try_stage_bytecode(
-        &mut self,
-        input: &nir::program::NormalFormArgument,
-        environment: &mut Environment,
-        depth: usize,
-    ) -> Result<Option<std::ops::ControlFlow<Flow, normal_inputs::StagedNormalInput>>, Error> {
-        let Some(frame) = self.start_staged_input(input, environment, depth)? else {
-            return Ok(None);
-        };
-        let result = frame.run(self);
-        *environment = result.environment;
-        Ok(Some(match result.flow? {
-            Flow::Value(_) => {
-                let (shape, mut staged) = result.staged.expect("completed staged fragment");
-                self.rekey_staged_input(&shape, &mut staged)?;
-                std::ops::ControlFlow::Continue(staged)
-            }
-            flow => std::ops::ControlFlow::Break(flow),
         }))
     }
 
@@ -927,20 +891,6 @@ impl<'a> Interpreter<'a> {
         self.eval_normal_argument(input, &mut literals, environment)
     }
 
-    pub(super) fn evaluate_contextual_argument(
-        &mut self,
-        input: &nir::program::NormalFormArgument,
-        expected: &Term,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        if let Some(frame) = self.start_contextual_input(input, expected, environment)? {
-            let result = frame.run(self);
-            *environment = result.environment;
-            return result.flow;
-        }
-        self.interpret_contextual_input(input, expected, environment)
-    }
-
     pub fn bytecode_contextual_inputs(&self) -> usize {
         self.bytecode_contextual_inputs
     }
@@ -971,19 +921,6 @@ impl<'a> Interpreter<'a> {
             code,
             finish: InputFinish::Ready,
         }))
-    }
-
-    pub(super) fn evaluate_input_preparation(
-        &mut self,
-        preparation: &nir::program::NormalFormPreparation,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let Some(frame) = self.start_input_preparation(preparation, environment)? else {
-            return self.eval(&preparation.expression, environment);
-        };
-        let result = frame.run(self);
-        *environment = result.environment;
-        result.flow
     }
 
     pub fn bytecode_input_preparations(&self) -> usize {
