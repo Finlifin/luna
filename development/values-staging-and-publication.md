@@ -1577,6 +1577,37 @@ indexed-code-signature 已由后续[统一父声明输入](#已接通contextual-
 还验证递归未决的固有代码方法不会进入普通数据路径，补充独立实现后成功。既有方法
 组覆盖接收者、默认值、实参求值次数及写回，未为取得通过提高生产额度。
 
+### 存储观察与入口快照的世界和预算
+
+CMTT 的存储读取、可变图检查点与 `old` 入口快照共用一处 VM 预算交接。准备前从
+检查器取走本次额度；准备失败或 unwind 不返还无法确定的余量，普通操作返回（包括
+错误）则按 VM 实际余量结算。不会因为下一次尝试重新赠送已消耗的额度。
+
+三个入口都使用当前 generator 的 target、NF 元数据和名义表示世界。旧入口快照用
+空 Package，新源码回归中，接收者的 `meta.Object` 保存用户定义 `Payload` 时因此
+错误报告 `generator entry snapshot failed: interpretation PhaseMismatch`。用
+`fe02e531` 的两份实现文件复测确认该失败，随后恢复本次实现；证据为
+`/tmp/luna-tools-ur3az5ef/result.json`，退出 101。
+
+同一次入口先在私有批次收集受检表达式和存储引用，再以一次 VM 准备完成全部值复制。
+所有复制成功后才返回 entry，失败不交付半份快照；批次退出不更改原接收者存储。
+读取保留活动 cell 身份，入口复制拥有独立的旧值，检查点恢复保留原 cell 身份；
+这三种行为不能用同一个无条件深拷贝代替，也不由 runtime Copy／Clone 授权。
+
+这只统一既有 CMTT 存储操作的服务入口。它不是整个 Checker 的事务，不允许通过
+回滚 cell 撤销外部副作用，也不把 quote 的有效构造误当作可以丢弃的候选试探。
+当前仍需构建临时表示世界，元数据捕获的完整计费与稳定世界共享尚未迁移；一般 HIR
+区域的恢复及统一 ContextualExpr 仍是独立缺口。
+
+检查工作目录 `/home/fin/luna`：
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test cmtt_storage_world --test cmtt_methods --test cmtt --test comptime_object_storage --test library_meta_objects --test comptime_memory --no-fail-fast`
+退出 0，1,098 项通过，证据 `/tmp/luna-tools-a6j8t_jo/result.json`；结果锚点为同目录
+`stdout.log` 中 `test result:`。新增单元检查覆盖准备失败后耗尽保留额度、普通错误的
+余量结算、unwind、不丢失活动 cell 身份及旧值复制的独立存储。源码检查使用真实
+sysroot，包含 List／Object 接收者更新、旧值与当前值分离及错误后置条件拒绝。
+四个修改的 Rust 文件定向格式检查通过，证据 `/tmp/luna-tools-3ezfkpe4/result.json`。
+未运行全 workspace 或性能基准；保留工作区原有资源检查修改，并非纯 HEAD 验收。
+
 ### 方法分类与公共来源一致
 
 分类器不能跳过普通方法解析已有的 capability 来源规则。此前对抽象 T 的方法分类

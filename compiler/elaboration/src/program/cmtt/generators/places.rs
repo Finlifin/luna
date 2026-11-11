@@ -6,7 +6,7 @@ use super::*;
 impl Checker<'_, '_> {
     /// Storage observations need the same nominal and representation world as
     /// invocation. An empty package cannot validate captured payload domains.
-    fn generator_storage_world(&self) -> n::Package {
+    pub(super) fn generator_storage_world(&self) -> n::Package {
         n::Package {
             target: self.target,
             normal_forms: self.normal_form_metadata(),
@@ -23,25 +23,17 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<comptime_interpretor::Value, Error> {
         let package = self.generator_storage_world();
-        let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        storage_observation::with_storage_vm(
             &package,
-            comptime_interpretor::Budget {
-                steps: self.required_steps,
-                depth: 128,
+            &mut self.required_steps,
+            span,
+            "generator storage",
+            "read",
+            |vm| match cell {
+                GeneratorCell::Owned(cell) => vm.read_owned_value(cell),
+                GeneratorCell::Reference(reference) => vm.read_referenced_value(reference),
             },
         )
-        .map_err(|failure| {
-            error(
-                span,
-                format!("generator storage preparation failed: {failure}"),
-            )
-        })?;
-        let value = match cell {
-            GeneratorCell::Owned(cell) => vm.read_owned_value(cell),
-            GeneratorCell::Reference(reference) => vm.read_referenced_value(reference),
-        };
-        self.required_steps = vm.remaining_steps();
-        value.map_err(|failure| error(span, format!("generator storage read failed: {failure}")))
     }
 
     pub(super) fn checkpoint_generator_cells(
@@ -50,22 +42,14 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<comptime_interpretor::OwnedGraphCheckpoint, Error> {
         let package = self.generator_storage_world();
-        let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        storage_observation::with_storage_vm(
             &package,
-            comptime_interpretor::Budget {
-                steps: self.required_steps,
-                depth: 128,
-            },
+            &mut self.required_steps,
+            span,
+            "generator checkpoint",
+            "capture",
+            |vm| vm.checkpoint_owned_graph(roots),
         )
-        .map_err(|failure| {
-            error(
-                span,
-                format!("generator checkpoint preparation failed: {failure}"),
-            )
-        })?;
-        let checkpoint = vm.checkpoint_owned_graph(roots);
-        self.required_steps = vm.remaining_steps();
-        checkpoint.map_err(|failure| error(span, format!("generator checkpoint failed: {failure}")))
     }
 
     pub(in crate::program::cmtt) fn generator_value_needs_live_storage(

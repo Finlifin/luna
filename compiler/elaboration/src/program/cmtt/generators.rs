@@ -15,6 +15,7 @@ mod properties;
 pub(in crate::program::cmtt) mod spreads;
 pub(in crate::program::cmtt) mod statements;
 mod storage;
+mod storage_observation;
 mod type_inputs;
 use statements::Control;
 
@@ -1388,33 +1389,37 @@ impl Checker<'_, '_> {
                         .get(id)
                         .ok_or_else(|| error(span, "missing live generator entry storage"))?
                         .1;
-                    let package = n::Package::default();
-                    let mut vm = comptime_interpretor::Interpreter::for_comptime(
-                        &package,
-                        comptime_interpretor::Budget {
-                            steps: self.required_steps,
-                            depth: 128,
-                        },
-                    )
-                    .map_err(|failure| {
-                        error(
-                            span,
-                            format!("generator entry preparation failed: {failure}"),
-                        )
-                    })?;
-                    let data = match cell {
-                        GeneratorCell::Owned(cell) => vm.copy_owned_value(cell),
-                        GeneratorCell::Reference(reference) => vm.copy_referenced_value(reference),
-                    };
-                    self.required_steps = vm.remaining_steps();
-                    let data = data.map_err(|failure| {
-                        error(span, format!("generator entry snapshot failed: {failure}"))
-                    })?;
-                    Some(GeneratorCell::owned(data))
+                    Some(cell.clone())
                 } else {
                     None
                 };
                 entry.insert(*id, (value.clone(), cell));
+            }
+            if entry.values().any(|(_, cell)| cell.is_some()) {
+                let package = self.generator_storage_world();
+                // One private batch observes the same declaration world and
+                // allowance. No entry is returned until every copy succeeds.
+                storage_observation::with_storage_vm(
+                    &package,
+                    &mut self.required_steps,
+                    span,
+                    "generator entry",
+                    "snapshot",
+                    |vm| {
+                        for (_, cell) in entry.values_mut() {
+                            if let Some(cell) = cell {
+                                let data = match cell {
+                                    GeneratorCell::Owned(cell) => vm.copy_owned_value(cell)?,
+                                    GeneratorCell::Reference(reference) => {
+                                        vm.copy_referenced_value(reference)?
+                                    }
+                                };
+                                *cell = GeneratorCell::owned(data);
+                            }
+                        }
+                        Ok(())
+                    },
+                )?;
             }
         }
         Ok(entry)
