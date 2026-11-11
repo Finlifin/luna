@@ -1,5 +1,6 @@
 //! Shared source-order input plans, independent of the eventual type constructor.
 use super::*;
+mod progress;
 
 /// Consumers that cannot yet suspend frontend checking require ordinary typed
 /// expressions. Both consumers retain the same routing and execution plan.
@@ -763,19 +764,17 @@ impl Checker<'_, '_> {
                 routed[slot] = Some(RoutedDeclarationInput::Collected(collected));
                 order.push(slot);
             }
-            let mut values = vec![None; parameters.len()];
-            let mut known: Vec<Option<Term>> = vec![None; parameters.len()];
             let bindings = (0..parameters.len())
                 .map(|_| self.spread_binding(span))
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut evaluation_order = Vec::new();
-            // Type information is accumulated without invoking input code.
-            let mut known_parameters = Vec::new();
-            let mut known_types = Vec::new();
-            for slot in order.into_iter().chain(0..parameters.len()) {
-                if values[slot].is_some() {
-                    continue;
-                }
+            let mut progress = progress::Progress::new(
+                parameters,
+                bindings,
+                order,
+                &mut self.required_steps,
+                span,
+            )?;
+            while let Some(slot) = progress.current() {
                 if routed[slot].is_none()
                     && matches!(
                         clauses[slot].kind,
@@ -786,8 +785,8 @@ impl Checker<'_, '_> {
                     // required input. Keep it in the normal-form telescope.
                     let ty = self.instantiate_input_types(
                         &parameters[slot].2,
-                        &known_parameters,
-                        &known_types,
+                        progress.observed_parameters(),
+                        progress.observed_values(),
                         span,
                     )?;
                     if self.list_element_type(&ty).is_none() {
@@ -796,21 +795,26 @@ impl Checker<'_, '_> {
                             "normal-form variadic collector requires meta.List<T>",
                         ));
                     }
-                    known[slot] =
+                    let identity =
                         self.checked_collected_list_in(&[], &ty, &prepared_bindings, span)?;
-                    self.locals.insert(bindings[slot], ty.clone());
-                    values[slot] = Some(n::NormalFormArgument::Value(n::Expr {
-                        source: source(span),
-                        ty,
-                        kind: K::TypeList(Vec::new()),
-                    }));
-                    evaluation_order.push(slot);
+                    self.locals.insert(progress.binding(slot), ty.clone());
+                    progress.record(
+                        slot,
+                        n::NormalFormArgument::Value(n::Expr {
+                            source: source(span),
+                            ty,
+                            kind: K::TypeList(Vec::new()),
+                        }),
+                        identity,
+                        &mut self.required_steps,
+                        span,
+                    )?;
                     continue;
                 }
                 let mut dependent = self.declaration_domain_pending(
                     &parameters[slot].2,
                     parameters,
-                    &known_parameters,
+                    progress.observed_parameters(),
                     span,
                 )?;
                 let ty = if matches!(&routed[slot], Some(RoutedDeclarationInput::Source(_)))
@@ -821,8 +825,8 @@ impl Checker<'_, '_> {
                         parameters,
                         &mut routed,
                         &prepared_bindings,
-                        &known_parameters,
-                        &known_types,
+                        progress.observed_parameters(),
+                        progress.observed_values(),
                         span,
                     )?;
                     dependent = domain.pending;
@@ -830,8 +834,8 @@ impl Checker<'_, '_> {
                 } else {
                     self.instantiate_input_types(
                         &parameters[slot].2,
-                        &known_parameters,
-                        &known_types,
+                        progress.observed_parameters(),
+                        progress.observed_values(),
                         span,
                     )?
                 };
@@ -855,28 +859,28 @@ impl Checker<'_, '_> {
                             self.alias_substitution.remove(&parameters[previous].0);
                             self.alias_value_bindings.remove(&parameters[previous].0);
                             self.normal_default_bindings.remove(&parameters[previous].0);
-                            if values[previous].is_none() {
+                            if !progress.is_prepared(previous) {
                                 return Err(error(
                                     span,
                                     "normal-form default awaits preceding input",
                                 ));
                             }
                             if parameters[previous].2 == p(P::Type) {
-                                if let Some(ty) = &known[previous] {
+                                if let Some(ty) = progress.identity(previous) {
                                     self.alias_substitution.insert(
                                         parameters[previous].0,
                                         std::sync::Arc::new(ty.clone()),
                                     );
                                 } else {
                                     self.alias_value_bindings
-                                        .insert(parameters[previous].0, bindings[previous]);
+                                        .insert(parameters[previous].0, progress.binding(previous));
                                 }
                             } else {
                                 // A value prefix contributes to later type identities
                                 // as well as to executable default expressions. Keep
                                 // the local for evaluation and the known term for
                                 // dependent nominal domains; neither runs input code.
-                                if let Some(value) = &known[previous] {
+                                if let Some(value) = progress.identity(previous) {
                                     let value = self.copy_alias_type(value, span)?;
                                     self.alias_substitution
                                         .insert(parameters[previous].0, std::sync::Arc::new(value));
@@ -884,11 +888,11 @@ impl Checker<'_, '_> {
                                 self.normal_default_bindings.insert(
                                     parameters[previous].0,
                                     (
-                                        bindings[previous],
+                                        progress.binding(previous),
                                         self.instantiate_input_types(
-                                            &self.locals[&bindings[previous]],
-                                            &known_parameters,
-                                            &known_types,
+                                            &self.locals[&progress.binding(previous)],
+                                            progress.observed_parameters(),
+                                            progress.observed_values(),
                                             span,
                                         )?,
                                     ),
@@ -974,7 +978,7 @@ impl Checker<'_, '_> {
                     }
                     failure
                 })?;
-                known[slot] = match &value {
+                let identity = match &value {
                     n::NormalFormArgument::List { items, .. } if !dependent => {
                         self.checked_collected_list_in(items, &ty, &prepared_bindings, span)?
                     }
@@ -989,53 +993,22 @@ impl Checker<'_, '_> {
                         None => None,
                     },
                 };
-                if let Some(known) = &known[slot] {
+                if let Some(known) = &identity {
                     prepared_bindings.insert(
-                        bindings[slot],
+                        progress.binding(slot),
                         std::sync::Arc::new(self.copy_alias_type(known, span)?),
                     );
                 }
-                if let Some(value) = &known[slot] {
-                    known_parameters.push(parameters[slot].0);
-                    known_types.push(value.clone());
-                }
                 self.locals.insert(
-                    bindings[slot],
+                    progress.binding(slot),
                     value.expression().map(|expr| expr.ty.clone()).unwrap_or(ty),
                 );
-                values[slot] = Some(value);
-                evaluation_order.push(slot);
+                progress.record(slot, value, identity, &mut self.required_steps, span)?;
             }
             self.signature_owner = saved_owner;
             self.context = saved_context.clone();
             self.in_required_comptime = saved_mode;
-            let mut deferred = BTreeSet::new();
-            let terms = known
-                .into_iter()
-                .zip(parameters)
-                .map(|(known, (id, sort, _))| {
-                    known.unwrap_or_else(|| {
-                        deferred.insert(*id);
-                        Term::Rigid {
-                            declaration: *id,
-                            sort: *sort,
-                        }
-                    })
-                })
-                .collect();
-            Ok(PreparedDeclarationInputs {
-                arguments: values.into_iter().map(Option::unwrap).collect(),
-                plan: n::NormalFormInputPlan {
-                    order: evaluation_order,
-                    preparations,
-                    bindings,
-                },
-                formation: FormationInputs {
-                    terms,
-                    deferred,
-                    environment: BTreeMap::new(),
-                },
-            })
+            progress.finish(preparations, span)
         })();
         self.locals = saved_locals;
         self.normal_default_bindings = saved_bindings;

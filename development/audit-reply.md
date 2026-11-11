@@ -210,6 +210,11 @@ cell 身份、内容和 ownership，成功 quote 仍保留构造效果。内部�
 最终相关检查 `/tmp/luna-tools-gwnms93_/result.json` 退出 0，1,679 项通过、
 2 项既有 ignored；普通调用的待定 Type 域仍未接通。
 
+声明输入准备循环随后迁入独立 Progress，集中保存 producer、身份、绑定与调度位置。
+越序／未完成计划不能发布，身份复制失败不消费当前位置；观察到身份仍保留原 producer。
+这是生产准备路径的状态清理，尚未接通 HIR 挂起或实际 Type 结果回填。范围见
+[声明输入准备进度](elaboration-state-and-publication.md#已接入声明输入准备有独立的进度所有者)。
+
 这几步是 M1–M3 的前置清理，不是整条恢复架构完成。后续主干仍是
 [待定域的普通调用](refactoring-plan.md#下一条纵向交付待定域的普通调用)，并用真实
 sysroot 的 meta.List／builder／comptime 方法作消费者。不能继续只在已知域的静态

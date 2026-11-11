@@ -370,6 +370,37 @@ ownership 保存和恢复机制。特别地，无声明目录的内部回退可�
   `/tmp/luna-tools-gwnms93_/result.json` 退出 0，1,679 项通过、2 项既有 ignored。
   原 VM 验证、CMTT 方法与真实 sysroot 源码路径一起检查，没有运行全 workspace。
 
+### 已接入：声明输入准备有独立的进度所有者
+
+`declaration_inputs::progress::Progress` 接管原准备循环中的 producer、身份、局部绑定、
+准备顺序及域替换前缀。显式输入按路由后的源码顺序处理，省略输入随后按声明顺序
+处理；当前位置只有在产物记录成功后才前进。空收集器与默认值使用相同记录入口。
+尚未准备完不能发布输入计划，重复／越序记录拒绝，预算不足不会留下半个身份前缀。
+新增身份复制在写入前计费，失败消耗的预算不退还。
+
+这里保存的是准备进度，并非已经执行的实参。producer 与可选的静态身份分别保留；
+未知身份继续作为 deferred 形成输入，不能凭 rigid 占位宣称域已经完成。最终计划
+按声明顺序返回参数，但按准备顺序保留求值位置；typed 消费者仍须取得普通 NIR
+表达式，身份观察不能抹掉原 producer 或授予执行资格。S-expression dump 显示
+调度、当前位置、已准备项及待定身份。
+
+生产准备循环已使用该 owner，不过它仍在同步调用内存活：路由后的 HIR、检查环境、
+展开输入准备以及实际 invocation 没有因此成为可挂起区域。现有 NormalFormArgument
+也尚未退役；本次没有增加其节点种类。两个待定 Type 域的普通调用正例继续 ignored，
+下一步须将源检查进度与原 invocation 的 Type 结果交接，不能重新执行整个输入前缀。
+
+验证工作目录 `/home/fin/luna`：
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test ordinary_clause_collectors --test ordinary_callable_types --test clause_packet_preparation --test clause_source_dependencies --test normal_input_plans --test open_normal_input_plans --test default_calls --test builder_invocations --no-fail-fast`：
+  `/tmp/luna-tools-402xn3ie/result.json`，退出 0，511 项通过、2 项既有 ignored。
+  新增局部测试覆盖越序、预算失败后继续、未完成计划拒绝、身份与 producer 分离及
+  dump 转义；现有真实 sysroot 用例检查默认值、收集器、输入顺序和 builder 消费者。
+- 两个修改的 Rust 文件通过 scoped rustfmt 检查，
+  `/tmp/luna-tools-89agc13r/result.json` 退出 0。未运行全 workspace 或性能基准。
+
+以上是保留作者既有资源检查修改的工作区验证；该修改、formatter、正式 docs 和
+library 的既有修改均未纳入本次提交。
+
 ### 已接入：已知泛型域与未供应输入分开
 
 `03908c64` 后追踪上述错误限定类型失败，实际拒绝条件是把 `!bool bool` 与
