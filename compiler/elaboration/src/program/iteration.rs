@@ -123,7 +123,7 @@ impl Checker<'_, '_> {
             kind,
         };
         self.locals.insert(receiver, iterable.ty.clone());
-        self.loops.push(identity);
+        self.control.loops.push(identity);
         let checked = (|| {
             let method = self
                 .selected_method(
@@ -194,7 +194,7 @@ impl Checker<'_, '_> {
             };
             let mut connections: BTreeMap<_, _> = saved_locals
                 .keys()
-                .chain(self.loops.iter())
+                .chain(self.control.loops.iter())
                 .map(|id| (*id, *id))
                 .collect();
             connections.extend(pattern_binding_ids(pat).into_iter().map(|id| (id, id)));
@@ -288,7 +288,7 @@ impl Checker<'_, '_> {
             }
             Ok(result)
         })();
-        self.loops.pop();
+        self.control.loops.pop();
         self.locals = saved_locals;
         self.immutable = saved_immutable;
         self.context = saved_context;

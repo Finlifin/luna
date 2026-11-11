@@ -218,7 +218,7 @@ impl Checker<'_, '_> {
                 .body(*body)
                 .ok_or_else(|| error(item.span, "missing template setup body"))?;
             let mut value = self.quoted_runtime_boundary(|checker| {
-                checker.result = Some(p(P::Void));
+                checker.control.result = Some(p(P::Void));
                 checker.computation_body(body.value, Some(&p(P::Void)))
             })?;
             if instance.is_some() {

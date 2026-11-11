@@ -138,7 +138,7 @@ impl Checker<'_, '_> {
                 } else {
                     pattern
                 };
-                // Keep self.result and loop targets: return/break/continue belong
+                // Keep self.control.result and loop targets: return/break/continue belong
                 // to the lexical caller, not the operation result contract.
                 let body = self.expr(arm.body, Some(result))?;
                 handlers[index].arms.push(n::MatchArm {

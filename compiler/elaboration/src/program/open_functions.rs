@@ -2050,11 +2050,7 @@ impl Checker<'_, '_> {
         let saved_staged_locals = std::mem::take(&mut self.open_staged_locals);
         let saved_staged_locals_members = std::mem::take(&mut self.open_member_locals);
         let saved_captures = std::mem::take(&mut self.captures);
-        let saved_result = self.result.take();
-        let saved_partial = self.partial_return_context.take();
-        let saved_optional = std::mem::take(&mut self.pending_optional_returns);
-        let saved_returns = self.return_observations.take();
-        let saved_loops = std::mem::take(&mut self.loops);
+        let saved_control = std::mem::take(&mut self.control);
         let saved_immutable = std::mem::take(&mut self.immutable);
         let saved_context = self.context.clone();
         let saved_contract = std::mem::replace(&mut self.checking_contract, false);
@@ -2086,11 +2082,7 @@ impl Checker<'_, '_> {
         self.open_staged_locals = saved_staged_locals;
         self.open_member_locals = saved_staged_locals_members;
         self.captures = saved_captures;
-        self.result = saved_result;
-        self.partial_return_context = saved_partial;
-        self.pending_optional_returns = saved_optional;
-        self.return_observations = saved_returns;
-        self.loops = saved_loops;
+        self.control = saved_control;
         self.immutable = saved_immutable;
         self.context = saved_context;
         self.checking_contract = saved_contract;
@@ -2307,7 +2299,7 @@ impl Checker<'_, '_> {
                 }
                 other => other.clone(),
             };
-            this.result = match &result {
+            this.control.result = match &result {
                 D::Known(ty) => Some(ty.clone()),
                 D::Any => None,
             };
@@ -3254,7 +3246,7 @@ impl Checker<'_, '_> {
                 let staged_members = self.open_member_locals.clone();
                 let immutable = self.immutable.clone();
                 let context = self.context.clone();
-                self.loops.push(local(value.hir_id));
+                self.control.loops.push(local(value.hir_id));
                 let checked = (|| {
                     self.immutable.extend(pattern_binding_ids(pat));
                     let pattern =
@@ -3288,7 +3280,7 @@ impl Checker<'_, '_> {
                     }
                     self.describe_open_block(body, &mut body_locals, returns, None, depth + 1)
                 })();
-                self.loops.pop();
+                self.control.loops.pop();
                 self.locals = saved;
                 self.open_staged_locals = staged;
                 self.open_member_locals = staged_members;
@@ -3461,9 +3453,9 @@ impl Checker<'_, '_> {
                 let saved_transfer = self
                     .open_loop_transfers
                     .insert(identity, LoopTransfers::default());
-                self.loops.push(identity);
+                self.control.loops.push(identity);
                 let checked = self.describe_open_block(body, locals, returns, None, depth + 1);
-                self.loops.pop();
+                self.control.loops.pop();
                 let transfers = self.open_loop_transfers.remove(&identity).unwrap();
                 if let Some(previous) = saved_transfer {
                     self.open_loop_transfers.insert(identity, previous);
@@ -4110,8 +4102,12 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(expr.span, "ordinary input description budget exhausted"))?;
         let saved_spread = std::mem::replace(&mut self.describing_open_spread, false);
         let expected_description = expected.cloned().map(D::Known);
-        let returns = self.result.clone().map(D::Known).or_else(|| {
-            matches!(self.return_observations, Some(ReturnObservations::Deferred)).then_some(D::Any)
+        let returns = self.control.result.clone().map(D::Known).or_else(|| {
+            matches!(
+                self.control.return_observations,
+                Some(ReturnObservations::Deferred)
+            )
+            .then_some(D::Any)
         });
         let mut locals = self
             .locals
@@ -4848,7 +4844,7 @@ impl Checker<'_, '_> {
         let saved_transfer = self
             .open_loop_transfers
             .insert(identity, LoopTransfers::default());
-        self.loops.push(identity);
+        self.control.loops.push(identity);
         let checked = (|| {
             let mut bodies_diverge = true;
             let mut patterns_irrefutable = true;
@@ -4919,7 +4915,7 @@ impl Checker<'_, '_> {
             self.require_description(&result, expected, expr.span)?;
             Ok(result)
         })();
-        self.loops.pop();
+        self.control.loops.pop();
         self.open_loop_transfers.remove(&identity);
         if let Some(previous) = saved_transfer {
             self.open_loop_transfers.insert(identity, previous);
@@ -4951,7 +4947,7 @@ impl Checker<'_, '_> {
         }
         // A pending return domain has no ordinary Term yet. Describe the
         // continuation compositionally, before installing candidate bindings.
-        if let Some(otherwise) = binding.otherwise.filter(|_| self.result.is_none()) {
+        if let Some(otherwise) = binding.otherwise.filter(|_| self.control.result.is_none()) {
             let description =
                 self.describe_open_expression(otherwise, locals, returns, None, depth + 1)?;
             self.require_description(&description, Some(&D::Known(p(P::Never))), otherwise.span)?;
@@ -5677,9 +5673,11 @@ impl Checker<'_, '_> {
             .map(|(_, context)| context.clone());
         let candidate = if infer_clauses {
             let saved = std::mem::replace(&mut self.describing_open_spread, true);
-            let saved_returns = if matches!(returns, Some(D::Any)) && self.result.is_none() {
+            let saved_returns = if matches!(returns, Some(D::Any)) && self.control.result.is_none()
+            {
                 Some(
-                    self.return_observations
+                    self.control
+                        .return_observations
                         .replace(ReturnObservations::Deferred),
                 )
             } else {
@@ -5699,7 +5697,7 @@ impl Checker<'_, '_> {
             });
             self.describing_open_spread = saved;
             if let Some(saved) = saved_returns {
-                self.return_observations = saved;
+                self.control.return_observations = saved;
             }
             let Some(candidate) = candidate? else {
                 return Ok(None);
@@ -5736,9 +5734,10 @@ impl Checker<'_, '_> {
             .checked_sub(self.open_loop_transfers.len() as u64)
             .ok_or_else(|| error(expr.span, "spread completion description budget exhausted"))?;
         let saved = std::mem::replace(&mut self.describing_open_spread, true);
-        let saved_returns = if matches!(returns, Some(D::Any)) && self.result.is_none() {
+        let saved_returns = if matches!(returns, Some(D::Any)) && self.control.result.is_none() {
             Some(
-                self.return_observations
+                self.control
+                    .return_observations
                     .replace(ReturnObservations::Deferred),
             )
         } else {
@@ -5810,7 +5809,7 @@ impl Checker<'_, '_> {
             },
         );
         if let Some(saved_returns) = saved_returns {
-            self.return_observations = saved_returns;
+            self.control.return_observations = saved_returns;
         }
         self.describing_open_spread = saved;
         if result.is_err() {
@@ -7486,10 +7485,11 @@ impl Checker<'_, '_> {
                     let saved_returns = if description
                         .as_ref()
                         .is_some_and(|(_, returns, _)| matches!(returns, Some(D::Any)))
-                        && self.result.is_none()
+                        && self.control.result.is_none()
                     {
                         Some(
-                            self.return_observations
+                            self.control
+                                .return_observations
                                 .replace(ReturnObservations::Deferred),
                         )
                     } else {
@@ -7504,7 +7504,7 @@ impl Checker<'_, '_> {
                         allow_numeric_defaults,
                     );
                     if let Some(saved) = saved_returns {
-                        self.return_observations = saved;
+                        self.control.return_observations = saved;
                     }
                     let (value, advanced) = attempt?;
                     if let Some(value) = value {
@@ -8926,7 +8926,7 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            this.result = Some((**result).clone());
+            this.control.result = Some((**result).clone());
             let preconditions = this.program_preconditions(owner)?;
             let result_binding = sig.return_binding.map(local);
             let (postconditions, entry_snapshots) =

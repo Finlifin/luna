@@ -165,7 +165,7 @@ impl Checker<'_, '_> {
             .then_some(attribute.lexical_owner);
             self.context = self.definition_context(attribute.lexical_owner);
             self.locals.clear();
-            self.result = None;
+            self.control.result = None;
             let expected = attribute.configuration_key.is_none().then(|| p(P::Object));
             let (value, ty) = self.required_typed_expression(attribute.value, expected.as_ref())?;
             let value = self.materialize_local_constant(value, ty, attribute.span)?;

@@ -22,9 +22,9 @@ impl Checker<'_, '_> {
             H::For {..} => return self.iterator_loop(expr, expected),
             H::Loop(block) => {
                 let identity = local(expr.hir_id);
-                self.loops.push(identity);
+                self.control.loops.push(identity);
                 let body = self.block(block, None);
-                self.loops.pop();
+                self.control.loops.pop();
                 let mut body = body?;
                 let mut source_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                 let before = source_fuel;
@@ -40,7 +40,7 @@ impl Checker<'_, '_> {
             }
             H::BreakTo(target) | H::ContinueTo(target) => {
                 let identity = local(*target);
-                if !self.loops.contains(&identity) {
+                if !self.control.loops.contains(&identity) {
                     return Err(error(
                         expr.span,
                         "loop transfer outside a loop in this function or lambda",
@@ -57,7 +57,7 @@ impl Checker<'_, '_> {
                 if label.name != hir::Symbol::invalid() {
                     return Err(error(expr.span, "named loop transfer is not implemented"));
                 }
-                let identity = *self
+                let identity = *self.control
                     .loops
                     .last()
                     .ok_or_else(|| error(expr.span, "loop transfer outside a loop"))?;
@@ -212,7 +212,7 @@ impl Checker<'_, '_> {
                 (p(P::Void), K::CheckPredicate(Box::new(condition)))
             }
             H::Return(value) => {
-                if self.result.is_none() && self.return_observations.is_none() {
+                if self.control.result.is_none() && self.control.return_observations.is_none() {
                     let crosses_required_boundary = self.in_required_comptime
                         && !self.in_code_body
                         && self.signature_owner.is_some_and(|owner| {
@@ -225,9 +225,9 @@ impl Checker<'_, '_> {
                         "return outside a function"
                     }));
                 }
-                let expected_return = self.result.clone().or_else(|| self.return_observations.as_ref()
+                let expected_return = self.control.result.clone().or_else(|| self.control.return_observations.as_ref()
                     .and_then(|observations| observations.iter().find(|ty| !is_never(ty) && !matches!(ty, Term::ErrorResult { result, .. } if is_never(result))).cloned()));
-                let partial = self.partial_return_context.clone();
+                let partial = self.control.partial_return_context.clone();
                 // Absence supplies no payload evidence. Keep the control exit
                 // private until the callback's successful paths determine ?T,
                 // just as for the missing branch of optional propagation.
@@ -236,7 +236,7 @@ impl Checker<'_, '_> {
                     && value.is_some_and(|value| matches!(value.kind, H::Null))
                 {
                     let return_source = source(expr.span);
-                    self.pending_optional_returns.insert(
+                    self.control.pending_optional_returns.insert(
                         (return_source.start, return_source.end),
                         source(value.unwrap().span),
                     );
@@ -261,12 +261,12 @@ impl Checker<'_, '_> {
                 if let Some(expected) = &expected_return {
                     self.require_expression(&ty, expected, expr.span)?;
                 }
-                if let Some(observations) = &mut self.return_observations {
+                if let Some(observations) = &mut self.control.return_observations {
                     observations.push(ty);
                 }
-                if self.result.is_none() && matches!(self.return_observations, Some(ReturnObservations::Infer(_))) {
+                if self.control.result.is_none() && matches!(self.control.return_observations, Some(ReturnObservations::Infer(_))) {
                     let site = source(expr.span);
-                    self.inferred_return_sites.insert((site.start, site.end));
+                    self.control.inferred_return_sites.insert((site.start, site.end));
                 }
                 (p(P::Never), K::Return(value.map(Box::new)))
             }

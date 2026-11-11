@@ -230,6 +230,48 @@ Type 发布只移除已经完成的等待项；失败沿原边传播，无关兄
 中 `test result:`。三个 Rust 文件格式检查 `/tmp/luna-tools-05y1dxrc/result.json` 退出 0，
 `git diff --check` 通过。保留作者原有资源分析修改，未做全 workspace 检查或性能测量。
 
+### 已接入：源码控制状态按边界归属
+
+`Checker` 原先分散保存返回目标、部分返回上下文、待完成的可选／错误返回点、
+推断返回位置、返回观察以及循环目标。签名、默认值、required invocation、quote
+和 generator 各自枚举这些字段；部分入口未包含错误传播及推断返回位置。
+现在这些活动数据归入 `program/control.rs::Context`，独立边界整体移出并恢复，
+推测检查复制及恢复完整控制上下文。闭包从独立控制上下文开始检查，不继承外层返回目标。
+
+这覆盖真实源码的签名、参数／字段／关联项默认值、required root/function、开放函数、
+闭包、quoted runtime 和 generator frame；不是另建一个仅供直接测试使用的入口。
+同一 computation body 仍只临时替换返回目标与部分上下文，保留当前返回证据；handler
+继续使用安装处的返回与循环目标。type observation 保持原有词法循环可见性，返回
+证据和捕获仍隔离。控制上下文、返回观察及部分调用上下文均有 S-expression Display，
+保留待定项的种类、源位置、嵌套结构和名称转义，不把 Unknown 导出为类型。
+
+这一步只收拢活动源码控制状态。局部绑定、捕获存储、候选事务、VM 预算和副作用的
+所有权没有被吸收到这里；复制控制上下文不意味着可以回退已经执行的 invocation。
+完整 Region 身份、可恢复检查位置及源码待定 callable 签名的调度接线仍未完成。
+
+验证工作目录 `/home/fin/luna`，以下命令均经
+`python3 -B development/check.py --timeout 900 -- test` 执行；完整命令与
+退出值见 result.json，输出锚点为同目录 stdout.log 的 `test result:`：
+
+- `-p elaboration --lib`：`/tmp/luna-tools-wrd0qehk/result.json`，退出 0，187 项通过。
+- `-p luna --test control_boundaries --test error_surface --test default_calls --test cmtt --test cmtt_methods --test optional_purity --test handler_lexical_returns --no-fail-fast`：
+  `/tmp/luna-tools-w7rr8fe3/result.json`，退出 101；926 项通过，一项已有用例失败。
+  新增源码检查覆盖六种嵌套入口、外层早退／错误传播、required 边界拒绝及 handler
+  的词法控制目标；保留原测试预期。
+- 将本次修改的生产文件临时换回 `dff0d369`，运行
+  `-p luna --test error_surface generic_comptime_error_inputs_resume_with_completed_success_domains -- --exact`：
+  `/tmp/luna-tools-uagymjto/result.json` 退出 101，在相同 313..325 调用处、内部
+  174..179 位置报相同 `TypeContractRejected`。这是仍待修复的泛型 comptime
+  错误限定类型准入问题；本次未修复。对照后按摘要恢复本次源码，保留作者原有修改。
+- `-p luna --test library_protocols --test ordinary_callable_types --test closure_environment_parameters --test spread_control --test inline_control --no-fail-fast`：
+  `/tmp/luna-tools-3ag0fquk/result.json`，退出 0，319 项通过；一项原有源码待定
+  签名用例仍 ignored。真实 sysroot 接口、闭包环境及循环／展开路径均参与检查。
+- `-p luna --test execution callback`：`/tmp/luna-tools-f3opzmrs/result.json`，退出 0，
+  30 项通过，包含部分上下文传播至显式／提前返回及候选重试。
+
+修改的 Rust 文件格式检查 `/tmp/luna-tools-g__5tg4l/result.json` 退出 0；
+`git diff --check` 通过。未运行全 workspace 或性能基准，未改动正式 docs。
+
 ## 5. Observe、登记与发布
 
 ObservationKey 包含语义主体、所请求 facet、作用域/视图和当前前提；它与 task key 不同。

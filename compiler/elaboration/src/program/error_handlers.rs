@@ -743,11 +743,12 @@ impl Checker<'_, '_> {
             result => (None, result),
         };
         let mut labels = self
+            .control
             .pending_error_returns
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        if let Some(observations) = &self.return_observations {
+        if let Some(observations) = &self.control.return_observations {
             for ty in observations.iter() {
                 if let Term::ErrorResult { errors, .. } = ty {
                     labels.extend(errors.iter().cloned());
@@ -764,11 +765,12 @@ impl Checker<'_, '_> {
             Term::error_result(labels, result)
         };
         let mut remaining = self
+            .control
             .pending_error_returns
             .keys()
             .copied()
             .collect::<BTreeSet<_>>();
-        let mut explicit = self.inferred_return_sites.clone();
+        let mut explicit = self.control.inferred_return_sites.clone();
         nir::visit::expression_mut(body, &mut 100_000, |node, _| {
             let key = (node.source.start, node.source.end);
             if remaining.contains(&key) {

@@ -1170,11 +1170,7 @@ impl Checker<'_, '_> {
         let saved_checking = std::mem::replace(&mut self.checking_contract, false);
         let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
         let saved_numeric = std::mem::replace(&mut self.numeric_defaults, true);
-        let saved_result = self.result.take();
-        let saved_partial_return = self.partial_return_context.take();
-        let saved_optional_returns = std::mem::take(&mut self.pending_optional_returns);
-        let saved_returns = self.return_observations.take();
-        let saved_loops = std::mem::take(&mut self.loops);
+        let saved_control = std::mem::take(&mut self.control);
         let saved_captures = std::mem::take(&mut self.captures);
         self.context = self.definition_context(owner);
         let result = self.expr(initializer, Some(expected)).and_then(|expr| {
@@ -1191,11 +1187,7 @@ impl Checker<'_, '_> {
         self.checking_contract = saved_checking;
         self.in_required_comptime = saved_mode;
         self.numeric_defaults = saved_numeric;
-        self.result = saved_result;
-        self.partial_return_context = saved_partial_return;
-        self.pending_optional_returns = saved_optional_returns;
-        self.return_observations = saved_returns;
-        self.loops = saved_loops;
+        self.control = saved_control;
         self.captures = saved_captures;
         result
     }

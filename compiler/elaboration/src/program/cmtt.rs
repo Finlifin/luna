@@ -417,7 +417,7 @@ impl Checker<'_, '_> {
         // Ordinary quotes have no outer control targets. Template bodies may
         // explicitly supply the return type of their generated function.
         let checked = self.quoted_runtime_boundary(|checker| {
-            checker.result = return_type;
+            checker.control.result = return_type;
             // Definition checking admits pattern interface evidence;
             // the quoted body is retained only after actual invocation.
             checker.pattern_quote_pending = Some(false);
@@ -520,11 +520,7 @@ impl Checker<'_, '_> {
         &mut self,
         check: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let result = self.result.take();
-        let returns = self.return_observations.take();
-        let partial = self.partial_return_context.take();
-        let optional = std::mem::take(&mut self.pending_optional_returns);
-        let loops = std::mem::take(&mut self.loops);
+        let saved_control = std::mem::take(&mut self.control);
         let captures = std::mem::take(&mut self.captures);
         let resume = self.effect_resume_result.take();
         let required = std::mem::replace(&mut self.in_required_comptime, false);
@@ -534,11 +530,7 @@ impl Checker<'_, '_> {
         let pattern_pending = self.pattern_quote_pending.take();
         let checked = check(self);
         self.pattern_quote_pending = pattern_pending;
-        self.result = result;
-        self.return_observations = returns;
-        self.partial_return_context = partial;
-        self.pending_optional_returns = optional;
-        self.loops = loops;
+        self.control = saved_control;
         self.captures = captures;
         self.effect_resume_result = resume;
         self.in_required_comptime = required;
@@ -673,7 +665,7 @@ impl Checker<'_, '_> {
         // A template body can carry a return to the generated test. Inserting
         // that control transfer into a closure or an independent quote must
         // not silently retarget it to the innermost function.
-        if self.result.is_none() || !self.captures.is_empty() {
+        if self.control.result.is_none() || !self.captures.is_empty() {
             let mut fuel = self.required_steps as usize;
             let checked = nir::visit::expression_in_scope(template, &mut fuel, |node, _| {
                 if matches!(node.kind, K::Return(_)) {

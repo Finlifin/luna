@@ -29,9 +29,12 @@ impl Checker<'_, '_> {
                 );
             }
             H::ErrorPropagate(input) => {
-                let target = self.result.clone();
+                let target = self.control.result.clone();
                 if target.is_none()
-                    && !matches!(self.return_observations, Some(ReturnObservations::Infer(_)))
+                    && !matches!(
+                        self.control.return_observations,
+                        Some(ReturnObservations::Infer(_))
+                    )
                 {
                     return Err(context_error(
                         expr.span,
@@ -93,7 +96,8 @@ impl Checker<'_, '_> {
                     )?;
                     let return_source = self.error_generated_source(expr.span)?;
                     if target.is_none() {
-                        self.pending_error_returns
+                        self.control
+                            .pending_error_returns
                             .insert((return_source.start, return_source.end), label.clone());
                     }
                     arms.push(n::MatchArm {
@@ -112,7 +116,8 @@ impl Checker<'_, '_> {
                         },
                     });
                 }
-                if let (Some(observations), Some(target)) = (&mut self.return_observations, target)
+                if let (Some(observations), Some(target)) =
+                    (&mut self.control.return_observations, target)
                 {
                     observations.push(target);
                 }
@@ -126,10 +131,10 @@ impl Checker<'_, '_> {
                 });
             }
             H::OptionPropagate(input) => {
-                let result = self.result.clone();
-                let deferred = self.return_observations.is_some()
+                let result = self.control.result.clone();
+                let deferred = self.control.return_observations.is_some()
                     && matches!(
-                        &self.partial_return_context,
+                        &self.control.partial_return_context,
                         Some(crate::calls::InputContext::Optional(_))
                     );
                 if result.is_none() && !deferred {
@@ -171,7 +176,7 @@ impl Checker<'_, '_> {
                 };
                 let empty = if result_layout.is_some() {
                     let result = result.unwrap();
-                    if let Some(observations) = &mut self.return_observations {
+                    if let Some(observations) = &mut self.control.return_observations {
                         observations.push(result.clone());
                     }
                     Some(Box::new(n::Expr {
@@ -181,7 +186,8 @@ impl Checker<'_, '_> {
                     }))
                 } else {
                     // This private control-exit site is completed before the closure is exported.
-                    self.pending_optional_returns
+                    self.control
+                        .pending_optional_returns
                         .insert((return_source.start, return_source.end), empty_source);
                     None
                 };

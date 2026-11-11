@@ -415,9 +415,9 @@ impl Checker<'_, '_> {
         };
         let saved_resume = self.effect_resume_result.take();
         let saved_environment = std::mem::replace(&mut self.effect_environment, effects.clone());
-        let saved_result = std::mem::replace(&mut self.result, value_type.cloned());
+        let saved_result = std::mem::replace(&mut self.control.result, value_type.cloned());
         let saved_partial_return = std::mem::replace(
-            &mut self.partial_return_context,
+            &mut self.control.partial_return_context,
             if value_type.is_none() {
                 input.cloned()
             } else {
@@ -428,8 +428,8 @@ impl Checker<'_, '_> {
             (None, Some(input)) => self.input_context_expression(body, input),
             _ => self.expr(body, value_type),
         };
-        self.result = saved_result;
-        self.partial_return_context = saved_partial_return;
+        self.control.result = saved_result;
+        self.control.partial_return_context = saved_partial_return;
 
         self.effect_resume_result = saved_resume;
         self.effect_environment = saved_environment;

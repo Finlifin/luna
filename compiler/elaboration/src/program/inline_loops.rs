@@ -202,7 +202,7 @@ impl Checker<'_, '_> {
         let saved_selection = self.inline_selection;
         let saved_suppressed = self.in_unselected_inline;
         let identity = local(expr.hir_id);
-        self.loops.push(identity);
+        self.control.loops.push(identity);
         let result = (|| {
             let mut iterations = Vec::new();
             // An empty range still checks its ordinary body, without invoking
@@ -306,7 +306,7 @@ impl Checker<'_, '_> {
                 if selected {
                     let connections = saved_locals
                         .keys()
-                        .chain(self.loops.iter())
+                        .chain(self.control.loops.iter())
                         .map(|id| (*id, *id))
                         .collect();
                     iterations.push(self.wrap_inline_iteration(
@@ -350,7 +350,7 @@ impl Checker<'_, '_> {
             }
             Ok(result)
         })();
-        self.loops.pop();
+        self.control.loops.pop();
         self.locals = saved_locals;
         self.partial_staged_bindings
             .retain(|binding, _| saved_partial_values.contains(binding));
@@ -414,7 +414,7 @@ impl Checker<'_, '_> {
         let saved_suppressed = self.in_unselected_inline;
         let suppressed = self.in_unselected_inline;
         let identity = local(expr.hir_id);
-        self.loops.push(identity);
+        self.control.loops.push(identity);
         let result = (|| {
             // Destructure once into private locals. Unvisited elements remain
             // owned by the outer block and are cleaned when that block exits.
@@ -432,7 +432,7 @@ impl Checker<'_, '_> {
             }
             let connections: BTreeMap<_, _> = saved_locals
                 .keys()
-                .chain(self.loops.iter())
+                .chain(self.control.loops.iter())
                 .map(|id| (*id, *id))
                 .collect();
             let mut iterations = Vec::new();
@@ -662,7 +662,7 @@ impl Checker<'_, '_> {
             }
             Ok(result)
         })();
-        self.loops.pop();
+        self.control.loops.pop();
         self.locals = saved_locals;
         self.partial_staged_bindings
             .retain(|binding, _| saved_partial_values.contains(binding));

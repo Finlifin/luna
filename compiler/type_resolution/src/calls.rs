@@ -9,6 +9,7 @@ use crate::{
 };
 use nir::{DeclarationId, Sort, Term, TypeError};
 
+mod display;
 mod domain_staging;
 
 pub struct Scheme {

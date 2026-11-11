@@ -24,6 +24,7 @@ mod nominal_fields;
 mod spreads;
 mod tactics;
 use arguments::route_arguments;
+use control::ReturnObservations;
 mod bit_indices;
 mod block_regions;
 pub mod build_context;
@@ -566,11 +567,7 @@ fn elaborate_with_attributes(
         preparing_spread: None,
         pending_spread_inputs: BTreeMap::new(),
         observing_type: false,
-        result: None,
-        partial_return_context: None,
-        pending_optional_returns: BTreeMap::new(),
-        pending_error_returns: BTreeMap::new(),
-        inferred_return_sites: BTreeSet::new(),
+        control: control::Context::default(),
         optional_branch_probe_budget: 100_000,
         probing_optional_branch: false,
         optional_target_probe: None,
@@ -578,8 +575,6 @@ fn elaborate_with_attributes(
         effect_resume_result: None,
         preserve_effect_value: false,
         captures: Vec::new(),
-        return_observations: None,
-        loops: Vec::new(),
         structs: BTreeMap::new(),
         newtypes: BTreeMap::new(),
         alias_contracts: BTreeMap::new(),
@@ -1311,7 +1306,7 @@ fn elaborate_candidate<'a, 'h>(
                 checker.locals.insert(*binding, ty.clone());
             }
         }
-        checker.result = Some((**result).clone());
+        checker.control.result = Some((**result).clone());
         let body = package
             .body(body_id)
             .ok_or_else(|| error(item.span, "missing function body"))?;
@@ -1559,27 +1554,6 @@ struct OldScope {
     active: bool,
     bindings: BTreeMap<n::LocalId, n::LocalId>,
 }
-/// A return scope can infer a closure's result, or merely check an open
-/// definition whose result domain is still suspended. The latter must not
-/// unify distinct source exits before the invocation inputs are available.
-#[derive(Clone)]
-enum ReturnObservations {
-    Infer(Vec<Term>),
-    Deferred,
-}
-impl ReturnObservations {
-    fn iter(&self) -> std::slice::Iter<'_, Term> {
-        match self {
-            Self::Infer(types) => types.iter(),
-            Self::Deferred => [].iter(),
-        }
-    }
-    fn push(&mut self, ty: Term) {
-        if let Self::Infer(types) = self {
-            types.push(ty);
-        }
-    }
-}
 
 #[derive(Clone)]
 enum GeneratorCell {
@@ -1773,14 +1747,7 @@ struct Checker<'a, 'h> {
     preparing_spread: Option<n::SourceRange>,
     pending_spread_inputs: BTreeMap<n::LocalId, spreads::PendingPacket>,
     observing_type: bool,
-    result: Option<Term>,
-    partial_return_context: Option<crate::calls::InputContext>,
-    // Unresolved missing returns (explicit null or propagation), completed
-    // before exporting the enclosing callback. Values are absence-node spans.
-    pending_optional_returns: BTreeMap<(u32, u32), n::SourceRange>,
-    // Private propagation sites, completed after the callback result is inferred.
-    pending_error_returns: BTreeMap<(u32, u32), Term>,
-    inferred_return_sites: BTreeSet<(u32, u32)>,
+    control: control::Context,
     optional_branch_probe_budget: usize,
     probing_optional_branch: bool,
     optional_target_probe: Option<hir::HirId>,
@@ -1788,8 +1755,6 @@ struct Checker<'a, 'h> {
     effect_resume_result: Option<Term>,
     preserve_effect_value: bool,
     captures: Vec<CaptureFrame>,
-    return_observations: Option<ReturnObservations>,
-    loops: Vec<n::LocalId>,
     structs: BTreeMap<DeclarationId, n::Struct>,
     newtypes: BTreeMap<DeclarationId, nir::newtypes::Newtype>,
     alias_contracts: BTreeMap<DeclarationId, nir::type_aliases::Contract>,
@@ -1875,13 +1840,7 @@ impl Checker<'_, '_> {
         let saved_owner = self.signature_owner.replace(owner);
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_captures = std::mem::take(&mut self.captures);
-        let saved_result = self.result.take();
-        let saved_partial_return = self.partial_return_context.take();
-        let saved_optional_returns = std::mem::take(&mut self.pending_optional_returns);
-        let saved_error_returns = std::mem::take(&mut self.pending_error_returns);
-        let saved_return_sites = std::mem::take(&mut self.inferred_return_sites);
-        let saved_returns = self.return_observations.take();
-        let saved_loops = std::mem::take(&mut self.loops);
+        let saved_control = std::mem::take(&mut self.control);
         let saved_immutable = std::mem::take(&mut self.immutable);
         let saved_context = self.context.clone();
         let saved_contract = std::mem::replace(&mut self.checking_contract, false);
@@ -2398,13 +2357,7 @@ impl Checker<'_, '_> {
         self.signature_owner = saved_owner;
         self.locals = saved_locals;
         self.captures = saved_captures;
-        self.result = saved_result;
-        self.partial_return_context = saved_partial_return;
-        self.pending_optional_returns = saved_optional_returns;
-        self.pending_error_returns = saved_error_returns;
-        self.inferred_return_sites = saved_return_sites;
-        self.return_observations = saved_returns;
-        self.loops = saved_loops;
+        self.control = saved_control;
         self.immutable = saved_immutable;
         self.context = saved_context;
         self.checking_contract = saved_contract;
@@ -3254,13 +3207,7 @@ impl Checker<'_, '_> {
         }
         let locals = std::mem::take(&mut self.locals);
         let captures = std::mem::take(&mut self.captures);
-        let result = self.result.take();
-        let partial_return_context = self.partial_return_context.take();
-        let optional_returns = std::mem::take(&mut self.pending_optional_returns);
-        let error_returns = std::mem::take(&mut self.pending_error_returns);
-        let return_sites = std::mem::take(&mut self.inferred_return_sites);
-        let returns = self.return_observations.take();
-        let loops = std::mem::take(&mut self.loops);
+        let saved_control = std::mem::take(&mut self.control);
         let base_context = self.definition_context(owner);
         let context = std::mem::replace(&mut self.context, base_context);
         let signature_owner = self.signature_owner.replace(owner);
@@ -3269,13 +3216,7 @@ impl Checker<'_, '_> {
         self.context = context;
         self.locals = locals;
         self.captures = captures;
-        self.result = result;
-        self.partial_return_context = partial_return_context;
-        self.pending_optional_returns = optional_returns;
-        self.pending_error_returns = error_returns;
-        self.inferred_return_sites = return_sites;
-        self.return_observations = returns;
-        self.loops = loops;
+        self.control = saved_control;
         self.active_defaults.remove(&(owner, variant, index));
         let checked = checked?;
         constants::charge_copy(&checked, &mut self.required_steps, field.span)?;
@@ -4096,23 +4037,15 @@ impl Checker<'_, '_> {
                 // still build their own capture types during checking.
                 let captures = std::mem::take(&mut self.captures);
                 let locals = self.locals.clone();
-                let result = self.result.take();
-                let partial_return_context = self.partial_return_context.take();
-                let optional_returns = std::mem::take(&mut self.pending_optional_returns);
-                let error_returns = std::mem::take(&mut self.pending_error_returns);
-                let return_sites = std::mem::take(&mut self.inferred_return_sites);
-                let returns = self.return_observations.take();
+                let saved_control = std::mem::take(&mut self.control);
+                // Preserve lexical loop visibility for the unevaluated operand.
+                self.control.loops = saved_control.loops.clone();
                 let observing = std::mem::replace(&mut self.observing_type, true);
                 let checked = self.expr(value, None).map(|value| value.ty);
                 self.observing_type = observing;
                 self.captures = captures;
                 self.locals = locals;
-                self.result = result;
-                self.partial_return_context = partial_return_context;
-                self.pending_optional_returns = optional_returns;
-                self.pending_error_returns = error_returns;
-                self.inferred_return_sites = return_sites;
-                self.return_observations = returns;
+                self.control = saved_control;
                 checked
             }
             H::TyClosure(context, body) => {
@@ -5818,14 +5751,8 @@ impl Checker<'_, '_> {
             self.code_values.clone(),
             self.pattern_codes.clone(),
             self.aliases.clone(),
-            self.result.clone(),
-            self.partial_return_context.clone(),
-            self.pending_optional_returns.clone(),
-            self.pending_error_returns.clone(),
-            self.inferred_return_sites.clone(),
+            self.control.clone(),
             self.captures.clone(),
-            self.return_observations.clone(),
-            self.loops.clone(),
             self.immutable.clone(),
             self.context.clone(),
             self.field_defaults.clone(),
@@ -5853,14 +5780,8 @@ impl Checker<'_, '_> {
                 self.code_values,
                 self.pattern_codes,
                 self.aliases,
-                self.result,
-                self.partial_return_context,
-                self.pending_optional_returns,
-                self.pending_error_returns,
-                self.inferred_return_sites,
+                self.control,
                 self.captures,
-                self.return_observations,
-                self.loops,
                 self.immutable,
                 self.context,
                 self.field_defaults,
@@ -7030,11 +6951,7 @@ impl Checker<'_, '_> {
             ));
         }
         let saved_locals = self.locals.clone();
-        let saved_result = self.result.clone();
-        let saved_partial_return = self.partial_return_context.take();
-        let saved_optional_returns = std::mem::take(&mut self.pending_optional_returns);
-        let saved_error_returns = std::mem::take(&mut self.pending_error_returns);
-        let saved_return_sites = std::mem::take(&mut self.inferred_return_sites);
+        let saved_control = std::mem::take(&mut self.control);
         let saved_tactic = self.tactic_frame.take();
         // A callback infers its own result from both its tail and explicit
         // returns, even when the callback value is being probed by a parent.
@@ -7046,8 +6963,6 @@ impl Checker<'_, '_> {
                 false,
             ));
         }
-        let saved_returns = self.return_observations.take();
-        let saved_loops = std::mem::take(&mut self.loops);
         let mut outer = self.locals.keys().copied().collect::<BTreeSet<_>>();
         if comptime {
             // Signature inputs can be read before a runtime locals frame exists.
@@ -7115,8 +7030,8 @@ impl Checker<'_, '_> {
             } else {
                 contextual_result
             };
-            self.result = result_type.clone();
-            self.return_observations = Some(ReturnObservations::Infer(Vec::new()));
+            self.control.result = result_type.clone();
+            self.control.return_observations = Some(ReturnObservations::Infer(Vec::new()));
             let result_context = partial.and_then(|context| context.result_context.as_deref());
             let mut body = if result_type.is_none() {
                 let mut return_hint = None;
@@ -7124,6 +7039,7 @@ impl Checker<'_, '_> {
                     let checked = checker.computation_body_with_input(body, None, result_context);
                     if matches!(&checked, Err(failure) if failure.needs_context) {
                         return_hint = checker
+                            .control
                             .return_observations
                             .as_ref()
                             .and_then(|returns| returns.iter().find(|ty| !is_never(ty)).cloned());
@@ -7148,7 +7064,7 @@ impl Checker<'_, '_> {
             } else {
                 self.computation_body_with_input(body, result_type.as_ref(), result_context)?
             };
-            let returns = self.return_observations.as_ref().unwrap().clone();
+            let returns = self.control.return_observations.as_ref().unwrap().clone();
             let mut result = result_type.unwrap_or_else(|| {
                 if !is_never(&body.ty) {
                     body.ty.clone()
@@ -7174,12 +7090,12 @@ impl Checker<'_, '_> {
                 _ => None,
             };
             let completed_error_returns =
-                !self.pending_error_returns.is_empty() || allowed_errors.is_some();
+                !self.control.pending_error_returns.is_empty() || allowed_errors.is_some();
             if completed_error_returns {
                 result =
                     self.complete_error_returns(&mut body, result, allowed_errors, expr.span)?;
             }
-            if !self.pending_optional_returns.is_empty() {
+            if !self.control.pending_optional_returns.is_empty() {
                 let value_result = if let Term::Computation { result, .. } = &result {
                     result.as_ref()
                 } else {
@@ -7187,6 +7103,7 @@ impl Checker<'_, '_> {
                 };
                 self.optional_payload(value_result, expr.span)?;
                 let mut remaining = self
+                    .control
                     .pending_optional_returns
                     .keys()
                     .copied()
@@ -7194,6 +7111,7 @@ impl Checker<'_, '_> {
                 nir::visit::expression_mut(&mut body, &mut 100_000, |node, _| {
                     if matches!(node.kind, K::Return(None)) {
                         if let Some(empty_source) = self
+                            .control
                             .pending_optional_returns
                             .get(&(node.source.start, node.source.end))
                         {
@@ -7256,16 +7174,10 @@ impl Checker<'_, '_> {
         })();
         self.captures.pop();
         self.locals = saved_locals;
-        self.result = saved_result;
-        self.partial_return_context = saved_partial_return;
-        self.pending_optional_returns = saved_optional_returns;
-        self.pending_error_returns = saved_error_returns;
-        self.inferred_return_sites = saved_return_sites;
+        self.control = saved_control;
         let used = self.tactic_frame.as_ref().is_some_and(|(_, _, used)| *used);
         self.tactic_frame = saved_tactic;
         self.probing_optional_branch = saved_branch_probe;
-        self.return_observations = saved_returns;
-        self.loops = saved_loops;
         checked.map(|value| (value, used)).map_err(|mut failure| {
             if !tactic {
                 failure.needs_tactic = false;

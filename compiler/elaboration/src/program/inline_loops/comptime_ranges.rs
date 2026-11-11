@@ -72,7 +72,7 @@ impl Checker<'_, '_> {
         let saved_context = self.context.clone();
         let saved_data = self.generator_data.clone();
         let saved_partial: BTreeSet<_> = self.partial_staged_bindings.keys().copied().collect();
-        self.loops.push(identity);
+        self.control.loops.push(identity);
         let result = (|| {
             self.immutable.extend(pattern_binding_ids(pat));
             let pattern = self.pattern(pat, &p(P::Integer))?;
@@ -95,7 +95,7 @@ impl Checker<'_, '_> {
             );
             let mut connections: BTreeMap<_, _> = saved_locals
                 .keys()
-                .chain(self.loops.iter())
+                .chain(self.control.loops.iter())
                 .map(|id| (*id, *id))
                 .collect();
             connections.insert(current, current);
@@ -175,7 +175,7 @@ impl Checker<'_, '_> {
             }
             Ok(result)
         })();
-        self.loops.pop();
+        self.control.loops.pop();
         self.locals = saved_locals;
         self.immutable = saved_immutable;
         self.context = saved_context;

@@ -434,8 +434,6 @@ impl Checker<'_, '_> {
             self.default_input_owner.take(),
             std::mem::take(&mut self.specialization_inputs),
             self.effect_environment.take(),
-            self.partial_return_context.take(),
-            self.return_observations.take(),
         );
         let aliases = std::mem::take(&mut self.alias_substitution);
         let clause_bindings = std::mem::take(&mut self.normal_default_bindings);
@@ -452,8 +450,7 @@ impl Checker<'_, '_> {
             self.signature_owner.replace(owner),
             self.in_code_body,
             std::mem::take(&mut self.captures),
-            self.result.take(),
-            std::mem::take(&mut self.loops),
+            std::mem::take(&mut self.control),
             self.effect_resume_result.take(),
             self.in_required_comptime,
             self.in_staged_input,
@@ -474,8 +471,7 @@ impl Checker<'_, '_> {
             self.signature_owner,
             self.in_code_body,
             self.captures,
-            self.result,
-            self.loops,
+            self.control,
             self.effect_resume_result,
             self.in_required_comptime,
             self.in_staged_input,
@@ -490,8 +486,6 @@ impl Checker<'_, '_> {
             self.default_input_owner,
             self.specialization_inputs,
             self.effect_environment,
-            self.partial_return_context,
-            self.return_observations,
         ) = outer;
         self.alias_substitution = aliases;
         self.normal_default_bindings = clause_bindings;
