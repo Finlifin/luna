@@ -535,6 +535,47 @@ Function 路径拼写、连续独立调用未重新提供测试预算的问题�
 契约前发生；保留的仍是完整受检 NIR，不是未完成 HIR。源码模板、源任务与 VM 主体
 请求仍待接通，两项待决 Type 正例没有因此获得实现。
 
+### 真实 sysroot 下的标量探测与开放描述
+
+原 nesting fixture 没加载 sysroot，HIR 阶段连 bool 都无法解析，实际没有验证其
+声称的深层前端路径。修正公开绑定、阶段参数及具体 IIR 执行入口后，保留原来的
+13 种源码、32 层深度和结果断言，暴露了三处独立问题：
+
+- 一元协议探测关闭 numeric defaults 后缺少类型上下文，却再次以相同条件检查
+  操作数；嵌套会成倍重复失败工作。现在没有新目标域或新 defaults 时直接传回
+  needs-context；成功的受检操作数继续复用，不重复执行。
+- 开放标量描述递归占用整个调用／控制流分派帧。标量规则现迁入独立分派函数，
+  保留原预算、深度检查、类型前提及控制转移处理，没有增加线程栈或降低测试深度。
+- 开放算术描述在协议存在时丢掉数字字面量的 peer context，过早默认成 i32，
+  而普通检查会使用已知的 u8 结果域。两者现在共用 arithmetic_operand_hint；
+  只在原普通规则可提供标量上下文的位置使用，不把任意协议 Output 当作输入域。
+
+只将三个块检查文件暂还原至当时 HEAD、保留相同 fixture 与一元修复，
+`/tmp/luna-tools-z9j59br7/result.json` 仍在 open-arithmetic/NIR 栈溢出，退出 101；
+随后逐字节恢复这三个文件。拆分帧后 `/tmp/luna-tools-xbr5b14g/result.json` 暴露
+u8/i32 不一致；共用上下文后，同一子案例 `/tmp/luna-tools-xqi67oat/result.json`
+退出 0。此前长时停留于负号案例的运行由执行会话取消，退出 130；其
+`/tmp/luna-tools-97uphhr1/result.json` 未完成落盘，不能按文件中的 running 字段
+把它当作仍活跃进程或通过证据。
+
+这些修复没有接通通用源任务挂起；开放描述与普通表达式仍有待继续合并的规则。
+
+验证目录 `/home/fin/luna`，命令前缀为
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p elaboration --lib -p luna --test arithmetic_contexts --test open_functions --test nesting --no-fail-fast`：
+  708 项通过，一项失败，一项 subprocess 驱动专用 ignore；
+  `/tmp/luna-tools-knctk6hj/result.json` 退出 101。完整 nesting 矩阵通过，包括全部
+  AST／HIR／NIR 阶段与具体执行；新 sysroot 对照还检查默认数字及未选分支的域错误。
+- 唯一失败为 `later_type_inputs_keep_associated_result_identity`，报
+  `342..364: invalid binder reference 0:2`。将本轮五个相关生产文件暂还原到
+  `d43fef03` 后，以 `-p luna --test open_functions later_type_inputs_keep_associated_result_identity -- --exact`
+  单独重跑，`/tmp/luna-tools-ei0m3_0l/result.json` 同样退出 101、诊断相同。
+  文件随后逐字节恢复，未改变预期；此旧关联结果绑定缺口仍待处理。
+- `-p luna --test execution source_unary_protocol -- --nocapture`：两项通过，
+  `/tmp/luna-tools-ejpbjo3f/result.json` 退出 0；覆盖选定协议的 Output、操作数求值
+  次数与效应边界。未运行全 workspace 或 LLVM 原生验收。
+
 ## 4. 本次证据与限制
 
 工作目录 `/home/fin/luna`；所有检查通过 `development/check.py --timeout 900 -- test`。

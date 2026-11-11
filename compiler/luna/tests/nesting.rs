@@ -1,5 +1,5 @@
 use luna::{
-    cli::{Emit, Options},
+    cli::{self, Command, Emit},
     frontend::{self, Artifact},
 };
 
@@ -42,22 +42,22 @@ fn nested_expression_child() {
             format!("fn run()->bool {{{body}}}")
         }
         "machine-logic" => format!(
-            "typealias Byte=.u8'builtin;fn run()->bool {{let value: Byte = 1; let result = value + 1; {}true{} and result == 2}}",
+            "typealias Byte=u8;fn run()->bool {{let value: Byte = 1; let result = value + 1; {}true{} and result == 2}}",
             "not (".repeat(32),
             ")".repeat(32)
         ),
         "negative" => format!(
-            "typealias Tiny=.i8'builtin;fn nested()->Tiny {{ {}1{} }}fn run()->bool {{nested()==1}}",
+            "typealias Tiny=i8;fn nested()->Tiny {{ {}1{} }}fn run()->bool {{nested()==1}}",
             "-(".repeat(32),
             ")".repeat(32)
         ),
         "bits" => format!(
-            "typealias Bits=.BitVec'builtin<8>;fn nested()->Bits {{{}0{}}}fn run()->bool {{nested()==0}}",
+            "typealias Bits=BitVec<8>;fn nested()->Bits {{{}0{}}}fn run()->bool {{nested()==0}}",
             "not (".repeat(32),
             ")".repeat(32)
         ),
         "concat" => format!(
-            "typealias Bit=.BitVec'builtin<1>;typealias Word=.BitVec'builtin<32>;fn nested()->Word {{let zero:Bit=0;{}zero{}}}fn run()->bool {{nested()==0}}",
+            "typealias Bit=BitVec<1>;typealias Word=BitVec<32>;fn nested()->Word {{let zero:Bit=0;{}zero{}}}fn run()->bool {{nested()==0}}",
             "zero ++ (".repeat(31),
             ")".repeat(31)
         ),
@@ -67,7 +67,7 @@ fn nested_expression_child() {
             ")".repeat(32)
         ),
         "open-arithmetic" => format!(
-            "typealias Byte=.u8'builtin;fn nested(comptime flag:bool)->Byte {{{}(do {{inline if flag {{0}} else {{1}}}}){}}}fn run()->bool {{nested(true)==0}}",
+            "typealias Byte=u8;fn nested(comptime flag:bool)->Byte {{{}(do {{inline if flag {{0}} else {{1}}}}){}}}fn run()->bool {{nested(true)==0}}",
             "0 + (".repeat(32),
             ")".repeat(32)
         ),
@@ -79,7 +79,7 @@ fn nested_expression_child() {
             format!("fn nested(comptime flag:bool)->bool {{{body}}}fn run()->bool {{nested(true)}}")
         }
         "open-concat" => format!(
-            "typealias Bit=.BitVec'builtin<1>;typealias Word=.BitVec'builtin<32>;fn nested(comptime flag:bool)->Word {{let zero:Bit=0;{}(do {{inline if flag {{zero}} else {{zero}}}}){}}}fn run()->bool {{nested(true)==0}}",
+            "typealias Bit=BitVec<1>;typealias Word=BitVec<32>;fn nested(comptime flag:bool)->Word {{let zero:Bit=0;{}(do {{inline if flag {{zero}} else {{zero}}}}){}}}fn run()->bool {{nested(true)==0}}",
             "zero ++ (".repeat(31),
             ")".repeat(31)
         ),
@@ -91,35 +91,35 @@ fn nested_expression_child() {
     ));
     std::fs::write(&path, source).unwrap();
     eprintln!("frontend begin");
-    let result = frontend::compile(&Options {
-        dispatch_fuel: None,
-        comptime_intrinsics: Vec::new(),
-        input: path.clone(),
-        emit,
-        output: None,
-        build_modes: Default::default(),
-        build_targets: Default::default(),
-        sysroot: None,
-        splice_protocol: None,
-        meta_list_type: None,
-        index_protocol: None,
-        ord_protocol: None,
-        eq_protocol: None,
-        list_pattern_protocol: None,
-        comptime_list_pattern_protocol: None,
-        iterator_protocol: None,
-        into_iterator_protocol: None,
-        literal_into_protocol: None,
-        arithmetic_protocols: Default::default(),
-        tuple_type: None,
-    });
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let Command::Check(mut options) = cli::parse([
+        "check".into(),
+        path.clone().into_os_string(),
+        "--sysroot".into(),
+        library.into_os_string(),
+        "--build-target".into(),
+        "x86_64".into(),
+        "linux".into(),
+        "64".into(),
+    ])
+    .unwrap() else {
+        panic!("check command")
+    };
+    options.emit = emit;
+    if matches!(emit, Emit::Ast | Emit::Hir) {
+        options.build_targets = Default::default();
+    }
+    let result = frontend::compile(&options);
     eprintln!("frontend returned");
     std::fs::remove_file(path).unwrap();
     let result = result.unwrap_or_else(|error| panic!("{case}: {error}"));
     if let Artifact::Nir(package) = result {
         eprintln!("execution begin");
+        let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+        let mut vm =
+            comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
         assert_eq!(
-            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
             comptime_interpretor::Value::Bool(true)
         );
     }

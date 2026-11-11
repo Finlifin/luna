@@ -7655,17 +7655,8 @@ impl Checker<'_, '_> {
         } else {
             None
         };
-        let hint = expected
-            .map(|ty| self.structural_type(ty, expr.span))
-            .transpose()?;
-        let hint = hint.as_ref().filter(|ty| {
-            matches!(
-                ty,
-                Term::Primitive(P::Float | P::F16 | P::Bf16 | P::F32 | P::F64 | P::Integer)
-            ) || matches!(ty, Term::Primitive(p) if self.integer_layout(*p).is_some())
-                || self.proved_integer_family(ty, false)
-                || self.proved_float_family(ty)
-        });
+        let hint = self.arithmetic_operand_hint(expected, expr.span)?;
+        let hint = hint.as_ref();
         let fallback = (is_numeric_literal(left) && !is_float_literal(left)).then(|| p(P::Integer));
         let (left, right) = match checked_left {
             Some(checked) => self.peer_operands_with_ready(

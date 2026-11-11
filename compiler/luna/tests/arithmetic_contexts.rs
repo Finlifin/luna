@@ -1,9 +1,44 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+#[path = "support/sysroot_execution.rs"]
+#[allow(dead_code)]
+mod sysroot;
 use comptime_interpretor::{Budget, Interpreter, Value};
 use elaboration::arithmetic::Operator;
 use support::{calls, compile_with_source_bindings};
+
+#[test]
+fn scalar_destinations_reach_open_operands_before_numeric_defaulting() {
+    assert_eq!(
+        sysroot::run(
+            "
+            fn ordinary() -> u8 { 0 + (do { 0 }) }
+            fn selected(comptime flag: bool) -> u8 {
+                0 + (do { inline if flag { 0 } else { 1 } })
+            }
+            comptime fn defaulted() -> bool {
+                let value = -(-(-(-1)));
+                value == 1
+            }
+            fn run() -> bool {
+                const defaults = defaulted();
+                ordinary() == 0 and selected(true) == 0 and selected(false) == 1 and defaults
+            }
+            "
+        ),
+        Value::Bool(true)
+    );
+    for wrong in ["256", "true"] {
+        let source = format!(
+            "fn selected(comptime flag: bool) -> u8 {{
+                0 + (do {{ inline if flag {{0}} else {{{wrong}}} }})
+            }}
+            fn run() -> u8 {{ selected(true) }}"
+        );
+        assert!(sysroot::compile(&source).is_err(), "accepted {wrong}");
+    }
+}
 
 #[test]
 fn bit_compound_assignment_infers_rhs_from_operator_protocol() {

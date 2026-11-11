@@ -21,6 +21,26 @@ pub(super) fn native_arithmetic_operand(
 }
 
 impl Checker<'_, '_> {
+    /// The result can supply a scalar peer context before numeric defaults are
+    /// committed. Open descriptions and concrete checking must use the same hint.
+    pub(super) fn arithmetic_operand_hint(
+        &self,
+        expected: Option<&Term>,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        let hint = expected
+            .map(|ty| self.structural_type(ty, span))
+            .transpose()?;
+        Ok(hint.filter(|ty| {
+            matches!(
+                ty,
+                Term::Primitive(P::Float | P::F16 | P::Bf16 | P::F32 | P::F64 | P::Integer)
+            ) || matches!(ty, Term::Primitive(p) if self.integer_layout(*p).is_some())
+                || self.proved_integer_family(ty, false)
+                || self.proved_float_family(ty)
+        }))
+    }
+
     pub(super) fn proved_integer_family(&self, ty: &Term, unsigned: bool) -> bool {
         if unsigned {
             self.proved_primitive_family(ty, &[P::U8, P::U16, P::U32, P::U64, P::U128, P::Usize])
@@ -163,6 +183,15 @@ impl Checker<'_, '_> {
         if !signed_literal {
             if let Some(protocol) = self.protocols.arithmetic[operator as usize] {
                 checked = self.argument_attempt(operand, None, None)?;
+                // The probe disabled numeric defaults. Without a destination
+                // or newly enabled defaults, retrying the same child has no
+                // additional information and repeats every nested failed probe.
+                if checked.is_none() && expected.is_none() && !self.numeric_defaults {
+                    return Err(context_error(
+                        expr.span,
+                        "unary operand requires a type context",
+                    ));
+                }
                 if checked.as_ref().is_some_and(|value| !is_never(&value.ty)) {
                     if let Some(result) = self.unary_protocol_result(
                         expr,
