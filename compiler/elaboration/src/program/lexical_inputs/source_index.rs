@@ -8,6 +8,7 @@ use std::cell::OnceCell;
 pub(in crate::program) struct SourceProtocolIndex<'a, 'h> {
     package: &'a hir::Package<'h>,
     parents: OnceCell<BTreeMap<OwnerId, BTreeSet<OwnerId>>>,
+    trait_members: OnceCell<BTreeMap<OwnerId, OwnerId>>,
 }
 
 impl<'a, 'h> SourceProtocolIndex<'a, 'h> {
@@ -15,7 +16,35 @@ impl<'a, 'h> SourceProtocolIndex<'a, 'h> {
         Self {
             package,
             parents: OnceCell::new(),
+            trait_members: OnceCell::new(),
         }
+    }
+
+    /// A trait member inherits the declaration telescope independently of
+    /// selected impl ownership and the current substitution for Self.
+    pub(in crate::program) fn trait_parent(
+        &self,
+        member: OwnerId,
+        mut charge: impl FnMut() -> Result<(), Error>,
+    ) -> Result<Option<OwnerId>, Error> {
+        if self.trait_members.get().is_none() {
+            let mut members = BTreeMap::new();
+            for (owner, info) in self.package.owners() {
+                charge()?;
+                if let ItemKind::Trait(definition) = &info.node.expect_item().kind {
+                    for member in &definition.items {
+                        charge()?;
+                        members.insert(*member, owner);
+                    }
+                }
+            }
+            // A failed scan never publishes an incomplete scope relation.
+            self.trait_members
+                .set(members)
+                .expect("source topology initialized once");
+        }
+        charge()?;
+        Ok(self.trait_members.get().unwrap().get(&member).copied())
     }
 
     pub(in crate::program) fn for_parent(
@@ -136,6 +165,56 @@ mod tests {
             package.lexical_parents.insert(child, other);
         }
         (package, parent, other, BTreeSet::from([first, second]))
+    }
+
+    #[test]
+    fn trait_scope_index_is_bounded_and_owned_by_its_source_view() {
+        let arena = HirArena::new();
+        let (mut package, member, other, _) = fixture(&arena, 64);
+        let trait_kind = |items| {
+            ItemKind::Trait(hir::item::TraitDef {
+                comptime_only: false,
+                super_traits: None,
+                clause_params: &[],
+                clause_constraints: &[],
+                items,
+            })
+        };
+        let parent = add(&mut package, &arena, trait_kind(vec![member]));
+        let index = SourceProtocolIndex::new(&package);
+        let lookup = |index: &SourceProtocolIndex<'_, '_>, member, fuel: &mut usize| {
+            index.trait_parent(member, || {
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or_else(|| error(DUMMY_SP, "budget exhausted"))?;
+                Ok(())
+            })
+        };
+        assert!(lookup(&index, member, &mut 10).is_err());
+        assert!(index.trait_members.get().is_none());
+        assert_eq!(lookup(&index, member, &mut 1000).unwrap(), Some(parent));
+        assert!(lookup(&index, member, &mut 0).is_err());
+        assert_eq!(lookup(&index, member, &mut 1).unwrap(), Some(parent));
+        assert_eq!(lookup(&index, other, &mut 1).unwrap(), None);
+
+        let mut successor = package.clone();
+        let replacement = arena.alloc_item(Item {
+            owner_id: parent,
+            ident: Ident::new(Symbol::intern("item"), DUMMY_SP),
+            span: DUMMY_SP,
+            kind: trait_kind(vec![other]),
+        });
+        successor.insert_owner(
+            parent,
+            OwnerInfo {
+                node: OwnerNode::Item(replacement),
+                nodes: OwnerNodes::new(),
+            },
+        );
+        let fresh = SourceProtocolIndex::new(&successor);
+        assert_eq!(lookup(&fresh, member, &mut 1000).unwrap(), None);
+        assert_eq!(lookup(&fresh, other, &mut 1).unwrap(), Some(parent));
+        assert_eq!(lookup(&index, member, &mut 1).unwrap(), Some(parent));
     }
 
     #[test]

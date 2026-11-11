@@ -1524,6 +1524,52 @@ fn code_method_parent_value_clauses_form_indexed_code_signatures() {
 }
 
 #[test]
+fn contextual_signatures_share_parent_value_scope_across_code_categories() {
+    for (method, use_code) in [
+        (
+            "comptime fn keep(code: <|- Token<flag>>) -> <|- Token<flag>> { code }",
+            "let value = ~<Token<FLAG>.as(Build<FLAG>).keep('(Token<FLAG> { value: FLAG }))>; value.value",
+        ),
+        (
+            "comptime fn keep(code: <x: Token<flag> |- bool>) -> <x: Token<flag> |- bool> { code }",
+            "const input: <x: Token<FLAG> |- bool> = '(x.value); const code = Token<FLAG>.as(Build<FLAG>).keep(input); let value = Token<FLAG> { value: FLAG }; ~[x = value]<code>",
+        ),
+        (
+            "comptime fn bind() -> <Token<flag> -| value: Token<flag>> { '<value> }",
+            "const pattern = Token<FLAG>.as(Build<FLAG>).bind(); let ~<pattern> = Token<FLAG> { value: FLAG }; value.value",
+        ),
+        (
+            "comptime fn inspect(code: <|- Token<flag>>) -> bool { flag }",
+            "const result = Token<FLAG>.as(Build<FLAG>).inspect('(Token<FLAG> { value: FLAG })); result",
+        ),
+    ] {
+        for explicit in [false, true] {
+            let (declaration, implementation) = if explicit {
+                (format!("{};", method.split(" { ").next().unwrap()), method)
+            } else {
+                (method.to_owned(), "")
+            };
+            let source = format!(
+                "struct Token where flag: bool {{ value: bool }}
+                trait Build where flag: bool {{ {declaration} }}
+                impl Build<flag> for Token<flag> where flag: bool {{ {implementation} }}
+                fn yes() -> bool {{ {} }}
+                fn no() -> bool {{ {} }}
+                fn run() -> bool {{ yes() and not no() and yes() }}",
+                use_code.replace("FLAG", "true"),
+                use_code.replace("FLAG", "false"),
+            );
+            assert_eq!(sysroot::run(&source), Value::Bool(true), "{source}");
+            let invalid = source.replace(
+                "Token<true> { value: true }",
+                "Token<false> { value: true }",
+            );
+            assert!(sysroot::compile(&invalid).is_err(), "{invalid}");
+        }
+    }
+}
+
+#[test]
 fn code_method_program_refinement_rejects_unused_strengthening() {
     let source = "trait Build {comptime fn build(flag:bool)-><|-bool>;}
         struct Builder {} impl Build for Builder {

@@ -269,6 +269,15 @@ impl Checker<'_, '_> {
                 parameters.extend(inputs.iter().map(|(id, _, _)| *id));
             }
             owner = self.self_containers.get(&current).copied();
+            if owner.is_none() {
+                let steps = &mut self.required_steps;
+                owner = self.lexical_source_protocols.trait_parent(current, || {
+                    *steps = steps.checked_sub(1).ok_or_else(|| {
+                        error(span, "abstract value scope preparation budget exhausted")
+                    })?;
+                    Ok(())
+                })?;
+            }
         }
         Ok(parameters.into_iter().collect())
     }

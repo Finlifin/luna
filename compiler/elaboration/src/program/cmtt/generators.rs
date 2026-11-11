@@ -187,26 +187,13 @@ impl Checker<'_, '_> {
             }
             // Keep the cached declaration symbolic. Selected invocations carry
             // their enclosing binders separately from method-local clauses.
-            let mut visible_parameters = self.type_parameters[&owner].clone();
-            if let Some(parent) = self.self_containers.get(&owner) {
-                visible_parameters.extend(self.type_parameters[parent].iter().copied());
-            }
+            let mut visible_parameters = self.visible_comptime_parameters(span)?;
             if let Some(Term::Rigid {
                 declaration: self_parameter,
                 sort: Sort::Type,
             }) = self.self_types.get(&owner)
             {
                 visible_parameters.push(*self_parameter);
-                if let Some((parent, _)) = self.package.owners().find(|(parent, _)| {
-                    matches_declaration(
-                        self.package,
-                        &self.package_identities,
-                        *parent,
-                        *self_parameter,
-                    )
-                }) {
-                    visible_parameters.extend(self.type_parameters[&parent].iter().copied());
-                }
             }
             let mut domains = Vec::new();
             for parameter in sig.clause_params {

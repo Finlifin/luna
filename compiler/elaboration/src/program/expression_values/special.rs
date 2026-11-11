@@ -268,33 +268,12 @@ impl Checker<'_, '_> {
             }
             // Container value parameters are generic inputs, not function locals.
             // Keep their identity until the selected callable is instantiated.
-            if self.signature_owner.is_some_and(|owner| {
-                // Associated defaults share the trait's input telescope, but
-                // must retain the existing symbolic associated-member lookup.
-                let associated_parent = self
-                    .package
-                    .item(owner)
-                    .filter(|item| matches!(item.kind, ItemKind::Associated(_)))
-                    .and_then(|_| {
-                        self.package.owners().find_map(|(parent, info)| {
-                            match &info.node.expect_item().kind {
-                                ItemKind::Trait(def) if def.items.contains(&owner) => Some(parent),
-                                _ => None,
-                            }
-                        })
-                    });
-                std::iter::once(owner)
-                    .chain(self.self_containers.get(&owner).copied())
-                    .chain(associated_parent)
-                    .any(|scope| {
-                        self.type_parameters
-                            .get(&scope)
-                            .is_some_and(|parameters| parameters.contains(&declaration))
-                            || self.nominal_capture_ids(scope).contains(&declaration)
-                    })
-            }) && let Some(domain) = self
+            if let Some(domain) = self
                 .trait_input_domain(declaration)
                 .filter(|ty| *ty != p(P::Type))
+                && self
+                    .visible_comptime_parameters(expr.span)?
+                    .contains(&declaration)
             {
                 let ty = self.substituted_trait_domain(&domain, expr.span)?;
                 if let Some(expected) = expected {

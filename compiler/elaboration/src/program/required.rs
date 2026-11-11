@@ -1530,9 +1530,44 @@ impl Checker<'_, '_> {
                 e
             })?;
             if let Some((parameters, arguments)) = self.initializer_substitution() {
-                root = root
-                    .instantiate_parameters(&self.input_binders(parameters), arguments)
+                // The selected initializer specializes its entire invocation
+                // frame, including lexical value captures. Substituting only
+                // the body leaves those inputs abstract or in the wrong domain.
+                let domains = parameters
+                    .iter()
+                    .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                    .collect::<Vec<_>>();
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let specialized = (|| {
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        parameters,
+                        &domains,
+                        arguments,
+                        &[],
+                        &mut fuel,
+                    )
                     .map_err(|e| error(expr.span, e.to_string()))?;
+                    root = substitution
+                        .instantiate_expression_bounded(&root, &mut fuel)
+                        .map_err(|e| error(expr.span, e.to_string()))?;
+                    for (_, domain, value) in &mut inputs {
+                        *domain = substitution
+                            .instantiate_bounded(domain, &mut fuel)
+                            .map_err(|e| error(expr.span, e.to_string()))?;
+                        *value = substitution
+                            .instantiate_bounded(value, &mut fuel)
+                            .map_err(|e| error(expr.span, e.to_string()))?;
+                    }
+                    for (_, domain) in &mut abstract_value_parameters {
+                        *domain = substitution
+                            .instantiate_bounded(domain, &mut fuel)
+                            .map_err(|e| error(expr.span, e.to_string()))?;
+                    }
+                    Ok::<_, Error>(())
+                })();
+                self.required_steps -= (before - fuel) as u64;
+                specialized?;
             }
             let result_type = root.ty.clone();
             for input in &self.specialization_inputs {

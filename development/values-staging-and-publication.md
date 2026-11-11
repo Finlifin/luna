@@ -687,6 +687,53 @@ Type 生产者的具名列表、固定展开包、成员默认值与跨实例调
   未运行全 workspace 或性能基准，未单独启动 native 验收。原有资源分析改动仍在验证
   基线中，docs 与用户已有修改保持不变。
 
+### 已接通：contextual 签名与普通值检查共用父声明输入
+
+此前 `form_contextual_generator` 单独收集 trait 的外围参数，但普通表达式检查只为
+associated 默认值寻找 trait 父声明。因而 `trait Build where flag: bool` 内的
+`<|- Tagged<flag>>` 已在生成器捕获表里登记，却仍在检查 `flag` 时报告未实现。
+这不是 NF 新规则，也不应该靠将 `flag` 提前求成某个布尔值修复。
+
+现在签名形成、普通值检查及 invocation/reification 共用
+`visible_comptime_parameters`。trait 成员沿源声明关系取得父 telescope，impl／名义
+成员沿原容器关系取得外围输入。参数保留真实域及 rigid 声明身份，选定实例才替换；
+生成器自己的子句与外围捕获仍分开。删除了生成器和 associated 默认值各自扫描父
+trait 的分支，没有把 trait 方法伪装成已选中的 impl 方法。
+
+`SourceProtocolIndex` 在当前不可变 HIR 内索引 trait 成员关系。构建和查找均计入
+额度，中断的扫描不发布半成品；预热查找无需扫描包，另一份 HIR 即使复用 owner
+编号也建立独立索引。这里只缓存源归属，不缓存类型判断、实现选择或实际参数值。
+这一步仍要求参数域已经形成，不补定尚待 invocation 才能取得的类型域。
+
+关联常量暴露了另一条必须同时满足的边界：selected initializer 的替换不仅作用于
+主体，也必须作用于捕获输入的域和值。过去没有发现父参数，主体中的直接 rigid
+可以在最后被替换；完整捕获后若仍只改主体，入口 local 的域已具体化而实际输入
+仍是抽象参数。`prepare_required` 现在以同一声明替换处理主体、捕获和值域证据，
+共享本次额度，再按实际残余选择抽象权限；不以跳过关联常量的词法输入掩盖缺口。
+定义期检查与实例期供应依旧分开，不能把一次实例参数留在声明缓存中。
+
+工作目录 `/home/fin/luna`，本阶段通过 `development/check.py --timeout 900 -- test`
+运行；完整命令与退出结果在对应 `result.json`：
+
+- `/tmp/luna-tools-wozegpeg`：luna lib 与 `cmtt_methods`、`cmtt_type_inputs`、
+  `associated_signatures`、`deferred_associated_values`、`normal_form_domains`、
+  `nominal_value_parameters`、`trait_domain_substitution`、`associated_purity`、
+  `comptime_bytecode_traits` 共 614 通过、1 项既有失败，退出 101。原 indexed code
+  签名用例通过；新增真实 sysroot 用例覆盖四种接口位置、默认／显式实现、同一程序
+  交替选择 true／false 实例及不匹配的代码结果、上下文和 pattern subject 拒绝。
+- `/tmp/luna-tools-z3n4n0gf`：elaboration lib 186 项通过，退出 0；包括源码索引
+  的预算失败恢复、预热读取与同号新源隔离，以及 required invocation 权限测试。
+- `/tmp/luna-tools-io5a1cok`：六个修改的 Rust 文件 scoped rustfmt check 退出 0；
+  `git diff --check` 通过。未运行全 workspace 测试。
+
+中途 `/tmp/luna-tools-o0n6xto7` 曾出现两项关联常量回归，已通过完整输入帧替换修复，
+上述最终运行中两项均通过。最初新增 fixture 在 splice substitution 内直接放泛型
+构造表达式不符合当前语法，改成先绑定普通值再传入；未为此放宽解析规则。
+剩余 `transported_runtime_methods_preserve_clause_domains_and_nested_storage` 仍在
+`550..578` 报 `required comptime evaluation failed: interpretation Type`，与上一阶段
+`/tmp/luna-tools-stgm4rkr` 相同；本阶段没有宣称其 runtime 方法存储链路已修复。
+
+
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
 
 当前实现的具体断点见
