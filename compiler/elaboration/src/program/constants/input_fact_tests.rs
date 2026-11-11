@@ -163,3 +163,22 @@ fn dump_distinguishes_partial_observations_supplied_values_and_provenance() {
     assert!(dump.contains("(derived (local 1 1))"), "{dump}");
     assert_eq!(dump, state.to_string());
 }
+
+#[test]
+fn block_evidence_dump_preserves_boundaries_and_escaped_snapshot_values() {
+    let boundary = facts().lexical_boundary().to_string();
+    assert!(boundary.contains("(specialized (local 1 1))"), "{boundary}");
+    assert!(boundary.contains("(types (local 1 2))"), "{boundary}");
+    assert!(
+        !boundary.contains("supplied"),
+        "supplied invalidation is not a lexical rollback"
+    );
+    let snapshot = StagedPatternSnapshot {
+        parts: vec![(n::Pattern::Wild, p(P::Str), Term::String("text\"\n".into()))],
+        staged: [id(3)].into(),
+    };
+    let dump = snapshot.to_string();
+    assert!(dump.contains("text\\\"\\n"), "{dump}");
+    assert!(dump.contains("(staged (local 1 3))"), "{dump}");
+    assert!(!dump.contains('\n'));
+}

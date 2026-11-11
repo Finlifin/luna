@@ -626,7 +626,7 @@ callable 的两个等待点。只增加 public request enum 或可手工构造�
 | 当前路径 | 同步假设 | 迁移时必须交出的状态 |
 | --- | --- | --- |
 | `program.rs::expr_context`／`delivery.rs` | 目标域适配已保存显式后继；一般子表达式检查仍是同步调用 | 将现有后继接到区域的子结果槽，补齐 expected／partial context 的待定观察；恢复不能重新选择一次转换 |
-| `block_regions.rs::check_block_region` | `in_block_scope` 闭包在同一 Rust 栈帧内完成所有语句和尾值 | 语句位置、局部声明域、diverges、staged pattern 结果、尾值及绑定完成任务；等待不等于退出词法域 |
+| `block_regions.rs::check_block_region` | 语句进度、受检前缀与词法退出责任已有独立状态；子检查和尾值仍同步 | 将活动词法状态与尾值检查一并交给可恢复区域；等待不等于退出词法域 |
 | `declaration_inputs.rs::Progress` | 原串行 cursor；后续已分离 schedule／checked-order 并接入前置域检查 | 仍须补齐可恢复检查任务及每项域依赖；已有结果位置和源码顺序不能被执行调度覆盖 |
 | `required.rs::prepare_required_root_with_live_inputs` | `build` 返回完整根后才收集自由绑定和建立世界 | 独立于完整根的源输入描述及受限可见世界；后续每段所需绑定增量检查，不能先捕获所有外围值 |
 
@@ -706,6 +706,53 @@ optional、错误结果、null、提前 return、分支及可变接收者仅求�
 [抽象错误结果交付](values-staging-and-publication.md#错误结果的恒等交付不观察抽象标签)。
 没有修改其预期或加入 ignore。这里的验证包含既有工作区修改，
 不宣称为纯 HEAD 验收。
+
+#### 已接入：块的语句进度与词法退出责任
+
+普通块和待定输入块共用的 `block_regions::Progress` 现在拥有源码块引用、受检语句
+前缀、当前子检查状态、diverges 和分期模式证据。同步驱动器请求下一条语句，再把
+检查结果交还；一个子检查尚未返回时不能再次请求，尾值状态不能重新开始语句遍历。
+完成语句后才发布相应后继类型事实。发生控制退出后仍检查后续源码，但不为它加入
+可达路径的后继事实；执行次数仍由原 NIR 控制流决定。
+
+`LexicalScope` 独占外层局部域、expr/pattern code 引用、PTC context 和输入事实边界。
+成功或普通诊断退出都恢复局部声明及类型前提，保留块内写入造成的外层值失效。
+它不是候选事务回滚，不复制整个 input_facts 来复活已失效值，也不拥有 VM 存储。
+复制局部域前使用共享 Term 复制预算，表项和边界集合先计费；共享 code/context 只
+保留引用。每条语句推进也扣除 required 步数。复制失败只消耗预算，不安装半份作用域。
+这限制了既有快照路径的成本，尚未消除随可见局部数量增长的复制开销。
+
+词法父环境、语句进度、输入边界和分期模式证据提供 S-expression dump。这里的 HIR
+引用仍借用同一次检查的源码包；不能发布到稳定世界。一般子检查、尾值检查和作用域
+装卸仍由同步入口驱动，尚不支持交错调度、取消外部请求或跨 Type 等待恢复。后续必须
+连同当前活动词法状态、tail continuation 及源 activation 迁移，不能将保存外层环境
+误当成保存了完整 Checker，也不能在挂起时执行 leave。
+
+验证在 `/home/fin/luna`，命令前缀为
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p elaboration --lib --test invocation_budget -p luna --test contextual_input_regions
+  --test contextual_delivery --test required_input_scopes --no-fail-fast`：315 项通过，
+  `/tmp/luna-tools-r7d6b9xs/result.json` 退出 0，包含真实 sysroot 的新源码用例。
+- 补充 dump 单元测试时两处测试类型名写错，首次编译退出 101，
+  `/tmp/luna-tools-p7ry40yw/result.json`；修正后执行 `-p elaboration --lib -p luna
+  --test inline_pattern_observation --test ordinary_callable_types --test ordinary_clause_collectors
+  --test cmtt_methods --test contextual_spreads --no-fail-fast`：537 项通过、2 项既有
+  ignored、2 项旧诊断匹配失败，`/tmp/luna-tools-c9j2d0px/result.json` 退出 101。
+- 旧诊断已在 `a00e221f` 删除 clause_inputs 独立实现时退役。扩大扫描范围仍失败
+  （`/tmp/luna-tools-o_kut3ni/result.json`，退出 101），因此撤回范围修改。两项测试
+  改为核对现行 `input_observation` 的 observation-limit 和 declaration Progress
+  的身份捕获预算错误，源码、原有额度范围、失败后新尝试的执行断言都保留。
+  `-p luna --test inline_pattern_observation --no-fail-fast`：16 项通过，
+  `/tmp/luna-tools-7r44av9l/result.json` 退出 0。新增作用域复制及语句推进预算用例
+  也在此组，确认资源失败没有变成合法输入或上下文缺失。
+- 最后将新增拒绝例的 bool 结果函数名按约定改为小写；单独重跑
+  `-p luna --test contextual_input_regions -- --exact block_exit_does_not_skip_checks_or_export_a_private_binding`，
+  `/tmp/luna-tools-5tlaf2be/result.json` 退出 0。修改的 Rust 文件经 scoped rustfmt
+  检查，`/tmp/luna-tools-2tebstto/result.json` 退出 0；后续测试文件修改也已格式化。
+
+上述分组有重叠，不累加为独立覆盖；两个普通 callable 待定域正例仍未完成。检查
+使用保留作者已有修改的工作区，未执行全 workspace 或性能测量。
 
 #### 已接入：required 世界的依赖发现共用结构遍历
 

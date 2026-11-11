@@ -1699,7 +1699,7 @@ impl Checker<'_, '_> {
             let value = self.expr(value, None)?;
             let mut checked = Vec::new();
             for arm in *arms {
-                checked.push(self.in_block_scope(|this| {
+                checked.push(self.in_block_scope(arm.span, |this| {
                     let pattern = this.match_arm_pattern(arm, &value)?;
                     let body = this.under_matched_pattern_type_facts(
                         &pattern,
@@ -1731,7 +1731,7 @@ impl Checker<'_, '_> {
             if fallback.is_none() {
                 return self.expr(input, None).map(n::NormalFormArgument::Value);
             }
-            return self.in_block_scope(|this| {
+            return self.in_block_scope(input.span, |this| {
                 let mut branches = Vec::new();
                 for arm in *arms {
                     let condition = arm
@@ -1739,7 +1739,7 @@ impl Checker<'_, '_> {
                         .map(|value| this.expr(value, Some(&p(P::Bool))))
                         .transpose()?;
                     let check = |this: &mut Self| {
-                        this.in_block_scope(|this| {
+                        this.in_block_scope(arm.span, |this| {
                             this.dependent_normal_argument(arm.body, depth + 1)
                         })
                     };

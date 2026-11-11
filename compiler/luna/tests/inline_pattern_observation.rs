@@ -103,6 +103,24 @@ fn inline_pattern_budget_failure_is_diagnostic_and_a_fresh_attempt_recovers() {
 }
 
 #[test]
+fn lexical_scope_copy_is_bounded_before_retaining_local_domains() {
+    check_source_observation(
+        "fn keep(value: bool) -> bool { do { value } } fn run() -> bool { keep(true) }",
+        "lexical scope type snapshot budget exhausted",
+        512,
+    );
+}
+
+#[test]
+fn block_statement_progress_cannot_bypass_the_checking_budget() {
+    check_source_observation(
+        "fn run() -> bool { true; false; true }",
+        "block checking budget exhausted",
+        512,
+    );
+}
+
+#[test]
 fn pending_clause_context_retains_the_failed_type_observation() {
     let source = format!(
         "typealias Type = .Type'builtin; typealias str = .str'builtin;
@@ -112,7 +130,11 @@ fn pending_clause_context_retains_the_failed_type_observation() {
         fn run() -> bool {{ const answer = choose<.value = null, if true {{ Marker }} else {{ bool }}>(); answer }}",
         "x".repeat(128),
     );
-    check_source_observation(&source, "required clause identity observation failed", 4096);
+    check_source_observation(
+        &source,
+        "input identity observation failed: (observation-limit steps)",
+        4096,
+    );
 }
 
 #[test]
@@ -129,7 +151,11 @@ fn transitive_clause_identity_copy_is_bounded_and_recovers() {
         }}",
         "x".repeat(128),
     );
-    check_source_observation(&source, "clause identity copy failed: Steps", 4096);
+    check_source_observation(
+        &source,
+        "declaration input identity capture failed: residual invocation structure budget exhausted",
+        4096,
+    );
 }
 
 #[test]

@@ -25,6 +25,26 @@ pub(super) struct LexicalBoundary {
     derived: BTreeSet<n::LocalId>,
 }
 
+impl std::fmt::Display for LexicalBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(lexical-input-boundary")?;
+        for (name, bindings) in [
+            ("specialized", &self.specialized),
+            ("types", &self.types),
+            ("partial", &self.partial),
+            ("values", &self.values),
+            ("derived", &self.derived),
+        ] {
+            write!(f, " ({name}")?;
+            for binding in bindings {
+                write!(f, " {binding}")?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(")")
+    }
+}
+
 impl State {
     pub fn is_empty(&self) -> bool {
         self.specialized.is_empty()

@@ -165,3 +165,51 @@ fn pending_blocks_retain_mixed_pattern_producers_and_guard_reads() {
         );
     }
 }
+
+#[test]
+fn nested_lexical_exit_keeps_outer_writes_in_ordinary_and_pending_blocks() {
+    for (input, expected_calls) in [
+        (
+            "do { do { changed = mark(); }; let inner = changed; inner }",
+            vec!["check", "mark"],
+        ),
+        (
+            "Packet<.values = do { do { changed = mark(); }; [1] }, Byte()> == Packet<u8, .values = [1]>",
+            vec!["check", "mark", "Byte"],
+        ),
+    ] {
+        check_both(
+            &format!(
+                "
+            pure comptime fn Packet<T, .values: meta.List<T> = []> -> Type {{ bool }}
+            comptime fn Byte() -> Type {{ u8 }}
+            comptime fn mark() -> bool {{ true }}
+            comptime fn check() -> bool {{
+                var changed = false;
+                let result = {input};
+                result and changed
+            }}
+        "
+            ),
+            &expected_calls,
+        );
+    }
+}
+
+#[test]
+fn block_exit_does_not_skip_checks_or_export_a_private_binding() {
+    for source in [
+        "comptime fn bad() -> bool { return true; let invalid: bool = 7; false }",
+        "comptime fn bad() -> bool { let unused = do { let private = true; private }; private }",
+    ] {
+        assert!(sysroot::compile(source).is_err(), "accepted {source}");
+    }
+    check_both(
+        "
+        comptime fn mark() -> bool { true }
+        comptime fn leave() -> bool { return true; mark(); false }
+        comptime fn check() -> bool { leave() }
+    ",
+        &["check", "leave"],
+    );
+}

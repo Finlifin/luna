@@ -26,6 +26,20 @@ pub(super) struct StagedPatternSnapshot {
     staged: BTreeSet<n::LocalId>,
 }
 
+impl std::fmt::Display for StagedPatternSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(staged-pattern-snapshot (parts")?;
+        for (pattern, domain, value) in &self.parts {
+            write!(f, " (part {pattern} (domain {domain}) (value {value}))")?;
+        }
+        f.write_str(") (staged")?;
+        for binding in &self.staged {
+            write!(f, " {binding}")?;
+        }
+        f.write_str("))")
+    }
+}
+
 // Immutable analysis evidence, not a runtime value or a serialized interpreter
 // environment. Unknown fields have no replacement expression. Shared snapshots
 // avoid copying nested aggregate aliases, while depth and traversal stay bounded.
