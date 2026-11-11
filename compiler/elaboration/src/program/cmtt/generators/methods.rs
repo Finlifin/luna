@@ -295,10 +295,7 @@ impl Checker<'_, '_> {
         // Resolution can already bind a nested nominal member directly. Its
         // identity is still checked against the admitted implementation world.
         let candidate = match head.kind {
-            H::Projection(base, name)
-                if self.is_static_method_subject(base)
-                    || self.local_field_domain(base)? == Some(p(P::Type)) =>
-            {
+            H::Projection(base, name) if self.is_type_receiver(base)? => {
                 Some((self.type_expr(base)?, name, None, None))
             }
             H::Projection(base, name) => {

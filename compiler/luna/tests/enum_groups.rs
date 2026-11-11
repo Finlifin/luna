@@ -8,6 +8,62 @@ use comptime_interpretor::Value;
 use support::compile_with_protocols;
 
 #[test]
+fn local_type_names_preserve_enum_namespaces_and_payload_order() {
+    let package = sysroot::compile(
+        "
+        enum Event {
+            idle,
+            network.{data(bool), record {flag: bool}},
+            struct_fields(bool),
+        }
+        struct Counter { calls: Integer }
+        impl Counter {
+            comptime fn next(self) -> bool {
+                self.calls = self.calls + 1;
+                self.calls == 2
+            }
+        }
+        comptime fn check() -> bool {
+            const Selected = Event;
+            const Alias = Selected;
+            let counter = Counter { calls: 0 };
+            let first = Alias.struct_fields(counter.next());
+            let second = Selected.network.data(counter.next());
+            let third = Alias.network.record { flag: counter.next() };
+            let idle = Selected.idle;
+            (first match { .struct_fields(flag) => not flag, _ => false })
+                and (second match { Alias.network.data(flag) => flag, _ => false })
+                and (third match { Selected.network.record {flag: flag} => not flag, _ => false })
+                and (idle match { Alias.idle => true, _ => false })
+                and (Selected.network.data(true) match { Alias.network => true, _ => false })
+                and counter.calls == 3
+        }
+        ",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "check", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn local_enum_namespace_rejects_groups_missing_members_and_wrong_payloads() {
+    for body in [
+        "Selected.network",
+        "Selected.network.missing",
+        "Selected.network.data(false, true)",
+        "Selected.network.record {wrong: true}",
+    ] {
+        let source = format!(
+            "enum Event {{ network.{{data(bool),record {{flag: bool}}}} }}
+            fn bad() -> Event {{ const Selected = Event; {body} }}"
+        );
+        assert!(sysroot::compile(&source).is_err(), "accepted {body}");
+    }
+}
+
+#[test]
 fn declared_enum_names_keep_precedence_over_type_receiver_methods() {
     for argument in ["true", "selected()"] {
         let source = format!(

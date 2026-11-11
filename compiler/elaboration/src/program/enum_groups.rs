@@ -57,7 +57,7 @@ impl Checker<'_, '_> {
             match &cursor.kind {
                 H::Projection(base, name) => {
                     names.push(name.name.to_string());
-                    if self.is_type_head(base) {
+                    if self.is_type_receiver(base)? {
                         target = if observe_only {
                             self.observed_enum_subject(base, &names)?
                         } else {

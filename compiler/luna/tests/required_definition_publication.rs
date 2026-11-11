@@ -77,6 +77,28 @@ fn body_required_enums_reach_runtime_construction_and_matching() {
 }
 
 #[test]
+fn body_required_enums_support_qualified_construction() {
+    assert_eq!(
+        sysroot::run(
+            "
+            comptime fn EventType() -> Type {
+                let draft = meta.EnumBuilder.new(.name = .LateEvent);
+                draft.add_unit(.idle);
+                draft.add_tuple(.data, [bool]);
+                draft.Build()
+            }
+            fn run() -> bool {
+                const Event = EventType();
+                let value = Event.data(true);
+                value match { Event.idle => false, Event.data(flag) => flag }
+            }
+            "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
 fn late_mixed_descriptions_preserve_prior_definitions_and_fresh_identities() {
     let package = sysroot::compile("
         struct Existing { flag: bool }

@@ -66,10 +66,7 @@ impl Checker<'_, '_> {
             H::Cast(base, interface) => (base, Some(interface)),
             _ => (view, None),
         };
-        let mut subject = if self.is_type_head(base)
-            || self.local_field_domain(base)? == Some(p(P::Type))
-            || matches!(&base.kind, H::ResolvedFnParam(_, id) if self.input_facts.types.contains_key(&local(*id)))
-        {
+        let mut subject = if self.is_type_receiver(base)? {
             self.type_expr(base)?
         } else if let H::Projection(view, field) = &base.kind {
             match self.associated_projection(view, field.name.as_str(), base.span, base.hir_id)? {

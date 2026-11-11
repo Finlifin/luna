@@ -3,6 +3,15 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    /// A Type namespace can be supplied by a value, not only declaration syntax.
+    /// Classification observes its domain; it neither completes the represented
+    /// identity nor authorizes dropping the receiver's evaluation. Keep this
+    /// separate from is_type_head, which also controls expression formation.
+    pub(super) fn is_type_receiver(&mut self, value: &Expr<'_>) -> Result<bool, Error> {
+        Ok(self.is_static_method_subject(value)
+            || self.local_field_domain(value)? == Some(p(P::Type)))
+    }
+
     /// Local Type values acquire their container identity during elaboration.
     /// Reuse the resolver's use-site candidate set, including access checks;
     /// ordinary value receivers must keep the field/method projection path.

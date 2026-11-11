@@ -166,19 +166,34 @@ quote 分析前补齐 checker 已接收的描述。内部 scalar packet 只另�
 不再获得另一条 enum 描述收集路径。此处不重新调用 builder、不修改生成身份，
 也不以布局代替类型身份。
 
-本次另发现局部 Type 常量的显式成员构造仍有缺口：
-`const Event = EventType(); let value = Event.data(true);` 在前端报
-`field projection requires a supported struct`，证据为
-`/tmp/luna-tools-y3aii0eo/result.json`。带目标域的
-`let value: Event = .data(true);` 用于独立检查 enum 描述交付；这不是对前一种
-语言用法的拒绝规则。该成员解析缺口、quote 内待决 Type，以及一般候选探测的
-生成定义所有权仍须后续处理，不能从这次修复推定完整回滚或活动源任务已经接通。
+成员查询另有一条一致性边界：enum 命名空间、普通／代码方法及关联项共用
+`is_type_receiver` 观察接收者域；Type 可以来自局部值，不只来自声明语法。
+`is_type_head` 仍负责其原有语法分类，不能借此把普通值引用折叠成 TypeValue。
+域是 Type 也不代表身份已经完成：enum 仍先观察已知命名空间，真正选中成员后才走
+原 required 类型形成；分组不是值，载荷仍按普通构造契约求值和检查。
+
+旧路径的 `const Event = EventType(); Event.data(true)` 误入 struct 字段投影，
+证据为 `/tmp/luna-tools-y3aii0eo/result.json`。新增命名空间基线还显示，局部 enum
+别名的 `struct_fields(...)` 变体误入同名 Type 反射方法，报实参数量错误：
+`/tmp/luna-tools-vv1xy062/result.json` 退出 101。共享域判断修复这两种路由差异；
+带类型上下文的构造、显式成员构造与匹配均保留独立正例。quote 内待决 Type，
+以及一般候选探测的生成定义所有权仍须后续处理，不能据此推定完整回滚或活动源任务
+已经接通，也不能把“尚未观察到身份”当作已证明不是 enum。
 
 验证目录 `/home/fin/luna`：
 `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test required_definition_publication --test builder_invocations --test cmtt_storage_world --test cmtt_phase_boundaries --test test_templates --test quote_functions --test inline_pattern_observation --no-fail-fast`，
 `/tmp/luna-tools-wcicoi_g/result.json` 退出 0，639 项通过；新增用例经真实 sysroot
 检查 newtype 转换、enum 构造与匹配，以及已有／晚生成混合描述的身份、反射和执行。
 工作区保留已有资源分析修改，未执行全 workspace 或 LLVM 原生验收。
+
+接收者域共用后的检查，目录仍为 `/home/fin/luna`，命令前缀均为
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p elaboration --lib -p luna --test cmtt_methods --test normal_form_methods --test enum_groups --test required_definition_publication --no-fail-fast`：
+  487 项通过，`/tmp/luna-tools-3h9qge4c/result.json` 退出 0。
+- `-p luna --test enum_groups --test associated_signatures --test deferred_associated_values --no-fail-fast`：
+  28 项通过，`/tmp/luna-tools-11h79gqp/result.json` 退出 0；包括进一步区分载荷
+  求值顺序的正例。两组有重叠，不相加为独立用例数。
 
 ## 4. Region 与 task 状态
 

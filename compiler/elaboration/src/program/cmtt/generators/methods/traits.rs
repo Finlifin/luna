@@ -19,8 +19,7 @@ impl Checker<'_, '_> {
                 "code method selection is waiting for the implementation world",
             ));
         }
-        let static_subject = self.is_static_method_subject(base)
-            || self.local_field_domain(base)? == Some(p(P::Type));
+        let static_subject = self.is_type_receiver(base)?;
         let receiver = (!static_subject).then_some(base);
         let subject = if receiver.is_some() {
             self.generator_intrinsic_input_hint(base, 0)?

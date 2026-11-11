@@ -1545,9 +1545,7 @@ impl Checker<'_, '_> {
             H::Cast(base, interface) => (base, Some(interface)),
             _ => (value, None),
         };
-        let subject = if self.is_static_method_subject(base)
-            || self.local_field_domain(base)? == Some(p(P::Type))
-        {
+        let subject = if self.is_type_receiver(base)? {
             self.type_expr(base)?
         } else if let H::Projection(view, field) = &base.kind {
             match self.associated_projection(view, field.name.as_str(), base.span, base.hir_id)? {
