@@ -205,132 +205,105 @@ impl Checker<'_, '_> {
         {
             return Err(error(expr.span, "clause input prefix arity mismatch"));
         }
-        let saved_locals = self.locals.clone();
-        let saved_substitution = self.alias_substitution.clone();
-        let saved_bindings = self.alias_value_bindings.clone();
-        let saved_normal_bindings = self.normal_default_bindings.clone();
-        let saved_owner = self.signature_owner;
-        let saved_context = self.context.clone();
-        let saved_mode = self.in_required_comptime;
-        let prepared = (|| {
-            let clauses = self.type_clause_params(owner);
-            let mut statements = Vec::new();
-            let mut prepared = self.prepared_clause_inputs_in_domains(
-                owner,
-                args,
-                &mut statements,
-                expr.span,
-                &domains[prefix.len()..],
-                &parameters[prefix.len()..],
-            )?;
-            let mut supplied = vec![None; clauses.len()];
-            let mut positional = 0;
-            for (name, value) in prepared.inputs {
-                let slot = Self::type_input_slot(&clauses, name, &mut positional, expr.span)?;
-                let cell = supplied
-                    .get_mut(slot)
-                    .ok_or_else(|| error(expr.span, "type argument count mismatch"))?;
-                if cell.replace(value).is_some() {
-                    return Err(error(expr.span, "duplicate type argument"));
-                }
+        // Prefix identities are already supplied by lexical capture. They
+        // specialize declaration defaults, never the explicit caller sources.
+        let mut substitution = self.alias_substitution.clone();
+        let mut value_bindings = self.alias_value_bindings.clone();
+        let mut default_bindings = self.normal_default_bindings.clone();
+        for (parameter, value) in parameters.iter().zip(prefix) {
+            substitution.insert(*parameter, std::sync::Arc::new(value.clone()));
+            value_bindings.remove(parameter);
+            default_bindings.remove(parameter);
+        }
+        let context = self.context.clone();
+        let defaults = nominal::InputEnvironment {
+            substitution: &substitution,
+            bindings: &value_bindings,
+            normal_bindings: &default_bindings,
+            context: &context,
+        };
+        let telescope = self
+            .input_binders(&parameters[prefix.len()..])
+            .into_iter()
+            .zip(&domains[prefix.len()..])
+            .map(|(binder, domain)| (binder.declaration, binder.sort, domain.clone()))
+            .collect::<Vec<_>>();
+        let prepared = self.planned_typed_declaration_inputs(
+            owner,
+            args,
+            expr.span,
+            &telescope,
+            Some(&defaults),
+        )?;
+        let mut symbols = prefix.to_vec();
+        symbols.extend(prepared.formation.terms);
+        let pending = prepared.formation.deferred;
+        let mut operands = prefix
+            .iter()
+            .zip(domains)
+            .map(|(value, domain)| n::Expr {
+                source: source(expr.span),
+                ty: domain.clone(),
+                kind: if *domain == p(P::Type) {
+                    K::TypeValue(value.clone())
+                } else {
+                    K::ComptimeValue(value.clone())
+                },
+            })
+            .collect::<Vec<_>>();
+        let n::NormalFormInputPlan {
+            order,
+            preparations,
+            bindings,
+        } = prepared.plan;
+        let mut sources = prepared.arguments.into_iter().map(Some).collect::<Vec<_>>();
+        let mut outputs = vec![None; sources.len()];
+        let mut preparations = preparations.into_iter().peekable();
+        let mut statements = Vec::new();
+        for (position, slot) in order.into_iter().enumerate() {
+            while preparations
+                .peek()
+                .is_some_and(|preparation| preparation.before <= position)
+            {
+                statements.push(preparations.next().unwrap().expression);
             }
-            self.signature_owner = Some(owner);
-            self.context = self.binder_context(owner);
-            self.in_required_comptime = true;
-            let mut operands = Vec::new();
-            let mut symbols = prefix.to_vec();
-            let mut pending = BTreeSet::new();
-            for (slot, term) in prefix.iter().enumerate() {
-                self.alias_substitution
-                    .insert(parameters[slot], std::sync::Arc::new(term.clone()));
-                self.alias_value_bindings.remove(&parameters[slot]);
-                self.normal_default_bindings.remove(&parameters[slot]);
-                operands.push(n::Expr {
-                    source: source(expr.span),
-                    ty: domains[slot].clone(),
-                    kind: if domains[slot] == p(P::Type) {
-                        K::TypeValue(term.clone())
+            let Some(n::NormalFormArgument::Value(value)) = sources[slot].take() else {
+                return Err(error(expr.span, "typed declaration input was not checked"));
+            };
+            let parameter = parameters[prefix.len() + slot];
+            let ty = value.ty.clone();
+            let output = if matches!(value.kind, K::TypeValue(_)) {
+                value
+            } else {
+                let location = value.source;
+                statements.push(n::Expr {
+                    source: location,
+                    ty: if is_never(&ty) {
+                        p(P::Never)
                     } else {
-                        K::ComptimeValue(term.clone())
+                        p(P::Void)
+                    },
+                    kind: K::Let {
+                        binding: bindings[slot],
+                        value: Box::new(value),
                     },
                 });
-            }
-            for (own_slot, supplied) in supplied.into_iter().enumerate() {
-                let slot = prefix.len() + own_slot;
-                let (value, identity) = if let Some(value) = supplied {
-                    (value, prepared.identities.remove(&parameters[slot]))
-                } else {
-                    let hir::clause::ClauseParamKind::Optional(_, _, default) =
-                        clauses[own_slot].kind
-                    else {
-                        return Err(error(expr.span, "type argument count mismatch"));
-                    };
-                    self.prepared_clause_default(
-                        owner,
-                        own_slot,
-                        default,
-                        &domains[slot],
-                        &mut statements,
-                        expr.span,
-                    )?
-                };
-                match &value.kind {
-                    K::TypeValue(ty) => {
-                        symbols.push(ty.clone());
-                        self.alias_substitution
-                            .insert(parameters[slot], std::sync::Arc::new(ty.clone()));
-                        self.alias_value_bindings.remove(&parameters[slot]);
-                        self.normal_default_bindings.remove(&parameters[slot]);
-                    }
-                    K::Local(binding) => {
-                        let identity = identity.as_ref();
-                        let is_type = domains[slot] == p(P::Type);
-                        symbols.push(match identity {
-                            Some(identity) => self.copy_clause_identity(identity, expr.span)?,
-                            None => Term::Rigid {
-                                declaration: parameters[slot],
-                                sort: if is_type {
-                                    Sort::Type
-                                } else {
-                                    Sort::ComptimeValue
-                                },
-                            },
-                        });
-                        self.normal_default_bindings
-                            .insert(parameters[slot], (*binding, value.ty.clone()));
-                        if is_type {
-                            self.alias_value_bindings.insert(parameters[slot], *binding);
-                        } else {
-                            self.alias_value_bindings.remove(&parameters[slot]);
-                        }
-                        if let Some(identity) = identity {
-                            let identity = self.copy_clause_identity(identity, expr.span)?;
-                            self.alias_substitution
-                                .insert(parameters[slot], std::sync::Arc::new(identity));
-                        } else {
-                            pending.insert(parameters[slot]);
-                            self.alias_substitution.remove(&parameters[slot]);
-                        }
-                    }
-                    _ => {
-                        return Err(error(
-                            expr.span,
-                            "clause input was not retained as a prepared value",
-                        ));
-                    }
+                n::Expr {
+                    source: location,
+                    ty,
+                    kind: if domains[prefix.len() + slot] == p(P::Type)
+                        && !pending.contains(&parameter)
+                    {
+                        K::TypeValue(symbols[prefix.len() + slot].clone())
+                    } else {
+                        K::Local(bindings[slot])
+                    },
                 }
-                operands.push(value);
-            }
-            Ok((operands, symbols, statements, pending))
-        })();
-        self.locals = saved_locals;
-        self.alias_substitution = saved_substitution;
-        self.alias_value_bindings = saved_bindings;
-        self.normal_default_bindings = saved_normal_bindings;
-        self.signature_owner = saved_owner;
-        self.context = saved_context;
-        self.in_required_comptime = saved_mode;
-        let (operands, symbols, statements, pending) = prepared?;
+            };
+            outputs[slot] = Some(output);
+        }
+        statements.extend(preparations.map(|preparation| preparation.expression));
+        operands.extend(outputs.into_iter().map(Option::unwrap));
         let formation = FormationInputs {
             terms: symbols.clone(),
             deferred: parameters

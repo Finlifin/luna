@@ -1,6 +1,14 @@
 //! Shared source-order input plans, independent of the eventual type constructor.
 use super::*;
 
+/// Consumers that cannot yet suspend frontend checking require ordinary typed
+/// expressions. Both consumers retain the same routing and execution plan.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputChecking {
+    Contextual,
+    Typed,
+}
+
 pub(super) struct PreparedDeclarationInputs {
     pub arguments: Vec<n::NormalFormArgument>,
     pub plan: n::NormalFormInputPlan,
@@ -208,6 +216,43 @@ impl Checker<'_, '_> {
         parameters: &[(DeclarationId, Sort, Term)],
         defaults: Option<&nominal::InputEnvironment<'_>>,
     ) -> Result<PreparedDeclarationInputs, Error> {
+        self.plan_declaration_inputs(
+            owner,
+            inputs,
+            span,
+            parameters,
+            defaults,
+            InputChecking::Contextual,
+        )
+    }
+
+    pub(super) fn planned_typed_declaration_inputs(
+        &mut self,
+        owner: OwnerId,
+        inputs: &[Arg<'_>],
+        span: Span,
+        parameters: &[(DeclarationId, Sort, Term)],
+        defaults: Option<&nominal::InputEnvironment<'_>>,
+    ) -> Result<PreparedDeclarationInputs, Error> {
+        self.plan_declaration_inputs(
+            owner,
+            inputs,
+            span,
+            parameters,
+            defaults,
+            InputChecking::Typed,
+        )
+    }
+
+    fn plan_declaration_inputs(
+        &mut self,
+        owner: OwnerId,
+        inputs: &[Arg<'_>],
+        span: Span,
+        parameters: &[(DeclarationId, Sort, Term)],
+        defaults: Option<&nominal::InputEnvironment<'_>>,
+        checking: InputChecking,
+    ) -> Result<PreparedDeclarationInputs, Error> {
         let clauses = self.type_clause_params(owner);
         if parameters.len() != clauses.len() {
             return Err(error(span, "declaration input telescope arity mismatch"));
@@ -292,7 +337,7 @@ impl Checker<'_, '_> {
                         expanded.push(input.clone());
                     }
                 }
-                return self.planned_declaration_inputs(owner, &expanded, span, parameters, defaults);
+                return self.plan_declaration_inputs(owner, &expanded, span, parameters, defaults, checking);
             }
             let packet_contexts = if inputs.iter().any(|input| matches!(input, Arg::Expand(_))) {
                 self.spread_packet_layout(&layout_inputs, &positional_types, span)?
@@ -502,7 +547,8 @@ impl Checker<'_, '_> {
                 };
                 let dependent = self.declaration_domain_pending(expected, span)?;
                 let at_tail = pending.source_index >= tail_start;
-                let value = if dependent && !pending.spread {
+                let value = if dependent && !pending.spread && checking == InputChecking::Contextual
+                {
                     if at_tail {
                         collected.push(self.dependent_normal_argument(pending.input, 0)?);
                         continue;
@@ -707,52 +753,56 @@ impl Checker<'_, '_> {
                         "cyclic or excessively deep normal-form default",
                     ));
                 }
-                let dependent = self.declaration_domain_pending(&ty, span)?;
-                let checked = if let Some(RoutedDeclarationInput::Collected(items)) = explicit {
-                    if !dependent
-                        && items.iter().all(|item| {
-                            matches!(
-                                item,
-                                n::NormalFormArgument::Value(_)
-                                    | n::NormalFormArgument::ListSpread(_)
-                            )
-                        })
-                    {
-                        let mut collection = super::clause_inputs::ClauseCollection::default();
-                        for item in items {
-                            match item {
-                                n::NormalFormArgument::Value(value) => {
-                                    collection.push_element(value.clone())
+                let dependent = self.declaration_domain_pending(&ty, span);
+                let checked = (|| {
+                    let dependent = dependent?;
+                    let checked = if let Some(RoutedDeclarationInput::Collected(items)) = explicit {
+                        if (!dependent || checking == InputChecking::Typed)
+                            && items.iter().all(|item| {
+                                matches!(
+                                    item,
+                                    n::NormalFormArgument::Value(_)
+                                        | n::NormalFormArgument::ListSpread(_)
+                                )
+                            })
+                        {
+                            let mut collection = super::clause_inputs::ClauseCollection::default();
+                            for item in items {
+                                match item {
+                                    n::NormalFormArgument::Value(value) => {
+                                        collection.push_element(value.clone())
+                                    }
+                                    n::NormalFormArgument::ListSpread(value) => {
+                                        collection.push_spread(value.clone())
+                                    }
+                                    _ => unreachable!("checked collection input"),
                                 }
-                                n::NormalFormArgument::ListSpread(value) => {
-                                    collection.push_spread(value.clone())
-                                }
-                                _ => unreachable!("checked collection input"),
                             }
+                            self.clause_collection_expression(collection, ty.clone(), span)
+                                .map(n::NormalFormArgument::Value)
+                        } else {
+                            Ok(n::NormalFormArgument::List {
+                                source: source(span),
+                                items: items.clone(),
+                            })
                         }
-                        self.clause_collection_expression(collection, ty.clone(), span)
-                            .map(n::NormalFormArgument::Value)
+                    } else if let Some(RoutedDeclarationInput::Prepared(value)) = explicit {
+                        if !dependent {
+                            self.require_expression(&value.ty, &ty, span)?;
+                        }
+                        Ok(n::NormalFormArgument::Value(value.clone()))
+                    } else if dependent && checking == InputChecking::Contextual {
+                        self.dependent_normal_argument(input.unwrap(), 0)
                     } else {
-                        Ok(n::NormalFormArgument::List {
-                            source: source(span),
-                            items: items.clone(),
-                        })
-                    }
-                } else if let Some(RoutedDeclarationInput::Prepared(value)) = explicit {
-                    if !dependent {
-                        self.require_expression(&value.ty, &ty, span)?;
-                    }
-                    Ok(n::NormalFormArgument::Value(value.clone()))
-                } else if dependent {
-                    self.dependent_normal_argument(input.unwrap(), 0)
-                } else {
-                    self.expr(input.unwrap(), Some(&ty))
-                        .map(n::NormalFormArgument::Value)
-                };
+                        self.expr(input.unwrap(), (!dependent).then_some(&ty))
+                            .map(n::NormalFormArgument::Value)
+                    };
+                    checked.map(|value| (value, dependent))
+                })();
                 if explicit.is_none() {
                     self.active_type_defaults.remove(&(owner, slot));
                 }
-                let value = checked.map_err(|mut failure| {
+                let (value, dependent) = checked.map_err(|mut failure| {
                     if parameters[slot].2 != p(P::Type) && failure.message.contains("type mismatch")
                     {
                         failure.message = format!(

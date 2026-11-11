@@ -86,10 +86,11 @@ binder 提升由静态检查、观察与两种 VM 共用。动态 contextual 参
 
 ### 已接通：纯 Type 与混合子句共用准备路径
 
-`prepared_type_inputs` 的独立循环已删除。普通 callable、名义类型和成员实例的
-输入准备都经过 `prepared_clause_inputs_in_domains`，不再因接收域全为 Type 就
-绕过普通准备。传递给下游的仍是按源码位置保留的生产者和独立的身份观察，不能
-从静态 Type 观察推导出生产者可以省略。
+`prepared_type_inputs` 的独立循环已删除，不再因接收域全为 Type 就绕过普通准备。
+普通 callable 现已进一步迁入下述共同声明计划；非 contextual 名义类型和成员实例
+仍经过 `prepared_clause_inputs_in_domains`，这条旧路径尚未全部退役。传递给下游的
+仍是按源码位置保留的生产者和独立的身份观察，不能从静态 Type 观察推导出生产者
+可以省略。
 
 固定宽度展开包的布局与元素域分开取得；已观察的前置输入用于专门化各元素域，
 域全部可用时才形成普通 Tuple 上下文并检查包表达式。这保留了 Type 包的返回类型
@@ -131,10 +132,10 @@ ignored 用例，仍报 `191..201: list literal requires an element type context
 
 | 当前入口 | 已有能力 | 尚缺接线 |
 | --- | --- | --- |
-| `clause_inputs::prepared_clause_inputs_in_domains` | 保存 HIR 输入；静态域就绪后重排检查，最终仍按源码位置准备输入 | 无可用域时仍进入普通 `expr(None)`，没有可恢复的上下文检查请求 |
+| `declaration_inputs::planned_typed_declaration_inputs` | callable 与 NF／contextual 名义输入共用路由、域检查次序和执行计划 | callable 必须得到普通 typed Expr；无可用域时仍无可恢复的前端检查请求 |
 | `dynamic_instances::prepare_callable_clause_packet` | Type／普通值 local 与静态身份分开保存；签名闭合时在 invocation 中形成 callable | 接收域或函数签名依赖未执行输入时，仍缺上下文检查与恢复 |
 | `input_collection::Frame` | NF／名义输入的源码顺序、已执行值、域唤醒、终止与清理 | 消费的仍是 `NormalFormArgument`，不持有普通前端区域或其检查义务 |
-| `invocation::session::Session` | 独占 VM 的完整驱动现场，可在内部推进边界保存、移动与取消 | 生产入口仍同步驱动；尚无对外宿主请求与普通前端检查响应 |
+| `invocation::session::Session` | 独占 VM 驱动现场；公开关联选择请求可恢复、取消并检查响应身份 | 公开请求目前仅覆盖关联选择；尚无普通前端检查响应 |
 | `PreparedRequired::invoke_in_world` | 独立准备世界、限定的类型前提、同步 builder 服务 | builder 的 `prepare` 回调不是通用的前端暂停／恢复协议 |
 
 Type local 的旧限制已用接收域和函数签名均完整的源码独立复现，并按下一节解除。
@@ -573,8 +574,8 @@ Es 是否需要身份。名义输入及成员准备保留完整 PreparedClauseIn
 动态域的等待以及提前 return 均保留。
 
 此处统一的是检查和执行计划的构造，尚未退役 NormalFormArgument 的待定表达式树，
-也没有完成普通 callable 的动态签名恢复或全部 ArgumentPlan。共同入口给后续替换
-提供单一接线点，不能把文件提取与循环删除宣称为整个 ContextualExpr 已实现。
+也没有完成普通 callable 的动态签名恢复或全部 ArgumentPlan。普通 callable 已按
+下节进一步消费共同计划；不能把准备合流宣称为整个 ContextualExpr 已实现。
 
 验证工作目录 `/home/fin/luna`，检查入口
 `python3 -B development/check.py --timeout 900 -- test`：
@@ -597,6 +598,51 @@ Es 是否需要身份。名义输入及成员准备保留完整 PreparedClauseIn
   退出 0，887 项通过。五个修改 Rust 文件的 scoped rustfmt check 在
   `/tmp/luna-tools-ro2un3i_/result.json` 退出 0。正式 docs 与原有修改哈希不变；
   未执行全 workspace 或性能基准。
+
+### 已接通：普通 callable 消费共同声明输入计划
+
+`prepare_callable_clause_packet` 不再调用独立的子句准备循环，再进行一次路由和
+默认值绑定。它与 NF、contextual 名义类型和透明别名共用 `declaration_inputs`，
+只在最终阶段把计划中的 typed Expr、绑定和执行次序组装成普通 Block/Tuple 参数包。
+签名实例化、形成契约和 callable 发布仍由原消费者负责，没有伪造 NF 头或接收域。
+
+共同规划区分消费者是否能保留待定表达式。callable 目前要求普通 typed Expr；
+没有接收域的输入仍由普通表达式检查判断是否可独立取得类型。它不会走 NF 专用
+参数解释器，也不会在类型尚未确定时发布依赖该类型的函数签名。非 contextual
+名义实例仍有旧准备入口；这项迁移不等于退役全部 NormalFormArgument 或 ArgumentPlan。
+
+固定参数包在变参收集器之前也能取得自己的返回类型上下文。准备语句按计划位置
+插入，包括空展开包；默认值在全部显式生产者之后按声明次序执行。继承的词法输入
+只用于专门化声明默认环境，显式输入仍使用调用方环境。实际生产者先绑定，已观察的
+Type 身份仅供后续检查使用；同一 callable 值重复调用不会重放参数或默认生产者。
+
+共同身份观察在每次新查询开始时接入调用方已经完成的不可变局部值。查询取得独立
+事实表，遇到未知副作用后清除相关已知事实，不再从外部表重新加载；可变局部读取
+不会被当成静态值。共享默认入口也保证域查询失败会释放活动默认项，避免失败残留
+被后续准备误判成默认值递归。
+
+真实 sysroot 用例位于 `declaration_input_plans.rs`，覆盖泛型返回类型的展开包、
+前后空包、变参列表、词法捕获、默认值读取前置输入、提前 return、两次使用同一
+callable、错误字段／宽度／范围和不成立的生产者 requires。两种 VM 核对实际用户
+函数调用序列，而不只检查最终布尔结果。
+
+验证工作目录 `/home/fin/luna`：修改前专项
+`python3 -B development/check.py --timeout 900 -- test -p luna
+--test declaration_input_plans callable_packet_prefix --no-fail-fast`
+在 `/tmp/luna-tools-cwl8wd8d/result.json` 退出 101，包的返回类型推断未完成。
+首次合流回归 `/tmp/luna-tools-51jw3fi6/result.json` 暴露不可变局部身份证据遗漏，
+随后接回共同观察入口；未修改原测试预期。
+
+最终检查使用 `python3 -B development/check.py --timeout 900 -- test
+-p elaboration -p luna --lib --test declaration_input_plans --test clause_packet_preparation
+--test ordinary_callable_types --test ordinary_clause_collectors --test ordinary_input_identity
+--test normal_input_plans --test nominal_value_parameters --test clause_source_dependencies
+--test type_spreads --test default_calls --test comptime_clause_inputs --test library_meta_objects
+--test library_protocols --no-fail-fast`。`/tmp/luna-tools-2tiye8ws/result.json` 退出 0，
+924 项通过、2 项既有 ignored；后两项仍是动态域与依赖 callable 签名恢复缺口。
+四个修改 Rust 文件的 scoped rustfmt check 在
+`/tmp/luna-tools-c1yckumv/result.json` 退出 0，`git diff --check` 通过。
+未运行全 workspace、native 或性能基准；工作区原有资源分析改动保留在验证基线中。
 
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
 

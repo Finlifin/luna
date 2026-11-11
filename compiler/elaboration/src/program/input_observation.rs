@@ -89,7 +89,10 @@ impl Checker<'_, '_> {
         initial: impl IntoIterator<Item = (n::LocalId, &'value Term)>,
         span: Span,
     ) -> Result<Option<Term>, Error> {
-        let mut facts = BTreeMap::new();
+        // Each new observation may use completed immutable caller bindings.
+        // The owned query below invalidates them across unknown effects; never
+        // reload these facts after beginning to walk the producer.
+        let mut facts = self.observed_expression_bindings(producer, span)?;
         let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut fuel = before;
         let copied = initial.into_iter().try_for_each(|(binding, identity)| {

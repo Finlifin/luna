@@ -1,4 +1,4 @@
-//! NF, nominal, and alias inputs retain one source-order preparation contract.
+//! Type constructors and callables share source-order declaration input plans.
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
@@ -148,4 +148,95 @@ fn all_constructors_keep_early_return_before_later_producers() {
             &["check"],
         );
     }
+}
+
+#[test]
+fn callable_packet_prefix_receives_context_before_a_list_collector() {
+    check_both(
+        "
+        comptime fn prefix() -> R
+        where R, requires R == Tuple<u8, bool>
+        { (7, true) }
+        comptime fn empty() -> Tuple<> { () }
+        comptime fn flag() -> bool { true }
+        comptime fn take() -> bool
+        where value: u8, enabled: bool, ...flags: meta.List<bool>
+        { value == 7 and enabled and flags.length() == 1 }
+        comptime fn check() -> bool {
+            let selected = take<...empty(), ...prefix(), flag()>;
+            selected() and selected()
+        }
+        ",
+        &["check", "empty", "prefix", "flag", "take", "take"],
+    );
+}
+
+#[test]
+fn callable_packet_defaults_follow_all_explicit_sources_and_keep_prefix_values() {
+    check_both(
+        "
+        comptime fn prefix() -> R
+        where R, requires R == Tuple<u8, bool>
+        { (7, true) }
+        comptime fn tail() -> meta.List<bool> { [true, false] }
+        comptime fn mark() -> bool { true }
+        comptime fn outer() -> bool where seed: bool {
+            comptime fn take() -> bool
+            where value: u8, .copy: u8 = do { mark(); value }, enabled: bool,
+                  ...flags: meta.List<bool>
+            { value == copy and enabled and seed and flags.length() == 2 }
+            let selected = take<...prefix(), ...tail()>;
+            selected() and selected()
+        }
+        comptime fn check() -> bool { outer<true>() }
+        ",
+        &["check", "outer", "prefix", "tail", "mark", "take", "take"],
+    );
+}
+
+#[test]
+fn callable_packet_prefix_exit_skips_collector_defaults_and_formation() {
+    check_both(
+        "
+        comptime fn prefix() -> R
+        where R, requires R == Tuple<u8, bool>
+        { (7, true) }
+        comptime fn later() -> bool { true }
+        comptime fn take() -> bool
+        where value: u8, .tag: bool = later(), enabled: bool, ...flags: meta.List<bool>
+        { enabled }
+        comptime fn check() -> bool {
+            let selected = take<...do { return true; prefix() }, later()>;
+            false
+        }
+        ",
+        &["check"],
+    );
+}
+
+#[test]
+fn callable_collector_packet_context_keeps_producer_requirements_and_range_checks() {
+    let source = "
+        comptime fn prefix() -> R
+        where R, requires R == Tuple<u8, bool>
+        { BODY }
+        comptime fn take() -> bool
+        where value: u8, enabled: bool, ...flags: meta.List<bool>
+        { enabled }
+        comptime fn check() -> bool { take<...prefix(), true>() }
+    ";
+    for body in ["(256, true)", "(7, 8)", "(7, true, false)"] {
+        assert!(
+            sysroot::compile(&source.replace("BODY", body)).is_err(),
+            "{body}"
+        );
+    }
+    assert!(
+        sysroot::compile(
+            &source
+                .replace("BODY", "(7, true)")
+                .replace("R == Tuple<u8, bool>", "R == Tuple<bool, u8>")
+        )
+        .is_err()
+    );
 }
