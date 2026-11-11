@@ -6,6 +6,11 @@
 本文件保留初始审计；随后已实施的源码退役与检查见[模块边界](module-boundaries-and-retirement.md)。
 完整架构迁移尚未完成。
 
+R01–R20 是上述基线的根因定位，不是逐项尚未实现的当前清单。特别是 R11 的全量
+外围继承、R02 的 required 求值代码复用及 R03 的重复输入准备，已有后续生产迁移；
+不得再将当时的失败或专用路径存在性直接用于当前决策。当前已接线部分与明确未闭合
+边界见 [README](README.md#当前生产接线与下一步) 和[迁移计划](refactoring-plan.md)。
+
 ## 1. 体量与结构事实
 
 初始审计工作区 compiler 下 `.rs/.fl/.md/.py` 共 1,077 文件、766,700 行，含测试及停用目录；
@@ -19,7 +24,7 @@
 
 ## 2. 重新核对报告后的结论
 
-| 编号 | 当前源码证据 | 已有能力与真实缺口 | 目标处理 |
+| 编号 | 初始源码证据 | 当时已有能力与缺口 | 目标处理 |
 | --- | --- | --- | --- |
 | R01 | `compiler/comptime_interpretor/src/bytecode.rs::bytecode_invocation_available`、`effects.rs::eval_effect` | 字节码受 comptime_only、cleanup、effect environment 门控；runtime effect 参考执行与 comptime invocation 不能混称 | 独立 invocation engine；混合解释保留，语义操作共享；逐操作迁移后删除 invocation fallback |
 | R02 | `compiler/comptime_interpretor/src/code_session.rs::CodeSession`、`compiler/luna/src/memoization.rs::Invocation` | 已复用不可变源码世界、索引和代码；不是每次必重建。尚非跨稳定 query 的统一会话 | 区分 WorldSnapshot、CodeCache、VmSession、结果缓存；以版本依赖复用 |

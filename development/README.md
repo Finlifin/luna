@@ -41,30 +41,55 @@
 | 旧开发文档清理 | 旧正文退役，作者补充与现行 wire 保留；[重置记录](documentation-reset.md)给出映射与备份 | 源码和工具资产没有随文档删除；它们按独立退役条件处理 |
 | 语言设计认知整理 | [语言契约](language-contracts.md)按正式来源区分语言保证、实现策略和现状限制 | 实现中的语义偏差没有因整理文档而修复 |
 | 一致性易崩点整理 | [C01–C34](consistency-boundaries.md)及重绑定、值域、环境、世界和执行次数协议 | 这些反例尚未全部成为生产回归；跨层证据迁移未接通 |
-| 劣化代码清理 | [R01–R20](architecture-audit.md)与[退役审计](module-boundaries-and-retirement.md)定位现有路径；四个停用 crate 的 11 个文件已核对仓库内消费者 | 四个停用 crate、middle 旧类型侧表及包装已删除；通用机制替代后的专用分支仍待清理 |
+| 劣化代码清理 | [R01–R20](architecture-audit.md)与[退役审计](module-boundaries-and-retirement.md)定位现有路径；四个停用 crate、middle 旧类型侧表及包装已删除；共同输入、词法捕获和接收世界准入已有生产迁移 | 通用机制替代后的专用分支仍待清理，不能将局部接线计为完整新架构 |
 | 新一代全链路重构设计 | [总架构](architecture.md)及专题明确数据所有者、接口、状态转换、查询/执行边界、理论证据、六包与产物交付 | 具体 Rust 接线、理论片段实现、平台 ABI、持久编码及规模验证按依赖阶段完成 |
 
-本阶段取得的有限运行证据用于保留正确行为和定位失败，不作为新架构已完成的证明：
+## 当前生产接线与下一步
 
-| 现状路径 | 已核对结果与位置 |
-| --- | --- |
-| 真实 sysroot 的反射/builder、默认局部 const | [运行基线](architecture-audit.md#6-可复现的现状基线)通过；driver 包含工作区原有资源分析改动，不是纯 HEAD 构建 |
-| 局部 helper 子句默认 | [已按声明根/调用闭包选择输入](dependency-observations.md#54-声明根依赖选择与调用闭包已接通)，默认 helper 正例恢复；[staged 默认值已分离残余与冻结表示](dependency-observations.md#55-invocation-残余值与冻结值分离)，[默认值定义端类型前提已进入 P3 检查](dependency-observations.md#56-默认值的定义端类型前提进入-p3-检查)，抽象 Copy 的表示/清理证据仍缺失 |
-| 普通值、NF 与名义输入 | [共同值域检查](comptime-value-admission.md#10-已接通的共同值域检查)已接管递归成员检查，删除普通 callable 的伪造 NF 头适配；[普通子句的列表收集](comptime-value-admission.md#11-普通子句输入与列表收集)与[required/invocation 参数包](comptime-value-admission.md#12-required-与-invocation-共享-callable-参数包)已复用准备路径；[NF/名义输入的共同执行帧](comptime-value-admission.md#18-invocation-已完成输入共用槽位存储)已替换重复调度；[共同声明输入规划](values-staging-and-publication.md#已接通nf名义类型与透明别名共用输入规划)已覆盖 NF、普通 callable 与名义实例；[名义及成员旧准备循环已退役](values-staging-and-publication.md#已接通名义实例与成员输入退役旧准备循环)，typed 消费者共用普通 NIR 出口；[待定参数的块与分支检查](values-staging-and-publication.md#已接通待定参数复用普通块与分支检查)已复用普通语句、作用域和类型事实，完整值传送与 ArgumentPlan 尚未完成 |
-| HIR 查询保留能力 | [两个现有测试](module-boundaries-and-retirement.md#41-middle-的旧类型子系统须另作一个完整退役单元)覆盖输入失效与拥有结果的寿命；后续源码退役也已重跑这些检查及生命周期拒绝例 |
-| 两阶段方法与文本资源 | [真实六包的来源选择及有限调用](libraries-and-delivery.md#111-真实六包的两阶段方法基线)已核对；[文本来源分析成功而资源执行失败](solvers-resources-and-lowering.md#61-已有来源分析不等于可执行资源证据)，交付尚未接通 |
+以下核对基线为 `67420e7a`，包含工作区原有的资源分析修改；不是纯 HEAD 构建的
+全语言验收。初始审计和旧证据仍用于追溯，当前进度按实际消费者及未闭合边界判断。
 
-后续有两个已界定的入口：已完成的停用源码/旧类型包装退役，以及主干的声明需求 →
-依赖闭包 → 调用供应 → required 求值。它们的边界见[迁移计划](refactoring-plan.md)；
-不能只改继承循环，也不必等所有平台 ABI 和持久格式细节结束才开始前端工作。
-首批实施仍须补齐它实际依赖的 Rust 接口和失败现场证据，并保留当前有效机制。
+| 主干 | 当前已接入的生产入口 | 尚未闭合 |
+| --- | --- | --- |
+| 声明输入与调用供应 | `lexical_inputs` 按声明根及调用闭包收集依赖；`declaration_inputs` 的同一计划服务普通 callable、NF、别名及名义类型 | typed 消费者仍要求立即取得可检查域；完整 ContextualExpr 尚未替换 NormalFormArgument |
+| 词法参数与代码签名 | 普通表达式、contextual 签名和捕获共用可见声明输入；关联常量将主体与捕获一起按实例替换 | 这不能使尚未执行的 Type 生产者提前变成已完成输入 |
+| 值传递与接收世界 | 通用准入保留域、phase 和身份；跨 VM callable 在接收世界完成方法选择及关联签名观察 | 活动值、权限及选择证据不随 CodeSession 共享；完整统一值传送协议仍有待迁移 |
+| 稳定世界与执行 | DeclarationSnapshot 保活声明与索引；RequiredWorld 复用代码 session；VM 的关联选择请求支持持有进度与响应检查 | 普通前端检查请求、通用 Region/Candidate 所有权及任意定义发布尚未全线接通 |
+| TypeRef 与 IIR | core/substitution 已有实现，闭合 callable/template 有消费者 | 普通函数仍以 NIR Function 为实例载体；runtime_bindings 不能替代带域的 EnvironmentPlan |
+| 六包与资源 | 已有真实 sysroot 的 builder、列表、反射及两阶段方法路径作为前端迁移消费者 | 文本来源到资源执行、抽象 Copy 的表示与清理、完整库场景仍须分别贯通 |
 
-当前核验：旧文档 59 份逐字节备份仍完整；development Markdown 的 282 个相对文件
-链接可解析；从审计基线至 `9e86aa16` 的 75 个变更路径全部为 development Markdown。
-这证明修改边界与资料完整性，不证明语言实现或架构迁移完成。完整证据见
-`/tmp/luna-design-convergence-wl114wwt`；本机临时路径不是持久构建输入。
+具体接线及语义边界见[共同输入计划](values-staging-and-publication.md#已接通nf名义类型与透明别名共用输入规划)、
+[父声明输入](values-staging-and-publication.md#已接通contextual-签名与普通值检查共用父声明输入)、
+[接收世界的 callable 准入](comptime-value-admission.md#跨-vm-callable-输入的主动准入)、
+[世界所有权](world-storage-and-lifetimes.md)和[库迁移](libraries-and-delivery.md)。
+源码退役已经完成的部分见[模块边界](module-boundaries-and-retirement.md)，不再作为
+“首批尚待开始”的任务反复安排。后续仍按[迁移计划](refactoring-plan.md)删除被通用机制替换的分支。
 
-可执行脚本、examples、repros、bench 和 library-prototypes 保留；三个旧入口只作跳转。
+最近一次相关运行覆盖前端与 VM 共 1,284 项，均通过；它只证明上述 callable 准入
+改动及相关路径，不能证明 M1–M7 完成。证据及检查命令见
+[callable 准入验证](comptime-value-admission.md#跨-vm-callable-输入的主动准入)。
+
+本次重新运行四项语义缺口的 ignored 用例，四项均失败，未改其预期或 ignore：
+
+| 未完成用例 | 当前失败边界 | 下一步责任 |
+| --- | --- | --- |
+| `ordinary_clause_collectors::pending_clause_domains_can_wait_for_a_type_producer` | `191..201: list literal requires an element type context` | 保留待定接收域与表达式检查进度，接收 Type 结果后继续检查 |
+| `ordinary_callable_types::computed_type_inputs_can_complete_a_dependent_callable_signature` | `159..181: comptime callable signature still depends on an invocation-time clause input` | 参数供应完成后形成真实签名，再发布 callable |
+| `function_template_local_definitions::generic_default_stability_needs_its_definition_proof_environment` | `25..44: default expression requires P3 stability/termination evidence` | 定义端的抽象 Copy、表示及清理证据进入 P3 |
+| `predicate_calls::comptime_decisions_check_their_results_before_returning_types` | `120..141: assumes requires a supported effect-free program predicate` | phase 与值引用稳定性证明；不以 PTC 替代程序检查 |
+
+工作目录 `/home/fin/luna`，执行
+`python3 -B development/check.py --timeout 900 -- test -p luna --test ordinary_callable_types --test ordinary_clause_collectors --test function_template_local_definitions --test predicate_calls --no-fail-fast -- --ignored`，
+`/tmp/luna-tools-ed1vdnf1/result.json` 退出 101。`nesting` 的 subprocess 专用 ignore
+不属于这四项语义缺口，也不能据 ignored 名称推断整个前端只有四个缺口。
+
+下一条主干是[调用期域与签名恢复](refactoring-plan.md#下一条纵向交付待定域的普通调用)。
+保留前端区域、实际输入生产者和 VM 已执行前缀，既不伪造 Type／Any，也不重放
+已完成副作用。P3／资源线仍独立保留，不能因为另一个机制有进展就将其标为完成。
+
+初始资料清理的映射与备份说明见[文档重置记录](documentation-reset.md)；其中的文件数、
+行数和链接核验属于当时基线，不是当前状态。可执行工具、examples、repros、bench
+及 library-prototypes 按各自消费者保留，不随文档更新删除。
 保持单代理直接工作，不恢复 graph engineering 或 prompt 文档问答循环。
 
 ## 开发入口
