@@ -11,6 +11,7 @@
 | --- | --- |
 | [语言契约](language-contracts.md) | 哪些设计必须保持，哪些“未知”与阶段不能混淆？ |
 | [架构审计](architecture-audit.md) | 当前源码究竟在哪里偏离，哪些旧报告已经过时？ |
+| [晚报回复](audit-reply.md) | 2026-11-11 晚报哪些结论采纳、哪些须按当前代码和语言契约纠正？ |
 | [一致性边界](consistency-boundaries.md) | 哪些信息在变换中容易丢失，用什么反例检查？ |
 | [全链路架构](architecture.md) | 谁拥有世界、推断、执行、类型环境和产物？ |
 | [模块边界与退役](module-boundaries-and-retirement.md) | 实际 crate 依赖承载什么，哪些职责须保留，旧路径何时可删除？ |
@@ -46,12 +47,13 @@
 
 ## 当前生产接线与下一步
 
-以下核对基线为 `67420e7a`，包含工作区原有的资源分析修改；不是纯 HEAD 构建的
+以下核对基线为 `4937d332`，包含工作区原有的资源分析修改；不是纯 HEAD 构建的
 全语言验收。初始审计和旧证据仍用于追溯，当前进度按实际消费者及未闭合边界判断。
 
 | 主干 | 当前已接入的生产入口 | 尚未闭合 |
 | --- | --- | --- |
 | 声明输入与调用供应 | `lexical_inputs` 按声明根及调用闭包收集依赖；`declaration_inputs` 的同一计划服务普通 callable、NF、别名及名义类型 | typed 消费者仍要求立即取得可检查域；完整 ContextualExpr 尚未替换 NormalFormArgument |
+| 参数域与源码控制 | 声明／trait 输入在替换前识别 callee 依赖；caller 泛型值走普通转换；`control::Context` 整体管理检查边界的返回及循环状态 | 整个 Checker 尚非可挂起区域；已知符号身份不代表 invocation 生产者已执行 |
 | 词法参数与代码签名 | 普通表达式、contextual 签名和捕获共用可见声明输入；关联常量将主体与捕获一起按实例替换 | 这不能使尚未执行的 Type 生产者提前变成已完成输入 |
 | 值传递与接收世界 | 通用准入保留域、phase 和身份；跨 VM callable 在接收世界完成方法选择及关联签名观察 | 活动值、权限及选择证据不随 CodeSession 共享；完整统一值传送协议仍有待迁移 |
 | 稳定世界与执行 | DeclarationSnapshot 保活声明与索引；RequiredWorld 复用代码 session；VM 的关联选择请求支持持有进度与响应检查 | 普通前端检查请求、通用 Region/Candidate 所有权及任意定义发布尚未全线接通 |
@@ -65,9 +67,11 @@
 源码退役已经完成的部分见[模块边界](module-boundaries-and-retirement.md)，不再作为
 “首批尚待开始”的任务反复安排。后续仍按[迁移计划](refactoring-plan.md)删除被通用机制替换的分支。
 
-最近一次相关运行覆盖前端与 VM 共 1,284 项，均通过；它只证明上述 callable 准入
+上述 callable 准入阶段运行覆盖前端与 VM 共 1,284 项，均通过；它只证明该阶段准入
 改动及相关路径，不能证明 M1–M7 完成。证据及检查命令见
 [callable 准入验证](comptime-value-admission.md#跨-vm-callable-输入的主动准入)。
+后续 trait 域及阶段边界的针对性验证见[晚报回复](audit-reply.md#4-本次证据与限制)，
+不把不同源码基线的测试数量相加作为架构完成度。
 
 本次重新运行四项语义缺口的 ignored 用例，四项均失败，未改其预期或 ignore：
 
