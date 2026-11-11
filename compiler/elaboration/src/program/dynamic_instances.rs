@@ -251,59 +251,8 @@ impl Checker<'_, '_> {
                 },
             })
             .collect::<Vec<_>>();
-        let n::NormalFormInputPlan {
-            order,
-            preparations,
-            bindings,
-        } = prepared.plan;
-        let mut sources = prepared.arguments.into_iter().map(Some).collect::<Vec<_>>();
-        let mut outputs = vec![None; sources.len()];
-        let mut preparations = preparations.into_iter().peekable();
-        let mut statements = Vec::new();
-        for (position, slot) in order.into_iter().enumerate() {
-            while preparations
-                .peek()
-                .is_some_and(|preparation| preparation.before <= position)
-            {
-                statements.push(preparations.next().unwrap().expression);
-            }
-            let Some(n::NormalFormArgument::Value(value)) = sources[slot].take() else {
-                return Err(error(expr.span, "typed declaration input was not checked"));
-            };
-            let parameter = parameters[prefix.len() + slot];
-            let ty = value.ty.clone();
-            let output = if matches!(value.kind, K::TypeValue(_)) {
-                value
-            } else {
-                let location = value.source;
-                statements.push(n::Expr {
-                    source: location,
-                    ty: if is_never(&ty) {
-                        p(P::Never)
-                    } else {
-                        p(P::Void)
-                    },
-                    kind: K::Let {
-                        binding: bindings[slot],
-                        value: Box::new(value),
-                    },
-                });
-                n::Expr {
-                    source: location,
-                    ty,
-                    kind: if domains[prefix.len() + slot] == p(P::Type)
-                        && !pending.contains(&parameter)
-                    {
-                        K::TypeValue(symbols[prefix.len() + slot].clone())
-                    } else {
-                        K::Local(bindings[slot])
-                    },
-                }
-            };
-            outputs[slot] = Some(output);
-        }
-        statements.extend(preparations.map(|preparation| preparation.expression));
-        operands.extend(outputs.into_iter().map(Option::unwrap));
+        let statements = prepared.statements;
+        operands.extend(prepared.arguments);
         let formation = FormationInputs {
             terms: symbols.clone(),
             deferred: parameters

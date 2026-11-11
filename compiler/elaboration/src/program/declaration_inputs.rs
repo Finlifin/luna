@@ -15,7 +15,105 @@ pub(super) struct PreparedDeclarationInputs {
     pub formation: FormationInputs,
 }
 
+/// Typed consumers receive ordinary NIR only, with execution statements separate
+/// from the declaration-order result slots and their formation evidence.
+pub(super) struct CheckedDeclarationInputs {
+    pub arguments: Vec<n::Expr>,
+    pub statements: Vec<n::Expr>,
+    pub formation: FormationInputs,
+}
+
+impl std::fmt::Display for CheckedDeclarationInputs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(checked-declaration-inputs (statements")?;
+        for statement in &self.statements {
+            write!(f, " {statement}")?;
+        }
+        f.write_str(") (arguments")?;
+        for argument in &self.arguments {
+            write!(f, " {argument}")?;
+        }
+        f.write_str(") (identities")?;
+        for term in &self.formation.terms {
+            write!(f, " {term}")?;
+        }
+        f.write_str(") (deferred")?;
+        for parameter in &self.formation.deferred {
+            write!(f, " {parameter}")?;
+        }
+        f.write_str(") (environment")?;
+        for (parameter, value) in &self.formation.environment {
+            write!(f, " (input {parameter} {value})")?;
+        }
+        f.write_str("))")
+    }
+}
+
 impl PreparedDeclarationInputs {
+    fn into_typed(
+        self,
+        parameters: &[(DeclarationId, Sort, Term)],
+        span: Span,
+    ) -> Result<CheckedDeclarationInputs, Error> {
+        let n::NormalFormInputPlan {
+            order,
+            preparations,
+            bindings,
+        } = self.plan;
+        let mut sources = self.arguments.into_iter().map(Some).collect::<Vec<_>>();
+        let mut outputs = vec![None; sources.len()];
+        let mut preparations = preparations.into_iter().peekable();
+        let mut statements = Vec::new();
+        for (position, slot) in order.into_iter().enumerate() {
+            while preparations
+                .peek()
+                .is_some_and(|preparation| preparation.before <= position)
+            {
+                statements.push(preparations.next().unwrap().expression);
+            }
+            let Some(n::NormalFormArgument::Value(value)) = sources[slot].take() else {
+                return Err(error(span, "typed declaration input was not checked"));
+            };
+            let parameter = parameters[slot].0;
+            let ty = value.ty.clone();
+            let output = if matches!(value.kind, K::TypeValue(_)) {
+                value
+            } else {
+                let location = value.source;
+                statements.push(n::Expr {
+                    source: location,
+                    ty: if is_never(&ty) {
+                        p(P::Never)
+                    } else {
+                        p(P::Void)
+                    },
+                    kind: K::Let {
+                        binding: bindings[slot],
+                        value: Box::new(value),
+                    },
+                });
+                n::Expr {
+                    source: location,
+                    ty,
+                    kind: if parameters[slot].2 == p(P::Type)
+                        && !self.formation.deferred.contains(&parameter)
+                    {
+                        K::TypeValue(self.formation.terms[slot].clone())
+                    } else {
+                        K::Local(bindings[slot])
+                    },
+                }
+            };
+            outputs[slot] = Some(output);
+        }
+        statements.extend(preparations.map(|preparation| preparation.expression));
+        Ok(CheckedDeclarationInputs {
+            arguments: outputs.into_iter().map(Option::unwrap).collect(),
+            statements,
+            formation: self.formation,
+        })
+    }
+
     pub fn diverges(&self) -> bool {
         self.arguments
             .iter()
@@ -233,7 +331,7 @@ impl Checker<'_, '_> {
         span: Span,
         parameters: &[(DeclarationId, Sort, Term)],
         defaults: Option<&nominal::InputEnvironment<'_>>,
-    ) -> Result<PreparedDeclarationInputs, Error> {
+    ) -> Result<CheckedDeclarationInputs, Error> {
         self.plan_declaration_inputs(
             owner,
             inputs,
@@ -241,7 +339,8 @@ impl Checker<'_, '_> {
             parameters,
             defaults,
             InputChecking::Typed,
-        )
+        )?
+        .into_typed(parameters, span)
     }
 
     fn plan_declaration_inputs(
@@ -931,6 +1030,19 @@ mod tests {
             dump.contains("(deferred (declaration (package 1) (local 7)))"),
             "{dump}"
         );
+        assert!(!dump.contains('\n'), "unescaped newline: {dump}");
+        let checked = inputs
+            .into_typed(&[(id, Sort::ComptimeValue, p(P::Str))], Span::default())
+            .unwrap();
+        let dump = checked.to_string();
+        assert!(
+            dump.starts_with("(checked-declaration-inputs (statements "),
+            "{dump}"
+        );
+        assert!(dump.contains("quote\\\"\\n"), "{dump}");
+        assert!(dump.contains("(arguments (expr"), "{dump}");
+        assert!(dump.contains("(local 4 2)"), "{dump}");
+        assert!(dump.contains("(identities (primitive u8))"), "{dump}");
         assert!(!dump.contains('\n'), "unescaped newline: {dump}");
     }
 }

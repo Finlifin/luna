@@ -650,6 +650,7 @@ fn elaborate_candidate<'a, 'h>(
                     })
                 }
                 hir::clause::ClauseParamKind::Positional(..)
+                | hir::clause::ClauseParamKind::Varadic(..)
                     if matches!(
                         info.node.expect_item().kind,
                         ItemKind::TypeAlias(..)
@@ -709,7 +710,8 @@ fn elaborate_candidate<'a, 'h>(
                 ) {
                     match parameter.kind {
                         hir::clause::ClauseParamKind::Positional(_, ty)
-                        | hir::clause::ClauseParamKind::Optional(_, ty, _) => {
+                        | hir::clause::ClauseParamKind::Optional(_, ty, _)
+                        | hir::clause::ClauseParamKind::Varadic(_, ty) => {
                             Some(checker.type_expr(ty)?)
                         }
                         _ => Some(p(P::Type)),
@@ -746,6 +748,7 @@ fn elaborate_candidate<'a, 'h>(
                             parameter.kind,
                             hir::clause::ClauseParamKind::Positional(..)
                                 | hir::clause::ClauseParamKind::Optional(..)
+                                | hir::clause::ClauseParamKind::Varadic(..)
                         ))
                     && !matches!(
                         parameter.kind,

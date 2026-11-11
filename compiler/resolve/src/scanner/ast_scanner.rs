@@ -728,6 +728,7 @@ impl<'a> AstScanner<'a> {
                     | NodeKind::OptionalParam
                     | NodeKind::OptionalDeclClause
                     | NodeKind::VarargDeclClause
+                    | NodeKind::VarargParam
             ) {
                 let name = self.extract_name(if kind == NodeKind::Id {
                     clause

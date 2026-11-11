@@ -88,6 +88,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     | NodeKind::OptionalParam
                     | NodeKind::OptionalDeclClause
                     | NodeKind::VarargDeclClause
+                    | NodeKind::VarargParam
             ) {
                 self.emit_unsupported_clause(&format!("{kind:?}"), span);
                 continue;
@@ -117,7 +118,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     NodeKind::TypeBoundDeclClause | NodeKind::TypeBoundParam => {
                         ClauseParamKind::Positional(name, ty)
                     }
-                    NodeKind::VarargDeclClause => ClauseParamKind::Varadic(name, ty),
+                    NodeKind::VarargDeclClause | NodeKind::VarargParam => {
+                        ClauseParamKind::Varadic(name, ty)
+                    }
                     NodeKind::OptionalDeclClause | NodeKind::OptionalParam => {
                         let default = self.lower_expr(ExprContext::ComptimeArgument, children[2]);
                         ClauseParamKind::Optional(name, ty, self.arena.alloc_expr(default))

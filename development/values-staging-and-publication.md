@@ -87,10 +87,9 @@ binder 提升由静态检查、观察与两种 VM 共用。动态 contextual 参
 ### 已接通：纯 Type 与混合子句共用准备路径
 
 `prepared_type_inputs` 的独立循环已删除，不再因接收域全为 Type 就绕过普通准备。
-普通 callable 现已进一步迁入下述共同声明计划；非 contextual 名义类型和成员实例
-仍经过 `prepared_clause_inputs_in_domains`，这条旧路径尚未全部退役。传递给下游的
-仍是按源码位置保留的生产者和独立的身份观察，不能从静态 Type 观察推导出生产者
-可以省略。
+普通 callable、名义类型和成员实例均已迁入下述共同声明计划，旧的
+`prepared_clause_inputs_in_domains` 已删除。传递给下游的仍是按源码位置保留的
+生产者和独立的身份观察，不能从静态 Type 观察推导出生产者可以省略。
 
 固定宽度展开包的布局与元素域分开取得；已观察的前置输入用于专门化各元素域，
 域全部可用时才形成普通 Tuple 上下文并检查包表达式。这保留了 Type 包的返回类型
@@ -501,58 +500,19 @@ pending 标记，普通 callable 签名被拒绝，等待它的列表也失去�
 
 ### 已接通：默认子句共用检查与绑定，依赖包含默认表达式
 
-显式子句有静态身份，不能证明省略的子句也已完成。旧普通 callable 准备在检查
-默认表达式后只绑定 Local，没有观察其正常结果；即使默认值为
-`do { mark(); let kind = u8; kind }`，函数签名仍被视为依赖 invocation-time 输入。
+显式子句有静态身份，不能证明省略的子句也已完成。共同声明计划在声明侧环境中
+代入先前输入的域，检查默认表达式，以已有输入身份观察正常结果，再将完整生产者
+绑定到显式输入之后。Type 身份供后续域和 callable 签名使用；实际默认代码仍保留。
+形成两次 callable 就运行两次默认生产者，重复调用同一个已形成 callable 不重新
+执行默认子句。显式供应某个参数时不进入默认准备。
 
-普通 callable 和非 contextual 的名义输入现在共用 `prepared_clause_default`：
-在声明侧环境中代入先前输入的域，检查默认表达式，以已有输入身份观察正常结果，
-再将完整生产者绑定到显式输入之后。Type 身份可供后续域和 callable 签名使用；
-实际默认代码仍保留，形成两次 callable 就运行两次默认生产者，重复调用同一个
-已形成 callable 则不重新执行默认子句。显式供应某个参数时不进入默认准备。
-
-默认检查的循环保护在域检查、表达式检查、观察或绑定失败时统一撤销，不因早退错误
-留下活动默认项。替换为静态 Type 的参数也清除同一声明身份下的旧 local 映射，避免
-默认表达式先读到上一次准备的绑定。事实只取自已经建立的输入替换及其真实绑定，
-查询和复制仍计入预算，不从调用方任意存储推测默认值。
-
-子句身份的依赖集合同时包括域和默认表达式。后者通过现有的词法声明依赖闭包取得，
-不复制一份 HIR 遍历器。例如 Es 的域是普通 `meta.List<Type>`，而默认 T 的域只是
-Type；`T = Tuple<.Es = Es>` 对 Es 的读取存在于默认表达式中，不能仅查看域来判断
-Es 是否需要身份。名义输入及成员准备保留完整 PreparedClauseInputs，不再在中途
-丢弃已取得的 identities。这里不为列表或 Tuple 新设语义。
+共同入口替代了 `prepared_clause_default`。循环保护在域或表达式检查失败时撤销，
+默认环境只安装之前的声明输入，并清除这些身份下的旧绑定。所有槽位都保留普通值
+身份和实际生产者，所以 `Es: meta.List<Type>` 也能供应默认 `T = Tuple<.Es = Es>`；
+不再只看默认 T 的域是 Type 就遗漏它对 Es 的依赖，也不为 List／Tuple 另设身份规则。
 
 需要真实 invocation 才能确定的默认 Type 仍保持 pending，不发布为任意具体函数
-类型；contextual 名义准备和动态接收域的其余迁移仍未完成。这不是统一 ArgumentPlan
-或默认值全部特性的完成声明。
-
-验证工作目录 `/home/fin/luna`，检查入口
-`python3 -B development/check.py --timeout 900 -- test`：
-
-- 修改前 `-p luna --test clause_packet_preparation default --no-fail-fast`，
-  `/tmp/luna-tools-0638y_1x/result.json` 退出 101：两个默认 callable 用例失败，
-  两个名义对照用例通过。共同默认入口接通后，参数
-  `-p luna --test clause_packet_preparation --test ordinary_callable_types
-  --test normal_input_plans --no-fail-fast` 的 `/tmp/luna-tools-ovagmvs2/result.json`
-  退出 0，46 项通过、1 项既有 ignored。
-- 普通值依赖用例最初在 `/tmp/luna-tools-cie3t85q/result.json` 退出 101，原因是
-  Es 没有进入身份依赖集合；接通默认表达式的词法依赖后，用同一专项命令
-  `-p luna --test clause_packet_preparation defaults_use_ordinary --no-fail-fast`
-  重跑，`/tmp/luna-tools-75shkkq3/result.json` 退出 0，1 项通过。
-- 扩展检查参数 `-p elaboration -p luna --lib --test clause_packet_preparation
-  --test clause_source_dependencies --test ordinary_callable_types --test ordinary_clause_collectors
-  --test default_calls --test comptime_bytecode_defaults --test ordinary_input_identity
-  --test normal_input_plans --test nominal_value_parameters --test type_spreads
-  --test library_meta_objects --test library_protocols --no-fail-fast`，
-  `/tmp/luna-tools-8xz2oeah/result.json` 退出 101，876 项通过、2 项既有 ignored。
-  唯一失败是新拒绝用例给任意 T 声明整数默认值，先在定义侧被正确拒绝，没有到达
-  预期的调用边界。用例改为由默认 T = u8 完成签名，再向调用传入 256，并补查
-  非 contextual 名义默认值；生产实现未再改变。
-- 最终重跑 `-p luna --test clause_packet_preparation --no-fail-fast`，
-  `/tmp/luna-tools-_ceost6v/result.json` 退出 0，16 项通过。覆盖两种 VM、实例形成
-  次数、默认转发、所有显式输入先执行、覆盖默认项、普通值依赖及未完成类型拒绝。
-  五个 Rust 文件 scoped rustfmt check 在 `/tmp/luna-tools-x4156x56/result.json`
-  退出 0。未运行全 workspace 或性能基准。
+类型。当前接线和证据见下述共同计划章节；完整 ContextualExpr 和动态签名恢复尚缺。
 
 ### 已接通：NF、名义类型与透明别名共用输入规划
 
@@ -609,7 +569,7 @@ Es 是否需要身份。名义输入及成员准备保留完整 PreparedClauseIn
 共同规划区分消费者是否能保留待定表达式。callable 目前要求普通 typed Expr；
 没有接收域的输入仍由普通表达式检查判断是否可独立取得类型。它不会走 NF 专用
 参数解释器，也不会在类型尚未确定时发布依赖该类型的函数签名。非 contextual
-名义实例仍有旧准备入口；这项迁移不等于退役全部 NormalFormArgument 或 ArgumentPlan。
+名义实例也已按下节完成迁移；这仍不等于退役全部 NormalFormArgument 或完成 ArgumentPlan。
 
 固定参数包在变参收集器之前也能取得自己的返回类型上下文。准备语句按计划位置
 插入，包括空展开包；默认值在全部显式生产者之后按声明次序执行。继承的词法输入
@@ -643,6 +603,55 @@ callable、错误字段／宽度／范围和不成立的生产者 requires。两
 四个修改 Rust 文件的 scoped rustfmt check 在
 `/tmp/luna-tools-c1yckumv/result.json` 退出 0，`git diff --check` 通过。
 未运行全 workspace、native 或性能基准；工作区原有资源分析改动保留在验证基线中。
+
+### 已接通：名义实例与成员输入退役旧准备循环
+
+`build_type_instance` 与成员实例现在消费 `CheckedDeclarationInputs`。共同规划将
+待执行准备语句、声明顺序的普通 typed Expr 及形成身份证据分别交付；callable 也
+使用同一降码出口。其 S-expression dump 保留语句、槽位值、身份、待定项及环境，
+不再让 typed 消费者自行拆解 NormalFormArgument 或重建一次输入路由。
+
+删除了 `prepared_clause_inputs_in_domains`、PreparedClauseInputs、旧等待／证据
+状态、独立默认准备器，以及只扫描绑定前缀来重新猜测参数身份的入口。ClauseCollection
+只保留已检查元素和展开部分的组装；完整具名供应和重复／混合供应检查归共同路由。
+
+成员投影显式传入调用方环境，默认值和成员主体使用选中的父实例环境。父实例的形成
+检查仍在成员生产者之前执行，前置参数、空展开包和默认值各运行一次；没有把父级
+替换泄漏到显式实参。递归名义使用清除自身旧参数替换，只由实际词法捕获专门化域。
+
+声明登记和惰性域查询都将变参作为其声明域的普通值参数；`where` 与尖括号参数在
+名称登记和 HIR lowering 中一致保留 Varadic。名义构造因此也能使用现有列表收集，
+无需专门的参数种类或列表值身份。真实 sysroot 用例覆盖 bool／u8／Type 元素、先于
+Type 生产者的具名列表、固定展开包、成员默认值与跨实例调用方环境、错误／混合供应。
+不同冻结收集值的名义类型不等依赖[通用索引证据](type-models-and-theory-evidence.md#已接通名义类型中的冻结值索引不等证据)，
+两种 VM 使用真实声明查询服务检查该结论。
+
+剩余边界：ContextualExpr、普通 callable 的 invocation-time 域及签名恢复仍未完成；
+共同规划内部的待定输入树仍需退役。本次未完成通用 freeze/restore 或整个 M2。
+
+验证工作目录 `/home/fin/luna`，入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- 修改前 `-p luna --test declaration_input_plans nominal_packet_prefix --no-fail-fast`，
+  `/tmp/luna-tools-oqxfq67i/result.json` 退出 101，名义声明登记拒绝变参子句。
+  接通后新增尖括号用例依次暴露 VarargParam 的 lowering 与名称登记遗漏；专项
+  `/tmp/luna-tools-vrcbsueh/result.json`、`/tmp/luna-tools-3s4rfqq3/result.json`
+  保留这些失败证据。已有名义、默认值与 callable 回归未失败。
+- 补齐前端后，不等用例在 `/tmp/luna-tools-8ads0fzi/result.json` 仍返回
+  TypeContractUnresolved。请求记录确认相等不成立的反例已有，而否定证明缺少载荷
+  索引规则；没有将 Unknown 改成 false 或削弱用例，随后接入上述独立 PTC 修复。
+- 最终参数 `-p resolve -p ast_lowering -p elaboration -p luna --lib
+  --test declaration_input_plans --test clause_packet_preparation --test ordinary_callable_types
+  --test ordinary_clause_collectors --test ordinary_input_identity --test normal_input_plans
+  --test nominal_value_parameters --test nominal_staging --test open_normal_input_plans
+  --test clause_source_dependencies --test type_spreads --test default_calls --test comptime_clause_inputs
+  --test library_meta_objects --test library_protocols --no-fail-fast`，
+  `/tmp/luna-tools-dznn76xh/result.json` 退出 0，949 项通过、2 项既有 ignored。
+  旧准备结果类型的单元测试随类型删除；共同输出的 dump 检查保留在 declaration_inputs。
+- 十个修改 Rust 文件的 scoped rustfmt check：
+  `/tmp/luna-tools-ep3sgn8w/result.json` 退出 0；`git diff --check` 通过。
+  未运行全 workspace 或性能基准，未单独启动 native 验收。原有资源分析改动仍在验证
+  基线中，docs 与用户已有修改保持不变。
 
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
 

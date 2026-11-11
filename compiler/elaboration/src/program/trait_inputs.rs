@@ -23,7 +23,8 @@ impl Checker<'_, '_> {
         for clause in self.type_clause_params(owner) {
             domains.push(match clause.kind {
                 hir::clause::ClauseParamKind::Positional(_, ty)
-                | hir::clause::ClauseParamKind::Optional(_, ty, _) => self.type_expr(ty)?,
+                | hir::clause::ClauseParamKind::Optional(_, ty, _)
+                | hir::clause::ClauseParamKind::Varadic(_, ty) => self.type_expr(ty)?,
                 _ => p(P::Type),
             });
         }

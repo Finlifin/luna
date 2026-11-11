@@ -674,7 +674,6 @@ impl Checker<'_, '_> {
         let result = (|| {
             // Explicit member arguments belong to the caller's environment;
             // only defaults and the member body see the selected container.
-            let binders = self.input_binders(&parameters);
             // Prepared parent values live in locals. Recover only structural
             // evidence from their initializers, without invoking input code.
             let mut known_parent = BTreeMap::new();
@@ -694,25 +693,7 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            let parent_terms = arguments
-                .iter()
-                .zip(&binders)
-                .map(|(argument, binder)| {
-                    self.known_normal_input_in(argument, 0, &mut budget, &known_parent)
-                        .unwrap_or(Term::Rigid {
-                            declaration: binder.declaration,
-                            sort: binder.sort,
-                        })
-                })
-                .collect::<Vec<_>>();
             self.required_steps -= (before - budget.steps) as u64;
-            let domains = self
-                .trait_domains(owner)?
-                .iter()
-                .map(|domain| {
-                    self.instantiate_trait_domain(domain, &binders, &parent_terms, expr.span)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
             let member_captures = self.nominal_captures(owner, expr.span)?;
             let contextual_alias = matches!(
                 self.package.item(owner).map(|item| &item.kind),
@@ -725,22 +706,6 @@ impl Checker<'_, '_> {
                     .trait_domains(owner)?
                     .iter()
                     .any(|domain| member_captures.iter().any(|id| domain.mentions_rigid(*id)));
-            let mut member_statements = Vec::new();
-            // Constants capture their container inputs but have no clause
-            // telescope of their own. Explicit member inputs were rejected
-            // above; do not route them through nominal parameter metadata.
-            let member_inputs = if constant || contextual_alias {
-                super::clause_inputs::PreparedClauseInputs::default()
-            } else {
-                self.prepared_nominal_inputs_in_domains(
-                    owner,
-                    supplied,
-                    &mut member_statements,
-                    expr.span,
-                    &domains,
-                )?
-            };
-
             let (mut statements, instance_body) = match instance.kind {
                 K::Block {
                     statements,
@@ -842,12 +807,18 @@ impl Checker<'_, '_> {
                 )?
                 .ok_or_else(|| error(expr.span, "missing contextual alias input domain"))?
             } else {
+                let caller = nominal::InputEnvironment {
+                    substitution: &saved_substitution,
+                    bindings: &saved_bindings,
+                    normal_bindings: &saved_normal_bindings,
+                    context: &saved_context,
+                };
                 self.prepared_type_member_expression(
                     owner,
-                    member_inputs,
-                    member_statements,
+                    supplied,
                     expr.span,
                     Some(&p(P::Type)),
+                    &caller,
                 )?
             };
             let ty = if statements.iter().any(|value| is_never(&value.ty)) {

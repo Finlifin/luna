@@ -135,42 +135,6 @@ impl<'h> Checker<'_, 'h> {
         Ok(inputs)
     }
 
-    /// Prepare mixed nominal inputs in source order, retaining each value once.
-    pub(super) fn prepared_nominal_inputs(
-        &mut self,
-        owner: OwnerId,
-        args: &[Arg<'_>],
-        statements: &mut Vec<n::Expr>,
-        span: Span,
-    ) -> Result<super::clause_inputs::PreparedClauseInputs, Error> {
-        let declared_domains = self.trait_domains(owner)?;
-        // A recursive use of this declaration has a fresh input telescope.
-        // Only lexical captures may specialize its domains before routing the
-        // new arguments; the caller still supplies explicit expressions.
-        let saved = self.alias_substitution.clone();
-        for parameter in &self.type_parameters[&owner] {
-            self.alias_substitution.remove(parameter);
-        }
-        let domains = declared_domains
-            .iter()
-            .map(|domain| self.substituted_trait_domain(domain, span))
-            .collect::<Result<Vec<_>, _>>();
-        self.alias_substitution = saved;
-        self.prepared_nominal_inputs_in_domains(owner, args, statements, span, &domains?)
-    }
-
-    pub(super) fn prepared_nominal_inputs_in_domains(
-        &mut self,
-        owner: OwnerId,
-        args: &[Arg<'_>],
-        statements: &mut Vec<n::Expr>,
-        span: Span,
-        domains: &[Term],
-    ) -> Result<super::clause_inputs::PreparedClauseInputs, Error> {
-        let parameters = self.type_parameters[&owner].clone();
-        self.prepared_clause_inputs_in_domains(owner, args, statements, span, domains, &parameters)
-    }
-
     pub(super) fn prepared_packet_fields(
         &mut self,
         packet: &n::Expr,
@@ -274,32 +238,6 @@ impl<'h> Checker<'_, 'h> {
             .map(|(value, _)| value)
     }
 
-    /// Observe an immutable preparation prefix without executing producers.
-    /// Keep the original statements: an observed identity is not permission to
-    /// erase input evaluation. Unknown work ends the prefix rather than letting
-    /// later reads reuse evidence from before an unobserved mutation.
-    fn prepared_type_input_terms(
-        &mut self,
-        statements: &[n::Expr],
-        inputs: &[n::Expr],
-        span: Span,
-    ) -> Result<Vec<Option<Term>>, Error> {
-        let mut bindings = BTreeMap::new();
-        for statement in statements {
-            let K::Let { binding, value } = &statement.kind else {
-                break;
-            };
-            let Some(term) = self.checked_normal_input_in(value, &bindings, span)? else {
-                break;
-            };
-            bindings.insert(*binding, std::sync::Arc::new(term));
-        }
-        inputs
-            .iter()
-            .map(|input| self.checked_normal_input_in(input, &bindings, span))
-            .collect()
-    }
-
     /// Retain the prepared input values for a selected member of this instance.
     /// Local inputs refer to bindings in the returned expression's outer block.
     pub(super) fn prepared_type_instance(
@@ -315,12 +253,12 @@ impl<'h> Checker<'_, 'h> {
     pub(super) fn prepared_type_member_expression(
         &mut self,
         owner: OwnerId,
-        inputs: super::clause_inputs::PreparedClauseInputs,
-        statements: Vec<n::Expr>,
+        args: &[Arg<'_>],
         span: Span,
         expected: Option<&Term>,
+        caller: &nominal::InputEnvironment<'_>,
     ) -> Result<n::Expr, Error> {
-        self.build_type_instance(owner, &[], span, expected, Some((inputs, statements)))
+        self.build_type_instance(owner, args, span, expected, Some(caller))
             .map(|(value, _)| value)
     }
 
@@ -330,9 +268,8 @@ impl<'h> Checker<'_, 'h> {
         args: &[Arg<'_>],
         span: Span,
         expected: Option<&Term>,
-        prepared: Option<(super::clause_inputs::PreparedClauseInputs, Vec<n::Expr>)>,
+        caller: Option<&nominal::InputEnvironment<'_>>,
     ) -> Result<(n::Expr, Vec<n::Expr>), Error> {
-        let clauses = self.type_clause_params(owner);
         let parameters = self.type_parameters[&owner].clone();
         let mut domains = self.trait_domains(owner)?;
         if domains.is_empty() {
@@ -346,104 +283,59 @@ impl<'h> Checker<'_, 'h> {
         let saved_context = self.context.clone();
         let saved_mode = self.in_required_comptime;
         let result = (|| {
-            let mut values: Vec<Option<n::Expr>> = vec![None; clauses.len()];
-            let mut statements = Vec::new();
-            let mut positional = 0;
-            let inputs = if let Some((inputs, prepared_statements)) = prepared {
-                statements = prepared_statements;
-                inputs
-            } else {
-                self.prepared_nominal_inputs(owner, args, &mut statements, span)?
+            // A recursive use has a fresh own telescope; only selected lexical
+            // captures specialize its domains before explicit input checking.
+            for parameter in &parameters {
+                self.alias_substitution.remove(parameter);
+            }
+            let domains = domains
+                .iter()
+                .map(|domain| self.substituted_trait_domain(domain, span))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.alias_substitution = saved_substitution.clone();
+            let telescope = self
+                .input_binders(&parameters)
+                .into_iter()
+                .zip(&domains)
+                .map(|(binder, domain)| (binder.declaration, binder.sort, domain.clone()))
+                .collect::<Vec<_>>();
+            let defaults = nominal::InputEnvironment {
+                substitution: &saved_substitution,
+                bindings: &saved_bindings,
+                normal_bindings: &saved_normal_bindings,
+                context: &saved_context,
             };
-            let mut identities = inputs.identities;
-            for (name, value) in inputs.inputs {
-                let slot = Self::type_input_slot(&clauses, name, &mut positional, span)?;
-                let cell = values
-                    .get_mut(slot)
-                    .ok_or_else(|| error(span, "type argument count mismatch"))?;
-                if cell.replace(value).is_some() {
-                    return Err(error(span, "duplicate type argument"));
-                }
+            if let Some(caller) = caller {
+                self.alias_substitution = caller.substitution.clone();
+                self.alias_value_bindings = caller.bindings.clone();
+                self.normal_default_bindings = caller.normal_bindings.clone();
+                self.context = caller.context.clone();
             }
-            self.signature_owner = Some(owner);
-            self.context = self.binder_context(owner);
-            self.in_required_comptime = true;
-            let mut arguments = Vec::new();
-            for (slot, value) in values.into_iter().enumerate() {
-                let (value, identity) = if let Some(value) = value {
-                    (value, identities.remove(&parameters[slot]))
-                } else {
-                    let hir::clause::ClauseParamKind::Optional(_, _, default) = clauses[slot].kind
-                    else {
-                        return Err(error(span, "type argument count mismatch"));
-                    };
-                    self.prepared_clause_default(
-                        owner,
-                        slot,
-                        default,
-                        &domains[slot],
-                        &mut statements,
-                        span,
-                    )?
-                };
-                match &value.kind {
-                    K::TypeValue(ty) => {
-                        self.alias_substitution
-                            .insert(parameters[slot], std::sync::Arc::new(ty.clone()));
-                        self.alias_value_bindings.remove(&parameters[slot]);
-                        self.normal_default_bindings.remove(&parameters[slot]);
-                    }
-                    K::Local(binding) => {
-                        if value.ty == p(P::Type) {
-                            self.alias_value_bindings.insert(parameters[slot], *binding);
-                            self.normal_default_bindings.remove(&parameters[slot]);
-                        } else {
-                            self.normal_default_bindings
-                                .insert(parameters[slot], (*binding, value.ty.clone()));
-                            self.alias_value_bindings.remove(&parameters[slot]);
-                        }
-                        if let Some(identity) = identity {
-                            self.alias_substitution
-                                .insert(parameters[slot], std::sync::Arc::new(identity));
-                        } else {
-                            self.alias_substitution.remove(&parameters[slot]);
-                        }
-                    }
-                    _ => unreachable!(),
-                }
-                arguments.push(value);
-            }
-            self.signature_owner = saved_owner;
-            self.context = saved_context.clone();
-            self.in_required_comptime = saved_mode;
+            let prepared = self.planned_typed_declaration_inputs(
+                owner,
+                args,
+                span,
+                &telescope,
+                Some(&defaults),
+            )?;
             self.alias_substitution = saved_substitution.clone();
             self.alias_value_bindings = saved_bindings.clone();
             self.normal_default_bindings = saved_normal_bindings.clone();
+            self.context = saved_context.clone();
+            let mut statements = prepared.statements;
+            let arguments = prepared.arguments;
+            for argument in &arguments {
+                if let K::Local(binding) = &argument.kind {
+                    self.locals.insert(*binding, argument.ty.clone());
+                }
+            }
             let mut prepared_arguments = arguments.clone();
             let body =
                 if let ItemKind::TypeAlias(value, ..) = &self.package.item(owner).unwrap().kind {
                     self.alias_value_expression(owner, value, arguments, span)?
                 } else {
-                    let mut terms = Vec::new();
-                    let mut deferred = BTreeSet::new();
-                    let observed = self.prepared_type_input_terms(&statements, &arguments, span)?;
-                    for ((known, parameter), domain) in
-                        observed.into_iter().zip(&parameters).zip(&domains)
-                    {
-                        if let Some(known) = known {
-                            terms.push(known);
-                        } else {
-                            deferred.insert(*parameter);
-                            terms.push(Term::Rigid {
-                                declaration: *parameter,
-                                sort: if *domain == p(P::Type) {
-                                    Sort::Type
-                                } else {
-                                    Sort::ComptimeValue
-                                },
-                            });
-                        }
-                    }
+                    let mut terms = prepared.formation.terms;
+                    let mut deferred = prepared.formation.deferred;
                     deferred.extend(
                         self.nominal_captures(owner, span)?
                             .into_iter()
@@ -545,68 +437,6 @@ impl<'h> Checker<'_, 'h> {
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.in_required_comptime = saved_mode;
-        result
-    }
-
-    /// Defaults use the declaration telescope, after all explicit producers.
-    /// Observe only supplied input facts; a known identity never substitutes
-    /// for execution of the checked default or its earlier input bindings.
-    pub(super) fn prepared_clause_default(
-        &mut self,
-        owner: OwnerId,
-        slot: usize,
-        default: &Expr<'_>,
-        domain: &Term,
-        statements: &mut Vec<n::Expr>,
-        span: Span,
-    ) -> Result<(n::Expr, Option<Term>), Error> {
-        if self.active_type_defaults.len() >= 64 || !self.active_type_defaults.insert((owner, slot))
-        {
-            return Err(error(span, "cyclic or excessively deep type default"));
-        }
-        let result = (|| {
-            let domain = self.substituted_trait_domain(domain, span)?;
-            let dependent = self
-                .alias_value_bindings
-                .keys()
-                .chain(self.normal_default_bindings.keys())
-                .any(|id| domain.mentions_rigid(*id));
-            let checked = self.expr(default, (!dependent).then_some(&domain))?;
-            self.required_steps = self
-                .required_steps
-                .checked_sub(
-                    (self.normal_default_bindings.len() + self.alias_value_bindings.len()) as u64,
-                )
-                .ok_or_else(|| error(span, "default input fact budget exhausted"))?;
-            let mut facts = BTreeMap::new();
-            for (parameter, (binding, _)) in &self.normal_default_bindings {
-                if let Some(identity) = self.alias_substitution.get(parameter) {
-                    facts.insert(*binding, std::sync::Arc::clone(identity));
-                }
-            }
-            for (parameter, binding) in &self.alias_value_bindings {
-                if let Some(identity) = self.alias_substitution.get(parameter) {
-                    facts.insert(*binding, std::sync::Arc::clone(identity));
-                }
-            }
-            let identity = self.preserved_input_identity(
-                &checked,
-                facts
-                    .iter()
-                    .map(|(binding, identity)| (*binding, identity.as_ref())),
-                span,
-            )?;
-            let mut value = self.bind_type_input(checked, statements, span)?;
-            if value.ty == p(P::Type)
-                && let Some(identity) = &identity
-            {
-                // Keep the bound producer above. The packet can expose its
-                // identity to consumers without replaying its source code.
-                value.kind = K::TypeValue(self.copy_clause_identity(identity, span)?);
-            }
-            Ok((value, identity))
-        })();
-        self.active_type_defaults.remove(&(owner, slot));
         result
     }
 

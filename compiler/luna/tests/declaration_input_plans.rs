@@ -3,6 +3,7 @@
 #[allow(dead_code)]
 mod sysroot;
 use comptime_interpretor::{Budget, Event, Interpreter, Value};
+use elaboration::materialization::SourceInvocationQueries;
 
 fn check_both(source: &str, calls: &[&str]) {
     let package = sysroot::compile(source).unwrap();
@@ -12,13 +13,23 @@ fn check_both(source: &str, calls: &[&str]) {
         .find(|f| f.name == "check")
         .unwrap()
         .declaration;
+    let context = elaboration::ptc::Context::from_package(&package).unwrap();
+    let queries = SourceInvocationQueries::new(&package, &context, &[]);
+    let solver = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
+        queries.check(predicate, Default::default(), fuel)
+    };
+    let methods = |callee: &nir::program::Expr, fuel: &mut u64| queries.resolve(callee, fuel);
+    let associated = |access: &nir::program::Expr, fuel: &mut u64| queries.associated(access, fuel);
     for tree in [false, true] {
         let mut vm = if tree {
             Interpreter::for_comptime_tree(&package, Budget::default())
         } else {
             Interpreter::for_comptime(&package, Budget::default())
         }
-        .unwrap();
+        .unwrap()
+        .with_budgeted_type_solver(&solver)
+        .with_method_resolver(&methods)
+        .with_associated_resolver(&associated);
         assert_eq!(
             vm.invoke(entry, vec![]).unwrap(),
             Value::Bool(true),
@@ -238,5 +249,104 @@ fn callable_collector_packet_context_keeps_producer_requirements_and_range_check
                 .replace("R == Tuple<u8, bool>", "R == Tuple<bool, u8>")
         )
         .is_err()
+    );
+}
+
+#[test]
+fn nominal_packet_prefix_receives_context_before_a_list_collector() {
+    for declaration in [
+        "struct Packet where value: u8, enabled: bool, ...flags: meta.List<bool> {}",
+        "newtype Packet<value: u8, enabled: bool, ...flags: meta.List<bool>> = bool;",
+    ] {
+        check_both(
+            &format!(
+                "
+                {declaration}
+                comptime fn prefix() -> R
+                where R, requires R == Tuple<u8, bool>
+                {{ (7, true) }}
+                comptime fn empty() -> Tuple<> {{ () }}
+                comptime fn flag() -> bool {{ true }}
+                comptime fn check() -> bool {{
+                    let selected = Packet<...empty(), ...prefix(), flag()>;
+                    selected == Packet<7, true, .flags = [true]>
+                }}
+                "
+            ),
+            &["check", "empty", "prefix", "flag"],
+        );
+    }
+}
+
+#[test]
+fn member_input_plans_keep_caller_arguments_and_selected_parent_defaults() {
+    check_both(
+        "
+        comptime fn prefix(flag: bool) -> R
+        where R, requires R == Tuple<u8, bool>
+        { (7, flag) }
+        comptime fn tail() -> meta.List<bool> { [true, false] }
+        comptime fn mark() -> bool { true }
+        struct Holder where seed: bool {
+            pub newtype Packet<value: u8, .copy: bool = do { mark(); seed },
+                               enabled: bool, ...flags: meta.List<bool>> = bool;
+            pub comptime fn Build() -> Type {
+                Holder<false>.Packet<...prefix(seed), ...tail()>
+            }
+        }
+        comptime fn check() -> bool {
+            Holder<true>.Build() ==
+                Holder<false>.Packet<7, .copy = false, true, .flags = [true, false]>
+        }
+        ",
+        &["check", "Build", "prefix", "tail", "mark"],
+    );
+}
+
+#[test]
+fn nominal_collectors_reject_wrong_or_mixed_supplies_and_keep_opaque_identity() {
+    let source = "
+        newtype Flags<...values: meta.List<bool>> = bool;
+        comptime fn check() -> bool { Flags<INPUT> == Flags<true, false> }
+    ";
+    for input in [
+        "1u8",
+        ".values = [1u8]",
+        "true, .values = [false]",
+        ".values = [true], false",
+        ".values = [true], .values = [false]",
+        "...(true, false)",
+        "...()",
+        ".missing = [true]",
+    ] {
+        assert!(
+            sysroot::compile(&source.replace("INPUT", input)).is_err(),
+            "accepted {input}"
+        );
+    }
+    check_both(
+        "
+        newtype Flags<...values: meta.List<bool>> = bool;
+        comptime fn check() -> bool {
+            Flags<true, false> == Flags<.values = [true, false]>
+                and Flags<> != Flags<true>
+        }
+        ",
+        &["check"],
+    );
+}
+
+#[test]
+fn nominal_collectors_use_ordinary_values_in_dependent_and_type_domains() {
+    check_both(
+        "
+        newtype Entries<T, ...items: meta.List<T>> = bool;
+        comptime fn Byte() -> Type { u8 }
+        comptime fn check() -> bool {
+            Entries<.items = [1, 255], Byte()> == Entries<u8, .items = [1, 255]>
+                and Entries<Type, bool, u8> == Entries<Type, .items = [bool, u8]>
+        }
+        ",
+        &["check", "Byte"],
     );
 }
