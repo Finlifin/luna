@@ -3,7 +3,8 @@
 use super::*;
 use comptime_interpretor::{
     AssociatedHostRequest, AssociatedHostResponse, DefinitionHostRequest, DefinitionHostResponse,
-    InvocationProgress, InvocationSession, RejectedDefinitionResponse, RejectedHostResponse,
+    InvocationProgress, InvocationSession, MethodHostRequest, MethodHostResponse,
+    RejectedDefinitionResponse, RejectedHostResponse, RejectedMethodResponse,
 };
 
 /// Dependency waits and terminal results do not create an execution driver.
@@ -18,6 +19,7 @@ pub enum Progress<'session, 'world> {
     Waiting,
     Associated(AssociatedHostRequest<'world>),
     Definition(DefinitionHostRequest<'world>),
+    Method(MethodHostRequest<'world>),
     Settled(&'session State),
 }
 
@@ -86,6 +88,7 @@ impl<'world> Invocation<'_, 'world> {
             Ok(InvocationProgress::Definition(request)) => {
                 return Ok(Progress::Definition(request));
             }
+            Ok(InvocationProgress::Method(request)) => return Ok(Progress::Method(request)),
             Ok(InvocationProgress::Complete(value)) => {
                 let result = self.publish(context, value);
                 self.settle(result);
@@ -95,6 +98,16 @@ impl<'world> Invocation<'_, 'world> {
         Ok(Progress::Settled(&self.pending.state))
     }
 
+    pub fn resume_method(
+        &mut self,
+        response: MethodHostResponse<'world>,
+    ) -> Result<(), RejectedMethodResponse<'world>> {
+        if let Some(driver) = &mut self.driver {
+            driver.resume_method(response)
+        } else {
+            Err(response.reject())
+        }
+    }
     pub fn resume_definition(
         &mut self,
         response: DefinitionHostResponse<'world>,
@@ -270,6 +283,11 @@ pub(super) fn drive(
             }
             Progress::Definition(request) => {
                 if let Err(rejected) = execution.resume_definition(request.prepare()) {
+                    execution.settle(Err(Error::Invocation(rejected.error().clone())));
+                }
+            }
+            Progress::Method(request) => {
+                if let Err(rejected) = execution.resume_method(request.prepare()) {
                     execution.settle(Err(Error::Invocation(rejected.error().clone())));
                 }
             }

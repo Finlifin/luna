@@ -5,7 +5,7 @@ use comptime_compiler::{Op, Program};
 #[path = "bytecode_interface.rs"]
 mod interface;
 mod preparation;
-pub(super) use preparation::Preparation;
+pub(super) use preparation::{MethodContinuation, MethodWait, Preparation};
 
 pub(super) struct Frame {
     code: Arc<Program>,

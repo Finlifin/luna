@@ -51,6 +51,7 @@ pub use invocation::host::{
     AssociatedHostRequest, AssociatedHostResponse, InvocationProgress, InvocationSession,
     RejectedHostResponse,
 };
+pub use invocation::method_host::{MethodHostRequest, MethodHostResponse, RejectedMethodResponse};
 mod invocation_contracts;
 mod list_append;
 mod list_index;

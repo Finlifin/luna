@@ -4,6 +4,7 @@ use super::*;
 mod contracts;
 pub(super) mod definition_host;
 pub(super) mod host;
+pub(super) mod method_host;
 mod session;
 use session::Session;
 

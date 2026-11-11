@@ -27,6 +27,26 @@ impl Preparation {
     pub(crate) fn is_definition(&self) -> bool {
         matches!(self.operation, Operation::Definition { .. })
     }
+    pub(crate) fn is_method(&self) -> bool {
+        match &self.operation {
+            Operation::Method { .. } => true,
+            Operation::Call {
+                code,
+                instruction,
+                dynamic_method,
+            } => {
+                dynamic_method.is_some()
+                    || matches!(
+                        &code.instructions()[*instruction].op,
+                        Op::BeginCall {
+                            method: Some(_),
+                            ..
+                        }
+                    )
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -44,6 +64,41 @@ pub(super) enum Operation {
         code: Arc<Program>,
         instruction: usize,
     },
+}
+
+pub(crate) struct MethodWait {
+    pub(crate) request: trait_methods::Request,
+    pub(crate) continuation: MethodContinuation,
+}
+pub(crate) enum MethodContinuation {
+    Value {
+        destination: usize,
+    },
+    Call {
+        code: Arc<Program>,
+        instruction: usize,
+        setup: CallSetup,
+    },
+}
+pub(crate) struct CallSetup {
+    defaults: Option<(Vec<nir::DeclarationParameter>, Vec<Term>)>,
+    program: nir::contracts::ProgramContract,
+    parameters: Option<Vec<LocalId>>,
+}
+impl fmt::Display for MethodContinuation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Value { destination } => write!(f, "(method-value (destination {destination}))"),
+            Self::Call { instruction, .. } => {
+                write!(f, "(method-call (instruction {instruction}))")
+            }
+        }
+    }
+}
+impl fmt::Display for MethodWait {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(method-wait {} {})", self.continuation, self.request)
+    }
 }
 
 impl fmt::Display for Preparation {
@@ -95,6 +150,13 @@ impl<'a> Interpreter<'a> {
                 if ticket.matches(&request.ticket))
         {
             return Err(self.failure(ErrorKind::InvalidControlFlow, None));
+        }
+        if self.graph.is_none() && request.is_method() {
+            if let Some(wait) = self.begin_bytecode_method(frame, request, false)? {
+                let selected = self.resolve_method_request(&wait.request);
+                self.finish_bytecode_method(frame, wait, selected)?;
+            }
+            return Ok(());
         }
         if request.is_definition() {
             let (destination, request) = self.begin_bytecode_definition(frame, request)?;
@@ -193,6 +255,123 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
+    pub(crate) fn begin_bytecode_method(
+        &mut self,
+        frame: &mut Frame,
+        request: Preparation,
+        external: bool,
+    ) -> Result<Option<MethodWait>, Error> {
+        if frame.terminal
+            || !matches!(&frame.waiting,Some(Waiting::Preparation(ticket)) if ticket.matches(&request.ticket))
+        {
+            return Err(self.failure(ErrorKind::InvalidControlFlow, None));
+        }
+        frame.waiting = None;
+        frame.terminal = true;
+        let (method, continuation, direct) = match request.operation {
+            Operation::Method {
+                destination,
+                method,
+            } => (method, MethodContinuation::Value { destination }, false),
+            Operation::Call {
+                code,
+                instruction,
+                dynamic_method,
+            } => {
+                if !Arc::ptr_eq(&frame.code, &code) || frame.pc.checked_sub(1) != Some(instruction)
+                {
+                    return Err(self.failure(ErrorKind::InvalidControlFlow, None));
+                }
+                let setup = self.bytecode_call_setup(
+                    &code.instructions()[instruction],
+                    dynamic_method.as_ref(),
+                )?;
+                let Op::BeginCall { method, .. } = &code.instructions()[instruction].op else {
+                    return Err(self.failure(ErrorKind::InvalidControlFlow, None));
+                };
+                let method = method
+                    .clone()
+                    .or_else(|| dynamic_method.map(Arc::new))
+                    .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
+                self.tick(Some(method.source))?;
+                (
+                    method,
+                    MethodContinuation::Call {
+                        code,
+                        instruction,
+                        setup,
+                    },
+                    true,
+                )
+            }
+            _ => return Err(self.failure(ErrorKind::InvalidControlFlow, None)),
+        };
+        let prepared = if direct {
+            self.with_native_depth(|vm| vm.prepare_trait_method(method.view(), direct, external))?
+        } else {
+            self.prepare_trait_method(method.view(), direct, external)?
+        };
+        match prepared {
+            trait_methods::Preparation::Ready(selection) => {
+                let value = if direct {
+                    self.with_native_depth(|vm| vm.trait_selection_value(selection, method.source))?
+                } else {
+                    self.trait_selection_value(selection, method.source)?
+                };
+                self.complete_bytecode_method(frame, continuation, value)?;
+                Ok(None)
+            }
+            trait_methods::Preparation::Request(request) => Ok(Some(MethodWait {
+                request,
+                continuation,
+            })),
+        }
+    }
+
+    pub(crate) fn finish_bytecode_method(
+        &mut self,
+        frame: &mut Frame,
+        wait: MethodWait,
+        selected: Result<nir::program::MethodInstance, Error>,
+    ) -> Result<(), Error> {
+        if !frame.terminal || frame.waiting.is_some() {
+            return Err(self.failure(ErrorKind::InvalidControlFlow, None));
+        }
+        let source = wait.request.access().source;
+        let complete = |vm: &mut Self| {
+            let selection = vm.accept_method_selection(wait.request, selected)?;
+            vm.trait_selection_value(selection, source)
+        };
+        let value = if matches!(wait.continuation, MethodContinuation::Call { .. }) {
+            self.with_native_depth(complete)?
+        } else {
+            complete(self)?
+        };
+        self.complete_bytecode_method(frame, wait.continuation, value)
+    }
+
+    fn complete_bytecode_method(
+        &mut self,
+        frame: &mut Frame,
+        continuation: MethodContinuation,
+        value: Value,
+    ) -> Result<(), Error> {
+        match continuation {
+            MethodContinuation::Value { destination } => {
+                frame.slots[destination] = Some(value);
+            }
+            MethodContinuation::Call {
+                code,
+                instruction,
+                setup,
+            } => {
+                self.finish_bytecode_call(frame, &code.instructions()[instruction], value, setup)?
+            }
+        }
+        frame.terminal = false;
+        Ok(())
+    }
+
     fn prepare_bytecode_call(
         &mut self,
         frame: &mut Frame,
@@ -204,38 +383,80 @@ impl<'a> Interpreter<'a> {
             kind: ErrorKind::MissingBinding,
             source: Some(source),
         };
-        let Op::BeginCall {
-            call,
-            callee,
-            callee_source,
-            normal_form,
-            parameter_bindings,
-            prepare_defaults,
-            method,
-        } = &instruction.op
-        else {
+        let Op::BeginCall { callee, method, .. } = &instruction.op else {
             return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
         };
-        let trait_defaults = if *prepare_defaults {
-            dynamic_method
-                .as_ref()
-                .map(|method| self.trait_method_default_inputs(method.view()))
-                .transpose()?
-        } else {
-            None
-        };
+        let setup = self.bytecode_call_setup(instruction, dynamic_method.as_ref())?;
         let method = method.as_deref().or(dynamic_method.as_ref());
-        let (interface_program, interface_parameters) = if let Some(method) = method {
-            self.interface_method_contract(method.view(), source)?
-        } else {
-            (Default::default(), None)
-        };
         let callee = if let Some(method) = method {
             self.tick(Some(method.source))?;
             self.with_native_depth(|vm| vm.bytecode_trait_method(method.view(), true))?
         } else {
             frame.slots[*callee].take().ok_or_else(missing)?
         };
+        self.finish_bytecode_call(frame, instruction, callee, setup)
+    }
+
+    fn bytecode_call_setup(
+        &mut self,
+        instruction: &comptime_compiler::Instruction,
+        dynamic_method: Option<&comptime_compiler::methods::Method>,
+    ) -> Result<CallSetup, Error> {
+        let Op::BeginCall {
+            prepare_defaults,
+            method,
+            ..
+        } = &instruction.op
+        else {
+            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(instruction.source)));
+        };
+        let defaults = if *prepare_defaults {
+            dynamic_method
+                .map(|method| self.trait_method_default_inputs(method.view()))
+                .transpose()?
+        } else {
+            None
+        };
+        let (program, parameters) = if let Some(method) = method.as_deref().or(dynamic_method) {
+            self.interface_method_contract(method.view(), instruction.source)?
+        } else {
+            (Default::default(), None)
+        };
+        Ok(CallSetup {
+            defaults,
+            program,
+            parameters,
+        })
+    }
+
+    fn finish_bytecode_call(
+        &mut self,
+        frame: &mut Frame,
+        instruction: &comptime_compiler::Instruction,
+        callee: Value,
+        setup: CallSetup,
+    ) -> Result<(), Error> {
+        let source = instruction.source;
+        let missing = || Error {
+            kind: ErrorKind::MissingBinding,
+            source: Some(source),
+        };
+        let Op::BeginCall {
+            call,
+            callee_source,
+            normal_form,
+            parameter_bindings,
+            prepare_defaults,
+            ..
+        } = &instruction.op
+        else {
+            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+        };
+        let CallSetup {
+            defaults: trait_defaults,
+            program: interface_program,
+            parameters: interface_parameters,
+        } = setup;
         let callee = if normal_form.is_none() {
             self.resolve_invocation_identity(callee)?
         } else {

@@ -210,7 +210,7 @@ ignored 用例，仍报 `191..201: list literal requires an element type context
 | `declaration_inputs::planned_typed_declaration_inputs` | callable 与 NF／contextual 名义输入共用路由、域检查次序和执行计划 | callable 必须得到普通 typed Expr；无可用域时仍无可恢复的前端检查请求 |
 | `dynamic_instances::prepare_callable_clause_packet` | Type／普通值 local 与静态身份分开保存；签名闭合时在 invocation 中形成 callable | 接收域或函数签名依赖未执行输入时，仍缺上下文检查与恢复 |
 | `input_collection::Frame` | NF／名义输入的源码顺序、已执行值、域唤醒、终止与清理 | 消费的仍是 `NormalFormArgument`，不持有普通前端区域或其检查义务 |
-| `invocation::session::Session` | 独占 VM 驱动现场；关联选择和具体定义准备请求可恢复、取消并检查响应身份 | 尚无普通前端表达式检查响应；定义 publisher 内部准备仍同步 |
+| `invocation::session::Session` | 独占 VM 驱动现场；关联／方法选择和具体定义准备请求可恢复、取消并检查响应身份 | 尚无普通前端表达式检查响应；定义 publisher 内部准备仍同步 |
 | `PreparedRequired::invoke_in_world` | 独立准备世界、限定的类型前提、同步 builder 服务 | builder 的 `prepare` 回调不是通用的前端暂停／恢复协议 |
 
 Type local 的旧限制已用接收域和函数签名均完整的源码独立复现，并按下一节解除。

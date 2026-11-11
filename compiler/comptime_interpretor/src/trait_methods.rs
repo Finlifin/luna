@@ -1,6 +1,34 @@
 //! Select an interface member before choosing its execution/delivery mechanism.
 use super::*;
-use comptime_compiler::methods::View;
+use comptime_compiler::methods::{Method, View};
+
+type Key = (InterfaceInstance, Term, DeclarationId);
+type Binding = (DeclarationId, Vec<Term>);
+pub(super) enum Preparation {
+    Ready(Selection),
+    Request(Request),
+}
+pub(super) struct Request {
+    access: Expr,
+    method: Method,
+    key: Key,
+    has_preconditions: bool,
+    retained_template: bool,
+}
+impl Request {
+    pub(super) fn access(&self) -> &Expr {
+        &self.access
+    }
+}
+impl fmt::Display for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(method-selection-request (original {}) (access {}) (preconditions {}) (retained-template {}))",
+            self.method, self.access, self.has_preconditions, self.retained_template
+        )
+    }
+}
 
 #[cfg(test)]
 mod budget_tests;
@@ -91,6 +119,21 @@ impl Interpreter<'_> {
         method: View<'_>,
         direct_callee: bool,
     ) -> Result<Selection, Error> {
+        match self.prepare_trait_method(method, direct_callee, false)? {
+            Preparation::Ready(selection) => Ok(selection),
+            Preparation::Request(request) => {
+                let selected = self.resolve_method_request(&request);
+                self.accept_method_selection(request, selected)
+            }
+        }
+    }
+
+    pub(super) fn prepare_trait_method(
+        &mut self,
+        method: View<'_>,
+        direct_callee: bool,
+        external: bool,
+    ) -> Result<Preparation, Error> {
         let View {
             interface,
             member,
@@ -147,58 +190,141 @@ impl Interpreter<'_> {
             selected_subject,
             member,
         );
-        let (binding, pending) = if let Some(binding) = self
+        let has_preconditions = !contract.program.preconditions.is_empty();
+        if let Some(binding) = self
             .method_bodies
             .get(&key)
             .or_else(|| self.resolved_method_bodies.get(&key))
             .cloned()
         {
-            (binding, false)
-        } else {
-            let resolver = self
-                .method_resolver
-                .filter(|_| self.comptime_only && self.graph.is_none())
-                .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
-            self.charge_copy_work(Some(source), |fuel| {
-                for term in std::iter::once(&key.1)
-                    .chain(&key.0.arguments)
-                    .chain(method_arguments)
-                    .chain(std::iter::once(output))
-                {
-                    nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
-                }
-                Ok(())
-            })?;
-            let expression = Expr {
-                source,
-                ty: output.clone(),
-                kind: K::TraitMethod {
-                    interface,
-                    interface_arguments: key.0.arguments.clone(),
-                    subject: key.1.clone(),
-                    member,
-                    method_arguments: method_arguments.to_vec(),
-                },
-            };
-            let selected =
-                host_budget::checked(&mut self.budget.steps, Some(source), |remaining| {
-                    resolver(&expression, remaining)
-                })?;
-            self.charge_copy_work(Some(source), |fuel| {
-                for argument in selected.arguments.iter().chain(&selected.method_arguments) {
-                    nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;
-                }
-                Ok(())
-            })?;
-            if selected.member != member
-                || selected.method_arguments != method_arguments
-                || !selected.arguments.ends_with(method_arguments)
+            return self
+                .finish_trait_selection(
+                    method,
+                    key,
+                    binding,
+                    false,
+                    has_preconditions,
+                    retained_template,
+                )
+                .map(Preparation::Ready);
+        }
+        if !self.comptime_only
+            || self.graph.is_some()
+            || (!external && self.method_resolver.is_none())
+        {
+            return Err(self.failure(ErrorKind::UnmaterializedDispatch, Some(source)));
+        }
+        self.charge_copy_work(Some(source), |fuel| {
+            for term in std::iter::once(&key.1)
+                .chain(&key.0.arguments)
+                .chain(method_arguments)
+                .chain(std::iter::once(output))
             {
-                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
             }
-            let prefix = selected.arguments.len() - method_arguments.len();
-            ((selected.body, selected.arguments[..prefix].to_vec()), true)
+            Ok(())
+        })?;
+        let expression = Expr {
+            source,
+            ty: output.clone(),
+            kind: K::TraitMethod {
+                interface,
+                interface_arguments: key.0.arguments.clone(),
+                subject: key.1.clone(),
+                member,
+                method_arguments: method_arguments.to_vec(),
+            },
         };
+        self.charge_copy_work(Some(source), |fuel| {
+            for term in std::iter::once(subject)
+                .chain(interface_arguments)
+                .chain(method_arguments)
+                .chain(std::iter::once(output))
+            {
+                nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+            }
+            Ok(())
+        })?;
+        Ok(Preparation::Request(Request {
+            access: expression,
+            method: Method {
+                interface,
+                member,
+                subject: subject.clone(),
+                interface_arguments: interface_arguments.to_vec(),
+                method_arguments: method_arguments.to_vec(),
+                output: output.clone(),
+                source,
+            },
+            key,
+            has_preconditions,
+            retained_template,
+        }))
+    }
+
+    pub(super) fn resolve_method_request(
+        &mut self,
+        request: &Request,
+    ) -> Result<nir::program::MethodInstance, Error> {
+        let source = request.access.source;
+        let resolver = self
+            .method_resolver
+            .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
+        host_budget::checked(&mut self.budget.steps, Some(source), |fuel| {
+            resolver(&request.access, fuel)
+        })
+    }
+
+    pub(super) fn accept_method_selection(
+        &mut self,
+        request: Request,
+        selected: Result<nir::program::MethodInstance, Error>,
+    ) -> Result<Selection, Error> {
+        let selected = selected?;
+        let method = request.method.view();
+        let source = method.source;
+        self.charge_copy_work(Some(source), |fuel| {
+            for argument in selected.arguments.iter().chain(&selected.method_arguments) {
+                nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;
+            }
+            Ok(())
+        })?;
+        if selected.member != method.member
+            || selected.method_arguments != method.method_arguments
+            || !selected.arguments.ends_with(method.method_arguments)
+        {
+            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+        }
+        let prefix = selected.arguments.len() - method.method_arguments.len();
+        let binding = (selected.body, selected.arguments[..prefix].to_vec());
+        self.finish_trait_selection(
+            method,
+            request.key,
+            binding,
+            true,
+            request.has_preconditions,
+            request.retained_template,
+        )
+    }
+
+    fn finish_trait_selection(
+        &mut self,
+        method: View<'_>,
+        key: Key,
+        binding: Binding,
+        pending: bool,
+        has_preconditions: bool,
+        retained_template: bool,
+    ) -> Result<Selection, Error> {
+        let View {
+            interface,
+            member,
+            subject,
+            interface_arguments,
+            method_arguments,
+            output,
+            source,
+        } = method;
         let (body, mut arguments) = binding.clone();
         arguments.extend(method_arguments.iter().cloned());
         if let Some(identity) = self.runtime_function_identities.get(&body) {
@@ -208,7 +334,7 @@ impl Interpreter<'_> {
                 .instantiate_parameters(&self.input_binders(&identity.type_parameters), &arguments)
                 .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
             if !self.observe_same_type(&signature, output, source)?
-                || (!contract.program.preconditions.is_empty() && !retained_template)
+                || (has_preconditions && !retained_template)
             {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
             }
@@ -249,7 +375,7 @@ impl Interpreter<'_> {
         }
         if self.comptime_only && definition.phase == nir::program::FunctionPhase::Runtime {
             self.admit_function_inputs(&definition.type_parameters, &arguments, source)?;
-            if !contract.program.preconditions.is_empty() && !retained_template {
+            if has_preconditions && !retained_template {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
             }
             // Transport the public interface identity even when this
@@ -288,7 +414,15 @@ impl Interpreter<'_> {
         if self.graph.is_some() {
             return self.iir_method_value(method);
         }
-        match self.select_trait_method(method, direct_callee)? {
+        let selection = self.select_trait_method(method, direct_callee)?;
+        self.trait_selection_value(selection, method.source)
+    }
+    pub(super) fn trait_selection_value(
+        &mut self,
+        selection: Selection,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        match selection {
             Selection::Value(value) => Ok(value),
             Selection::Function {
                 declaration,
@@ -297,10 +431,10 @@ impl Interpreter<'_> {
                 instantiate,
             } => {
                 // Account for the selected callable observation, without tree execution.
-                self.tick(Some(method.source))?;
+                self.tick(Some(source))?;
                 self.with_native_depth(|vm| {
                     if instantiate {
-                        vm.function_instance_value(declaration, &arguments, &ty, method.source)
+                        vm.function_instance_value(declaration, &arguments, &ty, source)
                     } else if vm.runtime_function_identities.contains_key(&declaration) {
                         Ok(Value::FunctionInstance {
                             declaration,

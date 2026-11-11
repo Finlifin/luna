@@ -157,6 +157,11 @@ fn source_selection(deferred: bool, contracts: bool) {
                                     .resume_definition(request.prepare())
                                     .map_err(|failure| failure.error().clone())?;
                             }
+                            InvocationProgress::Method(request) => {
+                                active
+                                    .resume_method(request.prepare())
+                                    .map_err(|failure| failure.error().clone())?;
+                            }
                             InvocationProgress::Complete(value) => break Ok(value),
                             InvocationProgress::Waiting => {
                                 panic!("an answered request must not remain waiting")

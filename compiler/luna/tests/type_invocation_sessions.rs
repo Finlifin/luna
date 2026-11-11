@@ -104,6 +104,7 @@ fn request<'w>(
         match active.poll(context).unwrap() {
             Progress::Running => {}
             Progress::Associated(request) => return request,
+            Progress::Method(request) => active.resume_method(request.prepare()).unwrap(),
             Progress::Definition(_) => panic!("unexpected definition preparation"),
             Progress::Settled(state) => panic!("settled before selection: {state}"),
             Progress::Waiting => panic!("request was not returned"),

@@ -37,6 +37,16 @@ impl Root<'_> {
 }
 
 enum Pending<'a> {
+    Method(bytecode::MethodWait),
+    MethodResponse {
+        wait: bytecode::MethodWait,
+        selected: Result<nir::program::MethodInstance, Error>,
+    },
+    MethodHost {
+        ticket: Ticket,
+        granted: u64,
+        continuation: bytecode::MethodContinuation,
+    },
     Definition {
         destination: usize,
         request: DefinitionBuildRequest,
@@ -63,6 +73,16 @@ enum Pending<'a> {
 impl fmt::Display for Pending<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Method(wait) => write!(f, "{wait}"),
+            Self::MethodResponse { wait, .. } => write!(f, "(method-response {wait})"),
+            Self::MethodHost {
+                ticket,
+                granted,
+                continuation,
+            } => write!(
+                f,
+                "(awaiting-method {ticket} (granted {granted}) {continuation})"
+            ),
             Self::Definition {
                 destination,
                 request,
@@ -200,6 +220,17 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 .map_err(|failure| failure.error().clone())?;
             return Ok(Poll::Pending);
         }
+        if matches!(self.pending, Some(Pending::Method(_))) {
+            if external {
+                return Ok(Poll::Pending);
+            }
+            let Some(Pending::Method(wait)) = self.pending.take() else {
+                unreachable!()
+            };
+            let selected = self.vm.resolve_method_request(&wait.request);
+            self.pending = Some(Pending::MethodResponse { wait, selected });
+            return Ok(Poll::Pending);
+        }
         if matches!(self.pending, Some(Pending::Definition { .. })) {
             if external {
                 return Ok(Poll::Pending);
@@ -244,7 +275,9 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
     pub(super) fn waiting_for_host(&self) -> bool {
         matches!(
             self.pending,
-            Some(Pending::Host { .. } | Pending::DefinitionHost { .. })
+            Some(
+                Pending::Host { .. } | Pending::DefinitionHost { .. } | Pending::MethodHost { .. }
+            )
         )
     }
 
@@ -378,6 +411,73 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         Ok(())
     }
 
+    pub(super) fn take_method_request(&mut self) -> Result<Option<MethodHostRequest<'a>>, Error> {
+        if self.terminal || !matches!(self.pending, Some(Pending::Method(_))) {
+            return Ok(None);
+        }
+        let Some(world) = self.vm.declaration_world else {
+            self.cancel();
+            return Err(self.vm.failure(ErrorKind::InvalidControlFlow, None));
+        };
+        let ticket = match self.requests.issue() {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                self.cancel();
+                return Err(error);
+            }
+        };
+        let Some(Pending::Method(wait)) = self.pending.take() else {
+            unreachable!()
+        };
+        let granted = std::mem::take(&mut self.vm.budget.steps);
+        self.pending = Some(Pending::MethodHost {
+            ticket: ticket.clone(),
+            granted,
+            continuation: wait.continuation,
+        });
+        Ok(Some(MethodHostRequest {
+            ticket,
+            world,
+            request: wait.request,
+            resolver: self.vm.method_resolver,
+            granted,
+            remaining: granted,
+        }))
+    }
+
+    pub(super) fn receive_method_response(
+        &mut self,
+        response: MethodHostResponse<'a>,
+    ) -> Result<(), RejectedMethodResponse<'a>> {
+        let valid = !self.terminal
+            && self
+                .vm
+                .declaration_world
+                .is_some_and(|world| std::ptr::eq(world, response.world))
+            && matches!(&self.pending,Some(Pending::MethodHost {ticket,..}) if ticket.matches(&response.ticket));
+        if !valid {
+            return Err(response.reject());
+        }
+        let Some(Pending::MethodHost {
+            granted,
+            continuation,
+            ..
+        }) = self.pending.take()
+        else {
+            unreachable!()
+        };
+        let (remaining, request, selected) = response.settle(granted);
+        self.vm.budget.steps = remaining;
+        self.pending = Some(Pending::MethodResponse {
+            wait: bytecode::MethodWait {
+                request,
+                continuation,
+            },
+            selected,
+        });
+        Ok(())
+    }
+
     fn step(&mut self, external: bool) -> Result<Poll<Option<Flow>>, Error> {
         let Self {
             vm,
@@ -405,6 +505,13 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                                 });
                             },
                         )
+                    } else if vm.graph.is_none() && preparation.is_method() {
+                        vm.begin_bytecode_method(parent, preparation, external)
+                            .map(|wait| {
+                                if let Some(wait) = wait {
+                                    *pending = Some(Pending::Method(wait));
+                                }
+                            })
                     } else {
                         vm.prepare_bytecode_request(parent, preparation)
                     };
@@ -418,6 +525,19 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                     // definition request has left and its receipt is admitted.
                     if pending.is_some() {
                         return Ok(Poll::Pending);
+                    }
+                }
+                Pending::MethodResponse { wait, selected } => {
+                    let parent = stack
+                        .last_mut()
+                        .and_then(StackEntry::code)
+                        .or_else(|| root.code())
+                        .expect("method owner");
+                    if let Err(error) = vm.finish_bytecode_method(parent, wait, selected) {
+                        *result = Some(Completion::Ordinary {
+                            flow: Err(error),
+                            defaults: None,
+                        });
                     }
                 }
                 Pending::DefinitionResponse {
@@ -443,7 +563,9 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 Pending::Associated(_)
                 | Pending::Host { .. }
                 | Pending::Definition { .. }
-                | Pending::DefinitionHost { .. } => {
+                | Pending::DefinitionHost { .. }
+                | Pending::Method(_)
+                | Pending::MethodHost { .. } => {
                     unreachable!("host work is driven before execution")
                 }
                 Pending::AssociatedResponse(response) => {

@@ -239,6 +239,7 @@ fn method_preparation_is_owned_and_cancelled_at_every_driver_boundary() {
         let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
         let mut complete_polls = None;
         let mut pending_method = false;
+        let mut pending_response = false;
         for limit in std::iter::once(usize::MAX).chain(0..64) {
             if complete_polls.is_some_and(|count| limit >= count) {
                 break;
@@ -294,6 +295,13 @@ fn method_preparation_is_owned_and_cancelled_at_every_driver_boundary() {
                 }));
                 pending_method = true;
             }
+            let unadmitted_response =
+                matches!(session.pending, Some(Pending::MethodResponse { .. }));
+            if unadmitted_response {
+                assert_eq!(calls.get(), 1);
+                assert!(session.vm.resolved_method_bodies.is_empty());
+                pending_response = true;
+            }
             let before = (
                 calls.get(),
                 session.vm.remaining_steps(),
@@ -329,12 +337,13 @@ fn method_preparation_is_owned_and_cancelled_at_every_driver_boundary() {
             );
             assert_eq!(
                 calls.get(),
-                1,
-                "retry only selects if cancellation preceded the response"
+                1 + usize::from(unadmitted_response),
+                "retry must select again if the returned answer was not admitted"
             );
         }
         assert!(complete_polls.is_some());
         assert!(pending_method);
+        assert!(pending_response);
     }
 }
 

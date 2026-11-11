@@ -47,16 +47,17 @@
 
 ## 当前生产接线与下一步
 
-以下核对基线为 `4937d332`，包含工作区原有的资源分析修改；不是纯 HEAD 构建的
-全语言验收。初始审计和旧证据仍用于追溯，当前进度按实际消费者及未闭合边界判断。
+以下沿 `4937d332` 的整体核对更新已完成的输入事实、Type 输出许可及宿主请求迁移，
+具体证据见对应专题。验证包含工作区原有的资源分析修改，不是纯 HEAD 构建的全语言
+验收。初始审计和旧证据仍用于追溯，当前进度按实际消费者及未闭合边界判断。
 
 | 主干 | 当前已接入的生产入口 | 尚未闭合 |
 | --- | --- | --- |
 | 声明输入与调用供应 | `lexical_inputs` 按声明根及调用闭包收集依赖；`declaration_inputs` 的同一计划服务普通 callable、NF、别名及名义类型 | typed 消费者仍要求立即取得可检查域；完整 ContextualExpr 尚未替换 NormalFormArgument |
-| 参数域与源码控制 | 声明／trait 输入在替换前识别 callee 依赖；caller 泛型值走普通转换；`control::Context` 整体管理检查边界的返回及循环状态 | 整个 Checker 尚非可挂起区域；已知符号身份不代表 invocation 生产者已执行 |
+| 参数域与源码控制 | 声明／trait 输入在替换前识别 callee 依赖；caller 泛型值走普通转换；控制状态和输入事实分别管理整体回滚及词法退出 | 整个 Checker 尚非可挂起区域；已知符号身份不代表 invocation 生产者已执行 |
 | 词法参数与代码签名 | 普通表达式、contextual 签名和捕获共用可见声明输入；关联常量将主体与捕获一起按实例替换 | 这不能使尚未执行的 Type 生产者提前变成已完成输入 |
 | 值传递与接收世界 | 通用准入保留域、phase 和身份；跨 VM callable 在接收世界完成方法选择及关联签名观察 | 活动值、权限及选择证据不随 CodeSession 共享；完整统一值传送协议仍有待迁移 |
-| 稳定世界与执行 | DeclarationSnapshot 保活声明与索引；RequiredWorld 复用代码 session；VM 的关联选择请求支持持有进度与响应检查 | 普通前端检查请求、通用 Region/Candidate 所有权及任意定义发布尚未全线接通 |
+| 稳定世界与执行 | DeclarationSnapshot 保活声明与索引；RequiredWorld 复用代码 session；关联选择、方法选择及具体定义准备可交接宿主请求；Type 输出由单次发布许可保护 | 普通前端检查请求、通用 Region/Candidate 所有权及任意定义发布尚未全线接通 |
 | TypeRef 与 IIR | core/substitution 已有实现，闭合 callable/template 有消费者 | 普通函数仍以 NIR Function 为实例载体；runtime_bindings 不能替代带域的 EnvironmentPlan |
 | 六包与资源 | 已有真实 sysroot 的 builder、列表、反射及两阶段方法路径作为前端迁移消费者 | 文本来源到资源执行、抽象 Copy 的表示与清理、完整库场景仍须分别贯通 |
 

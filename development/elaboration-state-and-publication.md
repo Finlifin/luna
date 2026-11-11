@@ -756,6 +756,44 @@ Region 和两个普通 callable 待定域正例仍未完成；不能把公开请
 未运行全 workspace 或性能基准；原有资源检查修改仍保留在工作区，以上并非纯 HEAD
 验收。正式 docs 与另一位开发者的 formatter 未修改或纳入提交。
 
+### 方法选择保留调用准备进度
+
+trait 方法选择的宿主调用也已从字节码准备步中分离。请求产生前已经检查的接口
+形成条件、公开方法身份与签名、原默认值绑定和接口程序契约保留在同一次准备中。
+等待时不运行普通实参；响应后直接进入剩余选择准入，不重新调用整个准备函数。
+直接方法调用与取得方法值共用选择协议；调用 continuation 另外保留原指令位置、
+默认值及接口参数映射，完成后才建立原 `PendingCall`。
+
+宿主给出的 `MethodInstance` 仍是待核验的选择结果。接收 VM 检查 member、方法
+实参、实现参数、阶段和公开签名，再形成 callable 并保存已接纳的选择元数据。
+错误响应不进入缓存、不执行实现体；修复响应后，新 invocation 可重新请求。
+票据、源世界与预算随原 owner 交付，误投保留原响应供正确送达，取消不退款未知工作。
+S-expression 可显示原方法、实际访问、已保留的契约判断及调用／值 continuation。
+
+Type 队列与 luna 源调用均转发 `MethodHostRequest`；默认适配器在驱动外调用现有
+源码 resolver。参考执行和具体 IIR 仍沿各自合法入口运行，与源路径共用选择准入。
+接口条件中的类型观察、callable 具体化及调用准入仍可能同步执行；这不是任意方法
+准备步骤均可恢复，也尚未补齐普通 HIR 表达式的上下文检查请求。
+
+本阶段检查目录均为 `/home/fin/luna`，测试统一通过
+`python3 -B development/check.py --timeout 900 -- test` 执行：
+
+- `-p comptime_interpretor --lib -p luna --test method_host_requests --test invocation_host_requests --test type_invocation_sessions --test comptime_bytecode_traits --test dynamic_trait_clauses --test library_protocols --no-fail-fast`：
+  `/tmp/luna-tools-zjje1rz2/result.json`，退出 101。luna 的 154 项全部通过；
+  VM 584 项通过、1 项取消测试失败。旧断言把 resolver 返回等同于选择已接纳，
+  新协议在两者之间允许取消，故未接纳的响应必须丢弃并在重试时重新选择。
+- 取消测试增加响应待接纳状态的覆盖，验证该时刻缓存为空；在每个驱动边界取消后，
+  再次调用只复用已接纳的选择。局部 `-p comptime_interpretor --lib method_preparation --no-fail-fast`
+  退出 0、6 项通过，见 `/tmp/luna-tools-2u2f_17b/result.json`。
+- 最终 `-p comptime_interpretor --lib --no-fail-fast` 退出 0、585 项通过，见
+  `/tmp/luna-tools-9z_2ecmi/result.json`。真实源码的 4 项新增用例覆盖直接调用、方法值、
+  默认值与参数顺序、错误响应后重试、取消、预算膨胀及跨 invocation 误投后正确送达。
+- 修改的 14 个 Rust 文件定向 `rustfmt --check` 退出 0，见
+  `/tmp/luna-tools-h11n2oev/result.json`；未格式化另一位开发者的 formatter 文件。
+
+未运行全 workspace 或性能基准；检查仍包含工作区原有资源分析修改，不能称为纯 HEAD
+验收。正式 docs、formatter 和其他原有改动均未纳入本阶段提交。
+
 ## 8. 宿主请求与候选、取消的组合
 
 候选内允许的计算必须可隔离且可安全重放。pure 承诺用于相应纯计算，不自动使定义发布

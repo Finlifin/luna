@@ -16,6 +16,7 @@ pub enum InvocationProgress<'world> {
     Waiting,
     Associated(AssociatedHostRequest<'world>),
     Definition(DefinitionHostRequest<'world>),
+    Method(MethodHostRequest<'world>),
     Complete(Value),
 }
 
@@ -188,6 +189,8 @@ impl<'world> InvocationSession<'_, 'world> {
                     Ok(InvocationProgress::Associated(request))
                 } else if let Some(request) = self.session.take_definition_request()? {
                     Ok(InvocationProgress::Definition(request))
+                } else if let Some(request) = self.session.take_method_request()? {
+                    Ok(InvocationProgress::Method(request))
                 } else if self.session.waiting_for_host() {
                     Ok(InvocationProgress::Waiting)
                 } else {
@@ -210,6 +213,12 @@ impl<'world> InvocationSession<'_, 'world> {
         response: DefinitionHostResponse<'world>,
     ) -> Result<(), RejectedDefinitionResponse<'world>> {
         self.session.receive_definition_response(response)
+    }
+    pub fn resume_method(
+        &mut self,
+        response: MethodHostResponse<'world>,
+    ) -> Result<(), RejectedMethodResponse<'world>> {
+        self.session.receive_method_response(response)
     }
     pub fn cancel(&mut self) {
         self.session.cancel();
@@ -268,6 +277,7 @@ impl fmt::Display for InvocationProgress<'_> {
             Self::Waiting => f.write_str("(waiting)"),
             Self::Associated(request) => write!(f, "{request}"),
             Self::Definition(request) => write!(f, "{request}"),
+            Self::Method(request) => write!(f, "{request}"),
             Self::Complete(value) => write!(f, "(complete {value})"),
         }
     }
