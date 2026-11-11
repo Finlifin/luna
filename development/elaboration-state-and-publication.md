@@ -522,6 +522,52 @@ cleanup/effect 模式选择及同步准备服务尚在；通用前端 Region 恢
 
 上述为工作区验证，仍含作者原有资源分析改动；没有执行全 workspace 或性能测量。
 
+### required 输入证据的区域所有权
+
+上述 CMTT 失败的来源现已进一步定位。外层 required preparation 已为 `flag` 供应
+具体 bool，并建立普通局部绑定；默认值 `Flag<flag>{}` 的名义类型检查递归进入
+required preparation 时，只继承了 binding/domain，没有继承值。于是内层把一次
+已有身份观察变成另一次没有输入的 invocation。修复点在准备区域的输入交付，
+不在 generator、Flag、List 或某个源码形状上。
+
+`required::inputs::Scope` 现在按活动准备区域持有只读输入证据。每个 frame 保留
+`LocalId → (domain, supplied value / unavailable)`，父 frame 用 Arc 保活；没有
+pending producer、VM 可变存储或候选等待者，也不进入 RequiredWorld 或代码缓存。
+子区域在形成后续参数域之前逐项登记已完成前缀，优先观察自己的输入；live 输入显式
+遮蔽同号外层快照。退出准备区域（成功或
+错误）恢复原 scope 和本区域引入的 immutable 标记。Display 使用 S-expression，
+同时显示局部身份、域及可用性，不把 unavailable 当作已完成值。
+
+普通 `preserved_input_identity` 的已有结构观察可读取仍在词法作用域的 immutable
+输入证据；若需要真实执行 helper，nested required 捕获只复制实际引用的外层输入，
+并继续走既有 domain/phase/capture 准入。读取、复制和遍历都消耗 required 预算；
+失败不发布部分 snapshot。赋值、取址及捕获的既有失效入口同步遮蔽该证据，失败分支
+恢复规则也保存 scope；多次失效替换当前 frame，不为每次写入增加一层 lexical 链。
+
+普通函数的定义期默认值检查也建立独立输入区域：前序子句参数供应自己的 rigid 身份
+和声明域，不把未知参数当作具体值。普通调用计划则继续区分「观察出的身份」与
+「已经执行得到的输入」：前序 prepared binding 的事实临时进入已有 partial-staged
+观察表，供嵌套表达式检查使用；它们不进入 required 的可执行输入 Scope，也不删除
+原 producer。完成后只恢复本 packet 的事实条目，保留其他存储写入产生的失效。
+
+这项交付只涉及已供应且可只读观察的输入。它没有把有待执行的 Type 生产者变成
+已知值，没有重放副作用来取得证据，也没有接通通用前端 Region suspension。普通
+待定域两个 ignored 正例仍需要原计划中的检查／执行恢复协议。
+
+本项最终验证在 `/home/fin/luna`，使用 `development/check.py --timeout 900 -- test`：
+
+- `-p elaboration --lib --no-fail-fast`：`/tmp/luna-tools-3_d6iitq/result.json`
+  退出 0，193 项通过，包含输入遮蔽、live 阻断、预算失败、前缀扩展、失效和 dump。
+- `-p luna --test required_input_scopes --test cmtt --test cmtt_methods --test prepared_input_dependencies --test comptime_clause_inputs --test clause_staged_constants --test default_calls --test normal_form_domains --test invocation_host_requests --test builder_invocations --test library_protocols --test comptime_bytecode_defaults --test trait_domain_substitution --test trait_obligations --test ordinary_clause_collectors --test ordinary_callable_types --no-fail-fast`：
+  `/tmp/luna-tools-rgq9meba/result.json` 退出 0，1038 项通过，两个原有待定域正例仍 ignored。
+  原 CMTT 失败已通过；七项新增真实 sysroot 用例覆盖重复实例、helper 捕获、泛型转发、
+  普通函数、meta.List、错误域/后续参数/runtime 输入拒绝，以及带副作用实参恰好执行一次。
+- 七个改动 Rust 文件的 scoped rustfmt 检查：
+  `/tmp/luna-tools-9l1y0ao4/result.json` 退出 0；`git diff --check` 通过。
+
+这是含作者既有资源分析修改的工作区验收，没有执行全 workspace、LLVM/native 或
+性能基准；正式 docs、library 现有修改与另一开发者的 formatter 均未改写或纳入提交。
+
 ## 8. 宿主请求与候选、取消的组合
 
 候选内允许的计算必须可隔离且可安全重放。pure 承诺用于相应纯计算，不自动使定义发布

@@ -951,8 +951,10 @@ impl Checker<'_, '_> {
                     } else if dependent && checking == InputChecking::Contextual {
                         self.dependent_normal_argument(input.unwrap(), 0)
                     } else {
-                        self.expr(input.unwrap(), (!dependent).then_some(&ty))
-                            .map(n::NormalFormArgument::Value)
+                        self.with_prepared_input_observations(&prepared_bindings, span, |this| {
+                            this.expr(input.unwrap(), (!dependent).then_some(&ty))
+                        })
+                        .map(n::NormalFormArgument::Value)
                     };
                     checked.map(|value| (value, dependent))
                 })();

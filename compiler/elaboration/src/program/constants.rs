@@ -1909,6 +1909,51 @@ impl Checker<'_, '_> {
         result.map_err(|e: String| error(span, e))
     }
 
+    /// Let nested expression checks observe earlier prepared input identities.
+    /// The source producers remain in the call plan; these facts do not supply
+    /// values to required invocation or establish permission to execute them.
+    pub(super) fn with_prepared_input_observations<R>(
+        &mut self,
+        facts: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        span: Span,
+        check: impl FnOnce(&mut Self) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let mut saved = Vec::new();
+        let result = (|| {
+            for (binding, identity) in facts {
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let copied = nir::copy_budget::clone_term(identity, &mut fuel);
+                self.required_steps -= (before - fuel) as u64;
+                let copied = copied.map_err(|failure| {
+                    error(
+                        span,
+                        format!("prepared input observation failed: {failure:?}"),
+                    )
+                })?;
+                let previous = self
+                    .partial_staged_bindings
+                    .insert(*binding, PartialStagedValue::known(copied));
+                let newly_immutable = self.immutable.insert(*binding);
+                saved.push((*binding, previous, newly_immutable));
+            }
+            check(self)
+        })();
+        // Restore only this packet's entries. Writes to unrelated enclosing
+        // storage must keep their ordinary observation invalidations.
+        for (binding, previous, newly_immutable) in saved {
+            if let Some(previous) = previous {
+                self.partial_staged_bindings.insert(binding, previous);
+            } else {
+                self.partial_staged_bindings.remove(&binding);
+            }
+            if newly_immutable {
+                self.immutable.remove(&binding);
+            }
+        }
+        result
+    }
+
     /// Supply existing immutable facts to a structural observation. This does
     /// not promote ordinary locals to staged inputs or replace their producers.
     pub(super) fn observed_expression_bindings(
@@ -1929,6 +1974,20 @@ impl Checker<'_, '_> {
             let mut bindings = BTreeMap::new();
             for binding in referenced {
                 if !self.locals.contains_key(&binding) || !self.immutable.contains(&binding) {
+                    continue;
+                }
+                let mut remaining = fuel as u64;
+                let supplied = self
+                    .required_input_scope
+                    .lookup(binding, &mut remaining, span);
+                fuel = remaining as usize;
+                if let Some((_, value)) = supplied.map_err(|failure| failure.message)? {
+                    let Some(value) = value else {
+                        continue;
+                    };
+                    let value = nir::copy_budget::clone_term(value, &mut fuel)
+                        .map_err(|failure| format!("required identity copy failed: {failure:?}"))?;
+                    bindings.insert(binding, std::sync::Arc::new(value));
                     continue;
                 }
                 let Some(value) = self.partial_staged_bindings.get(&binding) else {
@@ -2680,7 +2739,10 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn check_failure_branch(&mut self, body: &Expr<'_>) -> Result<n::Expr, Error> {
-        if self.specialization_inputs.is_empty() && self.partial_staged_bindings.is_empty() {
+        if self.specialization_inputs.is_empty()
+            && self.partial_staged_bindings.is_empty()
+            && self.required_input_scope.is_empty()
+        {
             return self.expr(body, None);
         }
         let saved = (
@@ -2688,6 +2750,7 @@ impl Checker<'_, '_> {
             self.type_input_bindings.clone(),
             self.partial_staged_bindings.clone(),
             self.value_input_bindings.clone(),
+            self.required_input_scope.clone(),
         );
         let checked = self.expr(body, None);
         let isolated = (|| {
@@ -2727,6 +2790,7 @@ impl Checker<'_, '_> {
                 self.type_input_bindings,
                 self.partial_staged_bindings,
                 self.value_input_bindings,
+                self.required_input_scope,
             ) = saved;
         }
         isolated?;
@@ -2743,6 +2807,7 @@ impl Checker<'_, '_> {
         // construction observations still need invalidation inside that store.
         let staged = self.in_required_comptime || self.in_staged_input;
         if self.partial_staged_bindings.is_empty()
+            && self.required_input_scope.is_empty()
             && (staged || self.specialization_inputs.is_empty())
         {
             return Ok(());
@@ -2795,6 +2860,8 @@ impl Checker<'_, '_> {
         });
         self.required_steps -= (before - fuel) as u64;
         result.map_err(|failure| error(span, failure))?;
+        self.required_input_scope
+            .invalidate(&invalidated, &mut self.required_steps, span)?;
         invalidated.retain(|binding| {
             self.specialization_inputs
                 .iter()

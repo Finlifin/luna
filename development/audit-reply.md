@@ -113,9 +113,12 @@ query 和 std 的实际接口仍未完成；报告中的局部能力不能替代
 定位、额外 guarded 分支及剩余迁移见
 [编译拒绝与执行模式分开](elaboration-state-and-publication.md#编译拒绝与执行模式分开)。
 尚未接通一般前端检查请求的判断仍然成立。此次扩大 CMTT 验证还复现了
-`generator_clause_domains_depend_on_prior_value_indices` 的已有 required 输入捕获失败；
-修改前 `59405db5` 的三个 VM／编译文件也产生相同诊断，证据见上述迁移小节。
-不能把这次检查描述为源码全部通过，也没有用跳过该正例掩盖它。
+`generator_clause_domains_depend_on_prior_value_indices` 的已有 required 输入捕获失败，
+修改前 `59405db5` 的三个 VM／编译文件也产生相同诊断。后续已沿
+[required 输入证据的区域所有权](elaboration-state-and-publication.md#required-输入证据的区域所有权)
+修正它，并覆盖普通函数默认值和真实 meta.List 消费者：已供应输入进入准备区域，
+普通调用的观察事实留在原观察表，不能据此删掉或提前执行 producer。
+原先失败的证据保留于前一小节；当前验证单独记录，没有跳过或放宽该正例。
 
 ## 3. 已有清理在目标架构中的位置
 

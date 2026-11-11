@@ -4,6 +4,7 @@
 use super::*;
 use comptime_interpretor::{Budget, Interpreter, Value};
 use std::collections::VecDeque;
+pub(super) mod inputs;
 pub(super) mod prepared;
 mod restore;
 mod scope;
@@ -1464,8 +1465,18 @@ impl Checker<'_, '_> {
         let signature_start = self.signature_type_uses.len();
         let saved_value_locals = self.locals.clone();
         let saved_value_bindings = self.normal_default_bindings.clone();
+        let saved_input_scope = self.required_input_scope.clone();
+        let saved_input_immutable = self.immutable.clone();
         let result = (|| {
             let mut inputs = inputs;
+            // Nested checks may use supplied input evidence from this region,
+            // while pending defaults and live storage remain unavailable.
+            self.required_input_scope = self.required_input_scope.child(
+                &inputs,
+                live,
+                &mut self.required_steps,
+                expr.span,
+            )?;
             let mut abstract_value_parameters = Vec::new();
             let visible = self.visible_comptime_parameters(expr.span)?;
             for id in visible {
@@ -1506,6 +1517,7 @@ impl Checker<'_, '_> {
                     None => self.spread_binding(expr.span)?,
                 };
                 self.locals.insert(binding, domain.clone());
+                self.immutable.insert(binding);
                 self.normal_default_bindings
                     .insert(id, (binding, domain.clone()));
                 if value
@@ -1516,6 +1528,14 @@ impl Checker<'_, '_> {
                 {
                     abstract_value_parameters.push((id, domain.clone()));
                 }
+                // Publish the completed prefix before forming the next domain.
+                self.required_input_scope.supply(
+                    binding,
+                    &domain,
+                    &value,
+                    &mut self.required_steps,
+                    expr.span,
+                )?;
                 inputs.push((binding, domain, value));
             }
             let mut root = build(self).map_err(|mut e| {
@@ -1597,6 +1617,33 @@ impl Checker<'_, '_> {
                     }
                 }
                 self.required_steps = budget.steps as u64;
+            }
+            // Retain only referenced outer inputs, including dependencies in
+            // type annotations. This transports existing evidence; it does not
+            // evaluate a producer to fill a missing capture.
+            if !self.required_input_scope.is_empty() {
+                let mut capture_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = capture_fuel;
+                let free = nir::free_bindings::collect(&root, &mut capture_fuel);
+                self.required_steps -= (before - capture_fuel) as u64;
+                for binding in free.map_err(|reason| error(expr.span, reason))? {
+                    if inputs.iter().any(|(id, _, _)| *id == binding)
+                        || live.iter().any(|(id, _, _)| *id == binding)
+                        || !self.locals.contains_key(&binding)
+                        || !self.immutable.contains(&binding)
+                    {
+                        continue;
+                    }
+                    if let Some((domain, Some(value))) = self.required_input_scope.lookup(
+                        binding,
+                        &mut self.required_steps,
+                        expr.span,
+                    )? {
+                        let domain = inputs::copy(domain, &mut self.required_steps, expr.span)?;
+                        let value = inputs::copy(value, &mut self.required_steps, expr.span)?;
+                        inputs.push((binding, domain, value));
+                    }
+                }
             }
             let mut scoped_parameters = Vec::new();
             let mut scoped_arguments = Vec::new();
@@ -2420,6 +2467,8 @@ impl Checker<'_, '_> {
         }
         self.locals = saved_value_locals;
         self.normal_default_bindings = saved_value_bindings;
+        self.required_input_scope = saved_input_scope;
+        self.immutable = saved_input_immutable;
         self.control = saved_control;
         self.captures = saved_captures;
         self.in_required_comptime = saved_mode;

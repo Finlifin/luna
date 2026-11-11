@@ -286,9 +286,17 @@ impl Checker<'_, '_> {
         let saved_bindings = std::mem::take(&mut self.normal_default_bindings);
         let saved_aliases = std::mem::take(&mut self.alias_substitution);
         let saved_forbidden = self.forbidden_default_inputs.clone();
+        let saved_required_inputs = std::mem::take(&mut self.required_input_scope);
+        let saved_immutable = self.immutable.clone();
         let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
         self.context = self.definition_context(owner);
         let result = (|| {
+            self.required_input_scope = self.required_input_scope.child(
+                &[],
+                &[],
+                &mut self.required_steps,
+                self.package.item(owner).unwrap().span,
+            )?;
             // Captured parent inputs are already in lexical scope before the
             // member's own telescope, including in its default expressions.
             for parameter in self.nominal_captures(owner, self.package.item(owner).unwrap().span)? {
@@ -296,10 +304,11 @@ impl Checker<'_, '_> {
                     .trait_input_domain(parameter)
                     .filter(|ty| *ty != p(P::Type))
                 {
-                    let binding = self.spread_binding(self.package.item(owner).unwrap().span)?;
-                    self.locals.insert(binding, domain.clone());
-                    self.normal_default_bindings
-                        .insert(parameter, (binding, domain));
+                    self.install_abstract_clause_input(
+                        parameter,
+                        &domain,
+                        self.package.item(owner).unwrap().span,
+                    )?;
                 }
             }
             for (slot, clause) in clauses.iter().enumerate() {
@@ -339,10 +348,11 @@ impl Checker<'_, '_> {
                     self.forbidden_default_inputs = saved_forbidden.clone();
                 }
                 if domains[slot] != p(P::Type) {
-                    let binding = self.spread_binding(clause.span)?;
-                    self.locals.insert(binding, domains[slot].clone());
-                    self.normal_default_bindings
-                        .insert(parameters[slot], (binding, domains[slot].clone()));
+                    self.install_abstract_clause_input(
+                        parameters[slot],
+                        &domains[slot],
+                        clause.span,
+                    )?;
                 }
             }
             Ok(())
@@ -354,7 +364,34 @@ impl Checker<'_, '_> {
         self.alias_substitution = saved_aliases;
         self.forbidden_default_inputs = saved_forbidden;
         self.in_required_comptime = saved_mode;
+        self.required_input_scope = saved_required_inputs;
+        self.immutable = saved_immutable;
         result
+    }
+
+    fn install_abstract_clause_input(
+        &mut self,
+        parameter: DeclarationId,
+        domain: &Term,
+        span: Span,
+    ) -> Result<(), Error> {
+        let binding = self.spread_binding(span)?;
+        let value = Term::Rigid {
+            declaration: parameter,
+            sort: Sort::ComptimeValue,
+        };
+        self.required_input_scope.supply(
+            binding,
+            domain,
+            &value,
+            &mut self.required_steps,
+            span,
+        )?;
+        self.locals.insert(binding, domain.clone());
+        self.immutable.insert(binding);
+        self.normal_default_bindings
+            .insert(parameter, (binding, domain.clone()));
+        Ok(())
     }
 
     /// Fix an explicitly supplied positional prefix; remaining declaration
