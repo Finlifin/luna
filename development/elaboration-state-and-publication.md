@@ -702,8 +702,9 @@ optional、错误结果、null、提前 return、分支及可变接收者仅求�
 内容，使新增 delivery 模块不参与构建；其他工作区改动保持原样。运行
 `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface -- --exact error_value_trait_indices_reconstruct_both_branches_in_selected_bodies`，
 `/tmp/luna-tools-z6jzssh3/result.json` 同样退出 101，诊断完全相同。随后恢复本次
-接线。该基线失败尚未修复，没有修改其预期或加入 ignore；应继续追踪错误结果值
-作为泛型 trait 参数时的重建及 required 输入协议。这里的验证包含既有工作区修改，
+接线。该基线失败后续已定位并修复：VM 的恒等 Embed 不应要求具体标签，见
+[抽象错误结果交付](values-staging-and-publication.md#错误结果的恒等交付不观察抽象标签)。
+没有修改其预期或加入 ignore。这里的验证包含既有工作区修改，
 不宣称为纯 HEAD 验收。
 
 #### 已接入：required 世界的依赖发现共用结构遍历

@@ -158,6 +158,12 @@ impl Interpreter<'_> {
         at: SourceRange,
     ) -> Result<Value, Error> {
         use nir::error_results::Conversion;
+        // Identity delivery does not observe a tag. In particular an admitted
+        // abstract clause value can be forwarded without selecting its branch.
+        if conversion == Conversion::Embed && source_ty == target_ty {
+            self.check_value_type(&payload, target_ty, Some(at))?;
+            return Ok(payload);
+        }
         if conversion == Conversion::Product {
             let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
             let before = fuel;
@@ -201,7 +207,14 @@ impl Interpreter<'_> {
             ),
             Conversion::Embed => {
                 let Value::ErrorResult { ty, error, value } = payload else {
-                    return Err(self.failure(ErrorKind::Type, Some(at)));
+                    return Err(self.failure(
+                        if matches!(payload, Value::AbstractValue { .. }) {
+                            ErrorKind::AbstractValueUnresolved
+                        } else {
+                            ErrorKind::Type
+                        },
+                        Some(at),
+                    ));
                 };
                 let Term::ErrorResult { errors: source, .. } = ty else {
                     return Err(self.failure(ErrorKind::Type, Some(at)));
@@ -258,6 +271,126 @@ mod tests {
                     .unwrap()
             }),
             value: Box::new(payload),
+        }
+    }
+
+    #[test]
+    fn identity_error_delivery_preserves_abstract_values_and_checks_authority() {
+        let package = Package::default();
+        let boolean = Term::Primitive(Primitive::Bool);
+        let domain = Term::error_result(vec![boolean.clone()], boolean.clone());
+        let declaration = DeclarationId {
+            package: 9,
+            local: 1,
+        };
+        let binding = LocalId { owner: 9, index: 0 };
+        let abstract_value = Value::AbstractValue {
+            declaration,
+            ty: domain.clone(),
+        };
+        let body = expr(
+            domain.clone(),
+            K::ErrorConvert {
+                conversion: C::Embed,
+                value: Box::new(expr(domain.clone(), K::Local(binding))),
+            },
+        );
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+        for compiled in [false, true] {
+            let run = |vm: &mut Interpreter<'_>, value: Value| {
+                let mut env = Environment::from([(binding, value)]);
+                if compiled {
+                    vm.execute_code(&code, &mut env)
+                } else {
+                    vm.eval(&body, &mut env)
+                }
+            };
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            // Values cannot confer their own declaration-domain authority.
+            assert_eq!(
+                run(&mut vm, abstract_value.clone()).unwrap_err().kind,
+                ErrorKind::Type
+            );
+            vm.authorize_abstract_value_parameters(&[(declaration, domain.clone())])
+                .unwrap();
+            assert_eq!(
+                run(&mut vm, Value::Bool(true)).unwrap_err().kind,
+                ErrorKind::Type
+            );
+            let foreign = Value::AbstractValue {
+                declaration: DeclarationId {
+                    package: 10,
+                    local: 1,
+                },
+                ty: domain.clone(),
+            };
+            assert_eq!(run(&mut vm, foreign).unwrap_err().kind, ErrorKind::Type);
+            let Flow::Value(value) = run(&mut vm, abstract_value.clone()).unwrap() else {
+                panic!()
+            };
+            assert_eq!(value, abstract_value);
+            // Identity applies to both concrete branches without retagging.
+            for label in [None, Some(&boolean)] {
+                let input = tagged(&domain, label, Value::Bool(true));
+                let Flow::Value(value) = run(&mut vm, input.clone()).unwrap() else {
+                    panic!()
+                };
+                assert_eq!(value, input);
+            }
+        }
+    }
+
+    #[test]
+    fn error_widening_waits_for_a_concrete_tag_without_inventing_a_branch() {
+        let package = Package::default();
+        let boolean = Term::Primitive(Primitive::Bool);
+        let domain = Term::error_result(vec![boolean.clone()], boolean.clone());
+        let target = Term::error_result(vec![Term::Primitive(Primitive::Char)], domain.clone());
+        let declaration = DeclarationId {
+            package: 9,
+            local: 1,
+        };
+        let binding = LocalId { owner: 9, index: 0 };
+        let body = expr(
+            target.clone(),
+            K::ErrorConvert {
+                conversion: C::Embed,
+                value: Box::new(expr(domain.clone(), K::Local(binding))),
+            },
+        );
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .with_abstract_value_parameters(&[(declaration, domain.clone())])
+                .unwrap();
+            let run = |vm: &mut Interpreter<'_>, value: Value| {
+                let mut env = Environment::from([(binding, value)]);
+                if compiled {
+                    vm.execute_code(&code, &mut env)
+                } else {
+                    vm.eval(&body, &mut env)
+                }
+            };
+            assert_eq!(
+                run(
+                    &mut vm,
+                    Value::AbstractValue {
+                        declaration,
+                        ty: domain.clone()
+                    }
+                )
+                .unwrap_err()
+                .kind,
+                ErrorKind::AbstractValueUnresolved
+            );
+            for label in [None, Some(&boolean)] {
+                let input = tagged(&domain, label, Value::Bool(false));
+                let Flow::Value(value) = run(&mut vm, input).unwrap() else {
+                    panic!()
+                };
+                assert_eq!(value, tagged(&target, label, Value::Bool(false)));
+            }
         }
     }
 

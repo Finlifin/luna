@@ -386,7 +386,27 @@ execution 用例 26 项，均退出 0；前后两轮 execution 用例有重叠�
 
 扩大回归时发现错误结果值作为 trait 参数的一个既有用例失败。在关闭本次 delivery
 接线、恢复 `a1aab74a` 的 program.rs 后仍得到相同 Type interpretation 错误；详细
-命令和对照证据在上述链接。该问题仍需修复，既没有计入通过项，也没有改变测试预期。
+命令和对照证据在上述链接。该次检查没有将它计入通过项，也没有改变测试预期；
+后续修复见下节。
+
+### 错误结果值参数的恒等传送修复
+
+具体失败并非 trait 值参数语义不成立，而是 VM 的 Embed 即使面对相同源域与目标域，
+也强行拆解具体错误标签。诊断跟踪确认输入为已有声明域授权的 AbstractValue，
+类型为 `!bool bool`。现已让恒等交付保持原值并检查当前 VM 的授权；非恒等转换遇到
+抽象标签报告未决，仍不制造成功分支。共享入口同时服务树解释和字节码。
+实现边界见 [抽象错误结果交付](values-staging-and-publication.md#错误结果的恒等交付不观察抽象标签)。
+
+局部命令（工作目录 `/home/fin/luna`）
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib error_results:: --no-fail-fast`
+三项通过，`/tmp/luna-tools-jml75ops/result.json` 退出 0。修复前诊断复现记录为
+`/tmp/luna-tools-l8xmhm90/result.json`，退出 101；临时跟踪代码已删除。
+
+完整受影响检查使用
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test abstract_values --test normal_values --test immutable_normal_inputs -p luna --test error_surface --test error_result_flow --test contextual_delivery --no-fail-fast`，
+870 项通过，`/tmp/luna-tools-z8avn1z9/result.json` 退出 0；包含上述三项局部检查，
+不重复累加覆盖。原失败案例在精简 fixture 与真实 sysroot 下都通过，未解除或新增
+ignore。这里仍使用保留作者已有修改的工作区，不是纯 HEAD 或全 workspace 验收。
 
 ## 4. 本次证据与限制
 

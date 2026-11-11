@@ -183,6 +183,28 @@ NF、名义类型和透明别名的输入帧现在通过 `input_bindings::Bindin
 512 步预算，并在充足预算下取得完整字符串；两种 VM 均覆盖。此项是让预算断言实际触达
 其检查边界，不改变错误类别或放宽输入合法性。
 
+### 错误结果的恒等交付不观察抽象标签
+
+错误结果值可以作为普通 comptime 子句参数；在定义检查中，已知声明身份及值域的
+抽象参数仍须能够转发。其成功／错误分支尚未取得，不等于它没有合法值域，也不许可
+编译器选择某个分支。没有声明域授权的 AbstractValue 仍不能进入当前 VM。
+
+原 VM 的 Embed 无条件拆解 Value::ErrorResult，即使源域与目标域完全相同，也要求
+取得具体标签。这使 `impl Read<tag> ... where tag: !bool bool` 在形成 trait 输入时
+错误地拒绝已授权的抽象 tag。已在共享 error conversion 完成入口区分恒等交付：
+两域相同时重新检查当前值域授权并原样返回值，既不造标签，也不增加成功包装。
+非恒等 Embed 仍按原行重映射具体标签；遇到合法抽象值返回 AbstractValueUnresolved，
+不再误报 Type。前置域准入、调用阶段检查和实际输入检查继续执行。
+
+这不是通用符号执行或可恢复的前端等待：非恒等转换的抽象 residual 仍未表达。
+调用者必须保留待决状态或报告该边界，不能把 unresolved 当成具体类型不匹配，
+也不能以恒等传送为由将抽象值发布为完成的冻结值。
+
+单元检查在树解释和字节码路径覆盖恒等转发、两种具体分支、未授权／外来声明拒绝、
+错误值域拒绝，以及非恒等转换未决后用具体值重试。原失败源码保持预期不变，并增加
+真实 sysroot 的编译及 IIR 执行；测试沿用 `error_surface` 中的 trait 值参数案例。
+详细命令与回归结果见 [报告回复](audit-reply.md#错误结果值参数的恒等传送修复)。
+
 真实 sysroot 的 `ordinary_clause_collectors`、`ordinary_callable_types`、
 `nominal_value_parameters`、`normal_form_methods`、`library_protocols` 共 384 项通过，
 两个原有语义缺口仍 ignored；证据 `/tmp/luna-tools-h5s6l7lr/result.json`，退出 0。

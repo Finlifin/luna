@@ -4,6 +4,8 @@ use luna::{
 };
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
+#[path = "support/sysroot_execution.rs"]
+mod sysroot;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -1441,6 +1443,7 @@ fn error_value_trait_indices_reconstruct_both_branches_in_selected_bodies() {
         impl Read<tag> for bool where tag:!bool bool {fn read()->bool {tag! {bad=>bad}}}
         fn run()->bool {bool.as(Read<good()>).read() and not bool.as(Read<bad()>).read()}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(sysroot::run(source), Value::Bool(true));
 }
 
 #[test]
