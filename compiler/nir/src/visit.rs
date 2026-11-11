@@ -299,6 +299,26 @@ pub fn argument_checked<'a, E: From<Error>>(
         |expr, fuel| visit(expr, fuel).map(|_| true),
         true,
         true,
+        false,
+    )
+}
+
+/// Discover dependencies in retained code, including defaults and closures.
+/// Pattern evidence has no executable expression children and remains opaque
+/// here. This does not certify it for execution; ordinary visitors still reject
+/// unresolved evidence. All structural placeholders consume the same budget.
+pub fn retained_expressions_checked<'a, E: From<Error>>(
+    roots: impl DoubleEndedIterator<Item = &'a Expr>,
+    fuel: &mut usize,
+    mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<(), E>,
+) -> Result<(), E> {
+    walk_nodes(
+        roots.map(Node::Expr),
+        fuel,
+        |expr, fuel| visit(expr, fuel).map(|_| true),
+        true,
+        true,
+        true,
     )
 }
 
@@ -315,6 +335,7 @@ fn walk_roots<'a, E: From<Error>>(
         visit,
         include_defaults,
         include_closure_bodies,
+        false,
     )
 }
 
@@ -324,6 +345,7 @@ fn walk_nodes<'a, E: From<Error>>(
     mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<bool, E>,
     include_defaults: bool,
     include_closure_bodies: bool,
+    allow_pattern_evidence: bool,
 ) -> Result<(), E> {
     // Keep root order without allocating one slot per contract/default. The
     // same lazy root stream serves ordinary functions and borrowed summaries.
@@ -398,7 +420,9 @@ fn walk_nodes<'a, E: From<Error>>(
                 | P::TypeTuple(fields)
                 | P::Or(fields) => work.extend(fields.iter().map(Node::Pattern)),
                 P::CodeEvidence { .. } => {
-                    return Err(Error::Invalid("unresolved pattern-code evidence").into());
+                    if !allow_pattern_evidence {
+                        return Err(Error::Invalid("unresolved pattern-code evidence").into());
+                    }
                 }
                 P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => {}
             },

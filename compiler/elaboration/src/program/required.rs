@@ -4,10 +4,12 @@
 use super::*;
 use comptime_interpretor::{Budget, Interpreter, Value};
 use std::collections::VecDeque;
+mod dependencies;
 pub(super) mod inputs;
 pub(super) mod prepared;
 mod restore;
 mod scope;
+pub(super) use dependencies::{function_references, references};
 use prepared::PreparedRequired;
 
 /// Required expression evaluation can prepare a distinct clause packet at the
@@ -1586,6 +1588,15 @@ impl Checker<'_, '_> {
                 specialized?;
             }
             let result_type = root.ty.clone();
+            // The root is structurally stable after initializer substitution.
+            // Later Type-slot rebinding changes Bound terms to rigid identities,
+            // not lexical LocalIds. Capture selection and dependency discovery
+            // share this one scoped observation, never a cross-root cache.
+            let mut capture_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let before = capture_fuel;
+            let free = nir::free_bindings::collect(&root, &mut capture_fuel);
+            self.required_steps -= (before - capture_fuel) as u64;
+            let free = free.map_err(|message| error(expr.span, message))?;
             for input in &self.input_facts.specialized {
                 if !inputs.iter().any(|(id, _, _)| *id == input.0) {
                     inputs.push(input.clone());
@@ -1599,12 +1610,7 @@ impl Checker<'_, '_> {
                     steps: self.required_steps as usize,
                     max_limbs: 4096,
                 };
-                let mut fuel = budget.steps;
-                let free = nir::free_bindings::collect(&root, &mut fuel);
-                budget.steps = fuel;
-                self.required_steps = fuel as u64;
-                let free = free.map_err(|message| error(expr.span, message))?;
-                for binding in free {
+                for binding in free.iter().copied() {
                     if inputs.iter().any(|(id, _, _)| *id == binding)
                         || live.iter().any(|(id, _, _)| *id == binding)
                     {
@@ -1622,11 +1628,7 @@ impl Checker<'_, '_> {
             // type annotations. This transports existing evidence; it does not
             // evaluate a producer to fill a missing capture.
             if !self.input_facts.supplied.is_empty() {
-                let mut capture_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let before = capture_fuel;
-                let free = nir::free_bindings::collect(&root, &mut capture_fuel);
-                self.required_steps -= (before - capture_fuel) as u64;
-                for binding in free.map_err(|reason| error(expr.span, reason))? {
+                for binding in free.iter().copied() {
                     if inputs.iter().any(|(id, _, _)| *id == binding)
                         || live.iter().any(|(id, _, _)| *id == binding)
                         || !self.locals.contains_key(&binding)
@@ -1674,12 +1676,6 @@ impl Checker<'_, '_> {
                     })
                     .collect::<Vec<_>>();
                 let owner = self.default_input_owner.or(self.signature_owner).unwrap();
-                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let before = fuel;
-                let free = nir::free_bindings::collect(&root, &mut fuel)
-                    .map_err(|message| error(expr.span, message));
-                self.required_steps -= (before - fuel) as u64;
-                let free = free?;
                 for (binding, symbol) in &self.input_facts.types {
                     if binding.owner != owner.def_id.raw() {
                         continue;
@@ -1747,14 +1743,17 @@ impl Checker<'_, '_> {
             let mut expanded_members = BTreeSet::new();
             let mut associated = BTreeSet::new();
             let mut expanded_associated = BTreeSet::new();
-            let mut queue = VecDeque::from_iter(references(&root, &mut members, &mut associated));
+            let mut queue = VecDeque::from_iter(
+                references(
+                    &root,
+                    &mut members,
+                    &mut associated,
+                    &mut self.required_steps,
+                )
+                .map_err(|failure| error(expr.span, failure.to_string()))?,
+            );
             // A frozen callable input is an execution dependency even when the
             // source computation refers to it through a local parameter.
-            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-            let before = fuel;
-            let free = nir::free_bindings::collect(&root, &mut fuel);
-            self.required_steps -= (before - fuel) as u64;
-            let free = free.map_err(|message| error(expr.span, message))?;
             queue.extend(frozen_references(
                 inputs
                     .iter()
@@ -1813,18 +1812,30 @@ impl Checker<'_, '_> {
                             .iter()
                             .filter(|(id, _)| *id == member)
                         {
-                            queue.extend(references(value, &mut members, &mut associated));
+                            queue.extend(
+                                references(
+                                    value,
+                                    &mut members,
+                                    &mut associated,
+                                    &mut self.required_steps,
+                                )
+                                .map_err(|failure| error(expr.span, failure.to_string()))?,
+                            );
                         }
                         for (_, initializer) in implementation
                             .associated_initializers
                             .iter()
                             .filter(|(id, _)| *id == member)
                         {
-                            queue.extend(references(
-                                initializer.expression(),
-                                &mut members,
-                                &mut associated,
-                            ));
+                            queue.extend(
+                                references(
+                                    initializer.expression(),
+                                    &mut members,
+                                    &mut associated,
+                                    &mut self.required_steps,
+                                )
+                                .map_err(|failure| error(expr.span, failure.to_string()))?,
+                            );
                         }
                     }
                 }
@@ -1930,11 +1941,15 @@ impl Checker<'_, '_> {
                                 .with_unsafe_call_requirement(function.is_unsafe),
                         });
                     } else {
-                        queue.extend(function_references(
-                            &function,
-                            &mut members,
-                            &mut associated,
-                        ));
+                        queue.extend(
+                            function_references(
+                                &function,
+                                &mut members,
+                                &mut associated,
+                                &mut self.required_steps,
+                            )
+                            .map_err(|failure| error(expr.span, failure.to_string()))?,
+                        );
                         functions.push(function);
                     }
                     continue;
@@ -1984,11 +1999,15 @@ impl Checker<'_, '_> {
                     continue;
                 }
                 let function = self.required_function(owner, expr.span)?;
-                queue.extend(function_references(
-                    &function,
-                    &mut members,
-                    &mut associated,
-                ));
+                queue.extend(
+                    function_references(
+                        &function,
+                        &mut members,
+                        &mut associated,
+                        &mut self.required_steps,
+                    )
+                    .map_err(|failure| error(expr.span, failure.to_string()))?,
+                );
                 functions.push(function);
             }
             // Signature formation may have produced obligations independently of
@@ -2668,9 +2687,18 @@ fn live_references(
                     if let Some((declaration, _)) = closure.declaration_instance() {
                         found.insert(declaration);
                     }
-                    constants::charge_copy(closure.body(), fuel, span)
-                        .map_err(|_| comptime_interpretor::ErrorKind::StepsExhausted)?;
-                    found.extend(references(closure.body(), members, associated));
+                    found.extend(
+                        references(closure.body(), members, associated, fuel).map_err(
+                            |failure| match failure {
+                                nir::visit::Error::Budget(_) => {
+                                    comptime_interpretor::ErrorKind::StepsExhausted
+                                }
+                                nir::visit::Error::Invalid(_) => {
+                                    comptime_interpretor::ErrorKind::Type
+                                }
+                            },
+                        )?,
+                    );
                 }
                 _ => {}
             }
@@ -2683,376 +2711,6 @@ fn live_references(
             )
         })?;
     Ok(found)
-}
-
-pub(super) fn function_references(
-    function: &n::Function,
-    members: &mut BTreeSet<DeclarationId>,
-    associated: &mut BTreeSet<DeclarationId>,
-) -> BTreeSet<DeclarationId> {
-    // Every expression retained in the snapshot needs its dependencies, even
-    // when it occurs only in a contract. Source function defaults are already
-    // moved into the call plans that use them by required_function.
-    std::iter::once(&function.body)
-        .chain(&function.preconditions)
-        .chain(&function.postconditions)
-        .chain(function.defaults.iter().map(|(_, value)| value))
-        .flat_map(|value| references(value, members, associated))
-        .collect()
-}
-
-pub(super) fn references(
-    root: &n::Expr,
-    members: &mut BTreeSet<DeclarationId>,
-    associated: &mut BTreeSet<DeclarationId>,
-) -> BTreeSet<DeclarationId> {
-    enum Node<'a> {
-        Expr(&'a n::Expr),
-        Pattern(&'a n::Pattern),
-    }
-    let mut pending = vec![Node::Expr(root)];
-    let mut output = BTreeSet::new();
-    while let Some(node) = pending.pop() {
-        match node {
-            Node::Pattern(p) => match p {
-                n::Pattern::CodeEvidence { .. } => {}
-                n::Pattern::Then { first, value, next } => {
-                    pending.push(Node::Pattern(first));
-                    pending.push(Node::Expr(value));
-                    pending.push(Node::Pattern(next));
-                }
-                n::Pattern::Guard { pattern, condition } => {
-                    pending.push(Node::Pattern(pattern));
-                    pending.push(Node::Expr(condition));
-                }
-                n::Pattern::OptionalPresent(pattern)
-                | n::Pattern::ErrorResult { inner: pattern, .. }
-                | n::Pattern::Observe { inner: pattern, .. }
-                | n::Pattern::Remap { pattern, .. }
-                | n::Pattern::Binding { inner: pattern, .. } => {
-                    pending.push(Node::Pattern(pattern))
-                }
-                n::Pattern::NominalType { fields, .. }
-                | n::Pattern::Record { fields, .. }
-                | n::Pattern::AnonymousRecord { fields, .. }
-                | n::Pattern::Variant { fields, .. }
-                | n::Pattern::NormalForm {
-                    arguments: fields, ..
-                }
-                | n::Pattern::TypeTuple(fields)
-                | n::Pattern::Tuple(fields)
-                | n::Pattern::Or(fields) => pending.extend(fields.iter().map(Node::Pattern)),
-                n::Pattern::OptionalAbsent
-                | n::Pattern::Wild
-                | n::Pattern::Unit
-                | n::Pattern::Literal(_) => {}
-            },
-            Node::Expr(e) => match &e.kind {
-                K::EffectHandle {
-                    computation,
-                    handlers,
-                    ..
-                } => {
-                    pending.push(Node::Expr(computation));
-                    for handler in handlers {
-                        for arm in &handler.arms {
-                            pending.push(Node::Pattern(&arm.pattern));
-                            if let Some(g) = &arm.guard {
-                                pending.push(Node::Expr(g));
-                            }
-                            pending.push(Node::Expr(&arm.body));
-                        }
-                    }
-                }
-                K::EffectResume(body)
-                | K::EffectComputation { body, .. }
-                | K::EffectRun {
-                    computation: body, ..
-                } => pending.push(Node::Expr(body)),
-                K::EffectRequest { arguments, .. } => {
-                    pending.extend(arguments.iter().map(Node::Expr))
-                }
-                K::ComptimeFunctionInstance {
-                    declaration,
-                    subject,
-                } => {
-                    output.insert(*declaration);
-                    pending.push(Node::Expr(subject));
-                }
-                K::Function(id)
-                | K::FunctionInstance {
-                    declaration: id, ..
-                } => {
-                    output.insert(*id);
-                }
-                K::Closure { captures, body, .. } => {
-                    pending.push(Node::Expr(body));
-                    pending.extend(
-                        captures
-                            .iter()
-                            .filter_map(|c| c.value.as_deref())
-                            .map(Node::Expr),
-                    );
-                }
-                K::Call {
-                    callee, arguments, ..
-                } => {
-                    pending.push(Node::Expr(callee));
-                    pending.extend(arguments.iter().map(|a| Node::Expr(&a.value)));
-                }
-                K::NormalFormType {
-                    arguments, plan, ..
-                } => {
-                    pending.extend(
-                        plan.iter()
-                            .flat_map(|p| &p.preparations)
-                            .map(|p| Node::Expr(&p.expression)),
-                    );
-                    pending.extend(
-                        arguments
-                            .iter()
-                            .flat_map(|a| a.patterns())
-                            .map(Node::Pattern),
-                    );
-                    pending.extend(
-                        arguments
-                            .iter()
-                            .flat_map(|a| a.expressions())
-                            .map(Node::Expr),
-                    );
-                }
-                K::NominalType {
-                    arguments,
-                    preparations,
-                    ..
-                } => {
-                    pending.extend(preparations.iter().map(|p| Node::Expr(&p.expression)));
-                    pending.extend(
-                        arguments
-                            .iter()
-                            .flat_map(|a| a.patterns())
-                            .map(Node::Pattern),
-                    );
-                    pending.extend(
-                        arguments
-                            .iter()
-                            .flat_map(|a| a.expressions())
-                            .map(Node::Expr),
-                    );
-                }
-                K::ClosureType {
-                    environment,
-                    signature,
-                } => {
-                    pending.extend(environment.iter().map(Node::Expr));
-                    pending.push(Node::Expr(signature));
-                }
-                K::CheckTypeAlias {
-                    arguments,
-                    body,
-                    preparations,
-                    ..
-                } => {
-                    pending.extend(preparations.iter().map(|p| Node::Expr(&p.expression)));
-                    pending.extend(
-                        arguments
-                            .iter()
-                            .flat_map(|a| a.patterns())
-                            .map(Node::Pattern),
-                    );
-                    pending.extend(
-                        arguments
-                            .iter()
-                            .flat_map(|a| a.expressions())
-                            .map(Node::Expr),
-                    );
-                    if let Some(body) = body {
-                        pending.push(Node::Expr(body));
-                    }
-                }
-                K::FunctionType {
-                    parameters: fields, ..
-                }
-                | K::TypeList(fields)
-                | K::Intrinsic { inputs: fields, .. }
-                | K::Tuple(fields)
-                | K::Object { fields, .. }
-                | K::AnonymousRecord { fields }
-                | K::Record { fields, .. }
-                | K::Variant { fields, .. } => pending.extend(fields.iter().map(Node::Expr)),
-                K::AnonymousField { value, .. }
-                | K::Field { value, .. }
-                | K::Let { value, .. }
-                | K::Assign { value, .. }
-                | K::BitAssign { value, .. }
-                | K::UnsafeScope(value)
-                | K::Discard(value)
-                | K::RequirePredicate(value)
-                | K::EnsurePredicate(value)
-                | K::CheckPredicate(value)
-                | K::BitSlice { value, .. }
-                | K::BitConvert(value)
-                | K::ErrorConvert { value: value, .. }
-                | K::NewtypeConvert(value)
-                | K::Snapshot(value)
-                | K::TakeBits(value)
-                | K::TextQuery { subject: value, .. }
-                | K::IntegerRepresentation(value)
-                | K::ComptimeIntegerConvert(value)
-                | K::SymbolName(value)
-                | K::EnumName(value)
-                | K::Not(value)
-                | K::IntegerNegate(value)
-                | K::FloatNegate(value)
-                | K::AddressOf(value)
-                | K::ReadPointer(value)
-                | K::PointerAnonymousField { pointer: value, .. }
-                | K::PointerField { pointer: value, .. }
-                | K::OptionalPresent(value)
-                | K::OptionalType(value)
-                | K::PointerType(value)
-                | K::ListLength(value)
-                | K::NewtypeRepresentation(value)
-                | K::StructFieldTypes(value)
-                | K::BuildStruct(value)
-                | K::BuildNewtype(value)
-                | K::BuildMetadata {
-                    selector: value, ..
-                }
-                | K::BuildEnum(value)
-                | K::EnumStructure { subject: value, .. }
-                | K::ObjectQuery { subject: value, .. }
-                | K::ObjectEdit { subject: value, .. }
-                | K::StructFieldNames(value)
-                | K::BitVecType(value)
-                | K::Loop { body: value, .. } => pending.push(Node::Expr(value)),
-                K::ScalarLess(a, b)
-                | K::ScalarGreater(a, b)
-                | K::ScalarGreaterEqual(a, b)
-                | K::ScalarLessEqual(a, b)
-                | K::TemplateEqual(a, b)
-                | K::ScalarEqual(a, b)
-                | K::TypeEqual(a, b)
-                | K::ListConcat(a, b)
-                | K::TypeListIndex(a, b)
-                | K::BitEqual(a, b)
-                | K::BitConcat(a, b)
-                | K::BitIndex(a, b)
-                | K::And(a, b)
-                | K::Or(a, b)
-                | K::WritePointer {
-                    pointer: a,
-                    value: b,
-                }
-                | K::FunctionResultType {
-                    signature: a,
-                    result: b,
-                }
-                | K::IntegerBinary {
-                    left: a, right: b, ..
-                }
-                | K::FloatBinary {
-                    left: a, right: b, ..
-                } => {
-                    pending.push(Node::Expr(a));
-                    pending.push(Node::Expr(b));
-                }
-                K::BitWritePointer {
-                    pointer,
-                    selections,
-                    value,
-                } => {
-                    pending.push(Node::Expr(pointer));
-                    pending.extend(
-                        selections
-                            .iter()
-                            .flat_map(n::BitSelection::expressions)
-                            .map(Node::Expr),
-                    );
-                    pending.push(Node::Expr(value));
-                }
-                K::BitUpdate {
-                    selections, value, ..
-                } => {
-                    pending.extend(
-                        selections
-                            .iter()
-                            .flat_map(n::BitSelection::expressions)
-                            .map(Node::Expr),
-                    );
-                    pending.push(Node::Expr(value));
-                }
-                K::BitWindow { value, start, end } => {
-                    pending.push(Node::Expr(value));
-                    pending.push(Node::Expr(start));
-                    pending.push(Node::Expr(end));
-                }
-                K::Match { value, arms } => {
-                    pending.push(Node::Expr(value));
-                    for arm in arms {
-                        pending.push(Node::Pattern(&arm.pattern));
-                        if let Some(g) = &arm.guard {
-                            pending.push(Node::Expr(g));
-                        }
-                        pending.push(Node::Expr(&arm.body));
-                    }
-                }
-                K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                    pending.extend(statements.iter().map(Node::Expr));
-                    if let Some(r) = result {
-                        pending.push(Node::Expr(r));
-                    }
-                }
-                K::LetPattern {
-                    pattern,
-                    value,
-                    guard,
-                    otherwise,
-                } => {
-                    pending.push(Node::Pattern(pattern));
-                    pending.push(Node::Expr(value));
-                    if let Some(g) = guard {
-                        pending.push(Node::Expr(g));
-                    }
-                    if let Some(e) = otherwise {
-                        pending.push(Node::Expr(e));
-                    }
-                }
-                K::If {
-                    condition,
-                    then_branch,
-                    else_branch,
-                } => {
-                    pending.push(Node::Expr(condition));
-                    pending.push(Node::Expr(then_branch));
-                    if let Some(e) = else_branch {
-                        pending.push(Node::Expr(e));
-                    }
-                }
-                K::Return(value) => {
-                    if let Some(e) = value {
-                        pending.push(Node::Expr(e));
-                    }
-                }
-                K::TraitMethod { member, .. } => {
-                    members.insert(*member);
-                }
-                K::AssociatedValue { member, .. } => {
-                    associated.insert(*member);
-                }
-                K::StagedValue(_)
-                | K::ComptimeValue(_)
-                | K::TypeValue(_)
-                | K::Literal(_)
-                | K::Local(_)
-                | K::OptionalAbsent
-                | K::Unit
-                | K::Break(_)
-                | K::Continue(_) => {}
-            },
-        }
-    }
-    output
 }
 
 // Classification follows resolved value binders, never a failed PTC attempt.

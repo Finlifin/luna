@@ -2585,9 +2585,15 @@ impl Checker<'_, '_> {
             .collect::<Result<Vec<_>, Error>>()?;
         let mut members = BTreeSet::new();
         let mut associated = BTreeSet::new();
-        let mut pending = required::references(&value, &mut members, &mut associated)
-            .into_iter()
-            .collect::<Vec<_>>();
+        let mut pending = required::references(
+            &value,
+            &mut members,
+            &mut associated,
+            &mut self.required_steps,
+        )
+        .map_err(|failure| error(span, failure.to_string()))?
+        .into_iter()
+        .collect::<Vec<_>>();
         let mut seen = BTreeSet::new();
         let mut functions = Vec::new();
         while let Some(id) = pending.pop() {
@@ -2610,11 +2616,15 @@ impl Checker<'_, '_> {
                 charged.map_err(|_| {
                     error(span, "ordinary region function snapshot budget exhausted")
                 })?;
-                pending.extend(required::function_references(
-                    function,
-                    &mut members,
-                    &mut associated,
-                ));
+                pending.extend(
+                    required::function_references(
+                        function,
+                        &mut members,
+                        &mut associated,
+                        &mut self.required_steps,
+                    )
+                    .map_err(|failure| error(span, failure.to_string()))?,
+                );
                 functions.push(function.clone());
                 continue;
             }
@@ -2627,11 +2637,15 @@ impl Checker<'_, '_> {
             if matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head)
             {
                 let function = self.required_function(owner, span)?;
-                pending.extend(required::function_references(
-                    &function,
-                    &mut members,
-                    &mut associated,
-                ));
+                pending.extend(
+                    required::function_references(
+                        &function,
+                        &mut members,
+                        &mut associated,
+                        &mut self.required_steps,
+                    )
+                    .map_err(|failure| error(span, failure.to_string()))?,
+                );
                 functions.push(function);
             } else {
                 self.ensure_signature(owner, span)?;

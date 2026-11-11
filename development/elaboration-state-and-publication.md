@@ -664,6 +664,53 @@ CheckRegion
 任务时先检查未收回的宿主请求、预算和未迁移规则；只有完整依赖中的闭环才报循环。
 当前 `active_required` 的 32 层保护不能直接复用为区域依赖循环证明。
 
+#### 已接入：required 世界的依赖发现共用结构遍历
+
+`required/dependencies.rs` 现在统一发现代码中的函数、trait 方法和关联值依赖，
+替换 required.rs 的独立表达式／模式工作栈。required 根、生成函数、关联初始化器、
+普通延迟区域以及 live 闭包均已迁到同一入口。结构递归交给 `nir::visit`，并消耗
+调用者的 required 步数；代码中的模式计算、闭包体、默认值、前后条件与 contextual
+参数占位节点都参与计量。一次完整扫描成功后才合并成员／关联值集合，失败消耗的
+预算不退还，也不返回半份可供世界发布的依赖集合。
+
+依赖发现与可执行性检查仍分开。retained_expressions_checked 允许尚未实例化的
+CodeEvidence 模式作为不透明叶保留：该节点本身没有待遍历的表达式子节点。它不赋予
+执行许可；普通 NIR 遍历仍拒绝未解决的 evidence，最终程序和域检查仍照常执行。
+同样，扫描不会运行 Type 生产者，不把 opaque NF 头作为函数体展开，不选择任意
+concrete impl 来补齐未知的动态成员。冻结值和活动对象图仍走各自的身份／依赖发现
+协议，活动对象图不因为代码遍历统一就能进入持久缓存。
+
+同一 required 根的自由 LocalId 现在在 initializer substitution 后观察一次，供
+生成器输入、已供应输入、Type 槽运输和世界依赖选择共同读取。随后的 Type-slot
+rebind 只将 Bound 替换为当前 invocation 的 rigid 身份，不引入或消除词法 LocalId；
+因此这份结果仅在这次结构稳定的根内复用。不是跨根缓存，也没有把所有外围值都捕获。
+不同根、实际改写结构或新增后继片段仍须各自发现依赖并通过域／阶段准入。
+
+这一步清理了现有完整根入口的依赖准备，但尚未让 build 闭包提前交出未完成根，
+也没有建立源区域的增量世界和冻结发布协议。共享 visitor 按结构节点扣费，不能据此
+宣称任意输入的所有临时分配、宿主栈和整个依赖闭包成本已经得到统一上界。
+
+验证工作目录 `/home/fin/luna`：
+
+- 初次局部编译因新增测试误写 `nir::InterfaceInstance` 路径退出 101，
+  `/tmp/luna-tools-axflm07s/result.json`；改为实际的 `nir::program` 类型后继续检查。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib
+  program::required --no-fail-fast`：35 项通过，退出 0，
+  `/tmp/luna-tools-nhep8l7d/result.json`。新增检查覆盖所有函数根、闭包和模式计算，
+  预算截断不发布部分集合、重试，以及 contextual 占位节点的计量；普通遍历仍拒绝
+  unresolved evidence，没有将发现依赖的宽松模式用于执行检查。
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p elaboration
+  -p luna --lib --test required_input_scopes --test open_normal_input_plans --test cmtt
+  --test cmtt_storage_world --test cmtt_methods --test staged_invocation_reuse
+  --test deferred_associated_values --test ordinary_callable_types --test ordinary_clause_collectors
+  --no-fail-fast`：1,177 项通过、2 项既有 ignored，退出 0，
+  `/tmp/luna-tools-zrknan4h/result.json`，包含前述局部检查。
+- scoped rustfmt 退出 0，最终修改的文件见 `/tmp/luna-tools-m_sar90_/result.json`；
+  NIR visitor 与普通延迟区域此前已通过 `/tmp/luna-tools-qdjtsaca/result.json`。
+
+未运行全 workspace、性能对比或 ignored 正例；仍是带既有资源分析修改的工作区
+验证。正式 docs、formatter 及其他已有改动保持原样。
+
 #### 实施细化：词法状态与值存储不共用快照
 
 现有 `Checker` 同时持有声明服务、推断状态和词法字段。区域暂停时，仅保存

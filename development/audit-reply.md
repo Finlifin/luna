@@ -267,6 +267,16 @@ checked-order 与 schedule。这是现有生产准备逻辑的迁移，没有新
 证据 `/tmp/luna-tools-r52uh6us/result.json`，其中包含首轮局部用例。没有执行全
 workspace 或解除普通调用 Type 等待的 ignore，也没有改动另一代理的 formatter。
 
+required 世界准备中的另一套结构遍历已退役：其函数、方法和关联值依赖发现改用
+NIR 公共遍历，required 根／关联初始化器／生成函数／普通延迟区域／live 闭包的
+调用方都传入实际预算并处理失败。成员依赖在整次扫描成功后合并；原先不执行代码的
+发现职责保持不变，retained pattern evidence 不被误当成已获准执行。原入口对同一
+根的多次自由绑定扫描也合并为一次，不扩大外围捕获。具体阶段边界见
+[required 依赖发现](elaboration-state-and-publication.md#已接入required-世界的依赖发现共用结构遍历)。
+局部 35 项通过，随后包含 NIR／elaboration 和真实源码消费者的 1,177 项通过，
+2 项既有 ignored 保留；证据 `/tmp/luna-tools-zrknan4h/result.json`，退出 0。
+本次没有增加 source activation 或 Type 响应恢复能力，也未执行性能对比。
+
 资源与库线仍保留独立缺口。运行时文本接口须以真实 sysroot、标准资源检查及正常
 调用贯通，不能用手拼片段、直降 builtin 或跳过来源检查证明库可用。
 
