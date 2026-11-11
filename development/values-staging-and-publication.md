@@ -152,6 +152,48 @@ VM 的完整用户函数调用序列。拒绝例检查事实不能进入兄弟�
 `/tmp/luna-tools-wlo4pvdv/result.json`。未运行全 workspace 或性能基准；这些结果使用
 保留作者已有资源分析改动的工作区，不声称为隔离的纯 HEAD 验证。
 
+### 已统一：输入域观察与 sort 变化的准入策略
+
+NF、名义类型和透明别名的输入帧现在通过 `input_bindings::Bindings` 共用三项操作：
+完成值替换、接收域依赖观察、输入表达式及 pattern 的类型特化。参数、域和值的内部
+数组已封闭，消费者不能分别改写它们；执行顺序、完成顺序和最终声明顺序仍分别保留。
+域观察只读取本次已完成值，预算耗尽不删除这些值，也不把失败观察缓存为类型拒绝。
+
+共享存储不等于共享准入证据。构造输入帧时显式选择 sort 变化策略：NF 使用结构替换，
+完整应用仍由 NF 契约检查；名义类型／别名在 sort 改变时按声明顺序执行域准入，查询
+当前 VM 的字段和抽象值域证据。完成值由发送世界获准传送，不能代替接收世界的证据；
+同一份完成值在不同接收 VM 中重新观察时，不复用前一次成功或失败的准入结论。
+这些是已有两条生产路径的共同实现，不是新增的跨 VM 活动帧传送接口。
+
+这一清理仍不拥有 HIR 区域、普通前端检查请求或待发布 callable 签名，也没有扩充
+`NormalFormArgument` 的语法树。下一节的两个普通 callable 缺口仍保留；它们需要
+完整的检查与执行交接，不能通过给现有参数树增加第三个消费者宣称解决。
+
+验证包含 sort 改变后的域唤醒、预算耗尽后复用完成值、声明顺序输出，以及接收 VM
+分别有／没有抽象值域证据时的重新准入。VM 库测试及 `normal_values`、`nominal_types`、
+`abstract_values`、`immutable_normal_inputs` 共 649 项通过，证据
+`/tmp/luna-tools-7el_yhr9/result.json`，退出 0；命令为
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test normal_values --test nominal_types --test abstract_values --test immutable_normal_inputs --no-fail-fast`。
+
+首次检查还暴露了既有预算 fixture 问题：`captured_value_payload_budget_is_not_a_type_error`
+将 2 KiB 嵌入常量的世界准备和调用一起塞进 512 步，初始化 `unwrap` 先失败，调用断言
+未执行。将本次五个实现／单元测试文件暂时恢复为 `068eb023` 内容后，
+针对该用例得到相同失败，证据 `/tmp/luna-tools-qacmxvoq/result.json`，退出 101；
+随后恢复本次修改。修正后的 fixture 分别断言世界准备耗尽和调用耗尽，调用仍保留原来的
+512 步预算，并在充足预算下取得完整字符串；两种 VM 均覆盖。此项是让预算断言实际触达
+其检查边界，不改变错误类别或放宽输入合法性。
+
+真实 sysroot 的 `ordinary_clause_collectors`、`ordinary_callable_types`、
+`nominal_value_parameters`、`normal_form_methods`、`library_protocols` 共 384 项通过，
+两个原有语义缺口仍 ignored；证据 `/tmp/luna-tools-h5s6l7lr/result.json`，退出 0。
+命令为 `python3 -B development/check.py --timeout 900 -- test -p luna --test ordinary_clause_collectors --test ordinary_callable_types --test nominal_value_parameters --test normal_form_methods --test library_protocols --no-fail-fast`。
+以上工作目录均为 `/home/fin/luna`，结果锚点为报告同目录的 `stdout.log` 中
+`test result:`；前端检查保留作者已有资源分析修改，不声称为纯 HEAD 验收。
+最后收紧了缺少接收域证据时的精确错误断言，`input_bindings::tests` 四项再次通过，
+证据 `/tmp/luna-tools-gq807c5g/result.json`，退出 0。六个 Rust 文件格式检查退出 0，
+证据 `/tmp/luna-tools-vyky791o/result.json`；`git diff --check` 通过。
+没有运行全 workspace 或性能基准，也未改动正式 docs。
+
 ### Invocation 才能取得的域：必须同时接通检查与执行
 
 普通调用的现有正例 `pending_clause_domains_can_wait_for_a_type_producer`

@@ -53,7 +53,7 @@ impl<'a> Frame<'a> {
             source,
             inputs: Inputs::Borrowed(arguments, plan),
             specialized: BTreeMap::new(),
-            bindings: input_bindings::Bindings::new(arguments.len()),
+            bindings: input_bindings::Bindings::structural(arguments.len()),
         })
     }
 
@@ -94,7 +94,7 @@ impl<'a> Frame<'a> {
         Ok(Frame::from_source(Source {
             head: *head,
             source: expression.source,
-            bindings: input_bindings::Bindings::new(arguments.len()),
+            bindings: input_bindings::Bindings::structural(arguments.len()),
             inputs: Inputs::Owned(expression),
             specialized: BTreeMap::new(),
         }))
@@ -201,24 +201,15 @@ impl input_collection::Source for Source<'_> {
             .normal_forms
             .get(&self.head)
             .expect("admitted normal head");
-        let expected = self
-            .bindings
-            .instantiate(vm, &metadata.parameters[slot].ty, self.source)?;
-        let inputs = vm.observe_input_dependencies(&expected, self.source)?;
-        vm.integer_operation(Some(self.source), |budget| {
-            budget.consume(metadata.parameters.len())
-        })?;
-        let awaiting = metadata
-            .parameters
-            .iter()
-            .enumerate()
-            .filter_map(|(index, parameter)| {
-                (!self.bindings.contains(index)
-                    && inputs.declarations.contains_key(&parameter.declaration))
-                .then_some(index)
-            })
-            .collect();
-        Ok(input_collection::Domain { expected, awaiting })
+        self.bindings.observe_domain(
+            vm,
+            &metadata.parameters[slot].ty,
+            metadata
+                .parameters
+                .iter()
+                .map(|parameter| parameter.declaration),
+            self.source,
+        )
     }
 
     fn bind(
@@ -242,7 +233,8 @@ impl input_collection::Source for Source<'_> {
     }
 
     fn complete(&mut self, vm: &mut Interpreter<'_>) -> Result<Progress, Error> {
-        let bindings = std::mem::replace(&mut self.bindings, input_bindings::Bindings::new(0));
+        let bindings =
+            std::mem::replace(&mut self.bindings, input_bindings::Bindings::structural(0));
         let arguments = bindings
             .finish()
             .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.source)))?;

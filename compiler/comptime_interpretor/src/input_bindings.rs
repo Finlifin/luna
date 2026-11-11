@@ -1,17 +1,47 @@
 //! Invocation-local completed input bindings shared by input plans.
 use super::*;
 
+/// A changed sort needs either a structural substitution or declaration-domain
+/// admission. This policy belongs to the consumer, not to a completed value.
+#[derive(Clone, Copy)]
+enum SortChange {
+    Substitute,
+    Admit,
+}
+impl fmt::Display for SortChange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Substitute => "substitute",
+            Self::Admit => "admit",
+        })
+    }
+}
+
 /// Substitutions follow completion order; final arguments follow declaration order.
 /// Slots store indices rather than cloning potentially large comptime terms.
 pub(super) struct Bindings {
     slots: Vec<Option<usize>>,
-    pub parameters: Vec<nir::DeclarationParameter>,
-    pub arguments: Vec<Term>,
+    parameters: Vec<nir::DeclarationParameter>,
+    arguments: Vec<Term>,
+    sort_change: SortChange,
     domains: Vec<Term>,
 }
 impl Bindings {
-    pub fn new(count: usize) -> Self {
+    /// NF heads admit the complete application separately; substitution does
+    /// not confer declaration-domain evidence on the stored values.
+    pub fn structural(count: usize) -> Self {
+        Self::new(count, SortChange::Substitute)
+    }
+
+    /// Nominal/alias inputs require current-world evidence when an input changes
+    /// a declaration binder's sort. Neither transport nor shared storage grants it.
+    pub fn admitted(count: usize) -> Self {
+        Self::new(count, SortChange::Admit)
+    }
+
+    fn new(count: usize, sort_change: SortChange) -> Self {
         Self {
+            sort_change,
             slots: vec![None; count],
             parameters: vec![],
             arguments: vec![],
@@ -58,11 +88,7 @@ impl Bindings {
         self.arguments.len()
     }
 
-    pub fn slot_count(&self) -> usize {
-        self.slots.len()
-    }
-
-    pub fn completed(&self) -> impl Iterator<Item = (&nir::DeclarationParameter, &Term, &Term)> {
+    fn completed(&self) -> impl Iterator<Item = (&nir::DeclarationParameter, &Term, &Term)> {
         // Domain admission follows declaration order even when execution and
         // completion follow a different source order. Callers charge the scan.
         self.slots.iter().filter_map(|index| {
@@ -75,8 +101,6 @@ impl Bindings {
             })
         })
     }
-    // NF substitution policy. Nominal consumers retain their evidence-aware
-    // admission path; sharing completed storage does not confer that evidence.
     pub fn instantiate(
         &self,
         vm: &mut Interpreter<'_>,
@@ -94,31 +118,99 @@ impl Bindings {
         }
         let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = before;
-        let ids = self
-            .parameters
-            .iter()
-            .map(|p| p.declaration)
-            .collect::<Vec<_>>();
-        let result = nir::DeclarationSubstitution::bounded(
-            &ids,
-            &self.domains,
-            &self.arguments,
-            &[],
-            &mut remaining,
-        )
-        .and_then(|substitution| substitution.instantiate_bounded(ty, &mut remaining));
+        let result = match self.sort_change {
+            SortChange::Substitute => {
+                let ids = self
+                    .parameters
+                    .iter()
+                    .map(|p| p.declaration)
+                    .collect::<Vec<_>>();
+                nir::DeclarationSubstitution::bounded(
+                    &ids,
+                    &self.domains,
+                    &self.arguments,
+                    &[],
+                    &mut remaining,
+                )
+                .and_then(|substitution| substitution.instantiate_bounded(ty, &mut remaining))
+                .map_err(|error| {
+                    if matches!(error, nir::type_computations::Error::Budget) {
+                        ErrorKind::StepsExhausted
+                    } else {
+                        ErrorKind::Type
+                    }
+                })
+            }
+            SortChange::Admit => self.instantiate_admitted(vm, ty, &mut remaining),
+        };
         vm.budget.steps -= (before - remaining) as u64;
-        result.map_err(|error| {
-            vm.failure(
-                if matches!(error, nir::type_computations::Error::Budget) {
-                    ErrorKind::StepsExhausted
-                } else {
-                    ErrorKind::Type
+        result.map_err(|kind| vm.failure(kind, Some(source)))
+    }
+
+    fn instantiate_admitted(
+        &self,
+        vm: &Interpreter<'_>,
+        ty: &Term,
+        remaining: &mut usize,
+    ) -> Result<Term, ErrorKind> {
+        let result = (|| -> Result<Term, nir::NominalAdmissionError> {
+            *remaining = remaining
+                .checked_sub(self.slots.len())
+                .ok_or(nir::NominalAdmissionError::Budget)?;
+            let mut ids = Vec::new();
+            let mut domains = Vec::new();
+            let mut arguments = Vec::new();
+            for (parameter, domain, argument) in self.completed() {
+                nir::type_computations::charge_term(domain, remaining)?;
+                nir::type_computations::charge_term(argument, remaining)?;
+                ids.push(parameter.declaration);
+                domains.push(domain.clone());
+                arguments.push(argument.clone());
+            }
+            let admitted = nir::admit_declaration_arguments_with_evidence_in(
+                &ids,
+                &domains,
+                &arguments,
+                remaining,
+                |ty, variant, fuel| vm.query_normal_value_fields(ty, variant, fuel),
+                |value, domain, _| {
+                    matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue}
+                    if vm.abstract_value_parameters.get(declaration) == Some(domain))
                 },
-                Some(source),
-            )
+                vm.target,
+            )?;
+            admitted.instantiate(ty, remaining).map_err(Into::into)
+        })();
+        result.map_err(|error| match error {
+            nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+            nir::NominalAdmissionError::Unresolved(_) => ErrorKind::TypeContractUnresolved,
+            nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
         })
     }
+
+    /// Observe dependencies only after substituting completed inputs. A source
+    /// slot is a wakeup dependency precisely while its declaration remains in
+    /// the resulting domain and the slot has not completed in this invocation.
+    pub fn observe_domain(
+        &self,
+        vm: &mut Interpreter<'_>,
+        domain: &Term,
+        parameters: impl ExactSizeIterator<Item = DeclarationId>,
+        source: SourceRange,
+    ) -> Result<input_collection::Domain, Error> {
+        let expected = self.instantiate(vm, domain, source)?;
+        let dependencies = vm.observe_input_dependencies(&expected, source)?;
+        vm.integer_operation(Some(source), |budget| budget.consume(parameters.len()))?;
+        let awaiting = parameters
+            .enumerate()
+            .filter_map(|(slot, parameter)| {
+                (!self.contains(slot) && dependencies.declarations.contains_key(&parameter))
+                    .then_some(slot)
+            })
+            .collect();
+        Ok(input_collection::Domain { expected, awaiting })
+    }
+
     pub fn specialize(
         &self,
         vm: &mut Interpreter<'_>,
@@ -156,7 +248,7 @@ impl Bindings {
 }
 impl fmt::Display for Bindings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(input-bindings")?;
+        write!(f, "(input-bindings (sort-change {})", self.sort_change)?;
         for (slot, index) in self.slots.iter().enumerate() {
             write!(f, " (slot {slot}")?;
             if let Some(index) = index {
@@ -189,6 +281,182 @@ mod tests {
         }
     }
 
+    fn id(local: u32) -> DeclarationId {
+        DeclarationId { package: 92, local }
+    }
+    fn rigid(local: u32, sort: nir::Sort) -> Term {
+        Term::Rigid {
+            declaration: id(local),
+            sort,
+        }
+    }
+
+    #[test]
+    fn domain_observation_preserves_pending_slots_and_recovers_from_exhaustion() {
+        let package = Package::default();
+        for make in [Bindings::structural, Bindings::admitted] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut bindings = make(2);
+            let domain = rigid(2, nir::Sort::ComptimeValue);
+            let observe = |bindings: &Bindings, vm: &mut Interpreter<'_>| {
+                bindings.observe_domain(vm, &domain, [id(1), id(2)].into_iter(), SOURCE)
+            };
+            let pending = observe(&bindings, &mut vm).unwrap();
+            assert_eq!(pending.expected, domain);
+            assert_eq!(pending.awaiting, BTreeSet::from([1]));
+            // The value parameter becomes Type-sorted only through its actual
+            // domain input. Recording that input alone does not finish slot 1.
+            bindings
+                .bind(
+                    &mut vm,
+                    0,
+                    parameter(),
+                    &Term::Primitive(Primitive::Type),
+                    Value::Type(Term::Primitive(Primitive::Type)),
+                    SOURCE,
+                )
+                .unwrap();
+            let pending = observe(&bindings, &mut vm).unwrap();
+            assert_eq!(pending.expected, domain);
+            assert_eq!(pending.awaiting, BTreeSet::from([1]));
+            bindings
+                .bind(
+                    &mut vm,
+                    1,
+                    nir::DeclarationParameter {
+                        declaration: id(2),
+                        sort: nir::Sort::ComptimeValue,
+                    },
+                    &rigid(1, nir::Sort::Type),
+                    Value::Type(Term::Primitive(Primitive::U8)),
+                    SOURCE,
+                )
+                .unwrap();
+            let snapshot = bindings.to_string();
+            let mut exhausted = 0;
+            let mut completed = 0;
+            for steps in 0..256 {
+                vm.budget.steps = steps;
+                match observe(&bindings, &mut vm) {
+                    Ok(domain) => {
+                        assert_eq!(domain.expected, Term::Primitive(Primitive::U8));
+                        assert!(domain.awaiting.is_empty());
+                        completed += 1;
+                    }
+                    Err(failure) => {
+                        assert_eq!(failure.kind, ErrorKind::StepsExhausted);
+                        assert_eq!(failure.source, Some(SOURCE));
+                        exhausted += 1;
+                        // Recovery reuses the completed values, with no input
+                        // re-execution and no sticky failed domain observation.
+                        vm.budget = Budget::default();
+                        let domain = observe(&bindings, &mut vm).unwrap();
+                        assert_eq!(domain.expected, Term::Primitive(Primitive::U8));
+                        assert!(domain.awaiting.is_empty());
+                    }
+                }
+                assert_eq!(bindings.to_string(), snapshot);
+            }
+            assert!(exhausted > 0 && completed > 0);
+            assert_eq!(
+                bindings.finish(),
+                Some(vec![
+                    Term::Primitive(Primitive::Type),
+                    Term::Primitive(Primitive::U8),
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn sort_change_admission_uses_the_receiving_world_without_retaining_authority() {
+        let package = Package::default();
+        let ty = Term::Primitive(Primitive::Type);
+        let boolean = Term::Primitive(Primitive::Bool);
+        let mut sender = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        sender
+            .authorize_abstract_value_parameters(&[(id(4), boolean.clone())])
+            .unwrap();
+        let mut bindings = Bindings::admitted(3);
+        // Completion order differs from declaration order. The abstract value
+        // was authorized for transport by the sender, not by future receivers.
+        bindings
+            .bind(
+                &mut sender,
+                2,
+                nir::DeclarationParameter {
+                    declaration: id(3),
+                    sort: nir::Sort::ComptimeValue,
+                },
+                &boolean,
+                Value::AbstractValue {
+                    declaration: id(4),
+                    ty: boolean.clone(),
+                },
+                SOURCE,
+            )
+            .unwrap();
+        bindings
+            .bind(
+                &mut sender,
+                0,
+                parameter(),
+                &ty,
+                Value::Type(ty.clone()),
+                SOURCE,
+            )
+            .unwrap();
+        bindings
+            .bind(
+                &mut sender,
+                1,
+                nir::DeclarationParameter {
+                    declaration: id(2),
+                    sort: nir::Sort::ComptimeValue,
+                },
+                &rigid(1, nir::Sort::Type),
+                Value::Type(Term::Primitive(Primitive::U8)),
+                SOURCE,
+            )
+            .unwrap();
+        let snapshot = bindings.to_string();
+        let domain = rigid(2, nir::Sort::ComptimeValue);
+        for authorized in [false, true, false, true] {
+            let mut receiver = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            if authorized {
+                receiver
+                    .authorize_abstract_value_parameters(&[(id(4), boolean.clone())])
+                    .unwrap();
+            }
+            let observed = bindings.observe_domain(
+                &mut receiver,
+                &domain,
+                [id(1), id(2), id(3)].into_iter(),
+                SOURCE,
+            );
+            if authorized {
+                let observed = observed.unwrap();
+                assert_eq!(observed.expected, Term::Primitive(Primitive::U8));
+                assert!(observed.awaiting.is_empty());
+            } else {
+                let failure = observed
+                    .err()
+                    .expect("transport is not admission authority");
+                assert_eq!(failure.source, Some(SOURCE));
+                assert_eq!(failure.kind, ErrorKind::Type);
+            }
+            assert_eq!(bindings.to_string(), snapshot);
+        }
+        assert_eq!(
+            bindings.finish(),
+            Some(vec![
+                ty,
+                Term::Primitive(Primitive::U8),
+                rigid(4, nir::Sort::ComptimeValue),
+            ])
+        );
+    }
+
     #[test]
     fn exhausted_completion_never_publishes_and_can_retry() {
         let package = Package::default();
@@ -198,7 +466,7 @@ mod tests {
         let mut failures = 0;
         let mut successes = 0;
         for steps in 0..32 {
-            let mut bindings = Bindings::new(1);
+            let mut bindings = Bindings::structural(1);
             vm.budget.steps = steps;
             match bindings.bind(
                 &mut vm,
@@ -216,7 +484,10 @@ mod tests {
                     assert!(!bindings.contains(0));
                     assert!(bindings.parameters.is_empty());
                     assert!(bindings.domains.is_empty());
-                    assert_eq!(bindings.to_string(), "(input-bindings (slot 0 pending))");
+                    assert_eq!(
+                        bindings.to_string(),
+                        "(input-bindings (sort-change substitute) (slot 0 pending))"
+                    );
                     vm.budget = Budget::default();
                     bindings
                         .bind(
@@ -240,7 +511,7 @@ mod tests {
         let package = Package::default();
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let domain = Term::Primitive(Primitive::Type);
-        let mut bindings = Bindings::new(2);
+        let mut bindings = Bindings::structural(2);
         bindings
             .bind(
                 &mut vm,

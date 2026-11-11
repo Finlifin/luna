@@ -1003,23 +1003,35 @@ fn captured_value_payload_budget_is_not_a_type_error() {
         functions: vec![read],
         ..Default::default()
     };
-    let mut vm = Interpreter::for_comptime(
-        &package,
-        Budget {
-            steps: 512,
-            ..Budget::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        vm.invoke(id(81), vec![]).unwrap_err().kind,
-        ErrorKind::StepsExhausted
-    );
-    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    assert_eq!(
-        vm.invoke(id(81), vec![]).unwrap(),
-        Value::String("x".repeat(2048).into())
-    );
+    for make in [Interpreter::for_comptime, Interpreter::for_comptime_tree] {
+        // World preparation itself accounts for the embedded payload. A low
+        // construction allowance must fail before a VM is published.
+        let failure = make(
+            &package,
+            Budget {
+                steps: 512,
+                ..Budget::default()
+            },
+        )
+        .err()
+        .expect("payload preparation exceeds the allowance");
+        assert_eq!(failure.kind, ErrorKind::StepsExhausted);
+
+        // Independently test invocation with the original 512-step allowance;
+        // successful world preparation must not consume that test allowance.
+        let mut vm = make(&package, Budget::default()).unwrap();
+        vm.charge_preparation((vm.remaining_steps() - 512) as usize)
+            .unwrap();
+        assert_eq!(
+            vm.invoke(id(81), vec![]).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+        let mut vm = make(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(id(81), vec![]).unwrap(),
+            Value::String("x".repeat(2048).into())
+        );
+    }
 }
 
 #[test]

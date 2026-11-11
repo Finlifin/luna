@@ -16,7 +16,7 @@ impl Inputs {
         Self {
             normal: Some(Normal {
                 head,
-                bindings: Bindings::new(count),
+                bindings: Bindings::structural(count),
             }),
             prepared: BTreeMap::new(),
         }
@@ -79,7 +79,7 @@ impl Interpreter<'_> {
             .normal_forms
             .get(&normal.head)
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        if index != normal.bindings.arguments.len() || index >= metadata.parameters.len() {
+        if index != normal.bindings.len() || index >= metadata.parameters.len() {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         let expected = normal
@@ -243,7 +243,7 @@ impl Interpreter<'_> {
             .normal
             .as_mut()
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        let slot = normal.bindings.arguments.len();
+        let slot = normal.bindings.len();
         self.bind_normal_input(normal.head, &mut normal.bindings, slot, value, source)
     }
     pub(super) fn bind_normal_input(

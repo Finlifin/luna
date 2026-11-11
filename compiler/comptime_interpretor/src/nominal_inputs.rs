@@ -54,7 +54,7 @@ impl<'e> Source<'e> {
             specialized: specialize.then(|| arguments.to_vec()),
             alias: matches!(expression.kind, K::CheckTypeAlias { .. }),
             source: expression.source,
-            completed: input_bindings::Bindings::new(parameters.len()),
+            completed: input_bindings::Bindings::admitted(parameters.len()),
             expression,
             parameters,
             domains,
@@ -96,88 +96,13 @@ impl<'e> Source<'e> {
             .as_ref()
             .map_or(&self.arguments()[slot], |inputs| &inputs[slot])
     }
-    fn instantiate(
-        &self,
-        vm: &mut Interpreter<'_>,
-        term: &Term,
-        source: SourceRange,
-    ) -> Result<Term, Error> {
-        vm.integer_operation(Some(source), |budget| budget.consume(self.completed.len()))?;
-        if self
-            .completed
-            .parameters
-            .iter()
-            .zip(&self.completed.arguments)
-            .all(|(parameter, argument)| parameter.sort == argument.sort())
-        {
-            return vm.instantiate_contextual_domain(
-                term,
-                &self.completed.parameters,
-                &self.completed.arguments,
-                source,
-            );
-        }
-        let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
-        let mut remaining = before;
-        let result = (|| -> Result<Term, nir::NominalAdmissionError> {
-            remaining = remaining
-                .checked_sub(self.completed.slot_count())
-                .ok_or(nir::NominalAdmissionError::Budget)?;
-            let mut ids = Vec::new();
-            let mut domains = Vec::new();
-            let mut arguments = Vec::new();
-            for (parameter, domain, argument) in self.completed.completed() {
-                nir::type_computations::charge_term(domain, &mut remaining)?;
-                nir::type_computations::charge_term(argument, &mut remaining)?;
-                ids.push(parameter.declaration);
-                domains.push(domain.clone());
-                arguments.push(argument.clone());
-            }
-            let admitted = nir::admit_declaration_arguments_with_evidence_in(
-                &ids,
-                &domains,
-                &arguments,
-                &mut remaining,
-                |ty, variant, fuel| vm.query_normal_value_fields(ty, variant, fuel),
-                |value, domain, _| {
-                    matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue}
-                    if vm.abstract_value_parameters.get(declaration) == Some(domain))
-                },
-                vm.target,
-            )?;
-            admitted
-                .instantiate(term, &mut remaining)
-                .map_err(Into::into)
-        })();
-        vm.budget.steps -= (before - remaining) as u64;
-        result.map_err(|error| {
-            vm.failure(
-                match error {
-                    nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
-                    nir::NominalAdmissionError::Unresolved(_) => ErrorKind::TypeContractUnresolved,
-                    nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
-                },
-                Some(source),
-            )
-        })
-    }
     fn specialize(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error> {
         let Some(mut inputs) = self.specialized.take() else {
             return Ok(());
         };
         // Staged keys use structural paths and remain valid when argument types
         // are specialized after another input completes.
-        let source = inputs[slot].source();
-        let result = (|| {
-            let mut rewrite = |ty: &Term| self.instantiate(vm, ty, source);
-            for pattern in inputs[slot].patterns_mut() {
-                pattern.rewrite_types(&mut rewrite)?;
-            }
-            for expression in inputs[slot].expressions_mut() {
-                expression.rewrite_types(&mut rewrite)?;
-            }
-            Ok(())
-        })();
+        let result = self.completed.specialize(vm, &mut inputs[slot]);
         self.specialized = Some(inputs);
         result
     }
@@ -190,21 +115,14 @@ impl<'e> Source<'e> {
             .domains
             .get(slot)
             .unwrap_or(&Term::Primitive(Primitive::Type));
-        let expected = self.instantiate(vm, domain, self.arguments()[slot].source())?;
-        let source = self.arguments()[slot].source();
-        let inputs = vm.observe_input_dependencies(&expected, source)?;
-        vm.integer_operation(Some(source), |budget| budget.consume(self.parameters.len()))?;
-        let awaiting = self
-            .parameters
-            .iter()
-            .enumerate()
-            .filter_map(|(index, parameter)| {
-                (!self.completed.contains(index)
-                    && inputs.declarations.contains_key(&parameter.declaration))
-                .then_some(index)
-            })
-            .collect();
-        Ok(input_collection::Domain { expected, awaiting })
+        self.completed.observe_domain(
+            vm,
+            domain,
+            self.parameters
+                .iter()
+                .map(|parameter| parameter.declaration),
+            self.arguments()[slot].source(),
+        )
     }
     fn check_alias_input(
         &self,
@@ -628,10 +546,11 @@ mod tests {
                     Value::Type(Term::Primitive(Primitive::U8)),
                 )
                 .unwrap();
-            let result =
-                frame
-                    .source
-                    .instantiate(&mut vm, &rigid(2, nir::Sort::ComptimeValue), source);
+            let result = frame.source.completed.instantiate(
+                &mut vm,
+                &rigid(2, nir::Sort::ComptimeValue),
+                source,
+            );
             if valid {
                 assert_eq!(result.unwrap(), Term::Primitive(Primitive::U8));
                 assert_eq!(
