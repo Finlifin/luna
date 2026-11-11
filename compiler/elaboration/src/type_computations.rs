@@ -405,6 +405,7 @@ impl<'a> Session<'a> {
     pub(crate) fn new_resolving_in_scope(
         package: &'a Package,
         context: &InferenceContext,
+        code: &mut comptime_interpretor::CodeSession,
         budget: &mut Budget,
         assumptions: &[nir::program::TraitRequirement],
         parameters: &[DeclarationId],
@@ -414,8 +415,9 @@ impl<'a> Session<'a> {
         if context.is_trial() {
             return Err(Error::SpeculativeContext);
         }
-        let interpreter = Interpreter::for_comptime_resolving_in_budget(
+        let interpreter = Interpreter::for_comptime_resolving_in_scope_in_session(
             package,
+            code,
             assumptions,
             parameters,
             value_parameters,
@@ -1169,7 +1171,7 @@ impl<'a> Session<'a> {
                 }
             }
             if matches!(
-                self.resume_after_cycle_check(context, id, Ok(()))?,
+                self.resume_after_cycle_check(context, id, Ok(()), None)?,
                 State::Failed(_)
             ) {
                 failed_dependency = true;
@@ -1195,13 +1197,28 @@ impl<'a> Session<'a> {
     ) -> Result<&State, Error> {
         self.check_context(context)?;
         let acyclic = self.check_cycle(context, output);
-        self.resume_after_cycle_check(context, output, acyclic)
+        self.resume_after_cycle_check(context, output, acyclic, None)
     }
+
+    /// Reuse immutable code only while executing a ready computation. The
+    /// scheduler continues to own waiting inputs, failures and output authority.
+    pub(crate) fn resume_with_code_session(
+        &mut self,
+        context: &mut InferenceContext,
+        output: MetaId,
+        code: &mut comptime_interpretor::CodeSession,
+    ) -> Result<&State, Error> {
+        self.check_context(context)?;
+        let acyclic = self.check_cycle(context, output);
+        self.resume_after_cycle_check(context, output, acyclic, Some(code))
+    }
+
     fn resume_after_cycle_check(
         &mut self,
         context: &mut InferenceContext,
         output: MetaId,
         acyclic: Result<(), Error>,
+        code: Option<&mut comptime_interpretor::CodeSession>,
     ) -> Result<&State, Error> {
         let pending = self
             .pending
@@ -1227,7 +1244,7 @@ impl<'a> Session<'a> {
             let mut fuel =
                 usize::try_from(self.interpreter.remaining_steps()).unwrap_or(usize::MAX);
             let before = fuel;
-            let value = match &mut pending.inputs {
+            let mut invoke = |vm: &mut Interpreter<'_>| match &mut pending.inputs {
                 PendingInputs::Symbolic(inputs) => {
                     let arguments = inputs
                         .iter()
@@ -1238,31 +1255,31 @@ impl<'a> Session<'a> {
                             ))
                         })
                         .collect::<Result<Vec<_>, InferenceError>>();
-                    self.interpreter
-                        .charge_preparation(before - fuel)
+                    vm.charge_preparation(before - fuel)
                         .map_err(Error::Invocation)?;
-                    self.interpreter
-                        .invoke_with_normal_arguments(pending.target, arguments?)
-                        .map_err(Error::Invocation)?
+                    vm.invoke_with_normal_arguments(pending.target, arguments?)
+                        .map_err(Error::Invocation)
                 }
                 PendingInputs::Prepared { domains, values } => {
                     let domains = domains
                         .iter()
                         .map(|ty| context.freeze_metered(ty, &mut fuel))
                         .collect::<Result<Vec<_>, _>>();
-                    self.interpreter
-                        .charge_preparation(before - fuel)
+                    vm.charge_preparation(before - fuel)
                         .map_err(Error::Invocation)?;
                     let domains = domains?;
                     let values = values.take().ok_or(Error::ConsumedInputs)?;
-                    self.interpreter
-                        .invoke_with_prepared_arguments(
-                            pending.target,
-                            domains.into_iter().zip(values).collect(),
-                        )
-                        .map_err(Error::Invocation)?
+                    vm.invoke_with_prepared_arguments(
+                        pending.target,
+                        domains.into_iter().zip(values).collect(),
+                    )
+                    .map_err(Error::Invocation)
                 }
             };
+            let value = match code {
+                Some(code) => self.interpreter.with_code_session(code, invoke),
+                None => invoke(&mut self.interpreter),
+            }?;
             let ty = match value {
                 Value::Type(ty) => ty,
                 Value::TypeParameter(declaration) => Term::Rigid {

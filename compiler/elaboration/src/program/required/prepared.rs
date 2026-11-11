@@ -3,15 +3,41 @@
 use super::restore::{restore_required_packet, restore_required_type_input};
 use super::*;
 use crate::materialization::{DeclarationSnapshot, DeclarationSource};
-use comptime_interpretor::InvocationValue;
-use std::sync::Arc;
+use comptime_interpretor::{CodeSession, InvocationValue};
+use std::sync::{Arc, Mutex};
 mod inputs;
 
 /// Own the declarations and their derived index together. Once published into
 /// a preparation, this world is immutable; invocation state lives elsewhere.
 pub(super) struct RequiredWorld {
     source: DeclarationSnapshot,
+    code: Mutex<Option<CodeSession>>,
 }
+
+// A lease never holds a lock while invoking source code or a host callback.
+// Reentrant invocations get a separate cache; only one completed cache is kept.
+struct RequiredCode<'a> {
+    world: &'a RequiredWorld,
+    session: Option<CodeSession>,
+}
+impl RequiredCode<'_> {
+    fn session(&mut self) -> &mut CodeSession {
+        self.session.as_mut().expect("live code lease")
+    }
+}
+impl Drop for RequiredCode<'_> {
+    fn drop(&mut self) {
+        let mut retained = self
+            .world
+            .code
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if retained.is_none() {
+            *retained = self.session.take();
+        }
+    }
+}
+
 impl RequiredWorld {
     pub(super) fn new(package: n::Package, span: Span) -> Result<Arc<Self>, Error> {
         let source = DeclarationSnapshot::new(Arc::new(package));
@@ -23,7 +49,23 @@ impl RequiredWorld {
                     format!("required comptime declaration directory: {failure}"),
                 )
             })?;
-        Ok(Arc::new(Self { source }))
+        Ok(Arc::new(Self {
+            source,
+            code: Mutex::new(None),
+        }))
+    }
+
+    fn code(&self) -> RequiredCode<'_> {
+        let session = self
+            .code
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .unwrap_or_else(|| CodeSession::new(self.source.package().clone()));
+        RequiredCode {
+            world: self,
+            session: Some(session),
+        }
     }
 
     fn package(&self) -> &n::Package {
@@ -265,6 +307,7 @@ impl PreparedRequired {
     ) -> Result<(Value, Term), Error> {
         let world = Arc::clone(&self.world);
         let package = world.package();
+        let mut code = world.code();
         let build = |request: &comptime_interpretor::StructBuildRequest, fuel: &mut u64| {
             builder
                 .expect("configured builder service")
@@ -384,6 +427,7 @@ impl PreparedRequired {
             let session = Session::new_resolving_in_scope(
                 &package,
                 &context,
+                code.session(),
                 &mut budget,
                 &invocation_assumptions,
                 &abstract_parameters,
@@ -426,16 +470,17 @@ impl PreparedRequired {
                         format!("required type computation could not be queued: {failure}"),
                     )
                 })?;
-            let result = match session.resume(&mut context, output) {
-                Ok(State::Complete(ty)) => Ok(Value::Type(ty.clone())),
-                Ok(State::Failed(failure)) => {
-                    Err(format!("required comptime evaluation failed: {failure}"))
-                }
-                Err(failure) => Err(format!("required comptime evaluation failed: {failure}")),
-                Ok(State::Waiting(_)) => {
-                    Err("required type computation has unresolved inputs".into())
-                }
-            };
+            let result =
+                match session.resume_with_code_session(&mut context, output, code.session()) {
+                    Ok(State::Complete(ty)) => Ok(Value::Type(ty.clone())),
+                    Ok(State::Failed(failure)) => {
+                        Err(format!("required comptime evaluation failed: {failure}"))
+                    }
+                    Err(failure) => Err(format!("required comptime evaluation failed: {failure}")),
+                    Ok(State::Waiting(_)) => {
+                        Err("required type computation has unresolved inputs".into())
+                    }
+                };
             *steps = session.remaining_steps();
             let value = result.map_err(|message| error(span, with_copy_failure(message)))?;
             let Value::Type(ty) = value else {
@@ -455,8 +500,9 @@ impl PreparedRequired {
             steps: std::mem::take(steps),
             depth: 128,
         };
-        let prepared = Interpreter::for_comptime_resolving_in_budget(
+        let prepared = Interpreter::for_comptime_resolving_in_scope_in_session(
             &package,
+            code.session(),
             &invocation_assumptions,
             &abstract_parameters,
             &abstract_value_parameters,
@@ -477,7 +523,9 @@ impl PreparedRequired {
                 .with_newtype_builder(&build_newtype);
         }
         interpreter = interpreter.with_budgeted_pointer_copy_permission(&pointer_copy);
-        let value = interpreter.invoke_with_prepared_arguments(entry, inputs);
+        let value = interpreter.with_code_session(code.session(), |vm| {
+            vm.invoke_with_prepared_arguments(entry, inputs)
+        });
         *steps = interpreter.remaining_steps();
         let value=value.map_err(|e| {
             if e.kind == comptime_interpretor::ErrorKind::MissingBinding
@@ -629,6 +677,146 @@ mod tests {
     }
 
     #[test]
+    fn required_execution_populates_reusable_code_for_both_result_paths() {
+        for type_result in [false, true] {
+            let prepared = literal_preparation(type_result);
+            let expected = prepared
+                .fork()
+                .invoke(&mut 100_000, Span::default())
+                .unwrap()
+                .0;
+            let queries = crate::materialization::SourceInvocationQueries::in_source(
+                DeclarationSource::Snapshot(&prepared.world.source),
+                &prepared.context,
+                &[],
+            );
+            let solver = |predicate: &n::TypePredicate, fuel: &mut u64| {
+                queries.check(predicate, Default::default(), fuel)
+            };
+            let methods = |callee: &n::Expr, fuel: &mut u64| queries.resolve(callee, fuel);
+            let associated = |access: &n::Expr, fuel: &mut u64| queries.associated(access, fuel);
+            let mut code = prepared.world.code();
+            let mut vm = Interpreter::for_comptime_resolving_in_scope_in_session(
+                prepared.world.package(),
+                code.session(),
+                &[],
+                &[],
+                &[],
+                comptime_interpretor::SourceResolvers {
+                    types: &solver,
+                    methods: &methods,
+                    associated: &associated,
+                },
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                vm.with_code_session(code.session(), |vm| { vm.invoke(prepared.entry, vec![]) })
+                    .unwrap(),
+                expected
+            );
+            assert!(vm.bytecode_invocations() > 0);
+            assert_eq!(
+                vm.bytecode_compilations(),
+                0,
+                "required path did not retain code"
+            );
+            drop(vm);
+            drop(code);
+            // A warm cache is never an execution allowance or a result cache.
+            assert!(prepared.fork().invoke(&mut 0, Span::default()).is_err());
+            assert_eq!(
+                prepared
+                    .fork()
+                    .invoke(&mut 100_000, Span::default())
+                    .unwrap()
+                    .0,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn warmed_required_code_cannot_retain_invocation_trait_authority() {
+        for type_result in [false, true] {
+            let mut prepared = literal_preparation(type_result);
+            let interface = DeclarationId {
+                package: 7,
+                local: 90,
+            };
+            let premise = n::TraitRequirement {
+                interface,
+                interface_arguments: vec![],
+                subject: p(P::Bool),
+            };
+            prepared.edit_package(|package| {
+                package.traits.push(n::Trait {
+                    declaration: interface,
+                    self_parameter: DeclarationId {
+                        package: 7,
+                        local: 91,
+                    },
+                    name: "Granted".into(),
+                    comptime_only: false,
+                    type_parameters: vec![],
+                    parameter_types: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    parents: vec![],
+                    associated: vec![],
+                    methods: vec![],
+                });
+                package.functions[0].capabilities.push(premise.clone());
+            });
+            prepared.context = crate::ptc::Context::from_package(prepared.world.package()).unwrap();
+            let mut granted = prepared.fork();
+            granted.invocation_assumptions.push(premise);
+            let expected = granted
+                .fork()
+                .invoke(&mut 100_000, Span::default())
+                .unwrap()
+                .0;
+            let failure = prepared
+                .fork()
+                .invoke(&mut 100_000, Span::default())
+                .unwrap_err();
+            assert!(failure.message.contains("TypeContract"), "{failure}");
+            assert_eq!(
+                granted.invoke(&mut 100_000, Span::default()).unwrap().0,
+                expected
+            );
+            assert!(prepared.invoke(&mut 100_000, Span::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn required_code_leases_allow_reentry_and_recover_after_unwind() {
+        let prepared = literal_preparation(true);
+        let world = prepared.world.clone();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _outer = world.code();
+            assert!(world.code.lock().unwrap().is_none());
+            assert_eq!(
+                prepared
+                    .fork()
+                    .invoke(&mut 100_000, Span::default())
+                    .unwrap()
+                    .0,
+                Value::Type(p(P::U8))
+            );
+            assert!(world.code.lock().unwrap().is_some());
+            panic!("host failure while the outer cache is leased");
+        }));
+        assert!(failure.is_err());
+        assert!(!world.code.is_poisoned());
+        assert_eq!(
+            prepared.invoke(&mut 100_000, Span::default()).unwrap().0,
+            Value::Type(p(P::U8))
+        );
+        assert!(world.code.lock().unwrap().is_some());
+    }
+
+    #[test]
     fn prepared_forks_share_declarations_and_isolate_input_assignments() {
         let span = Span::default();
         let mut prepared = literal_preparation(false);
@@ -701,8 +889,8 @@ mod tests {
                     package.functions.push(function);
                 }
             });
-            // VM execution indexes are still prepared per invocation. Measure
-            // that independent cost before adding a declaration proof demand.
+            // Measure a cold invocation before adding a declaration proof
+            // demand. Replacing the immutable world starts a fresh code cache.
             let mut baseline = 100_000;
             prepared
                 .fork()

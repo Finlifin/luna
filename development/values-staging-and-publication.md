@@ -1983,6 +1983,8 @@ runtime reference session 与 checked/native 清理构图也从所属来源复�
 详见[staged 来源边界](world-storage-and-lifetimes.md#15-staged-入口与声明世界分离)。staged VM 已接入
 同源 CodeSession，复用声明索引和代码，每次重新准入当前前提与抽象参数权限，
 详见[staged session 边界](world-storage-and-lifetimes.md#16-staged-vm-索引与当前调用权限分离)。
+RequiredWorld 的 Type／普通值调用也已[接入同源 CodeSession](world-storage-and-lifetimes.md#11-required-计算的共享声明快照)，
+通过短期独占 lease 保留代码，重入时独立执行；调用结果、活动值和证明前提不共享。
 detached phase 检查进一步从同源 owner 复用已完成的声明目录，每个表达式仍重新
 检查阶段和 unsafe 边界，详见[phase 目录边界](world-storage-and-lifetimes.md#17-phase-声明目录与表达式检查分离)。
 源码 VM 的全包 phase 检查已消费同一次构造预算，并将目录交给首次表达式检查；

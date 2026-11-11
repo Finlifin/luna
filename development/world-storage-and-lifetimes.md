@@ -74,8 +74,39 @@ RequiredWorld::capabilities 取得借用视图；实际 invocation 的三类查�
 重新建立 RequiredWorld，不能保留修改前的索引；生产没有可变访问器或 Arc::make_mut
 旁路。目录共享回归构造两千多个声明，先测量无额外证明需求的调用成本，再只增加
 不足以冷建目录的证明额度；Type 和普通值 invocation 均须在该总额度内重试并完成。
-这单独保留了 VM 执行索引的准备成本，不宣称它也已跨调用复用。单次证明加入的前提
-不会进入另一查询。
+该用例先计入 VM 的冷准备成本；单次证明加入的前提不会进入另一查询。
+
+同一个 RequiredWorld 现在惰性保留一个 CodeSession，Type 结果调度器与普通值调用
+均通过它复用精确来源的 VM 声明索引及已检查代码。每次仍创建新 VM、安装本次类型／
+方法／关联项和 Copy 服务，并重新准入输入、抽象参数和前提。Type 调度器仅在执行
+ready computation 时借用代码缓存，等待者、已消费输入和输出发布权限继续归 Session。
+既没有保存调用结果，也没有把活动 inference context 放进世界或缓存。
+
+调用使用短锁取得缓存后立即释放锁，执行与宿主回调期间只持有独占 lease。若同一
+世界发生重入，内层使用自己的同源空缓存；归还时只保留一份，数量不随调用累计。
+正常完成、错误和 Rust unwind 都归还可用缓存，重入不会等待外层调用归还。
+缓存只在同一个不可变快照中复用，编辑／发布产生新世界时重新准备；这没有解决
+每次重新收集不同 required 快照的成本，也不是跨编辑或跨会话结果缓存。
+
+回归直接通过 PreparedRequired 的两个真实 invoke 分支预热，再从其 owner 借出
+CodeSession，确认后续 VM 执行但零次字节码编译；预热后的零预算仍拒绝，失败后可重试。
+现有输入赋值隔离、live closure／值引用写回和同号不同世界用例继续适用，另覆盖
+嵌套 lease 与 unwind 后仍能调用。初次索引构造和后续执行仍计入各次调用额度。
+预热所用的 trait 前提撤回后，两条结果路径均拒绝调用；重新提供前提才能再次执行。
+
+代码 session 接线的检查在 `/home/fin/luna` 通过 `development/check.py --timeout 900 -- test`
+运行，完整命令在各 result 文件内，输出锚点为同目录 `stdout.log` 的 `test result:`：
+
+- `/tmp/luna-tools-s8szs3g5/result.json`：477 通过、2 失败，退出 101；覆盖 elaboration／
+  luna 库测试、调用预算、发布器、builder、真实 meta/builtin、反射、值引用和派生调用。
+- 两项失败均为已有 source_reflection 方法分类缺口，见[原有诊断与基线](type-models-and-theory-evidence.md#调用内的统一声明查询状态)。
+  暂时还原本次拥有的两份 Rust 文件到 `4830092f` 后复测，
+  `/tmp/luna-tools-upgs8lru/result.json` 同样 15 通过、2 失败，位置与诊断完全一致；
+  随后逐字节恢复本次源码，未改测试预期或作者文件。
+- 补充前提撤回边界后，`/tmp/luna-tools-ykni9t99/result.json` 的 required prepared 组
+  24 项全部通过，退出 0。它与前述检查重叠，不累加为独立验收数。
+
+未执行全 workspace、性能或并发压力测试；本次证明同源代码已复用，未宣称整体编译加速比例。
 
 当前仍是单份完整 package 的共享所有权。初次准备分别收集可执行与资源声明并建立各自索引，输入供应
 与上下文仍会复制；没有完成分块存储、跨编辑增量索引、稳定句柄或通用发布事务。
