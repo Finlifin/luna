@@ -20,12 +20,12 @@ pub enum Progress<'session, 'world> {
     Settled(&'session State),
 }
 
-/// Owns this producer's publication authority until completion or cancellation.
-/// The inference context is exclusively borrowed; this is not yet a frontend
-/// region that permits other inference work while an invocation is suspended.
+/// Owns one output's publication permit, without borrowing inference storage
+/// while the VM is suspended. Unrelated inference can progress between polls.
 pub struct Invocation<'session, 'world> {
     driver: Option<InvocationSession<'session, 'world>>,
-    context: &'session mut InferenceContext,
+    context: u64,
+    permit: type_resolution::AssignmentPermit,
     pending: &'session mut Pending,
     failed: &'session mut BTreeSet<MetaId>,
     output: MetaId,
@@ -45,11 +45,11 @@ impl Invocation<'_, '_> {
         self.driver.take();
     }
 
-    fn publish(&mut self, value: Value) -> Result<Term, Error> {
+    fn publish(&mut self, context: &mut InferenceContext, value: Value) -> Result<Term, Error> {
         let driver = self.driver.as_mut().expect("active Type invocation");
         publish(
-            self.context,
-            self.output,
+            context,
+            &self.permit,
             value,
             driver.remaining_steps(),
             |work| driver.charge_preparation(work),
@@ -64,21 +64,31 @@ impl Invocation<'_, '_> {
 }
 
 impl<'world> Invocation<'_, 'world> {
-    pub fn poll(&mut self) -> Progress<'_, 'world> {
+    /// Wrong-context polls leave the execution and its outstanding request
+    /// untouched. A committed candidate may change unrelated inference inputs.
+    pub fn poll(&mut self, context: &mut InferenceContext) -> Result<Progress<'_, 'world>, Error> {
+        if context.is_trial() {
+            return Err(Error::SpeculativeContext);
+        }
+        if context.identity() != self.context {
+            return Err(Error::ForeignContext);
+        }
         if self.terminal {
-            return Progress::Settled(&self.pending.state);
+            return Ok(Progress::Settled(&self.pending.state));
         }
         match self.driver.as_mut().expect("active Type invocation").poll() {
-            Ok(InvocationProgress::Running) => return Progress::Running,
-            Ok(InvocationProgress::Waiting) => return Progress::Waiting,
-            Ok(InvocationProgress::Associated(request)) => return Progress::Associated(request),
+            Ok(InvocationProgress::Running) => return Ok(Progress::Running),
+            Ok(InvocationProgress::Waiting) => return Ok(Progress::Waiting),
+            Ok(InvocationProgress::Associated(request)) => {
+                return Ok(Progress::Associated(request));
+            }
             Ok(InvocationProgress::Complete(value)) => {
-                let result = self.publish(value);
+                let result = self.publish(context, value);
                 self.settle(result);
             }
             Err(error) => self.settle(Err(Error::Invocation(error))),
         }
-        Progress::Settled(&self.pending.state)
+        Ok(Progress::Settled(&self.pending.state))
     }
 
     pub fn resume(
@@ -103,7 +113,11 @@ impl Drop for Invocation<'_, '_> {
 
 impl fmt::Display for Invocation<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(type-invocation (output {}) ", self.output)?;
+        write!(
+            f,
+            "(type-invocation (output {}) {} ",
+            self.output, self.permit
+        )?;
         match &self.driver {
             Some(driver) => write!(f, "{driver}")?,
             None => write!(f, "{}", self.pending.state)?,
@@ -114,7 +128,7 @@ impl fmt::Display for Invocation<'_, '_> {
 
 pub(super) fn publish(
     context: &mut InferenceContext,
-    output: MetaId,
+    permit: &type_resolution::AssignmentPermit,
     value: Value,
     remaining: u64,
     charge: impl FnOnce(usize) -> Result<(), comptime_interpretor::Error>,
@@ -132,7 +146,7 @@ pub(super) fn publish(
     let bounded = nir::type_computations::charge_term(&ty, &mut fuel);
     charge(before - fuel).map_err(Error::Invocation)?;
     bounded.map_err(|_| Error::Inference(InferenceError::Budget))?;
-    context.assign(output, InferenceTerm::Stable(ty.clone()))?;
+    context.assign_reserved(permit, InferenceTerm::Stable(ty.clone()))?;
     Ok(ty)
 }
 
@@ -174,25 +188,25 @@ pub(super) fn arguments(
 
 pub(super) fn begin<'s, 'w>(
     vm: &'s mut Interpreter<'w>,
-    context: &'s mut InferenceContext,
+    context: &mut InferenceContext,
     pending: &'s mut Pending,
     failed: &'s mut BTreeSet<MetaId>,
     output: MetaId,
 ) -> Start<'s, 'w> {
     let arguments = (|| {
-        if context.is_assigned(output)? {
-            return Err(Error::Inference(InferenceError::AlreadyAssigned(output)));
-        }
-        arguments(vm, pending, context)
+        let permit = context.reserve_assignment(output)?;
+        Ok((permit, arguments(vm, pending, context)?))
     })();
-    let prepared = arguments.and_then(|arguments| {
+    let prepared = arguments.and_then(|(permit, arguments)| {
         vm.start_prepared_invocation(pending.target, arguments)
+            .map(|driver| (permit, driver))
             .map_err(Error::Invocation)
     });
     match prepared {
-        Ok(driver) => Start::Invocation(Invocation {
+        Ok((permit, driver)) => Start::Invocation(Invocation {
             driver: Some(driver),
-            context,
+            context: context.identity(),
+            permit,
             pending,
             failed,
             output,
@@ -224,7 +238,14 @@ pub(super) fn drive(
         return;
     };
     loop {
-        match execution.poll() {
+        let progress = match execution.poll(context) {
+            Ok(progress) => progress,
+            Err(error) => {
+                execution.settle(Err(error));
+                return;
+            }
+        };
+        match progress {
             Progress::Running => {}
             Progress::Associated(request) => {
                 let response = request.resolve(&mut *resolve);

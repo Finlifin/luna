@@ -1152,7 +1152,7 @@ impl<'a> Session<'a> {
     /// A dependency wait invokes nothing; dropping active execution cancels it.
     pub fn start<'s>(
         &'s mut self,
-        context: &'s mut InferenceContext,
+        context: &mut InferenceContext,
         output: MetaId,
         fuel: &mut usize,
     ) -> Result<InvocationStart<'s, 'a>, Error> {
@@ -1287,6 +1287,7 @@ impl<'a> Session<'a> {
             if !waiting.is_empty() {
                 return Ok(State::Waiting(waiting));
             }
+            let permit = context.reserve_assignment(output)?;
             let arguments = execution::arguments(&mut self.interpreter, pending, context)?;
             let value = self
                 .interpreter
@@ -1294,7 +1295,7 @@ impl<'a> Session<'a> {
                 .map_err(Error::Invocation)?;
             let ty = execution::publish(
                 context,
-                output,
+                &permit,
                 value,
                 self.interpreter.remaining_steps(),
                 |work| self.interpreter.charge_preparation(work),

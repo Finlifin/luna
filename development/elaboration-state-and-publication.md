@@ -573,8 +573,9 @@ pending producer、VM 可变存储或候选等待者，也不进入 RequiredWorl
 此前 Type 计算队列保存了输入等待者，但就绪后的 `resume_prepared` 一次性调用 VM，
 不能将主体或普通函数契约中的关联选择交回队列外的驱动者。现在 `Session::start`
 沿用有界依赖预检，再返回独占的 `Invocation`；等待输入或已有终态直接返回 `Settled`。
-活动句柄拥有该输出的 Pending、失败集合和推断上下文借用，不把执行现场序列化进
-Type、残余调用或 code cache。其 Display 显示输出身份及内部执行阶段。
+活动句柄拥有该输出的 Pending、失败集合和单输出发布许可，不再借用整个推断
+上下文，也不把执行现场序列化进 Type、残余调用或 code cache。其 Display 显示
+输出、许可的上下文身份及内部执行阶段。
 
 `poll` 区分 Running、Waiting、Associated 和 Settled。Associated 请求使用已有
 VM session ticket、源世界和预算所有权；等待期间再次 poll 不重发请求、不执行前缀。
@@ -594,8 +595,9 @@ prepared value 准入和结果发布与旧同步接口共用；Live 值保留图
 输入先通过准入，随后才执行 Normal 输入工厂。没有因接入会话而改成全量 Term 化。
 
 边界仍然明确：旧 `resume`／依赖批量驱动保留同步入口；输入工厂、类型准入、方法
-解析和 builder 服务还没有全部变成可恢复请求。这个句柄独占 inference context，
-不能在暂停中运行其他推断任务；required 的便利驱动仍同步处理宿主请求至完成。
+解析和 builder 服务还没有全部变成可恢复请求。暂停中可以进行独立推断，多个独立
+Type 会话也可交错发布到同一上下文；一个会话的 VM 和队列仍由活动句柄独占，
+required 的便利驱动仍同步处理宿主请求至完成。
 一般源码检查 Region、实际输入生产者与待定 callable 签名之间的双向交接尚未实现，
 两个既有普通调用正例仍 ignored。此次没有提前求值 Type 生产者、重跑调用 AST，
 也没有放宽原正例或更改正式 docs。
@@ -621,6 +623,49 @@ required Type 调用到运行时值的路径；这些不是整个普通 callable
 
 本轮保留了作者的资源分析修改，是工作区验证；没有执行全 workspace、性能基准或
 纯 HEAD 验收。`compiler/fmt`、正式 docs 和既有库文档改动不属于本次提交范围。
+
+### 单输出发布许可允许暂停中的独立推断
+
+初始 invocation 接线为保护结果赋值而借用整个 `InferenceContext`。这使等待宿主时
+无法处理其他输入，也使两个独立生产者不能在同一上下文中交错推进。解除借用本身
+不安全：普通赋值或候选提交可能抢先改写生产者的输出，直到执行完成才发现冲突。
+
+现由 `type_resolution::AssignmentPermit` 表示某个已提交上下文内、单个未赋值 meta
+的发布权。执行前保留输出并推进 revision，旧候选不能覆盖这次保留。许可不可复制；
+普通及有界 assign 对该输出返回 ReservedVariable，候选不能取得或使用生产者许可。
+候选仍可观察其未解值、修改无关变量并正常提交；共享变量快照保留输出的归属标记。
+完成时共用 occurrence／sort 检查，凭原许可赋值一次。许可和正常变量都保留原来的
+错误／预算边界，不用全局 revision 相等否决无关推断进展。
+
+`Invocation::poll(context)` 在任何 VM 进展前核对提交态及上下文身份。错投或传入
+trial 返回错误，保持原执行现场、宿主请求和额度；可以随后用正确上下文继续。
+正常完成才执行有界 Type 结果传递及授权发布。同步 Type 驱动同样在执行前保留
+输出，不能成为绕过归属的第二条路径。Drop／取消只放弃发布，输出继续不可由普通
+推断写入；计算队列负责保留 Failed 并沿依赖传播，不能将取消当作可重新执行。
+
+这里没有改变自由推断变量的写入规则；只有已开始生产的输出使用许可。尚在输入
+等待中的输出仍由原依赖预检检查外部赋值冲突。许可也不是语言级 capability、PTC
+命题或持久化 receipt；它只管理活动编译任务的单次结果交付。完整源码 Region、
+候选义务所有权及前端检查请求仍按前述边界继续迁移。
+
+该许可接线的验证在 `/home/fin/luna` 执行，Cargo 入口仍为
+`python3 -B development/check.py --timeout 900 -- test`；各报告退出 0，计数锚点
+为 `stdout.log` 中的 `test result:`：
+
+- `-p type_resolution --tests --no-fail-fast`：
+  `/tmp/luna-tools-3255i47o/result.json`，396 项通过。包含普通／有界写入拒绝、
+  旧候选拒绝、无关候选提交、错误域与 foreign/trial 发布，以及放弃许可的四项回归。
+- `-p elaboration --lib --test type_computation_demands --test delivered_types --test invocation_budget -p luna --test type_invocation_sessions --test ordinary_callable_types --test ordinary_clause_collectors --test builder_invocations --test required_input_scopes --test prepared_invocations --test invocation_host_requests --no-fail-fast`：
+  `/tmp/luna-tools-_o1_sir4/result.json`，461 项通过、两项既有正例 ignored。
+  十项源码会话测试包括暂停中推断、候选干扰、错误上下文 poll，以及两个独立
+  VM 向同一个推断上下文交错发布；跨会话误投响应仍可送回原生产者完成一次。
+- `-p luna --test execution type_computation`：
+  `/tmp/luna-tools-eha1mgx5/result.json`，九项既有同步／依赖驱动回归通过，覆盖
+  外部赋值冲突、循环、live capture 和不重放；其余 1,359 项按名称过滤，未执行。
+- 七个修改 Rust 文件的限定范围 `rustfmt --check`：
+  `/tmp/luna-tools-3osuj9yg/result.json`；`git diff --check` 通过。
+
+以上仍为保留既有工作区修改的针对性验证；没有运行全 workspace 或性能基准。
 
 ## 8. 宿主请求与候选、取消的组合
 

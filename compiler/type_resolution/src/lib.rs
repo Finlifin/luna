@@ -34,6 +34,7 @@ pub enum InferenceTerm {
 struct Variable {
     sort: Sort,
     value: Option<Arc<InferenceTerm>>,
+    reserved: bool,
 }
 
 pub struct InferenceContext {
@@ -48,6 +49,9 @@ pub enum InferenceError {
     ForeignVariable(MetaId),
     Unresolved(MetaId),
     AlreadyAssigned(MetaId),
+    ReservedVariable(MetaId),
+    ForeignAssignment,
+    SpeculativeAssignment,
     Occurs(MetaId),
     WrongSort { expected: Sort, actual: Sort },
     InvalidSubstitution(TypeError),
@@ -86,7 +90,14 @@ impl InferenceContext {
 
     pub fn fresh(&mut self, sort: Sort) -> MetaId {
         let id = MetaId(fresh_identity());
-        Arc::make_mut(&mut self.variables).insert(id, Variable { sort, value: None });
+        Arc::make_mut(&mut self.variables).insert(
+            id,
+            Variable {
+                sort,
+                value: None,
+                reserved: false,
+            },
+        );
         self.changed();
         id
     }
@@ -122,14 +133,16 @@ impl InferenceContext {
     }
 
     pub fn assign(&mut self, id: MetaId, value: InferenceTerm) -> Result<(), InferenceError> {
-        let variable = self
-            .variables
-            .get(&id)
-            .ok_or(InferenceError::ForeignVariable(id))?;
-        if variable.value.is_some() {
-            return Err(InferenceError::AlreadyAssigned(id));
-        }
-        let expected = variable.sort;
+        self.assign_authorized(id, value, None)
+    }
+
+    fn assign_authorized(
+        &mut self,
+        id: MetaId,
+        value: InferenceTerm,
+        permit: Option<&AssignmentPermit>,
+    ) -> Result<(), InferenceError> {
+        let expected = self.assignment_sort(id, permit)?;
         self.check_occurs(id, &value)?;
         let actual = self.sort(&value)?;
         if expected != actual {
@@ -446,6 +459,15 @@ impl fmt::Display for InferenceError {
             Self::ForeignVariable(id) => write!(f, "unknown inference variable {id}"),
             Self::Unresolved(id) => write!(f, "unresolved inference variable {id}"),
             Self::AlreadyAssigned(id) => write!(f, "inference variable {id} already assigned"),
+            Self::ReservedVariable(id) => {
+                write!(f, "inference variable {id} is reserved for its producer")
+            }
+            Self::ForeignAssignment => {
+                f.write_str("assignment permit belongs to another inference context")
+            }
+            Self::SpeculativeAssignment => {
+                f.write_str("producer assignment requires a committed inference context")
+            }
             Self::Occurs(id) => write!(f, "cyclic assignment of {id}"),
             Self::WrongSort { expected, actual } => write!(f, "expected {expected}, got {actual}"),
             Self::InvalidSubstitution(error) => error.fmt(f),
@@ -459,11 +481,13 @@ impl fmt::Display for InferenceError {
 impl std::error::Error for InferenceError {}
 
 pub use ::ptc;
+mod assignment;
 pub mod associated;
 pub mod calls;
 pub mod capabilities;
 pub mod implementation;
 mod inference_budget;
+pub use assignment::AssignmentPermit;
 pub mod input_identity;
 pub mod matching;
 pub mod obligations;

@@ -261,14 +261,7 @@ impl InferenceContext {
         max_depth: usize,
     ) -> Result<(), InferenceError> {
         charge(fuel, 1)?;
-        let variable = self
-            .variables
-            .get(&id)
-            .ok_or(InferenceError::ForeignVariable(id))?;
-        if variable.value.is_some() {
-            return Err(InferenceError::AlreadyAssigned(id));
-        }
-        let expected = variable.sort;
+        let expected = self.assignment_sort(id, None)?;
         self.check_occurs_with_limits(id, &value, fuel, max_depth)?;
         let actual = self.sort(&value)?;
         if actual != expected {

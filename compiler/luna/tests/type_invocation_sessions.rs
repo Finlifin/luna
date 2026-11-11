@@ -32,6 +32,20 @@ fn in_source(
         Session<'_>,
     ),
 ) {
+    in_sources(1, |package, queries, context, mut sessions| {
+        test(package, queries, context, sessions.pop().unwrap());
+    });
+}
+
+fn in_sources(
+    count: usize,
+    test: impl FnOnce(
+        &nir::program::Package,
+        &SourceInvocationQueries<'_>,
+        InferenceContext,
+        Vec<Session<'_>>,
+    ),
+) {
     let package = sysroot::compile(SOURCE).unwrap();
     let source = DeclarationSource::Borrowed(&package)
         .retain_declarations(&mut 1_000_000)
@@ -48,25 +62,29 @@ fn in_source(
         |_: &nir::program::Expr, _: &mut u64| panic!("body selection must leave the driver");
     let context = InferenceContext::default();
     let mut code = CodeSession::new(package.clone());
-    let session = Session::new_resolving_in_scope(
-        package,
-        &context,
-        &mut code,
-        &mut Budget {
-            steps: 1_000_000,
-            depth: 128,
-        },
-        &[],
-        &[],
-        &[],
-        SourceResolvers {
-            types: &types,
-            methods: &methods,
-            associated: &associated,
-        },
-    )
-    .unwrap();
-    test(package, &queries, context, session);
+    let sessions = (0..count)
+        .map(|_| {
+            Session::new_resolving_in_scope(
+                package,
+                &context,
+                &mut code,
+                &mut Budget {
+                    steps: 1_000_000,
+                    depth: 128,
+                },
+                &[],
+                &[],
+                &[],
+                SourceResolvers {
+                    types: &types,
+                    methods: &methods,
+                    associated: &associated,
+                },
+            )
+            .unwrap()
+        })
+        .collect();
+    test(package, &queries, context, sessions);
 }
 
 fn id(package: &nir::program::Package, name: &str) -> DeclarationId {
@@ -78,9 +96,12 @@ fn id(package: &nir::program::Package, name: &str) -> DeclarationId {
         .declaration
 }
 
-fn request<'w>(active: &mut Invocation<'_, 'w>) -> comptime_interpretor::AssociatedHostRequest<'w> {
+fn request<'w>(
+    active: &mut Invocation<'_, 'w>,
+    context: &mut InferenceContext,
+) -> comptime_interpretor::AssociatedHostRequest<'w> {
     loop {
-        match active.poll() {
+        match active.poll(context).unwrap() {
             Progress::Running => {}
             Progress::Associated(request) => return request,
             Progress::Settled(state) => panic!("settled before selection: {state}"),
@@ -89,9 +110,9 @@ fn request<'w>(active: &mut Invocation<'_, 'w>) -> comptime_interpretor::Associa
     }
 }
 
-fn complete(active: &mut Invocation<'_, '_>) -> Term {
+fn complete(active: &mut Invocation<'_, '_>, context: &mut InferenceContext) -> Term {
     loop {
-        match active.poll() {
+        match active.poll(context).unwrap() {
             Progress::Running => {}
             Progress::Settled(State::Complete(ty)) => return ty.clone(),
             Progress::Settled(state) => panic!("Type producer failed: {state}"),
@@ -121,17 +142,20 @@ fn source_type_producer_keeps_its_prefix_and_publishes_once_after_host_resume() 
             else {
                 panic!("ready producer must start")
             };
-            let request = request(&mut active);
+            let request = request(&mut active, &mut context);
             assert!(std::ptr::eq(request.source_world(), package));
             let dump = active.to_string();
             for _ in 0..4 {
-                assert!(matches!(active.poll(), Progress::Waiting));
+                assert!(matches!(
+                    active.poll(&mut context).unwrap(),
+                    Progress::Waiting
+                ));
                 assert_eq!(active.to_string(), dump);
             }
             let response = request.resolve(|access, fuel| queries.associated(access, fuel));
             active.resume(response).unwrap();
-            assert_eq!(complete(&mut active), Term::Primitive(P::U8));
-            assert_eq!(complete(&mut active), Term::Primitive(P::U8));
+            assert_eq!(complete(&mut active, &mut context), Term::Primitive(P::U8));
+            assert_eq!(complete(&mut active, &mut context), Term::Primitive(P::U8));
         }
         assert_eq!(
             context.freeze(&I::Meta(output)).unwrap(),
@@ -175,11 +199,11 @@ fn cancellation_blocks_dependents_and_late_answers_cannot_resume_another_produce
             else {
                 panic!("ready")
             };
-            let request = request(&mut active);
+            let request = request(&mut active, &mut context);
             let response = request.resolve(|access, fuel| queries.associated(access, fuel));
             active.cancel();
             assert!(matches!(
-                active.poll(),
+                active.poll(&mut context).unwrap(),
                 Progress::Settled(State::Failed(Error::Cancelled))
             ));
             // A terminal wrapper must return the complete rejected answer to its owner.
@@ -236,13 +260,16 @@ fn cancellation_blocks_dependents_and_late_answers_cannot_resume_another_produce
             else {
                 panic!("ready")
             };
-            let current = request(&mut active);
+            let current = request(&mut active, &mut context);
             let _rejected = active.resume(late).unwrap_err();
-            assert!(matches!(active.poll(), Progress::Waiting));
+            assert!(matches!(
+                active.poll(&mut context).unwrap(),
+                Progress::Waiting
+            ));
             active
                 .resume(current.resolve(|access, fuel| queries.associated(access, fuel)))
                 .unwrap();
-            assert_eq!(complete(&mut active), Term::Primitive(P::U8));
+            assert_eq!(complete(&mut active, &mut context), Term::Primitive(P::U8));
         }
         assert!(context.is_assigned(second).unwrap());
         assert_eq!(enters(&session, id(package, "Output")), 1);
@@ -263,7 +290,7 @@ fn dropping_an_active_producer_is_terminal_without_publishing_a_type() {
             else {
                 panic!("ready")
             };
-            drop(request(&mut active));
+            drop(request(&mut active, &mut context));
         }
         assert!(!context.is_assigned(output).unwrap());
         assert!(matches!(
@@ -287,7 +314,7 @@ fn host_failure_and_exhaustion_are_terminal_without_replaying_the_prefix() {
                 else {
                     panic!("ready")
                 };
-                let request = request(&mut active);
+                let request = request(&mut active, &mut context);
                 let response = if exhausted {
                     request.resolve(|access, fuel| {
                         let selection = queries.associated(access, fuel)?;
@@ -302,7 +329,7 @@ fn host_failure_and_exhaustion_are_terminal_without_replaying_the_prefix() {
                 };
                 active.resume(response).unwrap();
                 loop {
-                    match active.poll() {
+                    match active.poll(&mut context).unwrap() {
                         Progress::Running => {}
                         Progress::Settled(State::Failed(Error::Invocation(error))) => {
                             assert_eq!(
@@ -365,7 +392,7 @@ fn scheduling_exhaustion_and_foreign_context_do_not_consume_the_producer() {
         else {
             panic!("ready")
         };
-        drop(request(&mut active));
+        drop(request(&mut active, &mut context));
     });
 }
 
@@ -413,7 +440,10 @@ fn live_input_admission_rejects_wrong_domains_before_execution_and_allows_next_w
             else {
                 panic!("supplied input")
             };
-            assert_eq!(complete(&mut active), Term::Primitive(P::Bool));
+            assert_eq!(
+                complete(&mut active, &mut context),
+                Term::Primitive(P::Bool)
+            );
         }
         assert_eq!(
             context.freeze(&I::Meta(valid)).unwrap(),
@@ -424,5 +454,156 @@ fn live_input_admission_rejects_wrong_domains_before_execution_and_allows_next_w
             session.start(&mut context, invalid, &mut 0).unwrap(),
             Start::Settled(State::Failed(_))
         ));
+    });
+}
+
+#[test]
+fn suspended_source_invocation_allows_other_inference_and_rejects_wrong_context_polls() {
+    in_source(|package, queries, mut context, mut session| {
+        let output = session
+            .enqueue(&mut context, id(package, "Output"), vec![])
+            .unwrap();
+        let unrelated = context.fresh(Sort::Type);
+        let Start::Invocation(mut active) =
+            session.start(&mut context, output, &mut 100_000).unwrap()
+        else {
+            panic!("ready")
+        };
+        let mut foreign = InferenceContext::default();
+        let before = active.to_string();
+        assert!(matches!(
+            active.poll(&mut foreign),
+            Err(Error::ForeignContext)
+        ));
+        assert_eq!(active.to_string(), before);
+        let request = request(&mut active, &mut context);
+        let waiting = active.to_string();
+        assert!(!context.is_assigned(output).unwrap());
+        let mut candidate = context.trial();
+        assert!(matches!(
+            active.poll(&mut candidate),
+            Err(Error::SpeculativeContext)
+        ));
+        assert!(matches!(
+            active.poll(&mut foreign),
+            Err(Error::ForeignContext)
+        ));
+        assert_eq!(active.to_string(), waiting);
+        assert_eq!(
+            candidate.assign(output, I::Stable(Term::Primitive(P::U16))),
+            Err(elaboration::InferenceError::ReservedVariable(output))
+        );
+        candidate
+            .assign(unrelated, I::Stable(Term::Primitive(P::Bool)))
+            .unwrap();
+        context.commit(candidate).unwrap();
+        assert!(context.is_assigned(unrelated).unwrap());
+        assert_eq!(
+            context.assign(output, I::Stable(Term::Primitive(P::U16))),
+            Err(elaboration::InferenceError::ReservedVariable(output))
+        );
+        assert!(matches!(
+            active.poll(&mut context).unwrap(),
+            Progress::Waiting
+        ));
+        active
+            .resume(request.resolve(|access, fuel| queries.associated(access, fuel)))
+            .unwrap();
+        assert_eq!(complete(&mut active, &mut context), Term::Primitive(P::U8));
+        assert!(matches!(
+            active.poll(&mut foreign),
+            Err(Error::ForeignContext)
+        ));
+        assert_eq!(complete(&mut active, &mut context), Term::Primitive(P::U8));
+        drop(active);
+        assert_eq!(enters(&session, id(package, "Output")), 1);
+        assert_eq!(enters(&session, id(package, "initialize")), 1);
+    });
+}
+
+#[test]
+fn cancellation_after_independent_inference_preserves_the_unpublished_output() {
+    in_source(|package, _queries, mut context, mut session| {
+        let output = session
+            .enqueue(&mut context, id(package, "Output"), vec![])
+            .unwrap();
+        let Start::Invocation(mut active) =
+            session.start(&mut context, output, &mut 100_000).unwrap()
+        else {
+            panic!("ready")
+        };
+        drop(request(&mut active, &mut context));
+        let other = context.fresh(Sort::Type);
+        context
+            .assign(other, I::Stable(Term::Primitive(P::Bool)))
+            .unwrap();
+        drop(active);
+        assert!(!context.is_assigned(output).unwrap());
+        assert!(context.is_assigned(other).unwrap());
+        assert_eq!(
+            context.assign(output, I::Stable(Term::Primitive(P::U8))),
+            Err(elaboration::InferenceError::ReservedVariable(output))
+        );
+        assert!(matches!(
+            session.start(&mut context, output, &mut 0).unwrap(),
+            Start::Settled(State::Failed(Error::Cancelled))
+        ));
+    });
+}
+
+#[test]
+fn two_source_producers_can_publish_into_one_context_without_sharing_execution() {
+    in_sources(2, |package, queries, mut context, mut sessions| {
+        let mut first = sessions.pop().unwrap();
+        let mut second = sessions.pop().unwrap();
+        let left = first
+            .enqueue(&mut context, id(package, "Output"), vec![])
+            .unwrap();
+        let right = second
+            .enqueue(&mut context, id(package, "Output"), vec![])
+            .unwrap();
+        let Start::Invocation(mut left_run) =
+            first.start(&mut context, left, &mut 100_000).unwrap()
+        else {
+            panic!("left ready")
+        };
+        let left_request = request(&mut left_run, &mut context);
+        let Start::Invocation(mut right_run) =
+            second.start(&mut context, right, &mut 100_000).unwrap()
+        else {
+            panic!("right ready")
+        };
+        let right_request = request(&mut right_run, &mut context);
+        assert!(!context.is_assigned(left).unwrap());
+        assert!(!context.is_assigned(right).unwrap());
+        let left_answer = left_request.resolve(|access, fuel| queries.associated(access, fuel));
+        let left_answer = right_run.resume(left_answer).unwrap_err().into_response();
+        assert!(matches!(
+            right_run.poll(&mut context).unwrap(),
+            Progress::Waiting
+        ));
+        right_run
+            .resume(right_request.resolve(|access, fuel| queries.associated(access, fuel)))
+            .unwrap();
+        assert_eq!(
+            complete(&mut right_run, &mut context),
+            Term::Primitive(P::U8)
+        );
+        assert!(!context.is_assigned(left).unwrap());
+        assert!(context.is_assigned(right).unwrap());
+        assert!(matches!(
+            left_run.poll(&mut context).unwrap(),
+            Progress::Waiting
+        ));
+        left_run.resume(left_answer).unwrap();
+        assert_eq!(
+            complete(&mut left_run, &mut context),
+            Term::Primitive(P::U8)
+        );
+        drop((left_run, right_run));
+        for session in [&first, &second] {
+            assert_eq!(enters(session, id(package, "Output")), 1);
+            assert_eq!(enters(session, id(package, "initialize")), 1);
+        }
     });
 }
