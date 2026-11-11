@@ -465,6 +465,136 @@ callee 尚未供应的 B；调整具名参数位置不应改变合法性或实�
 workspace 成员；同步的 Cargo.lock 仅增该成员条目，和外部 Cargo.toml 修改一起留在
 工作区，不属于本次语义修正提交。正式 docs 与作者原有源码修改保持不变。
 
+### 设计决定：待定源区域与已检查片段共用一个 execution owner
+
+以下是尚未实现的接口决定，核对基线为 `b613147b`。单有输入 Progress 不足以恢复
+普通调用；目前 `prepare_required_root_with_live_inputs` 的 `build` 必须先返回完整
+`n::Expr`，之后才能构造 required 世界并 invocation。`Session::fragment` 虽能暂停
+子调用，却借用已建立的 `bytecode::Frame`；它没有源区域身份、待定接收域或后继代码
+交付入口。`InvocationSession` 对外则从一次已获准的函数调用开始。这三个入口都不能
+直接承接“正在检查一个尚无完整结果类型的调用”。
+
+因此下一条接线引入 **源 activation**：前端持有 HIR 与检查任务，VM 持有本次源区域
+的实际存储、已执行前缀及控制出口。它不成为新的源语言函数，不通过合成函数包装
+每个片段，也不增加 `NormalFormArgument` 的表达式分支。完整、已检查的函数仍走
+已有字节码调用；源 activation 在取得一个已检查片段后也进入同一字节码执行核心。
+
+#### 交接数据与所有权
+
+| 对象 | 唯一所有者与内容 | 不能携带的内容 |
+| --- | --- | --- |
+| 源检查区域 | elaboration 会话；保留 HIR snapshot 的借用、`HirId`、词法／phase 环境、任务 continuation、待决域、候选及义务 | 克隆出的另一份 VM 值环境、全局源码地址等待表 |
+| 源 activation | 原 invocation 驱动；区域的本次 activation 身份、环境存储、执行序号、分支／循环出口和未交付结果 | 整个 Checker、HIR 语法树、可由宿主任意改写的寄存器 |
+| 片段许可 | 一个具体 activation、一个尚未消费的执行位置、已完成的域及前提观察 | 仅凭 `HirId` 取得的执行权、旧代许可、其它调用的完成值 |
+| 检查完成片段 | 普通受检 NIR／字节码、显式 import/export 绑定和控制结果契约 | Any 占位、待域完成的表达式、活动 candidate 或 waiter |
+| 域观察响应 | 来自原 activation 的结果身份、接收世界与代次、观察预算；Type 走已有结果准入与发布许可 | 一次无来源的 `Term` 赋值、可变值的永久静态身份、隐含 Copy/Clone 权限 |
+
+表中名字是逻辑职责，尚非新增 Rust API。HIR snapshot 在编译会话中保持有效，任务
+引用原节点；continuation 只保存“已完成哪些子项及下一条规则”，不重建第二份可执行
+AST。完成片段可以包含已有普通控制流；只有遇到实际待决域的地方才交回源检查任务。
+VM 侧请求仅含不透明区域句柄和受限观察，不依赖 `hir` 或 `elaboration` crate。
+新增状态落地时同步提供 S-expression Display，分别显示 source／region／activation
+身份、当前检查任务、执行位置、待定域、实际结果是否已交付及未退出的作用域；不得
+只输出一个含糊的 pending 标志，也不以宿主指针地址区分两次源码执行。
+
+现有 `start_frame` 已将环境移入帧，再把所需绑定移入寄存器；`restore_environment`
+负责归还 imported 绑定。片段交接沿这套移动机制实现，不用 `Value::clone` 快照整个
+环境。新增绑定的 export、未取得的值及已经移走的责任必须分别记录；片段结束不等于
+词法作用域结束。外层可变绑定和捕获保留原存储身份，默认值、方法接收者和嵌套调用
+都共享这条边界。真实作用域退出才按现有规则处理剩余责任。
+
+这里不能原样调用当前 `restore_environment` 来实现任意切点：它先遍历并退出全部
+`Frame::scopes`，适合现有完整片段的完成，不适合在模式／块作用域中挂起。新的交接
+必须由源 activation 保留仍活跃的作用域责任，或仅在内部作用域已经闭合的切点归还
+完整帧；等待本身不触发 `leave_scope`。import/export 交付、控制退出和取消各有一次性
+归还记录，避免正常完成与 Drop 再次恢复同一环境。这一项属于片段协议的验收条件，
+不是现有 Frame 已经提供的能力。
+
+#### 检查前沿和执行前沿分别推进
+
+源检查任务的步骤返回“已完成片段”“等待具体输入”“尚无实现／预算不足”或语义失败。
+等待不能编码成普通 `Error::needs_context` 后从头重试；每个待决项必须保留输入来源
+及 continuation。`checking_attempt` 仍用于候选探测，但不能成为已执行前缀的恢复工具。
+一个步骤退出前结束对活动 Checker 的借用，所有后继所需数据由区域持有；不能把引用
+Checker 的 Rust closure 塞进 VM 或冻结产物。
+
+调度器只交付执行前沿已经获准的片段。纯粹的域检查／表示组装可以留下任务，但其中
+的调用、写入、分支条件、guard、默认值和控制转移仍占有原执行位置。哪些子步骤依赖
+接收域，由普通表达式检查规则产生；不能用 Integer／List／Tuple 名称或 HIR 节点
+白名单赋予“可以跨过”的特权，也不能因为某函数 pure 就越过源码求值顺序执行它。
+
+例如下面的目标用例要求 `trace == 12`，且各处写入只发生一次：
+
+```flurry
+comptime fn Byte() -> Type { u8 }
+
+comptime fn count() -> Integer
+where T, ...values: meta.List<T>
+{
+    values.length()
+}
+
+comptime fn check() -> bool {
+    var trace: Integer = 0;
+    let size = count<
+        .values = do { trace = trace * 10 + 1; [1, 255] },
+        do { trace = trace * 10 + 2; Byte() }
+    >();
+    size == 2 and trace == 12
+}
+```
+
+检查先保存列表接收域的依赖，并按普通规则准备独立于该域的前缀。原 activation
+执行第一处写入；尚待 `u8` 的字面量组装不伪装成一个已经取得的列表值。到达第二个
+输入时，在同一存储中执行写入及 Byte；结果通过 Type 准入后唤醒列表组装和范围检查。
+两个输入都完成后才调用 count。列表中出现需上下文才能选择的调用时，必须保留那条
+操作依赖；不能无条件沿用这个时序。真实依赖闭环才报循环，未实现的节点单独报缺口。
+该示例是接口验收目标，当前尚未动态通过，不是新增的语言放宽规则。
+
+`identity<Byte(), true>(9)` 的另一处暂停发生在 callee：输入 packet 已有完整 producer，
+但 callable 签名还不能发布。区域保存待形成的 callee 任务；Byte 在原 activation 的
+callee 位置执行，接收结果形成 `fn(u8) -> u8` 后才为 9 提供上下文。它不能先作为
+`fn(rigid T) -> rigid T` 进入已完成 NIR，也不能退成任意 `comptime fn` 值。后续实参
+若提供推断证据，可推进检查；这不授予它们先于 callee 执行的许可。
+
+#### 恢复、控制出口与冻结边界
+
+每次交接沿现有请求 Authority/Ticket 增加源 activation 的代次和执行位置校验。
+同一 HIR 节点递归调用或循环再次进入时具有不同执行身份；拒绝重复、跨区域及旧代
+响应时保留当前 waiter。预算不足保留已完成前缀，不重置执行额度，也不自动无限重试。
+响应准入失败终止本次区域，并通过已有调用／输入帧恢复路径处理责任。
+
+片段完成必须传回原 `Flow` 语义，不能把所有出口都折叠为 Value。`return` 离开原函数，
+带标签的 break/continue 指向原循环；它们终结或跳转相应前沿，未到达的后继生产者
+不运行。取消同样不执行后继源码、默认值或契约；已发生的不纯效果不承诺回滚。内部
+存储检查点只用于尚未提交的检查探测，不抵消真实 invocation 的写入或外部效果。
+
+声明世界仍由不可变快照及发布协议提供。活动区域不能冻结进 RequiredWorld、代码
+缓存或 Type 结果缓存；新增片段必须带可见世界与依赖证据。后继片段若需要新发布
+定义，显式申请对应可见世界，不能替换当前 CodeSession 的包指针并沿用旧准入结果。
+首次交付可以限制为现有世界中的代码片段，但必须明确诊断跨世界缺口，不悄悄忽略。
+
+#### 第一条接线必须闭合的范围
+
+先在同一纵向提交中接通源检查 continuation、源 activation 的片段交接，以及普通
+callable 的两个等待点。只增加 public request enum 或可手工构造的 fragment session
+不能算这条路径完成。完整表达式继续沿已有入口；待定表达式由共同规则逐步产出片段，
+最终不再要求 VM 执行一份扩张后的专用参数 AST。NF／名义类型随后改为同一消费者，
+在它们迁移前不能删除仍在用的旧参数计划。
+
+验收同时检查：上述源码顺序、Type 生产者次数、分支只执行所选路径、提前 return
+阻断后继、跨片段可变接收者身份、默认值与空展开位置、域错误拒绝、失败／取消后旧
+响应拒绝，以及同一源码的递归／循环 activation 不串值。Type 结果保留不透明 NF 头；
+错误元素不能借机改变为“延迟接受”。普通定义和未选分支仍执行语言要求的检查；已知
+错误不能因为本次没有执行而消失，合法 residual 与尚无实现的检查分开报告。
+
+当前动态证据：在 `/home/fin/luna` 运行
+`python3 -B development/check.py --timeout 900 -- test -p luna --test ordinary_callable_types --test ordinary_clause_collectors --no-fail-fast -- --ignored`，
+`/tmp/luna-tools-qx183hcc/result.json` 退出 101。两个原有正例分别报
+`comptime callable signature still depends on an invocation-time clause input` 和
+`list literal requires an element type context`。没有改变其预期或解除 ignore。
+本次是接口与迁移设计收敛，不声称实现了源 activation。
+
 ## 5. Observe、登记与发布
 
 ObservationKey 包含语义主体、所请求 facet、作用域/视图和当前前提；它与 task key 不同。

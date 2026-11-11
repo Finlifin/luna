@@ -126,16 +126,24 @@ where T, flag: bool
 
 | 现有生产入口 | 当前已经保留 | 本次需要贯通的交接 |
 | --- | --- | --- |
-| `declaration_inputs.rs` | 路由、源码求值顺序、默认值、前置域与形成义务 | `InputChecking::Typed` 不再迫使待定域立即产出完整 Expr；普通检查器保留可恢复区域 |
+| `declaration_inputs.rs` | 路由、源码求值顺序、默认值、前置域与形成义务；Progress 独占 producer、身份及准备位置 | `InputChecking::Typed` 不再迫使待定域立即产出完整 Expr；普通检查器保留可恢复区域 |
 | `dynamic_instances.rs` | packet 的实际表达式、已观察身份及 pending 参数分别保存 | pending 参数影响签名时保留尚未发布的调用准备，不能把 rigid 当作已完成 callable 类型 |
 | `type_computations.rs::Session` | committed 推断世界、单输出发布许可、可恢复 invocation 及已有签名任务 | 形成的 Type 结果需回到其源表达式区域，关联原参数位置、词法环境及真实生产者 |
 | `invocation/host.rs::InvocationSession` | 独占执行现场、关联／方法选择与定义准备请求、线性响应及取消 | 一般前端表达式检查仍需接入；不把同步回调或另起一次求值当成恢复 |
-| `required/prepared.rs` | 冻结声明目录、单次输入及代码缓存所有者 | 世界可共享，活动前端区域、等待者及本次值不得冻结到代码缓存 |
+| `invocation/session.rs::Session::fragment` | 已建字节码帧的驱动及其子调用；现有输入帧通过移动归还环境 | 源 activation 接收后继受检片段，保留环境、原控制出口及一次性执行位置；不能仅公开原借用入口 |
+| `required.rs` / `required/prepared.rs` | 完整根 Expr 的准备、冻结声明目录、单次输入及代码缓存所有者 | 在完整根形成前启动源区域；世界可共享，活动前端区域、等待者及本次值不得冻结到代码缓存 |
 
 先使用已有 HIR 身份、telescope、声明输入计划和 VM activation；不建立第二份
 可修改的值表或以 AST 地址为键的全局等待表。具体所有权和响应提交沿
 [状态协议](elaboration-state-and-publication.md)，表达式检查与执行依赖的区别沿
 [调用期域边界](values-staging-and-publication.md#invocation-才能取得的域必须同时接通检查与执行)。
+
+下一批不继续把“新增一个 owner／请求变体”单独当成恢复主干的交付。按
+[源 activation 与片段交接](elaboration-state-and-publication.md#设计决定待定源区域与已检查片段共用一个-execution-owner)
+完成三个共同依赖的改变：普通检查规则返回保留 continuation 的待决任务；原 VM
+activation 在同一存储中执行已获准片段并交回控制结果；callable 输入域及签名消费
+实际 Type 响应。完整根仍走已有快路径。不能为每个片段合成一个新函数／新 invocation，
+也不能将活动 HIR 句柄塞进稳定 NIR 或代码缓存来获得一个看似可运行的入口。
 
 这一纵向交付必须同时做到：
 

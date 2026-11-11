@@ -215,6 +215,15 @@ cell 身份、内容和 ownership，成功 quote 仍保留构造效果。内部�
 这是生产准备路径的状态清理，尚未接通 HIR 挂起或实际 Type 结果回填。范围见
 [声明输入准备进度](elaboration-state-and-publication.md#已接入声明输入准备有独立的进度所有者)。
 
+在 `b613147b` 再次显式执行两个 ignored 正例，仍分别失败于待定 callable 签名和
+列表缺少元素上下文，证据 `/tmp/luna-tools-qx183hcc/result.json`（退出 101）。
+进一步核对发现，required 准备必须先取得完整根 Expr，而 fragment 驱动只借用
+已建字节码帧；现有外部请求本身不能跨越这道前端边界。已补定
+[源 activation 的交接设计](elaboration-state-and-publication.md#设计决定待定源区域与已检查片段共用一个-execution-owner)：
+HIR 与检查 continuation 归前端，实际存储和执行位置归原 invocation；后继受检片段
+通过移动交接绑定，并保留原控制出口。设计明确了完整根入口的迁移、身份／许可、
+尚未取得的值、域响应及冻结边界；这部分尚未实现，没有把失败测试改成拒绝预期。
+
 这几步是 M1–M3 的前置清理，不是整条恢复架构完成。后续主干仍是
 [待定域的普通调用](refactoring-plan.md#下一条纵向交付待定域的普通调用)，并用真实
 sysroot 的 meta.List／builder／comptime 方法作消费者。不能继续只在已知域的静态
