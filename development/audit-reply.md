@@ -130,6 +130,13 @@ Type 生产队列还有一个实际断点：保留输入等待者之后，就绪
 这仍不是通用前端 Region：参数准备与部分服务仍同步，两个普通 callable 待定
 正例仍未解锁。报告关于全链路恢复未接通的判断继续保留。
 
+定义 builder 的同步边界也已进一步拆开：struct／enum／newtype 的源字节码请求
+现在能离开 invocation 驱动，宿主完成准备后返回未提交 receipt，由原 VM 核对并安装。
+Type 队列与 luna 调用入口均使用该接线；参考执行共用描述检查和安装规则。
+这消除了“已有 preparation 但外层仍不能保存等待状态”的一处断点；普通源码检查和
+publisher 内部步骤尚未因此获得恢复能力。范围及验证见
+[定义准备的宿主交接](elaboration-state-and-publication.md#定义准备也能离开源-invocation-驱动)。
+
 ## 3. 已有清理在目标架构中的位置
 
 `03908c64` 将源码控制状态集中到 `control::Context`，降低进入／退出检查边界漏恢复

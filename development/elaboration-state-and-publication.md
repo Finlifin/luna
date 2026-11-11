@@ -716,6 +716,46 @@ trial 返回错误，保持原执行现场、宿主请求和额度；可以随�
 
 以上仍为保留既有工作区修改的针对性验证；没有运行全 workspace 或性能基准。
 
+### 定义准备也能离开源 invocation 驱动
+
+字节码的 `BuildDefinition` 原本虽已发出 preparation，却在下一驱动步同步执行
+builder 回调。现已将 struct、enum、newtype 的处理拆成共同的三段：解码并检查
+源描述；宿主准备未提交的 receipt；原 VM 核对描述、完成目录准入后安装。
+源调用返回 `DefinitionHostRequest`，请求持有原描述、源世界、线性 ticket 和独占
+预算额度；宿主可以保存请求，待其依赖就绪后再交回 prepared receipt。
+
+暂停期间原字节码 frame 保留指令位置和目标槽，输入包已经消费，不再执行生产者。
+外层 Type 输出仍未赋值，接收响应也不立即安装：下一次 poll 才进入原有描述核对与
+发布边界。错误类型、篡改字段／表示、无效定义及宿主虚增预算均不得发布。
+误投响应原样退回；取消销毁活动 receipt，迟到响应不能命中新 invocation。
+这里的取消不撤销宿主 prepare 已经发生的外部行为，也不会退款未知工作量。
+
+Type 队列驱动与 luna 源 invocation 入口均处理这个请求，默认同步适配器在 VM 外
+调用已配置 publisher，再把 receipt 交回原执行。调用者也可自行调度请求后显式
+respond。参考树执行及 IIR 内部驱动仍同步使用原 publisher，但与源调用共用
+解码和接收方准入，不增加另一套描述检查。代码缓存不存请求、receipt 或完成 Type。
+
+这条边界服务已有的具体定义 builder，不等于任意 HIR 表达式检查已可恢复，也不等于
+publisher 内部的 Preparing 已拆成可恢复步骤。定义发布的统一版本根、一般源码
+Region 和两个普通 callable 待定域正例仍未完成；不能把公开请求接口当成这些接线。
+
+验证工作目录 `/home/fin/luna`：
+
+- `python3 -B development/check.py --timeout 900 -- check -p elaboration -p luna`：
+  `/tmp/luna-tools-t76z7lzt/result.json`，退出 0。
+- 最终 `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib -p luna --test invocation_host_requests --test type_invocation_sessions --test builder_invocations --no-fail-fast`：
+  `/tmp/luna-tools-adhqa3r1/result.json`，退出 0，775 项通过。覆盖暂停期间不消耗
+  VM 额度、接收后仍未发布、跨 owner 响应退回、取消、错误描述、虚增额度和宿主
+  拒绝不执行后继。真实 sysroot 验证三类 builder 依次使用刚生成的类型、每次调用
+  产生新身份，Type 队列在 receipt 安装前保持输出未赋值。
+- 既有 86 项 builder 集成检查包含声明期生成、正常调用、描述拒绝、回调失败及
+  具体 IIR／参考执行；没有用只拼 Rust 描述的测试代替公开库接口验收。
+- 本次 16 个 Rust 文件的 `rustfmt --check`：
+  `/tmp/luna-tools-549c9lek/result.json`，退出 0；`git diff --check` 通过。
+
+未运行全 workspace 或性能基准；原有资源检查修改仍保留在工作区，以上并非纯 HEAD
+验收。正式 docs 与另一位开发者的 formatter 未修改或纳入提交。
+
 ## 8. 宿主请求与候选、取消的组合
 
 候选内允许的计算必须可隔离且可安全重放。pure 承诺用于相应纯计算，不自动使定义发布

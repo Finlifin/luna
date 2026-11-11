@@ -1,5 +1,5 @@
-//! An exclusively borrowed invocation with owned associated-selection messages.
-//! Admission and other host services are still synchronous. This interface is
+//! An exclusively borrowed invocation with owned selection and definition messages.
+//! Call admission and other host services are still synchronous. This interface is
 //! not a general frontend-region suspension or a cross-process wire protocol.
 use super::*;
 use crate::request_identity::Ticket;
@@ -15,6 +15,7 @@ pub enum InvocationProgress<'world> {
     Running,
     Waiting,
     Associated(AssociatedHostRequest<'world>),
+    Definition(DefinitionHostRequest<'world>),
     Complete(Value),
 }
 
@@ -185,6 +186,8 @@ impl<'world> InvocationSession<'_, 'world> {
             Poll::Pending => {
                 if let Some(request) = self.session.take_host_request()? {
                     Ok(InvocationProgress::Associated(request))
+                } else if let Some(request) = self.session.take_definition_request()? {
+                    Ok(InvocationProgress::Definition(request))
                 } else if self.session.waiting_for_host() {
                     Ok(InvocationProgress::Waiting)
                 } else {
@@ -201,6 +204,12 @@ impl<'world> InvocationSession<'_, 'world> {
         response: AssociatedHostResponse<'world>,
     ) -> Result<(), RejectedHostResponse<'world>> {
         self.session.receive_host_response(response)
+    }
+    pub fn resume_definition(
+        &mut self,
+        response: DefinitionHostResponse<'world>,
+    ) -> Result<(), RejectedDefinitionResponse<'world>> {
+        self.session.receive_definition_response(response)
     }
     pub fn cancel(&mut self) {
         self.session.cancel();
@@ -258,6 +267,7 @@ impl fmt::Display for InvocationProgress<'_> {
             Self::Running => f.write_str("(running)"),
             Self::Waiting => f.write_str("(waiting)"),
             Self::Associated(request) => write!(f, "{request}"),
+            Self::Definition(request) => write!(f, "{request}"),
             Self::Complete(value) => write!(f, "(complete {value})"),
         }
     }

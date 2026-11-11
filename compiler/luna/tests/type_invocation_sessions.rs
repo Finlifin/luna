@@ -104,6 +104,7 @@ fn request<'w>(
         match active.poll(context).unwrap() {
             Progress::Running => {}
             Progress::Associated(request) => return request,
+            Progress::Definition(_) => panic!("unexpected definition preparation"),
             Progress::Settled(state) => panic!("settled before selection: {state}"),
             Progress::Waiting => panic!("request was not returned"),
         }
@@ -606,4 +607,69 @@ fn two_source_producers_can_publish_into_one_context_without_sharing_execution()
             assert_eq!(enters(session, id(package, "initialize")), 1);
         }
     });
+}
+
+#[test]
+fn generated_type_output_remains_reserved_until_its_receipt_is_installed() {
+    use elaboration::definitions::AllocatedDefinitionPublisher;
+    let package = sysroot::compile(
+        "
+        comptime fn Build() -> Type {
+            let record = meta.StructBuilder.new(.name = .Record);
+            record.add_field(.flag, bool);
+            record.Build()
+        }
+    ",
+    )
+    .unwrap();
+    let publisher = AllocatedDefinitionPublisher::new(&package, 9900, 1, 10_000_000);
+    let builder = |request: &comptime_interpretor::StructBuildRequest, fuel: &mut u64| {
+        publisher.prepare_struct(request, fuel)
+    };
+    let mut context = InferenceContext::default();
+    let mut session = Session::new_with_struct_builder(
+        &package,
+        &context,
+        Budget {
+            steps: 10_000_000,
+            depth: 128,
+        },
+        &builder,
+    )
+    .unwrap();
+    let output = session
+        .enqueue(&mut context, id(&package, "Build"), vec![])
+        .unwrap();
+    let ty = {
+        let Start::Invocation(mut active) =
+            session.start(&mut context, output, &mut 100_000).unwrap()
+        else {
+            panic!("ready")
+        };
+        let request = loop {
+            match active.poll(&mut context).unwrap() {
+                Progress::Running => {}
+                Progress::Definition(request) => break request,
+                _ => panic!("definition producer must suspend"),
+            }
+        };
+        assert!(!context.is_assigned(output).unwrap());
+        let response = request.prepare();
+        assert!(!context.is_assigned(output).unwrap());
+        active.resume_definition(response).unwrap();
+        assert!(!context.is_assigned(output).unwrap());
+        complete(&mut active, &mut context)
+    };
+    assert_eq!(context.freeze(&I::Meta(output)).unwrap(), ty);
+    assert_eq!(enters(&session, id(&package, "Build")), 1);
+    drop(session);
+    let (published, _) = publisher.finish();
+    assert_eq!(published.structs.len(), 1);
+    assert_eq!(
+        ty,
+        Term::Nominal {
+            declaration: published.structs[0][0].declaration,
+            arguments: vec![]
+        }
+    );
 }

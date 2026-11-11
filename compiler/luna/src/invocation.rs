@@ -334,6 +334,11 @@ fn execute_prepared(
                             .resume(response)
                             .map_err(|failure| failure.error().clone())?;
                     }
+                    InvocationProgress::Definition(request) => {
+                        active
+                            .resume_definition(request.prepare())
+                            .map_err(|failure| failure.error().clone())?;
+                    }
                     InvocationProgress::Complete(value) => break Ok(value),
                     // This synchronous adapter immediately answers every request.
                     InvocationProgress::Waiting => {

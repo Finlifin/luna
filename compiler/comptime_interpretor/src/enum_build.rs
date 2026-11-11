@@ -162,11 +162,11 @@ impl<'a> Interpreter<'a> {
         self
     }
 
-    pub(super) fn build_enum_value(
+    pub(super) fn decode_enum_build(
         &mut self,
         value: Value,
         source: SourceRange,
-    ) -> Result<Value, Error> {
+    ) -> Result<EnumBuildRequest, Error> {
         let fail = || Error {
             kind: ErrorKind::Type,
             source: Some(source),
@@ -340,10 +340,19 @@ impl<'a> Interpreter<'a> {
             symbol_encoding,
             source: source,
         };
-        let builder = self.enum_builder.ok_or_else(fail)?;
-        let prepared = host_budget::clamped(&mut self.budget.steps, |remaining| {
-            builder(&request, remaining)
-        })?;
+        Ok(request)
+    }
+
+    pub(super) fn admit_enum_build(
+        &mut self,
+        request: &EnumBuildRequest,
+        prepared: PreparedEnumBuild<'a>,
+    ) -> Result<Value, Error> {
+        let source = request.source;
+        let fail = || Error {
+            kind: ErrorKind::Type,
+            source: Some(source),
+        };
         self.integer_operation(Some(source), |budget| {
             budget.consume(prepared.definitions.len())
         })?;

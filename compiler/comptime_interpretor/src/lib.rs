@@ -44,6 +44,9 @@ mod input_collection;
 mod input_dependencies;
 mod input_domains;
 mod invocation;
+pub use invocation::definition_host::{
+    DefinitionHostRequest, DefinitionHostResponse, RejectedDefinitionResponse,
+};
 pub use invocation::host::{
     AssociatedHostRequest, AssociatedHostResponse, InvocationProgress, InvocationSession,
     RejectedHostResponse,
@@ -91,6 +94,7 @@ pub use definition_diagnostics::DefinitionBuildError;
 mod enum_build;
 pub use enum_build::{EnumBuildRequest, PreparedEnumBuild};
 mod definition_build;
+pub use definition_build::{DefinitionBuildRequest, PreparedDefinitionBuild};
 mod newtype_build;
 pub use newtype_build::{NewtypeBuildRequest, PreparedNewtypeBuild};
 mod struct_build;

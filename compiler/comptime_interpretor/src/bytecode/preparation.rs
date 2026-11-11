@@ -23,6 +23,12 @@ impl Frame {
     }
 }
 
+impl Preparation {
+    pub(crate) fn is_definition(&self) -> bool {
+        matches!(self.operation, Operation::Definition { .. })
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum Operation {
     Method {
@@ -78,7 +84,7 @@ impl fmt::Display for Operation {
     }
 }
 
-impl Interpreter<'_> {
+impl<'a> Interpreter<'a> {
     pub(crate) fn prepare_bytecode_request(
         &mut self,
         frame: &mut Frame,
@@ -90,36 +96,20 @@ impl Interpreter<'_> {
         {
             return Err(self.failure(ErrorKind::InvalidControlFlow, None));
         }
+        if request.is_definition() {
+            let (destination, request) = self.begin_bytecode_definition(frame, request)?;
+            let resolver = self.definition_resolver(&request);
+            let prepared = host_budget::clamped(&mut self.budget.steps, |fuel| {
+                resolver.prepare(&request, fuel)
+            })?;
+            return self.finish_bytecode_definition(frame, destination, &request, prepared);
+        }
         // Claim before touching operands or calling the host. Errors and unwinds
         // leave this activation terminal; retry requires a fresh execution frame.
         frame.waiting = None;
         frame.terminal = true;
         match request.operation {
-            Operation::Definition { code, instruction } => {
-                if !Arc::ptr_eq(&frame.code, &code) || frame.pc.checked_sub(1) != Some(instruction)
-                {
-                    return Err(self.failure(ErrorKind::InvalidControlFlow, None));
-                }
-                let instruction = &code.instructions()[instruction];
-                let Op::BuildDefinition {
-                    destination,
-                    value,
-                    build,
-                } = &instruction.op
-                else {
-                    return Err(
-                        self.failure(ErrorKind::InvalidControlFlow, Some(instruction.source))
-                    );
-                };
-                let value = frame.slots[*value].take().ok_or_else(|| {
-                    self.failure(ErrorKind::MissingBinding, Some(instruction.source))
-                })?;
-                frame.slots[*destination] = Some(self.complete_definition_build(
-                    build.as_ref(),
-                    value,
-                    instruction.source,
-                )?);
-            }
+            Operation::Definition { .. } => unreachable!("handled above"),
             Operation::Method {
                 destination,
                 method,
@@ -143,6 +133,62 @@ impl Interpreter<'_> {
                 )?;
             }
         }
+        frame.terminal = false;
+        Ok(())
+    }
+
+    /// Claim this instruction once, retaining a terminal frame until its
+    /// checked publication response is admitted by the owning session.
+    pub(crate) fn begin_bytecode_definition(
+        &mut self,
+        frame: &mut Frame,
+        request: Preparation,
+    ) -> Result<(usize, DefinitionBuildRequest), Error> {
+        if frame.terminal
+            || !matches!(&frame.waiting, Some(Waiting::Preparation(ticket))
+            if ticket.matches(&request.ticket))
+        {
+            return Err(self.failure(ErrorKind::InvalidControlFlow, None));
+        }
+        frame.waiting = None;
+        frame.terminal = true;
+        let Operation::Definition { code, instruction } = request.operation else {
+            return Err(self.failure(ErrorKind::InvalidControlFlow, None));
+        };
+        if !Arc::ptr_eq(&frame.code, &code) || frame.pc.checked_sub(1) != Some(instruction) {
+            return Err(self.failure(ErrorKind::InvalidControlFlow, None));
+        }
+        let instruction = &code.instructions()[instruction];
+        let Op::BuildDefinition {
+            destination,
+            value,
+            build,
+        } = &instruction.op
+        else {
+            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(instruction.source)));
+        };
+        if build.output != Term::Primitive(Primitive::Type) {
+            return Err(self.failure(ErrorKind::Type, Some(instruction.source)));
+        }
+        let value = frame.slots[*value]
+            .take()
+            .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(instruction.source)))?;
+        self.decode_definition_build(build.kind, value, instruction.source)
+            .map(|request| (*destination, request))
+    }
+
+    pub(crate) fn finish_bytecode_definition(
+        &mut self,
+        frame: &mut Frame,
+        destination: usize,
+        request: &DefinitionBuildRequest,
+        prepared: PreparedDefinitionBuild<'a>,
+    ) -> Result<(), Error> {
+        if !frame.terminal || frame.waiting.is_some() || destination >= frame.slots.len() {
+            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(request.source())));
+        }
+        let value = self.admit_definition_build(request, prepared)?;
+        frame.slots[destination] = Some(value);
         frame.terminal = false;
         Ok(())
     }

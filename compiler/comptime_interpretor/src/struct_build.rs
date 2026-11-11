@@ -63,11 +63,11 @@ impl<'a> Interpreter<'a> {
         self
     }
 
-    pub(super) fn build_struct_value(
+    pub(super) fn decode_struct_build(
         &mut self,
         value: Value,
         source: SourceRange,
-    ) -> Result<Value, Error> {
+    ) -> Result<StructBuildRequest, Error> {
         let fail = || Error {
             kind: ErrorKind::Type,
             source: Some(source),
@@ -133,12 +133,19 @@ impl<'a> Interpreter<'a> {
             fields,
             source: source,
         };
-        // Reserve the allowance before entering host code. Unwind cannot refund
-        // unknown work, and a successful host cannot replenish the VM's budget.
-        let builder = self.struct_builder.ok_or_else(fail)?;
-        let prepared = host_budget::clamped(&mut self.budget.steps, |remaining| {
-            builder(&request, remaining)
-        })?;
+        Ok(request)
+    }
+
+    pub(super) fn admit_struct_build(
+        &mut self,
+        request: &StructBuildRequest,
+        prepared: PreparedStructBuild<'a>,
+    ) -> Result<Value, Error> {
+        let source = request.source;
+        let fail = || Error {
+            kind: ErrorKind::Type,
+            source: Some(source),
+        };
         self.integer_operation(Some(source), |budget| {
             budget.consume(prepared.definitions.len())
         })?;

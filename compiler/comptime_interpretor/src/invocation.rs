@@ -2,6 +2,7 @@
 //! These boundaries are shared by the migration interpreter and linear bodies.
 use super::*;
 mod contracts;
+pub(super) mod definition_host;
 pub(super) mod host;
 mod session;
 use session::Session;

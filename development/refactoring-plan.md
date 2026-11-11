@@ -129,7 +129,7 @@ where T, flag: bool
 | `declaration_inputs.rs` | 路由、源码求值顺序、默认值、前置域与形成义务 | `InputChecking::Typed` 不再迫使待定域立即产出完整 Expr；普通检查器保留可恢复区域 |
 | `dynamic_instances.rs` | packet 的实际表达式、已观察身份及 pending 参数分别保存 | pending 参数影响签名时保留尚未发布的调用准备，不能把 rigid 当作已完成 callable 类型 |
 | `type_computations.rs::Session` | committed 推断世界、单输出发布许可、可恢复 invocation 及已有签名任务 | 形成的 Type 结果需回到其源表达式区域，关联原参数位置、词法环境及真实生产者 |
-| `invocation/host.rs::InvocationSession` | 独占执行现场、关联选择请求、线性响应及取消 | 前端检查请求复用执行进度，不把同步回调或另起一次求值当成恢复 |
+| `invocation/host.rs::InvocationSession` | 独占执行现场、关联选择与定义准备请求、线性响应及取消 | 一般前端表达式检查仍需接入；不把同步回调或另起一次求值当成恢复 |
 | `required/prepared.rs` | 冻结声明目录、单次输入及代码缓存所有者 | 世界可共享，活动前端区域、等待者及本次值不得冻结到代码缓存 |
 
 先使用已有 HIR 身份、telescope、声明输入计划和 VM activation；不建立第二份

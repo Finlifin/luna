@@ -1,5 +1,5 @@
 //! One owner for the complete driver continuation and its exclusively borrowed VM.
-//! Associated selections can leave the driver as owned host requests.
+//! Associated selection and definition preparation can leave as owned host requests.
 use super::host::{AssociatedHostRequest, AssociatedHostResponse, RejectedHostResponse};
 use super::*;
 use crate::request_identity::{Authority, Ticket};
@@ -36,16 +36,56 @@ impl Root<'_> {
     }
 }
 
-enum Pending {
+enum Pending<'a> {
+    Definition {
+        destination: usize,
+        request: DefinitionBuildRequest,
+    },
+    DefinitionResponse {
+        destination: usize,
+        request: DefinitionBuildRequest,
+        prepared: Result<PreparedDefinitionBuild<'a>, Error>,
+    },
+    DefinitionHost {
+        ticket: Ticket,
+        granted: u64,
+        destination: usize,
+    },
     Associated(associated_execution::Request),
     AssociatedResponse(associated_execution::Response),
-    Host { ticket: Ticket, granted: u64 },
+    Host {
+        ticket: Ticket,
+        granted: u64,
+    },
     Bytecode(bytecode::Preparation),
 }
 
-impl fmt::Display for Pending {
+impl fmt::Display for Pending<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Definition {
+                destination,
+                request,
+            } => write!(
+                f,
+                "(prepare-definition (destination {destination}) {request})"
+            ),
+            Self::DefinitionResponse {
+                destination,
+                request,
+                ..
+            } => write!(
+                f,
+                "(definition-response (destination {destination}) {request})"
+            ),
+            Self::DefinitionHost {
+                ticket,
+                granted,
+                destination,
+            } => write!(
+                f,
+                "(awaiting-definition {ticket} (granted {granted}) (destination {destination}))"
+            ),
             Self::Associated(request) => write!(f, "{request}"),
             Self::AssociatedResponse(response) => write!(f, "{response}"),
             Self::Host { ticket, granted } => {
@@ -60,7 +100,7 @@ pub(super) struct Session<'vm, 'a, 'r> {
     vm: &'vm mut Interpreter<'a>,
     root: Root<'r>,
     execution: Option<Execution<'a>>,
-    pending: Option<Pending>,
+    pending: Option<Pending<'a>>,
     requests: Authority,
     stack: Vec<StackEntry<'a>>,
     result: Option<Completion<'a>>,
@@ -160,6 +200,31 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 .map_err(|failure| failure.error().clone())?;
             return Ok(Poll::Pending);
         }
+        if matches!(self.pending, Some(Pending::Definition { .. })) {
+            if external {
+                return Ok(Poll::Pending);
+            }
+            // Reference/IIR execution has no source-world host envelope. It
+            // uses the same descriptor/receipt admission with its configured
+            // synchronous service, while source sessions may yield externally.
+            let Some(Pending::Definition {
+                destination,
+                request,
+            }) = self.pending.take()
+            else {
+                unreachable!()
+            };
+            let resolver = self.vm.definition_resolver(&request);
+            let prepared = host_budget::clamped(&mut self.vm.budget.steps, |fuel| {
+                resolver.prepare(&request, fuel)
+            });
+            self.pending = Some(Pending::DefinitionResponse {
+                destination,
+                request,
+                prepared,
+            });
+            return Ok(Poll::Pending);
+        }
         let result = self.step(external);
         if !matches!(result, Ok(Poll::Pending)) {
             debug_assert!(
@@ -177,7 +242,10 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
     }
 
     pub(super) fn waiting_for_host(&self) -> bool {
-        matches!(self.pending, Some(Pending::Host { .. }))
+        matches!(
+            self.pending,
+            Some(Pending::Host { .. } | Pending::DefinitionHost { .. })
+        )
     }
 
     pub(super) fn charge_preparation(&mut self, steps: usize) -> Result<(), Error> {
@@ -238,6 +306,78 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         Ok(())
     }
 
+    pub(super) fn take_definition_request(
+        &mut self,
+    ) -> Result<Option<DefinitionHostRequest<'a>>, Error> {
+        if self.terminal || !matches!(self.pending, Some(Pending::Definition { .. })) {
+            return Ok(None);
+        }
+        let Some(world) = self.vm.declaration_world else {
+            self.cancel();
+            return Err(self.vm.failure(ErrorKind::InvalidControlFlow, None));
+        };
+        let ticket = match self.requests.issue() {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                self.cancel();
+                return Err(error);
+            }
+        };
+        let Some(Pending::Definition {
+            destination,
+            request,
+        }) = self.pending.take()
+        else {
+            unreachable!()
+        };
+        let resolver = self.vm.definition_resolver(&request);
+        let granted = std::mem::take(&mut self.vm.budget.steps);
+        self.pending = Some(Pending::DefinitionHost {
+            ticket: ticket.clone(),
+            granted,
+            destination,
+        });
+        Ok(Some(DefinitionHostRequest {
+            ticket,
+            world,
+            request,
+            resolver,
+            granted,
+            remaining: granted,
+        }))
+    }
+
+    pub(super) fn receive_definition_response(
+        &mut self,
+        response: DefinitionHostResponse<'a>,
+    ) -> Result<(), RejectedDefinitionResponse<'a>> {
+        let valid = !self.terminal
+            && self
+                .vm
+                .declaration_world
+                .is_some_and(|world| std::ptr::eq(world, response.world))
+            && matches!(&self.pending, Some(Pending::DefinitionHost {ticket,..}) if ticket.matches(&response.ticket));
+        if !valid {
+            return Err(response.reject());
+        }
+        let Some(Pending::DefinitionHost {
+            granted,
+            destination,
+            ..
+        }) = self.pending.take()
+        else {
+            unreachable!()
+        };
+        let (remaining, request, prepared) = response.settle(granted);
+        self.vm.budget.steps = remaining;
+        self.pending = Some(Pending::DefinitionResponse {
+            destination,
+            request,
+            prepared,
+        });
+        Ok(())
+    }
+
     fn step(&mut self, external: bool) -> Result<Poll<Option<Flow>>, Error> {
         let Self {
             vm,
@@ -256,14 +396,54 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                         .and_then(StackEntry::code)
                         .or_else(|| root.code())
                         .expect("preparation owner");
-                    if let Err(error) = vm.prepare_bytecode_request(parent, preparation) {
+                    let checked = if preparation.is_definition() {
+                        vm.begin_bytecode_definition(parent, preparation).map(
+                            |(destination, request)| {
+                                *pending = Some(Pending::Definition {
+                                    destination,
+                                    request,
+                                });
+                            },
+                        )
+                    } else {
+                        vm.prepare_bytecode_request(parent, preparation)
+                    };
+                    if let Err(error) = checked {
+                        *result = Some(Completion::Ordinary {
+                            flow: Err(error),
+                            defaults: None,
+                        });
+                    }
+                    // Do not resume the terminal bytecode frame before the
+                    // definition request has left and its receipt is admitted.
+                    if pending.is_some() {
+                        return Ok(Poll::Pending);
+                    }
+                }
+                Pending::DefinitionResponse {
+                    destination,
+                    request,
+                    prepared,
+                } => {
+                    let parent = stack
+                        .last_mut()
+                        .and_then(StackEntry::code)
+                        .or_else(|| root.code())
+                        .expect("definition owner");
+                    let checked = prepared.and_then(|prepared| {
+                        vm.finish_bytecode_definition(parent, destination, &request, prepared)
+                    });
+                    if let Err(error) = checked {
                         *result = Some(Completion::Ordinary {
                             flow: Err(error),
                             defaults: None,
                         });
                     }
                 }
-                Pending::Associated(_) | Pending::Host { .. } => {
+                Pending::Associated(_)
+                | Pending::Host { .. }
+                | Pending::Definition { .. }
+                | Pending::DefinitionHost { .. } => {
                     unreachable!("host work is driven before execution")
                 }
                 Pending::AssociatedResponse(response) => {

@@ -2,8 +2,8 @@
 //! until the invocation completes; cancellation is terminal and cannot replay it.
 use super::*;
 use comptime_interpretor::{
-    AssociatedHostRequest, AssociatedHostResponse, InvocationProgress, InvocationSession,
-    RejectedHostResponse,
+    AssociatedHostRequest, AssociatedHostResponse, DefinitionHostRequest, DefinitionHostResponse,
+    InvocationProgress, InvocationSession, RejectedDefinitionResponse, RejectedHostResponse,
 };
 
 /// Dependency waits and terminal results do not create an execution driver.
@@ -17,6 +17,7 @@ pub enum Progress<'session, 'world> {
     Running,
     Waiting,
     Associated(AssociatedHostRequest<'world>),
+    Definition(DefinitionHostRequest<'world>),
     Settled(&'session State),
 }
 
@@ -82,6 +83,9 @@ impl<'world> Invocation<'_, 'world> {
             Ok(InvocationProgress::Associated(request)) => {
                 return Ok(Progress::Associated(request));
             }
+            Ok(InvocationProgress::Definition(request)) => {
+                return Ok(Progress::Definition(request));
+            }
             Ok(InvocationProgress::Complete(value)) => {
                 let result = self.publish(context, value);
                 self.settle(result);
@@ -89,6 +93,17 @@ impl<'world> Invocation<'_, 'world> {
             Err(error) => self.settle(Err(Error::Invocation(error))),
         }
         Ok(Progress::Settled(&self.pending.state))
+    }
+
+    pub fn resume_definition(
+        &mut self,
+        response: DefinitionHostResponse<'world>,
+    ) -> Result<(), RejectedDefinitionResponse<'world>> {
+        if let Some(driver) = &mut self.driver {
+            driver.resume_definition(response)
+        } else {
+            Err(response.reject())
+        }
     }
 
     pub fn resume(
@@ -250,6 +265,11 @@ pub(super) fn drive(
             Progress::Associated(request) => {
                 let response = request.resolve(&mut *resolve);
                 if let Err(rejected) = execution.resume(response) {
+                    execution.settle(Err(Error::Invocation(rejected.error().clone())));
+                }
+            }
+            Progress::Definition(request) => {
+                if let Err(rejected) = execution.resume_definition(request.prepare()) {
                     execution.settle(Err(Error::Invocation(rejected.error().clone())));
                 }
             }

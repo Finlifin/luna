@@ -152,6 +152,11 @@ fn source_selection(deferred: bool, contracts: bool) {
                                 });
                                 active.resume(response).unwrap();
                             }
+                            InvocationProgress::Definition(request) => {
+                                active
+                                    .resume_definition(request.prepare())
+                                    .map_err(|failure| failure.error().clone())?;
+                            }
                             InvocationProgress::Complete(value) => break Ok(value),
                             InvocationProgress::Waiting => {
                                 panic!("an answered request must not remain waiting")
@@ -222,4 +227,96 @@ fn explicit_comptime_type_arguments_can_use_the_active_callers_storage() {
         ),
         Value::Bool(true)
     );
+}
+
+#[test]
+fn public_builders_suspend_cross_kind_publication_and_reuse_completed_types() {
+    use elaboration::definitions::AllocatedDefinitionPublisher;
+    let package = sysroot::compile(
+        "
+        comptime fn Build() -> Type {
+            let wrapper = meta.NewtypeBuilder.new(bool, .name = .Flag).Build();
+            let record = meta.StructBuilder.new(.name = .Record);
+            record.add_field(.flag, wrapper);
+            let choice = meta.EnumBuilder.new(.name = .Choice);
+            choice.add_tuple(.some, [record.Build()]);
+            choice.Build()
+        }
+    ",
+    )
+    .unwrap();
+    let entry = package
+        .functions
+        .iter()
+        .find(|f| f.name == "Build")
+        .unwrap()
+        .declaration;
+    let publisher = AllocatedDefinitionPublisher::new(&package, 9900, 1, 10_000_000);
+    let structs = |r: &comptime_interpretor::StructBuildRequest, steps: &mut u64| {
+        publisher.prepare_struct(r, steps)
+    };
+    let enums = |r: &comptime_interpretor::EnumBuildRequest, steps: &mut u64| {
+        publisher.prepare_enum(r, steps)
+    };
+    let newtypes = |r: &comptime_interpretor::NewtypeBuildRequest, steps: &mut u64| {
+        publisher.prepare_newtype(r, steps)
+    };
+    let mut vm = Interpreter::for_comptime(
+        &package,
+        Budget {
+            steps: 10_000_000,
+            depth: 128,
+        },
+    )
+    .unwrap()
+    .with_struct_builder(&structs)
+    .with_enum_builder(&enums)
+    .with_newtype_builder(&newtypes);
+    let mut results = Vec::new();
+    for _ in 0..2 {
+        let mut active = vm.start_invocation(Value::Function(entry), vec![]).unwrap();
+        let mut kinds = Vec::new();
+        loop {
+            match active.poll().unwrap() {
+                InvocationProgress::Running => {}
+                InvocationProgress::Definition(request) => {
+                    kinds.push(match request.descriptor() {
+                        comptime_interpretor::DefinitionBuildRequest::Struct(_) => "struct",
+                        comptime_interpretor::DefinitionBuildRequest::Enum(_) => "enum",
+                        comptime_interpretor::DefinitionBuildRequest::Newtype(_) => "newtype",
+                    });
+                    assert!(matches!(
+                        active.poll().unwrap(),
+                        InvocationProgress::Waiting
+                    ));
+                    assert_eq!(active.remaining_steps(), 0);
+                    let response = request.prepare();
+                    assert!(matches!(
+                        active.poll().unwrap(),
+                        InvocationProgress::Waiting
+                    ));
+                    active.resume_definition(response).unwrap();
+                }
+                InvocationProgress::Complete(value) => {
+                    results.push(value);
+                    break;
+                }
+                other => panic!("unexpected host work: {other}"),
+            }
+        }
+        assert_eq!(kinds, ["newtype", "struct", "enum"]);
+    }
+    assert_ne!(results[0], results[1]);
+    assert_eq!(
+        vm.events()
+            .iter()
+            .filter(|e| matches!(e,Event::EnterFunction(id) if *id == entry))
+            .count(),
+        2
+    );
+    drop(vm);
+    let (published, _) = publisher.finish();
+    assert_eq!(published.structs.len(), 2);
+    assert_eq!(published.enums.len(), 2);
+    assert_eq!(published.newtypes.len(), 2);
 }

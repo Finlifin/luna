@@ -48,11 +48,11 @@ impl<'a> Interpreter<'a> {
         self
     }
 
-    pub(super) fn build_newtype_value(
+    pub(super) fn decode_newtype_build(
         &mut self,
         value: Value,
         source: SourceRange,
-    ) -> Result<Value, Error> {
+    ) -> Result<NewtypeBuildRequest, Error> {
         let fail = || Error {
             kind: ErrorKind::Type,
             source: Some(source),
@@ -75,10 +75,19 @@ impl<'a> Interpreter<'a> {
             representation,
             source,
         };
-        let builder = self.newtype_builder.ok_or_else(fail)?;
-        let prepared = host_budget::clamped(&mut self.budget.steps, |remaining| {
-            builder(&request, remaining)
-        })?;
+        Ok(request)
+    }
+
+    pub(super) fn admit_newtype_build(
+        &mut self,
+        request: &NewtypeBuildRequest,
+        prepared: PreparedNewtypeBuild<'a>,
+    ) -> Result<Value, Error> {
+        let source = request.source;
+        let fail = || Error {
+            kind: ErrorKind::Type,
+            source: Some(source),
+        };
         self.integer_operation(Some(source), |budget| {
             budget.consume(prepared.definitions.len())
         })?;
