@@ -568,23 +568,17 @@ impl Checker<'_, '_> {
                 .pairs
                 .iter()
                 .find(|(_, _, result)| !result.is_proved());
-            let span = self
-                .package
-                .owners()
-                .find_map(|(owner, info)| {
-                    let item = info.node.expect_item();
-                    (matches!(item.kind, ItemKind::Impl(_))
-                        && pair.is_none_or(|(_, right, _)| {
-                            matches_declaration(
-                                self.package,
-                                &self.package_identities,
-                                owner,
-                                *right,
-                            )
-                        }))
-                    .then_some(item.span)
-                })
-                .unwrap_or_default();
+            let item = if let Some((_, right, _)) = pair {
+                self.source_declarations
+                    .item(*right)
+                    .filter(|item| matches!(item.kind, ItemKind::Impl(_)))
+            } else {
+                self.package
+                    .owners()
+                    .map(|(_, info)| info.node.expect_item())
+                    .find(|item| matches!(item.kind, ItemKind::Impl(_)))
+            };
+            let span = item.map(|item| item.span).unwrap_or_default();
             return Err(error(
                 span,
                 format!(
@@ -1214,12 +1208,9 @@ impl Checker<'_, '_> {
         )
         .map_err(|(identity, message)| {
             let span = self
-                .package
-                .owners()
-                .find_map(|(owner, info)| {
-                    matches_declaration(self.package, &self.package_identities, owner, identity)
-                        .then_some(info.node.expect_item().span)
-                })
+                .source_declarations
+                .item(identity)
+                .map(|item| item.span)
                 .unwrap_or_default();
             error(span, message)
         })?;
@@ -1271,17 +1262,8 @@ impl Checker<'_, '_> {
             if let Some(interface) = implementation.interface {
                 let contract = &traits[&interface];
                 let owner = self
-                    .package
-                    .owners()
-                    .find_map(|(owner, _)| {
-                        (matches_declaration(
-                            self.package,
-                            &self.package_identities,
-                            owner,
-                            implementation.declaration,
-                        ))
-                        .then_some(owner)
-                    })
+                    .source_declarations
+                    .owner(implementation.declaration)
                     .unwrap();
                 let span = self.package.item(owner).unwrap().span;
                 let arguments: Vec<_> = std::iter::once(implementation.subject.clone())
@@ -1635,12 +1617,7 @@ impl Checker<'_, '_> {
                 .or_else(|| self.package.deferred_member_projections.get(&projection)),
             target,
         ) {
-            if let Some(owner) = Some(target).and_then(|target| {
-                self.package.owners().find_map(|(owner, _)| {
-                    matches_declaration(self.package, &self.package_identities, owner, target)
-                        .then_some(owner)
-                })
-            }) {
+            if let Some(owner) = self.source_declarations.owner(target) {
                 if let Some(parent) = self.self_containers.get(&owner).copied().filter(|parent| {
                     self.package.item(*parent).is_some_and(|item| {
                         matches!(item.kind, ItemKind::Struct(_) | ItemKind::Enum(_))
@@ -1930,14 +1907,7 @@ impl Checker<'_, '_> {
                 },
             }));
         }
-        let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                (matches_declaration(self.package, &self.package_identities, owner, body))
-                    .then_some(owner)
-            })
-            .unwrap();
+        let owner = self.source_declarations.owner(body).unwrap();
         let arguments = if self.type_parameters[&owner].is_empty() {
             Vec::new()
         } else if self.self_containers.contains_key(&owner) {
@@ -2502,14 +2472,7 @@ impl Checker<'_, '_> {
             | K::FunctionInstance {
                 declaration: body, ..
             } => {
-                let owner = self
-                    .package
-                    .owners()
-                    .find_map(|(owner, _)| {
-                        (matches_declaration(self.package, &self.package_identities, owner, *body))
-                            .then_some(owner)
-                    })
-                    .unwrap();
+                let owner = self.source_declarations.owner(*body).unwrap();
                 let ItemKind::Fn(sig, _) = &self.package.item(owner).unwrap().kind else {
                     unreachable!()
                 };
@@ -2598,17 +2561,8 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                (matches_declaration(
-                    self.package,
-                    &self.package_identities,
-                    owner,
-                    contract.declaration,
-                ))
-                .then_some(owner)
-            })
+            .source_declarations
+            .owner(contract.declaration)
             .ok_or_else(|| error(span, "missing trait method declaration"))?;
         let arguments = self.interface_substitution(interface, subject).1;
         self.check_capabilities(owner, &arguments, span)?;
@@ -2855,10 +2809,7 @@ impl Checker<'_, '_> {
             subject,
         } = &value.kind
         {
-            let owner = self.package.owners().find_map(|(owner, _)| {
-                matches_declaration(self.package, &self.package_identities, owner, *id)
-                    .then_some(owner)
-            })?;
+            let owner = self.source_declarations.owner(*id)?;
             return Some((
                 owner,
                 self.comptime_instance_clause_evidence(owner, subject)?,
@@ -2884,12 +2835,8 @@ impl Checker<'_, '_> {
             ),
             _ => return None,
         };
-        self.package
-            .owners()
-            .find_map(|(owner, _)| {
-                (matches_declaration(self.package, &self.package_identities, owner, id))
-                    .then_some(owner)
-            })
+        self.source_declarations
+            .owner(id)
             .map(|owner| (owner, arguments))
     }
     pub(super) fn incomplete_method_instance(&self, value: &n::Expr) -> bool {

@@ -55,21 +55,13 @@ impl Checker<'_, '_> {
                     };
                     let mut normal_head = false;
                     if let Some(id) = id {
-                        for (owner, _) in self.package.owners() {
-                            *fuel = fuel
-                                .checked_sub(1)
-                                .ok_or("inline phase checking budget exhausted")?;
-                            if matches_declaration(
-                                self.package,
-                                &self.package_identities,
-                                owner,
-                                id,
-                            ) {
-                                normal_head = matches!(&self.package.item(owner).unwrap().kind,
+                        *fuel = fuel
+                            .checked_sub(1)
+                            .ok_or("inline phase checking budget exhausted")?;
+                        if let Some(item) = self.source_declarations.item(id) {
+                            normal_head = matches!(&item.kind,
                                     ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
                                     if sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head);
-                                break;
-                            }
                         }
                     }
                     if !normal_head {

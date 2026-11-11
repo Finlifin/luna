@@ -167,6 +167,50 @@ O(log P)，再支付实际选中边及语义观察的成本。这里没有声称
 未运行全 workspace、native 或整体性能基准；本机清单与证据在
 `/tmp/luna-lexical-source-index-wpkauuvg`。
 
+#### 源声明身份查询不重复扫描包
+
+`program::SourceDeclarations` 将语义 DeclarationId 到 HIR OwnerId 的查询绑定到
+一个不可变 Package 借用。Checker 在模板／派生展开后的实际包视图上构建一次索引；
+required 依赖准备、普通调用、NF、名义类型、成员／关联项和 CMTT 查询共用它。
+原 `matches_declaration` 及其逐次全包查找已退役。声明枚举、候选发现和词法关系分析
+仍有自己的遍历责任，不把这些不同操作一并替换成“查到一个 owner”。
+
+身份继续按 resolver DefId 和语义包映射形成；没有 resolver 绑定的已有 HIR 声明
+保留原稠密身份规则。import 只有语法 owner，不生成新语义声明，也不能用稠密编号
+遮蔽另一声明的 resolver 编号。不同包的相同 local 编号保持不同身份；同一包视图
+若给两个声明分配相同完整语义身份，构建时拒绝，不选择遍历碰到的第一个。
+
+构建在扫描前计量完整稠密槽数，包含没有 OwnerInfo 的槽；预算不足不发布部分索引。
+设槽数为 S、有效声明数为 D，当前 BTreeMap 实现的构建成本为 O(S + D log D)，
+空间为 O(D)，之后命中／缺失查找均为 O(log D)，不再为每次查询扫描 S 个槽。
+显示使用稳定顺序的 S-expression。新 HIR 视图必须重建，已有索引仍只返回自己的
+源码条目；不能把这个借用期索引当作跨编辑 query 缓存或已选 impl 证据。查到声明
+也不授予访问权限；可见性、phase、形成条件和成员候选检查仍由原消费者完成。
+
+运行中生成的 NIR 声明仍由已有生成目录和发布协议处理；缺少源 owner 的声明不会
+凭索引获得源码。待定输入域的前端 continuation、源 activation 以及 Type 响应接线
+仍未完成，这项查找迁移不改变它们的完成状态。
+
+验证工作目录 `/home/fin/luna`；统一使用
+`python3 -B development/check.py --timeout 900 -- test`：
+
+| 检查参数 | 结果与证据 |
+| --- | --- |
+| `-p elaboration --lib source_declarations --no-fail-fast` | 首次编译退出 101，新增测试的 DefId 和 PathAnchor 导入路径有误；`/tmp/luna-tools-ag1s6fwr/result.json` |
+| `-p elaboration --lib --no-fail-fast` | 修正测试导入后 210 项通过；`/tmp/luna-tools-3sb2xw_b/result.json`，退出 0 |
+| `-p elaboration --lib --test invocation_budget -p luna --test library_protocols --test normal_form_domains --test cmtt_methods --test function_template_local_definitions --test trait_phases --test required_input_scopes --test default_calls --test effect_contracts --test packages --test builder_invocations --no-fail-fast` | 778 通过、1 失败、1 既有 ignored；`/tmp/luna-tools-bwtanuid/result.json`，退出 101。唯一失败为预算诊断，见下文 |
+| `-p elaboration --test invocation_budget -p luna --test nominal_staging --test contextual_spreads --test type_spreads --no-fail-fast` | 121 项通过；`/tmp/luna-tools-8yyfdmw2/result.json`，退出 0。复验失败项，并覆盖最后迁移的名义容器投影；与前轮预算组重叠 |
+
+索引准备加入公共预算后，原预算扫描测试到达生成器世界复制的另一个耗尽边界。
+该路径的 CopyBudgetExhausted 原诊断仅称 `capture exhausted`；现明确为
+`capture budget exhausted`，保留具体原因，不修改预算断言、放大额度或修改预期。
+新增局部检查覆盖 import 与 resolver 编号碰撞、跨包同号、稀疏槽预算、重复身份
+拒绝／修复，以及不同包视图相同数字 owner 不串源码。
+
+scoped rustfmt 退出 0：初轮 `/tmp/luna-tools-e06hzs7v/result.json`，最后两处
+修改 `/tmp/luna-tools-ogrs8doy/result.json`。未执行全 workspace 或性能测量；
+这些是保留原 moves/effects.rs 工作区改动的验证，不宣称纯 HEAD 验收。
+
 ### 4.6 已接通：自由源码输入与执行区域扫描分离
 
 `body_local_references` 原先复用 `scan_body_requirement`，后者为当前函数的

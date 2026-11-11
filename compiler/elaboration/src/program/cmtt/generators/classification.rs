@@ -467,12 +467,8 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<MethodCategory, Error> {
         let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                matches_declaration(self.package, &self.package_identities, owner, member)
-                    .then_some(owner)
-            })
+            .source_declarations
+            .owner(member)
             .ok_or_else(|| error(span, "contextual method declaration is unavailable"))?;
         Ok(
             if self.is_code_generator(owner)

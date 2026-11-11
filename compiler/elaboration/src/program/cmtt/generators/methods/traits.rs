@@ -161,12 +161,7 @@ impl Checker<'_, '_> {
                 ));
             }
         };
-        let find_owner = |id| {
-            self.package.owners().find_map(|(owner, _)| {
-                matches_declaration(self.package, &self.package_identities, owner, id)
-                    .then_some(owner)
-            })
-        };
+        let find_owner = |id| self.source_declarations.owner(id);
         let public = find_owner(public_id)
             .ok_or_else(|| error(head.span, "trait code declaration is unavailable"))?;
         let target = find_owner(body_id)

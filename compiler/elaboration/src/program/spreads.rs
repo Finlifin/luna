@@ -925,19 +925,13 @@ impl Checker<'_, '_> {
                 K::TraitMethod { member, .. } => Some(member),
                 _ => None,
             };
-            let declarations = direct.and_then(|id| {
-                self.package.owners().find_map(|(owner, _)| {
-                    if declaration(self.package, &self.package_identities, owner) != id {
-                        return None;
+            let declarations =
+                direct.and_then(|id| match &self.source_declarations.item(id)?.kind {
+                    ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature) => {
+                        Some(&signature.params[offset..])
                     }
-                    match &self.package.item(owner)?.kind {
-                        ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature) => {
-                            Some(&signature.params[offset..])
-                        }
-                        _ => None,
-                    }
-                })
-            });
+                    _ => None,
+                });
             let generics = self
                 .method_instantiation_inputs(callee)
                 .map(|(owner, arguments)| self.type_parameters[&owner][arguments.len()..].to_vec())

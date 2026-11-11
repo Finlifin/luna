@@ -59,6 +59,7 @@ mod projections;
 mod purity;
 mod refinements;
 mod required;
+mod source_declarations;
 mod splicing;
 mod text_queries;
 mod trait_inputs;
@@ -190,19 +191,6 @@ fn declaration(
 }
 fn is_never(ty: &Term) -> bool {
     *ty == p(P::Never)
-}
-/// Imports own HIR syntax, but never introduce a semantic declaration.
-/// Do not interpret their dense owner index as a resolver declaration index.
-fn matches_declaration(
-    package: &hir::Package<'_>,
-    identities: &BTreeMap<u32, u64>,
-    owner: OwnerId,
-    id: DeclarationId,
-) -> bool {
-    !matches!(
-        package.item(owner).map(|item| &item.kind),
-        Some(ItemKind::Use(_))
-    ) && declaration(package, identities, owner) == id
 }
 fn discard_result(value: n::Expr) -> n::Expr {
     if is_never(&value.ty) || value.ty == p(P::Void) {
@@ -413,7 +401,13 @@ fn elaborate_with_attributes(
             ));
         }
     }
+    let source_declarations = source_declarations::SourceDeclarations::new(
+        package,
+        package_identities,
+        invocation_steps,
+    )?;
     let mut checker = Checker {
+        source_declarations,
         next_definition_identity: package
             .next_definition_index()
             .max(u32::try_from(package.num_defs()).unwrap_or(u32::MAX)),
@@ -909,9 +903,7 @@ fn elaborate_candidate<'a, 'h>(
     }
     for interface in &checker.checked_traits {
         for method in &interface.methods {
-            if let Some((member, _)) = package.owners().find(|(owner, _)| {
-                matches_declaration(package, package_identities, *owner, method.declaration)
-            }) {
+            if let Some(member) = checker.source_declarations.owner(method.declaration) {
                 checker
                     .requirements
                     .entry(member)
@@ -921,12 +913,10 @@ fn elaborate_candidate<'a, 'h>(
         }
     }
     if let Some(id) = checker.protocols.splice {
-        let span = package
-            .owners()
-            .find_map(|(owner, info)| {
-                (matches_declaration(package, package_identities, owner, id))
-                    .then_some(info.node.expect_item().span)
-            })
+        let span = checker
+            .source_declarations
+            .item(id)
+            .map(|item| item.span)
             .unwrap_or(rustc_span::DUMMY_SP);
         crate::splice::protocol(&checker.checked_traits, id)
             .map_err(|reason| error(span, reason))?;
@@ -1580,6 +1570,7 @@ impl GeneratorCell {
 }
 
 struct Checker<'a, 'h> {
+    source_declarations: source_declarations::SourceDeclarations<'a, 'h>,
     next_definition_identity: u32,
     delivered_types: BTreeMap<n::LocalId, (std::sync::Arc<Term>, Span)>,
     target: Option<nir::target::TargetData>,
@@ -1874,18 +1865,7 @@ impl Checker<'_, '_> {
                         declaration: interface,
                         ..
                     }) => {
-                        let parent = package
-                            .owners()
-                            .find_map(|(owner, _)| {
-                                (matches_declaration(
-                                    self.package,
-                                    &self.package_identities,
-                                    owner,
-                                    *interface,
-                                ))
-                                .then_some(owner)
-                            })
-                            .unwrap();
+                        let parent = self.source_declarations.owner(*interface).unwrap();
                         std::iter::once(*interface)
                             .chain(self.type_parameters[&parent].iter().copied())
                             .collect()
@@ -1908,15 +1888,7 @@ impl Checker<'_, '_> {
                     else {
                         return None;
                     };
-                    package.owners().find_map(|(parent, _)| {
-                        (matches_declaration(
-                            self.package,
-                            &self.package_identities,
-                            parent,
-                            *interface,
-                        ))
-                        .then_some(parent)
-                    })
+                    self.source_declarations.owner(*interface)
                 });
             let mut capabilities = parent
                 .and_then(|parent| self.capabilities.get(&parent))
@@ -2458,10 +2430,7 @@ impl Checker<'_, '_> {
                 ));
             }
         }
-        let owner = self.package.owners().find_map(|(owner, _)| {
-            (matches_declaration(self.package, &self.package_identities, owner, id))
-                .then_some(owner)
-        });
+        let owner = self.source_declarations.owner(id);
         let mut fields = Vec::new();
         for (slot, ty) in variant.fields.iter().enumerate() {
             fields.push(if let Some(value) = supplied.get(&slot) {
@@ -2526,12 +2495,8 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(expr.span, format!("unknown enum variant {name}")))?;
         let variant = &definition.variants[index];
         let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                (matches_declaration(self.package, &self.package_identities, owner, id))
-                    .then_some(owner)
-            })
+            .source_declarations
+            .owner(id)
             .ok_or_else(|| error(expr.span, "enum declaration owner is unavailable"))?;
         let binders = definition
             .parameter_binders()
@@ -2929,11 +2894,9 @@ impl Checker<'_, '_> {
     }
     fn bound_tuple_metadata(&self) -> Option<nir::normal_forms::Head> {
         let identity = self.protocols.tuple?;
-        self.normal_parameters.keys().find_map(|owner| {
-            matches_declaration(self.package, &self.package_identities, *owner, identity)
-                .then(|| self.normal_form_head_metadata(*owner))
-                .flatten()
-        })
+        let owner = self.source_declarations.owner(identity)?;
+        self.normal_parameters.get(&owner)?;
+        self.normal_form_head_metadata(owner)
     }
     fn bound_tuple_list_domain(&self) -> Option<Term> {
         let head = self.bound_tuple_metadata()?;
@@ -3255,10 +3218,7 @@ impl Checker<'_, '_> {
         let (instantiated_fields, type_parameters, parameter_types) =
             nominal_fields::constructor_fields(def, arguments, &frames, &mut self.required_steps)
                 .map_err(|e| error(expr.span, e.to_string()))?;
-        let owner = self.package.owners().find_map(|(owner, _)| {
-            (matches_declaration(self.package, &self.package_identities, owner, *id))
-                .then_some(owner)
-        });
+        let owner = self.source_declarations.owner(*id);
         let mut supplied = BTreeMap::new();
         for arg in args {
             let Arg::Named(name, value) = arg else {
@@ -4562,12 +4522,7 @@ impl Checker<'_, '_> {
         }
         if let Some(interface) = self.checked_traits.iter().find(|interface| {
             self.self_containers.get(&owner).is_some_and(|parent| {
-                matches_declaration(
-                    self.package,
-                    &self.package_identities,
-                    *parent,
-                    interface.declaration,
-                )
+                self.source_declarations.owner(interface.declaration) == Some(*parent)
             }) || interface.methods.iter().any(|method| {
                 method.declaration == declaration(self.package, &self.package_identities, owner)
             }) || interface.associated.iter().any(|member| {
@@ -6596,12 +6551,7 @@ impl Checker<'_, '_> {
         };
         let direct = direct_id
             .filter(|_| !callee.ty.is_normal_form_callable())
-            .and_then(|id| {
-                self.package.owners().find_map(|(owner, _)| {
-                    matches_declaration(self.package, &self.package_identities, owner, id)
-                        .then_some(owner)
-                })
-            });
+            .and_then(|id| self.source_declarations.owner(id));
         if direct.is_some_and(|owner| self.is_quote_function(owner)) {
             self.record_quote_application(expr.span)?;
         }

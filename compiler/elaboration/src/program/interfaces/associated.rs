@@ -294,10 +294,7 @@ impl Checker<'_, '_> {
 
 impl Checker<'_, '_> {
     pub(in crate::program) fn associated_owner(&self, member: DeclarationId) -> Option<OwnerId> {
-        self.package.owners().find_map(|(owner, _)| {
-            (matches_declaration(self.package, &self.package_identities, owner, member))
-                .then_some(owner)
-        })
+        self.source_declarations.owner(member)
     }
 
     pub(in crate::program) fn associated_has_initializer(&self, member: DeclarationId) -> bool {

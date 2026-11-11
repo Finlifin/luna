@@ -518,17 +518,13 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<nir::effects::Declaration, Error> {
         let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, info)| {
-                (matches!(info.node.expect_item().kind, ItemKind::Effect(..))
-                    && matches_declaration(
-                        self.package,
-                        &self.package_identities,
-                        owner,
-                        operation.declaration,
-                    ))
-                .then_some(owner)
+            .source_declarations
+            .owner(operation.declaration)
+            .filter(|owner| {
+                matches!(
+                    self.package.item(*owner).unwrap().kind,
+                    ItemKind::Effect(..)
+                )
             })
             .ok_or_else(|| error(span, "missing effect operation metadata"))?;
         // Validate the copy before constructing the owned formation descriptor.

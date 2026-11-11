@@ -165,12 +165,8 @@ impl Checker<'_, '_> {
 
     fn ensure_meta_list_metadata(&mut self, head: DeclarationId, span: Span) -> Result<(), Error> {
         let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                matches_declaration(self.package, &self.package_identities, owner, head)
-                    .then_some(owner)
-            })
+            .source_declarations
+            .owner(head)
             .ok_or_else(|| error(span, "bound meta.List declaration is unavailable"))?;
         self.ensure_signature(owner, span)?;
         self.ensure_contract(owner, span)?;

@@ -50,12 +50,8 @@ impl Checker<'_, '_> {
             return Ok(None);
         };
         let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                (matches_declaration(self.package, &self.package_identities, owner, head))
-                    .then_some(owner)
-            })
+            .source_declarations
+            .owner(head)
             .ok_or_else(|| error(span, "bound Tuple head is not in this source package"))?;
         self.ensure_signature(owner, span)?;
         let parameters = self
@@ -82,14 +78,7 @@ impl Checker<'_, '_> {
         let Some(head) = self.bound_tuple_head(span)? else {
             return Ok(Term::Tuple(elements));
         };
-        let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                (matches_declaration(self.package, &self.package_identities, owner, head))
-                    .then_some(owner)
-            })
-            .unwrap();
+        let owner = self.source_declarations.owner(head).unwrap();
         let domain = self.normal_parameters[&owner][0].2.clone();
         let arguments = vec![self.freeze_normal_list(&domain, elements, span)?];
         self.check_type_application(owner, &arguments, span)?;
@@ -550,12 +539,8 @@ impl Checker<'_, '_> {
                 "normal-form constant has no completed declaration identity",
             ));
         };
-        self.package
-            .owners()
-            .find_map(|(owner, _)| {
-                matches_declaration(self.package, &self.package_identities, owner, identity)
-                    .then_some(owner)
-            })
+        self.source_declarations
+            .owner(identity)
             .map(Some)
             .ok_or_else(|| error(head.span, "normal-form callable declaration is unavailable"))
     }
@@ -921,13 +906,12 @@ impl Checker<'_, '_> {
             .iter()
             .any(|argument| matches!(argument, n::NormalFormArgument::List { .. }))
         {
-            for (owner, inputs) in &self.normal_parameters {
-                budget.consume(1)?;
-                if matches_declaration(self.package, &self.package_identities, *owner, head) {
-                    parameters = Some(inputs.as_slice());
-                    break;
-                }
-            }
+            budget.consume(1)?;
+            parameters = self
+                .source_declarations
+                .owner(head)
+                .and_then(|owner| self.normal_parameters.get(&owner))
+                .map(Vec::as_slice);
         }
         if parameters.is_some_and(|inputs| inputs.len() != arguments.len()) {
             return Err(Failure::Unavailable);

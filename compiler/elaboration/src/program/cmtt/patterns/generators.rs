@@ -322,14 +322,7 @@ impl Checker<'_, '_> {
             }) = this.self_types.get(&owner)
             {
                 visible_parameters.push(*self_parameter);
-                if let Some((parent, _)) = this.package.owners().find(|(parent, _)| {
-                    matches_declaration(
-                        this.package,
-                        &this.package_identities,
-                        *parent,
-                        *self_parameter,
-                    )
-                }) {
+                if let Some(parent) = this.source_declarations.owner(*self_parameter) {
                     visible_parameters.extend(this.type_parameters[&parent].iter().copied());
                 }
             }

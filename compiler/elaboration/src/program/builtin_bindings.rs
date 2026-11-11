@@ -76,12 +76,8 @@ impl Checker<'_, '_> {
             .signature(self.protocols.meta_list)
             .ok_or_else(|| error(span, "builtin callable signature dependency is unavailable"))?;
         let canonical = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                matches_declaration(self.package, &self.package_identities, owner, identity)
-                    .then_some(owner)
-            })
+            .source_declarations
+            .owner(identity)
             .ok_or_else(|| error(span, "builtin constructor binding is unavailable"))?;
         if canonical != owner {
             let value = self.normal_form_value(initializer, canonical, None)?;

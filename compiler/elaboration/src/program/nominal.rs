@@ -521,12 +521,8 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                (matches_declaration(self.package, &self.package_identities, owner, *id))
-                    .then_some(owner)
-            })
+            .source_declarations
+            .owner(*id)
             .ok_or_else(|| error(span, "nominal declaration is missing"))?;
         self.ensure_nominal(owner, span)
     }
@@ -565,14 +561,11 @@ impl Checker<'_, '_> {
                     } = &representation
                     {
                         if let Some(target_owner) =
-                            self.package.owners().find_map(|(owner, info)| {
-                                (matches_declaration(
-                                    self.package,
-                                    &self.package_identities,
-                                    owner,
-                                    *target,
-                                ) && matches!(info.node.expect_item().kind, ItemKind::Newtype(..)))
-                                .then_some(owner)
+                            self.source_declarations.owner(*target).filter(|owner| {
+                                matches!(
+                                    self.package.item(*owner).unwrap().kind,
+                                    ItemKind::Newtype(..)
+                                )
                             })
                         {
                             self.ensure_nominal(target_owner, value.span)?;

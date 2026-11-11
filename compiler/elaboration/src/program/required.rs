@@ -1954,19 +1954,12 @@ impl Checker<'_, '_> {
                     }
                     continue;
                 }
-                let owner = self
-                    .package
-                    .owners()
-                    .find_map(|(o, _)| {
-                        (matches_declaration(self.package, &self.package_identities, o, id))
-                            .then_some(o)
-                    })
-                    .ok_or_else(|| {
-                        error(
-                            expr.span,
-                            "required comptime function declaration is missing",
-                        )
-                    })?;
+                let owner = self.source_declarations.owner(id).ok_or_else(|| {
+                    error(
+                        expr.span,
+                        "required comptime function declaration is missing",
+                    )
+                })?;
                 if self.package.item(owner).is_some_and(|item| matches!(&item.kind,
                     ItemKind::Fn(sig, _) if !sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head)) {
                     self.ensure_signature(owner, expr.span)?;

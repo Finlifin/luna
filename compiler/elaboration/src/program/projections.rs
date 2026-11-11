@@ -1025,12 +1025,8 @@ impl Checker<'_, '_> {
         {
             let parent = *parent;
             let owner = self
-                .package
-                .owners()
-                .find_map(|(owner, _)| {
-                    (declaration(self.package, &self.package_identities, owner) == parent)
-                        .then_some(owner)
-                })
+                .source_declarations
+                .owner(parent)
                 .ok_or_else(|| error(base.span, "nominal container declaration is missing"))?;
             let value = n::Expr {
                 source: source(base.span),
@@ -1157,12 +1153,8 @@ impl Checker<'_, '_> {
             ));
         };
         let parent = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                matches_declaration(self.package, &self.package_identities, owner, parent_id)
-                    .then_some(owner)
-            })
+            .source_declarations
+            .owner(parent_id)
             .ok_or_else(|| error(expr.span, "type member container declaration is missing"))?;
         let mut parameters = self.type_parameters[&parent].clone();
         parameters.extend(self.nominal_captures(parent, expr.span)?);

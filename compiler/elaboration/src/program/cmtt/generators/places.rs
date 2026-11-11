@@ -30,7 +30,7 @@ impl Checker<'_, '_> {
         checked.map_err(|failure| {
             error(
                 span,
-                format!("generator storage world capture exhausted: {failure:?}"),
+                format!("generator storage world capture budget exhausted: {failure:?}"),
             )
         })?;
         Ok(n::Package {

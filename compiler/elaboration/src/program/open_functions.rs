@@ -2628,10 +2628,7 @@ impl Checker<'_, '_> {
                 functions.push(function.clone());
                 continue;
             }
-            let Some(owner) = self.package.owners().find_map(|(owner, _)| {
-                (matches_declaration(self.package, &self.package_identities, owner, id))
-                    .then_some(owner)
-            }) else {
+            let Some(owner) = self.source_declarations.owner(id) else {
                 continue;
             };
             if matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head)

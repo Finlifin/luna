@@ -360,6 +360,18 @@ execution 用例 26 项，均退出 0；前后两轮 execution 用例有重叠�
 仍由调用者的复制前检查负责。边界与验证见
 [共享遍历的准备成本](solvers-resources-and-lowering.md#42-共享遍历的准备成本)。
 
+### 源声明查找与活动检查状态分开
+
+继续核对 required 依赖准备和成员消费者，确认多处为一个完整 DeclarationId
+重复扫描全部 HIR owner。现已迁到与不可变源码包绑定的 SourceDeclarations，
+构建时使用 resolver 身份及语义包映射，排除 import 语法 owner，拒绝重复完整身份。
+调用、成员、CMTT 和 NF 等消费者共用查找；索引不保存候选选择、活动域或 VM 值。
+具体复杂度、不同视图的所有权及验证见
+[源声明身份查询](dependency-observations.md#源声明身份查询不重复扫描包)。
+
+这项迁移减少真实消费者的全包查询，不是细粒度增量 Query、前端 continuation 或
+动态 NF 具名参数支持已经完成；这些缺口仍按前述边界保留。
+
 ## 4. 本次证据与限制
 
 工作目录 `/home/fin/luna`；所有检查通过 `development/check.py --timeout 900 -- test`。

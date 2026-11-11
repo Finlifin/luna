@@ -303,10 +303,7 @@ impl Checker<'_, '_> {
         else {
             return Ok(None);
         };
-        let Some(owner) = self.package.owners().find_map(|(owner, _)| {
-            matches_declaration(self.package, &self.package_identities, owner, body)
-                .then_some(owner)
-        }) else {
+        let Some(owner) = self.source_declarations.owner(body) else {
             return Ok(None);
         };
         if let Some(clauses) = clauses {

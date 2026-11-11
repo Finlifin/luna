@@ -209,10 +209,7 @@ impl Checker<'_, '_> {
                     K::TraitMethod { member, .. } => member,
                     _ => return None,
                 };
-                self.package.owners().find_map(|(owner, _)| {
-                    (matches_declaration(self.package, &self.package_identities, owner, id))
-                        .then_some(owner)
-                })
+                self.source_declarations.owner(id)
             })
         }
         .ok_or_else(|| {

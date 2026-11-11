@@ -370,16 +370,9 @@ impl Checker<'_, '_> {
                     .find(|(member, _)| member == name.name.as_str())
                     .map(|(_, body)| *body)
                     .ok_or_else(|| error(head.span, "selected code method is unavailable"))?;
-                let owner = self
-                    .package
-                    .owners()
-                    .find_map(|(owner, _)| {
-                        matches_declaration(self.package, &self.package_identities, owner, body)
-                            .then_some(owner)
-                    })
-                    .ok_or_else(|| {
-                        error(head.span, "selected code method declaration is unavailable")
-                    })?;
+                let owner = self.source_declarations.owner(body).ok_or_else(|| {
+                    error(head.span, "selected code method declaration is unavailable")
+                })?;
                 if requested_owner.is_some_and(|requested| requested != owner) {
                     return Err(error(
                         head.span,
