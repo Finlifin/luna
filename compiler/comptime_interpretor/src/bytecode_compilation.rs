@@ -28,13 +28,13 @@ fn compilation_charges_actual_work_and_does_not_publish_on_exhaustion() {
             assert_eq!(result.unwrap_err().kind, ErrorKind::StepsExhausted);
             assert!(vm.bytecode_cache.entries.is_empty());
         } else {
-            assert!(result.unwrap().is_some());
+            result.unwrap();
         }
         assert_eq!(vm.budget.steps, reference_fuel as u64);
         assert_eq!(vm.bytecode_compilation_steps(), spent);
         assert_eq!(vm.bytecode_invocations(), 0);
         vm.budget.steps = 1000;
-        assert!(vm.compile_body(&body).unwrap().is_some());
+        vm.compile_body(&body).unwrap();
         assert_eq!(vm.budget.steps, 1000 - work as u64);
         assert_eq!(vm.bytecode_compilation_steps(), spent + work as u64);
     }
@@ -73,22 +73,27 @@ fn unsupported_and_invalid_compilation_probes_keep_their_work_charges() {
     );
     assert!(vm.budget.steps < before);
     assert_eq!(vm.bytecode_invocations(), 0);
-    // Unsupported effect control retains its separate fallback policy.
-    let unsupported = Expr {
+    // Rejected lowering is an error, not a request to select another engine.
+    let unsupported = Arc::new(Expr {
         kind: K::EffectResume(Box::new(body())),
         ..body()
-    };
-    let before = vm.budget.steps;
-    assert!(vm.compile_body(&unsupported).unwrap().is_none());
-    assert!(vm.budget.steps < before);
+    });
+    for _ in 0..2 {
+        let before = vm.budget.steps;
+        let failure = vm.owned_invocation_code(&unsupported).unwrap_err();
+        assert_eq!(failure.kind, ErrorKind::Unsupported);
+        assert_eq!(failure.source, Some(unsupported.source));
+        assert!(vm.budget.steps < before);
+        assert!(vm.bytecode_cache.owned.is_empty());
+    }
+    assert_eq!(vm.bytecode_compilations(), 4);
     assert_eq!(vm.bytecode_invocations(), 0);
-    let unsupported = Arc::new(unsupported);
-    assert!(vm.owned_invocation_code(&unsupported).unwrap().is_none());
-    let compiled = vm.bytecode_compilations();
-    let steps = vm.bytecode_compilation_steps();
-    assert!(vm.owned_invocation_code(&unsupported).unwrap().is_none());
-    assert_eq!(vm.bytecode_compilations(), compiled);
-    assert_eq!(vm.bytecode_compilation_steps(), steps);
+    let valid = Arc::new(body());
+    let code = vm.owned_invocation_code(&valid).unwrap().unwrap();
+    assert!(matches!(
+        vm.execute_code(&code, &mut Environment::new()).unwrap(),
+        Flow::Value(Value::Bool(true))
+    ));
 }
 
 #[test]
@@ -96,12 +101,12 @@ fn stable_code_cache_hits_do_not_repeat_compilation_charges() {
     let package = Package::default();
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let body = body();
-    let code = Arc::new(vm.compile_body(&body).unwrap().unwrap());
+    let code = Arc::new(vm.compile_body(&body).unwrap());
     let declaration = DeclarationId {
         package: 1,
         local: 1,
     };
-    vm.bytecode_cache.insert(declaration, Some(code.clone()));
+    vm.bytecode_cache.insert(declaration, code.clone());
     let before = vm.budget.steps;
     for _ in 0..3 {
         let cached = vm
@@ -172,21 +177,21 @@ fn owned_and_declaration_code_share_a_bounded_cache() {
         },
         ..body()
     });
-    let code = Arc::new(vm.compile_body(&source).unwrap().unwrap());
+    let code = Arc::new(vm.compile_body(&source).unwrap());
     let declaration = DeclarationId {
         package: 91,
         local: 1,
     };
-    vm.bytecode_cache.insert(declaration, Some(code.clone()));
-    vm.bytecode_cache.insert_owned(&source, Some(code.clone()));
+    vm.bytecode_cache.insert(declaration, code.clone());
+    vm.bytecode_cache.insert_owned(&source, code.clone());
     let weight = vm.bytecode_cache.weight;
-    vm.bytecode_cache.insert_owned(&source, Some(code.clone()));
-    vm.bytecode_cache.insert(declaration, Some(code.clone()));
+    vm.bytecode_cache.insert_owned(&source, code.clone());
+    vm.bytecode_cache.insert(declaration, code.clone());
     assert_eq!(vm.bytecode_cache.weight, weight);
     let mut sources = vec![source];
     for _ in 0..100 {
         let next = Arc::new(sources[0].as_ref().clone());
-        vm.bytecode_cache.insert_owned(&next, Some(code.clone()));
+        vm.bytecode_cache.insert_owned(&next, code.clone());
         sources.push(next);
         assert!(vm.bytecode_cache.weight <= 100_000);
         if vm.bytecode_cache.entries.is_empty() {
@@ -194,12 +199,7 @@ fn owned_and_declaration_code_share_a_bounded_cache() {
         }
     }
     assert!(vm.bytecode_cache.entries.is_empty());
-    assert!(
-        vm.bytecode_cache
-            .owned(sources.last().unwrap())
-            .unwrap()
-            .is_some()
-    );
+    assert!(vm.bytecode_cache.owned(sources.last().unwrap()).is_some());
     assert!(vm.bytecode_cache.owned(&sources[0]).is_none());
 }
 
@@ -287,24 +287,18 @@ fn independent_compilations_share_constants_only_in_the_matching_code_session() 
     let mut session = CodeSession::new(package.clone());
     let first = {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-        vm.with_code_session(&mut session, |vm| {
-            vm.compile_body(&body()).unwrap().unwrap()
-        })
+        vm.with_code_session(&mut session, |vm| vm.compile_body(&body()).unwrap())
     };
     let mut other_body = body();
     other_body.source = SourceRange { start: 5, end: 7 };
     let second = {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-        vm.with_code_session(&mut session, |vm| {
-            vm.compile_body(&other_body).unwrap().unwrap()
-        })
+        vm.with_code_session(&mut session, |vm| vm.compile_body(&other_body).unwrap())
     };
     assert!(Arc::ptr_eq(constant(&first), constant(&second)));
     let different_world = Package::default();
     let mut vm = Interpreter::for_comptime(&different_world, Budget::default()).unwrap();
-    let isolated = vm.with_code_session(&mut session, |vm| {
-        vm.compile_body(&body()).unwrap().unwrap()
-    });
+    let isolated = vm.with_code_session(&mut session, |vm| vm.compile_body(&body()).unwrap());
     assert!(!Arc::ptr_eq(constant(&first), constant(&isolated)));
     let weak = Arc::downgrade(constant(&first));
     drop(first);
@@ -348,4 +342,91 @@ fn staged_values_are_not_executable_frozen_constants() {
             .unwrap(),
         Flow::Value(Value::Bool(true))
     ));
+}
+
+#[test]
+fn rejected_input_lowering_never_starts_execution_or_publishes_code() {
+    let package = Package::default();
+    let trace = LocalId { owner: 1, index: 0 };
+    let unsupported_source = SourceRange { start: 10, end: 20 };
+    // Deliberately incomplete IR probes the engine boundary. This is not a
+    // legal source program: staged values must be completed before execution.
+    let expression = Expr {
+        kind: K::Block {
+            statements: vec![Expr {
+                ty: Term::Primitive(Primitive::Void),
+                kind: K::Assign {
+                    place: nir::program::Place {
+                        root: trace,
+                        fields: vec![],
+                    },
+                    value: Box::new(Expr {
+                        kind: K::Literal(Literal::Bool(false)),
+                        ..body()
+                    }),
+                },
+                ..body()
+            }],
+            result: Some(Box::new(Expr {
+                source: unsupported_source,
+                kind: K::StagedValue(Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: nir::Sort::ComptimeValue,
+                }),
+                ..body()
+            })),
+        },
+        ..body()
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut environment = Environment::from([(trace, Value::Bool(true))]);
+    let failure = match vm.start_expression_input(&expression, &mut environment) {
+        Err(error) => error,
+        Ok(_) => panic!("rejected bytecode must not select tree execution"),
+    };
+    assert_eq!(failure.kind, ErrorKind::Unsupported);
+    assert_eq!(failure.source, Some(unsupported_source));
+    assert_eq!(environment.get(&trace), Some(&Value::Bool(true)));
+    let declaration = DeclarationId {
+        package: 1,
+        local: 1,
+    };
+    for _ in 0..2 {
+        assert_eq!(
+            vm.invocation_code(&expression, Some(declaration))
+                .unwrap_err()
+                .kind,
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            vm.borrowed_invocation_code(&expression).unwrap_err().kind,
+            ErrorKind::Unsupported
+        );
+    }
+    assert!(vm.bytecode_cache.entries.is_empty());
+    assert!(vm.borrowed_code_cache.entries.is_empty());
+    let valid = body();
+    let frame = vm
+        .start_expression_input(&valid, &mut environment)
+        .unwrap()
+        .unwrap();
+    let result = frame.run(&mut vm);
+    assert!(matches!(result.flow, Ok(Flow::Value(Value::Bool(true)))));
+    assert_eq!(result.environment.get(&trace), Some(&Value::Bool(true)));
+
+    // Explicit reference execution remains available; it is not selected by
+    // a failed compilation and therefore consumes no bytecode compiler work.
+    let mut reference = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
+    assert!(
+        reference
+            .start_expression_input(&valid, &mut environment)
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        reference.eval(&valid, &mut environment).unwrap(),
+        Flow::Value(Value::Bool(true))
+    ));
+    assert_eq!(reference.bytecode_compilations(), 0);
 }

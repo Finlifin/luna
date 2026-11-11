@@ -451,7 +451,7 @@ tree 参考执行和字节码驱动共用这套进度及完成规则。字节码
 VM 局部测试另覆盖前后置条件拒绝、提前 return、等待、过期响应、预算耗尽和取消。
 
 本项只接通普通程序契约的执行进度，尚非通用前端检查／发布宿主协议。参数准入、
-类型契约及某些准备服务仍同步；不支持的字节码操作仍可能进入既有 tree fallback。
+类型契约及某些准备服务仍同步；本阶段原有的编译拒绝回退已由下节清理。
 签名依赖实际 invocation 产物的两个普通调用正例仍未解锁。
 
 验证在 `/home/fin/luna` 通过 `development/check.py --timeout 900 -- test`：
@@ -473,6 +473,54 @@ VM 局部测试另覆盖前后置条件拒绝、提前 return、等待、过期�
 七个修改 Rust 文件的格式检查 `/tmp/luna-tools-hfak84ny/result.json` 退出 0，
 `git diff --check` 通过。未运行全 workspace、LLVM/native 或性能基准；工作区仍包含
 作者原有资源分析修改，未将其改写或纳入提交。正式 docs 与 formatter 开发保持独立。
+
+### 编译拒绝与执行模式分开
+
+字节码编译失败原先返回 `Ok(None)`；声明、借用体、owned body 和 contextual input
+代码缓存因此都能保存“没有程序”的成功条目。调用者会据此进入树执行，后续调用则
+复用这次回退决定。它把编译错误、缓存未命中和显式参考执行混为一个协议。
+
+现在编译返回可执行代码或带来源的错误。Unsupported、预算、深度、控制流和未解
+类型证据分别保留错误类别；失败消耗的编译工作照常计费，不能发布代码缓存条目。
+代码缓存的条目类型只容纳可执行程序，缓存未命中仍允许重新编译。执行入口的
+`Option` 只表达现有 mode/schedule/effect 门控，不能由编译拒绝产生。
+
+主 ExprKind 分派改为穷尽匹配，标量编译也进入该分派。尚未实现的节点逐项列出，
+新 IR 变体必须做显式 lowering 决定。报告列出的十三种节点不能直接算作十三项
+合法 comptime 能力缺失：
+
+- 指针操作被 comptime 执行阶段拒绝；runtime 指针 Type 描述和 quote 不因此禁用。
+- effect 当前在 phase 检查与 comptime 树执行中均明确未实现。这里没有把这个
+  实现限制上升为最终语言永远禁止 comptime effect 的规则。
+- StagedValue 尚未完成，不能作为可执行常量；TemplateEqual 服务 runtime 的
+  staged callable 身份分派。换引擎不能完成其阶段证据。
+- 原 wildcard 还隐藏了 guarded 分支的剩余情况：非法域 and/or、携带参数绑定的
+  NF Call。后者在树执行也报 InvalidCallPlan，必须补齐实际准备协议，不能靠回退。
+
+回归直接送入有赋值前缀的未完成 IR，验证编译拒绝保留原来源，未启动输入执行，
+声明／借用／owned 缓存不产生负条目；同一 VM 后续合法代码仍可执行。这个 IR 探针
+不是合法源码用例。缓存容量、LRU、过期弱身份、时钟耗尽测试改用真实可执行程序，
+不再以失败条目当作缓存载荷。显式 tree 参考执行仍单独验证。
+
+本项没有声称 tree 求值完全退出生产路径。nested staged input 的 depth 门控、
+cleanup/effect 模式选择及同步准备服务尚在；通用前端 Region 恢复仍未完成。
+
+本阶段在 `/home/fin/luna` 的实际验证（`development/check.py --timeout 900 -- test`）：
+
+- `-p comptime_interpretor -p comptime_compiler --lib --no-fail-fast`：
+  `/tmp/luna-tools-ul7bbp65/result.json` 退出 0，分别 580、7 项通过。
+- `-p luna --test invocation_host_requests --test prepared_invocations --test staged_invocation_reuse --test default_calls --test comptime_bytecode_defaults --test conditional_capture_cleanup --test library_protocols --test builder_invocations --test cmtt --test cmtt_methods --test cmtt_type_inputs --test comptime_pointer_phase --test comptime_staged_values --test normal_form_domains --test comptime_bytecode --no-fail-fast`：
+  `/tmp/luna-tools-lxvqpcqr/result.json` 退出 101，982 项通过，一项失败，无 ignored。
+- 唯一失败是 `cmtt::generator_clause_domains_depend_on_prior_value_indices`，
+  在 `118..122` 捕获 `(local 4294967295 1)` 时拒绝 required 输入。临时将三个
+  生产文件恢复为 `59405db5` 后以 `-p luna --test cmtt generator_clause_domains_depend_on_prior_value_indices -- --exact`
+  单独复测，`/tmp/luna-tools-g42rqpk1/result.json` 退出 101，出现相同错误。
+  已恢复当前三个文件并按 `/tmp/luna-bytecode-rejection-baseline/restore.json`
+  核对内容摘要。此为已有前端依赖输入捕获失败，本阶段未修改用例、放宽预期或修复它。
+- 四个改动 Rust 文件的 scoped rustfmt 检查
+  `/tmp/luna-tools-r_tyye2_/result.json` 退出 0；`git diff --check` 通过。
+
+上述为工作区验证，仍含作者原有资源分析改动；没有执行全 workspace 或性能测量。
 
 ## 8. 宿主请求与候选、取消的组合
 

@@ -108,7 +108,14 @@ query 和 std 的实际接口仍未完成；报告中的局部能力不能替代
 树解释器。实际仍同步执行普通声明前后置条件的是 `prepare_invocation`／原
 `finish_invocation`。这条路径现已迁入 owned activation 的 entry/body/exit 状态，
 对应交付与限制见[普通函数契约的恢复边界](elaboration-state-and-publication.md#普通函数契约的恢复边界)。
-原报告中关于一般 fallback 和尚未接通前端检查请求的判断仍然成立。
+编译 Unsupported 后静默选择 tree 的 fallback 现已移除，代码缓存也不再存储失败
+决定；显式参考执行、嵌套 staged input 与 mode 门控仍在。十三种不支持节点的阶段
+定位、额外 guarded 分支及剩余迁移见
+[编译拒绝与执行模式分开](elaboration-state-and-publication.md#编译拒绝与执行模式分开)。
+尚未接通一般前端检查请求的判断仍然成立。此次扩大 CMTT 验证还复现了
+`generator_clause_domains_depend_on_prior_value_indices` 的已有 required 输入捕获失败；
+修改前 `59405db5` 的三个 VM／编译文件也产生相同诊断，证据见上述迁移小节。
+不能把这次检查描述为源码全部通过，也没有用跳过该正例掩盖它。
 
 ## 3. 已有清理在目标架构中的位置
 

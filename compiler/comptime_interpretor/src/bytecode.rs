@@ -528,11 +528,11 @@ impl Frame {
 }
 
 /// Only immutable code bodies are admitted. Neither invocation results nor
-/// captured environments are stored here. A missing program records unsupported
-/// lowering, so repeated calls do not repeatedly traverse a migration body.
+/// captured environments or failed lowering decisions are stored here.
+/// A cache entry always owns executable code; absence only means a cache miss.
 #[derive(Default)]
 pub(super) struct CodeCache {
-    entries: BTreeMap<DeclarationId, Option<Arc<Program>>>,
+    entries: BTreeMap<DeclarationId, Arc<Program>>,
     owned: BTreeMap<usize, OwnedCode>,
     recency: BTreeMap<CodeKey, u64>,
     order: BTreeMap<u64, CodeKey>,
@@ -550,7 +550,7 @@ enum CodeKey {
 // session cache, this table never outlives or moves between source worlds.
 #[derive(Default)]
 pub(super) struct BorrowedCodeCache<'a> {
-    entries: HashMap<BorrowedBody<'a>, Option<Arc<Program>>>,
+    entries: HashMap<BorrowedBody<'a>, Arc<Program>>,
     weight: usize,
 }
 
@@ -569,7 +569,7 @@ impl std::hash::Hash for BorrowedBody<'_> {
 }
 
 impl<'a> BorrowedCodeCache<'a> {
-    fn insert(&mut self, body: &'a Expr, program: Option<Arc<Program>>) {
+    fn insert(&mut self, body: &'a Expr, program: Arc<Program>) {
         const LIMIT: usize = 100_000;
         let weight = CodeCache::program_weight(&program);
         if weight > LIMIT {
@@ -588,7 +588,7 @@ impl<'a> BorrowedCodeCache<'a> {
 
 struct OwnedCode {
     body: std::sync::Weak<Expr>,
-    program: Option<Arc<Program>>,
+    program: Arc<Program>,
 }
 
 impl CodeCache {
@@ -618,13 +618,13 @@ impl CodeCache {
         self.clock += 1;
     }
 
-    fn named(&mut self, id: DeclarationId) -> Option<Option<Arc<Program>>> {
+    fn named(&mut self, id: DeclarationId) -> Option<Arc<Program>> {
         let program = self.entries.get(&id)?.clone();
         self.touch(CodeKey::Named(id));
         Some(program)
     }
 
-    fn insert(&mut self, id: DeclarationId, program: Option<Arc<Program>>) {
+    fn insert(&mut self, id: DeclarationId, program: Arc<Program>) {
         self.forget(CodeKey::Named(id));
         if let Some(previous) = self.entries.remove(&id) {
             self.weight -= Self::program_weight(&previous);
@@ -635,13 +635,11 @@ impl CodeCache {
         }
     }
 
-    fn program_weight(program: &Option<Arc<Program>>) -> usize {
-        program.as_ref().map_or(1, |code| {
-            1 + code.storage_work() + code.locals().len() + code.registers()
-        })
+    fn program_weight(program: &Program) -> usize {
+        1 + program.storage_work() + program.locals().len() + program.registers()
     }
 
-    fn reserve(&mut self, program: &Option<Arc<Program>>) -> bool {
+    fn reserve(&mut self, program: &Arc<Program>) -> bool {
         const LIMIT: usize = 100_000;
         let weight = Self::program_weight(program);
         if weight > LIMIT {
@@ -679,7 +677,7 @@ impl CodeCache {
         true
     }
 
-    fn owned(&mut self, body: &Arc<Expr>) -> Option<Option<Arc<Program>>> {
+    fn owned(&mut self, body: &Arc<Expr>) -> Option<Arc<Program>> {
         // This address is only an interpreter-local lookup index. A live weak
         // identity check prevents stale allocation reuse from selecting code.
         let key = Arc::as_ptr(body) as usize;
@@ -699,7 +697,7 @@ impl CodeCache {
         None
     }
 
-    fn insert_owned(&mut self, body: &Arc<Expr>, program: Option<Arc<Program>>) {
+    fn insert_owned(&mut self, body: &Arc<Expr>, program: Arc<Program>) {
         let key = Arc::as_ptr(body) as usize;
         self.forget(CodeKey::Owned(key));
         if let Some(previous) = self.owned.remove(&key) {
@@ -736,7 +734,7 @@ impl<'a> Interpreter<'a> {
         self.bytecode_compilation_steps
     }
 
-    fn compile_body(&mut self, body: &Expr) -> Result<Option<Program>, Error> {
+    fn compile_body(&mut self, body: &Expr) -> Result<Program, Error> {
         self.compile_bytecode(|session, fuel| session.compile(body, fuel))
     }
 
@@ -746,7 +744,7 @@ impl<'a> Interpreter<'a> {
             &mut comptime_compiler::CompilationSession,
             &mut usize,
         ) -> Result<T, comptime_compiler::Error>,
-    ) -> Result<Option<T>, Error> {
+    ) -> Result<T, Error> {
         self.bytecode_compilations += 1;
         // Compilation is actual invocation work, including unsuccessful probes.
         // Use the caller's remaining budget rather than an unrelated fixed cap;
@@ -760,8 +758,10 @@ impl<'a> Interpreter<'a> {
             .bytecode_compilation_steps
             .saturating_add(before - self.budget.steps);
         match result {
-            Ok(program) => Ok(Some(program)),
-            Err(comptime_compiler::Error::Unsupported(_)) => Ok(None),
+            Ok(program) => Ok(program),
+            Err(comptime_compiler::Error::Unsupported(source)) => {
+                Err(self.failure(ErrorKind::Unsupported, Some(source)))
+            }
             Err(comptime_compiler::Error::UnresolvedTypeEvidence(source)) => {
                 Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)))
             }
@@ -795,15 +795,15 @@ impl<'a> Interpreter<'a> {
         // Decide the execution route before any instruction has run.
         if let Some(id) = stable_code {
             if let Some(program) = self.bytecode_cache.named(id) {
-                return Ok(program);
+                return Ok(Some(program));
             }
             // The invocation boundary supplies either immutable package code
             // or a validated input-independent prepared body of that declaration.
-            let program = self.compile_body(body)?.map(Arc::new);
+            let program = Arc::new(self.compile_body(body)?);
             self.bytecode_cache.insert(id, program.clone());
-            Ok(program)
+            Ok(Some(program))
         } else {
-            Ok(self.compile_body(body)?.map(Arc::new))
+            Ok(Some(Arc::new(self.compile_body(body)?)))
         }
     }
 
@@ -815,13 +815,13 @@ impl<'a> Interpreter<'a> {
             return Ok(None);
         }
         if let Some(program) = self.borrowed_code_cache.entries.get(&BorrowedBody(body)) {
-            return Ok(program.clone());
+            return Ok(Some(program.clone()));
         }
-        // Budget and malformed-control errors are not cached. Only completed
-        // compilation or a stable unsupported-lowering decision can be reused.
-        let program = self.compile_body(body)?.map(Arc::new);
+        // Failures preserve their source and never select another evaluator.
+        // Only successfully compiled immutable code is eligible for reuse.
+        let program = Arc::new(self.compile_body(body)?);
         self.borrowed_code_cache.insert(body, program.clone());
-        Ok(program)
+        Ok(Some(program))
     }
 
     pub(super) fn owned_invocation_code(
@@ -832,11 +832,11 @@ impl<'a> Interpreter<'a> {
             return Ok(None);
         }
         if let Some(program) = self.bytecode_cache.owned(body) {
-            return Ok(program);
+            return Ok(Some(program));
         }
-        let program = self.compile_body(body)?.map(Arc::new);
+        let program = Arc::new(self.compile_body(body)?);
         self.bytecode_cache.insert_owned(body, program.clone());
-        Ok(program)
+        Ok(Some(program))
     }
 
     #[cfg(test)]
@@ -865,9 +865,7 @@ impl<'a> Interpreter<'a> {
         if !self.bytecode_invocation_available() || depth != 0 {
             return Ok(None);
         }
-        let Some(compiled) = self.contextual_input_code(input, None)? else {
-            return Ok(None);
-        };
+        let compiled = self.contextual_input_code(input, None)?;
         let code = self.start_frame(&compiled.program, environment)?;
         let shape = compiled.shape.expect("staged input shape");
         self.bytecode_staged_inputs += 1;
@@ -926,9 +924,7 @@ impl<'a> Interpreter<'a> {
         if !self.bytecode_invocation_available() {
             return Ok(None);
         }
-        let Some(compiled) = self.contextual_input_code(input, Some(expected))? else {
-            return Ok(None);
-        };
+        let compiled = self.contextual_input_code(input, Some(expected))?;
         let code = self.start_frame(&compiled.program, environment)?;
         self.bytecode_contextual_inputs += 1;
         Ok(Some(InputFrame {
@@ -3843,7 +3839,7 @@ mod tests {
                     package: 1,
                     local: 0,
                 },
-                Some(code.clone()),
+                code.clone(),
             );
             let mut frame = vm.start_frame(&code, &mut environment).unwrap();
             assert!(matches!(
@@ -3995,55 +3991,62 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unsupported_code_cache_is_bounded_and_eviction_allows_reinsertion() {
-        let mut cache = CodeCache::default();
-        for local in 0..=100_000 {
-            cache.insert(DeclarationId { package: 1, local }, None);
-        }
-        assert_eq!(cache.entries.len(), 100_000);
-        assert_eq!(cache.weight, 100_000);
-        let first = DeclarationId {
-            package: 1,
-            local: 0,
-        };
-        assert!(!cache.entries.contains_key(&first));
-        cache.insert(first, None);
-        assert!(cache.entries.contains_key(&first));
-        assert_eq!(cache.weight, 100_000);
-    }
-
-    #[test]
-    fn cache_recency_survives_hits_replacement_and_clock_exhaustion() {
-        let mut cache = CodeCache::default();
+    fn cached_unit() -> (Arc<Expr>, Arc<Program>) {
         let body = Arc::new(Expr {
             source: SourceRange { start: 1, end: 2 },
             ty: Term::Primitive(Primitive::Void),
             kind: K::Unit,
         });
         let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
-        let id = |local| DeclarationId { package: 1, local };
-        cache.insert(id(0), Some(code.clone()));
-        cache.insert_owned(&body, None);
-        // Replacement must remove both old weight and its recency node.
-        cache.insert(id(0), None);
-        for local in 1..99_999 {
-            cache.insert(id(local), None);
+        (body, code)
+    }
+
+    #[test]
+    fn executable_code_cache_is_bounded_and_eviction_allows_reinsertion() {
+        let mut cache = CodeCache::default();
+        let (_, code) = cached_unit();
+        let weight = CodeCache::program_weight(&code);
+        let capacity = 100_000 / weight;
+        for local in 0..=capacity as u32 {
+            cache.insert(DeclarationId { package: 1, local }, code.clone());
         }
-        assert_eq!(cache.weight, 100_000);
+        assert_eq!(cache.entries.len(), capacity);
+        assert_eq!(cache.weight, capacity * weight);
+        let first = DeclarationId {
+            package: 1,
+            local: 0,
+        };
+        assert!(!cache.entries.contains_key(&first));
+        cache.insert(first, code);
+        assert!(cache.entries.contains_key(&first));
+        assert_eq!(cache.weight, capacity * weight);
+    }
+
+    #[test]
+    fn cache_recency_survives_hits_replacement_and_clock_exhaustion() {
+        let mut cache = CodeCache::default();
+        let (body, code) = cached_unit();
+        let weight = CodeCache::program_weight(&code);
+        let capacity = 100_000 / weight;
+        let id = |local| DeclarationId { package: 1, local };
+        cache.insert(id(0), code.clone());
+        cache.insert_owned(&body, code.clone());
+        // Replacement must remove both old weight and its recency node.
+        cache.insert(id(0), code.clone());
+        for local in 1..capacity as u32 - 1 {
+            cache.insert(id(local), code.clone());
+        }
+        assert_eq!(cache.weight, capacity * weight);
         cache.clock = u64::MAX;
-        assert!(matches!(cache.named(id(0)), Some(None)));
-        cache.insert(id(99_999), None);
-        // The live owned marker is older than the refreshed declaration.
+        assert!(matches!(cache.named(id(0)), Some(retained) if Arc::ptr_eq(&retained, &code)));
+        cache.insert(id(capacity as u32 - 1), code.clone());
+        // The live owned body is older than the refreshed declaration.
         assert!(cache.owned(&body).is_none());
         assert!(cache.entries.contains_key(&id(0)));
-        cache.insert_owned(&body, Some(code.clone()));
-        let code_weight = CodeCache::program_weight(&Some(code));
-        for local in 1..=code_weight as u32 {
-            assert!(!cache.entries.contains_key(&id(local)));
-        }
-        assert!(cache.entries.contains_key(&id(code_weight as u32 + 1)));
-        assert_eq!(cache.weight, 100_000);
+        cache.insert_owned(&body, code.clone());
+        assert!(!cache.entries.contains_key(&id(1)));
+        assert!(cache.entries.contains_key(&id(2)));
+        assert_eq!(cache.weight, capacity * weight);
         for _ in 0..1000 {
             assert!(cache.named(id(0)).is_some());
         }
@@ -4054,7 +4057,7 @@ mod tests {
             cache
                 .entries
                 .values()
-                .map(CodeCache::program_weight)
+                .map(|code| CodeCache::program_weight(code))
                 .sum::<usize>()
                 + cache
                     .owned
@@ -4067,26 +4070,19 @@ mod tests {
     #[test]
     fn cache_pressure_reclaims_expired_bodies_before_live_code() {
         let mut cache = CodeCache::default();
-        let body = || {
-            Arc::new(Expr {
-                source: SourceRange { start: 1, end: 2 },
-                ty: Term::Primitive(Primitive::Void),
-                kind: K::Unit,
-            })
-        };
-        let live = body();
-        let code = Arc::new(comptime_compiler::compile(&live, &mut 1000).unwrap());
-        let live_weight = CodeCache::program_weight(&Some(code.clone()));
-        cache.insert_owned(&live, Some(code.clone()));
-        let expired = body();
+        let (live, code) = cached_unit();
+        let weight = CodeCache::program_weight(&code);
+        let capacity = 100_000 / weight;
+        cache.insert_owned(&live, code.clone());
+        let expired = Arc::new(live.as_ref().clone());
         let expired_key = Arc::as_ptr(&expired) as usize;
-        cache.insert_owned(&expired, None);
+        cache.insert_owned(&expired, code.clone());
         drop(expired);
-        let named_count = (100_000 - live_weight - 1) as u32;
+        let named_count = capacity as u32 - 2;
         for local in 0..named_count {
-            cache.insert(DeclarationId { package: 1, local }, None);
+            cache.insert(DeclarationId { package: 1, local }, code.clone());
         }
-        assert_eq!(cache.weight, 100_000);
+        assert_eq!(cache.weight, capacity * weight);
         let first = DeclarationId {
             package: 1,
             local: 0,
@@ -4095,27 +4091,23 @@ mod tests {
             package: 1,
             local: named_count,
         };
-        cache.insert(added, None);
+        cache.insert(added, code.clone());
         assert!(cache.entries.contains_key(&first));
         assert!(cache.entries.contains_key(&added));
-        assert!(
-            matches!(cache.owned(&live), Some(Some(retained)) if Arc::ptr_eq(&retained, &code))
-        );
+        assert!(matches!(cache.owned(&live), Some(retained) if Arc::ptr_eq(&retained, &code)));
         assert!(!cache.owned.contains_key(&expired_key));
-        assert_eq!(cache.weight, 100_000);
+        assert_eq!(cache.weight, capacity * weight);
         // With no dead entries left, the established bounded eviction policy applies.
         cache.insert(
             DeclarationId {
                 package: 1,
                 local: named_count + 1,
             },
-            None,
+            code.clone(),
         );
-        assert_eq!(cache.weight, 100_000);
+        assert_eq!(cache.weight, capacity * weight);
         assert!(!cache.entries.contains_key(&first));
-        assert!(
-            matches!(cache.owned(&live), Some(Some(retained)) if Arc::ptr_eq(&retained, &code))
-        );
+        assert!(matches!(cache.owned(&live), Some(retained) if Arc::ptr_eq(&retained, &code)));
     }
 
     #[test]

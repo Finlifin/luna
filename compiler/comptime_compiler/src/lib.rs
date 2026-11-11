@@ -1497,41 +1497,52 @@ fn compile_root<'a>(
                     slot
                 };
                 let emit = |work: &mut Vec<_>, op| work.push(Work::Emit(source, op));
-                if let Some((scalar, left, right)) = Scalar::expression(expr) {
-                    let scalar = Arc::new(OwnedScalar::copy(scalar, fuel, source)?);
-                    let a = fresh();
-                    let b = right.map(|_| fresh());
-                    emit(
-                        &mut work,
-                        Op::Scalar {
-                            destination: dst,
-                            scalar: scalar.clone(),
-                            left: a,
-                            right: b,
-                        },
-                    );
-                    if let Some((right, b)) = right.zip(b) {
+                match &expr.kind {
+                    K::ComptimeIntegerConvert(_)
+                    | K::IntegerRepresentation(_)
+                    | K::IntegerBinary { .. }
+                    | K::IntegerNegate(_)
+                    | K::FloatNegate(_)
+                    | K::FloatBinary { .. }
+                    | K::ScalarEqual(..)
+                    | K::ScalarLess(..)
+                    | K::ScalarLessEqual(..)
+                    | K::ScalarGreater(..)
+                    | K::ScalarGreaterEqual(..) => {
+                        let (scalar, left, right) =
+                            Scalar::expression(expr).expect("scalar expression descriptor");
+                        let scalar = Arc::new(OwnedScalar::copy(scalar, fuel, source)?);
+                        let a = fresh();
+                        let b = right.map(|_| fresh());
+                        emit(
+                            &mut work,
+                            Op::Scalar {
+                                destination: dst,
+                                scalar: scalar.clone(),
+                                left: a,
+                                right: b,
+                            },
+                        );
+                        if let Some((right, b)) = right.zip(b) {
+                            emit(
+                                &mut work,
+                                Op::CheckScalarOperand {
+                                    scalar: scalar.clone(),
+                                    value: b,
+                                },
+                            );
+                            work.push(Work::Expression(right, b));
+                        }
                         emit(
                             &mut work,
                             Op::CheckScalarOperand {
                                 scalar: scalar.clone(),
-                                value: b,
+                                value: a,
                             },
                         );
-                        work.push(Work::Expression(right, b));
+                        work.push(Work::Expression(left, a));
+                        emit(&mut work, Op::PrepareScalar(scalar));
                     }
-                    emit(
-                        &mut work,
-                        Op::CheckScalarOperand {
-                            scalar: scalar.clone(),
-                            value: a,
-                        },
-                    );
-                    work.push(Work::Expression(left, a));
-                    emit(&mut work, Op::PrepareScalar(scalar));
-                    continue;
-                }
-                match &expr.kind {
                     K::ComptimeFunctionInstance {
                         declaration,
                         subject,
@@ -3175,7 +3186,24 @@ fn compile_root<'a>(
                             emit(&mut work, Op::Unit(src));
                         }
                     }
-                    _ => return Err(Error::Unsupported(source)),
+                    // Boolean and bit-vector domains were handled above.
+                    K::And(..) | K::Or(..) => return Err(Error::Unsupported(source)),
+                    // Normal-form calls with parameter bindings still require
+                    // a preparation protocol; reference execution rejects them too.
+                    K::Call { .. } => return Err(Error::Unsupported(source)),
+                    K::AddressOf(_)
+                    | K::ReadPointer(_)
+                    | K::WritePointer { .. }
+                    | K::PointerAnonymousField { .. }
+                    | K::PointerField { .. }
+                    | K::BitWritePointer { .. }
+                    | K::EffectResume(_)
+                    | K::EffectHandle { .. }
+                    | K::EffectRun { .. }
+                    | K::EffectComputation { .. }
+                    | K::EffectRequest { .. }
+                    | K::StagedValue(_)
+                    | K::TemplateEqual(..) => return Err(Error::Unsupported(source)),
                 }
             }
         }

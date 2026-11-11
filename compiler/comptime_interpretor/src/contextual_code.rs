@@ -12,7 +12,7 @@ pub(super) struct Code {
 struct Entry {
     input: NormalFormArgument,
     expected: Option<Term>,
-    code: Option<Code>,
+    code: Code,
     key_work: u64,
     weight: u64,
 }
@@ -27,7 +27,7 @@ impl Cache {
         input: &NormalFormArgument,
         expected: Option<&Term>,
         fuel: &mut u64,
-    ) -> Result<Option<Option<Code>>, ()> {
+    ) -> Result<Option<Code>, ()> {
         for entry in self.entries.iter().rev() {
             *fuel = fuel.checked_sub(1).ok_or(())?;
             if entry.input.source() != input.source()
@@ -59,7 +59,7 @@ impl Interpreter<'_> {
         &mut self,
         input: &NormalFormArgument,
         expected: Option<&Term>,
-    ) -> Result<Option<Code>, Error> {
+    ) -> Result<Code, Error> {
         let source = input.source();
         // Bound recursive comparison and copying before looking at owned keys.
         let before = self.budget.steps;
@@ -89,19 +89,20 @@ impl Interpreter<'_> {
         }
         let before = self.budget.steps;
         let code = if let Some(expected) = expected {
-            self.compile_bytecode(|session, fuel| {
+            let program = self.compile_bytecode(|session, fuel| {
                 session.compile_contextual_input(input, expected, fuel)
-            })?
-            .map(|program| Code {
+            })?;
+            Code {
                 program: Arc::new(program),
                 shape: None,
-            })
+            }
         } else {
-            self.compile_bytecode(|session, fuel| session.compile_staged_input(input, fuel))?
-                .map(|(program, shape)| Code {
-                    program: Arc::new(program),
-                    shape: Some(Arc::new(shape)),
-                })
+            let (program, shape) =
+                self.compile_bytecode(|session, fuel| session.compile_staged_input(input, fuel))?;
+            Code {
+                program: Arc::new(program),
+                shape: Some(Arc::new(shape)),
+            }
         };
         let weight = (before - self.budget.steps)
             .saturating_add(key_work)
@@ -141,29 +142,19 @@ mod tests {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let input = literal("17");
         let u8 = Term::Primitive(Primitive::U8);
-        let first = vm
-            .contextual_input_code(&input, Some(&u8))
-            .unwrap()
-            .unwrap();
+        let first = vm.contextual_input_code(&input, Some(&u8)).unwrap();
         let count = vm.bytecode_compilations();
-        let copy = vm
-            .contextual_input_code(&input.clone(), Some(&u8))
-            .unwrap()
-            .unwrap();
+        let copy = vm.contextual_input_code(&input.clone(), Some(&u8)).unwrap();
         assert!(Arc::ptr_eq(&first.program, &copy.program));
         assert_eq!(vm.bytecode_compilations(), count);
         let other = vm
             .contextual_input_code(&input, Some(&Term::Primitive(Primitive::U16)))
-            .unwrap()
             .unwrap();
         assert!(!Arc::ptr_eq(&first.program, &other.program));
-        let changed = vm
-            .contextual_input_code(&literal("18"), Some(&u8))
-            .unwrap()
-            .unwrap();
+        let changed = vm.contextual_input_code(&literal("18"), Some(&u8)).unwrap();
         assert!(!Arc::ptr_eq(&first.program, &changed.program));
-        let staged = vm.contextual_input_code(&input, None).unwrap().unwrap();
-        let repeated = vm.contextual_input_code(&input, None).unwrap().unwrap();
+        let staged = vm.contextual_input_code(&input, None).unwrap();
+        let repeated = vm.contextual_input_code(&input, None).unwrap();
         assert!(Arc::ptr_eq(&staged.program, &repeated.program));
         assert!(Arc::ptr_eq(
             staged.shape.as_ref().unwrap(),
@@ -185,11 +176,7 @@ mod tests {
                 failed += 1;
                 assert!(vm.contextual_code_cache.entries.is_empty());
                 vm.budget = Budget::default();
-                assert!(
-                    vm.contextual_input_code(&input, Some(&expected))
-                        .unwrap()
-                        .is_some()
-                );
+                vm.contextual_input_code(&input, Some(&expected)).unwrap();
             }
         }
         assert!(failed > 1);
