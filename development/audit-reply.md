@@ -267,8 +267,12 @@ runtime str 无类型操作及资源来源、数学包装复用仍未完成。
 | `--test comptime_list_operations --test frontend_cli --test elaboration --no-fail-fast -- --exact ordinary_package_uses_public_list_operations_without_builtin_access sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override unsupported_abi_attributes_cannot_publish_default_abi_functions` | 3 项通过 | `/tmp/luna-tools-diko8kqp/result.json`，退出 0 |
 
 derive 的旧例只使用独立源码，不依赖迁移的库：它执行 `storage.ref`／`pointer.*`，
-实际报错为 comptime 禁止指针操作，符合作者明确规则。暂不把其接受预期当作语言契约，
-也不将这次整组运行称为全部通过；后续单独以值引用更新和指针拒绝覆盖原检查目的。
+实际报错为 comptime 禁止指针操作，符合作者明确规则及 `docs/comptime/index.md`
+开头的语义边界。后续单独将该例迁为值引用更新：方法修改 `self.flag`，调用方读取
+原存储确认写回，再将完成的 bool 捕获进生成的 runtime 成员；另保留明确的源指针
+拒绝例。没有删除原有临时值／生成代码的阶段隔离检查目的，也没有恢复 comptime
+指针。`--test derivation --no-fail-fast` 78 项通过，证据
+`/tmp/luna-tools-bhk7ztwk/result.json`（退出 0，工作目录与命令前缀同上）。
 
 ## 4. 本次证据与限制
 

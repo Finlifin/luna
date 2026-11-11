@@ -539,13 +539,50 @@ fn strategy_computations_preserve_type_mutability_and_phase_checks() {
 }
 
 #[test]
-fn strategy_temporary_references_do_not_escape_into_generated_members() {
+fn strategy_value_reference_updates_do_not_escape_into_generated_members() {
     let package = compile_with_strategy_bool_splice(
-        "trait Flag {fn flag()->bool;} derive fn configured for Flag {let storage=true; let pointer=storage.ref; let result=pointer.*; fn flag()->bool {result}} struct Subject {} derive Flag.use(configured) for Subject; fn run()->bool {Subject.as(Flag).flag()}",
+        "struct State {flag:bool}
+         impl State {
+             comptime fn flip(self)->bool {
+                 self.flag = not self.flag;
+                 self.flag
+             }
+         }
+         trait Flag {fn flag()->bool;}
+         derive fn configured for Flag {
+             let storage=State {flag:false};
+             let changed=storage.flip();
+             let result=changed and storage.flag;
+             fn flag()->bool {result}
+         }
+         struct Subject {}
+         derive Flag.use(configured) for Subject;
+         fn run()->bool {Subject.as(Flag).flag()}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
+    );
+}
+
+#[test]
+fn strategy_computation_rejects_source_pointer_operations() {
+    let error = support::compile_with_protocols(
+        "trait Flag {fn flag()->bool;}
+         derive fn configured for Flag {
+             let storage=true;
+             let pointer=storage.ref;
+             let result=pointer.*;
+             fn flag()->bool {true}
+         }
+         struct Subject {}
+         derive Flag.use(configured) for Subject;",
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("pointer operations cannot execute at comptime"),
+        "{error}"
     );
 }
 
