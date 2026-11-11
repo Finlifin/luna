@@ -13,7 +13,7 @@ impl World<'_> {
     ) -> Result<bool, QueryError> {
         self.closed_inputs_metered(query.inputs(), budget)
     }
-    pub(super) fn closed_inputs_metered<'t>(
+    pub(crate) fn closed_inputs_metered<'t>(
         &self,
         inputs: impl IntoIterator<Item = &'t Term>,
         budget: &mut Budget,

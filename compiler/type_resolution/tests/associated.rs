@@ -84,6 +84,202 @@ fn implementation(subject: Term, result: Term) -> Implementation {
 }
 
 #[test]
+fn closed_projection_views_keep_the_world_premise_scope() {
+    use type_resolution::ptc::Formula;
+
+    // A completed Type input can equal a closed subject while the enclosing
+    // definition still carries its capability under the original binder.
+    let input = Term::Bound {
+        depth: 0,
+        index: 2,
+        sort: Sort::Type,
+    };
+    let frames = vec![vec![Sort::ComptimeValue, Sort::Runtime, Sort::Type]];
+    let mut context = Context::with_scope(frames.clone());
+    context.assume(Formula::equal(input.clone(), rigid(90)));
+    let assumptions = [TraitRequirement {
+        subject: input,
+        interface: id(1),
+        interface_arguments: vec![],
+    }];
+    let traits = [contract()];
+    let index = Index::default();
+    let world = World {
+        index: &index,
+        implementations: &[],
+        traits: &traits,
+        assumptions: &assumptions,
+        context: &context,
+    };
+    let projected = projection(rigid(90), vec![]);
+    let mut pending_context = context.clone();
+    pending_context.assume(Formula::equal(ty(P::Bool), ty(P::Bool)));
+    pending_context.assume(Formula::from_predicate(&TypePredicate::Trait(
+        TraitRequirement {
+            subject: rigid(91),
+            interface: id(99),
+            interface_arguments: vec![],
+        },
+    )));
+    assert!(matches!(
+        pending_context.structural_view(&rigid(90), Budget::default()),
+        Err(type_resolution::ptc::UnknownReason::UnvalidatedModel)
+    ));
+    assert_eq!(
+        World {
+            context: &pending_context,
+            ..world
+        }
+        .associated_type_view(&projected, Budget::default())
+        .unwrap()
+        .value,
+        projected
+    );
+    // Inner callable binders must not capture the outer world's premises.
+    let nested = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::Runtime,
+            ty: ty(P::Bool),
+        }],
+        result: Box::new(Term::Function {
+            parameters: vec![],
+            result: Box::new(projected.clone()),
+        }),
+    };
+    for observed in [&projected, &nested] {
+        let view = world
+            .associated_type_view(observed, Budget::default())
+            .unwrap();
+        assert_eq!(&view.value, observed);
+        assert!(view.steps.is_empty());
+    }
+    // Capability evidence neither selects a member value nor uses its default.
+    assert!(
+        world
+            .normalize_associated_types(&projected, Budget::default())
+            .is_err()
+    );
+    let mut cache = Default::default();
+    let mut exhausted = Budget {
+        steps: 1,
+        ..Budget::default()
+    };
+    assert!(matches!(
+        world.associated_type_view_cached_metered(&nested, &mut exhausted, &mut cache),
+        Err(nir::NominalAdmissionError::Budget)
+    ));
+    assert!(cache.is_empty());
+    assert_eq!(
+        world
+            .associated_type_view_cached_metered(&nested, &mut Budget::default(), &mut cache)
+            .unwrap()
+            .value,
+        nested
+    );
+
+    let without_equality = Context::with_scope(frames);
+    assert!(
+        World {
+            context: &without_equality,
+            ..world
+        }
+        .associated_type_view(&projected, Budget::default())
+        .is_err()
+    );
+    // A concrete query must still reject premises whose owning frame is gone.
+    let expired = Context::default();
+    assert!(matches!(
+        World {
+            context: &expired,
+            ..world
+        }
+        .associated_type_view(&projected, Budget::default()),
+        Err(nir::NominalAdmissionError::Invalid(_))
+    ));
+}
+
+#[test]
+fn concrete_projection_inputs_select_values_despite_scoped_givens() {
+    use type_resolution::ptc::Formula;
+
+    let input = Term::Bound {
+        depth: 0,
+        index: 2,
+        sort: Sort::Type,
+    };
+    let mut context =
+        Context::with_scope(vec![vec![Sort::ComptimeValue, Sort::Runtime, Sort::Type]]);
+    context.assume(Formula::equal(input.clone(), ty(P::Bool)));
+    let mut source = contract();
+    // Formation also uses the same scoped premises, independently of the
+    // concrete implementation that supplies Source.Element.
+    source.capabilities.push(TraitRequirement {
+        subject: rigid(3),
+        interface: id(99),
+        interface_arguments: vec![],
+    });
+    let mut marker = contract();
+    marker.declaration = id(99);
+    marker.self_parameter = id(100);
+    marker.associated.clear();
+    let package = nir::program::Package {
+        traits: vec![source, marker],
+        implementations: vec![implementation(ty(P::Bool), ty(P::U8))],
+        ..Default::default()
+    };
+    let (declarations, _) =
+        type_resolution::dispatch::DeclarationWorld::new(&package, Budget::default(), None)
+            .unwrap();
+    let assumptions: Vec<_> = [id(1), id(99)]
+        .into_iter()
+        .map(|interface| TraitRequirement {
+            subject: input.clone(),
+            interface,
+            interface_arguments: vec![],
+        })
+        .collect();
+    let world = World {
+        index: declarations.index(),
+        implementations: &package.implementations,
+        traits: &package.traits,
+        assumptions: &assumptions,
+        context: &context,
+    };
+    let projected = projection(ty(P::Bool), vec![]);
+    let result = world
+        .associated_type_view(&projected, Budget::default())
+        .unwrap();
+    assert_eq!(result.value, ty(P::U8));
+    assert_eq!(result.steps.len(), 1);
+    assert_eq!(result.steps[0].resolution.evidence.implementation, id(4));
+    assert_eq!(
+        World {
+            assumptions: &assumptions[1..],
+            ..world
+        }
+        .associated_type_view(&projected, Budget::default())
+        .unwrap()
+        .value,
+        ty(P::U8)
+    );
+    // An abstract premise is not permission to select a different subject.
+    assert!(
+        world
+            .associated_type_view(&projection(ty(P::Char), vec![]), Budget::default())
+            .is_err()
+    );
+    // Without the formation premise, a selected member value is insufficient.
+    assert!(
+        World {
+            assumptions: &[],
+            ..world
+        }
+        .associated_type_view(&projected, Budget::default())
+        .is_err()
+    );
+}
+
+#[test]
 fn declaration_selection_preserves_query_fuel_and_failure_categories() {
     use nir::value_admission::Error;
     use type_resolution::{

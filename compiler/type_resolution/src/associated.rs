@@ -76,7 +76,10 @@ impl World<'_> {
         for capability in &contract.capabilities {
             let capability =
                 substitution.instantiate_requirement_bounded(capability, &mut budget.steps)?;
-            if self.given_metered(&capability, budget)?.is_some() {
+            if self
+                .given_in_context_metered(&capability, budget)?
+                .is_some()
+            {
                 continue;
             }
             let resolved = resolve(
@@ -357,9 +360,9 @@ impl World<'_> {
             .map(|(result, _, completed)| (result, completed))
     }
 
-    /// Definition-side type view: given interfaces remain abstract, while
-    /// independent concrete projections may still resolve. IIR uses the strict
-    /// normalization entry and cannot retain these abstract results.
+    /// Definition-side type view: given interfaces with open inputs remain
+    /// abstract; completed inputs still select their associated value. IIR uses
+    /// the strict normalization entry and cannot retain abstract results.
     pub fn associated_type_view(
         &self,
         ty: &Term,
@@ -628,11 +631,39 @@ impl Normalizer<'_, '_, '_> {
                         steps: query_steps,
                         ..self.budget
                     };
-                    let found = self.world.given_metered(&given, &mut given_budget);
+                    // The projection is closed, but its evidence may still
+                    // refer to the world's enclosing input frame. Nested
+                    // callable frames belong to the observed type, not to
+                    // those premises, so use the world's original context.
+                    let found = self
+                        .world
+                        .given_in_context_metered(&given, &mut given_budget);
                     // A failed premise lookup may consume very little work.
                     // Charging its whole allowance starves nested projections.
                     self.spend(query_steps - given_budget.steps)?;
-                    if found?.is_some() {
+                    let preserve = if found?.is_some() {
+                        let mut allowance = Budget {
+                            steps: self.remaining,
+                            ..self.budget
+                        };
+                        let closed = self.world.closed_inputs_metered(
+                            std::iter::once(subject.as_ref()).chain(arguments),
+                            &mut allowance,
+                        );
+                        self.remaining = allowance.steps;
+                        match closed {
+                            Ok(closed) => !closed,
+                            // This proof only permits refining an already
+                            // valid given view. An unfinished closure proof
+                            // leaves that view abstract; it is not evidence
+                            // of absence or permission to choose a default.
+                            Err(QueryError::Unresolved(_)) => true,
+                            Err(failure) => return Err(failure),
+                        }
+                    } else {
+                        false
+                    };
+                    if preserve {
                         let contract = self
                             .world
                             .traits

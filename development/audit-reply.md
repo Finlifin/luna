@@ -571,10 +571,47 @@ u8/i32 不一致；共用上下文后，同一子案例 `/tmp/luna-tools-xqi67oa
   `342..364: invalid binder reference 0:2`。将本轮五个相关生产文件暂还原到
   `d43fef03` 后，以 `-p luna --test open_functions later_type_inputs_keep_associated_result_identity -- --exact`
   单独重跑，`/tmp/luna-tools-ei0m3_0l/result.json` 同样退出 101、诊断相同。
-  文件随后逐字节恢复，未改变预期；此旧关联结果绑定缺口仍待处理。
+  文件随后逐字节恢复，未改变预期；后续根因与修复见下节。
 - `-p luna --test execution source_unary_protocol -- --nocapture`：两项通过，
   `/tmp/luna-tools-ejpbjo3f/result.json` 退出 0；覆盖选定协议的 Output、操作数求值
   次数与效应边界。未运行全 workspace 或 LLVM 原生验收。
+
+### 关联类型观察保留前提作用域，具体输入继续选择实现
+
+上述旧失败不是参数编号在替换时错位。`given_metered` 以空 frame 验证前提，
+而调用实例仍保留原定义中对后置 Type 参数的约束。即使查询主语已经是 bool，
+用于证明其 trait 资格的前提仍可引用 `Bound(0, 2)`。关联观察和接口形成现在使用
+世界原有 context 查询前提；观察到嵌套函数时，其局部 frame 不成为外层前提的 owner。
+
+仅修复作用域后，原用例进一步报关联结果与 bool 的等式未决：旧观察器只要找到 given
+就永远保留抽象投影。按正式 `docs/type/comptime-gradual-dependent-type.md` 的约定，
+具体实例应使用选定实现的关联类型。现复用已有的带预算输入闭合性证明：输入已完成时
+继续原有实现选择与关联值验证；仍抽象或闭合性证明未决时保留已经合法形成的 given
+投影。后者不建立否定事实、不采用 trait 默认值，也不把预算耗尽或非法作用域当成
+可以忽略的失败。实际成员来源、NF 头和不同实例的身份继续保留。
+
+新增对照覆盖世界前提与嵌套函数 frame 的区别、具体实现值与抽象 given 的区别、
+接口形成约束、失效 scope、闭合性证明 Unknown，以及缓存失败后的恢复。现有
+`later_type_inputs_keep_associated_result_identity` 的 bool／u8 实例与拒绝断言保持原样。
+初轮 sysroot 回归发现把闭合性 Unknown 当作整个观察失败的回归，已按上述边界修正；
+没有放宽测试预期。新测试初稿重复 trait binder 身份及未区分继承前提的构造错误也已修正。
+
+工作目录 `/home/fin/luna`，执行
+`python3 -B development/check.py --timeout 900 -- test -p type_resolution --no-fail-fast`，
+398 项通过，`/tmp/luna-tools-h55_2v2v/result.json` 退出 0。这仍是现有 Term／Context
+架构中的查询修复，不代表新的 TypeRef 环境、待决源码 activation 或通用交织挂起完成。
+formatter 由另一 agent 负责，本次未修改或纳入提交；正式 docs 与其他已有修改保持原样。
+
+同一目录执行前端回归：
+`python3 -B development/check.py --timeout 900 -- test -p luna --test open_functions --test associated_signatures --test trait_obligations --test trait_domain_substitution --test trait_query_failures --test sysroot_preludes --test ordinary_callable_types --no-fail-fast`，
+443 项通过、2 项失败、1 项旧 ignore，`/tmp/luna-tools-xv6vk95h/result.json` 退出 101。
+包括真实 sysroot 的列表、builder、两阶段方法、math、迭代器及相关 trait 查询；
+没有运行全 workspace。两个失败为 `shipped_meta_object_preserves_type_valued_indices_in_normal_inputs`
+和 `shipped_meta_object_values_dispatch_type_indexed_traits`，仍缺调用期 Type 完成后的签名恢复。
+仅将本次两个生产文件暂还原到 cbde5271，运行
+`python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_meta_object -- --nocapture`，
+`/tmp/luna-tools-zveh15kp/result.json` 同样退出 101，两个源码位置和诊断完全相同。
+随后按保存的哈希逐字节恢复修复，不改这些用例的预期或 ignore。
 
 ## 4. 本次证据与限制
 
