@@ -625,7 +625,7 @@ callable 的两个等待点。只增加 public request enum 或可手工构造�
 
 | 当前路径 | 同步假设 | 迁移时必须交出的状态 |
 | --- | --- | --- |
-| `program.rs::expr_context`／`expr_context_adapted` | 子表达式返回完整 Expr 后才做目标域适配 | 当前规则、expected／partial context、已检查子结果、尚未兑现的适配；恢复不能重新选择一次转换 |
+| `program.rs::expr_context`／`delivery.rs` | 目标域适配已保存显式后继；一般子表达式检查仍是同步调用 | 将现有后继接到区域的子结果槽，补齐 expected／partial context 的待定观察；恢复不能重新选择一次转换 |
 | `block_regions.rs::check_block_region` | `in_block_scope` 闭包在同一 Rust 栈帧内完成所有语句和尾值 | 语句位置、局部声明域、diverges、staged pattern 结果、尾值及绑定完成任务；等待不等于退出词法域 |
 | `declaration_inputs.rs::Progress` | 原串行 cursor；后续已分离 schedule／checked-order 并接入前置域检查 | 仍须补齐可恢复检查任务及每项域依赖；已有结果位置和源码顺序不能被执行调度覆盖 |
 | `required.rs::prepare_required_root_with_live_inputs` | `build` 返回完整根后才收集自由绑定和建立世界 | 独立于完整根的源输入描述及受限可见世界；后续每段所需绑定增量检查，不能先捕获所有外围值 |
@@ -663,6 +663,48 @@ CheckRegion
 所有检查依赖已满足的任务，VM 只能执行控制许可和前序效果已满足的代码。没有就绪
 任务时先检查未收回的宿主请求、预算和未迁移规则；只有完整依赖中的闭环才报循环。
 当前 `active_required` 的 32 层保护不能直接复用为区域依赖循环证明。
+
+#### 已接入：目标域适配保存子检查后继
+
+`delivery.rs` 替换原 `expr_context_adapted`，由同一组规则区分已检查结果、子域检查
+和暂未迁移的一般表达式检查。可选包装与错误结果交付保存为显式 Delivery；同步
+驱动器检查子域后，逆序消费这些后继。后继消费受检结果，不执行源码，不重新发起
+一次调用来取得值。提前离开控制区域的 NoReturn 结果直接传递，不附加包装。
+
+既有上下文规则继续生效：分支、null、上下文枚举构造等仍接收完整目标域；已有
+optional 保留自身存在性层次，已有错误结果走 Embed，普通值走 Success。整域探测
+和无上下文探测沿用原有策略，本次不将探测改造成执行许可或新的失败分类协议。
+
+每次规则推进消耗 required 步数；需要保留错误结果的子域时，先通过共享复制预算
+检查，再保存拥有的 Term。外层目标尽量借用或移动，后继不复制 Checker。借用仅在
+当前同步调用内有效，不能直接冻结进 RequiredWorld 或持久缓存。Delivery 和推进
+结果均提供 S-expression Display，保留目标域、源码位置及字符串转义。
+
+这是普通检查器中真实目标适配规则的迁移，仍没有 CheckRegion、词法区域挂起或
+外部 Type 响应。一般检查和候选探测仍有同步递归；两个普通调用的待定域正例仍未
+接通，不能用这次局部迁移声称源 activation 已完成。下一步必须处理块的作用域
+所有权及子结果交接，使后继真正可以跨域等待存活。
+
+新增 `contextual_delivery` 使用真实 sysroot，分别在字节码与树解释路径检查三层
+optional、错误结果、null、提前 return、分支及可变接收者仅求值一次；拒绝越界
+整数、错误 payload 域和成功 payload 域不匹配。工作目录 `/home/fin/luna`，命令
+`python3 -B development/check.py --timeout 900 -- test -p luna --test contextual_delivery --no-fail-fast`，
+两项通过，`/tmp/luna-tools-j0lgm2ce/result.json` 退出 0。
+
+受影响回归命令为
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib --test invocation_budget -p luna --test native_optional --test error_surface --test error_result_flow --test contextual_spreads --test ordinary_callable_types --test ordinary_clause_collectors --test cmtt_methods --no-fail-fast`。
+`/tmp/luna-tools-7osoe6b4/result.json` 退出 101：671 项通过、2 项原有 ignored，
+`error_value_trait_indices_reconstruct_both_branches_in_selected_bodies` 一项失败，
+诊断为 `177..180: required comptime evaluation failed: interpretation Type at
+(generated-source 0)`。其中 elaboration 的 211 项包含新增后继 dump 检查。
+
+为区分本次回归与基线问题，暂时将唯一接线文件 program.rs 恢复为 `a1aab74a` 的
+内容，使新增 delivery 模块不参与构建；其他工作区改动保持原样。运行
+`python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface -- --exact error_value_trait_indices_reconstruct_both_branches_in_selected_bodies`，
+`/tmp/luna-tools-z6jzssh3/result.json` 同样退出 101，诊断完全相同。随后恢复本次
+接线。该基线失败尚未修复，没有修改其预期或加入 ignore；应继续追踪错误结果值
+作为泛型 trait 参数时的重建及 required 输入协议。这里的验证包含既有工作区修改，
+不宣称为纯 HEAD 验收。
 
 #### 已接入：required 世界的依赖发现共用结构遍历
 

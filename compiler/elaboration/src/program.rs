@@ -8,6 +8,7 @@ pub mod attributes;
 mod computed_patterns;
 mod control;
 mod delivered_types;
+mod delivery;
 mod effects;
 mod error_handlers;
 mod expression_values;
@@ -7887,115 +7888,12 @@ impl Checker<'_, '_> {
         // Ordinary scalar recursion must not retain the larger adaptation
         // frame used by error-result and optional destinations.
         // Primitive identities cannot denote optional types.
-        if matches!(expected, Some(Term::ErrorResult { .. }))
-            || expected.is_some_and(|ty| !matches!(ty, Term::Primitive(_)))
-        {
-            self.expr_context_adapted(expr, expected, partial)
-        } else {
-            self.expr_context_unadapted(expr, expected, partial)
-        }
-    }
-
-    #[inline(never)]
-    fn expr_context_adapted(
-        &mut self,
-        expr: &Expr<'_>,
-        expected: Option<&Term>,
-        partial: Option<&crate::calls::CallableContext>,
-    ) -> Result<n::Expr, Error> {
-        if let Some(target @ Term::ErrorResult { result, .. }) = expected {
-            // Branching syntax distributes the destination to its yielded paths.
-            let directed = matches!(
-                expr.kind,
-                H::Block(_)
-                    | H::If(_, _, Some(_))
-                    | H::Match(..)
-                    | H::When(_)
-                    | H::Return(_)
-                    | H::ErrorNew(_)
-                    | H::ErrorHandle { .. }
-                    | H::EffectHandle(..)
-            );
-            if !directed {
-                let value = if let Some(value) = self.argument_attempt(expr, None, partial)? {
-                    value
-                } else {
-                    self.expr_context(expr, Some(result), partial)?
-                };
-                if is_never(&value.ty) {
-                    return Ok(value);
-                }
-                let (value, conversion) = if matches!(value.ty, Term::ErrorResult { .. }) {
-                    (value, nir::error_results::Conversion::Embed)
-                } else {
-                    // A synthesized plain value still needs adaptation to the
-                    // success payload. Preserve optional presence layers before
-                    // adding the outer error-result success tag; never treat an
-                    // already-qualified result as a plain payload this way.
-                    let value = if self.optional_payload(result, expr.span).is_ok() {
-                        self.inject_optional_value(value, result, expr.span)?
-                    } else {
-                        value
-                    };
-                    (value, nir::error_results::Conversion::Success)
-                };
-                return self.convert_error_value(value, target, conversion, expr.span);
+        match expected {
+            Some(target) if !matches!(target, Term::Primitive(_)) => {
+                self.check_delivery(expr, target, partial)
             }
+            _ => self.expr_context_unadapted(expr, expected, partial),
         }
-        if self.optional_target_probe != Some(expr.hir_id) {
-            if let Some(target) = expected {
-                if let Ok(payload) = self.optional_payload(target, expr.span) {
-                    // Branches and null receive the whole destination, not a payload hint.
-                    let directed = matches!(
-                        &expr.kind,
-                        H::Null
-                            | H::Block(_)
-                            | H::If(..)
-                            | H::Match(..)
-                            | H::When(_)
-                            | H::Return(_)
-                            | H::EffectRequest(_)
-                            | H::ErrorHandle { .. }
-                            | H::EffectHandle(..)
-                    ) || enum_groups::symbol_path(expr).is_some()
-                        || matches!(&expr.kind, H::Application(head,_) | H::ExtendedApplication(head,_)
-                            if enum_groups::symbol_path(head).is_some());
-                    if !directed {
-                        if let Some(value) = self.argument_attempt(expr, None, partial)? {
-                            return self.inject_optional_value(value, target, expr.span);
-                        }
-                        // A generic producer or optional elimination may itself
-                        // produce the complete optional, preserving nested layers.
-                        if matches!(
-                            expr.kind,
-                            H::Application(..) | H::ExtendedApplication(..) | H::OptionPropagate(_)
-                        ) {
-                            let saved = self.optional_target_probe.replace(expr.hir_id);
-                            let attempt = self.argument_attempt_with_defaults(
-                                expr,
-                                Some(target),
-                                partial,
-                                false,
-                            );
-                            self.optional_target_probe = saved;
-                            if let Ok(Some(value)) = attempt {
-                                return Ok(value);
-                            }
-                        }
-                        let value = self.expr_context(expr, Some(&payload), partial)?;
-                        if is_never(&value.ty) {
-                            return Ok(value);
-                        }
-                        return Ok(n::Expr {
-                            source: source(expr.span),
-                            ty: target.clone(),
-                            kind: K::OptionalPresent(Box::new(value)),
-                        });
-                    }
-                }
-            }
-        }
-        self.expr_context_unadapted(expr, expected, partial)
     }
 
     // An omitted block tail or bare return still delivers a void value.
