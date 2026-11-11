@@ -11,6 +11,10 @@ use std::{
     fmt,
 };
 
+mod demand;
+
+const DEFAULT_SCHEDULING_STEPS: usize = 100_000;
+
 #[derive(Clone, Debug)]
 pub struct Input {
     pub ty: InferenceTerm,
@@ -158,7 +162,8 @@ enum PendingInputs {
 }
 impl PendingInputs {
     fn dependencies(&self, context: &InferenceContext) -> Result<BTreeSet<MetaId>, InferenceError> {
-        self.dependencies_metered(context, &mut 100_000)
+        let mut fuel = DEFAULT_SCHEDULING_STEPS;
+        self.dependencies_metered(context, &mut fuel)
     }
     fn dependencies_metered(
         &self,
@@ -1056,36 +1061,6 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    fn check_cycle(&self, context: &InferenceContext, output: MetaId) -> Result<(), Error> {
-        let mut work = vec![(output, false)];
-        let mut active = BTreeSet::new();
-        let mut done = BTreeSet::new();
-        while let Some((id, leave)) = work.pop() {
-            if leave {
-                active.remove(&id);
-                done.insert(id);
-                continue;
-            }
-            if done.contains(&id) {
-                continue;
-            }
-            let Some(pending) = self.pending.get(&id) else {
-                continue;
-            };
-            if !matches!(pending.state, State::Waiting(_)) {
-                continue;
-            }
-            if !active.insert(id) {
-                return Err(Error::DependencyCycle(id));
-            }
-            work.push((id, true));
-            for dependency in pending.inputs.dependencies(context)? {
-                work.push((dependency, false));
-            }
-        }
-        Ok(())
-    }
-
     /// Drive only the computations reachable from this demanded output.
     /// Plan before executing so a cycle or exhausted scheduling budget cannot
     /// partially invoke an otherwise ready branch. External inference leaves
@@ -1099,90 +1074,39 @@ impl<'a> Session<'a> {
         fuel: &mut usize,
     ) -> Result<&State, Error> {
         self.check_context(context)?;
-        let pending = self.pending.get(&output).ok_or(Error::UnknownComputation)?;
-        if !matches!(pending.state, State::Waiting(_)) {
-            return self.resume(context, output);
+        if !self.is_waiting(output)? {
+            return Ok(&self.pending[&output].state);
         }
-        let mut work = vec![(output, false)];
-        let mut active = BTreeSet::new();
-        let mut done = BTreeSet::new();
-        let mut order = Vec::new();
-        let mut external = BTreeSet::new();
-        let mut failed_dependency = false;
-        while let Some((id, leave)) = work.pop() {
-            *fuel = fuel.checked_sub(1).ok_or(Error::SchedulingBudget)?;
-            if leave {
-                active.remove(&id);
-                done.insert(id);
-                order.push(id);
+        let plan = match self.plan_demand(context, output, fuel) {
+            Ok(plan) => plan,
+            Err(
+                error @ (Error::DependencyCycle(_)
+                | Error::Inference(InferenceError::AlreadyAssigned(_))),
+            ) => {
+                return self.fail_demand(output, error);
+            }
+            Err(error) => return Err(error),
+        };
+        // The exclusive context cannot acquire new edges during this pass:
+        // invocation publishes stable Types only. Retain the observed graph
+        // instead of giving every execution/failure scan a fresh allowance.
+        let mut failed_dependency = plan.failed;
+        for computation in plan.order {
+            let mut waiting = computation.inputs;
+            if failed_dependency && waiting.is_disjoint(&self.failed) {
                 continue;
             }
-            if done.contains(&id) {
-                continue;
-            }
-            let Some(pending) = self.pending.get(&id) else {
-                external.insert(id);
-                continue;
-            };
-            match pending.state {
-                State::Failed(_) => {
-                    failed_dependency = true;
-                    continue;
-                }
-                State::Complete(_) => continue,
-                State::Waiting(_) => {}
-            }
-            if !active.insert(id) {
-                // Preserve resume's terminal failure and propagation contract.
-                return self.resume(context, output);
-            }
-            if context.is_assigned(id)? {
-                self.resume(context, id)?;
-                return self.resume(context, output);
-            }
-            let inputs = pending
-                .inputs
-                .dependencies_metered(context, fuel)
-                .map_err(|error| {
-                    if error == InferenceError::Budget {
-                        Error::SchedulingBudget
-                    } else {
-                        Error::Inference(error)
-                    }
-                })?;
-            *fuel = fuel
-                .checked_sub(inputs.len())
-                .ok_or(Error::SchedulingBudget)?;
-            work.push((id, true));
-            for input in inputs.into_iter().rev() {
-                work.push((input, false));
-            }
-        }
-        // Publication produces stable Types and cannot introduce new inference
-        // edges. The preflight therefore covers this entire synchronous pass;
-        // do not rescan each node's transitive graph for cycles again.
-        for id in order {
-            if failed_dependency {
-                // Continue publishing failure along the demanded path, but do
-                // not run independent siblings after the demand has failed.
-                let inputs = self.pending[&id].inputs.dependencies(context)?;
-                if inputs.is_disjoint(&self.failed) {
-                    continue;
-                }
-            }
+            waiting.retain(|input| !matches!(self.state(*input), Some(State::Complete(_))));
             if matches!(
-                self.resume_after_cycle_check(context, id, Ok(()), None)?,
+                self.resume_prepared(context, computation.output, waiting, None)?,
                 State::Failed(_)
             ) {
                 failed_dependency = true;
             }
         }
-        let pending = self
-            .pending
-            .get_mut(&output)
-            .ok_or(Error::UnknownComputation)?;
+        let pending = self.pending.get_mut(&output).expect("planned demand");
         if matches!(pending.state, State::Waiting(_)) {
-            pending.state = State::Waiting(external);
+            pending.state = State::Waiting(plan.external);
         }
         Ok(&pending.state)
     }
@@ -1195,9 +1119,20 @@ impl<'a> Session<'a> {
         context: &mut InferenceContext,
         output: MetaId,
     ) -> Result<&State, Error> {
-        self.check_context(context)?;
-        let acyclic = self.check_cycle(context, output);
-        self.resume_after_cycle_check(context, output, acyclic, None)
+        let mut fuel = DEFAULT_SCHEDULING_STEPS;
+        self.resume_bounded(context, output, &mut fuel)
+    }
+
+    /// Resume this output only, using one caller-owned scheduling allowance for
+    /// its dependency preflight. Exhaustion leaves queued inputs untouched and
+    /// invokes nothing. Dependency bodies are driven only by resume_dependencies.
+    pub fn resume_bounded(
+        &mut self,
+        context: &mut InferenceContext,
+        output: MetaId,
+        fuel: &mut usize,
+    ) -> Result<&State, Error> {
+        self.resume_one(context, output, fuel, None)
     }
 
     /// Reuse immutable code only while executing a ready computation. The
@@ -1208,16 +1143,58 @@ impl<'a> Session<'a> {
         output: MetaId,
         code: &mut comptime_interpretor::CodeSession,
     ) -> Result<&State, Error> {
-        self.check_context(context)?;
-        let acyclic = self.check_cycle(context, output);
-        self.resume_after_cycle_check(context, output, acyclic, Some(code))
+        let mut fuel = DEFAULT_SCHEDULING_STEPS;
+        self.resume_one(context, output, &mut fuel, Some(code))
     }
 
-    fn resume_after_cycle_check(
+    fn is_waiting(&self, output: MetaId) -> Result<bool, Error> {
+        self.pending
+            .get(&output)
+            .map(|pending| matches!(pending.state, State::Waiting(_)))
+            .ok_or(Error::UnknownComputation)
+    }
+
+    fn fail_demand(&mut self, output: MetaId, error: Error) -> Result<&State, Error> {
+        let pending = self
+            .pending
+            .get_mut(&output)
+            .ok_or(Error::UnknownComputation)?;
+        pending.state = State::Failed(error);
+        self.failed.insert(output);
+        Ok(&pending.state)
+    }
+
+    fn resume_one(
         &mut self,
         context: &mut InferenceContext,
         output: MetaId,
-        acyclic: Result<(), Error>,
+        fuel: &mut usize,
+        code: Option<&mut comptime_interpretor::CodeSession>,
+    ) -> Result<&State, Error> {
+        self.check_context(context)?;
+        if !self.is_waiting(output)? {
+            return Ok(&self.pending[&output].state);
+        }
+        let mut plan = match self.plan_demand(context, output, fuel) {
+            Ok(plan) => plan,
+            Err(
+                error @ (Error::DependencyCycle(_)
+                | Error::Inference(InferenceError::AlreadyAssigned(_))),
+            ) => {
+                return self.fail_demand(output, error);
+            }
+            Err(error) => return Err(error),
+        };
+        let computation = plan.order.pop().expect("waiting root is planned last");
+        debug_assert_eq!(computation.output, output);
+        self.resume_prepared(context, output, computation.inputs, code)
+    }
+
+    fn resume_prepared(
+        &mut self,
+        context: &mut InferenceContext,
+        output: MetaId,
+        waiting: BTreeSet<MetaId>,
         code: Option<&mut comptime_interpretor::CodeSession>,
     ) -> Result<&State, Error> {
         let pending = self
@@ -1228,13 +1205,11 @@ impl<'a> Session<'a> {
             return Ok(&pending.state);
         }
         let result = (|| {
-            acyclic?;
             // Check this before invocation so an externally assigned output
             // cannot cause effects followed by a failed publication.
             if context.is_assigned(output)? {
                 return Err(Error::Inference(InferenceError::AlreadyAssigned(output)));
             }
-            let waiting = pending.inputs.dependencies(context)?;
             if let Some(dependency) = waiting.intersection(&self.failed).next() {
                 return Err(Error::DependencyFailed(*dependency));
             }
@@ -1313,7 +1288,8 @@ fn dependencies(
     context: &InferenceContext,
     inputs: &[Input],
 ) -> Result<BTreeSet<MetaId>, InferenceError> {
-    dependencies_metered(context, inputs, &mut 100_000)
+    let mut fuel = DEFAULT_SCHEDULING_STEPS;
+    dependencies_metered(context, inputs, &mut fuel)
 }
 fn dependencies_metered(
     context: &InferenceContext,

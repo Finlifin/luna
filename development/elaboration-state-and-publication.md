@@ -153,6 +153,45 @@ Closing 不接受无关新请求，但允许既有任务所必需的子请求；
 任务预算耗尽不立即销毁可恢复进度，也不能自行用相同预算无限入队。是否提供新额度
 由调用方工具策略决定，类型规则不因为重试次数改变。
 
+### 已接入：Type 计算恢复共用有界依赖预检
+
+`type_computations::Session` 的单输出恢复、带 CodeSession 的恢复和依赖驱动恢复，
+现在共用 `type_computations/demand.rs` 的预检。计划保留按依赖排序的计算、观察到的
+输入边、外部等待叶及已有失败；它只在本次独占 context 的同步操作中使用，可按
+S-expression 显示，不保存到声明快照或代码缓存。预检完成前不进入任何计算体。
+
+旧路径在循环／外部赋值分支重新进入另一套遍历，执行前及失败传播时又各自用新的
+100,000 步扫描依赖。现路径在调用方给定的同一调度额度内观察并保留依赖边，稳定
+Type 发布只移除已经完成的等待项；失败沿原边传播，无关兄弟保持可独立使用。
+循环证据直接终结当前 demand，调度预算耗尽则返回 `SchedulingBudget`，不把队列
+改为 Failed，不消费已交付值，也不重放生产者。VM 执行额度没有因调度重试而补充。
+
+`resume_bounded` 只观察并恢复指定输出；`resume_dependencies` 才驱动其生产者。
+原 `resume` 便利入口使用整次操作共用的 100,000 步调度额度，调用方可通过显式入口
+提供其他额度。预算独立于 VM invocation，不能把此局部边界称为全编译器 WorkBudget
+已统一。enqueue 的检查、完整 Region 身份及前端检查响应仍按各自迁移条件推进；
+这项交付不解除普通 callable 的待定域与签名缺口。
+
+新增验证覆盖两万节点依赖链、不同预检截断位置后恢复、共享生产者只执行一次、
+真实循环与预算耗尽分离，以及单输出恢复不隐式驱动生产者。工作目录
+`/home/fin/luna`，检查均通过 `python3 -B development/check.py --timeout 900 -- test`
+执行，命令、退出值及 `stdout.log` 的 `test result:` 锚点见以下报告：
+
+- `-p elaboration --test type_computation_demands -p luna --test ordinary_callable_types --test ordinary_clause_collectors --test source_reflection --test builder_invocations --test library_protocols --no-fail-fast`：
+  `/tmp/luna-tools-kv8164xb/result.json`，退出 0；四项新检查及真实 sysroot 消费者通过，
+  两项原有 ordinary callable 语义缺口仍 ignored。
+- `-p luna --test execution type_computation`：`/tmp/luna-tools-8ed0env6/result.json`，退出 0，
+  九项既有 Type 计算回归通过；该报告还包含被名称过滤掉的新检查，不能据此证明新检查。
+- `-p luna --test execution signature`：`/tmp/luna-tools-t55cc9tj/result.json`，退出 0，
+  42 项签名相关回归通过。
+- `-p luna --test execution failed_type_demands_do_not_execute_unneeded_siblings -- --exact`：
+  `/tmp/luna-tools-qjpumzwj/result.json`，退出 0，失败传播及兄弟计算保留通过。
+
+初始实现的 elaboration 库检查亦通过，证据 `/tmp/luna-tools-jpvrgxqw/result.json`；
+该轮早于新增显式 `resume_bounded` 入口，不冒充最终全库复验。三个 Rust 文件格式
+检查退出 0，证据 `/tmp/luna-tools-9z5q_8pg/result.json`；`git diff --check` 通过。
+以上均保留作者原有的资源分析修改，未运行全 workspace 或性能基准，正式 docs 未修改。
+
 ## 5. Observe、登记与发布
 
 ObservationKey 包含语义主体、所请求 facet、作用域/视图和当前前提；它与 task key 不同。
