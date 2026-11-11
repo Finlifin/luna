@@ -19,7 +19,7 @@
   comptime 数学函数；实现文件位于各包的 `numeric/`。
 - `builtin/bindings.fl` 集中绑定文本观察与 Hash 使用的编译器操作；
   `builtin.compiler` 向其他内置包再导出这些声明，不加入 prelude。
-  meta 的文本接口复用同一绑定，不重新绑定原始符号。
+  meta 的文本接口有独立的 comptime 签名，不能调用 runtime 绑定来代替。
   绑定复用不代表运行时 str 的资源证明已经完成：现有 backing-region 阻塞仍由
   [原生文本复现](../development/repros/native-text-method-provenance.fl) 保留，不能关闭资源检查绕过。
 - `builtin.text` 导出 `text_impl/bytes.fl`。`str` 属于 builtin，String 属于 std。
@@ -27,6 +27,8 @@
   `types/option.fl`、`types/result.fl` 操作原生可选／错误结果，不定义枚举替身。
 - `meta.List` 的 normal-form 定义保留在包根；列表方法位于 `data/list.fl`。
   `meta/bindings.fl` 是编译器操作的集中具名绑定层，公开领域接口在各模块中再导出。
+  `meta/types/bindings.fl` 提供独立于这些操作的基础域绑定；Object 在此绑定一次，
+  attrs 与 build 均通过公开 `meta.Object` 导入。
   Object、整数操作、StructBuilder、EnumBuilder 的根入口保持可用。
 - `attrs.abi`、`attrs.comptime_phase` 由领域实现再导出；build 的 mode、target、
   package_metadata 及相应类型由 `info/` 再导出。

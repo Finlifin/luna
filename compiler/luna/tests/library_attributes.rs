@@ -1,7 +1,10 @@
-//! Attribute construction uses the repository package, not fixture definitions.
+//! Shipped attribute constructors in isolated and full sysroot configurations.
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+#[path = "support/sysroot_execution.rs"]
+#[allow(dead_code)]
+mod sysroot;
 
 use comptime_interpretor::{Interpreter, Value};
 use nir::{Primitive, Term};
@@ -13,7 +16,7 @@ fn abi_constructor_preserves_symbol_and_object_entry_type() {
     let package = support::compile(&format!(
         "mod attrs {{ {ATTRS} }}
         use attrs.abi as calling_convention;
-        comptime fn metadata() -> .Object'builtin {{ calling_convention(.c) }}"
+        comptime fn metadata() -> attrs.bindings.Object {{ calling_convention(.c) }}"
     ));
     let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
     let value = vm
@@ -32,9 +35,9 @@ fn abi_constructor_preserves_symbol_and_object_entry_type() {
 #[test]
 fn abi_constructor_rejects_wrong_domain_and_runtime_transport() {
     for body in [
-        "comptime fn wrong() -> .Object'builtin { attrs.abi(true) }",
-        "fn wrong() -> .Object'builtin { attrs.abi(.c) }",
-        "fn wrong(name: .Symbol'builtin) { const value = attrs.abi(name); }",
+        "comptime fn wrong() -> attrs.bindings.Object { attrs.abi(true) }",
+        "fn wrong() -> attrs.bindings.Object { attrs.abi(.c) }",
+        "fn wrong(name: attrs.builtin.Symbol) { const value = attrs.abi(name); }",
     ] {
         let source = format!("mod attrs {{ {ATTRS} }} {body}");
         assert!(support::compile_with_protocols(&source, &Default::default()).is_err());
@@ -57,36 +60,16 @@ fn repository_attribute_package_inspects_abi_without_claiming_abi_lowering() {
             .output()
             .unwrap()
     };
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl");
-    let builtin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../library/builtin/primitives.fl");
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
     let arguments = [
-        "--packages-v1",
-        "--package",
-        "3",
-        "303",
-        "builtin",
-        builtin.to_str().unwrap(),
-        "--dependency",
-        "2",
-        "builtin",
-        "3",
-        "--package",
-        "1",
-        "101",
-        "app",
+        "dump",
         "input.fl",
-        "--package",
-        "2",
-        "202",
-        "attrs",
-        path.to_str().unwrap(),
-        "--dependency",
-        "1",
-        "attrs",
-        "2",
-        "--primary",
-        "1",
+        "--sysroot",
+        library.to_str().unwrap(),
+        "--build-target",
+        "x86_64",
+        "linux",
+        "64",
         "--emit",
         "attributes",
     ];
@@ -201,7 +184,7 @@ fn source_merge_preserves_application_order_and_failed_output() {
 #[test]
 fn comptime_phase_prelude_value_preserves_boolean_metadata() {
     let package = support::compile(&format!(
-        "mod attrs {{{ATTRS}}} use attrs.prelude.*; comptime fn metadata()->.Object'builtin {{comptime_phase}}"
+        "mod attrs {{{ATTRS}}} use attrs.prelude.*; comptime fn metadata()->attrs.bindings.Object {{comptime_phase}}"
     ));
     let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
     let Value::Object(object) = vm
@@ -228,43 +211,19 @@ fn phase_attribute_alias_is_inspected_through_the_repository_package() {
         "use builtin.bool; use attrs.comptime_phase as staged; trait Code {^staged comptime fn value()->bool;}",
     )
     .unwrap();
-    let attrs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl");
-    let builtin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../library/builtin/primitives.fl");
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
     for emit in ["attributes", "merged-attributes"] {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
             .current_dir(&directory)
             .args([
-                "--packages-v1",
-                "--package",
-                "3",
-                "303",
-                "builtin",
-                builtin.to_str().unwrap(),
-                "--dependency",
-                "2",
-                "builtin",
-                "3",
-                "--dependency",
-                "1",
-                "builtin",
-                "3",
-                "--package",
-                "1",
-                "101",
-                "app",
+                "dump",
                 "input.fl",
-                "--package",
-                "2",
-                "202",
-                "attrs",
-                attrs.to_str().unwrap(),
-                "--dependency",
-                "1",
-                "attrs",
-                "2",
-                "--primary",
-                "1",
+                "--sysroot",
+                library.to_str().unwrap(),
+                "--build-target",
+                "x86_64",
+                "linux",
+                "64",
                 "--emit",
                 emit,
             ])
@@ -282,4 +241,26 @@ fn phase_attribute_alias_is_inspected_through_the_repository_package() {
         }
     }
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn sysroot_attribute_constructor_returns_the_public_meta_domain() {
+    let package = sysroot::compile(
+        "use meta.Object as Metadata;
+         use attrs.abi as convention;
+         comptime fn metadata() -> Metadata { convention(.c) }",
+    )
+    .unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let Value::Object(object) = vm
+        .invoke(support::id(&package, "metadata"), vec![])
+        .unwrap()
+    else {
+        panic!("expected meta.Object");
+    };
+    assert_eq!(object.entries().len(), 1);
+    let entry = &object.entries()[0];
+    assert_eq!(entry.key(), Some("abi"));
+    assert_eq!(entry.value().ty, Term::Primitive(Primitive::Symbol));
+    assert_eq!(entry.value().value, Value::Symbol("c".into()));
 }

@@ -7,6 +7,9 @@
 `comptime_phase: true` 的 Object 常量，条目保留 Bool 类型。
 `attrs.prelude` 导出两者。
 
+Object 通过 `meta.Object` 导入，attrs 不重复建立原始 builtin 绑定。
+meta 的基础域绑定与集合操作分开；属性消费者仍通过普通包依赖取得同一域。
+
 需要逐成员指定阶段的混合 trait 可以复用 `^attrs.comptime_phase`，不重复写属性
 Object。只包含 comptime 内容的协议使用 `pure comptime trait`；例如 meta 的
 `ComptimeListPatternView`，其方法与 builtin 的 runtime 列表模式协议同名。
@@ -23,13 +26,9 @@ fn sample() {}
 在仓库根目录运行：
 
 ```sh
-python3 -B development/cargo.py run --release -p luna -- \
-  --packages-v1 \
-  --package 1 101 app /tmp/attrs-example.fl \
-  --package 2 202 attrs library/attrs/lib.fl \
-  --package 3 303 builtin library/builtin/primitives.fl \
-  --dependency 2 builtin 3 \
-  --dependency 1 attrs 2 --primary 1 --emit merged-attributes
+python3 -B development/cargo.py run -p luna -- \
+  dump /tmp/attrs-example.fl --sysroot library \
+  --build-target x86_64 linux 64 --emit merged-attributes
 ```
 
 `--emit attributes` 显示求值后的 Object；`--emit merged-attributes` 还显示
@@ -37,8 +36,8 @@ python3 -B development/cargo.py run --release -p luna -- \
 不合法的合并输入会报错；使用 `--output` 时，检查失败不会覆盖已有输出。
 
 此入口只交付属性检查结果。ABI 消费者尚未接线，普通 NIR 编译仍拒绝尚未
-应用的 ABI 属性；不能将检查成功解释为已经生成 C ABI 函数。这里显式加载
-attrs 包，完整仓库 sysroot 的格式化、分配和 I/O 接口仍有独立阻塞。
+应用的 ABI 属性；不能将检查成功解释为已经生成 C ABI 函数。这里加载完整
+sysroot；格式化、分配和 I/O 接口仍有独立阻塞。
 
 trait 成员可以使用普通属性值及别名：
 

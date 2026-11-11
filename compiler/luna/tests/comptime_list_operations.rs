@@ -480,6 +480,7 @@ fn ordinary_package_uses_public_list_operations_without_builtin_access() {
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl"))
         .args(["--dependency", "2", "attrs", "4"])
         .args(["--dependency", "4", "builtin", "3"])
+        .args(["--dependency", "4", "meta", "2"])
         .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
             [
                 "--comptime-intrinsic".to_owned(),

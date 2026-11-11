@@ -245,8 +245,30 @@ builtin 绑定和比较定义；不为测试臆造 target，也不模拟 Object 
 `build_context` 和 `build_metadata` 共 47 项通过，包含真实 sysroot 的 O0／O3
 执行、错域／缺失、别名来源和驻留配置失效恢复。证据
 `/tmp/luna-tools-2m6haxur/result.json`（退出 0），完整命令及范围见
-[库接线现状](libraries-and-delivery.md#9-当前生产入口与迁移接线)。attrs 的重复
-Object 绑定仍待清理，不把本包完成扩大成全部集中绑定已收敛。
+[库接线现状](libraries-and-delivery.md#9-当前生产入口与迁移接线)。随后 attrs 也改为
+导入公开 `meta.Object`，基础域原始绑定与服务操作分开，库中 Object 与 object_get
+各只保留一个原始绑定。显式加载 attrs 的 builder／List 调用方已补依赖；build 缓存
+夹具此前遗漏的 meta 依赖一并补齐，与包来源检查共用真实库装配。
+
+去重范围按完整契约判断，不能把报告的同名符号计数直接等同于冗余声明：runtime／
+comptime 阶段、usize／isize 输入及整数转换方向均属于函数签名。已在
+[绑定去重边界](libraries-and-delivery.md#绑定去重必须保留阶段和函数契约)逐项核对，
+并修正 `library/STRUCTURE.md` 中“meta 文本接口复用 runtime 绑定”的过时描述。
+runtime str 无类型操作及资源来源、数学包装复用仍未完成。
+
+本轮验证均在 `/home/fin/luna`，前缀为
+`python3 -B development/check.py --timeout 900 -- test -p luna`：
+
+| 后续检查参数 | 实际结果 | 本机证据 |
+| --- | --- | --- |
+| `--test library_attributes --test builder_invocations --test build_context --no-fail-fast` | builder 86、build 35 通过；属性 2 项命令入口错误，后续已改为 dump 并重验 | `/tmp/luna-tools-_b093ekm/result.json`，退出 101 |
+| `--test library_attributes --test trait_phases --test derivation --test compilation_cache --test library_meta_objects --no-fail-fast` | 属性 7、阶段 73、Object 34 通过；缓存 3 项依赖缺失后续已修复；derive 76 通过、1 项旧 comptime 指针接受例失败 | `/tmp/luna-tools-j4ghb7qr/result.json`，退出 101 |
+| `--test compilation_cache --test build_context --no-fail-fast` | 46 项通过，保持缓存失效与缺失配置恢复检查 | `/tmp/luna-tools-zkil21o6/result.json`，退出 0 |
+| `--test comptime_list_operations --test frontend_cli --test elaboration --no-fail-fast -- --exact ordinary_package_uses_public_list_operations_without_builtin_access sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override unsupported_abi_attributes_cannot_publish_default_abi_functions` | 3 项通过 | `/tmp/luna-tools-diko8kqp/result.json`，退出 0 |
+
+derive 的旧例只使用独立源码，不依赖迁移的库：它执行 `storage.ref`／`pointer.*`，
+实际报错为 comptime 禁止指针操作，符合作者明确规则。暂不把其接受预期当作语言契约，
+也不将这次整组运行称为全部通过；后续单独以值引用更新和指针拒绝覆盖原检查目的。
 
 ## 4. 本次证据与限制
 

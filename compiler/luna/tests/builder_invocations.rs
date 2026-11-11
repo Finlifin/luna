@@ -408,6 +408,11 @@ impl Fixture {
                     provider: 43,
                 },
                 resolve::DependencyEdge {
+                    requester: 44,
+                    alias: "meta".into(),
+                    provider: 42,
+                },
+                resolve::DependencyEdge {
                     requester: 17,
                     alias: "meta".into(),
                     provider: 42,
@@ -544,6 +549,7 @@ fn package_cli_invokes_public_builders_with_observed_inputs() {
             .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl"))
             .args(["--dependency", "42", "attrs", "44"])
             .args(["--dependency", "44", "builtin", "43"])
+            .args(["--dependency", "44", "meta", "42"])
             .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
                 [
                     "--comptime-intrinsic".to_owned(),

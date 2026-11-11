@@ -1,3 +1,6 @@
+#[path = "support/build_libraries.rs"]
+mod build_libraries;
+use build_libraries::{comptime_intrinsics, supporting_dependencies, supporting_libraries};
 use luna::{
     build_context::{Error, Host, INPUT_VERSION, PackageBuild, Query, Snapshot, Target, Value},
     packages::SourcePackage,
@@ -208,55 +211,6 @@ fn dumps_are_stable_escaped_and_balanced() {
     );
 }
 
-const SUPPORTING_LIBRARIES: [(u32, u64, &str); 3] =
-    [(11, 400, "builtin"), (12, 500, "meta"), (13, 600, "attrs")];
-
-fn supporting_libraries(builtin: &std::path::Path) -> Vec<SourcePackage> {
-    SUPPORTING_LIBRARIES
-        .into_iter()
-        .map(|(resolution_id, identity, name)| SourcePackage {
-            resolution_id,
-            identity,
-            name: name.into(),
-            entry: if name == "builtin" {
-                builtin.to_path_buf()
-            } else {
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join(format!("../../library/{name}/lib.fl"))
-            },
-        })
-        .collect()
-}
-
-fn supporting_dependencies(requesters: &[u32]) -> Vec<resolve::DependencyEdge> {
-    requesters
-        .iter()
-        .flat_map(|&requester| {
-            SUPPORTING_LIBRARIES
-                .into_iter()
-                .filter_map(move |(provider, _, alias)| {
-                    (requester != provider).then_some(resolve::DependencyEdge {
-                        requester,
-                        alias: alias.into(),
-                        provider,
-                    })
-                })
-        })
-        .collect()
-}
-
-fn math_bindings(package: &str, module: &str) -> Vec<(nir::intrinsics::Operation, String)> {
-    nir::intrinsics::Operation::ALL
-        .iter()
-        .map(|op| {
-            (
-                *op,
-                format!("{package}.numeric.{module}.target.Scalar.{}", op.name()),
-            )
-        })
-        .collect()
-}
-
 fn with_libraries(mut args: Vec<String>, builtin: &std::path::Path) -> Vec<String> {
     for package in supporting_libraries(builtin) {
         args.extend([
@@ -278,7 +232,7 @@ fn with_libraries(mut args: Vec<String>, builtin: &std::path::Path) -> Vec<Strin
         ]);
     }
     args.extend(["--meta-list-type".into(), "meta.List".into()]);
-    for (operation, path) in math_bindings("meta", "scalar_math") {
+    for (operation, path) in comptime_intrinsics() {
         args.extend([
             "--comptime-intrinsic".into(),
             format!("{}={path}", operation.name()),
@@ -306,26 +260,7 @@ impl SourceFixture {
         Self(dir)
     }
     fn builtin_entry(&self) -> std::path::PathBuf {
-        // Build-origin checks also run without a code-generation target. Retain
-        // the shipped binding/comparison dependency closure here; full sysroot
-        // target and metadata tests below separately cover the runtime library.
-        let directory = self.0.join("builtin");
-        std::fs::create_dir_all(&directory).unwrap();
-        let entry = directory.join("lib.fl");
-        std::fs::write(
-            &entry,
-            concat!(
-                "mod primitives {\n",
-                include_str!("../../../library/builtin/primitives.fl"),
-                "\n} pub use primitives.*;\n",
-                include_str!("../../../library/builtin/numeric/comparison.fl"),
-                "\npub mod compiler {\n",
-                include_str!("../../../library/builtin/bindings.fl"),
-                "\n}\n",
-            ),
-        )
-        .unwrap();
-        entry
+        build_libraries::builtin_entry(&self.0)
     }
     fn compile(&self, modes: &[(u64, &str)]) -> Result<luna::frontend::Artifact, String> {
         let mut protocols = elaboration::program::Protocols::default();
@@ -384,7 +319,7 @@ impl SourceFixture {
         protocols
             .builtin_implementation_packages
             .extend([300, 400, 500, 600]);
-        let comptime_intrinsics = math_bindings("meta", "scalar_math");
+        let comptime_intrinsics = comptime_intrinsics();
         luna::packages::compile_with_definitions(
             &packages,
             &dependencies,

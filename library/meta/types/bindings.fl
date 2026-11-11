@@ -1,0 +1,2 @@
+{- Compiler data domains; independent of collection operations and their protocols. -}
+pub typealias Object = .Object'builtin;

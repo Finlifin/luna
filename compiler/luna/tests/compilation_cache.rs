@@ -1,3 +1,5 @@
+#[path = "support/build_libraries.rs"]
+mod build_libraries;
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
 use luna::{
@@ -48,15 +50,24 @@ impl Drop for Files {
     }
 }
 
-fn bind_build_primitives(request: &mut Request, build: u32) {
-    request.packages.push(luna::packages::SourcePackage {
-        resolution_id: 99,
-        identity: 9900,
-        name: "builtin".into(),
-        entry: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../library/builtin/primitives.fl"),
-    });
-    request.dependencies.push((build, "builtin".into(), 99));
+fn bind_build_libraries(files: &Files, request: &mut Request) {
+    let packages = build_libraries::supporting_libraries(&build_libraries::builtin_entry(&files.0));
+    request
+        .builtin_implementation_packages
+        .extend(packages.iter().map(|package| package.resolution_id));
+    request.packages.extend(packages);
+    let requesters: Vec<_> = request
+        .packages
+        .iter()
+        .map(|package| package.resolution_id)
+        .collect();
+    request.dependencies.extend(
+        build_libraries::supporting_dependencies(&requesters)
+            .into_iter()
+            .map(|edge| (edge.requester, edge.alias, edge.provider)),
+    );
+    request.options.meta_list_type = Some("meta.List".into());
+    request.options.comptime_intrinsics = build_libraries::comptime_intrinsics();
 }
 fn result(value: &luna::compilation_cache::CompilationOutcome) -> comptime_interpretor::Value {
     let Artifact::Nir(package) = &value.compilation.artifact else {
@@ -377,7 +388,7 @@ fn explicit_build_modes_invalidate_cached_source_results_without_fallback() {
         entry: std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl"),
     });
     request.dependencies.push((1, "build".into(), 2));
-    bind_build_primitives(&mut request, 2);
+    bind_build_libraries(&files, &mut request);
     request.options.build_modes.primary = Some("debug".into());
     let mut cache = CompilationCache::new(4);
     let first = cache.compile(&request).unwrap();
@@ -433,7 +444,7 @@ fn target_snapshots_and_optional_features_participate_in_cache_identity() {
         entry: std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl"),
     });
     request.dependencies.push((1, "build".into(), 2));
-    bind_build_primitives(&mut request, 2);
+    bind_build_libraries(&files, &mut request);
     let options = |arch: &str, os: &str, bits: &str, feature: Option<bool>| {
         let mut selected = luna::build_context::TargetOptions::default();
         selected
@@ -511,7 +522,7 @@ fn typed_metadata_requests_invalidate_values_presence_and_provider_identity() {
         });
     }
     request.dependencies = vec![(1, "provider".into(), 2), (1, "build".into(), 4)];
-    bind_build_primitives(&mut request, 4);
+    bind_build_libraries(&files, &mut request);
     let input = |identity, enabled| Input {
         identity,
         fields: vec![(

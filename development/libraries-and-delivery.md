@@ -155,9 +155,11 @@ meta 的布局观察、attrs.abi 和 builtin 的目标数值接口需通过真�
 断言现有 CLI 只加载两个包。重构统一的是实际包实例身份与来源，不能重新引入全局固定
 包编号作为语义身份。
 
-集中绑定也应复用：meta 已通过公开入口提供 Object，而 attrs/bindings.fl 又建立原始
-Object 绑定。目标应由 attrs 导入既有绑定，不在调用点和各包重复声明原始 builtin。
-跨包签名的相互引用通过声明准备解决，不以复制绑定作为规避 bootstrap 的手段。
+集中绑定也应复用：Object 的原始域绑定位于 `meta/types/bindings.fl`，与依赖 List
+及数值协议的操作绑定分开。meta 的操作和公开 Object 模块再导出该声明，attrs 与
+build 导入公开 `meta.Object`，不再各自建立原始绑定。完整 sysroot 使用正常的包依赖；
+属性消费者不因只需要一个数据域而获得重复声明的特权。跨包签名的相互引用通过
+声明准备解决，不以复制绑定作为规避 bootstrap 的手段。
 
 build 已复用 `meta.Object` 与其固有 `get` 方法，删除本包重复的 Object／object_get
 原始绑定；mode、target 和 package_metadata 仍保留原声明来源。目标 feature 与包
@@ -167,7 +169,26 @@ metadata 的 typed lookup 经过普通方法实例化，保持缺失、关闭和
 `python3 -B development/check.py --timeout 900 -- test -p luna --test build_context --test build_metadata --no-fail-fast`，
 退出 0）。源归属 fixture 加载真实 meta／attrs／build 与 builtin 绑定和比较定义，
 保留无 codegen target、32 位与冲突布局检查；完整运行时库由上述 sysroot 用例覆盖。
-这不表示 attrs 的重复绑定或其他库缺口已消除。
+这是 build 的验证范围，不表示其他库能力已经完成。
+
+### 绑定去重必须保留阶段和函数契约
+
+报告 6.2 的底层符号计数能定位审查位置，但不能单凭同名决定两个声明可互换。
+检查对象应包括来源声明、阶段、参数和返回域、资源契约以及底层服务的前提。
+
+| 当前绑定 | 核对结果 | 清理边界 |
+| --- | --- | --- |
+| Object／object_get | Object 曾在三包重复绑定，查询曾在两包绑定相同 comptime 契约 | 统一域身份，并由 build 复用 meta 的公开方法；不能用复制域声明解决依赖缺口 |
+| 文本／Symbol 字节查询 | builtin 是 runtime 接口，meta 是 comptime 接口；runtime str 还有未完成的资源来源要求 | 共用底层操作不等于能直接共享同一个 callable；不能把阶段中立操作 token 或跨阶段调用当作去重方案 |
+| integer_representation | 当前分别绑定 usize／isize 输入，以及 runtime／comptime 阶段，结果均为 u128 | 原语名相同仍有不同完整签名；未来用普通泛型封装时也必须保留输入域和目标宽度检查 |
+| comptime_integer_convert | Integer → usize、usize → Integer、Integer → u8 是不同转换域 | 不以宿主表示猜返回域，不把原始操作别名当作任意转换；减少重复应通过受检泛型接口完成 |
+| builtin.math／meta.math | 作者要求 runtime 与 comptime 都有接口；现有包装主体高度重复 | 可共享生成或普通代码复用机制，但必须输出各自阶段的公开契约；不能删除 meta.math 或让 runtime 函数充当 comptime 函数 |
+
+上述签名区分可在库绑定和
+[编译器操作契约](../compiler/elaboration/src/program/builtin_bindings/signatures.rs)
+交叉核对。它解释当前不同声明的必要边界，不认可无类型绑定、直降豁免或所有包装
+重复都是终局设计。runtime str 的两个无类型绑定及资源来源仍是实际待修复项；
+本轮不修改作者已有的资源检查工作区改动。
 
 ## 10. 编译器服务绑定不授予库定义特殊语言规则
 

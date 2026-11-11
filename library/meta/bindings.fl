@@ -3,7 +3,7 @@ use List;
 use numeric.bindings.{integer_div_trunc as compiler_comptime_integer_div_trunc,
     integer_rem_trunc as compiler_comptime_integer_rem_trunc};
 
-pub typealias Object = .Object'builtin;
+pub use types.bindings.Object;
 
 const compiler_list_length: comptime fn(comptime T: Type, List<T>) -> Integer = .list_length'builtin;
 pub const compiler_list_concat: comptime fn(comptime T: Type, List<T>, List<T>) -> List<T> = .list_concat'builtin;
