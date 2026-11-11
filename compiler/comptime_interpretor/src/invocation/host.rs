@@ -135,7 +135,8 @@ impl<'world> RejectedHostResponse<'world> {
 impl<'world> Interpreter<'world> {
     /// Begin ordinary source comptime invocation admission, then return its
     /// owned driver. Admission may use configured synchronous semantic services.
-    /// Only linear-body associated selections can currently leave the driver.
+    /// Associated selections in declaration contracts and linear bodies can
+    /// leave the driver without losing the invocation's current stage.
     pub fn start_invocation<'vm>(
         &'vm mut self,
         function: Value,

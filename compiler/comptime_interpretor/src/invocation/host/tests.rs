@@ -1,5 +1,6 @@
 use super::*;
 use nir::program::{IntegerOp, Place};
+mod contracts;
 
 const SOURCE: SourceRange = SourceRange { start: 10, end: 20 };
 fn id(local: u32) -> DeclarationId {

@@ -103,6 +103,13 @@ lift 崩溃是需要纠正的诊断缺陷，消除崩溃与实现依赖类型必
 完整的 Region／Candidate 所有权、任意 definition 发布、独立高级 IIR、细粒度持久
 query 和 std 的实际接口仍未完成；报告中的局部能力不能替代这些交付。
 
+继续沿契约路径核对时发现，第 2.1 节的定位也需细分：`Progress::Contract` 经
+`Execution::Contract` 已能进入字节码执行，它服务接口调用，不能直接称为必然逃回
+树解释器。实际仍同步执行普通声明前后置条件的是 `prepare_invocation`／原
+`finish_invocation`。这条路径现已迁入 owned activation 的 entry/body/exit 状态，
+对应交付与限制见[普通函数契约的恢复边界](elaboration-state-and-publication.md#普通函数契约的恢复边界)。
+原报告中关于一般 fallback 和尚未接通前端检查请求的判断仍然成立。
+
 ## 3. 已有清理在目标架构中的位置
 
 `03908c64` 将源码控制状态集中到 `control::Context`，降低进入／退出检查边界漏恢复

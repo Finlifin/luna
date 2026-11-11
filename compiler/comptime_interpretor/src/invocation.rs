@@ -1,6 +1,7 @@
 //! Invocation admission, owned frame state, delivery and caller restoration.
 //! These boundaries are shared by the migration interpreter and linear bodies.
 use super::*;
+mod contracts;
 pub(super) mod host;
 mod session;
 use session::Session;
@@ -26,6 +27,8 @@ struct InvocationFrame<'a> {
     type_scope: Option<nir::FunctionInputBinding>,
     origin: Option<DeclarationId>,
     stable_code: Option<DeclarationId>,
+    progress: contracts::Progress,
+    condition: Option<Arc<Expr>>,
 }
 
 // The monotonic effect identity allocator and pending transfers are intentionally
@@ -74,8 +77,15 @@ impl Execution<'_> {
             Self::Invocation(activation) => {
                 let frame = &mut activation.frame;
                 (
-                    frame.body.expression(),
-                    frame.stable_code,
+                    frame
+                        .condition
+                        .as_deref()
+                        .unwrap_or_else(|| frame.body.expression()),
+                    frame
+                        .condition
+                        .is_none()
+                        .then_some(frame.stable_code)
+                        .flatten(),
                     &mut frame.environment,
                 )
             }
@@ -91,7 +101,8 @@ impl Execution<'_> {
     }
 }
 
-enum Completion {
+enum Completion<'a> {
+    Continue(Box<Activation<'a>>),
     Ordinary {
         flow: Result<Flow, Error>,
         defaults: Option<Environment>,
@@ -108,8 +119,8 @@ struct PlanActivation<'a> {
     frame: Box<dyn input_collection::InputPlan + 'a>,
     environment: Environment,
 }
-impl PlanActivation<'_> {
-    fn complete(mut self, flow: Result<Flow, Error>) -> Completion {
+impl<'a> PlanActivation<'a> {
+    fn complete(mut self, flow: Result<Flow, Error>) -> Completion<'a> {
         self.frame.cleanup(&mut self.environment);
         Completion::Ordinary {
             flow,
@@ -153,7 +164,11 @@ impl<'a> Interpreter<'a> {
             // frame at every native recursive call. Admission, completion and
             // restoration still use the shared invocation boundaries.
             let frame = &mut activation.frame;
-            let result = self.eval(frame.body.expression(), &mut frame.environment);
+            let expression = frame
+                .condition
+                .as_deref()
+                .unwrap_or_else(|| frame.body.expression());
+            let result = self.eval(expression, &mut frame.environment);
             return self.complete_invocation(activation, result);
         }
         match Session::invocation(self, activation).run()? {
@@ -233,7 +248,7 @@ impl<'a> Interpreter<'a> {
         context: StackContext<'a>,
         code: bytecode::Frame,
         flow: Result<Flow, Error>,
-    ) -> Completion {
+    ) -> Completion<'a> {
         match context {
             StackContext::Execution(mut execution) => {
                 *execution.parts().2 = code.restore_environment();
@@ -247,16 +262,26 @@ impl<'a> Interpreter<'a> {
         &mut self,
         execution: Execution<'a>,
         flow: Result<Flow, Error>,
-    ) -> Completion {
+    ) -> Completion<'a> {
         match execution {
             Execution::Associated { activation, .. } => Completion::Ordinary {
                 flow: activation.complete(self, flow),
                 defaults: None,
             },
-            Execution::Invocation(activation) => Completion::Ordinary {
-                flow: self.complete_invocation(activation, flow).map(Flow::Value),
-                defaults: None,
-            },
+            Execution::Invocation(mut activation) => {
+                match flow.and_then(|flow| self.accept_invocation_step(&mut activation.frame, flow))
+                {
+                    Ok(None) => Completion::Continue(activation),
+                    result => {
+                        self.leave_invocation(activation.saved);
+                        Completion::Ordinary {
+                            flow: result
+                                .map(|value| Flow::Value(value.expect("completed invocation"))),
+                            defaults: None,
+                        }
+                    }
+                }
+            }
             Execution::Default { environment, .. } | Execution::Contract { environment, .. } => {
                 Completion::Ordinary {
                     flow,
@@ -275,7 +300,13 @@ impl<'a> Interpreter<'a> {
         let function = self.resolve_invocation_identity(function)?;
         let origin = self.admit_invocation(&function, context.as_ref())?;
         let saved = self.enter_invocation(&function, origin, context)?;
-        match self.prepare_invocation(function, arguments, origin) {
+        let prepared = self
+            .prepare_invocation(function, arguments, origin)
+            .and_then(|mut frame| {
+                self.prepare_invocation_step(&mut frame)?;
+                Ok(frame)
+            });
+        match prepared {
             Ok(frame) => Ok(Box::new(Activation { frame, saved })),
             Err(error) => {
                 self.leave_invocation(saved);
@@ -325,9 +356,22 @@ impl<'a> Interpreter<'a> {
         mut activation: Box<Activation<'_>>,
         result: Result<Flow, Error>,
     ) -> Result<Value, Error> {
-        let result = result.and_then(|flow| self.finish_invocation(&mut activation.frame, flow));
+        let mut result = result;
+        let completed = loop {
+            match result.and_then(|flow| self.accept_invocation_step(&mut activation.frame, flow)) {
+                Ok(None) => {
+                    let frame = &mut activation.frame;
+                    let expression = frame
+                        .condition
+                        .as_deref()
+                        .unwrap_or_else(|| frame.body.expression());
+                    result = self.eval(expression, &mut frame.environment);
+                }
+                outcome => break outcome.map(|value| value.expect("completed invocation")),
+            }
+        };
         self.leave_invocation(activation.saved);
-        result
+        completed
     }
 
     fn admit_invocation(
@@ -609,25 +653,6 @@ impl<'a> Interpreter<'a> {
                 let value = self.local_value(&environment, snapshot.parameter, None)?;
                 environment.insert(snapshot.binding, value);
             }
-            for condition in &definition.preconditions {
-                let mut condition =
-                    self.copy_invocation_condition(condition, definition, &function)?;
-                if let Some(scope) = &type_scope {
-                    self.specialize_input_types(&mut condition, scope)?;
-                }
-                let check = Expr {
-                    source: condition.source,
-                    ty: Term::Primitive(Primitive::Void),
-                    kind: K::CheckPredicate(Box::new(condition)),
-                };
-                match self.eval(&check, &mut environment)? {
-                    Flow::Value(Value::Unit) => {}
-                    _ => {
-                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(check.source)));
-                    }
-                }
-            }
-            self.events.push(Event::EnterFunction(id));
         }
         let stable_code = match &function {
             Value::Function(id) if specialized_body.is_none() || independent_body => Some(*id),
@@ -652,71 +677,9 @@ impl<'a> Interpreter<'a> {
             type_scope,
             origin,
             stable_code,
+            progress: contracts::Progress::Entry(0),
+            condition: None,
         })
-    }
-
-    fn finish_invocation(
-        &mut self,
-        frame: &mut InvocationFrame<'_>,
-        flow: Flow,
-    ) -> Result<Value, Error> {
-        let InvocationFrame {
-            function,
-            environment,
-            body,
-            result_type,
-            type_scope,
-            origin,
-            ..
-        } = frame;
-        let source = body.expression().source;
-        let (value, returned) = match flow {
-            Flow::Value(value) => (value, false),
-            Flow::Return(value) => (value, true),
-            _ => return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source))),
-        };
-        let delivered_type = if let Term::Computation { result, .. } = &*result_type {
-            result.as_ref()
-        } else {
-            result_type
-        };
-        self.check_value_type(&value, delivered_type, Some(source))?;
-        if self.cleanup_schedule.is_some() {
-            if !returned {
-                self.check_scheduled_result(&value, source, environment)?;
-            }
-        } else if let Some(id) = *origin {
-            let definition = self
-                .invocation_definition(id, function)
-                .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
-            if !definition.postconditions.is_empty()
-                && let Some(binding) = definition.result_binding
-            {
-                environment.insert(binding, value.clone());
-            }
-            for condition in &definition.postconditions {
-                let mut condition =
-                    self.copy_invocation_condition(condition, definition, function)?;
-                if let Some(scope) = &type_scope {
-                    self.specialize_input_types(&mut condition, scope)?;
-                }
-                let check = Expr {
-                    source: condition.source,
-                    ty: Term::Primitive(Primitive::Void),
-                    kind: K::CheckPredicate(Box::new(condition)),
-                };
-                match self.eval(&check, environment)? {
-                    Flow::Value(Value::Unit) => {}
-                    _ => {
-                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(check.source)));
-                    }
-                }
-            }
-        }
-        if !returned {
-            self.cleanup_site(source, iir::cleanup::Boundary::FunctionEnd, environment)?;
-        }
-        Ok(value)
     }
 }
 

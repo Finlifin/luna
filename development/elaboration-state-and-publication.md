@@ -11,7 +11,7 @@
 | --- | --- | --- |
 | `type_resolution/src/obligations.rs::Engine` | trial 独立、parent identity/revision 校验、meta watchers、settled 后提交 | 全部 elaboration 状态、宿主请求、代码 hole、候选诊断及不纯执行 |
 | `comptime_interpretor/src/bytecode.rs::Frame` | PC、slots、prepared types、调用/默认值/plan 等 Waiting | 通用宿主协议、独立于当前 Interpreter 的可恢复 session |
-| `comptime_interpretor/src/invocation.rs` | owned activation、保存/恢复调用方、显式执行栈 | 跨稳定查询的 session 身份、发布后的语义可见范围 |
+| `comptime_interpretor/src/invocation.rs` | owned activation、前置条件／主体／后置条件进度、保存/恢复调用方、显式执行栈 | 跨稳定查询的 session 身份、发布后的语义可见范围 |
 | `comptime_interpretor/src/code_session.rs::CodeSession` | 精确不可变世界绑定，代码与结果缓存分开，fresh VM | 跨世界通用迁移、活动帧持久化；不应放宽 ptr/world 检查假装支持 |
 | `hir/src/definitions.rs::PreparedPublication` | prepare 后草稿冻结、drop 不发布、commit 不再校验/分配/回调 | 一般定义对所有消费者的统一准入和可见范围 |
 | `generated_structs/admission_session.rs::DefinitionAdmissionSession` | struct/enum/newtype 共用 revision，foreign/stale receipt 拒绝、预付安装工作 | 活跃调用中的任意 definition 发布与整个实例的 coherence |
@@ -423,6 +423,56 @@ generation 不匹配的旧响应不触碰新 activation；其宿主资源仍按 
 所需不可变描述，返回值由 session 在响应边界写入约定结果位置。不能把 lens 序列化成
 comptime 指针，也不能从另一 session 回写。这里的暂停位置保护不改变普通嵌套调用中
 已有的值引用更新和 RHS 求值规则。
+
+### 普通函数契约的恢复边界
+
+普通函数的前后置条件原先在 `prepare_invocation` 和 `finish_invocation` 内同步
+调用树求值器。即使主体支持宿主请求，前置条件中的关联值选择也会在返回 session
+之前尝试同步解析，后置条件则在主体完成的交付栈上同步执行。接口调用的
+`Execution::Contract` 已能使用字节码，不能把这两条路径混为一谈。
+
+普通声明现由同一 activation 持有 `Entry(index) → Body → Exit(index,result,returned)`。
+每次只准备一个条件的普通 CheckPredicate 表达式，交给已有执行驱动；完成后保存
+环境并推进原 activation。主体仅在所有前置条件成功后进入一次，后置条件保留已检查
+的实际返回值，显式 return 不绕过后置条件。类型／capability 准入仍在各自原边界完成。
+
+tree 参考执行和字节码驱动共用这套进度及完成规则。字节码路径在条件内遇到关联
+请求时保留 PC、环境、调用者及当前条件索引，恢复不重跑前序条件或主体；Display
+显示当前阶段、下一个条件和保留结果。body 的稳定 code 身份不能用作条件代码的键。
+函数进入事件和 bytecode invocation 计数只计主体，不把每个条件计成新的函数调用。
+
+失败及取消沿同一 activation 恢复链退出，不执行剩余条件；未交回的宿主预算不会
+凭取消而退还。runtime 的 scheduled result／清理检查仍由原资源计划负责，这项
+迁移没有去掉字节码的 cleanup/effect 门控，也没有让 PTC 执行程序谓词。
+
+源码测试 `invocation_host_requests` 使用真实六包、SourceInvocationQueries 和外置
+宿主响应，覆盖实例化 Type 参数的契约、闭合及泛型关联初始化器、代码会话复用。
+泛型初始化器在前后置条件中各执行一次；缓存选择与代码不缓存读取的值或契约结论。
+VM 局部测试另覆盖前后置条件拒绝、提前 return、等待、过期响应、预算耗尽和取消。
+
+本项只接通普通程序契约的执行进度，尚非通用前端检查／发布宿主协议。参数准入、
+类型契约及某些准备服务仍同步；不支持的字节码操作仍可能进入既有 tree fallback。
+签名依赖实际 invocation 产物的两个普通调用正例仍未解锁。
+
+验证在 `/home/fin/luna` 通过 `development/check.py --timeout 900 -- test`：
+
+- 保留新回归，将两个生产文件临时还原到 `4ae19727`，精确运行
+  `-p comptime_interpretor --lib invocation::host::tests::contracts::entry_body_and_exit_share_a_suspendable_activation -- --exact`：
+  `/tmp/luna-tools-2u3witg2/result.json` 退出 101，start_invocation 提前报
+  UnmaterializedDispatch，尚未产生可回答的宿主请求。随后按摘要恢复改动。
+- `-p comptime_interpretor --lib --no-fail-fast`：
+  `/tmp/luna-tools-kbbm25fp/result.json` 退出 0，579 项通过。
+- `-p luna --test invocation_host_requests --no-fail-fast`：
+  `/tmp/luna-tools-uba4431g/result.json` 退出 0，五项源码回归通过。
+- 最终相关组使用
+  `-p luna --test invocation_host_requests --test integer_contracts --test snapshot_contracts --test predicate_calls --test effect_contracts --test prepared_invocations --test staged_invocation_reuse --test default_calls --test comptime_bytecode_defaults --test conditional_capture_cleanup --test library_protocols --test builder_invocations --no-fail-fast`：
+  `/tmp/luna-tools-m_ofiefj/result.json` 退出 0，216 项通过，一项原有 predicate
+  phase-aware stability 用例仍 ignored。先前新源码 fixture 缺少调用前提证明的拒绝
+  已通过改为直接调用带契约的公开 invocation 入口纠正，没有放宽源码程序验证。
+
+七个修改 Rust 文件的格式检查 `/tmp/luna-tools-hfak84ny/result.json` 退出 0，
+`git diff --check` 通过。未运行全 workspace、LLVM/native 或性能基准；工作区仍包含
+作者原有资源分析修改，未将其改写或纳入提交。正式 docs 与 formatter 开发保持独立。
 
 ## 8. 宿主请求与候选、取消的组合
 

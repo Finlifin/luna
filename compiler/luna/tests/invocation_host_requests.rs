@@ -10,15 +10,25 @@ use std::cell::Cell;
 
 #[test]
 fn source_selection_resumes_nested_calls_and_keeps_code_cache_separate_from_answers() {
-    source_selection(false);
+    source_selection(false, false);
 }
 
 #[test]
 fn source_initializers_execute_after_resume_and_do_not_cache_their_results() {
-    source_selection(true);
+    source_selection(true, false);
 }
 
-fn source_selection(deferred: bool) {
+#[test]
+fn source_contracts_suspend_without_entering_the_synchronous_resolver() {
+    source_selection(false, true);
+}
+
+#[test]
+fn source_contracts_invoke_initializers_once_per_read_across_resume() {
+    source_selection(true, true);
+}
+
+fn source_selection(deferred: bool, contracts: bool) {
     let implementations = if deferred {
         "impl Flag for T where T { assoc enabled: bool = initialize(T); }"
     } else {
@@ -45,6 +55,18 @@ fn source_selection(deferred: bool) {
         ",
     ]
     .concat();
+    let source = if contracts {
+        source.replace(
+            "comptime fn enabled(comptime T: Type) -> bool\n        where requires T :- Flag\n        { T.as(Flag).enabled }",
+            "comptime fn enabled(comptime T: Type) -> result: bool
+             where requires T :- Flag, requires T.as(Flag).enabled,
+                   ensures result and T.as(Flag).enabled
+             { true }",
+        ).replace("enabled(bool)", "true")
+         .replace("enabled(char)", "false")
+    } else {
+        source
+    };
     let package = sysroot::compile(&source).unwrap();
     let source = DeclarationSource::Borrowed(&package)
         .retain_declarations(&mut 1_000_000)
@@ -95,8 +117,16 @@ fn source_selection(deferred: bool) {
             .with_code_session(
                 &mut code,
                 |vm| -> Result<Value, comptime_interpretor::Error> {
+                    let (entry, arguments) = if contracts {
+                        (
+                            "enabled",
+                            vec![Value::Type(nir::Term::Primitive(nir::Primitive::Bool))],
+                        )
+                    } else {
+                        ("check", vec![])
+                    };
                     let mut active =
-                        Box::new(vm.start_invocation(Value::Function(id("check")), vec![])?);
+                        Box::new(vm.start_invocation(Value::Function(id(entry)), arguments)?);
                     loop {
                         match active.poll()? {
                             InvocationProgress::Running => {}
@@ -142,19 +172,30 @@ fn source_selection(deferred: bool) {
         }
         assert_eq!(
             requests,
-            vec![
-                nir::Term::Primitive(nir::Primitive::Bool),
-                nir::Term::Primitive(nir::Primitive::Char)
-            ]
+            if contracts {
+                vec![nir::Term::Primitive(nir::Primitive::Bool)]
+            } else {
+                vec![
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                    nir::Term::Primitive(nir::Primitive::Char),
+                ]
+            }
         );
         assert_eq!(fallback_calls.get(), 0);
         // Closed constants were evaluated during elaboration. A generic
         // initializer remains a program and runs on each read, including reads
         // whose implementation was already selected in the current invocation.
         for (name, expected) in [
-            ("check", 1),
-            ("enabled", 3),
-            ("initialize", if deferred { 3 } else { 0 }),
+            ("check", if contracts { 0 } else { 1 }),
+            ("enabled", if contracts { 1 } else { 3 }),
+            (
+                "initialize",
+                if deferred {
+                    if contracts { 2 } else { 3 }
+                } else {
+                    0
+                },
+            ),
         ] {
             assert_eq!(vm.events().iter().filter(|event| matches!(event, Event::EnterFunction(declaration) if *declaration == id(name))).count(), expected, "{name}");
         }

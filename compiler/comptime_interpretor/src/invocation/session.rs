@@ -63,7 +63,7 @@ pub(super) struct Session<'vm, 'a, 'r> {
     pending: Option<Pending>,
     requests: Authority,
     stack: Vec<StackEntry<'a>>,
-    result: Option<Completion>,
+    result: Option<Completion<'a>>,
     terminal: bool,
 }
 
@@ -282,6 +282,9 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         }
         if let Some(mut active) = execution.take() {
             let owned = match &active {
+                Execution::Invocation(activation) if activation.frame.condition.is_some() => {
+                    activation.frame.condition.clone()
+                }
                 Execution::Invocation(activation) if activation.frame.stable_code.is_none() => {
                     match &activation.frame.body {
                         Body::Owned(body) => Some(body.clone()),
@@ -309,14 +312,20 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 Ok(Some(code)) => {
                     // Suspended bytecode activations live on the explicit stack.
                     // Keep the native guard for tree evaluation and preparation.
-                    if let Execution::Invocation(activation) = &mut active {
+                    if let Execution::Invocation(activation) = &mut active
+                        && activation.saved.counts_native_depth
+                    {
                         activation.saved.counts_native_depth = false;
                         vm.depth -= 1;
                     }
                     match vm.start_frame(&code, active.parts().2) {
                         Ok(code_frame) => {
                             match &active {
-                                Execution::Invocation(_) => vm.bytecode_invocations += 1,
+                                Execution::Invocation(activation) => {
+                                    if activation.frame.condition.is_none() {
+                                        vm.bytecode_invocations += 1;
+                                    }
+                                }
                                 Execution::Default { .. } => vm.bytecode_default_evaluations += 1,
                                 Execution::Contract { .. } | Execution::Associated { .. } => {}
                             }
@@ -339,6 +348,10 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         }
         if let Some(delivered) = result.take() {
             let (flow, defaults) = match delivered {
+                Completion::Continue(active) => {
+                    *execution = Some(Execution::Invocation(active));
+                    return Ok(Poll::Pending);
+                }
                 Completion::Input(input) => {
                     if let Some(StackEntry::Plan(active)) = stack.last_mut() {
                         let outcome = active
@@ -523,6 +536,9 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             Some(self.vm.complete_execution(active, Err(error)))
         } else if let Some(completion) = self.result.take() {
             Some(match completion {
+                Completion::Continue(active) => self
+                    .vm
+                    .complete_execution(Execution::Invocation(active), Err(error)),
                 Completion::Ordinary { defaults, .. } => Completion::Ordinary {
                     flow: Err(error),
                     defaults,
@@ -562,7 +578,11 @@ impl fmt::Display for Session<'_, '_, '_> {
         fn execution(f: &mut fmt::Formatter<'_>, value: &Execution<'_>) -> fmt::Result {
             match value {
                 Execution::Invocation(active) => {
-                    write!(f, "(invocation {})", active.frame.function)
+                    write!(
+                        f,
+                        "(invocation {} {})",
+                        active.frame.function, active.frame.progress
+                    )
                 }
                 Execution::Associated { activation, .. } => write!(f, "{activation}"),
                 Execution::Contract { .. } => f.write_str("(contract)"),
@@ -587,10 +607,15 @@ impl fmt::Display for Session<'_, '_, '_> {
         }
         f.write_str(") (completion")?;
         if let Some(completion) = &self.result {
-            f.write_str(match completion {
-                Completion::Ordinary { .. } => " ordinary",
-                Completion::Input(_) => " input",
-            })?;
+            match completion {
+                Completion::Continue(active) => write!(
+                    f,
+                    " (continue {} {})",
+                    active.frame.function, active.frame.progress
+                )?,
+                Completion::Ordinary { .. } => f.write_str(" ordinary")?,
+                Completion::Input(_) => f.write_str(" input")?,
+            }
         }
         f.write_str(") (stack")?;
         for entry in &self.stack {
