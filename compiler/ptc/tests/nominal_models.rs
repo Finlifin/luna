@@ -125,6 +125,114 @@ fn nominal_model_admission_keeps_unknown_domains_and_head_authority() {
     ));
 }
 
+#[test]
+fn retained_value_indices_supply_checkable_nominal_apartness() {
+    let domain = Term::NormalForm {
+        head: id(12),
+        sort: Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Bool)],
+    };
+    let payload = |variant: Option<u32>, fields| Term::NominalValue {
+        ty: Box::new(if variant.is_some() {
+            Term::Nominal {
+                declaration: id(11),
+                arguments: vec![],
+            }
+        } else {
+            domain.clone()
+        }),
+        variant,
+        fields,
+    };
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(10));
+    context.admit_nominal_constructor(id(11));
+    context.admit_congruence(id(12));
+    for (left, right) in [
+        (payload(None, vec![]), payload(None, vec![Term::Bool(true)])),
+        (
+            payload(None, vec![Term::Bool(true)]),
+            payload(None, vec![Term::Bool(false)]),
+        ),
+        (payload(Some(0), vec![]), payload(Some(1), vec![])),
+        (
+            Term::TupleValue(vec![payload(None, vec![])]),
+            Term::TupleValue(vec![payload(None, vec![Term::Bool(true)])]),
+        ),
+    ] {
+        let goal = F::equal(nominal(left.clone()), nominal(right.clone())).negate();
+        let outcome = context.prove(goal.clone(), Budget::default());
+        let Outcome::Entailed(proof) = outcome else {
+            panic!("missing nominal index apartness: {goal}: {outcome:?}")
+        };
+        context.verify_proof(&proof, Budget::default()).unwrap();
+        let mut unregistered = Context::default();
+        unregistered.admit_nominal_constructor(id(11));
+        unregistered.admit_congruence(id(12));
+        assert!(
+            unregistered
+                .verify_proof(&proof, Budget::default())
+                .is_err()
+        );
+        assert!(!matches!(
+            unregistered.prove(goal.clone(), Budget::default()),
+            Outcome::Entailed(_)
+        ));
+        assert!(matches!(
+            context.prove(
+                goal.clone(),
+                Budget {
+                    steps: 0,
+                    ..Default::default()
+                }
+            ),
+            Outcome::Unknown {
+                reason: ptc::UnknownReason::BudgetExhausted,
+                ..
+            }
+        ));
+        assert!(matches!(
+            context.prove(goal, Budget::default()),
+            Outcome::Entailed(_)
+        ));
+
+        let opaque = |value| Term::NormalForm {
+            head: id(12),
+            sort: Sort::Type,
+            arguments: vec![value],
+        };
+        assert!(!matches!(
+            context.prove(
+                F::equal(opaque(left), opaque(right)).negate(),
+                Budget::default()
+            ),
+            Outcome::Entailed(_)
+        ));
+    }
+    for (left, right) in [
+        (Term::Float64(0), Term::Float64(1)),
+        (
+            Term::Value { store: 1, index: 0 },
+            Term::Value { store: 1, index: 1 },
+        ),
+    ] {
+        let goal = F::equal(
+            nominal(payload(None, vec![left])),
+            nominal(payload(None, vec![right])),
+        )
+        .negate();
+        assert!(!matches!(
+            context.prove(goal, Budget::default()),
+            Outcome::Entailed(_)
+        ));
+    }
+    let value = payload(None, vec![]);
+    assert!(matches!(
+        context.prove(F::equal(value.clone(), value), Budget::default()),
+        Outcome::IllFormed(_)
+    ));
+}
+
 fn payload(variant: Option<u32>, field: Term) -> Term {
     Term::NominalValue {
         ty: Box::new(Term::Nominal {

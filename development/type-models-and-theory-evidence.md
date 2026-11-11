@@ -1,6 +1,6 @@
 # Type 模型、理论证据与候选提交
 
-状态：重构设计，未实施。源码核对基线 `517dc043`。
+状态：总体协议仍为重构设计；已落地部分在相应小节列出接线和验证。最初源码核对基线 `517dc043`。
 本文细化[求解器总览](solvers-resources-and-lowering.md)，不扩大隐式推导范围，不将程序验证
 并入 PTC。依据为正式[原子目录](../docs/type/propositional-constraints/atoms.md)、
 [理论分工](../docs/type/propositional-constraints/theory-solvers.md)、
@@ -23,6 +23,26 @@
 当前并非“没有 CDCL”或“完全没有 trait 事实”。真正缺口是统一后的组合与交付协议。
 也不能把现有 four-atom 搜索器、世界适配器和投影搜索简单拼起来，便宣布 A01–A19 全覆盖。
 本次为静态核对，未运行上述模块测试。
+
+### 已接通：名义类型中的冻结值索引不等证据
+
+`ptc::value_indices` 扩展了已准入名义构造子的索引比较：除直接标量外，普通 tuple
+载荷以及同一保留域的 nominal 载荷可以通过不同字段数、不同 variant 或内部固定
+标量建立不等。它比较的是已形成 comptime 值的保留身份，不是用户 Eq、程序状态或
+内存规格；不识别 List、Tuple 等库名称，也不为普通 NF 头赋予逆向单射规律。
+
+结构遍历先从本次 query 预算扣除。域标签不能确定相同时、浮点／存储句柄／Type
+语义尚需另行证明时，这个入口不提供额外不等证据。证明搜索和独立 proof replay
+消费同一受限规则；缺少名义构造子准入不能重放原证明。模型搜索不是这里的否定
+证据来源，不把 equality 的反例直接当作 inequality 的证明。
+
+验证：工作目录 `/home/fin/luna`，
+`python3 -B development/check.py --timeout 900 -- test -p ptc --no-fail-fast`，
+`/tmp/luna-tools-svjat95a/result.json` 退出 0，242 项通过。`nominal_models`
+覆盖嵌套值、域和 variant、证明重放、缺失准入、预算耗尽后重试、opaque NF 无单射性、
+浮点与未完成存储不提供证据，以及独立值等式继续被 PTC 拒绝。初版新增 variant
+用例把枚举 tag 放在非名义域上，被正确诊断为 InvalidNominalValueType；已修正
+测试载体为名义域，没有放宽值准入。
 
 ## 2. 三种问题必须具有不同入口
 

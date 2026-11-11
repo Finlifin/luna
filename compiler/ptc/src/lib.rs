@@ -19,6 +19,7 @@ mod model_search;
 mod search;
 mod type_candidates;
 mod type_inputs;
+mod value_indices;
 pub use model_applications::TypeApplication;
 pub use type_inputs::{TypeInputOutcome, TypeInputSolution};
 mod theory_state;
@@ -1661,7 +1662,7 @@ impl Search<'_> {
                         if !matches!(ha, Head::Nominal(..))
                             || matches!(ha, Head::Nominal(head, _) if self.context.is_nominal_constructor(head))
                         {
-                            // Closed scalar indices are part of a nominal
+                            // Retained immutable indices are part of a nominal
                             // type's identity, not program-state predicates.
                             if let (
                                 Term::Nominal {
@@ -1672,12 +1673,10 @@ impl Search<'_> {
                                 },
                             ) = (ta, tb)
                             {
-                                if left.iter().zip(right).any(|(left, right)| {
-                                    left.scalar_index_domain().is_some()
-                                        && right.scalar_index_domain().is_some()
-                                        && left != right
-                                }) {
-                                    return Ok(None);
+                                for (left, right) in left.iter().zip(right) {
+                                    if value_indices::distinct(left, right, &mut self.steps)? {
+                                        return Ok(None);
+                                    }
                                 }
                             }
                             for (&ca, &cb) in
