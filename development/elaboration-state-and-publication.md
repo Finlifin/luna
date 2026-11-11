@@ -192,6 +192,44 @@ Type 发布只移除已经完成的等待项；失败沿原边传播，无关兄
 检查退出 0，证据 `/tmp/luna-tools-9z5q_8pg/result.json`；`git diff --check` 通过。
 以上均保留作者原有的资源分析修改，未运行全 workspace 或性能基准，正式 docs 未修改。
 
+### 同一注解的联合需求
+
+已知注解仍可能通过输入绑定依赖多个排队的 Type 生产者。逐个调用单根恢复不构成
+整个注解的预检：较早独立生产者可以先执行，随后才发现另一根的循环或已有失败。
+在 `a591e54a` 的两个实现文件上运行新增回归，确实观察到这两种错误执行；证据
+`/tmp/luna-tools-7er7lruz/result.json`，退出 101，两项失败于生产者已经进入函数体，
+正常共享及外部等待对照通过。核验后已恢复本轮修改，未回滚其他工作区内容。
+
+现在同一注解的全部未决输入进入一个共同需求计划，共用 active/done 集合、调度额度
+和失败预检，再由与单根恢复相同的执行器运行。遍历同时保留每条边所属的需求根；
+循环或发布冲突使该生产者进入失败终态，注解报告对应的 DependencyFailed，保留
+原始原因和失败归属。失败沿保留边传播；预检耗尽保留等待和输入，不执行任何生产者。正常外部等待允许保存已完成
+生产者，恢复不会重放；共享生产者只运行一次。后续注解仍由原有逐项准入规则控制，
+不因联合预检而被提前执行。
+
+这修复了已有签名任务 API 的准备边界，并扩展了源程序 required Type invocation
+共用的底层计划器。调用点核对显示，`resume_instantiated_signature_annotation_checked`
+和 `resume_runtime_signature_checked` 目前仍主要由直接 API 测试调用；普通源码的
+待定域与待定签名还没有接入这些接口，不能以这里的直接测试冒充该语言用例完成。
+联合需求的最终结果只报告 Ready／外部等待／失败生产者，不制造占位 Type。
+
+工作目录 `/home/fin/luna`。`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib --test type_computation_demands --no-fail-fast`
+在 `/tmp/luna-tools-_n_n357y/result.json` 退出 0，186 项库检查及八项需求检查通过。
+新增行为包括后续循环、后续已失败子计算、共享生产者与外部等待，以及后续大依赖图
+耗尽预算时阻止较早根执行、补充调度额度后继续等待而不重放生产者。
+
+最终 `luna --test execution` 的 `signature`、`type_computation` 和
+`failed_type_demands_do_not_execute_unneeded_siblings -- --exact` 三组分别为
+42／9／1 项通过，报告为 `/tmp/luna-tools-dsd3s1bh/result.json`、
+`/tmp/luna-tools-iqer6zlk/result.json`、`/tmp/luna-tools-om0q2nga/result.json`，均退出 0。
+首次签名检查曾在 `/tmp/luna-tools-z1h2vp0q/result.json` 暴露错误归属回归；上述最终
+结果已经覆盖保留失败生产者身份后的修正，未放宽原测试预期。
+`-p luna --test library_protocols --test ordinary_callable_types --test source_reflection --no-fail-fast`
+在 `/tmp/luna-tools-stufey3b/result.json` 退出 0，真实 sysroot 路径通过，原有待定签名
+用例保持 ignored。命令统一使用前述 check.py 入口，结果锚点为各报告的 `stdout.log`
+中 `test result:`。三个 Rust 文件格式检查 `/tmp/luna-tools-05y1dxrc/result.json` 退出 0，
+`git diff --check` 通过。保留作者原有资源分析修改，未做全 workspace 检查或性能测量。
+
 ## 5. Observe、登记与发布
 
 ObservationKey 包含语义主体、所请求 facet、作用域/视图和当前前提；它与 task key 不同。

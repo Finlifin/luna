@@ -188,6 +188,14 @@ struct Pending {
     state: State,
 }
 
+/// Readiness of one annotation's complete producer set. Ready means every
+/// observed input has settled, not that a provisional Type has been published.
+enum DemandState {
+    Ready,
+    Waiting(BTreeSet<MetaId>),
+    Failed(MetaId),
+}
+
 /// One invocation's signature resolution. The originating session owns all
 /// computation outputs and effects; a task cannot be moved to another session.
 pub struct SignatureTask {
@@ -822,59 +830,24 @@ impl<'a> Session<'a> {
                         let waiting = context
                             .unresolved_metered(&input, fuel)
                             .map_err(inference)?;
-                        // A declaration annotation can refer to a Type produced
-                        // by another queued invocation, not just a caller-owned
-                        // inference leaf. Demand those producers through the
-                        // same bounded dependency scheduler as computed slots.
-                        // Do not drive unrelated work or execute later slots.
-                        if let Some(output) =
-                            waiting.iter().find(|output| self.failed.contains(output))
-                        {
-                            task.state = State::Failed(Error::DependencyFailed(*output));
-                            return self
-                                .signature_annotation_state(task, index)
-                                .map_err(computation);
-                        }
-                        for output in &waiting {
-                            if !self.pending.contains_key(output) {
-                                continue;
-                            }
-                            if matches!(
-                                self.resume_dependencies(context, *output, fuel)
-                                    .map_err(computation)?,
-                                State::Failed(_)
-                            ) {
-                                task.state = State::Failed(Error::DependencyFailed(*output));
+                        // One annotation is one demand: preflight all its
+                        // producers before allowing any of them to execute.
+                        // A later cycle/failure must not run an earlier sibling.
+                        match self.resume_input_demands(context, &waiting, fuel) {
+                            Ok(DemandState::Ready) => {}
+                            Ok(DemandState::Waiting(leaves)) => {
+                                task.state = State::Waiting(leaves);
                                 return self
                                     .signature_annotation_state(task, index)
                                     .map_err(computation);
                             }
-                        }
-                        let waiting = context
-                            .unresolved_metered(&input, fuel)
-                            .map_err(inference)?;
-                        if !waiting.is_empty() {
-                            let mut leaves = BTreeSet::new();
-                            for output in waiting {
-                                match self.state(output) {
-                                    Some(State::Waiting(inputs)) => {
-                                        *fuel = fuel
-                                            .checked_sub(inputs.len())
-                                            .ok_or_else(|| computation(Error::SchedulingBudget))?;
-                                        leaves.extend(inputs.iter().copied());
-                                    }
-                                    _ => {
-                                        *fuel = fuel
-                                            .checked_sub(1)
-                                            .ok_or_else(|| computation(Error::SchedulingBudget))?;
-                                        leaves.insert(output);
-                                    }
-                                }
+                            Ok(DemandState::Failed(output)) => {
+                                task.state = State::Failed(Error::DependencyFailed(output));
+                                return self
+                                    .signature_annotation_state(task, index)
+                                    .map_err(computation);
                             }
-                            task.state = State::Waiting(leaves);
-                            return self
-                                .signature_annotation_state(task, index)
-                                .map_err(computation);
+                            Err(error) => return Err(computation(error)),
                         }
                         context.freeze_metered(&input, fuel).map_err(inference)?
                     }
@@ -1087,6 +1060,46 @@ impl<'a> Session<'a> {
             }
             Err(error) => return Err(error),
         };
+        let external = self.execute_demand_plan(context, plan)?;
+        let pending = self.pending.get_mut(&output).expect("planned demand");
+        if matches!(pending.state, State::Waiting(_)) {
+            pending.state = State::Waiting(external);
+        }
+        Ok(&pending.state)
+    }
+
+    fn resume_input_demands(
+        &mut self,
+        context: &mut InferenceContext,
+        outputs: &BTreeSet<MetaId>,
+        fuel: &mut usize,
+    ) -> Result<DemandState, Error> {
+        let plan = match self.plan_demands(context, outputs.iter().copied(), fuel) {
+            Ok(plan) => plan,
+            Err(demand::Failure::Unresolved(error)) => return Err(error),
+            Err(demand::Failure::Rejected { output, reason }) => {
+                self.fail_demand(output, reason)?;
+                return Ok(DemandState::Failed(output));
+            }
+        };
+        let external = self.execute_demand_plan(context, plan)?;
+        for output in outputs {
+            if matches!(self.state(*output), Some(State::Failed(_))) {
+                return Ok(DemandState::Failed(*output));
+            }
+        }
+        Ok(if external.is_empty() {
+            DemandState::Ready
+        } else {
+            DemandState::Waiting(external)
+        })
+    }
+
+    fn execute_demand_plan(
+        &mut self,
+        context: &mut InferenceContext,
+        plan: demand::Plan,
+    ) -> Result<BTreeSet<MetaId>, Error> {
         // The exclusive context cannot acquire new edges during this pass:
         // invocation publishes stable Types only. Retain the observed graph
         // instead of giving every execution/failure scan a fresh allowance.
@@ -1104,11 +1117,7 @@ impl<'a> Session<'a> {
                 failed_dependency = true;
             }
         }
-        let pending = self.pending.get_mut(&output).expect("planned demand");
-        if matches!(pending.state, State::Waiting(_)) {
-            pending.state = State::Waiting(plan.external);
-        }
-        Ok(&pending.state)
+        Ok(plan.external)
     }
 
     /// Recheck current alias leaves, then invoke at most once. The caller may

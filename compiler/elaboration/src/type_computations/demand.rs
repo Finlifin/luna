@@ -29,8 +29,33 @@ impl fmt::Display for Plan {
     }
 }
 
+pub(super) enum Failure {
+    Unresolved(Error),
+    Rejected { output: MetaId, reason: Error },
+}
+impl From<Error> for Failure {
+    fn from(error: Error) -> Self {
+        Self::Unresolved(error)
+    }
+}
+impl Failure {
+    fn into_error(self) -> Error {
+        match self {
+            Self::Unresolved(error) | Self::Rejected { reason: error, .. } => error,
+        }
+    }
+}
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unresolved(error) => write!(f, "(demand-unresolved {error})"),
+            Self::Rejected { output, reason } => write!(f, "(demand-rejected {output} {reason})"),
+        }
+    }
+}
+
 enum Work {
-    Enter(MetaId),
+    Enter { output: MetaId, root: MetaId },
     Leave(Computation),
 }
 impl Session<'_> {
@@ -40,7 +65,26 @@ impl Session<'_> {
         output: MetaId,
         fuel: &mut usize,
     ) -> Result<Plan, Error> {
-        let mut work = vec![Work::Enter(output)];
+        self.plan_demands(context, std::iter::once(output), fuel)
+            .map_err(Failure::into_error)
+    }
+
+    pub(super) fn plan_demands(
+        &self,
+        context: &InferenceContext,
+        outputs: impl ExactSizeIterator<Item = MetaId>,
+        fuel: &mut usize,
+    ) -> Result<Plan, Failure> {
+        *fuel = fuel
+            .checked_sub(outputs.len())
+            .ok_or(Error::SchedulingBudget)?;
+        let mut work = outputs
+            .map(|output| Work::Enter {
+                output,
+                root: output,
+            })
+            .collect::<Vec<_>>();
+        work.reverse();
         let mut active = BTreeSet::new();
         let mut done = BTreeSet::new();
         let mut plan = Plan {
@@ -50,8 +94,8 @@ impl Session<'_> {
         };
         while let Some(work_item) = work.pop() {
             *fuel = fuel.checked_sub(1).ok_or(Error::SchedulingBudget)?;
-            let id = match work_item {
-                Work::Enter(id) => id,
+            let (id, root) = match work_item {
+                Work::Enter { output, root } => (output, root),
                 Work::Leave(computation) => {
                     active.remove(&computation.output);
                     done.insert(computation.output);
@@ -75,10 +119,16 @@ impl Session<'_> {
                 State::Waiting(_) => {}
             }
             if !active.insert(id) {
-                return Err(Error::DependencyCycle(id));
+                return Err(Failure::Rejected {
+                    output: root,
+                    reason: Error::DependencyCycle(id),
+                });
             }
-            if context.is_assigned(id)? {
-                return Err(Error::Inference(InferenceError::AlreadyAssigned(id)));
+            if context.is_assigned(id).map_err(Error::Inference)? {
+                return Err(Failure::Rejected {
+                    output: root,
+                    reason: Error::Inference(InferenceError::AlreadyAssigned(id)),
+                });
             }
             let inputs = pending
                 .inputs
@@ -99,7 +149,12 @@ impl Session<'_> {
                 output: id,
                 inputs: inputs.clone(),
             }));
-            work.extend(inputs.into_iter().rev().map(Work::Enter));
+            work.extend(
+                inputs
+                    .into_iter()
+                    .rev()
+                    .map(|output| Work::Enter { output, root }),
+            );
         }
         Ok(plan)
     }

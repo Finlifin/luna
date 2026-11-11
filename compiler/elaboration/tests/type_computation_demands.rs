@@ -249,3 +249,213 @@ fn bounded_single_resume_observes_but_never_drives_dependency_bodies() {
         vec![id(0), id(1)]
     );
 }
+
+fn annotation_task(
+    session: &mut Session<'_>,
+    context: &mut InferenceContext,
+    inputs: &[elaboration::MetaId],
+) -> elaboration::type_computations::SignatureTask {
+    use nir::deferred_signatures::{Annotation, Input as SignatureInput, Signature};
+    let signature = Signature::new(
+        inputs
+            .iter()
+            .map(|_| SignatureInput {
+                sort: Sort::Type,
+                annotation: Annotation::Known(Term::Primitive(P::Type)),
+            })
+            .collect(),
+        Annotation::Known(Term::Tuple(
+            inputs
+                .iter()
+                .enumerate()
+                .map(|(index, _)| Term::Bound {
+                    depth: 0,
+                    index,
+                    sort: Sort::Type,
+                })
+                .collect(),
+        )),
+        vec![],
+        &mut 1000,
+    )
+    .unwrap();
+    session
+        .enqueue_signature(
+            context,
+            signature,
+            &inputs.iter().copied().map(I::Meta).collect::<Vec<_>>(),
+        )
+        .unwrap()
+}
+
+#[test]
+fn one_annotation_preflights_all_producers_before_executing_a_ready_sibling() {
+    use elaboration::type_computations::AnnotationState;
+    let package = package();
+    let mut context = InferenceContext::default();
+    let mut session = Session::new(&package, &context, Budget::default()).unwrap();
+    let ready = session.enqueue(&mut context, id(0), vec![]).unwrap();
+    let alias = context.fresh(Sort::Type);
+    let cyclic = session
+        .enqueue(&mut context, id(1), vec![input(I::Meta(alias))])
+        .unwrap();
+    context.assign(alias, I::Meta(cyclic)).unwrap();
+    let mut task = annotation_task(&mut session, &mut context, &[ready, cyclic]);
+    let result = session
+        .resume_instantiated_signature_annotation_checked(
+            &mut context,
+            &mut task,
+            2,
+            &mut 1000,
+            |_, _, _| Ok::<(), ()>(()),
+        )
+        .unwrap();
+    assert!(
+        matches!(result, AnnotationState::Failed(Error::DependencyFailed(output)) if *output == cyclic)
+    );
+    assert!(matches!(
+        session.state(cyclic),
+        Some(State::Failed(Error::DependencyCycle(_)))
+    ));
+    assert!(
+        session.events().is_empty(),
+        "a later producer cycle must precede all sibling effects"
+    );
+    assert!(matches!(session.state(ready), Some(State::Waiting(_))));
+    assert!(!context.is_assigned(ready).unwrap());
+    assert!(matches!(
+        session.resume(&mut context, ready).unwrap(),
+        State::Complete(_)
+    ));
+    let events = session.events().len();
+    assert!(matches!(
+        session
+            .resume_instantiated_signature_annotation_checked(
+                &mut context,
+                &mut task,
+                2,
+                &mut 0,
+                |_, _, _| -> Result<(), ()> { panic!("failed annotation cannot be admitted") },
+            )
+            .unwrap(),
+        AnnotationState::Failed(_)
+    ));
+    assert_eq!(session.events().len(), events);
+}
+
+#[test]
+fn one_annotation_detects_failed_descendants_before_running_independent_roots() {
+    use elaboration::type_computations::AnnotationState;
+    let package = package();
+    let mut context = InferenceContext::default();
+    let mut session = Session::new(&package, &context, Budget::default()).unwrap();
+    let ready = session.enqueue(&mut context, id(0), vec![]).unwrap();
+    let alias = context.fresh(Sort::Type);
+    let failed = session
+        .enqueue(&mut context, id(1), vec![input(I::Meta(alias))])
+        .unwrap();
+    context.assign(alias, I::Meta(failed)).unwrap();
+    assert!(matches!(
+        session.resume(&mut context, failed).unwrap(),
+        State::Failed(Error::DependencyCycle(_))
+    ));
+    let forwarded = session
+        .enqueue(&mut context, id(1), vec![input(I::Meta(failed))])
+        .unwrap();
+    let mut task = annotation_task(&mut session, &mut context, &[ready, forwarded]);
+    assert!(
+        matches!(session.resume_instantiated_signature_annotation_checked(
+        &mut context, &mut task, 2, &mut 1000, |_, _, _| Ok::<(), ()>(()),
+    ).unwrap(), AnnotationState::Failed(Error::DependencyFailed(output)) if *output == forwarded)
+    );
+    assert!(session.events().is_empty());
+    assert!(matches!(session.state(ready), Some(State::Waiting(_))));
+    assert!(
+        matches!(session.state(forwarded), Some(State::Failed(Error::DependencyFailed(output))) if *output == failed)
+    );
+}
+
+#[test]
+fn one_annotation_shares_producers_and_retains_progress_across_external_waits() {
+    use elaboration::type_computations::AnnotationState;
+    let package = package();
+    let mut context = InferenceContext::default();
+    let mut session = Session::new(&package, &context, Budget::default()).unwrap();
+    let ready = session.enqueue(&mut context, id(0), vec![]).unwrap();
+    let forwarded = session
+        .enqueue(&mut context, id(1), vec![input(I::Meta(ready))])
+        .unwrap();
+    let external = context.fresh(Sort::Type);
+    let mut task = annotation_task(&mut session, &mut context, &[ready, forwarded, external]);
+    assert!(
+        matches!(session.resume_instantiated_signature_annotation_checked(
+        &mut context, &mut task, 3, &mut 1000, |_, _, _| Ok::<(), ()>(()),
+    ).unwrap(), AnnotationState::Waiting(inputs) if inputs == &std::collections::BTreeSet::from([external]))
+    );
+    let entered = session
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            Event::EnterFunction(id) => Some(*id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(entered, vec![id(0), id(1)]);
+    let events = session.events().len();
+    context
+        .assign(external, I::Stable(Term::Primitive(P::U8)))
+        .unwrap();
+    assert!(
+        matches!(session.resume_instantiated_signature_annotation_checked(
+            &mut context, &mut task, 3, &mut 1000, |_, _, _| Ok::<(), ()>(()),
+        ).unwrap(), AnnotationState::Ready(ty) if *ty == Term::Tuple(vec![
+            Term::Primitive(P::Bool), Term::Primitive(P::Bool), Term::Primitive(P::U8),
+        ]))
+    );
+    assert_eq!(session.events().len(), events);
+}
+
+#[test]
+fn annotation_preflight_exhaustion_cannot_execute_an_earlier_root() {
+    use elaboration::type_computations::{AdmissionError, AnnotationState};
+    let package = package();
+    let mut context = InferenceContext::default();
+    let mut session = Session::new(&package, &context, Budget::default()).unwrap();
+    let ready = session.enqueue(&mut context, id(0), vec![]).unwrap();
+    let external = context.fresh(Sort::Type);
+    let mut delayed = external;
+    for _ in 0..100 {
+        delayed = session
+            .enqueue(&mut context, id(1), vec![input(I::Meta(delayed))])
+            .unwrap();
+    }
+    let mut task = annotation_task(&mut session, &mut context, &[ready, delayed]);
+    assert!(matches!(
+        session.resume_instantiated_signature_annotation_checked(
+            &mut context,
+            &mut task,
+            2,
+            &mut 128,
+            |_, _, _| Ok::<(), ()>(()),
+        ),
+        Err(AdmissionError::Computation(Error::SchedulingBudget))
+    ));
+    assert!(session.events().is_empty());
+    assert!(!context.is_assigned(ready).unwrap());
+    assert!(matches!(task.state(), State::Waiting(_)));
+    for _ in 0..2 {
+        assert!(
+            matches!(session.resume_instantiated_signature_annotation_checked(
+            &mut context, &mut task, 2, &mut 10_000, |_, _, _| Ok::<(), ()>(()),
+        ).unwrap(), AnnotationState::Waiting(inputs) if inputs == &std::collections::BTreeSet::from([external]))
+        );
+        assert_eq!(
+            session
+                .events()
+                .iter()
+                .filter(|event| matches!(event, Event::EnterFunction(_)))
+                .count(),
+            1
+        );
+    }
+}
