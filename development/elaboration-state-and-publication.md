@@ -1041,6 +1041,47 @@ unsafe 和部分结构输入的专用规则仍沿既有入口，不按普通块�
   退出 0；`git diff --check` 通过。验证保留工作区原有资源分析修改；未运行全
   workspace、LLVM 或性能基准。formatter、正式 docs 和其他已有改动均不纳入提交。
 
+#### 已接入：普通输入依赖保留任务后继
+
+`prepare_call_types` 所用的普通参数依赖准备已从递归调用迁到
+`dependent_inputs/tasks.rs`。同一任务驱动处理参数域依赖、受检源码输入、默认值的
+参数引用和默认值完成；PreparedInputs 继续区分受检生产者、符号证据、实际值和默认
+表达式。任务的活动路径属于本次检查，不再作为完成输入记录的可变旁表。
+
+默认值一旦取得，任务在检查其前置引用时持有原受检表达式和绑定映射；依赖完成后
+才替换普通参数域、观察身份并发布该槽。共享依赖复用已经完成的输入证据，转发默认
+值保留 Local 读取，不复制前置输入的生产者。整个过程沿原来的依赖检查次序，调用
+产物仍使用源码实参次序；这里的任务就绪不授予提前执行的许可。源码表达式检查和
+required invocation 仍是原同步规则，尚未转换成可以等待外部响应的子任务。
+
+仅当请求重新进入当前活动路径，才报告依赖循环；删除了将 64 层无环路径也归为
+“cyclic or excessively deep”的原保护。任务推进、后继分配、默认绑定表和保留证据
+复制消耗同一 required 预算，资源耗尽与循环分开诊断。失败前不消费下一个待办项；
+失败的整个同步准备仍终止，不宣称可以在外部补预算后恢复本次调用。Task 和 Progress
+提供 S-expression dump，默认值生产者、绑定引用和活动路径分别可见。
+
+真实 sysroot 的 72 层 Type 默认参数链在修改前报
+`2110..2118: cyclic or excessively deep dependent input preparation`，
+`/tmp/luna-tools-64q31ax8/result.json` 退出 101。迁移后同一源程序在树解释器和字节码
+解释器均完成两次调用，每次根默认值中的 mark 恰好执行一次；
+`/tmp/luna-tools-3i5keeag/result.json` 退出 0。这说明原固定深度判断确实拒绝了合法
+无环依赖，不将增加任务类型或单独的 dump 测试当作功能验收。
+
+该迁移没有实现一般的 callable 签名等待、源检查 activation 或 VM 片段交付。
+下一步仍须把源码子检查／值观察作为持有上下文的后继交回区域，不能把本地任务栈
+冻结进 CodeSession，也不能将现有 freeze_dependency_input 再包装一次称为挂起恢复。
+
+最终验证目录 `/home/fin/luna`：
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test ordinary_dependency_tasks --test ordinary_input_identity --test default_calls --test comptime_bytecode_defaults --test required_input_scopes --test ordinary_callable_types --test ordinary_clause_collectors --test signature_capabilities --no-fail-fast`，
+435 项通过、两个既有动态调用正例 ignored；`/tmp/luna-tools-sdgv1vw8/result.json`
+退出 0。新增对照检查普通 bool 值索引、默认参数转发、trace 次序和错误索引拒绝；
+任务单元测试区分真实环、预算失败不消费待办、非法完成顺序及后续新进入，并核对
+默认值绑定和转义后的 dump。初次组合构建因新增测试的 String／Arc<str> 构造不匹配
+退出 101（`/tmp/luna-tools-v7ol23mg/result.json`），修正后才取得上述结果。
+三个 Rust 文件 scoped rustfmt check（`/tmp/luna-tools-scxh3ygu/result.json`）与
+`git diff --check` 均通过。未运行全 workspace、LLVM、性能基准或两个 ignored 正例；
+验证保留已有资源分析修改，formatter 与正式 docs 保持不动。
+
 #### 实施补充：声明接口与可执行主体不能共用完成状态
 
 当前调用路径还有一个早于 Type 响应的发布边界。普通函数收集与 required 依赖准备

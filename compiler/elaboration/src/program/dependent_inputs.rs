@@ -1,13 +1,13 @@
 //! Prepare the compile-time dependencies of ordinary call input types.
 //! Checking order does not change the source-ordered runtime argument plan.
 use super::*;
+mod tasks;
 
 pub(super) struct PreparedInputs {
     pub values: Vec<Option<n::Expr>>,
     pub symbols: Vec<Option<Term>>,
     pub live: Vec<Option<comptime_interpretor::Value>>,
     pub defaults: Vec<Option<n::Expr>>,
-    active: BTreeSet<usize>,
 }
 
 impl PreparedInputs {
@@ -17,7 +17,6 @@ impl PreparedInputs {
             symbols: vec![None; count],
             live: vec![None; count],
             defaults: vec![None; count],
-            active: BTreeSet::new(),
         }
     }
 }
@@ -676,217 +675,6 @@ impl Checker<'_, '_> {
             .rewrite_types(&mut |ty| substitution.instantiate(ty))
             .map_err(|e| error(span, e.to_string()))?;
         Ok(value)
-    }
-
-    pub(super) fn prepare_type_dependency(
-        &mut self,
-        slot: usize,
-        parameters: &[Parameter],
-        callee: &n::Expr,
-        owner: Option<OwnerId>,
-        routes: &[arguments::RoutedArgument<'_>],
-        offset: usize,
-        source: &Expr<'_>,
-        prepared: &mut PreparedInputs,
-    ) -> Result<(), Error> {
-        self.required_steps = self
-            .required_steps
-            .checked_sub(1)
-            .ok_or_else(|| error(source.span, "dependent input preparation budget exhausted"))?;
-        if prepared.symbols.get(slot).is_some_and(Option::is_some) {
-            return Ok(());
-        }
-        if prepared.active.len() >= 64 || !prepared.active.insert(slot) {
-            return Err(error(
-                source.span,
-                "cyclic or excessively deep dependent input preparation",
-            ));
-        }
-        let checked = (|| {
-            let parameter = parameters
-                .get(slot)
-                .ok_or_else(|| error(source.span, "invalid dependent input slot"))?;
-            if parameter.sort == Sort::Runtime {
-                return Err(error(
-                    source.span,
-                    "dependent comptime input cannot read a runtime argument",
-                ));
-            }
-            for dependency in self
-                .term_substitution_inputs(&parameter.ty, source.span)?
-                .keys()
-            {
-                self.prepare_type_dependency(
-                    *dependency,
-                    parameters,
-                    callee,
-                    owner,
-                    routes,
-                    offset,
-                    source,
-                    prepared,
-                )?;
-            }
-            let binding = self.prepare_call_binding(parameters, &prepared.symbols, source.span)?;
-            let expected = binding
-                .substitute(&parameter.ty)
-                .map_err(|e| error(source.span, e.to_string()))?;
-            let expected = self.callable_input_view(&expected, source.span)?;
-            let route = routes.iter().find(|route| route.parameter + offset == slot);
-            let mut bindings = Vec::new();
-            let mut forwarded_default = None;
-            let value = if let Some(value) = &prepared.values[slot] {
-                value.clone()
-            } else if let Some(route) = route {
-                route.require_collection_type(self, &expected, source.span)?;
-                let value = route.expression(source);
-                self.with_staged_input(true, |this| this.expr(&value, Some(&expected)))?
-            } else {
-                let owner = owner.ok_or_else(|| {
-                    error(
-                        source.span,
-                        "dependent default needs declaration parameter metadata",
-                    )
-                })?;
-                let mut value = match prepared.defaults[slot].take() {
-                    Some(value) => value,
-                    None => self.call_default(owner, slot, callee, source.span)?,
-                };
-                let item = self.package.item(owner).unwrap();
-                let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
-                    return Err(error(
-                        source.span,
-                        "dependent default needs function parameter metadata",
-                    ));
-                };
-                let ids: Vec<_> = sig
-                    .params
-                    .iter()
-                    .map(|parameter| local(parameter.hir_id))
-                    .collect();
-                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let before = fuel;
-                let references = nir::preparation::references(&value, &mut fuel);
-                self.required_steps -= (before - fuel) as u64;
-                for binding in references.map_err(|e| error(source.span, e))? {
-                    if let Some(dependency) = ids.iter().position(|id| *id == binding) {
-                        self.prepare_type_dependency(
-                            dependency,
-                            parameters,
-                            callee,
-                            Some(owner),
-                            routes,
-                            offset,
-                            source,
-                            prepared,
-                        )?;
-                        bindings.push((
-                            binding,
-                            prepared.values[dependency].as_ref().unwrap().ty.clone(),
-                            prepared.symbols[dependency].as_ref().unwrap().clone(),
-                        ));
-                    }
-                }
-                let binding =
-                    self.prepare_call_binding(parameters, &prepared.symbols, source.span)?;
-                value
-                    .rewrite_types(&mut |ty| binding.substitute(ty))
-                    .map_err(|e| error(source.span, e.to_string()))?;
-                value.rewrite_types(&mut |ty| self.callable_input_view(ty, source.span))?;
-                // Forward identity evidence, but keep the default's read of
-                // its already bound parameter. Copying that input's producer
-                // would replay it in the default's different local environment.
-                if let K::Local(binding) = value.kind {
-                    if let Some(dependency) = ids.iter().position(|id| *id == binding) {
-                        forwarded_default = Some((
-                            value.clone(),
-                            prepared.symbols[dependency].as_ref().unwrap().clone(),
-                        ));
-                    }
-                }
-                value
-            };
-            let observed = if matches!(value.kind, K::TypeValue(_) | K::Local(_)) {
-                None
-            } else {
-                self.preserved_input_identity(
-                    &value,
-                    bindings
-                        .iter()
-                        .map(|(binding, _, identity)| (*binding, identity)),
-                    source.span,
-                )?
-            };
-            if !matches!(value.kind, K::TypeValue(_) | K::Local(_)) {
-                let unresolved = owner
-                    .and_then(|owner| self.type_parameters.get(&owner))
-                    .cloned()
-                    .unwrap_or_default();
-                let inputs = self.checked_declaration_inputs(&value, source.span)?;
-                if unresolved.iter().any(|id| inputs.contains(id)) {
-                    // Opaque heads and other structural Type values can retain
-                    // rigids without invoking a computation over unknown inputs.
-                    if observed.is_none() {
-                        return Err(context_error(
-                            source.span,
-                            "dependent Type computation awaits inferred type arguments",
-                        ));
-                    }
-                }
-            }
-            let (value, symbol) = if let Some(forwarded) = forwarded_default {
-                forwarded
-            } else if let Some(identity) = observed {
-                // Identity evidence does not complete the producer. Its writes,
-                // calls and control transfers remain at the source input slot.
-                (value, identity)
-            } else {
-                match &value.kind {
-                    K::TypeValue(ty) => (value.clone(), ty.clone()),
-                    K::Local(binding)
-                        if route.is_some() && self.input_facts.types.contains_key(binding) =>
-                    {
-                        (value.clone(), self.input_facts.types[binding].clone())
-                    }
-                    K::Local(binding)
-                        if route.is_some() && self.input_facts.values.contains_key(binding) =>
-                    {
-                        (value.clone(), self.input_facts.values[binding].0.clone())
-                    }
-                    K::Local(binding) => {
-                        // A prepared container input is supplied by the enclosing
-                        // invocation. Its declaration identity is enough to check
-                        // the callee telescope and container premises now; retain
-                        // the Local expression so execution receives the actual
-                        // value rather than freezing this symbolic identity.
-                        let captured = self
-                            .alias_value_bindings
-                            .iter()
-                            .find_map(|(parameter, id)| (id == binding).then_some(*parameter));
-                        if let Some(declaration) = captured {
-                            (
-                                value,
-                                Term::Rigid {
-                                    declaration,
-                                    sort: Sort::Type,
-                                },
-                            )
-                        } else {
-                            match self.spread_input_symbol(*binding, &value.ty, source)? {
-                                Some(symbol) => (value, symbol),
-                                None => self.freeze_dependency_input(source, value, bindings)?,
-                            }
-                        }
-                    }
-                    _ => self.freeze_dependency_input(source, value, bindings)?,
-                }
-            };
-            prepared.values[slot] = Some(value);
-            prepared.symbols[slot] = Some(symbol);
-            Ok(())
-        })();
-        prepared.active.remove(&slot);
-        checked
     }
 }
 
