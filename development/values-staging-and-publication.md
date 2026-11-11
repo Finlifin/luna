@@ -1551,13 +1551,13 @@ Identity<Row> 的固有实现查询，并因主体资格未决而在调用前失
 同一 VM 随后仍能成功反射合法 struct。真实 sysroot 回归在树解释与字节码路径中
 检查调用、块及分支生产者恰好执行一次，并检查拒绝后的恢复。
 
-另外保留未完成回归 computed_normal_form_receiver_keeps_live_clause_inputs：
+该批另保留了未完成回归 computed_normal_form_receiver_keeps_live_clause_inputs：
 `Identity<counter.Selected()>.struct_fields()` 应先执行普通 NF 参数，再由反射拒绝
-不透明身份；目前枚举构造探测 enum_member_reference 在方法解析之前调用 type_expr，
+不透明身份；当时枚举构造探测 enum_member_reference 在方法解析之前调用 type_expr，
 经 normal_type_annotation / required_normal_type_plan 提前要求局部值，报
 required comptime input unavailable。临时调用栈诊断仅用于定位，未留在生产代码。
-此问题需要后续统一调用类别观察与实际输入准备；不能用吞掉错误、展开 NF 或假造
-已完成输入来绕过。该用例标为 ignored 并单独运行确认失败，不计作通过或能力交付。
+该批没有用吞掉错误、展开 NF 或假造已完成输入绕过它；用例当时标为 ignored 并
+单独运行确认失败。后续已通过下节的名字来源观察修复，现已恢复为正常回归。
 
 验证工作目录 `/home/fin/luna`，命令通过 `development/check.py --timeout 900 -- test`
 执行，完整参数及输出在各目录的 result.json、stdout.log 和 stderr.log：
@@ -1574,6 +1574,47 @@ required comptime input unavailable。临时调用栈诊断仅用于定位，未
   `/tmp/luna-tools-eroqlcit` 同样在 393..421 报局部输入不可用，退出 101。
 - 三份修改的 Rust 文件 scoped rustfmt check 退出 0：`/tmp/luna-tools-ripe1etq`；
   git diff --check 通过。没有运行全 workspace 或性能测试。
+
+### 枚举名字观察与类型形成分开
+
+表达式中的 enum 路径现在先观察名字来源，再决定是否需要完整 Type 身份。
+已检查表达式复用 observed_expression_type 的被动身份观察；若普通实参尚未执行，
+不再为了试探它是否为 enum 而进入 required invocation。该观察使用独立 checking
+attempt，保留原阶段的输入规则并恢复局部绑定、捕获和控制状态，不把临时 NIR
+表达式交付为执行结果。未知不是“不等于某个 enum”的 PTC 证据。
+
+当完整类型身份尚未取得，但 NIR NominalType 已绑定 enum 声明时，仍可读取该声明
+固定的 variant/group 名字。Block／CallPreparation 只沿结果路径观察这个来源，
+不会执行语句或输入，也不为缺少参数的类型伪造 Term。名字匹配按预算计费。
+这保留 `Choice<selected()>.struct_fields(payload)` 中同名变体的优先级；
+不能因为参数未完成就错误地选择 Type 上的 struct_fields 方法。
+
+只有已经确定的 enum 变体或 group 才进入原有 type_expr 形成路径，并重新检查
+实际主体、payload 与类型关系。观察到的身份不能替代这一步，也不能丢弃输入
+生产失败。与 enum 名字无关的投影继续交给普通成员解析；pattern 中已经要求的
+类型身份仍走严格检查。没有调换 variant_target 与 receiver_call 的先后次序。
+
+`Identity<counter.Selected()>.struct_fields()` 现在保留普通 NF 输入到 invocation，
+Selected 恰好执行一次，随后反射按原契约拒绝不透明 NF；头不展开、不变成 Row。
+原回归已取消 ignored，树解释和字节码均验证这一执行边界。真实 sysroot 另检查
+已知及计算型 enum 参数的同名成员、载荷实参一次求值，以及参数生产失败仍拒绝。
+
+这交付的是名字探测与类型形成的职责分离。所有调用路径尚未共享同一份完整输入
+准备结果；重复的非执行检查、前端可恢复等待与 ContextualExpr 迁移仍待完成。
+
+工作目录 `/home/fin/luna`，通过 `development/check.py --timeout 900 -- test` 验证：
+
+- `/tmp/luna-tools-m63pfd4n`：显式运行原 ignored 的 live-NF 反例，退出 0；其修改前
+  失败及基线在上节列出的 `/tmp/luna-tools-tkmrlk_p`、`/tmp/luna-tools-eroqlcit`。
+- 最终 `/tmp/luna-tools-stgm4rkr`：enum_groups、source_reflection、nominal_staging、
+  nominal_value_parameters、normal_form_methods、quote_functions、cmtt_methods
+  共 620 通过、2 个既有 CMTT 失败，退出 101，无 ignored。反射组 20 项全部通过。
+  两项失败仍是 indexed-code-signature 与 runtime 方法经聚合传递，位置和诊断与
+  前述基线一致；未修改这些预期或将其计作本批通过。
+- 五份修改的 Rust 文件 scoped rustfmt check 退出 0：`/tmp/luna-tools-mbabq8_e`；
+  git diff --check 通过。没有运行全 workspace 或性能测试。
+
+各目录的 result.json 保存命令和退出结果，stdout.log / stderr.log 保存实际输出。
 
 首次扩展运行 `/tmp/luna-tools-4b93ojd9/result.json` 退出 101：新增来源优先级用例
 误将普通 trait 的 runtime-phase 成员实现放在 comptime impl 中，被阶段检查拒绝。

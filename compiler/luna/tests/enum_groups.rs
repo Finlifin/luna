@@ -1,8 +1,45 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+#[path = "support/sysroot_execution.rs"]
+#[allow(dead_code)]
+mod sysroot;
 use comptime_interpretor::Value;
 use support::compile_with_protocols;
+
+#[test]
+fn declared_enum_names_keep_precedence_over_type_receiver_methods() {
+    for argument in ["true", "selected()"] {
+        let source = format!(
+            "enum Choice where flag: bool {{ struct_fields(bool) }}
+            comptime fn selected() -> bool {{ true }}
+            struct Counter {{ calls: Integer }}
+            impl Counter {{
+                comptime fn next(self) -> bool {{ self.calls = self.calls + 1; true }}
+            }}
+            comptime fn check() -> bool {{
+                let counter = Counter {{ calls: 0 }};
+                let value = Choice<{argument}>.struct_fields(counter.next());
+                (value match {{ .struct_fields(flag) => flag }}) and counter.calls == 1
+            }}"
+        );
+        let package = sysroot::compile(&source).unwrap();
+        assert_eq!(
+            luna::invocation::invoke(&package, "check", 1_000_000).unwrap(),
+            Value::Bool(true)
+        );
+        if argument == "selected()" {
+            let invalid = source.replace(
+                "comptime fn selected() -> bool { true }",
+                "comptime fn selected() -> bool { let values: meta.List<bool> = []; values[0] }",
+            );
+            assert!(
+                sysroot::compile(&invalid).is_err(),
+                "constructor input failure was erased"
+            );
+        }
+    }
+}
 
 #[test]
 fn grouped_leaves_construct_the_outer_enum_and_whole_groups_match() {

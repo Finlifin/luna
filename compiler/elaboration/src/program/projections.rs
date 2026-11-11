@@ -1277,7 +1277,7 @@ impl Checker<'_, '_> {
         // Group prefixes are namespaces in an enum, not values. Resolve their
         // complete path before member and place probes can evaluate the prefix.
         if matches!(value.kind, H::Projection(..))
-            && let Some((ty, group)) = self.enum_member_reference(value, None)?
+            && let Some((ty, group)) = self.observed_enum_member_reference(value, None)?
             && matches!(&ty, Term::Nominal {declaration, ..}
                 if self.enums.get(declaration).is_some_and(|definition| definition.groups.contains(&group)))
         {

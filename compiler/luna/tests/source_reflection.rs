@@ -848,7 +848,6 @@ fn generic_type_receivers_keep_negative_evidence_separate_from_reflection_admiss
 }
 
 #[test]
-#[ignore = "enum constructor probing demands a live NF receiver before ordinary method routing"]
 fn computed_normal_form_receiver_keeps_live_clause_inputs() {
     let package = sysroot::compile(
         "struct Row { field: bool }

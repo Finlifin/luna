@@ -2446,7 +2446,7 @@ impl Checker<'_, '_> {
         callee: &Expr<'_>,
         expected: Option<&Term>,
     ) -> Result<Option<(Term, usize)>, Error> {
-        let Some((ty, name)) = self.enum_member_reference(callee, expected)? else {
+        let Some((ty, name)) = self.observed_enum_member_reference(callee, expected)? else {
             return Ok(None);
         };
         let Term::Nominal { declaration, .. } = &ty else {

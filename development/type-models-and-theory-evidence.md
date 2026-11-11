@@ -322,9 +322,11 @@ driver 的调用／缓存／键协议／资源协议／参考执行通过同一�
 正前提及撤回，检查排除证明和选择证据的重放；预算扫描要求未完成时不能伪造排除。
 成员域、precision、世界修订、未知候选与既有调用资格检查继续由原有契约约束。
 
-这没有修复枚举构造探测过早取得 live NF 输入的独立缺口。直接把 receiver_call
+该批没有修复枚举构造探测过早取得 live NF 输入的独立缺口。直接把 receiver_call
 挪到 variant_target 前会改变同名成员的选择并重复准备实参；后续应让调用类别观察
-与实际参数准备共享结果，再退役那条急切 type_expr 路径，而不是吞掉它的失败。
+与实际参数准备共享结果，而不是吞掉失败。后续的
+[枚举名字观察](values-staging-and-publication.md#枚举名字观察与类型形成分开)
+已退役为探测而强求身份的路径；完整调用输入准备的统一仍未完成。
 
 验证目录 `/home/fin/luna`，入口 `development/check.py --timeout 900 -- test`；
 完整命令、退出结果及逐组输出在各目录的 result.json / stdout.log / stderr.log：
