@@ -17,6 +17,11 @@ TypeValue       完成当前所需形成检查的类型描述
 可共享整数、文本、持久序列、记录等 immutable 节点，但不能以共享节点为由跳过
 接收域、阶段、存储及 world 检查。NF、普通实参、反射、builder、缓存使用同一值准入服务。
 
+TypeValue 包括已经取得但仍含 Any/refinement 的描述，不能只理解为具体 Term。
+定义侧的未知观察、尚未完成的 Type 计算与完成描述分别归属不同状态，见
+[可计算类型描述与调用准入](type-descriptions-and-admission.md)。该专题同时明确
+普通定义检查的结果证据；不能只扩展 VM 枚举便把格式化变参标为可用。
+
 comptime value-reference 用 VM 的 slot/lens 表示可更新位置。读取和更新仍作用于原值，
 不能以删掉指针语法后按值复制替代；同时不得导出为 Flurry runtime pointer。
 嵌套字段/列表位置需维护根、路径、世代和权限。赋值使旧内容证据失效，不一律使值引用

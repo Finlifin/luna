@@ -8,15 +8,19 @@ even when the user only needed builtin iteration or arithmetic.
 | Draft | Missing work before reintroduction |
 | --- | --- |
 | builtin/option_unwrap.fl, builtin/result_unwrap.fl | Define and implement panic/control-transfer behavior, including resource cleanup. Total optional/error-result operations remain in builtin. |
-| builtin/formatting.fl | Design Display/Debug without depending on std.String. The old String-returning signatures are not the accepted final contract. |
 | std/collections.fl | Real allocation/storage and resource contracts, language optional/error semantics, and source Iterator integration. The legacy intrinsic names and Some/None forms are not implementations. |
-| std/fmt.fl | Owned String, comptime format descriptions and formatting protocol integration. |
-| std/io.fl | Runtime output/input capabilities and actual platform bindings. |
-| std/lib.fl | Historical exports only; restore exports as their implementations become usable. |
 
-Unfinished String/formatting dependencies remain separate so the real builtin
-package can load. Allocation, containers, formatting, I/O and owned strings
-remain required work in the [library delivery design](../libraries-and-delivery.md).
+The unused formatting, I/O and export stubs have been removed. Their invented
+`__builtin_format`/`__builtin_println` calls and String-returning Display contract
+must not guide implementation. The actual source protocols and Linux output
+foundation live in builtin and std; see the
+[host foundation status](../std-host-foundation.md). The requested formatted
+println still requires ordinary `std.fmt.Parse(format)` Type production and
+argument admission, as described in the
+[type-description design](../type-descriptions-and-admission.md).
+
+Allocation, containers, complete formatting, I/O and owned strings remain
+required work in the [library delivery design](../libraries-and-delivery.md).
 Do not reintroduce placeholder bodies or aliases merely to make names resolve.
 
 `builtin/text_iteration.fl` is an executable algorithm prototype, not a

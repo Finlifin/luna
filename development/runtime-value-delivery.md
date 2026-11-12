@@ -470,6 +470,10 @@ Any/Known 观察；`type_computations::State::Complete` 保存具体 Term，
 已计算完成”与“runtime 类型已具体化”两个事实，不能只在 publish 放宽匹配。
 具体函数类型和 runtime IR 的发布仍要求所需布局与义务完整。
 
+完整的状态和数据分工见[可计算类型描述与调用准入](type-descriptions-and-admission.md)。
+尤其不能将 FrozenDescription::Any 当作已经求值的 Type 数据；Parse 只声明返回
+Type 也不自动授予消费者 tuple 结构或 Display 证据，定义检查仍需可靠结果观察。
+
 `development/repros/refined-any-type-producer.fl` 隔离最小合法输入：普通 Type
 生产函数返回带 Display 约束的 Any，经 defer 用于两个 tuple 元素。当前在名字
 解析时报 `Unresolved identifier Any`，说明显式源描述入口也未接通。复现命令：

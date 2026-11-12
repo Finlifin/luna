@@ -19,6 +19,7 @@
 | [状态与发布协议](elaboration-state-and-publication.md) | 如何暂停、恢复、提交、取消，并保持可见性与 coherence？ |
 | [依赖观察](dependency-observations.md) | 如何观察局部信息、精确捕获外层输入并维护查询依赖？ |
 | [值、执行与发布](values-staging-and-publication.md) | 如何统一参数和值，交织 VM、模板和 builder？ |
+| [可计算类型描述](type-descriptions-and-admission.md) | Any 的完成数据、定义观察和等待怎样区分，Type 生产与参数准入怎样支撑 Parse(format)？ |
 | [跨阶段 runtime 值交付](runtime-value-delivery.md) | 源输入、Splice 实例和运行时构造怎样分开，参数重建何时可以退役？ |
 | [函数值的参数接口](callable-input-interfaces.md) | 公开入口、默认提供者与代码身份怎样共同传送，动态 NF 如何接入共享计划？ |
 | [Comptime 值准入](comptime-value-admission.md) | 成员资格、值引用、快照、Any/代码见证与缓存资格如何分别检查？ |
