@@ -387,6 +387,58 @@ callee 可以在“调用者提供有效视图”的显式前提下形成条件�
 调用与清理，拒绝例必须在错误访问发生前诊断。不能用现有 Static 正例替代拥有存储
 和生命周期反例。这里规定的是待实现契约，本轮只执行了独立来源分析。
 
+### 6.4 标量存储更新与读取事实的有效期
+
+[writer 范围复现](repros/writer-sibling-range.fl)暴露了一条通用精度缺口：
+检查 `sink.count < 8` 后写入 `sink.bytes`，原先 `WritePointer` 会清空整个外部
+读取表并 havoc，下一次 `count + 1` 因失去范围而失败。问题不属于类型命题，
+不能交给 PTC，也不能要求每个库方法在每次兄弟字段写入后重复 assumes。
+
+本阶段将标量 store 的保留判定集中到 `flow/stores.rs`，共享 State 的写入失效
+机制。它同时检查：
+
+1. 目标是 bool/机器整数存储，地址由普通指针上的结构字段投影构成；中途读取
+   另一指针、调用或未证明的地址计算不取得这一证据。
+2. 地址在右侧求值前取得，其根版本在右侧完成后仍匹配。根是未暴露地址的局部
+   指针值；复制指针名称本身与读取该指针指向的内容分开。
+3. 读取和写入共享当前地址根，投影在同一 record 的不同字段分开。不同根、不同
+   结构种类、相同路径及祖先/后代路径均不能据此证明不相交。
+4. 只保留获准的标量观察及其根身份；保留同根的局部指针别名时，同样要求原值
+   与别名版本匹配，且别名的地址未暴露。不同指针字段可能指向同一存储，不因
+   字段索引不同获得 pointee 分离结论。
+
+其余观察仍失效，旧写入结果的范围传播路径不变。保留算术事实不建立指针的存活、
+初始化或读写许可，这些仍由资源/内存检查独立验证。扫描、路径复制和比较仍使用
+调用方的程序分析预算；没有新建全局事实缓存或将程序观察写入类型身份。
+
+这不是完整内存足迹替换：普通调用、位写回、未知别名及聚合写入仍使用现有保守
+规则。后续可将已核定的 memory summary 映射到同一失效入口，但必须同时传送
+地址版本、可能目标集合、字段覆盖和 effect；不能只拿字段路径集合推断不别名。
+union/重叠 view 也不能复用普通 record 的字段分离判定。
+
+`scalar_store_facts` 使用真实 sysroot 验证嵌套 record、分支交汇、完整指针及子字段
+指针别名；拒绝同字段覆盖、不同根可能别名、整对象与祖先覆盖、右侧改写内容或
+地址、指针字段可能别名、已知写调用和 opaque call 后的不安全算术。实际库 writer
+测试恢复先写 bytes、再增加 count 的原顺序，不以提前计算结果掩盖这一精度缺口。
+
+本次检查工作目录 `/home/fin/luna`；除原生复现执行外，以下检查均经
+`python3 -B development/check.py --timeout 900 --`，没有全量 workspace 测试：
+
+| 参数 | 结果与证据 |
+| --- | --- |
+| `run -p luna -- build development/repros/writer-sibling-range.fl --entry run --sysroot library --fuel 10000000 --output /tmp/luna-writer-sibling-range` | 退出 0，`/tmp/luna-tools-tfm19dg6/result.json`；随后经 command.py 执行产物，退出 0、`(bool true)`，`/tmp/luna-tools-b_tf_utw/result.json` |
+| `test -p program_verification --lib flow:: -- --test-threads=1` | 最终状态转移实现通过 24 项单测，含预算失败/恢复；`/tmp/luna-tools-tn2yj38j/result.json` |
+| `test -p luna --test scalar_store_facts --test library_std -- --test-threads=1` | 退出 0，2 + 10 项通过；`/tmp/luna-tools-h2km8zyc/result.json`。writer 原始写入顺序通过 O0/O3 原生检查 |
+| `test -p luna --test scalar_store_facts --test integer_contracts --test snapshot_contracts -- --test-threads=1` | 退出 0，2 + 18 + 2 项通过；`/tmp/luna-tools-tbm50a8d/result.json` |
+| `test -p luna --test scalar_store_facts -- --test-threads=1 sibling_spelling` | 扩充后的拒绝组退出 0；`/tmp/luna-tools-ga6w9w41/result.json`。另外检查加载指针的潜在别名，以及保留兄弟事实时仍撤销被覆盖字段的旧事实 |
+
+扩充后的正例组还验证两个字段间的不等式关系经过兄弟写入仍能证明安全减法，
+不只保存单个字段的区间。命令 `test -p luna --test scalar_store_facts --
+--test-threads=1 sibling_stores` 退出 0，`/tmp/luna-tools-l_dq_q53/result.json`。
+
+Rust 改动使用 rustfmt edition 2024、skip_children=true 格式化，最后一轮测试文件
+格式化证据 `/tmp/luna-tools-w9_mghwg/result.json`；工作区原有改动没有纳入提交。
+
 ## 7. 纯度的优化使用方式
 
 分析输出应包含层级、适用区间、依赖版本、读写/身份足迹、完成性和控制风险。

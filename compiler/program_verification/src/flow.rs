@@ -14,6 +14,7 @@ mod operations;
 mod operators;
 mod paths;
 mod patterns;
+mod stores;
 use paths::{Component, FieldPath, Projection, record_path};
 
 use super::{
@@ -307,7 +308,8 @@ struct State {
     paths: BTreeMap<FieldPath, ValueId>,
     frozen: BTreeMap<PlaceId, Term>,
     // Same-address observations, not ownership roots or disjointness evidence.
-    // A pointer binding and its field path survive only until a write barrier.
+    // External observations use current address paths. Writes retire possible
+    // overlaps; proven disjoint projections can retain their scalar facts.
     reads: BTreeMap<FieldPath, (Term, PlaceId)>,
     // Copy-time pointer identities. Both binding versions must still match.
     read_aliases: BTreeMap<PlaceId, (FieldPath, ValueId, ValueId)>,
@@ -355,57 +357,7 @@ impl State {
         addressed: Option<&BTreeSet<LocalId>>,
         limits: &mut Limits,
     ) -> Result<(), Unknown> {
-        self.forget_reads(limits)?;
-        if !self.facts.is_reachable() {
-            return Ok(());
-        }
-        self.invalidate_paths(None, &[], limits)?;
-        limits.step(self.aggregates.len())?;
-        let mut forgotten = Vec::new();
-        for (place, value) in &mut self.aggregates {
-            if self.frozen.contains_key(place) {
-                continue;
-            }
-            if !value.forget_observations(limits)? {
-                forgotten.push(*place);
-            }
-        }
-        for place in forgotten {
-            self.aggregates.remove(&place);
-        }
-        for (place, domain) in &self.domains {
-            if self.frozen.contains_key(place) {
-                continue;
-            }
-            limits.step(1)?;
-            // Synthetic observations are not lexical locals. Preserve only
-            // scalar by-value storage that has never had its address exposed.
-            if (domain.is_some()
-                || self
-                    .aggregates
-                    .get(place)
-                    .is_some_and(|value| value.unbounded_integer))
-                && addressed.is_some_and(|addressed| {
-                    u32::try_from(place.owner).ok().is_some_and(|owner| {
-                        !addressed.contains(&LocalId {
-                            owner,
-                            index: place.local,
-                        })
-                    })
-                })
-            {
-                continue;
-            }
-            match domain {
-                Some(bound) => {
-                    self.facts.assign(*place, bound.copy(limits)?)?;
-                }
-                None => {
-                    self.facts.invalidate(*place)?;
-                }
-            }
-        }
-        Ok(())
+        self.havoc_with_retained_reads(addressed, BTreeMap::new(), limits)
     }
 }
 /// Conservative entry stability for a repeatedly callable environment. This

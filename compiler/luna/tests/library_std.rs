@@ -330,10 +330,8 @@ fn builtin_display_borrows_stateful_writers_and_preserves_their_errors() {
                 if self.count.* >= self.limit.* { return error SinkError.full(byte); }
                 assumes self.count.* < 8;
                 assumes self.bytes.* <= 72057594037927935;
-                let next_count = self.count.* + 1;
-                let next_bytes = self.bytes.* * 256 + byte'bitvec.as(u64);
-                self.bytes.* = next_bytes;
-                self.count.* = next_count;
+                self.bytes.* = self.bytes.* * 256 + byte'bitvec.as(u64);
+                self.count.* = self.count.* + 1;
             }
         }
         fn render(value: T, sink: *W) -> !W.as(ByteWriter).Error void

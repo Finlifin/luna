@@ -256,8 +256,8 @@ impl Walker<'_> {
                     .and_then(|path| state.facts.value(path.root).map(|version| (path, version)));
                 let mut replacement = self.child(value, state, depth)?;
                 if state.facts.is_reachable() {
-                    state.forget_reads(self.limits)?;
                     if let Some(targets) = targets {
+                        state.forget_reads(self.limits)?;
                         let multiple = targets.len() > 1;
                         let mut updates = Vec::new();
                         for target in targets {
@@ -286,22 +286,20 @@ impl Walker<'_> {
                         // the new observation to its source path if that binding
                         // still names the captured address after RHS effects.
                         let view = self.scalar_type_view(&value.ty)?;
-                        let observed = if let Some((path, version)) = address {
-                            if state.facts.value(path.root) == Some(version)
+                        let observed = if let Some((path, version)) = &address {
+                            if state.facts.value(path.root) == Some(*version)
                                 && matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || self.integer_layout(p).is_some())
                             {
                                 let transfer = self.prepare_copy(&replacement, state)?;
-                                Some((path, transfer))
+                                self.limits.step(path.fields.len().saturating_add(1))?;
+                                Some((path.clone(), transfer))
                             } else {
                                 None
                             }
                         } else {
                             None
                         };
-                        state.havoc_with_private_scalars(
-                            Some(&self.addressed_locals),
-                            self.limits,
-                        )?;
+                        self.havoc_after_store(pointer, &view, address.as_ref(), state)?;
                         if let Some((path, transfer)) = observed {
                             let root = self.result_root(&view)?.ok_or(Reason::Unsupported)?;
                             bind_value_place(state, root, &view, replacement, self.limits)?;

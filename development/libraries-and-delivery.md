@@ -95,12 +95,10 @@ File 提供具体实现；File 保持自身关闭责任，用户 writer 可以�
 迁移时验证了普通泛型方法、关联错误及 borrowed self 的现有通路，也暴露出两个
 独立基础缺口，不能将它们隐藏成库规则：
 
-- [兄弟字段范围复现](repros/writer-sibling-range.fl)：flow 的外部指针写入会
-  `forget_reads` 并 havoc，导致写一个字段后，另一个字段的已检查范围丢失。
-  这是程序事实精度问题，不交给 PTC；完整修复应使用已验证的写入 footprint 和
-  当前地址身份，仍使同字段、可能别名、地址重绑定及 opaque call 的旧事实失效。
-  writer 状态测试先计算新状态再写入，保持相同错误、字节、次数和恢复契约；
-  独立复现仍要求原顺序合法，不能改成预期拒绝。
+- [兄弟字段范围复现](repros/writer-sibling-range.fl)：原先外部指针 store
+  一律丢弃所有观察；现已按当前地址身份保留确定不相交的标量字段事实。writer
+  测试恢复原先写字段再增计数的顺序。一般调用、位写回与未知别名仍保守处理，
+  具体准入、拒绝边界和证据见[标量存储更新](solvers-resources-and-lowering.md#64-标量存储更新与读取事实的有效期)。
 - [跨阶段文本观察](repros/staged-text-observations.fl)：IIR staging 的 `wrap`
   将已完成的 comptime 参数恢复成 runtime Let；多个观察会按 runtime str 移动
   规则冲突。要结合 Splice 实例、文本来源和阶段访问完成交接，不能全局替换所有
@@ -114,7 +112,7 @@ File 提供具体实现；File 保持自身关闭责任，用户 writer 可以�
 | --- | --- |
 | `-- test -p luna --test library_std -- --test-threads=1` | 退出 0，10 项通过；`/tmp/luna-tools-3jasp96j/result.json`。覆盖 O0/O3 非 Copy writer、自定义关联错误、准确前缀/写入次数、失败后恢复、File 借用、原 println 和系统错误路径 |
 | `-- test -p luna --test sysroot_preludes --test trait_phases -- --test-threads=1` | 退出 0，15 + 73 项通过；`/tmp/luna-tools-p54hrida/result.json`。覆盖默认导出身份、真实库与阶段选择 |
-| `-- run -p luna -- build development/repros/writer-sibling-range.fl --entry run --sysroot library --fuel 10000000 --output /tmp/luna-writer-sibling-range` | 退出 1，最后的 count 加法范围未证明；`/tmp/luna-tools-f4e63q6x/result.json`。这是未修复正例，不是通过的拒绝测试 |
+| `-- run -p luna -- build development/repros/writer-sibling-range.fl --entry run --sysroot library --fuel 10000000 --output /tmp/luna-writer-sibling-range` | 退出 1，最后的 count 加法范围未证明；`/tmp/luna-tools-f4e63q6x/result.json`。这是迁移初期的正例失败；后续修复与成功证据见上述标量存储更新章节 |
 | `-- run -p luna -- build development/repros/staged-text-observations.fl --entry run --sysroot library --fuel 10000000 --output /tmp/luna-staged-text-observations` | 退出 1，第二次 text 读取报告 unavailable value；`/tmp/luna-tools-g5un6efs/result.json`。同样保留为待修复正例 |
 
 Rust 测试文件经 `development/command.py --timeout 120 -- rustfmt --edition 2024

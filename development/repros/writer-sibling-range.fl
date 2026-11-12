@@ -1,7 +1,6 @@
-{- Positive range-proof precision case. A store to a disjoint sibling currently
-   retires the earlier count observation, rejecting the final increment.
-   Both additions are safe under the checked assumes; the expected outcome is
-   acceptance without repeating those assumes after the sibling store. -}
+{- Positive range-proof precision case. A store to a disjoint sibling must
+   preserve the earlier count observation. Both additions are safe under the
+   checked assumes, without repeating them after the sibling store. -}
 struct Sink { count: u64, bytes: u64 }
 fn update(sink: *Sink, byte: u8) {
     assumes sink.count.* < 8;
