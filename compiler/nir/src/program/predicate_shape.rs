@@ -107,9 +107,9 @@ fn predicate_shape(
                 inputs,
                 binding,
             } => {
-                // Target evidence establishes a scalar operation with no memory
-                // or owning-result effects. It never grants permission for its
-                // operands: continue visiting every input, including unsafe scopes.
+                // Admit only pure target operations; checked platform evidence
+                // does not remove external effects. Evidence never grants
+                // permission for operands: visit every input, including unsafe scopes.
                 // Pending evidence only admits template shape; concrete execution
                 // still calls intrinsics::checked after specialization.
                 charge(remaining, inputs.len())?;
@@ -117,7 +117,8 @@ fn predicate_shape(
                     charge_type(&input.ty, remaining)?;
                 }
                 if !binding.as_ref().is_some_and(|binding| {
-                    binding.validate_template(*tag, inputs, &expr.ty).is_ok()
+                    binding.operation().is_pure()
+                        && binding.validate_template(*tag, inputs, &expr.ty).is_ok()
                 }) {
                     return Ok(false);
                 }

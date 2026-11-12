@@ -481,7 +481,7 @@ fn ordinary_package_uses_public_list_operations_without_builtin_access() {
         .args(["--dependency", "2", "attrs", "4"])
         .args(["--dependency", "4", "builtin", "3"])
         .args(["--dependency", "4", "meta", "2"])
-        .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
+        .args(nir::intrinsics::Operation::scalar_math().flat_map(|op| {
             [
                 "--comptime-intrinsic".to_owned(),
                 format!(

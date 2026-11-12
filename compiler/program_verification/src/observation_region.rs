@@ -227,7 +227,10 @@ pub(super) fn check(
     reachable(expr, fuel, 0, &mut |node, fuel| {
         match &node.kind {
             K::Intrinsic { .. } => {
-                nir::intrinsics::checked(node).map_err(str::to_owned)?;
+                let binding = nir::intrinsics::checked(node).map_err(str::to_owned)?;
+                if !binding.operation().is_pure() {
+                    return Err("external platform effects are not observations".into());
+                }
             }
 
             K::Let { .. }

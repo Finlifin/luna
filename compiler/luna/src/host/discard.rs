@@ -101,5 +101,7 @@ pub fn llvm_ir_discarding_result(
         },
     };
     owned.functions.push(wrapper);
-    llvm_ir_declaration(&owned, declaration, fuel, Some(protocols))
+    let prepared =
+        prepare_declaration_with_protocols(&owned, declaration, fuel, protocols.0, protocols.1)?;
+    llvm_ir_prepared_with_output(&prepared, fuel, false)
 }

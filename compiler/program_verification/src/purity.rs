@@ -2336,7 +2336,7 @@ impl<'a> Analysis<'a> {
                 true
             }
             K::Intrinsic { inputs, .. } => {
-                nir::intrinsics::checked(value).is_ok()
+                nir::intrinsics::checked(value).is_ok_and(|binding| binding.operation().is_pure())
                     && inputs
                         .iter()
                         .all(|input| self.expression(input, private, returns, depth + 1))

@@ -39,8 +39,7 @@ pub(crate) fn supporting_dependencies(requesters: &[u32]) -> Vec<resolve::Depend
 }
 
 pub(crate) fn comptime_intrinsics() -> Vec<(nir::intrinsics::Operation, String)> {
-    nir::intrinsics::Operation::ALL
-        .iter()
+    nir::intrinsics::Operation::scalar_math()
         .map(|op| {
             (
                 *op,

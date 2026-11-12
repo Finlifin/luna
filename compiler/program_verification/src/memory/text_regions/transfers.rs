@@ -1048,12 +1048,23 @@ impl Query<'_, '_> {
             unreachable!("checked text transfer variant")
         };
         let empty = Some(Regions::new());
-        // Only admitted scalar operations have no hidden memory
-        // behavior. Their source-ordered inputs may still read text.
+        // Admitted operations do not retain text or mutate caller memory.
+        // Platform operations may synchronously read their text inputs.
         nir::intrinsics::checked(expr).map_err(|e| e.to_string())?;
         for input in inputs {
-            if self.expr(input, locals, returned, next)?.is_none() {
+            let Some(regions) = self.expr(input, locals, returned, next)? else {
                 return Ok(None);
+            };
+            if input.ty == Term::Primitive(Primitive::Str) {
+                let origins = regions
+                    .get(&vec![])
+                    .filter(|origins| !origins.is_empty())
+                    .ok_or("intrinsic text input has no backing-region origin")?;
+                charge(self.fuel, origins.len())?;
+                self.reads
+                    .last_mut()
+                    .unwrap()
+                    .extend(origins.iter().cloned());
             }
         }
         Ok(empty)

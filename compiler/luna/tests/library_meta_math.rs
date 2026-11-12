@@ -6,8 +6,7 @@ use comptime_interpretor::{Budget, Interpreter, Value};
 use nir::intrinsics::Operation;
 
 fn compile(body: &str, width: u32) -> Result<nir::program::Package, String> {
-    let bindings: Vec<_> = Operation::ALL
-        .iter()
+    let bindings: Vec<_> = Operation::scalar_math()
         .map(|op| (*op, format!("input.math.target.Scalar.{}", op.name())))
         .collect();
     support::compile_with_source_bindings_for_target(

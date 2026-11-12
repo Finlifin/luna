@@ -7593,7 +7593,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 result_code = self.observe_guard_result(body, flow, depth + 1)?;
             }
             K::Intrinsic { inputs, .. } => {
-                nir::intrinsics::checked(expr).map_err(|reason| error(source, reason))?;
+                let binding =
+                    nir::intrinsics::checked(expr).map_err(|reason| error(source, reason))?;
+                if !binding.operation().is_pure() {
+                    return Err(error(
+                        source,
+                        "external platform effects are not observations",
+                    ));
+                }
                 for input in inputs {
                     self.observe_guard(input, flow, depth + 1)?;
                 }

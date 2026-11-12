@@ -968,13 +968,18 @@ mod repository_bindings_tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
         let bindings = SysrootBindings::load(&root).unwrap();
         for &operation in nir::intrinsics::Operation::ALL {
-            assert!(bindings.host_intrinsics.contains(&(
-                operation,
+            let path = if operation.is_platform() {
+                format!(
+                    "std.platform.linux.target.System.{}",
+                    operation.name().strip_prefix("linux_").unwrap()
+                )
+            } else {
                 format!(
                     "builtin.numeric.math_intrinsics.target.Scalar.{}",
                     operation.name()
                 )
-            )));
+            };
+            assert!(bindings.host_intrinsics.contains(&(operation, path)));
         }
 
         assert_eq!(

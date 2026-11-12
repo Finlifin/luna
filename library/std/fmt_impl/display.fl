@@ -1,0 +1,107 @@
+use io_impl.writer.Writer;
+use io_impl.errors.Error;
+
+pub trait Display { fn write(self, output: Writer) -> !Error void; }
+
+fn unsigned_decimal(value: u128, output: Writer) -> !Error void {
+    if value >= 10 { unsigned_decimal(value / 10, output)!; }
+    let digit = (value % 10)'bitvec[0..8].as(u8);
+    assumes digit <= 9;
+    output.write_byte(48 + digit)
+}
+fn signed_decimal(value: i128, output: Writer) -> !Error void {
+    if value < 0 {
+        output.write_byte(45)!;
+        -- -(MIN + 1) fits; add the final unit in the unsigned domain.
+        let magnitude = (-(value + 1))'bitvec.as(u128);
+        assumes magnitude < 340282366920938463463374607431768211455;
+        unsigned_decimal(magnitude + 1, output)
+    } else { unsigned_decimal(value'bitvec.as(u128), output) }
+}
+impl Display for bool {
+    fn write(self, output: Writer) -> !Error void {
+        if self { output.write_all<"true">() } else { output.write_all<"false">() }
+    }
+}
+impl Display for u8 {
+    fn write(self, output: Writer) -> !Error void { unsigned_decimal(self'bitvec.as(u128), output) }
+}
+
+impl Display for u16 {
+    fn write(self, output: Writer) -> !Error void { unsigned_decimal(self'bitvec.as(u128), output) }
+}
+
+impl Display for u32 {
+    fn write(self, output: Writer) -> !Error void { unsigned_decimal(self'bitvec.as(u128), output) }
+}
+
+impl Display for u64 {
+    fn write(self, output: Writer) -> !Error void { unsigned_decimal(self'bitvec.as(u128), output) }
+}
+
+impl Display for u128 {
+    fn write(self, output: Writer) -> !Error void { unsigned_decimal(self'bitvec.as(u128), output) }
+}
+
+impl Display for usize {
+    fn write(self, output: Writer) -> !Error void { unsigned_decimal(builtin.compiler.usize_representation(self), output) }
+}
+
+impl Display for i8 {
+    fn write(self, output: Writer) -> !Error void {
+        if self < 0 {
+            output.write_byte(45)!;
+            let magnitude = (-(self + 1))'bitvec.as(u128);
+            assumes magnitude < 340282366920938463463374607431768211455;
+            unsigned_decimal(magnitude + 1, output)
+        } else { unsigned_decimal(self'bitvec.as(u128), output) }
+    }
+}
+
+impl Display for i16 {
+    fn write(self, output: Writer) -> !Error void {
+        if self < 0 {
+            output.write_byte(45)!;
+            let magnitude = (-(self + 1))'bitvec.as(u128);
+            assumes magnitude < 340282366920938463463374607431768211455;
+            unsigned_decimal(magnitude + 1, output)
+        } else { unsigned_decimal(self'bitvec.as(u128), output) }
+    }
+}
+
+impl Display for i32 {
+    fn write(self, output: Writer) -> !Error void {
+        if self < 0 {
+            output.write_byte(45)!;
+            let magnitude = (-(self + 1))'bitvec.as(u128);
+            assumes magnitude < 340282366920938463463374607431768211455;
+            unsigned_decimal(magnitude + 1, output)
+        } else { unsigned_decimal(self'bitvec.as(u128), output) }
+    }
+}
+
+impl Display for i64 {
+    fn write(self, output: Writer) -> !Error void {
+        if self < 0 {
+            output.write_byte(45)!;
+            let magnitude = (-(self + 1))'bitvec.as(u128);
+            assumes magnitude < 340282366920938463463374607431768211455;
+            unsigned_decimal(magnitude + 1, output)
+        } else { unsigned_decimal(self'bitvec.as(u128), output) }
+    }
+}
+
+impl Display for i128 {
+    fn write(self, output: Writer) -> !Error void { signed_decimal(self'bitvec.as(i128), output) }
+}
+
+impl Display for isize {
+    fn write(self, output: Writer) -> !Error void {
+        if self < 0 {
+            output.write_byte(45)!;
+            let magnitude = builtin.compiler.isize_representation(-(self + 1));
+            assumes magnitude < 340282366920938463463374607431768211455;
+            unsigned_decimal(magnitude + 1, output)
+        } else { unsigned_decimal(builtin.compiler.isize_representation(self), output) }
+    }
+}

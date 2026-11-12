@@ -7787,7 +7787,7 @@ fn package_discard_result_uses_selected_identity_and_checked_drop() {
             success(&sandbox.run(&args));
             let result = run_command(&mut Command::new(sandbox.path("native")));
             if primary == "1" {
-                assert_eq!(success(&result), "(unit)\n");
+                assert_eq!(success(&result), "");
             } else {
                 assert!(!result.status.success());
                 assert!(result.stdout.is_empty());
@@ -9156,7 +9156,7 @@ fn sysroot_repository_resource_defaults_execute_cleanup_and_reject_double_move()
         "program",
     ]));
     let output = Command::new(sandbox.path("program")).output().unwrap();
-    assert_eq!(success(&output).trim(), "(unit)");
+    assert_eq!(success(&output).trim(), "");
     sandbox.write(
         "input.fl",
         source.replace(

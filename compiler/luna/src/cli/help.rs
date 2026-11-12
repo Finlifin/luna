@@ -97,7 +97,7 @@ fn command_help(name: &str) -> Result<String, String> {
     }
     if matches!(name, "build" | "dump") {
         text.push_str(
-            "  --discard-result          Host output only; requires Copy/Drop bindings\n",
+            "  --discard-result          Retire result silently; requires Copy/Drop bindings\n",
         );
     }
     text.push_str(FRONTEND);

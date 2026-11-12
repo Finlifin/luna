@@ -98,6 +98,13 @@ pub enum Operation {
     IntegerMinimum,
     IntegerMaximum,
     WrappingAbsoluteValue,
+    LinuxWrite,
+    LinuxWriteByte,
+    LinuxReadByte,
+    LinuxOpen,
+    LinuxClose,
+    LinuxUnlink,
+    LinuxGetPid,
 }
 impl Operation {
     /// Stable target-operation names used by host configuration, not source tag identities.
@@ -146,6 +153,13 @@ impl Operation {
         Self::IntegerMinimum,
         Self::IntegerMaximum,
         Self::WrappingAbsoluteValue,
+        Self::LinuxWrite,
+        Self::LinuxWriteByte,
+        Self::LinuxReadByte,
+        Self::LinuxOpen,
+        Self::LinuxClose,
+        Self::LinuxUnlink,
+        Self::LinuxGetPid,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -194,7 +208,41 @@ impl Operation {
             Self::IntegerMinimum => "min",
             Self::IntegerMaximum => "max",
             Self::WrappingAbsoluteValue => "abs",
+            Self::LinuxWrite => "linux_write",
+            Self::LinuxWriteByte => "linux_write_byte",
+            Self::LinuxReadByte => "linux_read_byte",
+            Self::LinuxOpen => "linux_open",
+            Self::LinuxClose => "linux_close",
+            Self::LinuxUnlink => "linux_unlink",
+            Self::LinuxGetPid => "linux_getpid",
         }
+    }
+
+    /// Platform operations observe or change external process state. They
+    /// neither retain input text nor expose pointers or allocation ownership.
+    pub fn is_platform(self) -> bool {
+        matches!(
+            self,
+            Self::LinuxWrite
+                | Self::LinuxWriteByte
+                | Self::LinuxReadByte
+                | Self::LinuxOpen
+                | Self::LinuxClose
+                | Self::LinuxUnlink
+                | Self::LinuxGetPid
+        )
+    }
+
+    /// Numeric operations exported by the scalar math libraries. Platform
+    /// operations have their own declaration families and runtime-only ABI.
+    pub fn scalar_math() -> impl Iterator<Item = &'static Self> {
+        Self::ALL
+            .iter()
+            .filter(|operation| !operation.is_platform())
+    }
+
+    pub fn is_pure(self) -> bool {
+        !self.is_platform()
     }
 
     pub fn is_float_predicate(self) -> bool {
@@ -215,14 +263,30 @@ impl Operation {
     /// Concrete operand roles are independent of the result's scalar family.
     /// Integer-exponent operations retain their floating base/result type.
     pub fn operand_type(self, scalar: &Term, index: usize) -> Term {
-        if self.has_integer_exponent() && index == 1 {
+        if self.is_platform() {
+            use Primitive::*;
+            Term::Primitive(match (self, index) {
+                (Self::LinuxWrite, 0)
+                | (Self::LinuxWriteByte, 0)
+                | (Self::LinuxReadByte, 0)
+                | (Self::LinuxClose, 0)
+                | (Self::LinuxOpen, 1) => I32,
+                (Self::LinuxWrite, 1) | (Self::LinuxOpen, 0) | (Self::LinuxUnlink, 0) => Str,
+                (Self::LinuxWrite, 2) => U64,
+                (Self::LinuxWriteByte, 1) => U8,
+                (Self::LinuxOpen, 2) => U32,
+                _ => unreachable!("platform operand index validated by arity"),
+            })
+        } else if self.has_integer_exponent() && index == 1 {
             Term::Primitive(Primitive::I32)
         } else {
             scalar.clone()
         }
     }
     pub fn result_type(self, scalar: &Term) -> Term {
-        if self.is_float_predicate() {
+        if self.is_platform() {
+            Term::Primitive(Primitive::I64)
+        } else if self.is_float_predicate() {
             Term::Primitive(Primitive::Bool)
         } else {
             scalar.clone()
@@ -237,6 +301,13 @@ impl Operation {
     pub fn scalar_types(self) -> &'static [Primitive] {
         use Primitive::*;
         match self {
+            Self::LinuxWrite
+            | Self::LinuxWriteByte
+            | Self::LinuxReadByte
+            | Self::LinuxOpen
+            | Self::LinuxClose
+            | Self::LinuxUnlink
+            | Self::LinuxGetPid => &[I64],
             Self::WrappingAbsoluteValue => &[I8, I16, I32, I64, I128, Isize],
             Self::BitAnd | Self::BitOr | Self::BitXor => &[
                 U8, U16, U32, U64, U128, I8, I16, I32, I64, I128, Usize, Isize,
@@ -288,6 +359,10 @@ impl Operation {
 
     pub fn operand_count(self) -> usize {
         match self {
+            Self::LinuxWrite | Self::LinuxOpen => 3,
+            Self::LinuxWriteByte => 2,
+            Self::LinuxReadByte | Self::LinuxClose | Self::LinuxUnlink => 1,
+            Self::LinuxGetPid => 0,
             Self::FusedMultiplyAdd | Self::FunnelShiftLeft | Self::FunnelShiftRight => 3,
             Self::SquareRoot
             | Self::WrappingAbsoluteValue
@@ -613,6 +688,9 @@ impl Checked {
         inputs: impl ExactSizeIterator<Item = &'t Term>,
         output: &Term,
     ) -> Result<(), &'static str> {
+        if self.comptime && self.operation.is_platform() {
+            return Err("platform operations are runtime-only");
+        }
         if tag != self.tag {
             return Err("intrinsic binding has a different tag identity");
         }
@@ -702,8 +780,9 @@ impl Checked {
     }
 }
 
-/// Admitted scalar operations have no pointer, allocation or owning payload
-/// effects; their input expressions still carry all ordinary evaluation effects.
+/// Admitted operations never retain input text or expose pointer/ownership
+/// effects. Platform operations still have external effects: purity and
+/// observation consumers must inspect `operation().is_pure()` as well.
 pub fn checked(expr: &crate::program::Expr) -> Result<&Checked, &'static str> {
     let crate::program::ExprKind::Intrinsic {
         tag,

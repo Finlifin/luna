@@ -133,6 +133,9 @@ impl Checker<'_, '_> {
             admission
                 .validate_target_layout(self.target)
                 .map_err(|reason| error(expr.span, reason))?;
+            if comptime && operation.is_platform() {
+                return Err(error(expr.span, "platform operations are runtime-only"));
+            }
             Some(if comptime {
                 admission.for_comptime()
             } else {

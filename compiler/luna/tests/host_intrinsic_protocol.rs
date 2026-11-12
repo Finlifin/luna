@@ -1819,6 +1819,10 @@ fn scalar_intrinsic_predicates_revalidate_evidence_and_all_operands() {
                 binding: Some(binding),
             },
         );
+        if operation.is_platform() {
+            assert!(!checkable_predicate(&predicate(original)), "{operation:?}");
+            continue;
+        }
         assert!(
             checkable_predicate(&predicate(original.clone())),
             "{operation:?}"
@@ -2215,5 +2219,46 @@ fn half_math_bindings_preserve_format_identity() {
                 .collect::<Vec<_>>();
             assert!(registry.check(tag, &inputs, &ty).is_err());
         }
+    }
+}
+
+#[test]
+fn linux_bindings_check_operand_roles_and_refuse_comptime_evidence() {
+    let package = support::compile("^intrinsic_enum enum Ops {system}");
+    let tag = tag(&package, "Ops", 0);
+    for (operation, operands) in [
+        (Operation::LinuxWrite, vec![P::I32, P::Str, P::U64]),
+        (Operation::LinuxWriteByte, vec![P::I32, P::U8]),
+        (Operation::LinuxReadByte, vec![P::I32]),
+        (Operation::LinuxOpen, vec![P::Str, P::I32, P::U32]),
+        (Operation::LinuxClose, vec![P::I32]),
+        (Operation::LinuxUnlink, vec![P::Str]),
+        (Operation::LinuxGetPid, vec![]),
+    ] {
+        let registry = Registry::new(&package, &[(tag, operation)]).unwrap();
+        let inputs: Vec<_> = operands.into_iter().map(Term::Primitive).collect();
+        let output = Term::Primitive(P::I64);
+        let binding = registry.check(tag, &inputs, &output).unwrap();
+        assert!(!binding.operation().is_pure());
+        assert!(binding.validate_types(tag, inputs.iter(), &output).is_ok());
+        assert!(
+            binding
+                .for_comptime()
+                .validate_types(tag, inputs.iter(), &output)
+                .is_err()
+        );
+        assert!(
+            registry
+                .check(tag, &inputs, &Term::Primitive(P::U64))
+                .is_err()
+        );
+        for index in 0..inputs.len() {
+            let mut wrong = inputs.clone();
+            wrong[index] = Term::Primitive(P::Bool);
+            assert!(registry.check(tag, &wrong, &output).is_err());
+        }
+        let mut too_many = inputs;
+        too_many.push(Term::Primitive(P::I32));
+        assert!(registry.check(tag, &too_many, &output).is_err());
     }
 }

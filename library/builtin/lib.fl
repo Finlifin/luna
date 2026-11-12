@@ -9,6 +9,7 @@ use types.{tuple, option, result, equality, hashing};
 use numeric.{comparison, math_intrinsics};
 
 pub use primitives.*;
+pub use protocols.staging.Splice;
 pub use tuple.Tuple;
 pub use option.OptionalOps;
 pub use text_impl.bytes.TextBytes;
@@ -33,6 +34,7 @@ pub mod math {
 }
 
 pub mod prelude {
+    pub use protocols.staging.Splice;
     pub use .math;
     pub use primitives.*;
     pub use tuple.Tuple;

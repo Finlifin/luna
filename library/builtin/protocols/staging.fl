@@ -1,0 +1,106 @@
+{- Ordinary runtime construction from comptime data. Implementations do not
+   authorize pointers, managed storage, or arbitrary compile-time objects. -}
+pub trait Splice {
+    assoc RuntimeTarget: Type;
+    fn splice(comptime data: Self) -> RuntimeTarget;
+}
+
+impl Splice for bool {
+    assoc RuntimeTarget: Type = bool;
+    fn splice(comptime data: bool) -> bool { data }
+}
+
+impl Splice for u8 {
+    assoc RuntimeTarget: Type = u8;
+    fn splice(comptime data: u8) -> u8 { data }
+}
+
+impl Splice for u16 {
+    assoc RuntimeTarget: Type = u16;
+    fn splice(comptime data: u16) -> u16 { data }
+}
+
+impl Splice for u32 {
+    assoc RuntimeTarget: Type = u32;
+    fn splice(comptime data: u32) -> u32 { data }
+}
+
+impl Splice for u64 {
+    assoc RuntimeTarget: Type = u64;
+    fn splice(comptime data: u64) -> u64 { data }
+}
+
+impl Splice for u128 {
+    assoc RuntimeTarget: Type = u128;
+    fn splice(comptime data: u128) -> u128 { data }
+}
+
+impl Splice for i8 {
+    assoc RuntimeTarget: Type = i8;
+    fn splice(comptime data: i8) -> i8 { data }
+}
+
+impl Splice for i16 {
+    assoc RuntimeTarget: Type = i16;
+    fn splice(comptime data: i16) -> i16 { data }
+}
+
+impl Splice for i32 {
+    assoc RuntimeTarget: Type = i32;
+    fn splice(comptime data: i32) -> i32 { data }
+}
+
+impl Splice for i64 {
+    assoc RuntimeTarget: Type = i64;
+    fn splice(comptime data: i64) -> i64 { data }
+}
+
+impl Splice for i128 {
+    assoc RuntimeTarget: Type = i128;
+    fn splice(comptime data: i128) -> i128 { data }
+}
+
+impl Splice for usize {
+    assoc RuntimeTarget: Type = usize;
+    fn splice(comptime data: usize) -> usize { data }
+}
+
+impl Splice for isize {
+    assoc RuntimeTarget: Type = isize;
+    fn splice(comptime data: isize) -> isize { data }
+}
+
+impl Splice for f16 {
+    assoc RuntimeTarget: Type = f16;
+    fn splice(comptime data: f16) -> f16 { data }
+}
+
+impl Splice for bf16 {
+    assoc RuntimeTarget: Type = bf16;
+    fn splice(comptime data: bf16) -> bf16 { data }
+}
+
+impl Splice for f32 {
+    assoc RuntimeTarget: Type = f32;
+    fn splice(comptime data: f32) -> f32 { data }
+}
+
+impl Splice for f64 {
+    assoc RuntimeTarget: Type = f64;
+    fn splice(comptime data: f64) -> f64 { data }
+}
+
+impl Splice for char {
+    assoc RuntimeTarget: Type = char;
+    fn splice(comptime data: char) -> char { data }
+}
+
+impl Splice for Symbol {
+    assoc RuntimeTarget: Type = Symbol;
+    fn splice(comptime data: Symbol) -> Symbol { data }
+}
+
+impl Splice for void {
+    assoc RuntimeTarget: Type = void;
+    fn splice(comptime data: void) -> void { data }
+}

@@ -1,0 +1,40 @@
+{-
+    Linux host operations. Signed results use -errno on failure; read_byte
+    uses 256 for EOF. These calls borrow text only until the call returns.
+    Raw descriptors do not carry ownership. Prefer std.fs.File for ownership.
+-}
+pub mod target {
+    ^intrinsic_enum
+    pub enum System { write, write_byte, read_byte, open, close, unlink, getpid }
+}
+
+pub fn write(fd: i32, offset: u64) -> i64 where text: str {
+    unsafe { target.System.write'intrinsic(fd, text, offset).as(i64) }
+}
+pub fn write_byte(fd: i32, byte: u8) -> i64 {
+    unsafe { target.System.write_byte'intrinsic(fd, byte).as(i64) }
+}
+pub fn read_byte(fd: i32) -> i64 {
+    unsafe { target.System.read_byte'intrinsic(fd).as(i64) }
+}
+pub fn open(flags: i32, mode: u32) -> i64 where path: str {
+    unsafe { target.System.open'intrinsic(path, flags, mode).as(i64) }
+}
+pub fn close(fd: i32) -> i64 {
+    unsafe { target.System.close'intrinsic(fd).as(i64) }
+}
+pub fn unlink() -> i64 where path: str {
+    unsafe { target.System.unlink'intrinsic(path).as(i64) }
+}
+pub fn getpid() -> i64 {
+    unsafe { target.System.getpid'intrinsic().as(i64) }
+}
+
+pub const read_only: i32 = 0;
+pub const write_only: i32 = 1;
+pub const read_write: i32 = 2;
+pub const create: i32 = 64;
+pub const truncate: i32 = 512;
+pub const append: i32 = 1024;
+pub const close_on_exec: i32 = 524288;
+pub const interrupted: i64 = -4;

@@ -7292,7 +7292,7 @@ fn native_discard_result_retires_owned_entry_values() {
             let output = w.execute();
             if valid {
                 success(&output);
-                assert_eq!(output.stdout, b"(unit)\n");
+                assert_eq!(output.stdout, b"");
             } else {
                 assert!(!output.status.success());
                 assert!(output.stdout.is_empty());
@@ -9389,7 +9389,7 @@ fn native_error_result_printer_does_not_erase_owned_payloads() {
     );
     let output = w.execute();
     success(&output);
-    assert_eq!(output.stdout, b"(unit)\n");
+    assert_eq!(output.stdout, b"");
 }
 
 #[test]
@@ -10320,7 +10320,7 @@ fn emit_object_packages_preserve_discarded_result_cleanup_and_failure() {
             assert_eq!(
                 out.stdout,
                 if valid {
-                    b"(unit)\n".as_slice()
+                    b"".as_slice()
                 } else {
                     b"".as_slice()
                 }
@@ -10475,7 +10475,7 @@ fn native_integer_math_wrappers_cover_widths_bits_and_once_only_inputs() {
         "--fuel",
         "1000000",
     ]);
-    for operation in nir::intrinsics::Operation::ALL {
+    for operation in nir::intrinsics::Operation::scalar_math() {
         let name = operation.name();
         dump.args([
             "--host-intrinsic",
@@ -10505,7 +10505,7 @@ fn native_integer_math_wrappers_cover_widths_bits_and_once_only_inputs() {
             "--fuel",
             "1000000",
         ]);
-        for operation in nir::intrinsics::Operation::ALL {
+        for operation in nir::intrinsics::Operation::scalar_math() {
             let name = operation.name();
             command.args([
                 "--host-intrinsic",
@@ -14211,7 +14211,7 @@ fn native_funnel_shifts_and_rotations_cover_modulo_width_and_argument_order() {
         "--fuel",
         "1000000",
     ]);
-    for operation in nir::intrinsics::Operation::ALL {
+    for operation in nir::intrinsics::Operation::scalar_math() {
         let name = operation.name();
         dump.args([
             "--host-intrinsic",
@@ -14242,7 +14242,7 @@ fn native_funnel_shifts_and_rotations_cover_modulo_width_and_argument_order() {
             "--fuel",
             "1000000",
         ]);
-        for operation in nir::intrinsics::Operation::ALL {
+        for operation in nir::intrinsics::Operation::scalar_math() {
             let name = operation.name();
             command.args([
                 "--host-intrinsic",
@@ -14414,7 +14414,7 @@ fn native_scalar_newtype_entry_requires_ownership_adapter() {
                 let output = w.execute();
                 if valid {
                     success(&output);
-                    assert_eq!(output.stdout, b"(unit)\n");
+                    assert_eq!(output.stdout, b"");
                     assert!(output.stderr.is_empty());
                     continue;
                 }
@@ -14498,8 +14498,8 @@ fn native_discard_entry_selects_only_the_live_owned_error_payload() {
                         String::from_utf8_lossy(&output.stderr)
                     );
                     if valid {
-                        assert_eq!(output.stdout, reference.stdout);
-                        assert_eq!(output.stdout, b"(unit)\n");
+                        assert_eq!(reference.stdout, b"(unit)\n");
+                        assert_eq!(output.stdout, b"");
                         assert!(output.stderr.is_empty());
                     } else {
                         assert!(output.stdout.is_empty());
@@ -15343,7 +15343,7 @@ fn native_float_classification_generic_library_preserves_ieee_classes() {
                 "--output",
                 "native program",
             ]);
-            for operation in nir::intrinsics::Operation::ALL {
+            for operation in nir::intrinsics::Operation::scalar_math() {
                 command.args([
                     "--host-intrinsic",
                     &format!("{0}=input.math.target.Scalar.{0}", operation.name()),
@@ -15790,7 +15790,7 @@ fn native_saturating_integer_math_covers_all_widths_and_signs() {
                     "--output",
                     "native program",
                 ]);
-                for operation in nir::intrinsics::Operation::ALL {
+                for operation in nir::intrinsics::Operation::scalar_math() {
                     command.args([
                         "--host-intrinsic",
                         &format!("{0}=input.math.target.Scalar.{0}", operation.name()),
@@ -15992,7 +15992,7 @@ fn native_integer_minmax_math_covers_all_widths_and_signs() {
                     "--output",
                     "native program",
                 ]);
-                for operation in nir::intrinsics::Operation::ALL {
+                for operation in nir::intrinsics::Operation::scalar_math() {
                     command.args([
                         "--host-intrinsic",
                         &format!("{0}=input.math.target.Scalar.{0}", operation.name()),
@@ -19699,7 +19699,7 @@ fn native_wrapping_absolute_value_all_widths_and_argument_once() {
                 "--output",
                 "native program",
             ]);
-            for operation in nir::intrinsics::Operation::ALL {
+            for operation in nir::intrinsics::Operation::scalar_math() {
                 command.args([
                     "--host-intrinsic",
                     &format!("{0}=input.math.target.Scalar.{0}", operation.name()),
@@ -21051,7 +21051,7 @@ fn native_bitwise_library_operations_preserve_width_sign_and_operand_order() {
                     "--output",
                     "native program",
                 ]);
-                for operation in nir::intrinsics::Operation::ALL {
+                for operation in nir::intrinsics::Operation::scalar_math() {
                     command.args([
                         "--host-intrinsic",
                         &format!(

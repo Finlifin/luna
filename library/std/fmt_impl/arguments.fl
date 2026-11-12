@@ -1,0 +1,19 @@
+use io_impl.writer.{stdout, stderr, write_all};
+use io_impl.errors.Error;
+use fmt_impl.display.Display;
+
+pub fn print(comptime text: str) -> !Error void { write_all<text>(1) }
+pub fn println(comptime text: str) -> !Error void {
+    write_all<text>(1)!;
+    stdout().write_byte(10)
+}
+pub fn eprint(comptime text: str) -> !Error void { write_all<text>(2) }
+pub fn eprintln(comptime text: str) -> !Error void {
+    write_all<text>(2)!;
+    stderr().write_byte(10)
+}
+pub fn print_value(value: T) -> !Error void where T :- Display { value.write(stdout()) }
+pub fn println_value(value: T) -> !Error void where T :- Display {
+    value.write(stdout())!;
+    stdout().write_byte(10)
+}

@@ -907,8 +907,7 @@ fn platform_bitwise_intrinsics_use_package_target_for_proofs_and_native_layout()
 
 #[test]
 fn platform_bit_counts_reversal_and_funnels_use_target_layout() {
-    let bindings: Vec<String> = nir::intrinsics::Operation::ALL
-        .iter()
+    let bindings: Vec<String> = nir::intrinsics::Operation::scalar_math()
         .map(|operation| {
             format!(
                 "{}=input.math.target.Scalar.{}",
@@ -987,8 +986,7 @@ fn platform_bit_counts_reversal_and_funnels_use_target_layout() {
 
 #[test]
 fn platform_saturation_extrema_and_absolute_value_follow_selected_bounds() {
-    let bindings: Vec<String> = nir::intrinsics::Operation::ALL
-        .iter()
+    let bindings: Vec<String> = nir::intrinsics::Operation::scalar_math()
         .map(|op| format!("{}=input.math.target.Scalar.{}", op.name(), op.name()))
         .collect();
     let bindings: Vec<&str> = bindings.iter().map(String::as_str).collect();

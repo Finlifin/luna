@@ -144,16 +144,25 @@ fn prepare_declaration_with_protocols(
 /// Lower exactly the graph/schedule pair produced by checked preparation.
 /// Preserve the schedule until admission; never discard Invoke responsibilities.
 pub fn llvm_ir_prepared(prepared: &Prepared, fuel: u64) -> Result<String, String> {
+    llvm_ir_prepared_with_output(prepared, fuel, true)
+}
+
+fn llvm_ir_prepared_with_output(
+    prepared: &Prepared,
+    fuel: u64,
+    display_result: bool,
+) -> Result<String, String> {
     let executable = &prepared.executable;
     let mut steps = host_budget(fuel)?;
     executable.graph.validate(&mut steps)?;
     llvm::validate_cleanup(&executable.graph, &executable.schedule, &mut steps)?;
-    llvm::emit(
+    llvm::emit_with_result_output(
         &executable.graph,
         steps,
         true,
         Some(&executable.schedule),
         Some(&executable.entry),
+        display_result,
     )
 }
 

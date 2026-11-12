@@ -12,6 +12,7 @@ mod frames;
 mod half_fma;
 mod named_calls;
 mod optional;
+mod platform;
 use bits::bit_width;
 mod decimal;
 mod patterns;
@@ -1136,6 +1137,9 @@ impl Emitter<'_> {
                         return Ok(Value::unit());
                     }
                 }
+                if checked.operation().is_platform() {
+                    return self.platform_intrinsic(checked.operation(), &values);
+                }
                 let width = checked
                     .validate_target_layout(self.graph.target).map_err(str::to_owned)?
                     .ok_or("host intrinsic requires concrete width (platform integers need an explicit pointer-width)")?;
@@ -1817,10 +1821,21 @@ impl Emitter<'_> {
 
 pub(super) fn emit(
     graph: &iir::Package,
+    fuel: usize,
+    checked: bool,
+    schedule: Option<&iir::cleanup::Schedule>,
+    entry: Option<&iir::InstanceKey>,
+) -> Result<String, String> {
+    emit_with_result_output(graph, fuel, checked, schedule, entry, true)
+}
+
+pub(super) fn emit_with_result_output(
+    graph: &iir::Package,
     mut fuel: usize,
     checked: bool,
     schedule: Option<&iir::cleanup::Schedule>,
     entry: Option<&iir::InstanceKey>,
+    display_result: bool,
 ) -> Result<String, String> {
     if graph.roots.is_empty() {
         return Err("host pipeline requires one entry".into());
@@ -2109,6 +2124,16 @@ pub(super) fn emit(
         module.push_str(&format!(
             "define i32 @main() {{\nentry:\n  call void @{target}()\n  unreachable\n}}\n"
         ));
+        return Ok(module);
+    }
+    if !display_result {
+        if !checked || result != Ty::Unit {
+            return Err("silent host entry requires a checked void adapter".into());
+        }
+        module.push_str(&functions);
+        module.push_str(
+            "define i32 @main() {\nentry:\n  call void @flurry_entry()\n  ret i32 0\n}\n",
+        );
         return Ok(module);
     }
     if matches!(result, Ty::Record(_) | Ty::ErrorResult(_))

@@ -1,0 +1,42 @@
+{-
+    Unix-facing descriptor operations. The first implementation selects the
+    Linux host adapter; another Unix target must supply its own platform ABI.
+    No operation retries close: a released descriptor may already be reused.
+-}
+use std.os.linux;
+use io_impl.errors.{Error, check};
+
+pub const stdin: i32 = 0;
+pub const stdout: i32 = 1;
+pub const stderr: i32 = 2;
+
+pub fn write(fd: i32, offset: u64) -> !Error u64 where text: str {
+    while true {
+        let result = linux.write<text>(fd, offset);
+        if result != linux.interrupted {
+            return check(result)!'bitvec.as(u64);
+        }
+    }
+}
+pub fn write_byte(fd: i32, byte: u8) -> !Error void {
+    while true {
+        let result = linux.write_byte(fd, byte);
+        if result != linux.interrupted {
+            let count = check(result)!;
+            if count == 0 { return error Error.write_zero; }
+            return;
+        }
+    }
+}
+pub fn read_byte(fd: i32) -> !Error ?u8 {
+    while true {
+        let result = linux.read_byte(fd);
+        if result != linux.interrupted {
+            let byte = check(result)!;
+            if byte == 256 { return null; }
+            return byte'bitvec[0..8].as(u8);
+        }
+    }
+}
+pub fn close(fd: i32) -> !Error void { let result = check(linux.close(fd))!; }
+pub fn getpid() -> i64 { linux.getpid() }

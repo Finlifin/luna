@@ -7473,12 +7473,28 @@ impl<'a> Infer<'a, '_> {
             | K::BitConvert(value)
             | K::Snapshot(value)
             | K::TakeBits(value)
-            | K::TextQuery { subject: value, .. }
             | K::IntegerRepresentation(value)
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::BitSlice { value, .. } => self.walk(value, depth + 1)?,
+            K::TextQuery { subject, query } => {
+                if !query.validate(&self.ty(&subject.ty)?, &self.ty(&expr.ty)?) {
+                    return Err("invalid text query signature in memory analysis".into());
+                }
+                // The primitive consumes a transient operand packet, not an
+                // escaping tuple of borrowed views. Visit each producer in
+                // order. Stored packets still take the ordinary provenance
+                // path; this grants no lifetime to a runtime text parameter.
+                if let K::Tuple(inputs) = &subject.kind {
+                    self.step(depth + 1)?;
+                    for input in inputs {
+                        self.walk(input, depth + 2)?;
+                    }
+                } else {
+                    self.walk(subject, depth + 1)?;
+                }
+            }
             K::BitWindow { value, start, end } => {
                 self.walk(value, depth + 1)?;
                 self.walk(start, depth + 1)?;

@@ -1,0 +1,25 @@
+use std.os.unix;
+use io_impl.errors.Error;
+
+{- A complete text write retries short transfers and EINTR. A zero transfer
+   fails rather than spinning. Errors may follow an already written prefix. -}
+pub fn write_all(fd: i32) -> !Error void where text: str {
+    let length: u64 = builtin.compiler.str_byte_length(text);
+    var offset: u64 = 0;
+    while offset < length {
+        let count = unix.write<text>(fd, offset)!;
+        if count == 0 { return error Error.write_zero; }
+        assumes count <= length - offset;
+        offset = offset + count;
+    }
+}
+
+pub struct Writer { descriptor: i32 }
+impl Clone for Writer { fn clone(*self) -> Self { Writer { descriptor: self.descriptor.* } } }
+impl Copy for Writer {}
+impl Writer {
+    pub fn write_all(self) -> !Error void where text: str { io_impl.writer.write_all<text>(self.descriptor) }
+    pub fn write_byte(self, byte: u8) -> !Error void { unix.write_byte(self.descriptor, byte) }
+}
+pub fn stdout() -> Writer { Writer { descriptor: unix.stdout } }
+pub fn stderr() -> Writer { Writer { descriptor: unix.stderr } }

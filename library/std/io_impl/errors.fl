@@ -1,0 +1,9 @@
+pub enum Error {
+    os(i64),
+    write_zero,
+}
+
+-- Preserve the platform error before another operation changes errno.
+pub fn check(result: i64) -> !Error i64 {
+    if result < 0 { assumes result != -9223372036854775808; error Error.os(-result) } else { result }
+}

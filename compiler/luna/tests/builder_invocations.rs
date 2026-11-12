@@ -385,8 +385,7 @@ impl Fixture {
             name: "builtin".into(),
             entry: self.builtin_entry(),
         });
-        let intrinsics: Vec<_> = nir::intrinsics::Operation::ALL
-            .iter()
+        let intrinsics: Vec<_> = nir::intrinsics::Operation::scalar_math()
             .map(|op| {
                 (
                     *op,
@@ -550,7 +549,7 @@ fn package_cli_invokes_public_builders_with_observed_inputs() {
             .args(["--dependency", "42", "attrs", "44"])
             .args(["--dependency", "44", "builtin", "43"])
             .args(["--dependency", "44", "meta", "42"])
-            .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
+            .args(nir::intrinsics::Operation::scalar_math().flat_map(|op| {
                 [
                     "--comptime-intrinsic".to_owned(),
                     format!(
