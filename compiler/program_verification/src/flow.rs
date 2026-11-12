@@ -3469,51 +3469,41 @@ impl Walker<'_> {
         let needs_arguments =
             target.is_some_and(|f| !f.preconditions.is_empty() || !f.entry_snapshots.is_empty());
         if let Some(target) = target {
-            let binders = if !target.preconditions.is_empty() || !target.postconditions.is_empty() {
-                self.declarations
-                    .binders(&target.type_parameters, &mut self.limits.arithmetic.steps)
-                    .map_err(declaration_failure)?
-            } else {
-                vec![]
-            };
             if needs_arguments && parameter_bindings != &target.parameters {
                 return Err(Reason::InvalidSignature);
             }
-            for condition in &target.preconditions {
-                let condition = if !target_arguments.is_empty() || !binders.is_empty() {
-                    let arguments = target_arguments;
-                    if arguments.iter().any(|ty| ty.check_scope(&[]).is_err()) {
-                        condition.instantiate_parameters_in_scope(
-                            &binders,
-                            arguments,
-                            &self.input_frames,
-                        )
-                    } else {
-                        condition.instantiate_parameters(&binders, arguments)
-                    }
-                    .map_err(|_| Reason::InvalidSignature)?
-                } else {
-                    condition.clone()
+            if !target.preconditions.is_empty() || !target.postconditions.is_empty() {
+                let domains = self
+                    .declarations
+                    .parameter_domains(&target.type_parameters, &mut self.limits.arithmetic.steps)
+                    .map_err(declaration_failure)?;
+                // The completed declaration domain, not the argument's shape,
+                // permits a value binder to become Type. All inputs belong to
+                // this caller's explicit scope; failed scope checking is never
+                // a request to retry under a more permissive environment.
+                let substitution = nir::DeclarationSubstitution::bounded(
+                    &target.type_parameters,
+                    &domains,
+                    target_arguments,
+                    &self.input_frames,
+                    &mut self.limits.arithmetic.steps,
+                )
+                .map_err(declaration_failure)?;
+                let mut prepare = |conditions: &[Expr]| {
+                    conditions
+                        .iter()
+                        .map(|condition| {
+                            substitution
+                                .instantiate_expression_bounded(
+                                    condition,
+                                    &mut self.limits.arithmetic.steps,
+                                )
+                                .map_err(|error| declaration_failure(error.into()))
+                        })
+                        .collect::<Result<Vec<_>, Reason>>()
                 };
-                preconditions.push(condition);
-            }
-            for condition in &target.postconditions {
-                let condition = if !target_arguments.is_empty() || !binders.is_empty() {
-                    let arguments = target_arguments;
-                    if arguments.iter().any(|ty| ty.check_scope(&[]).is_err()) {
-                        condition.instantiate_parameters_in_scope(
-                            &binders,
-                            arguments,
-                            &self.input_frames,
-                        )
-                    } else {
-                        condition.instantiate_parameters(&binders, arguments)
-                    }
-                    .map_err(|_| Reason::InvalidSignature)?
-                } else {
-                    condition.clone()
-                };
-                postconditions.push(condition);
+                preconditions = prepare(&target.preconditions)?;
+                postconditions = prepare(&target.postconditions)?;
             }
         }
         // Reserve immutable contract observations in the caller before making

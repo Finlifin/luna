@@ -233,3 +233,119 @@ fn method_contract_domains_do_not_conflate_budget_with_invalid_inputs() {
         .unwrap();
     assert_eq!(failure.reason, Reason::MissingPreconditionProof);
 }
+
+#[test]
+fn contract_specialization_uses_the_completed_declaration_domains() {
+    let mut package = package(1, 0);
+    package.functions[0].type_parameters = vec![id(50), id(51)];
+    package
+        .function_parameters
+        .push(nir::function_parameters::Declaration {
+            declaration: id(0),
+            parameters: vec![id(50), id(51)],
+            domains: vec![
+                Term::Primitive(P::Type),
+                Term::Rigid {
+                    declaration: id(50),
+                    sort: Sort::Type,
+                },
+            ],
+        });
+    for (arguments, accepted) in [
+        (vec![Term::Primitive(P::Type), Term::Primitive(P::U8)], true),
+        (vec![Term::Primitive(P::Bool), Term::Bool(true)], true),
+        (
+            vec![Term::Primitive(P::Bool), Term::Primitive(P::U8)],
+            false,
+        ),
+    ] {
+        let K::Block { statements, .. } = &mut package.functions[1].body.kind else {
+            unreachable!()
+        };
+        let K::Call { callee, .. } = &mut statements[0].kind else {
+            unreachable!()
+        };
+        let K::FunctionInstance {
+            arguments: actual, ..
+        } = &mut callee.kind
+        else {
+            unreachable!()
+        };
+        *actual = arguments;
+        let result = analyze_in_package(&package, &package.functions[1], &mut Limits::default());
+        if accepted {
+            assert!(
+                result.is_ok(),
+                "{}: {:?}",
+                package.functions[1].body,
+                result.err()
+            );
+        } else {
+            assert_eq!(result.err().unwrap().reason, Reason::InvalidSignature);
+        }
+    }
+}
+
+#[test]
+fn contract_specialization_keeps_the_callers_binder_scope() {
+    let mut package = package(1, 0);
+    package.functions[1].parameters = vec![LocalId { owner: 1, index: 0 }];
+    package.functions[1].signature = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::Type,
+            ty: Term::Primitive(P::Type),
+        }],
+        result: Box::new(Term::Primitive(P::Void)),
+    };
+    for (depth, accepted) in [(0, true), (1, false)] {
+        let K::Block { statements, .. } = &mut package.functions[1].body.kind else {
+            unreachable!()
+        };
+        let K::Call { callee, .. } = &mut statements[0].kind else {
+            unreachable!()
+        };
+        let K::FunctionInstance { arguments, .. } = &mut callee.kind else {
+            unreachable!()
+        };
+        *arguments = vec![Term::Bound {
+            depth,
+            index: 0,
+            sort: Sort::Type,
+        }];
+        let result = analyze_in_package(&package, &package.functions[1], &mut Limits::default());
+        if accepted {
+            assert!(result.is_ok(), "{:?}", result.err());
+        } else {
+            assert_eq!(result.err().unwrap().reason, Reason::InvalidSignature);
+        }
+    }
+}
+
+#[test]
+fn contract_copy_charges_type_payloads_in_unexecuted_branches() {
+    let mut package = package(1, 0);
+    let payload = value(
+        K::TypeValue(Term::Tuple(vec![Term::Primitive(P::Bool); 512])),
+        P::Type,
+    );
+    let truth = value(K::Literal(Literal::Bool(true)), P::Bool);
+    package.functions[0].preconditions = vec![value(
+        K::If {
+            condition: Box::new(truth.clone()),
+            then_branch: Box::new(truth),
+            else_branch: Some(Box::new(value(
+                K::TypeEqual(Box::new(payload.clone()), Box::new(payload)),
+                P::Bool,
+            ))),
+        },
+        P::Bool,
+    )];
+    let mut limits = Limits::default();
+    limits.arithmetic.steps = 256;
+    let failure = analyze_in_package(&package, &package.functions[1], &mut limits)
+        .err()
+        .expect("copying the contract must charge hidden type payloads before choosing a branch");
+    assert_eq!(failure.reason, unknown_budget());
+    limits.arithmetic.steps = 100_000;
+    assert!(analyze_in_package(&package, &package.functions[1], &mut limits).is_ok());
+}

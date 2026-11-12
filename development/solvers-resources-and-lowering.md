@@ -372,6 +372,58 @@ program_verification --lib -p luna --test integer_contracts --test snapshot_cont
 下的大载荷复制计量。重复调用测试限制无关目录增加的额外成本，覆盖真实分析入口，
 不以只命中 Metadata 的单元测试代替接线验证。
 
+### 7.3 契约替换消费完成后的声明域
+
+共享目录不等于正确替换。flow 的直接调用还曾把目录中的定义端 sort 取出，分别
+对 precondition、postcondition 使用固定 sort 替换；有开放参数时先试闭合 scope，
+失败后再换调用者 scope。非泛型契约直接 clone，两条路径都没有在复制前计量。
+这与 trait 方法已经采用的 `DeclarationSubstitution` 契约不同。
+
+以下程序通过真实 sysroot 暴露了语义后果：`D = Type` 完成后，`item` 的实际域就是
+Type，不能仍要求它具有定义时的 ComptimeValue sort。
+
+```flurry
+fn admits(ok: bool) -> result: bool
+where D, item: D, requires ok, ensures result
+{
+    ok
+}
+
+fn run() -> bool {
+    admits<Type, u8>(true) and admits<bool, true>(true)
+}
+```
+
+直接调用现同样用完整声明域建立 `DeclarationSubstitution::bounded`，在调用者的
+明确输入 frame 中一次完成 scope 与 sort 检查，再通过
+`instantiate_expression_bounded` 准备两组契约。值参数成为 Type 的许可来自它的
+实际域，不能从实参长得像 Type 反推；`D = bool, item = u8` 仍非法。完整成员资格、
+形成义务与 capability 准入继续由调用边界负责，结构替换不代替这些检查。
+NF 头不展开，也不为 Type-valued 参数增加专用替换分支。
+
+契约树、隐藏类型操作数及替换扩张在复制前计量。未执行分支无需执行，但它仍被
+复制进私有契约树，不能因此免计复制成本。准备失败不输出半组契约或发布程序事实；
+超预算保留 Unknown，开放 binder 只可引用实际调用者 frame，不以 scope 检查失败
+作为切换环境的信号。这是程序验证消费者迁移，不是一般前端 continuation 已完成。
+
+工作目录 `/home/fin/luna`：新增正例后、生产路径未改时，执行
+`python3 -B development/check.py --timeout 900 -- test -p program_verification
+--lib -p luna --test declaration_contracts --no-fail-fast`，
+`/tmp/luna-tools-3siluwjo/result.json` 退出 101。真实 sysroot 与直接 NIR 用例均被
+`invalid-signature` 拒绝。恢复旧生产路径对照复制用例，
+`/tmp/luna-tools-6so8_40h/result.json` 退出 101：256 步仍成功准备包含两份 512
+字段类型载荷的契约，明确捕获了未计费复制；随后恢复本次实现。
+
+迁移后，以 `python3 -B development/check.py --timeout 900 -- test -p
+program_verification --lib -p luna --test declaration_contracts --test integer_contracts
+--test staged_aggregate_contracts --test snapshot_contracts --test effect_contracts
+--test method_memory_contracts --test runtime_purity --test function_template_local_definitions
+--no-fail-fast` 验证，`/tmp/luna-tools-1hnu86xe/result.json` 退出 0，373 项通过、
+1 项既有忽略。补充调用者 binder 与未执行分支复制反例后，仅重跑程序验证单元及
+`declaration_contracts`（同一入口的 `--lib -p luna --test declaration_contracts
+--no-fail-fast`），`/tmp/luna-tools-m4zet26v/result.json` 退出 0，220 项通过。
+后者包含真实 sysroot 的显式 Type 值与跨函数转发，并保留错误运行时前提的拒绝。
+
 ## 8. IIR 到 ABI 的明确顺序
 
 IIR 完成类型的 comptime 部分和实例选择，保留高级操作、真实 runtime 依赖及 NIR 已建立的

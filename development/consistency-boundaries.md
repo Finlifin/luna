@@ -51,6 +51,11 @@ NF 参数、Any 容器、生成定义属性、冻结恢复。检查值域、顺�
 再改其中一个值的域、声明世界或代码类别，必须在正确接收边界拒绝。
 不能只测试 JSON/Term round trip 而不走源码及真实 sysroot。
 
+域本身可以依赖前置输入：`where D, item: D` 在 `D = Type` 时合法接收类型值。
+契约消费者不能继续以定义时的固定 sort 拒绝它，也不能直接从实参决定 sort；
+[程序契约替换](solvers-resources-and-lowering.md#73-契约替换消费完成后的声明域)
+已给出真实 sysroot 正例和错误域、scope、复制预算反例。
+
 ### 2.2 同一调用经过不同准备顺序
 
 后实参供给前 lambda 的类型，默认值引用前参，collector 混合显式元素和展开，
