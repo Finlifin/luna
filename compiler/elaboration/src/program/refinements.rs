@@ -358,11 +358,23 @@ impl Checker<'_, '_> {
         span: Span,
         check: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> Result<R, Error> {
+        let scope = self.enter_matched_pattern_type_facts(pattern, value, span)?;
+        let result = check(self);
+        scope.leave(self);
+        result
+    }
+
+    pub(super) fn enter_matched_pattern_type_facts(
+        &mut self,
+        pattern: &n::Pattern,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<TypeConditionScope, Error> {
         let observed = match &value.kind {
             K::TypeValue(ty) => Some(ty),
             _ => None,
         };
-        self.under_observed_pattern_type_facts(pattern, observed, span, check)
+        self.enter_observed_pattern_type_facts(pattern, observed, span)
     }
     pub(super) fn under_observed_pattern_type_facts<R>(
         &mut self,
@@ -371,14 +383,26 @@ impl Checker<'_, '_> {
         span: Span,
         check: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> Result<R, Error> {
+        let scope = self.enter_observed_pattern_type_facts(pattern, observed, span)?;
+        let result = check(self);
+        scope.leave(self);
+        result
+    }
+
+    fn enter_observed_pattern_type_facts(
+        &mut self,
+        pattern: &n::Pattern,
+        observed: Option<&Term>,
+        span: Span,
+    ) -> Result<TypeConditionScope, Error> {
         let Some(fact) = self.checked_pattern_type_fact(pattern, observed, span)? else {
-            return check(self);
+            return Ok(TypeConditionScope { parent: None });
         };
         let parent = self.context.clone();
         self.context.assume(fact);
-        let result = check(self);
-        self.context = parent;
-        result
+        Ok(TypeConditionScope {
+            parent: Some(parent),
+        })
     }
 
     fn checked_pattern_type_fact(

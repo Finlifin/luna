@@ -229,7 +229,7 @@ Waiting 与 Unresolved 不混用。没有就绪任务时，先区分外部请求
 
 | 入口 | 已有责任 | 未完成部分 |
 | --- | --- | --- |
-| `elaboration/src/program/block_regions/driver.rs` | 普通、contextual、部分结构输入的块／if 及带 fallback 的 contextual when 共用显式检查帧 | 帧栈仍在同步驱动内，活动 Checker 不能离开后再装回；普通 when 与 match 尚未迁移 |
+| `elaboration/src/program/block_regions/driver.rs` | 普通、contextual、部分结构输入的块／if，以及 contextual when／match 共用显式检查帧 | 帧栈仍在同步驱动内，活动 Checker 不能离开后再装回；普通 when／match 与模式子检查尚未迁移 |
 | `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；普通 when／match 共用适配 | 不提供执行前缀恢复，普通 when／match 子检查仍同步 |
 | `elaboration/src/program/dependent_inputs/tasks.rs` | 参数域、默认引用和默认值完成的显式后继 | 源码子检查和 required 求值仍同步 |
 | `elaboration/src/program/declaration_inputs/progress.rs` | producer、身份、检查次序与源码 schedule 分开 | Typed 路径仍要求普通完整 Expr，Contextual 仍保留 NormalFormArgument |
@@ -306,6 +306,13 @@ contextual when 的条件与主体也进入同一帧栈。`when::Frame` 保存�
 把前支的绑定或正前提带入后支。生成的每个 NormalFormArgument 分支仍保留原有
 Block 作用域，源码未选中的分支仍检查；这不是提前执行条件或用运行结果替代检查。
 无 fallback 的 when 继续采用普通语句规则，不伪造一个 contextual 值。
+
+contextual match 的 selector 和主体也交给同一驱动；`matches::Frame` 保留受检
+selector、当前模式、已完成 arms 及各 arm 的词法／匹配事实退出责任。模式与 guard
+仍调用共同的同步模式检查规则，最终 guard 嵌在 Pattern 中，不能额外执行一次，
+也不能在覆盖性检查前将其丢弃。每个主体返回后先撤销匹配事实，再恢复模式绑定的
+词法作用域；所有 arms 检查完成后仍运行共同的覆盖性检查。匹配事实的进入／退出
+服务同时供现有同步适配器使用，不建立帧专用的另一套类型事实提取规则。
 
 部分 optional／error 输入的 `Search` 先遍历实际类型证据，再允许数字默认类型；
 Never 和只有错误出口的结果不提供成功域证据。`Probe` 保留 Attempt 与父探测模式；
@@ -539,7 +546,7 @@ callable 签名对实际 Type 的消费。只增加 owner、请求枚举或可�
 分流和 NormalFormArgument 的执行树。未迁移消费者必须保留其真实检查，不能为了
 删枚举而丢失能力。活动 continuation 不进入稳定 NIR；实例化从稳定模板创建新任务。
 
-证据分为历史验证与本轮复核。下表的历史报告未在本轮重跑，不累计为当前通过率；
+下表记录各次迁移的对应验证，未重跑的历史报告不累计为当前通过率；
 详细命令与原失败过程可从相应提交及 result.json 查找。临时日志可能被环境清理，
 持久行为用例以仓库测试为准。
 
@@ -554,15 +561,23 @@ callable 签名对实际 Type 的消费。只增加 owner、请求枚举或可�
 | 帧绑定交接 | `bytecode::input_preparation_tests` 及 `luna/tests/clause_packet_preparation.rs`；`/tmp/luna-tools-r52uh6us/result.json`，退出 0 |
 | 块／if 与探测 | `luna/tests/{contextual_input_regions,cmtt_storage_world,native_optional,error_surface,contextual_delivery,effect_spreads}.rs`；`/tmp/luna-tools-4qp6q76r/result.json`，退出 0 |
 | contextual when 后继 | 在 `/home/fin/luna` 经 `development/check.py --timeout 900 -- test -p luna --test contextual_input_regions -- --test-threads=1` 运行，`/tmp/luna-tools-5a7k5fq6/result.json` 退出 0；随后新增 return 用例以同命令加 `contextual_when_returns` 过滤，`/tmp/luna-tools-_l3ix78q/result.json` 退出 0，共覆盖当前 19 项。包括真实 sysroot、两引擎顺序对照及深嵌套字节码路径；不是外部 Type 恢复验收 |
-| 检查帧 dump | 同工作目录与入口，`test -p elaboration --lib program::block_regions -- --test-threads=1`，`/tmp/luna-tools-nj_3p7m2/result.json` 退出 0；检查待检查条件、已完成分支和转义后的 S-expression |
+| 检查帧 dump | 同工作目录与入口，`test -p elaboration --lib program::block_regions -- --test-threads=1`，`/tmp/luna-tools-j2oi2f4c/result.json` 退出 0，8 项通过；检查待检查条件／selector、已完成分支和转义后的 S-expression |
+| contextual match 后继 | 同工作目录与入口，`test -p luna --test contextual_input_regions --test normal_patterns --no-fail-fast -- --test-threads=1`，`/tmp/luna-tools-97cot4g5/result.json` 退出 101：contextual 22 项通过，normal_patterns 41 项通过、1 项失败；新增用例验证 selector／失败 guard 顺序、模式事实隔离、覆盖性与提前返回 |
 | 扩展分支验收 | `/tmp/luna-tools-j385q075/result.json`：490 通过、1 个新 fixture 阶段声明错误；修正后该用例 `/tmp/luna-tools-qe9dsshx/result.json` 退出 0；32 层 CLI 用例 `/tmp/luna-tools-sjdhryg0/result.json` 退出 0 |
+
+match 迁移发现的失败为 `normal_record_defaults_follow_evaluated_value_prefixes_once`。
+临时撤回本次四个生产文件的补丁后，在 `a68e3087` 源码上按同入口执行
+`test -p luna --test normal_patterns normal_record_defaults_follow_evaluated_value_prefixes_once -- --exact --test-threads=1`，
+`/tmp/luna-tools-hwu9z154/result.json` 同样退出 101，仍报 `215..222` 的 comptime
+局部输入 `(local 4294967295 1)` 不可用。已原样恢复补丁并检查一致性。该默认值
+生产者缺口仍待修复，不能把这项合法程序改为拒绝测试，也不能称该回归组全绿。
 
 另有 32 项 luna elaboration 集成失败在 Attempt 迁移时与 `53696cc6` 基线逐例对照
 一致，报告 `/tmp/luna-tools-o47vegep/result.json`；本轮未复测，仍待处理。不能把其中
 诊断断言失败都认作测试过时；九项名义动态输入缺口另见[晚报回复](audit-reply.md)。
 这些历史验证包含当时工作区原有资源分析修改，不宣称为纯提交验收。
 
-本轮在 `/home/fin/luna`、`6a564ae5` 加保留的已有修改上执行：
+此前在 `/home/fin/luna`、`6a564ae5` 加保留的已有修改上执行：
 
 ```text
 python3 -B development/check.py --timeout 900 -- test -p luna \

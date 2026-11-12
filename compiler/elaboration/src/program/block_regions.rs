@@ -6,6 +6,7 @@ use constants::StagedPatternSnapshot;
 mod conditionals;
 mod destinations;
 mod driver;
+mod matches;
 mod tails;
 mod when;
 use destinations::{CheckedBlock, Destination};

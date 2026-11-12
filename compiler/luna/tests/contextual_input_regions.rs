@@ -512,6 +512,146 @@ fn contextual_when_returns_exit_the_original_invocation_without_later_inputs() {
 }
 
 #[test]
+fn contextual_match_frames_keep_selector_and_failed_guard_execution_order() {
+    for (levels, engines) in [(3, &[false, true][..]), (10, &[false][..])] {
+        let mut body = "[1, 255]".to_owned();
+        for _ in 0..levels {
+            body = format!(
+                "do {{ trace += 1; select() }} match {{
+                    flag if do {{ trace += 1; reject(flag) }} => [2],
+                    flag if do {{ trace += 1; accept(flag) }} => do {{ {body} }},
+                    _ => [3],
+                }}"
+            );
+        }
+        let mut calls = vec!["check", "Build"];
+        for _ in 0..levels {
+            calls.extend(["select", "reject", "accept"]);
+        }
+        calls.extend(["Byte", "Build", "Byte"]);
+        check_in_engines(
+            &format!(
+                "
+                pure comptime fn Packet<T, .values: meta.List<T> = []> -> Type {{ bool }}
+                comptime fn Byte() -> Type {{ u8 }}
+                comptime fn select() -> bool {{ true }}
+                comptime fn reject(value: bool) -> bool {{ not value }}
+                comptime fn accept(value: bool) -> bool {{ value }}
+                comptime fn Build(value: T) -> Type
+                where T
+                {{
+                    var trace: Integer = 0;
+                    let result = Packet<.values = T match {{
+                        'bool => do {{
+                            let flag: bool = value;
+                            if flag {{ {body} }} else {{ [] }}
+                        }},
+                        _ => [],
+                    }}, Byte()>;
+                    if T == bool and trace != {} {{ return Packet<u8>; }}
+                    result
+                }}
+                comptime fn check() -> bool {{
+                    Build<bool>(true) == Packet<u8, .values = [1, 255]>
+                        and Build<u8>(9) == Packet<u8>
+                }}",
+                levels * 3,
+            ),
+            &calls,
+            Budget {
+                steps: 1_000_000,
+                ..Default::default()
+            },
+            engines,
+        );
+    }
+}
+
+#[test]
+fn contextual_match_frames_keep_coverage_and_branch_fact_checks() {
+    for (body, diagnostic) in [
+        (
+            "Packet<.values = T match { 'bool => do {
+                let flag: bool = value; [1]
+            }, _ => [] }, Byte()>; let escaped: bool = value; Packet<u8>",
+            "type mismatch",
+        ),
+        (
+            "Packet<.values = true match { true => [1], false => do {
+                let invalid: bool = 7; []
+            } }, Byte()>",
+            "integer runtime proxy requires a supported fixed-width integer target",
+        ),
+        (
+            "Packet<.values = T match { 'bool => [], _ => do {
+                let invalid: bool = value; []
+            } }, Byte()>",
+            "type mismatch",
+        ),
+        (
+            "Packet<.values = value match { flag if guard(flag) => [1] }, Byte()>",
+            "type mismatch",
+        ),
+        (
+            "Packet<.values = guard(true) match { flag if guard(flag) => [1] }, Byte()>",
+            "exhaust",
+        ),
+        (
+            "Packet<.values = true match { flag if 7 => [1], _ => [] }, Byte()>",
+            "integer runtime proxy requires a supported fixed-width integer target",
+        ),
+    ] {
+        let failure = sysroot::compile(&format!(
+            "pure comptime fn Packet<T, .values: meta.List<T> = []> -> Type {{ bool }}
+             comptime fn Byte() -> Type {{ u8 }}
+             comptime fn guard(flag: bool) -> bool {{ flag }}
+             comptime fn Bad(value: T) -> Type where T {{ {body} }}"
+        ))
+        .err()
+        .expect("invalid contextual match was accepted");
+        assert!(failure.contains(diagnostic), "{failure}\n{body}");
+    }
+}
+
+#[test]
+fn contextual_match_returns_keep_the_original_activation_and_skip_later_inputs() {
+    check_both(
+        "
+        pure comptime fn Packet<T, .values: meta.List<T> = []> -> Type { bool }
+        comptime fn Byte() -> Type { u8 }
+        comptime fn mark(flag: bool) -> bool { flag }
+        comptime fn Build(value: T) -> Type
+        where T
+        {
+            Packet<.values = T match {
+                'bool => do { mark(value); return Packet<u8>; [1] },
+                _ => do { mark(false); [255] },
+            }, Byte()>
+        }
+        comptime fn ExitSelector() -> Type {
+            Packet<.values = do { mark(true); return Packet<u8>; true } match {
+                _ => [1],
+            }, Byte()>
+        }
+        comptime fn check() -> bool {
+            Build<bool>(true) == Packet<u8>
+                and Build<u8>(9) == Packet<u8, .values = [255]>
+                and ExitSelector() == Packet<u8>
+        }",
+        &[
+            "check",
+            "Build",
+            "mark",
+            "Build",
+            "mark",
+            "Byte",
+            "ExitSelector",
+            "mark",
+        ],
+    );
+}
+
+#[test]
 fn contextual_if_frames_do_not_skip_invalid_siblings_or_leak_negative_premises() {
     for (body, diagnostic) in [
         (

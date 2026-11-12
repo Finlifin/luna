@@ -1588,32 +1588,8 @@ impl Checker<'_, '_> {
                     .collect::<Result<_, _>>()?,
             });
         }
-        if let H::Match(value, arms) = &input.kind {
-            let value = self.expr(value, None)?;
-            let mut checked = Vec::new();
-            for arm in *arms {
-                checked.push(self.in_block_scope(arm.span, |this| {
-                    let pattern = this.match_arm_pattern(arm, &value)?;
-                    let body = this.under_matched_pattern_type_facts(
-                        &pattern,
-                        &value,
-                        arm.body.span,
-                        |this| this.dependent_normal_argument(arm.body, depth + 1),
-                    )?;
-                    Ok(n::NormalMatchArm {
-                        pattern,
-                        guard: None,
-                        body,
-                    })
-                })?);
-            }
-            let patterns: Vec<_> = checked.iter().map(|arm| &arm.pattern).collect();
-            self.require_match_coverage(&patterns, &value.ty, input.span)?;
-            return Ok(n::NormalFormArgument::Match {
-                source: source(input.span),
-                value,
-                arms: checked,
-            });
+        if matches!(input.kind, H::Match(..)) {
+            return self.check_contextual_match_region(input, depth);
         }
         if let H::When(arms) = &input.kind {
             let fallback = arms.iter().position(|arm| arm.cond.is_none());

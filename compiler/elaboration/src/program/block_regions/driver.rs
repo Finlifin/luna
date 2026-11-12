@@ -143,6 +143,7 @@ enum RegionFrame<'b, 'h> {
     Block(BlockFrame<'b, 'h>),
     Conditional(conditionals::Frame<'b, 'h>),
     When(when::Frame<'b, 'h>),
+    Match(matches::Frame<'b, 'h>),
 }
 
 impl RegionFrame<'_, '_> {
@@ -151,6 +152,7 @@ impl RegionFrame<'_, '_> {
             Self::Block(frame) => frame.unwind(checker),
             Self::Conditional(frame) => frame.unwind(checker),
             Self::When(frame) => frame.unwind(checker),
+            Self::Match(frame) => frame.unwind(checker),
         }
     }
 }
@@ -161,6 +163,7 @@ impl std::fmt::Display for RegionFrame<'_, '_> {
             Self::Block(frame) => frame.fmt(f),
             Self::Conditional(frame) => frame.fmt(f),
             Self::When(frame) => frame.fmt(f),
+            Self::Match(frame) => frame.fmt(f),
         }
     }
 }
@@ -266,6 +269,16 @@ impl Checker<'_, '_> {
             .contextual(expr.span)
     }
 
+    pub(in crate::program) fn check_contextual_match_region(
+        &mut self,
+        expr: &Expr<'_>,
+        depth: usize,
+    ) -> Result<n::NormalFormArgument, Error> {
+        let frame = matches::Frame::new(self, expr, depth)?;
+        self.drive_check_region(RegionFrame::Match(frame))?
+            .contextual(expr.span)
+    }
+
     pub(in crate::program) fn check_contextual_when_region(
         &mut self,
         expr: &Expr<'_>,
@@ -342,6 +355,7 @@ impl Checker<'_, '_> {
                         }
                         RegionFrame::Conditional(frame) => frame.step(self, returned.take())?,
                         RegionFrame::When(frame) => frame.step(self, returned.take())?,
+                        RegionFrame::Match(frame) => frame.step(self, returned.take())?,
                     };
                     let request = match step {
                         Step::Continue => continue,
@@ -378,6 +392,16 @@ impl Checker<'_, '_> {
                                 frames.push(RegionFrame::Conditional(
                                     conditionals::Frame::partial(self, expr, destination, true)?,
                                 ));
+                                continue;
+                            }
+                            if let Destination::Contextual(tail) = &destination
+                                && matches!(expr.kind, H::Match(..))
+                            {
+                                frames.push(RegionFrame::Match(matches::Frame::new(
+                                    self,
+                                    expr,
+                                    tail.depth + 1,
+                                )?));
                                 continue;
                             }
                             if let Destination::Contextual(tail) = &destination
