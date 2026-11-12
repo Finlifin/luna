@@ -444,6 +444,7 @@ dependencies = [
  "comptime_runtime",
  "diagnostic",
  "elaboration",
+ "fmt",
  "hir",
  "iir",
  "interface",

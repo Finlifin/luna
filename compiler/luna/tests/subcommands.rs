@@ -114,6 +114,7 @@ fn misplaced_duplicate_and_conflicting_actions_are_rejected() {
         vec!["serve", "unknown"],
         vec!["packages", "check"],
         vec!["packages", "dump", "input.fl"],
+        vec!["packages", "fmt"],
     ] {
         assert!(parse(&args).is_err(), "accepted {args:?}");
     }
@@ -145,6 +146,7 @@ fn package_and_stream_commands_keep_versioned_input_contracts() {
         "check",
         "build",
         "test",
+        "fmt",
         "dump",
         "comptime",
         "interpret",
@@ -284,6 +286,7 @@ fn nested_help_resolves_the_entire_command_path() {
     }
     for path in [
         vec!["help", "packages", "serve"],
+        vec!["help", "packages", "fmt"],
         vec!["help", "analyze", "typo"],
         vec!["help", "build", "extra"],
         vec!["packages", "analyze", "typo", "--help"],

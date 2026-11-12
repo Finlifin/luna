@@ -1,6 +1,6 @@
 //! Command-scoped help for the public CLI.
 pub const USAGE: &str = "Usage: luna <command> [options]\n       luna help [command]";
-pub const HELP: &str = "Luna — Flurry compiler\n\nUsage: luna <command> [options]\n\nCommands:\n  check       Type-check a source without emitting a dump\n  build       Build a host executable (or --emit object|bitcode)\n  test        Run tests (--engine native|reference; default native)\n  dump        Emit AST, HIR, NIR, IIR, LLVM, assembly or attributes\n  comptime    Invoke a comptime function\n  interpret   Execute a runtime entry in the reference interpreter\n  analyze     Inspect resources or text regions\n  packages    Apply a command to explicit package inputs\n  serve       Serve the versioned package stream protocol\n  help        Show command-specific help\n\nUse luna <command> --help for options and examples.\nSource-first invocations and --packages-v1/--packages-stream-v1 remain\ncompatibility entries; new automation should use subcommands.\n";
+pub const HELP: &str = "Luna — Flurry compiler\n\nUsage: luna <command> [options]\n\nCommands:\n  check       Type-check a source without emitting a dump\n  build       Build a host executable (or --emit object|bitcode)\n  test        Run tests (--engine native|reference; default native)\n  fmt         Format Flurry source files or check formatting\n  dump        Emit AST, HIR, NIR, IIR, LLVM, assembly or attributes\n  comptime    Invoke a comptime function\n  interpret   Execute a runtime entry in the reference interpreter\n  analyze     Inspect resources or text regions\n  packages    Apply a command to explicit package inputs\n  serve       Serve the versioned package stream protocol\n  help        Show command-specific help\n\nUse luna <command> --help for options and examples.\nSource-first invocations and --packages-v1/--packages-stream-v1 remain\ncompatibility entries; new automation should use subcommands.\n";
 const FRONTEND: &str = "
 Frontend options:
   --sysroot <path>
@@ -46,6 +46,9 @@ pipeline. Normal applications obtain bindings from --sysroot.
 ";
 
 fn command_help(name: &str) -> Result<String, String> {
+    if name == "fmt" {
+        return Ok(fmt::render_help("luna fmt", true));
+    }
     let usage = match name {
         "check" => {
             "check <input.fl> [options]\n  Check through typed NIR without emitting an output artifact."
@@ -119,7 +122,8 @@ pub fn help(path: &[&str]) -> Result<String, String> {
             ))
         }
         ["packages", rest @ ..]
-            if !rest.is_empty() && !matches!(rest[0], "packages" | "serve" | "bindings") =>
+            if !rest.is_empty()
+                && !matches!(rest[0], "packages" | "serve" | "bindings" | "fmt") =>
         {
             let text = help(rest)?;
             Ok(format!("{}{PACKAGE_INPUTS}", text.replacen("Usage: luna ", "Usage: luna packages ", 1)

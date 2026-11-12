@@ -17,7 +17,12 @@ fn main() -> ExitCode {
         }
     };
 
+    if let Command::Fmt(sub_args) = command {
+        return fmt::run_cli(sub_args, "luna fmt", true);
+    }
+
     let result = match command {
+        Command::Fmt(_) => unreachable!(),
         Command::PackageStream { capacity } => {
             luna::package_stream::serve(&mut io::stdin().lock(), &mut io::stdout().lock(), capacity)
         }

@@ -81,6 +81,9 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
             std::iter::once(OsString::from("--packages-stream-v1")).chain(args.into_iter().skip(2)),
         );
     }
+    if first == "fmt" {
+        return Ok(Command::Fmt(args.into_iter().skip(1).collect()));
+    }
     let packages = first == "packages";
     let mut start = if packages { 2 } else { 1 };
     let command = if packages {
@@ -94,7 +97,7 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
         return Err("bindings is a help topic; use luna help bindings".into());
     }
     help(&[command])?;
-    if matches!(command, "packages" | "serve") {
+    if matches!(command, "packages" | "serve" | "fmt") {
         return Err(format!("unsupported packages action '{command}'"));
     }
     if packages && args.len() == 3 && args[2] == "--help" {

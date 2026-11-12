@@ -7,6 +7,7 @@ edition = "2024"
 vfs = { path = "../vfs" }
 ast_lowering = { path = "../ast_lowering" }
 diagnostic = { path = "../diagnostic" }
+fmt = { path = "../fmt" }
 interface = { path = "../interface" }
 intrinsic = { path = "../intrinsic" }
 middle = { path = "../middle" }
