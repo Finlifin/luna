@@ -475,8 +475,14 @@ python3 -B development/reproduce.py --timeout 90 --binary DRIVER -- check develo
 
 两者均在 required comptime preparation 报 StepsExhausted，退出 1；报告分别为
 `/tmp/luna-tools-evvi9r5p/result.json` 和 `/tmp/luna-tools-7e83xgls/result.json`。
-这是需要修复的既有成本问题，不是语言拒绝例。`check` 不接收执行动作的 `--fuel`；
-前端当前固定调用准备预算为 100 万步，本次没有提高它或修改公共测试入口的预算。
+这是 `c15a0039` 阶段保留的成本问题，不是语言拒绝例。后续通过
+[Phase 与 VM 共享已检查参数域](world-storage-and-lifetimes.md#18-phase-与-vm-冷构造共享已检查的声明参数域)
+去掉同一个冷构造中的重复元数据检查；该源码现在进入
+`cmtt_storage_world::repeated_pattern_invocations_fit_the_real_sysroot_preparation_budget`
+并通过完整 sysroot 编译和 IIR 执行，报告 `/tmp/luna-tools-drfbyl5c/result.json`，
+退出 0。`check` 不接收执行动作的 `--fuel`；前端调用准备预算仍为 100 万步，
+没有提高预算或修改公共测试入口来取得通过。跨 RequiredWorld 的重复快照与更大
+程序的准备成本仍需继续处理。
 
 反射组的 `sysroot_reflection_uses_receiver_domains_without_unfolding_type_identity`
 和 `computed_normal_form_receiver_keeps_live_clause_inputs` 仍在旧 VM 构造器处报

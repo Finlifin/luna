@@ -81,6 +81,63 @@ fn construct(route: u8, source: &Package, budget: &mut Budget) -> Result<(), Err
 }
 
 #[test]
+fn source_constructors_reuse_phase_domains_without_reusing_body_authority() {
+    let mut source = package(0);
+    source.function_parameters = (0..256)
+        .map(|index| nir::function_parameters::Declaration {
+            declaration: DeclarationId {
+                package: 12,
+                local: index * 2,
+            },
+            parameters: vec![DeclarationId {
+                package: 12,
+                local: index * 2 + 1,
+            }],
+            domains: vec![Term::Primitive(Primitive::Type)],
+        })
+        .collect();
+    let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    for resolving in [false, true] {
+        let mut budget = Budget::default();
+        let mut vm = if resolving {
+            Interpreter::for_comptime_resolving_in_budget(
+                &source,
+                &[],
+                &[],
+                &[],
+                SourceResolvers {
+                    types: &solver,
+                    methods: &unavailable,
+                    associated: &unavailable,
+                },
+                &mut budget,
+            )
+        } else {
+            Interpreter::for_comptime_in_budget(&source, &[], &mut budget)
+        }
+        .unwrap();
+        let domains = vm
+            .phase_inspection
+            .as_ref()
+            .unwrap()
+            .admitted_parameter_domains(&source)
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &domains,
+            &vm.declaration_parameter_domains
+        ));
+        assert_eq!(
+            vm.invoke(source.functions[0].declaration, vec![]).unwrap(),
+            crate::Value::Bool(true)
+        );
+    }
+    source.functions[0].body.kind = ExprKind::ComptimeValue(Term::Symbol("wrong domain".into()));
+    for route in 0..4 {
+        assert!(construct(route, &source, &mut Budget::default()).is_err());
+    }
+}
+
+#[test]
 fn all_source_admission_routes_charge_complete_phase_work_and_recover() {
     let source = package(40);
     let mut phase_budget = Budget::default();

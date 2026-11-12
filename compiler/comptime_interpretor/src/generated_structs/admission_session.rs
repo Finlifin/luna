@@ -73,6 +73,7 @@ impl<'world> DefinitionAdmissionSession<'world> {
             reserved,
             None,
             None,
+            Some(&inspection),
             SourceDispatch::Admission,
         )?;
         vm.phase_inspection = Some(inspection);

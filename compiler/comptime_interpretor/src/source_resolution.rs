@@ -62,6 +62,7 @@ impl<'a> Interpreter<'a> {
             reserved,
             None,
             None,
+            Some(&inspection),
             SourceDispatch::Resolving(resolvers),
         )?;
         interpreter.phase_inspection = Some(inspection);

@@ -42,6 +42,23 @@ impl<'a> Inspection<'a> {
         })
     }
 
+    /// Share completed declaration domains only with this exact immutable
+    /// source. Directory construction also validates normal-form, newtype and
+    /// alias metadata. These facts do not certify any body, invocation premise
+    /// or runtime resource permission; callers still check those separately.
+    /// No work is initiated here and incomplete preparation exposes no table.
+    pub fn admitted_parameter_domains(
+        &self,
+        package: &Package,
+    ) -> Option<Arc<std::collections::BTreeMap<crate::DeclarationId, crate::Term>>> {
+        if !std::ptr::eq(self.package(), package) {
+            return None;
+        }
+        self.declarations
+            .get()
+            .map(|declarations| Arc::clone(&declarations.parameter_domains))
+    }
+
     pub fn check(&self, body: &Expr, fuel: &mut usize) -> Result<(), Error> {
         let declarations = self.declarations(body.source, fuel)?;
         PhaseContext::new(self.package(), declarations).check_comptime(body, fuel)
@@ -175,6 +192,33 @@ mod tests {
             }],
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn completed_domains_are_shared_only_with_the_exact_source() {
+        let source = source();
+        let inspection = Inspection::new(&source);
+        assert!(inspection.admitted_parameter_domains(&source).is_none());
+        inspection.check_package(&mut 2).unwrap_err();
+        assert!(inspection.admitted_parameter_domains(&source).is_none());
+        inspection.check_package(&mut 100_000).unwrap();
+        let domains = inspection.admitted_parameter_domains(&source).unwrap();
+        let retained = inspection.retain_in(source.clone()).unwrap();
+        assert!(Arc::ptr_eq(
+            &domains,
+            &retained.admitted_parameter_domains(&source).unwrap()
+        ));
+        let copied = source.as_ref().clone();
+        assert!(retained.admitted_parameter_domains(&copied).is_none());
+        // A completed directory does not admit a malformed detached body.
+        let malformed = Expr {
+            kind: K::ComptimeValue(Term::Symbol("wrong domain".into())),
+            ..flag()
+        };
+        assert_eq!(
+            retained.check(&malformed, &mut 1000).unwrap_err().kind,
+            super::super::ErrorKind::Invalid
+        );
     }
 
     #[test]

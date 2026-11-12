@@ -631,6 +631,46 @@ VM 建表中部分 metadata 检查也仍重复，整包捕获与跨编辑
 Type 缓存用例的额度。诊断用临时 probe 已移除。未运行全量回归或性能基准，正式
 `docs/` 和已有用户改动保持原样。
 
+### 1.8 Phase 与 VM 冷构造共享已检查的声明参数域
+
+`c15a0039` 保留的 pattern 生成器复现暴露另一处重复工作。临时 probe 在
+`prepare_resolving_source`、opaque metadata 检查和 VM 声明建表处记录预算差值，
+没有改变计费。典型准备只有一个函数，却带有 41 个 trait 和 232 个 implementation；
+phase 检查消费约 4,345 步，opaque 检查 72 步，后续声明建表约 4,396 步。
+报告 `/tmp/luna-tools-ydka4fkq/result.json` 退出 1，原始读数在同目录 stderr.log。
+这些是失败输入的诊断数据，不是整套编译器的耗时基准。临时日志代码已经移除。
+
+同一个冷构造中，`Inspection` 已完成声明参数域及 normal-form/newtype/alias
+元数据校验，VM 随后却重新验证并构造参数域表。现在目录以 Arc 保留参数域，
+`admitted_parameter_domains` 只为精确同一个 package 返回已完成的表；未准备、
+准备失败或另一份内容相同的源码都不提供表。VM 普通闭合构造、resolver-backed
+构造以及 definition admission 在完成 phase 检查后使用这项证据，去掉重复的
+opaque metadata 校验与参数域构造。没有 Inspection 的独立 runtime 构造仍执行
+原有检查。sort 索引的实际构造继续按条目数扣费。
+
+此共享只传递结构事实，不传递主体或调用的执行许可。`check_package` 仍检查全部
+函数体、默认值与合同；调用前提、scope、trait 实参及 implementation 方法校验
+仍由 VM 各自执行。目录可在非法 detached body 被拒绝后继续存在，不代表该 body
+获得准入。源码借用／Arc owner 保证目录所指 package 不可变；新生成的声明仍沿
+自己的发布和准入路径，不能修改已检查源码的身份或借用其证明。
+
+这项生产接线消除的是同一冷构造内部的重复检查。RequiredWorld 之间仍各自创建
+源码快照，尚未成为共享声明块加 invocation overlay；CodeSession、查询目录和
+稳定声明世界也尚未合并。不能用声明 ID 或内容相等跨 owner 复用结构证明，更
+不能用上述参数域表替代 PTC 前提、资源许可或调用结果缓存。
+
+本阶段验证工作目录为 `/home/fin/luna`：
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_storage_world -- --test-threads=1`
+  退出 0，7 项通过，`/tmp/luna-tools-drfbyl5c/result.json`。原先默认准备预算耗尽的
+  pattern 源码现在完整编译并执行得到 true；前端预算、测试入口预算均未提高。
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor -p luna --lib --test prepared_invocations --test key_code_sessions --test builder_invocations --test staged_invocation_reuse --no-fail-fast -- --test-threads=1`
+  退出 0，860 项通过，`/tmp/luna-tools-5u1tqw5n/result.json`。包含全部 NIR／VM／luna
+  单元测试、公开 builder、Type 缓存、源码查询和 prepared invocation。低预算失败、
+  重试、不同 owner 隔离、非法主体和不纯调用不缓存的检查均保留。
+- 7 个本次修改的 Rust 文件格式检查退出 0，`/tmp/luna-tools-y83nvz15/result.json`；
+  `git diff --check` 通过。未运行全 workspace 测试或据此宣称整体性能倍数。
+
 ## 2. 目标物理结构
 
 首选方案为**拥有数据的不可变分块、按路径复制的索引、单一发布根**。

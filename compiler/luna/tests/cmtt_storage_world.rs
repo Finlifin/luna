@@ -5,6 +5,13 @@ mod sysroot;
 use comptime_interpretor::Value;
 
 #[test]
+fn repeated_pattern_invocations_fit_the_real_sysroot_preparation_budget() {
+    let source =
+        include_str!("../../../development/repros/pattern-generator-sysroot-preparation.fl");
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
 fn single_hole_scalar_construction_fits_the_real_sysroot_budget() {
     let source = include_str!("../../../development/repros/scalar-code-construction.fl");
     // Exercise both branches and their interleaving, retaining eight quote layers.

@@ -1,5 +1,5 @@
-{- Multiple pattern generator invocations currently exhaust frontend preparation
-   with the full sysroot. Expected: run returns true. -}
+{- Regression: repeated pattern generator invocations must fit the default
+   frontend preparation budget with the full sysroot and return true. -}
 comptime fn parity(count: u8) -> <bool -| value: bool> {
     var remaining = count;
     var expected = true;

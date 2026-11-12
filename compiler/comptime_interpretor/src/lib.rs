@@ -1088,6 +1088,7 @@ impl<'a> Interpreter<'a> {
             budget,
             None,
             None,
+            None,
             SourceDispatch::Closed,
         )
     }
@@ -1098,6 +1099,7 @@ impl<'a> Interpreter<'a> {
         mut budget: Budget,
         positions: Option<Arc<declaration_index::SourceIndexes>>,
         scope: Option<source_state::InvocationScope<'_>>,
+        inspection: Option<&nir::phases::Inspection<'_>>,
         dispatch: SourceDispatch<'a>,
     ) -> Result<Self, Error> {
         let closed_dispatch = matches!(dispatch, SourceDispatch::Closed);
@@ -1112,6 +1114,11 @@ impl<'a> Interpreter<'a> {
             }
         }
         invocation_budget::charge_world_tables(package, &mut budget)?;
+        // Phase inspection already prepared these structural facts. Reuse
+        // them only in the exact source owner; this carries no caller premises
+        // or permission to skip body, scope or method admission.
+        let admitted_domains =
+            inspection.and_then(|inspection| inspection.admitted_parameter_domains(package));
         let functions = declaration_index::Functions::new(
             &package.functions,
             positions.as_ref().map(|index| index.functions.clone()),
@@ -1220,7 +1227,7 @@ impl<'a> Interpreter<'a> {
         // Matching source indexes certify structural metadata for this exact
         // immutable snapshot. Caller premises still receive their own checks
         // below, but cannot invalidate or replace this structural evidence.
-        if positions.is_none() {
+        if positions.is_none() && admitted_domains.is_none() {
             invocation_budget::validate_opaque_metadata(package, &mut budget)?;
         }
         let completed_tuple_heads = package
@@ -1279,14 +1286,25 @@ impl<'a> Interpreter<'a> {
                     index.parameter_sorts.clone(),
                 )
             } else {
-                let declaration_parameter_domains = package
-                    .declaration_parameter_domains_checked(&mut trait_parameter_fuel)
-                    .map_err(|reason| match reason {
-                        nir::type_computations::Error::Budget => Error {
-                            kind: ErrorKind::StepsExhausted,
-                            source: None,
-                        },
-                        _ => invalid(),
+                let declaration_parameter_domains = match admitted_domains {
+                    Some(domains) => domains,
+                    None => Arc::new(
+                        package
+                            .declaration_parameter_domains_checked(&mut trait_parameter_fuel)
+                            .map_err(|reason| match reason {
+                                nir::type_computations::Error::Budget => Error {
+                                    kind: ErrorKind::StepsExhausted,
+                                    source: None,
+                                },
+                                _ => invalid(),
+                            })?,
+                    ),
+                };
+                trait_parameter_fuel = trait_parameter_fuel
+                    .checked_sub(declaration_parameter_domains.len())
+                    .ok_or(Error {
+                        kind: ErrorKind::StepsExhausted,
+                        source: None,
                     })?;
                 let declaration_parameter_sorts: BTreeMap<_, _> = declaration_parameter_domains
                     .iter()
@@ -1302,7 +1320,7 @@ impl<'a> Interpreter<'a> {
                     })
                     .collect();
                 (
-                    Arc::new(declaration_parameter_domains),
+                    declaration_parameter_domains,
                     Arc::new(declaration_parameter_sorts),
                 )
             };
@@ -2051,6 +2069,7 @@ impl<'a> Interpreter<'a> {
             budget,
             positions,
             scope,
+            Some(&inspection),
             SourceDispatch::Closed,
         )?;
         interpreter.phase_inspection = Some(inspection);

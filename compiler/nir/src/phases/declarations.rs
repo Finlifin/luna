@@ -16,7 +16,7 @@ impl ParameterFrame {
 }
 
 pub(super) struct Declarations {
-    pub(super) parameter_domains: BTreeMap<crate::DeclarationId, Term>,
+    pub(super) parameter_domains: std::sync::Arc<BTreeMap<crate::DeclarationId, Term>>,
     pub(super) trait_index: trait_index::Index,
     pub(super) functions: BTreeMap<crate::DeclarationId, (Phase, bool, bool)>,
     pub(super) parameter_frames: BTreeMap<crate::DeclarationId, ParameterFrame>,
@@ -147,7 +147,7 @@ impl Declarations {
             )
             .collect();
         Ok(Self {
-            parameter_domains,
+            parameter_domains: std::sync::Arc::new(parameter_domains),
             trait_index,
             functions,
             parameter_frames,
