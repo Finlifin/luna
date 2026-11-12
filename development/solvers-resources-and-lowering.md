@@ -441,8 +441,8 @@ program_verification --lib -p luna --test declaration_contracts --test integer_c
 `python3 -B development/check.py --timeout 900 -- test -p luna --test declaration_contracts
 -- --nocapture`；`/tmp/luna-tools-f8f6w8k8/result.json` 退出 101，实际在 `run` 的
 P4 检查失败。同轮高阶输入／结果与 Drop 正例通过，故不把它们称为本次修复的旧
-失败，也不据此认定全部消费者已迁移。`moves` 的部分 callable signature／body
-准备和 Drop 选择／契约再核对仍保留固定 sort 路径，须按各自生产者继续迁移。
+失败，也不据此认定全部消费者已迁移。源码调用已有 residual body 时可能跳过
+声明侧替换，因此还需独立覆盖未特化函数的消费者。
 
 最终执行 `python3 -B development/check.py --timeout 900 -- test -p nir
 -p program_verification -p luna --lib --test declaration_contracts --test runtime_purity
@@ -451,6 +451,57 @@ P4 检查失败。同轮高阶输入／结果与 Drop 正例通过，故不把�
 `/tmp/luna-tools-ss__0lqr/result.json` 退出 0，811 项通过、1 项既有忽略。新增单元
 验证 owned 替换在原输入释放后仍保留 frame 与不透明头，低预算不复制大载荷，
 错误域不污染拒绝行为缓存，失败后的新合法查询仍能成功。
+
+
+资源分析中的四处声明消费者现沿用这一协议：callable 输入和内存摘要准备以
+完成域检查并有界复制签名；返回 callable 与清理调用图仅在存在声明输入时以共同
+Function API 预检完整函数后特化，没有输入的不可变函数直接借用。消费者仍计量
+其分析遍历，不再先 clone 整个函数或逐份套用固定 sort 替换。递归结果
+键的实参改为先计量再复制，清理候选参数类型的复制也单独计量。完整函数替换
+包含 requirements、capabilities、默认值和普通参数 frame，但它不证明这些义务；
+形成、选择与发布仍由原边界负责，NF 头保持不透明。
+
+所有生产调用者迁走后，删除 Metadata 的固定 sort binder 构造器。定义端抽象
+检查仍可查询 sort 目录；依赖域的实例化必须使用完整域。内存摘要独立入口目前
+仍自行读取包域目录，未宣称已经共享整个分析事务。Drop 选择、Drop 契约再核对
+与契约继承中的替换仍待迁移；这也不解决泛型默认值的 P3／Copy 证据缺口。
+
+工作目录 `/home/fin/luna`，执行
+`python3 -B development/check.py --timeout 900 -- test -p program_verification
+--lib moves::declaration_tests -- --nocapture`，原生产实现的
+`/tmp/luna-tools-s8mvdybj/result.json` 退出 101：三个合法的 `D = Type, item = u8`
+用例分别在 callable 输入、内存签名和返回 callable 分析失败。迁移后同组
+`/tmp/luna-tools-vme7hn4r/result.json` 退出 0。这些是直接 NIR 消费者证据，不能
+替代真实源码／sysroot 验收。
+
+额外预算对照仅临时恢复旧 callable 输入检查：同一入口加
+`moves::declaration_tests::callable_input_charges_expanded_signature_before_copying`，
+`/tmp/luna-tools-hlpnl_iq/result.json` 退出 101；旧实现以 1000 步接受了将 32 项
+类型载荷复制到 64 个签名参数的输出，违反复制预算断言。随后恢复迁移实现，
+低预算拒绝、高预算重试成功；错误域与失败后的有效查询也独立覆盖。
+
+
+首次扩大回归 `/tmp/luna-tools-jdhtvr64/result.json` 退出 101，只有
+`runtime_purity::recursive_nested_closure_factories_preserve_each_capture_layer`
+新失败。定位到 caller 剩余 36782 步时，递归闭包工厂的内存摘要耗尽预算；完整
+复制计量暴露了无需替换的函数仍被反复复制。准备入口现返回借用或拥有的函数：
+空声明输入借用原已检查函数，非空输入仍完整计量并替换，错误实参数量不走借用。
+没有扩大 P4 预算、跳过资源遍历或把错误域作为借用条件。恢复后执行
+`python3 -B development/check.py --timeout 900 -- test -p program_verification
+-p luna --lib --test runtime_purity --no-fail-fast`，
+`/tmp/luna-tools-q63ncb0_/result.json` 退出 0，288 项通过。临时诊断打印已删除。
+
+
+最终在恢复实现与移除诊断打印后执行
+`python3 -B development/check.py --timeout 900 -- test -p program_verification
+-p luna --lib --test declaration_contracts --test resources --test runtime_purity
+--test optional_purity --test default_calls --test function_template_local_definitions
+--test library_protocols --test method_memory_contracts --test comparison_resources
+--no-fail-fast`，`/tmp/luna-tools-yv94_tz9/result.json` 退出 0，778 项通过、1 项
+既有忽略。包含真实 sysroot 的声明契约、callable 输入／返回和 Drop 正例；它们
+与直接消费者反例共同支撑本次迁移，不表示整个资源或程序验证系统已经完成。
+修改的三个 Rust 文件通过 rustfmt 检查，证据
+`/tmp/luna-tools-99ffs6o7/result.json`；工作区原有修改未纳入本次提交。
 
 ## 8. IIR 到 ABI 的明确顺序
 

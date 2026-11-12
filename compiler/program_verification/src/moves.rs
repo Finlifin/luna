@@ -22,6 +22,8 @@ use borrowed_code::borrowed_memory_inputs;
 pub use borrowed_code::copy_borrowed_code;
 mod cleanup_memory;
 pub use cleanup_memory::BorrowedRoot;
+#[cfg(test)]
+mod declaration_tests;
 mod effects;
 #[cfg(test)]
 mod layout_tests;
@@ -4661,14 +4663,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return Ok(None);
         }
         let (declaration, arguments) = match &callee.kind {
-            K::Function(id) => (*id, vec![]),
+            K::Function(id) => (*id, &[][..]),
             K::FunctionInstance {
                 declaration,
                 arguments,
-            } => (*declaration, arguments.clone()),
+            } => (*declaration, arguments.as_slice()),
             _ => return Ok(None),
         };
-        let key = (declaration, arguments.clone());
+        for argument in arguments {
+            super::memory::bound_type(argument, &mut self.fuel).map_err(|e| error(source, e))?;
+        }
+        let key = (declaration, arguments.to_vec());
         if self.return_stack.contains(&key) {
             return Ok(None);
         }
@@ -4680,7 +4685,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return Ok(None);
         };
         let (original, body_arguments) = package
-            .runtime_body(declaration, &arguments)
+            .runtime_body(declaration, arguments)
             .ok_or_else(|| error(source, "callable result function is missing"))?;
         if original.phase != FunctionPhase::Runtime
             || original.type_parameters.len() != body_arguments.len()
@@ -4690,41 +4695,19 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 "callable result requires a concrete runtime function",
             ));
         }
-        let binders = self
+        let mut function = self
             .declarations
-            .binders(&original.type_parameters, &mut self.fuel)
-            .map_err(|e| error(source, e.to_string()))?;
-        let mut function = original.clone();
-        let instantiate = |expr: &Expr| {
-            expr.instantiate_parameters(&binders, body_arguments)
-                .map_err(|e| error(source, format!("callable result instantiation: {e}")))
-        };
-        function.signature = original
-            .signature
-            .instantiate_parameters(&binders, body_arguments)
-            .map_err(|e| error(source, format!("callable result signature: {e}")))?;
+            .specialize_function(original, body_arguments, &mut self.fuel)
+            .map_err(|e| error(source, format!("callable result instantiation: {e}")))?;
         if function.signature.callable_signature() != callee.ty.callable_signature() {
             return Err(error(source, "callable result signature mismatch"));
         }
-        function.body = instantiate(&original.body)?;
-        function.preconditions = original
-            .preconditions
-            .iter()
-            .map(instantiate)
-            .collect::<Result<_, _>>()?;
-        function.postconditions = original
-            .postconditions
-            .iter()
-            .map(instantiate)
-            .collect::<Result<_, _>>()?;
-        function.defaults = original
-            .defaults
-            .iter()
-            .map(|(slot, value)| Ok((*slot, instantiate(value)?)))
-            .collect::<Result<_, Error>>()?;
-        // Requirements/capabilities remain the materialization/publication
-        // boundary's obligations. This summary never unfolds a normal-form head.
-        function.type_parameters.clear();
+        // Structural substitution preserves the selected declaration. Formation,
+        // requirements and capabilities remain publication obligations; this
+        // resource summary does not discharge them or unfold normal-form heads.
+        if let std::borrow::Cow::Owned(function) = &mut function {
+            function.type_parameters.clear();
+        }
         let mut borrows = vec![];
         let mut fields = vec![];
         if let Term::Function { parameters, .. } = function.signature.callable_signature() {
@@ -11130,34 +11113,29 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let Some((function, arguments)) = package.runtime_body(declaration, arguments) else {
                 return Ok(false);
             };
-            let binders = self
+            let function = self
                 .declarations
-                .binders(&function.type_parameters, &mut self.fuel)
+                .specialize_function(function, arguments, &mut self.fuel)
                 .map_err(|e| error(source, e.to_string()))?;
-            let signature = function
-                .signature
-                .instantiate_parameters(&binders, arguments)
-                .map_err(|e| error(source, e.to_string()))?;
-            super::memory::bound_type(&signature, &mut self.fuel).map_err(|e| error(source, e))?;
-            let Term::Function { parameters, .. } = signature.callable_signature() else {
+            let Term::Function { parameters, .. } = function.signature.callable_signature() else {
                 return Ok(false);
             };
-            let mut types = parameters.iter().map(|p| p.ty.clone()).collect::<Vec<_>>();
+            let mut types = Vec::new();
+            for parameter in parameters {
+                super::memory::bound_type(&parameter.ty, &mut self.fuel)
+                    .map_err(|e| error(source, e))?;
+                types.push(parameter.ty.clone());
+            }
             let mut calls = vec![];
             let mut effects = false;
             for body in std::iter::once(&function.body)
                 .chain(&function.preconditions)
                 .chain(&function.postconditions)
             {
-                nir::visit::expression(body, &mut self.fuel, |_, _| Ok(()))
-                    .map_err(|e| error(source, e))?;
-                let body = body
-                    .instantiate_parameters(&binders, arguments)
-                    .map_err(|e| error(source, e.to_string()))?;
                 // Defaults are evaluated as part of calls in this body. Include
                 // their cleanup too, while leaving deferred closure bodies out.
                 nir::visit::expression_in_closure_environment(
-                    &body,
+                    body,
                     &mut self.fuel,
                     |node, fuel| {
                         super::memory::bound_type(&node.ty, fuel)?;
@@ -14892,10 +14870,17 @@ fn infer_callable_memory_with_borrowed(
     for argument in arguments {
         super::memory::bound_type(argument, fuel)?;
     }
-    let binders = super::memory::memory_binders(Some(package), &function.type_parameters, fuel)?;
-    let signature = function
-        .signature
-        .instantiate_parameters(&binders, body_arguments)
+    let domains = super::memory::memory_domains(package, &function.type_parameters, fuel)?;
+    let substitution = nir::DeclarationSubstitution::bounded(
+        &function.type_parameters,
+        &domains,
+        body_arguments,
+        &[],
+        fuel,
+    )
+    .map_err(|e| e.to_string())?;
+    let signature = substitution
+        .instantiate_bounded(&function.signature, fuel)
         .map_err(|e| e.to_string())?;
     let Term::Function { parameters, .. } = signature.callable_signature() else {
         return Err("memory callee lacks a signature".into());
@@ -16043,8 +16028,9 @@ fn validate_callable_input(
         _ => None,
     };
     if let Some((declaration, arguments)) = named {
+        let package = package
+            .ok_or_else(|| error(expr.source, "callable input refers to an unknown function"))?;
         let (function, body_arguments) = package
-            .ok_or_else(|| error(expr.source, "callable input refers to an unknown function"))?
             .runtime_body_checked(declaration, arguments)
             .map_err(|reason| error(expr.source, format!("callable input {reason}")))?;
         if function.phase != FunctionPhase::Runtime {
@@ -16063,17 +16049,19 @@ fn validate_callable_input(
         for argument in arguments {
             super::memory::bound_type(argument, fuel).map_err(|e| error(expr.source, e))?;
         }
-        let binders = super::memory::memory_binders(package, &function.type_parameters, fuel)
+        let domains = super::memory::memory_domains(package, &function.type_parameters, fuel)
             .map_err(|e| error(expr.source, e))?;
-        let signature = function
-            .signature
-            .instantiate_parameters(&binders, body_arguments)
-            .map_err(|_| {
-                error(
-                    expr.source,
-                    "callable input has invalid function type arguments",
-                )
-            })?;
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &function.type_parameters,
+            &domains,
+            body_arguments,
+            &[],
+            fuel,
+        )
+        .map_err(|e| error(expr.source, format!("callable input instantiation: {e}")))?;
+        let signature = substitution
+            .instantiate_bounded(&function.signature, fuel)
+            .map_err(|e| error(expr.source, format!("callable input signature: {e}")))?;
         let signature = signature.with_unsafe_call_requirement(function.is_unsafe);
         if signature != expr.ty
             || !matches!(signature, Term::Function { .. } | Term::UnsafeFunction(_))

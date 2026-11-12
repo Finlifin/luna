@@ -1,10 +1,7 @@
 //! Immutable declaration evidence shared inside one package analysis. This
 //! contains no call-site assumptions, cleanup choices or behavior certificates.
-use nir::{
-    DeclarationId, DeclarationParameter, Primitive, Sort, Term, program::Package,
-    type_computations::Error,
-};
-use std::{cell::OnceCell, collections::BTreeMap, sync::Arc};
+use nir::{DeclarationId, Primitive, Sort, Term, program::Package, type_computations::Error};
+use std::{borrow::Cow, cell::OnceCell, collections::BTreeMap, sync::Arc};
 
 pub(crate) struct Metadata<'a> {
     package: Option<&'a Package>,
@@ -35,19 +32,24 @@ mod tests {
             .collect();
         let metadata = std::rc::Rc::new(Metadata::new(Some(&package)));
         let mut fuel = 32;
-        assert!(metadata.binders(&[id(1000)], &mut fuel).is_err());
+        assert!(metadata.parameter_domains(&[id(1000)], &mut fuel).is_err());
         assert!(fuel < 32);
-        assert!(!metadata.is_prepared());
-        let binders = metadata.binders(&[id(1000)], &mut 10_000).unwrap();
-        assert_eq!(binders[0].sort, Sort::Type);
+        assert!(!metadata.domains_prepared());
+        let domains = metadata
+            .parameter_domains(&[id(1000)], &mut 10_000)
+            .unwrap();
+        assert_eq!(domains[0], Term::Primitive(Primitive::Type));
         let consumer = metadata.clone();
-        let mut fuel = 2;
-        assert_eq!(consumer.binders(&[id(1000)], &mut fuel).unwrap(), binders);
+        let mut fuel = 3;
+        assert_eq!(
+            consumer.parameter_domains(&[id(1000)], &mut fuel).unwrap(),
+            domains
+        );
         assert_eq!(fuel, 0);
-        assert!(consumer.binders(&[id(1000)], &mut 0).is_err());
+        assert!(consumer.parameter_domains(&[id(1000)], &mut 0).is_err());
         assert!(
             Metadata::new(Some(&package))
-                .binders(&[id(1000)], &mut 32)
+                .parameter_domains(&[id(1000)], &mut 32)
                 .is_err()
         );
 
@@ -55,14 +57,13 @@ mod tests {
         other.alias_contracts[0].parameter_types[0] = Term::Primitive(Primitive::Bool);
         assert_eq!(
             Metadata::new(Some(&other))
-                .binders(&[id(1000)], &mut 10_000)
-                .unwrap()[0]
-                .sort,
-            Sort::ComptimeValue
+                .parameter_domains(&[id(1000)], &mut 10_000)
+                .unwrap()[0],
+            Term::Primitive(Primitive::Bool)
         );
         assert_eq!(
-            metadata.binders(&[id(1000)], &mut 2).unwrap()[0].sort,
-            Sort::Type
+            metadata.parameter_domains(&[id(1000)], &mut 3).unwrap()[0],
+            Term::Primitive(Primitive::Type)
         );
 
         other.alias_contracts[0].parameters.push(id(1000));
@@ -71,8 +72,8 @@ mod tests {
             .push(Term::Primitive(Primitive::Bool));
         let invalid = Metadata::new(Some(&other));
         for _ in 0..2 {
-            assert!(invalid.binders(&[id(1000)], &mut 10_000).is_err());
-            assert!(!invalid.is_prepared());
+            assert!(invalid.parameter_domains(&[id(1000)], &mut 10_000).is_err());
+            assert!(!invalid.domains_prepared());
         }
     }
 
@@ -102,7 +103,7 @@ mod tests {
         );
         assert!(10_000 - fuel >= 256);
         assert_eq!(
-            metadata.binders(&[id(2)], &mut 10_000).unwrap()[0].sort,
+            metadata.sorts(&mut 10_000).unwrap()[&id(2)],
             Sort::ComptimeValue
         );
     }
@@ -119,6 +120,25 @@ impl<'a> Metadata<'a> {
 
     pub(crate) fn package(&self) -> Option<&'a Package> {
         self.package
+    }
+
+    /// A residual body without declaration inputs needs no copy or rewrite.
+    /// Borrow it from its owner; consumers still pay for their analysis. This
+    /// is preparation of checked code, not a replacement for NIR validation.
+    pub(crate) fn specialize_function<'f>(
+        &self,
+        function: &'f nir::program::Function,
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<Cow<'f, nir::program::Function>, Error> {
+        *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
+        if function.type_parameters.is_empty() && arguments.is_empty() {
+            return Ok(Cow::Borrowed(function));
+        }
+        let domains = self.parameter_domains(&function.type_parameters, fuel)?;
+        function
+            .instantiate_declaration_parameters(&domains, arguments, fuel)
+            .map(Cow::Owned)
     }
 
     pub(crate) fn domains(
@@ -184,32 +204,8 @@ impl<'a> Metadata<'a> {
         Ok(self.sorts.get().expect("complete declaration directory"))
     }
 
-    pub(crate) fn binders(
-        &self,
-        parameters: &[DeclarationId],
-        fuel: &mut usize,
-    ) -> Result<Vec<DeclarationParameter>, Error> {
-        *fuel = fuel.checked_sub(parameters.len()).ok_or(Error::Budget)?;
-        if parameters.is_empty() {
-            return Ok(vec![]);
-        }
-        let sorts = self.sorts(fuel)?;
-        Ok(parameters
-            .iter()
-            .map(|declaration| DeclarationParameter {
-                declaration: *declaration,
-                sort: sorts.get(declaration).copied().unwrap_or(Sort::Type),
-            })
-            .collect())
-    }
-
     #[cfg(test)]
     pub(crate) fn domains_prepared(&self) -> bool {
         self.domains.get().is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_prepared(&self) -> bool {
-        self.sorts.get().is_some()
     }
 }
