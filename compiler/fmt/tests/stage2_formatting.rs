@@ -594,6 +594,89 @@ fn documented() {
 }
 
 #[test]
+fn symmetric_if_else_let_else_multiline_cond_or_pat_and_multi_bound_where() {
+    let src = "\
+enum Choice where T, enabled: bool {
+    On(T),
+    Off,
+}
+
+fn single_bound(r: R) where R :- Reading {
+    read_one(r);
+}
+
+fn multi_bounds(r: R, w: W) where R :- Reading, W :- Writing {
+    pipe(r, w);
+}
+
+fn control_heuristics(flag: bool, opt: ?i32) -> i32 {
+    let short = if flag { 1 } else { 2 };
+    let medium = if flag_with_a_longer_condition_name_exceeding_fifty { 1 } else { 2 };
+    let v = opt else { return 0; };
+    let very_long_extracted_binding = compute_some_optional_candidate(opt) else { return 0; };
+    if flag_alpha_condition_one_two_three_four and flag_beta_condition_five_six_seven_eight and flag_gamma_condition_nine_ten {
+        return 9;
+    }
+    v match {
+        100_000_001 or 100_000_002 or 100_000_003 or 100_000_004 or 100_000_005 or 100_000_006 or 100_000_007 or 100_000_008 => 1,
+        _ => short + medium + very_long_extracted_binding,
+    }
+}
+";
+    let got = fmt_ok(src);
+    let expected = "\
+enum Choice where T, enabled: bool {
+    On(T),
+    Off,
+}
+
+fn single_bound(r: R) where R :- Reading {
+    read_one(r);
+}
+
+fn multi_bounds(r: R, w: W)
+where
+    R :- Reading,
+    W :- Writing,
+{
+    pipe(r, w);
+}
+
+fn control_heuristics(flag: bool, opt: ?i32) -> i32 {
+    let short = if flag { 1 } else { 2 }
+    let medium = if flag_with_a_longer_condition_name_exceeding_fifty {
+        1
+    } else {
+        2
+    }
+    let v = opt else { return 0; }
+    let very_long_extracted_binding = compute_some_optional_candidate(opt) else {
+        return 0;
+    }
+    if
+        flag_alpha_condition_one_two_three_four
+            and flag_beta_condition_five_six_seven_eight
+            and flag_gamma_condition_nine_ten
+    {
+        return 9;
+    }
+    v match {
+        100_000_001
+        or 100_000_002
+        or 100_000_003
+        or 100_000_004
+        or 100_000_005
+        or 100_000_006
+        or 100_000_007
+        or 100_000_008 => 1,
+        _ => short + medium + very_long_extracted_binding,
+    }
+}
+";
+    assert_eq!(got, expected);
+}
+
+#[test]
 fn formats_sysroot_library_files_idempotently_and_verifies_ast() {
     use std::fs;
     use std::path::{Path, PathBuf};

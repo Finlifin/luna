@@ -1770,11 +1770,20 @@ impl<'a> Formatter<'a> {
                 )
             )
         });
+        let trait_bound_count = clauses
+            .iter()
+            .filter(|&&c| {
+                matches!(
+                    self.parsed.ast.get_node_kind(c),
+                    Some(NodeKind::TraitBoundDeclClause | NodeKind::TraitBoundParam)
+                )
+            })
+            .count();
         let has_comments = self
             .comments
             .peek()
             .is_some_and(|(_, cm)| cm.byte_start < limit_byte);
-        let force_multiline = has_contract || has_comments;
+        let force_multiline = has_contract || trait_bound_count >= 2 || has_comments;
 
         let tab = self.tab_spaces();
         let saved_indent = self.indent_spaces;

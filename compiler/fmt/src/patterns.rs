@@ -751,34 +751,39 @@ impl<'a> Formatter<'a> {
         }
     }
 
-    fn format_or_pattern(&mut self, node: NodeIndex, slot: TokenSlot) -> Doc {
-        // Flatten right-leaning `OrPattern` chain (unless an arm is explicitly parenthesized).
-        let mut arms: Vec<(NodeIndex, TokenSlot)> = Vec::new();
-        let mut cur_node = node;
-        let mut cur_slot = slot;
-        loop {
-            let (parens, inner) = cur_slot.unwrap_parens(self.parsed, cur_node);
-            if parens > 0 && !arms.is_empty() {
-                arms.push((cur_node, cur_slot));
-                break;
-            }
-            if self.parsed.ast.get_node_kind(cur_node) != Some(NodeKind::OrPattern) {
-                arms.push((cur_node, cur_slot));
-                break;
-            }
-            let ch = self.parsed.ast.get_children(cur_node);
-            let lhs = ch[0];
-            let rhs = ch[1];
-            let lhs_slot = inner.child_slot_from(self.parsed, inner.first, lhs);
-            let or_tok = self
-                .parsed
-                .find_depth_zero_token(lhs_slot.last + 1, inner.last, |k| k == TokenKind::Or, false)
-                .unwrap_or(lhs_slot.last + 1);
-            let rhs_slot = TokenSlot::new(or_tok + 1, inner.last);
-            arms.push((lhs, lhs_slot));
-            cur_node = rhs;
-            cur_slot = rhs_slot;
+    fn collect_or_pattern_arms(
+        &self,
+        node: NodeIndex,
+        slot: TokenSlot,
+        is_root: bool,
+        out: &mut Vec<(NodeIndex, TokenSlot)>,
+    ) {
+        let (parens, inner) = slot.unwrap_parens(self.parsed, node);
+        if parens > 0 && !is_root {
+            out.push((node, slot));
+            return;
         }
+        if self.parsed.ast.get_node_kind(node) != Some(NodeKind::OrPattern) {
+            out.push((node, slot));
+            return;
+        }
+        let ch = self.parsed.ast.get_children(node);
+        let lhs = ch[0];
+        let rhs = ch[1];
+        let lhs_slot = inner.child_slot_from(self.parsed, inner.first, lhs);
+        let or_tok = self
+            .parsed
+            .find_depth_zero_token(lhs_slot.last + 1, inner.last, |k| k == TokenKind::Or, false)
+            .unwrap_or(lhs_slot.last + 1);
+        let rhs_slot = TokenSlot::new(or_tok + 1, inner.last);
+        self.collect_or_pattern_arms(lhs, lhs_slot, false, out);
+        self.collect_or_pattern_arms(rhs, rhs_slot, false, out);
+    }
+
+    fn format_or_pattern(&mut self, node: NodeIndex, slot: TokenSlot) -> Doc {
+        // Flatten `OrPattern` tree across both left and right spines (unless explicitly parenthesized).
+        let mut arms: Vec<(NodeIndex, TokenSlot)> = Vec::new();
+        self.collect_or_pattern_arms(node, slot, true, &mut arms);
 
         let mut docs = Vec::with_capacity(arms.len() * 2);
         for (i, (arm_node, arm_slot)) in arms.into_iter().enumerate() {

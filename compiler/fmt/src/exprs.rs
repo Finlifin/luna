@@ -94,6 +94,51 @@ impl<'a> Formatter<'a> {
         Doc::concat([Doc::text(id_str), Doc::str(": "), val_doc])
     }
 
+    pub fn has_comments_in_range(&self, start_byte: usize, end_byte: usize) -> bool {
+        let idx = self
+            .parsed
+            .comments
+            .partition_point(|c| c.byte_start < start_byte);
+        self.parsed
+            .comments
+            .get(idx)
+            .is_some_and(|c| c.byte_start < end_byte)
+    }
+
+    pub fn is_single_line_block_eligible(
+        &self,
+        block_node: NodeIndex,
+        block_slot: TokenSlot,
+        allow_stmt_in_single_line: bool,
+    ) -> bool {
+        if self.parsed.ast.get_node_kind(block_node) != Some(NodeKind::Block) {
+            return false;
+        }
+        let ch = self.parsed.ast.get_children(block_node);
+        let elems = ch
+            .first()
+            .and_then(|&h| self.parsed.ast.get_multi_child_slice(h))
+            .unwrap_or(&[]);
+        if elems.len() > 1 {
+            return false;
+        }
+        let open_end_byte = self
+            .parsed
+            .sig_tokens
+            .get(block_slot.first)
+            .map_or(0, |t| t.to);
+        let close_start_byte = self
+            .parsed
+            .sig_tokens
+            .get(block_slot.last)
+            .map_or(self.parsed.original_src.len(), |t| t.from);
+        if self.has_comments_in_range(open_end_byte, close_start_byte) {
+            return false;
+        }
+        elems.is_empty()
+            || can_single_line_block_elem(&self.parsed.ast, elems[0], allow_stmt_in_single_line)
+    }
+
     /// Format a `{ ... }` `Block` node.
     /// When `single_line_budget` is `Some(budget)` and the block has at most 1 simple element
     /// without comments/newlines, tries `{ elem }` within `budget`; otherwise expands multi-line.
@@ -110,6 +155,7 @@ impl<'a> Formatter<'a> {
             block_slot,
             single_line_budget,
             false,
+            true,
             container_kind,
         )
     }
@@ -120,6 +166,7 @@ impl<'a> Formatter<'a> {
         block_slot: TokenSlot,
         single_line_budget: Option<usize>,
         allow_stmt_in_single_line: bool,
+        wrap_single_line_group: bool,
         container_kind: ContainerKind,
     ) -> Doc {
         let ch = self.parsed.ast.get_children(block_node);
@@ -178,15 +225,17 @@ impl<'a> Formatter<'a> {
                 self.cfg_stack.pop_above(self.brace_depth);
                 self.indent_spaces = saved_indent;
 
-                return Doc::group_with_budget(
-                    budget,
-                    Doc::concat([
-                        Doc::str("{"),
-                        Doc::indent(tab, Doc::concat([Doc::Line, elem_doc, semi])),
-                        Doc::Line,
-                        Doc::str("}"),
-                    ]),
-                );
+                let block_doc = Doc::concat([
+                    Doc::str("{"),
+                    Doc::indent(tab, Doc::concat([Doc::Line, elem_doc, semi])),
+                    Doc::Line,
+                    Doc::str("}"),
+                ]);
+                return if wrap_single_line_group {
+                    Doc::group_with_budget(budget, block_doc)
+                } else {
+                    block_doc
+                };
             }
         }
 
@@ -1802,22 +1851,9 @@ impl<'a> Formatter<'a> {
             )
         };
 
-        let if_else_budget = if allow_single_line_if_else
-            && else_node != 0
-            && self.parsed.ast.get_node_kind(else_node) == Some(NodeKind::Block)
-        {
-            Some(self.cfg().width_heuristics().single_line_if_else_max_width)
-        } else {
-            None
-        };
-
-        let then_doc = self.format_block(
-            then_block,
-            then_slot,
-            if_else_budget,
-            ContainerKind::ValueBlock,
-        );
         if else_node == 0 {
+            let then_doc =
+                self.format_block(then_block, then_slot, None, ContainerKind::ValueBlock);
             return Doc::concat([header_group, then_doc]);
         }
 
@@ -1828,6 +1864,26 @@ impl<'a> Formatter<'a> {
         let else_slot = TokenSlot::new(else_tok + 1, slot.last);
         let else_kind = self.parsed.ast.get_node_kind(else_node);
 
+        let coupled_budget = if allow_single_line_if_else
+            && else_kind == Some(NodeKind::Block)
+            && self.is_single_line_block_eligible(then_block, then_slot, false)
+            && self.is_single_line_block_eligible(else_node, else_slot, false)
+        {
+            let b = self.cfg().width_heuristics().single_line_if_else_max_width;
+            (b > 0).then_some(b)
+        } else {
+            None
+        };
+
+        let then_doc = self.format_block_with_policy(
+            then_block,
+            then_slot,
+            coupled_budget,
+            false,
+            false,
+            ContainerKind::ValueBlock,
+        );
+
         match else_kind {
             Some(NodeKind::IfStatement | NodeKind::IfIsMatch | NodeKind::IfMatch) => {
                 let else_if_doc =
@@ -1835,13 +1891,15 @@ impl<'a> Formatter<'a> {
                 Doc::concat([header_group, then_doc, Doc::str(" else "), else_if_doc])
             }
             Some(NodeKind::Block) => {
-                let else_doc = self.format_block(
+                let else_doc = self.format_block_with_policy(
                     else_node,
                     else_slot,
-                    if_else_budget,
+                    coupled_budget,
+                    false,
+                    false,
                     ContainerKind::ValueBlock,
                 );
-                if let Some(budget) = if_else_budget {
+                if let Some(budget) = coupled_budget {
                     Doc::group_with_budget(
                         budget,
                         Doc::concat([header_group, then_doc, Doc::str(" else "), else_doc]),
@@ -2076,16 +2134,19 @@ impl<'a> Formatter<'a> {
                 )
                 .unwrap_or(init_slot.last + 1);
             let else_slot = TokenSlot::new(else_tok + 1, slot.last);
-            let let_else_budget =
-                Some(self.cfg().width_heuristics().single_line_let_else_max_width);
+            let raw_budget = self.cfg().width_heuristics().single_line_let_else_max_width;
+            let coupled_budget = (raw_budget > 0
+                && self.is_single_line_block_eligible(else_block, else_slot, true))
+            .then_some(raw_budget);
             let else_doc = self.format_block_with_policy(
                 else_block,
                 else_slot,
-                let_else_budget,
+                coupled_budget,
                 true,
+                false,
                 ContainerKind::ValueBlock,
             );
-            let doc = Doc::concat([
+            let raw_doc = Doc::concat([
                 Doc::str(kw),
                 pat_doc,
                 ty_doc,
@@ -2094,6 +2155,11 @@ impl<'a> Formatter<'a> {
                 Doc::str(" else "),
                 else_doc,
             ]);
+            let doc = if let Some(budget) = coupled_budget {
+                Doc::group_with_budget(budget, raw_doc)
+            } else {
+                raw_doc
+            };
             return (doc, true);
         }
 
@@ -2455,11 +2521,13 @@ impl<'a> Formatter<'a> {
             Doc::concat([head_doc, Doc::str(" => "), b_doc])
         } else {
             let b_doc = self.format_expr(body, body_slot);
-            Doc::group(Doc::concat([
+            Doc::concat([
                 head_doc,
-                Doc::str(" =>"),
-                Doc::indent(tab, Doc::concat([Doc::Line, b_doc])),
-            ]))
+                Doc::group(Doc::concat([
+                    Doc::str(" =>"),
+                    Doc::indent(tab, Doc::concat([Doc::Line, b_doc])),
+                ])),
+            ])
         };
 
         Doc::concat([attrs_doc, arm_body_doc])
