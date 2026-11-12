@@ -566,8 +566,9 @@ package 取得，不复制成另一份合同，也不保留指向外部临时数
 检查的声明元数据。完整目录可以在某个表达式失败后保留，这不等于保留失败表达式
 的执行许可。Display 使用 S-expression，显示 pending／ready 与所属源码，不输出地址。
 
-源码 VM 构造现在通过同一 Inspection 完成 package 阶段验证，并将已完成声明目录
-交给 VM；首次 detached 表达式不再重新检查整份声明元数据。普通闭合构造、带显式
+源码 VM 构造通过同一 Inspection 完成 package 阶段验证，或消费第 1.9 节中由准备
+阶段保留的完整凭据，再将已完成声明目录交给 VM；首次 detached 表达式不再重新
+检查整份声明元数据。普通闭合构造、带显式
 作用域的构造、resolver-backed 构造及 DefinitionAdmissionSession 均消费当前构造
 预算，随后建表和准入只能使用余额。原先复制一份预算做顶层长度预检、在独立固定
 额度内遍历全部主体、再恢复原预算继续构造的路径已删除。函数主体、默认值、合同及
@@ -670,6 +671,39 @@ opaque metadata 校验与参数域构造。没有 Inspection 的独立 runtime �
   重试、不同 owner 隔离、非法主体和不纯调用不缓存的检查均保留。
 - 7 个本次修改的 Rust 文件格式检查退出 0，`/tmp/luna-tools-y83nvz15/result.json`；
   `git diff --check` 通过。未运行全 workspace 测试或据此宣称整体性能倍数。
+
+### 1.9 required 准备与 VM 之间的完整阶段凭据
+
+required 准备曾经通过程序验证入口做一次完整 phase 遍历，首次 VM 构造又做一次。
+前者使用 phase 工具的默认额度，后者才扣 invocation 的预算。现在准备先固定
+`Arc<Package>`，在 `required_steps` 中完成一次完整遍历，得到
+`nir::phases::PhaseCheckedPackage`。程序算术验证使用其中的源码及机器算术 owner
+集合；RequiredWorld 保留该凭据，后续 CodeSession 冷构造收费复用完整 phase 事实。
+
+凭据只能由成功的全包检查产生，不能由目录存在、单个表达式合法或调用者提供的
+owner 集合拼出。它包括函数体、默认值和合同的阶段检查，不包括类型证明、算术
+安全或 invocation 权限。程序验证仍检查机器算术；VM 仍建立和检查自己的声明表，
+每次调用重新检查 scope、前提和宿主答案；detached 表达式仍单独检查。
+
+凭据按准确的不可变源码 owner 保活，不按声明 ID、长度或内容相等复用。
+同源 CodeSession fork 可以携带；换源码必须重新检查。RequiredWorld 在代码缓存
+租借之外保留它，重入调用也能取得同一稳定事实，不能因外层占用缓存就重复全包
+遍历。查询目录仍按需建立；凭据不冻结活动推断变量、VM 存储或候选事务。
+
+这不等于统一所有阶段预算：程序验证的算术分析仍有自身有界额度，跨 RequiredWorld
+的源码快照仍未共享。活动 invocation receipt 与这里的稳定 phase 凭据不是同一层
+产物；只有后者可以长期保存在不可变源码世界中。
+
+验证工作目录 `/home/fin/luna`，经 `development/check.py --timeout 900 --`：
+
+- `test -p nir -p comptime_interpretor -p program_verification -p luna --lib --test prepared_invocations --test key_code_sessions --test builder_invocations --test staged_invocation_reuse --test cmtt_storage_world --no-fail-fast -- --test-threads=1`
+  退出 0，1,012 项通过，`/tmp/luna-tools-t2wd7ocy/result.json`。覆盖独立 owner、
+  低预算与恢复、当前调用权限、函数体／默认值算术拒绝，以及真实 sysroot 生成。
+- `test -p elaboration --lib program::required::prepared::tests -- --test-threads=1`
+  退出 0，25 项通过，`/tmp/luna-tools-dofwh1fs/result.json`。包含代码租借、重入、
+  unwind 恢复和未查询时不建立目录。两组去重共 1,037 项；不是全 workspace 验收。
+- 12 个修改的 Rust 文件格式检查退出 0，`/tmp/luna-tools-byj4q648/result.json`；
+  `git diff --check` 通过。这里验证的是检查复用及语义边界，没有宣称整体性能倍数。
 
 ## 2. 目标物理结构
 

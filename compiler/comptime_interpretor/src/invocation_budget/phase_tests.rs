@@ -55,6 +55,101 @@ fn unavailable<T>(_: &Expr, _: &mut u64) -> Result<T, Error> {
     })
 }
 
+#[test]
+fn completed_phase_receipt_reaches_cold_sessions_without_granting_body_authority() {
+    let source = std::sync::Arc::new(package(1000));
+    let mut fuel = 100_000;
+    let phase = nir::phases::Inspection::new(&source)
+        .check_package_with_evidence(&mut fuel)
+        .unwrap();
+    let phase_cost = 100_000 - fuel;
+    let copy = std::sync::Arc::new(source.as_ref().clone());
+    assert!(CodeSession::with_phase_checked_source(copy.clone(), &phase).is_err());
+    let seed = CodeSession::with_phase_checked_source(source.clone(), &phase).unwrap();
+    let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    for resolving in [false, true] {
+        let mut session = seed.fork_for_source(source.clone());
+        let mut budget = Budget {
+            steps: phase_cost as u64 - 1,
+            ..Default::default()
+        };
+        let mut vm = if resolving {
+            Interpreter::for_comptime_resolving_in_session(
+                &source,
+                &mut session,
+                SourceResolvers {
+                    types: &solver,
+                    methods: &unavailable,
+                    associated: &unavailable,
+                },
+                &mut budget,
+            )
+        } else {
+            Interpreter::for_comptime_in_session(&source, &mut session, &mut budget)
+        }
+        .unwrap();
+        assert!(budget.steps > 0 && budget.steps < phase_cost as u64 - 1);
+        let malformed = Expr {
+            kind: ExprKind::ComptimeValue(Term::Symbol("wrong domain".into())),
+            ..flag()
+        };
+        assert!(matches!(
+            vm.invoke_comptime_expression(&malformed).unwrap_err().kind,
+            ErrorKind::InvalidPhase(_)
+        ));
+        assert_eq!(
+            vm.invoke_comptime_expression(&flag()).unwrap(),
+            crate::Value::Bool(true)
+        );
+    }
+    // New owners cannot inherit evidence, even when IDs and contents match.
+    let mut changed = seed.fork_for_source(copy.clone());
+    let mut short = Budget {
+        steps: phase_cost as u64 - 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        Interpreter::for_comptime_in_session(&copy, &mut changed, &mut short)
+            .err()
+            .unwrap()
+            .kind,
+        ErrorKind::StepsExhausted
+    );
+    Interpreter::for_comptime_in_session(&copy, &mut changed, &mut Budget::default()).unwrap();
+}
+
+#[test]
+fn completed_phase_receipt_consumes_budget_and_requires_exact_source() {
+    let source = package(0);
+    let checked = nir::phases::Inspection::new(&source)
+        .check_package_with_evidence(&mut 100_000)
+        .unwrap();
+    let mut empty = Budget {
+        steps: 0,
+        ..Default::default()
+    };
+    assert!(matches!(
+        phase_inspection(&source, Some(&checked), &mut empty),
+        Err(Error {
+            kind: ErrorKind::StepsExhausted,
+            ..
+        })
+    ));
+    let mut exact = Budget {
+        steps: 1,
+        ..Default::default()
+    };
+    phase_inspection(&source, Some(&checked), &mut exact).unwrap();
+    assert_eq!(exact.steps, 0);
+    assert!(matches!(
+        phase_inspection(&source.clone(), Some(&checked), &mut Budget::default()),
+        Err(Error {
+            kind: ErrorKind::InvalidCallPlan,
+            ..
+        })
+    ));
+}
+
 fn construct(route: u8, source: &Package, budget: &mut Budget) -> Result<(), Error> {
     let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
     match route {

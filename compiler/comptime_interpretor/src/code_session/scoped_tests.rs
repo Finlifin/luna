@@ -84,8 +84,20 @@ fn unavailable<T>(_: &Expr, _: &mut u64) -> Result<T, Error> {
 
 #[test]
 fn source_forks_share_only_completed_admission_and_keep_code_and_permissions_local() {
+    check_source_forks(false);
+    check_source_forks(true);
+}
+
+fn check_source_forks(phase_checked: bool) {
     let package = source();
-    let mut parent = CodeSession::new(package.clone());
+    let phase = nir::phases::Inspection::new(&package)
+        .check_package_with_evidence(&mut 100_000)
+        .unwrap();
+    let mut parent = if phase_checked {
+        CodeSession::with_phase_checked_source(package.clone(), &phase).unwrap()
+    } else {
+        CodeSession::new(package.clone())
+    };
     let mut sibling = parent.fork_for_source(package.clone());
     let solver = |_: &nir::program::TypePredicate, _: &mut u64| ContractOutcome::Unknown;
     let services = || SourceResolvers {

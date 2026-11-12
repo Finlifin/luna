@@ -2354,15 +2354,31 @@ impl Checker<'_, '_> {
             } else {
                 &self.context
             };
-            crate::verification::flow::validate_machine_operations(&package)
-                .map_err(|mut failure| {
+            // Freeze the source before publishing phase evidence. Arithmetic
+            // safety consumes the same source receipt, and the eventual VM can
+            // reuse that completed traversal without inheriting safety or scope
+            // permissions. Preparation and invocation share one phase allowance.
+            let package = std::sync::Arc::new(package);
+            let mut phase_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let before = phase_fuel;
+            let phase =
+                nir::phases::Inspection::new(&package).check_package_with_evidence(&mut phase_fuel);
+            self.required_steps -= (before - phase_fuel) as u64;
+            let phase = phase.map_err(|failure| crate::verification::flow::Error {
+                source: failure.source,
+                reason: crate::verification::flow::Reason::Phase(failure.message),
+            }).and_then(|phase| {
+                crate::verification::flow::validate_machine_operations_checked(&phase)?;
+                Ok(phase)
+            }).map_err(|mut failure| {
                     failure.source = failure.source.original(&self.expansion_sources).unwrap_or(failure.source);
                     if matches!(failure.reason, crate::verification::flow::Reason::Phase("runtime function is unavailable during comptime execution")) {
                         error(expr.span, format!("required comptime evaluation cannot execute a runtime function or normal-form head: {failure}"))
                     } else { error(expr.span, failure.to_string()) }
                 })?;
             let prepared = PreparedRequired {
-                world: prepared::RequiredWorld::new(package),
+                world: prepared::RequiredWorld::with_phase(package.clone(), &phase)
+                    .map_err(|failure| error(expr.span, failure.to_string()))?,
                 entry,
                 inputs,
                 result_type,

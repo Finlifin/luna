@@ -11,6 +11,7 @@ mod scoped_tests;
 /// retained. A changed world requires a new session, even with identical IDs.
 pub struct CodeSession {
     world: CodeWorld,
+    phase: Option<nir::phases::PhaseCheckedPackage<'static>>,
     graph_indexes: Option<Arc<iir_execution::GraphIndexes>>,
     indexes: Arc<OnceLock<Arc<declaration_index::SourceIndexes>>>,
     resolving_indexes: Arc<OnceLock<Arc<declaration_index::SourceIndexes>>>,
@@ -29,6 +30,7 @@ impl CodeSession {
     pub fn new(package: Arc<Package>) -> Self {
         Self {
             world: CodeWorld::Source(package),
+            phase: None,
             graph_indexes: None,
             indexes: Default::default(),
             resolving_indexes: Default::default(),
@@ -39,6 +41,21 @@ impl CodeSession {
             contextual: Default::default(),
             instances: Default::default(),
         }
+    }
+
+    /// Seed only completed phase evidence from this source owner. The first
+    /// VM must still validate its declaration tables, scope and dispatch mode.
+    pub fn with_phase_checked_source(
+        package: Arc<Package>,
+        phase: &nir::phases::PhaseCheckedPackage<'_>,
+    ) -> Result<Self, Error> {
+        let retained = phase.retain_in(package.clone()).ok_or(Error {
+            kind: ErrorKind::InvalidCallPlan,
+            source: None,
+        })?;
+        let mut session = Self::new(package);
+        session.phase = Some(retained);
+        Ok(session)
     }
 
     /// Start an independent code cache for a source consumer. Only completed
@@ -53,6 +70,7 @@ impl CodeSession {
             world: CodeWorld::Source(package),
             graph_indexes: None,
             indexes: self.indexes.clone(),
+            phase: self.phase.clone(),
             resolving_indexes: self.resolving_indexes.clone(),
             compilation: Default::default(),
             bytecode: Default::default(),
@@ -68,6 +86,7 @@ impl CodeSession {
     pub fn for_iir(graph: Arc<iir::Package>) -> Self {
         Self {
             world: CodeWorld::Graph(graph),
+            phase: None,
             graph_indexes: None,
             indexes: Default::default(),
             resolving_indexes: Default::default(),
@@ -157,8 +176,14 @@ impl<'program> Interpreter<'program> {
         }
         let reserved = *budget;
         budget.steps = 0;
-        let mut vm =
-            Self::for_comptime_with_index(package, &[], reserved, session.indexes.get().cloned())?;
+        let mut vm = Self::for_comptime_with_index_and_scope(
+            package,
+            &[],
+            reserved,
+            session.indexes.get().cloned(),
+            None,
+            session.phase.as_ref(),
+        )?;
         vm.retain_source_indexes(&source, &session.indexes)?;
         budget.steps = vm.remaining_steps();
         Ok(vm)
@@ -304,7 +329,12 @@ impl<'program> Interpreter<'program> {
                 vm.associated_resolver = Some(resolvers.associated);
                 vm
             }
-            None => Self::prepare_resolving_source(package, resolvers, allowance)?,
+            None => Self::prepare_resolving_source(
+                package,
+                resolvers,
+                allowance,
+                session.phase.as_ref(),
+            )?,
         };
         vm.admit_resolving_scope(assumptions, parameters, value_parameters)?;
         vm.retain_source_indexes(&source, &session.resolving_indexes)?;

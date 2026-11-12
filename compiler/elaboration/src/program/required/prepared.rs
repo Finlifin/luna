@@ -11,6 +11,7 @@ mod inputs;
 /// a preparation, this world is immutable; invocation state lives elsewhere.
 pub(super) struct RequiredWorld {
     source: DeclarationSnapshot,
+    phase: Option<nir::phases::PhaseCheckedPackage<'static>>,
     code: Mutex<Option<CodeSession>>,
 }
 
@@ -39,14 +40,33 @@ impl Drop for RequiredCode<'_> {
 }
 
 impl RequiredWorld {
+    #[cfg(test)]
     pub(super) fn new(package: n::Package) -> Arc<Self> {
         // Retaining an owned source does not demand type/member lookup. The
         // query service prepares its directory using the first demand's budget;
         // VM declaration and phase admission remain a separate execution step.
         Arc::new(Self {
             source: DeclarationSnapshot::new(Arc::new(package)),
+            phase: None,
             code: Mutex::new(None),
         })
+    }
+
+    pub(super) fn with_phase(
+        package: Arc<n::Package>,
+        phase: &nir::phases::PhaseCheckedPackage<'_>,
+    ) -> Result<Arc<Self>, comptime_interpretor::Error> {
+        let phase = phase
+            .retain_in(package.clone())
+            .ok_or(comptime_interpretor::Error {
+                kind: comptime_interpretor::ErrorKind::InvalidCallPlan,
+                source: None,
+            })?;
+        Ok(Arc::new(Self {
+            source: DeclarationSnapshot::new(package),
+            phase: Some(phase),
+            code: Mutex::new(None),
+        }))
     }
 
     fn code(&self) -> RequiredCode<'_> {
@@ -55,7 +75,13 @@ impl RequiredWorld {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take()
-            .unwrap_or_else(|| CodeSession::new(self.source.package().clone()));
+            .unwrap_or_else(|| match &self.phase {
+                Some(phase) => {
+                    CodeSession::with_phase_checked_source(self.source.package().clone(), phase)
+                        .expect("required world retains phase evidence from its immutable source")
+                }
+                None => CodeSession::new(self.source.package().clone()),
+            });
         RequiredCode {
             world: self,
             session: Some(session),
@@ -814,6 +840,44 @@ mod tests {
             );
             assert!(prepared.invoke(&mut 100_000, Span::default()).is_err());
         }
+    }
+
+    #[test]
+    fn phase_evidence_survives_reentrant_code_leases() {
+        let mut prepared = literal_preparation(false);
+        let mut package = prepared.world.package().clone();
+        let body = package.functions[0].body.clone();
+        package.functions[0].body.kind = K::Block {
+            statements: vec![body.clone(); 1000],
+            result: Some(Box::new(body)),
+        };
+        let package = Arc::new(package);
+        let mut fuel = 100_000;
+        let phase = nir::phases::Inspection::new(&package)
+            .check_package_with_evidence(&mut fuel)
+            .unwrap();
+        let phase_cost = 100_000 - fuel;
+        prepared.world = RequiredWorld::with_phase(package.clone(), &phase).unwrap();
+        let outer = prepared.world.code();
+        for _ in 0..2 {
+            let mut nested = prepared.world.code();
+            let mut budget = comptime_interpretor::Budget {
+                steps: phase_cost as u64 - 1,
+                ..Default::default()
+            };
+            comptime_interpretor::Interpreter::for_comptime_in_session(
+                &package,
+                nested.session(),
+                &mut budget,
+            )
+            .unwrap();
+            assert!(budget.steps > 0);
+        }
+        drop(outer);
+        assert_eq!(
+            prepared.invoke(&mut 100_000, Span::default()).unwrap().0,
+            Value::Bool(true)
+        );
     }
 
     #[test]

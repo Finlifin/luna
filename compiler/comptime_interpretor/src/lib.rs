@@ -2044,7 +2044,7 @@ impl<'a> Interpreter<'a> {
         budget: Budget,
         positions: Option<Arc<declaration_index::SourceIndexes>>,
     ) -> Result<Self, Error> {
-        Self::for_comptime_with_index_and_scope(package, assumptions, budget, positions, None)
+        Self::for_comptime_with_index_and_scope(package, assumptions, budget, positions, None, None)
     }
 
     fn for_comptime_with_index_and_scope(
@@ -2053,6 +2053,7 @@ impl<'a> Interpreter<'a> {
         mut budget: Budget,
         positions: Option<Arc<declaration_index::SourceIndexes>>,
         scope: Option<source_state::InvocationScope<'_>>,
+        phase: Option<&nir::phases::PhaseCheckedPackage<'a>>,
     ) -> Result<Self, Error> {
         // Index publication certifies successful phase validation of this exact
         // owned snapshot. Never transfer that evidence by declaration identity
@@ -2061,7 +2062,7 @@ impl<'a> Interpreter<'a> {
             .filter(|index| scope.is_none() && std::ptr::eq(package, index.source.as_ref()));
         let inspection = match &positions {
             Some(index) => index.phase_inspection.clone(),
-            None => invocation_budget::prepare_phase_inspection(package, &mut budget)?,
+            None => invocation_budget::phase_inspection(package, phase, &mut budget)?,
         };
         let mut interpreter = Self::with_assumptions_and_index(
             package,
@@ -2116,6 +2117,7 @@ impl<'a> Interpreter<'a> {
                 types: parameters,
                 values: value_parameters,
             }),
+            None,
         )?;
         budget.steps = interpreter.remaining_steps();
         Ok(interpreter)

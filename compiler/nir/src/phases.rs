@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod comptime_storage;
 mod declarations;
 mod inspection;
-pub use inspection::Inspection;
+pub use inspection::{Inspection, PhaseCheckedPackage};
 #[cfg(test)]
 mod inspection_tests;
 use crate::member_types;

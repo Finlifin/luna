@@ -5513,6 +5513,25 @@ pub fn validate_machine_operations(package: &nir::program::Package) -> Result<()
         source: e.source,
         reason: Reason::Phase(e.message),
     })?;
+    validate_machine_owners(package, &owners)
+}
+
+/// Arithmetic obligations remain separate from the completed phase traversal.
+/// The receipt owns the source association; callers cannot supply another
+/// package or an incomplete set of arithmetic owners.
+pub fn validate_machine_operations_checked(
+    phase: &nir::phases::PhaseCheckedPackage<'_>,
+) -> Result<(), Error> {
+    validate_machine_owners(phase.package(), phase.machine_arithmetic_functions())
+}
+
+#[cfg(test)]
+mod phase_evidence_tests;
+
+fn validate_machine_owners(
+    package: &nir::program::Package,
+    owners: &std::collections::BTreeSet<nir::DeclarationId>,
+) -> Result<(), Error> {
     for function in package.functions.iter().chain(&package.quote_templates) {
         if !owners.contains(&function.declaration) {
             continue;

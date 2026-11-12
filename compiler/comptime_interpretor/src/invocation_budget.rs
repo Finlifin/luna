@@ -22,6 +22,26 @@ pub(super) fn prepare_phase_inspection<'a>(
     Ok(inspection)
 }
 
+/// Reuse a completed package traversal only in its original immutable source.
+/// Detached expressions, invocation premises and VM admission remain separate.
+pub(super) fn phase_inspection<'a>(
+    package: &'a Package,
+    checked: Option<&nir::phases::PhaseCheckedPackage<'a>>,
+    budget: &mut Budget,
+) -> Result<nir::phases::Inspection<'a>, Error> {
+    let Some(checked) = checked else {
+        return prepare_phase_inspection(package, budget);
+    };
+    budget.steps = budget.steps.checked_sub(1).ok_or(Error {
+        kind: ErrorKind::StepsExhausted,
+        source: None,
+    })?;
+    checked.inspection_for(package).ok_or(Error {
+        kind: ErrorKind::InvalidCallPlan,
+        source: None,
+    })
+}
+
 /// Reserve top-level world traversal and indexing before allocating VM tables.
 /// Nested type, contract and substitution work keeps its separate existing cost.
 pub(super) fn charge_world_tables(package: &Package, budget: &mut Budget) -> Result<(), Error> {

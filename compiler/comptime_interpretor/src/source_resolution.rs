@@ -36,7 +36,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Self, Error> {
         let reserved = *budget;
         budget.steps = 0;
-        let mut interpreter = Self::prepare_resolving_source(package, resolvers, reserved)?;
+        let mut interpreter = Self::prepare_resolving_source(package, resolvers, reserved, None)?;
         interpreter.admit_resolving_scope(assumptions, parameters, value_parameters)?;
         budget.steps = interpreter.remaining_steps();
         Ok(interpreter)
@@ -48,6 +48,7 @@ impl<'a> Interpreter<'a> {
         package: &'a Package,
         resolvers: SourceResolvers<'a>,
         mut reserved: Budget,
+        phase: Option<&nir::phases::PhaseCheckedPackage<'a>>,
     ) -> Result<Self, Error> {
         if !package.dispatch_instances.is_empty() {
             return Err(Error {
@@ -55,7 +56,7 @@ impl<'a> Interpreter<'a> {
                 source: None,
             });
         }
-        let inspection = invocation_budget::prepare_phase_inspection(package, &mut reserved)?;
+        let inspection = invocation_budget::phase_inspection(package, phase, &mut reserved)?;
         let mut interpreter = Self::with_assumptions_and_index(
             package,
             &[],

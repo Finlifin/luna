@@ -18,6 +18,47 @@ pub struct Inspection<'a> {
     declarations: Arc<OnceLock<Declarations>>,
 }
 
+/// Completed phase traversal of one immutable package, including defaults and
+/// contracts. This is not typing, arithmetic safety or invocation authority.
+#[derive(Clone)]
+pub struct PhaseCheckedPackage<'a> {
+    inspection: Inspection<'a>,
+    machine_owners: Arc<std::collections::BTreeSet<crate::DeclarationId>>,
+}
+
+impl<'a> PhaseCheckedPackage<'a> {
+    pub fn package(&self) -> &Package {
+        self.inspection.package()
+    }
+
+    pub fn machine_arithmetic_functions(
+        &self,
+    ) -> &std::collections::BTreeSet<crate::DeclarationId> {
+        &self.machine_owners
+    }
+
+    pub fn inspection_for(&self, package: &Package) -> Option<Inspection<'a>> {
+        std::ptr::eq(self.package(), package).then(|| self.inspection.clone())
+    }
+
+    pub fn retain_in(&self, source: Arc<Package>) -> Option<PhaseCheckedPackage<'static>> {
+        Some(PhaseCheckedPackage {
+            inspection: self.inspection.retain_in(source)?,
+            machine_owners: Arc::clone(&self.machine_owners),
+        })
+    }
+}
+
+impl std::fmt::Display for PhaseCheckedPackage<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(phase-checked-package (machine-arithmetic")?;
+        for owner in self.machine_owners.iter() {
+            write!(f, " {owner}")?;
+        }
+        write!(f, ") {})", self.inspection)
+    }
+}
+
 impl<'a> Inspection<'a> {
     pub fn new(package: &'a Package) -> Self {
         Self {
@@ -73,6 +114,18 @@ impl<'a> Inspection<'a> {
     ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
         let declarations = self.declarations(super::SourceRange { start: 0, end: 0 }, fuel)?;
         PhaseContext::new(self.package(), declarations).check_package(fuel)
+    }
+
+    /// Publish evidence only after the entire package traversal succeeds.
+    pub fn check_package_with_evidence(
+        &self,
+        fuel: &mut usize,
+    ) -> Result<PhaseCheckedPackage<'a>, Error> {
+        let machine_owners = self.check_package(fuel)?;
+        Ok(PhaseCheckedPackage {
+            inspection: self.clone(),
+            machine_owners: Arc::new(machine_owners),
+        })
     }
 
     fn declarations(
@@ -192,6 +245,53 @@ mod tests {
             }],
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn completed_phase_evidence_requires_all_bodies_and_retains_exact_source() {
+        let source = source();
+        let inspection = Inspection::new(&source);
+        assert!(inspection.check_package_with_evidence(&mut 2).is_err());
+        let checked = inspection
+            .check_package_with_evidence(&mut 100_000)
+            .unwrap();
+        let copied = Arc::new(source.as_ref().clone());
+        assert!(checked.inspection_for(&copied).is_none());
+        assert!(checked.retain_in(copied).is_none());
+        let retained = checked.retain_in(source.clone()).unwrap();
+        let weak = Arc::downgrade(&source);
+        let dump = retained.to_string();
+        assert!(dump.starts_with("(phase-checked-package (machine-arithmetic"));
+        assert!(dump.contains("\\\"name\\\"\\nnext"));
+        drop(checked);
+        drop(inspection);
+        drop(source);
+        assert!(weak.upgrade().is_some());
+        assert!(retained.inspection_for(retained.package()).is_some());
+        drop(retained);
+        assert!(weak.upgrade().is_none());
+
+        let mut invalid = Package {
+            functions: vec![identity()],
+            ..Default::default()
+        };
+        invalid.functions[0].body = Expr {
+            kind: K::ComptimeValue(Term::Symbol("wrong domain".into())),
+            ..flag()
+        };
+        let inspection = Inspection::new(&invalid);
+        // A complete declaration directory cannot certify invalid bodies.
+        inspection.check(&flag(), &mut 100_000).unwrap();
+        assert!(inspection.admitted_parameter_domains(&invalid).is_some());
+        for _ in 0..2 {
+            assert!(matches!(
+                inspection.check_package_with_evidence(&mut 100_000),
+                Err(Error {
+                    kind: super::super::ErrorKind::Invalid,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
