@@ -4,13 +4,14 @@ use platform.{linux as linux_impl, unix as unix_impl};
 use io_impl.{errors, writer};
 use fs_impl.file;
 use mem_impl.layout;
-use fmt_impl.{arguments, display};
+use fmt_impl.arguments;
 
 pub mod os {
     pub mod linux { pub use linux_impl.*; }
     pub mod unix { pub use unix_impl.*; }
 }
 pub mod io {
+    pub use builtin.fmt.ByteWriter;
     pub use errors.Error;
     pub use writer.{Writer, stdout, stderr, write_all};
     pub use unix_impl.read_byte;
@@ -18,11 +19,11 @@ pub mod io {
 pub mod fs { pub use file.{File, remove_file}; }
 pub mod mem { pub use layout.Layout; }
 pub mod fmt {
-    pub use display.Display;
+    pub use builtin.fmt.Display;
     pub use arguments.{print, println, eprint, eprintln, print_value, println_value};
 }
 pub mod prelude {
     pub use builtin.prelude.*;
     pub use arguments.{print, println, eprint, eprintln, print_value, println_value};
-    pub use display.Display;
+    pub use builtin.fmt.Display;
 }

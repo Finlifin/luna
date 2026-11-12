@@ -69,8 +69,16 @@ fn println_and_display_preserve_bytes_and_external_effects() {
         use std.prelude.*;
         struct Label { value: u32 }
         impl Display for Label {
-            fn write(self, output: std.io.Writer) -> !std.io.Error void {
-                output.write_all<"custom=">()!;
+            fn write(self, output: *W) -> !W.as(std.io.ByteWriter).Error void
+            where W :- std.io.ByteWriter
+            {
+                output.write_byte(99)!;
+                output.write_byte(117)!;
+                output.write_byte(115)!;
+                output.write_byte(116)!;
+                output.write_byte(111)!;
+                output.write_byte(109)!;
+                output.write_byte(61)!;
                 self.value.write(output)
             }
         }
@@ -305,4 +313,94 @@ fn discard_result_keeps_only_program_output() {
     let output = case.run();
     success(&output);
     assert_eq!(output.stdout, b"hello\n");
+}
+
+#[test]
+fn builtin_display_borrows_stateful_writers_and_preserves_their_errors() {
+    let case = Case::new(
+        r#"
+        use builtin.fmt.ByteWriter;
+        enum SinkError { full(u8) }
+        struct Sink { count: u64, limit: u64, bytes: u64, attempts: u64 }
+        impl ByteWriter for Sink {
+            assoc Error: Type = SinkError;
+            fn write_byte(*self, byte: u8) -> !SinkError void {
+                assumes self.attempts.* < 16;
+                self.attempts.* = self.attempts.* + 1;
+                if self.count.* >= self.limit.* { return error SinkError.full(byte); }
+                assumes self.count.* < 8;
+                assumes self.bytes.* <= 72057594037927935;
+                let next_count = self.count.* + 1;
+                let next_bytes = self.bytes.* * 256 + byte'bitvec.as(u64);
+                self.bytes.* = next_bytes;
+                self.count.* = next_count;
+            }
+        }
+        fn render(value: T, sink: *W) -> !W.as(ByteWriter).Error void
+        where T :- Display, W :- ByteWriter
+        {
+            value.write(sink)
+        }
+        fn run() -> bool {
+            var sink = Sink { count: 0, limit: 2, bytes: 0, attempts: 0 };
+            let value: u32 = 12345;
+            let failed = render(value, sink.ref) match {
+                _! => false,
+                error SinkError.full(byte) => byte == 51,
+            };
+            let prefix = sink.count == 2 and sink.attempts == 3 and sink.bytes == 12594;
+            sink.limit = 8;
+            let negative: i8 = -7;
+            let resumed = render(negative, sink.ref) match { _! => true, error _ => false };
+            let text = render(true, sink.ref) match { _! => true, error _ => false };
+            let full = render(false, sink.ref) match {
+                _! => false,
+                error SinkError.full(byte) => byte == 102,
+            };
+            failed and prefix and resumed and text and full and sink.count == 8
+                and sink.attempts == 10 and sink.bytes == 3544945572894111077
+        }
+    "#,
+    );
+    for level in ["0", "3"] {
+        success(&case.build(level));
+        let output = case.run();
+        success(&output);
+        assert_eq!(output.stdout, b"(bool true)\n");
+    }
+}
+
+#[test]
+fn display_writes_through_a_borrowed_file_without_transferring_ownership() {
+    let case = Case::new(
+        r#"
+        use std.fs.File;
+        fn exercise() -> !std.io.Error bool {
+            var file = File.create<"formatted.txt">()!;
+            let value: u32 = 42;
+            value.write(file.ref)!;
+            true.write(file.ref)!;
+            file.close()!;
+            var reader = File.open<"formatted.txt">()!;
+            let a = reader.read_byte()!;
+            let b = reader.read_byte()!;
+            let c = reader.read_byte()!;
+            let d = reader.read_byte()!;
+            let e = reader.read_byte()!;
+            let f = reader.read_byte()!;
+            let end = reader.read_byte()!;
+            reader.close()!;
+            std.fs.remove_file("formatted.txt")!;
+            (a matches 52?) and (b matches 50?) and (c matches 116?)
+                and (d matches 114?) and (e matches 117?) and (f matches 101?)
+                and (end matches null)
+        }
+        fn run() -> bool { exercise() match { value! => value, error _ => false } }
+    "#,
+    );
+    success(&case.build("3"));
+    let output = case.run();
+    success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+    assert!(!case.0.join("formatted.txt").exists());
 }

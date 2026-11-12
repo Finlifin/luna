@@ -83,12 +83,45 @@ List 的 append_all、固定快照 foreach、逐元素 Eq 短路和 Hash 次数�
 格式说明可以在 comptime 准备，runtime 以明确 writer 能力执行写入。
 fmt 参数的具体公开签名仍需按既定语言能力推敲，本设计不登记一个假定的 Rust 式 API。
 
-当前首版 `std.fmt.Display` 直接接收 std.io.Writer，尚未兑现上述基础协议位置与
-通用 writer 能力：不能把这份临时接口当成最终设计。后续迁移先在 builtin 定义
-不依赖 std 的写入协议，使 Display 保留实际 writer 的错误和借用契约；再让 stdout、
-文件借用、缓冲和用户 writer 提供实现。只将现有 trait 搬到 builtin、仍让其签名
-引用 std.io.Writer，会倒置依赖，不能作为完成。现有公开再导出可用于保持声明身份，
-不得复制出两个同名 Display；comptime 文本限制也不能变成语言规则。
+当前已将 `Display` 与单字节 `ByteWriter` 协议移到 builtin，标量格式化只依赖
+`W :- ByteWriter`，接收 `*W` 并返回 `!W.as(ByteWriter).Error void`。stdout 和
+File 提供具体实现；File 保持自身关闭责任，用户 writer 可以是不可复制的有状态
+对象。std.fmt.Display／std.io.ByteWriter 通过再导出保持同一声明身份。
+
+这一阶段交付的是同步字节写入：成功接受一字节，失败不接受本次字节；格式化首次
+失败即停止，已经写入的前缀保留。调用者不能从错误中推断整次格式化没有副作用，
+也不能盲目重试整个值。带进度的批量 API、缓冲、Debug 与格式计划仍未交付。
+
+迁移时验证了普通泛型方法、关联错误及 borrowed self 的现有通路，也暴露出两个
+独立基础缺口，不能将它们隐藏成库规则：
+
+- [兄弟字段范围复现](repros/writer-sibling-range.fl)：flow 的外部指针写入会
+  `forget_reads` 并 havoc，导致写一个字段后，另一个字段的已检查范围丢失。
+  这是程序事实精度问题，不交给 PTC；完整修复应使用已验证的写入 footprint 和
+  当前地址身份，仍使同字段、可能别名、地址重绑定及 opaque call 的旧事实失效。
+  writer 状态测试先计算新状态再写入，保持相同错误、字节、次数和恢复契约；
+  独立复现仍要求原顺序合法，不能改成预期拒绝。
+- [跨阶段文本观察](repros/staged-text-observations.fl)：IIR staging 的 `wrap`
+  将已完成的 comptime 参数恢复成 runtime Let；多个观察会按 runtime str 移动
+  规则冲突。要结合 Splice 实例、文本来源和阶段访问完成交接，不能全局替换所有
+  Local 为常量、复制 producer、给 str 强加 Copy 或只在 writer 处特判。通用文本
+  默认方法没有交付；现有 std 的 comptime 文本输出范围也不是最终语言规则。
+
+本阶段验证工作目录 `/home/fin/luna`，使用真实 sysroot 与资源检查；沿用工作区
+原有的资源分析排版修改，不宣称为干净 HEAD 验收：
+
+| 命令（均经 development/check.py --timeout 900） | 结果与证据 |
+| --- | --- |
+| `-- test -p luna --test library_std -- --test-threads=1` | 退出 0，10 项通过；`/tmp/luna-tools-3jasp96j/result.json`。覆盖 O0/O3 非 Copy writer、自定义关联错误、准确前缀/写入次数、失败后恢复、File 借用、原 println 和系统错误路径 |
+| `-- test -p luna --test sysroot_preludes --test trait_phases -- --test-threads=1` | 退出 0，15 + 73 项通过；`/tmp/luna-tools-p54hrida/result.json`。覆盖默认导出身份、真实库与阶段选择 |
+| `-- run -p luna -- build development/repros/writer-sibling-range.fl --entry run --sysroot library --fuel 10000000 --output /tmp/luna-writer-sibling-range` | 退出 1，最后的 count 加法范围未证明；`/tmp/luna-tools-f4e63q6x/result.json`。这是未修复正例，不是通过的拒绝测试 |
+| `-- run -p luna -- build development/repros/staged-text-observations.fl --entry run --sysroot library --fuel 10000000 --output /tmp/luna-staged-text-observations` | 退出 1，第二次 text 读取报告 unavailable value；`/tmp/luna-tools-g5un6efs/result.json`。同样保留为待修复正例 |
+
+Rust 测试文件经 `development/command.py --timeout 120 -- rustfmt --edition 2024
+--config skip_children=true compiler/luna/tests/library_std.rs` 格式化，退出 0，
+证据 `/tmp/luna-tools-v5no2sdu/result.json`。没有运行全 workspace 测试。
+`python3 -B development/demo_println.py` 重新构建并运行退出 0，证据
+`/tmp/luna-tools-1hq4va6r/result.json`；`/tmp/flurry-println` 已更新到迁移后的协议。
 
 目标 writer 支持组合：缓冲、限额、计数、编码、错误转换和部分写入。
 接口需说明实际写入量、失败时保留的状态、后续继续写入的许可，以及缓冲 flush/drop 行为。
@@ -155,7 +188,7 @@ meta 的布局观察、attrs.abi 和 builtin 的目标数值接口需通过真�
 | [StructBuilder](../library/meta/definitions/structs.fl)与 [FieldDescription](../library/meta/definitions/fields.fl) | 真正的字段编辑、Object 描述解析、Build 调用；不是仅有接口声明 | 保留顺序与编辑失败语义，将 Build 接到通用定义准备/发布服务 |
 | [attrs 根](../library/attrs/lib.fl) | comptime_phase 值及 abi Object 构造器 | 普通名称解析、属性求值、目标消费者分别检查；有构造器不等于 ABI 已实现 |
 | [build 根](../library/build/lib.fl) | mode、target、package_metadata 与类型包装 | 来源绑定、实际字段依赖、实例和目标；任务/工具接口按构建方案另行接通 |
-| [std 根](../library/std/lib.fl) | builtin 再导出和显式 prelude | 拥有型数据、allocator、writer 与 runtime 仍需实际实现，目录 README 不是 API |
+| [std 根](../library/std/lib.fl) | 显式 prelude、Linux 文件/字节 I/O、Layout、println；builtin 格式协议的 writer 实现 | 动态文本、拥有型数据、allocator、批量进度、格式计划及 runtime 仍需贯通 |
 | [verification 根](../library/verification/lib.fl) | 包身份和空 prelude | 保留边界；高级库暂缓不削弱编译器 safe 检查 |
 
 [真实 sysroot 装配](../compiler/luna/src/frontend.rs)枚举六包，并把除 std 之外的提供者

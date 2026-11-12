@@ -1,4 +1,5 @@
 use std.os.unix;
+use builtin.fmt.ByteWriter;
 use io_impl.errors.Error;
 
 {- A complete text write retries short transfers and EINTR. A zero transfer
@@ -19,7 +20,10 @@ impl Clone for Writer { fn clone(*self) -> Self { Writer { descriptor: self.desc
 impl Copy for Writer {}
 impl Writer {
     pub fn write_all(self) -> !Error void where text: str { io_impl.writer.write_all<text>(self.descriptor) }
-    pub fn write_byte(self, byte: u8) -> !Error void { unix.write_byte(self.descriptor, byte) }
+}
+impl ByteWriter for Writer {
+    assoc Error: Type = io_impl.errors.Error;
+    fn write_byte(*self, byte: u8) -> !Error void { unix.write_byte(self.descriptor.*, byte) }
 }
 pub fn stdout() -> Writer { Writer { descriptor: unix.stdout } }
 pub fn stderr() -> Writer { Writer { descriptor: unix.stderr } }

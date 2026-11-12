@@ -1,0 +1,11 @@
+{- Positive staging case: text is a completed comptime input, observed twice.
+   Its producers must not be replayed, and it must not silently become an owned
+   runtime local consumed by the first observation. The current residual
+   reconstruction triggers an unavailable-value move error on the second use.
+   This is not permission to mark runtime str Copy or skip resource checks. -}
+fn observations(comptime text: str, index: u64) -> bool {
+    let length = builtin.compiler.str_byte_length(text);
+    let byte = builtin.compiler.str_byte(text, index);
+    length == 2 and (byte matches 66?)
+}
+fn run() -> bool { observations("AB", 1) }

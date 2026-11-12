@@ -1,3 +1,27 @@
 # 格式协议
 
-待实现。Display/Debug 的基础协议属于 builtin，不能依赖 std.String。格式计划、选项和输出适配归 std/fmt；此目录尚未承诺具体方法签名。
+`builtin.fmt.Display` 和 `builtin.fmt.ByteWriter` 是不依赖 std、String 或
+allocator 的 runtime 协议。Display 同时进入 builtin.prelude；ByteWriter
+通过具名导入使用。std.fmt.Display 与 std.io.ByteWriter 只是同一声明的再导出。
+
+```flurry
+use builtin.fmt.ByteWriter;
+
+fn write_value(value: T, output: *W) -> !W.as(ByteWriter).Error void
+where T :- Display, W :- ByteWriter
+{
+    value.write(output)
+}
+```
+
+ByteWriter 借用接收者，不要求 Clone/Copy。write_byte 成功恰好接受一个字节；
+失败时不接受本次字节，前面已经接受的字节保持有效，错误域由具体 writer 的
+关联 Error 决定。Display 不把错误转换成 std.io.Error，也不消费 writer。
+
+当前协议只承诺单字节操作；多字节格式化按顺序调用，首次失败即停止，不回滚
+已写前缀，也不返回已写长度。调用者不能在失败后盲目重试整个格式化操作；恢复
+方式由具体 writer 的状态与错误契约决定。完整文本/批量写入需要独立的进度契约。
+
+整数和 bool 的 Display 实现在此目录。std 的文件与标准输出提供 ByteWriter
+实现；用户 writer 可以维护自己的状态、错误和重试策略，不需要文件描述符。
+Debug、格式选项、完整格式计划、动态文本和批量进度接口仍未交付。

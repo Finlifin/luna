@@ -1,0 +1,10 @@
+{-
+    A synchronous byte sink. Success accepts the byte exactly once. Failure
+    accepts no byte from that operation; earlier successful writes remain.
+    The receiver is borrowed, so stateful sinks need neither Clone nor Copy.
+-}
+pub trait ByteWriter {
+    assoc Error: Type;
+
+    fn write_byte(*self, byte: u8) -> !Error void;
+}

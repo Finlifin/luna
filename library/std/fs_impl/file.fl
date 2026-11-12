@@ -1,4 +1,5 @@
 use std.os.{linux, unix};
+use builtin.fmt.ByteWriter;
 use io_impl.errors.{Error, check};
 
 {- File owns one descriptor. Drop closes it once; close reports errors and
@@ -35,3 +36,8 @@ impl File {
     }
 }
 pub fn remove_file(comptime path: str) -> !Error void { let result = check(linux.unlink<path>())!; }
+
+impl ByteWriter for File {
+    assoc Error: Type = io_impl.errors.Error;
+    fn write_byte(*self, byte: u8) -> !Error void { unix.write_byte(self.descriptor.*, byte) }
+}

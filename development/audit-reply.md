@@ -44,7 +44,8 @@ telescope 构造，公开 NF 绑定直接借用参数域，退役为取得签名
 
 - D11/D12 的“Splice 缺席、std 空壳”已过时：builtin 现有普通标量的 Splice 实现，
   std 已有经过资源检查的 Linux 宿主接口。runtime str 来源、通用外部 ABI、allocator
-  和完整格式化仍未完成；首版 Display 与通用 writer 的依赖方向尚需迁移，见
+  和完整格式化仍未完成；基础 Display/ByteWriter 现已迁回 builtin，std 提供实现
+  与同身份再导出，阶段文本重建与更完整的写入契约仍待接通，见
   [格式化边界](libraries-and-delivery.md#5-格式化与-writer)。不能把 Linux 专用 intrinsic
   误称为 `attrs.abi` 已实现。
 - D01 中“接口契约必然逃回树解释器”不再符合当前路径：bytecode_interface 交付的

@@ -25,7 +25,11 @@ fn greet() -> !std.io.Error void {
 
 `println` 当前接收一段 comptime 文本；花括号原样输出，没有 `{}` 参数替换。
 `print_value`/`println_value` 用普通 `Display` trait 输出运行时 bool 和机器整数，
-用户也可以实现该 trait。浮点格式化、任意长度异构参数展开尚未交付。
+用户也可以实现该 trait。Display 来自 builtin.fmt，接收 `*W`，其中
+`W :- builtin.fmt.ByteWriter`，返回 `!W.as(ByteWriter).Error void`。
+std.io.Writer 与 File 都实现 ByteWriter；`value.write(file.ref)` 借用文件，
+不转移关闭责任。泛型 writer 无需 Clone/Copy，也不必使用 std.io.Error。
+浮点格式化、任意长度异构参数展开尚未交付。
 
 路径与文本暂用 comptime 输入；底层显式子句例如
 `std.os.linux.open<"data.txt">(0, 0)`、`stdout().write_all<"text">()`。
