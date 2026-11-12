@@ -128,6 +128,28 @@ impl fmt::Display for Head {
     }
 }
 
+/// Form the same stable callable telescope from borrowed source or published
+/// declaration domains. Requirements, bodies and layout roles are not copied
+/// to recover a signature. Their separate admission checks remain necessary.
+pub fn callable_type_from_declarations<'a>(
+    inputs: impl IntoIterator<Item = (DeclarationId, Sort, &'a Term)>,
+    collector: Option<usize>,
+    fuel: &mut usize,
+) -> Result<Term, crate::type_computations::Error> {
+    use crate::type_computations::{Error, charge_term};
+    let mut telescope = crate::callable_types::DeclarationTelescope::default();
+    for (declaration, sort, domain) in inputs {
+        telescope.push(declaration, sort, domain, fuel)?;
+    }
+    let ty = Term::NormalFormFunction(
+        Box::new(telescope.finish(&Term::Primitive(Primitive::Type), fuel)?),
+        collector,
+    );
+    charge_term(&ty, fuel)?;
+    ty.check_scope(&[]).map_err(Error::Scope)?;
+    Ok(ty)
+}
+
 /// Representation admission with explicit resource failure. Ordinary domain
 /// rejection is false; exhausted inspection must not become an invalid type.
 pub fn supported_input_type_with_collections_budgeted(
@@ -424,33 +446,31 @@ impl Head {
         crate::DeclarationSubstitution::bounded(&ids, &domains, arguments, frames, fuel)
     }
     /// Reconstruct the callable's dependent input frame without unfolding the head.
-    pub fn callable_type(&self) -> Result<Term, crate::TypeError> {
-        let mut binders = Vec::new();
-        let mut parameters = Vec::new();
-        for input in &self.parameters {
-            let sort = if input.kind == Kind::Type {
-                Sort::Type
-            } else {
-                Sort::ComptimeValue
-            };
-            parameters.push(crate::Parameter {
-                sort,
-                ty: input.ty.abstract_parameters(&binders)?,
-            });
-            binders.push(crate::DeclarationParameter {
-                declaration: input.declaration,
-                sort,
-            });
-        }
-        let ty = Term::NormalFormFunction(
-            Box::new(Term::Function {
-                parameters,
-                result: Box::new(Term::Primitive(Primitive::Type)),
+    pub fn callable_type(&self) -> Result<Term, crate::type_computations::Error> {
+        self.callable_type_in(&mut 100_000)
+    }
+
+    /// The receiving caller owns the allowance for signature construction and
+    /// scope checking. This forms no input values and never executes the head.
+    pub fn callable_type_in(
+        &self,
+        fuel: &mut usize,
+    ) -> Result<Term, crate::type_computations::Error> {
+        callable_type_from_declarations(
+            self.parameters.iter().map(|input| {
+                (
+                    input.declaration,
+                    if input.kind == Kind::Type {
+                        Sort::Type
+                    } else {
+                        Sort::ComptimeValue
+                    },
+                    &input.ty,
+                )
             }),
             self.collector,
-        );
-        ty.check_scope(&[])?;
-        Ok(ty)
+            fuel,
+        )
     }
     /// Inspect the trusted list representation without unfolding its opaque head.
     pub fn list_element<'a>(&self, ty: &'a Term) -> Option<&'a Term> {

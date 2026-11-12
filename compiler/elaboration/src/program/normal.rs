@@ -455,23 +455,46 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         self.ensure_signature(owner, expr.span)?;
         self.ensure_contract(owner, expr.span)?;
-        let head = self.normal_form_head_metadata(owner).ok_or_else(|| {
-            error(
-                expr.span,
-                "normal-form callable is missing declaration metadata",
-            )
-        })?;
-        let ty = head
-            .callable_type()
-            .map_err(|reason| error(expr.span, reason.to_string()))?;
+        let ty = self.normal_form_callable_type(owner, expr.span)?;
         if let Some(expected) = expected {
             self.require_expression(&ty, expected, expr.span)?;
         }
         Ok(n::Expr {
             source: source(expr.span),
             ty,
-            kind: K::Function(head.declaration),
+            kind: K::Function(declaration(self.package, &self.package_identities, owner)),
         })
+    }
+
+    pub(super) fn normal_form_callable_type(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<Term, Error> {
+        let inputs = self
+            .normal_parameters
+            .get(&owner)
+            .ok_or_else(|| error(span, "normal-form callable is missing declaration metadata"))?;
+        let collector = self.clause_has_collector(owner).then(|| inputs.len() - 1);
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let signature = nir::normal_forms::callable_type_from_declarations(
+            inputs.iter().map(|(declaration, _, domain)| {
+                (
+                    *declaration,
+                    if *domain == p(P::Type) {
+                        Sort::Type
+                    } else {
+                        Sort::ComptimeValue
+                    },
+                    domain,
+                )
+            }),
+            collector,
+            &mut fuel,
+        );
+        self.required_steps -= (before - fuel) as u64;
+        signature.map_err(|reason| error(span, reason.to_string()))
     }
 
     pub(super) fn normal_form_constant_target(

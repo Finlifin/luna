@@ -169,12 +169,7 @@ impl Interpreter<'_> {
             *fuel = fuel
                 .checked_sub(head.parameters.len())
                 .ok_or(AdmissionError::Budget)?;
-            for parameter in &head.parameters {
-                nir::type_computations::charge_term(&parameter.ty, fuel)?;
-            }
-            return Ok(Some(Cow::Owned(
-                head.callable_type().map_err(|e| e.to_string())?,
-            )));
+            return Ok(Some(Cow::Owned(head.callable_type_in(fuel)?)));
         }
         let (parameters, signature, qualifiers) =
             if let Some(identity) = self.runtime_function_identities.get(&declaration) {

@@ -162,13 +162,10 @@ impl<'a> DeclarationWorld<'a> {
             *fuel = fuel
                 .checked_sub(head.parameters.len())
                 .ok_or(AdmissionError::Budget)?;
-            for parameter in &head.parameters {
-                nir::type_computations::charge_term(&parameter.ty, fuel)?;
-            }
             return head
-                .callable_type()
+                .callable_type_in(fuel)
                 .map(Some)
-                .map_err(|e| AdmissionError::Invalid(e.to_string()));
+                .map_err(AdmissionError::from);
         }
         let (parameters, signature, qualifiers) =
             if let Some(identity) = self.runtime_function_identity(declaration) {

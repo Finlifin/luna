@@ -142,6 +142,65 @@ fn callable_metadata_abstracts_dependent_domains_and_checks_collectors() {
 }
 
 #[test]
+fn callable_construction_limits_and_invalid_domains_remain_distinct() {
+    use nir::type_computations::Error;
+    let mut descriptor = Head {
+        declaration: id(0),
+        role: nir::normal_forms::Role::Opaque,
+        collector: None,
+        requirements: vec![],
+        parameters: vec![
+            parameter(1, Kind::Type, primitive(P::Type)),
+            parameter(
+                2,
+                Kind::Value,
+                Term::Rigid {
+                    declaration: id(1),
+                    sort: Sort::Type,
+                },
+            ),
+        ],
+    };
+    let original = descriptor.clone();
+    let mut fuel = 10_000;
+    let expected = descriptor.callable_type_in(&mut fuel).unwrap();
+    let spent = 10_000 - fuel;
+    for allowance in [0, spent / 2, spent - 1] {
+        assert_eq!(
+            descriptor.callable_type_in(&mut { allowance }),
+            Err(Error::Budget)
+        );
+        assert_eq!(descriptor, original);
+        assert_eq!(descriptor.callable_type_in(&mut 10_000).unwrap(), expected);
+    }
+    descriptor.parameters[1].ty = Term::NormalForm {
+        head: id(9),
+        sort: Sort::Type,
+        arguments: vec![Term::Rigid {
+            declaration: id(1),
+            sort: Sort::ComptimeValue,
+        }],
+    };
+    assert!(matches!(
+        descriptor.callable_type_in(&mut 10_000),
+        Err(Error::Scope(nir::TypeError::WrongSort { .. }))
+    ));
+    descriptor.parameters[1].ty = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    assert!(matches!(
+        descriptor.callable_type_in(&mut 10_000),
+        Err(Error::Scope(nir::TypeError::InvalidBound { .. }))
+    ));
+    descriptor.parameters[1].ty = (0..129).fold(primitive(P::Bool), |value, _| {
+        Term::Optional(Box::new(value))
+    });
+    assert_eq!(descriptor.callable_type_in(&mut 10_000), Err(Error::Budget));
+}
+
+#[test]
 fn dependent_list_parameters_use_the_same_value_contract_for_types_and_bools() {
     let list = |element| Term::NormalForm {
         head: id(90),

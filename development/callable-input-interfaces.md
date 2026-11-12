@@ -31,9 +31,11 @@ implicit、变参及拓展变参都可按 `.name = value` 供应完整值。直�
 | 调用实例的供应计划 | 原输入怎样交付给本次接口？ | 已预留的槽已经求值或完成准入 |
 
 本设计不从“局部绑定可以改名”推出“公开入口名也不可观察”。也不反过来把所有
-绑定拼写加入 Type identity。不同公开名字的接口是否可自动互相适配，必须与纯粹
-的 alpha-equivalence 分开判定；不能仅修改 Term 的 PartialEq／Hash 来掩盖这件事。
-第一条迁移只要求同一公开接口在传送中完整保留，不依赖新的重命名适配规则。
+绑定拼写加入 Type identity。作者本轮确认：**允许按槽位适配**。当参数域和槽位
+相同时，实现的 `...Items` 可以交付到声明 `...Es` 的目标接口；调用者使用目标
+接口的 `.Es = value`，默认供应也由目标接口决定，不能借用实现的另一份默认值。
+适配与 alpha-equivalence 分开判定；这条决定不自动规定两个接口 Type 的相等关系，
+也不能仅修改 Term 的 PartialEq／Hash 来代替接口传送与准入。
 
 ### 接口关系不能由现有 Term 相等代替
 
@@ -54,9 +56,10 @@ typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
 
 迁移时必须分别回答三个问题：两个参数 telescope 是否等价，目标公开接口允许
 哪些调用，以及实际代码能否接收该接口交付的完整输入。代码身份相同不保证接口
-相同，代码身份不同也不妨碍实现同一个接口。若后续允许入口改名适配，应由显式
-的槽映射依据说明目标名字如何交付，不能在每次动态调用中读取所选主体的名字。
-第一条同名切片不需要依赖这种适配；对不同名字的相等与适配关系，仍不在此补定。
+相同，代码身份不同也不妨碍实现同一个接口。按作者已确认的适配规则，检查后的
+槽映射应说明目标名字如何交付，不能在每次动态调用中读取所选主体的名字。
+保留下面的同名用例作为基础对照，再覆盖实现名和目标名不同的转发；不从允许
+适配推出两个接口 Type 必须相等。
 
 ## 2. 当前信息在哪里丢失
 
@@ -95,6 +98,47 @@ typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
 首条迁移的完成条件因此是生产、替换、求解、准入、调用及传输共同保持同一个
 接口。只让 `.Items = items` 通过路由、只新增一个未被消费的接口结构，或仅让
 新的 Term 能往返编码，均不能计为这条纵向交付完成。
+
+### 已接通：共同的声明 telescope 构造
+
+公开入口传送尚未实现；其下层的依赖绑定形成已从两个独立循环迁到
+`nir::callable_types::DeclarationTelescope`。源码普通／comptime 函数类型和 NF
+元数据共用这一构造器，源码／集中绑定的 NF 值直接借用声明域，不再为取得签名
+先复制 Head 的域、要求和能力列表。NF 仍保留原头，构造过程不执行主体。
+
+每个参数先对已完成前缀抽象其域，成功后才发布自己的绑定；失败不改变前缀。
+前缀索引在构造期间复用，不再为每个参数重新建立。`Term::abstract_parameters`
+也把外层 Bound 位移和 Rigid 转换合为一次重写：已有内层绑定保持不变，外层引用
+跨过新增帧，刚生成的位置绑定不再被位移。普通 Type、值和 runtime 输入沿同一
+规则处理，参数名、收集协议及默认提供者仍属于上层接口。
+
+构造和最终 NF scope 检查使用调用者额度；VM 接收世界、类型解析的声明查询、
+NIR 阶段检查及 materialization 已接入。阶段检查不再用 `.ok()` 吞掉构造失败，
+预算失败保持 Budget，实际声明不匹配才报结构错误。Head 的无额度便捷入口仅给
+独立调用提供有限默认值，生产消费者使用有额度入口；没有新增签名结果缓存。
+
+这是共享绑定机制和失败传播的迁移，不是公开接口传送完成。构造器的 Display
+采用 S-expression；回归覆盖嵌套作用域、混合 sort、失败后重试、错误域、过深输入
+及 2,000 个参数的有限构造。该宽度用例检查共享额度内可完成构造，不是计时基准，
+也不把整个类型检查过程宣称为线性复杂度。
+
+工作目录 `/home/fin/luna`，基线 `46b601f8` 加本阶段工作区改动；下列测试均通过
+`python3 -B development/check.py --timeout 900 -- test` 执行。作者已有的资源分析
+改动保留在工作区，不把这些结果表述为纯 HEAD 或完整语言验收。
+
+| 参数 | 结果与范围 | 本机证据 |
+| --- | --- | --- |
+| `-p nir -p elaboration --lib --test normal_inputs --test phases --no-fail-fast` | 总退出 101；elaboration 237、NIR 单元 67、NF 输入 26 项通过；phases 因旧深度用例栈溢出中断 | `/tmp/luna-tools-lbw9agsn/result.json` |
+| `-p nir --test phases -- --exact runtime_default_analysis_distinguishes_resource_limits_and_invalid_scope` | 对照临时恢复四个 NIR 实现文件为 HEAD 后仍栈溢出，退出 101；之后已完整恢复本次实现 | `/tmp/luna-tools-pllw6epi/result.json` |
+| `-p nir --test types --test type_rewrite --test normal_form_callables --test normal_callable_inputs --test unsafe_callable_types --test phases --no-fail-fast -- --skip runtime_default_analysis_distinguishes_resource_limits_and_invalid_scope` | 本次实现退出 0，135 项通过；仅在本条命令过滤已确认的基线崩溃，未修改测试或 ignore | `/tmp/luna-tools-1z2ojkvt/result.json` |
+| `-p luna --test scoped_comptime_callables --test normal_form_domains --test normal_value_arguments --test ordinary_callable_types --test metadata_wire --test sysroot_preludes --no-fail-fast` | 退出 0，65 项通过、1 项既有 ignored；含真实 sysroot 的工厂、Tuple/List、builder 与两阶段公开接口 | `/tmp/luna-tools-vamtaz76/result.json` |
+| `-p comptime_interpretor -p type_resolution --lib --test callable_world --no-fail-fast -- signature_limits_do_not_become_missing_declarations evidence_lookup_work_does_not_scale_with_unrelated_declarations receiver_world` | 退出 0；实际选中 VM 预算分类和 NF 查询各 1 项，`receiver_world` 未匹配用例 | `/tmp/luna-tools-ri0ahhjo/result.json` |
+| `-p type_resolution --test callable_world` | 退出 0，8 项通过，补全接收世界隔离、准入、失败与恢复检查 | `/tmp/luna-tools-7wipdexv/result.json` |
+
+所改 Rust 文件的 rustfmt 检查退出 0，见 `/tmp/luna-tools-pbd1y25p/result.json`。
+没有增加线程栈或预算来掩盖基线失败；默认参数深度用例的栈溢出仍须单独修复。
+本阶段没有运行全 workspace 或新增性能测量，不宣称解除了待定签名恢复与接口
+传送的限制。
 
 ## 3. 稳定接口与活动计划
 
@@ -142,7 +186,8 @@ callee 取得位置、源码输入位置、所需域观察、执行后继和已�
 
 显式接口决定对调用者公开的入口。接口不提供某个名字时，即使 callee 恰好指向
 一个有该名字的源码声明，也不能从实现偷取入口。需要改变视图时，应经过明确的
-接口相容性与槽映射检查；本次不把不同名字自动等同作为已确认的语言保证。
+接口相容性与槽映射检查。名字不同本身不阻止适配；实际域、阶段、责任和契约仍须
+满足目标接口。适配后只暴露目标入口，实现的原始名字不自动成为附加入口。
 
 默认值属于本次公开接口。若接口明确给出提供者，应使用它，而非切换到所选实现的
 另一份默认值。若提供者必须随实际 callable 才能确定，产物须显式携带对应依据和
@@ -176,7 +221,9 @@ comptime fn Apply(factory: Factory, items: meta.List<Type>) -> Type {
 }
 ```
 
-两个头使用相同公开入口，因而这条切片不需要先决定不同入口名之间的自动适配。
+两个头使用相同公开入口，先作为保存完整接口的基础对照。作者已确认的槽位适配
+另用同域的 `...Items` 实现交付到 `...Es` 目标接口验证：`.Es = items` 成功，
+通过该目标接口调用 `.Items = items` 拒绝；返回、选择和转发不得重新暴露实现名。
 应同时接通公开 Tuple 集中绑定对应的同名接口，不能以用户源码头必须有 body
 为前提恢复参数描述。第一阶段覆盖完整值供应，并保留已经合法的位置收集与展开；
 未迁移的协议必须保留原有明确限制，不能以此切片宣称所有高阶默认值已经支持。

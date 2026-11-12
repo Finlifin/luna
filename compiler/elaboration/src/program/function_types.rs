@@ -227,8 +227,7 @@ impl Checker<'_, '_> {
         let mut previous_types = Vec::new();
         let mut previous_values = Vec::new();
         let result = (|| {
-            let mut binders = Vec::new();
-            let mut parameters = Vec::new();
+            let mut telescope = nir::callable_types::DeclarationTelescope::default();
             for input in inputs {
                 if input.flags & !hir::common::TPARAM_COMPTIME != 0 {
                     return Err(error(
@@ -256,22 +255,19 @@ impl Checker<'_, '_> {
                 } else {
                     Sort::Runtime
                 };
-                let abstract_ty = ty
-                    .abstract_parameters(&binders)
-                    .map_err(|reason| error(annotation.span, reason.to_string()))?;
-                parameters.push(Parameter {
-                    sort,
-                    ty: abstract_ty,
-                });
                 let declaration = DeclarationId {
                     package: INPUT_NAMESPACE,
                     local: self.next_temporary_binding,
                 };
+                let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let prepared = telescope.push(declaration, sort, &ty, &mut fuel);
+                self.required_steps -= (before - fuel) as u64;
+                prepared.map_err(|reason| error(annotation.span, reason.to_string()))?;
                 self.next_temporary_binding = self
                     .next_temporary_binding
                     .checked_add(1)
                     .ok_or_else(|| error(input.span, "callable input identity space exhausted"))?;
-                binders.push(nir::DeclarationParameter { declaration, sort });
                 if matches!(input.kind, TyParamKind::PositionalDependencyCatched(..)) {
                     let id = local(input.hir_id);
                     if sort == Sort::ComptimeValue {
@@ -290,14 +286,14 @@ impl Checker<'_, '_> {
             let result = output
                 .map(|output| self.type_expr(output))
                 .transpose()?
-                .unwrap_or(p(P::Void))
-                .abstract_parameters(&binders)
-                .map_err(|reason| error(span, reason.to_string()))?;
-            Ok(Term::Function {
-                parameters,
-                result: Box::new(result),
-            }
-            .with_comptime_phase(comptime))
+                .unwrap_or(p(P::Void));
+            let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let signature = telescope.finish(&result, &mut fuel);
+            self.required_steps -= (before - fuel) as u64;
+            Ok(signature
+                .map_err(|reason| error(span, reason.to_string()))?
+                .with_comptime_phase(comptime))
         })();
         for (id, previous) in previous_types.into_iter().rev() {
             if let Some(value) = previous {

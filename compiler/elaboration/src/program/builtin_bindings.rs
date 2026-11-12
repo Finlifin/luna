@@ -147,11 +147,7 @@ impl Checker<'_, '_> {
             self.normal_parameters.insert(owner, descriptors);
         }
         self.ensure_contract(owner, span)?;
-        let ty = self
-            .normal_form_head_metadata(owner)
-            .unwrap()
-            .callable_type()
-            .map_err(|reason| error(span, reason.to_string()))?;
+        let ty = self.normal_form_callable_type(owner, span)?;
         Ok(Some(n::Expr {
             source: source(span),
             ty,

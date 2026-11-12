@@ -533,7 +533,15 @@ impl<'a> PhaseContext<'a> {
                                         "normal-form heads cannot be invoked as ordinary functions or stored at runtime",
                                     ));
                                 }
-                                if descriptor.callable_type().ok().as_ref() != Some(&expr.ty) {
+                                let signature = descriptor.callable_type_in(inspection_fuel)
+                                    .map_err(|failure| match failure {
+                                        crate::type_computations::Error::Budget => Error::budget(
+                                            expr.source,
+                                            "normal-form callable inspection budget exhausted",
+                                        ),
+                                        _ => error("normal-form callable declaration has an invalid signature"),
+                                    })?;
+                                if signature != expr.ty {
                                     return Err(error(
                                         "normal-form callable type disagrees with its declaration",
                                     ));

@@ -3152,7 +3152,7 @@ impl Builder<'_> {
                     .find(|head| head.declaration == *id)
                     .ok_or("normal-form callable declaration is missing")?;
                 if descriptor
-                    .callable_type()
+                    .callable_type_in(&mut self.fuel)
                     .map_err(|error| error.to_string())?
                     != expr.ty
                 {

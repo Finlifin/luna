@@ -5,7 +5,7 @@
 //! frame; their types can refer to earlier parameters in that frame. Holes
 //! belong to a core's ordered telescope and are distinct from bound variables.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -1089,7 +1089,25 @@ impl Term {
         parameters: &[DeclarationParameter],
     ) -> Result<Term, TypeError> {
         let indices = declaration_parameter_indices(parameters)?;
-        self.shift(1, 0)?.rewrite(0, &mut |term, depth| match term {
+        self.abstract_parameter_indices(&indices)
+    }
+
+    /// Reuse a prepared declaration prefix. Shift existing outer references
+    /// and introduce rigid references in one pass, without shifting new slots.
+    pub(crate) fn abstract_parameter_indices(
+        &self,
+        indices: &BTreeMap<DeclarationId, (usize, Sort)>,
+    ) -> Result<Term, TypeError> {
+        self.rewrite(0, &mut |term, depth| match term {
+            Self::Bound {
+                depth: outer,
+                index,
+                sort,
+            } if *outer >= depth => Ok(Self::Bound {
+                depth: outer.checked_add(1).ok_or(TypeError::BinderDepthOverflow)?,
+                index: *index,
+                sort: *sort,
+            }),
             Self::Rigid { declaration, sort } => match indices.get(declaration) {
                 Some(&(index, expected)) => {
                     if *sort != expected {

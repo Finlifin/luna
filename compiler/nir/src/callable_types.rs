@@ -3,6 +3,9 @@
 use crate::type_computations::{Error, charge_term};
 use crate::{Parameter, Primitive, Sort, Term, TypeError};
 
+mod telescope;
+pub use telescope::DeclarationTelescope;
+
 fn check_type(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
     charge_term(ty, fuel)?;
     if ty.sort() != Sort::Type {
