@@ -1,6 +1,5 @@
 //! Static input identity is evidence, not a replacement for its producer.
-use comptime_interpretor::{Budget, Event, Interpreter, Value};
-use elaboration::materialization::SourceInvocationQueries;
+use comptime_interpretor::{Budget, Event, Value};
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
@@ -19,37 +18,23 @@ fn check_events(source: &str, events: &[(&str, usize)]) {
             .unwrap()
             .declaration
     };
-    let context = elaboration::ptc::Context::from_package(&package).unwrap();
-    let queries = SourceInvocationQueries::new(&package, &context, &[]);
-    let solver = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
-        queries.check(predicate, Default::default(), fuel)
-    };
-    let methods = |callee: &nir::program::Expr, fuel: &mut u64| queries.resolve(callee, fuel);
-    let associated = |access: &nir::program::Expr, fuel: &mut u64| queries.associated(access, fuel);
     for tree in [false, true] {
         let budget = Budget {
             steps: 1_000_000,
             depth: 128,
         };
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, budget)
-        } else {
-            Interpreter::for_comptime(&package, budget)
-        }
-        .unwrap()
-        .with_budgeted_type_solver(&solver)
-        .with_method_resolver(&methods)
-        .with_associated_resolver(&associated);
-        for invocation in 1..=2 {
-            assert_eq!(
-                vm.invoke(id("check"), vec![]).unwrap(),
-                Value::Bool(true),
-                "tree={tree}"
-            );
-            for (name, entered) in events {
-                assert_eq!(vm.events().iter().filter(|event| matches!(event, Event::EnterFunction(declaration) if *declaration == id(name))).count(), entered * invocation, "{name}, tree={tree}");
+        sysroot::with_comptime(&package, budget, tree, |vm| {
+            for invocation in 1..=2 {
+                assert_eq!(
+                    vm.invoke(id("check"), vec![]).unwrap(),
+                    Value::Bool(true),
+                    "tree={tree}"
+                );
+                for (name, entered) in events {
+                    assert_eq!(vm.events().iter().filter(|event| matches!(event, Event::EnterFunction(declaration) if *declaration == id(name))).count(), entered * invocation, "{name}, tree={tree}");
+                }
             }
-        }
+        });
     }
 }
 

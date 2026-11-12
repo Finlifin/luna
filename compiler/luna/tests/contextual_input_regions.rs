@@ -2,11 +2,10 @@
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
-use comptime_interpretor::{Budget, Event, Interpreter, Value};
-use elaboration::materialization::SourceInvocationQueries;
+use comptime_interpretor::{Budget, Event, Value};
 
 fn check_both(source: &str, calls: &[&str]) {
-    check_both_in_budget(source, calls, Budget::default());
+    check_both_in_budget(source, calls, sysroot::COMPTIME_BUDGET);
 }
 
 fn check_both_in_budget(source: &str, calls: &[&str], budget: Budget) {
@@ -21,47 +20,33 @@ fn check_in_engines(source: &str, calls: &[&str], budget: Budget, engines: &[boo
         .find(|f| f.name == "check")
         .unwrap()
         .declaration;
-    let context = elaboration::ptc::Context::from_package(&package).unwrap();
-    let queries = SourceInvocationQueries::new(&package, &context, &[]);
-    let solver = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
-        queries.check(predicate, Default::default(), fuel)
-    };
-    let methods = |callee: &nir::program::Expr, fuel: &mut u64| queries.resolve(callee, fuel);
-    let associated = |access: &nir::program::Expr, fuel: &mut u64| queries.associated(access, fuel);
     for &tree in engines {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, budget)
-        } else {
-            Interpreter::for_comptime(&package, budget)
-        }
-        .unwrap()
-        .with_budgeted_type_solver(&solver)
-        .with_method_resolver(&methods)
-        .with_associated_resolver(&associated);
-        assert_eq!(
-            vm.invoke(entry, vec![]).unwrap(),
-            Value::Bool(true),
-            "tree={tree}"
-        );
-        let observed = vm
-            .events()
-            .iter()
-            .filter_map(|event| match event {
-                Event::EnterFunction(id) if id.package == entry.package => package
-                    .functions
-                    .iter()
-                    .find(|f| f.declaration == *id)
-                    .map(|f| f.name.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(observed, calls, "tree={tree}");
-        if budget.steps != Budget::default().steps {
-            eprintln!(
-                "tree={tree}, invocation_work={}",
-                budget.steps - vm.remaining_steps()
+        sysroot::with_comptime(&package, budget, tree, |vm| {
+            assert_eq!(
+                vm.invoke(entry, vec![]).unwrap(),
+                Value::Bool(true),
+                "tree={tree}"
             );
-        }
+            let observed = vm
+                .events()
+                .iter()
+                .filter_map(|event| match event {
+                    Event::EnterFunction(id) if id.package == entry.package => package
+                        .functions
+                        .iter()
+                        .find(|f| f.declaration == *id)
+                        .map(|f| f.name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(observed, calls, "tree={tree}");
+            if budget.steps != sysroot::COMPTIME_BUDGET.steps {
+                eprintln!(
+                    "tree={tree}, invocation_work={}",
+                    budget.steps - vm.remaining_steps()
+                );
+            }
+        });
     }
 }
 

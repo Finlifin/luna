@@ -1,10 +1,19 @@
 //! Compile public source against the real built-in packages and execute concrete IIR.
-use comptime_interpretor::Value;
+use comptime_interpretor::{Budget, Interpreter, SourceResolvers, Value};
+use elaboration::materialization::{DeclarationSource, SourceInvocationQueries};
 use luna::{
     cli::{self, Command},
     frontend::{self, Artifact},
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Covers full sysroot retention, phase validation, queries and test execution.
+/// Callers testing exhaustion supply their own allowance instead.
+#[allow(dead_code)]
+pub(crate) const COMPTIME_BUDGET: Budget = Budget {
+    steps: 1_000_000,
+    depth: 128,
+};
 
 pub(crate) fn compile(source: &str) -> Result<nir::program::Package, String> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -42,4 +51,46 @@ pub(crate) fn run(source: &str) -> Value {
     let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
     let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
     vm.invoke_instance(&graph.roots[0], vec![]).unwrap()
+}
+
+/// Keep source queries alive for execution in the exact checked package.
+/// Reference routing does not substitute a closed dispatch world or runtime VM.
+#[allow(dead_code)]
+pub(crate) fn with_comptime<T>(
+    package: &nir::program::Package,
+    mut budget: Budget,
+    reference: bool,
+    action: impl FnOnce(&mut Interpreter<'_>) -> T,
+) -> T {
+    let mut remaining = usize::try_from(budget.steps).unwrap();
+    let source = DeclarationSource::Borrowed(package)
+        .retain_declarations(&mut remaining)
+        .unwrap();
+    let package = source.package();
+    let context = elaboration::ptc::Context::from_package_metered(package, &mut remaining).unwrap();
+    budget.steps = remaining as u64;
+    let queries =
+        SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&source), &context, &[]);
+    let solver = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
+        queries.check(predicate, Default::default(), fuel)
+    };
+    let methods = |callee: &nir::program::Expr, fuel: &mut u64| queries.resolve(callee, fuel);
+    let associated = |access: &nir::program::Expr, fuel: &mut u64| queries.associated(access, fuel);
+    let mut vm = Interpreter::for_comptime_resolving_in_budget(
+        package,
+        &[],
+        &[],
+        &[],
+        SourceResolvers {
+            types: &solver,
+            methods: &methods,
+            associated: &associated,
+        },
+        &mut budget,
+    )
+    .unwrap();
+    if reference {
+        vm = vm.with_reference_execution();
+    }
+    action(&mut vm)
 }

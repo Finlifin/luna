@@ -457,6 +457,37 @@ Package 捕获不因新增此入口而自动完成预算迁移。共享 owner �
 最初测试编译的 fixture 使用了不存在的 Budget 构造器和错误的 Term 载荷类型，
 已按实际表示修正；没有修改既有用例。未执行全量回归、Miri 或性能基准。
 
+### 源码世界准入与参考执行互相独立
+
+真实 sysroot 的前端产物可以携带已选择的 dispatch；它不能直接交给要求纯声明
+世界的 resolving 构造器。调用消费者先通过 `DeclarationSource::retain_declarations`
+取得独立声明快照，再从同一 owner 建立 Context、查询服务与 VM。不能只清空输入包
+的表，也不能先走 closed 构造器、待其成功后才安装源码解析回调：前者混淆所有权，
+后者在准入时已经选错了世界协议。源码投影不签发执行许可，阶段检查仍由 VM 完成。
+
+`Interpreter::with_reference_execution` 只在已构造的 VM 上关闭字节码路由。
+它不改变 universe、源码 owner、输入前提、查询服务或预算；closed 和 IIR 的既有
+reference 构造器也共用这个选择。它用于显式差分检查，不是编译失败时的 fallback，
+更不代表最终架构要保留两套语言语义。
+
+调用分期、输入身份、声明输入计划与 contextual 区域的源码测试现在共用这条入口。
+每种引擎各建自己的完整源码服务，捕获、上下文、准入与执行都扣同一额度；语义测试
+明确使用一百万步的 sysroot allowance，不改变生产 VM 默认值。查询拒绝、实际选择、
+零预算拒绝仍由独立用例检查。调用分期还核对字节码执行计数，防止所谓“两引擎”
+实际上都走同一路径；原有事件顺序、producer 次数与提前返回断言保持不变。
+
+验证工作目录 `/home/fin/luna`：
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_call_staging --test ordinary_input_identity --test declaration_input_plans --test contextual_input_regions --no-fail-fast -- --test-threads=1`：
+  退出 0，四组 7／13／13／16 项通过，`/tmp/luna-tools-8abd3sa3/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_query_failures -- --test-threads=1 source_selection_is_demanded_and_concrete_methods_cannot_bypass_the_host`：
+  退出 0，覆盖两种执行路由的允许／拒绝选择与零预算构造，
+  `/tmp/luna-tools-wy5jgew3/result.json`。此前加入 reference 对照后，十万步额度下
+  该路径报 StepsExhausted，见 `/tmp/luna-tools-97uv5v_1/result.json`；显式扩大的仅为
+  语义测试额度，没有退款、跳过检查或改写失败种类。
+
+上述证据不证明任意源码都已支持恢复执行；普通待定域与签名的主干缺口仍保留。
+
 ### 1.6 Staged VM 索引与当前调用权限分离
 
 按需源码入口拆成独立的声明准备与当前调用准入。前者验证精确 source package，

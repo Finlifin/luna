@@ -1,5 +1,5 @@
 //! Comptime calls keep their argument programs in the invoking environment.
-use comptime_interpretor::{Budget, Event, Interpreter, Value};
+use comptime_interpretor::{Event, Value};
 #[path = "support/sysroot_execution.rs"]
 mod sysroot;
 
@@ -14,22 +14,19 @@ fn check_both(source: &str, events: &[(&str, usize)]) {
             .declaration
     };
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime(&package, Budget::default())
-        }
-        .unwrap();
-        for invocation in 1..=2 {
-            assert_eq!(
-                vm.invoke(id("check"), vec![]).unwrap(),
-                Value::Bool(true),
-                "tree={tree}"
-            );
-            for (name, count) in events {
-                assert_eq!(vm.events().iter().filter(|event| matches!(event, Event::EnterFunction(declaration) if *declaration == id(name))).count(), count * invocation, "{name}, tree={tree}");
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            for invocation in 1..=2 {
+                assert_eq!(
+                    vm.invoke(id("check"), vec![]).unwrap(),
+                    Value::Bool(true),
+                    "tree={tree}"
+                );
+                for (name, count) in events {
+                    assert_eq!(vm.events().iter().filter(|event| matches!(event, Event::EnterFunction(declaration) if *declaration == id(name))).count(), count * invocation, "{name}, tree={tree}");
+                }
             }
-        }
+            assert_eq!(vm.bytecode_invocations() > 0, !tree);
+        });
     }
 }
 

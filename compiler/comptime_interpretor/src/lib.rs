@@ -1998,9 +1998,16 @@ impl<'a> Interpreter<'a> {
     /// Keeps comptime value-reference semantics and admission checks intact,
     /// allowing differential checks without substituting the runtime universe.
     pub fn for_comptime_tree(package: &'a Package, budget: Budget) -> Result<Self, Error> {
-        let mut interpreter = Self::for_comptime(package, budget)?;
-        interpreter.bytecode_enabled = false;
-        Ok(interpreter)
+        Self::for_comptime(package, budget).map(Self::with_reference_execution)
+    }
+
+    /// Select reference evaluation after constructing the appropriate world.
+    /// This changes execution routing only: phase, scope, source services and
+    /// admission remain those established by the constructor. It is intended
+    /// for differential checks, not recovery from bytecode compilation errors.
+    pub fn with_reference_execution(mut self) -> Self {
+        self.bytecode_enabled = false;
+        self
     }
     /// Evaluate under caller-established trait premises. Premises discharge
     /// obligations only; they provide neither method bodies nor associated values.

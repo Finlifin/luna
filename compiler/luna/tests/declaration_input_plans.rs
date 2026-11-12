@@ -2,8 +2,7 @@
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
-use comptime_interpretor::{Budget, Event, Interpreter, Value};
-use elaboration::materialization::SourceInvocationQueries;
+use comptime_interpretor::{Event, Value};
 
 fn check_both(source: &str, calls: &[&str]) {
     let package = sysroot::compile(source).unwrap();
@@ -13,41 +12,27 @@ fn check_both(source: &str, calls: &[&str]) {
         .find(|f| f.name == "check")
         .unwrap()
         .declaration;
-    let context = elaboration::ptc::Context::from_package(&package).unwrap();
-    let queries = SourceInvocationQueries::new(&package, &context, &[]);
-    let solver = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
-        queries.check(predicate, Default::default(), fuel)
-    };
-    let methods = |callee: &nir::program::Expr, fuel: &mut u64| queries.resolve(callee, fuel);
-    let associated = |access: &nir::program::Expr, fuel: &mut u64| queries.associated(access, fuel);
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime(&package, Budget::default())
-        }
-        .unwrap()
-        .with_budgeted_type_solver(&solver)
-        .with_method_resolver(&methods)
-        .with_associated_resolver(&associated);
-        assert_eq!(
-            vm.invoke(entry, vec![]).unwrap(),
-            Value::Bool(true),
-            "tree={tree}"
-        );
-        let observed = vm
-            .events()
-            .iter()
-            .filter_map(|event| match event {
-                Event::EnterFunction(id) if id.package == entry.package => package
-                    .functions
-                    .iter()
-                    .find(|f| f.declaration == *id)
-                    .map(|f| f.name.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(observed, calls, "tree={tree}");
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            assert_eq!(
+                vm.invoke(entry, vec![]).unwrap(),
+                Value::Bool(true),
+                "tree={tree}"
+            );
+            let observed = vm
+                .events()
+                .iter()
+                .filter_map(|event| match event {
+                    Event::EnterFunction(id) if id.package == entry.package => package
+                        .functions
+                        .iter()
+                        .find(|f| f.declaration == *id)
+                        .map(|f| f.name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(observed, calls, "tree={tree}");
+        });
     }
 }
 

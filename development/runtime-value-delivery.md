@@ -185,8 +185,9 @@ Splice。后续表达式交付必须保留消费角色：例如先观察源 `dat
   `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_call_staging -- --test-threads=1`，
   仍为同样的 1 通过、6 失败，退出 101；`/tmp/luna-tools-321mws0k/result.json`。
   六项均在 `for_comptime` 构造阶段报 UnmaterializedDispatch，尚未执行被测调用。
-  这些测试把真实 sysroot 源码交给要求闭合分派表的旧入口，仍需迁移其测试接线；
-  本轮未削弱 VM 检查或修改这些测试预期。对照完成后已恢复本次阶段判断实现。
+  当时这些测试把真实 sysroot 源码交给要求闭合分派表的旧入口。后续已迁移到
+  [声明快照与独立参考路由](world-storage-and-lifetimes.md#源码世界准入与参考执行互相独立)，
+  保留原有行为断言；这不改变该次失败作为阶段修复基线的证据。
 - 局部常量与闭包的定向检查：`/tmp/luna-tools-9f3aenq4/result.json`，退出 101；
   cmtt 23 项与 elaboration 5 项通过，另一项拒绝例因期望 `type equality`、实际
   诊断 `type mismatch` 而失败。临时恢复 `eb904d48` 后单独运行

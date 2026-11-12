@@ -107,10 +107,10 @@ fn source_selection_is_demanded_and_concrete_methods_cannot_bypass_the_host() {
         elaboration::materialization::resolve_associated_value_for_invocation(&world, access, fuel)
     };
     let counts = || (type_calls.get(), method_calls.get(), associated_calls.get());
-    for permitted in [false, true] {
+    for (reference, permitted) in [(false, false), (false, true), (true, false), (true, true)] {
         allow.set(permitted);
         let before = counts();
-        let mut budget = Budget::default();
+        let mut budget = sysroot::COMPTIME_BUDGET;
         let initial = budget.steps;
         let mut vm = Interpreter::for_comptime_resolving_in_budget(
             &package,
@@ -125,11 +125,15 @@ fn source_selection_is_demanded_and_concrete_methods_cannot_bypass_the_host() {
             &mut budget,
         )
         .unwrap();
+        if reference {
+            vm = vm.with_reference_execution();
+        }
         assert_eq!(counts(), before, "construction must not demand selections");
         assert!(budget.steps < initial);
         let result = vm.invoke(entry, vec![]);
         if permitted {
             assert_eq!(result.unwrap(), Value::Bool(true));
+            assert_eq!(vm.bytecode_invocations() > 0, !reference);
             assert!(associated_calls.get() > before.2);
         } else {
             assert_eq!(result.unwrap_err().kind, ErrorKind::UnmaterializedDispatch);

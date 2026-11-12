@@ -93,9 +93,7 @@ impl<'a> Interpreter<'a> {
         graph: &'a iir::Package,
         budget: Budget,
     ) -> Result<Self, Error> {
-        let mut interpreter = Self::from_iir_for_comptime(graph, budget)?;
-        interpreter.bytecode_enabled = false;
-        Ok(interpreter)
+        Self::from_iir_for_comptime(graph, budget).map(Self::with_reference_execution)
     }
 
     /// Return preparation work even if graph validation rejects the input.
