@@ -23825,39 +23825,136 @@ fn scheduled_handler_borrowed_copy_record_nested_fields_work_with_effectful_clos
 }
 
 #[test]
-fn scheduled_handler_borrowed_copy_record_rejects_unproved_owner_layouts() {
-    for (declaration, value, pointer, expected) in [
+fn scheduled_handler_borrowed_storage_preserves_access_and_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (declaration, value, pointer, field, drops, retained) in [
         (
-            "struct Flags {left:bool}",
+            "struct Flags {left:bool} impl Retire for Flags {fn drop(*self) {}}",
             "Flags {left:false}",
             "flags.left.ref",
-            "live local Copy scalar",
+            "pointer",
+            1,
+            "true",
         ),
         (
             "struct Flags {left:bool,alias:*bool} impl Duplicate for Flags {}",
             "Flags {left:false,alias:other.ref}",
             "flags.left.ref",
-            "pointer-free Copy layout",
+            "pointer",
+            0,
+            "flags.alias.*",
         ),
         (
             "struct Flags {left:bool} impl Duplicate for Flags {}",
             "Flags {left:false}",
             "flags.ref",
-            "live local Copy scalar",
+            "pointer.left",
+            0,
+            "true",
+        ),
+        (
+            "struct Flags {left:bool} impl Retire for Flags {fn drop(*self) {}}",
+            "Flags {left:false}",
+            "flags.ref",
+            "pointer.left",
+            1,
+            "true",
+        ),
+    ] {
+        for active in [false, true] {
+            let arm = if active {
+                format!("set({field})")
+            } else {
+                "true".into()
+            };
+            let observed = if active {
+                "flags.left"
+            } else {
+                "not flags.left"
+            };
+            let package = compile(&format!(
+                "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+                {declaration}
+                effect poll()->bool;
+                fn subject()->#poll bool {{poll()# and poll()#}}
+                fn set(pointer:*bool)->bool {{pointer.* = true;pointer.*}}
+                fn entry()->bool {{
+                    let other=true;let flags={value};let pointer={pointer};
+                    let result=subject()# {{poll()=>{arm},}};
+                    result and {observed} and {retained}
+                }}"
+            ));
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(true)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names.iter().filter(|name| name.as_str() == "set").count(),
+                if active { 2 } else { 0 },
+                "{names:?}"
+            );
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "drop Flags")
+                    .count(),
+                drops,
+                "{names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn scheduled_handler_borrowed_storage_rejects_invalid_delivery_and_lifetimes() {
+    for (declaration, value, pointer, before, arm, after, diagnostic) in [
+        (
+            "struct Flags {left:bool}",
+            "Flags {left:false}",
+            "flags.left.ref",
+            "let moved=flags;",
+            "pointer.*",
+            "result",
+            "handler pointer owner is not fully initialized",
+        ),
+        (
+            "struct Flags {left:bool}",
+            "Flags {left:false}",
+            "flags.ref",
+            "",
+            "do {let taken=pointer.*;true}",
+            "result",
+            "borrowed handler field access requires Copy delivery",
+        ),
+        (
+            "struct Flags {left:bool,alias:*bool} impl Duplicate for Flags {}",
+            "Flags {left:false,alias:other.ref}",
+            "flags.ref",
+            "",
+            "do {let local=true;pointer.alias.* = local.ref;true}",
+            "result and flags.alias.*",
+            // This write is rejected conservatively before escape analysis.
+            "aggregate handler pointees require a complete field access summary",
         ),
     ] {
         let package = compile(&format!(
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
             {declaration} effect poll()->bool;fn subject()->#poll bool {{poll()#}}
             fn entry()->bool {{
-                let other=true;let flags={value};let pointer={pointer};
-                subject()# {{poll()=>true,}}
+                let other=true;let flags={value};let pointer={pointer};{before}
+                let result=subject()# {{poll()=>{arm},}};{after}
             }}"
         ));
         let error = source_executable(&package, "entry")
             .err()
-            .expect("unproved aggregate storage must be rejected");
-        assert!(error.contains(expected), "{error}");
+            .expect("borrowed storage cannot be consumed or outlive its owner");
+        assert!(error.contains(diagnostic), "{error}");
     }
 }
 

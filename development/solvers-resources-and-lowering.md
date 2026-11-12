@@ -187,6 +187,61 @@ scoped rustfmt 退出 0，`/tmp/luna-tools-v25d0m2a/result.json`。未运行全 
 回调及捕获要求、所有出口的清理足迹、控制转移与完成性。每个摘要有明确前提和实例版本。
 摘要推导可递归迭代，但不能用空摘要打断递归并当成已证明无效果。
 
+### 5.1 Handler 借用检查不要求 owner 可复制
+
+正式语义依据是 [Once／Clone／Copy](../docs/resource-management/once-clone-copy.md)
+中的交付规则和[指针的复制与访问](../docs/resource-management/pointers.md#复制与访问)：
+复制指针不复制目标，也不取得目标的终结责任。借用非 Copy 聚合的标量字段，不要求
+整个 owner 具有 Copy；未被访问的指针字段也不能使另一独立字段的借用自动非法。
+真正需要核对的是目标存活、初始化、实际读取的交付能力、写入依赖和唯一清理责任。
+
+此前 Drop 回归中的
+`scheduled_handler_borrowed_copy_record_rejects_unproved_owner_layouts` 仍期待
+`live local Copy scalar`／`pointer-free Copy layout` 两项旧阶段诊断，而且 handler
+主体只是 `true`，根本没有使用被取址的局部。历史提交 `179a2f6d` 已允许借用仿射
+owner 的标量字段，`7ecfd4ab` 后续支持稳定的指针字段遍历；现有
+`moves/effects.rs::stable_handler_pointees` 导入初始化的借用存储，字段读取独立
+检查交付能力。不能为恢复这个旧断言而退回对 owner 的一概拒绝。
+
+现在以行为用例替换该断言：四种 owner／字段指针组合各运行 handler 使用和不使用
+指针的两条路径；使用路径连续请求两次，验证真实写回、调用次数、无关指针字段
+保留以及仿射 owner 恰好一次析构。拒绝例分别检查移动 owner 后访问、通过借用
+消耗仿射整体、将 handler 局部地址写入外部指针字段。第三项目前在字段访问摘要
+不完整处保守拒绝，**不是已经建立完整逃逸分析的证据**；前两项分别要求初始化和
+Copy 交付诊断。newtype 的对应拒绝例也去掉已不存在的旧诊断备选。
+
+本阶段只修正测试契约及其证据，没有改动生产检查器，也没有修改正式 docs。
+先保留旧用例、单独执行新增行为用例，确认它们在原实现上通过后才删除旧断言。
+第 7.4、7.5 节中的失败和 skip 是当时的真实历史证据；本节负责解释其后续处理。
+
+工作目录 `/home/fin/luna`，检查统一通过
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- 替换前单独运行 `-p luna --test drop scheduled_handler_borrowed_storage_
+  -- --nocapture`，`/tmp/luna-tools-9yak6qfs/result.json` 退出 0，两项测试覆盖
+  八次正例执行和三种拒绝；当时旧断言仍保留，生产代码未改。
+- 替换并收紧拒绝诊断后运行 `-p luna --test drop --test effect_memory_transfers
+  --test library_iteration --no-fail-fast`，`/tmp/luna-tools-bf_bgdi8/result.json`
+  退出 101。Drop 1002 项、效应内存传递 108 项全部通过，没有 skip；迭代器组在
+  `find_map_preserves_present_null_and_stops_mapping` 栈溢出并 SIGABRT，不能
+  宣称该组通过。本阶段未定位或修复此溢出的根因。
+- `-p luna --test library_iteration -- --exact
+  handler_borrows_pointer_bearing_affine_capture_without_copy
+  borrowed_pointer_capture_retains_owner_and_storage_restrictions
+  borrowed_affine_capture_cleanup_follows_lexical_return_and_loop_exit`：
+  `/tmp/luna-tools-ko7x2t_q/result.json` 退出 0，三项借用／清理用例通过。
+  这些采用库源码片段，不单独证明公开 sysroot 可用。
+- `-p luna --test newtypes installed_effects_do_not_revive_wrapped_pointer_targets
+  -- --exact`：`/tmp/luna-tools-waaonc49/result.json` 退出 0，检查死亡目标拒绝
+  和对应存活目标仍可执行。
+- `-p luna --test sysroot_preludes
+  complete_shipped_sysroot_runs_tuple_optional_math_and_iteration -- --exact`：
+  `/tmp/luna-tools-n_tcxca2/result.json` 退出 0，通过实际 sysroot、公开协议和
+  LLVM 原生执行验证 Tuple、可选方法、math 及普通迭代调用。
+
+两个修改的 Rust 文件通过 rustfmt 检查，`/tmp/luna-tools-79eyzm53/result.json`
+退出 0。检查保留工作区原有修改，没有将其纳入本次提交，也未执行全 workspace 测试。
+
 ## 6. str 是贯通资源设计的首个案例
 
 1. callee 摘要保存参数相对文本区域，不能保存 callee 局部地址作为 caller 根。

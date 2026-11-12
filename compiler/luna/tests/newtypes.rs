@@ -1555,7 +1555,6 @@ fn installed_effects_do_not_revive_wrapped_pointer_targets() {
         .unwrap_err();
         assert!(
             error.contains("unavailable")
-                || error.contains("handler pointer requires a live local Copy scalar target")
                 || error.contains("handler pointer owner is not fully initialized"),
             "{invocation}: {error}"
         );
