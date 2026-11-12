@@ -1,0 +1,285 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Flurry",
+  "scopeName": "source.flurry",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#raw_string" },
+    { "include": "#strings" },
+    { "include": "#characters_and_views" },
+    { "include": "#numbers" },
+    { "include": "#attributes" },
+    { "include": "#macros" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#types_and_builtins" },
+    { "include": "#symbols_and_calls" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "keyword.other.directive.flurryfmt.flurry",
+          "match": "^\\s*(--%)(.*)$",
+          "captures": {
+            "1": { "name": "punctuation.definition.directive.flurry" },
+            "2": { "name": "meta.directive.flurryfmt.flurry" }
+          }
+        },
+        {
+          "name": "comment.line.documentation.flurry",
+          "match": "---.*$"
+        },
+        {
+          "name": "comment.line.double-dash.flurry",
+          "match": "--.*$"
+        },
+        {
+          "include": "#block_comment"
+        }
+      ]
+    },
+    "block_comment": {
+      "name": "comment.block.flurry",
+      "begin": "\\{-",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.comment.begin.flurry" }
+      },
+      "end": "-\\}",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.comment.end.flurry" }
+      },
+      "patterns": [
+        { "include": "#block_comment" }
+      ]
+    },
+    "raw_string": {
+      "name": "string.quoted.other.raw.flurry",
+      "begin": "(@builtin\\.str\\.raw)\\s*(\\{)",
+      "beginCaptures": {
+        "1": { "name": "entity.name.function.macro.flurry" },
+        "2": { "name": "punctuation.section.braces.begin.flurry" }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": { "name": "punctuation.section.braces.end.flurry" }
+      },
+      "patterns": [
+        { "include": "#raw_string_nested" }
+      ]
+    },
+    "raw_string_nested": {
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        { "include": "#raw_string_nested" }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.flurry",
+      "begin": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.flurry" }
+      },
+      "end": "\"",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.flurry" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.flurry",
+          "match": "\\\\(?:x\\{[0-9a-fA-F_]+\\}|[nrt\\\\\"'0$])"
+        },
+        {
+          "name": "meta.interpolation.flurry",
+          "begin": "\\$\\{",
+          "beginCaptures": {
+            "0": { "name": "punctuation.section.interpolation.begin.flurry" }
+          },
+          "end": "\\}",
+          "endCaptures": {
+            "0": { "name": "punctuation.section.interpolation.end.flurry" }
+          },
+          "contentName": "source.flurry.embedded",
+          "patterns": [
+            { "include": "$self" }
+          ]
+        }
+      ]
+    },
+    "characters_and_views": {
+      "patterns": [
+        {
+          "name": "constant.numeric.bitvec.flurry",
+          "match": "\\b0[box]'[0-9a-fA-F_]+'"
+        },
+        {
+          "name": "string.quoted.single.char.flurry",
+          "match": "'(?:\\\\(?:x\\{[0-9a-fA-F_]+\\}|[nrt\\\\\"'0])|[^'\\\\\\n])'"
+        },
+        {
+          "match": "(?<=[A-Za-z0-9_\\)\\]\\}])(')(bit_vec|tag_name|old|intrinsic|tuple_enumerate|builtin)\\b",
+          "captures": {
+            "1": { "name": "keyword.operator.view.flurry" },
+            "2": { "name": "keyword.other.view.flurry" }
+          }
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.flurry",
+          "match": "\\b0x[0-9a-fA-F][0-9a-fA-F_]*\\b"
+        },
+        {
+          "name": "constant.numeric.octal.flurry",
+          "match": "\\b0o[0-7][0-7_]*\\b"
+        },
+        {
+          "name": "constant.numeric.binary.flurry",
+          "match": "\\b0b[01][01_]*\\b"
+        },
+        {
+          "name": "constant.numeric.float.flurry",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*(?:[eE][+-]?[0-9_]+)?\\b|\\b[0-9][0-9_]*[eE][+-]?[0-9_]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.flurry",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "match": "(\\^)([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)",
+          "captures": {
+            "1": { "name": "punctuation.definition.attribute.flurry" },
+            "2": { "name": "entity.other.attribute-name.flurry" }
+          }
+        }
+      ]
+    },
+    "macros": {
+      "patterns": [
+        {
+          "match": "\\b(define)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.macro.flurry" },
+            "2": { "name": "entity.name.function.macro.flurry" }
+          }
+        },
+        {
+          "match": "([@$])([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)",
+          "captures": {
+            "1": { "name": "punctuation.definition.macro.flurry" },
+            "2": { "name": "entity.name.function.macro.flurry" }
+          }
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(fn|effect)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.function.flurry" },
+            "2": { "name": "entity.name.function.flurry" }
+          }
+        },
+        {
+          "match": "\\b(struct|enum|trait|union|typealias|newtype)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.type.flurry" },
+            "2": { "name": "entity.name.type.flurry" }
+          }
+        },
+        {
+          "match": "\\b(mod)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.module.flurry" },
+            "2": { "name": "entity.name.namespace.flurry" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.flurry",
+          "match": "\\b(if|else|when|match|matches|for|while|in|do|return|break|continue|resume|defer|await|catch|handles)\\b"
+        },
+        {
+          "name": "storage.modifier.flurry",
+          "match": "\\b(pub|private|pure|comptime|inline|quote|unsafe|async|atomic|static|implicit|opaque|ghost|spec|verified|move|ref|dyn)\\b"
+        },
+        {
+          "name": "keyword.declaration.flurry",
+          "match": "\\b(fn|struct|enum|union|trait|impl|derive|extend|effect|mod|use|const|let|var|typealias|newtype|assoc|template|test|axiom|lemma|predicate|requires|ensures|decreases|invariant|asserts|assumes|opens|outcome|refines|lift|where|forall|exists|lambda|default|case|as|is)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.flurry",
+          "match": "\\b(and|or|not)\\b"
+        },
+        {
+          "name": "constant.language.flurry",
+          "match": "\\b(true|false|null|undefined)\\b"
+        },
+        {
+          "name": "variable.language.self.flurry",
+          "match": "\\b(self|itself)\\b"
+        }
+      ]
+    },
+    "types_and_builtins": {
+      "patterns": [
+        {
+          "name": "support.type.builtin.flurry",
+          "match": "\\b(Type|Self|Fn|void|noreturn|any|bool|str|char|u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f16|f32|f64|f128|Int)\\b"
+        },
+        {
+          "name": "entity.name.type.flurry",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "symbols_and_calls": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_\\)\\]\\}])(\\.[a-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "constant.other.symbol.flurry" }
+          }
+        },
+        {
+          "match": "\\b([a-z_][A-Za-z0-9_]*)(?=\\s*(?:<[^>\\n]*>)?\\s*\\()",
+          "captures": {
+            "1": { "name": "entity.name.function.call.flurry" }
+          }
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.flurry",
+          "match": "==>|->|=>|~>|\\|>"
+        },
+        {
+          "name": "keyword.operator.relation.flurry",
+          "match": ":-|:\\~|<:|\\|-|==|!=|<=|>="
+        },
+        {
+          "name": "keyword.operator.assignment.flurry",
+          "match": "\\+=|-=|\\*=|/=|%=|="
+        },
+        {
+          "name": "keyword.operator.other.flurry",
+          "match": "\\+\\+|\\.\\.|[+\\-*/%!?#|~&]"
+        }
+      ]
+    }
+  }
+}

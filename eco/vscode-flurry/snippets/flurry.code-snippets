@@ -1,0 +1,118 @@
+{
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2:params}) -> ${3:void} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Define a Flurry function"
+  },
+  "Public Function": {
+    "prefix": "pubfn",
+    "body": [
+      "pub fn ${1:name}(${2:params}) -> ${3:void} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Define a public Flurry function"
+  },
+  "Pure Comptime Function": {
+    "prefix": "cfn",
+    "body": [
+      "pure comptime fn ${1:Name}<${2:T: Type}>(${3:params}) -> ${4:Type} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Define a pure comptime function or type constructor"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": [
+      "pub struct ${1:Name} {",
+      "    ${2:field}: ${3:i32},",
+      "}"
+    ],
+    "description": "Define a Flurry struct"
+  },
+  "Enum": {
+    "prefix": "enum",
+    "body": [
+      "pub enum ${1:Name} {",
+      "    ${2:Variant},",
+      "}"
+    ],
+    "description": "Define a Flurry enum"
+  },
+  "Trait": {
+    "prefix": "trait",
+    "body": [
+      "pub trait ${1:Name} {",
+      "    fn ${2:method}(self) -> ${3:void};",
+      "}"
+    ],
+    "description": "Define a Flurry trait"
+  },
+  "Inherent Impl": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Type} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Define an inherent impl block"
+  },
+  "Trait Impl": {
+    "prefix": "implfor",
+    "body": [
+      "impl ${1:Trait} for ${2:Type} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Implement a trait for a type"
+  },
+  "Match Expression": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value} {",
+      "    ${2:pattern} => $0,",
+      "}"
+    ],
+    "description": "Pattern match expression"
+  },
+  "When Expression": {
+    "prefix": "when",
+    "body": [
+      "when {",
+      "    ${1:cond} => ${2:expr},",
+      "    else => $0,",
+      "}"
+    ],
+    "description": "Multi-branch conditional when expression"
+  },
+  "Let Else": {
+    "prefix": "letelse",
+    "body": [
+      "let ${1:pat} = ${2:expr} else {",
+      "    return ${3:null};",
+      "};"
+    ],
+    "description": "Refutable let binding with else divergence"
+  },
+  "Test Block": {
+    "prefix": "test",
+    "body": [
+      "test \"${1:behavior}\" {",
+      "    $0",
+      "}"
+    ],
+    "description": "Define a Flurry test block"
+  },
+  "Formatter Skip Directive": {
+    "prefix": "fmtskip",
+    "body": [
+      "--% .skip"
+    ],
+    "description": "Skip formatting on the following item, statement, or expression"
+  }
+}

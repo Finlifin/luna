@@ -1,0 +1,116 @@
+{
+  "name": "vscode-flurry",
+  "displayName": "Flurry",
+  "description": "Official Flurry language support for Visual Studio Code powered by the anar language server.",
+  "version": "0.1.0",
+  "publisher": "flurry-lang",
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters",
+    "Linters",
+    "Snippets"
+  ],
+  "keywords": [
+    "flurry",
+    "luna",
+    "anar",
+    "lsp"
+  ],
+  "activationEvents": [
+    "onLanguage:flurry",
+    "workspaceContains:**/flurry.toml",
+    "workspaceContains:**/flurryfmt.toml",
+    "workspaceContains:**/.flurryfmt.toml"
+  ],
+  "main": "./src/extension.js",
+  "scripts": {
+    "test": "node ./test/smoke_test.js"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "flurry",
+        "aliases": [
+          "Flurry",
+          "flurry"
+        ],
+        "extensions": [
+          ".fl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "flurry",
+        "scopeName": "source.flurry",
+        "path": "./syntaxes/flurry.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "flurry",
+        "path": "./snippets/flurry.code-snippets"
+      }
+    ],
+    "commands": [
+      {
+        "command": "flurry.restartServer",
+        "title": "Flurry: Restart Language Server (anar)",
+        "category": "Flurry"
+      },
+      {
+        "command": "flurry.showOutputChannel",
+        "title": "Flurry: Show Language Server Output",
+        "category": "Flurry"
+      }
+    ],
+    "configuration": {
+      "title": "Flurry",
+      "properties": {
+        "flurry.anar.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the anar Flurry language server."
+        },
+        "flurry.anar.path": {
+          "type": "string",
+          "default": "",
+          "description": "Explicit path to the anar executable. When empty, searches workspace build outputs and PATH."
+        },
+        "flurry.anar.sysroot": {
+          "type": "string",
+          "default": "",
+          "description": "Explicit path to the Flurry library sysroot directory containing builtin, meta, build, attrs, verification, and std."
+        },
+        "flurry.anar.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional command-line arguments passed when spawning anar."
+        },
+        "flurry.format.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Flurry document formatting via anar."
+        },
+        "flurry.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace JSON-RPC communication between VS Code and anar in the Flurry output channel."
+        }
+      }
+    }
+  }
+}
