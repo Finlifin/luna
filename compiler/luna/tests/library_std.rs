@@ -402,3 +402,37 @@ fn display_writes_through_a_borrowed_file_without_transferring_ownership() {
     assert_eq!(output.stdout, b"(bool true)\n");
     assert!(!case.0.join("formatted.txt").exists());
 }
+
+#[test]
+fn splice_construction_runs_per_use_after_staged_inputs_are_ready() {
+    let case = Case::new(
+        r#"
+        struct Seed { byte: u8 }
+        impl Splice for Seed {
+            assoc RuntimeTarget: Type = u8;
+            fn splice(comptime data: Seed) -> u8 {
+                let written = std.fmt.print("convert;") match {
+                    _! => true, error _ => false,
+                };
+                assumes written;
+                data.byte
+            }
+        }
+        const CONFIG: Seed = Seed { byte: 42 };
+        fn explicit(comptime data: Seed) -> u8 { Seed.as(Splice).splice(data) }
+        fn run() -> bool {
+            let first: u8 = CONFIG;
+            let second = explicit(Seed { byte: 42 });
+            let flag = std.os.unix.getpid() > 0;
+            let third: u8 = if flag { CONFIG } else { CONFIG };
+            first == 42 and second == 42 and third == 42
+        }
+    "#,
+    );
+    for level in ["0", "3"] {
+        success(&case.build(level));
+        let output = case.run();
+        success(&output);
+        assert_eq!(output.stdout, b"convert;convert;convert;(bool true)\n");
+    }
+}

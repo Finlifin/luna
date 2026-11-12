@@ -90,3 +90,27 @@ EINTR、零写入和部分写入后的 EIO，验证错误传播与已经输出�
 最终演示：`python3 -B development/demo_println.py` 构建与运行均退出 0；
 构建日志 `/tmp/luna-tools-kzljx98k/result.json`。产物 `/tmp/flurry-println`
 输出中文、42、实际 Linux pid、i128 最小值和 done，没有 `(unit)` 尾行。
+
+## 当前演示复验
+
+`python3 -B development/demo_println.py` 已在当前 dev 上重新构建并运行，
+退出 0；构建报告为 `/tmp/luna-tools-0fwuk41k/result.json`。可直接运行
+`/tmp/flurry-println`，输出如下（pid 随进程变化）：
+
+```text
+你好，Flurry！
+answer = 42
+Linux pid = 106
+i128 minimum = -170141183460469231731687303715884105728
+done
+```
+
+同一工作区执行
+`python3 -B development/check.py --timeout 900 -- test -p luna --test library_std -- --test-threads=1`，
+退出 0，`11 passed; 0 failed`；报告
+`/tmp/luna-tools-xi8zy3i8/result.json`。包含泛型 ByteWriter 的状态与错误传播、
+借用 File 输出，以及 O0/O3 下 Splice 中的输出次数：命名常量、显式调用和
+实际执行的分支各构造一次，未执行分支不输出。
+
+此项不证明任意 comptime 参数已能隐式转换为 runtime 值；该接线与动态文本
+的内存来源仍待完成。演示使用当前已接通的文本与标量接口。
