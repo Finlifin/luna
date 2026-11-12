@@ -355,7 +355,10 @@ impl Checker<'_, '_> {
             .map(|checked| checked.ty))
     }
 
-    fn declared_comptime_call_result(&mut self, base: &Expr<'_>) -> Result<Option<Term>, Error> {
+    pub(super) fn declared_comptime_call_result(
+        &mut self,
+        base: &Expr<'_>,
+    ) -> Result<Option<Term>, Error> {
         fn copy_result(ty: &Term, remaining: &mut u64, span: Span) -> Result<Option<Term>, Error> {
             let Term::Function { result, .. } = ty.callable_signature() else {
                 return Ok(None);
@@ -1237,7 +1240,6 @@ impl Checker<'_, '_> {
         result.map(Some)
     }
 
-    #[inline(never)]
     pub(super) fn projection_expression(
         &mut self,
         expr: &Expr<'_>,
@@ -1246,6 +1248,19 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
+        let operand = self.projection_operand(expr, value, field, expected, partial)?;
+        self.deliver_operand(expr, operand, expected)
+    }
+
+    #[inline(never)]
+    pub(super) fn projection_operand(
+        &mut self,
+        expr: &Expr<'_>,
+        value: &Expr<'_>,
+        field: &hir::common::Ident,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<splicing::Operand, Error> {
         // Type members preserve invocation-time inputs in their prepared
         // receiver. Classify them before probing enum namespaces, whose type
         // identity must already be complete.
@@ -1279,7 +1294,7 @@ impl Checker<'_, '_> {
         if known_type_member
             && let Some(value) = self.projected_member_expression(expr, expected)?
         {
-            return Ok(value);
+            return Ok(splicing::Operand::Value(value));
         }
         // Group prefixes are namespaces in an enum, not values. Resolve their
         // complete path before member and place probes can evaluate the prefix.
@@ -1299,12 +1314,12 @@ impl Checker<'_, '_> {
             if let Some(expected) = expected {
                 self.require(&variant.ty, expected, expr.span)?;
             }
-            return Ok(variant);
+            return Ok(splicing::Operand::Value(variant));
         }
         if !known_type_member
             && let Some(value) = self.projected_member_expression(expr, expected)?
         {
-            return Ok(value);
+            return Ok(splicing::Operand::Value(value));
         }
         if let Some(value) =
             self.associated_projection(value, field.name.as_str(), expr.span, expr.hir_id)?
@@ -1312,8 +1327,9 @@ impl Checker<'_, '_> {
             if let Some(expected) = expected {
                 self.require(&value.ty, expected, expr.span)?;
             }
-            return Ok(value);
+            return Ok(splicing::Operand::Value(value));
         }
+        let source_operand;
         let (ty, kind) = {
             if let Some(pointer) = self.dereferenced_place(expr)? {
                 let Term::Pointer(ty) = &pointer.ty else {
@@ -1328,11 +1344,11 @@ impl Checker<'_, '_> {
                 if let Some(expected) = expected {
                     self.require(ty, expected, expr.span)?;
                 }
-                return Ok(n::Expr {
+                return Ok(splicing::Operand::Value(n::Expr {
                     ty: (**ty).clone(),
                     source: source(expr.span),
                     kind: K::ReadPointer(Box::new(pointer)),
-                });
+                }));
             }
 
             if matches!(field.name.as_str(), "NaN" | "Infinity") && self.is_type_head(value) {
@@ -1343,16 +1359,20 @@ impl Checker<'_, '_> {
                     if let Some(expected) = expected {
                         self.require(&constant.ty, expected, expr.span)?;
                     }
-                    return Ok(constant);
+                    return Ok(splicing::Operand::Value(constant));
                 }
             }
             if let Some(method) =
                 self.static_method(value, field.name.as_str(), expr.span, expr.hir_id)?
             {
                 if self.incomplete_method_instance(&method) {
-                    return self.contextual_method_instance(expr, method, expected, partial);
+                    return self
+                        .contextual_method_instance(expr, method, expected, partial)
+                        .map(splicing::Operand::Value);
                 }
-                return self.callable_value_view(method, expected, expr.span);
+                return self
+                    .callable_value_view(method, expected, expr.span)
+                    .map(splicing::Operand::Value);
             }
             if let Some((ty, index)) = self.variant_target(expr, expected)? {
                 let Term::Nominal { declaration, .. } = &ty else {
@@ -1363,7 +1383,7 @@ impl Checker<'_, '_> {
                 if let Some(expected) = expected {
                     self.require(&variant.ty, expected, expr.span)?;
                 }
-                return Ok(variant);
+                return Ok(splicing::Operand::Value(variant));
             }
             if self.is_type_head(value) {
                 let ty = self.type_expr(value)?;
@@ -1373,11 +1393,15 @@ impl Checker<'_, '_> {
                         if let Some(expected) = expected {
                             self.require(&variant.ty, expected, expr.span)?;
                         }
-                        return Ok(variant);
+                        return Ok(splicing::Operand::Value(variant));
                     }
                 }
             }
-            let value = self.expr(value, None)?;
+            let (value, is_source) = self.field_operand(value)?.into_parts();
+            source_operand = is_source;
+            // Field checking sees the source domain. Only the projected result
+            // is constrained by the runtime destination after conversion.
+            let expected = if is_source { None } else { expected };
             // A resolved builtin view or Type constant is already a pure
             // TypeValue. Do not erase a dynamic Type-valued computation.
             if let K::TypeValue(ty) = &value.kind {
@@ -1387,7 +1411,7 @@ impl Checker<'_, '_> {
                     if let Some(expected) = expected {
                         self.require(&constant.ty, expected, expr.span)?;
                     }
-                    return Ok(constant);
+                    return Ok(splicing::Operand::Value(constant));
                 }
             }
 
@@ -1433,7 +1457,7 @@ impl Checker<'_, '_> {
                 if let Some(expected) = expected {
                     self.require(&projected.ty, expected, expr.span)?;
                 }
-                return Ok(projected);
+                return Ok(splicing::Operand::projected(projected, is_source));
             }
             let Term::Nominal {
                 declaration,
@@ -1487,14 +1511,14 @@ impl Checker<'_, '_> {
                 )
             }
         };
-        if let Some(expected) = expected {
-            self.require(&ty, expected, expr.span)?;
-        }
-        Ok(n::Expr {
-            ty,
-            source: source(expr.span),
-            kind,
-        })
+        Ok(splicing::Operand::projected(
+            n::Expr {
+                ty,
+                source: source(expr.span),
+                kind,
+            },
+            source_operand,
+        ))
     }
 
     /// A field pointer keeps its identity without a target. With a concrete

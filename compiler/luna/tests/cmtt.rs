@@ -1,6 +1,9 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+#[path = "support/sysroot_execution.rs"]
+#[allow(dead_code)]
+mod sysroot;
 use comptime_interpretor::{Interpreter, Value};
 use support::run_iir as run;
 
@@ -1699,7 +1702,10 @@ fn pattern_generators_share_range_and_conditional_binding_control() {
 
 #[test]
 fn pattern_generators_run_stateful_loops_and_early_returns() {
-    let source = "comptime fn parity(count:.u8'builtin)-><bool -| value:bool> {
+    let source = "typealias u8=.u8'builtin;typealias Kind=.Type'builtin;
+        trait Transfer {assoc RuntimeTarget:Kind;fn splice(comptime data:Self)->RuntimeTarget;}
+        impl Transfer for bool {assoc RuntimeTarget:Kind=bool;fn splice(comptime data:bool)->bool {data}}
+        comptime fn parity(count:u8)-><bool -| value:bool> {
         var remaining=count;var expected=true;
         while remaining > 0 {
             remaining -= 1;
@@ -1728,7 +1734,13 @@ fn pattern_generators_run_stateful_loops_and_early_returns() {
         let e=false match {~<no> => not value,_ => false};
         a and b and c and d and e
     }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let execute = |source: &str| {
+        let package =
+            support::compile_with_bindings(source, &Default::default(), Some("input.Transfer"))
+                .unwrap();
+        luna::execution::interpret(&package, "run", 100_000).unwrap()
+    };
+    assert_eq!(execute(source), Value::Bool(true));
     let records = source
         .replace(
             "var remaining=count;var expected=true;",
@@ -1742,11 +1754,9 @@ fn pattern_generators_run_stateful_loops_and_early_returns() {
         )
         .replace("value == expected", "value == state.expected");
     assert_eq!(
-        run(
-            &format!("struct State {{remaining:.u8'builtin,expected:bool}} {records}"),
-            "run",
-            vec![]
-        ),
+        execute(&format!(
+            "struct State {{remaining:u8,expected:bool}} {records}"
+        )),
         Value::Bool(true)
     );
 }
@@ -2010,7 +2020,10 @@ fn pattern_generators_lift_data_into_guards_and_discriminants() {
         .replace("value == expected", "value == config.enabled")
         .replace("matching(true)", "matching(Config{enabled:true})")
         .replace("matching(false)", "matching(Config{enabled:false})");
-    assert_eq!(run(&structured, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        sysroot::run_with_inputs(&structured, "run", vec![]),
+        Value::Bool(true)
+    );
     let callback = "fn invert(value:bool)->bool {not value}
         comptime fn matching(action:fn(bool)->bool)-><bool -| value:bool> {
             '<value if action(value)>
@@ -2367,7 +2380,7 @@ fn generator_match_checks_coverage_unselected_bodies_and_guard_phase() {
 
 #[test]
 fn generator_nested_field_updates_drive_code_assembly() {
-    let source = "struct Counter {remaining:.u8'builtin}
+    let source = "struct Counter {remaining:u8}
         struct State {counter:Counter,untouched:bool}
         pure comptime fn build(input:State)-><x:bool |- bool> {
             let state=input;
@@ -2383,11 +2396,11 @@ fn generator_nested_field_updates_drive_code_assembly() {
             ~[x=value]<code>
         }";
     assert_eq!(
-        run(source, "run", vec![Value::Bool(false)]),
+        sysroot::run_with_inputs(source, "run", vec![Value::Bool(false)]),
         Value::Bool(true)
     );
     assert_eq!(
-        run(source, "run", vec![Value::Bool(true)]),
+        sysroot::run_with_inputs(source, "run", vec![Value::Bool(true)]),
         Value::Bool(false)
     );
 }
@@ -2402,7 +2415,10 @@ fn generator_field_updates_preserve_previously_quoted_snapshots() {
             if state.flag {'(false)} else {original}
         }
         fn run()->bool {~<build()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        sysroot::run_with_inputs(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -2414,37 +2430,40 @@ fn generator_anonymous_record_fields_use_the_declared_schema() {
             '(config.enabled and config.stable)
         }
         fn run()->bool {~<build(schema {enabled:false,stable:true})>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        sysroot::run_with_inputs(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generator_bit_view_writeback_keeps_sibling_fields() {
-    let source = "struct State {bits:.u8'builtin,other:bool}
+    let source = "struct State {bits:u8,other:bool}
         pure comptime fn build()->< |- bool> {
             let state=State {bits:0,other:true};
             state.bits'bitvec[0..4]=9;
             '(state.bits == 9 and state.other)
         }
         fn run()->bool {~<build()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        sysroot::run_with_inputs(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generator_dynamic_bit_places_check_bounds_and_recover() {
-    let prefix = "struct State {bits:.u8'builtin,index:.u8'builtin}
-        pure comptime fn build(index:.u8'builtin)->< |- bool> {
+    let prefix = "struct State {bits:u8,index:u8}
+        pure comptime fn build(index:u8)->< |- bool> {
             let state=State {bits:0,index:index};
             state.bits'bitvec[state.index]=1;
             '(state.bits == 2)
         }";
-    let failure = support::compile_with_protocols(
-        &format!("{prefix} fn run()->bool {{~<build(8)>}}"),
-        &Default::default(),
-    )
-    .unwrap_err();
+    let failure =
+        sysroot::compile(&format!("{prefix} fn run()->bool {{~<build(8)>}}")).unwrap_err();
     assert!(failure.contains("IndexOutOfBounds"), "{failure}");
     assert_eq!(
-        run(
+        sysroot::run_with_inputs(
             &format!("{prefix} fn run()->bool {{~<build(1)>}}"),
             "run",
             vec![]
@@ -2864,7 +2883,7 @@ fn structured_generator_inputs_drive_code_and_lift_only_completed_data() {
             not ~[x=value]<inverted> and ~[x=value]<direct>
         }";
     assert_eq!(
-        run(source, "run", vec![Value::Bool(true)]),
+        sysroot::run_with_inputs(source, "run", vec![Value::Bool(true)]),
         Value::Bool(true)
     );
 }
@@ -2987,7 +3006,7 @@ fn generator_data_rejects_runtime_inputs_and_wrong_identities() {
         assert!(failure.contains(anchor), "{source}: {failure}");
     }
     assert_eq!(
-        run(
+        sysroot::run_with_inputs(
             "struct Config {flag:bool} pure comptime fn build(config:Config)->< |- bool> {'(config.flag)} fn run()->bool {~<build(Config {flag:true})>}",
             "run",
             vec![]
@@ -4428,11 +4447,23 @@ fn local_constants_can_select_runtime_functions_during_comptime() {
 
 #[test]
 fn local_constant_callbacks_survive_nominal_storage_and_runtime_closures() {
-    let source = "struct Callback {apply:fn(bool)->bool}
+    let source = "typealias Type=.Type'builtin;
+        trait Transfer {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}
+        impl Transfer for fn(bool)->bool {
+            assoc RuntimeTarget:Type=fn(bool)->bool;
+            fn splice(comptime data:fn(bool)->bool)->fn(bool)->bool {data}
+        }
+        struct Callback {apply:fn(bool)->bool}
         fn invert(value:bool)->bool {not value}
         fn run()->bool {const callback=Callback {apply:invert};
             let run_callback=|| callback.apply(false);run_callback()}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let package =
+        support::compile_with_bindings(source, &Default::default(), Some("input.Transfer"))
+            .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -5324,13 +5355,18 @@ fn generator_bit_compound_writeback_checks_bounds_and_phase() {
 }
 
 fn compile_bit_generator(source: &str) -> Result<nir::program::Package, String> {
-    let prelude = "typealias Bits4=.BitVec'builtin<4>;typealias Bits1=.BitVec'builtin<1>;
+    let prelude = "typealias Byte=.u8'builtin;typealias Kind=.Type'builtin;
+        trait Transfer {assoc RuntimeTarget:Kind;fn splice(comptime data:Self)->RuntimeTarget;}
+        impl Transfer for bool {assoc RuntimeTarget:Kind=bool;fn splice(comptime data:bool)->bool {data}}
+        impl Transfer for Byte {assoc RuntimeTarget:Kind=Byte;fn splice(comptime data:Byte)->Byte {data}}
+        typealias Bits4=.BitVec'builtin<4>;typealias Bits1=.BitVec'builtin<1>;
         trait Operation where Rhs {assoc Output:.Type'builtin;pure comptime fn add(self,rhs:Rhs)->Output;}
         impl Operation<Bits4> for Bits4 {assoc Output:.Type'builtin=Bits4;
             pure comptime fn add(self,rhs:Bits4)->Bits4 {self or rhs}}
         impl Operation<Bits1> for Bits1 {assoc Output:.Type'builtin=Bits1;
             pure comptime fn add(self,rhs:Bits1)->Bits1 {self or rhs}}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
+    selectors.splice = Some("input.Transfer");
     selectors.arithmetic[elaboration::arithmetic::Operator::Add as usize] = Some("input.Operation");
     support::compile_with_source_bindings(
         &format!("{prelude} {source}"),
@@ -5565,7 +5601,10 @@ fn generator_place_rhs_preserves_updates_to_other_owned_objects() {
             first.flag=do {second.flag=true;second.flag};
             '(first.flag and second.flag)
         } fn run()->bool {~<build()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        sysroot::run_with_inputs(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -5578,14 +5617,20 @@ fn generator_assignment_frames_preserve_scalar_updates_and_old_quotes() {
             flag=do {state.flag=true;state.flag};
             if state.flag and flag {old} else {'(false)}
         } fn run()->bool {~<build()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        sysroot::run_with_inputs(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let source = "struct State {flag:bool}
         pure comptime fn build()-><|-bool> {
-            let state=State {flag:false};var count:.u8'builtin=0;
+            let state=State {flag:false};var count:u8=0;
             state.flag=do {count+=1;true};
             '(state.flag and count == 1)
         } fn run()->bool {~<build()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        sysroot::run_with_inputs(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -5619,7 +5664,7 @@ fn generator_update_frames_keep_nested_write_mutability_and_phase_checks() {
 
 #[test]
 fn generator_data_initializers_and_conditions_preserve_owned_state() {
-    let source = "struct State {count:.u8'builtin}
+    let source = "struct State {count:u8}
         pure comptime fn build()-><|-bool> {
             let state=State {count:0};
             let chosen=do {state.count+=1;state.count == 1};
@@ -5628,7 +5673,10 @@ fn generator_data_initializers_and_conditions_preserve_owned_state() {
             }
             '(state.count == 4)
         } fn run()->bool {~<build()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        sysroot::run_with_inputs(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -6966,7 +7014,7 @@ fn static_normal_tuple_evidence_uses_completed_type_lists() {
 
 #[test]
 fn generator_value_writes_preserve_state_and_quote_snapshots_without_copy() {
-    let source = "struct State {flag:bool,count:.u8'builtin}
+    let source = "struct State {flag:bool,count:u8}
         pure comptime fn build()-><|-bool> {
             var state=State {flag:false,count:0};
             const original='(not state.flag and state.count == 0);
@@ -6975,9 +7023,12 @@ fn generator_value_writes_preserve_state_and_quote_snapshots_without_copy() {
             state.flag = false;
             '(~<original> and not state.flag and state.count == 3)
         } fn run()->bool {~<build()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        sysroot::run_with_inputs(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let invalid = source.replace("var state=", "let state=");
-    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    let failure = sysroot::compile(&invalid).unwrap_err();
     assert!(
         failure.contains("cannot assign an immutable generator binding"),
         "{failure}"
@@ -7044,20 +7095,17 @@ fn generator_temporary_pointer_writes_reject_stage_leaks_and_wrong_pointees() {
 
 #[test]
 fn generator_field_bit_writes_preserve_siblings_and_check_bounds() {
-    let prefix = "struct State {bits:.u8'builtin,other:bool}
-        pure comptime fn build(index:.u8'builtin)-><|-bool> {
+    let prefix = "struct State {bits:u8,other:bool}
+        pure comptime fn build(index:u8)-><|-bool> {
             let state=State {bits:0,other:false};
             state.bits'bitvec[index]=do {state.other=true;1};
             '(state.bits == 2 and state.other)
         }";
-    let failure = support::compile_with_protocols(
-        &format!("{prefix} fn run()->bool {{~<build(8)>}}"),
-        &Default::default(),
-    )
-    .unwrap_err();
+    let failure =
+        sysroot::compile(&format!("{prefix} fn run()->bool {{~<build(8)>}}")).unwrap_err();
     assert!(failure.contains("IndexOutOfBounds"), "{failure}");
     assert_eq!(
-        run(
+        sysroot::run_with_inputs(
             &format!("{prefix} fn run()->bool {{~<build(1)>}}"),
             "run",
             vec![]
@@ -8728,7 +8776,7 @@ fn generator_owned_float_frames_preserve_nan_and_finite_snapshots() {
             ("var state=State {value:1.5};", "state.value"),
         ] {
             let source = format!(
-                "typealias Real=.{width}'builtin;
+                "typealias Real={width};
                 struct State {{value:Real}}
                 comptime fn build()-><|-bool> {{
                     {initial}
@@ -8742,7 +8790,10 @@ fn generator_owned_float_frames_preserve_nan_and_finite_snapshots() {
                 }}
                 fn run()->bool {{~<build()>}}"
             );
-            assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+            assert_eq!(
+                sysroot::run_with_inputs(&source, "run", vec![]),
+                Value::Bool(true)
+            );
         }
     }
 }
@@ -9940,13 +9991,25 @@ fn error_generator_data_transports_runtime_callable_payload() {
 
 #[test]
 fn error_generator_data_preserves_reordered_labels_in_nested_containers() {
-    let source = "enum A {Bad(bool)} enum B {Bad(bool)} struct Packet {data:![B,A] bool}
+    let source = "typealias Type=.Type'builtin;
+        trait Transfer {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}
+        enum A {Bad(bool)} enum B {Bad(bool)} struct Packet {data:![B,A] bool}
+        impl Transfer for ![B,A] bool {
+            assoc RuntimeTarget: Type = ![B,A] bool;
+            fn splice(comptime data: ![B,A] bool) -> ![B,A] bool {data}
+        }
         pure comptime fn build(data:![A,B] bool)->< |- bool> {
             let packet=Packet {data:data};
             '(packet.data match {value! => value,error A.Bad(v)=>v,error B.Bad(v)=>v})
         }
         fn run()->bool {~<build(error A.Bad(true))> and ~<build(error B.Bad(true))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let package =
+        support::compile_with_bindings(source, &Default::default(), Some("input.Transfer"))
+            .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -10025,7 +10088,17 @@ fn error_generator_data_quotes_snapshot_before_later_assignment() {
 
 #[test]
 fn error_generator_packets_preserve_runtime_callback_phase() {
-    let source = "struct State {flag:bool}
+    let source = "typealias Type=.Type'builtin;
+        trait Transfer {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}
+        struct State {flag:bool}
+        impl Transfer for !State bool {
+            assoc RuntimeTarget: Type = !State bool;
+            fn splice(comptime data: !State bool) -> !State bool {data}
+        }
+        impl Transfer for fn()->bool {
+            assoc RuntimeTarget: Type = fn()->bool;
+            fn splice(comptime data: fn()->bool) -> fn()->bool {data}
+        }
         struct Packet {data:!State bool,callback:fn()->bool}
         fn action()->bool {true}
         comptime fn build()-><|-bool> {
@@ -10037,9 +10110,17 @@ fn error_generator_packets_preserve_runtime_callback_phase() {
             }))
         }
         fn run()->bool {~<build()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let package =
+        support::compile_with_bindings(source, &Default::default(), Some("input.Transfer"))
+            .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
     let invalid = source.replace("state.flag=true;", "state.flag=packet.callback();");
-    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    let failure =
+        support::compile_with_bindings(&invalid, &Default::default(), Some("input.Transfer"))
+            .unwrap_err();
     assert!(failure.contains("execution phase"), "{failure}");
 }
 
@@ -10569,12 +10650,18 @@ fn contextual_data_properties_collect_fields_and_preserve_whole_named_supply() {
             const config=pack {'(true), enabled:true, letter:'x'};
             config.enabled and config.letter == 'x'
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        sysroot::run_with_inputs(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let supplied = source.replace(
         "const config=pack {'(true), enabled:true, letter:'x'};",
         "const original=pack {'(true), enabled:true, letter:'x'}; const config=pack('(true), .properties=original);",
     );
-    assert_eq!(run(&supplied, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        sysroot::run_with_inputs(&supplied, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -10603,7 +10690,7 @@ fn contextual_data_properties_combine_tuple_spreads_and_explicit_collector_types
             config.enabled
         }";
     assert_eq!(
-        support::run_iir_with_tuple(source, "run", vec![]),
+        sysroot::run_with_inputs(source, "run", vec![]),
         Value::Bool(true)
     );
 }
@@ -10611,7 +10698,7 @@ fn contextual_data_properties_combine_tuple_spreads_and_explicit_collector_types
 #[test]
 fn contextual_data_properties_use_expected_record_field_types_and_result_contracts() {
     let source = "
-        typealias Byte=.u8'builtin;
+        typealias Byte=u8;
         comptime fn schema(...fields:T)->T where T {fields}
         comptime fn byte()->Byte {17}
         const SAMPLE=schema {size:byte(),enabled:true};
@@ -10620,9 +10707,12 @@ fn contextual_data_properties_use_expected_record_field_types_and_result_contrac
         where ensures result.enabled
         {properties}
         fn run()->bool {const config=pack {'(true),size:17,enabled:true}; config.size == 17}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        sysroot::run_with_inputs(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let invalid = source.replace("size:17,enabled:true", "size:17,enabled:false");
-    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    let failure = sysroot::compile(&invalid).unwrap_err();
     assert!(failure.contains("postcondition rejected"), "{failure}");
 }
 
@@ -11194,4 +11284,17 @@ fn generator_storage_checks_preserve_pointer_descriptions_and_runtime_ports() {
     ] {
         support::compile_with_protocols(source, &Default::default()).unwrap();
     }
+}
+
+#[test]
+fn quoted_source_fields_require_splice_even_when_the_domains_match() {
+    let source = "struct Config { flag: bool }
+        pure comptime fn build() -> <|- bool> {
+            let config = Config { flag: true };
+            '(config.flag)
+        }
+        fn run() -> bool { ~<build()> }";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(failure.contains("bound Splice protocol"), "{failure}");
+    assert_eq!(sysroot::run(source), Value::Bool(true));
 }

@@ -482,3 +482,86 @@ fn quoted_constants_construct_runtime_values_at_each_executed_use() {
         );
     }
 }
+
+#[test]
+fn source_field_observation_precedes_runtime_construction() {
+    let case = Case::new(
+        r#"
+        struct Seed { byte: u8 }
+        struct Packet { item: Seed }
+        impl Splice for Seed {
+            assoc RuntimeTarget: Type = u8;
+            fn splice(comptime data: Seed) -> u8 {
+                let written = std.fmt.print("convert;") match {
+                    _! => true, error _ => false,
+                };
+                assumes written;
+                data.byte
+            }
+        }
+        const CONFIG: Packet = Packet { item: Seed { byte: 42 } };
+        pure comptime fn produce() -> Packet { CONFIG }
+        pure comptime fn generic() -> Packet
+        where T
+        {
+            CONFIG
+        }
+        const FACTORY: comptime fn() -> Packet = produce;
+        fn use_callback(comptime callback: comptime fn() -> Packet) -> u8 {
+            callback().item
+        }
+        fn run() -> bool {
+            let direct: u8 = CONFIG.item;
+            let nested: u8 = CONFIG.item.byte;
+            let produced: u8 = produce().item;
+            let produced_nested: u8 = produce().item.byte;
+            let generic_value: u8 = generic<bool>().item;
+            let stored: u8 = FACTORY().item;
+            let passed: u8 = use_callback(produce);
+            const local: Packet = CONFIG;
+            let local_field: u8 = local.item;
+            let selected: u8 = if std.os.unix.getpid() > 0 {
+                CONFIG.item
+            } else {
+                produce().item
+            };
+            let runtime = Packet { item: Seed { byte: 42 } };
+            direct == 42 and nested == 42 and produced == 42
+                and produced_nested == 42 and generic_value == 42
+                and stored == 42 and passed == 42 and local_field == 42
+                and selected == 42 and runtime.item.byte == 42
+        }
+        "#,
+    );
+    for level in ["0", "3"] {
+        success(&case.build(level));
+        let output = case.run();
+        success(&output);
+        assert_eq!(
+            output.stdout,
+            b"convert;convert;convert;convert;convert;convert;convert;(bool true)\n"
+        );
+    }
+}
+
+#[test]
+fn source_field_observation_does_not_grant_whole_value_or_runtime_conversions() {
+    let definitions = r#"
+        struct Packet { byte: u8 }
+        const CONFIG: Packet = Packet { byte: 42 };
+        pure comptime fn produce() -> Packet { CONFIG }
+        fn runtime() -> Packet { Packet { byte: 42 } }
+    "#;
+    for body in [
+        "let value = CONFIG; value.byte == 42",
+        "let value = produce(); value.byte == 42",
+        "let value: u8 = runtime(); value == 42",
+    ] {
+        let case = Case::new(&format!("{definitions} fn run() -> bool {{ {body} }}"));
+        let output = case.build("0");
+        assert!(
+            !output.status.success(),
+            "source observation must not authorize this runtime delivery: {body}"
+        );
+    }
+}

@@ -47,10 +47,14 @@ pub(crate) fn compile(source: &str) -> Result<nir::program::Package, String> {
 }
 
 pub(crate) fn run(source: &str) -> Value {
+    run_with_inputs(source, "run", vec![])
+}
+
+pub(crate) fn run_with_inputs(source: &str, entry: &str, inputs: Vec<Value>) -> Value {
     let package = compile(source).unwrap();
-    let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+    let graph = luna::instantiation::instantiate(&package, entry, 1_000_000).unwrap();
     let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
-    vm.invoke_instance(&graph.roots[0], vec![]).unwrap()
+    vm.invoke_instance(&graph.roots[0], inputs).unwrap()
 }
 
 /// Keep source queries alive for execution in the exact checked package.

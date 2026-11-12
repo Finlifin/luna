@@ -15,11 +15,12 @@
 | 入口 | 当前消费者 | 实际行为 |
 | --- | --- | --- |
 | 命名常量 | expression_values/bindings → splice_constant → splice_value | 选择普通 runtime Splice 方法，以 comptime 输入实例化 |
+| 源字段接收者 | field_operand → projection_operand → deliver_operand | 已有源常量、已供应局部数据和可识别的 comptime 调用先保留源程序；嵌套字段投影后再按外层使用选择 Splice |
 | comptime 函数结果 | call/finish_prepared_call 等 → deliver_comptime_result | runtime 数据使用走转换；作为下一个 comptime callee/Type 构造头时保留源值 |
 | 普通函数的 comptime 参数 | expression_values/bindings 的 ResolvedFnParam | 通常直接生成 K::Local，先按源域核对 runtime 预期域，没有同等的交付步骤 |
 | 传给后续 staged 输入 | iir::staging::substitute_forwarded_inputs | 在被标记的 staged 位置替换已完成值，检查写入/地址逃逸与捕获作用域 |
 | 剩余参数读取 | iir::staging::wrap | 以 runtime Let 恢复值，随后按 runtime 移动、捕获、存储规则分析 |
-| quote 主体读取生成器数据 | bindings 中的 generator_data / materialize_generator_data 提前返回 | 已有 payload 可直接成为主体数据；当前同域自定义 Splice 的可观察行为可能被跳过，见下文 CMTT 复核 |
+| quote 主体直接读取生成器数据 | bindings 中的 generator_data / materialize_generator_data 提前返回 | 未经过字段观察的直接数据读取仍可能跳过同域 Splice；字段入口已迁移，见下文 CMTT 复核 |
 | 生成器定义中的源实参与 callee | check_code_generator → quote_expression → 普通 required 输入准备 | 抽象 Data(None) 被要求立即交付值，未调用的生成器也可能报输入不可用 |
 
 源码锚点：
@@ -64,8 +65,8 @@ generator 数据物化。`CONFIG.byte` 中的 CONFIG 先经 `splice_constant` �
 随后 `projection_expression` 在 u8 上找 byte 而失败。相反，生成器局部字段保持
 Seed 源域，却在最终交付位置没有转为 u8。两条路径分别转换过早与转换缺失。
 
-新的检查接口必须让父操作先取得带阶段的操作数，再选择怎样消费它。下列为目标
-接口，不是已经新增的 Rust API，也不改变正式语法：
+新的检查接口必须让父操作先取得带阶段的操作数，再选择怎样消费它。下列为完整
+目标接口，不等同于当前 Rust API，也不改变正式语法；已迁移的字段入口见下节。
 
 ```text
 check_operand(site, input_context, region) -> Progress<Operand>
@@ -92,10 +93,37 @@ formation = source-program | available-source-value | residual-program
 | place | 沿源阶段与资源协议检查可写位置；不能把临时 runtime 转换结果当成原 comptime 值引用的位置 |
 
 消费描述必须沿表达式的实际结果边传递。外层需要 runtime 值，不代表其字段接收者、
-callee、显式 comptime 参数也各自需要 runtime 值。反过来，观察接收者不能把其中
+callee、显式 comptime 参数也各自需要 runtime 值。callee 角色先确定调用阶段；
+从源数据取得 runtime 函数值仍需其合法目标表示和转换，不能把 comptime callable
+的免转换路径扩展到全部函数值而吞掉用户 Splice 的行为。反过来，观察接收者不能把其中
 真正的 runtime 调用标成 comptime。普通 runtime 条件保持 runtime 控制流，分支中
 需要的转换留在相应分支；仅凭分支结果的源身份已知，不能提前执行转换或条件。
 跨阶段可用性由作用域和已执行输入证明，不以“表达式没有自由变量”代替。
+
+### 已接通：源字段操作数与结果交付分离
+
+Rust 的 `splicing::Operand` 当前区分 Source 与 Value：前者保留受检 comptime
+程序，后者是已经按当前消费阶段检查的表达式。Source 不意味着已经取得执行结果，
+Value 也不意味着一律属于 runtime。两者均持有原域和程序；Display 显示
+`(source-operand ...)` 或 `(value-operand ...)`，不将观察记录放入按源码位置索引的
+全局侧表，也不在 Checker 上增设临时禁止转换的环境开关。
+
+`field_operand` 通过已有声明与输入信息识别源常量、已供应的局部 generator 数据
+及 comptime 调用；调用域观察复用 `declared_comptime_call_result`，不执行 producer。
+源调用仍由普通调用检查接收完整实参并保留程序。`projection_operand` 在源域中
+检查字段，嵌套投影继续传送 Operand；`deliver_operand` 最后按使用位置调用既有
+`deliver_comptime_result`，由普通 Splice 选择、输入准备与契约检查构造目标结果。
+匿名记录和名义字段共用此交接；runtime 字段仍保持原阶段。
+
+这消除了普通 `CONFIG.byte` 的过早转换，并允许不具备 Splice 的外层容器仅被源
+字段观察。若字段本身为 Seed 且其 RuntimeTarget 为 u8，最终交付检查的是 u8；
+若继续观察 Seed.byte，则先投影 byte，不执行 Seed 的转换。直接使用整个容器仍
+须满足自己的 Splice，不能因字段可读取而取得任意 runtime 表示。
+
+完整目标尚未接通：块／条件结果、类型成员常量的旧交付入口、尚未供应的 generator
+参数与一般普通 comptime 参数，尚未统一返回这类操作数。源表达式的形成与区域
+所有权仍依赖既有调用/检查后继；这不是新的全局阶段推断器。特别是不能用 Source
+标记掩盖输入未完成，也不能根据最终期望类型去猜测该读源域还是目标域。
 
 ### 生成器定义检查与实际调用的交接
 
@@ -368,8 +396,9 @@ trait 来源、接口契约、类型视图和程序义务。迁移不只改主�
 
 ## 9. 证据与当前限制
 
-此次收拢阶段分析和源码复现，运行行为对照已在 `689d45c5` 提交；没有改变 compiler 的交付语义，
-没有宣称修复隐式参数转换或文本来源。工作目录均为 `/home/fin/luna`。
+以下先保留 `689d45c5` 阶段分析的证据，再记录各次实际迁移。早期对照只证明
+当时的状态，不代表当前所有入口；源字段操作数的接线与限制见下节。工作目录均为
+`/home/fin/luna`。
 
 - `library_std::splice_construction_runs_per_use_after_staged_inputs_are_ready`
   使用真实 sysroot 与资源检查，在 O0/O3 输出三次 `convert;`：命名常量、显式
@@ -398,6 +427,64 @@ python3 -B development/check.py --timeout 900 -- run -p luna -- build SOURCE --e
 失败行是仍待修复的合法源码，不是正式拒绝测试；保留成功对照用于区分协议不可用
 与参数入口缺交付。上述准备状态和底层构造接口仍为设计，不能计为新的生产接线。
 
+### 源字段操作数迁移的验证边界
+
+`source_field_observation_precedes_runtime_construction` 使用真实 sysroot、资源检查和
+LLVM O0/O3，外层 Packet 没有 Splice，字段 Seed 的 RuntimeTarget 为 u8。
+它覆盖命名常量、局部 const、普通／泛型 comptime 生产者、存储的函数身份与显式
+comptime 回调。直接交付 Seed 字段执行一次转换；继续观察 byte 则不执行 Seed
+转换；runtime 分支只在被选择的位置转换。输出严格核对七次 `convert;` 和 true，
+不以“最终值相等”替代构造次数。直接使用完整 Packet 与把 runtime Packet 当成
+u8 的用法另有拒绝检查。基线 `ebf4369d` 上同一正例在 Packet 的 Splice 选择处
+失败，报告 `/tmp/luna-tools-0729jqlw/result.json`；迁移后完整 `library_std`
+14 项通过，`/tmp/luna-tools-hp1zw4_2/result.json`，退出 0。
+
+旧 CMTT 字段 fixture 没有绑定 Splice，曾依赖直接重建 runtime 数据。标量字段
+用例改用真实 sysroot；独立测试 Add 选择的 BitVec fixture 明确绑定自己的 Transfer
+协议及 bool/u8 实现。错误限定值、函数载荷的 fixture 同样显式提供本地协议和
+具体实现，保留原有标签重排、快照、阶段拒绝断言。这不添加 blanket 实现，也不
+宣称复杂类型自动派生已完成。新的缺协议反例即使源域和目标域相同也要求拒绝。
+不能为测试方便在用户包中为外部 Splice 和外部类型新增实现以绕过孤儿检查。
+
+完整 CMTT 组在当前 compiler 上执行 596 项，590 项通过，6 项旧 fixture 缺少
+转换协议，报告 `/tmp/luna-tools-125ia4tx/result.json`，退出 101。随后只修改这
+6 项 fixture 的协议／sysroot 供应，未改原有预期；相关 9 项复验中 8 项通过，
+`/tmp/luna-tools-_x_1xmg1/result.json`。余下一项在完整 sysroot 下触及准备预算，
+按原有隔离范围显式绑定 Transfer 后通过，`/tmp/luna-tools-b3dwyjaa/result.json`，
+退出 0。没有把这些分次结果写成“最终状态完整组一次全绿”。相关命令：
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt -- --test-threads=1
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt -- --test-threads=1 contextual_data_properties local_constant_callbacks_survive pattern_generators_lift_data pattern_generators_run_stateful
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt -- --test-threads=1 pattern_generators_run_stateful_loops_and_early_returns
+```
+
+当前 driver 构建报告 `/tmp/luna-tools-k88p5vj_/result.json`。原有
+`source-field-before-splice.fl` 的 build 与运行分别退出 0，报告
+`/tmp/luna-tools-8tifgt9o/result.json` 与 `/tmp/luna-tools-52dgjpde/result.json`，
+输出只有 `(bool true)`，没有 Seed 的 `convert;`。
+
+完整库的准备成本缺口保存为
+[pattern-generator-sysroot-preparation.fl](repros/pattern-generator-sysroot-preparation.fl)。
+对旧 driver `/tmp/luna-value-delivery-7f6d3715` 和当前 driver
+`/tmp/luna-source-operands-current` 执行相同命令：
+
+```sh
+python3 -B development/reproduce.py --timeout 90 --binary DRIVER -- check development/repros/pattern-generator-sysroot-preparation.fl --sysroot library --build-target x86_64 linux 64
+```
+
+两者均在 required comptime preparation 报 StepsExhausted，退出 1；报告分别为
+`/tmp/luna-tools-evvi9r5p/result.json` 和 `/tmp/luna-tools-7e83xgls/result.json`。
+这是需要修复的既有成本问题，不是语言拒绝例。`check` 不接收执行动作的 `--fuel`；
+前端当前固定调用准备预算为 100 万步，本次没有提高它或修改公共测试入口的预算。
+
+反射组的 `sysroot_reflection_uses_receiver_domains_without_unfolding_type_identity`
+和 `computed_normal_form_receiver_keeps_live_clause_inputs` 仍在旧 VM 构造器处报
+`UnmaterializedDispatch`。它们在上面的基线复跑中也失败，不能算成本次新回归或
+隐藏为通过；需要按 `support/sysroot_execution::with_comptime` 的源查询世界准入
+路径迁移。`cmtt_storage_world` 6 项、`cmtt_phase_boundaries` 3 项通过，
+`/tmp/luna-tools-uzh5l8n0/result.json`；该报告因这两个反射失败整体退出 101。
+
 ### 源操作数与生成器就绪状态的联合复查
 
 `7f6d3715` 基线，工作目录 `/home/fin/luna`。通过
@@ -413,7 +500,7 @@ python3 -B development/reproduce.py --timeout 90 --binary /tmp/luna-value-delive
 多写了 pure，触发另一项未实现诊断，修正为普通 `comptime fn` 类型后按上面命令
 单独重跑。下表使用最终有效源码的结果，不将函数类型修饰符错误算作交付证据。
 
-| 复现文件 | 当前结果 | 目标行为 | 报告目录（均在 `/tmp/`，内含 result.json） |
+| 复现文件 | `7f6d3715` 基线结果 | 目标行为 | 报告目录（均在 `/tmp/`，内含 result.json） |
 | --- | --- | --- | --- |
 | [source-field-before-splice.fl](repros/source-field-before-splice.fl) | 构建退出 1：field projection requires a supported struct | 先观察 CONFIG.byte，返回 true，无 Seed 转换 | luna-tools-jhhjt_7d |
 | [quoted-local-changing-target.fl](repros/quoted-local-changing-target.fl) | 构建退出 1：预期 u8，实际 Seed | 一个 runtime 转换，返回 true | luna-tools-_velwvdt |
@@ -423,7 +510,7 @@ python3 -B development/reproduce.py --timeout 90 --binary /tmp/luna-value-delive
 | [quoted-source-snapshot.fl](repros/quoted-source-snapshot.fl) | 构建和运行退出 0，只输出 `(bool true)` | 保留 byte 1 的旧快照，另输出一次 `convert;` | 构建 luna-tools-grdcbze_；运行 luna-tools-9cki7lyx |
 | [quoted-source-runtime-branch.fl](repros/quoted-source-runtime-branch.fl) | 构建和运行退出 0，只输出 `(bool true)` | runtime 选择的分支执行一次 `convert;` | 构建 luna-tools-grq1pg4_；运行 luna-tools-pg1hxbso |
 
-这七项都是目标行为尚未完成的复现，不是应该拒绝的正式测试，也不以 native 退出
+这七项在该基线都是目标行为尚未完成的复现，不是应该拒绝的正式测试，也不以 native 退出
 0 作为行为正确证据。各 report 保存完整 OUTPUT 路径及命令；七项初次执行的摘要
 在 `/tmp/luna-delivery-audit-7f6d3715.json`，callback 以其后重跑报告为准。
 
