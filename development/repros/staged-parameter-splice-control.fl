@@ -1,0 +1,14 @@
+{- Baseline paths already implement ordinary runtime Splice construction.
+   Compare with staged-parameter-splice.fl; explicit invocation is a control,
+   not the required spelling of every cross-stage parameter use. -}
+struct Seed { byte: u8 }
+impl Splice for Seed {
+    assoc RuntimeTarget: Type = u8;
+    fn splice(comptime data: Seed) -> u8 { data.byte }
+}
+const CONFIG: Seed = Seed { byte: 42 };
+fn explicit(comptime data: Seed) -> u8 { Seed.as(Splice).splice(data) }
+fn run() -> bool {
+    let direct: u8 = CONFIG;
+    direct == 42 and explicit(Seed { byte: 42 }) == 42
+}

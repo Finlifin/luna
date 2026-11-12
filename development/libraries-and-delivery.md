@@ -105,6 +105,11 @@ File 提供具体实现；File 保持自身关闭责任，用户 writer 可以�
   Local 为常量、复制 producer、给 str 强加 Copy 或只在 writer 处特判。通用文本
   默认方法没有交付；现有 std 的 comptime 文本输出范围也不是最终语言规则。
 
+进一步的[阶段交付复核](runtime-value-delivery.md)发现：用户类型 Seed 转成 u8 时，
+命名常量和显式 Splice 对照通过，直接返回 comptime 参数却在前端错用源域。这说明
+迁移不能只处理 str 的布局/来源；必须同时统一源输入与 runtime 消费的边界。原有
+文本正例仍保留，不能用标量对照或移除一次移动错误替代它的验收。
+
 本阶段验证工作目录 `/home/fin/luna`，使用真实 sysroot 与资源检查；沿用工作区
 原有的资源分析排版修改，不宣称为干净 HEAD 验收：
 

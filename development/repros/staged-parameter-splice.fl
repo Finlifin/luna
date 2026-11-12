@@ -1,0 +1,10 @@
+{- Positive cross-stage delivery case. A completed comptime parameter should
+   use the same Splice protocol as a named constant entering runtime data flow.
+   Currently the parameter is checked as Seed against u8, before conversion. -}
+struct Seed { byte: u8 }
+impl Splice for Seed {
+    assoc RuntimeTarget: Type = u8;
+    fn splice(comptime data: Seed) -> u8 { data.byte }
+}
+fn from_parameter(comptime data: Seed) -> u8 { data }
+fn run() -> u8 { from_parameter(Seed { byte: 42 }) }

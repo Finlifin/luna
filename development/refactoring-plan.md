@@ -39,6 +39,12 @@ M2 先接通[统一值准入](comptime-value-admission.md)及普通参数的真�
 带域 list 编码和闭包共享快照；再让 M3 的宿主响应、代码值与发布使用相应传送契约。
 不能先删除 normal_terms/normal_values 中的检查，或把活动值引用统一复制成冻结数据。
 
+源输入已经形成也不等于 runtime 值已经构造。[阶段交付设计](runtime-value-delivery.md)
+把参数/常量/结果的消费角色放在 M2，把受检 Splice 调用、捕获和契约残余接入 M4，
+再与 M5 的目标存储来源和真实文本 writer 贯通。现有 `iir::staging::wrap` 不能先删：
+必须先接通基础构造终点，避免标量身份实现自递归，再逐项接管主体、契约、默认值和
+捕获。对照已可执行，直接返回 comptime 参数仍是待修正例，不改变既有待定域主线。
+
 布局观察在 normalization 的反射和 safe 检查中已经需要，不推迟到 M6 才设计。
 M4 接通 TypeRef/环境与布局计划，M6 完成目标调用分类与交付；具体生产者、消费者和
 repr_at 退役条件见[布局与调用 ABI](layout-and-call-abi.md)。仅新增一个布局容器不算迁移。

@@ -41,6 +41,11 @@ comptime value-reference 用 VM 的 slot/lens 表示可更新位置。读取和�
 当前需要具体值的 CompletedValue；局部闭包快照也不等于 metadata wire 获准执行工厂。
 这些边界及现有 list 普通编码、闭包重建路径的迁移见[准入细则](comptime-value-admission.md)。
 
+Freeze/restore 仍是源执行环境之间的受检传送，不自动产生 runtime 对象。
+进入目标数据流另需[跨阶段值交付](runtime-value-delivery.md)：源值、消费角色、
+Splice 的 RuntimeTarget、实际调用与目标来源分别保留。当前参数重建为 runtime Let
+不是这个协议的完整实现；命名常量成功也不证明普通 comptime 参数通路已经合流。
+
 ## 3. 通用上下文表达式取代 NF 专用表达式
 
 当前 NormalFormArgument 的 If/Block/Match/Integer/List 等分支，是把一般表达式的
