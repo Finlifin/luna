@@ -118,15 +118,22 @@ enum Work<'a> {
 pub(super) struct Cache<'a> {
     package: Option<&'a Package>,
     definitions: Option<BTreeMap<DeclarationId, &'a Function>>,
-    parameter_sorts: Option<BTreeMap<DeclarationId, nir::Sort>>,
+    declarations: std::rc::Rc<super::declarations::Metadata<'a>>,
     completed: HashMap<Instance, bool>,
 }
 impl<'a> Cache<'a> {
     pub(super) fn new(package: Option<&'a Package>) -> Self {
-        Self {
+        Self::with_declarations(std::rc::Rc::new(super::declarations::Metadata::new(
             package,
+        )))
+    }
+    pub(super) fn with_declarations(
+        declarations: std::rc::Rc<super::declarations::Metadata<'a>>,
+    ) -> Self {
+        Self {
+            package: declarations.package(),
             definitions: None,
-            parameter_sorts: None,
+            declarations,
             completed: HashMap::new(),
         }
     }
@@ -200,8 +207,7 @@ impl<'a> Cache<'a> {
             self.definitions = Some(definitions);
         }
         let (result, visited) = scan(
-            package,
-            &mut self.parameter_sorts,
+            &self.declarations,
             self.definitions.as_ref().unwrap(),
             &self.completed,
             root.clone(),
@@ -233,8 +239,7 @@ fn cleanup_rejection(
 }
 
 fn scan<'a>(
-    package: &Package,
-    parameter_sorts: &mut Option<BTreeMap<DeclarationId, nir::Sort>>,
+    declarations: &super::declarations::Metadata<'_>,
     definitions: &BTreeMap<DeclarationId, &'a Function>,
     completed: &HashMap<Instance, bool>,
     root: Instance,
@@ -270,14 +275,16 @@ fn scan<'a>(
                 // An empty telescope has no sort observations. Follow calls
                 // normally; a reached generic callee acquires the directory at
                 // that point. Only complete immutable metadata is published.
-                if !function.type_parameters.is_empty() && parameter_sorts.is_none() {
-                    *parameter_sorts = Some(package.declaration_parameter_sorts(fuel).map_err(
-                        |_| "invalid rejection declaration metadata or exhausted budget",
-                    )?);
-                }
+                let sorts = if function.type_parameters.is_empty() {
+                    &empty_sorts
+                } else {
+                    declarations
+                        .sorts(fuel)
+                        .map_err(|_| "invalid rejection declaration metadata or exhausted budget")?
+                };
                 let context = Substitution::new(
                     &function.type_parameters,
-                    parameter_sorts.as_ref().unwrap_or(&empty_sorts),
+                    sorts,
                     id.arguments.clone(),
                     fuel,
                 )?;
@@ -1238,10 +1245,10 @@ mod tests {
         let callee = |local| generic_callee(local, vec![Term::Primitive(Primitive::Bool)]);
         let mut cache = Cache::new(Some(&package));
         assert!(cache.may_reject(&callee(0), &mut 64).is_err());
-        assert!(cache.parameter_sorts.is_none());
+        assert!(!cache.declarations.is_prepared());
         assert!(cache.completed.is_empty());
         assert!(!cache.may_reject(&callee(0), &mut 10_000).unwrap());
-        assert!(cache.parameter_sorts.is_some());
+        assert!(cache.declarations.is_prepared());
         // This is a different root, so only the declaration directory is warm.
         assert_eq!(cache.completed.len(), 1);
         let mut fuel = 64;
@@ -1266,7 +1273,7 @@ mod tests {
         let mut invalid = Cache::new(Some(&other_world));
         for _ in 0..2 {
             assert!(invalid.may_reject(&callee(1), &mut 10_000).is_err());
-            assert!(invalid.parameter_sorts.is_none());
+            assert!(!invalid.declarations.is_prepared());
             assert!(invalid.completed.is_empty());
         }
     }
@@ -1292,11 +1299,11 @@ mod tests {
         };
         let mut cache = Cache::new(Some(&package));
         assert!(!cache.may_reject(&callee(0), &mut 64).unwrap());
-        assert!(cache.parameter_sorts.is_none());
+        assert!(!cache.declarations.is_prepared());
         assert!(cache.may_reject(&callee(1), &mut 64).is_err());
-        assert!(cache.parameter_sorts.is_none());
+        assert!(!cache.declarations.is_prepared());
         assert_eq!(cache.completed.len(), 1);
         assert!(!cache.may_reject(&callee(1), &mut 10_000).unwrap());
-        assert!(cache.parameter_sorts.is_some());
+        assert!(cache.declarations.is_prepared());
     }
 }

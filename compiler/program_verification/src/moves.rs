@@ -2112,6 +2112,7 @@ struct Analyzer<'a, F, G> {
     effect_memory_inputs: Vec<super::memory::EffectInput>,
     effect_result_inputs: Vec<EffectResultInput>,
     handler_completions: Vec<std::sync::Arc<HandlerReturnValue>>,
+    declarations: std::rc::Rc<super::declarations::Metadata<'a>>,
     rejection: super::rejection::Cache<'a>,
     delivery: F,
     shape: G,
@@ -4689,9 +4690,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 "callable result requires a concrete runtime function",
             ));
         }
-        let binders =
-            super::memory::memory_binders(Some(package), &original.type_parameters, &mut self.fuel)
-                .map_err(|e| error(source, e))?;
+        let binders = self
+            .declarations
+            .binders(&original.type_parameters, &mut self.fuel)
+            .map_err(|e| error(source, e))?;
         let mut function = original.clone();
         let instantiate = |expr: &Expr| {
             expr.instantiate_parameters(&binders, body_arguments)
@@ -4793,6 +4795,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             &fields,
             borrowed_code,
             &self.trivial_cleanup_types,
+            Some(self.declarations.clone()),
         )?;
         self.fuel = self
             .fuel
@@ -11127,12 +11130,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let Some((function, arguments)) = package.runtime_body(declaration, arguments) else {
                 return Ok(false);
             };
-            let binders = super::memory::memory_binders(
-                Some(package),
-                &function.type_parameters,
-                &mut self.fuel,
-            )
-            .map_err(|e| error(source, e))?;
+            let binders = self
+                .declarations
+                .binders(&function.type_parameters, &mut self.fuel)
+                .map_err(|e| error(source, e))?;
             let signature = function
                 .signature
                 .instantiate_parameters(&binders, arguments)
@@ -13635,6 +13636,7 @@ fn analyze_with_shapes<'a>(
         borrowed_fields,
         &[],
         &Default::default(),
+        None,
     )
 }
 
@@ -13653,6 +13655,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
     borrowed_fields: &[BorrowedField],
     borrowed_code: &[BorrowedCode],
     trivial_cleanup_types: &std::collections::HashSet<Term>,
+    declarations: Option<std::rc::Rc<super::declarations::Metadata<'a>>>,
 ) -> Result<Report, Error> {
     // Callers supply many distinct closure types. Keep the large recursive
     // analyzer shared instead of monomorphizing it for every policy closure.
@@ -13673,6 +13676,8 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
     for input in &effect_result_inputs {
         effect_memory_inputs.push(input.memory_input(&mut fuel, source)?);
     }
+    let declarations = declarations
+        .unwrap_or_else(|| std::rc::Rc::new(super::declarations::Metadata::new(package)));
     let mut analyzer = Analyzer {
         trivial_cleanup_types: trivial_cleanup_types.clone(),
         cleanup,
@@ -13685,7 +13690,8 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         effect_memory_inputs,
         effect_result_inputs,
         handler_completions: vec![],
-        rejection: super::rejection::Cache::new(package),
+        rejection: super::rejection::Cache::with_declarations(declarations.clone()),
+        declarations,
         delivery,
         shape,
         fuel,
@@ -14263,6 +14269,47 @@ pub fn analyze_in_package_with_borrowed_code_context<'a>(
         borrowed_fields,
         borrowed_code,
         &Default::default(),
+        None,
+    )
+}
+
+/// Reuse declarations across behavior cases, keeping each resource analysis
+/// and its rejection/cleanup evidence private to its own invocation.
+pub(crate) fn analyze_with_declarations<'a>(
+    declarations: std::rc::Rc<super::declarations::Metadata<'a>>,
+    function: &'a Function,
+    delivery: impl FnMut(&Term) -> Result<Delivery, String>,
+    fuel: usize,
+    cleanup: Option<&'a mut dyn CleanupPolicy>,
+    borrowed_parameters: &[(usize, Term)],
+    callable_parameters: &[CallableParameter],
+    enum_parameters: &[EnumParameter],
+    effects: Vec<EffectResultInput>,
+    borrowed_fields: &[BorrowedField],
+) -> Result<Report, Error> {
+    let package = declarations.package().ok_or_else(|| {
+        error(
+            function.body.source,
+            "resource analysis requires declaration package",
+        )
+    })?;
+    let mut shape_fuel = fuel;
+    analyze_with_shapes_and_borrowed_code(
+        Some(package),
+        function,
+        delivery,
+        |ty| ownership_shape(package, ty, &mut shape_fuel, 0),
+        fuel,
+        cleanup,
+        borrowed_parameters,
+        callable_parameters,
+        enum_parameters,
+        vec![],
+        effects,
+        borrowed_fields,
+        &[],
+        &Default::default(),
+        Some(declarations),
     )
 }
 

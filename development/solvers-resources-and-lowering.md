@@ -282,6 +282,61 @@ Drop 的读写、发散或效应属于表达式行为，不能只分析显式函
 memory(none)、P2 映射 readonly。在没有额外证据时，不移动可能 trap 或发散的操作。
 优化必须保留参数求值、错误、handler 路由和资源 retirement 次数。
 
+### 7.1 纯度分析复用完整包的有界声明构造
+
+纯度的资源子查询原先在 `purity.rs::resource_world_parts` 自行建立 Context、布局和
+impl 索引：Context 使用自己的默认额度，布局载荷先 clone，每次 impl 插入又取得
+同一初始预算的副本。它与 dispatch 已使用的完整包构造规则重复，也不能把消耗
+准确交回本次纯度分析。已有世界缓存只减少重复构造，不能修复第一次构造的计量。
+
+现改为 `Context::from_package_metered` 与 `Index::from_package_metered`。两者沿
+同一剩余额度顺序工作；字段与类型载荷在复制前计量，impl 插入共同消费余额，参数域
+按同一完整包规则登记。失败保留实际余额，不发布局部索引；成功后才将 Context 与
+Index 一起放入本次分析的不可变缓存。观察和清理查询保留各自前提，不将某次选择
+证明或运行存储放入该缓存。此处只建立类型查询所需的声明世界，程序纯度、资源、
+终止与存活证明仍由各自分析完成，PTC 不因此接管程序状态。
+
+这是已完成包的共同入口，不用于替换 elaboration 中仍在增量建立声明的索引。
+没有新建全局缓存；不同包的同号身份仍各自选择实现。既有泛型
+默认值的抽象 Copy／表示／清理证据缺口保持未完成，不以具备 trait 前提就放行复制。
+其它纯度分析的工作量和临时分配也不因这一构造迁移自动取得完整复杂度上界。
+
+完整计量同时暴露了另一处重复：纯度已读取参数 sort 目录，随后每个资源子分析的
+拒绝行为检查又重读整个包。真实 sysroot 的 `rotate_left`／`rotate_right` 每个标量
+实例的资源检查消耗约 4,350 步，原先漏计世界构造掩盖了总额度耗尽。仅在单个
+资源子分析内部共享目录不足以修复这条路径，必须保留父分析已经取得的声明证据。
+
+`declarations::Metadata` 现在绑定一个不可变 Package，并按需、有界地构造完整
+sort 目录。纯度、其资源子分析、资源中的拒绝检查和嵌套结果分析共享目录；失败
+不发布，命中和 binder 输出仍计量。目录不包含调用现场、资源状态、选择证明或
+行为结果；每个子分析重新建立自己的拒绝与清理证据。公开独立入口仍建立自己的
+目录，不按裸 DeclarationId 跨包复用。这次不统一 memory 固定点内部的其它目录，
+也未增加纯度预算或改变有限性、Copy、Drop 的证明要求。
+
+对照与验证使用 `/home/fin/luna`，保留原有资源分析工作区修改：
+
+- 仅将资源世界构造函数临时还原为 `a4f72090`，保留新测试，执行
+  `python3 -B development/check.py --timeout 900 -- test -p program_verification
+  --lib purity::resource_world_tests::resource_world_charges_layout_payload_before_publishing
+  -- --exact --nocapture`。`/tmp/luna-tools-_j9vsovh/result.json` 退出 101：含 256
+  字段的布局在低额度下仍成功发布，断言明确捕获未计费复制。对照后按 SHA-256
+  核验备份并恢复本次生产修改。
+- 新测试另外检查同一额度覆盖整批 impl、失败后重新构造、缓存命中仍计费、不同
+  世界相同声明编号的正反选择。初轮将“无候选”误写成 Result 错误，修正为核对
+  `Selection::NoApplicableCandidate`；不修改既有语义预期。
+- 迁移构造而未共享父目录时，`/tmp/luna-tools-c9fhl2pu/result.json` 退出 101，
+  模板局部定义组 21 项在真实 sysroot 的 `mix_byte`／`mix_digest` 纯度检查失败。
+  临时恢复原构造后的单例对照 `/tmp/luna-tools-qyckx3xc/result.json` 退出 0；
+  确认是本次回归。修复目录生命周期后 `/tmp/luna-tools-keq9r9f1/result.json`
+  退出 0：模板组 22 项通过、1 项既有忽略，程序验证 121 项与 luna 单元 87 项通过。
+- 最终执行 `python3 -B development/check.py --timeout 900 -- test -p
+  program_verification --lib -p luna --test runtime_purity --test optional_purity
+  --test default_calls --test function_template_local_definitions --test library_protocols
+  --test resources --test method_memory_contracts --test comparison_resources --no-fail-fast`。
+  `/tmp/luna-tools-m3tvdn1w/result.json` 退出 0，760 项通过、1 项既有忽略。新增
+  覆盖包括低预算目录重试、相同编号在不同包中采用不同 sort、畸形目录不得发布，
+  以及纯度的实际资源子分析复用已准备目录后仍消费自身预算。
+
 ## 8. IIR 到 ABI 的明确顺序
 
 IIR 完成类型的 comptime 部分和实例选择，保留高级操作、真实 runtime 依赖及 NIR 已建立的

@@ -699,7 +699,8 @@ struct Analysis<'a> {
     resource_world: Option<ResourceWorld>,
     functions: HashMap<DeclarationId, &'a n::Function>,
     tuple_heads: HashMap<DeclarationId, &'a nir::normal_forms::Head>,
-    parameter_sorts: Option<BTreeMap<DeclarationId, Sort>>,
+    declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
+    parameter_sorts: Option<std::sync::Arc<BTreeMap<DeclarationId, Sort>>>,
     staged_parameters: BTreeSet<n::LocalId>,
     finite: bool,
     finite_loop_breaks: BTreeSet<n::LocalId>,
@@ -724,7 +725,8 @@ impl<'a> Analysis<'a> {
     }
 
     fn with_fuel(package: &'a n::Package, finite: bool, mut fuel: usize) -> Self {
-        let parameter_sorts = package.declaration_parameter_sorts(&mut fuel).ok();
+        let declarations = std::rc::Rc::new(crate::declarations::Metadata::new(Some(package)));
+        let parameter_sorts = declarations.sorts(&mut fuel).ok().cloned();
         let mut staged_parameters = BTreeSet::new();
         for function in &package.functions {
             let Term::Function { parameters, .. } = function.signature.callable_signature() else {
@@ -743,6 +745,7 @@ impl<'a> Analysis<'a> {
         Self {
             finite_loop_breaks: BTreeSet::new(),
             parameter_sorts,
+            declarations,
             staged_parameters,
             package,
             method_callees: Default::default(),
@@ -894,50 +897,18 @@ impl<'a> Analysis<'a> {
         if let Some(world) = &self.resource_world {
             return Some(world.clone());
         }
-        let context = crate::ptc::Context::from_package(self.package).ok()?;
-        let mut index = crate::implementation::Index::for_builtin_packages(
-            self.package.target,
-            self.package.builtin_implementation_packages.iter().copied(),
-        );
-        index.set_normal_form_metadata(self.package.normal_forms.clone());
-        index.sync_nominal_layouts(
-            &self.package.structs,
-            &self.package.enums,
-            &self.package.newtypes,
-        );
-        for (id, domain) in self
-            .package
-            .declaration_parameter_domains(&mut self.fuel)
-            .ok()?
-        {
-            index.register_parameter_domain(id, domain).ok()?;
-        }
-        let budget = crate::ptc::Budget {
+        let context =
+            crate::ptc::Context::from_package_metered(self.package, &mut self.fuel).ok()?;
+        // Use the completed-package construction contract shared by dispatch.
+        // Each failed insertion consumes this same allowance; no fresh budget
+        // or partially prepared world becomes visible to later observations.
+        let mut budget = crate::ptc::Budget {
             steps: self.fuel,
             ..Default::default()
         };
-        for implementation in &self.package.implementations {
-            if implementation.interface.is_none() {
-                continue;
-            }
-            if index
-                .insert(
-                    crate::implementation::ImplementationHead {
-                        parameter_types: implementation.parameter_types.clone(),
-                        declaration: implementation.declaration,
-                        interface: implementation.interface,
-                        interface_arguments: implementation.interface_arguments.clone(),
-                        subject: implementation.subject.clone(),
-                        type_parameters: implementation.type_parameters.clone(),
-                        requirements: implementation.requirements.clone(),
-                    },
-                    budget,
-                )
-                .is_err()
-            {
-                return None;
-            }
-        }
+        let index = crate::implementation::Index::from_package_metered(self.package, &mut budget);
+        self.fuel = budget.steps;
+        let index = index.ok()?;
         let world = std::sync::Arc::new((context, index));
         self.resource_world = Some(world.clone());
         Some(world)
@@ -2638,8 +2609,8 @@ impl<'a> Analysis<'a> {
         }
         let mut copy_types = HashSet::new();
         if self.protocols.drop.is_none() {
-            let report = moves::analyze_in_package_with_field_context(
-                self.package,
+            let report = moves::analyze_with_declarations(
+                self.declarations.clone(),
                 function,
                 |ty| {
                     Ok(if self.copy_type(ty) {
@@ -2679,8 +2650,8 @@ impl<'a> Analysis<'a> {
             implementations: &self.package.implementations,
             assumptions: &function.capabilities,
         };
-        let report = moves::analyze_in_package_with_field_context(
-            self.package,
+        let report = moves::analyze_with_declarations(
+            self.declarations.clone(),
             function,
             |ty| {
                 if self.copy_type(ty) || copy_types.contains(ty) {
@@ -4634,6 +4605,46 @@ mod resource_world_tests {
     }
 
     #[test]
+    fn cleanup_subanalysis_reuses_declarations_but_still_consumes_fuel() {
+        let mut package = package();
+        let parameter = DeclarationId {
+            package: 1,
+            local: 900,
+        };
+        package.functions[0].type_parameters = vec![parameter];
+        package.alias_contracts = (1000..1256)
+            .map(|local| nir::type_aliases::Contract {
+                declaration: DeclarationId { package: 1, local },
+                parameters: vec![],
+                parameter_types: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            })
+            .collect();
+        let callee = n::Expr {
+            source: package.functions[0].body.source,
+            ty: package.functions[0].signature.clone(),
+            kind: K::FunctionInstance {
+                declaration: package.functions[0].declaration,
+                arguments: vec![p(P::Bool)],
+            },
+        };
+        package.functions[1].body.kind = K::Call {
+            callee: Box::new(callee),
+            arguments: vec![],
+            parameter_bindings: vec![],
+        };
+        let mut analysis = Analysis::new(&package, false);
+        // The directory is already prepared by the enclosing analysis. A
+        // new resource report must pay for this call, not rescan all aliases.
+        analysis.fuel = 256;
+        assert!(analysis.transfer_cleanup_is_pure(&package.functions[1], &BTreeMap::new()));
+        assert!(analysis.fuel < 256);
+        analysis.fuel = 0;
+        assert!(!analysis.transfer_cleanup_is_pure(&package.functions[1], &BTreeMap::new()));
+    }
+
+    #[test]
     fn resource_world_reuse_is_local_and_failed_preparation_is_not_published() {
         let package = package();
         let mut analysis = Analysis::new(&package, false);
@@ -4652,6 +4663,151 @@ mod resource_world_tests {
             &first,
             &separate.resource_world_parts().unwrap()
         ));
+    }
+
+    #[test]
+    fn resource_world_charges_layout_payload_before_publishing() {
+        let base = package();
+        let mut baseline = Analysis::new(&base, true);
+        baseline.fuel = 50_000;
+        baseline.resource_world_parts().unwrap();
+        let base_cost = 50_000 - baseline.fuel;
+        let mut wide = package();
+        wide.structs.push(n::Struct {
+            declaration: DeclarationId {
+                package: 1,
+                local: 300,
+            },
+            name: "Wide".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            fields: (0..256)
+                .map(|i| (format!("field{i}"), p(P::Bool)))
+                .collect(),
+            requirements: vec![],
+            capabilities: vec![],
+        });
+        let mut analysis = Analysis::new(&wide, true);
+        analysis.fuel = base_cost + 64;
+        assert!(
+            analysis.resource_world_parts().is_none(),
+            "layout copying must consume the caller's allowance"
+        );
+        assert!(analysis.resource_world.is_none());
+        assert!(analysis.fuel < base_cost + 64);
+        analysis.fuel = 50_000;
+        let prepared = analysis.resource_world_parts().unwrap();
+        let after = analysis.fuel;
+        assert!(50_000 - after > base_cost + 64);
+        assert!(std::sync::Arc::ptr_eq(
+            &prepared,
+            &analysis.resource_world_parts().unwrap()
+        ));
+        assert_eq!(analysis.fuel, after - 1);
+    }
+
+    fn implementation_package(count: u32, argument: bool) -> n::Package {
+        let mut package = n::Package::default();
+        for slot in 0..count {
+            let id = |offset| DeclarationId {
+                package: 1,
+                local: slot * 10 + offset,
+            };
+            package.traits.push(n::Trait {
+                declaration: id(1),
+                self_parameter: id(2),
+                name: format!("Choice{slot}"),
+                comptime_only: false,
+                type_parameters: vec![id(3)],
+                parameter_types: vec![p(P::Bool)],
+                associated: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                parents: vec![],
+                methods: vec![],
+            });
+            package.implementations.push(n::Implementation {
+                declaration: id(4),
+                phases: Default::default(),
+                interface: Some(id(1)),
+                interface_arguments: vec![Term::Bool(argument)],
+                subject: p(P::Bool),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                methods: vec![],
+                associated: vec![],
+                associated_initializers: vec![],
+            });
+        }
+        package
+    }
+
+    #[test]
+    fn resource_world_uses_one_insertion_budget_and_keeps_selection_world_local() {
+        let many = implementation_package(16, true);
+        let mut analysis = Analysis::new(&many, true);
+        analysis.fuel = 50_000;
+        analysis.resource_world_parts().unwrap();
+        let cost = 50_000 - analysis.fuel;
+        let mut failed = Analysis::new(&many, true);
+        failed.fuel = cost - 1;
+        assert!(failed.resource_world_parts().is_none());
+        assert!(failed.resource_world.is_none());
+        assert!(failed.fuel < cost - 1);
+        failed.fuel = 50_000;
+        let first = failed.resource_world_parts().unwrap();
+        let different = implementation_package(16, false);
+        let mut other = Analysis::new(&different, true);
+        let second = other.resource_world_parts().unwrap();
+        for (package, prepared, flag) in [(&many, &first, true), (&different, &second, false)] {
+            let world = crate::capabilities::World {
+                context: &prepared.0,
+                index: &prepared.1,
+                traits: &package.traits,
+                implementations: &package.implementations,
+                assumptions: &[],
+            };
+            for slot in [0, 7, 15] {
+                let request = n::InterfaceInstance {
+                    declaration: DeclarationId {
+                        package: 1,
+                        local: slot * 10 + 1,
+                    },
+                    arguments: vec![Term::Bool(flag)],
+                };
+                let selected = world
+                    .resolve_instance_metered(
+                        &request,
+                        &p(P::Bool),
+                        &mut crate::ptc::Budget::default(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    selected.types.selection,
+                    crate::implementation::Selection::Selected(DeclarationId {
+                        package: 1,
+                        local: slot * 10 + 4
+                    })
+                );
+                let opposite = n::InterfaceInstance {
+                    arguments: vec![Term::Bool(!flag)],
+                    ..request
+                };
+                let excluded = world
+                    .resolve_instance_metered(
+                        &opposite,
+                        &p(P::Bool),
+                        &mut crate::ptc::Budget::default(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    excluded.types.selection,
+                    crate::implementation::Selection::NoApplicableCandidate
+                );
+            }
+        }
     }
 
     #[test]

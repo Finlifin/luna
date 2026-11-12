@@ -3,6 +3,7 @@
 pub mod contracts;
 pub mod control;
 pub mod copy;
+mod declarations;
 pub mod drop;
 mod effect_transfer;
 pub mod effect_usage;
