@@ -20,6 +20,7 @@
 | 传给后续 staged 输入 | iir::staging::substitute_forwarded_inputs | 在被标记的 staged 位置替换已完成值，检查写入/地址逃逸与捕获作用域 |
 | 剩余参数读取 | iir::staging::wrap | 以 runtime Let 恢复值，随后按 runtime 移动、捕获、存储规则分析 |
 | quote 主体读取生成器数据 | bindings 中的 generator_data / materialize_generator_data 提前返回 | 已有 payload 可直接成为主体数据；当前同域自定义 Splice 的可观察行为可能被跳过，见下文 CMTT 复核 |
+| 生成器定义中的源实参与 callee | check_code_generator → quote_expression → 普通 required 输入准备 | 抽象 Data(None) 被要求立即交付值，未调用的生成器也可能报输入不可用 |
 
 源码锚点：
 [参数读取](../compiler/elaboration/src/program/expression_values/bindings.rs)、
@@ -51,20 +52,85 @@
 NF 输入仍是普通 comptime 值，normal-form 头仍不展开。已知同一结构视图不代表源域
 与 RuntimeTarget 相同，也不授予 Copy、Drop 或内存访问能力。
 
-以下是职责划分，不是新增源码语法，也不是已存在的 Rust 类型：
+下节以 Operand 与 demand 明确这些职责。同阶段引用不复制 producer；runtime
+构造保留选中的 Splice 声明/实例、源输入、RuntimeTarget 与普通调用契约；代码
+展开沿既有 CMTT 规则。尚未完成的域/实现选择继续属于活动检查状态，不能冻结为
+“直接恢复一个 Local 即可”的成功计划。
+
+### 源操作数不能提前降成已经交付的 Expr
+
+`7f6d3715` 的对照进一步确认：问题在源操作数形成与消费之间，不能只归入
+generator 数据物化。`CONFIG.byte` 中的 CONFIG 先经 `splice_constant` 转为 u8，
+随后 `projection_expression` 在 u8 上找 byte 而失败。相反，生成器局部字段保持
+Seed 源域，却在最终交付位置没有转为 u8。两条路径分别转换过早与转换缺失。
+
+新的检查接口必须让父操作先取得带阶段的操作数，再选择怎样消费它。下列为目标
+接口，不是已经新增的 Rust API，也不改变正式语法：
 
 ```text
-SourceValue = (binding-or-result, domain, phase, formation-owner, availability)
-UseContext  = (consumer-role, expected-domain, lexical-scope, execution-boundary)
-Delivery    = same-stage-reference
-            | checked-runtime-construction
-            | contextual-code-expansion
+check_operand(site, input_context, region) -> Progress<Operand>
+consume(operand, demand, region)           -> Progress<Delivered>
+
+Operand = (domain, phase, category, formation, owner, source_range)
+phase   = comptime | runtime
+category = data | callable | contextual-code | type
+formation = source-program | available-source-value | residual-program
 ```
 
-same-stage-reference 不复制 producer；checked-runtime-construction 保留选中的
-Splice 声明/实例、已形成输入、RuntimeTarget 与普通调用契约；代码展开沿既有
-CMTT 规则，不把 quote payload 当作普通 RuntimeTarget。尚未完成的域/实现选择
-继续属于活动检查状态，不能冻结为“直接恢复一个 Local 即可”的成功计划。
+`phase` 与 `formation` 必须分开：一个参数确定属于 comptime，不代表其值已经供应；
+一个 runtime 函数的身份可以是已形成的 comptime 数据，不代表可以在 comptime
+执行其主体。`category` 从受检类型与代码接口取得，不能从源码名称或 ExprKind
+形状猜测。普通 n::Expr 可以继续承载受检程序，但不能独自承担上述事实。
+
+| demand | 操作数与结果的处理 |
+| --- | --- |
+| source-input | 按目标参数的源域检查并保留生产者顺序；输入未形成则保存检查后继，不能要求 RuntimeTarget |
+| field-observation | 对已成立的 comptime 源对象在源域中投影；所得字段成为新的源操作数，之后由外层 demand 决定是否转换 |
+| callee | 取得 callable 或 Type 构造头及接口；调用输入准备与调用结果另行交付，不把 callee 本身自动变成 runtime 数据 |
+| runtime-value | 同阶段值直接交付；源值选择 Splice 和 RuntimeTarget，准备源输入，保留普通 runtime 调用 |
+| code-expansion | 由 CMTT 核对上下文、孔和接入位置，不调用普通数据 Splice |
+| place | 沿源阶段与资源协议检查可写位置；不能把临时 runtime 转换结果当成原 comptime 值引用的位置 |
+
+消费描述必须沿表达式的实际结果边传递。外层需要 runtime 值，不代表其字段接收者、
+callee、显式 comptime 参数也各自需要 runtime 值。反过来，观察接收者不能把其中
+真正的 runtime 调用标成 comptime。普通 runtime 条件保持 runtime 控制流，分支中
+需要的转换留在相应分支；仅凭分支结果的源身份已知，不能提前执行转换或条件。
+跨阶段可用性由作用域和已执行输入证明，不以“表达式没有自由变量”代替。
+
+### 生成器定义检查与实际调用的交接
+
+`check_code_generator` 以 `Argument::Data(None)` 检查尚无实际输入的定义，再通过
+`run_code_generator` 检查 quote。此时知道参数源域，却没有调用值。现有
+`quote_expression` 随即进入普通 expr 检查；`read(comptime data)` 或 `callback()`
+会在这一层要求实际 required 输入，因此连未被调用的合法生成器也可能被拒绝。
+这与调用后 `generator_data` 已有快照却跳过 Splice，是两个不同完成点。
+
+定义检查可以建立字段域、Splice 义务与结果域、调用接口和代码上下文约束；无法
+立即完成的输入及依赖域必须交给拥有源区域的检查后继。实际调用供应数据之后，
+才形成相应快照、完成输入相关检查并发布代码。不能通过跳过生成器定义检查解决：
+错误分支、非法 runtime 存储、越界上下文和不成立的契约仍须得到诊断。
+
+引用可变生成器数据的 quote 在构造时观察源值；生成的 runtime Splice 保存该次
+观察的输入，不能稍后重新读取已经变更的 generator cell。尚未形成的输入保留其
+producer 和所属 activation，不能伪造冻结值。取消、预算失败和候选回滚遵守同一
+Region 所有权；已形成快照与已执行前缀不能因检查恢复而重放。这里与
+[源码检查和执行交接](elaboration-state-and-publication.md)共用恢复协议，不另造
+一个只认识 quote 数据形状的求值器。
+
+### 必须共同迁移的入口与退役条件
+
+1. binding、常量、调用结果、字段观察和 captured staged input 都先产生 Operand；
+   合并其源域检查，接收端预期域只在正确的消费边界参与。不能仅给 generator_data
+   的两个提前返回加转换。
+2. 将 `comptime_callee_result` 的特殊结果位置传播纳入消费描述。块尾、分支结果、
+   接收者和参数供应各自传递自己的 demand；不再依赖一个环境布尔量代表所有子项。
+3. Splice 选择完成后保留明确的源输入和目标调用。源参数擦除与 runtime 构造次数
+   分开；现有 `iir::staging::wrap` 只能在所有残余读取有明确交付计划后退役。
+4. quote 定义检查、调用、快照和接入均消费同一协议。先证明当前专题的类型改变、
+   源字段、staged 实参、callee、快照及分支用例，再移除旧物化直返路径。
+
+此顺序不要求先完成所有程序验证，但每个已交付结果仍要接受现有阶段、类型、
+资源和契约检查。程序状态命题不进入 PTC；明确 Unknown／待决与非法输入的区别。
 
 ## 3. 转换发生在值消费边界
 
@@ -331,6 +397,50 @@ python3 -B development/check.py --timeout 900 -- run -p luna -- build SOURCE --e
 退出 0，输出 `(bool true)`；`/tmp/luna-tools-2j0phy_q/result.json`。
 失败行是仍待修复的合法源码，不是正式拒绝测试；保留成功对照用于区分协议不可用
 与参数入口缺交付。上述准备状态和底层构造接口仍为设计，不能计为新的生产接线。
+
+### 源操作数与生成器就绪状态的联合复查
+
+`7f6d3715` 基线，工作目录 `/home/fin/luna`。通过
+`python3 -B development/command.py --timeout 900 -- python3 -B development/build_host_driver.py /tmp/luna-value-delivery-7f6d3715`
+保存本基线 driver，退出 0，`/tmp/luna-tools-megh2bhq/result.json`。以下直接运行该
+driver，所有实际构建输入均在 `development/repros/`，没有复用旧 native 产物：
+
+```sh
+python3 -B development/reproduce.py --timeout 90 --binary /tmp/luna-value-delivery-7f6d3715 -- build SOURCE --entry run --sysroot library --fuel 10000000 --output OUTPUT
+```
+
+首批七项由同一 `process_tools.run` 顺序执行并保存报告；callback 最初的函数类型
+多写了 pure，触发另一项未实现诊断，修正为普通 `comptime fn` 类型后按上面命令
+单独重跑。下表使用最终有效源码的结果，不将函数类型修饰符错误算作交付证据。
+
+| 复现文件 | 当前结果 | 目标行为 | 报告目录（均在 `/tmp/`，内含 result.json） |
+| --- | --- | --- | --- |
+| [source-field-before-splice.fl](repros/source-field-before-splice.fl) | 构建退出 1：field projection requires a supported struct | 先观察 CONFIG.byte，返回 true，无 Seed 转换 | luna-tools-jhhjt_7d |
+| [quoted-local-changing-target.fl](repros/quoted-local-changing-target.fl) | 构建退出 1：预期 u8，实际 Seed | 一个 runtime 转换，返回 true | luna-tools-_velwvdt |
+| [quoted-source-field-delivery.fl](repros/quoted-source-field-delivery.fl) | 构建退出 1：字段仍为 Seed | 先观察 Packet.item，再转换 Seed；Packet 不需要 Splice | luna-tools-e053ubx8 |
+| [quoted-source-staged-argument.fl](repros/quoted-source-staged-argument.fl) | 构建退出 1：required 输入不可用 | read 的 comptime 参数接收 Seed，不转换为 u8 | luna-tools-gnytk_ul |
+| [quoted-source-callback.fl](repros/quoted-source-callback.fl) | 构建退出 1：required 输入不可用 | 调用源 callback，仅交付其结果 | luna-tools-05frv_pg |
+| [quoted-source-snapshot.fl](repros/quoted-source-snapshot.fl) | 构建和运行退出 0，只输出 `(bool true)` | 保留 byte 1 的旧快照，另输出一次 `convert;` | 构建 luna-tools-grdcbze_；运行 luna-tools-9cki7lyx |
+| [quoted-source-runtime-branch.fl](repros/quoted-source-runtime-branch.fl) | 构建和运行退出 0，只输出 `(bool true)` | runtime 选择的分支执行一次 `convert;` | 构建 luna-tools-grq1pg4_；运行 luna-tools-pg1hxbso |
+
+这七项都是目标行为尚未完成的复现，不是应该拒绝的正式测试，也不以 native 退出
+0 作为行为正确证据。各 report 保存完整 OUTPUT 路径及命令；七项初次执行的摘要
+在 `/tmp/luna-delivery-audit-7f6d3715.json`，callback 以其后重跑报告为准。
+
+把 staged-argument 和 callback 两例的 run 改成 `{ true }`、保留原生成器声明，
+另存 `/tmp/quoted-source-staged-argument-unused.fl` 与
+`/tmp/quoted-source-callback-unused.fl`，使用上述 driver 的 `check SOURCE --sysroot library`
+仍分别得到同样的输入不可用错误，退出 1；报告为
+`/tmp/luna-tools-cfw3fdp_/result.json`、`/tmp/luna-tools-m8wonjbm/result.json`。
+这确认失败发生在定义检查阶段，不能只修调用后的物化分支。
+
+另将 callback 例的 `'(callback())` 改成 `let result = callback(); '(result)`，保存
+`/tmp/quoted-source-callback-before-quote.fl`。按同样选项构建至
+`/tmp/luna-callback-before-quote` 退出 0，`/tmp/luna-tools-n1faqvpu/result.json`；经
+`python3 -B development/command.py --timeout 15 -- /tmp/luna-callback-before-quote`
+运行退出 0，输出 `(bool true)`，`/tmp/luna-tools-5h_b5aq8/result.json`。这个对照
+证明现有 VM 可以调用该 callback；缺口在 quote 内源调用的检查／执行交接。
+没有要求用户永久把调用搬到 quote 外，也没有修改 compiler 或正式 docs。
 
 ### CMTT 补查证据
 

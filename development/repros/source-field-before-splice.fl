@@ -1,0 +1,15 @@
+{- A field observation uses the comptime source domain before runtime delivery.
+   Expected: (bool true), with no Seed conversion. -}
+struct Seed { byte: u8 }
+impl Splice for Seed {
+    assoc RuntimeTarget: Type = u8;
+    fn splice(comptime data: Seed) -> u8 {
+        let emitted = std.fmt.print("convert;") match {
+            _! => true, error _ => false,
+        };
+        assumes emitted;
+        data.byte
+    }
+}
+const CONFIG: Seed = Seed { byte: 42 };
+fn run() -> bool { CONFIG.byte == 42 }
