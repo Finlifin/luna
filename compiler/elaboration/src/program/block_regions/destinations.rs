@@ -123,6 +123,52 @@ impl Destination {
         }
     }
 
+    pub(super) fn structural_input(&self) -> Option<&crate::calls::InputContext> {
+        use crate::calls::InputContext as C;
+        let view = self.ordinary_view()?;
+        if view.expected.is_some() {
+            return None;
+        }
+        view.input.filter(|input| {
+            matches!(
+                input,
+                C::Optional(_)
+                    | C::Tuple(_)
+                    | C::NormalTuple { .. }
+                    | C::Record(_)
+                    | C::Nominal { .. }
+                    | C::ErrorResult { .. }
+            )
+        })
+    }
+
+    pub(super) fn with_expected(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        expected: Option<&Term>,
+        span: Span,
+    ) -> Result<Self, Error> {
+        let view = self
+            .ordinary_view()
+            .ok_or_else(|| error(span, "expected an ordinary destination"))?;
+        Self::ordinary(checker, OrdinaryTail { expected, ..view }, span)
+    }
+
+    pub(super) fn deliver_input(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        value: n::Expr,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        if let Some(crate::calls::InputContext::ErrorResult { errors, .. }) =
+            self.structural_input()
+        {
+            checker.deliver_error_context(value, errors, span)
+        } else {
+            Ok(value)
+        }
+    }
+
     pub(super) fn following_branch(
         &self,
         checker: &mut Checker<'_, '_>,
@@ -212,14 +258,17 @@ impl Destination {
     }
 
     /// A nested plain block can stay on the same driver. Partial ordinary
-    /// inputs retain their own rule. Contextual depth still counts both the
+    /// inputs keep their delivery boundary. Contextual depth still counts both the
     /// expression and block rule, exactly as the source dispatcher does.
     pub(super) fn nested(&self, expr: &Expr<'_>) -> Result<Option<Self>, Error> {
         let H::Block(block) = expr.kind else {
             return Ok(None);
         };
         match self {
-            Self::Ordinary(tail) => Ok(tail.input.is_none().then(|| self.clone())),
+            Self::Ordinary(tail) => Ok((tail.input.is_none()
+                || tail.expected.is_some()
+                || self.structural_input().is_some())
+            .then(|| self.clone())),
             Self::Contextual(tail) => {
                 if tail.depth >= 127 {
                     return Err(error(expr.span, "contextual input nesting limit exceeded"));

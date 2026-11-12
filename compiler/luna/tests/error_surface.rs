@@ -1046,6 +1046,8 @@ fn partial_error_callback_context_checks_both_branch_orders() {
     for body in [
         "if flag {error .Bad(true)} else {true}",
         "if flag {true} else {error .Bad(true)}",
+        "if flag {do {if flag {error .Bad(true)} else {error .Bad(true)}}} else {true}",
+        "do {if flag {true} else {do {if flag {error .Bad(true)} else {error .Bad(true)}}}}",
     ] {
         for flag in ["true", "false"] {
             let source = format!(

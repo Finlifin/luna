@@ -6,17 +6,24 @@ use super::*;
 struct ExpressionBoundary {
     callee: Option<hir::HirId>,
     preserve_effect: bool,
+    partial_input: bool,
     span: Span,
 }
 impl ExpressionBoundary {
-    fn enter(checker: &mut Checker<'_, '_>, expr: &Expr<'_>, block: &hir::Block<'_>) -> Self {
+    fn enter(
+        checker: &mut Checker<'_, '_>,
+        expr: &Expr<'_>,
+        block: &hir::Block<'_>,
+        partial_input: bool,
+    ) -> Self {
         let callee = checker.comptime_callee_result;
         if callee == Some(expr.hir_id) {
             checker.comptime_callee_result = block.expr.map(|tail| tail.hir_id);
         }
         Self {
             callee,
-            preserve_effect: std::mem::take(&mut checker.preserve_effect_value),
+            preserve_effect: partial_input || std::mem::take(&mut checker.preserve_effect_value),
+            partial_input,
             span: expr.span,
         }
     }
@@ -28,8 +35,9 @@ impl std::fmt::Display for ExpressionBoundary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(block-delivery (source {}) (preserve-effect {}) (callee",
+            "(block-delivery (source {}) (partial-input {}) (preserve-effect {}) (callee",
             source(self.span),
+            self.partial_input,
             self.preserve_effect
         )?;
         if let Some(callee) = self.callee {
@@ -65,6 +73,11 @@ impl BlockFrame<'_, '_> {
         if let Some(boundary) = self.boundary {
             boundary.leave(checker);
             let value = result?.ordinary(boundary.span)?;
+            if boundary.partial_input {
+                return destination
+                    .deliver_input(checker, value, boundary.span)
+                    .map(CheckedBlock::Ordinary);
+            }
             if !boundary.preserve_effect {
                 return checker
                     .run_computation(value, destination.expected(), boundary.span)
@@ -270,6 +283,25 @@ impl Checker<'_, '_> {
             .ordinary(expr.span)
     }
 
+    pub(in crate::program) fn check_partial_if_region(
+        &mut self,
+        expr: &Expr<'_>,
+        input: &crate::calls::InputContext,
+    ) -> Result<n::Expr, Error> {
+        let destination = Destination::ordinary(
+            self,
+            OrdinaryTail {
+                expected: None,
+                partial: None,
+                input: Some(input),
+            },
+            expr.span,
+        )?;
+        let frame = conditionals::Frame::partial(self, expr, destination, false)?;
+        self.drive_check_region(RegionFrame::Conditional(frame))?
+            .ordinary(expr.span)
+    }
+
     fn check_block_region(
         &mut self,
         block: &hir::Block<'_>,
@@ -287,106 +319,143 @@ impl Checker<'_, '_> {
     fn drive_check_region(&mut self, root: RegionFrame<'_, '_>) -> Result<CheckedBlock, Error> {
         let mut frames = vec![root];
         let statement_destination = Destination::statement();
-        let result = (|| {
-            let mut returned: Option<CheckedBlock> = None;
-            loop {
-                let step = match frames.last_mut().expect("active checking frame") {
-                    RegionFrame::Block(frame) => {
-                        frame.step(self, returned.take(), &statement_destination)?
-                    }
-                    RegionFrame::Conditional(frame) => frame.step(self, returned.take())?,
-                };
-                let request = match step {
-                    Step::Continue => continue,
-                    Step::Tail(tail) => {
-                        let RegionFrame::Block(frame) = frames.pop().unwrap() else {
-                            unreachable!("only blocks complete a tail")
-                        };
-                        let value = frame.finish(self, tail)?;
-                        if frames.is_empty() {
-                            return Ok(value);
+        let mut returned: Option<CheckedBlock> = None;
+        loop {
+            let result = (|| {
+                loop {
+                    let step = match frames.last_mut().expect("active checking frame") {
+                        RegionFrame::Block(frame) => {
+                            frame.step(self, returned.take(), &statement_destination)?
                         }
-                        returned = Some(value);
-                        continue;
-                    }
-                    Step::Conditional(value) => {
-                        // Completion has already left the final branch premise.
-                        frames.pop().unwrap().unwind(self);
-                        if frames.is_empty() {
-                            return Ok(value);
-                        }
-                        returned = Some(value);
-                        continue;
-                    }
-                    Step::Child(request) => request,
-                };
-                let (block, destination, boundary) = match request {
-                    Request::Block(block, destination) => (block, destination, None),
-                    Request::Expression(expr, destination) => {
-                        // Partial structural inputs retain their own rule.
-                        // Ordinary branches enter only after delivery prepares
-                        // the complete target, as in expr_context.
-                        if let Destination::Contextual(tail) = &destination
-                            && matches!(expr.kind, H::If(_, _, Some(_)))
-                        {
-                            frames.push(RegionFrame::Conditional(conditionals::Frame::new(
-                                self,
-                                expr,
-                                tail.depth + 1,
-                            )?));
-                            continue;
-                        }
-                        if matches!(expr.kind, H::If(..))
-                            && let Some(view) = destination.ordinary_view()
-                            && view.input.is_none()
-                            && self.prepare_region_if_delivery(expr, view.expected, view.partial)?
-                        {
-                            frames.push(RegionFrame::Conditional(conditionals::Frame::ordinary(
-                                self,
-                                expr,
-                                destination,
-                                true,
-                            )?));
-                            continue;
-                        }
-                        if let Some(nested) = destination.nested(expr)? {
-                            let H::Block(block) = expr.kind else {
-                                unreachable!("nested block destination")
+                        RegionFrame::Conditional(frame) => frame.step(self, returned.take())?,
+                    };
+                    let request = match step {
+                        Step::Continue => continue,
+                        Step::Tail(tail) => {
+                            let RegionFrame::Block(frame) = frames.pop().unwrap() else {
+                                unreachable!("only blocks complete a tail")
                             };
-                            let boundary = matches!(nested, Destination::Ordinary(_))
-                                .then(|| ExpressionBoundary::enter(self, expr, block));
-                            (block, nested, boundary)
-                        } else {
-                            returned = Some(destination.check_expression(self, expr)?);
+                            let value = frame.finish(self, tail)?;
+                            if frames.is_empty() {
+                                return Ok(value);
+                            }
+                            returned = Some(value);
                             continue;
                         }
-                    }
-                };
-                let scope = match self
-                    .charge_block_frame(block.span)
-                    .and_then(|()| LexicalScope::enter(self, block.span))
-                {
-                    Ok(scope) => scope,
-                    Err(error) => {
-                        if let Some(boundary) = &boundary {
-                            boundary.leave(self);
+                        Step::Conditional(value) => {
+                            // Completion has already left the final branch premise.
+                            frames.pop().unwrap().unwind(self);
+                            if frames.is_empty() {
+                                return Ok(value);
+                            }
+                            returned = Some(value);
+                            continue;
                         }
-                        return Err(error);
+                        Step::Child(request) => request,
+                    };
+                    let (block, destination, boundary) = match request {
+                        Request::Block(block, destination) => (block, destination, None),
+                        Request::Expression(expr, destination) => {
+                            // Retain the input rule and its delivery boundary;
+                            // probes use the same child driver as final checks.
+                            if destination.structural_input().is_some()
+                                && matches!(expr.kind, H::If(_, _, Some(_)))
+                            {
+                                frames.push(RegionFrame::Conditional(
+                                    conditionals::Frame::partial(self, expr, destination, true)?,
+                                ));
+                                continue;
+                            }
+                            // Ordinary branches enter after delivery prepares the
+                            // complete target, as in expr_context.
+                            if let Destination::Contextual(tail) = &destination
+                                && matches!(expr.kind, H::If(_, _, Some(_)))
+                            {
+                                frames.push(RegionFrame::Conditional(conditionals::Frame::new(
+                                    self,
+                                    expr,
+                                    tail.depth + 1,
+                                )?));
+                                continue;
+                            }
+                            if matches!(expr.kind, H::If(..))
+                                && let Some(view) = destination.ordinary_view()
+                                && (view.input.is_none() || view.expected.is_some())
+                                && self.prepare_region_if_delivery(
+                                    expr,
+                                    view.expected,
+                                    view.partial,
+                                )?
+                            {
+                                frames.push(RegionFrame::Conditional(
+                                    conditionals::Frame::ordinary(self, expr, destination, true)?,
+                                ));
+                                continue;
+                            }
+                            if let Some(nested) = destination.nested(expr)? {
+                                let H::Block(block) = expr.kind else {
+                                    unreachable!("nested block destination")
+                                };
+                                let boundary =
+                                    matches!(nested, Destination::Ordinary(_)).then(|| {
+                                        ExpressionBoundary::enter(
+                                            self,
+                                            expr,
+                                            block,
+                                            nested.structural_input().is_some(),
+                                        )
+                                    });
+                                (block, nested, boundary)
+                            } else {
+                                returned = Some(destination.check_expression(self, expr)?);
+                                continue;
+                            }
+                        }
+                    };
+                    let scope = match self
+                        .charge_block_frame(block.span)
+                        .and_then(|()| LexicalScope::enter(self, block.span))
+                    {
+                        Ok(scope) => scope,
+                        Err(error) => {
+                            if let Some(boundary) = &boundary {
+                                boundary.leave(self);
+                            }
+                            return Err(error);
+                        }
+                    };
+                    frames.push(RegionFrame::Block(BlockFrame {
+                        progress: Progress::new(block, destination),
+                        scope,
+                        boundary,
+                    }));
+                }
+            })();
+            match result {
+                Ok(value) => return Ok(value),
+                Err(failure) => {
+                    returned = None;
+                    let mut failure = Some(failure);
+                    // Lexical exits must run before their enclosing checkpoint.
+                    // Only a recoverable context request resumes a branch search.
+                    while let Some(mut frame) = frames.pop() {
+                        if let RegionFrame::Conditional(conditional) = &mut frame {
+                            match conditional.recover_probe(self, failure.take().unwrap()) {
+                                Ok(()) => {
+                                    frames.push(frame);
+                                    break;
+                                }
+                                Err(error) => failure = Some(error),
+                            }
+                        }
+                        frame.unwind(self);
                     }
-                };
-                frames.push(RegionFrame::Block(BlockFrame {
-                    progress: Progress::new(block, destination),
-                    scope,
-                    boundary,
-                }));
+                    if let Some(failure) = failure {
+                        return Err(failure);
+                    }
+                }
             }
-        })();
-        // Unwind inner lexical scopes before their enclosing branch premises.
-        // This restores checking context without rolling back outer writes.
-        while let Some(frame) = frames.pop() {
-            frame.unwind(self);
         }
-        result
     }
 }
 
@@ -429,6 +498,7 @@ mod tests {
             boundary: Some(ExpressionBoundary {
                 callee: Some(id),
                 preserve_effect: true,
+                partial_input: false,
                 span: block.span,
             }),
         };

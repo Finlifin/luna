@@ -409,13 +409,25 @@ PTC 上下文、字段默认值、完整输入事实和待发布 Type use 的截
 needs-context 诊断转换为暂缺结果，域错误、预算耗尽和恢复错误仍向外传播。
 Attempt 和词法／存储快照各有 S-expression dump，输入事实不因结构化而冻结发布。
 
-这是将部分输入的分支探测交给区域帧之前的所有权前置：下一步驱动必须把未完成
-Attempt 与探测的分支位置一起保留，并将子检查失败沿词法退出路径交给最近的
-Attempt，由它完成回退及诊断分类。不能让区域驱动直接用 `?` 越过 Attempt，也
-不能把 ordinary 的正常词法退出当作候选回滚。目前探测次序和分支检查仍由原同步
-适配器推进，部分输入 if 的独立规则尚未删除；本次没有声称它已完成帧迁移。
-词法表复制成本沿现状保留，存储图仍使用原有计费；本次不宣称完整快照有界化或
-消除了复制开销，也不赋予已执行的源码 activation 前缀回滚权。
+部分输入 if 已在此基础上进入共同条件帧。`branch_probes::Search` 保留分支位置、
+numeric defaults 模式及已观察的结果类型；先遍历各分支的实际证据，再允许数字
+默认类型。`Probe` 拥有本次 Attempt 和父探测模式。当前探测独立于条件帧的阶段
+字段保存，避免阶段移动后的错误路径丢失恢复责任。when／match 的同步适配器也
+使用同一 Search／Probe 协议，不另维护一套推导次序。
+
+条件帧请求普通受检子结果；嵌套结构输入块与 if 继续使用同一驱动。子检查失败时，
+驱动先退出内层词法作用域，再把错误交给最近的 Probe。缺少上下文使其恢复存储和
+检查状态并继续下一支；真实错误、预算耗尽及恢复失败继续向外传播，外层探测仍须
+完成自身清理。已耗预算不会因回滚归还。不能把 ordinary 的词法退出当作候选回滚。
+
+探测只提供目标证据，之后仍正式检查所有分支。部分输入的 then／else 目标、Never
+合并及错误结果包装保持原规则；结构输入块不擅自运行 computation。普通、部分
+输入和 contextual 三种检查共用控制交接，不因此混同结果种类或交付语义。Search、
+Probe、阶段与交付边界均可输出 S-expression。
+
+词法表复制成本沿现状保留，存储图仍使用原有计费；不宣称完整快照有界化或消除了
+复制开销，也不赋予已执行的源码 activation 前缀回滚权。其它表达式适配器仍可能
+同步重入检查；同一次 VM activation 的挂起与恢复仍未接通。
 
 本次 Attempt 所有权迁移的证据（工作目录 `/home/fin/luna`，命令统一以
 `python3 -B development/check.py --timeout 900 -- test` 开始）：
@@ -437,6 +449,30 @@ Attempt，由它完成回退及诊断分类。不能让区域驱动直接用 `?`
 - 两个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-ms0pv12g/result.json` 退出 0；
   `git diff --check` 通过。证据保留工作区原有资源分析等修改；未运行全 workspace。
   上述 32 项基线失败仍待处理，不因本轮定向组通过而标记为已解决。
+
+后续部分输入分支帧迁移的验证（相同工作目录及检查入口）：
+
+- `-p elaboration --lib -p luna --test cmtt_storage_world --test scoped_input_observation
+  --test contextual_input_regions --test native_optional --test error_surface --no-fail-fast`：
+  `/tmp/luna-tools-4qp6q76r/result.json` 退出 0，476 项通过。
+- 加入新用例并追加 `contextual_delivery`、`effect_spreads` 后，首次因新增 dump
+  测试误将错误行列表写为单个 Term 而编译失败（`/tmp/luna-tools-vjyvhbtm/result.json`）。
+  修正后 `-p elaboration --lib -p luna --test cmtt_storage_world --test contextual_input_regions
+  --test error_surface --test contextual_delivery --test effect_spreads --no-fail-fast`：
+  `/tmp/luna-tools-j385q075/result.json` 退出 101，490 项通过、1 项失败。失败的新
+  用例在 comptime check 中调用了 runtime 辅助函数；修正其阶段声明后单独执行
+  `-p luna --test contextual_input_regions partial_branch_search -- --nocapture`，
+  `/tmp/luna-tools-qe9dsshx/result.json` 退出 0。它在 VM 与树解释器上检查后续 u8
+  证据优先于数字默认类型，并核对生产者及消费者的执行顺序。
+- 新增拒绝例检查分支局部变量不泄漏、内部类型错误和不穷尽匹配不被吞掉；新增
+  CMTT 嵌套作用域用例检查回滚后仍向原接收者提交一次构造；错误结果组覆盖两种
+  分支次序下的嵌套块／if。它们均在上述扩展组通过。
+- `-p luna --test frontend_cli optional_branch -- --nocapture`：
+  `/tmp/luna-tools-sjdhryg0/result.json` 退出 0，两项 CLI 测试通过，覆盖 32 层
+  if／match／when 空分支之后的类型证据、两个运行分支及非法内部输入拒绝。
+- 八个修改 Rust 文件的 scoped rustfmt check：`/tmp/luna-tools-js3jj1k8/result.json`
+  退出 0。未运行全 workspace；原有 32 项 elaboration 基线失败本轮未复测，
+  不能据定向组通过标记为解决。检查仍包含工作区原有资源分析改动。
 
 此前 `checking_attempt(false)` 只恢复局部表，却保留了生成器接收者的实际存储写入。
 真实 sysroot 用例中，`wrap(if true { ~<state.build()> } else { null })` 为发现可选
@@ -1121,7 +1157,8 @@ else 的目标仍按原规则由显式 expected 或正常完成的 then 类型�
 表达式适配器，防止跳过整体值探测；适配之后的 if 本身仍进入同一条件帧。效应结果
 由外层表达式适配器或当前帧中的完成后继负责交付一次，不同时由两处执行。
 
-inline 选择、when／match、部分结构 input context 和其它子规则仍有同步适配器；
+部分结构 input context 的块／if 现也接入该驱动，探测退出见上文 Attempt 协议。
+inline 选择、when／match 和其它子规则仍有同步适配器；
 没有把它们的检查规则改写成只支持已迁移形状的替代语义。这里只将块和 if 的进度
 保留为数据，活动 HIR／Checker 世界、待定签名与源 activation 仍须共同迁移。
 

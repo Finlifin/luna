@@ -30,6 +30,7 @@ use arguments::route_arguments;
 use control::ReturnObservations;
 mod bit_indices;
 mod block_regions;
+mod branch_probes;
 pub mod build_context;
 mod builtin_bindings;
 mod checking_attempts;
@@ -5460,55 +5461,8 @@ impl Checker<'_, '_> {
                 | C::Record(_)
                 | C::Nominal { .. }
                 | C::ErrorResult { .. },
-                H::If(condition, yes, Some(no)),
-            ) => {
-                let condition = self.expr(condition, Some(&p(P::Bool)))?;
-                let inferred =
-                    self.optional_branch_context(input.span, context, 2, |checker, index| {
-                        checker.under_type_condition(
-                            &condition,
-                            index == 0,
-                            input.span,
-                            |checker| {
-                                if index == 0 {
-                                    checker.block_context_with_input(yes, None, None, Some(context))
-                                } else {
-                                    checker.input_context_expression(no, context)
-                                }
-                            },
-                        )
-                    })?;
-                let yes = self.under_type_condition(&condition, true, input.span, |checker| {
-                    checker.block_context_with_input(yes, inferred.as_ref(), None, Some(context))
-                })?;
-                let no = self.under_type_condition(&condition, false, input.span, |checker| {
-                    if is_never(&yes.ty) {
-                        match &inferred {
-                            Some(ty) => checker.expr(no, Some(ty)),
-                            None => checker.input_context_expression(no, context),
-                        }
-                    } else {
-                        checker.expr(no, Some(&yes.ty))
-                    }
-                })?;
-                let ty = if is_never(&condition.ty) {
-                    p(P::Never)
-                } else if is_never(&yes.ty) {
-                    no.ty.clone()
-                } else {
-                    self.require(&no.ty, &yes.ty, input.span)?;
-                    yes.ty.clone()
-                };
-                Ok(n::Expr {
-                    ty,
-                    source: source(input.span),
-                    kind: K::If {
-                        condition: Box::new(condition),
-                        then_branch: Box::new(yes),
-                        else_branch: Some(Box::new(no)),
-                    },
-                })
-            }
+                H::If(_, _, Some(_)),
+            ) => self.check_partial_if_region(input, context),
             (C::Record(fields), H::CollectedProperties(properties)) => {
                 self.property_packet_with_context(input, properties, None, Some(fields))
             }
@@ -5602,52 +5556,13 @@ impl Checker<'_, '_> {
         count: usize,
         mut check: impl FnMut(&mut Self, usize) -> Result<n::Expr, Error>,
     ) -> Result<Option<Term>, Error> {
-        if !matches!(context, crate::calls::InputContext::Optional(_))
-            && !matches!(context, crate::calls::InputContext::ErrorResult { .. })
-        {
-            return Ok(None);
+        let mut search = branch_probes::Search::new(self, context, count, span);
+        while let Some(request) = search.next(self)? {
+            let probe = branch_probes::Probe::begin(self, span, request)?;
+            let value = check(self, request.index);
+            search.observe(probe.finish(self, value)?);
         }
-        // Prefer evidence from every branch before defaulting numeric literals.
-        for defaults in [false, true] {
-            if defaults && !self.numeric_defaults {
-                break;
-            }
-            for index in 0..count {
-                self.optional_branch_probe_budget = self
-                    .optional_branch_probe_budget
-                    .checked_sub(1)
-                    .ok_or_else(|| {
-                        error(
-                            span,
-                            "optional branch inference budget exhausted; add a type annotation",
-                        )
-                    })?;
-                let probing = std::mem::replace(&mut self.probing_optional_branch, true);
-                let attempt =
-                    self.checking_attempt(span, defaults, CheckingDisposition::Probe, |checker| {
-                        check(checker, index)
-                    });
-                self.probing_optional_branch = probing;
-                if let Some(value) = attempt? {
-                    if !is_never(&value.ty)
-                        && !matches!(&value.ty, Term::ErrorResult { result, .. } if is_never(result))
-                    {
-                        return Ok(Some(value.ty));
-                    }
-                }
-            }
-        }
-        // The enclosing probe only needs a result type. With no evidence,
-        // falling through to ordinary branch checking would probe this same
-        // subtree again, multiplying work for every nested null-only branch.
-        // The final, non-speculative check still validates every branch.
-        if self.probing_optional_branch {
-            return Err(context_error(
-                span,
-                "optional branches need a result type context",
-            ));
-        }
-        Ok(None)
+        Ok(search.result())
     }
     fn generic_call(
         &mut self,

@@ -114,6 +114,10 @@ fn nested_contextual_retries_restore_storage_before_retaining_later_code() {
         "if true { if false { null } else {
             do { let _ = ~<state.build()>; null }
         } } else { null }",
+        "if true { do {
+            let local = true;
+            if local { do { let _ = ~<state.build()>; null } } else { null }
+        } } else { null }",
         "if false { null } else { do {
             let _ = ~<state.build()>;
             if true { null } else { null }

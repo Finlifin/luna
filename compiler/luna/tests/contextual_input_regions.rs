@@ -484,3 +484,44 @@ fn ordinary_if_joins_use_branch_premises_and_restore_them_after_early_exits() {
     .unwrap_err();
     assert!(failure.contains("type mismatch"), "{failure}");
 }
+
+#[test]
+fn partial_branch_search_prefers_typed_evidence_after_nested_missing_inputs() {
+    for body in [
+        "if false { 1 } else { byte() }",
+        "if false { do { if true { null } else { null } } } else { byte() }",
+        "if false { do { let local = true; if local { null } else { null } } } else { do { byte() } }",
+    ] {
+        check_both(
+            &format!(
+                "
+                comptime fn keep(value: ?T) -> ?T where T {{ value }}
+                comptime fn byte() -> u8 {{ 9 }}
+                comptime fn payload_is_byte(value: ?T) -> bool where T {{ T == u8 }}
+                comptime fn check() -> bool {{
+                    let value = keep({body});
+                    payload_is_byte(value)
+                }}
+                "
+            ),
+            &["check", "byte", "keep", "payload_is_byte"],
+        );
+    }
+}
+
+#[test]
+fn partial_probe_recovery_does_not_hide_errors_or_publish_branch_locals() {
+    for body in [
+        "if false { do { let private_value: bool = true; null } } else { private_value }",
+        "if false { do { let invalid: bool = 9; null } } else { true }",
+        "if false { do { true match { true => null } } } else { true }",
+    ] {
+        let source = format!(
+            "fn keep(value: ?T) -> ?T where T {{ value }}
+            fn run() -> bool {{ let result = keep({body}); true }}"
+        );
+        let failure = sysroot::compile(&source).expect_err("invalid branch must be checked");
+        assert!(!failure.contains("parsing failed"), "{failure}");
+        assert!(!failure.contains("budget exhausted"), "{failure}");
+    }
+}

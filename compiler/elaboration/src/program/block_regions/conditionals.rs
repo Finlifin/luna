@@ -1,5 +1,5 @@
-//! Ordinary and contextual branches retain checked children and their ambient
-//! checking boundaries. Only result joining differs between the two rules.
+//! Conditional rules retain checked children and their checking boundaries.
+//! Partial inputs additionally own speculative evidence searches and rollback.
 use super::*;
 use driver::{Request, Step};
 use refinements::TypeConditionScope;
@@ -40,6 +40,7 @@ impl std::fmt::Display for Ambient {
 enum State {
     Ready,
     Condition,
+    Inferring(n::Expr, branch_probes::Search),
     Then(n::Expr),
     Else(n::Expr, CheckedBlock, Destination),
     Complete,
@@ -54,6 +55,9 @@ pub(super) struct Frame<'b, 'h> {
     selection: Option<usize>,
     // None means the enclosing expression adapter owns effect delivery.
     preserve_effect: Option<bool>,
+    partial_input: bool,
+    own_input_delivery: bool,
+    probe: Option<branch_probes::Probe>,
 }
 
 impl<'b, 'h> Frame<'b, 'h> {
@@ -97,6 +101,27 @@ impl<'b, 'h> Frame<'b, 'h> {
         Self::create(checker, source, destination, own_effect_delivery)
     }
 
+    pub(super) fn partial(
+        checker: &mut Checker<'_, '_>,
+        source: &'b Expr<'h>,
+        destination: Destination,
+        own_input_delivery: bool,
+    ) -> Result<Self, Error> {
+        if !matches!(source.kind, H::If(_, _, Some(_))) || destination.structural_input().is_none()
+        {
+            return Err(error(
+                source.span,
+                "partial conditional requires a structural input",
+            ));
+        }
+        let mut frame = Self::create(checker, source, destination, false)?;
+        frame.ambient = None;
+        frame.selection = None;
+        frame.partial_input = true;
+        frame.own_input_delivery = own_input_delivery;
+        Ok(frame)
+    }
+
     fn create(
         checker: &mut Checker<'_, '_>,
         source: &'b Expr<'h>,
@@ -113,6 +138,9 @@ impl<'b, 'h> Frame<'b, 'h> {
             destination,
             state: State::Ready,
             branch: None,
+            partial_input: false,
+            own_input_delivery: false,
+            probe: None,
             ambient: ordinary.then(|| Ambient::capture(checker)),
             selection: ordinary
                 .then(|| {
@@ -135,6 +163,9 @@ impl<'b, 'h> Frame<'b, 'h> {
         let H::If(condition, yes, no) = self.source.kind else {
             unreachable!("validated conditional")
         };
+        if matches!(self.state, State::Inferring(..)) {
+            return self.advance_search(checker, returned);
+        }
         // Boundaries remain owned by the frame even if conversion or child
         // completion fails after its state has been consumed.
         let state = std::mem::replace(&mut self.state, State::Complete);
@@ -158,6 +189,18 @@ impl<'b, 'h> Frame<'b, 'h> {
             (State::Condition, Some(value)) => {
                 let condition = value.ordinary(self.source.span)?;
                 self.leave_branch(checker);
+                if self.partial_input {
+                    let search = branch_probes::Search::new(
+                        checker,
+                        self.destination
+                            .structural_input()
+                            .expect("partial destination"),
+                        2,
+                        self.source.span,
+                    );
+                    self.state = State::Inferring(condition, search);
+                    return self.advance_search(checker, None);
+                }
                 self.enter_branch(checker, &condition, true, yes.expr.map(|tail| tail.hir_id))?;
                 let destination = match &self.destination {
                     Destination::Contextual(tail) => {
@@ -187,6 +230,9 @@ impl<'b, 'h> Frame<'b, 'h> {
                     );
                 };
                 let destination = match &value {
+                    CheckedBlock::Ordinary(yes) if self.partial_input && !is_never(&yes.ty) => self
+                        .destination
+                        .with_expected(checker, Some(&yes.ty), self.source.span)?,
                     CheckedBlock::Ordinary(yes) => {
                         self.destination
                             .following_branch(checker, &yes.ty, self.source.span)?
@@ -199,7 +245,14 @@ impl<'b, 'h> Frame<'b, 'h> {
             }
             (State::Else(condition, yes, destination), Some(no)) => {
                 self.leave_branch(checker);
-                if matches!(self.destination, Destination::Ordinary(_)) {
+                if self.partial_input {
+                    self.finish_partial(
+                        checker,
+                        condition,
+                        yes.ordinary(self.source.span)?,
+                        no.ordinary(self.source.span)?,
+                    )
+                } else if matches!(self.destination, Destination::Ordinary(_)) {
                     self.finish_ordinary(
                         checker,
                         condition,
@@ -223,6 +276,125 @@ impl<'b, 'h> Frame<'b, 'h> {
                 "conditional child result does not match its continuation",
             )),
         }
+    }
+
+    fn advance_search(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        returned: Option<CheckedBlock>,
+    ) -> Result<Step<'b, 'h>, Error> {
+        if let Some(probe) = self.probe.take() {
+            self.leave_branch(checker);
+            let value = returned
+                .ok_or_else(|| error(self.source.span, "branch probe child is missing"))
+                .and_then(|value| value.ordinary(self.source.span));
+            let value = probe.finish(checker, value)?;
+            let State::Inferring(_, search) = &mut self.state else {
+                unreachable!("probe search")
+            };
+            search.observe(value);
+        } else if returned.is_some() {
+            return Err(error(
+                self.source.span,
+                "branch search received an unsolicited child",
+            ));
+        }
+        let State::Inferring(_, search) = &mut self.state else {
+            unreachable!("probe search")
+        };
+        let request = search.next(checker)?;
+        // Install the checkpoint before adding branch facts. If any later
+        // operation fails, the driver can still finish this exact attempt.
+        if let Some(request) = request {
+            self.probe = Some(branch_probes::Probe::begin(
+                checker,
+                self.source.span,
+                request,
+            )?);
+        }
+        let State::Inferring(condition, search) =
+            std::mem::replace(&mut self.state, State::Complete)
+        else {
+            unreachable!("probe search")
+        };
+        let H::If(_, yes, Some(no)) = self.source.kind else {
+            unreachable!("partial conditional")
+        };
+        if let Some(request) = request {
+            let positive = request.index == 0;
+            let entered = self.enter_branch(checker, &condition, positive, None);
+            self.state = State::Inferring(condition, search);
+            entered?;
+            Ok(Step::Child(if positive {
+                Request::Block(yes, self.destination.clone())
+            } else {
+                Request::Expression(no, self.destination.clone())
+            }))
+        } else {
+            let inferred = search.result();
+            if inferred.is_some() {
+                self.destination =
+                    self.destination
+                        .with_expected(checker, inferred.as_ref(), self.source.span)?;
+            }
+            self.enter_branch(checker, &condition, true, None)?;
+            self.state = State::Then(condition);
+            Ok(Step::Child(Request::Block(yes, self.destination.clone())))
+        }
+    }
+
+    pub(super) fn recover_probe(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        failure: Error,
+    ) -> Result<(), Error> {
+        let Some(probe) = self.probe.take() else {
+            return Err(failure);
+        };
+        self.leave_branch(checker);
+        probe.finish(checker, Err(failure))?;
+        Ok(())
+    }
+
+    fn finish_partial(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        condition: n::Expr,
+        yes: n::Expr,
+        no: n::Expr,
+    ) -> Result<Step<'b, 'h>, Error> {
+        let ty = if is_never(&condition.ty) {
+            p(P::Never)
+        } else if is_never(&yes.ty) {
+            no.ty.clone()
+        } else {
+            checker.require(&no.ty, &yes.ty, self.source.span)?;
+            yes.ty.clone()
+        };
+        let value = n::Expr {
+            ty,
+            source: source(self.source.span),
+            kind: K::If {
+                condition: Box::new(condition),
+                then_branch: Box::new(yes),
+                else_branch: Some(Box::new(no)),
+            },
+        };
+        // The original structural context remains responsible for error
+        // injection even after evidence has supplied a concrete destination.
+        let value = if self.own_input_delivery {
+            let Some(view) = self.destination.ordinary_view() else {
+                unreachable!("partial destination")
+            };
+            if let Some(crate::calls::InputContext::ErrorResult { errors, .. }) = view.input {
+                checker.deliver_error_context(value, errors, self.source.span)?
+            } else {
+                value
+            }
+        } else {
+            value
+        };
+        Ok(Step::Conditional(CheckedBlock::Ordinary(value)))
     }
 
     fn enter_branch(
@@ -302,6 +474,10 @@ impl<'b, 'h> Frame<'b, 'h> {
     }
 
     pub(super) fn unwind(mut self, checker: &mut Checker<'_, '_>) {
+        debug_assert!(
+            self.probe.is_none(),
+            "finish the attempt before leaving its frame"
+        );
         self.leave_branch(checker);
     }
 }
@@ -317,6 +493,9 @@ impl std::fmt::Display for Frame<'_, '_> {
         match &self.state {
             State::Ready => f.write_str("(phase ready)"),
             State::Condition => f.write_str("(phase condition-child)"),
+            State::Inferring(condition, search) => {
+                write!(f, "(phase inferring) (condition {condition}) {search}")
+            }
             State::Then(condition) => write!(f, "(phase then-child) (condition {condition})"),
             State::Else(condition, then_input, destination) => write!(
                 f,
@@ -324,7 +503,15 @@ impl std::fmt::Display for Frame<'_, '_> {
             ),
             State::Complete => f.write_str("(phase complete)"),
         }?;
-        f.write_str(" (selection")?;
+        write!(
+            f,
+            " (partial-input {}) (input-delivery {}) (probe",
+            self.partial_input, self.own_input_delivery
+        )?;
+        if let Some(probe) = &self.probe {
+            write!(f, " {probe}")?;
+        }
+        f.write_str(") (selection")?;
         if let Some(selection) = self.selection {
             write!(f, " {selection}")?;
         }
@@ -388,6 +575,9 @@ mod tests {
                 Destination::Contextual(ContextualTail { depth: 7 }),
             ),
             branch: None,
+            partial_input: false,
+            own_input_delivery: false,
+            probe: None,
         };
         let dump = frame.to_string();
         assert!(dump.starts_with("(if-check "), "{dump}");
