@@ -1,7 +1,8 @@
 # 六包与真实交付场景
 
 编译器与库是同一交付主线。这里定义重构必须支撑的接口责任和贯通场景，
-不把未实现接口写成已可调用 API。当前 std 的再导出壳不是标准库完成。
+不把未实现接口写成已可调用 API。`72932b66` 已交付 Linux 上的首批 std I/O，
+具体能力与限制见 [宿主基础交付](std-host-foundation.md)，不再将 std 描述为空壳。
 
 ## 1. 包的长期责任
 
@@ -81,6 +82,13 @@ List 的 append_all、固定快照 foreach、逐元素 Eq 短路和 Hash 次数�
 基础 Display/Debug 位于 builtin，不能以返回 String 迫使基础协议依赖拥有分配。
 格式说明可以在 comptime 准备，runtime 以明确 writer 能力执行写入。
 fmt 参数的具体公开签名仍需按既定语言能力推敲，本设计不登记一个假定的 Rust 式 API。
+
+当前首版 `std.fmt.Display` 直接接收 std.io.Writer，尚未兑现上述基础协议位置与
+通用 writer 能力：不能把这份临时接口当成最终设计。后续迁移先在 builtin 定义
+不依赖 std 的写入协议，使 Display 保留实际 writer 的错误和借用契约；再让 stdout、
+文件借用、缓冲和用户 writer 提供实现。只将现有 trait 搬到 builtin、仍让其签名
+引用 std.io.Writer，会倒置依赖，不能作为完成。现有公开再导出可用于保持声明身份，
+不得复制出两个同名 Display；comptime 文本限制也不能变成语言规则。
 
 目标 writer 支持组合：缓冲、限额、计数、编码、错误转换和部分写入。
 接口需说明实际写入量、失败时保留的状态、后续继续写入的许可，以及缓冲 flush/drop 行为。

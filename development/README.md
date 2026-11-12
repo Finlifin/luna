@@ -42,7 +42,7 @@
 | --- | --- | --- |
 | 旧开发文档清理 | 旧正文退役，作者补充与现行 wire 保留；[重置记录](documentation-reset.md)给出映射与备份 | 源码和工具资产没有随文档删除；它们按独立退役条件处理 |
 | 语言设计认知整理 | [语言契约](language-contracts.md)按正式来源区分语言保证、实现策略和现状限制 | 实现中的语义偏差没有因整理文档而修复 |
-| 一致性易崩点整理 | [C01–C34](consistency-boundaries.md)及重绑定、值域、环境、世界和执行次数协议 | 这些反例尚未全部成为生产回归；跨层证据迁移未接通 |
+| 一致性易崩点整理 | [C01–C36](consistency-boundaries.md)及重绑定、值域、环境、世界和执行次数协议 | 这些反例尚未全部成为生产回归；跨层证据迁移未接通 |
 | 劣化代码清理 | [R01–R20](architecture-audit.md)与[退役审计](module-boundaries-and-retirement.md)定位现有路径；四个停用 crate、middle 旧类型侧表及包装已删除；共同输入、词法捕获和接收世界准入已有生产迁移 | 通用机制替代后的专用分支仍待清理，不能将局部接线计为完整新架构 |
 | 新一代全链路重构设计 | [总架构](architecture.md)及专题明确数据所有者、接口、状态转换、查询/执行边界、理论证据、六包与产物交付 | 具体 Rust 接线、理论片段实现、平台 ABI、持久编码及规模验证按依赖阶段完成 |
 
@@ -63,7 +63,7 @@
 | 稳定世界与执行 | DeclarationSnapshot 保活声明与索引；RequiredWorld 复用代码 session；关联选择、方法选择及具体定义准备可交接宿主请求；Type 输出由单次发布许可保护 | 普通前端检查请求、通用 Region/Candidate 所有权及任意定义发布尚未全线接通 |
 | 源码主体与调用入口 | 普通收集和 required 共用 check_source_function；VM 在入口契约成功后才按普通输入重绑定主体 | 仍要求完整受检 NIR 主体，尚无待决源码主体请求；声明参数实例化不等于已移到契约之后 |
 | TypeRef 与 IIR | core/substitution 已有实现，闭合 callable/template 有消费者 | 普通函数仍以 NIR Function 为实例载体；runtime_bindings 不能替代带域的 EnvironmentPlan |
-| 六包与资源 | 已有真实 sysroot 的 builder、列表、反射及两阶段方法路径作为前端迁移消费者 | 文本来源到资源执行、抽象 Copy 的表示与清理、完整库场景仍须分别贯通 |
+| 六包与资源 | 已有真实 sysroot 的 builder、列表、反射及两阶段方法；`72932b66` 接入 Linux 文件/字节 I/O、Layout 和 println | runtime 文本来源、allocator、抽象 Copy、格式计划及 builtin 基础 Display/writer 协议仍须贯通；首版 std 不是终局接口 |
 
 具体接线及语义边界见[共同输入计划](values-staging-and-publication.md#已接通nf名义类型与透明别名共用输入规划)、
 [父声明输入](values-staging-and-publication.md#已接通contextual-签名与普通值检查共用父声明输入)、

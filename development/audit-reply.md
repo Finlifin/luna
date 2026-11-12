@@ -40,6 +40,20 @@ telescope 构造，公开 NF 绑定直接借用参数域，退役为取得签名
 和[本轮复核](elaboration-state-and-publication.md#纵向交付与验证证据)。本次未修改
 编译器，也没有据文档整理宣称待定输入已经可用。
 
+截至 `27fdc94f` 的再次核对补充两项当前事实，原报告不改写：
+
+- D11/D12 的“Splice 缺席、std 空壳”已过时：builtin 现有普通标量的 Splice 实现，
+  std 已有经过资源检查的 Linux 宿主接口。runtime str 来源、通用外部 ABI、allocator
+  和完整格式化仍未完成；首版 Display 与通用 writer 的依赖方向尚需迁移，见
+  [格式化边界](libraries-and-delivery.md#5-格式化与-writer)。不能把 Linux 专用 intrinsic
+  误称为 `attrs.abi` 已实现。
+- D01 中“接口契约必然逃回树解释器”不再符合当前路径：bytecode_interface 交付的
+  检查进入 Session 的普通 Execution 调度，能够编译且满足 VM 准入门控时形成字节码
+  帧；其余仍可走既有 fallback。源码模板仍存在，这不是无 AST 的完整 VM。
+  此次进一步删除了列表/Object 字面量选择器的 Arc<Expr> 载体，接入既有稳定常量表；
+  实际执行仍复用共同 literal 语义，不扩张选择器借用资格。范围、验证和剩余载体见
+  [借用读取常量](values-staging-and-publication.md#已清理借用读取的字面量载体)。
+
 当前交付应按下面三条边界阅读，不能把前一条的完成推及后两条：
 
 | 边界 | 已有证据与剩余工作 |
