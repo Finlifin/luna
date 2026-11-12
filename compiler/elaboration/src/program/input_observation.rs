@@ -169,33 +169,41 @@ impl Checker<'_, '_> {
                     };
                 }
             };
-            for statement in statements {
-                if !input_facts_cover(statement, &facts, budget)? {
-                    facts.clear();
-                    continue;
-                }
-                let observed = if matches!(statement.kind, K::Let { .. } | K::LetPattern { .. }) {
-                    observation::optional(
-                        self.observe_normal_binding(statement, 0, budget, &mut facts),
-                    )?
-                    .is_some()
-                } else {
-                    observation::optional(
-                        self.observe_normal_input_in(statement, 0, budget, &facts),
-                    )?
-                    .is_some()
-                };
-                if !observed {
-                    // Unknown calls or writes can invalidate aliases as well as
-                    // their apparent operands. Keep no pre-effect local facts.
-                    facts.clear();
-                }
-            }
+            self.observe_input_prefix_in(statements, &mut facts, budget)?;
             let Some(tail) = tail else {
                 return Err(Failure::Unavailable);
             };
             result = tail;
         }
+    }
+
+    /// Retain only facts surviving this executable prefix. The caller keeps
+    /// every producer; observation does not supply values to an invocation.
+    pub(super) fn observe_input_prefix_in(
+        &self,
+        statements: &[n::Expr],
+        facts: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        budget: &mut comptime_runtime::Budget,
+    ) -> Result<(), Failure> {
+        for statement in statements {
+            if !input_facts_cover(statement, facts, budget)? {
+                facts.clear();
+                continue;
+            }
+            let observed = if matches!(statement.kind, K::Let { .. } | K::LetPattern { .. }) {
+                observation::optional(self.observe_normal_binding(statement, 0, budget, facts))?
+                    .is_some()
+            } else {
+                observation::optional(self.observe_normal_input_in(statement, 0, budget, facts))?
+                    .is_some()
+            };
+            if !observed {
+                // Unknown calls or writes can invalidate aliases as well as
+                // their apparent operands. Keep no pre-effect local facts.
+                facts.clear();
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn observed_term_inputs(

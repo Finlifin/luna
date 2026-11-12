@@ -695,18 +695,18 @@ impl Checker<'_, '_> {
                 max_limbs: 4096,
             };
             let before = budget.steps;
-            if let K::Block { statements, .. } = &instance.kind {
-                for statement in statements {
-                    if let K::Let { binding, value } = &statement.kind {
-                        if let Some(value) =
-                            self.known_normal_input_in(value, 0, &mut budget, &known_parent)
-                        {
-                            known_parent.insert(*binding, std::sync::Arc::new(value));
-                        }
-                    }
-                }
-            }
+            let observed = if let K::Block { statements, .. } = &instance.kind {
+                self.observe_input_prefix_in(statements, &mut known_parent, &mut budget)
+            } else {
+                Ok(())
+            };
             self.required_steps -= (before - budget.steps) as u64;
+            observed.map_err(|failure| {
+                error(
+                    base.span,
+                    format!("parent input observation failed: {failure}"),
+                )
+            })?;
             let member_captures = self.nominal_captures(owner, expr.span)?;
             let contextual_alias = matches!(
                 self.package.item(owner).map(|item| &item.kind),
@@ -791,49 +791,51 @@ impl Checker<'_, '_> {
                 self.context
                     .assume(crate::ptc::Formula::from_predicate(&premise));
             }
-            let body = if constant {
-                let H::Projection(_, field) = projection.kind else {
-                    unreachable!()
-                };
-                let definition = Expr {
-                    kind: H::ResolvedDef {
-                        name: field.name,
-                        has_clause_param: false,
-                        def_id: member,
-                    },
-                    ..expr.clone()
-                };
-                self.expr(&definition, expected)?
-            } else if contextual_alias {
-                let caller = nominal::InputEnvironment {
-                    substitution: &saved_substitution,
-                    bindings: &saved_bindings,
-                    normal_bindings: &saved_normal_bindings,
-                    context: &saved_context,
-                };
-                self.contextual_nominal_expression_in(
-                    owner,
-                    supplied,
-                    expr.span,
-                    Some(&p(P::Type)),
-                    Some(&caller),
-                )?
-                .ok_or_else(|| error(expr.span, "missing contextual alias input domain"))?
-            } else {
-                let caller = nominal::InputEnvironment {
-                    substitution: &saved_substitution,
-                    bindings: &saved_bindings,
-                    normal_bindings: &saved_normal_bindings,
-                    context: &saved_context,
-                };
-                self.prepared_type_member_expression(
-                    owner,
-                    supplied,
-                    expr.span,
-                    Some(&p(P::Type)),
-                    &caller,
-                )?
-            };
+            let body = self.with_prepared_input_observations(&known_parent, expr.span, |this| {
+                if constant {
+                    let H::Projection(_, field) = projection.kind else {
+                        unreachable!()
+                    };
+                    let definition = Expr {
+                        kind: H::ResolvedDef {
+                            name: field.name,
+                            has_clause_param: false,
+                            def_id: member,
+                        },
+                        ..expr.clone()
+                    };
+                    this.expr(&definition, expected)
+                } else if contextual_alias {
+                    let caller = nominal::InputEnvironment {
+                        substitution: &saved_substitution,
+                        bindings: &saved_bindings,
+                        normal_bindings: &saved_normal_bindings,
+                        context: &saved_context,
+                    };
+                    this.contextual_nominal_expression_in(
+                        owner,
+                        supplied,
+                        expr.span,
+                        Some(&p(P::Type)),
+                        Some(&caller),
+                    )?
+                    .ok_or_else(|| error(expr.span, "missing contextual alias input domain"))
+                } else {
+                    let caller = nominal::InputEnvironment {
+                        substitution: &saved_substitution,
+                        bindings: &saved_bindings,
+                        normal_bindings: &saved_normal_bindings,
+                        context: &saved_context,
+                    };
+                    this.prepared_type_member_expression(
+                        owner,
+                        supplied,
+                        expr.span,
+                        Some(&p(P::Type)),
+                        &caller,
+                    )
+                }
+            })?;
             let ty = if statements.iter().any(|value| is_never(&value.ty)) {
                 p(P::Never)
             } else {

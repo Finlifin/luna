@@ -679,7 +679,7 @@ frame 中替换契约，形成检查不能再次用空 frame 对该契约做无�
   退出 0；`git diff --check` 通过。未运行全 workspace、LLVM 或性能基准；验证包含
   工作区原有资源分析改动，不宣称为纯 HEAD 验收。formatter 与其他受保护文件不纳入提交。
 
-### 父声明值捕获：已定位缺失交接，尚未修复
+### 父声明值捕获：静态证据已交付，动态输入仍待恢复
 
 在 `bcbcd0bc` 上复查 `member_record_defaults_use_selected_value_capture`：
 动态父输入 `Holder<enabled()>` 的成员默认值构造 `Config<enabled>` 时，
@@ -695,17 +695,38 @@ available 输入仅含成员自己的 config 参数，没有父 enabled 的值�
 符号来解除；声明身份、可被观察的输入证据和本次 invocation 已取得的值必须区分。
 是否可以合法保留符号还须核对使用处的参数域、声明作用域和后续替换消费者。
 
-该失败定位到 `normal.rs` 的 clause 值观察与 required 输入捕获之间；本次没有
+该失败定位到 `normal.rs` 的 clause 值观察与 required 输入捕获之间；这尚未
 证明只改捕获映射即可完成整个默认值，也没有将它归为 PTC 问题。后续需要沿原父
 输入计划交付绑定和待决检查，保留 enabled 与 compute_flag 的调用次数，再以
 原用例中的动态／静态父输入及 true／false 身份对照验收。原预期保持不变。
 
-本次工作目录 `/home/fin/luna`，执行
+定位时工作目录 `/home/fin/luna`，执行
 `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters member_record_defaults_use_selected_value_capture -- --exact --nocapture`，
 `/tmp/luna-tools-se7qt8qv/result.json` 退出 101，诊断仍为
 `256..263: required comptime input (local 4294967295 4) is not available in this invocation`。
 该运行包含只为定位输入集合添加的临时打印；打印已移除，`required.rs` 与 HEAD
-无差异。本次仅更新回复，没有提交编译器修复，也没有运行全量测试。
+无差异。该次仅更新回复，没有提交编译器修复。
+
+后续静态对照证明，`Holder<true>` 与 `Holder<false>` 也会失败：投影路径已经
+观察到父输入身份并填入声明替换表，但成员默认值读取的是对应局部绑定，尚未收到
+同一份观察证据。现在父输入前缀与普通输入共用有界前缀观察：未知操作清除旧事实，
+预算或结构错误保留其失败分类；仍有效的身份通过 `with_prepared_input_observations`
+进入成员检查。原生产者完整保留，不供应给 required invocation、不改变输入顺序，
+也不为缺少证据的动态父值制造抽象替代。
+
+新增真实 sysroot 用例在同一 VM 中依次调用 Enabled、Disabled、Enabled，分别与
+显式构造比较；两种执行引擎均检查默认 compute_flag 每次只调用一次、显式参数不
+调用默认值，以及不同父索引不能满足成员域。修改前同一用例失败于
+`238..245: required comptime input (local 4294967295 654) is not available in this invocation`，
+证据 `/tmp/luna-tools-c9p7le_v/result.json` 退出 101。此前初稿的角括号分行触发解析
+错误，未作为这条语义失败的证据。
+
+最终在同一工作目录执行
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test captured_input_observations --test nominal_value_parameters --test ordinary_input_identity --test required_input_scopes --test normal_input_plans --test sysroot_preludes --no-fail-fast`：
+`/tmp/luna-tools-g4rr4ng7/result.json` 退出 101，670 项通过、9 项失败。九项失败的
+名称与诊断逐项等于前述基线 `/tmp/luna-tools-ol48zymo/stdout.log`；动态父输入的
+旧用例仍失败，没有修改其预期。静态交付不是通用 source activation 或默认值恢复
+完成，也没有运行全 workspace、LLVM 或性能基准。
 
 ## 4. 本次证据与限制
 
