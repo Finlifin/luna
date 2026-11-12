@@ -161,6 +161,32 @@ impl ParsedSource {
         if let Some(bridged) = self.bridge.constructs_by_start.get(&lo) {
             hi = hi.max(bridged.span_bytes().1);
         }
+        // `Parser` constructs `NodeKind::Pub` and `NodeKind::Private` with `p.current_span()`
+        // evaluated BEFORE parsing the inner item, so extend `hi` through outer item wrappers.
+        let mut cur = node;
+        while let Some(kind) = self.ast.get_node_kind(cur) {
+            let ch = self.ast.get_children(cur);
+            let next = match kind {
+                NodeKind::Pub
+                | NodeKind::Private
+                | NodeKind::FunctionTemplateDef
+                | NodeKind::InlineStatement => ch.first().copied(),
+                NodeKind::Attribute | NodeKind::AttributeSetTrue => ch.get(1).copied(),
+                _ => None,
+            };
+            let Some(child) = next.filter(|&c| c != 0) else {
+                break;
+            };
+            if let Some(c_span) = self.ast.get_span(child) {
+                let c_lo = c_span.lo().0.saturating_sub(self.base_pos.0) as usize;
+                let c_hi = c_span.hi().0.saturating_sub(self.base_pos.0) as usize;
+                hi = hi.max(c_hi);
+                if let Some(bridged) = self.bridge.constructs_by_start.get(&c_lo) {
+                    hi = hi.max(bridged.span_bytes().1);
+                }
+            }
+            cur = child;
+        }
         (lo, hi)
     }
 
@@ -192,7 +218,19 @@ impl ParsedSource {
         // Handle leaf nodes whose exact token count is fixed when `current_span` was used.
         if let Some(kind) = self.ast.get_node_kind(node) {
             match kind {
-                NodeKind::SelfParam | NodeKind::ItselfParam => {
+                NodeKind::Id
+                | NodeKind::Int
+                | NodeKind::Real
+                | NodeKind::Str
+                | NodeKind::Char
+                | NodeKind::Bool
+                | NodeKind::Null
+                | NodeKind::Undefined
+                | NodeKind::SelfLower
+                | NodeKind::SelfCap
+                | NodeKind::Wildcard
+                | NodeKind::SelfParam
+                | NodeKind::ItselfParam => {
                     return (last_tok, last_tok);
                 }
                 NodeKind::Unit
@@ -211,6 +249,39 @@ impl ParsedSource {
                             && self.sig_tokens[attr_first - 1].kind == TokenKind::Caret
                         {
                             return (attr_first - 1, last_tok);
+                        }
+                    }
+                }
+                NodeKind::IfIsMatch | NodeKind::IfMatch => {
+                    // `try_if_is_match` / `try_if_match` open a nested `scoped` after `if expr is`;
+                    // recover the leading `if` token right before `expr` (`children[0]`).
+                    let children = self.ast.get_children(node);
+                    if !children.is_empty() {
+                        let (expr_first, _) = self.exact_token_bounds(children[0], floor);
+                        let mut k = expr_first;
+                        while k > floor {
+                            k -= 1;
+                            if self.sig_tokens[k].kind == TokenKind::If {
+                                return (k, last_tok);
+                            }
+                            if self.sig_tokens[k].kind != TokenKind::LParen {
+                                break;
+                            }
+                        }
+                    }
+                }
+                NodeKind::WhileIsMatch | NodeKind::WhileMatch => {
+                    // `try_while_is_match` / `try_while_match` open a nested `scoped` after `while (:lbl)? expr is`;
+                    // recover the leading `while` token before `expr` (`children[1]`).
+                    let children = self.ast.get_children(node);
+                    if children.len() >= 2 {
+                        let (expr_first, _) = self.exact_token_bounds(children[1], floor);
+                        let mut k = expr_first;
+                        while k > floor {
+                            k -= 1;
+                            if self.sig_tokens[k].kind == TokenKind::While {
+                                return (k, last_tok);
+                            }
                         }
                     }
                 }
