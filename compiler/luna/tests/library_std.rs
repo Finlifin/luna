@@ -436,3 +436,49 @@ fn splice_construction_runs_per_use_after_staged_inputs_are_ready() {
         assert_eq!(output.stdout, b"convert;convert;convert;(bool true)\n");
     }
 }
+
+#[test]
+fn quoted_constants_construct_runtime_values_at_each_executed_use() {
+    let case = Case::new(
+        r#"
+        struct Seed { byte: u8 }
+        impl Splice for Seed {
+            assoc RuntimeTarget: Type = u8;
+            fn splice(comptime data: Seed) -> u8 {
+                let written = std.fmt.print("convert;") match {
+                    _! => true, error _ => false,
+                };
+                assumes written;
+                data.byte
+            }
+        }
+        const CONFIG: Seed = Seed { byte: 42 };
+        fn read(comptime data: Seed) -> u8 { data.byte }
+        pure comptime fn quoted() -> <|- u8> { '(CONFIG) }
+        pure comptime fn callback() -> <|- fn() -> u8> { '(|| CONFIG) }
+        pure comptime fn input() -> <|- u8> { '(read(CONFIG)) }
+        fn run() -> bool {
+            const code = quoted();
+            let direct: u8 = CONFIG;
+            let first: u8 = ~<code>;
+            let second: u8 = ~<code>;
+            let selected: u8 = if std.os.unix.getpid() > 0 { ~<code> } else { ~<code> };
+            let action: fn() -> u8 = ~<callback()>;
+            let left = action();
+            let right = action();
+            let source = ~<input()>;
+            direct == 42 and first == 42 and second == 42 and selected == 42
+                and left == 42 and right == 42 and source == 42
+        }
+        "#,
+    );
+    for level in ["0", "3"] {
+        success(&case.build(level));
+        let output = case.run();
+        success(&output);
+        assert_eq!(
+            output.stdout,
+            b"convert;convert;convert;convert;convert;convert;(bool true)\n"
+        );
+    }
+}

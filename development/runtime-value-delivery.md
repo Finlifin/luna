@@ -148,9 +148,51 @@ Splice 当 comptime fn 执行，都不满足该交付契约。已提交 native �
 
 - `bindings_value_expression` 的 generator_data 和活跃 receiver 观察分支在普通
   交付前返回重建 Expr；payload 已检查/快照化不等于已经执行了跨阶段转换。
-- `quoted_runtime_boundary` 已切换 in_code_body、required 与 staged 状态，但
-  `runtime_value_context` 还以外层 signature_owner 的 comptime 修饰判断。runtime
-  主体的使用阶段不能只从外围生成器阶段推导，也不能只改一个布尔条件而遗漏前者。
+- 阶段判断原来只看外层 signature_owner 的 comptime 修饰，忽略
+  `quoted_runtime_boundary` 已建立的 runtime 边界。现已修正此处：类型观察、
+  required／staged 输入保持 comptime；否则先采用当前闭包的阶段，再采用 quote
+  的 runtime 阶段，最后才回退到外围声明。上述 generator_data 提前返回仍待迁移。
+
+命名常量走现有 Splice 选择，因此阶段判断修复已经让 quote 内的命名常量保留
+runtime 转换。新原生回归使用 `Seed -> u8`，生成器本身为 pure comptime，转换
+方法输出 `convert;`：同一代码接入两次会执行两次；runtime 分支仅执行所选位置；
+quote 中形成的 runtime 闭包按每次调用执行转换。`read(comptime data: Seed)` 的
+显式 staged 实参仍按源类型接收 CONFIG，不插入 runtime 转换。O0/O3 均需输出
+六次 `convert;` 并返回 true，而不能靠保持源域相同掩盖错误。
+
+这项修复不改变生成器局部数据的物化分支，也未使普通 comptime 参数读取统一进入
+Splice。后续表达式交付必须保留消费角色：例如先观察源 `data.byte`、把整个 data
+交给 runtime，以及将 data 作为另一个 comptime 实参，是不同的接线。不能为绕过
+前者缺少角色表示而在所有局部标识符处递归调用 Splice。
+
+阶段边界修复的证据（工作目录 `/home/fin/luna`）：
+
+- 从 quoted-data-splice 复现中将生成器改为
+  `pure comptime fn quoted() -> <|- Seed> { '(CONFIG) }`，调用改为 `quoted()`，
+  保存于 `/tmp/luna-quoted-constant-splice.fl`。修改前 build 退出 0，报告
+  `/tmp/luna-tools-srhwu7h4/result.json`；运行只输出 `convert;(bool true)`，
+  `/tmp/luna-tools-w3c6gspu/result.json`。修复后同一输入 build 退出 0，
+  `/tmp/luna-tools-411zgg63/result.json`；原生产物输出
+  `convert;convert;(bool true)`，`/tmp/luna-tools-id1k9sya/result.json`。
+  构建使用 `development/check.py --timeout 900 -- run -p luna -- build SOURCE
+  --entry run --sysroot library --fuel 10000000 --output OUTPUT`；运行使用
+  `development/command.py --timeout 30 -- OUTPUT`，两个脚本均以 `python3 -B` 调用。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_phase_boundaries --test comptime_call_staging --test trait_phases --test library_std --no-fail-fast -- --test-threads=1`：
+  报告 `/tmp/luna-tools-_4idz985/result.json`，退出 101。其中 CMTT 阶段 3、trait
+  阶段 73、std 12 项均通过；comptime_call_staging 为 1 通过、6 失败。新 std
+  用例同时检查不同 RuntimeTarget 和转换副作用，并在 O0/O3 下运行。
+- 仅将本次修改的 splicing.rs 临时恢复至 `eb904d48`，执行
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_call_staging -- --test-threads=1`，
+  仍为同样的 1 通过、6 失败，退出 101；`/tmp/luna-tools-321mws0k/result.json`。
+  六项均在 `for_comptime` 构造阶段报 UnmaterializedDispatch，尚未执行被测调用。
+  这些测试把真实 sysroot 源码交给要求闭合分派表的旧入口，仍需迁移其测试接线；
+  本轮未削弱 VM 检查或修改这些测试预期。对照完成后已恢复本次阶段判断实现。
+- 局部常量与闭包的定向检查：`/tmp/luna-tools-9f3aenq4/result.json`，退出 101；
+  cmtt 23 项与 elaboration 5 项通过，另一项拒绝例因期望 `type equality`、实际
+  诊断 `type mismatch` 而失败。临时恢复 `eb904d48` 后单独运行
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test elaboration -- --test-threads=1 symbolic_type_references_in_runtime_closures_do_not_enable_runtime_type_storage`，
+  同样退出 101，诊断一致，见 `/tmp/luna-tools-11gdytf2/result.json`。
+  原程序仍被正确拒绝，本轮没有改动此测试预期；对照结束后恢复阶段判断修复。
 
 目标行为是先在 quote 构造位置观察当时的源数据，保存其输入身份/快照及转换计划；
 Splice 主体放入生成的 runtime 程序。之后再修改生成器局部值，不能改变先前引用；

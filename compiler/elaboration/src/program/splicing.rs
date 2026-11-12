@@ -36,15 +36,23 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn runtime_value_context(&self) -> bool {
-        !(self.observing_type
-            || self.in_required_comptime
-            || self.in_staged_input
-            || self
+        if self.observing_type || self.in_required_comptime || self.in_staged_input {
+            return false;
+        }
+        // A quote checks runtime code inside a comptime producer. Nested
+        // closures own their execution phase; the enclosing declaration only
+        // supplies the phase when neither boundary is active.
+        if let Some(frame) = self.captures.last() {
+            return !frame.comptime;
+        }
+        self.in_code_body
+            || !self
                 .signature_owner
                 .and_then(|owner| self.package.item(owner))
-                .is_some_and(
-                    |item| matches!(&item.kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime),
-                ))
+                .is_some_and(|item| {
+                    matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                        if sig.modifiers.is_comptime)
+                })
     }
 
     pub(super) fn splice_constant(
