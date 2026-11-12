@@ -106,3 +106,38 @@ fn nominal_object_entries_use_the_generator_world_when_snapshotting_a_receiver()
         sysroot::compile(&source.replace("self.flag = true", "self.flag = false")).unwrap_err();
     assert!(failure.contains("postcondition rejected"), "{failure}");
 }
+
+#[test]
+fn nested_contextual_retries_restore_storage_before_retaining_later_code() {
+    for input in [
+        "if true { do { let _ = ~<state.build()>; null } } else { null }",
+        "if true { if false { null } else {
+            do { let _ = ~<state.build()>; null }
+        } } else { null }",
+        "if false { null } else { do {
+            let _ = ~<state.build()>;
+            if true { null } else { null }
+        } }",
+    ] {
+        let source = format!(
+            "
+            fn choose(value: ?T, fallback: T) -> T where T {{ fallback }}
+            struct State {{ values: meta.List<bool> }}
+            impl State {{
+                comptime fn build(self) -> <|- bool> {{
+                    self.values.append(true);
+                    '(true)
+                }}
+            }}
+            comptime fn outer() -> <|- bool> {{
+                let state = State {{ values: [] }};
+                const first = '(choose({input}, true));
+                const next = state.build();
+                if state.values.length() == 2 {{ first }} else {{ '(false) }}
+            }}
+            fn run() -> bool {{ ~<outer()> }}
+            "
+        );
+        assert_eq!(sysroot::run(&source), Value::Bool(true), "{input}");
+    }
+}

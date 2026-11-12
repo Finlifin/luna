@@ -397,6 +397,47 @@ quote 主体成功后保留生成的代码及构造效果，但不向外泄漏�
 失败尝试恢复输入事实、局部检查环境、pattern pending、quote hole 和生成器存储；
 成功 Probe 也恢复这些内容。预算不因恢复而退还。
 
+检查前状态现由 `checking_attempts::Attempt` 拥有，`begin` 取得快照后再安装本次
+numeric defaults 模式；`finish` 消费整个对象并按完成结果保留或恢复。原闭包入口
+只驱动这两个操作，不再把回滚字段藏在它的局部 tuple 中。Attempt 不可 Clone，
+也不借用活动 Checker；其职责是本次候选的内部回退，不是可跨 checker／world
+使用的快照。正常结束与诊断结束都必须交回原 owner 完成，不能靠 Drop 自动恢复。
+
+`LexicalCheckpoint` 保存局部与代码／pattern 绑定、alias、控制／捕获、不可变集合、
+PTC 上下文、字段默认值、完整输入事实和待发布 Type use 的截断位置；生成器实际
+存储及 quote 构造状态单独保留。恢复先处理检查状态，再处理原有存储图；只有
+needs-context 诊断转换为暂缺结果，域错误、预算耗尽和恢复错误仍向外传播。
+Attempt 和词法／存储快照各有 S-expression dump，输入事实不因结构化而冻结发布。
+
+这是将部分输入的分支探测交给区域帧之前的所有权前置：下一步驱动必须把未完成
+Attempt 与探测的分支位置一起保留，并将子检查失败沿词法退出路径交给最近的
+Attempt，由它完成回退及诊断分类。不能让区域驱动直接用 `?` 越过 Attempt，也
+不能把 ordinary 的正常词法退出当作候选回滚。目前探测次序和分支检查仍由原同步
+适配器推进，部分输入 if 的独立规则尚未删除；本次没有声称它已完成帧迁移。
+词法表复制成本沿现状保留，存储图仍使用原有计费；本次不宣称完整快照有界化或
+消除了复制开销，也不赋予已执行的源码 activation 前缀回滚权。
+
+本次 Attempt 所有权迁移的证据（工作目录 `/home/fin/luna`，命令统一以
+`python3 -B development/check.py --timeout 900 -- test` 开始）：
+
+- `-p elaboration --lib -p luna --test cmtt_storage_world --test scoped_input_observation
+  --test contextual_input_regions --test native_optional --test error_surface --test elaboration
+  --no-fail-fast`：`/tmp/luna-tools-mpr91uon/result.json` 退出 101，895 项通过、32 项失败。
+  失败均来自 luna 的 elaboration 集成组，未修改既有预期。
+- 只临时换回 `53696cc6` 的 checking_attempts 生产文件，其余工作区保持相同，执行
+  `-p luna --test elaboration --no-fail-fast`：`/tmp/luna-tools-o47vegep/result.json`
+  退出 101，同样 419 项通过、32 项失败。失败名称及逐例 CLI 错误文本均相同，
+  没有新增或消失的失败。28 项在诊断断言处失败，4 项在其它断言处失败；该分类
+  不证明它们只是过时测试或语义正确。比对后恢复本轮文件并核对 SHA-256。
+- 最终执行 `-p elaboration --lib -p luna --test cmtt_storage_world
+  --test scoped_input_observation --test contextual_input_regions --test native_optional
+  --test error_surface --no-fail-fast`：`/tmp/luna-tools-eftwwx8h/result.json` 退出 0，
+  476 项通过。新增用例覆盖多层缺少上下文的探测、只保留一次 splice 构造效果，
+  随后通过同一原始接收者继续构造，确认存储恢复后正式写入仍累积到原 owner。
+- 两个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-ms0pv12g/result.json` 退出 0；
+  `git diff --check` 通过。证据保留工作区原有资源分析等修改；未运行全 workspace。
+  上述 32 项基线失败仍待处理，不因本轮定向组通过而标记为已解决。
+
 此前 `checking_attempt(false)` 只恢复局部表，却保留了生成器接收者的实际存储写入。
 真实 sysroot 用例中，`wrap(if true { ~<state.build()> } else { null })` 为发现可选
 类型而探测分支，随后再正式检查；`build` 向 List 追加的结果因此被重复保留。
