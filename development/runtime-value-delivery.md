@@ -352,3 +352,39 @@ budget exhausted`；`/tmp/luna-tools-8bygfufu/result.json`。不能以错误位�
 
 以上命令均以 `python3 -B development/check.py --timeout 900 --` 为前缀。
 两个修改的 Rust 文件已经定向格式化；git diff --check 通过。未执行全 workspace。
+
+### Required comptime 准备不再建立 runtime 指针权限世界
+
+`PreparedRequired` 原来在准备源码世界之外，还复制所有已检查的 trait 与 impl，
+建立独立的 Copy/Drop 声明目录。该目录只服务于解释器的 runtime 指针读写权限
+回调；comptime VM 的 `eval_pointer` 在调用该回调前就拒绝所有指针操作。
+因此本阶段删除这份重复世界、其查询回调与 Type Session 的失效安装入口。
+comptime 值引用仍通过自己的存储与准入规则处理，不借用 runtime Copy 权限。
+
+runtime 解释器的指针权限检查不变；Type 值描述 runtime 指针、函数签名以及
+quote 内的 runtime 指针代码仍合法。实际源码世界的目录、成员查询和存储准入
+继续保留。CLI invocation、key 与 memoization 中的旧权限回调尚待另行清理，
+本阶段没有完成通用声明世界共享，也没有完成 staged 参数的 runtime 交付。
+
+八步字节构造仍失败：在 `/home/fin/luna` 执行
+`python3 -B development/check.py --timeout 900 -- run -p luna -- build development/repros/scalar-code-construction.fl --entry run --sysroot library --fuel 10000000 --output /tmp/luna-scalar-code-no-pointer-authority`，
+退出 1，报 `required comptime preparation failed: interpretation StepsExhausted`；
+`/tmp/luna-tools-8oog5bfa/result.json`。失败位置改变不代表代码构造已可用。
+
+当前工作区的端到端检查（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/demo_println.py` 构建与原生运行退出 0，报告
+  `/tmp/luna-tools-alxkh2_h/result.json`。中文、运行时整数与 pid 输出正确，
+  产物保留在 `/tmp/flurry-println`，未出现额外的 `(unit)` 输出。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_std --test comptime_pointer_phase --test comptime_storage_domains --test cmtt_storage_world -- --test-threads=1`
+  退出 0，分别 11、5、7、5 项通过；
+  `/tmp/luna-tools-z0uz251g/result.json`。包含真实 sysroot 的 comptime 值引用、
+  old 快照、名义对象，以及 runtime 指针类型与 quoted runtime 指针控制用例。
+  此前失败的 nested_contextual_retries 用例此次通过，预算常量与测试预期未改。
+  std 原生测试覆盖 O0/O3 输出、文件关闭、短写、EINTR 与错误传播。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -- --test-threads=1 program::required::prepared::tests type_computations::`
+  退出 0，24 项通过；`/tmp/luna-tools-o69fgbqr/result.json`。覆盖准备失败的预算
+  结算、值引用写回、目录身份隔离、重入和 Type/非 Type 两条调用路径。
+
+本阶段未执行全 workspace 测试；剩余预算失败如上单独保留，不以这些定向通过
+替代完整 CMTT 性能交付。

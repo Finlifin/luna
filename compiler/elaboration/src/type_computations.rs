@@ -365,7 +365,7 @@ impl<'a> Session<'a> {
             &'a dyn Fn(&nir::program::TypePredicate) -> comptime_interpretor::ContractOutcome,
         >,
     ) -> Result<Self, Error> {
-        Self::new_in_scope_with_pointer_copy(
+        Self::new_in_scope_in_budget(
             package,
             context,
             &mut budget,
@@ -373,10 +373,9 @@ impl<'a> Session<'a> {
             parameters,
             &[],
             solver,
-            None,
         )
     }
-    pub(crate) fn new_in_scope_with_pointer_copy(
+    pub(crate) fn new_in_scope_in_budget(
         package: &'a Package,
         context: &InferenceContext,
         budget: &mut Budget,
@@ -386,7 +385,6 @@ impl<'a> Session<'a> {
         solver: Option<
             &'a dyn Fn(&nir::program::TypePredicate) -> comptime_interpretor::ContractOutcome,
         >,
-        pointer_copy: Option<&'a dyn Fn(&Term, &mut u64) -> bool>,
     ) -> Result<Self, Error> {
         if context.is_trial() {
             return Err(Error::SpeculativeContext);
@@ -401,9 +399,6 @@ impl<'a> Session<'a> {
         .map_err(Error::Invocation)?;
         if let Some(solver) = solver {
             interpreter = interpreter.with_type_solver(solver);
-        }
-        if let Some(permission) = pointer_copy {
-            interpreter = interpreter.with_budgeted_pointer_copy_permission(permission);
         }
         Ok(Self {
             identity: crate::unique(),
@@ -452,15 +447,6 @@ impl<'a> Session<'a> {
         })
     }
 
-    pub(crate) fn with_pointer_copy(
-        mut self,
-        permission: &'a dyn Fn(&Term, &mut u64) -> bool,
-    ) -> Self {
-        self.interpreter = self
-            .interpreter
-            .with_budgeted_pointer_copy_permission(permission);
-        self
-    }
     fn check_context(&self, context: &InferenceContext) -> Result<(), Error> {
         if context.is_trial() {
             return Err(Error::SpeculativeContext);
@@ -1379,7 +1365,7 @@ mod admission_budget_tests {
             steps: 100,
             depth: 128,
         };
-        let failed = Session::new_in_scope_with_pointer_copy(
+        let failed = Session::new_in_scope_in_budget(
             &package,
             &context,
             &mut budget,
@@ -1387,23 +1373,14 @@ mod admission_budget_tests {
             &[],
             &[],
             None,
-            None,
         );
         assert!(matches!(failed, Err(Error::Invocation(_))));
         assert_eq!(budget.steps, 0);
         assert_eq!(budget.depth, 128);
         budget.steps = 100;
-        let session = Session::new_in_scope_with_pointer_copy(
-            &package,
-            &context,
-            &mut budget,
-            &[],
-            &[],
-            &[],
-            None,
-            None,
-        )
-        .unwrap();
+        let session =
+            Session::new_in_scope_in_budget(&package, &context, &mut budget, &[], &[], &[], None)
+                .unwrap();
         assert_eq!(session.remaining_steps(), budget.steps);
         // Successful scope authorization can consume work even in an empty
         // declaration world. Synchronize the actual remainder, not the grant.

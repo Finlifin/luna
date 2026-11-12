@@ -2362,30 +2362,6 @@ impl Checker<'_, '_> {
                     } else { error(expr.span, failure.to_string()) }
                 })?;
             let prepared = PreparedRequired {
-                copy_authority: self
-                    .protocols
-                    .copy
-                    .zip(self.protocols.drop)
-                    .map(|(copy, drop)| {
-                        let resources = n::Package {
-                            builtin_implementation_packages: self
-                                .protocols
-                                .builtin_implementation_packages
-                                .clone(),
-                            target: self.target,
-                            traits: self.checked_traits.clone(),
-                            implementations: self.checked_implementations.clone(),
-                            normal_forms: package.normal_forms.clone(),
-                            structs: package.structs.clone(),
-                            newtypes: package.newtypes.clone(),
-                            alias_contracts: package.alias_contracts.clone(),
-                            enums: package.enums.clone(),
-                            ..Default::default()
-                        };
-                        prepared::RequiredWorld::new(resources, &mut self.required_steps, expr.span)
-                            .map(|world| (copy, drop, world))
-                    })
-                    .transpose()?,
                 world: prepared::RequiredWorld::new(package, &mut self.required_steps, expr.span)?,
                 entry,
                 inputs,
