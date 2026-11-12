@@ -531,7 +531,7 @@ impl Checker<'_, '_> {
             let mut routed = vec![None; parameters.len()];
             let mut preparations = vec![Vec::new(); inputs.len()];
             let mut order = Vec::new();
-            let mut routing = clause_inputs::ClauseInputRouting::new(&clauses, inputs);
+            let mut routing = clause_inputs::ClauseInputRouting::new(&clauses, inputs, span)?;
             let mut pending_collection = Vec::new();
             let mut prepared_bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>> = BTreeMap::new();
             for (input_index, input) in inputs.iter().enumerate() {

@@ -2,7 +2,10 @@
 //!
 //! Entries describe the caller's supply interface. Routes retain source indices;
 //! they neither check expressions nor execute defaults or collection protocols.
-use std::{collections::HashMap, fmt, hash::Hash};
+use std::{fmt, hash::Hash};
+
+mod cursor;
+pub(super) use cursor::Cursor;
 
 #[derive(Clone, Debug)]
 pub(super) struct Entry<Name> {
@@ -66,6 +69,8 @@ pub(super) enum FailureKind {
     Unsupported,
     MissingImplicit,
     MissingAnchored,
+    NeedPositionalArity,
+    PacketTargetsCollection,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,109 +123,44 @@ pub(super) fn post_lambda_target<Name>(
         .ok_or_else(|| FailureKind::MissingPostTarget.call())
 }
 
-pub(super) fn route<Name: Eq + Hash>(
+pub(super) fn route<Name: Clone + Eq + Hash>(
     entries: &[Entry<Name>],
     inputs: &[Input<Name>],
 ) -> Result<Plan, Failure> {
-    let count = entries.len();
-    let post_target = post_lambda_target(entries, inputs)?;
-    let named: HashMap<_, _> = entries
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entry)| entry.name.as_ref().map(|name| (name, index)))
-        .collect();
-    // Reserve complete inputs before routing positions, without changing their
-    // evaluation order. A reservation is not an executed or checked argument.
-    let mut directly_supplied = vec![false; count];
-    for (position, input) in inputs.iter().enumerate() {
-        if let Input::Named(name) = input {
-            let index = named
-                .get(name)
-                .copied()
-                .ok_or_else(|| FailureKind::UnknownName.at(position))?;
-            if std::mem::replace(&mut directly_supplied[index], true) {
-                return Err(FailureKind::Duplicate.at(position));
-            }
-        }
-    }
-    let mut assigned = vec![false; count];
-    let mut slots = vec![None; count];
-    let mut routes: Vec<Route> = Vec::new();
-    let mut positional = 0;
-    let mut remaining = inputs
+    let remaining = inputs
         .iter()
         .filter(|input| matches!(input, Input::Positional))
         .count();
-    let mut anchored_suffix = vec![0; count + 1];
-    let mut variadic_suffix = vec![0; count + 1];
-    for index in (0..count).rev() {
-        let entry = &entries[index];
-        variadic_suffix[index] =
-            variadic_suffix[index + 1] + usize::from(entry.variadic && !directly_supplied[index]);
-        anchored_suffix[index] = anchored_suffix[index + 1]
-            + usize::from(!entry.skipped() && !entry.variadic && post_target != Some(index));
-    }
+    let mut cursor = Cursor::new(entries.to_vec(), inputs, Some(remaining))?;
+    let mut assigned = vec![false; entries.len()];
+    let mut slots = vec![None; entries.len()];
+    let mut routes: Vec<Route> = Vec::new();
     for (position, input) in inputs.iter().enumerate() {
-        let (parameter, collected) = match input {
-            Input::Positional => {
-                while positional < count
-                    && (post_target == Some(positional)
-                        || entries[positional].skipped()
-                        || (entries[positional].variadic
-                            && (directly_supplied[positional]
-                                || remaining <= anchored_suffix[positional + 1])))
-                {
-                    positional += 1;
-                }
-                if positional == count {
-                    return Err(
-                        if entries
-                            .iter()
-                            .enumerate()
-                            .any(|(index, entry)| entry.variadic && directly_supplied[index])
-                        {
-                            FailureKind::AppendToComplete.call()
-                        } else {
-                            FailureKind::TooMany.call()
-                        },
-                    );
-                }
-                let index = positional;
-                let collected = entries[index].variadic;
-                if collected && variadic_suffix[index + 1] != 0 {
-                    return Err(FailureKind::MultipleCollections.call());
-                }
-                if !collected {
-                    positional += 1;
-                }
-                remaining -= 1;
-                (index, collected)
+        let selection = cursor.select(input).map_err(|kind| {
+            if matches!(kind, FailureKind::Duplicate | FailureKind::UnknownName) {
+                kind.at(position)
+            } else {
+                kind.call()
             }
-            Input::Named(name) => (named[name], false),
-            Input::PostLambda => (post_target.expect("post target checked"), false),
-            Input::Unsupported => return Err(FailureKind::Unsupported.call()),
-        };
+        })?;
+        let parameter = selection.parameter;
         if let Some(slot) = slots[parameter] {
             let previous: &mut Route = &mut routes[slot];
-            if !collected || !previous.collected {
-                return Err(FailureKind::Duplicate.at(position));
-            }
             previous.sources.push(position);
         } else {
             slots[parameter] = Some(routes.len());
             routes.push(Route {
                 parameter,
                 sources: vec![position],
-                collected,
+                collected: selection.collected,
                 lambda: entries[parameter].lambda,
             });
         }
         assigned[parameter] = true;
     }
+    cursor.finish().map_err(FailureKind::call)?;
     for (index, entry) in entries.iter().enumerate() {
-        if !assigned[index] && entry.implicit {
-            return Err(FailureKind::MissingImplicit.call());
-        } else if !assigned[index] && entry.variadic {
+        if !assigned[index] && entry.variadic {
             routes.push(Route {
                 parameter: index,
                 sources: Vec::new(),
@@ -228,8 +168,6 @@ pub(super) fn route<Name: Eq + Hash>(
                 lambda: false,
             });
             assigned[index] = true;
-        } else if !assigned[index] && !entry.skipped() {
-            return Err(FailureKind::MissingAnchored.call());
         }
     }
     Ok(Plan { routes, assigned })
@@ -249,6 +187,8 @@ impl fmt::Display for FailureKind {
             Self::Unsupported => "expanded and implicit argument routing is not implemented",
             Self::MissingImplicit => "implicit parameter requires explicit named supply; automatic supply protocol is not yet implemented",
             Self::MissingAnchored => "argument count mismatch: missing anchored parameter",
+            Self::NeedPositionalArity => "input routing requires the remaining positional arity",
+            Self::PacketTargetsCollection => "fixed input packet cannot supply collection elements",
         })
     }
 }

@@ -1115,9 +1115,10 @@ S-expression Display，公开名字作为转义字符串输出。
 
 此阶段只迁移供应路由，并未发布跨函数值的参数协议。当前入口仍来自已有声明，
 没有入口元数据的函数值仍按既有位置接口处理；不会根据可见的 callee 实现猜名字。
-动态 NF 的 collector 元数据、独立列表合成及声明子句路由尚待迁入，具名调用的
-两个复现仍属未完成。完整 callable 接口需携带入口与槽的映射，保持域 telescope
-的绑定抽象；代码传送、接口适配、source activation 和执行恢复不能以这次拆分代替。
+动态 NF 的 collector 元数据和独立列表合成尚待迁入，具名调用的两个复现仍属
+未完成；声明输入的完整路由已按下节接入。完整 callable 接口需携带入口与槽的
+映射，保持域 telescope 的绑定抽象；代码传送、接口适配、source activation 和
+执行恢复不能以这次拆分代替。
 具体缺口和源对照见[动态 NF 审查回复](audit-reply.md#动态-nf-的具名入口已复现先补参数协议载体)。
 
 工作目录 `/home/fin/luna`，执行
@@ -1129,6 +1130,40 @@ S-expression Display，公开名字作为转义字符串输出。
 三个 Rust 文件 scoped rustfmt check（`/tmp/luna-tools-phq95m8i/result.json`）与
 `git diff --check` 通过。没有运行全 workspace、LLVM 或性能基准，也没有启用两个
 ignored 正例；工作区原有 formatter 与资源分析等修改保留，不宣称为纯 HEAD 验收。
+
+#### 已接入：整次调用与展开包共用供应游标
+
+`input_routing/cursor.rs::Cursor` 现在拥有入口描述、具名查找、完整值预留、已供应槽、
+当前位置及可选的剩余位置输入数。整次普通调用的 route 通过该游标生成原 Plan；
+声明输入准备和开放 NF 描述中的 ClauseInputRouting 也仅作源码／诊断适配，
+不再借用 ClauseParam 数组或另行维护位置与供应表。原两处入口选择循环已收敛。
+
+普通调用已知道位置输入总数，因此能够为收集器后面的固定参数保留输入。
+声明展开包逐步取得字段时可以保持数量未知：固定前缀逐项推进，尾部收集由自己的
+协议处理；若某次选择确实依赖未知的剩余数，则返回明确的 arity 需求，不能用零、
+猜测的包宽度或某个库类型代替。这不新增源码表达式挂起能力，也不改变当前子句中
+收集器位置的合法性规则。
+
+每次 select 先计算并检查候选，成功后才推进。未知名字、重复完整供应、固定包越过
+收集入口及缺少 arity 等失败不消费待处理的位置。完整供应的预留与实际到达分别
+保存；一个后写的 `.name = value` 可以限制前面位置输入的目标，却没有提前执行
+value。固定包不能借尾部收集器接纳额外字段；空收集与缺省输入仍由完成计划区别。
+Cursor 与 Selection 的 S-expression dump 显示这些边界及转义后的入口名称。
+
+这里合并的是普通调用和声明输入计划的供应状态，尚未删除所有观察器。
+`type_defaults.rs::type_input_slot` 仍被 Type 子句值、开放函数与 CMTT 的局部推断
+使用；其中有失败后返回 None 的候选探测，不能不区分失败职责就改成必需检查。
+动态 NF 元数据、跨函数值入口传送、通用收集协议和 source activation 仍属后续工作。
+
+工作目录 `/home/fin/luna`，执行
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test open_normal_input_plans --test normal_input_plans --test normal_form_domains --test ordinary_clause_collectors --test default_calls --test extended_calls --test type_spreads --test sysroot_preludes --test cmtt_methods --no-fail-fast`：
+732 项通过，一个原有的待定子句域正例仍 ignored；
+`/tmp/luna-tools-tvoezhl1/result.json` 退出 0。包含具名与位置供应冲突、包字段边界、
+默认值、生产者源序及调用次数、开放 NF、CMTT 方法与真实 sysroot 公开接口。
+游标单元检查另核对未知数量不猜测、失败不推进，以及预留和实际供应的不同状态。
+五个 Rust 文件 scoped rustfmt check（`/tmp/luna-tools-5l85lxa3/result.json`）与
+`git diff --check` 通过。未运行全 workspace、LLVM、性能基准或 ignored 正例；
+这些仍是保留原有 formatter、资源分析等修改的工作区证据。
 
 #### 实施补充：声明接口与可执行主体不能共用完成状态
 

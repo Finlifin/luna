@@ -3079,7 +3079,8 @@ impl Checker<'_, '_> {
                 let arguments = expanded.as_deref().unwrap_or(arguments);
                 let clauses = self.type_clause_params(owner);
                 let collector = self.clause_has_collector(owner).then(|| clauses.len() - 1);
-                let mut routing = clause_inputs::ClauseInputRouting::new(&clauses, arguments);
+                let mut routing =
+                    clause_inputs::ClauseInputRouting::new(&clauses, arguments, expr.span)?;
                 // Retain source order. The final marker distinguishes a single
                 // collected element from a whole input or collection spread.
                 let mut routed = Vec::new();
