@@ -4,7 +4,7 @@
 mod sysroot;
 use comptime_interpretor::{Budget, Interpreter, Value};
 
-fn check_both(source: &str) {
+fn check_comptime_and_runtime(source: &str) {
     let package = sysroot::compile(source).unwrap();
     let entry = package
         .functions
@@ -25,6 +25,8 @@ fn check_both(source: &str) {
             "tree={tree}"
         );
     }
+    let runtime = source.replace("comptime fn check()", "fn run()");
+    assert_eq!(sysroot::run(&runtime), Value::Bool(true));
 }
 
 #[test]
@@ -64,19 +66,16 @@ fn aggregate_annotations_retain_generic_inputs_and_check_the_whole_domain() {
         let source = format!(
             "
             struct State {{ flag: bool }}
-            struct Packet where state: {domain} {{}}
+            struct Packet where state: {domain} {{ payload: bool }}
             struct Holder where flag: bool {{ value: Packet<{generic}> }}
             comptime fn check() -> bool {{
-                let holder = Holder<true> {{ value: Packet<{concrete}> {{}} }};
-                true
+                let holder = Holder<true> {{ value: Packet<{concrete}> {{ payload: true }} }};
+                holder.value.payload
             }}
         "
         );
-        check_both(&source);
-        let invalid = source.replace(
-            &format!("Packet<{concrete}> {{}}"),
-            &format!("Packet<{wrong}> {{}}"),
-        );
+        check_comptime_and_runtime(&source);
+        let invalid = source.replace(&format!("Packet<{concrete}>"), &format!("Packet<{wrong}>"));
         let error = sysroot::compile(&invalid).unwrap_err();
         assert!(
             error.contains("type mismatch") || error.contains("unresolved type equality"),
@@ -104,15 +103,15 @@ fn aggregate_annotations_check_type_valued_leaves_without_unfolding_heads() {
         let source = format!(
             "
         pure comptime fn Identity<T> -> Type {{ T }}
-        struct Packet where types: {domain} {{}}
+        struct Packet where types: {domain} {{ payload: bool }}
         struct Holder where T {{ value: Packet<{generic}> }}
         comptime fn check() -> bool {{
-            let holder = Holder<bool> {{ value: Packet<{concrete}> {{}} }};
-            true
+            let holder = Holder<bool> {{ value: Packet<{concrete}> {{ payload: true }} }};
+            holder.value.payload
         }}
     "
         );
-        check_both(&source);
+        check_comptime_and_runtime(&source);
         let wrong = source.replace(&format!("Packet<{concrete}>"), &format!("Packet<{wrong}>"));
         let error = sysroot::compile(&wrong).unwrap_err();
         assert!(error.contains("type mismatch"), "{error}");

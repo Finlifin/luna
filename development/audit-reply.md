@@ -177,7 +177,25 @@ runtime 布局消费者完成。迁移后以 `python3 -B development/check.py --
 -p luna -- dump development/repros/aggregate-index-layout.fl --emit iir --entry run
 --sysroot library --build-target x86_64 linux 64` 复跑，
 `/tmp/luna-tools-opv69_qw/result.json` 退出 1，仍为相同布局错误。
-本阶段不运行全 workspace 或 LLVM 原生验收。
+该布局失败现已沿消费者修复。`value_admission` 原本就允许布局回调提供已登记的
+积字段域，而 materialization、函数声明参数与 trait 参数传入的包查询只接受
+Term::Nominal。新增 `query_value_fields` 接通接收世界已有的表示登记和递归参数
+准入；名义类型的内部参数也使用同一查询，避免只修顶层后在嵌套处再次失败。
+查找与字段复制消耗共享预算。仅名义布局的入口保持原限制，没有按 Tuple 名称
+识别值、展开 NF 头或跳过字段载荷检查。现有 Role 登记机制本身仍待后续迁移。
+
+新的低层对照使用任意声明 ID，覆盖直接 callable 参数与嵌套名义索引、字段数量、
+字段域、u8 越界、错误 variant、缺失或不匹配的表示登记、零预算及后续重试。
+源码矩阵同时执行 comptime 和具体 IIR，实际构造并读取嵌套 payload 字段，包含
+元组、列表、记录、相互嵌套和保留 opaque NF 头的 Type 值索引。
+
+本轮同一目录执行
+`python3 -B development/check.py --timeout 900 -- test -p nir -p materialization -p luna --lib --test normal_inputs --test nominal_parameters --test dependent_admission --test trait_parameters --test value_admission --test scoped_dispatch_inputs --test expansion_boundary --test normal_value_arguments --test sysroot_preludes --no-fail-fast`，
+`/tmp/luna-tools-8_pgihp9/result.json` 退出 0，314 项通过。随后原 CLI dump 命令复跑，
+`/tmp/luna-tools-fze4bn2w/result.json` 退出 0，产物包含 Holder 与 Packet 的具体实例
+及原 normal-form 头登记。初稿单元用例使用了不存在的 Integer::From 构造，改用
+已有 from_u128 后完成上述验证；没有放宽值域拒绝预期。
+本阶段不运行全 workspace 或 LLVM 原生验收；动态父输入及源码挂起仍未完成。
 
 ### math 镜像及 comptime trait 所在包属于设计偏离
 

@@ -633,7 +633,7 @@ impl Trait {
                                 "nominal value admission requires declaration layout evidence",
                             )
                         })?;
-                        crate::normal_forms::query_nominal_value_fields(package, ty, variant, fuel)
+                        crate::normal_forms::query_value_fields(package, ty, variant, fuel)
                     },
                     |value, expected, fuel| {
                         let Term::Rigid {
@@ -674,7 +674,7 @@ impl Trait {
                                             "nominal record index requires declaration layouts",
                                         )
                                     })?;
-                                    crate::normal_forms::query_nominal_value_fields(
+                                    crate::normal_forms::query_value_fields(
                                         package, ty, variant, fuel,
                                     )
                                 },

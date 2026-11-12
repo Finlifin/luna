@@ -674,6 +674,22 @@ pub fn query_nominal_value_fields(
     variant: Option<u32>,
     fuel: &mut usize,
 ) -> Result<Vec<Term>, crate::NominalAdmissionError> {
+    if !matches!(ty, Term::Nominal { .. }) {
+        return Err("layout requires a nominal type".into());
+    }
+    query_value_fields(package, ty, variant, fuel)
+}
+
+/// Field domains for value admission in this receiving world. Registered
+/// product representations and nominal definitions share recursive admission;
+/// the returned view does not replace the original type identity or establish
+/// its formation predicates.
+pub fn query_value_fields(
+    package: &Package,
+    ty: &Term,
+    variant: Option<u32>,
+    fuel: &mut usize,
+) -> Result<Vec<Term>, crate::NominalAdmissionError> {
     nominal_value_fields_at(
         ty,
         variant,
@@ -706,6 +722,21 @@ pub fn query_nominal_value_fields(
             Ok(None)
         },
         &|domain, fuel| list_element_budgeted(package, domain, fuel),
+        &|domain, fuel| {
+            crate::type_computations::charge_term(domain, fuel)?;
+            // The representation and its parameter collection must both be
+            // registered in this world. Bound both catalog scans before lookup.
+            *fuel = fuel
+                .checked_sub(package.normal_forms.len().saturating_mul(2))
+                .ok_or(crate::NominalAdmissionError::Budget)?;
+            Ok(registered_tuple_fields(domain, |id| {
+                package
+                    .normal_forms
+                    .iter()
+                    .find(|head| head.declaration == id)
+            })
+            .map(<[Term]>::to_vec))
+        },
         0,
         package.target,
     )
@@ -768,7 +799,16 @@ pub fn query_nominal_value_fields_with<'a>(
     collection: &impl Fn(&Term, &mut usize) -> Result<Option<Term>, crate::NominalAdmissionError>,
     target: Option<crate::target::TargetData>,
 ) -> Result<Vec<Term>, crate::NominalAdmissionError> {
-    nominal_value_fields_at(ty, variant, fuel, lookup, collection, 0, target)
+    nominal_value_fields_at(
+        ty,
+        variant,
+        fuel,
+        lookup,
+        collection,
+        &|_, _| Ok(None),
+        0,
+        target,
+    )
 }
 
 fn nominal_value_fields_at<'a>(
@@ -780,14 +820,29 @@ fn nominal_value_fields_at<'a>(
         &mut usize,
     ) -> Result<Option<NominalValueDeclaration<'a>>, crate::NominalAdmissionError>,
     collection: &impl Fn(&Term, &mut usize) -> Result<Option<Term>, crate::NominalAdmissionError>,
+    product: &impl Fn(&Term, &mut usize) -> Result<Option<Vec<Term>>, crate::NominalAdmissionError>,
     depth: usize,
     target: Option<crate::target::TargetData>,
 ) -> Result<Vec<Term>, crate::NominalAdmissionError> {
     if depth >= 128 {
         return Err(crate::NominalAdmissionError::Budget);
     }
+    if variant.is_none() && matches!(ty, Term::NormalForm { .. }) {
+        if let Some(fields) = product(ty, fuel)? {
+            return Ok(fields);
+        }
+    }
     let layout = |ty: &Term, variant, fuel: &mut usize| {
-        nominal_value_fields_at(ty, variant, fuel, lookup, collection, depth + 1, target)
+        nominal_value_fields_at(
+            ty,
+            variant,
+            fuel,
+            lookup,
+            collection,
+            product,
+            depth + 1,
+            target,
+        )
     };
     let Term::Nominal {
         declaration,

@@ -30,9 +30,7 @@ pub fn validate_arguments(
         domains,
         arguments,
         fuel,
-        |ty, variant, fuel| {
-            crate::normal_forms::query_nominal_value_fields(package, ty, variant, fuel)
-        },
+        |ty, variant, fuel| crate::normal_forms::query_value_fields(package, ty, variant, fuel),
         |_, _, _| false,
         |domain, fuel| crate::normal_forms::list_element_budgeted(package, domain, fuel),
         package.target,

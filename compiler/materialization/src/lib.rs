@@ -2322,7 +2322,7 @@ impl Builder<'_> {
             std::slice::from_ref(input),
             &mut self.fuel,
             |ty, variant, fuel| {
-                nir::normal_forms::query_nominal_value_fields(self.package, ty, variant, fuel)
+                nir::normal_forms::query_value_fields(self.package, ty, variant, fuel)
             },
             |_, _, _| false,
             |domain, fuel| nir::normal_forms::list_element_budgeted(self.package, domain, fuel),
@@ -2545,7 +2545,7 @@ impl Builder<'_> {
                             arguments,
                             &mut self.fuel,
                             |ty, variant, fuel| {
-                                nir::normal_forms::query_nominal_value_fields(
+                                nir::normal_forms::query_value_fields(
                                     self.package,
                                     ty,
                                     variant,
@@ -2620,7 +2620,7 @@ impl Builder<'_> {
                             arguments,
                             &mut self.fuel,
                             |ty, variant, fuel| {
-                                nir::normal_forms::query_nominal_value_fields(
+                                nir::normal_forms::query_value_fields(
                                     self.package,
                                     ty,
                                     variant,
@@ -2699,7 +2699,7 @@ impl Builder<'_> {
                             arguments,
                             &mut self.fuel,
                             |ty, variant, fuel| {
-                                nir::normal_forms::query_nominal_value_fields(
+                                nir::normal_forms::query_value_fields(
                                     self.package,
                                     ty,
                                     variant,

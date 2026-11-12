@@ -1515,3 +1515,107 @@ fn opaque_normal_domains_preserve_scope_without_granting_value_layouts() {
         );
     }
 }
+
+#[test]
+fn receiving_world_fields_admit_registered_products_in_nested_nominal_inputs() {
+    let domain = Term::NormalForm {
+        head: id(9),
+        sort: Sort::Type,
+        arguments: vec![type_list(vec![primitive(P::Bool), primitive(P::U8)])],
+    };
+    let value = Term::TupleValue(vec![
+        Term::Bool(true),
+        Term::Integer(comptime_runtime::Integer::from_u128(255)),
+    ]);
+    let mut package = nir::program::Package::default();
+    package.normal_forms = vec![list_head(), tuple_head()];
+    package.structs.push(nir::program::Struct {
+        declaration: id(40),
+        name: "Indexed".into(),
+        type_parameters: vec![id(41)],
+        parameter_types: vec![domain.clone()],
+        fields: vec![("value".into(), primitive(P::Bool))],
+        requirements: vec![],
+        capabilities: vec![],
+    });
+    let instance = |value| Term::Nominal {
+        declaration: id(40),
+        arguments: vec![value],
+    };
+    let check = |package: &nir::program::Package, value: &Term, fuel: &mut usize| {
+        nir::function_parameters::validate_arguments(
+            package,
+            &[id(50)],
+            &[domain.clone()],
+            &[value.clone()],
+            fuel,
+        )
+    };
+    check(&package, &value, &mut 100_000).unwrap();
+    let original = instance(value.clone());
+    assert_eq!(
+        nir::normal_forms::query_nominal_value_fields(&package, &original, None, &mut 100_000,)
+            .unwrap(),
+        vec![primitive(P::Bool)]
+    );
+    assert_eq!(
+        original,
+        instance(value.clone()),
+        "layout never replaces identity"
+    );
+    for invalid in [
+        Term::TupleValue(vec![Term::Bool(true)]),
+        Term::TupleValue(vec![Term::Bool(true), Term::Bool(false)]),
+        Term::TupleValue(vec![
+            Term::Bool(true),
+            Term::Integer(comptime_runtime::Integer::from_u128(256)),
+        ]),
+    ] {
+        assert!(check(&package, &invalid, &mut 100_000).is_err());
+        assert!(
+            nir::normal_forms::query_nominal_value_fields(
+                &package,
+                &instance(invalid),
+                None,
+                &mut 100_000,
+            )
+            .is_err(),
+            "nested input validation must not skip payload checks"
+        );
+    }
+    assert!(matches!(
+        nir::normal_forms::query_value_fields(&package, &domain, None, &mut 0),
+        Err(nir::NominalAdmissionError::Budget)
+    ));
+    assert_eq!(
+        nir::normal_forms::query_value_fields(&package, &domain, None, &mut 100_000).unwrap(),
+        vec![primitive(P::Bool), primitive(P::U8)]
+    );
+    assert!(
+        nir::normal_forms::query_value_fields(&package, &domain, Some(0), &mut 100_000).is_err()
+    );
+    assert!(
+        nir::normal_forms::query_nominal_value_fields(&package, &domain, None, &mut 100_000)
+            .is_err(),
+        "nominal-only query retains its boundary"
+    );
+    for mode in 0..3 {
+        let mut foreign = package.clone();
+        match mode {
+            0 => {
+                foreign.normal_forms.remove(0);
+            }
+            1 => {
+                foreign.normal_forms[0].role = nir::normal_forms::Role::Opaque;
+            }
+            _ => {
+                foreign.normal_forms[1].role = nir::normal_forms::Role::Opaque;
+            }
+        };
+        assert!(
+            check(&foreign, &value, &mut 100_000).is_err(),
+            "mode={mode}: isolated descriptors do not authorize a view"
+        );
+    }
+    check(&package, &value, &mut 100_000).unwrap();
+}

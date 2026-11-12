@@ -1,8 +1,8 @@
 {-
     Intended result: run returns true with the real sysroot.
-    NIR checking succeeds. The initial IIR probe at 3298e6b5 failed with
-    "layout requires a nominal type"; aggregate argument checking and the
-    runtime layout consumer are separate boundaries.
+    Regression: IIR value admission must obtain registered field domains from
+    the receiving world, including aggregate indices nested in nominal inputs.
+    The original 3298e6b5 probe failed with "layout requires a nominal type".
 -}
 struct Packet where state: Tuple<bool, bool> {}
 struct Holder where flag: bool { value: Packet<(flag, false)> }
