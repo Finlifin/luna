@@ -140,13 +140,17 @@ where T, flag: bool
 [调用期域边界](values-staging-and-publication.md#invocation-才能取得的域必须同时接通检查与执行)。
 
 下一批不继续把“新增一个 owner／请求变体”单独当成恢复主干的交付。按
-[源 activation 与片段交接](elaboration-state-and-publication.md#设计决定待定源区域与已检查片段共用一个-execution-owner)
+[源 activation 与片段交接](elaboration-state-and-publication.md#源检查与执行的交接目标)
 完成三个共同依赖的改变：普通检查规则返回保留 continuation 的待决任务；原 VM
 activation 在同一存储中执行已获准片段并交回控制结果；callable 输入域及签名消费
 实际 Type 响应。完整根仍走已有快路径。不能为每个片段合成一个新函数／新 invocation，
 也不能将活动 HIR 句柄塞进稳定 NIR 或代码缓存来获得一个看似可运行的入口。
+特别地，callee 签名待定时的 producer 归调用者源区域执行；目标 callable 尚未通过
+准入，不能先进入它的 activation 来求参数域。required 根由本次必需计算持有源区域，
+函数内区域归原调用持有，不为片段另造函数。接口／模板、调用准备、activation 和
+可执行主体的完成条件分别见上述状态协议；这一所有权顺序是接线约束，不是已有 API。
 
-实施分解见[普通检查 continuation](elaboration-state-and-publication.md#实施细化普通检查规则必须交付-continuation)
+实施分解见[普通检查 continuation](elaboration-state-and-publication.md#所有权与规则推进)
 及其后的词法、绑定和控制交接协议。同步检查入口改为驱动同一规则的适配器，不能
 另留一套只支持少数输入形状的检查器。Progress 已允许依赖项先完成检查并保留源码
 schedule，但仍缺恢复任务；帧导出已经从特殊输入完成逻辑迁到显式绑定交接，仍缺
@@ -165,7 +169,7 @@ when／match 通过同步适配器共用该搜索协议，其它子规则和外�
 把内部探测回退当作 VM activation 恢复。
 能编译或导出一个 fragment 本身不证明原控制出口和一次性 producer 已被保留。
 主体尚未形成时的发布责任见
-[声明接口与可执行主体](elaboration-state-and-publication.md#实施补充声明接口与可执行主体不能共用完成状态)。
+[声明接口与可执行主体](elaboration-state-and-publication.md#声明接口与主体发布目标)。
 这需要同时迁移函数收集与 VM 主体取得，不能只在完整 NIR 上增加一个宿主请求。
 
 这一纵向交付必须同时做到：

@@ -6,6 +6,15 @@
 保留原报告，不把不同基线的事实混成一次测量。
 formatter 由另一位开发者负责，本次未修改 `compiler/fmt` 及其依赖。
 
+在 `6a564ae5` 上再次执行两个原有 ignored 正例，仍在待定签名与元素域处失败，
+未抵达通用源执行恢复。现将状态协议第 4 节收敛为当前生产职责、交接目标与验收，
+删除被后续迁移取代的过程记录；历史验证与本轮失败证据分别保留。新明确的准入
+边界是：callee 形成期间的 Type 生产者由调用者源区域执行，不能先进入尚未形成
+签名的目标 invocation。接口、调用准备、已进入 activation 与可执行主体是不同
+完成点；详见[父区域与 callee](elaboration-state-and-publication.md#父区域与待形成-callee-分开)
+和[本轮复核](elaboration-state-and-publication.md#纵向交付与验证证据)。本次未修改
+编译器，也没有据文档整理宣称待定输入已经可用。
+
 当前交付应按下面三条边界阅读，不能把前一条的完成推及后两条：
 
 | 边界 | 已有证据与剩余工作 |
@@ -41,8 +50,8 @@ phase 检查另开默认额度的过时描述；历史版本仍可从 Git 查阅
 这些任务仍同步调用其余源码子检查与 required invocation；不具备
 一般源 activation 的挂起恢复。完整 callable 签名和待定 collector 域的两个正例
 仍未实现，不能把任务栈本身当作解除这两项限制的证据。具体交接与验证见
-[普通块帧](elaboration-state-and-publication.md#已接入普通块的显式子检查驱动)
-及[输入依赖任务](elaboration-state-and-publication.md#已接入普通输入依赖保留任务后继)。
+[普通块帧](elaboration-state-and-publication.md#检查帧与探测)
+及[输入依赖任务](elaboration-state-and-publication.md#输入路由与域依赖)。
 
 R12 发布边界的后续核对还发现 required invocation 向 Checker 回传多条生成定义时
 可能部分写入：后项超预算，早先描述与构造器权限已可见，布局索引尚未同步。
@@ -311,7 +320,7 @@ CMTT 存储服务另修复了入口快照使用空声明世界的问题：真实
 分支恢复整体事实；词法退出只移除内部绑定，不能恢复已经失效的外层值。原试探
 漏存 required scope、循环退出只裁剪 partial 的边界已经收拢，CMTT／普通输入仍
 分别保留观察与供应的含义。具体范围见
-[输入事实的回滚与词法边界](elaboration-state-and-publication.md#已接入输入事实有共同的回滚与词法边界)。
+[输入事实的回滚与词法边界](elaboration-state-and-publication.md#控制与输入事实)。
 这不是已经完成源码检查 Region，也没有把所有 Checker 字段重新打包成快照。
 
 继续核对普通调用的检查边界时，复现了成功探测仍提交生成器存储写入的问题。
@@ -320,20 +329,20 @@ cell 身份、内容和 ownership，成功 quote 仍保留构造效果。内部�
 整包域准入；VM 的受验证观察入口仍保留。初版完整声明目录快照导致一个既有方法
 传输用例耗尽预算，已按保存的表示规模处理，而非提高额度或跳过既有源值检查。
 具体职责与剩余边界见
-[探测与产物保留](elaboration-state-and-publication.md#已接入探测提交与-quote-产物保留分开)。
+[探测与产物保留](elaboration-state-and-publication.md#检查帧与探测)。
 最终相关检查 `/tmp/luna-tools-gwnms93_/result.json` 退出 0，1,679 项通过、
 2 项既有 ignored；普通调用的待定 Type 域仍未接通。
 
 声明输入准备循环随后迁入独立 Progress，集中保存 producer、身份、绑定与调度位置。
 越序／未完成计划不能发布，身份复制失败不消费当前位置；观察到身份仍保留原 producer。
 这是生产准备路径的状态清理，尚未接通 HIR 挂起或实际 Type 结果回填。范围见
-[声明输入准备进度](elaboration-state-and-publication.md#已接入声明输入准备有独立的进度所有者)。
+[声明输入准备进度](elaboration-state-and-publication.md#输入路由与域依赖)。
 
 在 `b613147b` 再次显式执行两个 ignored 正例，仍分别失败于待定 callable 签名和
 列表缺少元素上下文，证据 `/tmp/luna-tools-qx183hcc/result.json`（退出 101）。
 进一步核对发现，required 准备必须先取得完整根 Expr，而 fragment 驱动只借用
 已建字节码帧；现有外部请求本身不能跨越这道前端边界。已补定
-[源 activation 的交接设计](elaboration-state-and-publication.md#设计决定待定源区域与已检查片段共用一个-execution-owner)：
+[源 activation 的交接设计](elaboration-state-and-publication.md#源检查与执行的交接目标)：
 HIR 与检查 continuation 归前端，实际存储和执行位置归原 invocation；后继受检片段
 通过移动交接绑定，并保留原控制出口。设计明确了完整根入口的迁移、身份／许可、
 尚未取得的值、域响应及冻结边界；这部分尚未实现，没有把失败测试改成拒绝预期。
@@ -343,7 +352,7 @@ Progress 尚未分开检查就绪与执行次序；块作用域仍由同步闭�
 交付新绑定与作用域接口；字节码编译只接受本段登记的循环
 目标，不能直接承接外部 break／continue。相应的规则 continuation、词法状态借用、
 LocalId 交接、外部控制出口及实际 Type receipt 的消费已写入
-[实施细化](elaboration-state-and-publication.md#实施细化普通检查规则必须交付-continuation)。
+[实施细化](elaboration-state-and-publication.md#所有权与规则推进)。
 明确要求同步入口驱动同一检查规则，避免增加第三套局部求值器。本轮为静态源码核对
 和设计修改，没有新增 Rust API、运行测试或宣称两个 ignored 正例已恢复。
 
@@ -362,7 +371,7 @@ checked-order 与 schedule。这是现有生产准备逻辑的迁移，没有新
 3 项局部检查与 222 项真实消费者集成检查通过；新增用例检查后序 Type 提前检查时
 副作用顺序、保存 callable 后不重放及早退取消后继求值。2 项普通调用 Type 等待
 正例仍 ignored，本轮没有重跑或解除。完整命令与证据见
-[声明输入准备](elaboration-state-and-publication.md#已接入声明输入准备有独立的进度所有者)。
+[声明输入准备](elaboration-state-and-publication.md#输入路由与域依赖)。
 仍须接通前端 continuation、原 invocation 的实际 Type 响应及一次性执行 receipt；
 当前 checked-prefix 只表示准备前缀，绝非已经执行的前缀。
 
@@ -376,7 +385,7 @@ checked-order 与 schedule。这是现有生产准备逻辑的迁移，没有新
 错误和非局部控制只归还原输入及其真实写入，不发布一半输出；源作用域、外部控制
 出口和 Type 响应仍待前端接线，未将这次内部迁移写成完整 source activation。
 生产入口、边界及证据见
-[帧绑定导出](elaboration-state-and-publication.md#已接入帧持有显式绑定导出)。
+[帧绑定导出](elaboration-state-and-publication.md#required-世界与绑定交接)。
 局部 7 项通过；随后 VM 与调用方检查 755 项通过、2 项既有 ignored，退出 0，
 证据 `/tmp/luna-tools-r52uh6us/result.json`，其中包含首轮局部用例。没有执行全
 workspace 或解除普通调用 Type 等待的 ignore，也没有改动另一代理的 formatter。
@@ -386,7 +395,7 @@ NIR 公共遍历，required 根／关联初始化器／生成函数／普通延�
 调用方都传入实际预算并处理失败。成员依赖在整次扫描成功后合并；原先不执行代码的
 发现职责保持不变，retained pattern evidence 不被误当成已获准执行。原入口对同一
 根的多次自由绑定扫描也合并为一次，不扩大外围捕获。具体阶段边界见
-[required 依赖发现](elaboration-state-and-publication.md#已接入required-世界的依赖发现共用结构遍历)。
+[required 依赖发现](elaboration-state-and-publication.md#required-世界与绑定交接)。
 局部 35 项通过，随后包含 NIR／elaboration 和真实源码消费者的 1,177 项通过，
 2 项既有 ignored 保留；证据 `/tmp/luna-tools-zrknan4h/result.json`，退出 0。
 本次没有增加 source activation 或 Type 响应恢复能力，也未执行性能对比。
@@ -496,7 +505,7 @@ execution 用例 26 项，均退出 0；前后两轮 execution 用例有重叠�
 这一阶段仍是同步驱动：一般子表达式、候选探测与块作用域还没有统一挂起／恢复。
 没有解决普通 callable 的两个待定 Type 域正例，也没有把活动检查状态放入稳定世界。
 具体已交付范围、复制预算和执行证据见
-[目标域适配后继](elaboration-state-and-publication.md#已接入目标域适配保存子检查后继)。
+[目标域适配后继](elaboration-state-and-publication.md#检查帧与探测)。
 
 扩大回归时发现错误结果值作为 trait 参数的一个既有用例失败。在关闭本次 delivery
 接线、恢复 `a1aab74a` 的 program.rs 后仍得到相同 Type interpretation 错误；详细
@@ -532,7 +541,7 @@ ignore。这里仍使用保留作者已有修改的工作区，不是纯 HEAD �
 
 这仍不是可挂起的完整前端区域：子检查和尾值检查同步，活动词法状态尚在 Checker，
 没有跨 VM Type 响应、取消协议或新的稳定世界载荷。边界及证据见
-[块的语句进度与词法退出责任](elaboration-state-and-publication.md#已接入块的语句进度与词法退出责任)。
+[块的语句进度与词法退出责任](elaboration-state-and-publication.md#检查帧与探测)。
 
 ### required 声明目录使用调用者预算
 
@@ -563,7 +572,7 @@ invocation_budget 被名字过滤器全部筛去，不计为已验证，其后�
 
 沿两项主线正例追踪发现，当前函数收集必须先取得完整 NIR Expr，VM 准入也直接
 取得完整 Function.body。增加 VM 请求本身不能让尚未完成的源主体进入调用。
-已在[声明接口与可执行主体](elaboration-state-and-publication.md#实施补充声明接口与可执行主体不能共用完成状态)
+已在[声明接口与可执行主体](elaboration-state-and-publication.md#声明接口与主体发布目标)
 区分稳定接口／源码模板、活动源任务、完成的可执行产物，并将函数收集和主体取得
 列为同一迁移范围。定义检查、normalization 中的必需计算与 invocation 执行许可
 分别保持；不能用延迟所有函数检查、假主体或直接解释 HIR 代替接线。
@@ -881,13 +890,13 @@ available 输入仅含成员自己的 config 参数，没有父 enabled 的值�
 方法和 CMTT 的现有消费者已接入；域和默认值检查继续使用原输入准备机制。
 这使路由不再要求借用源码签名，但尚未让函数值携带公开入口，动态 NF 的两项
 失败仍未解决。职责边界和验证见
-[调用供应入口](elaboration-state-and-publication.md#已接入调用供应入口不再借用源码签名)。
+[调用供应入口](elaboration-state-and-publication.md#输入路由与域依赖)。
 声明输入准备和开放 NF 描述现也使用同一增量供应游标，删除其独立的位置／供应
 状态；已知整次输入数与逐步取得包宽度分别处理，失败不推进游标。后续清理还把
 Type 子句值、开放输入描述及两个 CMTT 提示入口接入，删除 type_input_slot。
 提示入口的冲突／信息不足仍返回 None，未知具名入口仍报错；未把提示失败升级为
 必需检查，也未借此吞掉域、预算或 invocation 错误。具体范围与限制见
-[展开包供应游标](elaboration-state-and-publication.md#已接入整次调用与展开包共用供应游标)。
+[展开包供应游标](elaboration-state-and-publication.md#输入路由与域依赖)。
 新增[函数值接口传送设计](callable-input-interfaces.md)沿类型形成、NIR、VM 准入和
 metadata 编码核对剩余缺口。其别名／返回值／高阶转发复现中，位置展开对照返回
 true，具名完整供应仍被拒绝；不能只在调用表达式上挂名字表后声称完成。首条迁移

@@ -242,7 +242,7 @@ Type local 的旧限制已用接收域和函数签名均完整的源码独立复
 原列表用例仍先失败于缺少接收域。字节码已有的 `Suspended` 只表示内部驱动继续
 推进，不等于第 5 节的对外 `HostRequest`。
 
-该交接已细化为[源 activation 与受检片段](elaboration-state-and-publication.md#设计决定待定源区域与已检查片段共用一个-execution-owner)，
+该交接已细化为[源 activation 与受检片段](elaboration-state-and-publication.md#源检查与执行的交接目标)，
 目前仍是设计。源码核对确认的关键断点是 required 准备先要求完整根 Expr，fragment
 入口只接受已经建立的字节码帧；仅添加一种宿主请求无法恢复普通前端检查。新设计
 分别约束 HIR continuation、执行前沿、同一存储中的绑定交接和 Type 结果准入，不能
