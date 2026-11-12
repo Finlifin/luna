@@ -1,0 +1,22 @@
+{-
+    Observe two distinct questions through the public sysroot. Local dependency
+    binder renaming preserves type identity. Public collector entry renaming
+    currently also disappears, because the published callable has no entry map.
+    The second result records the implementation; it does not specify whether
+    different public interfaces should admit an automatic adaptation.
+-}
+typealias DependentLeft = fn(comptime T: Type, value: T) -> T;
+typealias DependentRight = fn(comptime U: Type, item: U) -> U;
+
+typealias CollectedLeft = pure comptime fn<...Left: meta.List<Type>> -> Type;
+typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
+
+fn local_binder_identity() -> bool {
+    const same = DependentLeft == DependentRight;
+    same
+}
+
+fn public_entry_identity() -> bool {
+    const same = CollectedLeft == CollectedRight;
+    same
+}

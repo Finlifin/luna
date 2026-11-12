@@ -1,6 +1,7 @@
 # 函数值的参数入口、接口与传送
 
-状态：基于 `d6950e39` 的实现设计。供应路由已合并，函数值的公开参数协议仍未接通。
+状态：基于 `d6950e39` 的实现设计，接口身份和消费者核对至 `9e3509d7`。
+供应路由已合并，函数值的公开参数协议仍未接通。
 本文规定后续迁移应共同保存的信息和验收边界，不声明新的语言语法或已实现 API。
 
 ## 1. 语义依据与不能混同的身份
@@ -34,6 +35,29 @@ implicit、变参及拓展变参都可按 `.name = value` 供应完整值。直�
 的 alpha-equivalence 分开判定；不能仅修改 Term 的 PartialEq／Hash 来掩盖这件事。
 第一条迁移只要求同一公开接口在传送中完整保留，不依赖新的重命名适配规则。
 
+### 接口关系不能由现有 Term 相等代替
+
+在 `9e3509d7` 上，局部依赖名的改写和公开收集入口的改写都得到相同 Type：
+
+```flurry
+typealias DependentLeft = fn(comptime T: Type, value: T) -> T;
+typealias DependentRight = fn(comptime U: Type, item: U) -> U;
+
+typealias CollectedLeft = pure comptime fn<...Left: meta.List<Type>> -> Type;
+typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
+```
+
+前一组体现正式文档已确认的依赖绑定重命名；后一组只能说明当前表示没有入口名。
+后者不能证明 `.Left` 和 `.Right` 已经可以互换，也不能证明语言要求两组接口
+成为不同 Type。完整[观察程序](repros/callable-interface-name-observation.fl)分别
+返回两个比较结果，没有把第二个结果写成必须继续通过的语义测试。
+
+迁移时必须分别回答三个问题：两个参数 telescope 是否等价，目标公开接口允许
+哪些调用，以及实际代码能否接收该接口交付的完整输入。代码身份相同不保证接口
+相同，代码身份不同也不妨碍实现同一个接口。若后续允许入口改名适配，应由显式
+的槽映射依据说明目标名字如何交付，不能在每次动态调用中读取所选主体的名字。
+第一条同名切片不需要依赖这种适配；对不同名字的相等与适配关系，仍不在此补定。
+
 ## 2. 当前信息在哪里丢失
 
 | 生产者／消费者 | 当前事实 | 必须迁移的边界 |
@@ -50,6 +74,27 @@ implicit、变参及拓展变参都可按 `.name = value` 供应完整值。直�
 这不是新增一个 `name: String` 就能闭合的修改。编译器在局部变量上记录名字，
 但函数返回、类型别名、列表／记录载荷、生成定义或 metadata 传送不携带它，
 就会再次出现“同一个值在不同入口具有不同调用能力”的偏差。
+
+### 必须随载体迁移的消费者
+
+继续沿 `9e3509d7` 的实际消费链核对，载体变更还必须覆盖以下边界：
+
+| 消费者 | 当前行为 | 迁移要求 |
+| --- | --- | --- |
+| `nir/normal_forms.rs::Head::callable_type` | 从参数域重建 telescope，只附 collector 槽位；Head 本身也没有公开入口 | 源码声明和 builtin 集中绑定都交付稳定接口，不能只修改函数类型表达式的生产者 |
+| `ptc::constructor`、`model_domain::closed_type` | NF 构造子仅区分 collector 槽位；模型域另行检查签名形状 | 若接口限定参与类型命题，构造子分解、模型准入及重建都须保留它；不能只改 Term 的 Eq／Hash |
+| `type_resolution::implementation::Key`、`matching`、`associated` | 索引头、匹配条件及关联项重建都仅传 collector | 接口不能在索引、规范化或替换后消失，也不能制造与 PTC 不一致的相等判断 |
+| VM `callable_domains`、`value_types` 与 NIR `value_admission` | 从接收世界取得实际签名，再检查 callable 域；冻结描述与活动值有各自入口 | 两条准入链都要检查所需接口依据，不能只补源码调用或只补冻结值；失败和 Budget 继续区分 |
+| metadata `wire` 的 tag 35 | v1 编码仅含签名和可选槽位；现有往返测试只证明这些字段被保存 | 新接口使用明确的格式判别及对应版本入口，旧包不能被默认为拥有未传送的公开入口 |
+
+这里不据“当前缺少接口字段”推断 CodeSession 已发生跨世界污染。
+`code_session.rs::matches` 使用实际不可变 world 的指针身份，独立 world 不共用
+会话中的代码缓存。新增接口必须成为相应 world 的稳定内容，并由元数据编码和
+调用准入共同保存；不能另加一个会话外可修改的名字表来规避 world 所有权。
+
+首条迁移的完成条件因此是生产、替换、求解、准入、调用及传输共同保持同一个
+接口。只让 `.Items = items` 通过路由、只新增一个未被消费的接口结构，或仅让
+新的 Term 能往返编码，均不能计为这条纵向交付完成。
 
 ## 3. 稳定接口与活动计划
 
@@ -172,3 +217,18 @@ comptime fn Apply(factory: Factory, items: meta.List<Type>) -> Type {
 本次只交付接口设计和复现，没有增加新的编译器接口类型或改变准入判断。
 原有[单层动态 NF 复现及供应游标迁移](audit-reply.md#动态-nf-的具名入口已复现先补参数协议载体)
 继续作为基础证据，不能据它们或本文宣称参数协议传送已经完成。
+
+在 `9e3509d7` 工作区重新核验入口身份与具名调用，仍使用真实 sysroot。
+工作目录 `/home/fin/luna`，命令前缀为
+`python3 -B development/check.py --timeout 900 -- run -p luna --`，每条均追加
+`--sysroot library --build-target x86_64 linux 64`：
+
+| 参数 | 实际结果 | 本机证据 |
+| --- | --- | --- |
+| `interpret development/repros/callable-interface-name-observation.fl --entry local_binder_identity` | 退出 0，`(bool true)` | `/tmp/luna-tools-gddp2qmz/result.json` |
+| `interpret development/repros/callable-interface-name-observation.fl --entry public_entry_identity` | 退出 0，`(bool true)`；实现观察，不是公开名字可互换的证明 | `/tmp/luna-tools-ogx48nno/result.json` |
+| `check development/repros/dynamic-nf-interface-forwarding.fl` | 退出 1，仍为 `dynamic normal-form collection currently requires positional elements` | `/tmp/luna-tools-3s4639a2/result.json` |
+
+先前尝试用 `reproduce.py` 运行既有 binary 时，该产物已被构建入口按配额回收，
+得到 unavailable，没有执行源码。随后上述三条都通过受控 Cargo 入口实际执行。
+本次未改编译器、库、测试预期或正式 docs；未运行全量测试和 LLVM 验收。
