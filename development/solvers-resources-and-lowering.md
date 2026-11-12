@@ -571,10 +571,50 @@ subject 的重建、函数契约重建和名义字段投影都使用完整域的
 `/tmp/luna-tools-7w13wiwl/result.json`。这些都是保留原有工作区修改的验证，
 不宣称为隔离的纯 HEAD 检查。
 
-后续还需核对 SelectedDrop 的捕获证据边界：当前访问入口首先检查 index 的身份
-和版本，再重建 implementation subject、method 和 program；应继续审计这些字段
-与 TypeResolution 内所选 implementation 及实参证据是否始终绑定。这是对当前
-检查位置的静态观察，尚未据此宣称已复现证据伪造或已完成证书封装。
+### 7.5 捕获的 Drop 查询证据与前提作用域
+
+此前 SelectedDrop 仅保留公开可改写的 TypeResolution，丢失完整 capability
+Resolution 中的前提作用域与条件支持。访问检查只比较 index 身份／版本，再
+重建方法描述；同一索引中另一有效实例的 subject、method、contract 等字段
+可以与原选择结果混合，检查仍然接受。索引未变也不意味着调用者的前提未变。
+
+当前以私有 `SelectionEvidence` 共享持有完整 query：protocol、subject、类型
+选择、qualification、前提 scope 及 condition support。只在选择入口创建，克隆
+共享同一个不可变对象；读者可借用 TypeResolution 和 qualification，不能单独
+替换捕获的证明或清空能力需求。正向选择与 NoCustomDrop 都持有此证据，避免
+只保护“有析构方法”而丢掉“没有自定义析构方法”的前提。
+
+直接访问入口将公开描述中的 protocol、subject、implementation 与实参与原
+查询及 Applicable 证据对应，比较前计量类型载荷；继续独立核对源码方法、契约、
+当前构造状态和内存访问。清理计划在访问已获取责任时也检查查询作用域。条件
+支持使用既有 replay 路径，新增 metered 入口将成功和失败消耗交回同一 fuel。
+没有重新运行析构候选选择，没有把程序前后条件送进 PTC，也没有借此取得运行时
+handler／allocator 等环境。新证据 Display 为 S-expression，包含查询和作用域。
+
+这是一条 Drop 消费者的证据所有权迁移，不是所有 TypeResolution 都已封装，
+也不是整个 Package／函数体已拥有可跨编辑恢复的 snapshot。现有方法、契约、
+布局检查仍承担自己的职责；整体查询预算、完整代码来源与环境获取继续按前文
+协议推进，不能从 retained query 推导它们已经完成。
+
+工作目录 `/home/fin/luna`，统一通过
+`python3 -B development/check.py --timeout 900 -- test` 执行：
+
+- `-p luna --test drop captured_drop_selection_stays_bound_to_its_instance_and_premise_scope
+  -- --nocapture` 在旧实现 `/tmp/luna-tools-65eyene0/result.json` 退出 101：
+  接受结果为 `[true, true, true]`，分别对应换实参、换实现和换前提作用域。
+  修复后 `/tmp/luna-tools-txn4c3uf/result.json` 退出 0，三项均拒绝，原查询在
+  原作用域中仍可重试成功。
+- 增加 NoCustomDrop 作用域检查和嵌套条件支持的共享预算／耗尽恢复覆盖后，
+  执行 `-p type_resolution -p program_verification -p luna --lib --test capabilities
+  --test drop --test declaration_contracts --test runtime_purity --test resources
+  --test library_protocols --no-fail-fast
+  -- --skip scheduled_handler_borrowed_copy_record_rejects_unproved_owner_layouts`，
+  `/tmp/luna-tools-ah93fw1f/result.json` 退出 0，1769 项通过。只过滤前一节已在
+  本次修改前复现的基线断言，其预期仍未修改；不能宣称完整 Drop 组无失败。
+- 补充证据 dump 的嵌套结构断言后，仅重跑首项实例／作用域用例，
+  `/tmp/luna-tools-cjris69m/result.json` 退出 0。七个修改的 Rust 文件通过
+  rustfmt 检查，证据 `/tmp/luna-tools-bwxdwu89/result.json`。验证保留了原有
+  工作区修改，未声称隔离的纯 HEAD 验收。
 
 ## 8. IIR 到 ABI 的明确顺序
 

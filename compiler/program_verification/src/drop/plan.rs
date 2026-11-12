@@ -425,7 +425,7 @@ pub fn acquire_cleanup(
             Resolution::Assumed { .. } => {
                 return Err("cleanup binding requires concrete implementation evidence".into());
             }
-            Resolution::Selected(s) if !s.capabilities.is_empty() => {
+            Resolution::Selected(s) if !s.capabilities().is_empty() => {
                 return Err("cleanup binding requires runtime environment acquisition".into());
             }
             _ => (),
@@ -643,12 +643,17 @@ impl Planner<'_, '_> {
         }
         let evidence = match &binding.resolution {
             Resolution::NoCustomDrop(e) => e,
-            Resolution::Selected(s) => &s.selection,
+            Resolution::Selected(s) => &s.evidence,
             _ => return Err("cleanup binding has no concrete resolution".into()),
         };
-        if !self.world.index.type_resolution_is_current(evidence) {
+        if !self
+            .world
+            .index
+            .type_resolution_is_current(evidence.type_selection())
+        {
             return Err("cleanup binding belongs to a different implementation world".into());
         }
+        evidence.check_world(self.world, self.fuel)?;
         if matches!(binding.layout, Layout::Atomic) && tree.children.is_some() {
             return Err("cleanup ownership shape disagrees with acquired layout".into());
         }

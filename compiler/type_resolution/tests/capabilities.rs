@@ -1628,6 +1628,22 @@ fn conditional_implementation_nested_disjunctions_share_the_solver() {
     world
         .verify_condition_support(&resolution, Budget::default())
         .unwrap();
+    let mut exhausted = Budget {
+        steps: 1,
+        ..Budget::default()
+    };
+    assert!(
+        world
+            .verify_condition_support_metered(&resolution, &mut exhausted)
+            .is_err()
+    );
+    assert_eq!(exhausted.steps, 0);
+    let mut replay = Budget::default();
+    let before = replay.steps;
+    world
+        .verify_condition_support_metered(&resolution, &mut replay)
+        .unwrap();
+    assert!(replay.steps < before);
 }
 
 #[test]

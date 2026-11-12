@@ -20,6 +20,11 @@
 | `ptc/src/model_search.rs`、`model_applications.rs` | 有预算的具体 Type 候选及有限应用解释；候选不成为等式事实 | trait 原子当前阻止裸模型构造；Tuple 特例和专用值遍历仍需退役 |
 | `ptc/src/integer.rs`、`integer/state.rs` | 数学整数差分约束、可检查边界证据、一致性和传播共用的可回退差分图 | 跨传播调用的路径维护、一般线性整数、同余与其他域的明确桥接 |
 
+Drop 消费者已开始保留完整、不可变的 capability Resolution，避免仅拿 index
+版本和公开 TypeResolution 代替查询前提。正向与排除结论的作用域、实例绑定和
+有界重放见[捕获 Drop 查询](solvers-resources-and-lowering.md#75-捕获的-drop-查询证据与前提作用域)；
+此局部交付不代表所有 trait 证据或 Package snapshot 已统一。
+
 当前并非“没有 CDCL”或“完全没有 trait 事实”。真正缺口是统一后的组合与交付协议。
 也不能把现有 four-atom 搜索器、世界适配器和投影搜索简单拼起来，便宣布 A01–A19 全覆盖。
 初次表格核对为静态检查；后续实现和执行证据见以下小节。

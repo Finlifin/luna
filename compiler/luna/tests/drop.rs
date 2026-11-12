@@ -3524,7 +3524,7 @@ fn drop_protocol_identity_selects_reference_receiver_and_does_not_hide_field_cle
                 .unwrap()
                 .signature
         );
-        assert!(world.index.type_resolution_is_current(&selected.selection));
+        assert!(world.index.type_resolution_is_current(selected.selection()));
         for name in ["Container", "Pretender"] {
             assert!(matches!(
                 luna::protocols::select_drop(
@@ -3826,7 +3826,7 @@ fn type_qualification_is_fixed_with_destructor_selection() {
         else {
             panic!("qualified selection")
         };
-        assert!(!selected.qualification.is_empty());
+        assert!(!selected.qualification().is_empty());
         assert_eq!(selected.implementation_arguments, [allowed]);
         let denied = nominal(&package, "Box", vec![nominal(&package, "Denied", vec![])]);
         assert!(matches!(
@@ -3998,7 +3998,7 @@ fn selection_retains_concrete_identity_but_type_evidence_is_world_scoped() {
     assert_eq!(selected.protocol.package, 77);
     assert_eq!(selected.method.body.package, 77);
     world(&package, |world, _| {
-        assert!(!world.index.type_resolution_is_current(&selected.selection))
+        assert!(!world.index.type_resolution_is_current(selected.selection()))
     });
     assert_eq!(
         selected.parameters,
@@ -4277,6 +4277,175 @@ fn captured_drop_access_specializes_and_rebases_subobject_footprints() {
             )
             .is_err()
         );
+    });
+}
+
+#[test]
+fn captured_drop_selection_stays_bound_to_its_instance_and_premise_scope() {
+    use elaboration::verification::{
+        PlaceId,
+        ownership::{Place, Shape, State},
+    };
+    let package = compile(
+        "trait Retire {fn drop(*self);} struct Cell where T {} struct Other {}
+        impl Retire for Cell<T> where T {fn drop(*self) {}}
+        impl Retire for Other {fn drop(*self) {}}",
+    );
+    world(&package, |original, items| {
+        let select = |subject| {
+            let Resolution::Selected(selected) = luna::protocols::select_drop(
+                &package,
+                original,
+                items,
+                &subject,
+                Budget::default(),
+            )
+            .unwrap() else {
+                panic!("selected")
+            };
+            selected
+        };
+        let first = select(nominal(
+            &package,
+            "Cell",
+            vec![nir::Term::Primitive(nir::Primitive::Bool)],
+        ));
+        let dump = first.to_string();
+        assert!(dump.contains("(drop-selection-evidence (protocol "));
+        assert!(dump.contains("(capability-resolution "));
+        assert!(dump.contains("(scope "));
+        let root = PlaceId {
+            owner: 100,
+            local: 1,
+        };
+        let receiver = Place {
+            root,
+            fields: vec![],
+        };
+        let mut state = State::default();
+        state
+            .declare(root, &Shape::Fields(vec![]), true, &mut 1000)
+            .unwrap();
+        let mut accepted_mismatches = vec![];
+        for subject in [
+            nominal(
+                &package,
+                "Cell",
+                vec![nir::Term::Primitive(nir::Primitive::Char)],
+            ),
+            nominal(&package, "Other", vec![]),
+        ] {
+            let other = select(subject);
+            // Keep the original query evidence while replacing its public
+            // method description with another valid instance in the same index.
+            let mut mixed = first.clone();
+            mixed.subject = other.subject;
+            mixed.implementation = other.implementation;
+            mixed.implementation_arguments = other.implementation_arguments;
+            mixed.method = other.method;
+            mixed.contract = other.contract;
+            mixed.parameters = other.parameters;
+            mixed.program = other.program;
+            accepted_mismatches.push(
+                luna::protocols::check_drop_access(
+                    &package,
+                    original,
+                    &mixed,
+                    &state,
+                    &receiver,
+                    &mut 100_000,
+                )
+                .is_ok(),
+            );
+        }
+        let mut context = original.context.fork();
+        context.assume(elaboration::ptc::Formula::False);
+        let changed = World {
+            context: &context,
+            ..*original
+        };
+        accepted_mismatches.push(
+            luna::protocols::check_drop_access(
+                &package,
+                &changed,
+                &first,
+                &state,
+                &receiver,
+                &mut 100_000,
+            )
+            .is_ok(),
+        );
+        assert_eq!(accepted_mismatches, [false, false, false]);
+        luna::protocols::check_drop_access(
+            &package,
+            original,
+            &first,
+            &state,
+            &receiver,
+            &mut 100_000,
+        )
+        .unwrap();
+    });
+}
+
+#[test]
+fn captured_drop_absence_keeps_its_premise_scope() {
+    use elaboration::verification::{
+        PlaceId,
+        drop::plan_cleanup,
+        ownership::{Place, Shape, State},
+    };
+    let package = compile("trait Retire {fn drop(*self);} struct Owned {}");
+    world(&package, |original, items| {
+        let subject = nominal(&package, "Owned", vec![]);
+        let binding = luna::protocols::acquire_cleanup(
+            &package,
+            original,
+            items,
+            &subject,
+            Budget::default(),
+            &mut 100_000,
+        )
+        .unwrap();
+        let root = PlaceId {
+            owner: 100,
+            local: 1,
+        };
+        let receiver = Place {
+            root,
+            fields: vec![],
+        };
+        let mut state = State::default();
+        state
+            .declare(root, &Shape::Fields(vec![]), true, &mut 1000)
+            .unwrap();
+        let mut context = original.context.fork();
+        context.assume(elaboration::ptc::Formula::False);
+        let changed = World {
+            context: &context,
+            ..*original
+        };
+        assert!(
+            plan_cleanup(
+                &package,
+                &changed,
+                &binding,
+                &state,
+                &receiver,
+                &mut 100_000,
+            )
+            .unwrap_err()
+            .contains("query scope")
+        );
+        plan_cleanup(
+            &package,
+            original,
+            &binding,
+            &state,
+            &receiver,
+            &mut 100_000,
+        )
+        .unwrap();
     });
 }
 

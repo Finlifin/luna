@@ -625,7 +625,16 @@ impl World<'_> {
         resolution: &Resolution,
         budget: Budget,
     ) -> Result<(), EvidenceError> {
-        self.verify_support_in_domain(resolution, &mut { budget }, None)
+        self.verify_condition_support_metered(resolution, &mut { budget })
+    }
+
+    /// Replay into the caller's allowance, including work spent on failure.
+    pub fn verify_condition_support_metered(
+        &self,
+        resolution: &Resolution,
+        budget: &mut Budget,
+    ) -> Result<(), EvidenceError> {
+        self.verify_support_in_domain(resolution, budget, None)
     }
 
     /// The root belongs to the inherent member index; nested facts still belong

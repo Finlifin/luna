@@ -13,6 +13,8 @@ use nir::{
     program::{FunctionPhase, LocalId, MethodContract, MethodInstance, Package, TraitRequirement},
 };
 use std::fmt;
+mod evidence;
+pub use evidence::SelectionEvidence;
 
 #[derive(Clone, Debug)]
 pub struct SelectedDrop {
@@ -25,21 +27,32 @@ pub struct SelectedDrop {
     pub parameters: Vec<LocalId>,
     pub program: ProgramContract,
     /// Concrete type capabilities, not captured runtime handler/allocator values.
-    pub capabilities: Vec<TraitRequirement>,
-    pub qualification: Vec<Witness>,
-    /// Retains the index identity/revision and type applicability evidence.
-    pub selection: TypeResolution,
+    capabilities: Vec<TraitRequirement>,
+    /// Private authority: descriptions may be inspected, but query premises and
+    /// applicability evidence cannot be replaced independently by consumers.
+    evidence: SelectionEvidence,
 }
 #[derive(Clone, Debug)]
 pub enum Resolution {
     /// No user destructor in this query world. Automatic field cleanup remains.
-    NoCustomDrop(TypeResolution),
+    NoCustomDrop(SelectionEvidence),
     Assumed {
         requirement: TraitRequirement,
         contract: MethodContract,
     },
     Selected(SelectedDrop),
     Pending(String),
+}
+impl SelectedDrop {
+    pub fn selection(&self) -> &TypeResolution {
+        self.evidence.type_selection()
+    }
+    pub fn qualification(&self) -> &[Witness] {
+        self.evidence.qualification()
+    }
+    pub fn capabilities(&self) -> &[TraitRequirement] {
+        &self.capabilities
+    }
 }
 impl fmt::Display for SelectedDrop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -64,10 +77,10 @@ impl fmt::Display for SelectedDrop {
             write!(f, " {capability}")?;
         }
         f.write_str(") (qualification")?;
-        for witness in &self.qualification {
+        for witness in self.qualification() {
             write!(f, " {witness}")?;
         }
-        write!(f, ") {})", self.selection)
+        write!(f, ") {})", self.evidence)
     }
 }
 impl fmt::Display for Resolution {
@@ -278,7 +291,12 @@ pub fn select(
     let implementation = match resolution.types.selection {
         Selection::Selected(id) => id,
         Selection::NoApplicableCandidate if world.assumptions.is_empty() => {
-            return Ok(Resolution::NoCustomDrop(resolution.types));
+            return Ok(Resolution::NoCustomDrop(SelectionEvidence::capture(
+                protocol,
+                subject,
+                resolution,
+                &mut preparation_fuel,
+            )?));
         }
         Selection::NoApplicableCandidate => {
             return Ok(Resolution::Pending(
@@ -292,8 +310,10 @@ pub fn select(
     else {
         return Err("Drop selection lacks instantiated type evidence".into());
     };
-    let Some(Qualification::Proved(qualification)) = resolution.qualifications.get(&implementation)
-    else {
+    if !matches!(
+        resolution.qualifications.get(&implementation),
+        Some(Qualification::Proved(_))
+    ) {
         return Err("Drop selection lacks capability evidence".into());
     };
     let definition = world
@@ -414,8 +434,7 @@ pub fn select(
         parameters: function.parameters.clone(),
         program,
         capabilities,
-        qualification: qualification.clone(),
-        selection: resolution.types,
+        evidence: SelectionEvidence::capture(protocol, subject, resolution, &mut preparation_fuel)?,
     }))
 }
 

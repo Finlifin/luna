@@ -105,9 +105,17 @@ pub(super) fn check_access_with_layout(
         return Err("Drop access budget exhausted".into());
     }
     *fuel -= 1;
-    if !world.index.type_resolution_is_current(&selected.selection) {
+    if !world.index.type_resolution_is_current(selected.selection()) {
         return Err("Drop selection belongs to a different implementation world".into());
     }
+    selected.evidence.check_instance(
+        selected.protocol,
+        &selected.subject,
+        selected.implementation,
+        &selected.implementation_arguments,
+        fuel,
+    )?;
+    selected.evidence.check_world(world, fuel)?;
     let implementation = package
         .implementations
         .iter()
