@@ -40,6 +40,12 @@ R12 发布边界的后续核对还发现 required invocation 向 Checker 回传�
 见[整批定义接收](elaboration-state-and-publication.md#已接入required-invocation-的整批定义接收)。
 这修复跨层接收原子性，尚不代表完整发布事务或调用期 Type 恢复已经完成。
 
+沿同一发布原则，VM 的 contextual 域准备现也先完成私有草稿，再交付执行表：
+后项错误或预算中断不再留下前项准备结果，NF 输入切换不再提前清空旧表。
+实际失败复现、重试与双引擎／真实 sysroot 验证见
+[域准备的完整结果交付](comptime-value-admission.md#域准备的完整结果交付)。
+这是现有域检查的局部原子性交付，不是源 activation 恢复或 NormalFormArgument 退役。
+
 沿同一交付链继续检查，发现 Checker 已接收的晚生成普通 enum／newtype 仍可能被
 最终 NIR 收集遗漏。现统一三类描述的补收与身份去重；真实 sysroot 的函数体局部
 newtype 构造可复现旧路径在 IIR 实例化时报缺少声明。详见

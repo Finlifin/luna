@@ -1,5 +1,6 @@
 //! One contextual domain preparation algorithm over borrowed source or compiled
 //! descriptions. Neither adapter executes operand expressions or unfolds heads.
+//! Domain checking owns its draft; execution receives only a complete result.
 use super::*;
 use comptime_compiler::normal_types::{Input as Scalar, Shape, ShapeKind};
 use nir::program::NormalFormArgument as A;
@@ -21,6 +22,28 @@ enum Kind<'a> {
     Match(usize),
     List(usize),
     Tuple(usize),
+}
+
+/// A completed preparation, owned by one invocation. No callback can publish a
+/// prefix while later branches or fields still have unchecked domains.
+pub(super) struct Preparation {
+    entries: Vec<(InputKey, Prepared)>,
+}
+
+impl Preparation {
+    pub(super) fn into_entries(self) -> impl Iterator<Item = (InputKey, Prepared)> {
+        self.entries.into_iter()
+    }
+}
+
+impl fmt::Display for Preparation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(input-domain-preparation")?;
+        for (key, value) in &self.entries {
+            write!(f, " (entry {key} {value})")?;
+        }
+        f.write_str(")")
+    }
 }
 
 impl<'a> Node<'a> {
@@ -147,7 +170,19 @@ impl Interpreter<'_> {
         expected: &Term,
         key: InputKey,
         depth: usize,
-        emit: &mut impl FnMut(InputKey, Prepared),
+    ) -> Result<Preparation, Error> {
+        let mut entries = Vec::new();
+        self.check_input_domain(node, expected, key, depth, &mut entries)?;
+        Ok(Preparation { entries })
+    }
+
+    fn check_input_domain(
+        &mut self,
+        node: Node<'_>,
+        expected: &Term,
+        key: InputKey,
+        depth: usize,
+        entries: &mut Vec<(InputKey, Prepared)>,
     ) -> Result<(), Error> {
         let source = node.source();
         if depth >= 128 {
@@ -175,24 +210,24 @@ impl Interpreter<'_> {
                     return Err(self.failure(ErrorKind::Type, Some(condition_source)));
                 }
                 for index in 0..2 {
-                    self.prepare_input_domain(
+                    self.check_input_domain(
                         node.child(index),
                         expected,
                         node.child_key(index, &key),
                         depth + 1,
-                        emit,
+                        entries,
                     )?;
                 }
                 return Ok(());
             }
             Kind::Block(has_result) => {
                 if has_result {
-                    self.prepare_input_domain(
+                    self.check_input_domain(
                         node.child(0),
                         expected,
                         node.child_key(0, &key),
                         depth + 1,
-                        emit,
+                        entries,
                     )?;
                 } else if !node.diverges() {
                     self.check_type_contract(
@@ -212,12 +247,12 @@ impl Interpreter<'_> {
                             return Err(self.failure(ErrorKind::Type, Some(source)));
                         }
                     }
-                    self.prepare_input_domain(
+                    self.check_input_domain(
                         node.child(index),
                         expected,
                         node.child_key(index, &key),
                         depth + 1,
-                        emit,
+                        entries,
                     )?;
                 }
                 return Ok(());
@@ -225,7 +260,7 @@ impl Interpreter<'_> {
             Kind::List(count) => {
                 let element = self.normal_list_domain(expected, count, source)?;
                 for index in 0..count {
-                    self.prepare_input_domain(
+                    self.check_input_domain(
                         node.child(index),
                         if node.spread(index) {
                             expected
@@ -234,7 +269,7 @@ impl Interpreter<'_> {
                         },
                         node.child_key(index, &key),
                         depth + 1,
-                        emit,
+                        entries,
                     )?;
                 }
                 Prepared::List {
@@ -250,18 +285,53 @@ impl Interpreter<'_> {
                     return Err(self.failure(ErrorKind::Arity, Some(source)));
                 }
                 for (index, ty) in types.iter().enumerate() {
-                    self.prepare_input_domain(
+                    self.check_input_domain(
                         node.child(index),
                         ty,
                         node.child_key(index, &key),
                         depth + 1,
-                        emit,
+                        entries,
                     )?;
                 }
                 Prepared::Tuple { values: vec![] }
             }
         };
-        emit(key, value);
+        entries.push((key, value));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_domain_dump_keeps_paths_and_literal_values() {
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let input = A::Tuple {
+            source: SourceRange { start: 3, end: 8 },
+            items: vec![A::Integer {
+                source: SourceRange { start: 4, end: 5 },
+                spelling: "7".into(),
+                negative: false,
+            }],
+        };
+        let complete = vm
+            .prepare_input_domain(
+                Node::Source(&input),
+                &Term::Tuple(vec![Term::Primitive(Primitive::U8)]),
+                InputKey::root(),
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            complete.to_string(),
+            format!(
+                "(input-domain-preparation (entry (input-path 0) (literal {})) (entry (input-path) (tuple (values))))",
+                Value::UnsignedInteger(7)
+            )
+        );
+        assert_eq!(complete.into_entries().count(), 2);
     }
 }

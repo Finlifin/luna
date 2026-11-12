@@ -435,3 +435,141 @@ fn source_and_compiled_domain_preparation_share_diagnostics_and_work() {
         }
     }
 }
+
+#[test]
+fn contextual_domain_failure_does_not_publish_partial_preparations() {
+    let package = Package::default();
+    let expected = Term::Tuple(vec![Term::Primitive(Primitive::U8); 2]);
+    let input = A::Tuple {
+        source: SOURCE,
+        items: ["7", "256"]
+            .into_iter()
+            .map(|spelling| A::Integer {
+                source: SOURCE,
+                spelling: spelling.into(),
+                negative: false,
+            })
+            .collect(),
+    };
+    let (_, shape) = comptime_compiler::compile_staged_input(&input, &mut 100_000).unwrap();
+    let mut tree = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut code = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let saved_key = InputKey::root().child(99);
+    let mut source_entries = BTreeMap::from([(
+        saved_key.clone(),
+        PreparedNormalInput::Value(Value::Bool(true)),
+    )]);
+    let mut compiled_entries = BTreeMap::from([(
+        usize::MAX,
+        normal_types::Prepared::Literal(Value::Bool(true)),
+    )]);
+    let a = tree
+        .prepare_normal_argument(&input, &expected, &mut source_entries, 0)
+        .unwrap_err();
+    let b = code
+        .prepare_normal_shape(&shape, &expected, &mut compiled_entries, 0)
+        .unwrap_err();
+    assert_eq!(a.kind, ErrorKind::Type);
+    assert_eq!((a.kind, a.source), (b.kind, b.source));
+    assert_eq!(
+        source_entries.len(),
+        1,
+        "source preparation leaked a prefix"
+    );
+    assert_eq!(
+        compiled_entries.len(),
+        1,
+        "compiled preparation leaked a prefix"
+    );
+    assert!(matches!(
+        source_entries.get(&saved_key),
+        Some(PreparedNormalInput::Value(Value::Bool(true)))
+    ));
+    assert!(matches!(
+        compiled_entries.get(&usize::MAX),
+        Some(normal_types::Prepared::Literal(Value::Bool(true)))
+    ));
+}
+
+#[test]
+fn contextual_domain_budget_failure_preserves_tables_and_allows_retry() {
+    let package = Package::default();
+    let expected = Term::Tuple(vec![Term::Primitive(Primitive::U8); 2]);
+    let input = A::Tuple {
+        source: SOURCE,
+        items: ["7", "13"]
+            .into_iter()
+            .map(|spelling| A::Integer {
+                source: SOURCE,
+                spelling: spelling.into(),
+                negative: false,
+            })
+            .collect(),
+    };
+    let (_, shape) = comptime_compiler::compile_staged_input(&input, &mut 100_000).unwrap();
+    let mut failures = 0;
+    let mut successes = 0;
+    for steps in 0..128 {
+        let mut tree = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut code = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        tree.budget.steps = steps;
+        code.budget.steps = steps;
+        let saved_key = InputKey::root().child(99);
+        let mut source_entries = BTreeMap::from([(
+            saved_key.clone(),
+            PreparedNormalInput::Value(Value::Bool(true)),
+        )]);
+        let mut compiled_entries = BTreeMap::from([(
+            usize::MAX,
+            normal_types::Prepared::Literal(Value::Bool(true)),
+        )]);
+        let a = tree.prepare_normal_argument(&input, &expected, &mut source_entries, 0);
+        let b = code.prepare_normal_shape(&shape, &expected, &mut compiled_entries, 0);
+        assert_eq!(
+            a.as_ref().err().map(|error| (&error.kind, error.source)),
+            b.as_ref().err().map(|error| (&error.kind, error.source))
+        );
+        assert_eq!(tree.budget.steps, code.budget.steps);
+        if let Err(error) = a {
+            failures += 1;
+            assert_eq!(error.kind, ErrorKind::StepsExhausted);
+            assert_eq!(source_entries.len(), 1, "source prefix at budget {steps}");
+            assert_eq!(
+                compiled_entries.len(),
+                1,
+                "compiled prefix at budget {steps}"
+            );
+            tree.budget = Budget::default();
+            code.budget = Budget::default();
+            tree.prepare_normal_argument(&input, &expected, &mut source_entries, 0)
+                .unwrap();
+            code.prepare_normal_shape(&shape, &expected, &mut compiled_entries, 0)
+                .unwrap();
+        } else {
+            successes += 1;
+        }
+        assert_eq!(source_entries.len(), 3);
+        assert_eq!(compiled_entries.len(), 4);
+        tree.budget = Budget::default();
+        let Flow::Value(value) = tree
+            .eval_normal_argument(&input, &mut source_entries, &mut Environment::new())
+            .unwrap()
+        else {
+            panic!("prepared tuple must yield a value")
+        };
+        assert_eq!(
+            value,
+            Value::Tuple(vec![Value::UnsignedInteger(7), Value::UnsignedInteger(13)])
+        );
+        assert_eq!(source_entries.len(), 1);
+        assert!(matches!(
+            source_entries.get(&saved_key),
+            Some(PreparedNormalInput::Value(Value::Bool(true)))
+        ));
+        assert!(matches!(
+            compiled_entries.get(&usize::MAX),
+            Some(normal_types::Prepared::Literal(Value::Bool(true)))
+        ));
+    }
+    assert!(failures > 2 && successes > 0);
+}

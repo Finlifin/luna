@@ -1011,6 +1011,35 @@ NF 的独立参数循环已删除。没有显式计划时，Source 按声明顺�
 栈帧；仍使用同一个 next_input/终止协议。可恢复字节码模式继续交给 invocation
 驱动，不在准备过程中执行后备路径或重放已经产生的值。
 
+### 域准备的完整结果交付
+
+`input_domains::prepare_input_domain` 已退役向调用者逐项发布结果的回调。它在私有
+草稿中检查所有相关分支、字段及元素，只在整体成功后返回独占的 `Preparation`；
+树解释和字节码适配器随后分别安装路径键与寄存器键。该结果有 S-expression dump，
+不保存到代码缓存，也不充当整个源码表达式已经完成检查的证据。
+
+原路径在准备元组的 `7`、`256` 两项 u8 输入时，会先发布 7，再因 256 越界失败。
+现在域错误、额度或深度耗尽均不改动接收侧准备表；已花费的检查预算不回滚。
+`prepare_compiled_normal_input` 也在取得完整准备表后才替换上一输入的表，不在检查
+之前清空旧状态。重试重新检查域，不执行或重放输入生产者；执行帧的终止／取消规则
+保持独立，不能把这个局部结果的可重试性解释为整个失败 invocation 可以原地重启。
+
+这一步收紧的是已有 VM 域检查的交付边界。检查仍使用既有 contextual 表示和递归
+深度限制；没有实现前端待定域恢复，也没有消除 NF 的专用表达式结构。草稿临时持有
+O(准备项数) 的条目，成功后移动至执行表，不复制 literal 载荷或复用活动状态。
+
+验证工作目录 `/home/fin/luna`。仅新增失败回归、未修实现时，执行
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib contextual_domain_failure_does_not_publish_partial_preparations -- --nocapture`，
+`/tmp/luna-tools-lc88y9pa/result.json` 退出 101：源准备表有 2 项而非原来的 1 项。
+修复后执行
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib -p luna --test normal_input_plans --test normal_value_arguments --test ordinary_clause_collectors --test sysroot_preludes --test open_normal_input_plans --no-fail-fast`，
+`/tmp/luna-tools-hgg9vdyy/result.json` 退出 0，762 项通过、1 项既有 ignore。
+其中新回归覆盖后项域错误、逐预算失败及重试、NF 准备表的整体替换和结果 dump；
+现有源码／sysroot 用例覆盖输入顺序、Type 工厂、反射 builder 和公开库接口。
+五个改动 Rust 文件的 scoped rustfmt check 退出 0，证据
+`/tmp/luna-tools-cnp8k0xu/result.json`；`git diff --check` 通过。
+这是含工作区原有资源分析改动的验证，未运行全 workspace、LLVM 或性能基准。
+
 ### 剩余迁移边界
 
 共享输入所有权和调度不取消消费者的接纳边界。已完成的 Type 参数可使后续数据

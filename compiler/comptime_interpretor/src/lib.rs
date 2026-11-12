@@ -3468,20 +3468,21 @@ impl<'a> Interpreter<'a> {
         literals: &mut BTreeMap<InputKey, PreparedNormalInput>,
         depth: usize,
     ) -> Result<(), Error> {
-        self.prepare_input_domain(
+        let prepared = self.prepare_input_domain(
             input_domains::Node::Source(input),
             expected,
             InputKey::root(),
             depth,
-            &mut |key, prepared| {
-                let value = match prepared {
-                    normal_types::Prepared::Literal(value) => PreparedNormalInput::Value(value),
-                    normal_types::Prepared::List { ty, .. } => PreparedNormalInput::ListType(ty),
-                    normal_types::Prepared::Tuple { .. } => return,
-                };
-                literals.insert(key, value);
-            },
-        )
+        )?;
+        for (key, value) in prepared.into_entries() {
+            let value = match value {
+                normal_types::Prepared::Literal(value) => PreparedNormalInput::Value(value),
+                normal_types::Prepared::List { ty, .. } => PreparedNormalInput::ListType(ty),
+                normal_types::Prepared::Tuple { .. } => continue,
+            };
+            literals.insert(key, value);
+        }
+        Ok(())
     }
 
     fn eval_normal_argument(

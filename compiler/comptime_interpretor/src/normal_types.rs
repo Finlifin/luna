@@ -85,8 +85,10 @@ impl Interpreter<'_> {
         let expected = normal
             .bindings
             .instantiate(self, &metadata.parameters[index].ty, source)?;
-        inputs.prepared.clear();
-        self.prepare_normal_shape(input, &expected, &mut inputs.prepared, 0)
+        let mut prepared = BTreeMap::new();
+        self.prepare_normal_shape(input, &expected, &mut prepared, 0)?;
+        inputs.prepared = prepared;
+        Ok(())
     }
     pub(super) fn normal_list_domain(
         &mut self,
@@ -119,18 +121,19 @@ impl Interpreter<'_> {
         prepared: &mut BTreeMap<usize, Prepared>,
         depth: usize,
     ) -> Result<(), Error> {
-        self.prepare_input_domain(
+        let complete = self.prepare_input_domain(
             input_domains::Node::Compiled(shape),
             expected,
             InputKey::Register(shape.slot),
             depth,
-            &mut |key, value| {
-                let InputKey::Register(slot) = key else {
-                    unreachable!("compiled input identity")
-                };
-                prepared.insert(slot, value);
-            },
-        )
+        )?;
+        for (key, value) in complete.into_entries() {
+            let InputKey::Register(slot) = key else {
+                unreachable!("compiled input identity")
+            };
+            prepared.insert(slot, value);
+        }
+        Ok(())
     }
     pub(super) fn append_compiled_normal_container(
         &mut self,

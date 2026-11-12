@@ -11,6 +11,92 @@ fn expr(ty: Primitive, kind: K) -> Expr {
 }
 
 #[test]
+fn normal_input_preparation_replaces_the_previous_slot_only_after_success() {
+    let head = DeclarationId {
+        package: 91,
+        local: 0,
+    };
+    let package = Package {
+        normal_forms: vec![Head {
+            declaration: head,
+            collector: None,
+            role: Role::Opaque,
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: DeclarationId {
+                    package: 91,
+                    local: 1,
+                },
+                binding: LocalId { owner: 0, index: 0 },
+                kind: Kind::Value,
+                ty: Term::Tuple(vec![Term::Primitive(Primitive::U8); 2]),
+            }],
+        }],
+        ..Default::default()
+    };
+    let shape = |last: &str| {
+        let input = A::Tuple {
+            source: SOURCE,
+            items: ["7", last]
+                .into_iter()
+                .map(|spelling| A::Integer {
+                    source: SOURCE,
+                    spelling: spelling.into(),
+                    negative: false,
+                })
+                .collect(),
+        };
+        comptime_compiler::compile_staged_input(&input, &mut 100_000)
+            .unwrap()
+            .1
+    };
+    let invalid = shape("256");
+    let valid = shape("13");
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut inputs = normal_types::Inputs::new(head, 1);
+    inputs.prepared.insert(
+        usize::MAX,
+        normal_types::Prepared::Literal(Value::Bool(true)),
+    );
+    let saved = inputs.to_string();
+    assert_eq!(
+        vm.prepare_compiled_normal_input(&mut inputs, 0, &invalid, SOURCE)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Type
+    );
+    assert_eq!(inputs.to_string(), saved);
+    let mut exhausted = 0;
+    let mut complete = false;
+    for steps in 0..256 {
+        vm.budget.steps = steps;
+        match vm.prepare_compiled_normal_input(&mut inputs, 0, &valid, SOURCE) {
+            Err(error) => {
+                assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                assert_eq!(inputs.to_string(), saved);
+                exhausted += 1;
+            }
+            Ok(()) => {
+                complete = true;
+                break;
+            }
+        }
+    }
+    assert!(exhausted > 2 && complete);
+    assert!(!inputs.prepared.contains_key(&usize::MAX));
+    assert_eq!(inputs.prepared.len(), 3);
+    assert_eq!(inputs.normal.as_ref().unwrap().bindings.len(), 0);
+    vm.budget = Budget::default();
+    vm.bind_compiled_normal_input(
+        &mut inputs,
+        Value::Tuple(vec![Value::UnsignedInteger(7), Value::UnsignedInteger(13)]),
+        SOURCE,
+    )
+    .unwrap();
+    assert_eq!(inputs.normal.as_ref().unwrap().bindings.len(), 1);
+}
+
+#[test]
 fn sequential_normal_inputs_preserve_identity_order_and_recovery() {
     let head = DeclarationId {
         package: 3,
