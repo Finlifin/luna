@@ -19,6 +19,7 @@
 | [状态与发布协议](elaboration-state-and-publication.md) | 如何暂停、恢复、提交、取消，并保持可见性与 coherence？ |
 | [依赖观察](dependency-observations.md) | 如何观察局部信息、精确捕获外层输入并维护查询依赖？ |
 | [值、执行与发布](values-staging-and-publication.md) | 如何统一参数和值，交织 VM、模板和 builder？ |
+| [函数值的参数接口](callable-input-interfaces.md) | 公开入口、默认提供者与代码身份怎样共同传送，动态 NF 如何接入共享计划？ |
 | [Comptime 值准入](comptime-value-admission.md) | 成员资格、值引用、快照、Any/代码见证与缓存资格如何分别检查？ |
 | [求解、资源与降码](solvers-resources-and-lowering.md) | CDCL、程序规格和后端如何分工并交换证据？ |
 | [Type 模型与理论证据](type-models-and-theory-evidence.md) | 模型怎样成为合法替换，跨 theory 的解释与理由如何验证？ |
@@ -47,14 +48,15 @@
 
 ## 当前生产接线与下一步
 
-以下以 `4937d332` 的整体核对为基础，纳入至 `75c70197` 的主体检查入口归并、入口
-契约顺序修复与局部复查，具体证据见对应专题。验证包含工作区原有的资源分析修改，
+以下以 `4937d332` 的整体核对为基础，纳入至 `d6950e39` 的主体检查入口归并、入口
+契约顺序修复、供应路由合流与局部复查，具体证据见对应专题。验证包含工作区原有的资源分析修改，
 不是纯 HEAD 构建的全语言验收。初始审计和旧证据仍用于追溯，当前进度按实际消费者
 及未闭合边界判断。
 
 | 主干 | 当前已接入的生产入口 | 尚未闭合 |
 | --- | --- | --- |
-| 声明输入与调用供应 | `lexical_inputs` 按声明根及调用闭包收集依赖；`declaration_inputs` 的同一计划服务普通 callable、NF、别名及名义类型 | typed 消费者仍要求立即取得可检查域；完整 ContextualExpr 尚未替换 NormalFormArgument |
+| 声明输入与调用供应 | `lexical_inputs` 按声明根及调用闭包收集依赖；`declaration_inputs` 的同一计划服务普通 callable、NF、别名及名义类型；完整供应与局部提示共用入口游标，旧 type_input_slot 已删除 | typed 消费者仍要求立即取得可检查域；完整 ContextualExpr 尚未替换 NormalFormArgument |
+| 函数值的公开入口 | 普通调用和子句已从 HIR 提取独立入口描述，分别保留预留、到达与源码位置 | 描述尚未跨 callable Type／值传送；动态 NF 具名供应仍失败；[接口设计](callable-input-interfaces.md)明确准入、提供者和编码的共同迁移边界 |
 | 参数域与源码控制 | 声明／trait 输入在替换前识别 callee 依赖；caller 泛型值走普通转换；控制状态和输入事实分别管理整体回滚及词法退出 | 整个 Checker 尚非可挂起区域；已知符号身份不代表 invocation 生产者已执行 |
 | 词法参数与代码签名 | 普通表达式、contextual 签名和捕获共用可见声明输入；关联常量将主体与捕获一起按实例替换 | 这不能使尚未执行的 Type 生产者提前变成已完成输入 |
 | 值传递与接收世界 | 通用准入保留域、phase 和身份；跨 VM callable 在接收世界完成方法选择及关联签名观察 | 活动值、权限及选择证据不随 CodeSession 共享；完整统一值传送协议仍有待迁移 |

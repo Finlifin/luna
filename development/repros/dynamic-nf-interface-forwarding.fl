@@ -1,0 +1,31 @@
+{-
+    Known missing interface transport: the public Items entry must survive a
+    type alias, a selected function result and ordinary higher-order forwarding.
+    Replacing .Items = items with ...items gives the existing packet control.
+-}
+typealias Factory = pure comptime fn<...Items: meta.List<Type>> -> Type;
+
+pure comptime fn First<...Items: meta.List<Type>> -> Type { bool }
+pure comptime fn Second<...Items: meta.List<Type>> -> Type { bool }
+
+comptime fn select(flag: bool) -> Factory {
+    if flag { First } else { Second }
+}
+
+comptime fn forward(factory: Factory) -> Factory { factory }
+
+comptime fn Apply(factory: Factory, items: meta.List<Type>) -> Type {
+    factory<.Items = items>
+}
+
+comptime fn verify() -> bool {
+    let items: meta.List<Type> = [bool, u8];
+    let first = Apply(forward(select(true)), items);
+    let second = Apply(forward(select(false)), items);
+    first == First<.Items = items> and second == Second<.Items = items>
+}
+
+fn run() -> bool {
+    const accepted = verify();
+    accepted
+}
