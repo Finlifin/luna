@@ -2,16 +2,23 @@
 
 核对对象：`ai_dev_logs/comptime_type_vm_divergence_report_2026-11-11_evening.md`。
 报告主体基线是 `a00e221f`，附录推进至 `bfe8221c`；本回复在 2026-11-12
-整体核对至 `4937d332`，后续局部迁移与旧问题复查推进至 `75c70197`。
+整体核对至 `4937d332`，后续局部迁移与旧问题复查推进至 `bcbcd0bc`。
 保留原报告，不把不同基线的事实混成一次测量。
 formatter 由另一位开发者负责，本次未修改 `compiler/fmt` 及其依赖。
 
-最新复查六项旧问题，2 项通过、4 项失败：动态名义子句值与嵌套 Type 转发已通过；
+此前复查六项旧问题，2 项通过、4 项失败：动态名义子句值与嵌套 Type 转发已通过；
 一项失败是 TypeContractUnresolved 与旧 InvalidCallPlan 断言的差异，另三项仍在
 调用期输入或程序后置条件处失败。未修改测试预期，也未将这批局部通过计作架构
 完成。命令、位置及证据见[当前准入边界](comptime-value-admission.md#当前尚未完成的边界)。
 该文的 VM／声明域接线说明已按当前职责压缩，移除重复中间日志，并纠正 fresh
 phase 检查另开默认额度的过时描述；历史版本仍可从 Git 查阅。
+
+截至 `bcbcd0bc`，普通块检查已经使用显式帧，普通调用参数的域依赖和默认值引用
+也已使用显式任务栈。两者仍同步调用源码子检查与 required invocation；不具备
+一般源 activation 的挂起恢复。完整 callable 签名和待定 collector 域的两个正例
+仍未实现，不能把任务栈本身当作解除这两项限制的证据。具体交接与验证见
+[普通块帧](elaboration-state-and-publication.md#已接入普通块的显式子检查驱动)
+及[输入依赖任务](elaboration-state-and-publication.md#已接入普通输入依赖保留任务后继)。
 
 R12 发布边界的后续核对还发现 required invocation 向 Checker 回传多条生成定义时
 可能部分写入：后项超预算，早先描述与构造器权限已可见，布局索引尚未同步。
@@ -671,6 +678,34 @@ frame 中替换契约，形成检查不能再次用空 frame 对该契约做无�
 - 五个 Rust 文件的 scoped rustfmt check：`/tmp/luna-tools-n7mo9da4/result.json`
   退出 0；`git diff --check` 通过。未运行全 workspace、LLVM 或性能基准；验证包含
   工作区原有资源分析改动，不宣称为纯 HEAD 验收。formatter 与其他受保护文件不纳入提交。
+
+### 父声明值捕获：已定位缺失交接，尚未修复
+
+在 `bcbcd0bc` 上复查 `member_record_defaults_use_selected_value_capture`：
+动态父输入 `Holder<enabled()>` 的成员默认值构造 `Config<enabled>` 时，
+`normal_value_argument_at` 先检查 clause 参数并观察身份；观察不可用后进入
+required invocation，最终因缺少捕获报错。临时诊断显示读取的是 bool 域的
+`(local 4294967295 4)`，它存在于 `normal_default_bindings`，而 required 根的
+available 输入仅含成员自己的 config 参数，没有父 enabled 的值。
+
+此证据不能归因于 `dependent_inputs/tasks.rs` 中 Type 捕获分支的固定 sort：
+该分支读取的 `alias_value_bindings` 保存 Type 域绑定，普通值域另存于
+`normal_default_bindings`。`required.rs` 当前也明确不把已有的 pending 默认输入
+自动升级为可执行的抽象值。这条限制不能通过给所有未供应的局部值制造 rigid
+符号来解除；声明身份、可被观察的输入证据和本次 invocation 已取得的值必须区分。
+是否可以合法保留符号还须核对使用处的参数域、声明作用域和后续替换消费者。
+
+该失败定位到 `normal.rs` 的 clause 值观察与 required 输入捕获之间；本次没有
+证明只改捕获映射即可完成整个默认值，也没有将它归为 PTC 问题。后续需要沿原父
+输入计划交付绑定和待决检查，保留 enabled 与 compute_flag 的调用次数，再以
+原用例中的动态／静态父输入及 true／false 身份对照验收。原预期保持不变。
+
+本次工作目录 `/home/fin/luna`，执行
+`python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters member_record_defaults_use_selected_value_capture -- --exact --nocapture`，
+`/tmp/luna-tools-se7qt8qv/result.json` 退出 101，诊断仍为
+`256..263: required comptime input (local 4294967295 4) is not available in this invocation`。
+该运行包含只为定位输入集合添加的临时打印；打印已移除，`required.rs` 与 HEAD
+无差异。本次仅更新回复，没有提交编译器修复，也没有运行全量测试。
 
 ## 4. 本次证据与限制
 
