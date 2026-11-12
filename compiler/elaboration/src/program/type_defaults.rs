@@ -25,41 +25,17 @@ impl<'h> Checker<'_, 'h> {
         self.spread_packet_layout_with_widths(args, domains, span, &empty)
     }
 
-    pub(super) fn type_input_slot(
-        clauses: &[hir::clause::ClauseParam<'_>],
-        name: Option<hir::common::Ident>,
-        positional: &mut usize,
-        span: Span,
-    ) -> Result<usize, Error> {
-        if let Some(name) = name {
-            return clauses
-                .iter()
-                .position(|clause| {
-                    clause.name.name == name.name
-                        && matches!(
-                            clause.kind,
-                            hir::clause::ClauseParamKind::Optional(..)
-                                | hir::clause::ClauseParamKind::Varadic(..)
-                        )
-                })
-                .ok_or_else(|| error(span, "unknown named type argument"));
-        }
-        while *positional < clauses.len()
-            && matches!(
-                clauses[*positional].kind,
-                hir::clause::ClauseParamKind::Optional(..)
-            )
-        {
-            *positional += 1;
-        }
-        let slot = *positional;
-        if !clauses
-            .get(slot)
-            .is_some_and(|clause| matches!(clause.kind, hir::clause::ClauseParamKind::Varadic(..)))
-        {
-            *positional += 1;
-        }
-        Ok(slot)
+    pub(super) fn type_input_routing_error(kind: input_routing::FailureKind, span: Span) -> Error {
+        use input_routing::FailureKind as F;
+        error(
+            span,
+            match kind {
+                F::UnknownName => "unknown named type argument".into(),
+                F::Duplicate => "duplicate type argument".into(),
+                F::TooMany | F::PacketTargetsCollection => "type argument count mismatch".into(),
+                _ => kind.to_string(),
+            },
+        )
     }
 
     /// Concrete declaration arguments are required computations. A tuple
@@ -729,14 +705,26 @@ impl<'h> Checker<'_, 'h> {
         prefix: Vec<Term>,
     ) -> Result<Vec<Term>, Error> {
         let clauses = self.type_clause_params(owner);
+        let inputs = values
+            .iter()
+            .map(|(name, _)| {
+                name.map_or(input_routing::Input::Positional, |name| {
+                    input_routing::Input::Named(name.name)
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut routing =
+            input_routing::Cursor::new(clause_inputs::entries(&clauses), &inputs, None)
+                .map_err(|failure| Self::type_input_routing_error(failure.kind, span))?;
         let mut supplied = vec![None; clauses.len()];
-        let mut positional = 0;
-        for (name, value) in values {
-            let slot = Self::type_input_slot(&clauses, name, &mut positional, span)?;
-            let cell = supplied
-                .get_mut(slot)
-                .ok_or_else(|| error(span, "type argument count mismatch"))?;
-            if cell.replace(value).is_some() {
+        for ((_, value), input) in values.into_iter().zip(&inputs) {
+            let slot = routing
+                .select(input)
+                .map_err(|kind| Self::type_input_routing_error(kind, span))?
+                .parameter;
+            // This consumer supplies complete Type slots, not a collection
+            // builder. Repeated elements still require the collection consumer.
+            if supplied[slot].replace(value).is_some() {
                 return Err(error(span, "duplicate type argument"));
             }
         }

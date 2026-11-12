@@ -1032,6 +1032,22 @@ impl Checker<'_, '_> {
         }
     }
 
+    /// Static hints are observations, not mandatory argument checking. A
+    /// conflicting or incomplete routing shape yields no hint; an unknown
+    /// named entry remains the same source error as before this observation.
+    fn generator_routing_hint<T>(
+        result: Result<T, input_routing::FailureKind>,
+        span: Span,
+    ) -> Result<Option<T>, Error> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(kind @ input_routing::FailureKind::UnknownName) => {
+                Err(Self::type_input_routing_error(kind, span))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
     fn generator_explicit_signature_hint(
         &mut self,
         head: &Expr<'_>,
@@ -1105,22 +1121,29 @@ impl Checker<'_, '_> {
         if clauses.len() + established.len() != parameters.len() {
             return Ok(None);
         }
+        let Some(mut routing) = Self::generator_routing_hint(
+            clause_inputs::routing_cursor(clauses, arguments).map_err(|failure| failure.kind),
+            head.span,
+        )?
+        else {
+            return Ok(None);
+        };
         let mut supplied = vec![None; clauses.len()];
-        let mut positional = 0;
         for argument in arguments {
-            let (name, value) = match argument {
-                Arg::Positional(value) => (None, *value),
-                Arg::Named(name, value) => (Some(*name), *value),
+            let (input, value) = match argument {
+                Arg::Positional(value) => (input_routing::Input::Positional, *value),
+                Arg::Named(name, value) => (input_routing::Input::Named(name.name), *value),
                 _ => return Ok(None),
             };
-            let slot = Self::type_input_slot(clauses, name, &mut positional, head.span)?;
-            let Some(cell) = supplied.get_mut(slot) else {
+            let Some(selection) = Self::generator_routing_hint(routing.select(&input), head.span)?
+            else {
                 return Ok(None);
             };
-            if cell.is_some() {
+            // A signature hint needs one complete value for each input. A
+            // repeated collector element must go through collection checking.
+            if supplied[selection.parameter].replace(value).is_some() {
                 return Ok(None);
             }
-            *cell = Some(value);
         }
         // Route first, then complete the declaration telescope. Later value
         // domains and defaults can depend on earlier Type or value clauses.
@@ -1598,39 +1621,34 @@ impl Checker<'_, '_> {
             matches!(clause.kind, hir::clause::ClauseParamKind::Varadic(..))
                 .then_some(clauses.len() - 1)
         });
+        let Some(mut routing) = Self::generator_routing_hint(
+            clause_inputs::routing_cursor(&clauses, arguments).map_err(|failure| failure.kind),
+            span,
+        )?
+        else {
+            return Ok(None);
+        };
         let mut collected = Vec::new();
         let mut supplied = vec![None; parameters.len()];
-        let mut positional = 0;
         for argument in arguments {
-            let (name, value, spread) = match argument {
-                Arg::Positional(value) => (None, *value, false),
-                Arg::Named(name, value) => (Some(*name), *value, false),
-                Arg::Expand(value) => (None, *value, true),
+            let (input, value, spread) = match argument {
+                Arg::Positional(value) => (input_routing::Input::Positional, *value, false),
+                Arg::Named(name, value) => (input_routing::Input::Named(name.name), *value, false),
+                Arg::Expand(value) => (input_routing::Input::Positional, *value, true),
                 _ => return Ok(None),
             };
-            let slot = if name.is_some_and(|name| {
-                collector.is_some_and(|index| clauses[index].name.name == name.name)
-            }) {
-                collector.unwrap()
-            } else {
-                Self::type_input_slot(&clauses, name, &mut positional, value.span)?
+            let Some(selection) = Self::generator_routing_hint(routing.select(&input), value.span)?
+            else {
+                return Ok(None);
             };
-            if name.is_none() && collector.is_some_and(|index| slot >= index) {
+            if selection.collected {
                 collected.push((value, spread));
                 continue;
             }
             if spread {
                 return Ok(None);
             }
-            let Some(cell) = supplied.get_mut(slot) else {
-                return Ok(None);
-            };
-            if cell.replace(value).is_some() {
-                return Ok(None);
-            }
-        }
-        if collector.is_some_and(|index| supplied[index].is_some()) && !collected.is_empty() {
-            return Ok(None);
+            supplied[selection.parameter] = Some(value);
         }
         let binders = self.input_binders(&parameters);
         let mut completed = Vec::with_capacity(parameters.len());

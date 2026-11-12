@@ -1,6 +1,44 @@
 //! Source-order preparation of ordinary clause inputs and collection values.
 use super::*;
 
+/// HIR supplies only entry declarations; no input values or domains are routed here.
+pub(super) fn entries(
+    clauses: &[hir::clause::ClauseParam<'_>],
+) -> Vec<input_routing::Entry<hir::Symbol>> {
+    clauses
+        .iter()
+        .map(|clause| {
+            let optional = matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..));
+            let variadic = matches!(clause.kind, hir::clause::ClauseParamKind::Varadic(..));
+            input_routing::Entry {
+                name: (optional || variadic).then_some(clause.name.name),
+                optional,
+                variadic,
+                post_target: false,
+                ..input_routing::Entry::anchored()
+            }
+        })
+        .collect()
+}
+
+pub(super) fn supplies(inputs: &[Arg<'_>]) -> Vec<input_routing::Input<hir::Symbol>> {
+    inputs
+        .iter()
+        .map(|input| match input {
+            Arg::Positional(_) => input_routing::Input::Positional,
+            Arg::Named(name, _) => input_routing::Input::Named(name.name),
+            _ => input_routing::Input::Unsupported,
+        })
+        .collect::<Vec<_>>()
+}
+
+pub(super) fn routing_cursor(
+    clauses: &[hir::clause::ClauseParam<'_>],
+    inputs: &[Arg<'_>],
+) -> Result<input_routing::Cursor<hir::Symbol>, input_routing::Failure> {
+    input_routing::Cursor::new(entries(clauses), &supplies(inputs), None)
+}
+
 /// Source adaptation for the same supply cursor used by ordinary calls.
 /// Packet widths are discovered by the caller; no HIR is retained by the cursor.
 pub(super) struct ClauseInputRouting {
@@ -13,30 +51,8 @@ impl ClauseInputRouting {
         inputs: &[Arg<'_>],
         span: Span,
     ) -> Result<Self, Error> {
-        let entries = clauses
-            .iter()
-            .map(|clause| {
-                let optional = matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..));
-                let variadic = matches!(clause.kind, hir::clause::ClauseParamKind::Varadic(..));
-                input_routing::Entry {
-                    name: (optional || variadic).then_some(clause.name.name),
-                    optional,
-                    variadic,
-                    post_target: false,
-                    ..input_routing::Entry::anchored()
-                }
-            })
-            .collect();
-        let inputs = inputs
-            .iter()
-            .map(|input| match input {
-                Arg::Positional(_) => input_routing::Input::Positional,
-                Arg::Named(name, _) => input_routing::Input::Named(name.name),
-                _ => input_routing::Input::Unsupported,
-            })
-            .collect::<Vec<_>>();
-        let cursor = input_routing::Cursor::new(entries, &inputs, None)
-            .map_err(|failure| Self::failure(failure.kind, span))?;
+        let cursor =
+            routing_cursor(clauses, inputs).map_err(|failure| Self::failure(failure.kind, span))?;
         Ok(Self { cursor })
     }
 

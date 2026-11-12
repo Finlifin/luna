@@ -394,19 +394,19 @@ impl Checker<'_, '_> {
             }
             if independent && domains.len() == lexical.len() + parameters.len() {
                 let mut supplied = vec![false; parameters.len()];
-                let mut positional = 0;
+                let mut routing = clause_inputs::routing_cursor(&parameters, routed)
+                    .map_err(|failure| Self::type_input_routing_error(failure.kind, expr.span))?;
                 for argument in routed {
-                    let (name, value) = match argument {
-                        Arg::Positional(value) => (None, *value),
-                        Arg::Named(name, value) => (Some(*name), *value),
+                    let (input, value) = match argument {
+                        Arg::Positional(value) => (input_routing::Input::Positional, *value),
+                        Arg::Named(name, value) => (input_routing::Input::Named(name.name), *value),
                         _ => unreachable!(),
                     };
-                    let slot =
-                        Self::type_input_slot(&parameters, name, &mut positional, value.span)?;
-                    let supplied = supplied
-                        .get_mut(slot)
-                        .ok_or_else(|| error(value.span, "type argument count mismatch"))?;
-                    if std::mem::replace(supplied, true) {
+                    let slot = routing
+                        .select(&input)
+                        .map_err(|kind| Self::type_input_routing_error(kind, value.span))?
+                        .parameter;
+                    if std::mem::replace(&mut supplied[slot], true) {
                         return Err(error(value.span, "duplicate type argument"));
                     }
                     let domain = D::Known(domains[lexical.len() + slot].clone());

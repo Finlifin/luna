@@ -1150,9 +1150,16 @@ ignored 正例；工作区原有 formatter 与资源分析等修改保留，不�
 value。固定包不能借尾部收集器接纳额外字段；空收集与缺省输入仍由完成计划区别。
 Cursor 与 Selection 的 S-expression dump 显示这些边界及转义后的入口名称。
 
-这里合并的是普通调用和声明输入计划的供应状态，尚未删除所有观察器。
-`type_defaults.rs::type_input_slot` 仍被 Type 子句值、开放函数与 CMTT 的局部推断
-使用；其中有失败后返回 None 的候选探测，不能不区分失败职责就改成必需检查。
+Type 子句值供应、开放函数的待定输入描述、CMTT 显式签名提示和静态 NF 提示现也
+从同一份子句 Entry 描述取得游标，`type_defaults.rs::type_input_slot` 已删除。
+源码适配只负责从 HIR 提取供应标记和公开入口，不再选择目标参数；Type 实参诊断
+仍由专门的错误适配处理。完整 Type 槽的消费者继续拒绝用重复元素冒充完整收集值。
+
+必需检查与提示观察使用同一路由，但失败责任不同：Type 子句值和开放输入描述
+把供应冲突作为错误；CMTT 的两个静态提示入口遇到冲突、包形状不足或不支持的
+供应方式时返回 None，交给后续正式检查，不能当作已经接受输入。未知具名入口仍
+保留原来的源码错误。此提示适配只接收路由 FailureKind，不捕获或吞掉域检查、
+预算、形成义务或 invocation 的失败。删除的旧选择器不再为 NF 收集器名字另设旁路。
 动态 NF 元数据、跨函数值入口传送、通用收集协议和 source activation 仍属后续工作。
 
 工作目录 `/home/fin/luna`，执行
@@ -1164,6 +1171,15 @@ Cursor 与 Selection 的 S-expression dump 显示这些边界及转义后的入�
 五个 Rust 文件 scoped rustfmt check（`/tmp/luna-tools-5l85lxa3/result.json`）与
 `git diff --check` 通过。未运行全 workspace、LLVM、性能基准或 ignored 正例；
 这些仍是保留原有 formatter、资源分析等修改的工作区证据。
+
+退役 type_input_slot 后在同一目录执行
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test cmtt --test ordinary_callable_types --test ordinary_clause_collectors --test type_spreads --test trait_domain_substitution --test trait_obligations --test open_normal_input_plans --test sysroot_preludes --no-fail-fast`：
+1080 项通过，两个既有待定域正例仍 ignored；
+`/tmp/luna-tools-2x37n5o8/result.json` 退出 0。包括 CMTT 的 594 项检查、公开入口的
+未知名／重复供应拒绝、显式与缺省类型输入、collector 静态提示、trait 参数域替换、
+开放 NF 和真实 sysroot 路径。没有修改测试预期；路由提示不适用仍不能证明调用合法。
+四个 Rust 文件 scoped rustfmt check（`/tmp/luna-tools-pcqc7de7/result.json`）与
+`git diff --check` 通过；未运行全 workspace、LLVM、性能基准或 ignored 正例。
 
 #### 实施补充：声明接口与可执行主体不能共用完成状态
 
