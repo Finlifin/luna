@@ -1,0 +1,123 @@
+================================================================================
+Whitespace-sensitive operators, views, pointers, and qualified types
+================================================================================
+
+pub typealias u8 = .u8'builtin;
+
+fn compute(ptr: *u8) -> !Error ?u8 {
+    let raw = ptr.* + 1u8;
+    let addr = raw.ref;
+    let ok = raw < 10u8 and not false;
+    if ok {
+        addr.*.as(u8)
+    } else {
+        null
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (typealias_definition
+    (visibility)
+    name: (identifier)
+    type: (take_view_expression
+      object: (symbol_literal
+        name: (identifier))
+      view: (identifier)))
+  (function_definition
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)
+        type: (unary_expression
+          operand: (identifier))))
+    return_type: (return_type
+      type: (qualified_type
+        qualifier: (identifier)
+        type: (unary_expression
+          operand: (identifier))))
+    body: (block
+      (let_statement
+        pattern: (identifier)
+        value: (binary_expression
+          left: (member_expression
+            object: (identifier))
+          right: (suffixed_literal
+            value: (integer_literal)
+            suffix: (identifier))))
+      (let_statement
+        pattern: (identifier)
+        value: (member_expression
+          object: (identifier)))
+      (let_statement
+        pattern: (identifier)
+        value: (binary_expression
+          left: (binary_expression
+            left: (identifier)
+            right: (suffixed_literal
+              value: (integer_literal)
+              suffix: (identifier)))
+          right: (unary_expression
+            operand: (boolean_literal))))
+      (expression_statement
+        (if_expression
+          condition: (identifier)
+          consequence: (block
+            (expression_statement
+              (cast_expression
+                value: (member_expression
+                  object: (identifier))
+                target: (identifier))))
+          alternative: (block
+            (expression_statement
+              (null_literal))))))))
+
+================================================================================
+Contextual code types, quotes, splices, and lambdas
+================================================================================
+
+fn meta_demo(code: < x: i32 |- i32 >) -> i32 {
+    let f = |value: i32| -> i32 value + 1;
+    let q = '(~<code> + 2);
+    f(0)
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)
+        type: (contextual_expr_type
+          (runtime_binding
+            name: (identifier)
+            type: (identifier))
+          type: (identifier))))
+    return_type: (return_type
+      type: (identifier))
+    body: (block
+      (let_statement
+        pattern: (identifier)
+        value: (lambda_expression
+          (lambda_parameter
+            name: (identifier)
+            type: (identifier))
+          return_type: (identifier)
+          body: (binary_expression
+            left: (identifier)
+            right: (integer_literal))))
+      (let_statement
+        pattern: (identifier)
+        value: (quote_expression
+          (binary_expression
+            left: (splice_expression
+              (identifier))
+            right: (integer_literal))))
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          (argument
+            (integer_literal)))))))

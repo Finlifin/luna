@@ -1,0 +1,16 @@
+[
+  (block)
+  (declaration_body)
+  (struct_body)
+  (enum_body)
+  (effect_enum_definition)
+  (when_expression)
+  (match_expression)
+  (effect_handling_expression)
+  (error_handling_expression)
+  (object_expression)
+  (list_expression)
+  (block_comment)
+  (raw_string_literal)
+  (use_list_path)
+] @fold

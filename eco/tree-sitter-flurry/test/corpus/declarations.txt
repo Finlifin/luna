@@ -1,0 +1,194 @@
+================================================================================
+Functions and normal-form heads
+================================================================================
+
+pub fn add(x: i32, .step: i32 = 1) -> i32
+where
+    requires x >= 0,
+    ensures result >= x,
+{
+    x + step
+}
+
+pub pure comptime fn Pair<T: Type> -> Type {
+    Tuple<T, T>
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    (visibility)
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)
+        type: (identifier))
+      (parameter
+        name: (identifier)
+        type: (identifier)
+        default: (integer_literal)))
+    return_type: (return_type
+      type: (identifier))
+    (where_clause
+      (clause
+        (requires_clause
+          condition: (binary_expression
+            left: (identifier)
+            right: (integer_literal))))
+      (clause
+        (ensures_clause
+          condition: (binary_expression
+            left: (identifier)
+            right: (identifier)))))
+    body: (block
+      (expression_statement
+        (binary_expression
+          left: (identifier)
+          right: (identifier)))))
+  (function_definition
+    (visibility)
+    (function_modifier)
+    (function_modifier)
+    name: (identifier)
+    parameters: (type_parameter_list
+      (parameter
+        name: (identifier)
+        type: (identifier)))
+    return_type: (return_type
+      type: (identifier))
+    body: (block
+      (expression_statement
+        (generic_application
+          head: (identifier)
+          (argument
+            (identifier))
+          (argument
+            (identifier)))))))
+
+================================================================================
+Structs, enums, traits, impls, and imports
+================================================================================
+
+pub use builtin.prelude.*;
+use std.io.{Writer, stdout as out};
+
+^attrs.abi(.c)
+pub struct Point where T: Type {
+    pub x: T,
+    pub y: T = 0,
+}
+
+pub enum Outcome {
+    Idle,
+    Ready(u32),
+    Failed { code: i32 },
+}
+
+pub pure comptime trait Describe :- Display {
+    assoc Label: Symbol = .item;
+    fn describe(self) -> str;
+}
+
+comptime impl Describe for Point<i32> {
+    fn describe(self) -> str {
+        "point"
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (use_declaration
+    (visibility)
+    path: (use_wildcard_path
+      path: (scoped_use_path
+        path: (identifier)
+        name: (identifier))))
+  (use_declaration
+    path: (use_list_path
+      path: (scoped_use_path
+        path: (identifier)
+        name: (identifier))
+      (identifier)
+      (use_as_clause
+        path: (identifier)
+        alias: (identifier))))
+  (struct_definition
+    (attribute
+      value: (call_expression
+        function: (member_expression
+          object: (identifier)
+          member: (identifier))
+        (argument
+          (symbol_literal
+            name: (identifier)))))
+    (visibility)
+    name: (identifier)
+    (where_clause
+      (clause
+        (decl_clause
+          name: (identifier)
+          type: (identifier))))
+    body: (struct_body
+      (struct_field
+        (visibility)
+        name: (identifier)
+        type: (identifier))
+      (struct_field
+        (visibility)
+        name: (identifier)
+        type: (identifier)
+        default: (integer_literal))))
+  (enum_definition
+    (visibility)
+    name: (identifier)
+    body: (enum_body
+      (enum_variant
+        name: (identifier))
+      (enum_variant
+        name: (identifier)
+        (identifier))
+      (enum_variant
+        name: (identifier)
+        (struct_field
+          name: (identifier)
+          type: (identifier)))))
+  (trait_definition
+    (visibility)
+    (function_modifier)
+    (function_modifier)
+    name: (identifier)
+    bounds: (identifier)
+    body: (declaration_body
+      (assoc_declaration
+        name: (identifier)
+        type: (identifier)
+        default: (symbol_literal
+          name: (identifier)))
+      (function_definition
+        name: (identifier)
+        parameters: (parameter_list
+          (parameter
+            (self_literal)))
+        return_type: (return_type
+          type: (identifier)))))
+  (impl_definition
+    (function_modifier)
+    subject: (identifier)
+    target: (generic_application
+      head: (identifier)
+      (argument
+        (identifier)))
+    body: (declaration_body
+      (function_definition
+        name: (identifier)
+        parameters: (parameter_list
+          (parameter
+            (self_literal)))
+        return_type: (return_type
+          type: (identifier))
+        body: (block
+          (expression_statement
+            (string_literal
+              (string_content))))))))

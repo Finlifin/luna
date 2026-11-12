@@ -1,0 +1,105 @@
+================================================================================
+Nested block comments, string interpolation, and raw strings
+================================================================================
+
+-- Top line comment
+{- Outer comment
+   {- Nested inner comment -}
+   Still in outer comment -}
+fn greet(name: str) -> str {
+    let msg = "Hello, ${name}!\n";
+    let raw = @builtin.str.raw { unescaped "quotes" and { braces } };
+    msg
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (line_comment)
+  (block_comment)
+  (function_definition
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)
+        type: (identifier)))
+    return_type: (return_type
+      type: (identifier))
+    body: (block
+      (let_statement
+        pattern: (identifier)
+        value: (string_literal
+          (string_content)
+          (string_interpolation
+            (identifier))
+          (string_content)
+          (escape_sequence)))
+      (let_statement
+        pattern: (identifier)
+        value: (raw_string_literal
+          (raw_block_content)))
+      (expression_statement
+        (identifier)))))
+
+================================================================================
+Patterns, optional/error propagation, and BitVec segments
+================================================================================
+
+fn decode(word: BitVec<16>, maybe: ?i32) -> ?i32 {
+    let v = maybe?;
+    word match {
+        0b1110(xs: BitVec<4>) 10(ys: BitVec<10>) => v,
+        _ => null,
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)
+        type: (generic_application
+          head: (identifier)
+          (argument
+            (integer_literal))))
+      (parameter
+        name: (identifier)
+        type: (unary_expression
+          operand: (identifier))))
+    return_type: (return_type
+      type: (unary_expression
+        operand: (identifier)))
+    body: (block
+      (let_statement
+        pattern: (identifier)
+        value: (postfix_expression
+          operand: (identifier)))
+      (expression_statement
+        (match_expression
+          value: (identifier)
+          (match_arm
+            pattern: (bit_vec_pattern
+              (bit_vec_pattern
+                (bit_vec_pattern
+                  (integer_literal)
+                  (bit_vec_segment
+                    pattern: (identifier)
+                    type: (generic_application
+                      head: (identifier)
+                      (argument
+                        (integer_literal)))))
+                (bit_vec_segment
+                  (integer_literal)))
+              (bit_vec_segment
+                pattern: (identifier)
+                type: (generic_application
+                  head: (identifier)
+                  (argument
+                    (integer_literal)))))
+            body: (identifier))
+          (match_arm
+            pattern: (wildcard)
+            body: (null_literal)))))))
