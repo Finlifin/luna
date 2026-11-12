@@ -224,7 +224,7 @@ Copy 交付诊断。newtype 的对应拒绝例也去掉已不存在的旧诊断�
   --test library_iteration --no-fail-fast`，`/tmp/luna-tools-bf_bgdi8/result.json`
   退出 101。Drop 1002 项、效应内存传递 108 项全部通过，没有 skip；迭代器组在
   `find_map_preserves_present_null_and_stops_mapping` 栈溢出并 SIGABRT，不能
-  宣称该组通过。本阶段未定位或修复此溢出的根因。
+  宣称该组通过。该阶段未定位根因；后续处理见[契约分析栈帧](#82-程序契约分析的操作栈帧)。
 - `-p luna --test library_iteration -- --exact
   handler_borrows_pointer_bearing_affine_capture_without_copy
   borrowed_pointer_capture_retains_owner_and_storage_restrictions
@@ -727,6 +727,56 @@ Flurry 的语言限制。更深的有限程序仍可能触发现有分析额度�
   `/tmp/luna-tools-8u6n660u/result.json` 退出 0，1,002 项通过，2 项已知基线问题
   显式过滤。前者是准备成功与拒绝预期不符，后者是拒绝诊断断言不符，均未修复；
   [原对照证据](comptime-value-admission.md)保留。未执行全 workspace 回归。
+
+### 8.2 程序契约分析的操作栈帧
+
+`find_map_preserves_present_null_and_stops_mapping` 的另一条溢出发生在 cleanup
+准备的最终 residual contract 检查中。源码检查、inline 展开、实例化和 moves 分析
+已经完成，尚未进入参考 VM。进程内回溯指向 flow 的 `inner → general_expression
+→ child`，不是迭代器运行时自动机无限递归。保留的无优化、无 debuginfo 二进制中，
+`general_expression` 的 prologue 分配 `0x25898`（153752）字节栈空间；每层简单
+操作也携带未选中的指针写回、聚合与类型形成分支的临时状态。
+
+`flow/operations.rs` 现按操作职责隔离普通值操作、指针读取、写回、透明边界、
+类型形成和聚合。总分派仅选择路径；所有子表达式仍回到同一 `child`，保留预算、
+失败 source、状态失效及证据完成钩子。操作主体和次序逐项核对为原实现；没有绕过
+程序契约、增加分析额度或扩大执行线程栈。此次构建中总分派栈帧为 56 字节，六类
+操作分别约 6–36 KiB，实测 prologue 保存在 `/tmp/luna-flow-stack-after.txt`。
+这些是该构建的诊断测量，不是跨平台 ABI 或所有递归路径的空间上界。
+
+新增固定 2 MiB 栈的独立回归：40 层透明边界中的指针写入和随后读取仍支持真实
+后置条件证明；相反后置条件按原 source 拒绝；20 步预算返回 BudgetExhausted，
+重新分析可以成功。原有 find_map 用例继续验证 present-null 与 absent 的区别、
+mapper 次数、展开／未展开参考执行及 LLVM O0/O3。此阶段属于现有检查器实现
+清理，尚未把全部程序验证迁入显式 continuation；其他递归路径的安全性仍需审计。
+
+工作目录 `/home/fin/luna`，Cargo 通过
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- 原实现单独运行 `-p luna --test library_iteration
+  find_map_preserves_present_null_and_stops_mapping -- --exact --nocapture`，
+  `/tmp/luna-tools-x6t870p3/result.json` 退出 101，SIGABRT。可选 GDB 因 ptrace
+  不可用，`/tmp/luna-tools-yciol9i9/result.json` 标记 unavailable；后续进程内
+  定位回溯在 `/tmp/luna-tools-ad70wt4n/stderr.log`，临时插桩已全部撤除。
+- `-p program_verification -p luna --lib --test library_iteration
+  --test integer_contracts --test effect_contracts --test method_memory_contracts
+  --test snapshot_contracts --test staged_aggregate_contracts --test error_result_flow
+  --test pure_bitvec --no-fail-fast`，`/tmp/luna-tools-oyqzrgvn/result.json`
+  退出 101。除迭代器组外 340 项通过，包括独立栈回归；迭代器组仍有下述两项
+  问题，因进程中止不能计为该组完整验收。
+- 最终 `-p luna --test library_iteration --test sysroot_preludes -- --exact
+  find_map_preserves_present_null_and_stops_mapping
+  complete_shipped_sysroot_runs_tuple_optional_math_and_iteration`，
+  `/tmp/luna-tools-gpyvrfg3/result.json` 退出 0，两项通过；后者使用真实六包
+  sysroot 和原生执行，未改写公开库源码。rustfmt 检查退出 0，
+  `/tmp/luna-tools-x3r_hddl/result.json`。
+
+完整迭代器组剩余已观察问题：`counted_adapters_retire_skipped_delivered_and_remaining_items_once`
+仍栈溢出；`ordinary_for_prefers_direct_iteration_and_converts_generic_inputs`
+在源码检查处报 `Type domain equality: UnvalidatedModel`。用本次生产修改之前
+保留的二进制逐项复现，`/tmp/luna-tools-fqinaqxb/result.json` 为 SIGABRT，
+`/tmp/luna-tools-17ztwbja/result.json` 为相同 UnvalidatedModel。二者尚未修复；
+没有删除用例或改变语义预期，也不将本节交付称为所有宿主栈问题已经解决。
 
 ## 9. BitVec 与目标能力
 

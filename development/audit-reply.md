@@ -113,6 +113,12 @@ Drop 现共享保留私有完整查询，正向选择和 NoCustomDrop 均保留�
 逃逸分析；依据和执行证据见
 [Handler 借用检查](solvers-resources-and-lowering.md#51-handler-借用检查不要求-owner-可复制)。
 
+其回归暴露的 find_map 栈溢出已定位到最终程序契约分析的大型操作分派帧，现按
+操作职责隔离临时状态，保持原检查与求值次序。该用例及真实 sysroot 原生检查
+通过，但 counted-adapters 的另一处栈溢出和泛型 IntoIterator 的 UnvalidatedModel
+仍可在改动前二进制复现；详见[契约分析栈帧](solvers-resources-and-lowering.md#82-程序契约分析的操作栈帧)。
+这不是全链路 continuation 已完成，也不能用单一深度计数宣称宿主空间有界。
+
 报告第 7.4 节指出的三类根因成立：重复实现同一表达式语义、跨层值传送分散、
 生产证据未完整交付给消费者。下一阶段应按这些职责迁移，而不是追着行数、
 枚举变体数或测试通过数量继续增加局部分支。以下同时列出必须修正的审查判断。
