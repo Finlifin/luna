@@ -143,6 +143,42 @@ Tseitin 辅变量的独立状态、跨查询学习和合法 trait 模型交付�
 头不展开的契约。wire 编码、VM 恢复和 runtime 物化有不同输出职责，统一其传送
 契约与准入依据，不要求把不同操作改名成一个转换函数。
 
+后续已删除 `normal_value_argument_at` 的聚合递归：类型参数值的元组、列表
+不再逐项建立 required 求值，而由普通表达式检查及一个完整 required 根构造；
+泛型输入继续走已有词法捕获，结果使用普通值编码。记录和其他聚合不需要另加
+源语法分支。此退役不代表 Role、NormalFormArgument 或动态 NF 收集器均已移除。
+
+工作目录 `/home/fin/luna`，本阶段执行以下针对性检查：
+
+- 修改前新的 sysroot comptime 对照通过，`/tmp/luna-tools-tmjzd7s_/result.json`
+  退出 0；覆盖合法聚合、不同值索引的拒绝及 Type 值的 opaque 头身份。
+- 修改后 `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_value_arguments
+  --test normal_form_domains --test nominal_value_parameters --test captured_input_observations --no-fail-fast`：
+  `/tmp/luna-tools-c38s7ksb/result.json` 退出 101。305 项通过、9 项失败；九项名称
+  与诊断逐项等于上一阶段的 `/tmp/luna-tools-g4rr4ng7/stdout.log`。
+- 扩展至 elaboration 单元检查以及普通输入、required scope、聚合与真实 sysroot：
+  `/tmp/luna-tools-eruh0s3z/result.json` 退出 101，384 项通过、2 项失败。其中新增
+  嵌套错误索引已被正确拒绝，测试初稿只接受 type mismatch 文本，漏掉 unresolved
+  type equality；现同时识别这两类域错误，未修改合法／非法输入预期。
+- 另一项 `descriptor_contracts_do_not_infer_factory_injectivity` 要求错误包含 unknown，
+  当前诊断给出 not-entailed 模型。仅将本阶段唯一生产文件暂还原到 `3298e6b5`，
+  单独执行该用例，`/tmp/luna-tools-w11d6bl8/result.json` 退出 101，完整诊断相同。
+  随后逐字节恢复修改，没有改变旧用例的断言。
+- 修正新增诊断断言后，`python3 -B development/check.py --timeout 900 -- test -p luna
+  --test normal_value_arguments -- --nocapture`：`/tmp/luna-tools-ig9ca8fk/result.json`
+  退出 0。两组矩阵覆盖 tuple/list/record、相互嵌套及 Type 值叶子的正反例。
+  直接消费者 `--test trait_domain_substitution --test trait_obligations --no-fail-fast`
+  另有 8 项通过，`/tmp/luna-tools-84qdjn2j/result.json` 退出 0。
+
+最初 runtime 对照在修改前已经失败于 IIR 的 `layout requires a nominal type`
+（`/tmp/luna-tools-47m1uo2t/result.json`）。源码保存在
+[聚合索引布局复现](repros/aggregate-index-layout.fl)；comptime 路径通过不能证明
+runtime 布局消费者完成。迁移后以 `python3 -B development/check.py --timeout 900 -- run
+-p luna -- dump development/repros/aggregate-index-layout.fl --emit iir --entry run
+--sysroot library --build-target x86_64 linux 64` 复跑，
+`/tmp/luna-tools-opv69_qw/result.json` 退出 1，仍为相同布局错误。
+本阶段不运行全 workspace 或 LLVM 原生验收。
+
 ### math 镜像及 comptime trait 所在包属于设计偏离
 
 作者明确要求 builtin.math 服务 runtime，并提供 meta.math 的 comptime 对应能力。

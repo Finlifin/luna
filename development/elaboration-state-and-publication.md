@@ -519,11 +519,20 @@ trait 的标量、具名参数及展开包都在原始 callee 域中识别待供
 caller 域检查值。否则 `Swapped<B, .tag = value, A>` 中 caller 的 B 会被误认成
 callee 尚未供应的 B；调整具名参数位置不应改变合法性或实际执行顺序。
 
-`normal_value_argument_at` 的符号子句参数不再自行查多张侧表并要求域直接相等，
+`normal_value_argument` 的符号子句参数不再自行查多张侧表并要求域直接相等，
 而是复用普通 `expr` 检查及上下文转换。静态身份观察保留符号值；需要 invocation
 时交付已经检查的表达式，不重新检查或重放源 AST。真实 sysroot 用例覆盖 trait
 自身引用、换参、具名乱序、可选与错误结果转换，以及不相关泛型域的拒绝。
 此处删除了该符号分支的平行检查规则，尚未删除整个 NormalFormArgument。
+
+类型注解中元组／列表值的独立递归也已退役：不再按源语法逐项调用
+`normal_value_argument_at`，或在该路径自行形成 TupleValue／冻结列表。整个聚合
+由普通表达式检查取得元素上下文，再进入同一个 required 根；其声明参数由既有
+词法捕获和调用者 telescope 恢复协议交付，最后走通用值编码。保留的 Type 位置
+和直接参数读取规则负责阶段与作用域检查，不为具体库定义提供额外参数类别。
+真实 sysroot 对照包含嵌套聚合、记录、值索引及不展开的 Type 值 NF 头。
+这一步没有接通动态父输入恢复，也没有删除所有 Tuple/List 布局或准入角色。
+验证及独立的 IIR 布局失败见[晚报回复](audit-reply.md#listtuple-和跨阶段值转换的数量直接代表特权数量)。
 
 上述 trait 扩展在 `/home/fin/luna` 经同一检查入口验证：
 

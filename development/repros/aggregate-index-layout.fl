@@ -1,0 +1,13 @@
+{-
+    Intended result: run returns true with the real sysroot.
+    NIR checking succeeds. The initial IIR probe at 3298e6b5 failed with
+    "layout requires a nominal type"; aggregate argument checking and the
+    runtime layout consumer are separate boundaries.
+-}
+struct Packet where state: Tuple<bool, bool> {}
+struct Holder where flag: bool { value: Packet<(flag, false)> }
+
+fn run() -> bool {
+    let holder = Holder<true> { value: Packet<(true, false)> {} };
+    true
+}

@@ -277,22 +277,10 @@ impl Checker<'_, '_> {
         value: &Expr<'_>,
         ty: &Term,
     ) -> Result<Term, Error> {
-        self.normal_value_argument_at(value, ty, 0)
-    }
-
-    fn normal_value_argument_at(
-        &mut self,
-        value: &Expr<'_>,
-        ty: &Term,
-        depth: usize,
-    ) -> Result<Term, Error> {
-        if depth >= 128 || self.required_steps == 0 {
-            return Err(error(
-                value.span,
-                "normal-form input structure budget exhausted",
-            ));
-        }
-        self.required_steps -= 1;
+        self.required_steps = self
+            .required_steps
+            .checked_sub(1)
+            .ok_or_else(|| error(value.span, "normal-form input structure budget exhausted"))?;
         // A dependent input specialized to Type is a type identity, not a
         // scalar comptime-value reference with the wrong semantic sort.
         if *ty == p(P::Type) {
@@ -353,37 +341,9 @@ impl Checker<'_, '_> {
             let (result, _) = self.required_normal_input(value, checked, Vec::new())?;
             return self.required_normal_term(result, value.span);
         }
-        // Preserve declaration inputs inside aggregates instead of attempting
-        // to execute them before their enclosing definition is instantiated.
-        let shape = if matches!(value.kind, H::Tuple(_)) {
-            Some(self.structural_type(ty, value.span)?)
-        } else {
-            None
-        };
-        if let (H::Tuple(values), Some(Term::Tuple(types))) = (&value.kind, shape.as_ref()) {
-            if values.len() != types.len() {
-                return Err(error(
-                    value.span,
-                    "normal-form tuple argument arity mismatch",
-                ));
-            }
-            return Ok(Term::TupleValue(
-                values
-                    .iter()
-                    .zip(types)
-                    .map(|(value, ty)| self.normal_value_argument_at(value, ty, depth + 1))
-                    .collect::<Result<_, _>>()?,
-            ));
-        }
-        if let H::List(values) = value.kind {
-            if let Some(element) = self.list_element_type(ty).cloned() {
-                let mut fields = Vec::with_capacity(values.len());
-                for value in values {
-                    fields.push(self.normal_value_argument_at(value, &element, depth + 1)?);
-                }
-                return self.freeze_normal_list(ty, fields, value.span);
-            }
-        }
+        // Aggregate construction uses ordinary contextual checking and one
+        // required root. Its lexical declaration inputs are captured by that
+        // root; individual elements do not become separate invocations.
         let result = self.required_expression(value, Some(ty))?;
         self.required_normal_term(result, value.span)
     }
