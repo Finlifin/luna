@@ -1,5 +1,5 @@
 //! Block checking owns its unfinished children and lexical exits.
-//! Blocks and contextual conditionals share this stack. Other expression rules
+//! Blocks and conditionals share this stack. Other expression rules
 //! remain atomic adapters until their continuations can join the region.
 use super::*;
 
@@ -93,7 +93,7 @@ pub(super) enum Step<'b, 'h> {
     Continue,
     Child(Request<'b, 'h>),
     Tail(destinations::CheckedTail),
-    Conditional(n::NormalFormArgument),
+    Conditional(CheckedBlock),
 }
 
 impl std::fmt::Display for Request<'_, '_> {
@@ -250,6 +250,26 @@ impl Checker<'_, '_> {
             .contextual(expr.span)
     }
 
+    pub(in crate::program) fn check_ordinary_if_region(
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        let destination = Destination::ordinary(
+            self,
+            OrdinaryTail {
+                expected,
+                partial,
+                input: None,
+            },
+            expr.span,
+        )?;
+        let frame = conditionals::Frame::ordinary(self, expr, destination, false)?;
+        self.drive_check_region(RegionFrame::Conditional(frame))?
+            .ordinary(expr.span)
+    }
+
     fn check_block_region(
         &mut self,
         block: &hir::Block<'_>,
@@ -292,7 +312,6 @@ impl Checker<'_, '_> {
                     Step::Conditional(value) => {
                         // Completion has already left the final branch premise.
                         frames.pop().unwrap().unwind(self);
-                        let value = CheckedBlock::Contextual(value);
                         if frames.is_empty() {
                             return Ok(value);
                         }
@@ -304,9 +323,9 @@ impl Checker<'_, '_> {
                 let (block, destination, boundary) = match request {
                     Request::Block(block, destination) => (block, destination, None),
                     Request::Expression(expr, destination) => {
-                        // Ordinary if/delivery and partial structural inputs
-                        // still use their own expression protocols. Only the
-                        // contextual if rule joins this frame stack here.
+                        // Partial structural inputs retain their own rule.
+                        // Ordinary branches enter only after delivery prepares
+                        // the complete target, as in expr_context.
                         if let Destination::Contextual(tail) = &destination
                             && matches!(expr.kind, H::If(_, _, Some(_)))
                         {
@@ -314,6 +333,19 @@ impl Checker<'_, '_> {
                                 self,
                                 expr,
                                 tail.depth + 1,
+                            )?));
+                            continue;
+                        }
+                        if matches!(expr.kind, H::If(..))
+                            && let Some(view) = destination.ordinary_view()
+                            && view.input.is_none()
+                            && self.prepare_region_if_delivery(expr, view.expected, view.partial)?
+                        {
+                            frames.push(RegionFrame::Conditional(conditionals::Frame::ordinary(
+                                self,
+                                expr,
+                                destination,
+                                true,
                             )?));
                             continue;
                         }

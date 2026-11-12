@@ -21,6 +21,12 @@ fn nested_expression_child() {
             "do {".repeat(32),
             "}".repeat(32)
         ),
+        "branches" => {
+            let body = (0..32).fold("true".to_owned(), |body, _| {
+                format!("if true {{ {body} }} else {{ false }}")
+            });
+            format!("fn run()->bool {{{body}}}")
+        }
         "not" => format!(
             "fn run()->bool {{{}true{}}}",
             "not (".repeat(32),
@@ -134,6 +140,7 @@ fn nested_expression_child() {
 fn nested_scalar_operators_survive_frontend_and_execution() {
     for case in [
         "blocks",
+        "branches",
         "not",
         "and",
         "or",

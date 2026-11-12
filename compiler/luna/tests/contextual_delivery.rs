@@ -35,6 +35,11 @@ fn nested_destinations_preserve_contextual_values_calls_and_control_exits() {
         comptime fn nested() -> Delivered { do { do { 7 } } }
         comptime fn nested_early() -> Delivered { do { do { return 9; 7 } } }
         comptime fn nested_void() -> !bool void { do { do {} } }
+        comptime fn discarded(flag: bool) -> !bool void { if flag { 7; } }
+        comptime fn branched(flag: bool) -> Delivered {
+            if flag { do { if flag { 7 } else { error false } } }
+            else if flag { return 9; } else { error true }
+        }
         comptime fn empty() -> ?u8 { null }
         comptime fn absence() -> Delivered { empty() }
         comptime fn early() -> Delivered {
@@ -88,6 +93,26 @@ fn nested_destinations_preserve_contextual_values_calls_and_control_exits() {
             payload(vm.invoke(id("nested_void"), vec![]).unwrap(), 0),
             Value::Unit
         );
+        for flag in [true, false] {
+            assert_eq!(
+                payload(
+                    vm.invoke(id("discarded"), vec![Value::Bool(flag)]).unwrap(),
+                    0
+                ),
+                Value::Unit
+            );
+        }
+        assert_eq!(
+            payload(
+                vm.invoke(id("branched"), vec![Value::Bool(true)]).unwrap(),
+                3
+            ),
+            Value::UnsignedInteger(7)
+        );
+        assert!(matches!(
+            vm.invoke(id("branched"), vec![Value::Bool(false)]).unwrap(),
+            Value::ErrorResult { error: Some(_), .. }
+        ));
         let value = vm.invoke(id("absence"), vec![]).unwrap();
         assert!(matches!(
             payload(value, 2),
@@ -132,4 +157,67 @@ fn pending_delivery_does_not_weaken_the_child_domain() {
         let source = format!("comptime fn invalid() -> !bool ???u8 {{ {body} }}");
         assert!(sysroot::compile(&source).is_err(), "accepted {source}");
     }
+}
+
+#[test]
+fn ordinary_conditional_delivers_effect_results_under_the_installed_handler() {
+    assert_eq!(
+        sysroot::run(
+            "
+            effect read() -> bool;
+            fn selected(flag: bool) -> #read bool {
+                if flag { do { if true { read()# } else { false } } }
+                else { not read()# }
+            }
+            fn run() -> bool {
+                (selected(true)# { read() => true, })
+                    and (selected(false)# { read() => false, })
+            }
+            "
+        ),
+        Value::Bool(true),
+    );
+}
+
+#[test]
+fn conditional_arguments_keep_the_complete_computation_destination() {
+    let package = sysroot::compile(
+        "
+        effect read() -> bool;
+        effect retain(value: #read bool) -> #read bool;
+        fn source() -> #read bool { read()# }
+        fn request(flag: bool) -> #[retain, read] bool {
+            retain(if flag { do { source() } } else { source() })#
+        }
+        ",
+    )
+    .unwrap();
+    let request = package
+        .functions
+        .iter()
+        .find(|function| function.name == "request")
+        .unwrap();
+    let mut found = false;
+    iir::visit::expressions(request, &mut 10_000, |value, _| {
+        if let nir::program::ExprKind::EffectRequest { arguments, .. } = &value.kind {
+            let input = &arguments[0];
+            let nir::program::ExprKind::If {
+                then_branch,
+                else_branch: Some(otherwise),
+                ..
+            } = &input.kind
+            else {
+                panic!("conditional input was lost: {input}")
+            };
+            assert!(matches!(input.ty, nir::Term::Computation { .. }));
+            assert_eq!(then_branch.ty, input.ty);
+            assert_eq!(otherwise.ty, input.ty);
+            found = true;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(found);
+    // Stored computation values still lack executable evidence. This checks
+    // their NIR delivery contract, not support for executing such storage.
 }

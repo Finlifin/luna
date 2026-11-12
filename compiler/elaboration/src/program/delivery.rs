@@ -111,6 +111,43 @@ impl Delivery<'_> {
 }
 
 impl Checker<'_, '_> {
+    fn charge_expression_delivery(&mut self, span: Span) -> Result<(), Error> {
+        self.required_steps = self
+            .required_steps
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "expression delivery budget exhausted"))?;
+        Ok(())
+    }
+
+    /// The region may enter an if rule only after its value-delivery protocol.
+    /// Two-arm conditionals deliver the complete target to both branches.
+    /// A one-arm expression with a structured target may instead need a whole
+    /// value probe/conversion, so that entry stays with the general adapter.
+    pub(super) fn prepare_region_if_delivery(
+        &mut self,
+        expr: &Expr<'_>,
+        target: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<bool, Error> {
+        let H::If(_, _, otherwise) = expr.kind else {
+            return Ok(false);
+        };
+        let Some(target) = target.filter(|target| !matches!(target, Term::Primitive(_))) else {
+            return Ok(true);
+        };
+        if otherwise.is_none() {
+            return Ok(false);
+        }
+        self.charge_expression_delivery(expr.span)?;
+        match self.prepare_delivery(expr, Cow::Borrowed(target), partial)? {
+            Step::Unadapted(_) => Ok(true),
+            _ => Err(error(
+                expr.span,
+                "two-arm conditional lost its directed delivery rule",
+            )),
+        }
+    }
+
     /// The synchronous adapter drives the same post-child rules. General
     /// expression checking is still an atomic call here; no suspended source
     /// region or external Type response is manufactured by this adapter.
@@ -124,10 +161,7 @@ impl Checker<'_, '_> {
         let mut expected = Cow::Borrowed(target);
         let mut pending = Vec::new();
         let mut value = loop {
-            self.required_steps = self
-                .required_steps
-                .checked_sub(1)
-                .ok_or_else(|| error(expr.span, "expression delivery budget exhausted"))?;
+            self.charge_expression_delivery(expr.span)?;
             match self.prepare_delivery(expr, expected, partial)? {
                 Step::Child {
                     expected: child,

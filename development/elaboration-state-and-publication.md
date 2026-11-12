@@ -1043,14 +1043,14 @@ callable 和结构化 input context，成功后才进入词法帧。相邻嵌套
 尚未确定的 value 原样保留。深度与步数耗尽分别返回，不作为缺少上下文或类型不符
 继续尝试。共享对象仍是区域／候选私有的检查信息，不授权冻结到 NIR、代码缓存或
 跨候选复用，也不形成新的 Type 身份。该迁移为分支过程中产生的新目标域提供所有权
-基础。contextual 条件分支现已接入同一驱动，普通分支的交付适配尚未迁移。
+基础。普通与 contextual 条件分支现已接入同一驱动，交付适配沿原规则准备。
 
 这是同一同步检查器内部的实际 continuation 接线，不是完整 CheckRegion：源 HIR
-仍借用本次快照，当前活动词法状态仍装在 Checker 中，除块与 contextual if 外的
+仍借用本次快照，当前活动词法状态仍装在 Checker 中，除块与已迁移 if 外的
 子规则仍通过原同步入口完成。它不提供外部等待、取消、源码 activation 或 VM 片段执行许可。后续必须将这套
 帧连同活动上下文交给区域所有者，并迁移调用检查的后继，不能把有帧栈本身当作两个
 动态调用正例已完成。旧 NormalFormArgument 仍作为 contextual 输出存在；共享块驱动
-不等于该表示已退役，也没有使普通控制流和调用检查成为可挂起的普通表达式区域任务。
+不等于该表示已退役，也没有使其余控制流和调用检查成为可挂起的普通表达式区域任务。
 
 contextual `if` 的原递归实现已经删除，直接入口与块中的嵌套入口使用同一条件帧。
 条件按普通 bool 表达式检查；then 请求源码块规则，else 请求源码表达式规则，
@@ -1064,10 +1064,25 @@ contextual `if` 的原递归实现已经删除，直接入口与块中的嵌套�
 执行存储，也不恢复因外层写入而失效的输入事实。条件帧 dump 显示阶段、深度、
 受检条件、已完成 then 和父事实上下文，不发布到稳定代码缓存。
 
-普通 if（包括无 else 的 contextual 源码）、inline 控制及部分结构输入仍沿既有
-规则进入可选／错误结果、callee 位置和效应交付；本次没有用新帧绕过这些适配。
-条件中除普通块外的表达式仍同步检查。这里只把待定输入分支的检查进度保留为数据，
-没有执行未知 producer，也没有接通源 activation 或一般外部挂起恢复。
+普通 if 的旧 aggregates 递归实现现也退役，与 contextual if 共用条件帧和子结果
+交接。普通规则保留 required-comptime 状态、未选 inline 分支状态及 callee 位置；
+条件仍在其原阶段检查，只有结果产生位置继承 callee 交付。子任务完成或失败时恢复
+这些状态，并退出本支类型事实。条件本身和未选分支不因迁移获得提前执行许可。
+
+else 的目标仍按原规则由显式 expected 或正常完成的 then 类型取得；新目标按共享
+预算复制到区域私有 Destination，不再借用保存在前一分支结果里的 Type。Never
+结果不充当推导目标；两个分支已在各自事实下证明的目标关系不在分支外重新要求。
+无 else 仍丢弃 then 结果，按原 Void／Never 规则合并，再检查整体目标。
+
+两侧分支进入前，`prepare_region_if_delivery` 复用原 `prepare_delivery`，保留同一次
+交付准备及其额度。两分支 if 接收完整 optional／error／computation 目标，具体
+产生值的子表达式负责注入或转换。无 else 且目标为非原始类型的情况仍先经过完整
+表达式适配器，防止跳过整体值探测；适配之后的 if 本身仍进入同一条件帧。效应结果
+由外层表达式适配器或当前帧中的完成后继负责交付一次，不同时由两处执行。
+
+inline 选择、when／match、部分结构 input context 和其它子规则仍有同步适配器；
+没有把它们的检查规则改写成只支持已迁移形状的替代语义。这里只将块和 if 的进度
+保留为数据，活动 HIR／Checker 世界、待定签名与源 activation 仍须共同迁移。
 
 普通块首批迁移的证据如下；工作目录 `/home/fin/luna`，检查命令统一使用
 `python3 -B development/check.py --timeout 900 -- test`：
@@ -1141,6 +1156,25 @@ contextual 条件帧迁移的验证，工作目录与检查前缀同上：
 - 六个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-s05ag6vr/result.json` 退出 0；
   `git diff --check` 通过。未运行全 workspace 或完整 LLVM 验收；其他开发者的
   formatter、资源分析、正式 docs 与库状态修改保持不动，证据来自保留这些修改的工作区。
+
+普通条件帧与交付适配迁移的验证，工作目录及检查前缀同上：
+
+- `-p elaboration --lib -p luna --test contextual_input_regions --test contextual_delivery
+  --test inline_control --test inline_pattern_observation --test inline_returns
+  --test error_result_flow --test effect_contracts --test nesting --test sysroot_preludes
+  --no-fail-fast`：`/tmp/luna-tools-6i4bbhfl/result.json` 退出 0，647 项通过、1 项
+  子进程入口 ignore（由 nesting 父测试实际调用）。新增 32 层 if 在正常线程栈上
+  经过 AST／HIR／NIR 及执行，未扩大栈。新用例同时检查推导的 else 域、分支
+  Type 事实与作用域退出、提前 return、callee 位置和值引用接收者的调用轨迹。
+- 补入 runtime handler 下的嵌套条件执行及 computation 参数的 NIR 目标保持后，
+  执行 `-p luna --test contextual_delivery --test effect_spreads --no-fail-fast`：
+  `/tmp/luna-tools-skpsheuz/result.json` 退出 0，25 项通过。computation 参数的
+  两侧分支和整体保留同一完整目标；存储 computation 的 executable evidence
+  仍未实现，相关 NIR 断言不计作该能力完成。optional／error 多层交付、无 else
+  的 Void 成功注入及错误分支亦通过。
+- 十个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-eh60r37e/result.json` 退出 0；
+  `git diff --check` 通过。工作区原有资源分析等修改未改写或提交；没有运行全
+  workspace 或完整 LLVM 验收，也没有将这次迁移表述为性能优化或源码 activation 完成。
 
 #### 已接入：普通输入依赖保留任务后继
 

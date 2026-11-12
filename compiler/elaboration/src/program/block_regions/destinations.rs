@@ -116,6 +116,35 @@ impl Destination {
         }))
     }
 
+    pub(super) fn ordinary_view(&self) -> Option<OrdinaryTail<'_>> {
+        match self {
+            Self::Ordinary(tail) => Some(tail.view()),
+            Self::Contextual(_) => None,
+        }
+    }
+
+    pub(super) fn following_branch(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        previous: &Term,
+        span: Span,
+    ) -> Result<Self, Error> {
+        let Some(view) = self.ordinary_view() else {
+            return Ok(self.clone());
+        };
+        if view.expected.is_some() || is_never(previous) {
+            return Ok(self.clone());
+        }
+        Self::ordinary(
+            checker,
+            OrdinaryTail {
+                expected: Some(previous),
+                ..view
+            },
+            span,
+        )
+    }
+
     pub(super) fn expected(&self) -> Option<&Term> {
         match self {
             Self::Ordinary(tail) => tail.expected.as_ref(),

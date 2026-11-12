@@ -425,3 +425,62 @@ fn contextual_if_frames_do_not_skip_invalid_siblings_or_leak_negative_premises()
         assert!(failure.contains(diagnostic), "{body}: {failure}");
     }
 }
+
+#[test]
+fn ordinary_if_frames_retain_callee_positions_and_inferred_sibling_destinations() {
+    check_both(
+        "
+        struct Counter { count: Integer }
+        impl Counter {
+            comptime fn choose(self) -> bool { self.count += 1; true }
+            comptime fn next(self) -> u8 { self.count += 1; 7 }
+        }
+        comptime fn identity(value: T) -> T where T { value }
+        comptime fn check() -> bool {
+            var counter = Counter { count: 0 };
+            let selected = (if counter.choose() {
+                do { if true { identity<u8> } else { identity<u8> } }
+            } else { identity<u8> })(counter.next());
+            let inferred = if true { do { selected == 7 } } else { false };
+            let other = if false { counter.next() } else { counter.next() };
+            inferred and selected == 7 and other == 7 and counter.count == 3
+        }
+        ",
+        &["check", "choose", "next", "identity", "next"],
+    );
+}
+
+#[test]
+fn ordinary_if_joins_use_branch_premises_and_restore_them_after_early_exits() {
+    check_both(
+        "
+        comptime fn identity(value: T) -> T
+        where T
+        {
+            if T == bool { if value { true } else { false } } else { value }
+        }
+        comptime fn choose(value: T) -> bool
+        where T
+        {
+            if T != bool { return false; }
+            if value { do { return true; false } } else { false }
+        }
+        comptime fn check() -> bool {
+            identity<bool>(true) and identity<u8>(7) == 7
+                and choose<bool>(true) and not choose<u8>(7)
+        }
+        ",
+        &["check", "identity", "identity", "choose", "choose"],
+    );
+    let failure = sysroot::compile(
+        "comptime fn invalid(value: T) -> bool
+        where T
+        {
+            let local = if T == bool { let valid: bool = value; valid } else { false };
+            let escaped: bool = value;
+            local and escaped
+        }",
+    )
+    .unwrap_err();
+    assert!(failure.contains("type mismatch"), "{failure}");
+}

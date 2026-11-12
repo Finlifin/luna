@@ -59,11 +59,9 @@ impl Checker<'_, '_> {
             | H::Defer(_)
             | H::Assumes(_)
             | H::Return(_) => self.control_value_expression(expr, expected, partial),
-            H::CollectedProperties(_)
-            | H::Object(_)
-            | H::Tuple(_)
-            | H::If(..)
-            | H::InlineControl(_) => self.aggregates_value_expression(expr, expected, partial),
+            H::CollectedProperties(_) | H::Object(_) | H::Tuple(_) | H::InlineControl(_) => {
+                self.aggregates_value_expression(expr, expected, partial)
+            }
             H::Index(..)
             | H::Cast(..)
             | H::TakeOld(_)
@@ -80,7 +78,7 @@ impl Checker<'_, '_> {
         }
     }
 
-    fn finish_value_expression(
+    pub(in crate::program) fn finish_value_expression(
         &mut self,
         expr: &Expr<'_>,
         expected: Option<&Term>,
