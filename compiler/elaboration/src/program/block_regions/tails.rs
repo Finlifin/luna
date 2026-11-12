@@ -68,7 +68,7 @@ impl OrdinaryTail<'_> {
         // typed tail need not be forced into the block's result destination.
         if diverges
             && checker.runtime_value_context()
-            && checker.preparing_spread.is_none()
+            && checker.preparing_inputs.is_none()
             && self.input.is_none()
             && let Some(checked) = checker.argument_attempt(value, None, None)?
         {

@@ -550,44 +550,43 @@ impl Checker<'_, '_> {
             checked,
             packets,
             |this, inputs, mut spreads, flat_count| {
-                let saved = this.preparing_spread.replace(source(expr.span));
-                // The enclosing expression cannot produce the callee's result
-                // when any packet producer exits. Keep checking every input,
-                // but let the caller discard only its result expectation.
-                let diverges = spreads.iter().any(|(_, statement)| is_never(&statement.ty));
-                let call = build(this, inputs, diverges);
-                this.preparing_spread = saved;
-                let call = call?;
-                for (_, statement) in &mut spreads {
-                    let (key, value) = match &mut statement.kind {
-                        K::Let { binding, value } => (*binding, value),
-                        K::LetPattern {
-                            pattern: n::Pattern::Tuple(fields),
-                            value,
-                            ..
-                        } => {
-                            let Some(n::Pattern::Binding { binding, .. }) = fields.first() else {
-                                continue;
-                            };
-                            (*binding, value)
+                this.prepare_call_inputs(expr, |this| {
+                    // The enclosing expression cannot produce the callee's result
+                    // when any packet producer exits. Keep checking every input,
+                    // but let the caller discard only its result expectation.
+                    let diverges = spreads.iter().any(|(_, statement)| is_never(&statement.ty));
+                    let call = build(this, inputs, diverges)?;
+                    for (_, statement) in &mut spreads {
+                        let (key, value) = match &mut statement.kind {
+                            K::Let { binding, value } => (*binding, value),
+                            K::LetPattern {
+                                pattern: n::Pattern::Tuple(fields),
+                                value,
+                                ..
+                            } => {
+                                let Some(n::Pattern::Binding { binding, .. }) = fields.first()
+                                else {
+                                    continue;
+                                };
+                                (*binding, value)
+                            }
+                            _ => continue,
+                        };
+                        if let Some((frozen, _)) = this
+                            .pending_spread_inputs
+                            .get(&key)
+                            .and_then(|packet| packet.frozen.as_ref())
+                        {
+                            **value = frozen.clone();
                         }
-                        _ => continue,
-                    };
-                    if let Some((frozen, _)) = this
-                        .pending_spread_inputs
-                        .get(&key)
-                        .and_then(|packet| packet.frozen.as_ref())
-                    {
-                        **value = frozen.clone();
                     }
-                }
-                if spreads.is_empty() {
-                    return Ok(call);
-                }
-                let prepared = this.insert_spread_preparation(
-                    call, spreads, flat_count, trailing, anchor, expr.span,
-                )?;
-                this.freeze_staged_preparation(prepared, expr)
+                    if spreads.is_empty() {
+                        return Ok(call);
+                    }
+                    this.insert_spread_preparation(
+                        call, spreads, flat_count, trailing, anchor, expr.span,
+                    )
+                })
             },
         )
     }

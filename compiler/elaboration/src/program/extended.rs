@@ -253,6 +253,31 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         open_instantiated: bool,
     ) -> Result<n::Expr, Error> {
+        self.prepare_call_inputs(expr, |this| {
+            this.collect_properties_in_preparation(
+                expr,
+                callee,
+                args,
+                expected,
+                partial,
+                resolved,
+                owner,
+                open_instantiated,
+            )
+        })
+    }
+
+    fn collect_properties_in_preparation(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        resolved: Option<(n::Expr, Vec<n::Expr>)>,
+        owner: OwnerId,
+        open_instantiated: bool,
+    ) -> Result<n::Expr, Error> {
         let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
             self.package.item(owner).map(|item| &item.kind)
         else {

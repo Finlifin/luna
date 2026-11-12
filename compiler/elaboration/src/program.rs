@@ -561,7 +561,7 @@ fn elaborate_with_attributes(
         required_steps: *invocation_steps,
         in_required_comptime: false,
         in_staged_input: false,
-        preparing_spread: None,
+        preparing_inputs: None,
         pending_spread_inputs: BTreeMap::new(),
         observing_type: false,
         control: control::Context::default(),
@@ -1673,7 +1673,7 @@ struct Checker<'a, 'h> {
     input_facts: input_facts::State,
     in_required_comptime: bool,
     in_staged_input: bool,
-    preparing_spread: Option<n::SourceRange>,
+    preparing_inputs: Option<n::SourceRange>,
     pending_spread_inputs: BTreeMap<n::LocalId, spreads::PendingPacket>,
     observing_type: bool,
     control: control::Context,
@@ -6172,7 +6172,7 @@ impl Checker<'_, '_> {
             },
         };
         let call = self.freeze_staged_call_inputs(call, expr)?;
-        self.stage_collected_call(call, &routes, offset, expr.span)
+        self.stage_collected_call(call, &routes, offset, expr)
     }
     fn call(
         &mut self,
@@ -6583,7 +6583,7 @@ impl Checker<'_, '_> {
             },
         };
         let call = self.freeze_staged_call_inputs(call, expr)?;
-        self.stage_collected_call(call, &routes, offset, expr.span)
+        self.stage_collected_call(call, &routes, offset, expr)
     }
 
     fn closure(

@@ -490,8 +490,9 @@ impl Checker<'_, '_> {
         mut call: n::Expr,
         routes: &[RoutedArgument<'_>],
         offset: usize,
-        span: Span,
+        expr: &Expr<'_>,
     ) -> Result<n::Expr, Error> {
+        let span = expr.span;
         let completed_defaults = matches!(&call.kind, K::Call { arguments, .. }
             if arguments.iter().any(|argument| argument.parameter >= offset
                 && !argument.is_default
@@ -593,14 +594,45 @@ impl Checker<'_, '_> {
                 )?;
             }
         }
-        Ok(n::Expr {
+        let call = n::Expr {
             ty: call.ty.clone(),
             source: call.source,
             kind: K::CallPreparation {
                 statements: statements.into_iter().flatten().collect(),
                 result: Some(Box::new(call)),
             },
-        })
+        };
+        // Collection preparation has the same phase split as explicit packet
+        // expansion. Complete its staged producers before publishing runtime
+        // storage. An enclosing packet preparation still owns source positions
+        // and must insert its producers before performing this step itself.
+        self.finish_input_preparation(call, expr)
+    }
+
+    pub(super) fn finish_input_preparation(
+        &mut self,
+        call: n::Expr,
+        expr: &Expr<'_>,
+    ) -> Result<n::Expr, Error> {
+        if self.preparing_inputs == Some(source(expr.span)) {
+            Ok(call)
+        } else {
+            self.freeze_staged_preparation(call, expr)
+        }
+    }
+
+    /// Packet and property collectors may nest for one source call. The
+    /// outermost owner completes the source-order plan before splitting its
+    /// phases; nested calls at other source positions keep their own boundary.
+    pub(super) fn prepare_call_inputs(
+        &mut self,
+        expr: &Expr<'_>,
+        build: impl FnOnce(&mut Self) -> Result<n::Expr, Error>,
+    ) -> Result<n::Expr, Error> {
+        let saved = self.preparing_inputs.replace(source(expr.span));
+        let call = build(self);
+        self.preparing_inputs = saved;
+        self.finish_input_preparation(call?, expr)
     }
 }
 

@@ -8110,7 +8110,7 @@ impl Checker<'_, '_> {
                     .collect(),
             },
         };
-        let call = self.stage_collected_call(call, &routes, 0, expr.span)?;
+        let call = self.stage_collected_call(call, &routes, 0, expr)?;
         if live_bindings.is_empty() {
             return Ok(call);
         }

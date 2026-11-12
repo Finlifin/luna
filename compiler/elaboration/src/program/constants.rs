@@ -2887,7 +2887,7 @@ impl Checker<'_, '_> {
             return Ok(call);
         }
         if self.in_required_comptime
-            || self.preparing_spread
+            || self.preparing_inputs
                 == Some(n::SourceRange {
                     start: source.span.lo().0,
                     end: source.span.hi().0,
