@@ -784,3 +784,141 @@ fn partial_probe_recovery_does_not_hide_errors_or_publish_branch_locals() {
         assert!(!failure.contains("budget exhausted"), "{failure}");
     }
 }
+
+#[test]
+fn declaration_defaults_specialize_each_completed_prefix_without_reexecution() {
+    check_both(
+        r#"
+        struct Config where enabled: bool { flag: bool }
+        comptime fn prefix(value: bool) -> bool { value }
+        comptime fn field(value: bool) -> bool { value }
+        pure comptime fn Packet<
+            .enabled: bool = true,
+            .first: Config<enabled> = defer Config<enabled> { flag: field(enabled) },
+            .second: Config<enabled> = defer do {
+                let previous = first;
+                let read = || previous.flag;
+                Config<enabled> { flag: read() }
+            }> -> Type { bool }
+        comptime fn check() -> bool {
+            let yes = Packet<.enabled = prefix(true)>;
+            let no = Packet<.enabled = prefix(false)>;
+            (yes match { Packet<true, first, second> => first.flag and second.flag, _ => false }) and
+            (no match { Packet<false, first, second> => not first.flag and not second.flag, _ => false })
+        }
+        "#,
+        &["check", "prefix", "field", "prefix", "field"],
+    );
+}
+
+#[test]
+fn declaration_default_overrides_preserve_source_order_and_skip_default_effects() {
+    check_both(
+        r#"
+        struct Config where enabled: bool { flag: bool }
+        comptime fn prefix(value: bool) -> bool { value }
+        comptime fn field(value: bool) -> bool { value }
+        comptime fn unused(value: bool) -> bool { value }
+        pure comptime fn Packet<
+            .enabled: bool = true,
+            .first: Config<enabled> = defer Config<enabled> { flag: unused(enabled) },
+            .second: Config<enabled> = defer do {
+                let previous = first;
+                let read = || previous.flag;
+                Config<enabled> { flag: read() }
+            }> -> Type { bool }
+        comptime fn check() -> bool {
+            Packet<.first = Config<false> { flag: field(true) }, .enabled = prefix(false)> match {
+                Packet<false, first, second> => first.flag and second.flag,
+                _ => false,
+            }
+        }
+        "#,
+        &["check", "field", "prefix"],
+    );
+}
+
+#[test]
+fn declaration_defaults_still_reject_forward_references_and_invalid_domains() {
+    for (default, message) in [
+        (
+            "first",
+            "normal-form default references itself or a later parameter",
+        ),
+        (
+            "second",
+            "normal-form default references itself or a later parameter",
+        ),
+        ("Config<true> { flag: enabled }", "unresolved type equality"),
+        ("Config<enabled> { flag: Type }", "type mismatch"),
+    ] {
+        let source = format!(
+            "struct Config where enabled: bool {{ flag: bool }}
+             pure comptime fn Packet<.enabled: bool = true,
+                .first: Config<enabled> = defer {default},
+                .second: Config<enabled> = defer first> -> Type {{ bool }}"
+        );
+        let failure = sysroot::compile(&source).unwrap_err();
+        assert!(failure.contains(message), "{default}: {failure}");
+    }
+}
+
+#[test]
+fn declaration_defaults_keep_actual_domain_checks_and_recover_after_rejection() {
+    let package = sysroot::compile(
+        r#"
+        struct Config where enabled: bool { flag: bool }
+        comptime fn prefix(value: bool) -> bool { value }
+        comptime fn field(value: bool) -> bool { value }
+        comptime fn later() -> bool { true }
+        pure comptime fn Packet<
+            .enabled: bool = true,
+            .value: Config<enabled> = defer Config<enabled> { flag: field(enabled) },
+            .last: bool = defer later()> -> Type { bool }
+        comptime fn Invalid() -> Type {
+            Packet<.enabled = prefix(false), .value = Config<true> { flag: true }>
+        }
+        comptime fn Valid() -> Type { Packet<.enabled = prefix(true)> }
+        "#,
+    )
+    .unwrap();
+    let id = |name| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    for reference in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, reference, |vm| {
+            let failure = vm.invoke(id("Invalid"), vec![]).unwrap_err();
+            assert_eq!(
+                failure.kind,
+                comptime_interpretor::ErrorKind::TypeContractRejected
+            );
+            assert!(matches!(
+                vm.invoke(id("Valid"), vec![]).unwrap(),
+                Value::Type(_)
+            ));
+            let calls = vm
+                .events()
+                .iter()
+                .filter_map(|event| {
+                    let Event::EnterFunction(id) = event else {
+                        return None;
+                    };
+                    package
+                        .functions
+                        .iter()
+                        .find(|f| f.declaration == *id)
+                        .map(|f| f.name.as_str())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                calls,
+                ["Invalid", "prefix", "Valid", "prefix", "field", "later"]
+            );
+        });
+    }
+}

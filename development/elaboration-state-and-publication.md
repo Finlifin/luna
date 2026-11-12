@@ -569,8 +569,73 @@ match 迁移发现的失败为 `normal_record_defaults_follow_evaluated_value_pr
 临时撤回本次四个生产文件的补丁后，在 `a68e3087` 源码上按同入口执行
 `test -p luna --test normal_patterns normal_record_defaults_follow_evaluated_value_prefixes_once -- --exact --test-threads=1`，
 `/tmp/luna-tools-hwu9z154/result.json` 同样退出 101，仍报 `215..222` 的 comptime
-局部输入 `(local 4294967295 1)` 不可用。已原样恢复补丁并检查一致性。该默认值
-生产者缺口仍待修复，不能把这项合法程序改为拒绝测试，也不能称该回归组全绿。
+局部输入 `(local 4294967295 1)` 不可用。已原样恢复补丁并检查一致性。这个对照
+证明缺口先于 match 迁移；下述声明默认代码交接修复其根因，原合法用例保持不变。
+
+#### 声明默认代码与调用前缀的交接
+
+上述默认值失败揭示了两种环境不能互换。`Config<enabled>` 在默认值所属声明中
+引用的是合法的抽象形参；在调用输入准备阶段，`enabled()` 的临时绑定只是已经
+检查的生产者，还不是已供应的值。把前者直接改为后者再调用 `type_expr`，会令
+required 捕获一个尚不存在的值。扩大捕获权限、提前执行生产者或给临时绑定塞入
+一个 rigid 都不能解决这个所有权错误。
+
+NF 输入计划的迁移采用声明侧检查结果作为代码：保留形参身份与泛型域，将代码的
+自由形参局部连接到本次计划的输入绑定，内部局部、闭包捕获、模式及控制身份按
+现有通用 freshening 规则改名。连接只允许使用已有的前序输入位置，不使其变为
+completed；已经观察到的身份可以代入，尚待执行的前缀继续由 VM 输入计划取得。
+VM 在执行该默认值前，使用已经准入的前缀实例化代码中的域，并按实际接收域检查
+结果。显式输入仍保持源码顺序，缺省输入仍排在显式输入之后按声明次序执行。
+
+声明验证与调用处代码准备必须共用同一个默认表达式检查入口，保留自身／后续
+形参引用禁令。声明侧事实与调用方的控制、输入观察不能混用；默认代码的内部局部
+也不能在两次展开间共享身份。这里不新建默认结果缓存，也不把已执行调用的值写回
+声明模板。当前准备仍重新检查声明侧源码；稳定模板查询的复用与失效属于后续工作。
+
+回归入口还须保留真实源码查询服务。`normal_input_plans` 的三个默认值用例原先
+使用不带 resolver 的 `Interpreter::for_comptime`；在 `c799dc9b` 原生产文件上复测
+`/tmp/luna-tools-2w26g_0a/result.json`，三项同样在 VM 构造时失败，错误为
+`UnmaterializedDispatch`。候选生产文件随后按字节恢复。现在这组及
+`open_normal_input_plans` 统一调用现有 `sysroot::with_comptime`，使用同一受检
+包的 Type、方法和关联项查询；两种引擎和全部行为断言保留。
+
+这些语义用例使用该支持入口统一的 `COMPTIME_BUDGET`，包含声明保留、前提建立、
+VM 准入和执行。旧的 100,000 步在接通查询后仍于 VM 准入耗尽，证据为
+`/tmp/luna-tools-_xo0_yen/result.json`；没有改生产 `Budget::default`，也没有为
+原 192 次 collection 调用成本用例提高其显式 200,000 步额度。预算内通过只证明
+对应用例可执行，不据此宣称整体 comptime 成本已达标。
+
+扩展验证 `/tmp/luna-tools-il07i1sw/result.json` 中，`normal_patterns` 42 项通过，
+`normal_input_plans` 23 项通过、上述成本用例失败；`open_normal_input_plans` 4 项
+通过，缺失必填参数的诊断回归一项失败。后者定位为把全部缺失槽都路由到默认代码，
+现已将该路径限定为 Optional 槽，保留必填参数的原有缺失诊断。
+
+成本失败已在 `c799dc9b` 的两个原生产文件、保留修正后的源码查询测试入口上单独
+对照：`/tmp/luna-tools-cebk7w_v/result.json` 同样退出 101，仍在调用阶段报
+`StepsExhausted`，source 为 `1095..3683`。已恢复候选文件并逐字节核对。
+这不是默认代码迁移引入的差异；现有 200,000 步用例保持失败，尚待成本定位与修复，
+不能将整组验收描述为通过，也不把更大的语义测试预算当成性能修复。
+
+最终针对性检查在 `/home/fin/luna` 执行：
+
+```text
+python3 -B development/check.py --timeout 900 -- test -p luna \
+  --test contextual_input_regions --test normal_patterns \
+  --test open_normal_input_plans --no-fail-fast -- --test-threads=1 \
+  declaration_default normal_record_defaults suspended_collection_routes
+```
+
+`/tmp/luna-tools-82o4tbxw/result.json` 退出 0：新增四项真实 sysroot 用例、原失败
+用例以及整项路由拒绝检查均通过。新增用例在两引擎检查不同前缀与闭包捕获、显式
+输入次序、覆盖跳过默认副作用、后续默认依赖、错误域的 `TypeContractRejected`、
+失败后下一次调用恢复，以及自身／后续参数和无依据泛型等式的拒绝。五个改动 Rust
+文件的 scoped rustfmt check 通过，报告 `/tmp/luna-tools-07fw1j0i/result.json`；
+`git diff --check` 通过。首轮新增 fixture 的块／尖括号词法边界和诊断断言已修正，
+原有回归的行为预期与成本额度未改。
+
+这只能处理已能在声明环境形成受检代码的默认值。依赖外部 Type 生产者才能继续
+检查的源码、普通调用的待定参数域、完整 `std.fmt.Parse` 描述准入仍需要源区域的
+挂起和恢复，不能从这条默认值路径推导出它们已完成。
 
 另有 32 项 luna elaboration 集成失败在 Attempt 迁移时与 `53696cc6` 基线逐例对照
 一致，报告 `/tmp/luna-tools-o47vegep/result.json`；本轮未复测，仍待处理。不能把其中

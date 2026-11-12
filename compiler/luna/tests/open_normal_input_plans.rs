@@ -2,7 +2,6 @@
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
-use comptime_interpretor::{Budget, Interpreter};
 
 fn check_application(head: &str, application: &str, concrete: &str) {
     let source = format!(
@@ -30,18 +29,14 @@ fn check_application(head: &str, application: &str, concrete: &str) {
             .declaration
     };
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime(&package, Budget::default())
-        }
-        .unwrap();
-        let actual = vm.invoke(id("Actual"), vec![]).unwrap();
-        assert_eq!(
-            actual,
-            vm.invoke(id("Expected"), vec![]).unwrap(),
-            "{application}"
-        );
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            let actual = vm.invoke(id("Actual"), vec![]).unwrap();
+            assert_eq!(
+                actual,
+                vm.invoke(id("Expected"), vec![]).unwrap(),
+                "{application}"
+            );
+        });
     }
 }
 

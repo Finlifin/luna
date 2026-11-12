@@ -2,7 +2,7 @@
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
-use comptime_interpretor::{Budget, Event, Interpreter, Value};
+use comptime_interpretor::{Budget, Event, Value};
 use nir::program::{ExprKind as K, NormalFormArgument, Package};
 
 fn id(package: &Package, name: &str) -> nir::DeclarationId {
@@ -15,10 +15,13 @@ fn id(package: &Package, name: &str) -> nir::DeclarationId {
 }
 
 fn invoke_both(package: &Package, name: &str) -> Value {
-    let mut vm = Interpreter::for_comptime(package, Budget::default()).unwrap();
-    let actual = vm.invoke(id(package, name), vec![]).unwrap();
-    let mut tree = Interpreter::for_comptime_tree(package, Budget::default()).unwrap();
-    assert_eq!(tree.invoke(id(package, name), vec![]).unwrap(), actual);
+    let actual = sysroot::with_comptime(package, sysroot::COMPTIME_BUDGET, false, |vm| {
+        vm.invoke(id(package, name), vec![]).unwrap()
+    });
+    let expected = sysroot::with_comptime(package, sysroot::COMPTIME_BUDGET, true, |vm| {
+        vm.invoke(id(package, name), vec![]).unwrap()
+    });
+    assert_eq!(expected, actual);
     actual
 }
 
@@ -254,27 +257,23 @@ fn dynamic_domains_do_not_move_or_replay_input_effects() {
     .unwrap();
     let direct = invoke_both(&package, "Direct");
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime(&package, Budget::default())
-        }
-        .unwrap();
-        assert!(vm.invoke(id(&package, "Wrong"), vec![]).is_err());
-        let start = vm.events().len();
-        assert_eq!(vm.invoke(id(&package, "Build"), vec![]).unwrap(), direct);
-        let calls: Vec<_> = vm.events()[start..]
-            .iter()
-            .filter_map(|event| match event {
-                Event::EnterFunction(declaration) => package
-                    .functions
-                    .iter()
-                    .find(|f| f.declaration == *declaration)
-                    .map(|f| f.name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(calls, ["Build", "choose", "Byte"]);
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            assert!(vm.invoke(id(&package, "Wrong"), vec![]).is_err());
+            let start = vm.events().len();
+            assert_eq!(vm.invoke(id(&package, "Build"), vec![]).unwrap(), direct);
+            let calls: Vec<_> = vm.events()[start..]
+                .iter()
+                .filter_map(|event| match event {
+                    Event::EnterFunction(declaration) => package
+                        .functions
+                        .iter()
+                        .find(|f| f.declaration == *declaration)
+                        .map(|f| f.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(calls, ["Build", "choose", "Byte"]);
+        });
     }
 }
 
@@ -297,7 +296,7 @@ fn ready_domains_reject_invalid_values_in_every_branch() {
 }
 
 fn trace_both(package: &Package, name: &str, expected: &Value, calls: &[&str]) {
-    trace_both_in_budget(package, name, expected, calls, Budget::default());
+    trace_both_in_budget(package, name, expected, calls, sysroot::COMPTIME_BUDGET);
 }
 
 fn trace_both_in_budget(
@@ -308,26 +307,22 @@ fn trace_both_in_budget(
     budget: Budget,
 ) {
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(package, budget)
-        } else {
-            Interpreter::for_comptime(package, budget)
-        }
-        .unwrap();
-        assert_eq!(vm.invoke(id(package, name), vec![]).unwrap(), *expected);
-        let actual: Vec<_> = vm
-            .events()
-            .iter()
-            .filter_map(|event| match event {
-                Event::EnterFunction(declaration) => package
-                    .functions
-                    .iter()
-                    .find(|f| f.declaration == *declaration)
-                    .map(|f| f.name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(actual, calls, "{name}, tree={tree}");
+        sysroot::with_comptime(package, budget, tree, |vm| {
+            assert_eq!(vm.invoke(id(package, name), vec![]).unwrap(), *expected);
+            let actual: Vec<_> = vm
+                .events()
+                .iter()
+                .filter_map(|event| match event {
+                    Event::EnterFunction(declaration) => package
+                        .functions
+                        .iter()
+                        .find(|f| f.declaration == *declaration)
+                        .map(|f| f.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(actual, calls, "{name}, tree={tree}");
+        });
     }
 }
 
@@ -420,14 +415,10 @@ fn dynamic_contiguous_collections_keep_contextual_branches_and_mixed_producer_or
         &["Block", "Byte", "mark", "choose"],
     );
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime(&package, Budget::default())
-        }
-        .unwrap();
-        assert!(vm.invoke(id(&package, "Wrong"), vec![]).is_err());
-        assert_eq!(vm.invoke(id(&package, "Branch"), vec![]).unwrap(), direct);
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            assert!(vm.invoke(id(&package, "Wrong"), vec![]).is_err());
+            assert_eq!(vm.invoke(id(&package, "Branch"), vec![]).unwrap(), direct);
+        });
     }
 }
 
@@ -522,11 +513,12 @@ fn ordinary_collection_assembly_preserves_many_inline_spread_producers() {
     let mut calls = vec!["Build"];
     calls.extend(std::iter::repeat_n("part", count));
     /*
-     * Cold source admission and execution now share one allowance. This
-     * workload measures about 79,000 construction steps plus 64,000 execution
-     * steps; its 192 calls and ordering contract need both costs covered.
-     * Production defaults remain unchanged. Scaling is checked separately in
-     * contextual_input_costs, rather than hiding nonlinear work with this limit.
+     * Preserve the existing combined admission/execution ceiling. With the
+     * complete sysroot query services, this workload currently exceeds it even
+     * on the pre-default-migration compiler; see the baseline evidence in
+     * development/elaboration-state-and-publication.md. Resolver wiring must
+     * not silently relax the cost contract or skip any of the 192 calls.
+     * Scaling is also checked separately in contextual_input_costs.
      */
     trace_both_in_budget(
         &package,
@@ -783,21 +775,18 @@ fn unobserved_invocations_keep_failure_and_dead_branch_behavior() {
     )
     .unwrap();
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
-        } else {
-            Interpreter::for_comptime(&package, Budget::default()).unwrap()
-        };
-        let failure = vm.invoke(id(&package, "Fail"), vec![]).unwrap_err();
-        assert_eq!(
-            failure.kind,
-            comptime_interpretor::ErrorKind::DivisionByZero
-        );
-        let actual = vm.invoke(id(&package, "Skipped"), vec![]).unwrap();
-        assert_eq!(
-            actual,
-            vm.invoke(id(&package, "Reference"), vec![]).unwrap()
-        );
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            let failure = vm.invoke(id(&package, "Fail"), vec![]).unwrap_err();
+            assert_eq!(
+                failure.kind,
+                comptime_interpretor::ErrorKind::DivisionByZero
+            );
+            let actual = vm.invoke(id(&package, "Skipped"), vec![]).unwrap();
+            assert_eq!(
+                actual,
+                vm.invoke(id(&package, "Reference"), vec![]).unwrap()
+            );
+        });
     }
 }
 

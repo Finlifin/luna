@@ -2538,8 +2538,39 @@ mod tests {
 
 impl Checker<'_, '_> {
     pub(super) fn check_normal_defaults(&mut self, owner: OwnerId) -> Result<(), Error> {
+        for (slot, clause) in self.type_clause_params(owner).iter().enumerate() {
+            if matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)) {
+                self.checked_normal_default(owner, slot)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Check a default in its declaration telescope, independently of whether
+    /// any particular caller has executed its prefix producers. The returned
+    /// code still refers to formal inputs; connecting it is a separate step.
+    pub(super) fn checked_normal_default(
+        &mut self,
+        owner: OwnerId,
+        slot: usize,
+    ) -> Result<n::Expr, Error> {
         let clauses = self.type_clause_params(owner);
         let parameters = self.normal_parameters[&owner].clone();
+        let hir::clause::ClauseParamKind::Optional(_, _, value) = clauses[slot].kind else {
+            return Err(error(
+                clauses[slot].span,
+                "normal-form input has no default",
+            ));
+        };
+        // This is declaration checking, not a fragment of the caller's
+        // activation. In particular, supplied caller observations cannot give
+        // these formal inputs concrete values or a caller return target.
+        let saved_control = std::mem::take(&mut self.control);
+        let saved_captures = std::mem::take(&mut self.captures);
+        let saved_inputs = std::mem::take(&mut self.input_facts);
+        let saved_input_scope = self.default_input_scope.take();
+        let saved_input_owner = self.default_input_owner.take();
+        let saved_stage = std::mem::replace(&mut self.in_staged_input, false);
         let saved_owner = self.signature_owner.replace(owner);
         let saved_context = self.context.clone();
         let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
@@ -2549,18 +2580,15 @@ impl Checker<'_, '_> {
         let saved_values = std::mem::take(&mut self.alias_value_bindings);
         let saved_bindings = std::mem::take(&mut self.normal_default_bindings);
         self.context = self.binder_context(owner);
-        let result = (|| {
-            for (slot, clause) in clauses.iter().enumerate() {
-                let hir::clause::ClauseParamKind::Optional(_, _, value) = clause.kind else {
-                    continue;
-                };
-                self.forbidden_default_inputs
-                    .extend(parameters[slot..].iter().map(|p| p.0));
-                self.expr(value, Some(&parameters[slot].2))?;
-                self.forbidden_default_inputs = saved_forbidden.clone();
-            }
-            Ok(())
-        })();
+        self.forbidden_default_inputs
+            .extend(parameters[slot..].iter().map(|p| p.0));
+        let result = self.expr(value, Some(&parameters[slot].2));
+        self.control = saved_control;
+        self.captures = saved_captures;
+        self.input_facts = saved_inputs;
+        self.default_input_scope = saved_input_scope;
+        self.default_input_owner = saved_input_owner;
+        self.in_staged_input = saved_stage;
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.in_required_comptime = saved_mode;

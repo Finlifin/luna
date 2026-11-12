@@ -389,6 +389,51 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
+    /// Retain declaration-checked code until the VM has admitted the actual
+    /// prefix. Rebinding changes local identities, not the prefix's availability.
+    fn connected_normal_default(
+        &mut self,
+        owner: OwnerId,
+        slot: usize,
+        progress: &progress::Progress,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        if (0..slot).any(|previous| !progress.is_prepared(previous)) {
+            return Err(error(span, "normal-form default awaits preceding input"));
+        }
+        let mut value = self.checked_normal_default(owner, slot)?;
+        constants::charge_copy(&value, &mut self.required_steps, span)?;
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let free = nir::free_bindings::collect(&value, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        let mut connections = free
+            .map_err(|message| error(span, message))?
+            .into_iter()
+            .map(|binding| (binding, binding))
+            .collect::<BTreeMap<_, _>>();
+        for (previous, (_, binding, _)) in self.normal_parameters[&owner][..slot].iter().enumerate()
+        {
+            connections.insert(*binding, progress.binding(previous));
+        }
+        cmtt::freshen(
+            &mut value,
+            connections,
+            &mut self.next_temporary_binding,
+            &mut self.expansion_sources,
+            span,
+        )?;
+        value.rewrite_types(&mut |ty| {
+            self.instantiate_input_types(
+                ty,
+                progress.observed_parameters(),
+                progress.observed_values(),
+                span,
+            )
+        })?;
+        Ok(value)
+    }
+
     /// Prepare explicit inputs in source order, then omitted inputs in their
     /// declaration telescope. All reuse goes through fresh local bindings.
     pub(super) fn planned_declaration_inputs(
@@ -874,11 +919,19 @@ impl Checker<'_, '_> {
                     )?
                 };
                 let explicit = routed[slot].as_ref();
+                let declaration_default = explicit.is_none()
+                    && matches!(
+                        clauses[slot].kind,
+                        hir::clause::ClauseParamKind::Optional(..)
+                    )
+                    && checking == InputChecking::Contextual
+                    && self.normal_parameters.contains_key(&owner);
                 let input = match explicit {
                     Some(RoutedDeclarationInput::Source(input)) => Some(*input),
                     Some(
                         RoutedDeclarationInput::Prepared(_) | RoutedDeclarationInput::Collected(_),
                     ) => None,
+                    None if declaration_default => None,
                     None => {
                         // Defaults use the declaration environment; explicit inputs
                         // retain the caller environment, including member projections.
@@ -954,7 +1007,10 @@ impl Checker<'_, '_> {
                     ));
                 }
                 let checked = (|| {
-                    let checked = if let Some(RoutedDeclarationInput::Collected(items)) = explicit {
+                    let checked = if declaration_default {
+                        self.connected_normal_default(owner, slot, &progress, span)
+                            .map(n::NormalFormArgument::Value)
+                    } else if let Some(RoutedDeclarationInput::Collected(items)) = explicit {
                         if (!dependent || checking == InputChecking::Typed)
                             && items.iter().all(|item| {
                                 matches!(
