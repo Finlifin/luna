@@ -1010,15 +1010,22 @@ LocalId 到寄存器的映射。请求是 invocation 内部数据，不是缓存
 
 #### 已接入：普通块的显式子检查驱动
 
-普通 `block_context` 现由 `block_regions/driver.rs` 的 Frame 栈推进。Frame 拥有
+普通 `block_context` 与待定输入块现由 `block_regions/driver.rs` 的同一 Frame 栈推进。Frame 拥有
 Progress、词法父环境和块表达式的交付边界；语句完成和尾值完成是不同后继，子结果
-只交回当前等待它的父帧。相邻嵌套普通块不再递归调用整个表达式分派器。每次进入帧
+只交回当前等待它的父帧。相邻嵌套普通／contextual 块不再递归调用整个表达式分派器。每次进入帧
 消耗共享检查预算，空块和只有尾值的嵌套也不能无界分配帧。
 
 尾值规则分为准备、检查子表达式和消费受检结果，仍共用原先的不可达尾值检查、部分
 输入上下文、隐式错误成功值、结果域要求和绑定收尾。普通块把完整目标域传给尾值，
 不再走可选／错误结果的值级探测；这两类适配仍由真正产生值的子表达式负责。
 unsafe 和部分结构输入的专用规则仍沿既有入口，不按普通块的形状绕过它们。
+
+`Destination` 区分普通目标与待定输入目标，`CheckedBlock` 分别交付普通 Expr 和
+NormalFormArgument；不以假 Type 或 Any 合并二者。普通语句子块和 contextual
+尾值子块可在同一栈中交错，父帧只能接收对应种类的结果。原 contextual 语句循环
+和 Tail 中同步检查整个子树的入口已删除；ContextualTail 继续保留既有逻辑深度，
+把递归改为帧并不放宽输入表示的深度限制。两种模式共用 Progress 的事实建立、
+绑定活跃性与退出处理，结果构造只消费已经完成的尾值，不重新检查生产者。
 
 嵌套块的 callee 位置和 effect 结果交付随帧保留。正常完成先收尾本块绑定、恢复父
 词法环境，再向父规则交付；诊断失败逐层退出仍活跃的帧，保留外层写入造成的事实
@@ -1029,10 +1036,10 @@ unsafe 和部分结构输入的专用规则仍沿既有入口，不按普通块�
 仍借用本次调用，当前活动词法状态仍装在 Checker 中，非块子规则仍通过原同步入口
 完成。它不提供外部等待、取消、源码 activation 或 VM 片段执行许可。后续必须将这套
 帧连同活动上下文交给区域所有者，并迁移调用检查的后继，不能把有帧栈本身当作两个
-动态调用正例已完成。旧 NormalFormArgument 的 contextual 块仍复用 Progress／绑定
-收尾，但尚未成为普通表达式区域任务。
+动态调用正例已完成。旧 NormalFormArgument 仍作为 contextual 输出存在；共享块驱动
+不等于该表示已退役，也没有使非块控制流和调用检查成为可挂起的普通表达式区域任务。
 
-工作目录 `/home/fin/luna`，检查命令统一使用
+普通块首批迁移的证据如下；工作目录 `/home/fin/luna`，检查命令统一使用
 `python3 -B development/check.py --timeout 900 -- test`：
 
 - `-p luna --test contextual_input_regions --test contextual_delivery --test required_input_scopes
@@ -1052,6 +1059,25 @@ unsafe 和部分结构输入的专用规则仍沿既有入口，不按普通块�
 - 七个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-z6jbfvb1/result.json`
   退出 0；`git diff --check` 通过。验证保留工作区原有资源分析修改；未运行全
   workspace、LLVM 或性能基准。formatter、正式 docs 和其他已有改动均不纳入提交。
+
+合并 contextual 块驱动后的验证，工作目录和命令前缀同上：
+
+- `-p elaboration --lib -p luna --test contextual_input_regions --test contextual_delivery
+  --test normal_input_plans --test open_normal_input_plans --test ordinary_callable_types
+  --test ordinary_clause_collectors --test required_input_scopes --test sysroot_preludes
+  --no-fail-fast`：`/tmp/luna-tools-5tqkeiw6/result.json` 退出 101，430 项通过、2 项新
+  用例失败、2 项既有 ignore。一个新用例的源码检查成功，但深层混合块执行超出测试
+  默认 100,000 步；另一个正确拒绝 bool 域中的整数，测试断言没有匹配实际诊断。
+  编译器实现未因这两项失败放宽检查，既有用例的预期及 ignore 未改。
+- 调整这两个新用例的测试额度与精确诊断后，执行 `-p luna --test contextual_input_regions
+  --test nesting --test contextual_input_costs --no-fail-fast -- --nocapture`：
+  `/tmp/luna-tools-pc3izs0l/result.json` 退出 0，12 项通过、1 项子进程入口 ignore。
+  24 层 mixed block 在两个引擎中检查外层写入、T 条件事实、提前 return 和调用轨迹；
+  字节码模式实际消耗 100,497 步，树模式 84,323 步，测试单独给 1,000,000 步上限。
+  生产预算不变；这不是成本下降的声明。原有输入规模成本检查及 AST/HIR/NIR/执行
+  的普通嵌套回归也通过。非块子规则仍同步，不据此宣称一般源码恢复已接通。
+- 六个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-kbok9zpx/result.json` 退出 0；
+  `git diff --check` 通过。未运行全 workspace 或完整 LLVM 验收；保留原有工作区改动。
 
 #### 已接入：普通输入依赖保留任务后继
 

@@ -1,4 +1,4 @@
-//! Ordinary block checking owns its unfinished children and lexical exits.
+//! Block checking owns its unfinished children and lexical exits.
 //! Nested block rules use this same stack; other expression rules remain atomic
 //! adapters until their continuations can be handed back to the region.
 use super::*;
@@ -40,7 +40,7 @@ impl std::fmt::Display for ExpressionBoundary {
 }
 
 struct Frame<'b, 'h, 't> {
-    progress: Progress<'b, 'h, OrdinaryTail<'t>>,
+    progress: Progress<'b, 'h, Destination<'t>>,
     scope: LexicalScope,
     boundary: Option<ExpressionBoundary>,
 }
@@ -57,18 +57,20 @@ impl Frame<'_, '_, '_> {
     fn finish(
         self,
         checker: &mut Checker<'_, '_>,
-        value: tails::OrdinaryResult,
-    ) -> Result<n::Expr, Error> {
-        let expected = self.progress.tail.expected;
+        value: destinations::CheckedTail,
+    ) -> Result<CheckedBlock, Error> {
+        let expected = self.progress.tail.expected();
         let result = self.progress.finish(checker, value);
         self.scope.leave(checker);
         if let Some(boundary) = self.boundary {
             boundary.leave(checker);
-            let value = result?;
+            let value = result?.ordinary(boundary.span)?;
             if !boundary.preserve_effect {
-                return checker.run_computation(value, expected, boundary.span);
+                return checker
+                    .run_computation(value, expected, boundary.span)
+                    .map(CheckedBlock::Ordinary);
             }
-            return Ok(value);
+            return Ok(CheckedBlock::Ordinary(value));
         }
         result
     }
@@ -93,6 +95,24 @@ impl Checker<'_, '_> {
         block: &hir::Block<'_>,
         tail: OrdinaryTail<'_>,
     ) -> Result<n::Expr, Error> {
+        self.check_block_region(block, Destination::Ordinary(tail))?
+            .ordinary(block.span)
+    }
+
+    pub(in crate::program) fn check_contextual_block_region(
+        &mut self,
+        block: &hir::Block<'_>,
+        tail: ContextualTail,
+    ) -> Result<n::NormalFormArgument, Error> {
+        self.check_block_region(block, Destination::Contextual(tail))?
+            .contextual(block.span)
+    }
+
+    fn check_block_region(
+        &mut self,
+        block: &hir::Block<'_>,
+        tail: Destination<'_>,
+    ) -> Result<CheckedBlock, Error> {
         self.charge_block_frame(block.span)?;
         let scope = LexicalScope::enter(self, block.span)?;
         let mut frames = vec![Frame {
@@ -101,12 +121,14 @@ impl Checker<'_, '_> {
             boundary: None,
         }];
         let result = (|| {
-            let mut returned = None;
+            let mut returned: Option<CheckedBlock> = None;
             loop {
                 let frame = frames.last_mut().expect("active block frame");
                 if let Some(value) = returned.take() {
                     match frame.progress.phase {
-                        Phase::Child => frame.progress.accept(self, value)?,
+                        Phase::Child => frame
+                            .progress
+                            .accept(self, value.ordinary(frame.progress.block.span)?)?,
                         Phase::TailChild => {
                             let checked = frame.progress.tail.complete(
                                 self,
@@ -138,11 +160,11 @@ impl Checker<'_, '_> {
                                 })?;
                             (
                                 statement,
-                                OrdinaryTail {
+                                Destination::Ordinary(OrdinaryTail {
                                     expected: None,
                                     partial: None,
                                     input: None,
-                                },
+                                }),
                             )
                         }
                         None => continue,
@@ -175,27 +197,31 @@ impl Checker<'_, '_> {
                     }
                 };
                 let (expr, destination) = request;
-                // A plain block receives the complete ordinary destination.
+                // Plain blocks retain their ordinary or contextual destination.
                 // Partial structural input and unsafe adaptation still enter
                 // their existing rules; they cannot masquerade as this rule.
-                if destination.input.is_none()
-                    && let H::Block(block) = expr.kind
-                {
-                    let boundary = ExpressionBoundary::enter(self, expr, block);
+                if let Some(nested) = destination.nested(expr)? {
+                    let H::Block(block) = expr.kind else {
+                        unreachable!("nested block destination")
+                    };
+                    let boundary = matches!(nested, Destination::Ordinary(_))
+                        .then(|| ExpressionBoundary::enter(self, expr, block));
                     let scope = match self
                         .charge_block_frame(block.span)
                         .and_then(|()| LexicalScope::enter(self, block.span))
                     {
                         Ok(scope) => scope,
                         Err(error) => {
-                            boundary.leave(self);
+                            if let Some(boundary) = &boundary {
+                                boundary.leave(self);
+                            }
                             return Err(error);
                         }
                     };
                     frames.push(Frame {
-                        progress: Progress::new(block, destination),
+                        progress: Progress::new(block, nested),
                         scope,
-                        boundary: Some(boundary),
+                        boundary,
                     });
                 } else {
                     returned = Some(destination.check_expression(self, expr)?);
@@ -247,11 +273,11 @@ mod tests {
         let mut frame = Frame {
             progress: Progress::new(
                 &block,
-                OrdinaryTail {
+                Destination::Ordinary(OrdinaryTail {
                     expected: None,
                     partial: None,
                     input: None,
-                },
+                }),
             ),
             scope,
             boundary: Some(ExpressionBoundary {
@@ -269,6 +295,9 @@ mod tests {
         assert!(dump.contains("(preserve-effect true) (callee"), "{dump}");
         assert!(dump.contains("scope\\\"\\n"), "{dump}");
         assert!(!dump.contains('\n'), "{dump}");
-        assert_eq!(tails::TailCheck::Child.to_string(), "(tail-check child)");
+        assert_eq!(
+            tails::TailCheck::<n::Expr>::Child.to_string(),
+            "(tail-check child)"
+        );
     }
 }

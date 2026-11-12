@@ -17,19 +17,6 @@ impl Tail for OrdinaryTail<'_> {
     type Checked = OrdinaryResult;
     type Output = n::Expr;
 
-    fn check(
-        &self,
-        checker: &mut Checker<'_, '_>,
-        block: &hir::Block<'_>,
-        diverges: bool,
-    ) -> Result<Self::Checked, Error> {
-        let value = match self.prepare(checker, block, diverges)? {
-            TailCheck::Checked(value) => value,
-            TailCheck::Child => Some(self.check_expression(checker, block.expr.unwrap())?),
-        };
-        self.complete(checker, block, diverges, value)
-    }
-
     fn references(
         checked: &Self::Checked,
         fuel: &mut usize,
@@ -42,7 +29,7 @@ impl Tail for OrdinaryTail<'_> {
             .map(Option::unwrap_or_default)
     }
 
-    fn finish(self, checked: Self::Checked, statements: Vec<n::Expr>, span: Span) -> n::Expr {
+    fn finish(checked: Self::Checked, statements: Vec<n::Expr>, span: Span) -> n::Expr {
         n::Expr {
             ty: checked.ty,
             source: source(span),
@@ -54,11 +41,11 @@ impl Tail for OrdinaryTail<'_> {
     }
 }
 
-pub(super) enum TailCheck {
-    Checked(Option<n::Expr>),
+pub(super) enum TailCheck<T = n::Expr> {
+    Checked(Option<T>),
     Child,
 }
-impl std::fmt::Display for TailCheck {
+impl<T: std::fmt::Display> std::fmt::Display for TailCheck<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Child => f.write_str("(tail-check child)"),
@@ -131,6 +118,7 @@ impl OrdinaryTail<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(in crate::program) struct ContextualTail {
     pub depth: usize,
 }
@@ -138,19 +126,6 @@ pub(in crate::program) struct ContextualTail {
 impl Tail for ContextualTail {
     type Checked = Option<Box<n::NormalFormArgument>>;
     type Output = n::NormalFormArgument;
-
-    fn check(
-        &self,
-        checker: &mut Checker<'_, '_>,
-        block: &hir::Block<'_>,
-        _diverges: bool,
-    ) -> Result<Self::Checked, Error> {
-        block
-            .expr
-            .map(|value| checker.dependent_normal_argument(value, self.depth + 1))
-            .transpose()
-            .map(|value| value.map(Box::new))
-    }
 
     fn references(
         checked: &Self::Checked,
@@ -163,7 +138,7 @@ impl Tail for ContextualTail {
             .map(Option::unwrap_or_default)
     }
 
-    fn finish(self, result: Self::Checked, statements: Vec<n::Expr>, span: Span) -> Self::Output {
+    fn finish(result: Self::Checked, statements: Vec<n::Expr>, span: Span) -> Self::Output {
         n::NormalFormArgument::Block {
             source: source(span),
             statements,

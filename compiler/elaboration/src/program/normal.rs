@@ -1694,7 +1694,7 @@ impl Checker<'_, '_> {
         if depth >= 128 {
             return Err(error(block.span, "contextual input nesting limit exceeded"));
         }
-        self.check_block_region(block, block_regions::ContextualTail { depth })
+        self.check_contextual_block_region(block, block_regions::ContextualTail { depth })
     }
 }
 

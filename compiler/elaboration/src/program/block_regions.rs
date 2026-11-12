@@ -3,8 +3,10 @@
 //! neither path executes a producer while preparing this region.
 use super::*;
 use constants::StagedPatternSnapshot;
+mod destinations;
 mod driver;
 mod tails;
+use destinations::{CheckedBlock, Destination};
 pub(super) use tails::{ContextualTail, OrdinaryTail};
 
 /// The destination rule survives statement checking as data. Its checked child
@@ -14,17 +16,11 @@ pub(super) trait Tail: std::fmt::Display {
     type Checked;
     type Output;
 
-    fn check(
-        &self,
-        checker: &mut Checker<'_, '_>,
-        block: &hir::Block<'_>,
-        diverges: bool,
-    ) -> Result<Self::Checked, Error>;
     fn references(
         checked: &Self::Checked,
         fuel: &mut usize,
     ) -> Result<BTreeSet<n::LocalId>, nir::preparation::Error>;
-    fn finish(self, checked: Self::Checked, statements: Vec<n::Expr>, span: Span) -> Self::Output;
+    fn finish(checked: Self::Checked, statements: Vec<n::Expr>, span: Span) -> Self::Output;
 }
 
 /// The parent lexical environment, not a checking transaction. Leaving a
@@ -221,7 +217,7 @@ impl<'b, 'h, T: Tail> Progress<'b, 'h, T> {
             self.block,
             &self.staged_patterns,
         )?;
-        Ok(self.tail.finish(checked, statements, self.block.span))
+        Ok(T::finish(checked, statements, self.block.span))
     }
 }
 
@@ -332,27 +328,6 @@ impl Checker<'_, '_> {
         let result = check(self);
         scope.leave(self);
         result
-    }
-
-    pub(super) fn check_block_region<T: Tail>(
-        &mut self,
-        block: &hir::Block<'_>,
-        tail: T,
-    ) -> Result<T::Output, Error> {
-        self.in_block_scope(block.span, |this| {
-            let mut progress = Progress::new(block, tail);
-            while let Some(statement) = progress.next()? {
-                this.required_steps = this
-                    .required_steps
-                    .checked_sub(1)
-                    .ok_or_else(|| error(statement.span, "block checking budget exhausted"))?;
-                let value = this.expr(statement, None)?;
-                progress.accept(this, value)?;
-            }
-            let diverges = progress.diverges;
-            let checked = progress.request_tail()?.check(this, block, diverges)?;
-            progress.finish(this, checked)
-        })
     }
 
     pub(super) fn finish_block_bindings(

@@ -28,7 +28,9 @@ formatter 由另一位开发者负责，本次未修改 `compiler/fmt` 及其依
 phase 检查另开默认额度的过时描述；历史版本仍可从 Git 查阅。
 
 截至 `bcbcd0bc`，普通块检查已经使用显式帧，普通调用参数的域依赖和默认值引用
-也已使用显式任务栈。两者仍同步调用源码子检查与 required invocation；不具备
+也已使用显式任务栈。后续 contextual 块亦接入同一块驱动，删除其独立语句循环；
+普通语句与待定尾值保存不同结果种类，共用帧栈的词法退出和受检子结果交接。
+这些任务仍同步调用非块源码子检查与 required invocation；不具备
 一般源 activation 的挂起恢复。完整 callable 签名和待定 collector 域的两个正例
 仍未实现，不能把任务栈本身当作解除这两项限制的证据。具体交接与验证见
 [普通块帧](elaboration-state-and-publication.md#已接入普通块的显式子检查驱动)
