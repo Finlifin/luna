@@ -1,0 +1,26 @@
+{- Eight single-hole quotes construct a byte using fixed literals and
+   checked BitVec operations. No quote embeds the generator's data value.
+   This positive case currently exhausts the frontend preparation budget. -}
+pure comptime fn byte_code(data: u8) -> < |- u8 > {
+    var code: < |- u8 > = '(0);
+    var remaining = data;
+    var mask: u8 = 128;
+    while mask > 0 {
+        const previous = code;
+        if remaining >= mask {
+            remaining = remaining - mask;
+            code = '(do {
+                let low: u8 = 1;
+                ((~<previous>)'bitvec[0..7] ++ low'bitvec[0..1]).as(u8)
+            });
+        } else {
+            code = '(do {
+                let low: u8 = 0;
+                ((~<previous>)'bitvec[0..7] ++ low'bitvec[0..1]).as(u8)
+            });
+        }
+        mask = mask / 2;
+    }
+    code
+}
+fn run() -> u8 { ~<byte_code(255)> }

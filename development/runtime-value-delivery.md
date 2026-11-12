@@ -18,6 +18,7 @@
 | 普通函数的 comptime 参数 | expression_values/bindings 的 ResolvedFnParam | 通常直接生成 K::Local，先按源域核对 runtime 预期域，没有同等的交付步骤 |
 | 传给后续 staged 输入 | iir::staging::substitute_forwarded_inputs | 在被标记的 staged 位置替换已完成值，检查写入/地址逃逸与捕获作用域 |
 | 剩余参数读取 | iir::staging::wrap | 以 runtime Let 恢复值，随后按 runtime 移动、捕获、存储规则分析 |
+| quote 主体读取生成器数据 | bindings 中的 generator_data / materialize_generator_data 提前返回 | 已有 payload 可直接成为主体数据；当前同域自定义 Splice 的可观察行为可能被跳过，见下文 CMTT 复核 |
 
 源码锚点：
 [参数读取](../compiler/elaboration/src/program/expression_values/bindings.rs)、
@@ -119,8 +120,10 @@ Splice 当 comptime fn 执行，都不满足该交付契约。已提交 native �
 这些方法会形成自递归；对泛型返回、字段选择和同域用户转换同样不能草率处理。
 
 迁移应明确由类型/阶段检查授权的字面量或代码构造底层能力，再由普通 Splice 实现
-使用它。底层构造负责目标常量/代码表示，不负责替普通源值选择 Splice。它属于
-六包集中绑定与受检 IR 的构造边界，不新增源码关键字；具体绑定接口尚未交付。
+使用它。底层构造负责目标常量/代码表示，不负责替普通源值选择 Splice。固定字面量
+和普通 CMTT 组合已经能表达部分构造，因此不预先要求新增 builtin intrinsic。
+若性能需要额外构造操作，应沿六包集中绑定与受检 IR 交付完整契约，不新增源码
+关键字，也不将重建任意 VM payload 的内部函数直接暴露为公共逃生口。
 不能通过 `函数名 == splice`、内置包名称或“输入输出类型相同”跳过正常转换。
 即使源域与目标域相同，用户实现也可能有可观察行为。
 
@@ -131,6 +134,47 @@ Splice 当 comptime fn 执行，都不满足该交付契约。已提交 native �
 源为 str 时还必须提供目标数据的有效来源。静态文本可以由合法常量存储支持；
 动态字符串、切片、拥有型对象和带引用的图各有不同依赖。全局追加 Copy、将源 VM
 地址带入目标程序或将所有 frozen payload 直接当 native 数据均不成立。
+
+### CMTT 数据读取与代码构造必须分开
+
+在 `dec912f4` 工作区补查：
+[quoted-data-splice](repros/quoted-data-splice.fl)定义同域 `Seed -> Seed` 转换，
+每次 Splice 输出 `convert;`。一个源常量直接交付、另一个值经生成器 `'(data)`
+交付，程序应输出两次；实际只输出一次，然后返回 true。这是成功编译后的行为
+偏差，不是缺实现的正常拒绝，不能把现有输出登记成语言预期。
+
+源码上有两处相连的缺口：
+
+- `bindings_value_expression` 的 generator_data 和活跃 receiver 观察分支在普通
+  交付前返回重建 Expr；payload 已检查/快照化不等于已经执行了跨阶段转换。
+- `quoted_runtime_boundary` 已切换 in_code_body、required 与 staged 状态，但
+  `runtime_value_context` 还以外层 signature_owner 的 comptime 修饰判断。runtime
+  主体的使用阶段不能只从外围生成器阶段推导，也不能只改一个布尔条件而遗漏前者。
+
+目标行为是先在 quote 构造位置观察当时的源数据，保存其输入身份/快照及转换计划；
+Splice 主体放入生成的 runtime 程序。之后再修改生成器局部值，不能改变先前引用；
+同一份代码接入两个实际执行的位置，转换也分别执行。纯生成器生成带输出行为的
+代码不矛盾，构造代码与执行代码的纯度检查须保持分开。
+
+作为对照，[quoted-literal-control](repros/quoted-literal-control.fl)只用 comptime
+布尔值选择 `'(true)` 或 `'(false)`。quote 主体没有读取普通生成器数据，因而没有
+被省略的数据转换。这条真实 sysroot 路径可编译运行，返回 true。它是合法字面量
+构造的参照，不能据此把 `'(data)` 宣布为免 Splice 的通用操作。
+
+在此基础上，[scalar-code-construction](repros/scalar-code-construction.fl)用八次
+迭代从最高位到最低位选择 0/1 字面量，通过单洞 quote 与固定宽度 BitVec 拼接产生
+一个字节。源码层每个 quote 只接入前一段代码，没有把 data、mask 或 remaining
+嵌入 runtime 主体，也不依赖 u8 的 Splice 身份实现。当前连单个 255 案例仍耗尽
+前端准备额度，未取得原生产物，故不能将这条路径称为已可用的数值构造库。
+
+此外，[staged-code-input](repros/staged-code-input.fl)只把上述布尔生成器放入普通
+函数，让它接收该函数的 comptime 参数；当前仍报输入不可用。这与 quote 中遗漏
+runtime Splice 是两种交接失败：前者要延后到源输入可取得的准备点，后者要在目标
+主体中保留构造。不能用直接字面量调用的成功代替参数转发验收。
+
+因此下一项生产迁移须同时明确：哪些读取属于普通数据交付，哪些是代码值接入，
+哪些只是生成器自己的源阶段计算。源语法的单洞检查仍按原 CMTT 规则执行；数据
+Splice 的 runtime 调用不能被假装成拥有任意上下文权限的代码值。
 
 ## 6. 替换 wrap 的条件
 
@@ -241,3 +285,28 @@ python3 -B development/check.py --timeout 900 -- run -p luna -- build SOURCE --e
 退出 0，输出 `(bool true)`；`/tmp/luna-tools-2j0phy_q/result.json`。
 失败行是仍待修复的合法源码，不是正式拒绝测试；保留成功对照用于区分协议不可用
 与参数入口缺交付。上述准备状态和底层构造接口仍为设计，不能计为新的生产接线。
+
+### CMTT 补查证据
+
+本轮先在 `/tmp` 探测，再将下列源码原样保留到 `development/repros`，只添加说明
+注释；下面记录实际执行的临时路径，不把未重跑的仓库路径冒充日志输入。构建命令
+与前表相同，fuel 均为 10000000，OUTPUT 为 SOURCE 去掉 `.fl` 后的路径。
+
+| 保存的复现 | 实际 SOURCE | 结果与报告 |
+| --- | --- | --- |
+| quoted-data-splice.fl | `/tmp/luna-quoted-data-delivery.fl` | 构建退出 0，`/tmp/luna-tools-9cpmhs5z/result.json`；运行只输出 `convert;(bool true)`，`/tmp/luna-tools-223qirr0/result.json`，行为仍错误 |
+| quoted-literal-control.fl | `/tmp/luna-quoted-literal-control.fl` | 构建退出 0，`/tmp/luna-tools-q9q1aspo/result.json`；运行返回 `(bool true)`，`/tmp/luna-tools-gktyve11/result.json` |
+| staged-code-input.fl | `/tmp/luna-staged-code-input.fl` | 构建退出 1，`required comptime input ... is not available in this invocation`；`/tmp/luna-tools-zlz9y20_/result.json` |
+| scalar-code-construction.fl | `/tmp/luna-scalar-code-construction.fl` | 单个 255 的八步构造在 generator checkpoint preparation 报 StepsExhausted，退出 1；`/tmp/luna-tools-2hghr316/result.json` |
+
+两个原生产物均通过 `python3 -B development/command.py --timeout 30 -- OUTPUT`
+运行，退出 0。退出成功不能替代第一行的可观察行为比较。
+
+规模诊断时还执行过四个字节值的同类构造；fuel 为 10000000 和 100000000 时均在
+前端准备失败，报告分别为 `/tmp/luna-tools-0cap8plq/result.json` 与
+`/tmp/luna-tools-_qr3cl3x/result.json`。这**不是提高前端额度后的性能测量**：
+`packages::compile_observed_with_preludes` 当前调用 `elaborate_packages_for_target`，
+后者仍内部提供独立的 1000000 invocation/preparation 步额度，build 的 `--fuel`
+没有传入此处。不能据相同失败推断生成器无限循环，也不能把它归为位运算语义错误。
+实际准备成本的分布尚未测定；通用预算传送和减少重复准备仍需后续调查，不能简单
+调大内部常量或取消准入检查后宣称代码构造已经满足库的性能要求。

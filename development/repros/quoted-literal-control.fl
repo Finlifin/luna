@@ -1,0 +1,6 @@
+{- Comptime chooses between fixed runtime literals. Neither quote reads
+   generator data, so this constructs code without an implicit data conversion. -}
+pure comptime fn flag_code(enabled: bool) -> < |- bool > {
+    if enabled { '(true) } else { '(false) }
+}
+fn run() -> bool { ~<flag_code(true)> and not ~<flag_code(false)> }

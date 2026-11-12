@@ -61,7 +61,7 @@
 | 参数域与源码控制 | 声明／trait 输入在替换前识别 callee 依赖；caller 泛型值走普通转换；控制状态和输入事实分别管理整体回滚及词法退出 | 整个 Checker 尚非可挂起区域；已知符号身份不代表 invocation 生产者已执行 |
 | 词法参数与代码签名 | 普通表达式、contextual 签名和捕获共用可见声明输入；关联常量将主体与捕获一起按实例替换 | 这不能使尚未执行的 Type 生产者提前变成已完成输入 |
 | 值传递与接收世界 | 通用准入保留域、phase 和身份；跨 VM callable 在接收世界完成方法选择及关联签名观察 | 活动值、权限及选择证据不随 CodeSession 共享；完整统一值传送协议仍有待迁移 |
-| 跨阶段 runtime 交付 | 常量与 comptime 调用结果可选择普通 runtime Splice；实际构造次数已有 native 对照 | comptime 参数直接作为 runtime 结果仍按源域报错，残留读取还会重建为 runtime Let；[交付设计](runtime-value-delivery.md)规定共同消费边界及退役条件，尚未实现 |
+| 跨阶段 runtime 交付 | 常量与 comptime 调用结果可选择普通 runtime Splice；实际构造次数已有 native 对照 | comptime 参数直接作为 runtime 结果仍按源域报错，残留读取还会重建为 runtime Let，quote 数据重建也会跳过转换；[交付设计](runtime-value-delivery.md)规定共同消费边界及退役条件，尚未实现 |
 | 稳定世界与执行 | DeclarationSnapshot 保活声明与索引；RequiredWorld 复用代码 session；关联选择、方法选择及具体定义准备可交接宿主请求；Type 输出由单次发布许可保护 | 普通前端检查请求、通用 Region/Candidate 所有权及任意定义发布尚未全线接通 |
 | 源码主体与调用入口 | 普通收集和 required 共用 check_source_function；VM 在入口契约成功后才按普通输入重绑定主体 | 仍要求完整受检 NIR 主体，尚无待决源码主体请求；声明参数实例化不等于已移到契约之后 |
 | TypeRef 与 IIR | core/substitution 已有实现，闭合 callable/template 有消费者 | 普通函数仍以 NIR Function 为实例载体；runtime_bindings 不能替代带域的 EnvironmentPlan |

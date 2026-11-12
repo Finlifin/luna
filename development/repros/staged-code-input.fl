@@ -1,0 +1,8 @@
+{- Positive input-forwarding case. Unlike quoted-literal-control.fl,
+   the generator receives an enclosing runtime function's comptime parameter.
+   This should retain the source input rather than require a runtime capture. -}
+pure comptime fn flag_code(enabled: bool) -> < |- bool > {
+    if enabled { '(true) } else { '(false) }
+}
+fn from_parameter(comptime enabled: bool) -> bool { ~<flag_code(enabled)> }
+fn run() -> bool { from_parameter(true) and not from_parameter(false) }
