@@ -232,51 +232,73 @@ pub(super) fn require_function_value_parameters(
     Ok(())
 }
 
+/// Snapshot supply metadata independently of the borrowed source signature.
+/// Domains, defaults and expression ownership remain with their consumers.
+fn input_entries(
+    declarations: Option<&[hir::common::FnParam<'_>]>,
+    count: usize,
+) -> Vec<input_routing::Entry<hir::Symbol>> {
+    match declarations {
+        None => (0..count)
+            .map(|_| input_routing::Entry::anchored())
+            .collect(),
+        Some(parameters) => parameters
+            .iter()
+            .map(|parameter| {
+                let implicit = parameter.ty.is_implicit();
+                let optional = matches!(parameter.ty.kind, TyParamKind::Optional(..));
+                let variadic = matches!(parameter.ty.kind, TyParamKind::Varadic(..));
+                input_routing::Entry {
+                    name: (implicit || optional || variadic).then_some(parameter.name.name),
+                    optional,
+                    implicit,
+                    variadic,
+                    lambda: parameter.ty.is_lambda(),
+                    post_target: matches!(
+                        parameter.ty.kind,
+                        TyParamKind::Positional(_) | TyParamKind::PositionalDependencyCatched(..)
+                    ),
+                }
+            })
+            .collect(),
+    }
+}
+
+fn routing_inputs(args: &[Arg<'_>]) -> Vec<input_routing::Input<hir::Symbol>> {
+    args.iter()
+        .map(|argument| match argument {
+            Arg::Positional(_) => input_routing::Input::Positional,
+            Arg::Named(name, _) => input_routing::Input::Named(name.name),
+            Arg::PostLambda(_) => input_routing::Input::PostLambda,
+            _ => input_routing::Input::Unsupported,
+        })
+        .collect()
+}
+
+fn routing_error(failure: input_routing::Failure, args: &[Arg<'_>], span: Span) -> Error {
+    let input = failure.input.map(|index| &args[index]);
+    let span = match input {
+        Some(Arg::Named(name, _)) => name.span,
+        Some(Arg::Positional(value) | Arg::PostLambda(value)) => value.span,
+        _ => span,
+    };
+    if failure.kind == input_routing::FailureKind::UnknownName
+        && let Some(Arg::Named(name, _)) = input
+    {
+        error(span, format!("no named parameter entry {}", name.name))
+    } else {
+        error(span, failure.kind.to_string())
+    }
+}
+
 pub(super) fn post_lambda_target(
     args: &[Arg<'_>],
     declarations: Option<&[hir::common::FnParam<'_>]>,
     count: usize,
     span: Span,
 ) -> Result<Option<usize>, Error> {
-    let supplied = args
-        .iter()
-        .filter(|arg| matches!(arg, Arg::PostLambda(_)))
-        .count();
-    if supplied == 0 {
-        return Ok(None);
-    }
-    if supplied != 1 {
-        return Err(error(span, "post do parameter supplied more than once"));
-    }
-    if let Some(parameters) = declarations {
-        let mut marked = parameters
-            .iter()
-            .enumerate()
-            .filter(|(_, parameter)| parameter.ty.is_lambda());
-        if let Some((index, _)) = marked.next() {
-            if marked.next().is_some() {
-                return Err(error(span, "ambiguous post do lambda parameter"));
-            }
-            return Ok(Some(index));
-        }
-        return parameters
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, parameter)| {
-                !parameter.ty.is_implicit()
-                    && matches!(
-                        parameter.ty.kind,
-                        TyParamKind::Positional(_) | TyParamKind::PositionalDependencyCatched(..)
-                    )
-            })
-            .map(|(index, _)| Some(index))
-            .ok_or_else(|| error(span, "post do has no anchored parameter target"));
-    }
-    count
-        .checked_sub(1)
-        .map(Some)
-        .ok_or_else(|| error(span, "post do has no anchored parameter target"))
+    input_routing::post_lambda_target(&input_entries(declarations, count), &routing_inputs(args))
+        .map_err(|failure| routing_error(failure, args, span))
 }
 
 pub(super) fn route_arguments<'h>(
@@ -285,152 +307,32 @@ pub(super) fn route_arguments<'h>(
     count: usize,
     span: Span,
 ) -> Result<(Vec<RoutedArgument<'h>>, Vec<bool>), Error> {
-    let post_target = post_lambda_target(args, declarations, count, span)?;
-    let kind = |index: usize| declarations.map(|params| &params[index].ty.kind);
-    let implicit = |index: usize| declarations.is_some_and(|params| params[index].ty.is_implicit());
-    let optional =
-        |index| implicit(index) || matches!(kind(index), Some(TyParamKind::Optional(..)));
-    let variadic = |index| matches!(kind(index), Some(TyParamKind::Varadic(..)));
-    let named: std::collections::HashMap<_, _> = declarations
+    let plan = input_routing::route(&input_entries(declarations, count), &routing_inputs(args))
+        .map_err(|failure| routing_error(failure, args, span))?;
+    let routes = plan
+        .routes
         .into_iter()
-        .flatten()
-        .enumerate()
-        .filter(|(_, p)| {
-            p.ty.is_implicit()
-                || matches!(
-                    p.ty.kind,
-                    TyParamKind::Optional(..) | TyParamKind::Varadic(..)
-                )
-        })
-        .map(|(index, p)| (p.name.name, index))
-        .collect();
-    // Whole-value supply reserves its entry before positional routing, even
-    // when written later. It cannot also be a positional collection target.
-    let mut directly_supplied = vec![false; count];
-    for argument in args {
-        if let Arg::Named(name, _) = argument {
-            let index = named.get(&name.name).copied().ok_or_else(|| {
-                error(name.span, format!("no named parameter entry {}", name.name))
-            })?;
-            if std::mem::replace(&mut directly_supplied[index], true) {
-                return Err(error(name.span, "parameter supplied more than once"));
-            }
-        }
-    }
-    let mut assigned = vec![false; count];
-    let mut slots = vec![None; count];
-    let mut routes: Vec<RoutedArgument<'h>> = Vec::new();
-    let mut positional = 0;
-    let mut remaining = args
-        .iter()
-        .filter(|arg| matches!(arg, Arg::Positional(_)))
-        .count();
-    let mut anchored_suffix = vec![0; count + 1];
-    let mut variadic_suffix = vec![0; count + 1];
-    for index in (0..count).rev() {
-        variadic_suffix[index] =
-            variadic_suffix[index + 1] + usize::from(variadic(index) && !directly_supplied[index]);
-        anchored_suffix[index] = anchored_suffix[index + 1]
-            + usize::from(!optional(index) && !variadic(index) && post_target != Some(index));
-    }
-    for (position, argument) in args.iter().enumerate() {
-        let (parameter, value, collected) = match argument {
-            Arg::Positional(value) => {
-                while positional < count
-                    && (post_target == Some(positional)
-                        || optional(positional)
-                        || (variadic(positional)
-                            && (directly_supplied[positional]
-                                || remaining <= anchored_suffix[positional + 1])))
-                {
-                    positional += 1;
-                }
-                if positional == count {
-                    if (0..count).any(|index| variadic(index) && directly_supplied[index]) {
-                        return Err(error(
-                            span,
-                            "parameter supplied more than once: positional inputs cannot append to a directly supplied collection",
-                        ));
+        .map(|route| {
+            let values = route
+                .sources
+                .iter()
+                .map(|index| match &args[*index] {
+                    Arg::Positional(value) | Arg::Named(_, value) | Arg::PostLambda(value) => {
+                        (**value).clone()
                     }
-                    return Err(error(
-                        span,
-                        "argument count mismatch: too many positional inputs",
-                    ));
-                }
-                let index = positional;
-                let collected = variadic(index);
-                if collected && variadic_suffix[index + 1] != 0 {
-                    return Err(error(
-                        span,
-                        "multiple variadic positional collections require a routing protocol not yet implemented; supply complete named packages",
-                    ));
-                }
-                if !collected {
-                    positional += 1;
-                }
-                remaining -= 1;
-                (index, *value, collected)
+                    _ => unreachable!("only supported supplies receive routes"),
+                })
+                .collect();
+            RoutedArgument {
+                parameter: route.parameter,
+                values,
+                positions: route.sources,
+                collected: route.collected,
+                lambda: route.lambda,
             }
-            Arg::Named(name, value) => {
-                let index = named.get(&name.name).copied().ok_or_else(|| {
-                    error(name.span, format!("no named parameter entry {}", name.name))
-                })?;
-                (index, *value, false)
-            }
-            Arg::PostLambda(value) => (
-                post_target.expect("post do target was checked"),
-                *value,
-                false,
-            ),
-            _ => {
-                return Err(error(
-                    span,
-                    "expanded and implicit argument routing is not implemented",
-                ));
-            }
-        };
-        if let Some(slot) = slots[parameter] {
-            let previous: &mut RoutedArgument<'h> = &mut routes[slot];
-            if !collected || !previous.collected {
-                return Err(error(value.span, "parameter supplied more than once"));
-            }
-            previous.values.push(value.clone());
-            previous.positions.push(position);
-        } else {
-            slots[parameter] = Some(routes.len());
-            routes.push(RoutedArgument {
-                parameter,
-                values: vec![value.clone()],
-                positions: vec![position],
-                collected,
-                lambda: declarations.is_some_and(|parameters| parameters[parameter].ty.is_lambda()),
-            });
-        }
-        assigned[parameter] = true;
-    }
-    for index in 0..count {
-        if !assigned[index] && implicit(index) {
-            return Err(error(
-                span,
-                "implicit parameter requires explicit named supply; automatic supply protocol is not yet implemented",
-            ));
-        } else if !assigned[index] && variadic(index) {
-            routes.push(RoutedArgument {
-                parameter: index,
-                values: Vec::new(),
-                positions: Vec::new(),
-                collected: true,
-                lambda: false,
-            });
-            assigned[index] = true;
-        } else if !assigned[index] && !optional(index) {
-            return Err(error(
-                span,
-                "argument count mismatch: missing anchored parameter",
-            ));
-        }
-    }
-    Ok((routes, assigned))
+        })
+        .collect();
+    Ok((routes, plan.assigned))
 }
 
 impl Checker<'_, '_> {

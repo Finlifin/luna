@@ -21,6 +21,7 @@ mod inline_loops;
 pub mod inlining;
 mod input_domains;
 mod input_observation;
+mod input_routing;
 mod intrinsics;
 mod nominal_fields;
 mod spreads;

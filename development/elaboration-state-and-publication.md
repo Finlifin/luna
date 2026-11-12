@@ -1094,6 +1094,42 @@ required invocation 仍是原同步规则，尚未转换成可以等待外部响
 `git diff --check` 均通过。未运行全 workspace、LLVM、性能基准或两个 ignored 正例；
 验证保留已有资源分析修改，formatter 与正式 docs 保持不动。
 
+#### 已接入：调用供应入口不再借用源码签名
+
+普通调用的参数路由已迁到 `program/input_routing.rs`。Entry 只拥有公开名字、
+可省略／隐式／收集／lambda 供应标记及后置 lambda 的候选资格，不引用 FnParam、
+表达式、默认值或参数域。Input 只描述供应方式；Plan 的每条 Route 保存参数槽与
+原实参索引，另存已供应槽位。它不是另一套表达式 IR，也不是执行许可。
+
+`arguments.rs` 负责从当前源码签名取得入口描述，并把索引接回原表达式。
+`finish_prepared_call`、依赖参数准备、开放函数、方法、spread 和 CMTT 生成器的
+现有路由消费者均经过这一个核心；删除了原先在源码适配器中执行的路由算法。
+独立选择后置 lambda 的消费者也使用同一入口描述。域替换、缺省表达式准备、
+收集值的协议检查及实际执行顺序仍由既有输入准备规则负责。
+
+具名完整值在路由前占用对应槽，不能再追加位置收集项；这份预留不重排实参。
+空收集产生一个无来源元素的收集 Route，可省略输入保持未供应以供后续默认值准备，
+缺失隐式输入仍报当前未实现边界。失败携带原实参索引或整次调用位置，由源码适配器
+生成诊断；核心不借用诊断 span，也不持有正在检查的源码。Entry、Route、Plan 均有
+S-expression Display，公开名字作为转义字符串输出。
+
+此阶段只迁移供应路由，并未发布跨函数值的参数协议。当前入口仍来自已有声明，
+没有入口元数据的函数值仍按既有位置接口处理；不会根据可见的 callee 实现猜名字。
+动态 NF 的 collector 元数据、独立列表合成及声明子句路由尚待迁入，具名调用的
+两个复现仍属未完成。完整 callable 接口需携带入口与槽的映射，保持域 telescope
+的绑定抽象；代码传送、接口适配、source activation 和执行恢复不能以这次拆分代替。
+具体缺口和源对照见[动态 NF 审查回复](audit-reply.md#动态-nf-的具名入口已复现先补参数协议载体)。
+
+工作目录 `/home/fin/luna`，执行
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test default_calls --test extended_calls --test ordinary_callable_types --test ordinary_clause_collectors --test sysroot_preludes --test normal_input_plans --test cmtt_methods --no-fail-fast`：
+643 项通过、两个原有待定域正例 ignored；`/tmp/luna-tools-pjossyf0/result.json`
+退出 0。除新路由单元检查外，覆盖默认值、具名／收集供应的次数和源序、拒绝例、
+开放函数、CMTT 方法及真实 sysroot 公开接口。初次构建因适配器引用了错误的 Symbol
+导出位置失败，修正为现有 hir::Symbol 后取得上述结果。
+三个 Rust 文件 scoped rustfmt check（`/tmp/luna-tools-phq95m8i/result.json`）与
+`git diff --check` 通过。没有运行全 workspace、LLVM 或性能基准，也没有启用两个
+ignored 正例；工作区原有 formatter 与资源分析等修改保留，不宣称为纯 HEAD 验收。
+
 #### 实施补充：声明接口与可执行主体不能共用完成状态
 
 当前调用路径还有一个早于 Type 响应的发布边界。普通函数收集与 required 依赖准备
