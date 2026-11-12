@@ -1,10 +1,14 @@
 //! Immutable declaration evidence shared inside one package analysis. This
 //! contains no call-site assumptions, cleanup choices or behavior certificates.
-use nir::{DeclarationId, DeclarationParameter, Sort, program::Package};
+use nir::{
+    DeclarationId, DeclarationParameter, Primitive, Sort, Term, program::Package,
+    type_computations::Error,
+};
 use std::{cell::OnceCell, collections::BTreeMap, sync::Arc};
 
 pub(crate) struct Metadata<'a> {
     package: Option<&'a Package>,
+    domains: OnceCell<Arc<BTreeMap<DeclarationId, Term>>>,
     sorts: OnceCell<Arc<BTreeMap<DeclarationId, Sort>>>,
 }
 
@@ -71,12 +75,44 @@ mod tests {
             assert!(!invalid.is_prepared());
         }
     }
+
+    #[test]
+    fn warm_directory_still_charges_selected_domain_payloads() {
+        let domain = Term::Tuple(vec![Term::Primitive(Primitive::Bool); 256]);
+        let package = Package {
+            alias_contracts: vec![Contract {
+                declaration: id(1),
+                parameters: vec![id(2)],
+                parameter_types: vec![domain.clone()],
+                requirements: vec![],
+                capabilities: vec![],
+            }],
+            ..Default::default()
+        };
+        let metadata = Metadata::new(Some(&package));
+        metadata.domains(&mut 10_000).unwrap();
+        assert_eq!(
+            metadata.parameter_domains(&[id(2)], &mut 8),
+            Err(Error::Budget)
+        );
+        let mut fuel = 10_000;
+        assert_eq!(
+            metadata.parameter_domains(&[id(2)], &mut fuel).unwrap(),
+            vec![domain]
+        );
+        assert!(10_000 - fuel >= 256);
+        assert_eq!(
+            metadata.binders(&[id(2)], &mut 10_000).unwrap()[0].sort,
+            Sort::ComptimeValue
+        );
+    }
 }
 
 impl<'a> Metadata<'a> {
     pub(crate) fn new(package: Option<&'a Package>) -> Self {
         Self {
             package,
+            domains: OnceCell::new(),
             sorts: OnceCell::new(),
         }
     }
@@ -85,18 +121,62 @@ impl<'a> Metadata<'a> {
         self.package
     }
 
+    pub(crate) fn domains(
+        &self,
+        fuel: &mut usize,
+    ) -> Result<&Arc<BTreeMap<DeclarationId, Term>>, Error> {
+        *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
+        if self.domains.get().is_none() {
+            let domains = match self.package {
+                Some(package) => package.declaration_parameter_domains_checked(fuel)?,
+                None => BTreeMap::new(),
+            };
+            let _ = self.domains.set(Arc::new(domains));
+        }
+        Ok(self.domains.get().expect("complete declaration domains"))
+    }
+
+    pub(crate) fn parameter_domains(
+        &self,
+        parameters: &[DeclarationId],
+        fuel: &mut usize,
+    ) -> Result<Vec<Term>, Error> {
+        *fuel = fuel.checked_sub(parameters.len()).ok_or(Error::Budget)?;
+        if parameters.is_empty() {
+            return Ok(vec![]);
+        }
+        let domains = self.domains(fuel)?;
+        parameters
+            .iter()
+            .map(|id| {
+                let domain = domains.get(id).unwrap_or(&Term::Primitive(Primitive::Type));
+                nir::type_computations::charge_term(domain, fuel)?;
+                Ok(domain.clone())
+            })
+            .collect()
+    }
+
     pub(crate) fn sorts(
         &self,
         fuel: &mut usize,
-    ) -> Result<&Arc<BTreeMap<DeclarationId, Sort>>, String> {
-        *fuel = fuel
-            .checked_sub(1)
-            .ok_or("declaration lookup budget exhausted")?;
+    ) -> Result<&Arc<BTreeMap<DeclarationId, Sort>>, Error> {
+        *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
         if self.sorts.get().is_none() {
-            let sorts = match self.package {
-                Some(package) => package.declaration_parameter_sorts(fuel)?,
-                None => BTreeMap::new(),
-            };
+            let domains = self.domains(fuel)?;
+            *fuel = fuel.checked_sub(domains.len()).ok_or(Error::Budget)?;
+            let sorts = domains
+                .iter()
+                .map(|(id, domain)| {
+                    (
+                        *id,
+                        if *domain == Term::Primitive(Primitive::Type) {
+                            Sort::Type
+                        } else {
+                            Sort::ComptimeValue
+                        },
+                    )
+                })
+                .collect();
             // Publish only a complete directory. A failed attempt remains
             // retryable and never refunds the work already performed.
             let _ = self.sorts.set(Arc::new(sorts));
@@ -108,10 +188,8 @@ impl<'a> Metadata<'a> {
         &self,
         parameters: &[DeclarationId],
         fuel: &mut usize,
-    ) -> Result<Vec<DeclarationParameter>, String> {
-        *fuel = fuel
-            .checked_sub(parameters.len())
-            .ok_or("declaration binder budget exhausted")?;
+    ) -> Result<Vec<DeclarationParameter>, Error> {
+        *fuel = fuel.checked_sub(parameters.len()).ok_or(Error::Budget)?;
         if parameters.is_empty() {
             return Ok(vec![]);
         }

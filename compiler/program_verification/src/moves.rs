@@ -4693,7 +4693,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let binders = self
             .declarations
             .binders(&original.type_parameters, &mut self.fuel)
-            .map_err(|e| error(source, e))?;
+            .map_err(|e| error(source, e.to_string()))?;
         let mut function = original.clone();
         let instantiate = |expr: &Expr| {
             expr.instantiate_parameters(&binders, body_arguments)
@@ -11133,7 +11133,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let binders = self
                 .declarations
                 .binders(&function.type_parameters, &mut self.fuel)
-                .map_err(|e| error(source, e))?;
+                .map_err(|e| error(source, e.to_string()))?;
             let signature = function
                 .signature
                 .instantiate_parameters(&binders, arguments)

@@ -337,6 +337,41 @@ sort 目录。纯度、其资源子分析、资源中的拒绝检查和嵌套结
   覆盖包括低预算目录重试、相同编号在不同包中采用不同 sort、畸形目录不得发布，
   以及纯度的实际资源子分析复用已准备目录后仍消费自身预算。
 
+### 7.2 程序契约的声明域与失败分类
+
+`flow::Walker` 的普通泛型调用、trait 方法契约和捕获的 comptime 值原先分别读取
+整包参数域，并将目录构造的所有错误映射为 `InvalidSignature`。这既把重复调用的
+成本乘上无关包大小，也把预算耗尽误判为程序非法。声明域用于确定替换与程序值
+的类型；它不证明程序谓词，修复仍属于程序验证层，不能转交 PTC 求内存或程序事实。
+
+现在同一次 flow 分析持有绑定不可变 Package 的 `declarations::Metadata`。它从
+`declaration_parameter_domains_checked` 取得完整域目录，sort 从该目录派生，两个
+结果分别只在完整构造后发布。各查询仍支付目录访问、binder 输出及所选域载荷的
+复制成本；没有预付未知的总额度，也没有将工作转移到调用者预算之外。不同 flow
+分析不共享程序状态、成功路径事实或契约证明；不同包的同号声明不共用目录。
+
+结构化失败保持到 flow 的接收边界：`Budget` 成为 `Unknown(BudgetExhausted)`，
+畸形域或不一致的签名仍拒绝为 `InvalidSignature`，不成立的程序前提仍是
+`MissingPreconditionProof`。耗尽不发表否定结论，重新分析有足够额度时可正常完成。
+这次只覆盖声明目录及其消费；其它契约替换、内存固定点和复制路径的复杂度仍须
+按各自边界审查，不能据目录共享宣称整个程序验证已经线性化。
+
+对照在 `/home/fin/luna` 执行
+`python3 -B development/check.py --timeout 900 -- test -p program_verification
+--lib flow::declaration_tests -- --nocapture`。仅增加用例、未改生产路径时，
+`/tmp/luna-tools-o__7i_d_/result.json` 退出 101：两条耗尽路径实际返回
+`InvalidSignature`；八次相同泛型契约调用加入 2,048 条无关别名后，检查成本从
+380 增至 18,812 步。迁移后的针对性检查使用同一输入和额度，不放宽证明要求。
+
+最终检查执行 `python3 -B development/check.py --timeout 900 -- test -p
+program_verification --lib -p luna --test integer_contracts --test snapshot_contracts
+--test staged_aggregate_contracts --test effect_contracts --test method_memory_contracts
+--test predicate_calls --test runtime_purity --test function_template_local_definitions
+--no-fail-fast`。`/tmp/luna-tools-kydv1ihv/result.json` 退出 0，375 项通过、2 项
+既有忽略。三条消费路径分别覆盖低预算与恢复；另验同号不同域、错误前提及热目录
+下的大载荷复制计量。重复调用测试限制无关目录增加的额外成本，覆盖真实分析入口，
+不以只命中 Metadata 的单元测试代替接线验证。
+
 ## 8. IIR 到 ABI 的明确顺序
 
 IIR 完成类型的 comptime 部分和实例选择，保留高级操作、真实 runtime 依赖及 NIR 已建立的

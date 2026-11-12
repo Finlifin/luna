@@ -3,6 +3,8 @@
 //! verifier. Unsupported constructs return an explicit analysis limitation.
 mod bit_indices;
 mod copies;
+#[cfg(test)]
+mod declaration_tests;
 mod error_results;
 mod finite_domains;
 mod intrinsics;
@@ -94,6 +96,17 @@ pub enum Reason {
     Phase(&'static str),
     IntegerFormation(String),
 }
+// Declaration structure errors reject the interface; exhausted inspection
+// supplies no conclusion about its validity or the program contract.
+fn declaration_failure(error: nir::type_computations::Error) -> Reason {
+    match error {
+        nir::type_computations::Error::Budget => {
+            Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into())
+        }
+        _ => Reason::InvalidSignature,
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -909,6 +922,7 @@ fn analyze_impl(
         next_frame: 1,
         limits,
         package,
+        declarations: crate::declarations::Metadata::new(package),
         points: vec![],
         collect_points,
         failure_source: None,
@@ -1014,6 +1028,7 @@ struct Walker<'a> {
     )>,
     limits: &'a mut Limits,
     package: Option<&'a nir::program::Package>,
+    declarations: crate::declarations::Metadata<'a>,
     points: Vec<Point>,
     // Final validation consumes only success/failure, not report snapshots.
     collect_points: bool,
@@ -3384,20 +3399,10 @@ impl Walker<'_> {
                 .into_iter()
                 .chain(method.type_parameters.iter().copied())
                 .collect();
-            let declared_domains = self
-                .package
-                .ok_or(Reason::InvalidSignature)?
-                .declaration_parameter_domains(&mut self.limits.arithmetic.steps)
-                .map_err(|_| Reason::InvalidSignature)?;
-            let domains: Vec<_> = parameters
-                .iter()
-                .map(|id| {
-                    declared_domains
-                        .get(id)
-                        .cloned()
-                        .unwrap_or(Term::Primitive(nir::Primitive::Type))
-                })
-                .collect();
+            let domains = self
+                .declarations
+                .parameter_domains(&parameters, &mut self.limits.arithmetic.steps)
+                .map_err(declaration_failure)?;
             let arguments: Vec<_> = std::iter::once(subject.clone())
                 .chain(interface_arguments.clone())
                 .chain(method_arguments.clone())
@@ -3464,24 +3469,13 @@ impl Walker<'_> {
         let needs_arguments =
             target.is_some_and(|f| !f.preconditions.is_empty() || !f.entry_snapshots.is_empty());
         if let Some(target) = target {
-            let sorts = if !target.type_parameters.is_empty()
-                && (!target.preconditions.is_empty() || !target.postconditions.is_empty())
-            {
-                self.package
-                    .ok_or(Reason::InvalidSignature)?
-                    .declaration_parameter_sorts(&mut self.limits.arithmetic.steps)
-                    .map_err(|_| Reason::InvalidSignature)?
+            let binders = if !target.preconditions.is_empty() || !target.postconditions.is_empty() {
+                self.declarations
+                    .binders(&target.type_parameters, &mut self.limits.arithmetic.steps)
+                    .map_err(declaration_failure)?
             } else {
-                BTreeMap::new()
+                vec![]
             };
-            let binders = target
-                .type_parameters
-                .iter()
-                .map(|id| nir::DeclarationParameter {
-                    declaration: *id,
-                    sort: sorts.get(id).copied().unwrap_or(nir::Sort::Type),
-                })
-                .collect::<Vec<_>>();
             if needs_arguments && parameter_bindings != &target.parameters {
                 return Err(Reason::InvalidSignature);
             }
@@ -4729,12 +4723,14 @@ impl Walker<'_> {
                     }
                     *root
                 } else {
-                    let Some(package) = self.package else {
+                    if self.package.is_none() {
                         return Ok(result);
-                    };
-                    let domains = package
-                        .declaration_parameter_domains(&mut self.limits.arithmetic.steps)
-                        .map_err(|_| Reason::InvalidSignature)?;
+                    }
+                    let domains = self
+                        .declarations
+                        .domains(&mut self.limits.arithmetic.steps)
+                        .map_err(declaration_failure)?
+                        .clone();
                     let domain = domains.get(declaration).ok_or(Reason::InvalidSignature)?;
                     if self.scalar_type_view(domain)? != view {
                         return Err(Reason::InvalidSignature);
@@ -7147,6 +7143,7 @@ mod memory_summary_cache_tests {
             associated_scalars: Vec::new(),
             limits: &mut limits,
             package: Some(&package),
+            declarations: crate::declarations::Metadata::new(Some(&package)),
             points: vec![],
             collect_points: true,
             failure_source: None,
@@ -7261,6 +7258,7 @@ mod conditional_origin_tests {
             associated_scalars: vec![],
             limits: &mut limits,
             package: None,
+            declarations: crate::declarations::Metadata::new(None),
             points: vec![],
             collect_points: true,
             failure_source: None,
@@ -7737,6 +7735,7 @@ mod tuple_storage_tests {
                 associated_scalars: vec![],
                 limits: &mut limits,
                 package: Some(&package),
+                declarations: crate::declarations::Metadata::new(Some(&package)),
                 points: vec![],
                 collect_points: true,
                 failure_source: None,
