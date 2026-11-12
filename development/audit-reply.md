@@ -2,7 +2,7 @@
 
 核对对象：`ai_dev_logs/comptime_type_vm_divergence_report_2026-11-11_evening.md`。
 报告主体基线是 `a00e221f`，附录推进至 `bfe8221c`；本回复在 2026-11-12
-整体核对至 `4937d332`，后续局部迁移与旧问题复查推进至 `bcbcd0bc`。
+整体核对至 `4937d332`，后续局部迁移与旧问题复查推进至 `71efd6f8`。
 保留原报告，不把不同基线的事实混成一次测量。
 formatter 由另一位开发者负责，本次未修改 `compiler/fmt` 及其依赖。
 
@@ -781,6 +781,70 @@ available 输入仅含成员自己的 config 参数，没有父 enabled 的值�
 名称与诊断逐项等于前述基线 `/tmp/luna-tools-ol48zymo/stdout.log`；动态父输入的
 旧用例仍失败，没有修改其预期。静态交付不是通用 source activation 或默认值恢复
 完成，也没有运行全 workspace、LLVM 或性能基准。
+
+### 动态 NF 的具名入口：已复现，先补参数协议载体
+
+在 `71efd6f8` 上核对报告 D04／S06：动态 NF 的完整收集值供应仍失败，
+但位置收集与单包展开已有生产接线。保留三个使用真实 sysroot 的源码对照：
+
+- [正向对照](repros/dynamic-nf-input-control.fl)：用户头 Bundle 的直接具名供应、
+  高阶位置收集、高阶单包展开得到相同身份；公开 Tuple 绑定的两种高阶路径也与
+  直接具名供应一致。参考执行 `run` 返回 `(bool true)`。
+- [用户头的具名供应](repros/dynamic-nf-named-input.fl)：回调类型显式声明
+  `...Items: meta.List<Type>`，`factory<.Items = items>` 仍被拒绝。
+- [公开内置头的具名供应](repros/dynamic-nf-builtin-input.fl)：同样通过显式回调
+  类型供应 `factory<.Es = elements>`，也被同一分支拒绝。不能只为 Es 增加入口。
+
+这次没有改编译器。源码链条表明，缺口不止是路由器漏掉 Arg::Named：
+
+1. `function_types.rs::form_normal_form_callable_type` 将变参声明改作命名位置
+   参数，形成普通依赖签名，再只保留 collector 的索引。`form_callable_type`
+   把依赖绑定抽象为参数位置，发布的 Parameter 只有 sort 和域，没有公开入口。
+2. `normal.rs::dynamic_normal_form_application` 依 collector 索引单独切割实参，
+   将尾部位置输入拼成 H::List；单个 Expand 另行改作完整位置输入。
+   具名供应和混合展开在这里被拒绝，尚未进入共享输入路由。
+3. `program.rs::finish_prepared_call` 对 NF 不恢复源码函数声明参数；
+   `arguments.rs::route_arguments` 的具名入口又只能来自 FnParam。
+   因此仅删除第一层拒绝，仍不能建立具名参数映射，也没有解决普通函数值的协议载体。
+
+正式依据是 `docs/functions/parameters.md` 的完整参数值供应规则，以及
+`docs/functions/higher-order-functions.md` 的 NF callable、依赖签名说明。
+前者要求整个 collector 值不再收集，仍接受域、阶段和契约检查；后者把签名局部
+依赖名字抽象为位置，一致重命名不改变该依赖关系。**局部绑定名字与公开供应入口
+不是同一种信息。** 不能为了具名调用把每个局部绑定名都塞进类型身份，也不能因
+依赖签名可以去名字，就抹掉调用接口声明的入口。这些文档也明确把动态具名入口
+标为尚未实现，并未规定语言禁止此用法。
+
+后续 M2 迁移需要同时交付以下边界，不能先增加一个 Tuple 专用 named 分支：
+
+- 参数协议独立描述可供应入口与参数槽的映射、位置／完整值／收集方式，以及所需
+  的默认、隐式和收集协议。依赖 telescope 继续负责参数域和 binder 替换。
+  公开入口信息随检查后的 callable 接口传递；不能从偶然可见的函数体或运行时
+  选择结果猜测名字。跨接口适配须保存入口与槽的对应证据。
+- 直接声明、保存的函数值和 NF 使用同一输入规划契约。完整值供应只检查一次，
+  不先展开再收集；逐项供应才走所声明的收集协议。具体 List 表示不决定路由。
+  计划分别保存源码求值顺序和参数槽顺序，callee 与 producer 各求值一次。
+- 参数域若仍依赖未取得的输入，保留原计划及对应检查任务，接入已有待定域的
+  source activation 迁移；不能执行 callee 猜头、重放已执行前缀或以 Type 替代未知域。
+  NF 最终检查所选头的形成条件并保留头身份，不执行其函数体。
+- 验收覆盖用户头和公开内置绑定、同一接口下多个 callee、直接／高阶／返回值传递、
+  完整值和逐项收集、未知名、重复供应、整包与追加冲突、错误域、源顺序和失败后重用。
+  入口载体、通用路由与消费者一起接通后，删除现有动态列表合成分支。
+
+工作目录 `/home/fin/luna`，统一通过
+`python3 -B development/check.py --timeout 900 -- run -p luna --` 执行，
+每条命令均追加 `--sysroot library --build-target x86_64 linux 64`：
+
+| 剩余命令参数 | 结果 | 本机证据 |
+| --- | --- | --- |
+| `development/repros/dynamic-nf-input-control.fl --interpret run` | 退出 0，`(bool true)` | `/tmp/luna-tools-t7xkmqoq/result.json` |
+| `check development/repros/dynamic-nf-named-input.fl` | 退出 1，`dynamic normal-form collection currently requires positional elements` | `/tmp/luna-tools-hi_y6v8d/result.json` |
+| `check development/repros/dynamic-nf-builtin-input.fl` | 退出 1，同上 | `/tmp/luna-tools-oydfp37d/result.json` |
+
+初稿把 Type 常量比较放在 runtime，先触发 Splice 边界；移入局部 const 后，额外的
+不同头不等式又触发 TypeContractUnresolved。最终对照只核验各路径与各自直接构造
+相等，不据这两次初稿失败判断具名供应问题或头不等式的语义。上述两个拒绝例保留为
+已知失败复现，没有改成预期拒绝测试，也没有声称具名入口、通用收集协议或恢复已完成。
 
 ## 4. 本次证据与限制
 

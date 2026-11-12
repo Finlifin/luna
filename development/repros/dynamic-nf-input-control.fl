@@ -1,0 +1,28 @@
+{-
+    Control for dynamic-nf-named-input.fl and dynamic-nf-builtin-input.fl.
+    Direct named supply and higher-order positional collection should preserve
+    the selected normal-form head without invoking its body.
+-}
+pure comptime fn Bundle<...Items: meta.List<Type>> -> Type { bool }
+
+comptime fn Collect(factory: pure comptime fn<...Items: meta.List<Type>> -> Type) -> Type {
+    factory<bool, u8>
+}
+
+comptime fn Forward(factory: pure comptime fn<...Items: meta.List<Type>> -> Type) -> Type {
+    let items: meta.List<Type> = [bool, u8];
+    factory<...items>
+}
+
+const DIRECT = Bundle<.Items = [bool, u8]>;
+const COLLECTED = Collect(Bundle);
+const FORWARDED = Forward(Bundle);
+const PRODUCT = Collect(Tuple);
+const FORWARDED_PRODUCT = Forward(Tuple);
+
+fn run() -> bool {
+    const same = DIRECT == COLLECTED and DIRECT == FORWARDED
+        and PRODUCT == Tuple<.Es = [bool, u8]>
+        and PRODUCT == FORWARDED_PRODUCT;
+    same
+}

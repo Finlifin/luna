@@ -1,0 +1,15 @@
+{-
+    Expected: the public builtin binding follows the same complete-input rule
+    as user-defined NF callables. This remains a known failing source repro.
+-}
+comptime fn Apply(factory: pure comptime fn<...Es: meta.List<Type>> -> Type) -> Type {
+    let elements: meta.List<Type> = [bool, u8];
+    factory<.Es = elements>
+}
+
+const RESULT = Apply(Tuple);
+
+fn run() -> bool {
+    const same = RESULT == Tuple<.Es = [bool, u8]>;
+    same
+}

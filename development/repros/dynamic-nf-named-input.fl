@@ -1,0 +1,18 @@
+{-
+    Expected: accept the complete collector value through the callable's
+    declared Items entry. Current dynamic NF routing rejects named inputs.
+    No tuple head or builtin spelling is involved in this constructor.
+-}
+pure comptime fn Bundle<...Items: meta.List<Type>> -> Type { bool }
+
+comptime fn Apply(factory: pure comptime fn<...Items: meta.List<Type>> -> Type) -> Type {
+    let items: meta.List<Type> = [bool, u8];
+    factory<.Items = items>
+}
+
+const RESULT = Apply(Bundle);
+
+fn run() -> bool {
+    const same = RESULT == Bundle<.Items = [bool, u8]>;
+    same
+}
