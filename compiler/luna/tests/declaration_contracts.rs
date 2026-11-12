@@ -91,3 +91,47 @@ fn selected_drop_keeps_dependent_declaration_domains() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn inherited_program_contracts_keep_owner_and_method_declaration_domains() {
+    for source in [
+        r#"
+        trait Gate where D, item: D {
+            fn check(ok: bool) -> result: bool
+            where requires ok, ensures result;
+        }
+        struct Marker where D, item: D {}
+        impl Gate<D, item> for Marker<D, item> where D, item: D {
+            fn check(ok: bool) -> bool { ok }
+        }
+        fn run() -> bool {
+            Marker<Type, u8>.as(Gate<Type, u8>).check(true)
+                and Marker<bool, true>.as(Gate<bool, true>).check(true)
+        }
+        "#,
+        r#"
+        trait Gate {
+            fn check(ok: bool) -> result: bool
+            where D, item: D, requires ok, ensures result;
+        }
+        impl Gate for bool {
+            fn check(ok: bool) -> bool
+            where D, item: D
+            {
+                ok
+            }
+        }
+        fn run() -> bool {
+            bool.as(Gate).check<Type, u8>(true)
+                and bool.as(Gate).check<bool, true>(true)
+        }
+        "#,
+    ] {
+        assert_eq!(sysroot::run(source), Value::Bool(true));
+        let rejected = source.replace("(true)", "(false)");
+        let error = sysroot::compile(&rejected)
+            .err()
+            .expect("inherited entry condition must remain required");
+        assert!(error.contains("precondition"), "{error}");
+    }
+}

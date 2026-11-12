@@ -1,6 +1,8 @@
 //! Trait program-contract replacement; no obligation here is a type proposition.
+#[cfg(test)]
+mod tests;
 use super::{Limits, flow};
-use nir::{Primitive, Term, contracts::remap_predicate, program::*};
+use nir::{Primitive, Term, contracts::remap_predicate_metered, program::*};
 use std::collections::BTreeMap;
 
 fn failure(source: SourceRange, message: &'static str) -> flow::Error {
@@ -19,24 +21,120 @@ fn fresh(next: &mut u32, source: SourceRange) -> Result<LocalId, flow::Error> {
         index,
     })
 }
-fn remap(values: &mut [Expr], bindings: &BTreeMap<LocalId, LocalId>) -> Result<(), flow::Error> {
+fn budget(source: SourceRange) -> flow::Error {
+    flow::Error {
+        source,
+        reason: flow::Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()),
+    }
+}
+fn preparation(source: SourceRange, error: nir::type_computations::Error) -> flow::Error {
+    match error {
+        nir::type_computations::Error::Budget => budget(source),
+        _ => failure(source, "invalid contract declaration substitution"),
+    }
+}
+fn copy_function(value: &Function, limits: &mut Limits) -> Result<Function, flow::Error> {
+    nir::copy_budget::charge_function_substitution(value, &[], &[], &mut limits.arithmetic.steps)
+        .map_err(|_| budget(value.body.source))?;
+    Ok(value.clone())
+}
+fn copy_expression(value: &Expr, limits: &mut Limits) -> Result<Expr, flow::Error> {
+    nir::copy_budget::charge_substitution(value, &[], &[], &mut limits.arithmetic.steps)
+        .map_err(|_| budget(value.source))?;
+    Ok(value.clone())
+}
+fn copy_expressions(values: &[Expr], limits: &mut Limits) -> Result<Vec<Expr>, flow::Error> {
+    values
+        .iter()
+        .map(|value| copy_expression(value, limits))
+        .collect()
+}
+fn remap(
+    values: &mut [Expr],
+    bindings: &BTreeMap<LocalId, LocalId>,
+    limits: &mut Limits,
+) -> Result<(), flow::Error> {
     for value in values {
-        remap_predicate(value, bindings).map_err(|message| failure(value.source, message))?;
+        remap_predicate_metered(value, bindings, &mut limits.arithmetic.steps).map_err(
+            |message| {
+                if message == "program contract substitution budget exhausted" {
+                    budget(value.source)
+                } else {
+                    failure(value.source, message)
+                }
+            },
+        )?;
     }
     Ok(())
 }
-/// Prepare effective body contracts, then verify every explicit weakening.
-/// Each input package is a fresh elaboration snapshot; do not apply twice.
+
+/// Private overlay under an exclusive package borrow. No snapshot can escape
+/// validation; errors or unwinding restore every replaced function.
+struct Overlay<'a> {
+    package: &'a mut Package,
+    originals: Vec<(usize, Function)>,
+    committed: bool,
+}
+impl Drop for Overlay<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            for (index, original) in self.originals.drain(..) {
+                self.package.functions[index] = original;
+            }
+        }
+    }
+}
+
+/// Prepare all effective contracts before checking explicit weakening.
+/// Successful inheritance is applied once to a fresh elaboration snapshot.
 pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error> {
-    let domains = package
-        .declaration_parameter_domains(&mut 100_000)
-        .map_err(|_| {
-            failure(
-                SourceRange { start: 0, end: 0 },
-                "invalid contract parameter domains",
-            )
+    inherit_with_limits(package, next, &mut Limits::default())
+}
+
+/// Failure preserves both the caller's package and its binding cursor. Copy
+/// preparation and proof checks consume the same caller-owned work budget.
+pub fn inherit_with_limits(
+    package: &mut Package,
+    next: &mut u32,
+    limits: &mut Limits,
+) -> Result<(), flow::Error> {
+    let mut prepared_next = *next;
+    let (drafts, obligations) = prepare(package, &mut prepared_next, limits)?;
+    let mut overlay = Overlay {
+        package,
+        originals: Vec::with_capacity(drafts.len()),
+        committed: false,
+    };
+    for (index, draft) in drafts {
+        let original = std::mem::replace(&mut overlay.package.functions[index], draft);
+        overlay.originals.push((index, original));
+    }
+    for obligation in obligations {
+        flow::analyze_in_package(overlay.package, &obligation, limits).map_err(|error| {
+            match error.reason {
+                flow::Reason::Unknown(_) | flow::Reason::DepthLimit => error,
+                _ => failure(obligation.body.source, "implementation strengthens trait program preconditions or their definedness is not proven"),
+            }
         })?;
-    let binder = |id: &nir::DeclarationId| nir::DeclarationParameter {
+    }
+    overlay.committed = true;
+    *next = prepared_next;
+    Ok(())
+}
+
+fn prepare(
+    package: &Package,
+    next: &mut u32,
+    limits: &mut Limits,
+) -> Result<(BTreeMap<usize, Function>, Vec<Function>), flow::Error> {
+    let metadata = super::declarations::Metadata::new(Some(package));
+    let source = SourceRange { start: 0, end: 0 };
+    let domains = metadata
+        .domains(&mut limits.arithmetic.steps)
+        .map_err(|error| preparation(source, error))?;
+    // These describe abstract definition inputs. Completed domain substitution
+    // below, not this initial classification, admits concrete Type values.
+    let rigid = |id: &nir::DeclarationId| Term::Rigid {
         declaration: *id,
         sort: if domains
             .get(id)
@@ -47,25 +145,30 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
             nir::Sort::Type
         },
     };
-    for implementation in package.implementations.clone() {
+    let mut drafts = BTreeMap::new();
+    let mut obligations = Vec::new();
+    for implementation in &package.implementations {
+        limits.step(1).map_err(|_| budget(source))?;
         let Some(interface) = implementation.interface else {
             continue;
         };
+        limits
+            .step(package.traits.len())
+            .map_err(|_| budget(source))?;
         let definition = package
             .traits
             .iter()
             .find(|t| t.declaration == interface)
-            .cloned()
             .ok_or_else(|| {
                 failure(
                     SourceRange { start: 0, end: 0 },
                     "trait contract is missing",
                 )
             })?;
-        let arguments: Vec<_> = std::iter::once(implementation.subject.clone())
-            .chain(implementation.interface_arguments.clone())
-            .collect();
         for (name, body) in &implementation.methods {
+            limits
+                .step(definition.methods.len().saturating_add(1))
+                .map_err(|_| budget(source))?;
             let method = definition
                 .methods
                 .iter()
@@ -79,6 +182,14 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
             if method.default == Some(*body) {
                 continue;
             }
+            limits
+                .step(
+                    package
+                        .runtime_function_identities
+                        .len()
+                        .saturating_add(package.functions.len()),
+                )
+                .map_err(|_| budget(source))?;
             // A required-invocation snapshot may carry only the identity of a
             // runtime method. It cannot invoke the body; the complete package
             // still performs inheritance and body verification later.
@@ -103,72 +214,68 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                     "implementation contract body is missing",
                 ));
             };
-            let mut actual = package.functions[index].clone();
+            let mut actual = copy_function(
+                drafts.get(&index).unwrap_or(&package.functions[index]),
+                limits,
+            )?;
             // Omitting the spelling on an override does not weaken the
             // interface behavior promise. The complete body is checked later.
             actual.pure |= method.pure;
             let source = actual.body.source;
-            let parameters: Vec<_> = definition
-                .binders_with_self(&mut 100_000)
-                .map_err(|_| failure(source, "invalid trait parameter domains"))?
+            limits
+                .step(
+                    definition
+                        .type_parameters
+                        .len()
+                        .saturating_add(method.type_parameters.len())
+                        .saturating_add(1),
+                )
+                .map_err(|_| budget(source))?;
+            let parameter_ids: Vec<_> = definition
+                .parameters_with_self()
                 .into_iter()
-                .chain(method.type_parameters.iter().map(&binder))
+                .chain(method.type_parameters.iter().copied())
                 .collect();
             let prefix = actual
                 .type_parameters
                 .get(..implementation.type_parameters.len())
                 .ok_or_else(|| failure(source, "implementation method input prefix is missing"))?;
-            let prefix_inputs = prefix
-                .iter()
-                .map(|id| {
-                    let binding = binder(id);
-                    Term::Rigid {
-                        declaration: binding.declaration,
-                        sort: binding.sort,
-                    }
-                })
-                .collect::<Vec<_>>();
-            let implementation_binders = implementation
-                .parameter_binders()
-                .map_err(|_| failure(source, "invalid implementation parameter domains"))?;
-            let arguments = arguments
-                .iter()
+            limits
+                .step(actual.type_parameters.len())
+                .map_err(|_| budget(source))?;
+            let prefix_inputs = prefix.iter().map(&rigid).collect::<Vec<_>>();
+            let owner_domains = metadata
+                .parameter_domains(
+                    &implementation.type_parameters,
+                    &mut limits.arithmetic.steps,
+                )
+                .map_err(|error| preparation(source, error))?;
+            let owner = nir::DeclarationSubstitution::bounded(
+                &implementation.type_parameters,
+                &owner_domains,
+                &prefix_inputs,
+                &[],
+                &mut limits.arithmetic.steps,
+            )
+            .map_err(|error| preparation(source, error))?;
+            let mut method_arguments = std::iter::once(&implementation.subject)
+                .chain(&implementation.interface_arguments)
                 .map(|argument| {
-                    argument
-                        .instantiate_parameters(&implementation_binders, &prefix_inputs)
-                        .map_err(|_| failure(source, "trait contract owner substitution failed"))
+                    owner
+                        .instantiate_bounded(argument, &mut limits.arithmetic.steps)
+                        .map_err(|error| preparation(source, error))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let method_arguments: Vec<_> = arguments
-                .iter()
-                .cloned()
-                .chain(
-                    actual
-                        .type_parameters
-                        .iter()
-                        .skip(implementation.type_parameters.len())
-                        .map(|id| {
-                            let binding = binder(id);
-                            nir::Term::Rigid {
-                                declaration: binding.declaration,
-                                sort: binding.sort,
-                            }
-                        }),
-                )
-                .collect();
-            let parameter_ids = parameters
-                .iter()
-                .map(|parameter| parameter.declaration)
-                .collect::<Vec<_>>();
-            let parameter_domains = parameter_ids
-                .iter()
-                .map(|id| {
-                    domains
-                        .get(id)
-                        .cloned()
-                        .unwrap_or(Term::Primitive(Primitive::Type))
-                })
-                .collect::<Vec<_>>();
+            method_arguments.extend(
+                actual
+                    .type_parameters
+                    .iter()
+                    .skip(implementation.type_parameters.len())
+                    .map(&rigid),
+            );
+            let parameter_domains = metadata
+                .parameter_domains(&parameter_ids, &mut limits.arithmetic.steps)
+                .map_err(|error| preparation(source, error))?;
             let frames = match actual.signature.callable_signature() {
                 Term::Function { parameters, .. } if !parameters.is_empty() => {
                     vec![parameters.iter().map(|parameter| parameter.sort).collect()]
@@ -182,9 +289,9 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                     &parameter_domains,
                     &method_arguments,
                     &frames,
-                    &mut 100_000,
+                    &mut limits.arithmetic.steps,
                 )
-                .map_err(|_| failure(source, "trait program contract substitution failed"))?;
+                .map_err(|error| preparation(source, error))?;
             if method.parameter_bindings.len() != actual.parameters.len() {
                 return Err(failure(source, "trait program contract arity mismatch"));
             }
@@ -194,13 +301,13 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                 .copied()
                 .zip(actual.parameters.iter().copied())
                 .collect();
-            remap(&mut contract.preconditions, &bindings)?;
+            remap(&mut contract.preconditions, &bindings, limits)?;
             let inherited_domain = actual.preconditions.is_empty();
             if inherited_domain {
                 // An omitted program entry clause uses the interface domain.
-                actual.preconditions = contract.preconditions.clone();
+                actual.preconditions = copy_expressions(&contract.preconditions, limits)?;
             } else {
-                let mut obligation = actual.clone();
+                let mut obligation = copy_function(&actual, limits)?;
                 let Term::Function { result, .. } = &mut obligation.signature else {
                     return Err(failure(source, "invalid implementation signature"));
                 };
@@ -210,13 +317,12 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                     ty: Term::Primitive(Primitive::Void),
                     kind: ExprKind::Unit,
                 };
-                obligation.preconditions = contract.preconditions.clone();
-                obligation.postconditions = actual.preconditions.clone();
+                obligation.preconditions = copy_expressions(&contract.preconditions, limits)?;
+                obligation.postconditions = copy_expressions(&actual.preconditions, limits)?;
                 obligation.result_binding = None;
                 obligation.entry_snapshots.clear();
                 obligation.defaults.clear();
-                flow::analyze_in_package(package, &obligation, &mut Limits::default())
-                    .map_err(|_| failure(source, "implementation strengthens trait program preconditions or their definedness is not proven"))?;
+                obligations.push(obligation);
             }
             if let Some(binding) = contract.result_binding {
                 let destination = match actual.result_binding {
@@ -230,6 +336,9 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                 bindings.insert(binding, destination);
             }
             for snapshot in contract.entry_snapshots {
+                limits
+                    .step(actual.entry_snapshots.len().saturating_add(1))
+                    .map_err(|_| budget(source))?;
                 let parameter = *bindings.get(&snapshot.parameter).ok_or_else(|| {
                     failure(source, "trait snapshot does not refer to a parameter")
                 })?;
@@ -248,7 +357,7 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                 };
                 bindings.insert(snapshot.binding, binding);
             }
-            remap(&mut contract.postconditions, &bindings)?;
+            remap(&mut contract.postconditions, &bindings, limits)?;
             // A weaker implementation domain must not make trait ensures apply
             // to inputs outside the trait's domain. Guard with frozen ENTRY
             // predicates, never with the possibly modified exit parameters.
@@ -258,6 +367,9 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
             let mut entry = BTreeMap::new();
             if !contract.preconditions.is_empty() && !contract.postconditions.is_empty() {
                 for parameter in &actual.parameters {
+                    limits
+                        .step(actual.entry_snapshots.len().saturating_add(1))
+                        .map_err(|_| budget(source))?;
                     let binding = if let Some(snapshot) = actual
                         .entry_snapshots
                         .iter()
@@ -275,7 +387,7 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                     entry.insert(*parameter, binding);
                 }
             }
-            remap(&mut contract.preconditions, &entry)?;
+            remap(&mut contract.preconditions, &entry, limits)?;
             let guard = contract.preconditions.into_iter().reduce(|a, b| Expr {
                 source: a.source,
                 ty: Term::Primitive(Primitive::Bool),
@@ -290,7 +402,7 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                             Box::new(Expr {
                                 source: guard.source,
                                 ty: guard.ty.clone(),
-                                kind: ExprKind::Not(Box::new(guard.clone())),
+                                kind: ExprKind::Not(Box::new(copy_expression(guard, limits)?)),
                             }),
                             Box::new(postcondition),
                         ),
@@ -300,8 +412,8 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                 };
                 actual.postconditions.push(postcondition);
             }
-            package.functions[index] = actual;
+            drafts.insert(index, actual);
         }
     }
-    Ok(())
+    Ok((drafts, obligations))
 }

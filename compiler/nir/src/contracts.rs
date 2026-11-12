@@ -247,16 +247,25 @@ pub fn remap_predicate(
     expr: &mut Expr,
     bindings: &BTreeMap<LocalId, LocalId>,
 ) -> Result<(), &'static str> {
+    remap_predicate_metered(expr, bindings, &mut 10_000)
+}
+
+/// Rewrite a private contract with the caller's shared traversal budget.
+/// Failure can leave this private expression partially remapped.
+pub fn remap_predicate_metered(
+    expr: &mut Expr,
+    bindings: &BTreeMap<LocalId, LocalId>,
+    remaining: &mut usize,
+) -> Result<(), &'static str> {
     let mut pending = vec![expr];
-    let mut remaining = 10_000;
     while let Some(expr) = pending.pop() {
-        if remaining == 0 {
+        if *remaining == 0 {
             return Err("program contract substitution budget exhausted");
         }
-        remaining -= 1;
+        *remaining -= 1;
         match &mut expr.kind {
             K::ComptimeValue(value) => {
-                crate::comptime_values::validate(value, &expr.ty, &mut remaining)
+                crate::comptime_values::validate(value, &expr.ty, remaining)
                     .map_err(|error| error.message())?;
             }
             K::Local(id) => {
@@ -276,7 +285,7 @@ pub fn remap_predicate(
                 guard: None,
                 otherwise: None,
             } => {
-                remap_predicate_pattern(pattern, bindings, &mut pending, &mut remaining)?;
+                remap_predicate_pattern(pattern, bindings, &mut pending, remaining)?;
                 pending.push(value);
             }
             // Associated identities contain declaration inputs, not local
@@ -337,12 +346,7 @@ pub fn remap_predicate(
             K::Match { value, arms } => {
                 pending.push(value);
                 for arm in arms {
-                    remap_predicate_pattern(
-                        &mut arm.pattern,
-                        bindings,
-                        &mut pending,
-                        &mut remaining,
-                    )?;
+                    remap_predicate_pattern(&mut arm.pattern, bindings, &mut pending, remaining)?;
                     pending.extend(arm.guard.as_mut());
                     pending.push(&mut arm.body);
                 }

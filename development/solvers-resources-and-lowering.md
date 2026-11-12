@@ -167,6 +167,66 @@ flow 的 proof site 仍是当前树的临时地址键。先分离闭包，再记
 scoped rustfmt 退出 0，`/tmp/luna-tools-v25d0m2a/result.json`。未运行全 workspace
 测试或性能测量；验证仍包含工作区原有 moves/effects.rs 修改，未将该文件纳入提交。
 
+### 4.3 契约继承的整批准备与发布
+
+依据 [trait 契约替换](../docs/traits/declarations.md#编译器实现引导)，入口弱化检查
+使用 `trait 前提 ⇒ impl 前提`。这属于程序验证，不是 PTC 类型命题；继承阶段还把
+接口的 pure、结果条件与入口快照交给完整方法检查，不能据此声称方法体已经满足
+所有结果、资源、纯度和效应要求。
+
+原 `contracts::inherit` 逐个方法复制、证明并立即写回包，同时直接推进调用者的
+临时绑定编号。后项拒绝会留下前项契约与 pure 标志；此外，前项的弱化证明可能
+读取后项尚未继承的入口条件。已复现：某方法的实现前提调用另一方法，后者的
+接口入口域为 false，却在继承前表现为无前提调用；旧顺序因此错误接受弱化。
+
+当前分成三个边界：
+
+1. 只读原包，以共享声明域目录准备全部方法草稿和弱化义务；新结果／入口快照
+   编号先保存在私有游标。没有复制整个 implementation 列表、trait 或整个包。
+2. 在独占 `&mut Package` 借用内安装方法草稿，保存被替换的原函数；弱化分析
+   读取完整有效契约。任何拒绝或展开式 panic 都由局部 RAII guard 恢复原函数。
+   这个同步私有 overlay 不向外发布 snapshot、候选权限或可执行代码。
+3. 所有弱化义务通过后才提交方法和新游标。函数体的完整检查仍走既有后续阶段。
+
+`inherit_with_limits` 将声明目录、owner 实参替换、完整函数／表达式复制预检、
+局部绑定 remap 和弱化证明放在同一个预算内；`inherit` 是现有生产入口的默认
+额度适配器。owner 重绑定改用带完整域的 DeclarationSubstitution，接口程序契约
+沿用完整域替换。定义端尚未完成的输入仍保留抽象 sort，不把这个初始分类误当成
+完成实参的准入证据。NF 头不会因这次替换而展开。
+
+Metadata 只借用准备阶段的原包，安装前结束其生命周期；证明阶段重新在有效包
+上建立分析视图，避免跨包修改复用旧目录所有权。这里不引入可变 Package 的全局
+缓存，也尚未把该额度并入整个 elaboration／invocation 的统一事务预算。NIR 的
+原 remap API 保留默认额度，新增 metered 入口供继承共享计量；失败可改变私有
+表达式草稿，但不能改变调用方可见的原契约。预算 Unknown 与语义弱化失败分别报告。
+
+工作目录 `/home/fin/luna`，使用
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- 原实现运行 `-p program_verification --lib contracts::tests::late_rejection
+  -- --nocapture`，`/tmp/luna-tools-xuicmjod/result.json` 退出 101：后项被拒绝时
+  调用方游标已由 100 变成 101。修复后同一用例的
+  `/tmp/luna-tools-i4kq18em/result.json` 退出 0，原包和游标均保持不变。
+- 临时还原旧继承器，保留新顺序反例，以
+  `-p program_verification --lib
+  contracts::tests::weakening_observes_all_effective_callee_contracts_in_either_method_order
+  -- --exact --nocapture` 对照，`/tmp/luna-tools-vgdac3r1/result.json` 退出 101：
+  旧实现返回 Ok，错误接受依赖尚未继承前提的证明。随后恢复当前实现；两种方法
+  顺序均拒绝，且整包不变。对照中仅保留编译新预算测试所需的未执行兼容入口，
+  被测路径直接使用旧 `inherit`。
+- 最终执行 `-p nir -p program_verification -p luna --lib
+  --test declaration_contracts --test trait_domain_substitution --test trait_phases
+  --test trait_purity --test method_memory_contracts --test snapshot_contracts
+  --test integer_contracts --test effect_contracts --test staged_aggregate_contracts
+  --test library_protocols --no-fail-fast`，
+  `/tmp/luna-tools-vb84wljr/result.json` 退出 0，494 项通过，无过滤或忽略。
+  包含零／中途／最后阶段预算失败后的完整重试，以及真实 sysroot 下 trait owner
+  与方法自身的 `D = Type, item = u8`、`D = bool, item = true` 和运行时前提拒绝。
+  源码域用例是交叉路径守护，不把它们称为已复现的旧 Type 拒绝错误。
+
+四个修改的 Rust 文件通过 rustfmt 检查，`/tmp/luna-tools-r5g5n8by/result.json`
+退出 0。本阶段保留工作区其他修改；未执行全 workspace 测试，没有改动正式 docs。
+
 ## 5. 统一资源描述，区分具体含义
 
 资源证据采用逻辑路径、物理位置、分支 guard、时间/存储版本和责任所有者的组合。
@@ -519,7 +579,7 @@ Function API 预检完整函数后特化，没有输入的不可变函数直接�
 所有生产调用者迁走后，删除 Metadata 的固定 sort binder 构造器。定义端抽象
 检查仍可查询 sort 目录；依赖域的实例化必须使用完整域。内存摘要独立入口目前
 仍自行读取包域目录，未宣称已经共享整个分析事务。Drop 消费者的后续迁移见
-下一节；契约继承与泛型默认值的 P3／Copy 证据缺口仍未解决。
+下一节；契约继承后续迁移见第 4.3 节，泛型默认值的 P3／Copy 证据缺口仍未解决。
 
 工作目录 `/home/fin/luna`，执行
 `python3 -B development/check.py --timeout 900 -- test -p program_verification
@@ -582,7 +642,7 @@ Drop 选择现以有界声明替换准备签名、类型 requirements 和 capabi
 subject 的重建、函数契约重建和名义字段投影都使用完整域的 bounded 替换。
 旧 `memory_binders` 已失去全部生产调用者并删除。此迁移没有统一整个 selection
 查询的预算：类型查询仍接收独立 Budget，完整事务的预算与证据所有权还有后续
-工作。契约继承也仍有自己的旧替换路径。
+工作。契约继承的旧 owner 替换与发布路径已另按第 4.3 节迁移。
 
 工作目录 `/home/fin/luna`，以下命令均使用
 `python3 -B development/check.py --timeout 900 -- test`：
