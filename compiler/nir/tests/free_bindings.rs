@@ -494,6 +494,63 @@ fn binding_failures_distinguish_budget_depth_and_invalid_scope() {
 }
 
 #[test]
+fn lexical_depth_limits_remain_diagnostics_on_a_two_megabyte_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            use nir::free_bindings::{Error, collect};
+            let mut too_deep = local(1);
+            for _ in 0..130 {
+                too_deep = expr(K::Block {
+                    statements: vec![],
+                    result: Some(Box::new(too_deep)),
+                });
+            }
+            assert_eq!(
+                collect(&too_deep, &mut 100_000),
+                Err(Error::Depth("capture analysis depth exhausted"))
+            );
+
+            let wrap = |mut body| {
+                for _ in 0..96 {
+                    body = expr(K::Block {
+                        statements: vec![expr(K::Let {
+                            binding: id(2),
+                            value: Box::new(local(1)),
+                        })],
+                        result: Some(Box::new(body)),
+                    });
+                }
+                body
+            };
+            let valid = wrap(local(2));
+            assert!(matches!(collect(&valid, &mut 20), Err(Error::Budget(_))));
+            assert_eq!(
+                collect(&valid, &mut 100_000).unwrap(),
+                [id(1)].into_iter().collect()
+            );
+            let invalid = wrap(expr(K::Closure {
+                captures: vec![],
+                parameters: vec![],
+                body: std::sync::Arc::new(local(99)),
+            }));
+            assert_eq!(
+                collect(&invalid, &mut 100_000),
+                Err(Error::Invalid(
+                    "closure body references an undeclared capture"
+                ))
+            );
+            assert_eq!(
+                collect(&valid, &mut 100_000).unwrap(),
+                [id(1)].into_iter().collect()
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn typed_traversal_preserves_callback_errors_and_structural_failures() {
     use nir::visit::{Error, expression_checked};
     let unit = expr(K::Unit);

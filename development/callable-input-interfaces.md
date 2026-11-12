@@ -136,7 +136,9 @@ NIR 阶段检查及 materialization 已接入。阶段检查不再用 `.ok()` �
 | `-p type_resolution --test callable_world` | 退出 0，8 项通过，补全接收世界隔离、准入、失败与恢复检查 | `/tmp/luna-tools-7wipdexv/result.json` |
 
 所改 Rust 文件的 rustfmt 检查退出 0，见 `/tmp/luna-tools-pbd1y25p/result.json`。
-没有增加线程栈或预算来掩盖基线失败；默认参数深度用例的栈溢出仍须单独修复。
+这次没有增加线程栈或预算来掩盖基线失败。后续已将遍历器回调与结构展开的栈帧
+分离，修复该默认参数深度用例；无过滤的完整阶段检查与真实 sysroot 回归见
+[词法分析回调栈边界](solvers-resources-and-lowering.md#83-词法分析回调与通用遍历器的栈边界)。
 本阶段没有运行全 workspace 或新增性能测量，不宣称解除了待定签名恢复与接口
 传送的限制。
 

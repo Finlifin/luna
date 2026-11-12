@@ -838,6 +838,41 @@ mapper 次数、展开／未展开参考执行及 LLVM O0/O3。此阶段属于�
 `/tmp/luna-tools-17ztwbja/result.json` 为相同 UnvalidatedModel。二者尚未修复；
 没有删除用例或改变语义预期，也不将本节交付称为所有宿主栈问题已经解决。
 
+### 8.3 词法分析回调与通用遍历器的栈边界
+
+阶段检查的 `runtime_default_analysis_distinguishes_resource_limits_and_invalid_scope`
+在 130 层 block 上栈溢出，而未返回原有的默认参数绑定分析深度诊断。
+`abb4588d` 之前的 NIR 对照同样失败，见
+[telescope 验证记录](callable-input-interfaces.md#已接通共同的声明-telescope-构造)。
+新加的固定 2 MiB 栈回归直接调用 free_bindings，也在修改前复现 SIGABRT：
+`/tmp/luna-tools-g37zif7x/result.json` 退出 101。
+
+问题发生在 `free_bindings::scan → visit::walk_nodes → visitor → scan` 的调用环。
+遍历器虽然使用显式 work stack，但调用词法回调时仍保留整个结构分派的临时栈槽。
+无优化构建的 `walk_nodes` 栈帧为 `0x2c08`（11272）字节，加上词法回调，尚未
+到达 128 层分析上限就已耗尽默认线程栈。因此“内部使用 Vec work stack”也不能
+单独证明回调重入路径的宿主空间上界。
+
+现将结构分派移到 `visit/children.rs::expand`，回调先返回，再展开未剪枝节点。
+该函数不接收回调，并明确禁止内联回驱动；不再将大型分派栈帧保留在回调重入链上。
+所有结构分支、入队次序、模式证据检查、默认值／闭包开关和额度扣除保持原规则；
+本次构建的回调驱动栈帧为 456 字节，独立展开函数为 8872 字节，测量见
+`/tmp/luna-visitor-stack-after.txt`。这些数值是本次构建证据，不是跨平台 ABI 保证。
+
+固定 2 MiB 回归还检查 96 层绑定的真实自由变量、预算失败后的重试、未声明闭包
+捕获的 Invalid，以及后续成功分析；没有扩大线程栈、增加默认额度或改低深度上限。
+原阶段检查用例恢复原诊断并通过，当前不再需要过滤它。其它递归分析器仍须分别核验。
+
+工作目录 `/home/fin/luna`，最终执行
+`python3 -B development/check.py --timeout 900 -- test -p nir -p program_verification
+-p luna --lib --test free_bindings --test phases --test default_calls
+--test comptime_bytecode_defaults --test comptime_bytecode_closures
+--test closure_environment_parameters --test sysroot_preludes --no-fail-fast`，
+`/tmp/luna-tools-o_npuj8i/result.json` 退出 0，447 项通过，无过滤或 ignored。
+包含真实 sysroot 的公开接口验收；工作区已有的作者资源分析改动保持原样，未计入
+本次提交。所改 Rust 文件格式检查退出 0，`/tmp/luna-tools-9mbkf1lu/result.json`。
+未执行全 workspace 或另行性能测量。
+
 ## 9. BitVec 与目标能力
 
 定义端 BitVec 宽度可为受约束的 comptime 整数项；具体实例必须确定。
