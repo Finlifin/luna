@@ -1131,3 +1131,65 @@ fn wide_predicate_does_not_compile_to_a_false_shape_guard() {
         comptime_compiler::Op::PreparePredicate { valid: false }
     )));
 }
+
+#[test]
+fn borrowed_selectors_share_constant_storage_without_losing_use_sites() {
+    use comptime_compiler::{Op, leaf_inputs::Selector};
+    use nir::program::{Literal, ObjectQueryKind};
+    let code = {
+        let literal = Expr {
+            source: SourceRange { start: 10, end: 11 },
+            ty: Term::Primitive(Primitive::Symbol),
+            kind: K::Literal(Literal::Symbol("key\"\\\n".repeat(256))),
+        };
+        let mut selector = literal.clone();
+        selector.source = SourceRange { start: 20, end: 21 };
+        let receiver = Expr {
+            ty: Term::Primitive(Primitive::Object),
+            ..expr(K::Local(LocalId { owner: 1, index: 0 }))
+        };
+        let query = Expr {
+            ty: Term::Optional(Box::new(Term::Primitive(Primitive::Bool))),
+            ..expr(K::ObjectQuery {
+                query: ObjectQueryKind::NamedValue,
+                subject: Box::new(Expr {
+                    ty: Term::Tuple(vec![receiver.ty.clone(), selector.ty.clone()]),
+                    ..expr(K::Tuple(vec![receiver, selector]))
+                }),
+            })
+        };
+        let body = expr(K::Block {
+            statements: vec![literal, query],
+            result: None,
+        });
+        let mut session = comptime_compiler::CompilationSession::default();
+        assert!(matches!(
+            session.compile(&body, &mut 10),
+            Err(Error::Budget(_))
+        ));
+        session.compile(&body, &mut 100_000).unwrap()
+    };
+    assert_eq!(code.constants().len(), 1);
+    let mut sites = vec![];
+    for instruction in code.instructions() {
+        match &instruction.op {
+            Op::Constant { constant, .. } => sites.push((*constant, instruction.source)),
+            Op::LocalObjectAccess { selectors, .. } => {
+                let [Selector::Literal(constant, source)] = selectors.as_slice() else {
+                    panic!("expected a constant selector")
+                };
+                sites.push((*constant, *source));
+            }
+            _ => (),
+        }
+    }
+    assert_eq!(sites.len(), 2);
+    assert_eq!(sites[0].0, sites[1].0);
+    assert_ne!(sites[0].1, sites[1].1);
+    let dump = code.to_string();
+    assert!(
+        dump.contains("(literal-constant 0 (source 20 21))"),
+        "{dump}"
+    );
+    assert!(dump.contains("key\\\"\\\\\\n"));
+}

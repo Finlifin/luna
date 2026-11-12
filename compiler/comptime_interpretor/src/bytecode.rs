@@ -1499,21 +1499,15 @@ impl<'a> Interpreter<'a> {
                     index,
                 } => {
                     let ty = frame.take_type(*destination).ok_or_else(missing)?;
-                    use comptime_compiler::leaf_inputs::Selector;
                     use leaf_inputs::LocalSelector;
                     self.tick(Some(*list_source))?;
                     let list = frame.slots[*list].as_ref().ok_or_else(|| {
                         self.failure(ErrorKind::MissingBinding, Some(*list_source))
                     })?;
-                    let index = match index {
-                        Selector::Local(slot, at) => {
-                            LocalSelector::Value(frame.slots[*slot].as_ref(), *at)
-                        }
-                        Selector::Literal(expr) => LocalSelector::Literal(expr),
-                    };
+                    let index = self.compiled_leaf_selector(index, &code, &frame.slots)?;
                     let independent = matches!(
                         &index,
-                        LocalSelector::Literal(_)
+                        LocalSelector::Literal { .. }
                             | LocalSelector::Value(Some(Value::Integer(_)), _)
                     );
                     let Flow::Value(value) = self.read_local_list_index(
@@ -1633,27 +1627,22 @@ impl<'a> Interpreter<'a> {
                     receiver_source,
                     selectors,
                 } => {
-                    use comptime_compiler::leaf_inputs::Selector;
-                    use leaf_inputs::LocalSelector;
                     let receiver = frame.slots[*receiver].as_ref().ok_or_else(|| {
                         self.failure(ErrorKind::MissingBinding, Some(*receiver_source))
                     })?;
                     if selectors.len() > 2 {
                         return Err(self.failure(ErrorKind::Type, Some(source)));
                     }
-                    let selectors = [0, 1].map(|index| {
-                        selectors.get(index).map(|selector| match selector {
-                            Selector::Local(slot, source) => {
-                                LocalSelector::Value(frame.slots[*slot].as_ref(), *source)
-                            }
-                            Selector::Literal(expr) => LocalSelector::Literal(expr),
-                        })
-                    });
+                    let mut selected = [None, None];
+                    for (destination, selector) in selected.iter_mut().zip(selectors) {
+                        *destination =
+                            Some(self.compiled_leaf_selector(selector, &code, &frame.slots)?);
+                    }
                     let Flow::Value(value) = self.access_local_object(
                         access,
                         receiver,
                         *receiver_source,
-                        selectors,
+                        selected,
                         source,
                     )?
                     else {

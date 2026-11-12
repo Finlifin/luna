@@ -16,7 +16,7 @@ impl Interpreter<'_> {
         let independent = selectors.iter().flatten().all(|selector| {
             matches!(
                 selector,
-                LocalSelector::Literal(_)
+                LocalSelector::Literal { .. }
                     | LocalSelector::Value(Some(Value::Integer(_) | Value::Symbol(_)), _)
             )
         });

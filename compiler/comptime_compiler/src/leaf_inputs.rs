@@ -3,7 +3,7 @@ use super::*;
 #[derive(Debug)]
 pub enum Selector {
     Local(Register, SourceRange),
-    Literal(Arc<Expr>),
+    Literal(constants::Id, SourceRange),
 }
 impl fmt::Display for Selector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -13,7 +13,11 @@ impl fmt::Display for Selector {
                 "(local %{slot} (source {} {}))",
                 source.start, source.end
             ),
-            Self::Literal(value) => write!(f, "(literal {value})"),
+            Self::Literal(value, source) => write!(
+                f,
+                "(literal-constant {value} (source {} {}))",
+                source.start, source.end
+            ),
         }
     }
 }

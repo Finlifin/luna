@@ -2296,9 +2296,9 @@ fn compile_root<'a>(
                                     index.source,
                                 ),
                                 _ => {
-                                    nir::copy_budget::charge_substitution(index, &[], &[], fuel)
-                                        .map_err(|error| copy_error(error, index.source))?;
-                                    leaf_inputs::Selector::Literal(Arc::new(index.as_ref().clone()))
+                                    let constant =
+                                        constant_table.insert(constants.get(index, fuel)?);
+                                    leaf_inputs::Selector::Literal(constant, index.source)
                                 }
                             };
                             emit(
@@ -2529,14 +2529,9 @@ fn compile_root<'a>(
                                         field.source,
                                     )),
                                     K::Literal(_) => {
-                                        nir::copy_budget::charge_substitution(
-                                            field,
-                                            &[],
-                                            &[],
-                                            fuel,
-                                        )
-                                        .map_err(|error| copy_error(error, field.source))?;
-                                        Ok(leaf_inputs::Selector::Literal(Arc::new(field.clone())))
+                                        let constant =
+                                            constant_table.insert(constants.get(field, fuel)?);
+                                        Ok(leaf_inputs::Selector::Literal(constant, field.source))
                                     }
                                     _ => unreachable!(),
                                 })

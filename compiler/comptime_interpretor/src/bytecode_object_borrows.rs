@@ -217,3 +217,71 @@ fn local_object_slices_keep_snapshots_and_release_locks_for_sibling_bounds() {
     };
     assert!(empty.entries().is_empty());
 }
+
+#[test]
+fn literal_selector_constants_recheck_domains_and_recover_after_failure() {
+    let source = SourceRange { start: 10, end: 11 };
+    let selected_source = SourceRange { start: 20, end: 21 };
+    let receiver = LocalId { owner: 1, index: 0 };
+    let package = Package::default();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut environment = Environment::new();
+    environment.insert(
+        receiver,
+        Value::Object(Object::from_entries(vec![ObjectEntry::Property {
+            key: "flag".into(),
+            value: ObjectValue {
+                ty: Term::Primitive(Primitive::Bool),
+                value: Value::Bool(true),
+            },
+        }])),
+    );
+    for valid in [true, false, true] {
+        let selector = Expr {
+            source: selected_source,
+            ty: Term::Primitive(Primitive::Symbol),
+            kind: K::Literal(if valid {
+                Literal::Symbol("flag".into())
+            } else {
+                Literal::Integer("0".into())
+            }),
+        };
+        let body = Expr {
+            source,
+            ty: Term::Optional(Box::new(Term::Primitive(Primitive::Bool))),
+            kind: K::ObjectQuery {
+                query: Q::NamedValue,
+                subject: Box::new(Expr {
+                    source,
+                    ty: Term::Tuple(vec![
+                        Term::Primitive(Primitive::Object),
+                        selector.ty.clone(),
+                    ]),
+                    kind: K::Tuple(vec![
+                        Expr {
+                            source,
+                            ty: Term::Primitive(Primitive::Object),
+                            kind: K::Local(receiver),
+                        },
+                        selector,
+                    ]),
+                }),
+            },
+        };
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 10_000).unwrap());
+        let result = vm.execute_code(&code, &mut environment);
+        if valid {
+            let Flow::Value(Value::Optional {
+                value: Some(value), ..
+            }) = result.unwrap()
+            else {
+                panic!("expected the stored boolean")
+            };
+            assert_eq!(*value, Value::Bool(true));
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Type);
+            assert_eq!(error.source, Some(selected_source));
+        }
+    }
+}

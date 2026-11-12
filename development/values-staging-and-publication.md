@@ -859,6 +859,34 @@ comptime 值引用与 runtime 资源约束；描述器不执行主体。每次�
 世界依赖和验证结果。代码缓存可复用它，不共享某次 invocation 的帧或可变值。
 指令必须有完整 Display；原语操作通过明确绑定身份 dispatch，不按公共源码拼写识别。
 
+### 已清理：借用读取的字面量载体
+
+列表下标和 Object 借用读取的字面量选择器现在与普通常量指令共用 typed constant
+表。指令只保存表内编号与本次使用的 SourceRange，不再保存 `Arc<Expr>`；VM 取得
+字面量、域和来源后调用共同 literal 语义服务，不构造空环境或返回表达式求值入口。
+相同载荷可共享，同值的两个使用位置仍分别执行并分别诊断；表内编号只在所属代码
+对象内有效。池命中仍付身份检查预算，编译失败不发布残缺代码或保活失败载荷。
+
+借用资格没有扩大：只有原先允许的局部值／字面量选择器走该路径；计算型选择器
+仍先取得快照。可变别名、锁冲突、实际域、目标数值形成与值引用检查保持在执行时。
+本阶段没有把默认模板、闭包主体或 TypeInputPlan 移出源码载体，也没有取消整个
+invocation 的 tree fallback；不能以这个常量表接线宣称完成独立执行 IR。
+
+工作目录 `/home/fin/luna`，基线 `72932b66` 加本阶段改动。
+`python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --test control -- --test-threads=1`
+退出 0（编译器单元 7、控制流 30、解释器单元 599）；证据
+`/tmp/luna-tools-cau1e2eg/result.json`。新增回归覆盖共享载荷保留不同来源、预算失败
+后重试、错误字面量域与失败后恢复；已有借用锁、别名和求值顺序用例保持通过。
+源码集成检查 `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects --test comptime_bytecode_lists --test comptime_list_operations -- --test-threads=1`
+退出 0，三个组分别 34、6、66 项通过，见 `/tmp/luna-tools-u68gxans/result.json`。
+其中既有普通包公开 List 入口会从实际 library 载入依赖；其余拼接库源码的隔离用例
+不单独用来证明完整 sysroot 交付。
+真实 sysroot 补充检查 `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes -- --test-threads=1 shipped_meta_object shipped_object_fallible`
+退出 0，3 项通过；`/tmp/luna-tools-xwheicba/result.json`。本阶段未运行全 workspace
+或计时性能基准，不从载荷复用推断整体复杂度改善。
+
+
+
 ### 已清理：BitVec 固定元数操作的临时堆参数
 
 BitVec 取表示、转换、slice 是单参数；index、concat、equal、and／or 是双参数；
