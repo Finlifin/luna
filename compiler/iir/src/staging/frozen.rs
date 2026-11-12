@@ -36,59 +36,14 @@ fn decode(
     let child = |value: &Term, ty: &Term, fuel: &mut usize| {
         decode(heads, value, ty, source, fuel, depth + 1)
     };
+    if value.scalar_index_domain().is_some() {
+        return nir::scalar_construction::expression(value, ty, heads.target, source, fuel)
+            .map_err(|error| error.to_string());
+    }
     let kind = if *ty == Term::Primitive(Primitive::Type) && value.sort() == Sort::Type {
         K::TypeValue(value.clone())
     } else {
         match value {
-            Term::Bool(value) => K::Literal(Literal::Bool(*value)),
-            Term::Char(value) => K::Literal(Literal::Char(*value)),
-            Term::Symbol(value) => K::Literal(Literal::Symbol(value.to_string())),
-            Term::String(value) => K::Literal(Literal::String(value.to_string())),
-            Term::Unit => K::Unit,
-            Term::Float16(value) => K::Literal(Literal::Float16(*value)),
-            Term::BFloat16(value) => K::Literal(Literal::BFloat16(*value)),
-            Term::Float32(value) => K::Literal(Literal::Float32(*value)),
-            Term::Float64(value) => K::Literal(Literal::Float64(*value)),
-            Term::BitVec(value) => K::Literal(Literal::BitVec {
-                width: value.width(),
-                words: value.words().to_vec(),
-            }),
-            Term::Float(value) => {
-                let mut budget = comptime_runtime::Budget {
-                    steps: *fuel,
-                    max_limbs: 4096,
-                };
-                let spelling = value.to_literal(&mut budget);
-                *fuel = budget.steps;
-                K::Literal(Literal::Float(spelling.map_err(|e| e.to_string())?))
-            }
-            Term::Integer(value) => {
-                if *ty == Term::Primitive(Primitive::Integer) {
-                    let mut budget = comptime_runtime::Budget {
-                        steps: *fuel,
-                        max_limbs: 4096,
-                    };
-                    let spelling = value.to_hex_literal(&mut budget);
-                    *fuel = budget.steps;
-                    K::Literal(Literal::Integer(spelling.map_err(|e| e.to_string())?))
-                } else {
-                    let Term::Primitive(primitive) = ty else {
-                        return Err("frozen integer requires an integer domain".into());
-                    };
-                    let (signed, width) = heads
-                        .integer_layout(*primitive)
-                        .ok_or("frozen integer requires a target-resolved integer domain")?;
-                    if signed {
-                        K::Literal(Literal::SignedInteger(
-                            value.to_signed(width).map_err(|e| e.to_string())?,
-                        ))
-                    } else {
-                        K::Literal(Literal::UnsignedInteger(
-                            value.to_unsigned(width).map_err(|e| e.to_string())?,
-                        ))
-                    }
-                }
-            }
             Term::NominalValue {
                 ty: domain,
                 variant: None,

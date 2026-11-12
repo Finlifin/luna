@@ -594,6 +594,16 @@ fn domain_in(
             limits,
         )?));
     }
+    // Unicode scalar order, independent of storage layout. The convex range
+    // deliberately includes the surrogate gap: this is an overapproximation,
+    // never permission to construct an invalid character or perform arithmetic.
+    if *primitive == nir::Primitive::Char {
+        return Ok(Some(Interval::new(
+            Integer::zero(),
+            Integer::from_u128(0x10ffff),
+            limits,
+        )?));
+    }
     target
         .map_or_else(
             || primitive.fixed_integer_layout(),
@@ -4698,16 +4708,25 @@ impl Walker<'_> {
             ) => {
                 return self.completed_aggregate_value(value, &expr.ty, expr.source, state, depth);
             }
-            K::ComptimeValue(Term::Bool(value))
-                if expr.ty == Term::Primitive(nir::Primitive::Bool) =>
-            {
-                // Completed immutable Boolean data uses the same program fact
-                // as a literal; symbolic captures remain unknown below.
-                let literal = Expr {
-                    source: expr.source,
-                    ty: expr.ty.clone(),
-                    kind: K::Literal(Literal::Bool(*value)),
-                };
+            K::ComptimeValue(value @ (Term::Bool(_) | Term::Char(_))) => {
+                // Completed source scalars and literals observe the same
+                // domain. This does not select a runtime Splice conversion.
+                let literal = nir::scalar_construction::expression(
+                    value,
+                    &expr.ty,
+                    self.target(),
+                    expr.source,
+                    &mut self.limits.arithmetic.steps,
+                )
+                .map_err(|error| match error {
+                    nir::scalar_construction::Error::Budget => {
+                        Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into())
+                    }
+                    nir::scalar_construction::Error::SizeLimit => {
+                        Reason::Unknown(comptime_runtime::Error::SizeLimit.into())
+                    }
+                    nir::scalar_construction::Error::Invalid(_) => Reason::InvalidSignature,
+                })?;
                 return self.binding_expression(&literal, state, depth);
             }
             K::ComptimeValue(Term::Integer(value)) => {
@@ -4734,6 +4753,7 @@ impl Walker<'_> {
                     Literal::SignedInteger(n) => Some(Integer::from_i128(*n)),
                     Literal::UnsignedInteger(n) => Some(Integer::from_u128(*n)),
                     Literal::Integer(text) => Some(self.integer_spelling(text)?),
+                    Literal::Char(value) => Some(Integer::from_u128(u128::from(u32::from(*value)))),
                     Literal::PendingInteger { spelling, negative } => {
                         if let Term::Primitive(domain) = expr.ty {
                             let target = self.target();
@@ -5527,6 +5547,8 @@ pub fn validate_machine_operations_checked(
 
 #[cfg(test)]
 mod phase_evidence_tests;
+#[cfg(test)]
+mod scalar_observation_tests;
 
 fn validate_machine_owners(
     package: &nir::program::Package,

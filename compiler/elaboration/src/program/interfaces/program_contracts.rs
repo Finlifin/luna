@@ -101,17 +101,17 @@ impl Checker<'_, '_> {
                         return Ok(true);
                     };
                     if let Some(value) = values.get(&binding) {
-                        expr.kind = match value {
-                            Term::Bool(value) => K::Literal(n::Literal::Bool(*value)),
-                            Term::Char(value) => K::Literal(n::Literal::Char(*value)),
-                            Term::Integer(value) => {
-                                let mut budget = comptime_runtime::Budget { steps: *fuel, max_limbs: 4096 };
-                                let spelling = value.to_hex_literal(&mut budget);
-                                *fuel = budget.steps;
-                                K::Literal(n::Literal::Integer(spelling.map_err(|e| e.to_string())?))
-                            }
-                            _ => return Err("code contract captured value is outside the program prover's scalar fragment".into()),
-                        };
+                        if !matches!(value, Term::Bool(_) | Term::Char(_) | Term::Integer(_)) {
+                            return Err("code contract captured value is outside the program prover's scalar fragment".into());
+                        }
+                        *expr = nir::scalar_construction::expression(
+                            value,
+                            &expr.ty,
+                            self.target,
+                            expr.source,
+                            fuel,
+                        )
+                        .map_err(|error| error.to_string())?;
                     }
                     Ok(false)
                 })?;

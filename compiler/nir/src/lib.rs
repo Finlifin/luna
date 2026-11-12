@@ -37,6 +37,7 @@ pub mod associated_initializers;
 pub mod completed_values;
 pub mod comptime_values;
 pub mod objects;
+pub mod scalar_construction;
 pub mod value_admission;
 
 pub mod effects;

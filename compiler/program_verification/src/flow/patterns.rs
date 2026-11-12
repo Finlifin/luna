@@ -123,6 +123,7 @@ impl Walker<'_> {
             Literal::UnsignedInteger(n) => Integer::from_u128(*n),
             Literal::Integer(text) => self.integer_spelling(text)?,
             Literal::Bool(value) => Integer::from_u128(u128::from(*value)),
+            Literal::Char(value) => Integer::from_u128(u128::from(u32::from(*value))),
             _ => return Ok(None),
         };
         Ok(match &input.scalar {

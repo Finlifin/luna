@@ -230,6 +230,43 @@ Splice 当 comptime fn 执行，都不满足该交付契约。已提交 native �
 动态字符串、切片、拥有型对象和带引用的图各有不同依赖。全局追加 Copy、将源 VM
 地址带入目标程序或将所有 frozen payload 直接当 native 数据均不成立。
 
+### 已接通的标量表示构造边界
+
+`nir::scalar_construction::expression` 现在集中处理已完成的普通标量值及其明确源域，
+供 IIR 的 frozen staged input 解码和 contextual-code 方法的程序契约替换使用。
+原先两处各自选择字面量表示的逻辑退役；契约中的机器整数按实际域构造 signed／
+unsigned literal，精确 Integer 则保留无界拼写，不再一律套 Integer literal。
+程序验证的冻结 bool／char 观察也经该服务验证实际域，再取得与字面量一致的事实。
+
+接口接收 value、domain、显式 target、source range 和当前 fuel。它保留域身份，
+检查整数范围与位宽、IEEE 位串、BitVec 宽度和文本载荷，预算覆盖验证、复制及精确
+数值拼写；错误区分额度耗尽、表示规模限制与域错误。usize/isize 没有目标时拒绝，
+不会取宿主宽度。未完成输入、Type、聚合及 opaque head 不在标量构造的接收范围，
+不能靠其内容像标量或 NF 主体返回标量而取得表示。
+
+这仍是编译器内部的**源表达式表示服务**。Integer/Float 表达式不会因此拥有 runtime
+存储，str 不会因此取得 backing region，函数也不会因此选择或执行 Splice。
+程序规格仍交给程序验证层。原先声明接收 char 的契约替换现在也接通字符比较事实，
+程序验证器按 Unicode scalar 顺序观察字面量、冻结值、局部和匹配，修改局部后沿用
+现有版本失效规则；范围使用包含 surrogate 空隙的保守区间，不据此授权字符构造
+或算术。新的公开代码构造接口
+若消费该服务，还必须完成 runtime 结果域、空上下文、代码类别和接入义务检查。
+
+这一步没有开放一个可绕过 Splice 的源语言函数，也没有补上普通 comptime 参数
+自动交付。后续须先把合法的代码构造终点接入 primitive Splice，再共同迁移参数、
+捕获和 generator 数据使用；不能把内部表达式构造函数直接当作普通读取的替代品。
+
+验证工作目录 `/home/fin/luna`，统一使用 `development/check.py --timeout 900 --`：
+
+- `test -p nir -p iir -p program_verification --lib --no-fail-fast -- --test-threads=1`
+  退出 0，277 项通过，`/tmp/luna-tools-mk82duag/result.json`。覆盖整数范围、显式
+  target、精确数值和 IEEE 位串、复制预算与重试、字符事实及写入后的失效。
+- `test -p luna --test scalar_construction --test cmtt_methods code_method_program_refinement -- --test-threads=1`
+  退出 0，10 项通过，`/tmp/luna-tools-fqwef94o/result.json`。真实 sysroot 验证
+  u8/i8/u128/i128/usize/char 的代码方法父约束、字符模式及强化前提的拒绝。
+- 修改的 9 个 Rust 文件格式检查退出 0，`/tmp/luna-tools-e6yu99k9/result.json`。
+  这是上述构造与程序观察边界的验收，不是普通 comptime 参数自动 Splice 的验收。
+
 ### CMTT 数据读取与代码构造必须分开
 
 在 `dec912f4` 工作区补查：
