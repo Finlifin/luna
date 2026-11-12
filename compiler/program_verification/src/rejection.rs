@@ -202,7 +202,7 @@ fn cleanup_rejection(
 }
 
 fn scan<'a>(
-    declarations: &super::declarations::Metadata<'_>,
+    declarations: &super::declarations::Metadata<'a>,
     definitions: &BTreeMap<DeclarationId, &'a Function>,
     completed: &HashMap<Instance, bool>,
     root: Instance,
@@ -226,11 +226,25 @@ fn scan<'a>(
                     }
                     continue;
                 }
-                let Some(function) = definitions.get(&id.declaration).copied() else {
+                if !definitions.contains_key(&id.declaration) {
                     return Ok((true, visited));
+                }
+                // Analyze the selected residual, including its contracts. Its
+                // completed staging inputs remain in the cache key, but are
+                // no longer substitutions for the residual body's telescope.
+                let selected = declarations
+                    .package()
+                    .ok_or("missing rejection package")?
+                    .runtime_body_checked(id.declaration, &id.arguments);
+                let (function, body_arguments) = match selected {
+                    Ok(selected) => selected,
+                    Err("function type arguments have incorrect arity") => {
+                        return Ok((true, visited));
+                    }
+                    Err(error) => return Err(error),
                 };
                 if function.phase != FunctionPhase::Runtime
-                    || function.type_parameters.len() != id.arguments.len()
+                    || function.type_parameters.len() != body_arguments.len()
                 {
                     return Ok((true, visited));
                 }
@@ -240,7 +254,7 @@ fn scan<'a>(
                     .parameter_domains(&function.type_parameters, fuel)
                     .map_err(|_| "invalid rejection declaration metadata or exhausted budget")?;
                 let context =
-                    Substitution::new(&function.type_parameters, &domains, &id.arguments, fuel)?;
+                    Substitution::new(&function.type_parameters, &domains, body_arguments, fuel)?;
                 // Parameter ownership is acquired even when the body never
                 // reads the parameter. Its exit cleanup can run user code.
                 if let Term::Function { parameters, .. } = function.signature.callable_signature() {
@@ -1048,6 +1062,53 @@ mod tests {
                 }]
             }]
         );
+    }
+
+    #[test]
+    fn selected_residual_controls_rejection_and_malformed_selection_fails() {
+        for source_rejects in [false, true] {
+            let body = |rejects| if rejects { rejected() } else { expr(K::Unit) };
+            let source = generic_function(0, 10, body(source_rejects));
+            let residual = function(0, body(!source_rejects));
+            let arguments = vec![Term::Primitive(Primitive::Bool)];
+            let selected = nir::program::RuntimeInstance {
+                declaration: id(0),
+                arguments: arguments.clone(),
+                function: residual,
+                cleanup_accesses: vec![],
+            };
+            let mut package = Package {
+                functions: vec![source],
+                runtime_instances: vec![selected.clone()],
+                ..Default::default()
+            };
+            let target = generic_callee(0, arguments);
+            assert_eq!(
+                Cache::new(Some(&package))
+                    .may_reject(&target, &mut 1000)
+                    .unwrap(),
+                !source_rejects,
+            );
+            package.runtime_instances.push(selected);
+            assert!(
+                Cache::new(Some(&package))
+                    .may_reject(&target, &mut 1000)
+                    .is_err()
+            );
+            package.runtime_instances.pop();
+            package.runtime_instances[0]
+                .function
+                .preconditions
+                .push(Expr {
+                    ty: Term::Primitive(Primitive::Bool),
+                    ..expr(K::Literal(Literal::Bool(false)))
+                });
+            assert!(
+                Cache::new(Some(&package))
+                    .may_reject(&target, &mut 1000)
+                    .unwrap()
+            );
+        }
     }
 
     #[test]

@@ -2224,21 +2224,21 @@ impl fmt::Display for RuntimeInstance {
 impl Package {
     /// Return the exact residual body when present. Completed bodies have no
     /// remaining clause substitutions; their invocation identity stays in the key.
-    pub fn runtime_body<'a>(
+    pub fn runtime_body<'a, 'b>(
         &'a self,
         declaration: DeclarationId,
-        arguments: &'a [Term],
-    ) -> Option<(&'a Function, &'a [Term])> {
+        arguments: &'b [Term],
+    ) -> Option<(&'a Function, &'b [Term])> {
         self.runtime_body_checked(declaration, arguments).ok()
     }
 
     /// Diagnostic-preserving form of runtime_body. An invalid selected
     /// instance is an error, never permission to use the source definition.
-    pub fn runtime_body_checked<'a>(
+    pub fn runtime_body_checked<'a, 'b>(
         &'a self,
         declaration: DeclarationId,
-        arguments: &'a [Term],
-    ) -> Result<(&'a Function, &'a [Term]), &'static str> {
+        arguments: &'b [Term],
+    ) -> Result<(&'a Function, &'b [Term]), &'static str> {
         let mut matches = self.runtime_instances.iter().filter(|instance| {
             instance.declaration == declaration && instance.arguments == arguments
         });
