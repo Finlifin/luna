@@ -424,6 +424,34 @@ program_verification --lib -p luna --test declaration_contracts --test integer_c
 --no-fail-fast`），`/tmp/luna-tools-m4zet26v/result.json` 退出 0，220 项通过。
 后者包含真实 sysroot 的显式 Type 值与跨函数转发，并保留错误运行时前提的拒绝。
 
+同一规则现延伸到 P3／P4 的函数特化与拒绝行为扫描。纯度采用
+`Function::instantiate_declaration_parameters`，同时预检整个函数的元数据、契约、
+默认值和主体扩张；原来分别计量部分表达式、再按固定 sort 复制函数的路径已删除。
+因此契约接受的 `D = Type, item = u8` 不会仅因进入纯度消费者而再次被拒绝。
+
+拒绝扫描的工作项需要比一次借用活得更久。`DeclarationSubstitution::into_owned`
+在复制前计量借用的实参和 frame，移动已拥有的数据，保留原 scope 和完成域的
+结构检查。工作项共享该只读替换上下文；逐项展开仍由共同的 bounded 接口计量。
+它只拥有替换语法和 frame 形状，不是 VM 存储、世界租约、值成员资格或行为证明，
+不能据此跨包复用选择结果。旧扫描器的固定 sort 映射与最大实参成本乘树大小的
+独立替换估算已退役。失败仍不写入成功行为缓存。
+
+此前新增真实 sysroot 的 `pure fn answer() -> bool where D, item: D { true }`
+及 `pure fn run() -> bool { answer<Type, u8>() }`，执行
+`python3 -B development/check.py --timeout 900 -- test -p luna --test declaration_contracts
+-- --nocapture`；`/tmp/luna-tools-f8f6w8k8/result.json` 退出 101，实际在 `run` 的
+P4 检查失败。同轮高阶输入／结果与 Drop 正例通过，故不把它们称为本次修复的旧
+失败，也不据此认定全部消费者已迁移。`moves` 的部分 callable signature／body
+准备和 Drop 选择／契约再核对仍保留固定 sort 路径，须按各自生产者继续迁移。
+
+最终执行 `python3 -B development/check.py --timeout 900 -- test -p nir
+-p program_verification -p luna --lib --test declaration_contracts --test runtime_purity
+--test optional_purity --test default_calls --test function_template_local_definitions
+--test resources --test library_protocols --no-fail-fast`，
+`/tmp/luna-tools-ss__0lqr/result.json` 退出 0，811 项通过、1 项既有忽略。新增单元
+验证 owned 替换在原输入释放后仍保留 frame 与不透明头，低预算不复制大载荷，
+错误域不污染拒绝行为缓存，失败后的新合法查询仍能成功。
+
 ## 8. IIR 到 ABI 的明确顺序
 
 IIR 完成类型的 comptime 部分和实例选择，保留高级操作、真实 runtime 依赖及 NIR 已建立的

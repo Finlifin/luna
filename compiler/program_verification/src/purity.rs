@@ -4346,35 +4346,18 @@ impl<'a> Analysis<'a> {
         {
             return false;
         }
-        // Charge owned body/type copies before specializing. A long or
-        // polymorphically growing call graph cannot bypass the analysis budget.
-        let mut fuel = self.fuel as u64;
-        let bounded = std::iter::once(&function.body)
-            .chain(function.preconditions.iter())
-            .chain(function.postconditions.iter())
-            .chain(function.defaults.iter().map(|(_, value)| value))
-            .all(|value| nir::copy_budget::charge_expression(value, &mut fuel).is_ok());
-        self.fuel = fuel as usize;
-        if !bounded
-            || crate::associated::charge_projection_copy(&function.signature, &mut self.fuel)
-                .is_err()
-        {
-            return false;
-        }
-        // Substitute declaration inputs with their declared sorts. This does
-        // not unfold opaque heads or observe runtime inputs.
-        let Some(sorts) = &self.parameter_sorts else {
+        // Complete declaration domains determine substitution, including a
+        // value binder whose actual domain is Type. The shared function path
+        // bounds metadata, contracts, defaults and body expansion together.
+        let Ok(domains) = self
+            .declarations
+            .parameter_domains(&function.type_parameters, &mut self.fuel)
+        else {
             return false;
         };
-        let binders = function
-            .type_parameters
-            .iter()
-            .map(|id| nir::DeclarationParameter {
-                declaration: *id,
-                sort: sorts.get(id).copied().unwrap_or(Sort::Type),
-            })
-            .collect::<Vec<_>>();
-        let Ok(function) = function.instantiate_parameters(&binders, types) else {
+        let Ok(function) =
+            function.instantiate_declaration_parameters(&domains, types, &mut self.fuel)
+        else {
             return false;
         };
         // A proven check has no rejection behavior, but its predicate still

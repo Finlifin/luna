@@ -42,3 +42,52 @@ fn forwarded_type_inputs_keep_the_callers_scope_in_contracts() {
     "#;
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn purity_checks_dependent_type_inputs_through_their_domains() {
+    assert_eq!(
+        sysroot::run(
+            r#"
+        pure fn answer() -> bool where D, item: D { true }
+        pure fn run() -> bool { answer<Type, u8>() }
+    "#
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn callable_inputs_and_results_keep_dependent_declaration_domains() {
+    assert_eq!(
+        sysroot::run(
+            r#"
+        fn answer() -> bool where D, item: D { true }
+        fn call(action: fn() -> bool) -> bool { action() }
+        fn factory() -> fn() -> bool where D, item: D { answer<D, item> }
+        fn run() -> bool {
+            call(answer<Type, u8>) and call(factory<Type, u8>())
+        }
+    "#
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn selected_drop_keeps_dependent_declaration_domains() {
+    assert_eq!(
+        sysroot::run(
+            r#"
+        struct Marker where D, item: D {}
+        impl Drop for Marker<D, item> where D, item: D {
+            fn drop(*self) {}
+        }
+        fn run() -> bool {
+            let owned = Marker<Type, u8> {};
+            true
+        }
+    "#
+        ),
+        Value::Bool(true)
+    );
+}

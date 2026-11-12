@@ -17,63 +17,26 @@ struct Instance {
     arguments: Arc<[Term]>,
 }
 #[derive(Clone)]
-struct Substitution {
-    parameters: Arc<[nir::DeclarationParameter]>,
-    arguments: Arc<[Term]>,
-    argument_cost: usize,
-}
+struct Substitution(Arc<nir::DeclarationSubstitution<'static>>);
 impl Substitution {
     fn new(
         parameters: &[DeclarationId],
-        sorts: &BTreeMap<DeclarationId, nir::Sort>,
-        arguments: Arc<[Term]>,
+        domains: &[Term],
+        arguments: &[Term],
         fuel: &mut usize,
     ) -> Result<Self, &'static str> {
-        if parameters.len() != arguments.len() {
-            return Err("invalid rejection declaration arguments");
-        }
-        *fuel = fuel
-            .checked_sub(parameters.len())
-            .ok_or("rejection binder budget exhausted")?;
-        let mut argument_cost = 0;
-        for argument in arguments.iter() {
-            let before = *fuel;
-            super::memory::bound_type(argument, fuel)
-                .map_err(|_| "rejection type budget exhausted")?;
-            argument_cost = argument_cost.max(before - *fuel);
-        }
-        let parameters: Arc<[_]> = parameters
-            .iter()
-            .map(|declaration| nir::DeclarationParameter {
-                declaration: *declaration,
-                sort: sorts.get(declaration).copied().unwrap_or(nir::Sort::Type),
-            })
-            .collect();
-        Term::Tuple(vec![])
-            .instantiate_parameters(&parameters, &arguments)
-            .map_err(|_| "invalid rejection declaration arguments")?;
-        Ok(Self {
-            parameters,
-            arguments,
-            argument_cost,
-        })
+        let substitution =
+            nir::DeclarationSubstitution::bounded(parameters, domains, arguments, &[], fuel)
+                .map_err(|_| "invalid rejection declaration arguments or exhausted budget")?;
+        let owned = substitution
+            .into_owned(fuel)
+            .map_err(|_| "rejection substitution ownership budget exhausted")?;
+        Ok(Self(Arc::new(owned)))
     }
     fn ty(&self, ty: &Term, fuel: &mut usize) -> Result<Term, &'static str> {
-        let before = *fuel;
-        super::memory::bound_type(ty, fuel).map_err(|_| "rejection type budget exhausted")?;
-        // Prepay a conservative bound on substitution expansion before cloning.
-        // No normal-form body is unfolded; only the reference's arguments change.
-        let cost = (before - *fuel)
-            .checked_mul(self.argument_cost)
-            .ok_or("rejection substitution budget exhausted")?;
-        *fuel = fuel
-            .checked_sub(cost)
-            .ok_or("rejection substitution budget exhausted")?;
-        let result = ty
-            .instantiate_parameters(&self.parameters, &self.arguments)
-            .map_err(|_| "invalid rejection type substitution")?;
-        super::memory::bound_type(&result, fuel).map_err(|_| "rejection type budget exhausted")?;
-        Ok(result)
+        self.0
+            .instantiate_bounded(ty, fuel)
+            .map_err(|_| "invalid rejection type substitution or exhausted budget")
     }
 }
 fn instance(
@@ -248,7 +211,6 @@ fn scan<'a>(
 ) -> Result<(bool, HashSet<Instance>), &'static str> {
     let mut work = vec![Work::Function(root)];
     let mut visited = HashSet::new();
-    let empty_sorts = BTreeMap::new();
     while let Some(item) = work.pop() {
         *fuel = fuel
             .checked_sub(1)
@@ -272,22 +234,13 @@ fn scan<'a>(
                 {
                     return Ok((true, visited));
                 }
-                // An empty telescope has no sort observations. Follow calls
-                // normally; a reached generic callee acquires the directory at
-                // that point. Only complete immutable metadata is published.
-                let sorts = if function.type_parameters.is_empty() {
-                    &empty_sorts
-                } else {
-                    declarations
-                        .sorts(fuel)
-                        .map_err(|_| "invalid rejection declaration metadata or exhausted budget")?
-                };
-                let context = Substitution::new(
-                    &function.type_parameters,
-                    sorts,
-                    id.arguments.clone(),
-                    fuel,
-                )?;
+                // An empty telescope needs no directory. Nonempty inputs
+                // retain declaration-domain admission in the owned work item.
+                let domains = declarations
+                    .parameter_domains(&function.type_parameters, fuel)
+                    .map_err(|_| "invalid rejection declaration metadata or exhausted budget")?;
+                let context =
+                    Substitution::new(&function.type_parameters, &domains, &id.arguments, fuel)?;
                 // Parameter ownership is acquired even when the body never
                 // reads the parameter. Its exit cleanup can run user code.
                 if let Term::Function { parameters, .. } = function.signature.callable_signature() {
@@ -1225,6 +1178,50 @@ mod tests {
     }
 
     #[test]
+    fn dependent_domains_remain_admitted_in_owned_rejection_work() {
+        let mut function = generic_function(0, 900, expr(K::Unit));
+        function.type_parameters.push(id(901));
+        let package = Package {
+            functions: vec![function],
+            function_parameters: vec![nir::function_parameters::Declaration {
+                declaration: id(0),
+                parameters: vec![id(900), id(901)],
+                domains: vec![
+                    Term::Primitive(Primitive::Type),
+                    Term::Rigid {
+                        declaration: id(900),
+                        sort: nir::Sort::Type,
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+        let callee = generic_callee(
+            0,
+            vec![
+                Term::Primitive(Primitive::Type),
+                Term::Primitive(Primitive::U8),
+            ],
+        );
+        let mut cache = Cache::new(Some(&package));
+        assert!(cache.may_reject(&callee, &mut 1).is_err());
+        assert!(cache.completed.is_empty());
+        assert!(!cache.may_reject(&callee, &mut 1000).unwrap());
+        let invalid = generic_callee(
+            0,
+            vec![
+                Term::Primitive(Primitive::Bool),
+                Term::Primitive(Primitive::U8),
+            ],
+        );
+        assert!(cache.may_reject(&invalid, &mut 1000).is_err());
+        assert_eq!(cache.completed.len(), 1);
+        let valid = generic_callee(0, vec![Term::Primitive(Primitive::Bool), Term::Bool(true)]);
+        assert!(!cache.may_reject(&valid, &mut 1000).unwrap());
+        assert_eq!(cache.completed.len(), 2);
+    }
+
+    #[test]
     fn declaration_evidence_is_shared_across_queries_without_caching_failures() {
         let package = Package {
             functions: vec![
@@ -1245,10 +1242,10 @@ mod tests {
         let callee = |local| generic_callee(local, vec![Term::Primitive(Primitive::Bool)]);
         let mut cache = Cache::new(Some(&package));
         assert!(cache.may_reject(&callee(0), &mut 64).is_err());
-        assert!(!cache.declarations.is_prepared());
+        assert!(!cache.declarations.domains_prepared());
         assert!(cache.completed.is_empty());
         assert!(!cache.may_reject(&callee(0), &mut 10_000).unwrap());
-        assert!(cache.declarations.is_prepared());
+        assert!(cache.declarations.domains_prepared());
         // This is a different root, so only the declaration directory is warm.
         assert_eq!(cache.completed.len(), 1);
         let mut fuel = 64;
@@ -1273,7 +1270,7 @@ mod tests {
         let mut invalid = Cache::new(Some(&other_world));
         for _ in 0..2 {
             assert!(invalid.may_reject(&callee(1), &mut 10_000).is_err());
-            assert!(!invalid.declarations.is_prepared());
+            assert!(!invalid.declarations.domains_prepared());
             assert!(invalid.completed.is_empty());
         }
     }
@@ -1299,11 +1296,11 @@ mod tests {
         };
         let mut cache = Cache::new(Some(&package));
         assert!(!cache.may_reject(&callee(0), &mut 64).unwrap());
-        assert!(!cache.declarations.is_prepared());
+        assert!(!cache.declarations.domains_prepared());
         assert!(cache.may_reject(&callee(1), &mut 64).is_err());
-        assert!(!cache.declarations.is_prepared());
+        assert!(!cache.declarations.domains_prepared());
         assert_eq!(cache.completed.len(), 1);
         assert!(!cache.may_reject(&callee(1), &mut 10_000).unwrap());
-        assert!(cache.declarations.is_prepared());
+        assert!(cache.declarations.domains_prepared());
     }
 }

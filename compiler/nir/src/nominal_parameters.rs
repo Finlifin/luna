@@ -1,7 +1,102 @@
 //! Nominal declaration binders. Layout substitution preserves value-indexed
 //! identities; domain admission and trait/program obligations remain separate.
 use crate::{DeclarationId, DeclarationParameter, Primitive, Sort, Term, TypeError};
-use std::collections::BTreeSet;
+use std::{borrow::Cow, collections::BTreeSet};
+
+#[cfg(test)]
+mod owned_substitution_tests {
+    use super::*;
+
+    fn id(local: u32) -> DeclarationId {
+        DeclarationId { package: 19, local }
+    }
+
+    #[test]
+    fn owned_substitution_keeps_completed_domains_and_caller_scope() {
+        let (owned, dump) = {
+            let parameters = [id(1), id(2)];
+            let domains = [
+                Term::Primitive(Primitive::Type),
+                Term::Rigid {
+                    declaration: id(1),
+                    sort: Sort::Type,
+                },
+            ];
+            let arguments = [
+                Term::Primitive(Primitive::Type),
+                Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: Sort::Type,
+                },
+            ];
+            let frames = [vec![Sort::Type]];
+            let prepared = DeclarationSubstitution::bounded(
+                &parameters,
+                &domains,
+                &arguments,
+                &frames,
+                &mut 1000,
+            )
+            .unwrap();
+            let dump = prepared.to_string();
+            (prepared.into_owned(&mut 1000).unwrap(), dump)
+        };
+        assert_eq!(owned.to_string(), dump);
+        let template = Term::NormalForm {
+            head: id(30),
+            sort: Sort::Type,
+            arguments: vec![Term::Rigid {
+                declaration: id(2),
+                sort: Sort::ComptimeValue,
+            }],
+        };
+        assert_eq!(
+            owned.instantiate_bounded(&template, &mut 1000).unwrap(),
+            Term::NormalForm {
+                head: id(30),
+                sort: Sort::Type,
+                arguments: vec![Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: Sort::Type
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn owning_a_substitution_charges_borrowed_payloads_before_copying() {
+        let parameters = [id(1)];
+        let domains = [Term::Primitive(Primitive::Type)];
+        let arguments = [Term::Tuple(vec![Term::Primitive(Primitive::Bool); 256])];
+        let prepared =
+            DeclarationSubstitution::bounded(&parameters, &domains, &arguments, &[], &mut 10_000)
+                .unwrap();
+        assert!(matches!(
+            prepared.into_owned(&mut 16),
+            Err(crate::type_computations::Error::Budget)
+        ));
+        let prepared =
+            DeclarationSubstitution::bounded(&parameters, &domains, &arguments, &[], &mut 10_000)
+                .unwrap();
+        let mut fuel = 10_000;
+        let owned = prepared.into_owned(&mut fuel).unwrap();
+        assert!(10_000 - fuel >= 256);
+        assert_eq!(
+            owned
+                .instantiate_bounded(
+                    &Term::Rigid {
+                        declaration: id(1),
+                        sort: Sort::Type,
+                    },
+                    &mut 10_000
+                )
+                .unwrap(),
+            arguments[0]
+        );
+    }
+}
 
 pub use crate::value_admission::Error as AdmissionError;
 
@@ -188,17 +283,17 @@ impl From<ExpressionInstantiationError> for crate::type_computations::Error {
 /// those remain formation/admission obligations at the owning boundary.
 pub struct DeclarationSubstitution<'a> {
     parameters: Vec<DeclarationParameter>,
-    arguments: &'a [Term],
-    frames: &'a [Vec<Sort>],
+    arguments: Cow<'a, [Term]>,
+    frames: Cow<'a, [Vec<Sort>]>,
 }
 impl std::fmt::Display for DeclarationSubstitution<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(declaration-substitution (inputs")?;
-        for (parameter, argument) in self.parameters.iter().zip(self.arguments) {
+        for (parameter, argument) in self.parameters.iter().zip(self.arguments.iter()) {
             write!(f, " (input {parameter} {argument})")?;
         }
         f.write_str(") (frames")?;
-        for frame in self.frames {
+        for frame in self.frames.iter() {
             f.write_str(" (frame")?;
             for sort in frame {
                 write!(f, " {sort}")?;
@@ -256,8 +351,8 @@ impl<'a> DeclarationSubstitution<'a> {
         }
         Ok(Self {
             parameters,
-            arguments,
-            frames,
+            arguments: Cow::Borrowed(arguments),
+            frames: Cow::Borrowed(frames),
         })
     }
     pub fn bounded(
@@ -290,11 +385,38 @@ impl<'a> DeclarationSubstitution<'a> {
         }
         Self::from_parameters(parameters, domains, arguments, frames).map_err(Error::Scope)
     }
+    /// Retain a structurally checked substitution beyond its input buffers.
+    /// This owns syntax and scope only, never invocation storage or proof authority.
+    /// All borrowed payloads are charged before the first owned copy is made.
+    pub fn into_owned(
+        self,
+        fuel: &mut usize,
+    ) -> Result<DeclarationSubstitution<'static>, crate::type_computations::Error> {
+        use crate::type_computations::{Error, charge_term};
+        *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
+        if let Cow::Borrowed(arguments) = &self.arguments {
+            for argument in *arguments {
+                charge_term(argument, fuel)?;
+            }
+        }
+        if let Cow::Borrowed(frames) = &self.frames {
+            *fuel = fuel.checked_sub(frames.len()).ok_or(Error::Budget)?;
+            for frame in *frames {
+                *fuel = fuel.checked_sub(frame.len()).ok_or(Error::Budget)?;
+            }
+        }
+        Ok(DeclarationSubstitution {
+            parameters: self.parameters,
+            arguments: Cow::Owned(self.arguments.into_owned()),
+            frames: Cow::Owned(self.frames.into_owned()),
+        })
+    }
+
     pub fn instantiate(&self, term: &Term) -> Result<Term, TypeError> {
         term.instantiate_domain_checked_parameters_in_scope(
             &self.parameters,
-            self.arguments,
-            self.frames,
+            &self.arguments,
+            &self.frames,
         )
     }
     pub fn instantiate_predicate(
@@ -336,7 +458,7 @@ impl<'a> DeclarationSubstitution<'a> {
         crate::copy_budget::charge_function_substitution(
             function,
             &self.parameters,
-            self.arguments,
+            &self.arguments,
             fuel,
         )
         .map_err(|_| crate::type_computations::Error::Budget)
@@ -351,8 +473,13 @@ impl<'a> DeclarationSubstitution<'a> {
         fuel: &mut usize,
     ) -> Result<crate::program::Expr, ExpressionInstantiationError> {
         use ExpressionInstantiationError as Error;
-        crate::copy_budget::charge_substitution(expression, &self.parameters, self.arguments, fuel)
-            .map_err(Error::Copy)?;
+        crate::copy_budget::charge_substitution(
+            expression,
+            &self.parameters,
+            &self.arguments,
+            fuel,
+        )
+        .map_err(Error::Copy)?;
         let mut value = expression.clone();
         value
             .rewrite_types(&mut |ty| self.instantiate(ty))
@@ -368,7 +495,7 @@ impl<'a> DeclarationSubstitution<'a> {
         crate::copy_budget::charge_predicate_substitution(
             predicate,
             &self.parameters,
-            self.arguments,
+            &self.arguments,
             fuel,
         )
         .map_err(|_| crate::type_computations::Error::Budget)?;
@@ -412,7 +539,7 @@ impl<'a> DeclarationSubstitution<'a> {
         crate::type_computations::charge_parameter_substitution(
             term,
             &self.parameters,
-            self.arguments,
+            &self.arguments,
             fuel,
         )?;
         self.instantiate(term)

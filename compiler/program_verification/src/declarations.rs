@@ -204,6 +204,11 @@ impl<'a> Metadata<'a> {
     }
 
     #[cfg(test)]
+    pub(crate) fn domains_prepared(&self) -> bool {
+        self.domains.get().is_some()
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_prepared(&self) -> bool {
         self.sorts.get().is_some()
     }
