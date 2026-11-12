@@ -3,6 +3,12 @@
 2026-11-12。范围是 x86_64 Linux 上的首批可运行接口，不是完整标准库。
 公开 API 与限制见 `library/std/README.md`。
 
+作者要求的 println 是
+`fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format))`。
+本记录中的文本输出 demo 只验证宿主底座，不满足该格式化变参要求。完整交付
+仍待类型描述计算和变参实例化接通；当前进度见
+[格式化变参边界](runtime-value-delivery.md#格式化变参边界不能把静态文本输出当作-println-交付)。
+
 ## 演示
 
 在仓库根目录执行：

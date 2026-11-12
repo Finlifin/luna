@@ -1,0 +1,16 @@
+{-
+    Expected: both calls accept their concrete Display arguments. The result
+    of Argument is a type description, not a common runtime representation.
+    This isolates the missing computation boundary needed by std.fmt.Parse.
+-}
+pure comptime fn Argument() -> Type {
+    refines { Itself :- Display } Any
+}
+
+fn accept(comptime tag: str, ...values: defer Tuple<Argument(), Argument()>) {}
+
+fn run() {
+    let number: u32 = 42;
+    accept("first", number, true);
+    accept("second", false, number);
+}

@@ -1,0 +1,77 @@
+{-
+    Formatting is a comptime library operation. A plan retains byte ranges in
+    the original text and ordered argument positions, without copying text or
+    constructing runtime storage. Empty fields use Display; doubled braces
+    produce one literal brace. Other field syntax is rejected explicitly.
+
+    This scanner is the lexical input to Parse's parameter-domain computation.
+    It does not replace the Type description or admit runtime arguments.
+-}
+pub enum FormatPiece {
+    text(u64, u64),
+    argument(Integer),
+}
+
+pub enum FormatError {
+    unclosed_field(u64),
+    unmatched_close(u64),
+    unsupported_field(u64),
+}
+
+pub struct FormatPlan {
+    pieces: meta.List<FormatPiece>,
+    argument_count: Integer,
+}
+
+impl FormatPlan {
+    pub pure comptime fn parse(format: str) -> !FormatError Self {
+        var pieces: meta.List<FormatPiece> = [];
+        var arguments: Integer = 0;
+        var cursor: u64 = 0;
+        var start: u64 = 0;
+        let length = format.byte_length();
+        while cursor < length {
+            let byte = format.byte(cursor) match {
+                value? => value,
+                null => return error FormatError.unclosed_field(cursor),
+            };
+            if byte == 123 or byte == 125 {
+                if start < cursor {
+                    pieces = pieces.concat([FormatPiece.text(start, cursor)]);
+                }
+                let next = cursor + 1;
+                let following = format.byte(next);
+                if byte == 123 {
+                    following match {
+                        123? => {
+                            pieces = pieces.concat([FormatPiece.text(cursor, next)]);
+                        },
+                        125? => {
+                            pieces = pieces.concat([FormatPiece.argument(arguments)]);
+                            arguments = arguments + 1;
+                        },
+                        null => return error FormatError.unclosed_field(cursor),
+                        _? => return error FormatError.unsupported_field(cursor),
+                    };
+                } else {
+                    following match {
+                        125? => {
+                            pieces = pieces.concat([FormatPiece.text(cursor, next)]);
+                        },
+                        _ => return error FormatError.unmatched_close(cursor),
+                    };
+                }
+                {- Every successful brace branch consumed a second byte. -}
+                assumes next < length;
+                cursor = next + 1;
+                start = cursor;
+            } else {
+                cursor = cursor + 1;
+            }
+        }
+        if start < length {
+            pieces = pieces.concat([FormatPiece.text(start, length)]);
+        }
+        Self { pieces: pieces, argument_count: arguments }
+    }
+}

@@ -5,6 +5,7 @@ use io_impl.{errors, writer};
 use fs_impl.file;
 use mem_impl.layout;
 use fmt_impl.arguments;
+use fmt_impl.parse;
 
 pub mod os {
     pub mod linux { pub use linux_impl.*; }
@@ -20,6 +21,7 @@ pub mod fs { pub use file.{File, remove_file}; }
 pub mod mem { pub use layout.Layout; }
 pub mod fmt {
     pub use builtin.fmt.Display;
+    pub use parse.{FormatPlan, FormatPiece, FormatError};
     pub use arguments.{print, println, eprint, eprintln, print_value, println_value};
 }
 pub mod prelude {

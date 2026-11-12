@@ -431,6 +431,96 @@ trait 来源、接口契约、类型视图和程序义务。迁移不只改主�
 决定，也不应借此扩大 Any、quote 或 PTC 的权限。新载体必须替换真实消费者后才可
 计为实现进度；仅增加枚举、side table 或成功打印的专用分支不算接通。
 
+### 格式化变参边界：不能把静态文本输出当作 println 交付
+
+作者再次明确目标签名为：
+
+```flurry
+fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format))
+```
+
+此前只接通 `println(comptime text: str)` 与 `println_value`，是错误地缩小了
+交付范围。这些函数证明 stdout、Display 与错误传播底座可用，不证明格式化
+变参已完成；演示验收必须包含 `println("answer = {}", answer)`。
+
+这不是向编译器添加 println intrinsic。最终层次和顺序是：
+
+1. `FormatPlan.parse` 在 comptime 扫描格式串，形成原文字节区间和有序字段。
+   已有实现是 `library/std/fmt_impl/parse.fl`，通过真实 sysroot 使用公开路径。
+   初步语法为 `{}` 与转义花括号；其它字段形式明确报告错误。
+2. `Parse` 根据计划计算参数类型描述。每个 `{}` 对应一个独立的未知类型，
+   附带 Display 约束。两项未知描述不意味着两项类型相等，也不等于同一个待解
+   metavariable。格式串本身决定字段数量，不能反过来按实参数量补全格式串。
+3. 这种结果须作为普通 comptime 数据流经返回、局部量、列表与类型构造输入。
+   `meta.List<Type>` 仍是普通列表，Tuple 仍保留普通头；不添加格式专用参数槽，
+   不将 Any 冒充具有布局的具体 Type，也不把描述相容关系送入 PTC 当作等式。
+4. `defer` 完成该计算后交付的是可供参数检查的描述。参数收集按槽位匹配实参，
+   每个实际类型在调用方证据下分别证明 Display，保留对应具体类型及存储要求。
+   对函数定义体提供的假设不能拿来自证调用方的实参准入；待定值不等于 Any。
+5. 实例的 tuple 布局形成后，普通 inline 结构迭代生成输出。原文按计划输出，
+   参数通过各自的 Display 写入同一个 writer。实参在普通调用位置按源码顺序
+   各求值一次；重复检查、格式展开、O3 优化不能重放 producer 或省略资源清理。
+   writer 的短写、失败前已输出前缀与清理规则继续适用。
+
+当前通用缺口并不只在 std：`FrozenDescription` 主要是普通定义检查中的
+Any/Known 观察；`type_computations::State::Complete` 保存具体 Term，
+`execution::publish` 直接把 Type 结果写入类型求解变量；`type_expr` 的 refinement
+先要求具体 base，再证明要求并返回 base。它们不能直接承担可计算、可嵌套、带
+约束的未知描述。应扩展描述数据及其 VM 交付与参数准入边界，分别保留“描述
+已计算完成”与“runtime 类型已具体化”两个事实，不能只在 publish 放宽匹配。
+具体函数类型和 runtime IR 的发布仍要求所需布局与义务完整。
+
+`development/repros/refined-any-type-producer.fl` 隔离最小合法输入：普通 Type
+生产函数返回带 Display 约束的 Any，经 defer 用于两个 tuple 元素。当前在名字
+解析时报 `Unresolved identifier Any`，说明显式源描述入口也未接通。复现命令：
+
+```sh
+python3 -B development/check.py --timeout 900 -- run -p luna -- check development/repros/refined-any-type-producer.fl --sysroot library --build-target x86_64 linux 64
+```
+
+报告 `/tmp/luna-tools-yw2cqbvc/result.json`，退出 1。这是待实现的合法程序，
+不是应当永久拒绝的测试；不能把这个失败改成 language rule。
+
+最终验收须同时覆盖：零／多个字段、不同机器类型与用户 Display、花括号转义、
+UTF-8 与 NUL、参数数量不匹配、无 Display 类型、错误格式与 runtime 格式输入；
+还包括按名称完整供应 tuple、展开输入、实参副作用顺序、writer 中途失败和 O0/O3。
+当前 scanner 的通过不能替代其中任何一个调用与输出契约。
+
+#### 已接通：收集准备的阶段完成点
+
+具体 Type 的对照用例也曾失败：`comptime count: Integer` 后接
+`...values: defer BooleanFields(count)`，虽然调用域已算出，收集准备仍把 count
+提升成 runtime let，IIR 因而报告 comptime-only 存储。普通已知域与 comptime
+变参包也有同一缺口；仅改 open 函数不能覆盖它们。
+
+收集、属性与展开现在共用 `prepare_call_inputs`／`finish_input_preparation`
+确定准备完成点。内层保留所有源码位置供外层合并；最外层完成后复用既有
+`freeze_staged_preparation` 执行所需 comptime producer 并替换其使用。
+不再提前把 staged 项从位置序列删除，也不在属性重排完成前删除其准备语句。
+comptime callee 保留整个 invocation 的准备边界，错误退出恢复外层准备状态。
+该修改不赋予 Any 布局，也不解决描述计算的剩余缺口。
+
+定向验证（工作目录 `/home/fin/luna`）：
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test staged_variadic_inputs --test library_std_format --test extended_calls --test contextual_spreads --test open_functions --no-fail-fast -- --test-threads=1 computed_tuple_domains staged_inputs_do_not_escape format_plan collection collected variadic packet spread
+```
+
+`/tmp/luna-tools-c4ev5pyt/result.json` 退出 0：分别 2、4、9、15、107 项通过。
+包括参数数量／字段域拒绝、不同调用的类型替换隔离、完整 Type 包、交错具名
+实参的次数与顺序、comptime 收集失败与默认输入次序；不是全 workspace 验证。
+scanner 的测试仅证明扫描契约与编译期阶段，不能据此称 Parse 已实现。
+
+过程中的真实失败也保留区分：`dufnais4` 揭示原有 runtime Integer 存储问题；
+`2vg1kiiy` 的简单跳过方案破坏展开位置，`q9hcgh1_` 的过早冻结破坏属性合并。
+这些方案均已由上述共享完成点替代。报告均位于对应 `/tmp/luna-tools-*/result.json`。
+
+最终补查 `extended_calls`、`contextual_spreads` 与 `library_std` 整组：
+`python3 -B development/check.py --timeout 900 -- test -p luna --test extended_calls --test contextual_spreads --test library_std --no-fail-fast -- --test-threads=1`
+退出 0，分别 38、16、14 项通过，报告 `/tmp/luna-tools-k05xc4q2/result.json`。
+其中 std 为真实 sysroot 的 LLVM 原生检查，含 O0/O3 输出、File、短写和 EINTR；
+不是 `{}` 参数替换验收。准备阶段修复已单独提交为 `488303ff`。
+
 ## 9. 证据与当前限制
 
 以下先保留 `689d45c5` 阶段分析的证据，再记录各次实际迁移。早期对照只证明
