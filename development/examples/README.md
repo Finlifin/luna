@@ -2,6 +2,23 @@
 
 从仓库根目录执行。运行器构建当前工作区的 luna，经 LLVM 生成 host 可执行文件，再实际运行；无需手工调用 Cargo。
 
+标准库 `println` 演示：
+
+```sh
+python3 -B development/demo_println.py
+```
+
+源码见 [host-println.fl](host-println.fl)。脚本使用实际 sysroot，生成并运行
+`/tmp/flurry-println`；演示时也可以直接运行该文件。输出包含中文问候、
+`answer = 42`、当前进程 PID、`i128` 最小值和 `done`。
+
+当前目标为 x86_64 Linux。`println` 接收 comptime 文本；运行时整数、bool
+和自定义 `Display` 使用 `println_value`，尚不支持 `{}` 参数替换。
+`std.fs`、`std.io`、`std.mem` 和平台接口的范围见
+[std 说明](../../library/std/README.md)。
+
+其他 host 示例：
+
 ```sh
 python3 -B development/run_host.py development/examples/host-arithmetic.fl --release-driver --build-timeout 900
 ```
@@ -26,4 +43,7 @@ python3 -B development/host_examples.py arithmetic number-theory library-tuple l
 
 工具链默认使用 `llvm-config-21` 和 `cc`，可用 `LUNA_LLVM_CONFIG`、`LUNA_CC` 指定已有安装。LLVM 的验证、优化、目标文件生成及链接都属于原生链路。
 
-这里的返回值打印由开发驱动生成，不表示标准库 `println`、完整 sysroot 或全部语言特性已经可用。运行和证据入口见[工具说明](../working-guide.md)，本阶段重新核对的实现边界见[架构审计](../architecture-audit.md)。本页示例本轮未重新运行。
+其他 host 示例中的 S-expression 返回值由开发驱动打印；上面的 `println`
+演示则由标准库写入 stdout。运行和证据入口见[工具说明](../working-guide.md)，
+实现边界见[架构审计](../architecture-audit.md)。本轮重新运行了 `println`
+演示，未重新运行这里列出的其他 host 示例。
