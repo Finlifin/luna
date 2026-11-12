@@ -1624,47 +1624,7 @@ impl Checker<'_, '_> {
             if fallback.is_none() {
                 return self.expr(input, None).map(n::NormalFormArgument::Value);
             }
-            return self.in_block_scope(input.span, |this| {
-                let mut branches = Vec::new();
-                for arm in *arms {
-                    let condition = arm
-                        .cond
-                        .map(|value| this.expr(value, Some(&p(P::Bool))))
-                        .transpose()?;
-                    let check = |this: &mut Self| {
-                        this.in_block_scope(arm.span, |this| {
-                            this.dependent_normal_argument(arm.body, depth + 1)
-                        })
-                    };
-                    let body = match &condition {
-                        Some(condition) => {
-                            this.under_type_condition(condition, true, arm.body.span, check)?
-                        }
-                        None => check(this)?,
-                    };
-                    if let Some(condition) = &condition {
-                        this.assume_type_condition(condition, false, arm.body.span)?;
-                    }
-                    // Each source arm owns its runtime locals as well.
-                    let body = n::NormalFormArgument::Block {
-                        source: source(arm.span),
-                        statements: Vec::new(),
-                        result: Some(Box::new(body)),
-                    };
-                    branches.push((condition, body));
-                }
-                let mut branches = branches.into_iter().rev();
-                let (_, mut tail) = branches.next().unwrap();
-                for (condition, body) in branches {
-                    tail = n::NormalFormArgument::If {
-                        source: source(input.span),
-                        condition: condition.unwrap(),
-                        then_input: Box::new(body),
-                        else_input: Box::new(tail),
-                    };
-                }
-                Ok(tail)
-            });
+            return self.check_contextual_when_region(input, depth);
         }
         if matches!(input.kind, H::If(_, _, Some(_))) {
             return self.check_contextual_if_region(input, depth);

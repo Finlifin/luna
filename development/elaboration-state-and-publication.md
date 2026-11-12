@@ -229,8 +229,8 @@ Waiting 与 Unresolved 不混用。没有就绪任务时，先区分外部请求
 
 | 入口 | 已有责任 | 未完成部分 |
 | --- | --- | --- |
-| `elaboration/src/program/block_regions/driver.rs` | 普通、contextual、部分结构输入的块／if 共用显式检查帧 | 帧栈仍在同步驱动内，活动 Checker 不能离开后再装回 |
-| `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；when／match 共用适配 | 不提供执行前缀恢复，when／match 子检查仍同步 |
+| `elaboration/src/program/block_regions/driver.rs` | 普通、contextual、部分结构输入的块／if 及带 fallback 的 contextual when 共用显式检查帧 | 帧栈仍在同步驱动内，活动 Checker 不能离开后再装回；普通 when 与 match 尚未迁移 |
+| `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；普通 when／match 共用适配 | 不提供执行前缀恢复，普通 when／match 子检查仍同步 |
 | `elaboration/src/program/dependent_inputs/tasks.rs` | 参数域、默认引用和默认值完成的显式后继 | 源码子检查和 required 求值仍同步 |
 | `elaboration/src/program/declaration_inputs/progress.rs` | producer、身份、检查次序与源码 schedule 分开 | Typed 路径仍要求普通完整 Expr，Contextual 仍保留 NormalFormArgument |
 | `elaboration/src/program/dynamic_instances.rs` | callable packet 保留实际 producer、静态身份与 pending 集合 | 签名仍提及 pending 参数时直接拒绝发布 |
@@ -299,6 +299,13 @@ SchedulingBudget 保留等待和已交付输入，不将队列改为 Failed；�
 普通 if 复用整体交付准备；它与 contextual、部分结构输入共用控制交接，却保留各自
 结果检查。inline 选择、callee 位置、分支前提和 effect 交付按边界恢复。没有 else
 的语句分支仍走原 Void／Never 规则；不是所有 if 都可按同一个目标推导规则合并。
+
+contextual when 的条件与主体也进入同一帧栈。`when::Frame` 保存已检查分支、当前
+条件／主体后继、整段词法边界和分支的正前提；主体退出后先恢复分支局部，再撤销
+正前提，随后给后续条件安装本条件为假的事实。完成与失败都退出所属作用域，不能
+把前支的绑定或正前提带入后支。生成的每个 NormalFormArgument 分支仍保留原有
+Block 作用域，源码未选中的分支仍检查；这不是提前执行条件或用运行结果替代检查。
+无 fallback 的 when 继续采用普通语句规则，不伪造一个 contextual 值。
 
 部分 optional／error 输入的 `Search` 先遍历实际类型证据，再允许数字默认类型；
 Never 和只有错误出口的结果不提供成功域证据。`Probe` 保留 Attempt 与父探测模式；
@@ -546,6 +553,8 @@ callable 签名对实际 Type 的消费。只增加 owner、请求枚举或可�
 | required 依赖发现 | `program/required/dependencies.rs` 及 `luna/tests/required_input_scopes.rs`；`/tmp/luna-tools-zrknan4h/result.json`，退出 0 |
 | 帧绑定交接 | `bytecode::input_preparation_tests` 及 `luna/tests/clause_packet_preparation.rs`；`/tmp/luna-tools-r52uh6us/result.json`，退出 0 |
 | 块／if 与探测 | `luna/tests/{contextual_input_regions,cmtt_storage_world,native_optional,error_surface,contextual_delivery,effect_spreads}.rs`；`/tmp/luna-tools-4qp6q76r/result.json`，退出 0 |
+| contextual when 后继 | 在 `/home/fin/luna` 经 `development/check.py --timeout 900 -- test -p luna --test contextual_input_regions -- --test-threads=1` 运行，`/tmp/luna-tools-5a7k5fq6/result.json` 退出 0；随后新增 return 用例以同命令加 `contextual_when_returns` 过滤，`/tmp/luna-tools-_l3ix78q/result.json` 退出 0，共覆盖当前 19 项。包括真实 sysroot、两引擎顺序对照及深嵌套字节码路径；不是外部 Type 恢复验收 |
+| 检查帧 dump | 同工作目录与入口，`test -p elaboration --lib program::block_regions -- --test-threads=1`，`/tmp/luna-tools-nj_3p7m2/result.json` 退出 0；检查待检查条件、已完成分支和转义后的 S-expression |
 | 扩展分支验收 | `/tmp/luna-tools-j385q075/result.json`：490 通过、1 个新 fixture 阶段声明错误；修正后该用例 `/tmp/luna-tools-qe9dsshx/result.json` 退出 0；32 层 CLI 用例 `/tmp/luna-tools-sjdhryg0/result.json` 退出 0 |
 
 另有 32 项 luna elaboration 集成失败在 Attempt 迁移时与 `53696cc6` 基线逐例对照

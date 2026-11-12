@@ -378,6 +378,140 @@ fn contextual_if_frames_keep_condition_order_and_only_execute_selected_children(
 }
 
 #[test]
+fn contextual_when_frames_preserve_ordered_conditions_and_nested_exits() {
+    for (levels, engines) in [(3, &[false, true][..]), (10, &[false][..])] {
+        let mut body = "[1, 255]".to_owned();
+        for _ in 0..levels {
+            body = format!(
+                "when {{
+                    do {{ trace += 1; select(false) }} => [2],
+                    do {{ trace += 1; select(true) }} => do {{ {body} }},
+                    select(true) => [3],
+                    else => [4],
+                }}"
+            );
+        }
+        let mut calls = vec!["check", "Build"];
+        calls.extend(std::iter::repeat_n("select", levels * 2));
+        calls.extend(["Byte", "Build", "Byte"]);
+        check_in_engines(
+            &format!(
+                "
+                pure comptime fn Packet<T, .values: meta.List<T> = []> -> Type {{ bool }}
+                comptime fn Byte() -> Type {{ u8 }}
+                comptime fn select(value: bool) -> bool {{ value }}
+                comptime fn Build(value: T) -> Type
+                where T
+                {{
+                    var trace: Integer = 0;
+                    let result = Packet<.values = when {{
+                        T != bool => [],
+                        else => do {{
+                            let flag: bool = value;
+                            if flag {{ {body} }} else {{ [] }}
+                        }},
+                    }}, Byte()>;
+                    if T == bool and trace != {} {{ return Packet<u8>; }}
+                    result
+                }}
+                comptime fn check() -> bool {{
+                    Build<bool>(true) == Packet<u8, .values = [1, 255]>
+                        and Build<u8>(9) == Packet<u8>
+                }}",
+                levels * 2,
+            ),
+            &calls,
+            Budget {
+                steps: 1_000_000,
+                ..Default::default()
+            },
+            engines,
+        );
+    }
+}
+
+#[test]
+fn contextual_when_frames_check_all_arms_and_restore_ordered_premises() {
+    for (body, diagnostic) in [
+        (
+            "Packet<.values = when { T != bool => [], else => do {
+                let flag: bool = value; [1]
+            } }, Byte()>; let escaped: bool = value; Packet<u8>",
+            "type mismatch",
+        ),
+        (
+            "Packet<.values = when { true => [1], else => when {
+                false => do { let invalid: bool = 7; [] }, else => []
+            } }, Byte()>",
+            "integer runtime proxy requires a supported fixed-width integer target",
+        ),
+        (
+            "Packet<.values = when { T == bool => [], else => when {
+                true => do { let invalid: bool = value; [] }, else => []
+            } }, Byte()>",
+            "type mismatch",
+        ),
+        (
+            "Packet<.values = when { true => [1], else => when {
+                else => [], true => []
+            } }, Byte()>",
+            "when fallback must be the final arm",
+        ),
+    ] {
+        let failure = sysroot::compile(&format!(
+            "pure comptime fn Packet<T, .values: meta.List<T> = []> -> Type {{ bool }}
+             comptime fn Byte() -> Type {{ u8 }}
+             comptime fn Bad(value: T) -> Type where T {{ {body} }}"
+        ))
+        .err()
+        .expect("invalid contextual arm was accepted");
+        assert!(failure.contains(diagnostic), "{failure}\n{body}");
+    }
+}
+
+#[test]
+fn contextual_when_returns_exit_the_original_invocation_without_later_inputs() {
+    check_both(
+        "
+        pure comptime fn Packet<T, .values: meta.List<T> = []> -> Type { bool }
+        comptime fn Byte() -> Type { u8 }
+        comptime fn mark(flag: bool) -> bool { flag }
+        comptime fn select() -> bool { false }
+        comptime fn Build(value: T) -> Type
+        where T
+        {
+            Packet<.values = when {
+                T == bool => do { mark(value); return Packet<u8>; [1] },
+                select() => [2],
+                else => do { mark(false); [255] },
+            }, Byte()>
+        }
+        comptime fn ExitCondition() -> Type {
+            Packet<.values = when {
+                do { mark(true); return Packet<u8>; false } => [1],
+                else => [2],
+            }, Byte()>
+        }
+        comptime fn check() -> bool {
+            Build<bool>(true) == Packet<u8>
+                and Build<u8>(9) == Packet<u8, .values = [255]>
+                and ExitCondition() == Packet<u8>
+        }",
+        &[
+            "check",
+            "Build",
+            "mark",
+            "Build",
+            "select",
+            "mark",
+            "Byte",
+            "ExitCondition",
+            "mark",
+        ],
+    );
+}
+
+#[test]
 fn contextual_if_frames_do_not_skip_invalid_siblings_or_leak_negative_premises() {
     for (body, diagnostic) in [
         (

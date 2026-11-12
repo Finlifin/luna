@@ -106,7 +106,7 @@ pub(super) enum Step<'b, 'h> {
     Continue,
     Child(Request<'b, 'h>),
     Tail(destinations::CheckedTail),
-    Conditional(CheckedBlock),
+    Completed(CheckedBlock),
 }
 
 impl std::fmt::Display for Request<'_, '_> {
@@ -134,7 +134,7 @@ impl std::fmt::Display for Step<'_, '_> {
             Self::Continue => f.write_str("(check-step continue)"),
             Self::Child(request) => write!(f, "(check-step {request})"),
             Self::Tail(value) => write!(f, "(check-step (tail {value}))"),
-            Self::Conditional(value) => write!(f, "(check-step (conditional {value}))"),
+            Self::Completed(value) => write!(f, "(check-step (completed {value}))"),
         }
     }
 }
@@ -142,6 +142,7 @@ impl std::fmt::Display for Step<'_, '_> {
 enum RegionFrame<'b, 'h> {
     Block(BlockFrame<'b, 'h>),
     Conditional(conditionals::Frame<'b, 'h>),
+    When(when::Frame<'b, 'h>),
 }
 
 impl RegionFrame<'_, '_> {
@@ -149,6 +150,7 @@ impl RegionFrame<'_, '_> {
         match self {
             Self::Block(frame) => frame.unwind(checker),
             Self::Conditional(frame) => frame.unwind(checker),
+            Self::When(frame) => frame.unwind(checker),
         }
     }
 }
@@ -158,6 +160,7 @@ impl std::fmt::Display for RegionFrame<'_, '_> {
         match self {
             Self::Block(frame) => frame.fmt(f),
             Self::Conditional(frame) => frame.fmt(f),
+            Self::When(frame) => frame.fmt(f),
         }
     }
 }
@@ -263,6 +266,16 @@ impl Checker<'_, '_> {
             .contextual(expr.span)
     }
 
+    pub(in crate::program) fn check_contextual_when_region(
+        &mut self,
+        expr: &Expr<'_>,
+        depth: usize,
+    ) -> Result<n::NormalFormArgument, Error> {
+        let frame = when::Frame::new(self, expr, depth)?;
+        self.drive_check_region(RegionFrame::When(frame))?
+            .contextual(expr.span)
+    }
+
     pub(in crate::program) fn check_ordinary_if_region(
         &mut self,
         expr: &Expr<'_>,
@@ -328,6 +341,7 @@ impl Checker<'_, '_> {
                             frame.step(self, returned.take(), &statement_destination)?
                         }
                         RegionFrame::Conditional(frame) => frame.step(self, returned.take())?,
+                        RegionFrame::When(frame) => frame.step(self, returned.take())?,
                     };
                     let request = match step {
                         Step::Continue => continue,
@@ -342,8 +356,8 @@ impl Checker<'_, '_> {
                             returned = Some(value);
                             continue;
                         }
-                        Step::Conditional(value) => {
-                            // Completion has already left the final branch premise.
+                        Step::Completed(value) => {
+                            // The owning frame restores its remaining branch/region boundaries.
                             frames.pop().unwrap().unwind(self);
                             if frames.is_empty() {
                                 return Ok(value);
@@ -364,6 +378,17 @@ impl Checker<'_, '_> {
                                 frames.push(RegionFrame::Conditional(
                                     conditionals::Frame::partial(self, expr, destination, true)?,
                                 ));
+                                continue;
+                            }
+                            if let Destination::Contextual(tail) = &destination
+                                && let H::When(arms) = expr.kind
+                                && arms.iter().any(|arm| arm.cond.is_none())
+                            {
+                                frames.push(RegionFrame::When(when::Frame::new(
+                                    self,
+                                    expr,
+                                    tail.depth + 1,
+                                )?));
                                 continue;
                             }
                             // Ordinary branches enter after delivery prepares the

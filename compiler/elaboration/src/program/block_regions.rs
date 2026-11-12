@@ -7,6 +7,7 @@ mod conditionals;
 mod destinations;
 mod driver;
 mod tails;
+mod when;
 use destinations::{CheckedBlock, Destination};
 pub(super) use tails::{ContextualTail, OrdinaryTail};
 

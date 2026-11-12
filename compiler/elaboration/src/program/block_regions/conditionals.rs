@@ -261,7 +261,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                         &destination,
                     )
                 } else {
-                    Ok(Step::Conditional(CheckedBlock::Contextual(
+                    Ok(Step::Completed(CheckedBlock::Contextual(
                         n::NormalFormArgument::If {
                             source: source(self.source.span),
                             condition,
@@ -394,7 +394,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         } else {
             value
         };
-        Ok(Step::Conditional(CheckedBlock::Ordinary(value)))
+        Ok(Step::Completed(CheckedBlock::Ordinary(value)))
     }
 
     fn enter_branch(
@@ -461,7 +461,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         } else {
             value
         };
-        Ok(Step::Conditional(CheckedBlock::Ordinary(value)))
+        Ok(Step::Completed(CheckedBlock::Ordinary(value)))
     }
 
     fn leave_branch(&mut self, checker: &mut Checker<'_, '_>) {
