@@ -1,0 +1,26 @@
+[package]
+name = "anar"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "anar"
+path = "src/lib.rs"
+
+[[bin]]
+name = "anar"
+path = "src/main.rs"
+
+[dependencies]
+ast = { path = "../ast" }
+ast_lowering = { path = "../ast_lowering" }
+diagnostic = { path = "../diagnostic" }
+fmt = { path = "../fmt" }
+hir = { path = "../hir" }
+lex = { path = "../lex" }
+parse = { path = "../parse" }
+resolve = { path = "../resolve" }
+rustc_data_structures = { workspace = true }
+rustc_span = { workspace = true }
+symbol = { workspace = true }
+vfs = { path = "../vfs" }
