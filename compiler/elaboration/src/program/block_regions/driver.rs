@@ -39,12 +39,12 @@ impl std::fmt::Display for ExpressionBoundary {
     }
 }
 
-struct Frame<'b, 'h, 't> {
-    progress: Progress<'b, 'h, Destination<'t>>,
+struct Frame<'b, 'h> {
+    progress: Progress<'b, 'h, Destination>,
     scope: LexicalScope,
     boundary: Option<ExpressionBoundary>,
 }
-impl std::fmt::Display for Frame<'_, '_, '_> {
+impl std::fmt::Display for Frame<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(block-frame {} {} (delivery", self.progress, self.scope)?;
         if let Some(boundary) = &self.boundary {
@@ -53,13 +53,13 @@ impl std::fmt::Display for Frame<'_, '_, '_> {
         f.write_str("))")
     }
 }
-impl Frame<'_, '_, '_> {
+impl Frame<'_, '_> {
     fn finish(
         self,
         checker: &mut Checker<'_, '_>,
         value: destinations::CheckedTail,
     ) -> Result<CheckedBlock, Error> {
-        let expected = self.progress.tail.expected();
+        let destination = self.progress.tail.clone();
         let result = self.progress.finish(checker, value);
         self.scope.leave(checker);
         if let Some(boundary) = self.boundary {
@@ -67,7 +67,7 @@ impl Frame<'_, '_, '_> {
             let value = result?.ordinary(boundary.span)?;
             if !boundary.preserve_effect {
                 return checker
-                    .run_computation(value, expected, boundary.span)
+                    .run_computation(value, destination.expected(), boundary.span)
                     .map(CheckedBlock::Ordinary);
             }
             return Ok(CheckedBlock::Ordinary(value));
@@ -95,7 +95,8 @@ impl Checker<'_, '_> {
         block: &hir::Block<'_>,
         tail: OrdinaryTail<'_>,
     ) -> Result<n::Expr, Error> {
-        self.check_block_region(block, Destination::Ordinary(tail))?
+        let destination = Destination::ordinary(self, tail, block.span)?;
+        self.check_block_region(block, destination)?
             .ordinary(block.span)
     }
 
@@ -111,7 +112,7 @@ impl Checker<'_, '_> {
     fn check_block_region(
         &mut self,
         block: &hir::Block<'_>,
-        tail: Destination<'_>,
+        tail: Destination,
     ) -> Result<CheckedBlock, Error> {
         self.charge_block_frame(block.span)?;
         let scope = LexicalScope::enter(self, block.span)?;
@@ -120,6 +121,7 @@ impl Checker<'_, '_> {
             scope,
             boundary: None,
         }];
+        let statement_destination = Destination::statement();
         let result = (|| {
             let mut returned: Option<CheckedBlock> = None;
             loop {
@@ -158,19 +160,12 @@ impl Checker<'_, '_> {
                                 self.required_steps.checked_sub(1).ok_or_else(|| {
                                     error(statement.span, "block checking budget exhausted")
                                 })?;
-                            (
-                                statement,
-                                Destination::Ordinary(OrdinaryTail {
-                                    expected: None,
-                                    partial: None,
-                                    input: None,
-                                }),
-                            )
+                            (statement, statement_destination.clone())
                         }
                         None => continue,
                     },
                     Phase::Tail => {
-                        let tail = *frame.progress.request_tail()?;
+                        let tail = frame.progress.request_tail()?.clone();
                         match tail.prepare(self, frame.progress.block, frame.progress.diverges)? {
                             tails::TailCheck::Checked(value) => {
                                 let checked = tail.complete(
@@ -271,14 +266,7 @@ mod tests {
             inputs: input_facts::State::default().lexical_boundary(),
         };
         let mut frame = Frame {
-            progress: Progress::new(
-                &block,
-                Destination::Ordinary(OrdinaryTail {
-                    expected: None,
-                    partial: None,
-                    input: None,
-                }),
-            ),
+            progress: Progress::new(&block, Destination::statement()),
             scope,
             boundary: Some(ExpressionBoundary {
                 callee: Some(id),

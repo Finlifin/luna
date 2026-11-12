@@ -812,9 +812,9 @@ optional、错误结果、null、提前 return、分支及可变接收者仅求�
 后继消费已检查结果，共用引用计费、混合分期绑定物化、别名清除与错误结果绑定稳定化。
 普通块的 NoReturn、隐式错误成功值及 spread 输入规则均保留在原有检查责任内。
 
-一般子检查、尾值规则和作用域装卸仍由同一个同步入口驱动；目标上下文仍借用当前
-调用，尚不支持交错调度、取消外部请求或跨 Type 等待恢复。后续必须连同当前活动
-词法状态、这些后继所依赖的上下文所有权及源 activation 迁移，不能将保存外层环境
+一般子检查、尾值规则和作用域装卸仍由同一个同步入口驱动；块目标的后续所有权迁移
+见下方显式驱动部分。尚不支持交错调度、取消外部请求或跨 Type 等待恢复。后续必须
+连同当前活动词法状态、其他子检查的上下文所有权及源 activation 迁移，不能将保存外层环境
 误当成保存了完整 Checker，也不能在挂起时执行 leave。该整理没有新增执行入口，
 没有扩展 NormalFormArgument，也没有解除普通调用的两个待决域 ignore。
 
@@ -1032,8 +1032,21 @@ NormalFormArgument；不以假 Type 或 Any 合并二者。普通语句子块和
 失效，不把词法退出变成事务回滚。Frame、交付边界和尾值请求均有 S-expression dump，
 父作用域与受检前缀分别显示。
 
-这是同一同步检查器内部的实际 continuation 接线，不是完整 CheckRegion：目标上下文
-仍借用本次调用，当前活动词法状态仍装在 Checker 中，非块子规则仍通过原同步入口
+块帧的普通目标现由本次区域拥有：根入口先按共享额度复制 expected Type、部分
+callable 和结构化 input context，成功后才进入词法帧。相邻嵌套块共享同一份不可变
+目标，语句的空目标也按驱动共享，不逐层复制整棵描述。检查规则只在执行期间取得
+短期借用视图，Frame 不再携带调用者目标的 lifetime。失败不产生半完成目标，也不
+回退已经消耗的额度；默认检查预算未放宽。
+
+`calls::{InputContext, CallableContext}::clone_bounded` 先计量完整复制载荷，覆盖记录
+名字、effect 参数、列表域及所有已知 Term；unknown Type、unknown value 和依赖域
+尚未确定的 value 原样保留。深度与步数耗尽分别返回，不作为缺少上下文或类型不符
+继续尝试。共享对象仍是区域／候选私有的检查信息，不授权冻结到 NIR、代码缓存或
+跨候选复用，也不形成新的 Type 身份。该迁移为分支过程中产生的新目标域提供所有权
+基础，尚未将条件分支本身改为可恢复任务。
+
+这是同一同步检查器内部的实际 continuation 接线，不是完整 CheckRegion：源 HIR
+仍借用本次快照，当前活动词法状态仍装在 Checker 中，非块子规则仍通过原同步入口
 完成。它不提供外部等待、取消、源码 activation 或 VM 片段执行许可。后续必须将这套
 帧连同活动上下文交给区域所有者，并迁移调用检查的后继，不能把有帧栈本身当作两个
 动态调用正例已完成。旧 NormalFormArgument 仍作为 contextual 输出存在；共享块驱动
@@ -1078,6 +1091,20 @@ NormalFormArgument；不以假 Type 或 Any 合并二者。普通语句子块和
   的普通嵌套回归也通过。非块子规则仍同步，不据此宣称一般源码恢复已接通。
 - 六个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-kbok9zpx/result.json` 退出 0；
   `git diff --check` 通过。未运行全 workspace 或完整 LLVM 验收；保留原有工作区改动。
+
+块目标所有权迁移的验证，工作目录及检查前缀同上：
+
+- `-p nir --test copy_budget -p type_resolution --test context_copy -p elaboration --lib
+  -p luna --test contextual_input_regions --test contextual_delivery --test ordinary_callable_types
+  --test ordinary_clause_collectors --test extended_calls --test required_input_scopes
+  --test sysroot_preludes --no-fail-fast`：`/tmp/luna-tools-nusmpcl0/result.json` 退出 0，
+  553 项通过、2 项既有 ignore。覆盖复制失败与重试、临时输入销毁后的目标保活、
+  嵌套目标共享、真实 sysroot 的部分调用上下文及块／调用交付。
+- 补充 partial context 与内嵌 Term 共用深度额度的断言后，单独执行
+  `-p type_resolution --test context_copy`，`/tmp/luna-tools-u2o9vvi2/result.json`
+  退出 0，2 项通过。七个 Rust 文件 scoped rustfmt check 退出 0，
+  `/tmp/luna-tools-3uzmucfp/result.json`；`git diff --check` 通过。
+  未运行全 workspace 或完整 LLVM 验收；原有资源分析等工作区修改保持不动。
 
 #### 已接入：普通输入依赖保留任务后继
 

@@ -3,10 +3,57 @@
 use super::*;
 use tails::{OrdinaryResult, TailCheck};
 
-#[derive(Clone, Copy)]
-pub(super) enum Destination<'a> {
-    Ordinary(OrdinaryTail<'a>),
+#[derive(Clone)]
+pub(super) enum Destination {
+    Ordinary(std::sync::Arc<OrdinaryDestination>),
     Contextual(ContextualTail),
+}
+
+/// Owned only by this checking region. Sharing nested destinations does not
+/// turn partial candidate information into a stable type or executable input.
+pub(super) struct OrdinaryDestination {
+    expected: Option<Term>,
+    partial: Option<crate::calls::CallableContext>,
+    input: Option<crate::calls::InputContext>,
+}
+
+impl OrdinaryDestination {
+    fn copy(
+        tail: OrdinaryTail<'_>,
+        fuel: &mut usize,
+    ) -> Result<Self, nir::copy_budget::CopyBudgetExhausted> {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or(nir::copy_budget::CopyBudgetExhausted::Steps)?;
+        Ok(Self {
+            expected: tail
+                .expected
+                .map(|value| nir::copy_budget::clone_term(value, fuel))
+                .transpose()?,
+            partial: tail
+                .partial
+                .map(|value| value.clone_bounded(fuel))
+                .transpose()?,
+            input: tail
+                .input
+                .map(|value| value.clone_bounded(fuel))
+                .transpose()?,
+        })
+    }
+
+    fn view(&self) -> OrdinaryTail<'_> {
+        OrdinaryTail {
+            expected: self.expected.as_ref(),
+            partial: self.partial.as_ref(),
+            input: self.input.as_ref(),
+        }
+    }
+}
+
+impl std::fmt::Display for OrdinaryDestination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.view().fmt(f)
+    }
 }
 
 pub(super) enum CheckedBlock {
@@ -35,22 +82,55 @@ impl CheckedBlock {
     }
 }
 
-impl<'a> Destination<'a> {
-    pub(super) fn expected(self) -> Option<&'a Term> {
+impl Destination {
+    pub(super) fn ordinary(
+        checker: &mut Checker<'_, '_>,
+        tail: OrdinaryTail<'_>,
+        span: Span,
+    ) -> Result<Self, Error> {
+        let before = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let retained = OrdinaryDestination::copy(tail, &mut fuel);
+        checker.required_steps -= (before - fuel) as u64;
+        let retained = retained.map_err(|failure| {
+            error(
+                span,
+                match failure {
+                    nir::copy_budget::CopyBudgetExhausted::Steps => {
+                        "block destination copy budget exhausted"
+                    }
+                    nir::copy_budget::CopyBudgetExhausted::Depth => {
+                        "block destination copy depth exhausted"
+                    }
+                },
+            )
+        })?;
+        Ok(Self::Ordinary(std::sync::Arc::new(retained)))
+    }
+
+    pub(super) fn statement() -> Self {
+        Self::Ordinary(std::sync::Arc::new(OrdinaryDestination {
+            expected: None,
+            partial: None,
+            input: None,
+        }))
+    }
+
+    pub(super) fn expected(&self) -> Option<&Term> {
         match self {
-            Self::Ordinary(tail) => tail.expected,
+            Self::Ordinary(tail) => tail.expected.as_ref(),
             Self::Contextual(_) => None,
         }
     }
 
     pub(super) fn prepare(
-        self,
+        &self,
         checker: &mut Checker<'_, '_>,
         block: &hir::Block<'_>,
         diverges: bool,
     ) -> Result<TailCheck<CheckedBlock>, Error> {
         match self {
-            Self::Ordinary(tail) => Ok(match tail.prepare(checker, block, diverges)? {
+            Self::Ordinary(tail) => Ok(match tail.view().prepare(checker, block, diverges)? {
                 TailCheck::Child => TailCheck::Child,
                 TailCheck::Checked(value) => TailCheck::Checked(value.map(CheckedBlock::Ordinary)),
             }),
@@ -63,7 +143,7 @@ impl<'a> Destination<'a> {
     }
 
     pub(super) fn complete(
-        self,
+        &self,
         checker: &mut Checker<'_, '_>,
         block: &hir::Block<'_>,
         diverges: bool,
@@ -71,6 +151,7 @@ impl<'a> Destination<'a> {
     ) -> Result<CheckedTail, Error> {
         match self {
             Self::Ordinary(tail) => tail
+                .view()
                 .complete(
                     checker,
                     block,
@@ -86,12 +167,13 @@ impl<'a> Destination<'a> {
     }
 
     pub(super) fn check_expression(
-        self,
+        &self,
         checker: &mut Checker<'_, '_>,
         value: &Expr<'_>,
     ) -> Result<CheckedBlock, Error> {
         match self {
             Self::Ordinary(tail) => tail
+                .view()
                 .check_expression(checker, value)
                 .map(CheckedBlock::Ordinary),
             Self::Contextual(tail) => checker
@@ -103,12 +185,12 @@ impl<'a> Destination<'a> {
     /// A nested plain block can stay on the same driver. Partial ordinary
     /// inputs retain their own rule. Contextual depth still counts both the
     /// expression and block rule, exactly as the source dispatcher does.
-    pub(super) fn nested(self, expr: &Expr<'_>) -> Result<Option<Self>, Error> {
+    pub(super) fn nested(&self, expr: &Expr<'_>) -> Result<Option<Self>, Error> {
         let H::Block(block) = expr.kind else {
             return Ok(None);
         };
         match self {
-            Self::Ordinary(tail) => Ok(tail.input.is_none().then_some(self)),
+            Self::Ordinary(tail) => Ok(tail.input.is_none().then(|| self.clone())),
             Self::Contextual(tail) => {
                 if tail.depth >= 127 {
                     return Err(error(expr.span, "contextual input nesting limit exceeded"));
@@ -124,7 +206,7 @@ impl<'a> Destination<'a> {
     }
 }
 
-impl Tail for Destination<'_> {
+impl Tail for Destination {
     type Checked = CheckedTail;
     type Output = CheckedBlock;
 
@@ -150,7 +232,7 @@ impl Tail for Destination<'_> {
     }
 }
 
-impl std::fmt::Display for Destination<'_> {
+impl std::fmt::Display for Destination {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ordinary(tail) => tail.fmt(f),
@@ -186,6 +268,44 @@ impl std::fmt::Display for CheckedTail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_targets_outlive_borrowed_inputs_and_share_nested_payloads() {
+        let retained = {
+            let ty = Term::Primitive(P::Bool);
+            let input = crate::calls::InputContext::Optional(Box::new(
+                crate::calls::InputContext::UnknownDependentValue,
+            ));
+            let partial = crate::calls::CallableContext {
+                comptime: true,
+                open_environment: true,
+                environment: None,
+                parameters: vec![None],
+                result: None,
+                result_context: Some(Box::new(input.clone())),
+            };
+            let tail = OrdinaryTail {
+                expected: Some(&ty),
+                input: Some(&input),
+                partial: Some(&partial),
+            };
+            assert!(OrdinaryDestination::copy(tail, &mut 0).is_err());
+            Destination::Ordinary(std::sync::Arc::new(
+                OrdinaryDestination::copy(tail, &mut 1000).unwrap(),
+            ))
+        };
+        let nested = retained.clone();
+        let (Destination::Ordinary(parent), Destination::Ordinary(child)) = (&retained, &nested)
+        else {
+            unreachable!()
+        };
+        assert!(std::sync::Arc::ptr_eq(parent, child));
+        drop(retained);
+        let dump = nested.to_string();
+        assert!(dump.contains("(expected (primitive bool))"), "{dump}");
+        assert!(dump.contains("(open-environment true)"), "{dump}");
+        assert!(dump.contains("(unknown-dependent-value)"), "{dump}");
+    }
 
     #[test]
     fn nested_contextual_blocks_keep_logical_depth_and_result_kind() {

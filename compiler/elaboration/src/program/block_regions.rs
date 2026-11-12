@@ -11,7 +11,7 @@ pub(super) use tails::{ContextualTail, OrdinaryTail};
 
 /// The destination rule survives statement checking as data. Its checked child
 /// and final output stay distinct; finishing never checks the source a second
-/// time. Borrowed contexts still belong to the current synchronous source region.
+/// time. The driver owns destinations; source references still borrow this region.
 pub(super) trait Tail: std::fmt::Display {
     type Checked;
     type Output;

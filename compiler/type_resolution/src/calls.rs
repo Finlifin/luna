@@ -9,6 +9,7 @@ use crate::{
 };
 use nir::{DeclarationId, Sort, Term, TypeError};
 
+mod context_copy;
 mod display;
 mod domain_staging;
 
