@@ -7602,32 +7602,6 @@ impl Round<'_> {
     }
 }
 
-// Binder sorts come from declarations, never from the supplied values. A
-// package-free monomorphic summary has no extra value-parameter evidence.
-pub(super) fn memory_binders(
-    package: Option<&Package>,
-    parameters: &[DeclarationId],
-    fuel: &mut usize,
-) -> Result<Vec<nir::DeclarationParameter>, String> {
-    *fuel = fuel
-        .checked_sub(parameters.len())
-        .ok_or("memory binder budget exhausted")?;
-    if parameters.is_empty() {
-        return Ok(vec![]);
-    }
-    let sorts = match package {
-        Some(package) => package.declaration_parameter_sorts(fuel)?,
-        None => BTreeMap::new(),
-    };
-    Ok(parameters
-        .iter()
-        .map(|id| nir::DeclarationParameter {
-            declaration: *id,
-            sort: sorts.get(id).copied().unwrap_or(nir::Sort::Type),
-        })
-        .collect())
-}
-
 pub(super) fn memory_domains(
     package: &Package,
     parameters: &[DeclarationId],

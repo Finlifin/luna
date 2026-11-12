@@ -3552,6 +3552,141 @@ fn drop_protocol_identity_selects_reference_receiver_and_does_not_hide_field_cle
 }
 
 #[test]
+fn dependent_domains_survive_drop_selection_and_captured_access() {
+    use elaboration::verification::{
+        PlaceId,
+        ownership::{Place, Shape, State},
+    };
+    let package = compile(
+        "trait Retire {fn drop(*self) {let pointer=self;}}
+        struct Explicit where D, item:D {flag:bool}
+        struct Defaulted where D, item:D {flag:bool}
+        impl Retire for Explicit<D,item> where D, item:D {
+            fn drop(*self) where ensures true
+            {let flag=self.flag.*;}
+        }
+        impl Retire for Defaulted<D,item> where D, item:D {}",
+    );
+    world(&package, |world, items| {
+        for name in ["Explicit", "Defaulted"] {
+            for arguments in [
+                vec![
+                    nir::Term::Primitive(nir::Primitive::Type),
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                ],
+                vec![
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                    nir::Term::Bool(true),
+                ],
+            ] {
+                let subject = nominal(&package, name, arguments.clone());
+                let Resolution::Selected(selected) = luna::protocols::select_drop(
+                    &package,
+                    world,
+                    items,
+                    &subject,
+                    Budget::default(),
+                )
+                .unwrap() else {
+                    panic!("expected selected Drop for {subject}")
+                };
+                assert_eq!(selected.implementation_arguments, arguments);
+                assert_eq!(
+                    selected.method.arguments,
+                    if name == "Explicit" {
+                        arguments
+                    } else {
+                        vec![subject]
+                    }
+                );
+                if name == "Explicit" {
+                    assert!(!selected.program.postconditions.is_empty());
+                }
+                let root = PlaceId {
+                    owner: 100,
+                    local: 1,
+                };
+                let receiver = Place {
+                    root,
+                    fields: vec![],
+                };
+                let mut state = State::default();
+                state
+                    .declare(root, &Shape::Fields(vec![Shape::Value]), true, &mut 1000)
+                    .unwrap();
+                assert!(
+                    luna::protocols::check_drop_access(
+                        &package, world, &selected, &state, &receiver, &mut 1,
+                    )
+                    .is_err()
+                );
+                let checked = luna::protocols::check_drop_access(
+                    &package,
+                    world,
+                    &selected,
+                    &state,
+                    &receiver,
+                    &mut 100_000,
+                )
+                .unwrap();
+                assert_eq!(checked.receiver, receiver);
+                assert_eq!(checked.footprint.accesses.is_empty(), name == "Defaulted");
+                let mut forged = selected.clone();
+                forged.program.postconditions.clear();
+                if name == "Explicit" {
+                    assert!(
+                        luna::protocols::check_drop_access(
+                            &package,
+                            world,
+                            &forged,
+                            &state,
+                            &receiver,
+                            &mut 100_000,
+                        )
+                        .unwrap_err()
+                        .contains("body contract changed")
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn selected_drop_bounds_program_contract_copy_before_publication() {
+    let mut package = compile(
+        "trait Retire {fn drop(*self);} struct Owned {}
+        impl Retire for Owned {fn drop(*self) where ensures true {}}",
+    );
+    let body = package.implementations[0].methods[0].1;
+    let function = package
+        .functions
+        .iter_mut()
+        .find(|f| f.declaration == body)
+        .unwrap();
+    function.postconditions = vec![function.postconditions[0].clone(); 2000];
+    world(&package, |world, items| {
+        let subject = nominal(&package, "Owned", vec![]);
+        let bounded = Budget {
+            steps: 1000,
+            ..Budget::default()
+        };
+        let limited = luna::protocols::select_drop(&package, world, items, &subject, bounded);
+        assert!(
+            !matches!(limited, Ok(Resolution::Selected(_))),
+            "oversized contract published"
+        );
+        let Resolution::Selected(selected) =
+            luna::protocols::select_drop(&package, world, items, &subject, Budget::default())
+                .unwrap()
+        else {
+            panic!("fresh complete selection must remain possible")
+        };
+        assert_eq!(selected.program.postconditions.len(), 2000);
+    });
+}
+
+#[test]
 fn generic_and_default_destructors_keep_distinct_substitution_plans() {
     let package = compile(
         "trait Retire {fn drop(*self) {let pointer=self;}} struct Box where T {value:T} struct Explicit where T {value:T} impl Retire for Box<T> where T {} impl Retire for Explicit<T> where T {fn drop(*self) {let pointer=self;}}",

@@ -62,38 +62,55 @@ impl ProgramContract {
         frames: &[Vec<crate::Sort>],
         fuel: &mut usize,
     ) -> Result<Self, crate::type_computations::Error> {
-        use crate::type_computations::Error;
         let substitution =
             crate::DeclarationSubstitution::bounded(parameters, domains, arguments, frames, fuel)?;
-        let mut expression = |value: &Expr| {
-            substitution
-                .instantiate_expression_bounded(value, fuel)
-                .map_err(Error::from)
-        };
-        let preconditions = self
-            .preconditions
-            .iter()
-            .map(&mut expression)
-            .collect::<Result<_, _>>()?;
-        let postconditions = self
-            .postconditions
-            .iter()
-            .map(&mut expression)
-            .collect::<Result<_, _>>()?;
-        *fuel = fuel
-            .checked_sub(self.entry_snapshots.len())
-            .ok_or(Error::Budget)?;
-        Ok(Self {
-            preconditions,
-            postconditions,
-            result_binding: self.result_binding,
-            entry_snapshots: self.entry_snapshots.clone(),
-        })
+        instantiate_program_parts(
+            &self.preconditions,
+            &self.postconditions,
+            self.result_binding,
+            &self.entry_snapshots,
+            &substitution,
+            fuel,
+        )
     }
     pub fn is_empty(&self) -> bool {
         self.preconditions.is_empty() && self.postconditions.is_empty()
     }
 }
+/// The owned contract and borrowed callable view use the same copy boundary.
+fn instantiate_program_parts(
+    preconditions: &[Expr],
+    postconditions: &[Expr],
+    result_binding: Option<LocalId>,
+    entry_snapshots: &[EntrySnapshot],
+    substitution: &crate::DeclarationSubstitution<'_>,
+    fuel: &mut usize,
+) -> Result<ProgramContract, crate::type_computations::Error> {
+    use crate::type_computations::Error;
+    let mut expression = |value: &Expr| {
+        substitution
+            .instantiate_expression_bounded(value, fuel)
+            .map_err(Error::from)
+    };
+    let preconditions = preconditions
+        .iter()
+        .map(&mut expression)
+        .collect::<Result<_, _>>()?;
+    let postconditions = postconditions
+        .iter()
+        .map(&mut expression)
+        .collect::<Result<_, _>>()?;
+    *fuel = fuel
+        .checked_sub(entry_snapshots.len())
+        .ok_or(Error::Budget)?;
+    Ok(ProgramContract {
+        preconditions,
+        postconditions,
+        result_binding,
+        entry_snapshots: entry_snapshots.to_vec(),
+    })
+}
+
 impl fmt::Display for ProgramContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(program-contract (requires")?;

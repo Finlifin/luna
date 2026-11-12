@@ -113,15 +113,17 @@ pub(super) fn check_access_with_layout(
         .iter()
         .find(|item| item.declaration == selected.implementation)
         .ok_or("captured Drop implementation is missing")?;
-    let subject = implementation
-        .subject
-        .instantiate_parameters(
-            &implementation
-                .parameter_binders()
-                .map_err(|e| e.to_string())?,
-            &selected.implementation_arguments,
-        )
-        .map_err(|error| error.to_string())?;
+    let substitution = nir::DeclarationSubstitution::bounded(
+        &implementation.type_parameters,
+        &implementation.parameter_types,
+        &selected.implementation_arguments,
+        &[],
+        fuel,
+    )
+    .map_err(|e| e.to_string())?;
+    let subject = substitution
+        .instantiate_bounded(&implementation.subject, fuel)
+        .map_err(|e| e.to_string())?;
     let contract = package
         .traits
         .iter()
@@ -147,7 +149,7 @@ pub(super) fn check_access_with_layout(
             .collect::<Vec<_>>()
             != vec![selected.method.body]
         || selected.method.arguments != expected_arguments
-        || instantiate_contract(member, contract.self_parameter, &selected.subject)?
+        || instantiate_contract(member, contract.self_parameter, &selected.subject, fuel)?
             != selected.contract
     {
         return Err("captured Drop method disagrees with the current package".into());
@@ -157,15 +159,19 @@ pub(super) fn check_access_with_layout(
         .iter()
         .find(|function| function.declaration == selected.method.body)
         .ok_or("captured Drop body is missing")?;
-    let binders = memory::memory_binders(Some(package), &function.type_parameters, fuel)?;
-    let program = ProgramContract {
-        preconditions: function.preconditions.clone(),
-        postconditions: function.postconditions.clone(),
-        result_binding: function.result_binding,
-        entry_snapshots: function.entry_snapshots.clone(),
-    }
-    .instantiate_parameters(&binders, &selected.method.arguments)
-    .map_err(|error| error.to_string())?;
+    let domains = memory::memory_domains(package, &function.type_parameters, fuel)?;
+    let frames = [vec![Sort::Runtime]];
+    let substitution = nir::DeclarationSubstitution::bounded(
+        &function.type_parameters,
+        &domains,
+        &selected.method.arguments,
+        &frames,
+        fuel,
+    )
+    .map_err(|e| e.to_string())?;
+    let program = nir::contracts::CallableProgram::function(function)
+        .instantiate_contract(&substitution, fuel)
+        .map_err(|e| e.to_string())?;
     if function.parameters != selected.parameters || program != selected.program {
         return Err("captured Drop body contract changed".into());
     }
@@ -488,16 +494,21 @@ fn field_type(
                 .iter()
                 .find(|item| item.declaration == *declaration)
                 .ok_or("Drop field layout is missing")?;
-            definition
+            let field = &definition
                 .fields
                 .get(index)
                 .ok_or("Drop field index is out of bounds")?
-                .1
-                .instantiate_parameters(
-                    &definition.parameter_binders().map_err(|e| e.to_string())?,
-                    arguments,
-                )
-                .map_err(|e| e.to_string())
+                .1;
+            nir::DeclarationSubstitution::bounded(
+                &definition.type_parameters,
+                &definition.parameter_types,
+                arguments,
+                &[],
+                fuel,
+            )
+            .map_err(|e| e.to_string())?
+            .instantiate_bounded(field, fuel)
+            .map_err(|e| e.to_string())
         }
         _ => Err("Drop field access has no aggregate layout".into()),
     }

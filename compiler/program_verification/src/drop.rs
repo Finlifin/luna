@@ -102,24 +102,72 @@ fn instantiate_contract(
     member: &MethodContract,
     self_parameter: DeclarationId,
     subject: &Term,
+    fuel: &mut usize,
 ) -> Result<MethodContract, String> {
-    let mut contract = member.clone();
-    let arguments = [subject.clone()];
-    contract.signature = member
-        .signature
-        .instantiate_types(&[self_parameter], &arguments)
+    let parameters = [self_parameter];
+    let domains = [Term::Primitive(Primitive::Type)];
+    let arguments = std::slice::from_ref(subject);
+    let closed = nir::DeclarationSubstitution::bounded(&parameters, &domains, arguments, &[], fuel)
         .map_err(|e| e.to_string())?;
-    contract.program = member
-        .program
-        .instantiate_types(&[self_parameter], &arguments)
+    let signature = member.signature.ordinary().map_err(|e| e.to_string())?;
+    let completed_signature = closed
+        .instantiate_bounded(signature, fuel)
         .map_err(|e| e.to_string())?;
-    contract.requirements = member
-        .requirements
-        .iter()
-        .map(|r| r.instantiate_types(&[self_parameter], &arguments))
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())?;
-    Ok(contract)
+    let Term::Function {
+        parameters: inputs, ..
+    } = signature.callable_signature()
+    else {
+        return Err("Drop contract lacks an ordinary signature".into());
+    };
+    *fuel = fuel
+        .checked_sub(
+            inputs
+                .len()
+                .saturating_add(member.name.len())
+                .saturating_add(member.type_parameters.len())
+                .saturating_add(member.parameter_bindings.len()),
+        )
+        .ok_or("Drop contract copy budget exhausted")?;
+    let frames = [inputs.iter().map(|p| p.sort).collect()];
+    let scoped =
+        nir::DeclarationSubstitution::bounded(&parameters, &domains, arguments, &frames, fuel)
+            .map_err(|e| e.to_string())?;
+    Ok(MethodContract {
+        declaration: member.declaration,
+        name: member.name.clone(),
+        phase: member.phase,
+        is_quote: member.is_quote,
+        pure: member.pure,
+        is_unsafe: member.is_unsafe,
+        by_value_receiver: member.by_value_receiver,
+        by_reference_receiver: member.by_reference_receiver,
+        default: member.default,
+        type_parameters: member.type_parameters.clone(),
+        parameter_bindings: member.parameter_bindings.clone(),
+        type_arguments: member
+            .type_arguments
+            .iter()
+            .map(|ty| closed.instantiate_bounded(ty, fuel))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?,
+        signature: completed_signature.into(),
+        program: nir::contracts::CallableProgram::method(member)
+            .map_err(|e| e.to_string())?
+            .instantiate_contract(&scoped, fuel)
+            .map_err(|e| e.to_string())?,
+        requirements: member
+            .requirements
+            .iter()
+            .map(|r| scoped.instantiate_predicate_bounded(r, fuel))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?,
+        capabilities: member
+            .capabilities
+            .iter()
+            .map(|r| scoped.instantiate_requirement_bounded(r, fuel))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?,
+    })
 }
 /// Source spelling never designates the protocol. The caller must supply its
 /// trusted language-item identity and the immutable package/world that owns it.
@@ -169,10 +217,26 @@ pub fn select(
             "Drop subject query budget exhausted".into(),
         ));
     }
-    let contract = instantiate_contract(member, trait_contract.self_parameter, subject)?;
+    let mut preparation_fuel = budget.steps;
+    let contract = instantiate_contract(
+        member,
+        trait_contract.self_parameter,
+        subject,
+        &mut preparation_fuel,
+    )?;
+    let self_parameters = [trait_contract.self_parameter];
+    let self_domains = [Term::Primitive(Primitive::Type)];
+    let self_substitution = nir::DeclarationSubstitution::bounded(
+        &self_parameters,
+        &self_domains,
+        std::slice::from_ref(subject),
+        &[],
+        &mut preparation_fuel,
+    )
+    .map_err(|e| e.to_string())?;
     for requirement in &trait_contract.requirements {
-        let requirement = requirement
-            .instantiate_types(&[trait_contract.self_parameter], &[subject.clone()])
+        let requirement = self_substitution
+            .instantiate_predicate_bounded(requirement, &mut preparation_fuel)
             .map_err(|e| e.to_string())?;
         if !matches!(
             world
@@ -263,12 +327,18 @@ pub fn select(
         .iter()
         .find(|f| f.declaration == body)
         .ok_or("Drop selected method body is missing")?;
-    let mut binder_fuel = budget.steps;
-    let binders =
-        super::memory::memory_binders(Some(package), &function.type_parameters, &mut binder_fuel)?;
-    let actual = function
-        .signature
-        .instantiate_parameters(&binders, &arguments)
+    let domains =
+        super::memory::memory_domains(package, &function.type_parameters, &mut preparation_fuel)?;
+    let substitution = nir::DeclarationSubstitution::bounded(
+        &function.type_parameters,
+        &domains,
+        &arguments,
+        &[],
+        &mut preparation_fuel,
+    )
+    .map_err(|e| e.to_string())?;
+    let actual = substitution
+        .instantiate_bounded(&function.signature, &mut preparation_fuel)
         .map_err(|e| e.to_string())?;
     if function.phase != FunctionPhase::Runtime
         || actual != signature(subject.clone())
@@ -277,9 +347,20 @@ pub fn select(
     {
         return Err("Drop selected body does not implement runtime fn drop(*self) -> void".into());
     }
+    // The ABI check above fixes one ordinary runtime receiver frame. Program
+    // predicates remain independent obligations; only type requirements enter PTC.
+    let frames = [vec![Sort::Runtime]];
+    let scoped = nir::DeclarationSubstitution::bounded(
+        &function.type_parameters,
+        &domains,
+        &arguments,
+        &frames,
+        &mut preparation_fuel,
+    )
+    .map_err(|e| e.to_string())?;
     for requirement in &function.requirements {
-        let requirement = requirement
-            .instantiate_parameters(&binders, &arguments)
+        let requirement = scoped
+            .instantiate_predicate_bounded(requirement, &mut preparation_fuel)
             .map_err(|e| e.to_string())?;
         if !matches!(
             world
@@ -292,30 +373,25 @@ pub fn select(
             ));
         }
     }
-    let program = ProgramContract {
-        preconditions: function.preconditions.clone(),
-        postconditions: function.postconditions.clone(),
-        result_binding: function.result_binding,
-        entry_snapshots: function.entry_snapshots.clone(),
-    }
-    .instantiate_parameters(&binders, &arguments)
-    .map_err(|e| e.to_string())?;
+    let program = nir::contracts::CallableProgram::function(function)
+        .instantiate_contract(&scoped, &mut preparation_fuel)
+        .map_err(|e| e.to_string())?;
     let mut capabilities: Vec<_> = function
         .capabilities
         .iter()
-        .map(|c| c.instantiate_parameters(&binders, &arguments))
+        .map(|c| scoped.instantiate_requirement_bounded(c, &mut preparation_fuel))
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
     for capability in &trait_contract.capabilities {
         capabilities.push(
-            capability
-                .instantiate_types(&[trait_contract.self_parameter], &[subject.clone()])
+            self_substitution
+                .instantiate_requirement_bounded(capability, &mut preparation_fuel)
                 .map_err(|e| e.to_string())?,
         );
     }
     for parent in &trait_contract.parents {
-        let parent = parent
-            .instantiate_types(&[trait_contract.self_parameter], &[subject.clone()])
+        let parent = self_substitution
+            .instantiate_interface_bounded(parent, &mut preparation_fuel)
             .map_err(|e| e.to_string())?;
         capabilities.push(TraitRequirement {
             interface: parent.declaration,

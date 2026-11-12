@@ -463,8 +463,8 @@ Function API 预检完整函数后特化，没有输入的不可变函数直接�
 
 所有生产调用者迁走后，删除 Metadata 的固定 sort binder 构造器。定义端抽象
 检查仍可查询 sort 目录；依赖域的实例化必须使用完整域。内存摘要独立入口目前
-仍自行读取包域目录，未宣称已经共享整个分析事务。Drop 选择、Drop 契约再核对
-与契约继承中的替换仍待迁移；这也不解决泛型默认值的 P3／Copy 证据缺口。
+仍自行读取包域目录，未宣称已经共享整个分析事务。Drop 消费者的后续迁移见
+下一节；契约继承与泛型默认值的 P3／Copy 证据缺口仍未解决。
 
 工作目录 `/home/fin/luna`，执行
 `python3 -B development/check.py --timeout 900 -- test -p program_verification
@@ -502,6 +502,79 @@ Function API 预检完整函数后特化，没有输入的不可变函数直接�
 与直接消费者反例共同支撑本次迁移，不表示整个资源或程序验证系统已经完成。
 修改的三个 Rust 文件通过 rustfmt 检查，证据
 `/tmp/luna-tools-99ffs6o7/result.json`；工作区原有修改未纳入本次提交。
+
+
+### 7.4 Drop 选择与捕获契约准备
+
+析构选择和清理时的访问核对都消费同一份声明域，不能在前者接受
+`D = Type, item = bool`，再由后者的固定 sort 替换拒绝。显式实现的 method 输入
+来自所选 implementation 的实参；trait 默认方法接收整个 Self。两种计划仍各自
+保留，不以重选实现、展开 NF 头或改变参数身份来消除差异。
+
+Drop 选择现以有界声明替换准备签名、类型 requirements 和 capabilities；程序
+前后条件保留普通 receiver frame，仅交给程序验证层，不进入 PTC。接口 Self
+替换也计量完整 MethodContract 的相关元数据，并替换其能力需求；接口与所选
+主体的准备共享本次 preparation fuel。此前直接 clone 整份 MethodContract、
+先 clone 函数前后条件再进行第二次替换的路径均退役。
+
+`CallableProgram::instantiate_contract` 从已借用的函数／方法取程序契约，与
+拥有的 ProgramContract 共用同一复制实现。只复制前后条件和入口快照，不复制
+函数体或默认值，更不据此证明这些程序的纯度、访问权限或安全性。低预算不返回
+半份契约，失败后能从原不可变输入重试；大主体和大默认值不影响只请求契约的
+复制成本，但请求的大契约本身必须完整计量。
+
+清理瞬间仍核对所捕获的方法和程序契约，不重新选择析构方法。implementation
+subject 的重建、函数契约重建和名义字段投影都使用完整域的 bounded 替换。
+旧 `memory_binders` 已失去全部生产调用者并删除。此迁移没有统一整个 selection
+查询的预算：类型查询仍接收独立 Budget，完整事务的预算与证据所有权还有后续
+工作。契约继承也仍有自己的旧替换路径。
+
+工作目录 `/home/fin/luna`，以下命令均使用
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- 新的源码声明经真实 frontend 编译后，以公开 Drop 入口选择和检查；
+  `-p luna --test drop dependent_domains_survive_drop_selection_and_captured_access
+  -- --nocapture` 在原实现 `/tmp/luna-tools-bt9ebib8/result.json` 退出 101，
+  报 `expected comptime-value, got type`。迁移后
+  `/tmp/luna-tools-a02uot7c/result.json` 退出 0。覆盖显式／默认析构方法、Type
+  与 bool 值输入、低预算后重试以及捕获的程序契约被改写后的拒绝。
+- 仅临时恢复旧 Drop selector，以
+  `-p luna --test drop selected_drop_bounds_program_contract_copy_before_publication
+  -- --nocapture` 做预算对照，`/tmp/luna-tools-7k2cbii0/result.json` 退出 101：
+  1000 步仍发布包含 2000 个后置条件的选择。随后恢复本次代码，低预算拒绝且
+  充足预算重新选择后完整保留全部条件。
+- `-p nir -p program_verification -p luna --lib --test drop
+  --test declaration_contracts --no-fail-fast` 的
+  `/tmp/luna-tools-baehal1i/result.json` 退出 101；新增用例通过，完整 Drop 组
+  有一项既有 handler 布局拒绝断言失败。将本次五个生产文件全部恢复为
+  `2ebe880d`，单独执行
+  `-p luna --test drop scheduled_handler_borrowed_copy_record_rejects_unproved_owner_layouts
+  -- --nocapture`，`/tmp/luna-tools-rs5eabcx/result.json` 同样退出 101，确认是
+  本阶段之前的基线行为。未改该测试预期；尚待按实际捕获与访问规则判断是
+  旧阶段限制已经过时还是遗漏检查，不能仅凭断言失败补定语言规则。
+- 恢复本次实现后，以
+  `-p nir -p program_verification -p luna --lib --test drop
+  --test declaration_contracts --test runtime_purity --test resources
+  --test method_memory_contracts --test library_protocols --no-fail-fast
+  -- --skip scheduled_handler_borrowed_copy_record_rejects_unproved_owner_layouts`
+  验证，`/tmp/luna-tools-2hvmqs5o/result.json` 退出 0，1758 项通过，单独过滤
+  上述已复现的基线断言。不能将此结果称为完整 Drop 组无失败；真实 sysroot 的
+  声明契约与公开内置包检查已包含在本轮中。
+
+
+随后将契约视图单元用例的默认值改为一个合法槽上的大表达式，单独重跑
+`-p nir --lib contracts::program_view::tests::contract_specialization_does_not_copy_unrequested_body_or_defaults
+-- --nocapture`，`/tmp/luna-tools-liaupxh6/result.json` 退出 0。另执行
+`-p nir --test scoped_contracts --test contract_alignment --test substitution_input_observation
+--no-fail-fast`，`/tmp/luna-tools-3kbuawk6/result.json` 退出 0，13 项通过。
+六个修改的 Rust 文件通过 rustfmt 检查，证据
+`/tmp/luna-tools-7w13wiwl/result.json`。这些都是保留原有工作区修改的验证，
+不宣称为隔离的纯 HEAD 检查。
+
+后续还需核对 SelectedDrop 的捕获证据边界：当前访问入口首先检查 index 的身份
+和版本，再重建 implementation subject、method 和 program；应继续审计这些字段
+与 TypeResolution 内所选 implementation 及实参证据是否始终绑定。这是对当前
+检查位置的静态观察，尚未据此宣称已复现证据伪造或已完成证书封装。
 
 ## 8. IIR 到 ABI 的明确顺序
 

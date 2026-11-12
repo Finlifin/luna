@@ -87,6 +87,24 @@ impl<'a> CallableProgram<'a> {
         }
     }
 
+    /// Specialize only program specifications, without copying the executable
+    /// body or defaults. The caller supplies the declaration substitution in
+    /// the ordinary input frame; this does not prove either contract side.
+    pub fn instantiate_contract(
+        self,
+        substitution: &crate::DeclarationSubstitution<'_>,
+        fuel: &mut usize,
+    ) -> Result<super::ProgramContract, crate::type_computations::Error> {
+        super::instantiate_program_parts(
+            self.preconditions,
+            self.postconditions,
+            self.result_binding,
+            self.entry_snapshots,
+            substitution,
+            fuel,
+        )
+    }
+
     /// Same root order as a Function traversal; consumers can reverse it to
     /// retain the existing work-stack order without collecting every root.
     pub fn roots(self) -> impl DoubleEndedIterator<Item = &'a Expr> {
@@ -265,6 +283,49 @@ mod tests {
         assert!(
             view.to_string()
                 .starts_with("(callable-program (anonymous) ")
+        );
+    }
+
+    #[test]
+    fn contract_specialization_does_not_copy_unrequested_body_or_defaults() {
+        let mut function = method()
+            .program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000)
+            .unwrap();
+        function.body = Expr {
+            kind: K::Block {
+                statements: (0..2000).map(flag).collect(),
+                result: Some(Box::new(flag(2001))),
+            },
+            ..flag(0)
+        };
+        function.defaults = vec![(0, function.body.clone())];
+        let substitution =
+            crate::DeclarationSubstitution::bounded(&[], &[], &[], &[], &mut 100).unwrap();
+        let view = CallableProgram::function(&function);
+        let contract = view.instantiate_contract(&substitution, &mut 100).unwrap();
+        assert_eq!(contract.preconditions, function.preconditions);
+        assert_eq!(contract.postconditions, function.postconditions);
+        assert_eq!(contract.entry_snapshots, function.entry_snapshots);
+        assert!(matches!(
+            view.instantiate_contract(&substitution, &mut 0),
+            Err(crate::type_computations::Error::Budget)
+        ));
+        assert_eq!(
+            view.instantiate_contract(&substitution, &mut 100).unwrap(),
+            contract
+        );
+        function.preconditions = (0..2000).map(flag).collect();
+        assert!(matches!(
+            CallableProgram::function(&function).instantiate_contract(&substitution, &mut 100),
+            Err(crate::type_computations::Error::Budget)
+        ));
+        assert_eq!(
+            CallableProgram::function(&function)
+                .instantiate_contract(&substitution, &mut 100_000)
+                .unwrap()
+                .preconditions
+                .len(),
+            2000
         );
     }
 
