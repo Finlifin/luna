@@ -901,35 +901,13 @@ impl Action {
                     .then_some(bindings),
                 filter.as_deref(),
             ),
-            Action::Invoke {
-                entry,
-                fuel,
-                protocols,
-                ..
-            } => {
+            Action::Invoke { entry, fuel, .. } => {
                 elaboration::verification::optimization::elide_proven_checks(
                     &mut package,
                     &mut elaboration::verification::Limits::default(),
                 );
-                crate::invocation::invoke_selected(
-                    &package,
-                    entry,
-                    Some(identity),
-                    if protocols.is_some() || bindings.copy.is_some() || bindings.drop.is_some() {
-                        Some((
-                            crate::resources::Selection::Identity(
-                                bindings.copy.ok_or("missing Copy binding")?,
-                            ),
-                            crate::resources::Selection::Identity(
-                                bindings.drop.ok_or("missing Drop binding")?,
-                            ),
-                        ))
-                    } else {
-                        None
-                    },
-                    *fuel,
-                )
-                .map(|v| v.to_string())
+                crate::invocation::invoke_in_package(&package, identity, entry, *fuel)
+                    .map(|v| v.to_string())
             }
             Action::Instantiate { entry, fuel } => {
                 crate::instantiation::instantiate_in_package(&package, identity, entry, *fuel)

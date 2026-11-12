@@ -184,26 +184,15 @@ fn default_entry_failure_does_not_become_cached_success_or_contaminate_another_s
 }
 
 #[test]
-fn default_entries_with_resource_protocols_preserve_the_source() {
+fn default_entries_preserve_unrelated_runtime_traits_in_the_source() {
     let package = support::compile(
         "trait Duplicate {} trait Retire {fn drop(*self);}
          comptime fn run(.flag:bool=true)->bool {flag}",
     );
     let original = package.to_string();
-    assert!(
-        luna::invocation::invoke_with_protocols(&package, "run", "Missing", "Retire", 100_000,)
-            .is_err()
-    );
     for _ in 0..2 {
         assert_eq!(
-            luna::invocation::invoke_with_protocols(
-                &package,
-                "run",
-                "Duplicate",
-                "Retire",
-                100_000,
-            )
-            .unwrap(),
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
             Value::Bool(true)
         );
         assert_eq!(package.to_string(), original);

@@ -8,7 +8,7 @@ use elaboration::{
     materialization::{DeclarationSnapshot, DeclarationSource},
     ptc,
 };
-use intrinsic::{LangItem, LangItemDef, LangItems};
+use intrinsic::LangItems;
 use nir::{
     Term,
     program::{Package, TypePredicate},
@@ -58,7 +58,6 @@ struct Binding {
     eq: Selected,
     hash: Selected,
     budget: ptc::Budget,
-    resources: Option<(nir::DeclarationId, nir::DeclarationId)>,
 }
 impl Protocol {
     /// Bind both operations and prove their declared type capabilities.
@@ -129,36 +128,8 @@ impl Protocol {
                 );
             }
 
-            let resource_binding = match (items.get(LangItem::Copy), items.get(LangItem::Drop)) {
-                (None, None) => None,
-                (Some(LangItemDef::UserDef(copy)), Some(LangItemDef::UserDef(drop))) => Some(
-                    crate::resources::ProtocolContext::selected_in_source_metered(
-                        source.clone(),
-                        crate::resources::Selection::Identity(copy),
-                        Some(crate::resources::Selection::Identity(drop)),
-                        &mut work,
-                    )?,
-                ),
-                _ => {
-                    return Err(
-                        "key pointer transfers require paired source Copy and Drop bindings".into(),
-                    );
-                }
-            };
-            let resources = resource_binding
-                .as_ref()
-                .map(|binding| (binding.copy, binding.drop.expect("paired protocols")));
-            let context = match &resource_binding {
-                Some(binding) => {
-                    work.steps = work
-                        .steps
-                        .checked_sub(1)
-                        .ok_or("key context retention budget exhausted")?;
-                    binding.context().clone()
-                }
-                None => ptc::Context::from_package_metered(package, &mut work.steps)
-                    .map_err(|error| format!("key type context: {error}"))?,
-            };
+            let context = ptc::Context::from_package_metered(package, &mut work.steps)
+                .map_err(|error| format!("key type context: {error}"))?;
             let world = source
                 .capabilities(&context, &[], &mut work)
                 .map_err(|error| format!("key declaration index: {error}"))?;
@@ -214,7 +185,6 @@ impl Protocol {
                     eq,
                     hash,
                     budget,
-                    resources,
                 },
             })
         })();
@@ -273,10 +243,6 @@ impl Binding {
         context: &mut Context,
         action: impl FnOnce(&mut Interpreter<'_>) -> Result<R, comptime_interpretor::Error>,
     ) -> Result<R, Error<String>> {
-        let world = self
-            .source
-            .capabilities(&self.context, &[], &mut { self.budget })
-            .map_err(|error| Error::Protocol(error.to_string()))?;
         let source_queries = elaboration::materialization::SourceInvocationQueries::in_source(
             DeclarationSource::Snapshot(&self.source),
             &self.context,
@@ -284,30 +250,6 @@ impl Binding {
         );
         let solver = |predicate: &TypePredicate, remaining: &mut u64| {
             source_queries.check(predicate, self.budget, remaining)
-        };
-        let copy_failure = std::cell::RefCell::new(None::<String>);
-        let pointer_copy = |ty: &Term, remaining: &mut u64| {
-            let Some((copy, drop)) = self.resources else {
-                return false;
-            };
-            let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
-            let before = fuel;
-            let evidence = elaboration::verification::copy::acquire(
-                self.source.package(),
-                &world,
-                copy,
-                drop,
-                ty,
-                ptc::Budget {
-                    steps: fuel,
-                    ..self.budget
-                },
-                &mut fuel,
-            );
-            *remaining = remaining.saturating_sub((before - fuel) as u64);
-            let allowed = evidence.is_ok();
-            *copy_failure.borrow_mut() = evidence.err();
-            allowed
         };
         // Ordinary Type inputs become concrete only inside the invocation.
         // Resolve their method calls against this protocol's frozen source world.
@@ -331,7 +273,7 @@ impl Binding {
             &mut allowance,
         );
         let mut interpreter = match prepared {
-            Ok(interpreter) => interpreter.with_budgeted_pointer_copy_permission(&pointer_copy),
+            Ok(interpreter) => interpreter,
             Err(error) => {
                 // Failed world construction retains its reservation, just as
                 // ordinary invocation does; retries cannot obtain free work.
@@ -345,12 +287,7 @@ impl Binding {
             bytecode_invocations: interpreter.bytecode_invocations(),
         };
         context.spend::<String>((steps - interpreter.remaining_steps()) as usize)?;
-        result.map_err(|e| {
-            Error::Protocol(match copy_failure.borrow().as_ref() {
-                Some(reason) => format!("{e}; pointer Copy evidence: {reason}"),
-                None => e.to_string(),
-            })
-        })
+        result.map_err(|e| Error::Protocol(e.to_string()))
     }
 }
 impl KeyProtocol<Value> for Protocol {

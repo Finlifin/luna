@@ -68,7 +68,6 @@ impl PreparedInvocation {
             DeclarationSource::Snapshot(&self.source),
             &mut self.invocation,
             &self.entry,
-            None,
             fuel,
             None,
             Some(&mut self.code),
@@ -81,7 +80,7 @@ impl PreparedInvocation {
 }
 
 pub fn invoke(package: &Package, entry: &str, fuel: u64) -> Result<Value, String> {
-    invoke_selected(package, entry, None, None, fuel)
+    invoke_selected(package, entry, None, fuel)
 }
 
 /// Invoke an entry belonging to a driver-selected semantic package identity.
@@ -91,26 +90,7 @@ pub fn invoke_in_package(
     entry: &str,
     fuel: u64,
 ) -> Result<Value, String> {
-    invoke_selected(package, entry, Some(identity), None, fuel)
-}
-
-pub fn invoke_with_protocols(
-    package: &Package,
-    entry: &str,
-    copy: &str,
-    drop: &str,
-    fuel: u64,
-) -> Result<Value, String> {
-    invoke_selected(
-        package,
-        entry,
-        None,
-        Some((
-            crate::resources::Selection::Name(copy),
-            crate::resources::Selection::Name(drop),
-        )),
-        fuel,
-    )
+    invoke_selected(package, entry, Some(identity), fuel)
 }
 
 /// Invoke through the ordinary driver preparation with a checked HIR publisher.
@@ -122,30 +102,22 @@ pub fn invoke_in_package_with_struct_publisher(
     fuel: u64,
     publisher: &elaboration::definitions::StructPublisher<'_>,
 ) -> Result<Value, String> {
-    invoke_selected_with_publisher(package, entry, Some(identity), None, fuel, Some(publisher))
+    invoke_selected_with_publisher(package, entry, Some(identity), fuel, Some(publisher))
 }
 
 pub(crate) fn invoke_selected(
     package: &Package,
     entry: &str,
     identity: Option<u64>,
-    protocols: Option<(
-        crate::resources::Selection<'_>,
-        crate::resources::Selection<'_>,
-    )>,
     fuel: u64,
 ) -> Result<Value, String> {
-    invoke_selected_with_publisher(package, entry, identity, protocols, fuel, None)
+    invoke_selected_with_publisher(package, entry, identity, fuel, None)
 }
 
 pub(crate) fn invoke_selected_with_publisher(
     package: &Package,
     entry: &str,
     identity: Option<u64>,
-    protocols: Option<(
-        crate::resources::Selection<'_>,
-        crate::resources::Selection<'_>,
-    )>,
     fuel: u64,
     publisher: Option<&dyn elaboration::definitions::StructBuildService>,
 ) -> Result<Value, String> {
@@ -155,10 +127,10 @@ pub(crate) fn invoke_selected_with_publisher(
     let mut fuel = fuel;
     let function = entry::select_in(package, entry, FunctionPhase::Comptime, identity, &mut fuel)?;
     let mut invocation = entry::Entry::new(function);
-    // Resource binding needs ownership; selected dispatch needs projection.
-    // Both use one capture, before VM and query services borrow that source.
+    // Selected dispatch needs projection before the VM and query services
+    // borrow the source. Comptime execution needs no runtime resource binding.
     let retained;
-    let source = if protocols.is_some() || !package.dispatch_instances.is_empty() {
+    let source = if !package.dispatch_instances.is_empty() {
         retained = retain_source(DeclarationSource::Borrowed(package), &mut fuel)?;
         DeclarationSource::Snapshot(&retained)
     } else {
@@ -168,7 +140,6 @@ pub(crate) fn invoke_selected_with_publisher(
         source,
         &mut invocation,
         entry,
-        protocols,
         fuel,
         publisher,
         None,
@@ -187,15 +158,10 @@ fn retain_source(
     result.map_err(|error| format!("invocation source retention budget exhausted: {error:?}"))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn execute_prepared(
     source: DeclarationSource<'_>,
     invocation: &mut entry::Entry,
     entry: &str,
-    protocols: Option<(
-        crate::resources::Selection<'_>,
-        crate::resources::Selection<'_>,
-    )>,
     fuel: u64,
     publisher: Option<&dyn elaboration::definitions::StructBuildService>,
     mut session: Option<&mut comptime_interpretor::CodeSession>,
@@ -208,60 +174,10 @@ fn execute_prepared(
             .map_err(|_| "invocation fuel does not fit the host counter")?,
         ..preparation_budget
     };
-    let resources = protocols
-        .map(|(copy, drop)| {
-            crate::resources::ProtocolContext::selected_in_source_metered(
-                match source {
-                    DeclarationSource::Snapshot(snapshot) => snapshot.clone(),
-                    DeclarationSource::Borrowed(_) => {
-                        return Err("resource invocation requires a retained source".into());
-                    }
-                },
-                copy,
-                Some(drop),
-                &mut preparation,
-            )
-        })
-        .transpose()?;
-    let context;
-    let context = match &resources {
-        Some(resources) => resources.context(),
-        None => {
-            context =
-                elaboration::ptc::Context::from_package_metered(package, &mut preparation.steps)
-                    .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
-            &context
-        }
-    };
-    let copy_failure = std::cell::RefCell::new(None::<String>);
-    let pointer_copy = |ty: &Term, remaining: &mut u64| {
-        let Some(resources) = &resources else {
-            return false;
-        };
-        let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
-        let before = fuel;
-        let evidence = elaboration::verification::copy::acquire(
-            resources.package(),
-            &resources.world(),
-            resources.copy,
-            resources.drop.expect("paired protocols"),
-            ty,
-            elaboration::ptc::Budget {
-                steps: fuel,
-                ..Default::default()
-            },
-            &mut fuel,
-        );
-        *remaining = remaining.saturating_sub((before - fuel) as u64);
-        let allowed = evidence.is_ok();
-        *copy_failure.borrow_mut() = evidence.err();
-        allowed
-    };
-    let source = resources
-        .as_ref()
-        .map_or(source, |resources| resources.source());
+    let context = elaboration::ptc::Context::from_package_metered(package, &mut preparation.steps)
+        .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
     let source_queries =
-        elaboration::materialization::SourceInvocationQueries::in_source(source, context, &[]);
+        elaboration::materialization::SourceInvocationQueries::in_source(source, &context, &[]);
     let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
         source_queries.check(predicate, preparation_budget, remaining)
     };
@@ -294,9 +210,8 @@ fn execute_prepared(
             &mut budget,
         ),
     };
-    let mut interpreter = interpreter
-        .map_err(|error| format!("cannot prepare comptime invocation: {error}"))?
-        .with_budgeted_pointer_copy_permission(&pointer_copy);
+    let mut interpreter =
+        interpreter.map_err(|error| format!("cannot prepare comptime invocation: {error}"))?;
     let builder = |request: &comptime_interpretor::StructBuildRequest, remaining: &mut u64| {
         publisher
             .expect("builder installed only with publisher")
@@ -368,9 +283,6 @@ fn execute_prepared(
         let mut message = format!("comptime invocation of '{entry}' failed: {error}");
         if let Some(reason) = publisher.and_then(|publisher| publisher.last_diagnostic()) {
             message.push_str(&format!("; definition publication: {reason}"));
-        }
-        if let Some(reason) = copy_failure.borrow().as_ref() {
-            message.push_str(&format!("; pointer Copy evidence: {reason}"));
         }
         message
     })

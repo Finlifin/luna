@@ -363,8 +363,9 @@ comptime 值引用仍通过自己的存储与准入规则处理，不借用 runt
 
 runtime 解释器的指针权限检查不变；Type 值描述 runtime 指针、函数签名以及
 quote 内的 runtime 指针代码仍合法。实际源码世界的目录、成员查询和存储准入
-继续保留。CLI invocation、key 与 memoization 中的旧权限回调尚待另行清理，
-本阶段没有完成通用声明世界共享，也没有完成 staged 参数的 runtime 交付。
+继续保留。CLI invocation、key 与 memoization 的同类清理已在后续接通，见
+[执行角色与资源权限](comptime-value-admission.md#执行角色与资源权限已分开)。
+这没有完成通用声明世界共享，也没有完成 staged 参数的 runtime 交付。
 
 八步字节构造仍失败：在 `/home/fin/luna` 执行
 `python3 -B development/check.py --timeout 900 -- run -p luna -- build development/repros/scalar-code-construction.fl --entry run --sysroot library --fuel 10000000 --output /tmp/luna-scalar-code-no-pointer-authority`，

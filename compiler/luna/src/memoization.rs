@@ -2,17 +2,16 @@
 //! compilation snapshot. Result caching is temporarily limited to calls whose
 //! bound output type is Type; other calls bypass key preparation and lookup.
 //! Callers supply fully prepared arguments; defaults and
-//! input evaluation are outside this cache. Optional paired source Copy/Drop
-//! bindings authorize pointer transfers in this immutable compilation snapshot.
+//! input evaluation are outside this cache. Runtime resource protocols do not
+//! authorize comptime value-reference operations or cache admission.
 use crate::comptime_keys::{Protocol, Snapshot};
 use comptime_executor::{Cache, Context, Error, KeyProtocol, Outcome, QueryId, Scope};
 use comptime_interpretor::{Budget, Interpreter, Value};
 use elaboration::{
-    capabilities::World,
     materialization::{DeclarationSnapshot, DeclarationSource},
     ptc,
 };
-use intrinsic::{LangItem, LangItemDef, LangItems};
+use intrinsic::LangItems;
 use nir::{
     DeclarationId, Term,
     program::{FunctionPhase, Package, TypePredicate},
@@ -26,7 +25,6 @@ pub struct Invocation {
     arguments: Vec<Term>,
     signature: Term,
     items: LangItems,
-    resources: Option<(DeclarationId, DeclarationId)>,
     schemas: Vec<Schema>,
     requirements: Vec<TypePredicate>,
     capacity: usize,
@@ -172,23 +170,6 @@ impl Invocation {
                         .into(),
                 );
             }
-            let resource_binding = match (items.get(LangItem::Copy), items.get(LangItem::Drop)) {
-                (None, None) => None,
-                (Some(LangItemDef::UserDef(copy)), Some(LangItemDef::UserDef(drop))) => Some(
-                    crate::resources::ProtocolContext::selected_in_source_metered(
-                        source.clone(),
-                        crate::resources::Selection::Identity(copy),
-                        Some(crate::resources::Selection::Identity(drop)),
-                        &mut work,
-                    )?,
-                ),
-                _ => {
-                    return Err(
-                        "memoized pointer transfers require paired source Copy and Drop bindings"
-                            .into(),
-                    );
-                }
-            };
             work.steps = work
                 .steps
                 .checked_sub(package.functions.len())
@@ -226,20 +207,8 @@ impl Invocation {
                 .map(|p| &p.ty)
                 .chain(std::iter::once(result.as_ref()))
                 .all(|ty| ty.check_scope(&[]).is_ok());
-            let resources = resource_binding
-                .as_ref()
-                .map(|binding| (binding.copy, binding.drop.expect("paired protocols")));
-            let context = match &resource_binding {
-                Some(binding) => {
-                    work.steps = work
-                        .steps
-                        .checked_sub(1)
-                        .ok_or("memoized context retention budget exhausted")?;
-                    binding.context().clone()
-                }
-                None => ptc::Context::from_package_metered(package, &mut work.steps)
-                    .map_err(|error| format!("memoized type context: {error}"))?,
-            };
+            let context = ptc::Context::from_package_metered(package, &mut work.steps)
+                .map_err(|error| format!("memoized type context: {error}"))?;
             let world = source
                 .capabilities(&context, &[], &mut work)
                 .map_err(|error| format!("memoization declaration index: {error}"))?;
@@ -388,7 +357,6 @@ impl Invocation {
                 arguments,
                 signature,
                 items: items.clone(),
-                resources,
                 schemas,
                 requirements: deferred,
                 capacity,
@@ -424,16 +392,11 @@ impl Invocation {
         // Gate before preparing Eq/Hash, snapshots or cache keys. A dependent
         // result is classified only after binding this invocation's inputs.
         if result_type != Term::Primitive(nir::Primitive::Type) {
-            let world = self
-                .source
-                .capabilities(&self.context, &[], &mut { self.budget })
-                .map_err(|error| Error::Protocol(error.to_string()))?;
             let (value, _) = evaluate(
                 &self.source,
                 &mut self.code_session,
                 &mut self.stats,
-                &world,
-                self.resources,
+                &self.context,
                 self.budget,
                 self.declaration,
                 &self.arguments,
@@ -500,10 +463,6 @@ impl Invocation {
                 (0, inputs)
             }
         };
-        let world = self
-            .source
-            .capabilities(&self.context, &[], &mut { self.budget })
-            .map_err(|error| Error::Protocol(error.to_string()))?;
         if let Some(mut protocols) = transient {
             let mut cache = Cache::new(
                 Scope {
@@ -517,8 +476,7 @@ impl Invocation {
                 &self.source,
                 &mut self.code_session,
                 &mut self.stats,
-                &world,
-                self.resources,
+                &self.context,
                 self.budget,
                 self.declaration,
                 &self.arguments,
@@ -534,8 +492,7 @@ impl Invocation {
                 &self.source,
                 &mut self.code_session,
                 &mut self.stats,
-                &world,
-                self.resources,
+                &self.context,
                 self.budget,
                 self.declaration,
                 &self.arguments,
@@ -684,8 +641,7 @@ fn execute(
     source: &DeclarationSnapshot,
     code_session: &mut comptime_interpretor::CodeSession,
     stats: &mut crate::invocation::InvocationStats,
-    world: &World<'_>,
-    resources: Option<(DeclarationId, DeclarationId)>,
+    type_context: &ptc::Context,
     budget: ptc::Budget,
     declaration: DeclarationId,
     arguments: &[Term],
@@ -718,8 +674,7 @@ fn execute(
                 source,
                 code_session,
                 stats,
-                world,
-                resources,
+                type_context,
                 budget,
                 declaration,
                 arguments,
@@ -736,8 +691,7 @@ fn evaluate(
     source: &DeclarationSnapshot,
     code_session: &mut comptime_interpretor::CodeSession,
     stats: &mut crate::invocation::InvocationStats,
-    world: &World<'_>,
-    resources: Option<(DeclarationId, DeclarationId)>,
+    type_context: &ptc::Context,
     budget: ptc::Budget,
     declaration: DeclarationId,
     arguments: &[Term],
@@ -749,8 +703,8 @@ fn evaluate(
     let package = source.package();
     let source_queries = elaboration::materialization::SourceInvocationQueries::in_source(
         DeclarationSource::Snapshot(source),
-        world.context,
-        world.assumptions,
+        type_context,
+        &[],
     );
     let solver = |predicate: &TypePredicate, remaining: &mut u64| {
         source_queries.check(predicate, budget, remaining)
@@ -773,35 +727,11 @@ fn evaluate(
         },
         &mut vm_budget,
     );
-    let copy_failure = std::cell::RefCell::new(None::<String>);
-    let pointer_copy = |ty: &Term, remaining: &mut u64| {
-        let Some((copy, drop)) = resources else {
-            return false;
-        };
-        let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
-        let before = fuel;
-        let evidence = elaboration::verification::copy::acquire(
-            package,
-            world,
-            copy,
-            drop,
-            ty,
-            ptc::Budget {
-                steps: fuel,
-                ..budget
-            },
-            &mut fuel,
-        );
-        *remaining = remaining.saturating_sub((before - fuel) as u64);
-        let allowed = evidence.is_ok();
-        *copy_failure.borrow_mut() = evidence.err();
-        allowed
-    };
     let mut vm = match prepared_vm {
-        Ok(vm) => vm.with_budgeted_pointer_copy_permission(&pointer_copy),
+        Ok(vm) => vm,
         Err(error) => {
             context.spend::<String>((steps - vm_budget.steps) as usize)?;
-            return Err(evaluation_error(error, None));
+            return Err(evaluation_error(error));
         }
     };
     let result = vm.with_code_session(code_session, |vm| {
@@ -831,13 +761,10 @@ fn evaluate(
         bytecode_invocations: vm.bytecode_invocations(),
     };
     context.spend::<String>((steps - vm.remaining_steps()) as usize)?;
-    result.map_err(|error| evaluation_error(error, copy_failure.borrow().as_deref()))
+    result.map_err(evaluation_error)
 }
 
-fn evaluation_error(
-    error: comptime_interpretor::Error,
-    copy_failure: Option<&str>,
-) -> Error<String> {
+fn evaluation_error(error: comptime_interpretor::Error) -> Error<String> {
     use comptime_interpretor::ErrorKind;
     if matches!(
         error.kind,
@@ -845,10 +772,7 @@ fn evaluation_error(
     ) {
         return Error::BudgetExhausted;
     }
-    Error::Evaluation(match copy_failure {
-        Some(reason) => format!("{error}; pointer Copy evidence: {reason}"),
-        None => error.to_string(),
-    })
+    Error::Evaluation(error.to_string())
 }
 
 // Only type predicates enter this transformation; state contracts stay in the VM.

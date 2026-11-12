@@ -548,18 +548,6 @@ impl BuilderInvocation<'_> {
             &mut nir,
             &mut elaboration::verification::Limits::default(),
         );
-        let resources = if protocols.copy.is_some() || protocols.drop.is_some() {
-            Some((
-                crate::resources::Selection::Identity(
-                    protocols.copy.ok_or("missing Copy binding")?,
-                ),
-                crate::resources::Selection::Identity(
-                    protocols.drop.ok_or("missing Drop binding")?,
-                ),
-            ))
-        } else {
-            None
-        };
         let publisher = elaboration::definitions::AllocatedDefinitionPublisher::new(
             &nir,
             identities[&primary],
@@ -572,7 +560,6 @@ impl BuilderInvocation<'_> {
             &nir,
             self.entry,
             Some(identities[&primary]),
-            resources,
             self.invocation_fuel,
             Some(&publisher),
         );

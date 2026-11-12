@@ -207,8 +207,10 @@ comptime 源程序能执行指针操作。当前有两层明确边界：
 本次重跑 `comptime_pointer_phase`、`comptime_storage_domains`、`comptime_receivers`，
 22 项通过，包括未调用定义、不可达代码、值引用接收者、runtime 参考执行和 quote
 边界。证据见第 4 节。这个结果不等于所有宿主注入路径已穷尽验证；报告所指出的
-pointer-copy 回调耦合仍值得在执行角色拆分时审计，但应给出可达调用链，不能据其
-注册位置认定已经发生语言违规，也不能删除 runtime 指针能力来“修复”计数。
+后续可达性检查确认 comptime 的 pointer-copy 回调均在指针阶段拒绝之后，现已
+移除 required、Type Session、CLI invocation、key 与 memoization 的注册及重复
+资源权限准备。runtime 执行的回调保留；不以删除 runtime 指针能力来“修复”计数。
+具体边界见[执行角色与资源权限](comptime-value-admission.md#执行角色与资源权限已分开)。
 
 ### 七套引擎应统一成一个求值器
 

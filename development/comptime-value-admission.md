@@ -19,12 +19,45 @@
 | [value_reference.rs](../compiler/comptime_interpretor/src/value_reference.rs) | owner 共享、路径重验、RHS 后写回、根重绑定权限；不依赖 runtime Copy | 位置身份、内容版本和可导出快照需在统一边界表达 |
 | [comptime_graph.rs](../compiler/comptime_interpretor/src/comptime_graph.rs) | 每次观察重新检查可变捕获图，访问去重不复制 owner | visited 集合不是冻结许可，也不证明所有循环图可逃逸 |
 | [code_values.rs](../compiler/comptime_interpretor/src/code_values.rs) | expr/pattern 类别与描述保留；内部表示相等不声称源 Eq | 当前代码传送限定 invocation；arm/Any/跨稳定边界的完整见证交付仍需接线 |
-| [memoization.rs](../compiler/luna/src/memoization.rs) | Type 结果过滤、已准备实参、来源世界重新准入、Eq/Hash 及额外输入判别 | pointer transfer 等旧接线不能成为 comptime 的长期权限；结果缓存与共享代码仍须分开 |
+| [memoization.rs](../compiler/luna/src/memoization.rs) | Type 结果过滤、已准备实参、来源世界重新准入、Eq/Hash 及额外输入判别；已移除 runtime 指针权限依赖 | 结果缓存与共享代码仍须分开，不能把不可变内部表示当作源协议许可 |
 | [meta List](../library/meta/data/list.fl)、[Eq](../library/meta/data/list_equality.fl)、[Hash](../library/meta/data/list_hashing.fl) | 值引用 append、固定快照遍历、逐元素协议和短路顺序 | 通用值改造必须保留真实公开 API 行为，不能用仅在 Rust 构造的列表替代验证 |
 
 既有 list 编码已保留 NF 域，不能再把“所有 List<Type> 都被导出为无域类型向量”当作
 现状。仍有待迁移的具体分支不证明应删除全部紧凑存储或现有准入检查。
 初始设计只静态核对这些生产入口；后续已接通的共同值域检查与运行证据见第 10 节。
+
+### 执行角色与资源权限已分开
+
+required comptime、Type Session、CLI invocation、缓存键 Eq/Hash 和 memoization
+不再安装 runtime 指针 Copy 检查回调，也不为该回调准备 Copy/Drop 权限世界。
+这些回调在 comptime VM 拒绝指针操作之后才可能被调用，原来只增加重复目录准备，
+并错误要求无关的 runtime 语言项成对绑定。现在无绑定、只有 Copy、只有 Drop 或
+两者都有均不影响合法 comptime 值的准入与执行；缓存键仍必须有真正的 comptime
+Eq/Hash，非 Type 结果仍跳过结果缓存，纯度与形成契约检查没有放宽。
+
+删除了 Rust 驱动 API `invocation::invoke_with_protocols`；调用方使用 `invoke` 或
+`invoke_in_package`。CLI 的源码协议选择仍在编译入口解析、验证，用于包内 runtime
+内容，不能把错误的源码 selector 静默忽略。builder 发布后的类型构造器校验也保留。
+runtime 参考执行 `execution.rs` 仍安装 pointer Copy 权限检查；Type 值可以继续
+描述 runtime 指针，quote 内也可以包含 runtime 指针操作。
+
+这次清理不代表 Interpreter 已按执行角色拆为独立类型，也不补齐 runtime str 的
+来源或普通 comptime 参数的跨阶段交付。存储准入、源查询和调用预算仍需各自检查。
+
+验证在 `/home/fin/luna` 使用 `python3 -B development/check.py --timeout 900 --`
+执行，未运行全 workspace：
+
+| 后续参数 | 结果与报告 |
+| --- | --- |
+| `test -p luna --test comptime_resource_independence --test prepared_invocations --test key_code_sessions --test key_preparation_budget --test staged_invocation_reuse --test comptime_memory --test comptime_pointer_phase -- --test-threads=1` | 退出 0，43 项通过；`/tmp/luna-tools-az6yzupb/result.json` |
+| `test -p luna --test builder_invocations --test invocation_value_templates --test key_protocol_members --no-fail-fast -- --test-threads=1 package_driver builder_driver package_cli_invokes isolated_library_cli sysroot_cli invocation_keeps_source memoized_preparation live_value_inputs prepared_value_templates type_results_use_real_meta type_input_dispatch canonical_key prefixed_members prefixed_comptime` | 14 项通过、1 项测试断言失败，退出 101；`/tmp/luna-tools-rqmovgbp/result.json`。不存在的 selector 正确被拒绝，但断言错误要求诊断带有 selector 名字 |
+| `test -p luna --test builder_invocations -- --test-threads=1 invocation_keeps_source_bindings_without_runtime_resource_permissions` | 修正断言为现有明确诊断后退出 0；`/tmp/luna-tools-7e_g7dmf/result.json`。仅 Copy 的合法配置成功，错误 selector 仍拒绝，两者都不消费未使用的 builder 额度 |
+| `test -p comptime_interpretor --lib pointer_copy_budget_tests -- --test-threads=1` | 退出 0，2 项通过；`/tmp/luna-tools-012io_a2/result.json`。runtime 指针写入在权限失败时不修改存储，允许重试；读取仍消费复制预算 |
+
+旧 builder 测试曾要求 comptime 调用因缺少 Drop 失败，原由即本次删除的运行时权限
+依赖；按值引用语义改为上述合法部分绑定正例，另保留真实源码绑定错误的拒绝例。
+新 `comptime_resource_independence` 使用真实 sysroot 的 ComptimeEq/ComptimeHash，
+没有伪造 Copy 权限来获得通过，也没有扩大 Type 结果缓存之外的缓存范围。
 
 ## 2. 一个值通过四道不同的边界
 

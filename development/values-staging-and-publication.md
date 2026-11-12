@@ -23,6 +23,10 @@ comptime value-reference 用 VM 的 slot/lens 表示可更新位置。读取和�
 失效；同一存活槽的引用可重新定位并观察新内容。owner 结束、槽世代不符或路径不合法
 时拒绝。具体准入、快照及恢复事务见[值传送协议](comptime-value-admission.md)。
 
+生产 comptime 入口已移除 runtime Copy/Drop 权限准备与指针转移回调；值引用、
+源 Eq/Hash 和 Type 结果缓存按各自契约工作，runtime 指针权限只用于 runtime
+执行。详见[执行角色边界](comptime-value-admission.md#执行角色与资源权限已分开)。
+
 ## 2. Freeze / restore 协议
 
 `freeze(value, receiving_contract, scope)` 逐项检查实际描述、依赖、可逃逸性及预算，
