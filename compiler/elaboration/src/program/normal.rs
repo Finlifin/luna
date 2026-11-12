@@ -1643,20 +1643,8 @@ impl Checker<'_, '_> {
                 Ok(tail)
             });
         }
-        if let H::If(condition, yes, Some(no)) = &input.kind {
-            let condition = self.expr(condition, Some(&p(P::Bool)))?;
-            let then_input = self.under_type_condition(&condition, true, input.span, |this| {
-                this.dependent_normal_block(yes, depth + 1)
-            })?;
-            let else_input = self.under_type_condition(&condition, false, input.span, |this| {
-                this.dependent_normal_argument(no, depth + 1)
-            })?;
-            return Ok(n::NormalFormArgument::If {
-                source: source(input.span),
-                condition,
-                then_input: Box::new(then_input),
-                else_input: Box::new(else_input),
-            });
+        if matches!(input.kind, H::If(_, _, Some(_))) {
+            return self.check_contextual_if_region(input, depth);
         }
         if let H::Block(block) = &input.kind {
             return self.dependent_normal_block(block, depth + 1);

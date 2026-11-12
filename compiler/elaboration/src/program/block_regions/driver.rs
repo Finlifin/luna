@@ -1,6 +1,6 @@
 //! Block checking owns its unfinished children and lexical exits.
-//! Nested block rules use this same stack; other expression rules remain atomic
-//! adapters until their continuations can be handed back to the region.
+//! Blocks and contextual conditionals share this stack. Other expression rules
+//! remain atomic adapters until their continuations can join the region.
 use super::*;
 
 struct ExpressionBoundary {
@@ -39,12 +39,12 @@ impl std::fmt::Display for ExpressionBoundary {
     }
 }
 
-struct Frame<'b, 'h> {
+struct BlockFrame<'b, 'h> {
     progress: Progress<'b, 'h, Destination>,
     scope: LexicalScope,
     boundary: Option<ExpressionBoundary>,
 }
-impl std::fmt::Display for Frame<'_, '_> {
+impl std::fmt::Display for BlockFrame<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(block-frame {} {} (delivery", self.progress, self.scope)?;
         if let Some(boundary) = &self.boundary {
@@ -53,7 +53,7 @@ impl std::fmt::Display for Frame<'_, '_> {
         f.write_str("))")
     }
 }
-impl Frame<'_, '_> {
+impl BlockFrame<'_, '_> {
     fn finish(
         self,
         checker: &mut Checker<'_, '_>,
@@ -78,6 +78,137 @@ impl Frame<'_, '_> {
         self.scope.leave(checker);
         if let Some(boundary) = self.boundary {
             boundary.leave(checker);
+        }
+    }
+}
+
+/// Requests distinguish a source block rule from an expression whose delivery
+/// protocol still has to run. A then-branch is a block, not a synthetic expr.
+pub(super) enum Request<'b, 'h> {
+    Expression(&'b Expr<'h>, Destination),
+    Block(&'b hir::Block<'h>, Destination),
+}
+
+pub(super) enum Step<'b, 'h> {
+    Continue,
+    Child(Request<'b, 'h>),
+    Tail(destinations::CheckedTail),
+    Conditional(n::NormalFormArgument),
+}
+
+impl std::fmt::Display for Request<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Expression(expr, destination) => write!(
+                f,
+                "(check-expression {} (source {}) {destination})",
+                expr.hir_id,
+                source(expr.span)
+            ),
+            Self::Block(block, destination) => write!(
+                f,
+                "(check-block {} (source {}) {destination})",
+                block.hir_id,
+                source(block.span)
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for Step<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Continue => f.write_str("(check-step continue)"),
+            Self::Child(request) => write!(f, "(check-step {request})"),
+            Self::Tail(value) => write!(f, "(check-step (tail {value}))"),
+            Self::Conditional(value) => write!(f, "(check-step (conditional {value}))"),
+        }
+    }
+}
+
+enum RegionFrame<'b, 'h> {
+    Block(BlockFrame<'b, 'h>),
+    Conditional(conditionals::Frame<'b, 'h>),
+}
+
+impl RegionFrame<'_, '_> {
+    fn unwind(self, checker: &mut Checker<'_, '_>) {
+        match self {
+            Self::Block(frame) => frame.unwind(checker),
+            Self::Conditional(frame) => frame.unwind(checker),
+        }
+    }
+}
+
+impl std::fmt::Display for RegionFrame<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Block(frame) => frame.fmt(f),
+            Self::Conditional(frame) => frame.fmt(f),
+        }
+    }
+}
+
+impl<'b, 'h> BlockFrame<'b, 'h> {
+    fn step(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        returned: Option<CheckedBlock>,
+        statement_destination: &Destination,
+    ) -> Result<Step<'b, 'h>, Error> {
+        if let Some(value) = returned {
+            return match self.progress.phase {
+                Phase::Child => {
+                    self.progress
+                        .accept(checker, value.ordinary(self.progress.block.span)?)?;
+                    Ok(Step::Continue)
+                }
+                Phase::TailChild => self
+                    .progress
+                    .tail
+                    .complete(
+                        checker,
+                        self.progress.block,
+                        self.progress.diverges,
+                        Some(value),
+                    )
+                    .map(Step::Tail),
+                _ => Err(error(
+                    self.progress.block.span,
+                    "block received an unsolicited child",
+                )),
+            };
+        }
+        match self.progress.phase {
+            Phase::Statements => match self.progress.next()? {
+                Some(statement) => {
+                    checker.required_steps = checker
+                        .required_steps
+                        .checked_sub(1)
+                        .ok_or_else(|| error(statement.span, "block checking budget exhausted"))?;
+                    Ok(Step::Child(Request::Expression(
+                        statement,
+                        statement_destination.clone(),
+                    )))
+                }
+                None => Ok(Step::Continue),
+            },
+            Phase::Tail => {
+                let tail = self.progress.request_tail()?.clone();
+                match tail.prepare(checker, self.progress.block, self.progress.diverges)? {
+                    tails::TailCheck::Checked(value) => tail
+                        .complete(checker, self.progress.block, self.progress.diverges, value)
+                        .map(Step::Tail),
+                    tails::TailCheck::Child => Ok(Step::Child(Request::Expression(
+                        self.progress.block.expr.unwrap(),
+                        tail,
+                    ))),
+                }
+            }
+            _ => Err(error(
+                self.progress.block.span,
+                "block child result is missing",
+            )),
         }
     }
 }
@@ -109,6 +240,16 @@ impl Checker<'_, '_> {
             .contextual(block.span)
     }
 
+    pub(in crate::program) fn check_contextual_if_region(
+        &mut self,
+        expr: &Expr<'_>,
+        depth: usize,
+    ) -> Result<n::NormalFormArgument, Error> {
+        let frame = conditionals::Frame::new(self, expr, depth)?;
+        self.drive_check_region(RegionFrame::Conditional(frame))?
+            .contextual(expr.span)
+    }
+
     fn check_block_region(
         &mut self,
         block: &hir::Block<'_>,
@@ -116,115 +257,100 @@ impl Checker<'_, '_> {
     ) -> Result<CheckedBlock, Error> {
         self.charge_block_frame(block.span)?;
         let scope = LexicalScope::enter(self, block.span)?;
-        let mut frames = vec![Frame {
+        self.drive_check_region(RegionFrame::Block(BlockFrame {
             progress: Progress::new(block, tail),
             scope,
             boundary: None,
-        }];
+        }))
+    }
+
+    fn drive_check_region(&mut self, root: RegionFrame<'_, '_>) -> Result<CheckedBlock, Error> {
+        let mut frames = vec![root];
         let statement_destination = Destination::statement();
         let result = (|| {
             let mut returned: Option<CheckedBlock> = None;
             loop {
-                let frame = frames.last_mut().expect("active block frame");
-                if let Some(value) = returned.take() {
-                    match frame.progress.phase {
-                        Phase::Child => frame
-                            .progress
-                            .accept(self, value.ordinary(frame.progress.block.span)?)?,
-                        Phase::TailChild => {
-                            let checked = frame.progress.tail.complete(
+                let step = match frames.last_mut().expect("active checking frame") {
+                    RegionFrame::Block(frame) => {
+                        frame.step(self, returned.take(), &statement_destination)?
+                    }
+                    RegionFrame::Conditional(frame) => frame.step(self, returned.take())?,
+                };
+                let request = match step {
+                    Step::Continue => continue,
+                    Step::Tail(tail) => {
+                        let RegionFrame::Block(frame) = frames.pop().unwrap() else {
+                            unreachable!("only blocks complete a tail")
+                        };
+                        let value = frame.finish(self, tail)?;
+                        if frames.is_empty() {
+                            return Ok(value);
+                        }
+                        returned = Some(value);
+                        continue;
+                    }
+                    Step::Conditional(value) => {
+                        // Completion has already left the final branch premise.
+                        frames.pop().unwrap().unwind(self);
+                        let value = CheckedBlock::Contextual(value);
+                        if frames.is_empty() {
+                            return Ok(value);
+                        }
+                        returned = Some(value);
+                        continue;
+                    }
+                    Step::Child(request) => request,
+                };
+                let (block, destination, boundary) = match request {
+                    Request::Block(block, destination) => (block, destination, None),
+                    Request::Expression(expr, destination) => {
+                        // Ordinary if/delivery and partial structural inputs
+                        // still use their own expression protocols. Only the
+                        // contextual if rule joins this frame stack here.
+                        if let Destination::Contextual(tail) = &destination
+                            && matches!(expr.kind, H::If(_, _, Some(_)))
+                        {
+                            frames.push(RegionFrame::Conditional(conditionals::Frame::new(
                                 self,
-                                frame.progress.block,
-                                frame.progress.diverges,
-                                Some(value),
-                            )?;
-                            let value = frames.pop().unwrap().finish(self, checked)?;
-                            if frames.is_empty() {
-                                return Ok(value);
-                            }
-                            returned = Some(value);
+                                expr,
+                                tail.depth + 1,
+                            )?));
+                            continue;
                         }
-                        _ => {
-                            return Err(error(
-                                frame.progress.block.span,
-                                "block received an unsolicited child",
-                            ));
+                        if let Some(nested) = destination.nested(expr)? {
+                            let H::Block(block) = expr.kind else {
+                                unreachable!("nested block destination")
+                            };
+                            let boundary = matches!(nested, Destination::Ordinary(_))
+                                .then(|| ExpressionBoundary::enter(self, expr, block));
+                            (block, nested, boundary)
+                        } else {
+                            returned = Some(destination.check_expression(self, expr)?);
+                            continue;
                         }
-                    }
-                    continue;
-                }
-                let request = match frame.progress.phase {
-                    Phase::Statements => match frame.progress.next()? {
-                        Some(statement) => {
-                            self.required_steps =
-                                self.required_steps.checked_sub(1).ok_or_else(|| {
-                                    error(statement.span, "block checking budget exhausted")
-                                })?;
-                            (statement, statement_destination.clone())
-                        }
-                        None => continue,
-                    },
-                    Phase::Tail => {
-                        let tail = frame.progress.request_tail()?.clone();
-                        match tail.prepare(self, frame.progress.block, frame.progress.diverges)? {
-                            tails::TailCheck::Checked(value) => {
-                                let checked = tail.complete(
-                                    self,
-                                    frame.progress.block,
-                                    frame.progress.diverges,
-                                    value,
-                                )?;
-                                let value = frames.pop().unwrap().finish(self, checked)?;
-                                if frames.is_empty() {
-                                    return Ok(value);
-                                }
-                                returned = Some(value);
-                                continue;
-                            }
-                            tails::TailCheck::Child => (frame.progress.block.expr.unwrap(), tail),
-                        }
-                    }
-                    _ => {
-                        return Err(error(
-                            frame.progress.block.span,
-                            "block child result is missing",
-                        ));
                     }
                 };
-                let (expr, destination) = request;
-                // Plain blocks retain their ordinary or contextual destination.
-                // Partial structural input and unsafe adaptation still enter
-                // their existing rules; they cannot masquerade as this rule.
-                if let Some(nested) = destination.nested(expr)? {
-                    let H::Block(block) = expr.kind else {
-                        unreachable!("nested block destination")
-                    };
-                    let boundary = matches!(nested, Destination::Ordinary(_))
-                        .then(|| ExpressionBoundary::enter(self, expr, block));
-                    let scope = match self
-                        .charge_block_frame(block.span)
-                        .and_then(|()| LexicalScope::enter(self, block.span))
-                    {
-                        Ok(scope) => scope,
-                        Err(error) => {
-                            if let Some(boundary) = &boundary {
-                                boundary.leave(self);
-                            }
-                            return Err(error);
+                let scope = match self
+                    .charge_block_frame(block.span)
+                    .and_then(|()| LexicalScope::enter(self, block.span))
+                {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        if let Some(boundary) = &boundary {
+                            boundary.leave(self);
                         }
-                    };
-                    frames.push(Frame {
-                        progress: Progress::new(block, nested),
-                        scope,
-                        boundary,
-                    });
-                } else {
-                    returned = Some(destination.check_expression(self, expr)?);
-                }
+                        return Err(error);
+                    }
+                };
+                frames.push(RegionFrame::Block(BlockFrame {
+                    progress: Progress::new(block, destination),
+                    scope,
+                    boundary,
+                }));
             }
         })();
-        // A diagnostic consumes the task too. Restore every entered lexical
-        // boundary exactly once without resurrecting invalidated outer facts.
+        // Unwind inner lexical scopes before their enclosing branch premises.
+        // This restores checking context without rolling back outer writes.
         while let Some(frame) = frames.pop() {
             frame.unwind(self);
         }
@@ -265,7 +391,7 @@ mod tests {
             context: crate::ptc::Context::from_package(&n::Package::default()).unwrap(),
             inputs: input_facts::State::default().lexical_boundary(),
         };
-        let mut frame = Frame {
+        let mut frame = BlockFrame {
             progress: Progress::new(&block, Destination::statement()),
             scope,
             boundary: Some(ExpressionBoundary {

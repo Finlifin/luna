@@ -1043,14 +1043,31 @@ callable 和结构化 input context，成功后才进入词法帧。相邻嵌套
 尚未确定的 value 原样保留。深度与步数耗尽分别返回，不作为缺少上下文或类型不符
 继续尝试。共享对象仍是区域／候选私有的检查信息，不授权冻结到 NIR、代码缓存或
 跨候选复用，也不形成新的 Type 身份。该迁移为分支过程中产生的新目标域提供所有权
-基础，尚未将条件分支本身改为可恢复任务。
+基础。contextual 条件分支现已接入同一驱动，普通分支的交付适配尚未迁移。
 
 这是同一同步检查器内部的实际 continuation 接线，不是完整 CheckRegion：源 HIR
-仍借用本次快照，当前活动词法状态仍装在 Checker 中，非块子规则仍通过原同步入口
-完成。它不提供外部等待、取消、源码 activation 或 VM 片段执行许可。后续必须将这套
+仍借用本次快照，当前活动词法状态仍装在 Checker 中，除块与 contextual if 外的
+子规则仍通过原同步入口完成。它不提供外部等待、取消、源码 activation 或 VM 片段执行许可。后续必须将这套
 帧连同活动上下文交给区域所有者，并迁移调用检查的后继，不能把有帧栈本身当作两个
 动态调用正例已完成。旧 NormalFormArgument 仍作为 contextual 输出存在；共享块驱动
-不等于该表示已退役，也没有使非块控制流和调用检查成为可挂起的普通表达式区域任务。
+不等于该表示已退役，也没有使普通控制流和调用检查成为可挂起的普通表达式区域任务。
+
+contextual `if` 的原递归实现已经删除，直接入口与块中的嵌套入口使用同一条件帧。
+条件按普通 bool 表达式检查；then 请求源码块规则，else 请求源码表达式规则，
+不合成一个假块／表达式来抹平两者。帧依次保留受检条件和 then 输入，接到 else
+结果后构造原 NormalFormArgument::If。相邻块、else-if 和分支内 contextual if
+在同一栈中推进；逻辑深度仍沿原表达式／块规则累计，帧分配消耗共享检查额度。
+
+分支事实由 `TypeConditionScope` 保存父 PTC 上下文，旧闭包适配器也使用该边界。
+条件不能提供类型命题时不引入额外事实或快照。then 完成先恢复父上下文，再在
+负命题下检查 else；失败按内层词法帧、外层分支事实的顺序退出。该边界不回滚
+执行存储，也不恢复因外层写入而失效的输入事实。条件帧 dump 显示阶段、深度、
+受检条件、已完成 then 和父事实上下文，不发布到稳定代码缓存。
+
+普通 if（包括无 else 的 contextual 源码）、inline 控制及部分结构输入仍沿既有
+规则进入可选／错误结果、callee 位置和效应交付；本次没有用新帧绕过这些适配。
+条件中除普通块外的表达式仍同步检查。这里只把待定输入分支的检查进度保留为数据，
+没有执行未知 producer，也没有接通源 activation 或一般外部挂起恢复。
 
 普通块首批迁移的证据如下；工作目录 `/home/fin/luna`，检查命令统一使用
 `python3 -B development/check.py --timeout 900 -- test`：
@@ -1105,6 +1122,25 @@ callable 和结构化 input context，成功后才进入词法帧。相邻嵌套
   退出 0，2 项通过。七个 Rust 文件 scoped rustfmt check 退出 0，
   `/tmp/luna-tools-3uzmucfp/result.json`；`git diff --check` 通过。
   未运行全 workspace 或完整 LLVM 验收；原有资源分析等工作区修改保持不动。
+
+contextual 条件帧迁移的验证，工作目录与检查前缀同上：
+
+- `-p elaboration --lib -p luna --test contextual_input_regions --test contextual_delivery
+  --test normal_input_plans --test open_normal_input_plans --test required_input_scopes
+  --test sysroot_preludes --no-fail-fast`：`/tmp/luna-tools-2xofiay4/result.json` 退出 101，
+  387 项通过，1 项新深层用例失败。源码检查与字节码执行通过；树解释器因其既有
+  64 层 native recursion 限制返回 DepthExhausted，不是条件检查帧的深度诊断。
+- 保留 12 组嵌套的源码／字节码正例，用 4 组嵌套作两引擎对照，不改变生产限制，
+  也不把合法深层程序改成拒绝契约。新增 dump 测试的 P::String 拼写导致一次编译
+  失败（`/tmp/luna-tools-xwphamz7/result.json`），修正为实际的 P::Str 后，执行
+  `-p elaboration --lib -p luna --test contextual_input_regions --test contextual_input_costs
+  --no-fail-fast -- --nocapture`：`/tmp/luna-tools-nq1_3fhw/result.json` 退出 0，335 项通过。
+  新用例核验负分支类型事实、条件调用顺序与次数、未选分支不执行但仍受检查、
+  结果域和外层写入。深层字节码消耗 115,242 步；浅层两引擎分别 98,684／83,677 步。
+  单独提高测试步数上限，不据此宣称性能改进或深层树执行已支持。
+- 六个 Rust 文件 scoped rustfmt check：`/tmp/luna-tools-s05ag6vr/result.json` 退出 0；
+  `git diff --check` 通过。未运行全 workspace 或完整 LLVM 验收；其他开发者的
+  formatter、资源分析、正式 docs 与库状态修改保持不动，证据来自保留这些修改的工作区。
 
 #### 已接入：普通输入依赖保留任务后继
 

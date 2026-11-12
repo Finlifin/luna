@@ -10,6 +10,10 @@ fn check_both(source: &str, calls: &[&str]) {
 }
 
 fn check_both_in_budget(source: &str, calls: &[&str], budget: Budget) {
+    check_in_engines(source, calls, budget, &[false, true]);
+}
+
+fn check_in_engines(source: &str, calls: &[&str], budget: Budget, engines: &[bool]) {
     let package = sysroot::compile(source).unwrap_or_else(|failure| panic!("{failure}\n{source}"));
     let entry = package
         .functions
@@ -24,7 +28,7 @@ fn check_both_in_budget(source: &str, calls: &[&str], budget: Budget) {
     };
     let methods = |callee: &nir::program::Expr, fuel: &mut u64| queries.resolve(callee, fuel);
     let associated = |access: &nir::program::Expr, fuel: &mut u64| queries.associated(access, fuel);
-    for tree in [false, true] {
+    for &tree in engines {
         let mut vm = if tree {
             Interpreter::for_comptime_tree(&package, budget)
         } else {
@@ -325,6 +329,89 @@ fn contextual_nested_exit_keeps_facts_local_and_checks_unreachable_children() {
             return Packet<u8>; let invalid: bool = 7; [1]
         } }, Byte()>",
             "integer runtime proxy requires a supported fixed-width integer target",
+        ),
+    ] {
+        let failure = sysroot::compile(&format!(
+            "pure comptime fn Packet<T, .values: meta.List<T> = []> -> Type {{ bool }}
+            comptime fn Byte() -> Type {{ u8 }}
+            comptime fn Bad(value: T) -> Type
+            where T
+            {{ {body} }}"
+        ))
+        .unwrap_err();
+        assert!(failure.contains(diagnostic), "{body}: {failure}");
+    }
+}
+
+#[test]
+fn contextual_if_frames_keep_condition_order_and_only_execute_selected_children() {
+    // The reference tree engine separately caps native recursion at 64.
+    // Keep the deep source/VM case and compare both engines within that bound.
+    for (levels, engines) in [(4, &[false, true][..]), (12, &[false][..])] {
+        let conditions = levels * 2;
+        let mut body = "[1, 255]".to_owned();
+        for _ in 0..levels {
+            body = format!(
+                "if do {{ trace += 1; select(false) }} {{ [2] }}
+             else if do {{ trace += 1; select(true) }} {{ do {{ {body} }} }}
+             else {{ [3] }}"
+            );
+        }
+        let mut calls = vec!["check", "Build"];
+        calls.extend(std::iter::repeat_n("select", levels * 2));
+        calls.extend(["Byte", "Build", "Byte"]);
+        check_in_engines(
+            &format!(
+                "
+            pure comptime fn Packet<T, .values: meta.List<T> = []> -> Type {{ bool }}
+            comptime fn Byte() -> Type {{ u8 }}
+            comptime fn select(value: bool) -> bool {{ value }}
+            comptime fn Build(value: T) -> Type
+            where T
+            {{
+                var trace: Integer = 0;
+                let result = Packet<.values = if T != bool {{ [] }} else {{
+                    let flag: bool = value;
+                    if flag {{ {body} }} else {{ [] }}
+                }}, Byte()>;
+                if T == bool and trace != {conditions} {{ return Packet<u8>; }}
+                result
+            }}
+            comptime fn check() -> bool {{
+                Build<bool>(true) == Packet<u8, .values = [1, 255]>
+                    and Build<u8>(9) == Packet<u8>
+            }}"
+            ),
+            &calls,
+            Budget {
+                steps: 1_000_000,
+                ..Default::default()
+            },
+            engines,
+        );
+    }
+}
+
+#[test]
+fn contextual_if_frames_do_not_skip_invalid_siblings_or_leak_negative_premises() {
+    for (body, diagnostic) in [
+        (
+            "Packet<.values = if T != bool { [] } else {
+                do { let flag: bool = value; [1] }
+            }, Byte()>; let escaped: bool = value; Packet<u8>",
+            "type mismatch",
+        ),
+        (
+            "Packet<.values = if true { [1] } else {
+                do { let invalid: bool = 7; [] }
+            }, Byte()>",
+            "integer runtime proxy requires a supported fixed-width integer target",
+        ),
+        (
+            "Packet<.values = if T == bool { [] } else if true {
+                do { let invalid: bool = value; [] }
+            } else { [] }, Byte()>",
+            "type mismatch",
         ),
     ] {
         let failure = sysroot::compile(&format!(

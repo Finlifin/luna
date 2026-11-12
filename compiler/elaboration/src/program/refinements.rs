@@ -1,6 +1,31 @@
 //! Signature refinements can depend on the implementation world being built.
 //! Retain their declaration context, never a caller's later assumptions.
 use super::*;
+
+/// A branch premise lasts only until its child check finishes or fails. This
+/// boundary changes type facts, not runtime input facts or lexical bindings.
+pub(super) struct TypeConditionScope {
+    parent: Option<crate::ptc::Context>,
+}
+
+impl TypeConditionScope {
+    pub(super) fn leave(self, checker: &mut Checker<'_, '_>) {
+        if let Some(parent) = self.parent {
+            checker.context = parent;
+        }
+    }
+}
+
+impl std::fmt::Display for TypeConditionScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(type-condition-parent")?;
+        if let Some(parent) = &self.parent {
+            write!(f, " {parent}")?;
+        }
+        f.write_str(")")
+    }
+}
+
 pub(super) struct Pending {
     pub owner: OwnerId,
     predicate: n::TypePredicate,
@@ -440,14 +465,26 @@ impl Checker<'_, '_> {
         span: Span,
         check: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        let scope = self.enter_type_condition(condition, positive, span)?;
+        let result = check(self);
+        scope.leave(self);
+        result
+    }
+
+    pub(super) fn enter_type_condition(
+        &mut self,
+        condition: &n::Expr,
+        positive: bool,
+        span: Span,
+    ) -> Result<TypeConditionScope, Error> {
         let Some(fact) = self.checked_type_condition(condition, positive, span)? else {
-            return check(self);
+            return Ok(TypeConditionScope { parent: None });
         };
         let parent = self.context.clone();
         self.context.assume(fact);
-        let result = check(self);
-        self.context = parent;
-        result
+        Ok(TypeConditionScope {
+            parent: Some(parent),
+        })
     }
 
     pub(super) fn assume_type_condition(
