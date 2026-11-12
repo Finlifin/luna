@@ -310,3 +310,45 @@ python3 -B development/check.py --timeout 900 -- run -p luna -- build SOURCE --e
 没有传入此处。不能据相同失败推断生成器无限循环，也不能把它归为位运算语义错误。
 实际准备成本的分布尚未测定；通用预算传送和减少重复准备仍需后续调查，不能简单
 调大内部常量或取消准入检查后宣称代码构造已经满足库的性能要求。
+
+### 回滚保留不再准备值观察世界
+
+沿八步构造的失败位置检查，`checkpoint_generator_cells` 原来与真实读值共用
+`generator_storage_world` 和 `with_storage_vm`：每个 generator frame、词法 scope
+和更新 frame 都会复制表示元数据并准备 VM，即使只为失败时恢复原有存储。
+这与实际取得/准入源值的职责不同。现在回滚复用已有的 `capture_retained`；图遍历、
+复制及恢复计量保留，实际读值与 old 入口复制的世界检查没有删除。
+
+新增 `cmtt::code_generator_rollback_cost_does_not_scale_with_unrelated_layouts`
+用 256 个记录和八层代码生成验证该边界。对照只切换本次修改的 places.rs：
+
+- 旧实现仍使用 `1a6296fb` 的代码，同一新测试退出 101，错误为 generator storage
+  world capture budget exhausted；`/tmp/luna-tools-cfryc7bk/result.json`。
+- 修改后的单例退出 0；`/tmp/luna-tools-52owl6hm/result.json`。两次命令均为
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt -- --test-threads=1 code_generator_rollback_cost`。
+
+最初用十六层生成器触发了独立的 code construction depth 限制，随后将费用用例
+限定为八层，避免把深度限制混入回滚成本测试；没有放宽生产深度或额度。
+
+真实 sysroot 再运行
+`python3 -B development/check.py --timeout 900 -- run -p luna -- build development/repros/scalar-code-construction.fl --entry run --sysroot library --fuel 10000000 --output /tmp/luna-scalar-code-checkpoint`，
+仍退出 1，现报 `required comptime declaration directory: value admission resource
+budget exhausted`；`/tmp/luna-tools-8bygfufu/result.json`。不能以错误位置推进代替
+字节构造成功，也不能据这项局部清理宣称准入世界已共享或 CMTT 性能问题已解决。
+
+最终定向检查（工作目录 `/home/fin/luna`，均使用 development/check.py）：
+
+- `test -p luna --test cmtt --test cmtt_methods --test library_std -- --test-threads=1 code_generator_rollback_cost generator_field_updates generator_value_writes generator_storage_checks unused_code_generators_reject generator_readonly_nominal_captures generator_entry_aggregates trait_default_forwarding_preserves_value generator_refutable_tuple_filters generator_var_else_failure generator_callback_snapshots println_and_display`
+  退出 0，分别 11、4、1 项通过；`/tmp/luna-tools-2wwhom9y/result.json`。包含原存储
+  身份、快照独立性、失败后的状态、runtime 指针域拒绝，以及真实 std 的 O0/O3 输出。
+- `test -p luna --test cmtt_storage_world -- --test-threads=1` 为 4 通过、1 失败，
+  退出 101；`/tmp/luna-tools-imurfhgx/result.json`。失败的 nested_contextual_retries
+  用例在 required comptime preparation 耗尽额度。切回旧 places.rs 后，以同一命令
+  追加 `nested_contextual_retries` 复核仍失败，此时在 lexical scope snapshot 耗尽；
+  `/tmp/luna-tools-6c7l4gvq/result.json`。这是当前基线的预算限制，没有改测试预期。
+- 恢复本次实现后，`test -p elaboration -p comptime_interpretor --lib -- --test-threads=1 storage_observation::tests memory::checkpoint::tests`
+  退出 0，3 项观察预算与 2 项存储图测试通过；`/tmp/luna-tools-r3borewb/result.json`。
+  图保留不授予陌生名义描述成员资格，失败捕获不修改原图，恢复保留共享身份和责任。
+
+以上命令均以 `python3 -B development/check.py --timeout 900 --` 为前缀。
+两个修改的 Rust 文件已经定向格式化；git diff --check 通过。未执行全 workspace。

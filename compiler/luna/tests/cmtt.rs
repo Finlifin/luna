@@ -5,6 +5,27 @@ use comptime_interpretor::{Interpreter, Value};
 use support::run_iir as run;
 
 #[test]
+fn code_generator_rollback_cost_does_not_scale_with_unrelated_layouts() {
+    let mut source = String::new();
+    for record in 0..256 {
+        source.push_str(&format!("struct Unused{record} {{"));
+        for field in 0..16 {
+            source.push_str(&format!("field{field}: bool,"));
+        }
+        source.push_str("}\n");
+    }
+    source.push_str("pure comptime fn code0()-><|-bool> {'(true)}\n");
+    for layer in 1..=8 {
+        source.push_str(&format!(
+            "pure comptime fn code{layer}()-><|-bool> {{code{}()}}\n",
+            layer - 1
+        ));
+    }
+    source.push_str("fn run()->bool {~<code8()>}");
+    assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
 fn pattern_generators_reject_ordinary_property_calls_and_function_values() {
     let prefix =
         "comptime fn produced(...options:Options)-><bool -| value:bool> where Options {'<value>}";

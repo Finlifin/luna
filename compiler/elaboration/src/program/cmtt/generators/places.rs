@@ -67,15 +67,20 @@ impl Checker<'_, '_> {
         roots: &[comptime_interpretor::Value],
         span: Span,
     ) -> Result<comptime_interpretor::OwnedGraphCheckpoint, Error> {
-        let package = self.generator_storage_world(span)?;
-        storage_observation::with_storage_vm(
-            &package,
+        // Rollback retains this invocation's existing cells; it neither reads
+        // a source value nor admits it into another world. Reuse the same
+        // metered graph retention as checking transactions. Actual reads,
+        // invocation inputs and result publication keep their domain checks.
+        comptime_interpretor::OwnedGraphCheckpoint::capture_retained(
+            roots,
             &mut self.required_steps,
-            span,
-            "generator checkpoint",
-            "capture",
-            |vm| vm.checkpoint_owned_graph(roots),
         )
+        .map_err(|failure| {
+            error(
+                span,
+                format!("generator checkpoint capture failed: {failure:?}"),
+            )
+        })
     }
 
     pub(in crate::program::cmtt) fn generator_value_needs_live_storage(
