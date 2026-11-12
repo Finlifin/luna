@@ -3,5 +3,5 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    ExitCode::SUCCESS
+    fmt::run_cli(std::env::args_os().skip(1), "flurryfmt", false)
 }
