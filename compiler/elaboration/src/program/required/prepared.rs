@@ -39,29 +39,14 @@ impl Drop for RequiredCode<'_> {
 }
 
 impl RequiredWorld {
-    pub(super) fn new(
-        package: n::Package,
-        steps: &mut u64,
-        span: Span,
-    ) -> Result<Arc<Self>, Error> {
-        let source = DeclarationSnapshot::new(Arc::new(package));
-        let before = usize::try_from(*steps).unwrap_or(usize::MAX);
-        let mut budget = crate::ptc::Budget {
-            steps: before,
-            ..Default::default()
-        };
-        let prepared = source.prepare(&mut budget);
-        *steps -= (before - budget.steps) as u64;
-        prepared.map_err(|failure| {
-            error(
-                span,
-                format!("required comptime declaration directory: {failure}"),
-            )
-        })?;
-        Ok(Arc::new(Self {
-            source,
+    pub(super) fn new(package: n::Package) -> Arc<Self> {
+        // Retaining an owned source does not demand type/member lookup. The
+        // query service prepares its directory using the first demand's budget;
+        // VM declaration and phase admission remain a separate execution step.
+        Arc::new(Self {
+            source: DeclarationSnapshot::new(Arc::new(package)),
             code: Mutex::new(None),
-        }))
+        })
     }
 
     fn code(&self) -> RequiredCode<'_> {
@@ -81,21 +66,15 @@ impl RequiredWorld {
         self.source.package()
     }
 
+    #[cfg(test)]
     fn capabilities<'a>(
         &'a self,
         assumptions: &'a [n::TraitRequirement],
         context: &'a crate::ptc::Context,
     ) -> crate::capabilities::World<'a> {
         self.source
-            .capabilities(
-                context,
-                assumptions,
-                &mut crate::ptc::Budget {
-                    steps: 0,
-                    ..Default::default()
-                },
-            )
-            .expect("RequiredWorld constructor completed the declaration directory")
+            .capabilities(context, assumptions, &mut crate::ptc::Budget::default())
+            .unwrap()
     }
 
     fn solve(
@@ -105,23 +84,12 @@ impl RequiredWorld {
         predicate: &n::TypePredicate,
         remaining: &mut u64,
     ) -> comptime_interpretor::ContractOutcome {
-        use comptime_interpretor::ContractOutcome;
-        let mut budget = crate::ptc::Budget {
-            steps: crate::ptc::Budget::default()
-                .steps
-                .min(usize::try_from(*remaining).unwrap_or(usize::MAX)),
-            ..Default::default()
-        };
-        let before = budget.steps;
-        let outcome = self
-            .capabilities(assumptions, context)
-            .check_predicate_metered(predicate, &mut budget);
-        *remaining -= (before - budget.steps) as u64;
-        match outcome {
-            Ok(crate::ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,
-            Ok(crate::ptc::Outcome::NotEntailed(_)) => ContractOutcome::Rejected,
-            _ => ContractOutcome::Unknown,
-        }
+        crate::materialization::SourceInvocationQueries::in_source(
+            DeclarationSource::Snapshot(&self.source),
+            context,
+            assumptions,
+        )
+        .check(predicate, crate::ptc::Budget::default(), remaining)
     }
 }
 
@@ -584,7 +552,7 @@ mod tests {
             assert_eq!(Arc::strong_count(&self.world), 1, "unique test fixture");
             let mut package = self.world.package().clone();
             edit(&mut package);
-            self.world = RequiredWorld::new(package, &mut 100_000, Span::default()).unwrap();
+            self.world = RequiredWorld::new(package);
         }
     }
 
@@ -629,7 +597,7 @@ mod tests {
             ..Default::default()
         };
         PreparedRequired {
-            world: RequiredWorld::new(package, &mut 100_000, Span::default()).unwrap(),
+            world: RequiredWorld::new(package),
             entry,
             inputs: vec![],
             result_type,
@@ -645,57 +613,94 @@ mod tests {
     }
 
     #[test]
-    fn world_directory_uses_the_callers_budget_before_publication() {
-        let preparation = literal_preparation(false);
-        let package = preparation.world.package();
-        let span = Span::default();
-        let mut available = 100_000;
-        let world = RequiredWorld::new(package.clone(), &mut available, span).unwrap();
-        let cost = 100_000 - available;
-        assert!(cost > 0);
-        for allowance in [0, cost - 1] {
-            let mut remaining = allowance;
-            let failure = RequiredWorld::new(package.clone(), &mut remaining, span)
-                .err()
-                .unwrap();
-            assert!(failure.message.contains("budget"), "{failure}");
-            assert!(remaining <= allowance);
+    fn unused_query_services_do_not_prepare_a_declaration_directory() {
+        for type_result in [false, true] {
+            let prepared = literal_preparation(type_result);
+            let world = prepared.world.clone();
+            let result = prepared.invoke(&mut 100_000, Span::default()).unwrap();
+            assert_eq!(
+                result.0,
+                if type_result {
+                    Value::Type(p(P::U8))
+                } else {
+                    Value::Bool(true)
+                }
+            );
+            assert!(world.code.lock().unwrap().is_some());
+            // Execution validated the source, but no lookup asked for an index.
+            let mut empty = crate::ptc::Budget {
+                steps: 0,
+                ..Default::default()
+            };
+            assert!(world.source.prepare(&mut empty).is_err());
         }
-        let mut exact = cost;
-        let retry = RequiredWorld::new(package.clone(), &mut exact, span).unwrap();
-        assert_eq!(exact, 0);
-        assert_eq!(retry.package(), world.package());
-        assert!(retry.code.lock().unwrap().is_none());
-        // Reading already prepared metadata neither constructs a new directory
-        // nor consumes an unrelated default allowance.
-        let context = crate::ptc::Context::default();
-        retry.capabilities(&[], &context);
-        // A second world (including a resource-authority world) shares the same
-        // caller allowance, rather than being granted another default budget.
-        assert!(RequiredWorld::new(package.clone(), &mut exact, span).is_err());
-        assert_eq!(exact, 0);
     }
 
     #[test]
-    fn invalid_world_metadata_spends_work_without_publishing_a_directory() {
-        let preparation = literal_preparation(false);
-        let mut package = preparation.world.package().clone();
-        package.functions.push(package.functions[0].clone());
+    fn first_query_spends_its_budget_and_retries_without_partial_publication() {
+        use comptime_interpretor::ContractOutcome;
+        let prepared = literal_preparation(false);
+        let predicate = n::TypePredicate::Equal(p(P::Bool), p(P::Bool));
+        let mut tiny = 1;
+        assert_eq!(
+            prepared
+                .world
+                .solve(&[], &prepared.context, &predicate, &mut tiny),
+            ContractOutcome::Unknown
+        );
+        assert_eq!(tiny, 0);
+        let mut empty = crate::ptc::Budget {
+            steps: 0,
+            ..Default::default()
+        };
+        assert!(prepared.world.source.prepare(&mut empty).is_err());
         let mut remaining = 100_000;
-        let failure = RequiredWorld::new(package, &mut remaining, Span::default())
+        assert_eq!(
+            prepared
+                .world
+                .solve(&[], &prepared.context, &predicate, &mut remaining),
+            ContractOutcome::Satisfied
+        );
+        assert!(remaining < 100_000);
+        prepared.world.source.prepare(&mut empty).unwrap();
+        assert_eq!(empty.steps, 0);
+        assert!(prepared.world.code.lock().unwrap().is_none());
+        assert_eq!(
+            prepared.invoke(&mut remaining, Span::default()).unwrap().0,
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn invalid_source_metadata_is_rejected_by_queries_and_execution() {
+        let mut prepared = literal_preparation(false);
+        prepared.edit_package(|package| package.functions.push(package.functions[0].clone()));
+        let mut budget = crate::ptc::Budget::default();
+        let before = budget.steps;
+        let failure = prepared.world.source.prepare(&mut budget).err().unwrap();
+        assert!(
+            failure
+                .to_string()
+                .contains("duplicate callable declaration"),
+            "{failure}"
+        );
+        assert!(budget.steps < before);
+        let failure = prepared
+            .invoke(&mut 100_000, Span::default())
             .err()
             .unwrap();
         assert!(
-            failure.message.contains("duplicate callable declaration"),
+            failure.message.contains("duplicate function declaration"),
             "{failure}"
         );
-        assert!(remaining < 100_000);
-        RequiredWorld::new(
-            preparation.world.package().clone(),
-            &mut remaining,
-            Span::default(),
-        )
-        .unwrap();
+        // Rejection of this owner grants no membership in another source world.
+        assert_eq!(
+            literal_preparation(false)
+                .invoke(&mut 100_000, Span::default())
+                .unwrap()
+                .0,
+            Value::Bool(true)
+        );
     }
 
     #[test]
@@ -925,6 +930,11 @@ mod tests {
             });
             let source = DeclarationSource::Snapshot(&prepared.world.source);
             let context = &prepared.context;
+            prepared
+                .world
+                .source
+                .prepare(&mut crate::ptc::Budget::default())
+                .unwrap();
             // A fresh scope only retains the completed directory. Rebuilding
             // this declaration set cannot fit within the same allowance.
             let scope = source
@@ -1928,8 +1938,7 @@ mod tests {
             arguments: vec![frozen_types(vec![p(P::Bool), p(P::U8)])],
         };
         let prepared = PreparedRequired {
-            world: RequiredWorld::new(n::Package::default(), &mut 100_000, Span::default())
-                .unwrap(),
+            world: RequiredWorld::new(n::Package::default()),
             entry: declaration,
             inputs: vec![(
                 n::LocalId {

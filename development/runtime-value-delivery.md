@@ -4,8 +4,9 @@
 这里描述目标职责与迁移条件，不表示这些载体已接入编译器。正式语义以
 [跨阶段值传递](../docs/comptime/quoting-and-splicing.md)、
 [函数参数阶段](../docs/functions/comptime_fn.md)和作者关于 comptime 值引用的决定为准。
-现状复核基于 `689d45c5` 的工作区，不改正式 docs，也不把当前残余重建方式补定为
-语言规则。工作区原有资源分析排版改动仍在，不能称为隔离的纯 HEAD 验收。
+初始复核基于 `689d45c5`，后续准备成本修复与当前证据见文末；不改正式 docs，
+也不把当前残余重建方式补定为语言规则。工作区原有资源分析排版改动仍在，
+不能称为隔离的纯 HEAD 验收。
 
 ## 1. 已确认的现状分裂
 
@@ -164,8 +165,10 @@ Splice 主体放入生成的 runtime 程序。之后再修改生成器局部值�
 在此基础上，[scalar-code-construction](repros/scalar-code-construction.fl)用八次
 迭代从最高位到最低位选择 0/1 字面量，通过单洞 quote 与固定宽度 BitVec 拼接产生
 一个字节。源码层每个 quote 只接入前一段代码，没有把 data、mask 或 remaining
-嵌入 runtime 主体，也不依赖 u8 的 Splice 身份实现。当前连单个 255 案例仍耗尽
-前端准备额度，未取得原生产物，故不能将这条路径称为已可用的数值构造库。
+嵌入 runtime 主体，也不依赖 u8 的 Splice 身份实现。删除无查询调用的提前建目录后，
+255 案例已通过真实 sysroot 编译，原生产物返回 255；回归另检查全零与交错位。
+这证明这条字面量组装路径可用，不证明普通 comptime 参数交付或完整数值构造库
+已经完成，也不代表更大规模生成已解决重复 VM 准备的问题。
 
 此外，[staged-code-input](repros/staged-code-input.fl)只把上述布尔生成器放入普通
 函数，让它接收该函数的 comptime 参数；当前仍报输入不可用。这与 quote 中遗漏
@@ -308,7 +311,7 @@ python3 -B development/check.py --timeout 900 -- run -p luna -- build SOURCE --e
 `packages::compile_observed_with_preludes` 当前调用 `elaborate_packages_for_target`，
 后者仍内部提供独立的 1000000 invocation/preparation 步额度，build 的 `--fuel`
 没有传入此处。不能据相同失败推断生成器无限循环，也不能把它归为位运算语义错误。
-实际准备成本的分布尚未测定；通用预算传送和减少重复准备仍需后续调查，不能简单
+初次探测未测定准备成本，后续计量见下文；通用预算传送和减少重复准备仍需推进，不能简单
 调大内部常量或取消准入检查后宣称代码构造已经满足库的性能要求。
 
 ### 回滚保留不再准备值观察世界
@@ -367,7 +370,7 @@ quote 内的 runtime 指针代码仍合法。实际源码世界的目录、成�
 [执行角色与资源权限](comptime-value-admission.md#执行角色与资源权限已分开)。
 这没有完成通用声明世界共享，也没有完成 staged 参数的 runtime 交付。
 
-八步字节构造仍失败：在 `/home/fin/luna` 执行
+删除 runtime 权限世界后、目录尚未惰性化时，八步字节构造仍失败：在 `/home/fin/luna` 执行
 `python3 -B development/check.py --timeout 900 -- run -p luna -- build development/repros/scalar-code-construction.fl --entry run --sysroot library --fuel 10000000 --output /tmp/luna-scalar-code-no-pointer-authority`，
 退出 1，报 `required comptime preparation failed: interpretation StepsExhausted`；
 `/tmp/luna-tools-8oog5bfa/result.json`。失败位置改变不代表代码构造已可用。
@@ -387,5 +390,50 @@ quote 内的 runtime 指针代码仍合法。实际源码世界的目录、成�
   退出 0，24 项通过；`/tmp/luna-tools-o69fgbqr/result.json`。覆盖准备失败的预算
   结算、值引用写回、目录身份隔离、重入和 Type/非 Type 两条调用路径。
 
-本阶段未执行全 workspace 测试；剩余预算失败如上单独保留，不以这些定向通过
-替代完整 CMTT 性能交付。
+该阶段未执行全 workspace 测试；当时的预算失败如上保留，不以定向通过替代
+完整 CMTT 性能交付。下面记录此后对同一复现的修复。
+
+### 查询目录按需求建立
+
+在 `7a63879e` 基线上临时计量相同字节构造，得到 47 次 RequiredWorld 创建和
+47 次冷 VM 准备，无同一代码会话的热命中。查询目录累计消费 368173 步，已完成
+VM 准备累计消费 430509 步，最后仍在 VM 准备耗尽。末段每次只有一个可执行函数，
+却含 41 个 trait 与 232 个 impl；目录成本为 8121 步，VM 准备约 9600 步。
+这是预算工作量，不是 CPU 时间或分配量。计量只输出已有计数，没有修改额度；
+日志为 `/tmp/luna-tools-xgsnvom3/result.json` 和 `stderr.log`，退出 1。
+临时 trace 已移除，生产代码不增加日志开关或计量分支。
+
+RequiredWorld 现在只接管声明快照。首次类型／成员查询通过既有
+SourceInvocationQueries 建立目录，并消费该查询的真实预算；之后同源查询共享
+已完成目录。发布器证明也走这条路径。没有查询的 Type 和普通值调用不建该目录，
+但 VM 的声明、阶段、存储与输入准入仍执行。重复声明仍拒绝；索引耗尽不发布部分
+目录，后续有额度可重试。具体所有权见
+[Required 世界](world-storage-and-lifetimes.md#11-required-计算的共享声明快照)。
+
+在 `/home/fin/luna` 执行
+`python3 -B development/check.py --timeout 900 -- run -p luna -- build development/repros/scalar-code-construction.fl --entry run --sysroot library --fuel 10000000 --output /tmp/luna-scalar-code-lazy-directory`，
+退出 0；`/tmp/luna-tools-wvcmzfla/result.json`。随后执行
+`python3 -B development/command.py --timeout 30 -- /tmp/luna-scalar-code-lazy-directory`，
+退出 0，输出 `(unsigned-integer 255)`；`/tmp/luna-tools-v38g1lim/result.json`。
+两次构建的 frontend 额度相同，仍未将 CLI fuel 接入 frontend。
+
+此项没有跨不同 RequiredWorld 共享 VM 元数据，不能用声明号或 package 内容近似
+相等来取得旧世界的准入许可。更大代码组装仍需减少重复声明捕获和冷 VM 准备，
+保留独立的输入、前提、可变存储及失败恢复责任。
+
+定向验证均在 `/home/fin/luna` 执行，以
+`python3 -B development/check.py --timeout 900 --` 为命令前缀：
+
+- `test -p elaboration --lib program::required::prepared::tests -- --test-threads=1`：
+  24 项通过，退出 0；`/tmp/luna-tools-me3772hh/result.json`。覆盖无查询调用、
+  首次查询计费／失败／重试、错误声明拒绝、前提撤回、世界身份、重入与存储写回。
+  初版新测试曾误断言重复声明在 InvalidCallPlan 层报错，实际更早由 phase 检查
+  拒绝；`/tmp/luna-tools-nr54s1h4/result.json` 为 23 通过、1 断言失败。已按该
+  真实拒绝边界修正断言，未修改生产检查以迎合测试。
+- `test -p luna --test cmtt_storage_world --test builder_invocations --test library_std --no-fail-fast -- --test-threads=1 single_hole_scalar optional_branch_probes contextual_retry entry_snapshot_retains nominal_object_entries nested_contextual_retries required_builder required_enum required_newtype required_value package_driver builder_driver println_and_display`：
+  分别 6、6、1 项通过，退出 0；`/tmp/luna-tools-nojj3jwr/result.json`。新增
+  标量构造检查 0、165、255，其余覆盖真实 meta builder、存储快照、失败重试及
+  std 的 O0/O3 字节输出与外部效应。
+
+修改的 Rust 文件已定向格式化，git diff --check 通过。未运行全 workspace，
+没有把以上通过扩大为完整数值生成库或一般参数阶段交付已完成。

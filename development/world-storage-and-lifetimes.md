@@ -32,36 +32,31 @@
 ### 1.1 Required 计算的共享声明快照
 
 `compiler/elaboration/src/program/required/prepared.rs` 的 RequiredWorld 把已检查的
-NIR Package 封装到 DeclarationSnapshot 中。构造函数消费 package，通过 prepare
-完成第 1.2 节的共享目录后才返回 Arc；失败不会发布 RequiredWorld。字段保持模块私有，
-生产入口不能分别替换声明或索引。它是准备计算的声明世界，不是第 10 节尚待实现的
-待发布 PreparedWorld。
+NIR Package 封装到 DeclarationSnapshot 中。构造函数只接管已有 package，返回 Arc；
+类型／成员查询首次发生时，才用该查询的预算建立第 1.2 节的共享目录。无查询的调用
+不支付目录成本。字段保持模块私有，生产入口不能分别替换声明或索引。此 owner
+本身不授予执行或类型证明权限，也不是第 10 节尚待实现的待发布 PreparedWorld。
 
 PreparedRequired 持有这个 owner，其输入赋值、scope substitution、调用前提及
 context 仍属于具体准备结果。fork 共享声明世界，复制本次调用的供应状态；不再
 深拷贝 package 或重新建立索引。派生过程中没有声明检查或执行，不需要诊断 span，
-也不再用 Result 暗示这里会重新准备代码。索引建立失败仍在最初的准备入口报告。
+也不再用 Result 暗示这里会重新准备代码。目录失败由首次查询报告，不留下部分目录；
+VM 执行入口仍独立验证声明、阶段与输入，未发起查询不意味着可以执行无效声明。
 
 普通 invocation 从自身 owner 取得 package 与索引，不能由调用者另传一个世界。
 builder 发布也以这同一快照建立发布服务，服务和 invocation 的借用期间保活 owner。
 已有 definition identity cursor 检查通过只读 accessor 取得原快照游标；调用者产生
 了更新的定义时，仍按既有路径重新准备，不向旧快照补入当前声明或活动推断状态。
 
-资源权限保存另一份 RequiredWorld，包含资源声明及由它们建立的索引。原先 Copy
-权限查询把资源 package 的 implementations／traits 与可执行 package 的 index
-拼在一起；当可执行声明闭包没有保留某个 runtime Copy implementation 时，权限
-查询会漏掉资源世界已经具有的实现。现在初次准备同时完成资源世界构造，fork 共享
-它，Copy 查询从这个 owner 取得 package 和 index。required 发布器的证明服务也从
-RequiredWorld::capabilities 取得借用视图；实际 invocation 的三类查询进一步统一到
-[调用内作用域](type-models-and-theory-evidence.md#调用内的统一声明查询状态)，不再在调用点
-手工配对这些字段。调用内查询通过 DeclarationSource::Snapshot 保留同一个目录，
-不再为每次 required invocation 重建；发布器证明也借用这个目录。执行与资源声明
-分别拥有自己的 snapshot，不能因为两者都使用同一个 owner 类型而合并权限。
+required 发布器证明与实际 invocation 的三类查询均走
+[调用内作用域](type-models-and-theory-evidence.md#调用内的统一声明查询状态)，通过
+DeclarationSource::Snapshot 复用同一份已完成目录。调用前提、类型 context 和
+证明结果仍属于本次查询，不存入共享目录。预算失败不会发布部分索引，同一 owner
+可在后续充足预算下重试；同号声明的另一份 owner 必须重新准备。
 
-调用前提与类型 context 仍按本次 invocation 传入借用视图；它们不是资源快照中的
-全局事实。资源 dump 展开自身的 source snapshot，包含 index 和 package，便于核对
-权限来源。回归检查同一 Copy 实现仅存在于资源世界时，两份世界各自给出正确分类、其他 subject
-不取得该权限、资源不足后可重试，以及派生调用共享同一资源 owner。
+旧的第二份 runtime Copy/Drop 权限世界及其回调已删除。comptime 值引用不依赖它；
+runtime 资源权限仍由 runtime 入口独立检查，详见
+[执行角色边界](comptime-value-admission.md#执行角色与资源权限已分开)。
 
 共享声明不缓存计算结果。每次 invocation 仍按自己的输入、预算与 live graph 执行；
 输入赋值失败不会污染其他派生调用。原准备结果释放后，未完成的派生调用继续保活
@@ -72,13 +67,14 @@ RequiredWorld::capabilities 取得借用视图；实际 invocation 的三类查�
 不同快照中同号声明的不同结果，以及 Weak 观察的最后引用释放。原有 live closure
 连续调用和 builder 公开接口检查继续覆盖实际执行。测试夹具编辑 package 副本后
 重新建立 RequiredWorld，不能保留修改前的索引；生产没有可变访问器或 Arc::make_mut
-旁路。目录共享回归构造两千多个声明，先测量无额外证明需求的调用成本，再只增加
-不足以冷建目录的证明额度；Type 和普通值 invocation 均须在该总额度内重试并完成。
-该用例先计入 VM 的冷准备成本；单次证明加入的前提不会进入另一查询。
+旁路。目录共享回归构造两千多个声明，显式完成第一次目录准备，再以不足以冷建
+目录的证明额度检查 Type 和普通值 invocation 的共享。该用例另计入 VM 冷准备成本；
+单次证明加入的前提不会进入另一查询。无查询调用、首次查询耗尽及重试分别验证，
+不能将测试中的目录预热当作所有调用必经的生产准备步骤。
 
 同一个 RequiredWorld 现在惰性保留一个 CodeSession，Type 结果调度器与普通值调用
 均通过它复用精确来源的 VM 声明索引及已检查代码。每次仍创建新 VM、安装本次类型／
-方法／关联项和 Copy 服务，并重新准入输入、抽象参数和前提。Type 调度器仅在执行
+方法／关联项服务，并重新准入输入、抽象参数和前提。Type 调度器仅在执行
 ready computation 时借用代码缓存，等待者、已消费输入和输出发布权限继续归 Session。
 既没有保存调用结果，也没有把活动 inference context 放进世界或缓存。
 

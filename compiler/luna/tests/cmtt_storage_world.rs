@@ -5,6 +5,16 @@ mod sysroot;
 use comptime_interpretor::Value;
 
 #[test]
+fn single_hole_scalar_construction_fits_the_real_sysroot_budget() {
+    let source = include_str!("../../../development/repros/scalar-code-construction.fl");
+    // Exercise both branches and their interleaving, retaining eight quote layers.
+    for value in [0, 165, 255] {
+        let source = source.replace("byte_code(255)", &format!("byte_code({value})"));
+        assert_eq!(sysroot::run(&source), Value::UnsignedInteger(value));
+    }
+}
+
+#[test]
 fn optional_branch_probes_do_not_repeat_generator_receiver_effects() {
     let source = "
         fn wrap(value: ?T) -> ?T where T { value }

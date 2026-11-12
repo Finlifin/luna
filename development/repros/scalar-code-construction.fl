@@ -1,6 +1,7 @@
 {- Eight single-hole quotes construct a byte using fixed literals and
    checked BitVec operations. No quote embeds the generator's data value.
-   This positive case currently exhausts the frontend preparation budget. -}
+   Regression: unused declaration queries must not exhaust the frontend
+   preparation budget before this code can be constructed. -}
 pure comptime fn byte_code(data: u8) -> < |- u8 > {
     var code: < |- u8 > = '(0);
     var remaining = data;

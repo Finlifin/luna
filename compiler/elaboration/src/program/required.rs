@@ -2362,7 +2362,7 @@ impl Checker<'_, '_> {
                     } else { error(expr.span, failure.to_string()) }
                 })?;
             let prepared = PreparedRequired {
-                world: prepared::RequiredWorld::new(package, &mut self.required_steps, expr.span)?,
+                world: prepared::RequiredWorld::new(package),
                 entry,
                 inputs,
                 result_type,
