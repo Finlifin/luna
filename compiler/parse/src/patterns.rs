@@ -109,6 +109,12 @@ impl Parser<'_> {
             // 循环处理操作符和右操作数
             loop {
                 let token = p.peek_next_token();
+                if min_prec == 0
+                    && let Some(err) = p.check_post_pattern_heuristics(current_left)
+                {
+                    return Err(err);
+                }
+
                 let op_info = get_pattern_op_info(token.kind);
 
                 // 如果操作符无效或优先级太低，则退出循环
@@ -118,7 +124,13 @@ impl Parser<'_> {
 
                 match p.try_postfix_pattern(token.kind, current_left, op_info.prec + 1, option) {
                     Ok(node) if node != 0 => {
+                        let full = p.current_span();
+                        if let Some(sp) = p.ast.get_span(node) {
+                            p.ast.spans[node as usize] =
+                                rustc_span::Span::new(sp.lo().min(full.lo()), sp.hi().max(full.hi()));
+                        }
                         current_left = node;
+                        p.check_pattern_parenthesization(current_left);
                     }
                     Err(ParseError::MeetPostExtendedCallStart) => {
                         // 如果遇到 MeetPostExtendedCallStart，跳过后缀模式处理
@@ -127,20 +139,32 @@ impl Parser<'_> {
                     Err(e) => return Err(e),
 
                     _ => {
+                        let op_span = p.next_token_span();
+                        let op_str = token.kind.lexme().trim();
                         // 消耗操作符标记
                         p.eat_tokens(1);
 
                         // 解析右操作数（递归调用，使用更高优先级）
                         let right = match p.try_pattern_pratt(op_info.prec + 1, option)? {
                             0 => {
-                                return Err(ParseError::invalid_syntax(
-                                    format!(
-                                        "Expected a right operand after binary operator `{}`",
-                                        token.kind.lexme()
+                                let found = p.peek_next_token().kind;
+                                return Err(
+                                    ParseError::invalid_syntax(
+                                        format!(
+                                            "expected a right-hand pattern after `{op_str}`, but ran into {}",
+                                            describe_token(found)
+                                        ),
+                                        found,
+                                        p.next_token_span(),
+                                    )
+                                    .with_primary_label(format!(
+                                        "expected a pattern here after `{op_str}`"
+                                    ))
+                                    .with_secondary_label(
+                                        op_span,
+                                        format!("`{op_str}` needs a right-hand pattern"),
                                     ),
-                                    token.kind,
-                                    p.next_token_span(),
-                                ));
+                                );
                             }
 
                             node => node,
@@ -151,6 +175,7 @@ impl Parser<'_> {
                             .add_single_child(current_left)
                             .add_single_child(right)
                             .build(&mut p.ast);
+                        p.check_pattern_parenthesization(current_left);
                     }
                 }
             }
@@ -178,7 +203,7 @@ impl Parser<'_> {
             }
 
             let token = p.peek_next_token();
-            match token.kind {
+            let node = match token.kind {
                 // 原子模式
                 TokenKind::Int
                 | TokenKind::Real
@@ -312,8 +337,17 @@ impl Parser<'_> {
                 }
 
                 TokenKind::Tilde => p.try_pattern_splice(),
-                _ => Ok(0),
+                _ => {
+                    if let Some(err) = p.check_prefix_pattern_heuristics() {
+                        return Err(err);
+                    }
+                    Ok(0)
+                }
+            }?;
+            if node != 0 {
+                p.check_pattern_parenthesization(node);
             }
+            Ok(node)
         })
     }
 
@@ -419,9 +453,9 @@ impl Parser<'_> {
                         let id = p.try_id()?;
                         if id == 0 {
                             return Err(ParseError::invalid_syntax(
-                                "Expected an identifier after `.`".to_string(),
-                                TokenKind::Id,
-                                p.current_span(),
+                                "expected an identifier after `.` in pattern".to_string(),
+                                p.peek_next_token().kind,
+                                p.next_token_span(),
                             ));
                         }
                         Ok(NodeBuilder::new(NodeKind::Projection, p.current_span())
@@ -679,9 +713,9 @@ impl Parser<'_> {
 
             if segments.is_empty() {
                 return Err(ParseError::invalid_syntax(
-                    "Expected at least one bit-vector segment".into(),
+                    "expected at least one bit-vector segment".into(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
             Ok(NodeBuilder::new(kind, p.current_span())
@@ -867,6 +901,7 @@ impl Parser<'_> {
     /// 尝试解析元组模式 (items)
     fn try_tuple_pattern(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::LParen], |p| {
+            let open_span = p.next_token_span();
             p.eat_tokens(1);
             if p.eat_token(TokenKind::RParen) {
                 return Ok(NodeBuilder::new(NodeKind::Unit, p.current_span()).build(&mut p.ast));
@@ -874,12 +909,14 @@ impl Parser<'_> {
             let first = p.try_pattern()?;
             if first == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a pattern".to_string(),
+                    "expected a pattern or `)` inside `(...)`".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
-                ));
+                )
+                .with_secondary_label(open_span, "this `(` was opened here"));
             }
             if p.eat_token(TokenKind::RParen) {
+                p.mark_parenthesized(first);
                 return Ok(first);
             }
             if !p.eat_token(TokenKind::Comma) {
@@ -887,7 +924,8 @@ impl Parser<'_> {
                     TokenKind::Comma,
                     p.peek_next_token().kind,
                     p.next_token_span(),
-                ));
+                )
+                .with_secondary_label(open_span, "this `(` was opened here"));
             }
             let mut nodes = vec![first];
             nodes.extend(p.try_multi(&[Rule::comma("pattern", |p| p.try_pattern())])?);
@@ -896,7 +934,8 @@ impl Parser<'_> {
                     TokenKind::RParen,
                     p.peek_next_token().kind,
                     p.next_token_span(),
-                ));
+                )
+                .with_secondary_label(open_span, "this `(` was opened here"));
             }
             Ok(NodeBuilder::new(NodeKind::TuplePattern, p.current_span())
                 .add_multiple_children(nodes)

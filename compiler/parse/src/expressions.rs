@@ -101,7 +101,9 @@ impl Parser<'_> {
                 {
                     break;
                 }
-                if option.stop_at_pattern_gt && token.kind == TokenKind::SeparatedGt {
+                if option.stop_at_pattern_gt
+                    && matches!(token.kind, TokenKind::Gt | TokenKind::SeparatedGt)
+                {
                     break;
                 }
                 if option.stop_at_pattern_context
@@ -131,28 +133,25 @@ impl Parser<'_> {
                 }
                 let op_info = get_expr_op_info(token.kind);
 
-                // These tokens have prefix meanings, but cannot continue an
-                // expression as infix arithmetic without whitespace. A type
-                // qualifier also ends before its result, as in `#read *T`.
-                // Preserve the statement boundary after a brace-ending expression:
-                // e.g. `if ready {} -value;` starts a new statement.
-                if op_info.node_kind == NodeKind::Invalid
-                    && !option.stop_at_type_qualifier
-                    && matches!(
-                        token.kind,
-                        TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash
-                    )
-                    && p.current_token().kind != TokenKind::RBrace
-                {
-                    return Err(ParseError::invalid_syntax(
-                        format!(
-                            "Infix operator `{}` requires whitespace on both sides",
-                            token.kind.lexme()
-                        ),
-                        token.kind,
-                        p.next_token_span(),
-                    ));
+                // Check Flurry-sensitive spacing rules and cross-language operator habits
+                // at the appropriate precedence layer so `lhs` snippets match natural grouping.
+                if !option.stop_at_type_qualifier {
+                    let check_here = min_prec == 0
+                        || (token.kind == TokenKind::Pipe && min_prec <= 20)
+                        || (token.kind == TokenKind::BangEq && min_prec <= 30)
+                        || (matches!(token.kind, TokenKind::Plus | TokenKind::Minus)
+                            && min_prec <= 60)
+                        || (matches!(
+                            token.kind,
+                            TokenKind::Star | TokenKind::Slash | TokenKind::Percent
+                        ) && min_prec <= 70);
+                    if check_here
+                        && let Some(err) = p.check_post_expr_heuristics(current_left)
+                    {
+                        return Err(err);
+                    }
                 }
+
                 // 如果操作符无效或优先级太低，则退出循环
                 if op_info.node_kind == NodeKind::Invalid || op_info.prec < min_prec {
                     break;
@@ -160,6 +159,11 @@ impl Parser<'_> {
 
                 match p.try_postfix_expr(token.kind, current_left, option) {
                     Ok(node) if node != 0 => {
+                        let full = p.current_span();
+                        if let Some(sp) = p.ast.get_span(node) {
+                            p.ast.spans[node as usize] =
+                                rustc_span::Span::new(sp.lo().min(full.lo()), sp.hi().max(full.hi()));
+                        }
                         current_left = node;
                     }
                     Err(ParseError::MeetPostExtendedCallStart) => {
@@ -173,6 +177,8 @@ impl Parser<'_> {
                     Err(e) => return Err(e),
 
                     _ => {
+                        let op_span = p.next_token_span();
+                        let op_str = token.kind.lexme().trim();
                         // 消耗操作符标记
                         p.eat_tokens(1);
 
@@ -186,14 +192,24 @@ impl Parser<'_> {
                         };
                         let right = match p.try_expr_pratt(right_prec, option)? {
                             0 => {
-                                return Err(ParseError::invalid_syntax(
-                                    format!(
-                                        "Expected a right operand after binary operator `{}`",
-                                        p.peek_next_token().kind.lexme()
+                                let found = p.peek_next_token().kind;
+                                return Err(
+                                    ParseError::invalid_syntax(
+                                        format!(
+                                            "expected a right-hand operand after binary operator `{op_str}`, but ran into {}",
+                                            describe_token(found)
+                                        ),
+                                        found,
+                                        p.next_token_span(),
+                                    )
+                                    .with_primary_label(format!(
+                                        "expected an expression here after `{op_str}`"
+                                    ))
+                                    .with_secondary_label(
+                                        op_span,
+                                        format!("`{op_str}` needs a right-hand operand"),
                                     ),
-                                    p.peek_next_token().kind,
-                                    p.next_token_span(),
-                                ));
+                                );
                             }
 
                             node => node,
@@ -207,6 +223,8 @@ impl Parser<'_> {
                         .add_single_child(current_left)
                         .add_single_child(right)
                         .build(&mut p.ast);
+
+                        p.check_expr_parenthesization(current_left);
                     }
                 }
             }
@@ -266,7 +284,7 @@ impl Parser<'_> {
     pub fn try_prefix_expr(&mut self, option: ExprOption) -> ParseResult {
         self.scoped(|p| {
             let token = p.peek_next_token();
-            match token.kind {
+            let node = match token.kind {
                 // for those atomic expressions
                 TokenKind::Int
                 | TokenKind::IntBin
@@ -398,8 +416,17 @@ impl Parser<'_> {
                     p.try_fn_type()
                 }
 
-                _ => Ok(0),
+                _ => {
+                    if let Some(err) = p.check_prefix_expr_heuristics() {
+                        return Err(err);
+                    }
+                    Ok(0)
+                }
+            }?;
+            if node != 0 {
+                p.check_expr_parenthesization(node);
             }
+            Ok(node)
         })
     }
 
@@ -409,6 +436,7 @@ impl Parser<'_> {
     /// unit -> ()
     fn try_unit_or_parenthesis_or_tuple(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::LParen], |p| {
+            let open_span = p.next_token_span();
             p.eat_tokens(1); // 消耗 '('
 
             // 检查是否是空的单元类型 ()
@@ -420,10 +448,11 @@ impl Parser<'_> {
             let first_expr = p.try_expr()?;
             if first_expr == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected expression in parenthesis expression or tuple".to_string(),
+                    "expected an expression or `)` inside `(...)`".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
-                ));
+                )
+                .with_secondary_label(open_span, "this `(` was opened here"));
             }
 
             // 检查是否有逗号，决定是元组还是括号表达式
@@ -438,7 +467,8 @@ impl Parser<'_> {
                         TokenKind::RParen,
                         p.peek_next_token().kind,
                         p.next_token_span(),
-                    ));
+                    )
+                    .with_secondary_label(open_span, "this `(` was opened here"));
                 }
 
                 Ok(NodeBuilder::new(NodeKind::Tuple, p.current_span())
@@ -451,9 +481,11 @@ impl Parser<'_> {
                         TokenKind::RParen,
                         p.peek_next_token().kind,
                         p.next_token_span(),
-                    ));
+                    )
+                    .with_secondary_label(open_span, "this `(` was opened here"));
                 }
 
+                p.mark_parenthesized(first_expr);
                 Ok(first_expr)
             }
         })
@@ -545,9 +577,9 @@ impl Parser<'_> {
                         let ty = p.try_expr_with_option(option)?;
                         if ty == 0 {
                             return Err(ParseError::invalid_syntax(
-                                "Expected lambda parameter type".into(),
+                                "expected lambda parameter type".into(),
                                 p.peek_next_token().kind,
-                                p.current_span(),
+                                p.next_token_span(),
                             ));
                         }
                         Ok(NodeBuilder::new(NodeKind::TypeBoundParam, p.current_span())
@@ -773,7 +805,7 @@ impl Parser<'_> {
             let effect_list = p.try_expr_with_option(row_option)?;
             if effect_list == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected effect list after '#'".to_string(),
+                    "expected an effect list after `#`".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));
@@ -782,8 +814,15 @@ impl Parser<'_> {
             // 解析类型表达式
             let type_expr = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
             if type_expr == 0 {
+                if let Some(err) = p.check_non_block_extended_call_conflict(
+                    effect_list,
+                    "an effect-qualified type",
+                    None,
+                ) {
+                    return Err(err);
+                }
                 return Err(ParseError::invalid_syntax(
-                    "Expected type expression in effect qualified type".to_string(),
+                    "expected a result type after the `#...` effect qualifier".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));
@@ -802,6 +841,7 @@ impl Parser<'_> {
     /// error_qualified_type -> !expr expr
     fn try_error_qualified_type(&mut self, option: ExprOption) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Bang], |p| {
+            let bang_span = p.next_token_span();
             p.eat_tokens(1); // 消耗 '!'
 
             // 解析错误列表
@@ -810,20 +850,42 @@ impl Parser<'_> {
             let error_list = p.try_expr_with_option(context_option)?;
             if error_list == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected error list after '!'".to_string(),
+                    "expected an error type after `!` (or use `not` for boolean negation)"
+                        .to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
-                ));
+                )
+                .with_help("For boolean negation, write `not expr` instead of `!expr`."));
             }
 
             // 解析类型表达式
             let type_expr = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
             if type_expr == 0 {
-                return Err(ParseError::invalid_syntax(
-                    "Expected type expression in error qualified type".to_string(),
-                    p.peek_next_token().kind,
-                    p.next_token_span(),
-                ));
+                if let Some(err) = p.check_non_block_extended_call_conflict(
+                    error_list,
+                    "an error-qualified type",
+                    None,
+                ) {
+                    return Err(err);
+                }
+                let err_snip = p.snippet_or(error_list, "expr");
+                let full_span = rustc_span::Span::new(bang_span.lo(), p.prev_token_span().hi());
+                return Err(ParseError::custom(
+                    PARSE_FOREIGN_HABIT,
+                    "foreign_bang_negation",
+                    format!(
+                        "prefix `!{err_snip}` looks like boolean negation, or an error-qualified type `!Err T` missing its payload type"
+                    ),
+                    full_span,
+                )
+                .with_found(p.peek_next_token().kind)
+                .with_primary_label("`!Err T` expects a payload type here — or use `not` to negate")
+                .with_note(
+                    "In Flurry, prefix `!Err T` writes an error-qualified type, while boolean negation is written `not expr`.",
+                )
+                .with_help(format!(
+                    "For boolean negation, write `not {err_snip}`; for an error-qualified type, add the result type: `!{err_snip} ResultType`."
+                )));
             }
 
             Ok(
@@ -838,7 +900,37 @@ impl Parser<'_> {
     // &expr expr
     fn try_reachability_type(&mut self, option: ExprOption) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Ampersand], |p| {
+            let amp_span = p.next_token_span();
             p.eat_tokens(1);
+
+            // Detect `&mut expr` right away!
+            if p.peek_next_token().kind == TokenKind::Id
+                && p.token_content(&p.peek_next_token()).as_deref() == Some("mut")
+            {
+                let mut_span = p.next_token_span();
+                p.eat_tokens(1);
+                let target = p.try_expr_with_option(option.with_no_extended_call(true))?;
+                let target_snip = if target != 0 {
+                    p.snippet_or(target, "value")
+                } else {
+                    "value".to_string()
+                };
+                let hi = if target != 0 {
+                    p.prev_token_span().hi()
+                } else {
+                    mut_span.hi()
+                };
+                return Err(ParseError::custom(
+                    PARSE_FOREIGN_HABIT,
+                    "foreign_amp_mut_ref",
+                    "Flurry takes references with postfix `.ref` rather than `&mut`",
+                    rustc_span::Span::new(amp_span.lo(), hi),
+                )
+                .with_primary_label("use postfix `.ref` instead of `&mut`")
+                .with_help(format!(
+                    "Write `{target_snip}.ref` to take a reference (mutability comes from `var` bindings)."
+                )));
+            }
 
             // 解析可达性列表
             let mut context_option = option.with_no_extended_call(true);
@@ -846,20 +938,42 @@ impl Parser<'_> {
             let reachability_set = p.try_expr_with_option(context_option)?;
             if reachability_set == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected reachability list after '&'".to_string(),
+                    "expected a reachability qualifier after `&` (or use postfix `.ref` to take a reference)"
+                        .to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
-                ));
+                )
+                .with_help("To take a reference to a value, write `value.ref`; for a pointer type, write `*T`."));
             }
 
             // 解析类型表达式
             let type_expr = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
             if type_expr == 0 {
-                return Err(ParseError::invalid_syntax(
-                    "Expected type expression in reachability type".to_string(),
-                    p.peek_next_token().kind,
-                    p.next_token_span(),
-                ));
+                if let Some(err) = p.check_non_block_extended_call_conflict(
+                    reachability_set,
+                    "a reachability-qualified type",
+                    None,
+                ) {
+                    return Err(err);
+                }
+                let reach_snip = p.snippet_or(reachability_set, "value");
+                let full_span = rustc_span::Span::new(amp_span.lo(), p.prev_token_span().hi());
+                return Err(ParseError::custom(
+                    PARSE_FOREIGN_HABIT,
+                    "foreign_amp_ref",
+                    format!(
+                        "prefix `&{reach_snip}` looks like taking a reference, or a reachability-qualified type `&s T` missing its target type"
+                    ),
+                    full_span,
+                )
+                .with_found(p.peek_next_token().kind)
+                .with_primary_label("use `.ref` to take a reference, or `*T` for a pointer type")
+                .with_note(
+                    "In Flurry, prefix `&s T` qualifies a type with reachability `s`, whereas taking the address of a place uses postfix `.ref`.",
+                )
+                .with_help(format!(
+                    "To take a reference, write `{reach_snip}.ref`; for a pointer type, write `*{reach_snip}`; for reachability, write `&{reach_snip} TargetType`."
+                )));
             }
 
             Ok(
@@ -951,26 +1065,26 @@ impl Parser<'_> {
                             }
                             if !p.eat_token(TokenKind::Colon) {
                                 return Err(ParseError::invalid_syntax(
-                                    "Expected ':' in closure environment binding".into(),
+                                    "expected `:` in closure environment binding".into(),
                                     p.peek_next_token().kind,
-                                    p.current_span(),
+                                    p.next_token_span(),
                                 ));
                             }
                             let ty = p.try_expr_without_extended_call()?;
                             if ty == 0 {
                                 return Err(ParseError::invalid_syntax(
-                                    "Expected closure environment binding type".into(),
+                                    "expected closure environment binding type".into(),
                                     p.peek_next_token().kind,
-                                    p.current_span(),
+                                    p.next_token_span(),
                                 ));
                             }
                             let value = if p.eat_token(TokenKind::Eq) {
                                 let value = p.try_expr_without_extended_call()?;
                                 if value == 0 {
                                     return Err(ParseError::invalid_syntax(
-                                        "Expected closure environment binding source".into(),
+                                        "expected closure environment binding source".into(),
                                         p.peek_next_token().kind,
-                                        p.current_span(),
+                                        p.next_token_span(),
                                     ));
                                 }
                                 value
@@ -999,9 +1113,9 @@ impl Parser<'_> {
             };
             if context == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected closure context after '%'".into(),
+                    "expected closure context after `%`".into(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
             // Include a function result arrow, but leave comparisons and
@@ -1010,10 +1124,17 @@ impl Parser<'_> {
             // in a lambda parameter its closing pipe is not a union operator.
             let body = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
             if body == 0 {
+                if let Some(err) = p.check_non_block_extended_call_conflict(
+                    context,
+                    "a closure-qualified type",
+                    None,
+                ) {
+                    return Err(err);
+                }
                 return Err(ParseError::invalid_syntax(
-                    "Expected closure body type".into(),
+                    "expected closure body type".into(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
             Ok(
@@ -1117,7 +1238,11 @@ impl Parser<'_> {
 
     /// normal_form_head_application -> expr<argument*>
     pub(crate) fn try_diamond_call_expr(&mut self, left: NodeIndex) -> ParseResult {
-        let node = self.scoped_with_expected_prefix(&[TokenKind::Lt], |p| {
+        if !self.peek(TokenKind::Lt.as_ref()) {
+            return Ok(0);
+        }
+        let lt_cursor = self.cursor + 1;
+        let res = self.scoped_with_expected_prefix(&[TokenKind::Lt], |p| {
             let args = p.try_multi_with_bracket(
                 &[
                     Rule::comma("optional argument", |p| p.try_optional_arg()),
@@ -1134,7 +1259,11 @@ impl Parser<'_> {
                     .add_multiple_children(args)
                     .build(&mut p.ast),
             )
-        })?;
+        });
+        let node = match res {
+            Ok(node) => node,
+            Err(err) => return Err(self.refine_failed_normal_form_lt(left, lt_cursor, err)),
+        };
         if node != 0 {
             // Also called directly by normal-form pattern parsing.
             self.include_left_span(left, node);
@@ -1143,7 +1272,11 @@ impl Parser<'_> {
     }
 
     /// extended_application -> expr { (property | extend_arg | expr)* }
-    fn try_extended_call_expr(&mut self, left: NodeIndex, opt: ExprOption) -> ParseResult {
+    pub(crate) fn try_extended_call_expr(
+        &mut self,
+        left: NodeIndex,
+        opt: ExprOption,
+    ) -> ParseResult {
         if opt.no_extended_call {
             return Err(ParseError::MeetPostExtendedCallStart);
         }
@@ -1172,23 +1305,26 @@ impl Parser<'_> {
     /// 索引调用表达式
     fn try_index_call_expr(&mut self, left: NodeIndex) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::LBracket], |p| {
+            let open_span = p.next_token_span();
             p.eat_tokens(1); // consume the opening bracket, not a list literal
             // 解析索引调用参数
             let expr = p.try_expr()?;
             if expr == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected expression after '[' in index call".to_string(),
+                    "expected an index expression after `[`".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
-                ));
+                )
+                .with_secondary_label(open_span, "this `[` was opened here"));
             }
 
             if !p.eat_token(TokenKind::RBracket) {
-                return Err(ParseError::invalid_syntax(
-                    "Expected ']' after index expression".to_string(),
+                return Err(ParseError::unexpected_token(
+                    TokenKind::RBracket,
                     p.peek_next_token().kind,
                     p.next_token_span(),
-                ));
+                )
+                .with_secondary_label(open_span, "this `[` was opened here"));
             }
             // 创建索引调用节点
             Ok(

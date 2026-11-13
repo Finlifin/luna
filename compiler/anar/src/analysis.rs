@@ -658,13 +658,17 @@ impl WorkspaceAnalyzer {
                     });
                 }
             }
+            let code_prefix = match d.level {
+                Level::Warning => "W",
+                _ => "E",
+            };
             push_unique_diag(
                 &mut raw_parse_diags,
                 fpath,
                 LspDiagnostic {
                     range: line_idx.span_to_range(&text, lo, hi),
                     severity,
-                    code: d.code.map(|c| format!("E{c:04}")),
+                    code: d.code.map(|c| format!("{code_prefix}{c:04}")),
                     message,
                     related,
                 },
@@ -753,22 +757,11 @@ impl WorkspaceAnalyzer {
             let (tokens, symbols, lex_errors) = lex(&content, sf.start_pos);
             let mut file_ok = lex_errors.is_empty();
 
+            let parse_diag_ctx = DiagnosticContext::new(source_map);
             for lerr in &lex_errors {
-                let (lo, hi) = lex_error_offsets(lerr, &content);
-                push_unique_diag(
-                    &mut parse_diags,
-                    abs.clone(),
-                    LspDiagnostic {
-                        range: line_idx.span_to_range(&content, lo, hi),
-                        severity: lsp_severity::ERROR,
-                        code: Some(format!("E{:04}", lerr.error_code())),
-                        message: format!("{lerr:?}"),
-                        related: Vec::new(),
-                    },
-                );
+                lerr.emit(&parse_diag_ctx, sf.start_pos);
             }
 
-            let parse_diag_ctx = DiagnosticContext::new(source_map);
             let mut parser = Parser::new(source_map, tokens, symbols, sf.start_pos);
             let parsed = parser.parse(&parse_diag_ctx);
             if !parsed {
@@ -783,15 +776,51 @@ impl WorkspaceAnalyzer {
                 let (lo, hi) = span_to_file_offsets(source_map, primary)
                     .map(|(_, s)| s)
                     .unwrap_or((0, 0));
+                let severity = match d.level {
+                    Level::Error => lsp_severity::ERROR,
+                    Level::Warning => lsp_severity::WARNING,
+                    Level::Note => lsp_severity::INFORMATION,
+                    Level::Help => lsp_severity::HINT,
+                };
+                let code_prefix = match d.level {
+                    Level::Warning => "W",
+                    _ => "E",
+                };
+                let mut message = d.message.clone();
+                for note in &d.notes {
+                    message.push_str(&format!("\nnote: {note}"));
+                }
+                for help in &d.helps {
+                    message.push_str(&format!("\nhelp: {help}"));
+                }
+                let mut related = Vec::new();
+                for lbl in &d.labels {
+                    if lbl.span != primary
+                        && let Some((lf, (llo, lhi))) = span_to_file_offsets(source_map, lbl.span)
+                    {
+                        let rel_range = if lf == abs {
+                            line_idx.span_to_range(&content, llo, lhi)
+                        } else if let Some((lt, lidx)) = self.file_text(&lf) {
+                            lidx.span_to_range(&lt, llo, lhi)
+                        } else {
+                            continue;
+                        };
+                        related.push(RelatedDiagInfo {
+                            file: lf,
+                            range: rel_range,
+                            message: lbl.message.clone(),
+                        });
+                    }
+                }
                 push_unique_diag(
                     &mut parse_diags,
                     abs.clone(),
                     LspDiagnostic {
                         range: line_idx.span_to_range(&content, lo, hi),
-                        severity: lsp_severity::ERROR,
-                        code: d.code.map(|c| format!("E{c:04}")),
-                        message: d.message.clone(),
-                        related: Vec::new(),
+                        severity,
+                        code: d.code.map(|c| format!("{code_prefix}{c:04}")),
+                        message,
+                        related,
                     },
                 );
             }
@@ -1727,13 +1756,6 @@ fn build_empty_ast(source_map: &SourceMap, start_pos: BytePos) -> Ast {
     let mut parser = Parser::new(source_map, tokens, symbols, start_pos);
     let _ = parser.parse(&silent);
     parser.finalize()
-}
-
-fn lex_error_offsets(err: &lex::LexError, content: &str) -> (usize, usize) {
-    // Extract byte index if available via debug/span or clamp to end of content.
-    let _ = err;
-    let end = content.len();
-    (end.saturating_sub(1), end)
 }
 
 fn push_unique_diag(

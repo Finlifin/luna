@@ -1,12 +1,11 @@
-pub mod error;
-pub mod operators;
-pub mod parser;
-
-// syntax rules
 pub mod basic;
 mod cmtt;
+pub mod diagnostics;
+pub mod error;
 pub mod expressions;
 pub mod items;
-pub mod others;
+mod operators;
+mod others;
+pub mod parser;
 pub mod patterns;
 pub mod statements;

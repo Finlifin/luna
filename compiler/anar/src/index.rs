@@ -321,6 +321,109 @@ pub fn source_file_path(sf: &SourceFile) -> Option<PathBuf> {
     }
 }
 
+fn consume_balanced_group(s: &str, open: char, close: char) -> Option<&str> {
+    let mut chars = s.char_indices();
+    let (_, first) = chars.next()?;
+    if first != open {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (idx, ch) in chars {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_str = true;
+        } else if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&s[idx + ch.len_utf8()..]);
+            }
+        }
+    }
+    None
+}
+
+/// Returns `true` when `line` contains only prefix attributes (`^...`) and
+/// declaration modifiers (`pub`, `private`, `pure`, `comptime`, etc.).
+fn is_item_prefix_only(line: &str) -> bool {
+    let mut rest = line.trim();
+    while !rest.is_empty() {
+        if let Some(after_caret) = rest.strip_prefix('^') {
+            let path_len = after_caret
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+                .unwrap_or(after_caret.len());
+            if path_len == 0 {
+                return false;
+            }
+            rest = &after_caret[path_len..];
+            loop {
+                let next_non_ws = rest.trim_start_matches([' ', '\t']);
+                let Some(first) = next_non_ws.chars().next() else {
+                    rest = next_non_ws;
+                    break;
+                };
+                let pair = match first {
+                    '(' => Some(('(', ')')),
+                    '[' => Some(('[', ']')),
+                    '{' => Some(('{', '}')),
+                    '<' => Some(('<', '>')),
+                    _ => None,
+                };
+                if let Some((open, close)) = pair {
+                    let Some(after_group) = consume_balanced_group(next_non_ws, open, close) else {
+                        return false;
+                    };
+                    rest = after_group;
+                } else {
+                    break;
+                }
+            }
+            rest = rest.trim_start();
+            continue;
+        }
+
+        let word_len = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        if word_len == 0 {
+            return false;
+        }
+        let word = &rest[..word_len];
+        if !matches!(
+            word,
+            "pub"
+                | "private"
+                | "pure"
+                | "comptime"
+                | "inline"
+                | "unsafe"
+                | "async"
+                | "spec"
+                | "verified"
+                | "atomic"
+                | "ghost"
+                | "quote"
+                | "effect"
+        ) {
+            return false;
+        }
+        rest = rest[word_len..].trim_start();
+    }
+    true
+}
+
 /// Extract leading `--` and `{- ... -}` documentation comments immediately preceding `item_lo`.
 pub fn extract_leading_doc(src: &str, item_lo: usize) -> Option<String> {
     if item_lo == 0 || item_lo > src.len() {
@@ -331,18 +434,18 @@ pub fn extract_leading_doc(src: &str, item_lo: usize) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
-    // Check if the current line has only whitespace/attributes before `item_lo`.
+    // Check if the current line has only whitespace, attributes, or declaration modifiers before `item_lo`.
     let mut idx = lines.len() - 1;
     let tail_line = lines[idx].trim();
-    if !tail_line.is_empty() && !tail_line.starts_with('^') {
+    if !tail_line.is_empty() && !is_item_prefix_only(tail_line) {
         return None;
     }
     let mut doc_lines = Vec::new();
     while idx > 0 {
         idx -= 1;
         let trimmed = lines[idx].trim_end_matches('\r').trim();
-        if trimmed.starts_with('^') {
-            // Skip prefix attributes sitting between doc comment and declaration.
+        if !trimmed.is_empty() && is_item_prefix_only(trimmed) {
+            // Skip prefix attributes or modifiers sitting between doc comment and declaration.
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("--") {

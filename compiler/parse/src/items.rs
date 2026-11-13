@@ -14,24 +14,24 @@ impl Parser<'_> {
             let id = p.try_id()?;
             if id == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected an identifier after `...`".to_string(),
-                    TokenKind::Id,
-                    p.current_span(),
+                    "expected an identifier after `...`".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
                 ));
             }
             if !p.eat_token(TokenKind::Colon) {
                 return Err(ParseError::unexpected_token(
                     TokenKind::Colon,
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
             let ty = p.try_expr_without_extended_call()?;
             if ty == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a type after `:`".to_string(),
+                    "expected a type after `:`".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
             Ok(NodeBuilder::new(kind, p.current_span())
@@ -50,16 +50,21 @@ impl Parser<'_> {
             let ty = p.try_expr_without_extended_call()?;
             if ty == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a type after `:`".to_string(),
+                    "expected a type after `:`".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
             if !p.eat_token(TokenKind::Eq) {
+                if let Some(err) =
+                    p.check_non_block_extended_call_conflict(ty, "an optional parameter type", None)
+                {
+                    return Err(err);
+                }
                 return Err(ParseError::unexpected_token(
                     TokenKind::Eq,
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
             // Delimited parameter lists own their closing token, so braces
@@ -68,13 +73,23 @@ impl Parser<'_> {
             let default_value = if delimited {
                 p.try_expr()?
             } else {
-                p.try_expr_without_extended_call()?
+                let dv = p.try_expr_without_extended_call()?;
+                if dv != 0
+                    && let Some(err) = p.check_non_block_extended_call_conflict(
+                        dv,
+                        "a `where` clause default",
+                        Some(TokenKind::LBrace),
+                    )
+                {
+                    return Err(err);
+                }
+                dv
             };
             if default_value == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a default value after `=`".to_string(),
+                    "expected a default value after `=`".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
             Ok(NodeBuilder::new(kind, p.current_span())
@@ -93,9 +108,9 @@ impl Parser<'_> {
             let ty = p.try_expr_without_extended_call()?;
             if ty == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a type after `:`".to_string(),
+                    "expected a type after `:`".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
             Ok(NodeBuilder::new(kind, p.current_span())
@@ -113,9 +128,9 @@ impl Parser<'_> {
             let trait_bound = p.try_expr_without_extended_call()?;
             if trait_bound == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a trait bound after `:-`".to_string(),
+                    "expected a trait bound after `:-`".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
             Ok(NodeBuilder::new(kind, p.current_span())
@@ -131,16 +146,14 @@ impl Parser<'_> {
         F: FnOnce(&mut Self) -> ParseResult,
     {
         self.scoped(|p| {
+            let kw = p.peek_next_token().kind.lexme().trim();
             p.eat_tokens(1); // consume the wrapper keyword
             let inner = inner_parser(p)?;
             if inner == 0 {
                 return Err(ParseError::invalid_syntax(
-                    format!(
-                        "Expected a parameter after `{}`",
-                        p.current_token().kind.lexme()
-                    ),
+                    format!("expected a parameter after `{kw}`"),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
             Ok(NodeBuilder::new(kind, p.current_span())
@@ -154,6 +167,9 @@ impl Parser<'_> {
     ///            | catch_param | lambda_param | implicit_param | quote_param | attr_param
     pub fn try_param(&mut self) -> ParseResult {
         self.scoped(|p| {
+            if let Some(err) = p.check_param_heuristics() {
+                return Err(err);
+            }
             // Wrapper parameter prefixes: comptime/error/catch/lambda/implicit/quote
             match p.peek_next_token().kind {
                 TokenKind::Comptime => {
@@ -267,6 +283,9 @@ impl Parser<'_> {
     /// Excludes self/self_ref — only type-parametric forms.
     pub fn try_type_param(&mut self) -> ParseResult {
         self.scoped(|p| {
+            if let Some(err) = p.check_param_heuristics() {
+                return Err(err);
+            }
             // Wrapper parameter prefixes
             match p.peek_next_token().kind {
                 TokenKind::Comptime => {
@@ -513,9 +532,9 @@ impl Parser<'_> {
             let id = self.try_id()?;
             if id == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected an identifier after `:`".to_string(),
-                    TokenKind::Id,
-                    self.current_span(),
+                    "expected an identifier after `:`".to_string(),
+                    self.peek_next_token().kind,
+                    self.next_token_span(),
                 ));
             }
             id
@@ -527,12 +546,19 @@ impl Parser<'_> {
         if predicate == 0 {
             return Err(ParseError::invalid_syntax(
                 format!(
-                    "Expected a predicate expression after `{}`",
-                    keyword.lexme()
+                    "expected a predicate expression after `{}`",
+                    keyword.lexme().trim()
                 ),
                 self.peek_next_token().kind,
-                self.current_span(),
+                self.next_token_span(),
             ));
+        }
+        if let Some(err) = self.check_non_block_extended_call_conflict(
+            predicate,
+            "a verification clause",
+            Some(TokenKind::LBrace),
+        ) {
+            return Err(err);
         }
 
         Ok(NodeBuilder::new(
@@ -540,7 +566,6 @@ impl Parser<'_> {
                 TokenKind::Requires => NodeKind::Requires,
                 TokenKind::Ensures => NodeKind::Ensures,
                 TokenKind::Decreases => NodeKind::Decreases,
-                // TokenKind::Outcomes => NodeKind::Outcomes,
                 _ => unreachable!(),
             },
             self.current_span(),
@@ -558,6 +583,9 @@ impl Parser<'_> {
 
     fn try_clause_with_delimiter(&mut self, delimited: bool) -> ParseResult {
         self.scoped(|p| {
+            if delimited && let Some(err) = p.check_param_heuristics() {
+                return Err(err);
+            }
             // Verification clauses
             match p.peek_next_token().kind {
                 TokenKind::Requires => return p.parse_predicate_clause(TokenKind::Requires),
@@ -611,14 +639,27 @@ impl Parser<'_> {
     // where clauses
     pub fn try_clauses(&mut self) -> Result<Vec<NodeIndex>, ParseError> {
         self.scoped_with_expected_prefix(TokenKind::Where.as_ref(), |p| {
+            let where_span = p.next_token_span();
             p.eat_tokens(1); // eat the 'where'
             let clauses = p.try_multi(&[Rule::comma("clause", |p| p.try_clause())])?;
             if clauses.is_empty() {
                 return Err(ParseError::invalid_syntax(
-                    "Expected at least one clause after `where`".to_string(),
-                    TokenKind::Id,
-                    p.current_span(),
-                ));
+                    "expected at least one clause after `where`".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                )
+                .with_secondary_label(where_span, "`where` starts here"));
+            }
+            if let Some(&last_clause) = clauses.last()
+                && let Some(last_ty) = p.ast.get_children(last_clause).last().copied()
+                && last_ty != 0
+                && let Some(err) = p.check_non_block_extended_call_conflict(
+                    last_ty,
+                    "a `where` clause",
+                    Some(TokenKind::LBrace),
+                )
+            {
+                return Err(err);
             }
             Ok(clauses)
         })
@@ -628,6 +669,7 @@ impl Parser<'_> {
     // -> type_expr
     pub fn try_return_type(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Arrow.as_ref(), |p| {
+            let arrow_span = p.next_token_span();
             p.eat_tokens(1); // eat the '->'
             if p.peek(&[TokenKind::Id, TokenKind::Colon]) {
                 let id = p.try_id()?;
@@ -635,10 +677,17 @@ impl Parser<'_> {
                 let ty = p.try_expr_without_extended_call()?;
                 if ty == 0 {
                     return Err(ParseError::invalid_syntax(
-                        "Expected a type after `:`".to_string(),
+                        "expected a return type after `:`".to_string(),
                         p.peek_next_token().kind,
-                        p.current_span(),
+                        p.next_token_span(),
                     ));
+                }
+                if let Some(err) = p.check_non_block_extended_call_conflict(
+                    ty,
+                    "a function return type",
+                    Some(TokenKind::LBrace),
+                ) {
+                    return Err(err);
                 }
                 return Ok(NodeBuilder::new(NodeKind::ResultWithId, p.current_span())
                     .add_single_child(id)
@@ -649,10 +698,18 @@ impl Parser<'_> {
             let ty = p.try_expr_without_extended_call()?;
             if ty == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a type after `->`".to_string(),
+                    "expected a return type after `->`".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
-                ));
+                    p.next_token_span(),
+                )
+                .with_secondary_label(arrow_span, "`->` expects a return type here"));
+            }
+            if let Some(err) = p.check_non_block_extended_call_conflict(
+                ty,
+                "a function return type",
+                Some(TokenKind::LBrace),
+            ) {
+                return Err(err);
             }
             Ok(ty)
         })
@@ -706,16 +763,16 @@ impl Parser<'_> {
                 return Err(ParseError::unexpected_token(
                     TokenKind::Colon,
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
 
             let ty = p.try_expr()?;
             if ty == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a type after `:`".to_string(),
+                    "expected a field type after `:`".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
 
@@ -723,9 +780,9 @@ impl Parser<'_> {
                 let value = p.try_expr()?;
                 if value == 0 {
                     return Err(ParseError::invalid_syntax(
-                        "Expected a default value after `=`".to_string(),
+                        "expected a default value after `=`".to_string(),
                         p.peek_next_token().kind,
-                        p.current_span(),
+                        p.next_token_span(),
                     ));
                 }
                 value
@@ -814,9 +871,9 @@ impl Parser<'_> {
         let pattern = self.try_pattern()?;
         if pattern == 0 {
             return Err(ParseError::invalid_syntax(
-                "Expected a pattern after `:` in enum variant".to_string(),
+                "expected a pattern after `:` in enum variant".to_string(),
                 self.peek_next_token().kind,
-                self.current_span(),
+                self.next_token_span(),
             ));
         }
 
@@ -835,10 +892,15 @@ impl Parser<'_> {
         let expr = self.try_expr_without_extended_call()?;
         if expr == 0 {
             return Err(ParseError::invalid_syntax(
-                "Expected an expression after `=` in enum variant".to_string(),
+                "expected an expression after `=` in enum variant".to_string(),
                 self.peek_next_token().kind,
-                self.current_span(),
+                self.next_token_span(),
             ));
+        }
+        if let Some(err) =
+            self.check_non_block_extended_call_conflict(expr, "an enum variant value", None)
+        {
+            return Err(err);
         }
 
         Ok(
@@ -867,6 +929,7 @@ impl Parser<'_> {
 
     fn parse_enum_variant_with_struct(&mut self) -> ParseResult {
         let id = self.try_id()?;
+        let open_span = self.next_token_span();
         self.eat_tokens(1); // eat the left brace
         let fields = self.try_multi(&[Rule::comma("struct field", |p| p.try_struct_field())])?;
 
@@ -874,8 +937,9 @@ impl Parser<'_> {
             return Err(ParseError::unexpected_token(
                 TokenKind::RBrace,
                 self.peek_next_token().kind,
-                self.current_span(),
-            ));
+                self.next_token_span(),
+            )
+            .with_secondary_label(open_span, "this `{` was opened here"));
         }
 
         Ok(
@@ -888,6 +952,7 @@ impl Parser<'_> {
 
     fn parse_enum_variant_with_tuple(&mut self) -> ParseResult {
         let id = self.try_id()?;
+        let open_span = self.next_token_span();
         self.eat_tokens(1); // eat the left parenthesis
         let fields = self.try_multi(&[Rule::comma("tuple field", |p| {
             p.try_expr_without_extended_call()
@@ -897,8 +962,9 @@ impl Parser<'_> {
             return Err(ParseError::unexpected_token(
                 TokenKind::RParen,
                 self.peek_next_token().kind,
-                self.current_span(),
-            ));
+                self.next_token_span(),
+            )
+            .with_secondary_label(open_span, "this `(` was opened here"));
         }
 
         Ok(
@@ -920,10 +986,17 @@ impl Parser<'_> {
                 let st = p.try_expr_without_extended_call()?;
                 if st == 0 {
                     return Err(ParseError::invalid_syntax(
-                        "Expected a super trait after `:-`".to_string(),
+                        "expected a super trait after `:-`".to_string(),
                         p.peek_next_token().kind,
-                        p.current_span(),
+                        p.next_token_span(),
                     ));
+                }
+                if let Some(err) = p.check_non_block_extended_call_conflict(
+                    st,
+                    "a super-trait bound",
+                    Some(TokenKind::LBrace),
+                ) {
+                    return Err(err);
                 }
                 st
             } else {
@@ -934,7 +1007,7 @@ impl Parser<'_> {
 
             if !p.peek(TokenKind::LBrace.as_ref()) {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a block after `trait` declaration".to_string(),
+                    "expected a `{ ... }` block after `trait` declaration".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));
@@ -971,9 +1044,9 @@ impl Parser<'_> {
             let id = p.try_id()?;
             if id == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected an identifier after `assoc`".to_string(),
+                    "expected an identifier after `assoc`".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
 
@@ -988,15 +1061,15 @@ impl Parser<'_> {
                 return Err(ParseError::unexpected_token(
                     TokenKind::Colon,
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
             let type_expr = p.try_expr_without_extended_call()?;
             if type_expr == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a type after `:` in `assoc` declaration".to_string(),
+                    "expected a type after `:` in `assoc` declaration".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
 
@@ -1005,9 +1078,9 @@ impl Parser<'_> {
                 let d = p.try_expr_without_extended_call()?;
                 if d == 0 {
                     return Err(ParseError::invalid_syntax(
-                        "Expected a default expression after `=`".to_string(),
+                        "expected a default expression after `=`".to_string(),
                         p.peek_next_token().kind,
-                        p.current_span(),
+                        p.next_token_span(),
                     ));
                 }
                 d
@@ -1072,6 +1145,25 @@ impl Parser<'_> {
                 return p.finish_function_template_instance(id, None);
             }
             if !p.peek(TokenKind::LParen.as_ref()) {
+                if p.peek(TokenKind::Lt.as_ref()) {
+                    let fn_name = p.snippet_or(id, "name");
+                    return Err(ParseError::custom(
+                        PARSE_FOREIGN_HABIT,
+                        "foreign_fn_angle_generics",
+                        format!(
+                            "runtime function `{fn_name}` cannot take `<...>` type parameters directly after its name"
+                        ),
+                        p.next_token_span(),
+                    )
+                    .with_found(TokenKind::Lt)
+                    .with_primary_label("unexpected `<...>` on runtime `fn`")
+                    .with_note(
+                        "Angle-bracket parameters `fn Name<...>` are reserved for `pure comptime fn` normal-form definitions.",
+                    )
+                    .with_help(format!(
+                        "Declare type parameters in a trailing `where` clause instead: `fn {fn_name}(...) -> ... where T`."
+                    )));
+                }
                 return Err(ParseError::invalid_syntax(
                     "expected `(` after function name".to_string(),
                     p.peek_next_token().kind,
@@ -1089,6 +1181,22 @@ impl Parser<'_> {
 
             let return_type = p.try_return_type()?;
 
+            if return_type == 0 && p.peek(TokenKind::Colon.as_ref()) {
+                let colon_span = p.next_token_span();
+                let ty_snip = p
+                    .token_content(&p.peek_nth_token(2))
+                    .unwrap_or_else(|| "ReturnType".to_string());
+                return Err(ParseError::custom(
+                    PARSE_FOREIGN_HABIT,
+                    "foreign_colon_return_type",
+                    "function return types in Flurry are introduced with `->` rather than `:`",
+                    colon_span,
+                )
+                .with_found(TokenKind::Colon)
+                .with_primary_label("replace `:` with `->`")
+                .with_help(format!("Write `-> {ty_snip}` for the function return type.")));
+            }
+
             if p.peek(TokenKind::Handles.as_ref()) {
                 return Err(ParseError::invalid_syntax(
                     "function signatures do not have a `handles` clause; capabilities use trait bounds".into(),
@@ -1104,7 +1212,7 @@ impl Parser<'_> {
                 && !p.peek(TokenKind::Semi.as_ref())
             {
                 return Err(ParseError::invalid_syntax(
-                    "expected a block or `=` after function declaration".to_string(),
+                    "expected a `{ ... }` block, `= expr`, or `;` after function signature".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));
@@ -1115,9 +1223,9 @@ impl Parser<'_> {
                 let expr = p.try_expr()?;
                 if expr == 0 {
                     return Err(ParseError::invalid_syntax(
-                        "Expected an expression after `=`".to_string(),
+                        "expected an expression after `=`".to_string(),
                         p.peek_next_token().kind,
-                        p.current_span(),
+                        p.next_token_span(),
                     ));
                 }
                 Ok(NodeBuilder::new(NodeKind::Function, p.current_span())
@@ -1249,10 +1357,17 @@ impl Parser<'_> {
             let expr = p.try_expr_without_extended_call()?;
             if expr == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a type or trait after `impl`".to_string(),
+                    "expected a type or trait after `impl`".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
+            }
+            if let Some(err) = p.check_non_block_extended_call_conflict(
+                expr,
+                "an `impl` header",
+                Some(TokenKind::LBrace),
+            ) {
+                return Err(err);
             }
 
             if p.eat_token(TokenKind::For) {
@@ -1260,10 +1375,17 @@ impl Parser<'_> {
                 let ty = p.try_expr_without_extended_call()?;
                 if ty == 0 {
                     return Err(ParseError::invalid_syntax(
-                        "Expected a type after `for`".to_string(),
+                        "expected a target type after `for`".to_string(),
                         p.peek_next_token().kind,
-                        p.current_span(),
+                        p.next_token_span(),
                     ));
+                }
+                if let Some(err) = p.check_non_block_extended_call_conflict(
+                    ty,
+                    "an `impl ... for` target type",
+                    Some(TokenKind::LBrace),
+                ) {
+                    return Err(err);
                 }
                 let clauses = p.try_clauses()?;
 
@@ -1337,10 +1459,17 @@ impl Parser<'_> {
             let expr = p.try_expr_without_extended_call()?;
             if expr == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a type or trait after `extend`".to_string(),
+                    "expected a type or trait after `extend`".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
+            }
+            if let Some(err) = p.check_non_block_extended_call_conflict(
+                expr,
+                "an `extend` header",
+                Some(TokenKind::LBrace),
+            ) {
+                return Err(err);
             }
 
             if p.eat_token(TokenKind::For) {
@@ -1348,10 +1477,17 @@ impl Parser<'_> {
                 let ty = p.try_expr_without_extended_call()?;
                 if ty == 0 {
                     return Err(ParseError::invalid_syntax(
-                        "Expected a type after `for`".to_string(),
+                        "expected a target type after `for`".to_string(),
                         p.peek_next_token().kind,
-                        p.current_span(),
+                        p.next_token_span(),
                     ));
+                }
+                if let Some(err) = p.check_non_block_extended_call_conflict(
+                    ty,
+                    "an `extend ... for` target type",
+                    Some(TokenKind::LBrace),
+                ) {
+                    return Err(err);
                 }
                 let clauses = p.try_clauses()?;
 
@@ -1430,10 +1566,15 @@ impl Parser<'_> {
             let trait_expr = p.try_expr_without_extended_call()?;
             if trait_expr == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a trait expression after `derive`".to_string(),
+                    "expected a trait expression after `derive`".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
+            }
+            if let Some(err) =
+                p.check_non_block_extended_call_conflict(trait_expr, "a `derive` trait", None)
+            {
+                return Err(err);
             }
 
             if !p.eat_token(TokenKind::For) {
@@ -1692,10 +1833,14 @@ impl Parser<'_> {
             let ty = p.try_expr_without_extended_call()?;
             if ty == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a type after `:` in union variant".to_string(),
+                    "expected a type after `:` in union variant".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
+            }
+            if let Some(err) = p.check_non_block_extended_call_conflict(ty, "a union variant", None)
+            {
+                return Err(err);
             }
             Ok(NodeBuilder::new(NodeKind::UnionVariant, p.current_span())
                 .add_single_child(id)
@@ -1711,9 +1856,9 @@ impl Parser<'_> {
             let id = p.try_id()?;
             if id == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected an identifier after `const`".to_string(),
+                    "expected an identifier after `const`".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
 
@@ -1721,9 +1866,9 @@ impl Parser<'_> {
                 let t = p.try_expr_without_extended_call()?;
                 if t == 0 {
                     return Err(ParseError::invalid_syntax(
-                        "Expected a type after `:`".to_string(),
+                        "expected a type after `:`".to_string(),
                         p.peek_next_token().kind,
-                        p.current_span(),
+                        p.next_token_span(),
                     ));
                 }
                 t
@@ -1735,16 +1880,16 @@ impl Parser<'_> {
                 return Err(ParseError::unexpected_token(
                     TokenKind::Eq,
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
 
             let init = p.try_expr()?;
             if init == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected an expression after `=` in const definition".to_string(),
+                    "expected an expression after `=` in const definition".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
 
@@ -1763,7 +1908,7 @@ impl Parser<'_> {
             let id = p.try_id()?;
             if id == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected identifier after 'typealias'".to_string(),
+                    "expected an identifier after `typealias`".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));
@@ -1784,10 +1929,15 @@ impl Parser<'_> {
             let type_expr = p.try_expr_without_extended_call()?;
             if type_expr == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected type expression after '='".to_string(),
+                    "expected a type expression after `=`".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));
+            }
+            if let Some(err) =
+                p.check_non_block_extended_call_conflict(type_expr, "a `typealias` target", None)
+            {
+                return Err(err);
             }
 
             Ok(NodeBuilder::new(NodeKind::TypealiasDef, p.current_span())
@@ -1805,7 +1955,7 @@ impl Parser<'_> {
             let id = p.try_id()?;
             if id == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected identifier after 'newtype'".to_string(),
+                    "expected an identifier after `newtype`".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));
@@ -1826,10 +1976,15 @@ impl Parser<'_> {
             let type_expr = p.try_expr_without_extended_call()?;
             if type_expr == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected type expression after '='".to_string(),
+                    "expected a type expression after `=`".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));
+            }
+            if let Some(err) =
+                p.check_non_block_extended_call_conflict(type_expr, "a `newtype` target", None)
+            {
+                return Err(err);
             }
 
             Ok(NodeBuilder::new(NodeKind::NewtypeDef, p.current_span())
@@ -1958,9 +2113,9 @@ impl Parser<'_> {
             let id = p.try_id()?;
             if id == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected an identifier after `case`".to_string(),
-                    TokenKind::Id,
-                    p.current_span(),
+                    "expected an identifier after `case`".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
                 ));
             }
 
@@ -1972,9 +2127,9 @@ impl Parser<'_> {
             let return_type = p.try_return_type()?;
             if return_type == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected a return type after `->`".to_string(),
+                    "expected a return type `-> ...` in `case` declaration".to_string(),
                     p.peek_next_token().kind,
-                    p.current_span(),
+                    p.next_token_span(),
                 ));
             }
 
@@ -1984,9 +2139,9 @@ impl Parser<'_> {
                 let expr = p.try_expr()?;
                 if expr == 0 {
                     return Err(ParseError::invalid_syntax(
-                        "Expected an expression after `=`".to_string(),
+                        "expected an expression after `=`".to_string(),
                         p.peek_next_token().kind,
-                        p.current_span(),
+                        p.next_token_span(),
                     ));
                 }
                 Ok(NodeBuilder::new(NodeKind::CaseDef, p.current_span())

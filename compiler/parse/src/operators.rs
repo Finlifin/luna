@@ -61,7 +61,6 @@ pub fn get_expr_op_info(token_kind: TokenKind) -> ExprOpInfo {
         TokenKind::Question => ExprOpInfo::new(100, NodeKind::OptionElimination), // ?
         TokenKind::Match => ExprOpInfo::new(100, NodeKind::PostMatch),    // match
         TokenKind::Do => ExprOpInfo::new(100, NodeKind::PostLambda),      // do
-        TokenKind::Matches => ExprOpInfo::new(100, NodeKind::BoolMatches), // matches
 
         // projection and take_view (110)
         TokenKind::Dot => ExprOpInfo::new(110, NodeKind::Projection), // .

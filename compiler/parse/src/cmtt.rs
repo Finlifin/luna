@@ -9,6 +9,13 @@ use lex::TokenKind as T;
 
 impl Parser<'_> {
     pub(crate) fn try_contextual_expr_type(&mut self) -> ParseResult {
+        self.angle_bracket_depth += 1;
+        let res = self.try_contextual_expr_type_inner();
+        self.angle_bracket_depth -= 1;
+        res
+    }
+
+    fn try_contextual_expr_type_inner(&mut self) -> ParseResult {
         self.eat_tokens(1);
         // Expression contexts start with `name:` or `|-`. Otherwise the
         // first expression is the subject of a pattern interface.
@@ -200,9 +207,11 @@ impl Parser<'_> {
         let substitutions = self.code_substitutions()?;
         if matches!(self.peek_next_token().kind, T::Lt | T::SeparatedLt) {
             self.eat_tokens(1);
+            self.angle_bracket_depth += 1;
             self.quote_holes.push(None);
             let pattern = self.try_pattern();
             self.quote_holes.pop();
+            self.angle_bracket_depth -= 1;
             let pattern = pattern?;
             if pattern == 0 {
                 return Err(ParseError::invalid_syntax(
@@ -251,36 +260,67 @@ impl Parser<'_> {
     fn code_splice(&mut self, kind: NodeKind) -> ParseResult {
         let span = self.next_token_span();
         if let Some(hole) = self.quote_holes.last_mut() {
-            if hole.is_some() {
+            if let Some(first_span) = *hole {
                 return Err(ParseError::invalid_syntax(
-                    "A quote permits at most one splice in its runtime body".into(),
+                    "a quote permits at most one splice in its runtime body".into(),
                     T::Tilde,
                     span,
-                ));
+                )
+                .with_secondary_label(first_span, "first splice in this quote is here"));
             }
             *hole = Some(span);
         }
         self.eat_tokens(1);
         let substitutions = self.code_substitutions()?;
-        if !self.eat_token(T::Lt) {
-            self.code_token(T::SeparatedLt)?;
+        if !self.eat_token(T::Lt) && !self.eat_token(T::SeparatedLt) {
+            if substitutions.is_empty() && self.quote_holes.is_empty() {
+                let next_snip = self
+                    .token_content(&self.peek_next_token())
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "expr".to_string());
+                return Err(ParseError::custom(
+                    PARSE_FOREIGN_HABIT,
+                    "foreign_tilde_bitwise_not",
+                    "`~` in Flurry starts a code-template splice (`~<...>`), not bitwise or logical negation",
+                    span,
+                )
+                .with_found(self.peek_next_token().kind)
+                .with_primary_label("`~` is a quote splice marker (`~<...>`)")
+                .with_help(format!(
+                    "Use `not {next_snip}` for boolean or `BitVec` negation; for a code splice, write `~<{next_snip}>`."
+                )));
+            }
+            return Err(ParseError::unexpected_token(
+                T::Lt,
+                self.peek_next_token().kind,
+                self.next_token_span(),
+            ));
         }
+        let open_lt_span = self.prev_token_span();
+        self.angle_bracket_depth += 1;
         let surrounding = std::mem::take(&mut self.quote_holes);
         let operand = self.try_expr_with_option(ExprOption {
             stop_at_pattern_gt: true,
             ..Default::default()
         });
         self.quote_holes = surrounding;
+        self.angle_bracket_depth -= 1;
         let operand = operand?;
         if operand == 0 {
             return Err(ParseError::invalid_syntax(
-                "Expected comptime code operand in splice".into(),
+                "expected comptime code operand in splice".into(),
                 self.peek_next_token().kind,
                 self.next_token_span(),
-            ));
+            )
+            .with_secondary_label(open_lt_span, "splice `<` was opened here"));
         }
-        if !self.eat_token(T::Gt) {
-            self.code_token(T::SeparatedGt)?;
+        if !self.eat_token(T::Gt) && !self.eat_token(T::SeparatedGt) {
+            return Err(ParseError::unexpected_token(
+                T::Gt,
+                self.peek_next_token().kind,
+                self.next_token_span(),
+            )
+            .with_secondary_label(open_lt_span, "splice `<` was opened here"));
         }
         Ok(NodeBuilder::new(kind, self.current_span())
             .add_single_child(operand)

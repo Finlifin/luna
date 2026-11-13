@@ -77,24 +77,16 @@ impl LexError {
     pub fn to_span(&self, base_pos: BytePos) -> Span {
         let start = self.start_position();
         let end = match self {
-            // 对于未终止的字符串，只高亮开始的引号
             LexError::UnterminatedString { .. } => start + 1,
-            // 对于未终止的字符，只高亮开始的引号
             LexError::UnterminatedChar { .. } => start + 1,
-            // 对于空字符，高亮整个 ''
             LexError::EmptyChar { .. } => start + 2,
             LexError::InvalidChar { .. } => start + 1,
-            // 对于无效转义，高亮转义序列 (如 \q 为 2 个字符)
             LexError::InvalidEscape { escape_char, .. } => {
                 start + 1 + escape_char.len_utf8() as u32
             }
-            // 对于无效数字，只高亮开始位置
             LexError::InvalidNumber { .. } => start + 1,
-            // 对于意外字符，高亮整个字符（考虑Unicode）
             LexError::UnexpectedChar { char, .. } => start + char.len_utf8() as u32,
-            // 对于未终止的注释，高亮注释开始
             LexError::UnterminatedComment { .. } => start + 2,
-            // 对于未终止的宏，高亮宏开始 '{
             LexError::UnterminatedMacro { .. } => start + 2,
         };
         Span::new(BytePos(base_pos.0 + start), BytePos(base_pos.0 + end))
@@ -138,103 +130,158 @@ impl FlurryError for LexError {
         }
     }
 
-    fn emit(&self, diag_ctx: &DiagnosticContext, base_pos: rustc_span::BytePos) {
+    fn emit(&self, diag_ctx: &DiagnosticContext, base_pos: BytePos) {
         let span = self.to_span(base_pos);
         let error_code = self.error_code();
 
         match self {
-            LexError::UnterminatedString { .. } => {
+            LexError::UnterminatedString { message, .. } => {
                 diag_ctx
-                    .error(self.message().to_string())
+                    .error(format!(
+                        "this string literal is missing its closing `\"` ({message})"
+                    ))
                     .with_code(error_code)
                     .with_primary_span(span)
-                    .with_error_label(span, "String literal is not terminated".to_string())
+                    .with_error_label(
+                        span,
+                        "string literal starts here and never closes".to_string(),
+                    )
                     .with_help(
-                        "Add a closing quote (\") to terminate the string literal".to_string(),
+                        "Add a closing `\"` to finish the string, or use `\"\"\"...\"\"\"` for multi-line text."
+                            .to_string(),
                     )
                     .emit(diag_ctx);
             }
-            LexError::UnterminatedChar { .. } => {
+            LexError::UnterminatedChar { message, .. } => {
                 diag_ctx
-                    .error(self.message().to_string())
+                    .error(format!(
+                        "this character literal is missing its closing `'` ({message})"
+                    ))
                     .with_code(error_code)
                     .with_primary_span(span)
-                    .with_error_label(span, "Character literal is not terminated".to_string())
+                    .with_error_label(span, "unclosed character literal".to_string())
                     .with_help(
-                        "Add a closing single quote (') to terminate the character literal"
+                        "Close a single-character literal with `'`, or use `\"...\"` for a string."
                             .to_string(),
                     )
                     .emit(diag_ctx);
             }
             LexError::EmptyChar { .. } => {
                 diag_ctx
-                    .error(self.message().to_string())
+                    .error("empty character literal `''`".to_string())
                     .with_code(error_code)
                     .with_primary_span(span)
-                    .with_error_label(span, "Character literal cannot be empty".to_string())
+                    .with_error_label(
+                        span,
+                        "expected one Unicode scalar inside `'...'`".to_string(),
+                    )
                     .with_help(
-                        "Add a character between the single quotes, e.g., 'a' or '\\n'".to_string(),
+                        "Put a single character inside the quotes, such as `'a'` or `'\\n'`, or write `\"\"` for an empty string."
+                            .to_string(),
                     )
                     .emit(diag_ctx);
             }
             LexError::InvalidChar { .. } => {
                 diag_ctx
-                    .error(self.message().to_string())
+                    .error("this `'...'` literal holds more than one character".to_string())
                     .with_code(error_code)
                     .with_primary_span(span)
                     .with_error_label(
                         span,
-                        "Character literal must contain one Unicode scalar".to_string(),
+                        "character literals hold a single Unicode scalar".to_string(),
                     )
                     .with_help(
-                        "Use double quotes for a string containing multiple characters".to_string(),
+                        "Switch to double quotes `\"...\"` for a multi-character string literal."
+                            .to_string(),
                     )
                     .emit(diag_ctx);
             }
-            LexError::InvalidEscape { escape_char, .. } => {
-                diag_ctx.error(self.message().to_string())
-                    .with_code(error_code)
-                    .with_primary_span(span)
-                    .with_error_label(span, format!("Invalid escape sequence '\\{}'", escape_char))
-                    .with_help("Valid escape sequences are: \\n, \\t, \\r, \\\\, \\', \\\", \\0, \\$, \\x{...} (1–6 hexadecimal digits encoding a Unicode scalar)".to_string())
-                    .emit(diag_ctx);
-            }
-            LexError::InvalidNumber { .. } => {
+            LexError::InvalidEscape {
+                escape_char,
+                message,
+                ..
+            } => {
                 diag_ctx
-                    .error(self.message().to_string())
+                    .error(format!(
+                        "unrecognized escape sequence `\\{escape_char}` ({message})"
+                    ))
                     .with_code(error_code)
                     .with_primary_span(span)
-                    .with_error_label(span, "Invalid number format".to_string())
-                    .with_help(
-                        "Make sure decimal numbers have digits after the decimal point".to_string(),
+                    .with_error_label(
+                        span,
+                        format!("unknown or malformed escape `\\{escape_char}`"),
                     )
+                    .with_help(
+                        "Supported escapes are `\\n`, `\\t`, `\\r`, `\\\\`, `\\'`, `\\\"`, `\\0`, `\\$`, and `\\x{...}` (1–6 hex digits)."
+                            .to_string(),
+                    )
+                    .emit(diag_ctx);
+            }
+            LexError::InvalidNumber { message, .. } => {
+                let help = if message.contains("Scientific notation") {
+                    "Include a decimal part before the exponent, for example `1.0e6` instead of `1e6`."
+                } else if message.contains("Radix prefixes") {
+                    "Write base prefixes in lowercase: `0b` (binary), `0o` (octal), or `0x` (hex)."
+                } else if message.contains("Hexadecimal digits") {
+                    "Pick either all lowercase (`0x1a2f`) or all uppercase (`0x1A2F`) hex letters."
+                } else if message.contains("separators") {
+                    "Place `_` only between digits, such as `1_000_000` (not at the start or end)."
+                } else {
+                    "Check that every digit matches the number's base and that `.` is followed by digits."
+                };
+                diag_ctx
+                    .error(format!("malformed number literal: {message}"))
+                    .with_code(error_code)
+                    .with_primary_span(span)
+                    .with_error_label(span, "malformed number literal".to_string())
+                    .with_help(help.to_string())
                     .emit(diag_ctx);
             }
             LexError::UnexpectedChar { char, .. } => {
+                let help = match char {
+                    '`' => {
+                        "Flurry doesn't use backticks — use `\"...\"` for strings or `'a'` for characters."
+                    }
+                    '\\' => {
+                        "A bare `\\` isn't used for line continuations in Flurry; expressions can span lines naturally."
+                    }
+                    _ => "Remove this character or replace it with valid Flurry syntax.",
+                };
                 diag_ctx
-                    .error(self.message().to_string())
+                    .error(format!(
+                        "unexpected character `{char}` is not part of Flurry syntax"
+                    ))
                     .with_code(error_code)
                     .with_primary_span(span)
-                    .with_error_label(span, format!("Unexpected character '{}'", char))
-                    .with_help("Remove or replace this character with a valid token".to_string())
+                    .with_error_label(span, format!("unexpected `{char}` here"))
+                    .with_help(help.to_string())
                     .emit(diag_ctx);
             }
             LexError::UnterminatedComment { .. } => {
                 diag_ctx
-                    .error(self.message().to_string())
+                    .error(
+                        "reached the end of the file inside an unclosed `{- ... -}` block comment"
+                            .to_string(),
+                    )
                     .with_code(error_code)
                     .with_primary_span(span)
-                    .with_error_label(span, "Comment is not terminated".to_string())
-                    .with_help("Add a comment terminator".to_string())
+                    .with_error_label(span, "this `{-` block comment was never closed".to_string())
+                    .with_help(
+                        "Add a matching `-}` to close the block comment (note that `{- ... -}` comments nest)."
+                            .to_string(),
+                    )
                     .emit(diag_ctx);
             }
             LexError::UnterminatedMacro { .. } => {
                 diag_ctx
-                    .error(self.message().to_string())
+                    .error(
+                        "reached the end of the file inside unclosed `'{ ... }` macro content"
+                            .to_string(),
+                    )
                     .with_code(error_code)
                     .with_primary_span(span)
-                    .with_error_label(span, "Macro content is not terminated".to_string())
-                    .with_help("Add a closing brace '}' to terminate the macro content".to_string())
+                    .with_error_label(span, "this `'{` macro block was never closed".to_string())
+                    .with_help("Add a matching `}` to close the `'{ ... }` block.".to_string())
                     .emit(diag_ctx);
             }
         }
