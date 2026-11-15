@@ -466,12 +466,21 @@ cell 身份和 owned graph，使用既有预算，不调用源语言 Copy／Clon
 Progress，`RoutedDeclarationInput` 不再可 Clone，不为交付重新复制整段 producer 代码。
 这条路径同时服务普通 callable、NF、名义输入与透明别名，原槽位同步循环已退役。
 
-依赖域检查由 `declaration_inputs::domain::Frame` 保留 consumer 槽位、传递依赖列表、
-游标与待检查子表达式。主槽位帧直接接收其子请求；依赖完成后继续原 consumer，
-不重新从 schedule 选择目标，不重新检查已记录的 producer。收集器的域准备也
-进入这个输入驱动；独立的同步 domain adapter 与 `declaration_input_domain` 已删除。
-依赖遍历复用有预算的 `input_observation::term_inputs`，保留重复身份 sort
-一致性检查，不为枚举 rigid 复制类型树。这里得到的仍是静态观察，不能为取得 Type 提前执行实参。
+依赖域检查由 `declaration_inputs::domain::Frame` 保留 consumer 槽位、传递依赖列表
+及游标，只交付需要准备的槽位和接收域。显式输入、默认供应和收集结果都回到
+`slots::Frame::check_slot`；原来只处理 Source／Prepared 的第二套依赖表达式检查已
+删除。依赖默认值时同时准备其前序声明绑定，包含默认值链自身的域依赖；完成后
+继续原 consumer，不重新从 schedule 选择目标，不重新检查已记录的 producer。
+收集器的域准备也进入这个输入驱动；独立的同步 domain adapter 与
+`declaration_input_domain` 已删除。依赖遍历复用有预算的
+`input_observation::term_inputs`，保留重复身份 sort 一致性检查，不为枚举 rigid
+复制类型树。这里得到的仍是静态观察，不能为取得 Type 提前执行实参。
+
+检查顺序可先准备提供域证据的默认代码，例如 `Tagged<.T: Type = u8, value: T>`
+中的 T；这样未调用定义里的 bool 实参和越界字面量也必须被拒绝。默认代码仍留在
+显式输入之后的原执行位置，显式覆盖和提前退出不运行它。需要安装默认供应环境
+时，由该槽位持有并恢复自己的 `scope::Scope`，然后才检查后面的显式源码；不能
+等整个输入包完成才恢复 caller，否则选定父声明的绑定会污染后续实参。
 
 `collections::Frame` 保留接收域、元素位置、连续尾部边界、已收集结果和各源码
 位置的 preparation。每个元素按原规则请求普通检查或 contextual 检查；非尾部

@@ -3026,9 +3026,17 @@ impl Checker<'_, '_> {
                     return self.describe_known_region(expr, expected);
                 };
                 let inputs = self.source_expression_inputs(expr.hir_id.owner, expr)?;
-                // Source locals and captures of referenced local declarations
-                // remain dependencies even without a direct parameter node.
-                if inputs.is_empty() {
+                // Knowing an input's domain is sufficient to check the ordinary
+                // input plan; its value need not be available or executed.
+                // This includes locals captured by referenced declarations.
+                // Reserve description-only routing for genuinely missing
+                // domains, so known defaults and formation requirements are
+                // checked by the same rules as concrete applications.
+                if inputs
+                    .locals
+                    .iter()
+                    .all(|binding| self.locals.contains_key(binding))
+                {
                     return self.describe_known_region(expr, expected);
                 }
                 let owner = self

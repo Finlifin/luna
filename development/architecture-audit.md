@@ -107,9 +107,10 @@ thread_local 且入口保存/恢复外层控制指针；这不等于一般跨激
 表达式，使语法形状错误地决定检查路径。`open_normal_form_inputs` 在修复前的
 当前工作树复现该 panic（`/tmp/luna-tools-29af7rms/result.json`，退出 101）。
 
-该白名单现已删除。仅直接声明头进入声明望远镜描述；函数值头通过已有普通 NF
-callable 检查取得签名证据。声明参数的控制流和子表达式直接接受正常的开放表达式
-检查，保留域、数量与定义端拒绝。实际返回值仍带原 NF 头及普通实参；不从函数体
+该白名单现已删除。函数值头通过已有普通 NF callable 检查取得签名证据；直接声明
+头只要其源码局部域已知，也进入同一通用输入准备，不再把“值尚不可执行”误判成
+“域不可检查”。仅确实缺少局部域时保留声明望远镜描述。声明参数的控制流和子表达式
+接受正常检查，保留域、数量与定义端拒绝。实际返回值仍带原 NF 头及普通实参；不从函数体
 推导头的展开或不等性。这里没有完成开放定义的整个语义路径统一：成员依赖分支、
 NF 声明域描述与通用输入准备仍须继续合并，动态 NF 具名接口与源码／VM 恢复也
 仍未接通。这个修复不能计作完整 `Parse(format)` 的实现。
@@ -123,6 +124,29 @@ NF 声明域描述与通用输入准备仍须继续合并，动态 NF 具名接�
 Type 返回用例直接断言两引擎产生的 Type 值的头和实参，不把 `Identity<T> != T` 的可证明性
 当作头不展开的前提。定向 rustfmt 检查退出 0（`/tmp/luna-tools-4d9sij_o/result.json`）。
 保留工作区原有修改，未执行全量测试。
+
+随后复现了默认输入的定义期漏检：`Tagged<.T: Type = u8, value: T>` 在未调用的
+开放函数中接受 `Tagged<flag>`，尽管 flag 的域已知为 bool。基线
+`/tmp/luna-tools-36xoml7d/result.json` 退出 101；仅让已知局部域进入普通检查还不够，
+`/tmp/luna-tools-qek997ya/result.json` 仍复现漏检。这证明第二个缺口位于共享参数计划：
+它只提前检查显式依赖，遗漏默认值能提供的域，不能只改开放定义的描述循环。
+
+现已删除依赖域帧中的独立表达式检查，依赖槽位统一交给普通槽位帧处理；默认供应
+同时准备前序绑定，保持执行 schedule 不变。选定默认环境在该槽位退出时恢复，
+避免其父声明绑定污染后续显式输入。检查静态域不提前调用用户代码，也不展开 NF
+头。缺少 invocation-time Type 响应与原 VM 活动恢复的路径仍未实现。
+
+本阶段在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test`：
+`-p elaboration --lib declaration_inputs -- --test-threads=1` 的 16 项通过
+（`/tmp/luna-tools-ikbnt4b4/result.json`，退出 0）；
+`-p luna --test open_normal_form_inputs --test normal_input_plans --test ordinary_callable_types --test ordinary_clause_collectors --test clause_packet_preparation --no-fail-fast -- --test-threads=1`
+的 104 项通过、2 项原有未实现正例保持忽略
+（`/tmp/luna-tools-iwfvglim/result.json`，退出 0）。同入口补验
+`-p luna --test open_functions -- normal --test-threads=1`，13 项通过
+（`/tmp/luna-tools-0_raocp9/result.json`，退出 0）。新增覆盖默认域拒绝、未执行分支、
+默认链、收集器、双 VM 执行轨迹及不同父实例间的 caller 绑定恢复。修改的六个 Rust
+文件定向 rustfmt `--check` 退出 0（`/tmp/luna-tools-rq_q0rdv/result.json`）；
+`git diff --check` 通过。未运行全量测试，未修改 docs 或采纳其他已有工作区改动。
 
 ### 4.3 一个可变检查器承担太多事务
 

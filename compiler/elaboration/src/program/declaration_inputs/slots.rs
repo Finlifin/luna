@@ -30,9 +30,10 @@ pub(super) struct Frame<'b, 'h> {
     preparations: Vec<n::NormalFormPreparation>,
     collection: Option<collections::Frame<'b, 'h>>,
     pending: Option<Pending<'b, 'h>>,
-    dependencies: Option<domain::Frame<'b, 'h>>,
+    dependencies: Option<domain::Frame>,
     observations: Option<constants::PreparedObservations>,
     active_default: Option<usize>,
+    default_scope: Option<scope::Scope>,
     complete: bool,
 }
 
@@ -65,6 +66,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             dependencies: None,
             observations: None,
             active_default: None,
+            default_scope: None,
             complete: false,
         }
     }
@@ -81,12 +83,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         }
         if let Some(collection) = &self.collection {
             if let Some(slot) = collection.domain_slot() {
-                self.dependencies = Some(domain::Frame::new(
-                    slot,
-                    &self.parameters,
-                    &mut checker.required_steps,
-                    self.span,
-                )?);
+                self.dependencies = Some(self.domain_frame(checker, slot)?);
                 return self.poll_dependencies(checker);
             }
             return self.poll_collection(checker);
@@ -95,55 +92,14 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             self.complete = true;
             return Ok(Poll::Complete);
         };
-        if self.routed[slot].is_none()
-            && matches!(
-                self.clauses[slot].kind,
-                hir::clause::ClauseParamKind::Varadic(..)
-            )
-        {
-            let ty = checker.instantiate_input_types(
-                &self.parameters[slot].2,
-                self.progress.observed_parameters(),
-                self.progress.observed_values(),
-                self.span,
-            )?;
-            if checker.list_element_type(&ty).is_none() {
-                return Err(error(
-                    self.span,
-                    "normal-form variadic collector requires meta.List<T>",
-                ));
-            }
-            let identity =
-                checker.checked_collected_list_in(&[], &ty, &self.bindings, self.span)?;
-            checker
-                .locals
-                .insert(self.progress.binding(slot), ty.clone());
-            self.progress.record(
-                slot,
-                n::NormalFormArgument::Value(n::Expr {
-                    source: source(self.span),
-                    ty,
-                    kind: K::TypeList(Vec::new()),
-                }),
-                identity,
-                &mut checker.required_steps,
-                self.span,
-            )?;
-            return Ok(Poll::Continue);
-        }
         let dependent = checker.declaration_domain_pending(
             &self.parameters[slot].2,
             &self.parameters,
             self.progress.observed_parameters(),
             self.span,
         )?;
-        if matches!(&self.routed[slot], Some(RoutedDeclarationInput::Source(_))) && dependent {
-            self.dependencies = Some(domain::Frame::new(
-                slot,
-                &self.parameters,
-                &mut checker.required_steps,
-                self.span,
-            )?);
+        if self.routed[slot].is_some() && dependent {
+            self.dependencies = Some(self.domain_frame(checker, slot)?);
             return self.poll_dependencies(checker);
         }
         let domain = DeclarationInputDomain {
@@ -158,17 +114,30 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         self.check_slot(checker, slot, domain)
     }
 
+    fn domain_frame(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        slot: usize,
+    ) -> Result<domain::Frame, Error> {
+        domain::Frame::new(
+            slot,
+            &self.parameters,
+            |previous| {
+                self.routed[previous].is_none()
+                    && matches!(
+                        self.clauses[previous].kind,
+                        hir::clause::ClauseParamKind::Optional(..)
+                    )
+            },
+            &mut checker.required_steps,
+            self.span,
+        )
+    }
+
     fn poll_dependencies(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b, 'h>, Error> {
         let dependencies = self.dependencies.as_mut().expect("active domain check");
-        match dependencies.poll(
-            checker,
-            &self.parameters,
-            &mut self.routed,
-            &mut self.bindings,
-            &mut self.progress,
-        )? {
-            domain::Poll::Continue => Ok(Poll::Continue),
-            domain::Poll::Child(request) => Ok(Poll::Child(request)),
+        match dependencies.poll(checker, &self.parameters, &self.progress)? {
+            domain::Poll::Input { slot, domain } => self.check_slot(checker, slot, domain),
             domain::Poll::Complete(domain) => {
                 let slot = self.dependencies.take().unwrap().slot();
                 if let Some(collection) = &mut self.collection {
@@ -207,6 +176,42 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         slot: usize,
         domain: DeclarationInputDomain,
     ) -> Result<Poll<'b, 'h>, Error> {
+        if self.routed[slot].is_none()
+            && matches!(
+                self.clauses[slot].kind,
+                hir::clause::ClauseParamKind::Varadic(..)
+            )
+        {
+            let ty = checker.instantiate_input_types(
+                &self.parameters[slot].2,
+                self.progress.observed_parameters(),
+                self.progress.observed_values(),
+                self.span,
+            )?;
+            if checker.list_element_type(&ty).is_none() {
+                return Err(error(
+                    self.span,
+                    "normal-form variadic collector requires meta.List<T>",
+                ));
+            }
+            let identity =
+                checker.checked_collected_list_in(&[], &ty, &self.bindings, self.span)?;
+            checker
+                .locals
+                .insert(self.progress.binding(slot), ty.clone());
+            self.progress.record(
+                slot,
+                n::NormalFormArgument::Value(n::Expr {
+                    source: source(self.span),
+                    ty,
+                    kind: K::TypeList(Vec::new()),
+                }),
+                identity,
+                &mut checker.required_steps,
+                self.span,
+            )?;
+            return Ok(Poll::Continue);
+        }
         let explicit = self.routed[slot].take();
         let declaration_default = explicit.is_none()
             && matches!(
@@ -219,7 +224,10 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             Some(RoutedDeclarationInput::Source(input)) => Some(*input),
             Some(_) => None,
             None if declaration_default => None,
-            None => Some(self.enter_default(checker, slot)?),
+            None => {
+                self.default_scope = Some(scope::Scope::enter(checker, self.span)?);
+                Some(self.enter_default(checker, slot)?)
+            }
         };
         if explicit.is_none() {
             if checker.active_type_defaults.len() >= 64
@@ -425,6 +433,9 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         if let Some(observations) = self.observations.take() {
             observations.leave(checker);
         }
+        if let Some(scope) = self.default_scope.take() {
+            scope.leave(checker);
+        }
         if let Some(slot) = self.active_default.take() {
             checker.active_type_defaults.remove(&(self.owner, slot));
         }
@@ -435,8 +446,8 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         checker: &mut Checker<'_, '_>,
         result: Result<n::NormalFormArgument, Error>,
     ) -> Result<(), Error> {
-        if let Some(dependencies) = &mut self.dependencies {
-            dependencies.accept(checker, &mut self.bindings, &mut self.progress, result)
+        if self.pending.is_some() {
+            self.accept(checker, result)
         } else if let Some(collection) = &mut self.collection {
             collection.accept(checker, &mut self.bindings, result)
         } else {
@@ -491,6 +502,10 @@ impl std::fmt::Display for Frame<'_, '_> {
         f.write_str(") (active-default")?;
         if let Some(slot) = self.active_default {
             write!(f, " {slot}")?;
+        }
+        f.write_str(") (default-scope")?;
+        if let Some(scope) = &self.default_scope {
+            write!(f, " {scope}")?;
         }
         f.write_str(") (observations")?;
         if let Some(observations) = &self.observations {

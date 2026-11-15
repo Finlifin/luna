@@ -9,6 +9,73 @@ const HEADS: &str = "
     comptime fn Pick(flag: bool) -> Type { bool }
 ";
 
+#[test]
+fn uninvoked_open_normal_inputs_use_known_type_defaults_for_domain_checks() {
+    let source = format!(
+        "{HEADS}
+        pure comptime fn Tagged<.T: Type = u8, value: T> -> Type {{ T }}
+        comptime fn unused(flag: bool) -> defer Pick(flag) {{
+            let formed = Tagged<flag>;
+            true
+        }}
+    "
+    );
+    let failure = match sysroot::compile(&source) {
+        Err(failure) => failure,
+        Ok(_) => panic!("accepted a bool input for a defaulted u8 domain"),
+    };
+    assert!(failure.contains("mismatch"), "{failure}");
+}
+
+#[test]
+fn open_normal_default_domains_check_literals_collections_and_unused_branches() {
+    for application in [
+        "Tagged<256>",
+        "Tagged<if flag { 1 } else { 256 }>",
+        "Tagged<when { flag => 1, else => false }>",
+        "Packet<1, 256>",
+        "Packet<.values = if flag { [1] } else { [false] }>",
+        "Chain<flag>",
+    ] {
+        let source = format!(
+            "{HEADS}
+            pure comptime fn Tagged<.T: Type = u8, value: T> -> Type {{ T }}
+            pure comptime fn Packet<.T: Type = u8, ...values: meta.List<T>> -> Type {{ T }}
+            pure comptime fn Chain<.T: Type = u8, .U: Type = T, value: U> -> Type {{ U }}
+            comptime fn unused(flag: bool) -> defer Pick(flag) {{
+                let formed = {application};
+                true
+            }}
+        "
+        );
+        assert!(sysroot::compile(&source).is_err(), "accepted {application}");
+    }
+}
+
+#[test]
+fn open_normal_defaults_and_overrides_share_ordinary_input_domains() {
+    let source = format!(
+        "{HEADS}
+        pure comptime fn Tagged<.T: Type = u8, value: T> -> Type {{ T }}
+        pure comptime fn Packet<.T: Type = u8, ...values: meta.List<T>> -> Type {{ T }}
+        pure comptime fn Chain<seed: Type, .T: Type = seed, .U: Type = T, value: U> -> Type {{ U }}
+        comptime fn apply(flag: bool) -> defer Pick(flag) {{
+            let fixed = Tagged<when {{ flag => 1, else => 255 }}>;
+            let override = Tagged<flag, .T = bool>;
+            let collected = Packet<1, 255>;
+            let chained = Chain<u8, if flag {{ 1 }} else {{ 255 }}>;
+            fixed == if flag {{ Tagged<1> }} else {{ Tagged<255> }}
+                and override == Tagged<.T = bool, flag>
+                and collected == Packet<.T = u8, .values = [1, 255]>
+                and chained == if flag {{ Chain<u8, 1> }} else {{ Chain<u8, 255> }}
+        }}
+        comptime fn check() -> bool {{ apply(true) and apply(false) }}
+        fn run() -> bool {{ const value = check(); value }}
+    "
+    );
+    check_both(&source);
+}
+
 fn check_both(source: &str) {
     let package = sysroot::compile(source).unwrap();
     let entry = package

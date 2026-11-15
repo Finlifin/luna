@@ -122,6 +122,46 @@ fn fixed_inputs_and_defaults_share_the_contextual_plan() {
 }
 
 #[test]
+fn default_domain_preparation_preserves_explicit_order_and_default_execution() {
+    let package = sysroot::compile(
+        "
+        comptime fn first() -> bool { true }
+        comptime fn second() -> bool { true }
+        comptime fn mark() -> bool { true }
+        pure comptime fn Tagged<flag: bool, .T: Type = do { mark(); u8 }, value: T> -> Type { bool }
+        comptime fn Build() -> Type { Tagged<first(), do { second(); 255 }> }
+        comptime fn Override() -> Type { Tagged<first(), do { second(); true }, .T = bool> }
+        comptime fn Exit() -> Type {
+            Tagged<first(), do { second(); return bool; 1 }>
+        }
+        comptime fn Direct() -> Type { Tagged<true, .T = u8, 255> }
+        comptime fn DirectOverride() -> Type { Tagged<true, .T = bool, true> }
+    ",
+    )
+    .unwrap();
+    let expected = invoke_both(&package, "Direct");
+    trace_both(
+        &package,
+        "Build",
+        &expected,
+        &["Build", "first", "second", "mark"],
+    );
+    let expected = invoke_both(&package, "DirectOverride");
+    trace_both(
+        &package,
+        "Override",
+        &expected,
+        &["Override", "first", "second"],
+    );
+    trace_both(
+        &package,
+        "Exit",
+        &Value::Type(nir::Term::Primitive(nir::Primitive::Bool)),
+        &["Exit", "first", "second"],
+    );
+}
+
+#[test]
 fn observed_domains_retain_effectful_producers_in_their_source_slots() {
     let package = sysroot::compile(
         "

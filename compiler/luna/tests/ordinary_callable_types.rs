@@ -23,6 +23,30 @@ fn check_both(source: &str) {
 }
 
 #[test]
+fn early_default_domain_checks_restore_caller_before_later_explicit_inputs() {
+    check_both(
+        "
+        struct Holder where seed: bool {
+            pub comptime fn pick() -> bool
+            where .T: Type = u8, index: T, value: bool
+            {
+                value == seed
+            }
+            pub comptime fn evaluate() -> bool {
+                var trace: Integer = 0;
+                let yes = Holder<true>.pick<do { trace = trace * 10 + 1; 7 }, seed>;
+                let no = Holder<false>.pick<do { trace = trace * 10 + 2; 8 }, seed>;
+                yes() == seed and no() != seed and trace == 12
+            }
+        }
+        comptime fn check() -> bool {
+            Holder<true>.evaluate() and Holder<false>.evaluate()
+        }
+    ",
+    );
+}
+
+#[test]
 fn sibling_callable_defaults_keep_selected_parent_and_caller_inputs_separate() {
     let source = "
         struct Holder where seed: bool {
