@@ -7,6 +7,8 @@ use tails::{OrdinaryResult, TailCheck};
 pub(super) enum Destination {
     Ordinary(std::sync::Arc<OrdinaryDestination>),
     Contextual(ContextualTail),
+    /// A whole declaration input starts at contextual depth zero.
+    ContextualInput,
 }
 
 /// Owned only by this checking region. Sharing nested destinations does not
@@ -119,7 +121,15 @@ impl Destination {
     pub(super) fn ordinary_view(&self) -> Option<OrdinaryTail<'_>> {
         match self {
             Self::Ordinary(tail) => Some(tail.view()),
-            Self::Contextual(_) => None,
+            Self::Contextual(_) | Self::ContextualInput => None,
+        }
+    }
+
+    pub(super) fn contextual_depth(&self) -> Option<usize> {
+        match self {
+            Self::Ordinary(_) => None,
+            Self::Contextual(tail) => Some(tail.depth + 1),
+            Self::ContextualInput => Some(0),
         }
     }
 
@@ -194,7 +204,7 @@ impl Destination {
     pub(super) fn expected(&self) -> Option<&Term> {
         match self {
             Self::Ordinary(tail) => tail.expected.as_ref(),
-            Self::Contextual(_) => None,
+            Self::Contextual(_) | Self::ContextualInput => None,
         }
     }
 
@@ -209,7 +219,7 @@ impl Destination {
                 TailCheck::Child => TailCheck::Child,
                 TailCheck::Checked(value) => TailCheck::Checked(value.map(CheckedBlock::Ordinary)),
             }),
-            Self::Contextual(_) => Ok(if block.expr.is_some() {
+            Self::Contextual(_) | Self::ContextualInput => Ok(if block.expr.is_some() {
                 TailCheck::Child
             } else {
                 TailCheck::Checked(None)
@@ -234,7 +244,7 @@ impl Destination {
                     value.map(|value| value.ordinary(block.span)).transpose()?,
                 )
                 .map(CheckedTail::Ordinary),
-            Self::Contextual(_) => value
+            Self::Contextual(_) | Self::ContextualInput => value
                 .map(|value| value.contextual(block.span).map(Box::new))
                 .transpose()
                 .map(CheckedTail::Contextual),
@@ -251,8 +261,8 @@ impl Destination {
                 .view()
                 .check_expression(checker, value)
                 .map(CheckedBlock::Ordinary),
-            Self::Contextual(tail) => checker
-                .dependent_normal_argument(value, tail.depth + 1)
+            Self::Contextual(_) | Self::ContextualInput => checker
+                .dependent_normal_argument(value, self.contextual_depth().unwrap())
                 .map(CheckedBlock::Contextual),
         }
     }
@@ -269,6 +279,7 @@ impl Destination {
                 || tail.expected.is_some()
                 || self.structural_input().is_some())
             .then(|| self.clone())),
+            Self::ContextualInput => Ok(Some(Self::Contextual(ContextualTail { depth: 1 }))),
             Self::Contextual(tail) => {
                 if tail.depth >= 127 {
                     return Err(error(expr.span, "contextual input nesting limit exceeded"));
@@ -315,6 +326,7 @@ impl std::fmt::Display for Destination {
         match self {
             Self::Ordinary(tail) => tail.fmt(f),
             Self::Contextual(tail) => tail.fmt(f),
+            Self::ContextualInput => f.write_str("(contextual-input (depth 0))"),
         }
     }
 }
@@ -383,6 +395,34 @@ mod tests {
         assert!(dump.contains("(expected (primitive bool))"), "{dump}");
         assert!(dump.contains("(open-environment true)"), "{dump}");
         assert!(dump.contains("(unknown-dependent-value)"), "{dump}");
+    }
+
+    #[test]
+    fn whole_contextual_inputs_keep_the_original_expression_depth() {
+        let destination = Destination::ContextualInput;
+        assert_eq!(destination.contextual_depth(), Some(0));
+        assert_eq!(
+            Destination::Contextual(ContextualTail { depth: 4 }).contextual_depth(),
+            Some(5)
+        );
+        let id = hir::HirId::new(
+            hir::OwnerId::new(hir::LocalDefId::new(1)),
+            hir::ItemLocalId::new(0),
+        );
+        let block = hir::Block {
+            hir_id: id,
+            stmts: &[],
+            expr: None,
+            span: Span::default(),
+        };
+        let expr = Expr {
+            hir_id: id,
+            span: block.span,
+            kind: H::Block(&block),
+        };
+        let nested = destination.nested(&expr).unwrap().unwrap();
+        assert_eq!(nested.to_string(), "(contextual-tail (depth 1))");
+        assert_eq!(nested.contextual_depth(), Some(2));
     }
 
     #[test]

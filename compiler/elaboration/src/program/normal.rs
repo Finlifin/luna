@@ -628,17 +628,7 @@ impl Checker<'_, '_> {
         inputs: &[Arg<'_>],
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
-        self.ensure_signature(owner, expr.span)?;
-        self.ensure_contract(owner, expr.span)?;
-        let expanded = if self.clause_has_collector(owner) {
-            self.clause_prefix_literal_spreads(owner, inputs)
-        } else {
-            literal_spreads(inputs)
-        };
-        if let Some(expanded) = expanded {
-            return self.normal_type_expression(expr, owner, &expanded, expected);
-        }
-        self.planned_normal_expression(owner, inputs, expr.span, expected)
+        self.check_normal_application_region(owner, inputs, expr.span, expected)
     }
 }
 
@@ -2527,48 +2517,6 @@ impl Checker<'_, '_> {
         self.alias_value_bindings = saved_values;
         self.normal_default_bindings = saved_bindings;
         result
-    }
-
-    fn planned_normal_expression(
-        &mut self,
-        owner: OwnerId,
-        inputs: &[Arg<'_>],
-        span: Span,
-        expected: Option<&Term>,
-    ) -> Result<n::Expr, Error> {
-        let parameters = self.normal_parameters[&owner]
-            .iter()
-            .map(|(id, _, domain)| {
-                (
-                    *id,
-                    if *domain == p(P::Type) {
-                        Sort::Type
-                    } else {
-                        Sort::ComptimeValue
-                    },
-                    domain.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let prepared = self.planned_declaration_inputs(owner, inputs, span, parameters, None)?;
-        let ty = if prepared.diverges() {
-            p(P::Never)
-        } else {
-            p(P::Type)
-        };
-        self.check_formation_application(owner, prepared.formation, span)?;
-        if let Some(expected) = expected {
-            self.require_expression(&ty, expected, span)?;
-        }
-        Ok(n::Expr {
-            source: source(span),
-            ty,
-            kind: K::NormalFormType {
-                head: declaration(self.package, &self.package_identities, owner),
-                arguments: prepared.arguments,
-                plan: Some(prepared.plan),
-            },
-        })
     }
 }
 

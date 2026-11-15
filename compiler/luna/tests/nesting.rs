@@ -73,6 +73,18 @@ fn nested_expression_child() {
             });
             format!("fn run()->bool {{{body}}}")
         }
+        "normal-regions" => {
+            let body = (0..32).fold("u8".to_owned(), |body, index| match index % 3 {
+                0 => format!("Layer<do {{ {body} }}>"),
+                1 => format!("Layer<if true {{ {body} }} else {{ bool }}>"),
+                _ => format!("Layer<when {{ false => bool, else => {body} }}>"),
+            });
+            format!(
+                "pure comptime fn Layer<T> -> Type {{ T }}
+                comptime fn Build() -> Type {{ {body} }}
+                fn run() -> bool {{ const first = Build(); const second = Build(); first == second }}"
+            )
+        }
         "logical-regions" => {
             let body = (0..48).fold("true".to_owned(), |body, index| match index % 4 {
                 0 => format!("true and ({body})"),
@@ -209,6 +221,11 @@ fn nested_partial_arm_probes_survive_frontend_and_execution() {
 #[test]
 fn nested_logical_regions_preserve_mixed_control_children() {
     check_cases(&["logical-regions"]);
+}
+
+#[test]
+fn nested_normal_inputs_share_the_control_region_stack() {
+    check_cases(&["normal-regions"]);
 }
 
 fn check_cases(cases: &[&str]) {

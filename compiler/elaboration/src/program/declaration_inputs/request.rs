@@ -1,13 +1,13 @@
 //! Source child requests shared by routing, slots, dependencies and collectors.
 use super::*;
 
-pub(super) enum Demand {
+pub(in crate::program) enum Demand {
     Ordinary(Option<Term>),
     Input(crate::calls::InputContext),
     Contextual,
 }
 
-pub(super) struct Request<'b, 'h> {
+pub(in crate::program) struct Request<'b, 'h> {
     input: &'b Expr<'h>,
     demand: Demand,
 }
@@ -32,6 +32,10 @@ impl<'b, 'h> Request<'b, 'h> {
             input,
             demand: Demand::Contextual,
         }
+    }
+
+    pub(in crate::program) fn into_parts(self) -> (&'b Expr<'h>, Demand) {
+        (self.input, self.demand)
     }
 
     pub(super) fn check(

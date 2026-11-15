@@ -9,6 +9,7 @@ mod destinations;
 mod driver;
 mod logical;
 mod matches;
+mod normal_applications;
 mod tails;
 mod when;
 use destinations::{CheckedBlock, Destination};

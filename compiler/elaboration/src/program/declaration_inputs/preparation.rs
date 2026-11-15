@@ -9,14 +9,14 @@ enum Phase<'h> {
     Finished,
 }
 
-enum Poll<'h, T> {
+pub(in crate::program) enum Poll<'h, T> {
     Continue,
     Child(Request<'h, 'h>),
     Complete(T),
 }
 
 #[must_use = "drive input preparation and restore its original caller scope"]
-pub(super) struct Frame<'h, C: Completion> {
+pub(in crate::program) struct Frame<'h, C: Completion> {
     owner: OwnerId,
     span: Span,
     clauses: Option<Vec<hir::clause::ClauseParam<'h>>>,
@@ -29,7 +29,33 @@ pub(super) struct Frame<'h, C: Completion> {
 }
 
 impl<'h, C: Completion> Frame<'h, C> {
-    pub(super) fn new(
+    pub(in crate::program) fn begin<'a: 'h, 'arena: 'h>(
+        checker: &mut Checker<'a, 'arena>,
+        owner: OwnerId,
+        inputs: &[Arg<'h>],
+        span: Span,
+        parameters: Vec<(DeclarationId, Sort, Term)>,
+        defaults: Option<Environment>,
+        completion: C,
+    ) -> Result<Self, Error> {
+        let clauses = checker.type_clause_params(owner);
+        if parameters.len() != clauses.len() {
+            return Err(error(span, "declaration input telescope arity mismatch"));
+        }
+        environment::charge(&mut checker.required_steps, parameters.len(), span)?;
+        Self::new(
+            checker,
+            owner,
+            inputs,
+            span,
+            parameters.into(),
+            clauses,
+            defaults,
+            completion,
+        )
+    }
+
+    fn new(
         checker: &mut Checker<'_, '_>,
         owner: OwnerId,
         inputs: &[Arg<'h>],
@@ -61,7 +87,10 @@ impl<'h, C: Completion> Frame<'h, C> {
         })
     }
 
-    fn poll(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'h, C::Output>, Error> {
+    pub(in crate::program) fn poll(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+    ) -> Result<Poll<'h, C::Output>, Error> {
         if self.waiting {
             return Err(error(
                 self.span,
@@ -121,7 +150,7 @@ impl<'h, C: Completion> Frame<'h, C> {
         Ok(Poll::Child(child))
     }
 
-    fn accept(
+    pub(in crate::program) fn accept(
         &mut self,
         checker: &mut Checker<'_, '_>,
         result: Result<n::NormalFormArgument, Error>,
@@ -142,7 +171,19 @@ impl<'h, C: Completion> Frame<'h, C> {
         }
     }
 
-    fn leave(&mut self, checker: &mut Checker<'_, '_>) {
+    pub(in crate::program) fn reject(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        failure: Error,
+    ) -> Result<(), Error> {
+        if self.waiting {
+            self.accept(checker, Err(failure))
+        } else {
+            Err(failure)
+        }
+    }
+
+    pub(in crate::program) fn leave(&mut self, checker: &mut Checker<'_, '_>) {
         if let Phase::Checking(frame) = &mut self.phase {
             frame.unwind(checker);
         }

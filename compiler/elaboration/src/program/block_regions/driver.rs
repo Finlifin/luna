@@ -148,6 +148,7 @@ enum RegionFrame<'b, 'h> {
     Match(matches::Frame<'b, 'h>),
     Comparison(comparisons::Frame<'b, 'h>),
     Logical(logical::Frame<'b, 'h>),
+    NormalApplication(normal_applications::Frame<'h>),
 }
 
 impl RegionFrame<'_, '_> {
@@ -159,6 +160,7 @@ impl RegionFrame<'_, '_> {
             Self::Match(frame) => frame.unwind(checker),
             Self::Comparison(_) => {}
             Self::Logical(frame) => frame.unwind(checker),
+            Self::NormalApplication(frame) => frame.unwind(checker),
         }
     }
 }
@@ -172,6 +174,7 @@ impl std::fmt::Display for RegionFrame<'_, '_> {
             Self::Match(frame) => frame.fmt(f),
             Self::Comparison(frame) => frame.fmt(f),
             Self::Logical(frame) => frame.fmt(f),
+            Self::NormalApplication(frame) => frame.fmt(f),
         }
     }
 }
@@ -240,7 +243,7 @@ impl<'b, 'h> BlockFrame<'b, 'h> {
     }
 }
 
-impl Checker<'_, '_> {
+impl<'a, 'arena> Checker<'a, 'arena> {
     pub(in crate::program) fn logical_expression(
         &mut self,
         expr: &Expr<'_>,
@@ -277,6 +280,27 @@ impl Checker<'_, '_> {
         let frame = comparisons::Frame::new(self, expr, destination, false)?;
         self.drive_check_region(RegionFrame::Comparison(frame))?
             .ordinary(expr.span)
+    }
+
+    pub(in crate::program) fn check_normal_application_region(
+        &mut self,
+        owner: OwnerId,
+        inputs: &[Arg<'_>],
+        span: Span,
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let destination = Destination::ordinary(
+            self,
+            OrdinaryTail {
+                expected,
+                partial: None,
+                input: None,
+            },
+            span,
+        )?;
+        let frame = normal_applications::Frame::new(self, owner, inputs, span, destination, false)?;
+        self.drive_check_region(RegionFrame::NormalApplication(frame))?
+            .ordinary(span)
     }
 
     fn charge_block_frame(&mut self, span: Span) -> Result<(), Error> {
@@ -430,7 +454,14 @@ impl Checker<'_, '_> {
         }))
     }
 
-    fn drive_check_region(&mut self, root: RegionFrame<'_, '_>) -> Result<CheckedBlock, Error> {
+    fn drive_check_region<'b, 'h>(
+        &mut self,
+        root: RegionFrame<'b, 'h>,
+    ) -> Result<CheckedBlock, Error>
+    where
+        'a: 'h,
+        'arena: 'h,
+    {
         let mut region = region::Region::new(root);
         loop {
             match region.poll(self)? {

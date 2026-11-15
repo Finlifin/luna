@@ -523,10 +523,46 @@ value/default 绑定，未覆盖项保留；失败不改原表。完成消费者
 的完成步骤。形成检查仍是同步操作，这项迁移没有把 pending 身份变成真实 VM 值，
 也没有允许尚依赖 invocation 输入的 callable 签名发布。
 
+声明 NF 应用现由 `block_regions::normal_applications::Frame` 持有同一个输入准备，
+子请求交给已有 Region 栈；嵌套直接声明头和已绑定的常量 NF 头可继续在该栈中推进，
+与块、分支、比较及逻辑表达式交接，不再经 `preparation::drive` 同步递归检查这些
+参数。原 `planned_normal_expression` 已删除，形成义务、期望域、NF 头与执行计划
+由准备帧持有的完成消费者统一交付。字面量包展开使用共同路由器，不再递归重启
+NF 准备。`begin` 是同步与区域消费者共同的有预算准入入口。
+
+每个子结果仍区分普通 Expr 与 contextual 输入。整段声明输入从原有 depth 0 开始，
+嵌套块／分支保持既有深度规则；不是通过多一层适配无意缩短允许的输入结构。
+失败先退出子区域，再送回输入准备中的收集器探测；没有待决子请求时保留原始
+形成／域错误，不能用“无等待者”覆盖诊断。完成和失败都退出原 caller scope。
+带捕获声明的供应、生成器数据处理及非 primitive 交付适配仍先经过原有前置规则，
+不会因源头看起来是 NF 就跳过它们。
+
 路由、收集、依赖域与槽位已有共同子检查后继，帧仍借用同一 Checker 与 HIR。
-布局提示扫描仍是同步操作，子请求仍由同步适配器检查并要求完整结果。这里还没有
-跨 VM 的响应收据、可迁移 Checker 或待定 Type 的执行入口；失败终止本次准备，
-不能把保留的检查位置称为已支持外部补值／补预算恢复。
+布局提示扫描、其他表达式种类及非 NF 消费者仍有同步适配；新区域帧没有 VM 响应
+收据、可迁移 Checker 或待定 Type 的执行入口。失败终止本次准备，不能把保留的
+检查位置称为已支持外部补值／补预算恢复。
+
+本次 NF 区域接线的验证工作目录为 `/home/fin/luna`，入口均为
+`python3 -B development/check.py --timeout 900 -- test`。
+`-p elaboration --lib -p luna --test normal_input_plans --test open_normal_form_inputs --test contextual_input_regions --test nesting --no-fail-fast -- nested_normal normal_input_plans open_normal_ declaration_inputs block_regions collection_ --test-threads=1`
+退出 0，52 项通过（`/tmp/luna-tools-020eo78x/result.json`）；其中
+`contextual_input_regions` 在该筛选下没有选中测试，随后单独包含完整组。
+32 层混合 NF／块／if／when 用例使用独立子进程的默认线程栈检查 AST、HIR、NIR
+及具体 IIR 执行；较浅嵌套核对两引擎的原 NF 头和每个生产者的调用次数。
+最初新拒绝 fixture 把 requires 写在 where 之外，按语法修正后保留原错误域／形成
+拒绝要求，未改生产准入来容纳错误语法。
+
+扩大到 `-p luna --test normal_input_plans --test contextual_input_regions --test captured_input_observations --test cmtt_type_inputs --test normal_form_domains --test open_normal_form_inputs --no-fail-fast -- --test-threads=1`
+得到 105 项通过、1 项失败（`/tmp/luna-tools-r05jnofr/result.json`，退出 101）。
+失败是 `immutable_structural_type_evidence_survives_generator_update_and_guard_frames`
+的手工 tuple-only 环境缺少跨阶段 Splice 协议。临时采用 `71981104` 的对应九个
+生产文件、以 `-p luna --test cmtt_type_inputs -- immutable_structural_type_evidence_survives_generator_update_and_guard_frames --exact --test-threads=1`
+复现相同诊断（`/tmp/luna-tools-2p2hdq1w/result.json`，退出 101），随后逐字节恢复
+本次文件。这是既有测试环境缺口，不是区域接线引入的行为变化。该用例现改用真实
+sysroot、`meta.List` 与实际 Splice 实现，四组原行为断言均保持；同命令复核退出 0
+（`/tmp/luna-tools-l5750u8o/result.json`）。以上去重后 143 项通过；未运行全量测试。
+修改的十三个 Rust 文件定向 rustfmt `--check` 退出 0
+（`/tmp/luna-tools-d19oop7j/result.json`），`git diff --check` 通过。
 
 pending 根据**原始 callee 域**中依赖本次尚未供应参数的交集判断，再在 caller 域中
 检查实际值。含 rigid 不自动 pending；调用者的合法泛型域不必闭合。依赖在替换前

@@ -4,9 +4,9 @@ mod collections;
 mod completion;
 mod domain;
 mod environment;
-mod preparation;
+pub(super) mod preparation;
 mod progress;
-mod request;
+pub(super) mod request;
 mod routing;
 mod scope;
 mod slots;
@@ -21,6 +21,7 @@ pub(super) enum InputChecking {
 
 pub(super) use completion::Completion;
 pub(super) use environment::Environment;
+pub(super) use environment::copy_term as copy_input_domain;
 
 // Shared only within this preparation and its result consumer. Domain
 // values move out of the caller's temporary telescope instead of borrowing it.
@@ -430,22 +431,8 @@ impl Checker<'_, '_> {
         defaults: Option<Environment>,
         completion: C,
     ) -> Result<C::Output, Error> {
-        let clauses = self.type_clause_params(owner);
-        if parameters.len() != clauses.len() {
-            return Err(error(span, "declaration input telescope arity mismatch"));
-        }
-        environment::charge(&mut self.required_steps, parameters.len(), span)?;
-        preparation::Frame::new(
-            self,
-            owner,
-            inputs,
-            span,
-            parameters.into(),
-            clauses,
-            defaults,
-            completion,
-        )?
-        .drive(self)
+        preparation::Frame::begin(self, owner, inputs, span, parameters, defaults, completion)?
+            .drive(self)
     }
 }
 

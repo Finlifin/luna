@@ -97,6 +97,57 @@ fn late_static_domains_contextualize_whole_collections_as_ordinary_expressions()
 }
 
 #[test]
+fn nested_normal_regions_retain_opaque_heads_and_source_effects() {
+    let body = (0..8).fold("u8".to_owned(), |body, index| match index % 3 {
+        0 => format!("Layer<do {{ mark(); {body} }}>"),
+        1 => format!("Layer<if true {{ mark(); {body} }} else {{ bool }}>"),
+        _ => format!("Layer<when {{ false => bool, else => do {{ mark(); {body} }} }}>"),
+    });
+    let package = sysroot::compile(&format!(
+        "pure comptime fn Layer<T> -> Type {{ T }}
+        comptime fn mark() -> bool {{ true }}
+        comptime fn Build() -> Type {{ {body} }}"
+    ))
+    .unwrap();
+    let mut expected = nir::Term::Primitive(nir::Primitive::U8);
+    for _ in 0..8 {
+        expected = nir::Term::NormalForm {
+            head: id(&package, "Layer"),
+            sort: nir::Sort::Type,
+            arguments: vec![expected],
+        };
+    }
+    let mut calls = vec!["Build"];
+    calls.extend(std::iter::repeat_n("mark", 8));
+    trace_both(&package, "Build", &Value::Type(expected), &calls);
+}
+
+#[test]
+fn nested_normal_input_failures_retain_domain_and_formation_diagnostics() {
+    for (input, expected) in [
+        ("Layer<Layer<true>>", "type mismatch"),
+        (
+            "Layer<Restricted<bool>>",
+            "type requirement is not satisfied",
+        ),
+        ("Layer<Layer<>>", "argument count mismatch"),
+    ] {
+        let source = format!(
+            "pure comptime fn Layer<T> -> Type {{ T }}
+            pure comptime fn Restricted<T> -> Type
+            where requires T == u8
+            {{ T }}
+            comptime fn Build() -> Type {{ {input} }}"
+        );
+        let failure = match sysroot::compile(&source) {
+            Err(failure) => failure,
+            Ok(_) => panic!("accepted {input}"),
+        };
+        assert!(failure.contains(expected), "{input}: {failure}");
+    }
+}
+
+#[test]
 fn fixed_inputs_and_defaults_share_the_contextual_plan() {
     let package = sysroot::compile(
         "

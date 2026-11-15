@@ -50,7 +50,10 @@ impl<'b, 'h> Region<'b, 'h> {
         Ok(())
     }
 
-    pub(super) fn poll(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b, 'h>, Error> {
+    pub(super) fn poll<'a: 'h, 'arena: 'h>(
+        &mut self,
+        checker: &mut Checker<'a, 'arena>,
+    ) -> Result<Poll<'b, 'h>, Error> {
         match self.state {
             State::Waiting(span) => {
                 return Err(error(span, "checking region is awaiting its child"));
@@ -74,6 +77,7 @@ impl<'b, 'h> Region<'b, 'h> {
                 RegionFrame::Match(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::Comparison(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::Logical(frame) => frame.step(checker, returned.take())?,
+                RegionFrame::NormalApplication(frame) => frame.step(checker, returned.take())?,
             };
             let request = match step {
                 Step::Continue => return Ok(Poll::Continue),
@@ -103,6 +107,50 @@ impl<'b, 'h> Region<'b, 'h> {
                 match request {
                     Request::Block(block, destination) => (block, destination, None),
                     Request::Expression(expr, destination) => {
+                        if let H::NFApplication(head, inputs) = expr.kind
+                            && let H::ResolvedDef { def_id, .. } = head.kind
+                            && checker.data_consumer_call(expr)?.is_none()
+                            && let Some(view) = destination.ordinary_view()
+                            && view.input.is_none()
+                            && view
+                                .expected
+                                .is_none_or(|ty| matches!(ty, Term::Primitive(_)))
+                        {
+                            // Captured declaration inputs still go through their
+                            // existing lexical/default supply before NF preparation.
+                            let source_owner = checker.package.definition_owner(def_id);
+                            let captured = if let Some(owner) = source_owner {
+                                checker
+                                    .nominal_captures(owner, expr.span)?
+                                    .iter()
+                                    .any(|id| checker.alias_value_bindings.contains_key(id))
+                            } else {
+                                false
+                            };
+                            let owner = if captured {
+                                None
+                            } else if let Some(owner) = checker.normal_form_constant_target(head)? {
+                                Some(owner)
+                            } else {
+                                source_owner.filter(|owner| matches!(
+                                    checker.package.item(*owner).map(|item| &item.kind),
+                                    Some(ItemKind::Fn(sig, _)) if sig.modifiers.is_normal_form_head
+                                ))
+                            };
+                            if let Some(owner) = owner {
+                                self.frames.push(RegionFrame::NormalApplication(
+                                    normal_applications::Frame::new(
+                                        checker,
+                                        owner,
+                                        inputs,
+                                        expr.span,
+                                        destination,
+                                        true,
+                                    )?,
+                                ));
+                                return Ok(Poll::Continue);
+                            }
+                        }
                         // Nonprimitive targets first pass through ordinary
                         // delivery adaptation, which enters the same frame.
                         if (comparisons::is_comparison(expr) || logical::is_logical(expr))
@@ -161,37 +209,30 @@ impl<'b, 'h> Region<'b, 'h> {
                                 return Ok(Poll::Continue);
                             }
                         }
-                        if let Destination::Contextual(tail) = &destination
+                        if let Some(depth) = destination.contextual_depth()
                             && matches!(expr.kind, H::Match(..))
                         {
                             self.frames.push(RegionFrame::Match(matches::Frame::new(
-                                checker,
-                                expr,
-                                tail.depth + 1,
+                                checker, expr, depth,
                             )?));
                             return Ok(Poll::Continue);
                         }
-                        if let Destination::Contextual(tail) = &destination
+                        if let Some(depth) = destination.contextual_depth()
                             && let H::When(arms) = expr.kind
                             && arms.iter().any(|arm| arm.cond.is_none())
                         {
-                            self.frames.push(RegionFrame::When(when::Frame::new(
-                                checker,
-                                expr,
-                                tail.depth + 1,
-                            )?));
+                            self.frames
+                                .push(RegionFrame::When(when::Frame::new(checker, expr, depth)?));
                             return Ok(Poll::Continue);
                         }
                         // Ordinary branches enter after delivery prepares the
                         // complete target, as in expr_context.
-                        if let Destination::Contextual(tail) = &destination
+                        if let Some(depth) = destination.contextual_depth()
                             && matches!(expr.kind, H::If(_, _, Some(_)))
                         {
                             self.frames
                                 .push(RegionFrame::Conditional(conditionals::Frame::new(
-                                    checker,
-                                    expr,
-                                    tail.depth + 1,
+                                    checker, expr, depth,
                                 )?));
                             return Ok(Poll::Continue);
                         }
@@ -307,6 +348,9 @@ impl<'b, 'h> Region<'b, 'h> {
                             Some(comparison.recover(checker, failure.take().unwrap()))
                         }
                         RegionFrame::Logical(frame) => {
+                            Some(frame.recover(checker, failure.take().unwrap()))
+                        }
+                        RegionFrame::NormalApplication(frame) => {
                             Some(frame.recover(checker, failure.take().unwrap()))
                         }
                         _ => None,

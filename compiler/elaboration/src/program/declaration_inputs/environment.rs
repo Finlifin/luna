@@ -17,7 +17,11 @@ pub(super) fn charge(fuel: &mut u64, count: usize, span: Span) -> Result<(), Err
     Ok(())
 }
 
-pub(super) fn copy_term(value: &Term, fuel: &mut u64, span: Span) -> Result<Term, Error> {
+pub(in crate::program) fn copy_term(
+    value: &Term,
+    fuel: &mut u64,
+    span: Span,
+) -> Result<Term, Error> {
     let before = usize::try_from(*fuel).unwrap_or(usize::MAX);
     let mut remaining = before;
     let result = nir::copy_budget::clone_term(value, &mut remaining);
