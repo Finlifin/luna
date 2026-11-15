@@ -13,13 +13,9 @@ fn check_required_and_published(source: &str) -> nir::program::Package {
         .unwrap()
         .declaration;
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime(&package, Budget::default())
-        }
-        .unwrap();
-        assert_eq!(vm.invoke(entry, vec![]).unwrap(), Value::Bool(true));
+        sysroot::with_comptime(&package, Budget::default(), tree, |vm| {
+            assert_eq!(vm.invoke(entry, vec![]).unwrap(), Value::Bool(true));
+        });
     }
     let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
@@ -181,21 +177,17 @@ fn required_and_published_bodies_keep_entry_and_result_contracts() {
     assert!(!function.postconditions.is_empty());
     assert!(!function.entry_snapshots.is_empty());
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime(&package, Budget::default())
-        }
-        .unwrap();
-        assert!(
-            vm.invoke(function.declaration, vec![Value::UnsignedInteger(11)])
-                .is_err()
-        );
-        assert_eq!(
-            vm.invoke(function.declaration, vec![Value::UnsignedInteger(9)])
-                .unwrap(),
-            Value::UnsignedInteger(9)
-        );
+        sysroot::with_comptime(&package, Budget::default(), tree, |vm| {
+            assert!(
+                vm.invoke(function.declaration, vec![Value::UnsignedInteger(11)])
+                    .is_err()
+            );
+            assert_eq!(
+                vm.invoke(function.declaration, vec![Value::UnsignedInteger(9)])
+                    .unwrap(),
+                Value::UnsignedInteger(9)
+            );
+        });
     }
     assert!(sysroot::compile(&source.replace("keep(9)", "keep(11)")).is_err());
     assert!(sysroot::compile(&source.replace("original\n", "0\n")).is_err());
