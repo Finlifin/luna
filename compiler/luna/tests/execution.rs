@@ -17309,7 +17309,10 @@ fn computed_value_pattern_failure_stops_before_later_candidates() {
     let mut interpreter = Interpreter::for_comptime(
         &package,
         Budget {
-            steps: 200,
+            // Reach the candidate body before its infinite loop exhausts the
+            // budget. Call preparation is charged too; 200 can stop before
+            // entering `first`, which does not test candidate failure order.
+            steps: 10_000,
             ..Budget::default()
         },
     )

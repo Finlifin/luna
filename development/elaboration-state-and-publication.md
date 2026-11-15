@@ -229,8 +229,8 @@ Waiting 与 Unresolved 不混用。没有就绪任务时，先区分外部请求
 
 | 入口 | 已有责任 | 未完成部分 |
 | --- | --- | --- |
-| `elaboration/src/program/block_regions/driver.rs` 与 `driver/region.rs` | 普通、contextual、部分结构输入共用 Region；帧栈、子请求及返回值由逐步状态持有，同步入口只负责驱动 | 仍使用原活动 Checker，没有可移交的外部等待权限；普通 match 与模式子检查尚未迁移；部分 when 的预探测仍同步 |
-| `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；普通 when／match 共用适配 | 不提供执行前缀恢复；部分 when 的预探测及普通 match 子检查仍同步 |
+| `elaboration/src/program/block_regions/driver.rs` 与 `driver/region.rs` | 普通、contextual、部分结构输入共用 Region；帧栈、子请求及返回值由逐步状态持有，同步入口只负责驱动 | 仍使用原活动 Checker，没有可移交的外部等待权限；模式／guard 子检查及部分 when／match 的预探测仍同步 |
+| `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；when／match 的部分输入候选域共用适配 | 不提供执行前缀恢复；部分 when／match 的候选域预探测仍同步 |
 | `elaboration/src/program/dependent_inputs/tasks.rs` | 参数域、默认引用和默认值完成的显式后继 | 源码子检查和 required 求值仍同步 |
 | `elaboration/src/program/declaration_inputs/progress.rs` | producer、身份、检查次序与源码 schedule 分开 | Typed 路径仍要求普通完整 Expr，Contextual 仍保留 NormalFormArgument |
 | `elaboration/src/program/dynamic_instances.rs` | callable packet 保留实际 producer、静态身份与 pending 集合 | 签名仍提及 pending 参数时直接拒绝发布 |
@@ -328,16 +328,34 @@ Block 作用域，源码未选中的分支仍检查；这不是提前执行条�
 递归。参考树解释器另有 64 层宿主递归保护，深层源码验收与双引擎对照分别标明范围。
 
 部分输入上下文仍用共同 `optional_branch_context` 有界探测来取得候选域，其内部
-子检查尚未帧化；最终条件和主体则交给 when 帧。普通 match 的选择、绑定和清理
-来源也仍需单独迁移。本步不改变外部 Type 等待、源码 activation 或模板发布的
-未完成状态。
+子检查尚未帧化；最终条件和主体则交给 when 帧。本步不改变外部 Type 等待、源码
+activation 或模板发布的未完成状态。
 
-contextual match 的 selector 和主体也交给同一驱动；`matches::Frame` 保留受检
-selector、当前模式、已完成 arms 及各 arm 的词法／匹配事实退出责任。模式与 guard
-仍调用共同的同步模式检查规则，最终 guard 嵌在 Pattern 中，不能额外执行一次，
-也不能在覆盖性检查前将其丢弃。每个主体返回后先撤销匹配事实，再恢复模式绑定的
-词法作用域；所有 arms 检查完成后仍运行共同的覆盖性检查。匹配事实的进入／退出
-服务同时供现有同步适配器使用，不建立帧专用的另一套类型事实提取规则。
+普通与 contextual match 的 selector 和主体现在都交给 `matches::Frame`；原
+`pattern_checking/matches.rs` 的普通同步循环已删除，仅保留共同模式／guard 与
+覆盖检查入口。帧保存受检 selector、当前模式、已完成 arms、交付目标，以及各 arm
+的词法／匹配事实退出责任。模式与 guard 仍调用共同的同步规则，最终 guard 嵌在
+Pattern 中，不能额外执行一次，也不能在覆盖性检查前将其丢弃。
+
+普通交付状态位于 `block_regions/matches/ordinary.rs`，保留 inline 主语、选中
+位置、待安装的物化绑定、分支结果域及父 callee/effect 交付责任。已有 inline 主语
+只复制已检查的数据，不重新检查或执行 selector；相关复制和 generator_data 快照
+纳入预算。每个 arm 在模式可能引入绑定前建立词法出口，在主体前保存 staged/member
+绑定和 callee 位置。主体返回后撤销匹配前提再汇合结果域，离开 arm 时恢复局部与
+staged 描述；对外层写入造成的输入事实失效仍按共同词法边界保留。
+
+完整目标、先前分支的已知结果域及部分输入规则继续决定下一个 arm 的交付。
+普通 match 的错误成功 payload 恢复、合成 arm 的独立清理来源、覆盖检查和行为
+模式抽象保持原顺序；inline 选择仍检查所有 arms，只有选中 arm 被交付执行。
+各路径在完成或失败时恢复父 inline 选择／抑制状态，不用局部成功免除覆盖或资源
+义务。S-expression dump 区分 selector、当前 pattern、已完成 arms、inline 绑定
+和待恢复的 scope。
+
+部分 match 的候选域搜索仍在取得 selector 后经同步 `optional_branch_context`
+进行；模式、guard、inline 模式选择与绑定物化也还没有可移交的外部等待后继。
+把 selector/主体移入 Region 不等于打通普通源码与 VM 的交织挂起，两个待定 Type
+正例仍待其共同前置能力。匹配事实的进入／退出仍复用统一服务，没有另造帧专用的
+类型事实规则。
 
 普通比较的左右操作数也进入同一帧栈。`operators::peers::Progress` 保存两侧源码、
 已检查代码、上下文搜索位置及默认类型策略；比较帧持有当前 Attempt，子检查结束
@@ -902,6 +920,44 @@ match 迁移发现的失败为 `normal_record_defaults_follow_evaluated_value_pr
 深度 62 溢出。静态控制路径迭代化后该崩溃已消除。参考树解释器仍受独立的 64 层
 宿主递归保护，不把扩大 invocation 预算当作修复：生产深度限制未改，32 层字节码
 验收保留，双引擎对照明确限制为 8 层。临时诊断输出已移除。
+
+#### 普通 match 的共同帧、阶段绑定与清理来源
+
+工作目录 `/home/fin/luna`，以下均使用 `python3 -B development/check.py --timeout 900 --`：
+
+- `test -p elaboration --lib -p luna --test contextual_input_regions --test inline_control --test error_surface --test nesting --no-fail-fast -- match --test-threads=1`：
+  `/tmp/luna-tools-poo1e_8m/result.json` 退出 0，43 项通过。新增真实 sysroot 的嵌套
+  callee／失败 guard 顺序、模式前提隔离和提前返回；32 层源码、字节码及 runtime
+  AST/HIR/NIR 流水线通过，8 层作双引擎对照。
+- `test -p luna --test execution --test normal_patterns --test effect_spreads --no-fail-fast -- match pattern partial_ --test-threads=1`：
+  `/tmp/luna-tools-9f7s6c9m/result.json` 退出 101，176 项通过，1 项失败；失败为
+  `computed_value_pattern_failure_stops_before_later_candidates` 的预算前提，见下文。
+- `test -p luna --test drop --test inline_control --test contextual_input_regions --no-fail-fast -- scheduled_match_presence whole_enum_group_matches candidate_order_patterns_cross_variants ordinary_copy_pattern_guard_and_or inactive_inline_pattern inline_patterns_execute_nested_guards pure_inline_pattern_guards partial_probe_recovery partial_branch_search --test-threads=1`：
+  `/tmp/luna-tools-wse350iz/result.json` 退出 0，14 项通过，覆盖选中 arm 清理、guard
+  失败后的所有权保留、重复匹配、inline 阶段边界及探测失败恢复。
+
+失败用例给予 VM 200 步，却要求已经进入首个候选的无限循环。实际轨迹仅到
+`choose`，预算在准备 `first` 时耗尽。保存本阶段六个已修改生产文件后，临时采用
+`3d3ff138` 的对应内容，以同入口执行 `test -p luna --test execution -- computed_value_pattern_failure_stops_before_later_candidates --exact --test-threads=1`，
+`/tmp/luna-tools-k7p4kfp0/result.json` 退出 101，同样只有 `choose`；随后逐字节恢复
+本阶段文件，未触及其他工作区改动。这不是 match 迁移引入的行为变化。
+
+保留该用例的 `StepsExhausted` 和精确 `[choose, first]` 轨迹断言，测试预算改为
+10,000，确保检验的是首个候选主体失败后不再尝试后续候选，而不是调用准备的固定
+工作量。最终 `test -p elaboration --lib -p luna --test execution --no-fail-fast -- computed_value_pattern_failure_stops_before_later_candidates block_regions --test-threads=1`，
+`/tmp/luna-tools-aw2pquwy/result.json` 退出 0，13 项通过。
+
+扩充部分输入测试中的两个 match 场景后，`test -p luna --test contextual_input_regions -- partial_branch_search --test-threads=1`，
+`/tmp/luna-tools-b0m502i0/result.json` 退出 0；包含 null arm 等待后续 u8 arm 提供
+上下文、嵌套模式局部、两引擎及生产者一次性顺序。生产检查与执行预算规则未放宽。
+
+公开库回归 `test -p luna --test library_std --test library_std_format --no-fail-fast -- --test-threads=1`：
+`/tmp/luna-tools-s67pbew_/result.json` 退出 0，18 项通过。覆盖真实 sysroot 的文件／
+错误结果、writer 借用与失败传播、描述符清理、文本输出、跨阶段构造和格式串扫描；
+不把这些结果记作完整 `defer std.fmt.Parse(format)` 的交付。
+本阶段修改 Rust 文件的定向 rustfmt `--check` 退出 0，
+`/tmp/luna-tools-s88klgjl/result.json`；`git diff --check` 通过。没有修改 docs 或
+其他既有工作区改动，也没有放宽资源、覆盖或模式准入规则。
 
 #### 声明默认代码与调用前缀的交接
 

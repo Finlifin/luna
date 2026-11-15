@@ -805,6 +805,8 @@ fn partial_branch_search_prefers_typed_evidence_after_nested_missing_inputs() {
         "if false { 1 } else { byte() }",
         "if false { do { if true { null } else { null } } } else { byte() }",
         "if false { do { let local = true; if local { null } else { null } } } else { do { byte() } }",
+        "false match { true => null, false => byte() }",
+        "false match { true => do { let local = true; local match { true => null, false => null } }, false => byte() }",
     ] {
         check_both(
             &format!(
@@ -1041,6 +1043,73 @@ fn nested_ordinary_when_frames_preserve_the_original_return_target() {
         let mut nested = "do { return true; false }".to_string();
         for _ in 0..levels {
             nested = format!("when {{ false => false, else => {nested}, }}");
+        }
+        check_in_engines(
+            &format!("comptime fn check() -> bool {{ let value: bool = {nested}; not value }}"),
+            &["check"],
+            sysroot::COMPTIME_BUDGET,
+            engines,
+        );
+    }
+}
+
+#[test]
+fn ordinary_match_frames_keep_nested_callee_selection_and_guard_order() {
+    check_both(
+        "
+        comptime fn select() -> bool { true }
+        comptime fn reject(value: bool) -> bool { not value }
+        comptime fn supply() -> u8 { 7 }
+        comptime fn identity(value: T) -> T where T { value }
+        comptime fn check() -> bool {
+            let answer = (select() match {
+                value if reject(value) => identity<u8>,
+                true => false match { false => identity<u8>, true => identity<u8>, },
+                false => identity<u8>,
+            })(supply());
+            answer == 7
+        }
+        ",
+        &["check", "select", "reject", "supply", "identity"],
+    );
+}
+
+#[test]
+fn ordinary_match_frames_restore_pattern_facts_after_nested_bodies() {
+    check_both(
+        "
+        comptime fn accepts(value: T) -> bool
+        where T
+        {
+            T match {
+                'bool => value match { true => true, false => false, },
+                _ => false,
+            }
+        }
+        comptime fn check() -> bool { accepts<bool>(true) and not accepts<u8>(7) }
+        ",
+        &["check", "accepts", "accepts"],
+    );
+    for body in [
+        "let selected = T match { 'bool => value, _ => false }; let escaped: bool = value; selected and escaped",
+        "T match { 'bool => value, _ => do { let escaped: bool = value; escaped } }",
+    ] {
+        let failure = sysroot::compile(&format!(
+            "comptime fn invalid(value: T) -> bool where T {{ {body} }}"
+        ))
+        .unwrap_err();
+        assert!(failure.contains("type mismatch"), "{failure}");
+    }
+}
+
+#[test]
+fn nested_ordinary_match_frames_preserve_the_original_return_target() {
+    // Keep the 32-level source case; the reference evaluator independently
+    // caps native recursion, so compare engines below that boundary.
+    for (levels, engines) in [(8, &[false, true][..]), (32, &[false][..])] {
+        let mut nested = "do { return true; false }".to_string();
+        for _ in 0..levels {
+            nested = format!("true match {{ false => false, true => {nested}, }}");
         }
         check_in_engines(
             &format!("comptime fn check() -> bool {{ let value: bool = {nested}; not value }}"),

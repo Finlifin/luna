@@ -164,6 +164,24 @@ impl<'b, 'h> Region<'b, 'h> {
                                 )?));
                             return Ok(Poll::Continue);
                         }
+                        if matches!(expr.kind, H::Match(..))
+                            && let Some(view) = destination.ordinary_view()
+                            && (view.input.is_none() || view.expected.is_some())
+                            && checker.prepare_region_branch_delivery(
+                                expr,
+                                view.expected,
+                                view.partial,
+                            )?
+                        {
+                            self.frames
+                                .push(RegionFrame::Match(matches::Frame::ordinary(
+                                    checker,
+                                    expr,
+                                    destination,
+                                    true,
+                                )?));
+                            return Ok(Poll::Continue);
+                        }
                         if matches!(expr.kind, H::When(_))
                             && let Some(view) = destination.ordinary_view()
                             && (view.input.is_none() || view.expected.is_some())

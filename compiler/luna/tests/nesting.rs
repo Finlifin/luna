@@ -33,6 +33,12 @@ fn nested_expression_child() {
             });
             format!("fn run()->bool {{ let value: bool = {body}; not value }}")
         }
+        "match" => {
+            let body = (0..32).fold("do { return true; false }".to_owned(), |body, _| {
+                format!("true match {{ false => false, true => {body}, }}")
+            });
+            format!("fn run()->bool {{ let value: bool = {body}; not value }}")
+        }
         "not" => format!(
             "fn run()->bool {{{}true{}}}",
             "not (".repeat(32),
@@ -166,6 +172,11 @@ fn nested_scalar_operators_survive_frontend_and_execution() {
 #[test]
 fn nested_when_preserves_return_through_the_pipeline() {
     check_cases(&["when"]);
+}
+
+#[test]
+fn nested_match_preserves_return_through_the_pipeline() {
+    check_cases(&["match"]);
 }
 
 fn check_cases(cases: &[&str]) {

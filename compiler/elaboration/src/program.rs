@@ -5258,8 +5258,8 @@ impl Checker<'_, '_> {
                 | C::Record(_)
                 | C::Nominal { .. }
                 | C::ErrorResult { .. },
-                H::Match(value, arms),
-            ) => self.match_expr_with_input(input, value, arms, None, None, Some(context)),
+                H::Match(..),
+            ) => self.check_ordinary_match_region(input, None, None, Some(context)),
             (
                 C::Optional(_)
                 | C::Tuple(_)
@@ -7693,7 +7693,7 @@ impl Checker<'_, '_> {
                     }
                 }
                 H::If(..) => self.check_ordinary_if_region(expr, expected, partial),
-                H::Match(value, arms) => self.match_expr(expr, value, arms, expected, partial),
+                H::Match(..) => self.check_ordinary_match_region(expr, expected, partial, None),
                 H::When(_) => self.check_ordinary_when_region(expr, expected, partial, None),
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "enum_group_paths" | "enum_variant_paths" | "enum_variant_shapes" | "enum_variant_field_names" | "enum_variant_field_types" | "enum_symbol_values" | "enum_bit_width" | "enum_bit_base_type" | "enum_bit_masks" | "enum_bit_values" | "enum_bit_offsets")) => {
                     self.enum_reflection_builtin(expr, callee, args, expected)

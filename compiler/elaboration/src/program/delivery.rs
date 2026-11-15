@@ -120,7 +120,7 @@ impl Checker<'_, '_> {
     }
 
     /// The region enters a branch rule only after its value-delivery protocol.
-    /// Two-arm ifs and ordered whens deliver the complete target to their arms.
+    /// Two-arm ifs, whens and matches deliver the complete target to their arms.
     /// A one-arm expression with a structured target may instead need a whole
     /// value probe/conversion, so that entry stays with the general adapter.
     pub(super) fn prepare_region_branch_delivery(
@@ -131,7 +131,7 @@ impl Checker<'_, '_> {
     ) -> Result<bool, Error> {
         let directed = match expr.kind {
             H::If(_, _, otherwise) => otherwise.is_some(),
-            H::When(_) => true,
+            H::When(_) | H::Match(..) => true,
             _ => return Ok(false),
         };
         let Some(target) = target.filter(|target| !matches!(target, Term::Primitive(_))) else {
