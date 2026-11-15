@@ -1,5 +1,5 @@
 //! Computed Type clauses retain their producers until callable formation.
-use comptime_interpretor::{Budget, Interpreter, Value};
+use comptime_interpretor::{Budget, Value};
 #[path = "support/sysroot_execution.rs"]
 mod sysroot;
 
@@ -12,17 +12,13 @@ fn check_both(source: &str) {
         .unwrap()
         .declaration;
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime(&package, Budget::default())
-        }
-        .unwrap();
-        assert_eq!(
-            vm.invoke(entry, vec![]).unwrap(),
-            Value::Bool(true),
-            "tree={tree}"
-        );
+        sysroot::with_comptime(&package, Budget::default(), tree, |vm| {
+            assert_eq!(
+                vm.invoke(entry, vec![]).unwrap(),
+                Value::Bool(true),
+                "tree={tree}"
+            );
+        });
     }
 }
 

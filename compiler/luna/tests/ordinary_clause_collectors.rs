@@ -189,11 +189,11 @@ fn clause_collectors_recover_after_a_failed_invocation_and_keep_type_elements() 
             .unwrap()
             .declaration
     };
-    let mut vm =
-        comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
-    assert!(vm.invoke(id("bad"), vec![]).is_err());
-    assert_eq!(vm.invoke(id("good"), vec![]).unwrap(), Value::Bool(true));
-    assert_eq!(vm.invoke(id("types"), vec![]).unwrap(), Value::Bool(true));
+    sysroot::with_comptime(&package, Default::default(), false, |vm| {
+        assert!(vm.invoke(id("bad"), vec![]).is_err());
+        assert_eq!(vm.invoke(id("good"), vec![]).unwrap(), Value::Bool(true));
+        assert_eq!(vm.invoke(id("types"), vec![]).unwrap(), Value::Bool(true));
+    });
 }
 
 #[test]
