@@ -130,6 +130,27 @@ impl<'b, 'h> Region<'b, 'h> {
                             ));
                             return Ok(Poll::Continue);
                         }
+                        if destination.structural_input().is_some() {
+                            let frame = match expr.kind {
+                                H::When(_) => Some(RegionFrame::When(when::Frame::ordinary(
+                                    checker,
+                                    expr,
+                                    destination.clone(),
+                                    true,
+                                )?)),
+                                H::Match(..) => Some(RegionFrame::Match(matches::Frame::ordinary(
+                                    checker,
+                                    expr,
+                                    destination.clone(),
+                                    true,
+                                )?)),
+                                _ => None,
+                            };
+                            if let Some(frame) = frame {
+                                self.frames.push(frame);
+                                return Ok(Poll::Continue);
+                            }
+                        }
                         if let Destination::Contextual(tail) = &destination
                             && matches!(expr.kind, H::Match(..))
                         {
@@ -265,6 +286,12 @@ impl<'b, 'h> Region<'b, 'h> {
                     let recovered = match &mut frame {
                         RegionFrame::Conditional(conditional) => {
                             Some(conditional.recover_probe(checker, failure.take().unwrap()))
+                        }
+                        RegionFrame::When(frame) => {
+                            Some(frame.recover_probe(checker, failure.take().unwrap()))
+                        }
+                        RegionFrame::Match(frame) => {
+                            Some(frame.recover_probe(checker, failure.take().unwrap()))
                         }
                         RegionFrame::Comparison(comparison) => {
                             Some(comparison.recover(checker, failure.take().unwrap()))

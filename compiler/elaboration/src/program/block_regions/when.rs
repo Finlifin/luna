@@ -5,6 +5,9 @@ use driver::{Request, Step};
 
 enum State {
     Ready,
+    Probing,
+    ProbeCondition { arm: usize, condition: usize },
+    ProbeBody,
     Condition,
     Body(Option<n::Expr>),
     Complete,
@@ -24,6 +27,9 @@ pub(super) struct Frame<'b, 'h> {
     arms: &'h [hir::expr::CondictionArm<'h>],
     destination: Destination,
     ordinary: Option<Ordinary>,
+    search: Option<branch_probes::Search>,
+    probe: Option<branch_probes::Probe>,
+    input_delivery: Option<Destination>,
     state: State,
     branches: Vec<(Option<n::Expr>, CheckedBlock)>,
     scope: LexicalScope,
@@ -65,6 +71,9 @@ impl<'b, 'h> Frame<'b, 'h> {
             arms,
             destination: Destination::Contextual(ContextualTail { depth }),
             ordinary: None,
+            search: None,
+            probe: None,
+            input_delivery: None,
             state: State::Ready,
             branches: Vec::new(),
             scope: LexicalScope::enter(checker, source.span)?,
@@ -92,31 +101,15 @@ impl<'b, 'h> Frame<'b, 'h> {
                 "ordinary when requires an ordinary destination",
             )
         })?;
-        // This adapter retains the common bounded probe search and its
-        // rollback rules. Probes see the same ordered premises as final checks.
-        let inferred = if view.expected.is_none() && fallback.is_some() {
-            match view.input {
-                Some(context) => checker.optional_branch_context(source.span, context, arms.len(), |checker, index| {
-                    for (prior, arm) in arms[..=index].iter().enumerate() {
-                        checker.optional_branch_probe_budget = checker.optional_branch_probe_budget.checked_sub(1)
-                            .ok_or_else(|| error(source.span, "optional branch inference budget exhausted; add a type annotation"))?;
-                        if let Some(condition) = arm.cond {
-                            let condition = checker.expr(condition, Some(&p(P::Bool)))?;
-                            checker.assume_type_condition(&condition, prior == index, arm.body.span)?;
-                        }
-                    }
-                    checker.input_context_expression(arms[index].body, context)
-                })?,
-                None => None,
-            }
+        let search = if view.expected.is_none() && fallback.is_some() {
+            view.input.map(|context| {
+                branch_probes::Search::new(checker, context, arms.len(), source.span)
+            })
         } else {
             None
         };
-        let destination = if let Some(inferred) = inferred.as_ref() {
-            destination.with_expected(checker, Some(inferred), source.span)?
-        } else {
-            destination
-        };
+        let input_delivery = (own_effect_delivery && destination.structural_input().is_some())
+            .then(|| destination.clone());
         checker.required_steps = checker
             .required_steps
             .checked_sub(1)
@@ -131,7 +124,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                 .map(|(_, index)| index),
             suppressed: checker.in_unselected_inline,
             callee: checker.comptime_callee_result,
-            preserve_effect: own_effect_delivery
+            preserve_effect: (own_effect_delivery && input_delivery.is_none())
                 .then(|| std::mem::take(&mut checker.preserve_effect_value)),
         };
         Ok(Self {
@@ -139,7 +132,14 @@ impl<'b, 'h> Frame<'b, 'h> {
             arms,
             destination,
             ordinary: Some(ordinary),
-            state: State::Ready,
+            state: if search.is_some() {
+                State::Probing
+            } else {
+                State::Ready
+            },
+            search,
+            probe: None,
+            input_delivery,
             branches: Vec::new(),
             scope,
             branch: None,
@@ -154,6 +154,28 @@ impl<'b, 'h> Frame<'b, 'h> {
     ) -> Result<Step<'b, 'h>, Error> {
         let state = std::mem::replace(&mut self.state, State::Complete);
         match (state, returned) {
+            (State::Probing, None) => self.advance_search(checker),
+            (State::ProbeCondition { arm, condition }, Some(value)) => {
+                let value = value.ordinary(self.source.span)?;
+                checker.assume_type_condition(
+                    &value,
+                    condition == arm,
+                    self.arms[condition].body.span,
+                )?;
+                self.probe_conditions(checker, arm, condition + 1)
+            }
+            (State::ProbeBody, Some(value)) => {
+                let result = value.ordinary(self.source.span);
+                let value = self
+                    .probe
+                    .take()
+                    .expect("active when probe")
+                    .finish(checker, result)?;
+                self.search.as_mut().expect("when search").observe(value);
+                self.state = State::Probing;
+                Ok(Step::Continue)
+            }
+
             (State::Ready, None) => {
                 let Some(arm) = self.arms.get(self.branches.len()) else {
                     return self.finish(checker);
@@ -221,6 +243,83 @@ impl<'b, 'h> Frame<'b, 'h> {
                 "when child result does not match its continuation",
             )),
         }
+    }
+
+    fn advance_search(&mut self, checker: &mut Checker<'_, '_>) -> Result<Step<'b, 'h>, Error> {
+        let search = self.search.as_mut().expect("when search");
+        if let Some(request) = search.next(checker)? {
+            self.probe = Some(branch_probes::Probe::begin(
+                checker,
+                self.source.span,
+                request,
+            )?);
+            self.probe_conditions(checker, request.index, 0)
+        } else {
+            let search = self.search.take().unwrap();
+            if let Some(inferred) = search.result() {
+                self.destination =
+                    self.destination
+                        .with_expected(checker, Some(&inferred), self.source.span)?;
+                self.ordinary.as_mut().unwrap().branch_type = Some(inferred);
+            }
+            self.state = State::Ready;
+            Ok(Step::Continue)
+        }
+    }
+
+    fn probe_conditions(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        arm: usize,
+        start: usize,
+    ) -> Result<Step<'b, 'h>, Error> {
+        // Each candidate sees preceding negative premises and its own positive
+        // premise. They belong to the probe checkpoint, not the final arms.
+        for index in start..=arm {
+            checker.optional_branch_probe_budget = checker
+                .optional_branch_probe_budget
+                .checked_sub(1)
+                .ok_or_else(|| {
+                    error(
+                        self.source.span,
+                        "optional branch inference budget exhausted; add a type annotation",
+                    )
+                })?;
+            if let Some(condition) = self.arms[index].cond {
+                let destination = Destination::ordinary(
+                    checker,
+                    OrdinaryTail {
+                        expected: Some(&p(P::Bool)),
+                        partial: None,
+                        input: None,
+                    },
+                    condition.span,
+                )?;
+                self.state = State::ProbeCondition {
+                    arm,
+                    condition: index,
+                };
+                return Ok(Step::Child(Request::Expression(condition, destination)));
+            }
+        }
+        self.state = State::ProbeBody;
+        Ok(Step::Child(Request::Expression(
+            self.arms[arm].body,
+            self.destination.clone(),
+        )))
+    }
+
+    pub(super) fn recover_probe(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        failure: Error,
+    ) -> Result<(), Error> {
+        let Some(probe) = self.probe.take() else {
+            return Err(failure);
+        };
+        probe.finish(checker, Err(failure))?;
+        self.state = State::Probing;
+        Ok(())
     }
 
     fn body(
@@ -352,6 +451,11 @@ impl<'b, 'h> Frame<'b, 'h> {
         } else {
             value
         };
+        let value = if let Some(destination) = &self.input_delivery {
+            destination.deliver_input(checker, value, self.source.span)?
+        } else {
+            value
+        };
         Ok(Step::Completed(CheckedBlock::Ordinary(value)))
     }
 
@@ -369,6 +473,10 @@ impl<'b, 'h> Frame<'b, 'h> {
     }
 
     pub(super) fn unwind(mut self, checker: &mut Checker<'_, '_>) {
+        debug_assert!(
+            self.probe.is_none(),
+            "finish the attempt before leaving its frame"
+        );
         self.leave_branch(checker);
         self.scope.leave(checker);
     }
@@ -411,6 +519,12 @@ impl std::fmt::Display for Frame<'_, '_> {
         )?;
         match &self.state {
             State::Ready => f.write_str("(phase ready)"),
+            State::Probing => f.write_str("(phase searching)"),
+            State::ProbeCondition { arm, condition } => write!(
+                f,
+                "(phase probe-condition) (arm {arm}) (condition {condition})"
+            ),
+            State::ProbeBody => f.write_str("(phase probe-body)"),
             State::Condition => f.write_str("(phase condition-child)"),
             State::Body(condition) => {
                 f.write_str("(phase body-child) (condition")?;
@@ -421,7 +535,19 @@ impl std::fmt::Display for Frame<'_, '_> {
             }
             State::Complete => f.write_str("(phase complete)"),
         }?;
-        f.write_str(" (ordinary")?;
+        f.write_str(" (search")?;
+        if let Some(search) = &self.search {
+            write!(f, " {search}")?;
+        }
+        f.write_str(") (probe")?;
+        if let Some(probe) = &self.probe {
+            write!(f, " {probe}")?;
+        }
+        f.write_str(") (input-delivery")?;
+        if let Some(destination) = &self.input_delivery {
+            write!(f, " {destination}")?;
+        }
+        f.write_str(") (ordinary")?;
         if let Some(ordinary) = &self.ordinary {
             write!(f, " {ordinary}")?;
         }
@@ -482,6 +608,9 @@ mod tests {
             arms: &[],
             destination: Destination::Contextual(ContextualTail { depth: 3 }),
             ordinary: None,
+            search: None,
+            probe: None,
+            input_delivery: None,
             state: State::Condition,
             branches: vec![(
                 Some(condition),

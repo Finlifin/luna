@@ -5364,6 +5364,7 @@ impl Checker<'_, '_> {
                                 | crate::calls::InputContext::NormalTuple { .. }
                                 | crate::calls::InputContext::Record(_)
                                 | crate::calls::InputContext::Nominal { .. }
+                                | crate::calls::InputContext::ErrorResult { .. }
                                 | crate::calls::InputContext::Callable(_)
                         )
                     )
@@ -5381,21 +5382,6 @@ impl Checker<'_, '_> {
         )
     }
 
-    fn optional_branch_context(
-        &mut self,
-        span: Span,
-        context: &crate::calls::InputContext,
-        count: usize,
-        mut check: impl FnMut(&mut Self, usize) -> Result<n::Expr, Error>,
-    ) -> Result<Option<Term>, Error> {
-        let mut search = branch_probes::Search::new(self, context, count, span);
-        while let Some(request) = search.next(self)? {
-            let probe = branch_probes::Probe::begin(self, span, request)?;
-            let value = check(self, request.index);
-            search.observe(probe.finish(self, value)?);
-        }
-        Ok(search.result())
-    }
     fn generic_call(
         &mut self,
         expr: &Expr<'_>,
@@ -5817,6 +5803,7 @@ impl Checker<'_, '_> {
                             | crate::calls::InputContext::NormalTuple { .. }
                             | crate::calls::InputContext::Record(_)
                             | crate::calls::InputContext::Nominal { .. }
+                            | crate::calls::InputContext::ErrorResult { .. }
                     )
                 {
                     checked[index] =

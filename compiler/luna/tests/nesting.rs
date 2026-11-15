@@ -39,6 +39,19 @@ fn nested_expression_child() {
             });
             format!("fn run()->bool {{ let value: bool = {body}; not value }}")
         }
+        "partial-arms" => {
+            let body = (0..32).fold("byte()".to_owned(), |body, index| match index % 3 {
+                0 => format!("when {{ false => null, else => {body} }}"),
+                1 => format!("false match {{ true => null, false => {body} }}"),
+                _ => format!("if false {{ null }} else {{ {body} }}"),
+            });
+            format!(
+                "fn byte() -> u8 {{ 9 }}
+                fn keep(value: ?T) -> ?T where T {{ value }}
+                fn is_byte(value: ?T) -> bool where T {{ T == u8 }}
+                fn run() -> bool {{ let value = keep({body}); is_byte(value) }}"
+            )
+        }
         "not" => format!(
             "fn run()->bool {{{}true{}}}",
             "not (".repeat(32),
@@ -177,6 +190,11 @@ fn nested_when_preserves_return_through_the_pipeline() {
 #[test]
 fn nested_match_preserves_return_through_the_pipeline() {
     check_cases(&["match"]);
+}
+
+#[test]
+fn nested_partial_arm_probes_survive_frontend_and_execution() {
+    check_cases(&["partial-arms"]);
 }
 
 fn check_cases(cases: &[&str]) {

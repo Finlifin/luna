@@ -807,6 +807,10 @@ fn partial_branch_search_prefers_typed_evidence_after_nested_missing_inputs() {
         "if false { do { let local = true; if local { null } else { null } } } else { do { byte() } }",
         "false match { true => null, false => byte() }",
         "false match { true => do { let local = true; local match { true => null, false => null } }, false => byte() }",
+        "when { false => 1, else => byte() }",
+        "when { false => do { let local = true; local match { true => null, false => null } }, else => byte() }",
+        "false match { true => when { false => null, else => null }, false => do { byte() } }",
+        "if false { when { false => null, else => null } } else { when { false => 1, else => byte() } }",
     ] {
         check_both(
             &format!(
@@ -831,6 +835,12 @@ fn partial_probe_recovery_does_not_hide_errors_or_publish_branch_locals() {
         "if false { do { let private_value: bool = true; null } } else { private_value }",
         "if false { do { let invalid: bool = 9; null } } else { true }",
         "if false { do { true match { true => null } } } else { true }",
+        "when { false => do { let private_value: bool = true; null }, else => private_value }",
+        "true match { false => do { let private_value: bool = true; null }, true => private_value }",
+        "when { false => do { let invalid: bool = 9; null }, else => true }",
+        "true match { false => do { let invalid: bool = 9; null }, true => true }",
+        "when { false => null, else => true match { true => null } }",
+        "true match { true => when { false => null, else => true match { true => null } } }",
     ] {
         let source = format!(
             "fn keep(value: ?T) -> ?T where T {{ value }}
@@ -839,6 +849,115 @@ fn partial_probe_recovery_does_not_hide_errors_or_publish_branch_locals() {
         let failure = sysroot::compile(&source).expect_err("invalid branch must be checked");
         assert!(!failure.contains("parsing failed"), "{failure}");
         assert!(!failure.contains("budget exhausted"), "{failure}");
+    }
+}
+
+#[test]
+fn partial_arm_probes_keep_type_facts_private_and_preserve_execution_order() {
+    for body in [
+        "when { T != bool => null, else => do { let flag: bool = value; mark(flag) } }",
+        "T match { 'bool => do { let flag: bool = value; mark(flag) }, _ => null }",
+        "when { T != bool => null, else => T match { 'bool => mark(value), _ => null } }",
+    ] {
+        check_both(
+            &format!(
+                "comptime fn keep(value: ?T) -> ?T where T {{ value }}
+                comptime fn mark(value: bool) -> bool {{ value }}
+                comptime fn select(value: T) -> bool where T {{
+                    let result = keep({body});
+                    result match {{ flag? => flag, null => false }}
+                }}
+                comptime fn check() -> bool {{ select<bool>(true) }}"
+            ),
+            &["check", "select", "mark", "keep"],
+        );
+    }
+    for body in [
+        "when { T != bool => null, else => true }",
+        "T match { 'bool => true, _ => null }",
+    ] {
+        let source = format!(
+            "fn keep(value: ?T) -> ?T where T {{ value }}
+            fn choose(value: T) -> bool where T {{
+                let result = keep({body});
+                let flag: bool = value;
+                flag
+            }}"
+        );
+        let failure = sysroot::compile(&source).expect_err("probe facts must not escape the arms");
+        assert!(failure.contains("type mismatch"), "{failure}");
+    }
+}
+
+#[test]
+fn partial_arm_probes_preserve_error_delivery_after_domain_selection() {
+    for body in [
+        "if fail { error true } else { byte() }",
+        "when { fail => error true, else => byte() }",
+        "fail match { true => error true, false => byte() }",
+        "when { fail => error true, else => false match { true => error false, false => byte() } }",
+        "fail match { true => error true, false => when { false => error false, else => byte() } }",
+    ] {
+        for fail in [false, true] {
+            let source = format!(
+                "comptime fn keep(value: !bool T) -> !bool T where T {{ value }}
+                comptime fn byte() -> u8 {{ 9 }}
+                comptime fn select(fail: bool) -> bool {{
+                    let result = keep({body});
+                    is_byte(result)
+                }}
+                comptime fn is_byte(value: !bool T) -> bool where T {{
+                    T == u8 and (value match {{ _! => true, error flag => flag }})
+                }}
+                comptime fn check() -> bool {{ select({fail}) }}"
+            );
+            let calls: &[&str] = if fail {
+                &["check", "select", "keep", "is_byte"]
+            } else {
+                &["check", "select", "byte", "keep", "is_byte"]
+            };
+            check_both(&source, calls);
+        }
+    }
+}
+
+#[test]
+fn partial_arm_probes_restore_return_targets_and_reject_foreign_error_rows() {
+    for body in [
+        "when { flag => do { return true; null }, else => byte() }",
+        "flag match { true => do { return true; null }, false => byte() }",
+    ] {
+        check_both(
+            &format!(
+                "comptime fn keep(value: ?T) -> ?T where T {{ value }}
+                comptime fn byte() -> u8 {{ 9 }}
+                comptime fn select(flag: bool) -> bool {{
+                    let result = keep({body}); false
+                }}
+                comptime fn check() -> bool {{ select(true) }}"
+            ),
+            &["check", "select"],
+        );
+    }
+    for body in [
+        "if true { error failure } else { true }",
+        "when { true => error failure, else => true }",
+        "true match { true => error failure, false => true }",
+    ] {
+        let source = format!(
+            "fn keep(value: !bool T) -> !bool T where T {{ value }}
+            fn run() -> bool {{
+                let failure: u8 = 7;
+                let result = keep({body}); true
+            }}"
+        );
+        let failure = sysroot::compile(&source).expect_err("foreign error row must be rejected");
+        assert!(!failure.contains("parsing failed"), "{failure}");
+        assert!(!failure.contains("budget exhausted"), "{failure}");
+        assert!(
+            failure.contains("type mismatch: expected (primitive bool), found (primitive u8)"),
+            "{failure}"
+        );
     }
 }
 

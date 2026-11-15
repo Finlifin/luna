@@ -9,6 +9,7 @@ use ordinary::Ordinary;
 enum State {
     Ready,
     Selector,
+    Inferring(n::Expr, branch_probes::Search),
     Arms(n::Expr),
     Body(n::Expr, n::Pattern),
     Complete,
@@ -18,6 +19,8 @@ pub(super) struct Frame<'b, 'h> {
     source: &'b Expr<'h>,
     destination: Destination,
     ordinary: Option<Ordinary>,
+    probe: Option<branch_probes::Probe>,
+    input_delivery: Option<Destination>,
     state: State,
     arms: Vec<(n::Pattern, CheckedBlock)>,
     scope: Option<LexicalScope>,
@@ -47,6 +50,8 @@ impl<'b, 'h> Frame<'b, 'h> {
             source,
             destination: Destination::Contextual(ContextualTail { depth }),
             ordinary: None,
+            probe: None,
+            input_delivery: None,
             state: State::Ready,
             arms: Vec::new(),
             scope: None,
@@ -70,11 +75,19 @@ impl<'b, 'h> Frame<'b, 'h> {
             .required_steps
             .checked_sub(1)
             .ok_or_else(|| error(source.span, "match checking budget exhausted"))?;
-        let ordinary = Ordinary::new(checker, source, own_effect_delivery)?;
+        let input_delivery = (own_effect_delivery && destination.structural_input().is_some())
+            .then(|| destination.clone());
+        let ordinary = Ordinary::new(
+            checker,
+            source,
+            own_effect_delivery && input_delivery.is_none(),
+        )?;
         Ok(Self {
             source,
             destination,
             ordinary: Some(ordinary),
+            probe: None,
+            input_delivery,
             state: State::Ready,
             arms: Vec::new(),
             scope: None,
@@ -90,33 +103,12 @@ impl<'b, 'h> Frame<'b, 'h> {
         let H::Match(_, arms) = self.source.kind else {
             unreachable!()
         };
-        if let Some(view) = self.destination.ordinary_view() {
-            if view.expected.is_none() {
-                if let Some(context) = view.input {
-                    let inferred = checker.optional_branch_context(
-                        self.source.span,
-                        context,
-                        arms.len(),
-                        |checker, index| {
-                            let arm = &arms[index];
-                            let pattern = checker.match_arm_pattern(arm, &value)?;
-                            checker.under_matched_pattern_type_facts(
-                                &pattern,
-                                &value,
-                                arm.body.span,
-                                |checker| checker.input_context_expression(arm.body, context),
-                            )
-                        },
-                    )?;
-                    if let Some(inferred) = inferred {
-                        self.destination = self.destination.with_expected(
-                            checker,
-                            Some(&inferred),
-                            self.source.span,
-                        )?;
-                    }
-                }
-            }
+        if let Some(context) = self.destination.structural_input() {
+            self.state = State::Inferring(
+                value,
+                branch_probes::Search::new(checker, context, arms.len(), self.source.span),
+            );
+            return Ok(());
         }
         self.state = State::Arms(value);
         Ok(())
@@ -130,6 +122,9 @@ impl<'b, 'h> Frame<'b, 'h> {
         let H::Match(selector, arms) = self.source.kind else {
             unreachable!("validated match frame")
         };
+        if matches!(self.state, State::Inferring(..)) {
+            return self.advance_search(checker, returned);
+        }
         let state = std::mem::replace(&mut self.state, State::Complete);
         match (state, returned) {
             (State::Ready, None) => {
@@ -228,6 +223,81 @@ impl<'b, 'h> Frame<'b, 'h> {
         }
     }
 
+    fn advance_search(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        returned: Option<CheckedBlock>,
+    ) -> Result<Step<'b, 'h>, Error> {
+        if let Some(probe) = self.probe.take() {
+            // Type facts leave before the checkpoint restores the candidate.
+            if let Some(premise) = self.premise.take() {
+                premise.leave(checker);
+            }
+            let result = returned
+                .ok_or_else(|| error(self.source.span, "match probe child is missing"))
+                .and_then(|value| value.ordinary(self.source.span));
+            let result = probe.finish(checker, result)?;
+            let State::Inferring(_, search) = &mut self.state else {
+                unreachable!()
+            };
+            search.observe(result);
+        } else if returned.is_some() {
+            return Err(error(
+                self.source.span,
+                "match search received an unsolicited child",
+            ));
+        }
+        let State::Inferring(value, search) = &mut self.state else {
+            unreachable!()
+        };
+        if let Some(request) = search.next(checker)? {
+            self.probe = Some(branch_probes::Probe::begin(
+                checker,
+                self.source.span,
+                request,
+            )?);
+            let H::Match(_, arms) = self.source.kind else {
+                unreachable!()
+            };
+            let arm = &arms[request.index];
+            let pattern = checker.match_arm_pattern(arm, value)?;
+            self.premise =
+                Some(checker.enter_matched_pattern_type_facts(&pattern, value, arm.body.span)?);
+            Ok(Step::Child(Request::Expression(
+                arm.body,
+                self.destination.clone(),
+            )))
+        } else {
+            let State::Inferring(value, search) =
+                std::mem::replace(&mut self.state, State::Complete)
+            else {
+                unreachable!()
+            };
+            if let Some(inferred) = search.result() {
+                self.destination =
+                    self.destination
+                        .with_expected(checker, Some(&inferred), self.source.span)?;
+            }
+            self.state = State::Arms(value);
+            Ok(Step::Continue)
+        }
+    }
+
+    pub(super) fn recover_probe(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        failure: Error,
+    ) -> Result<(), Error> {
+        let Some(probe) = self.probe.take() else {
+            return Err(failure);
+        };
+        if let Some(premise) = self.premise.take() {
+            premise.leave(checker);
+        }
+        probe.finish(checker, Err(failure))?;
+        Ok(())
+    }
+
     fn finish(
         &mut self,
         checker: &mut Checker<'_, '_>,
@@ -270,6 +340,15 @@ impl<'b, 'h> Frame<'b, 'h> {
                 arms,
             })
         };
+        let result = if let Some(destination) = &self.input_delivery {
+            CheckedBlock::Ordinary(destination.deliver_input(
+                checker,
+                result.ordinary(self.source.span)?,
+                self.source.span,
+            )?)
+        } else {
+            result
+        };
         Ok(Step::Completed(result))
     }
 
@@ -293,6 +372,10 @@ impl<'b, 'h> Frame<'b, 'h> {
     }
 
     pub(super) fn unwind(mut self, checker: &mut Checker<'_, '_>) {
+        debug_assert!(
+            self.probe.is_none(),
+            "finish the attempt before leaving its frame"
+        );
         self.leave_arm(checker);
         if let Some(ordinary) = self.ordinary {
             ordinary.unwind(checker);
@@ -312,6 +395,9 @@ impl std::fmt::Display for Frame<'_, '_> {
         match &self.state {
             State::Ready => f.write_str("(phase ready)"),
             State::Selector => f.write_str("(phase selector-child)"),
+            State::Inferring(value, search) => {
+                write!(f, "(phase inferring) (selector {value}) {search}")
+            }
             State::Arms(value) => write!(f, "(phase arms) (selector {value})"),
             State::Body(value, pattern) => write!(
                 f,
@@ -319,7 +405,15 @@ impl std::fmt::Display for Frame<'_, '_> {
             ),
             State::Complete => f.write_str("(phase complete)"),
         }?;
-        f.write_str(" (arms")?;
+        f.write_str(" (probe")?;
+        if let Some(probe) = &self.probe {
+            write!(f, " {probe}")?;
+        }
+        f.write_str(") (input-delivery")?;
+        if let Some(destination) = &self.input_delivery {
+            write!(f, " {destination}")?;
+        }
+        f.write_str(") (arms")?;
         for (pattern, body) in &self.arms {
             write!(f, " (arm {pattern} {body})")?;
         }
@@ -363,6 +457,8 @@ mod tests {
             source: &expr,
             destination: Destination::Contextual(ContextualTail { depth: 5 }),
             ordinary: None,
+            probe: None,
+            input_delivery: None,
             state: State::Body(value, n::Pattern::Wild),
             arms: Vec::new(),
             scope: None,

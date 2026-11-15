@@ -229,8 +229,8 @@ Waiting 与 Unresolved 不混用。没有就绪任务时，先区分外部请求
 
 | 入口 | 已有责任 | 未完成部分 |
 | --- | --- | --- |
-| `elaboration/src/program/block_regions/driver.rs` 与 `driver/region.rs` | 普通、contextual、部分结构输入共用 Region；帧栈、子请求及返回值由逐步状态持有，同步入口只负责驱动 | 仍使用原活动 Checker，没有可移交的外部等待权限；模式／guard 子检查及部分 when／match 的预探测仍同步 |
-| `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；when／match 的部分输入候选域共用适配 | 不提供执行前缀恢复；部分 when／match 的候选域预探测仍同步 |
+| `elaboration/src/program/block_regions/driver.rs` 与 `driver/region.rs` | 普通、contextual、部分结构输入共用 Region；帧栈、子请求及返回值由逐步状态持有，同步入口只负责驱动 | 仍使用原活动 Checker，没有可移交的外部等待权限；模式／guard 子检查仍同步 |
+| `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；if／when／match 帧持有搜索位置与当前事务 | 不提供执行前缀恢复或外部 Type 等待 |
 | `elaboration/src/program/dependent_inputs/tasks.rs` | 参数域、默认引用和默认值完成的显式后继 | 源码子检查和 required 求值仍同步 |
 | `elaboration/src/program/declaration_inputs/progress.rs` | producer、身份、检查次序与源码 schedule 分开 | Typed 路径仍要求普通完整 Expr，Contextual 仍保留 NormalFormArgument |
 | `elaboration/src/program/dynamic_instances.rs` | callable packet 保留实际 producer、静态身份与 pending 集合 | 签名仍提及 pending 参数时直接拒绝发布 |
@@ -327,9 +327,12 @@ Block 作用域，源码未选中的分支仍检查；这不是提前执行条�
 模式、条件、局部初始化及值构造的子观察尚未全部帧化，不能据此声称全前端已消除
 递归。参考树解释器另有 64 层宿主递归保护，深层源码验收与双引擎对照分别标明范围。
 
-部分输入上下文仍用共同 `optional_branch_context` 有界探测来取得候选域，其内部
-子检查尚未帧化；最终条件和主体则交给 when 帧。本步不改变外部 Type 等待、源码
-activation 或模板发布的未完成状态。
+部分输入上下文的候选域搜索与最终检查现在共用 when 帧。搜索仍采用
+`branch_probes::Search` 的原有次序：先寻找有类型证据的分支，再按允许的数字
+默认策略重试。每个候选持有独立 Probe，在交出第一个条件前保存检查事务；其前序
+条件提供负前提，本候选条件提供正前提，条件和主体都通过 Region 交还结果。
+候选完成后回滚探测私有状态，只将取得的类型证据交给后续正式检查。缺少上下文
+允许继续搜索；域错误、预算错误与恢复失败向外传播。
 
 普通与 contextual match 的 selector 和主体现在都交给 `matches::Frame`；原
 `pattern_checking/matches.rs` 的普通同步循环已删除，仅保留共同模式／guard 与
@@ -351,8 +354,12 @@ staged 描述；对外层写入造成的输入事实失效仍按共同词法边�
 义务。S-expression dump 区分 selector、当前 pattern、已完成 arms、inline 绑定
 和待恢复的 scope。
 
-部分 match 的候选域搜索仍在取得 selector 后经同步 `optional_branch_context`
-进行；模式、guard、inline 模式选择与绑定物化也还没有可移交的外部等待后继。
+部分 match 在取得一次受检 selector 后进入帧内搜索，保留 selector、搜索位置、
+当前 Probe 与匹配前提。候选主体返回或失败时，先撤销匹配前提，再消费事务。
+`optional_branch_context` 同步闭包循环已删除，嵌套部分输入 when／match 直接进入
+同一 Region。即使候选证据补齐了 expected，帧仍保留原结构输入的错误结果交付
+边界，不能在搜索完成后丢失或重复注入错误行。
+模式、guard、inline 模式选择与绑定物化仍没有可移交的外部等待后继。
 把 selector/主体移入 Region 不等于打通普通源码与 VM 的交织挂起，两个待定 Type
 正例仍待其共同前置能力。匹配事实的进入／退出仍复用统一服务，没有另造帧专用的
 类型事实规则。
@@ -958,6 +965,54 @@ match 迁移发现的失败为 `normal_record_defaults_follow_evaluated_value_pr
 本阶段修改 Rust 文件的定向 rustfmt `--check` 退出 0，
 `/tmp/luna-tools-s88klgjl/result.json`；`git diff --check` 通过。没有修改 docs 或
 其他既有工作区改动，也没有放宽资源、覆盖或模式准入规则。
+
+#### 部分输入分支的探测后继与错误行上下文
+
+`when` 的 ProbeCondition／ProbeBody 和 `match` 的 Inferring 状态现保留子检查
+之后的位置；失败沿 Region 退出内部帧后，由最近的 Probe 消费并恢复。正式 arm
+与探测 arm 共用源规则，没有候选专用的表达式解释器。原有搜索预算和 numeric
+默认策略保留；词法与存储回滚不退还已消耗的检查工作。
+
+新增错误结果用例发现一项入口遗漏：`argument_attempt_with_input` 及普通调用的
+候选重试筛选没有包含 `InputContext::ErrorResult`。于是 `!bool T` 的实参分支在
+T 未定时进入无目标检查，首个 `error true` 的 NoReturn 成功域成了后续分支目标，
+合法的 u8 成功分支被拒绝。两处入口现与已有结构输入规则对齐，将已知错误行和
+待定成功域交给共同检查；不更改错误结果 ABI、错误行允许范围或类型相等规则。
+
+工作目录 `/home/fin/luna`。在临时采用 `a61a15f7` 的四个对应生产文件时执行
+`python3 -B development/check.py --timeout 900 -- test -p luna --test contextual_input_regions -- partial_arm_probes_preserve_error_delivery_after_domain_selection --exact --test-threads=1`，
+`/tmp/luna-tools-kh08lb7z/result.json` 退出 101，复现同一 incompatible-success-type：
+输入 u8，目标 `!bool NoReturn`。随后逐字节恢复本阶段四个文件。这证明该错误先于
+探测帧迁移存在；修复的是实际调用路径，不把拒绝固化为测试预期。
+
+首批新增测试 `/tmp/luna-tools-qu8s99cf/result.json` 退出 101：错误行入口失败如上；
+另一项是测试把错误成功模式 `flag!` 写到了可选值上，已按语言规则改为 `flag?`。
+同轮候选切换、拒绝用例及 32 层混合分支 AST/HIR/NIR 和 runtime 检查通过。
+修正入口后的两个新增行为测试以
+`python3 -B development/check.py --timeout 900 -- test -p luna --test contextual_input_regions -- partial_arm_probes --test-threads=1`
+通过，`/tmp/luna-tools-32hroree/result.json` 退出 0，覆盖三组类型前提和五组错误
+结果分支的成功／失败路径，两引擎精确调用次序保持一致。
+
+扩大回归使用 `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test contextual_input_regions --test inline_control --test error_surface --test nesting --no-fail-fast -- partial_ block_regions when match --test-threads=1`：
+`/tmp/luna-tools-jlu3vfj1/result.json` 退出 101，86 项通过，1 项失败。该失败在新增
+拒绝测试的诊断文字断言：实际已拒绝 u8 错误载荷，报告 expected bool／found u8，
+却不含断言要求的单词 error。将测试改为核对具体类型冲突，不修改生产诊断或准入。
+定向重跑 `partial_arm_probes_restore_return_targets_and_reject_foreign_error_rows`
+（同一 check.py 入口，`--exact --test-threads=1 --nocapture`），
+`/tmp/luna-tools-9tig0mpn/result.json` 退出 0；提前返回仍跳过 byte 和 keep，三种
+分支中的外来错误行均被拒绝。
+
+补入分支外使用探测前提的拒绝例后，定向重跑
+`partial_arm_probes_keep_type_facts_private_and_preserve_execution_order`，
+`/tmp/luna-tools-8klnnejb/result.json` 退出 0，证实 when 的负前提与 match 的
+类型模式前提不会扩大外层泛型值的权限。修改 Rust 文件的最终定向 rustfmt
+`--check`（通过 `development/command.py --timeout 120`）退出 0，
+`/tmp/luna-tools-m6pirfbu/result.json`；`git diff --check` 通过。
+最后以 `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test library_std --test library_std_format --no-fail-fast -- --test-threads=1 --nocapture`
+复核错误结果入口和公开库路径，`/tmp/luna-tools-8pzt0wr3/result.json` 退出 0：
+121 项错误结果、14 项 std 宿主、4 项格式扫描测试通过。覆盖错误传播、writer
+借用、描述符清理、跨阶段构造与原生输出，不代表完整格式化变参接口已经实现。
+此处不把未完成的外部 Type 等待计作交付；docs 与其他既有工作区改动保持原样。
 
 #### 声明默认代码与调用前缀的交接
 
