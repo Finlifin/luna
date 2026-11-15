@@ -1,183 +1,77 @@
-# 对 2026-11-11 晚报的回复
+# 审查报告回复：当前判断与历史依据
 
-核对对象：`ai_dev_logs/comptime_type_vm_divergence_report_2026-11-11_evening.md`。
-报告主体基线是 `a00e221f`，附录推进至 `bfe8221c`；本回复在 2026-11-12
-整体核对至 `4937d332`，后续局部迁移与旧问题复查推进至 `9e3509d7`。
-保留原报告，不把不同基线的事实混成一次测量。
-formatter 由另一位开发者负责，本次未修改 `compiler/fmt` 及其依赖。
+2026-11-15 核对至 `3fd323ca`，工作分支 dev。本轮主要对照
+`ai_dev_logs/comptime_type_vm_divergence_report_2026-11-12_evening.md`
+（报告基线 `3fba208b`），并保留 11-11 晚报的有效纠正与具体取证。
+报告用于发现偏差，语言依据仍是作者确认与正式 docs；本轮不修改 docs。
 
-在 `9e3509d7` 上补查公开 callable 接口：局部依赖绑定改名与公开收集入口改名
-目前都得到相同 Type，真实 sysroot 的两个观察入口均返回 true；具名完整供应的
-原复现则仍被拒绝。这支持报告关于接口信息缺失的判断，但**不支持把现有相等
-结果当作公开名字可互换的语言保证**。已补齐 Head 元数据、PTC 构造子与模型、
-trait 索引及关联重建、两条 VM／冻结值准入链和 wire 的共同迁移边界。
-CodeSession 已按实际不可变 world 隔离，不能把接口缺失误报为已有跨世界缓存
-污染。源码位置、命令和结果见
-[接口身份](callable-input-interfaces.md#接口关系不能由现有-term-相等代替)及
-[消费者](callable-input-interfaces.md#必须随载体迁移的消费者)。
-此轮补充是审计和设计收敛，没有改变编译器行为，也没有完成动态具名调用。
+原引言持续追加不同基线的迁移记录，容易把历史失败、当前接线和目标设计混为一谈。
+现收敛为下面的当前判断；后面的编号 1–4 节是旧基线的取证及纠正，不能把其中
+“本次”“当前”当成 11-15 新执行结果。被删的过程性引言可从 Git 历史查看，
+重要技术结论与证据入口保留在对应专题。解析器、格式器与编辑器的独立交付不算作
+本主线的 Type 恢复、源码执行或库接口完成。
 
-随后沿同一主线迁移了其下层绑定机制：源码依赖函数类型和 NF 元数据共用有界
-telescope 构造，公开 NF 绑定直接借用参数域，退役为取得签名而复制整个 Head 的
-路径。VM、类型解析、阶段检查和 materialization 使用调用者额度；阶段检查不再
-吞掉构造失败。公开参数名和默认供应协议仍未传送，详见
-[共同 telescope 构造](callable-input-interfaces.md#已接通共同的声明-telescope-构造)。
-作者随后明确允许公开入口按槽位适配：同域的 `...Items` 实现可交付到 `...Es`
-目标接口，调用入口和默认供应由目标接口决定。这不从当前名字被擦除的 Type
-相等结果推导，也不取消域、阶段、责任和契约检查；相应适配尚待实现。
+## 当前报告结论的处理
 
-共同参数构造验证暴露的默认参数深度基线崩溃现已修复：通用遍历器先完成回调，
-再由独立函数展开子节点，避免每层词法重入保留大型结构分派栈帧。预算、深度、
-遍历次序和捕获检查均保持；固定 2 MiB 回归及原阶段检查用例通过。实现与最终
-447 项无过滤验证见[回调栈边界](solvers-resources-and-lowering.md#83-词法分析回调与通用遍历器的栈边界)。
+11-12 报告已经纠正了四类口径问题：共用 Value::Pointer 不等于 comptime 指针；
+接口契约与声明契约的执行路径要分别核对；Atom 枚举数不是类型命题覆盖率；
+builtin.math 与 meta.math 是作者要求的不同阶段接口。继续采用这些纠正，不再把
+旧报告中相反的说法当作待实施任务。
 
-在 `6a564ae5` 上再次执行两个原有 ignored 正例，仍在待定签名与元素域处失败，
-未抵达通用源执行恢复。现将状态协议第 4 节收敛为当前生产职责、交接目标与验收，
-删除被后续迁移取代的过程记录；历史验证与本轮失败证据分别保留。新明确的准入
-边界是：callee 形成期间的 Type 生产者由调用者源区域执行，不能先进入尚未形成
-签名的目标 invocation。接口、调用准备、已进入 activation 与可执行主体是不同
-完成点；详见[父区域与 callee](elaboration-state-and-publication.md#父区域与待形成-callee-分开)
-和[本轮复核](elaboration-state-and-publication.md#纵向交付与验证证据)。本次未修改
-编译器，也没有据文档整理宣称待定输入已经可用。
+| 报告维度 | 当前源码证据与处理 | 对应目标／限制 |
+| --- | --- | --- |
+| D01：字节码与参考执行 | `bytecode.rs::invocation_code` 传播编译错误；`invocation/contracts.rs` 用 Entry/Body/Exit 推进声明契约。`bytecode_invocation_available` 仍有 phase、cleanup 与 effect 门控 | 保留共同语义；受限路径和完整 NIR 依赖仍在，不称为无树载体的完整 VM |
+| D02：世界与复用 | `6895cdd7` 让 source invocation 借用原声明包，以 `SourceDispatch::instances` 隔离已选实例；CLI 不再为移除实例表而复制整包，原 CodeSession 可以保留 | 不等于共享活动 Interpreter、缓存任意调用结果或完成增量 query；见[声明视图](world-storage-and-lifetimes.md) |
+| D03：源码交织 | 块、if、contextual when/match 及比较已保留检查后继；两个待定 Type 正例本轮仍失败 | 当前帧仍同步，不能与可挂起的 VM 宿主请求混称；见下节及[交接协议](elaboration-state-and-publication.md#实际调用链与替换边界) |
+| D04：公开 callable 输入 | 共同路由与 telescope 已接通；`normal.rs` 的动态 NF 具名供应仍报 positional-only 缺口 | 作者已允许按槽位适配，入口名字与默认供应由目标接口决定；[接口迁移](callable-input-interfaces.md)仍需跨 Type、值、世界与 wire 接通 |
+| D05：NF 与普通值 | 聚合索引字段查询和抽象错误结果恒等交付已有修复；这没有退役 Role／BuiltinCallable 的专用职责 | 不透明头、普通 comptime 参数和值准入必须共同迁移；不能从布局视图反推 NF 等式，见[值准入](comptime-value-admission.md) |
+| D06–D08：runtime 类型 | TypeRef 的现有 IIR 消费者仍用空 substitution；抽象 BitVec 位宽在形成边界仍明确拒绝。新增解析／排版支持不是 lift 的语义接线 | TypeCore、环境取得、lift、符号布局及消费端尚需共同迁移，见[类型引用与环境](type-references-and-environments.md) |
+| D09：PTC | `integer::State` 的增量差分图应保留；`model_search::witness` 仍在遇到 Trait atom 时返回无见证 | Type 模型搜索不能借任意 EUF 代表充数；联合理论与模型重放仍未完成，见[理论证据](type-models-and-theory-evidence.md) |
+| D10：query | `middle::Providers` 和 QueryCaches 仍只登记 hir_package | 声明级按需 elaboration、跨会话依赖与产物失效不是 CodeSession 的别名；见[查询与构建交付](build-and-artifact-delivery.md) |
+| D11：CMTT 与构造 | 已有 Splice、quote 阶段边界与源字段观察；11-12 之后的片段检查迁移没有补齐通用 builder、宏或外部 ABI | 同步维护[跨阶段值交付](runtime-value-delivery.md)，不拿具体 quote 成功掩盖普通 comptime 参数交付缺口 |
+| D12：库与宿主 | `std` 已有 Linux 文件／字节 I/O、Layout、Display 输出和 FormatPlan 扫描；`memory::pointer_input_layout` 仍明确拒绝没有来源交付的 str | 动态文本、分配器及完整格式化尚未完成。`println` 必须消费 `defer std.fmt.Parse(format)`；scanner 与单值输出不能替代它 |
 
-截至 `27fdc94f` 的再次核对补充两项当前事实，原报告不改写：
+11-12 报告的代码量、变体数和通过数量只属于其记录的基线，不重新加总为完成率。
+对缺口采用具体消费者和失败行为，而不沿用“0%”一类超出证据范围的总体判断。
+例如有 TypeRef 数据结构与闭合消费者，不证明 runtime 环境取得已完成；有待决
+注解的定义检查，也不证明任意源码执行区域已经能够恢复。
 
-- D11/D12 的“Splice 缺席、std 空壳”已过时：builtin 现有普通标量的 Splice 实现，
-  std 已有经过资源检查的 Linux 宿主接口。runtime str 来源、通用外部 ABI、allocator
-  和完整格式化仍未完成；基础 Display/ByteWriter 现已迁回 builtin，std 提供实现
-  与同身份再导出，阶段文本重建与更完整的写入契约仍待接通，见
-  [格式化边界](libraries-and-delivery.md#5-格式化与-writer)。不能把 Linux 专用 intrinsic
-  误称为 `attrs.abi` 已实现。
-- D01 中“接口契约必然逃回树解释器”不再符合当前路径：bytecode_interface 交付的
-  检查进入 Session 的普通 Execution 调度，能够编译且满足 VM 准入门控时形成字节码
-  帧；其余仍可走既有 fallback。源码模板仍存在，这不是无 AST 的完整 VM。
-  此次进一步删除了列表/Object 字面量选择器的 Arc<Expr> 载体，接入既有稳定常量表；
-  实际执行仍复用共同 literal 语义，不扩张选择器借用资格。范围、验证和剩余载体见
-  [借用读取常量](values-staging-and-publication.md#已清理借用读取的字面量载体)。
+## 本轮复核与下一处交接
 
-`689d45c5` 工作区进一步复核 D11/D12：Splice 已存在且命名常量/显式调用的
-真实 sysroot 对照能运行，但普通 comptime 参数直接交付到不同 runtime 目标域
-仍被前端拒绝。下游 `iir::staging::wrap` 还会把存活参数读取恢复成 runtime Let，
-文本因此还涉及源阶段、目标来源与资源规则的共同迁移。不能把报告中“协议缺席”
-简单改为“跨阶段转换已完成”；新的源码锚点、成功/失败对照和退役条件集中在
-[runtime 值交付](runtime-value-delivery.md)。本次补充设计与证据，未改变编译器语义。
+在 `/home/fin/luna` 执行：
 
-在 `dec912f4` 上继续检查 CMTT 消费者，发现生成器内 `'(data)` 可以直接重建同域
-数据，跳过普通 Splice 的输出行为；固定字面量 quote 的成功不能为此授权。普通
-函数的 comptime 参数转交生成器还会报输入不可用，八步字节代码构造则耗尽当前
-前端准备额度。此处 build 的 `--fuel` 未传给前端独立额度，不把放大该参数后的
-同样失败当作规模测量。源码复现、阶段责任与实际命令见同一专题的 CMTT 补查。
+```text
+python3 -B development/check.py --timeout 900 -- test -p luna --test ordinary_callable_types --test ordinary_clause_collectors --no-fail-fast -- --ignored --test-threads=1
+```
 
-当前交付应按下面三条边界阅读，不能把前一条的完成推及后两条：
+`/tmp/luna-tools-_ylcsguu/result.json` 退出 101，两项正例均失败，未修改预期或 ignore：
 
-| 边界 | 已有证据与剩余工作 |
+| 正例 | 本轮实际诊断 |
 | --- | --- |
-| 输入供应路由 | `fc166abb`、`691f9a02`、`d6950e39` 已让普通实参、声明子句、Type 子句和相关 CMTT 提示消费者使用同一入口描述与游标，并删除独立的 `type_input_slot`。此层只决定供应到哪个槽，不证明值已取得或域已满足。 |
-| callable 公开接口传送 | `b360822f` 交付接口设计和真实 sysroot 复现。别名、选择和高阶返回之后，位置展开对照可执行，具名完整供应仍失败。公开入口、提供者与接收世界证据尚未随 callable 接口完整传送。 |
-| 源码检查与执行恢复 | 普通块和输入依赖已保存显式检查后继，但尚不能保留同一次源调用的活动执行前缀并恢复待定签名／域检查。两个既有合法正例仍未接通；不以任务栈或供应游标代替这项验收。 |
+| `computed_type_inputs_can_complete_a_dependent_callable_signature` | `159..181: comptime callable signature still depends on an invocation-time clause input` |
+| `pending_clause_domains_can_wait_for_a_type_producer` | `193..201: list literal requires an element type context` |
 
-前两条的具体源码链、命令及结果见
-[动态 NF 具名入口](#动态-nf-的具名入口已复现先补参数协议载体)与
-[接口传送设计](callable-input-interfaces.md)；第三条见
-[源码检查与执行交接](elaboration-state-and-publication.md)。这里汇总的是既有提交
-及其执行证据，本次没有重新运行这些检查，也不将 formatter 的独立进展计入语义修复。
+它们失败于源码准备，未进入所需的原区域 Type 响应交接。新的源码核对把断点明确为：
+`check_source_function` 必须先形成完整主体，`PreparedRequired` 必须先形成完整根，
+而 `prepare_invocation` 又从完成函数中取得 body。`InvocationProgress` 的现有宿主
+请求开始得太晚，不能直接接住完整根产生以前的检查等待。
 
-此前复查六项旧问题，2 项通过、4 项失败：动态名义子句值与嵌套 Type 转发已通过；
-一项失败是 TypeContractUnresolved 与旧 InvalidCallPlan 断言的差异，另三项仍在
-调用期输入或程序后置条件处失败。未修改测试预期，也未将这批局部通过计作架构
-完成。命令、位置及证据见[当前准入边界](comptime-value-admission.md#当前尚未完成的边界)。
-该文的 VM／声明域接线说明已按当前职责压缩，移除重复中间日志，并纠正 fresh
-phase 检查另开默认额度的过时描述；历史版本仍可从 Git 查阅。
+因此下一项实施必须共同改变声明接口／稳定模板交付、源检查后继与 VM 原区域的
+片段交接、实际 Type 结果的域与签名消费。不能在签名报错处另开一次 required
+invocation，不能给待决主体放空 Block，也不能重新执行 packet 取得已经产生的值。
+具体入口、数据所有者、借用期限、控制出口和 receipt 消费已收敛到
+[状态协议](elaboration-state-and-publication.md#实际调用链与替换边界)。
 
-截至 `bcbcd0bc`，普通块检查已经使用显式帧，普通调用参数的域依赖和默认值引用
-也已使用显式任务栈。后续 contextual 块亦接入同一块驱动，删除其独立语句循环；
-普通语句与待定尾值保存不同结果种类，共用帧栈的词法退出和受检子结果交接。
-块目标也已按共享预算取得区域私有副本，在嵌套帧间共享；不再借用调用者的目标
-上下文。普通与 contextual if 现也在同一栈保留条件、then 结果和分支事实退出，
-删除原递归检查路径；普通 if 复用原交付准备，并保留 inline／callee／effect 边界
-及区域拥有的 else 目标。部分结构输入的块／if 现已接入同一驱动；optional／error
-分支的探测位置、默认类型模式与当前 Attempt 由帧保留。错误先经过内部词法退出，
-再由最近的 Probe 恢复存储与检查状态；只有缺少上下文允许继续搜索，其余错误
-继续传播。when／match 共用探测协议，子分支仍经同步适配器检查。
-其它子规则与活动推断世界尚未迁移；这项内部回退不等于恢复已执行的源 activation。
-这些任务仍同步调用其余源码子检查与 required invocation；不具备
-一般源 activation 的挂起恢复。完整 callable 签名和待定 collector 域的两个正例
-仍未实现，不能把任务栈本身当作解除这两项限制的证据。具体交接与验证见
-[普通块帧](elaboration-state-and-publication.md#检查帧与探测)
-及[输入依赖任务](elaboration-state-and-publication.md#输入路由与域依赖)。
+此轮是源码复核与设计整理，未修改编译器、库或正式 docs；没有新增通过验收。
+工作区原有改动保持不动，以上执行不声称为干净 HEAD 的全量验证。
+前一轮比较迁移的验证另见[纵向交付证据](elaboration-state-and-publication.md#纵向交付与验证证据)，
+其通过不改变本轮两个失败结论。P3／值引用的另外两项 ignored 未在本轮重跑。
 
-R12 发布边界的后续核对还发现 required invocation 向 Checker 回传多条生成定义时
-可能部分写入：后项超预算，早先描述与构造器权限已可见，布局索引尚未同步。
-现已把全部可失败的传输预检放在接收方写入之前；原逻辑复现与 400 项针对性回归
-见[整批定义接收](elaboration-state-and-publication.md#已接入required-invocation-的整批定义接收)。
-这修复跨层接收原子性，尚不代表完整发布事务或调用期 Type 恢复已经完成。
+## 历史取证的阅读边界
 
-沿同一发布原则，VM 的 contextual 域准备现也先完成私有草稿，再交付执行表：
-后项错误或预算中断不再留下前项准备结果，NF 输入切换不再提前清空旧表。
-实际失败复现、重试与双引擎／真实 sysroot 验证见
-[域准备的完整结果交付](comptime-value-admission.md#域准备的完整结果交付)。
-这是现有域检查的局部原子性交付，不是源 activation 恢复或 NormalFormArgument 退役。
-
-沿同一交付链继续检查，发现 Checker 已接收的晚生成普通 enum／newtype 仍可能被
-最终 NIR 收集遗漏。现统一三类描述的补收与身份去重；真实 sysroot 的函数体局部
-newtype 构造可复现旧路径在 IIR 实例化时报缺少声明。详见
-[晚生成描述交付](elaboration-state-and-publication.md#已接入晚生成描述交付给后续-ir)。
-局部 Type 常量的 enum 成员曾因只接受语法类型头而误入字段或 Type 方法查询；
-现与普通／代码方法、关联项共享接收者域判断，保持命名空间优先级与普通值引用。
-这修复已完成 Type 的成员路由，尚不使待决身份提前完成。
-探测回滚的生成定义所有权尚未得到完整动态验证，不能据收集遗漏反推其正确或错误。
-
-完整包的声明世界仍有一条平行构造路径留在纯度分析：自建 Context 和 impl 索引
-绕开共同计量，布局复制未受调用者额度约束，逐项插入还重复使用初始额度。现已
-转接同一有界构造入口，保留本次分析的不可变缓存。完整计量暴露的真实 sysroot
-回归，进一步定位为资源子分析反复读取整包参数 sort 目录；现共享父分析的声明
-目录，各子分析仍独立建立行为证据，未扩大额度。对照与限制见
-[纯度声明世界](solvers-resources-and-lowering.md#71-纯度分析复用完整包的有界声明构造)。
-此修复不放宽 Copy 或 P3，也不代表泛型默认值缺口已经解决。
-
-同一审查进一步发现，flow 的三处声明域读取还把预算失败压成 `InvalidSignature`。
-现已共用有界域目录，保留结构错误与 `Unknown(BudgetExhausted)` 的区别；
-普通调用、trait 契约和捕获值沿同一规则消费声明证据。原实现的重复扫描与误诊
-反例见[程序契约声明域](solvers-resources-and-lowering.md#72-程序契约的声明域与失败分类)。
-
-继续核对发现，直接调用契约仍按定义端固定 sort 替换，遗漏了依赖域完成为 Type
-的情况。真实 sysroot 的 `admits<Type, u8>(true)` 已复现这个独立错误；现迁到同一
-有界声明域替换，保留调用者 scope 并在复制契约前计量，见
-[契约替换](solvers-resources-and-lowering.md#73-契约替换消费完成后的声明域)。
-
-纯度与拒绝行为扫描也存在相同固定 sort 分歧，已通过真实 sysroot 的 P4 拒绝复现
-并转接共同声明域替换。拒绝扫描保留有界的 owned 替换上下文，继续独立建立行为
-证据。资源分析中的 callable 输入、内存签名、返回 callable 和清理调用图也已迁到
-同一替换协议，退役 Metadata 的固定 sort binder 构造器。未生成 residual body 的
-声明用例和复制预算对照见上述契约替换节。Drop 选择、捕获契约再核对及字段投影
-现也保留完整声明域；借用 CallableProgram 只特化程序契约，避免先复制主体或
-整份契约。原选择器误拒 Type 值及超预算发布的对照见
-[Drop 契约准备](solvers-resources-and-lowering.md#74-drop-选择与捕获契约准备)。
-契约继承也已改为完整声明域的 owner 替换及整批准备，修复后项失败遗留前项和
-依赖方法顺序的错误弱化证明。共享预算耗尽保留 Unknown，原包和绑定游标不变；
-详见[契约继承发布](solvers-resources-and-lowering.md#43-契约继承的整批准备与发布)。
-各查询预算与整个 elaboration 事务的合并仍未完成，不能将局部交付描述为全线完成。
-随后的捕获证据审计复现了同一 index 内混用实现／实参及更换前提作用域仍被接受。
-Drop 现共享保留私有完整查询，正向选择和 NoCustomDrop 均保留作用域，条件支持
-重放交回实际预算；原方法／程序／访问检查继续执行。见
-[捕获查询证据](solvers-resources-and-lowering.md#75-捕获的-drop-查询证据与前提作用域)。
-
-另已按正式指针／资源语义核对上述检查中遗留的 handler 布局拒绝断言：它要求
-借用目标的 owner 必须 Copy 且不含指针，甚至没有让 handler 实际访问目标。
-这些是已被后续实现取代的阶段限制。现用实际访问、写回、清理次数及非法交付
-用例替换，未修改生产检查器。指针字段写入仍存在保守拒绝边界，不能称为完整
-逃逸分析；依据和执行证据见
-[Handler 借用检查](solvers-resources-and-lowering.md#51-handler-借用检查不要求-owner-可复制)。
-
-其回归暴露的 find_map 栈溢出已定位到最终程序契约分析的大型操作分派帧，现按
-操作职责隔离临时状态，保持原检查与求值次序。该用例及真实 sysroot 原生检查
-通过，但 counted-adapters 的另一处栈溢出和泛型 IntoIterator 的 UnvalidatedModel
-仍可在改动前二进制复现；详见[契约分析栈帧](solvers-resources-and-lowering.md#82-程序契约分析的操作栈帧)。
-这不是全链路 continuation 已完成，也不能用单一深度计数宣称宿主空间有界。
-
-报告第 7.4 节指出的三类根因成立：重复实现同一表达式语义、跨层值传送分散、
-生产证据未完整交付给消费者。下一阶段应按这些职责迁移，而不是追着行数、
-枚举变体数或测试通过数量继续增加局部分支。以下同时列出必须修正的审查判断。
+以下保留 11-11 晚报（主体 `a00e221f`、附录 `bfe8221c`）及后续对应提交的取证。
+既有链接和独有复现仍可定位；是否已修复须按上面的当前结论与对应专题判断。
+不要将旧命令的退出结果改写为本轮执行，或把尚未实现的语言特性改成预期拒绝。
 
 ## 1. 已过时或证据不足的结论
 

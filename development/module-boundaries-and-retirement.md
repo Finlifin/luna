@@ -7,7 +7,9 @@ middle 的旧类型子系统及关联包装也已退役；下文的现状表保�
 
 ## 1. 实际依赖与注释中的架构不同
 
-根 [Cargo.toml](../Cargo.toml)当前启用 26 个 workspace member。
+初始清理基线的根 [Cargo.toml](../Cargo.toml)启用 26 个 workspace member。
+11-15 在 `3fd323ca` 上直接读取 manifest 为 28 个，后续加入了 fmt 与 anar；
+下文的退役证据仍对应清理时的成员集合，不把后续工具变更计作旧 crate 退役。
 清理前 compiler 下另有 codegen、mir、mir_build、typeck 四个未启用的 manifest，
 它们仍引用不存在的 compiler/ty 路径。注释中的旧阶段图及被注释掉的 luna 条目
 不代表生产依赖；luna 已在活动成员中。这里仅核对 manifest，没有尝试构建停用 crate。

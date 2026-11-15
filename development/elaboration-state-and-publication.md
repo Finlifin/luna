@@ -509,6 +509,100 @@ loop id 穿过 Program。目标协议显式声明外部控制目标与需退出�
 NIR Function 继续代表已检查产物；不能给 body 塞占位表达式或活动源码句柄。
 源码服务分别持有接口与模板，活动任务归当前区域，完成片段才可进入执行器。
 
+#### 实际调用链与替换边界
+
+`3fd323ca` 上的生产链如下。箭头表示当前同步调用／数据依赖，不表示已经存在
+挂起请求；这里的 `check_source_function` 同时服务包收集与 required 依赖收集。
+
+```text
+package collection / required dependency discovery
+  -> check_source_function
+     -> function_body -> expr -> comptime_function_instance
+        -> prepare_callable_clause_packet -> planned_typed_declaration_inputs
+        -> require complete callable signature or return Error
+  -> completed nir::Function
+
+prepare_required_root_with_live_inputs
+  -> build closure -> checked root Expr
+  -> complete referenced functions -> PreparedRequired
+  -> invoke_publishing -> Interpreter
+     -> begin_invocation -> prepare_invocation
+        -> bind inputs, formation/capability checks, entry snapshots
+     -> Session: execute entry conditions with prepare/accept_invocation_step
+        -> prepare_invocation_body -> execute body -> execute exit conditions
+        -> completed value / original control flow
+```
+
+第一个断点发生在完整根产生以前，而 VM 宿主请求只在第二段已经取得执行代码后
+才会发生。因此给 `InvocationProgress` 增加一个枚举项、公开测试用 Fragment，
+或者在 `dynamic_instances` 的错误分支调用 required 求值，都没有连接这两段。
+特别是最后一种做法会在检查未调用定义时执行普通主体，或在原调用之外重建存储。
+
+目前 `PreparedRequired.entry`、result_type 和 RequiredWorld 都以完整根为前提。
+保留这个已经完成的快路径；新的活动源区域不能伪装成 PreparedRequired，也不能
+每交付一个片段便建立一份新根、重新捕获输入。`required_live_input` 接收 live 值
+不等于拥有原 activation，重复传入相同 Value 也不证明执行位置或 return 目标一致。
+
+以下是需要共同落地的职责边界，名称描述目标职责，不是声称已有这些 Rust API：
+
+| 交付物 | 首次建立它的入口 | 必须携带／验证 | 消费者 |
+| --- | --- | --- | --- |
+| 声明接口 | 当前签名、默认值和契约检查 | 身份、telescope、输入阶段与供应接口、形成条件、程序契约、结果观察及世界依赖；可以描述依赖，但不能谎报具体签名 | 定义检查与调用准备 |
+| 已检查源码模板 | 包收集与 `check_open_definition` 的共同定义规则 | 源码快照、声明／body 身份、定义端证据、允许延迟的义务及自由声明绑定；不含本次输入值 | 创建活动检查任务 |
+| 已准入调用 | 父区域的输入准备 | 当前签名、按源码序实际取得的参数、形成／阶段／域证据；默认值只按本次供应选择 | 原 VM 的调用入口 |
+| 活动主体检查 | 已准入调用的主体请求，或获准执行的 required 根 | 原区域与执行位置、输入域观察、规则后继、词法退出责任、等待的 Type 消费者 | 交付下一段受检代码或失败 |
+| 可执行片段 | 活动检查区域 | 完成的类型与 phase、输入输出绑定、原控制出口、世界与执行许可；没有待检查 HIR | 同一 VM 区域 |
+
+接口存在不授予执行权。源码模板存在也不代表其中每项调用都已准入。普通完整函数
+继续直接产生 NIR Function；合法延迟的主体保留在源码服务，不能为了让现有函数表
+接受它而放入空 Block、Never 或假的 Type。已声明函数值的身份和接口观察可用时，
+仍不等于已经取得一个可由 closed/runtime VM 执行的函数体。
+
+`open_functions::Definition` 已有定义端检查，但其 Known/Pending/InputType/Suspended
+只描述注解，不能直接当作一般主体模板。迁移必须共用已有定义规则及其前提管理，
+替换按语法形状追踪的重复路径；不得给所有 comptime 函数设置 `checked = true`
+绕过检查，也不能只等待具体调用后才检查未调用定义。已知错误、非法阶段和无依据
+的结构／trait 操作仍在定义端拒绝；只有正式规则允许延迟的义务进入模板。
+
+#### 检查服务与 VM 的借用边界
+
+当前 `InvocationSession` 独占借用 Interpreter，`Checker` 又直接借用 HIR 包。
+目标协调器分别拥有检查任务和执行驱动，在一次 poll 返回后传递消息；检查服务
+不持有 VM 的 `&mut Environment`，执行器不持有 Checker。不能靠把双方包进
+RefCell／Mutex 后从回调重入，或增加 unsafe Send／延长 HIR 生命周期来连接它们。
+
+源码 owner 沿现有 `HirPackageBox::package()` 的借用期限保活。稳定模板保存
+所属快照与声明/body 标识，活动任务在这个快照的有效借用内解析它们；快照退出前
+销毁活动任务。不把内部 `Package<'static>` 的擦除寿命暴露给 VM，也不把活动 HIR
+借用写进 NIR、CodeSession 或磁盘缓存。外部请求可拥有稳定标识与受检载荷，源码
+检查回调只在有效 owner 下临时借用 HIR。
+
+一次交接依次执行：
+
+1. 检查任务先保存所有父规则后继和本次待观察位置，交付带域、scope 和执行许可
+   的受检前缀。只检查完 producer 的类型不能标记它已经执行。
+2. VM 在原区域执行前缀，保留参数 cell、作用域、当前控制阶段和已消费位置。
+   若遇到关联项、方法或 builder 请求，继续使用已有线性宿主协议；请求未完成时
+   不额外启动同一片段。
+3. 正常结果经接收世界与域准入后形成观察响应。非局部 return、失败和取消走原
+   控制路径，不被包装成一个 Type 响应；入口／退出契约也不因切片重复运行。
+4. 原检查任务只恢复对应待观察规则。`CallableClausePacket.pending` 中的实际
+   Type 完成签名后，callable 才可交付；producer 的 receipt 保留在本次输入计划，
+   不能同时留下一个会再次执行的 `ComptimeFunctionInstance.subject`。
+5. 后续受检片段引用已取得的绑定，按通用域和资源规则使用它们。返回可变值引用
+   的读取与只读 Type 观察不同：描述响应不允许克隆可变环境，也不延长已退出 scope。
+
+借用解除只是宿主实现条件，不是源作用域退出。等待 Type 时不运行
+`restore_environment`、LexicalScope 的退出或 generator checkpoint 回退；正常离开
+和失败退出才消费各自责任。内部检查 Probe 可以撤销候选构造状态，已经执行的
+源程序前缀不能因此被回滚或重放。定义发布仍先完成整批接收预检，再切换后续代码
+可观察的声明世界；不得原地替换旧 CodeSession 的包并继续使用其准入证据。
+
+两个 ignored 正例分别覆盖签名与列表域消费者，并不覆盖这个交接协议的全部边界。
+当前同步错误应保留为明确缺口，直到上述生产链一起接通；已有帧化不构成可以在
+任何 `needs_context` 上自动执行源码的许可。Type 描述还须区分已完成的 Any 数据
+与尚未取得的观察，具体见[描述生产与准入](type-descriptions-and-admission.md)。
+
 | 完成点 | 可承诺 | 尚不能承诺 |
 | --- | --- | --- |
 | 定义接口／稳定模板 | 原身份、望远镜、阶段、已检查契约与合法 residual | 所有具体调用的签名已形成，或已有可执行 body |
