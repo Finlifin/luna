@@ -232,7 +232,7 @@ impl Checker<'_, '_> {
             owner,
             args,
             expr.span,
-            &telescope,
+            telescope,
             Some(&defaults),
         )?;
         let mut symbols = prefix.to_vec();

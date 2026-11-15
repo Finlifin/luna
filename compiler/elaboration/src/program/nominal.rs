@@ -300,7 +300,7 @@ impl Checker<'_, '_> {
                 context: &saved_context,
             };
             let prepared =
-                self.planned_declaration_inputs(owner, args, span, &telescope, Some(&defaults))?;
+                self.planned_declaration_inputs(owner, args, span, telescope, Some(&defaults))?;
             let n::NormalFormInputPlan {
                 order: mut slots,
                 mut preparations,

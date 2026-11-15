@@ -291,7 +291,7 @@ impl<'h> Checker<'_, 'h> {
                 owner,
                 args,
                 span,
-                &telescope,
+                telescope,
                 Some(&defaults),
             )?;
             self.alias_substitution = saved_substitution.clone();

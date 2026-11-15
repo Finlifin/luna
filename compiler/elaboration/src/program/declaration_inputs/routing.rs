@@ -9,9 +9,9 @@ pub(super) enum Poll<'h> {
     Complete,
 }
 
-pub(super) struct Frame<'a, 'h> {
+pub(super) struct Frame<'h> {
     span: Span,
-    parameters: &'a [(DeclarationId, Sort, Term)],
+    parameters: Parameters,
     inputs: Vec<Arg<'h>>,
     layout_inputs: Vec<Arg<'h>>,
     positional_types: Vec<Term>,
@@ -29,13 +29,13 @@ pub(super) struct Frame<'a, 'h> {
     prepared_bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
 }
 
-impl<'a, 'h> Frame<'a, 'h> {
+impl<'h> Frame<'h> {
     pub(super) fn new(
         checker: &mut Checker<'_, '_>,
         owner: OwnerId,
         inputs: &[Arg<'h>],
         span: Span,
-        parameters: &'a [(DeclarationId, Sort, Term)],
+        parameters: Parameters,
         clauses: &[hir::clause::ClauseParam<'h>],
     ) -> Result<Self, Error> {
         let mut inputs = inputs.to_vec();
@@ -120,6 +120,7 @@ impl<'a, 'h> Frame<'a, 'h> {
 
             let routing = clause_inputs::ClauseInputRouting::new(clauses, &inputs, span)?;
             let preparations = vec![Vec::new(); inputs.len()];
+            let routed = (0..parameters.len()).map(|_| None).collect();
             return Ok(Self {
                 span,
                 parameters,
@@ -133,7 +134,7 @@ impl<'a, 'h> Frame<'a, 'h> {
                 next: 0,
                 pending: None,
                 complete: false,
-                routed: (0..parameters.len()).map(|_| None).collect(),
+                routed,
                 order: Vec::new(),
                 preparations,
                 pending_collection: Vec::new(),
@@ -168,7 +169,7 @@ impl<'a, 'h> Frame<'a, 'h> {
                 use crate::calls::InputContext as C;
                 let pending = fields
                     .iter()
-                    .map(|ty| checker.declaration_domain_pending(ty, self.parameters, &[], span))
+                    .map(|ty| checker.declaration_domain_pending(ty, &self.parameters, &[], span))
                     .collect::<Result<Vec<_>, _>>()?;
                 if pending.iter().any(|pending| *pending) {
                     let fields = fields
@@ -342,9 +343,9 @@ impl<'a, 'h> Frame<'a, 'h> {
         checker: &mut Checker<'_, '_>,
         owner: OwnerId,
         clauses: Vec<hir::clause::ClauseParam<'h>>,
-        defaults: Option<&'a nominal::InputEnvironment<'a>>,
+        defaults: Option<environment::Environment>,
         checking: InputChecking,
-    ) -> Result<slots::Frame<'a, 'h, 'h>, Error> {
+    ) -> Result<slots::Frame<'h, 'h>, Error> {
         if !self.complete || self.pending.is_some() {
             return Err(error(self.span, "input routing is incomplete"));
         }
@@ -357,7 +358,7 @@ impl<'a, 'h> Frame<'a, 'h> {
             .map(|_| checker.spread_binding(self.span))
             .collect::<Result<Vec<_>, _>>()?;
         let progress = progress::Progress::new(
-            self.parameters,
+            &self.parameters,
             bindings,
             self.order,
             &mut checker.required_steps,
@@ -386,7 +387,7 @@ impl<'a, 'h> Frame<'a, 'h> {
     }
 }
 
-impl std::fmt::Display for Frame<'_, '_> {
+impl std::fmt::Display for Frame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -449,7 +450,7 @@ mod tests {
         };
         let frame = Frame {
             span,
-            parameters: &[],
+            parameters: Vec::new().into(),
             inputs: vec![Arg::Expand(&input), Arg::Expand(&input)],
             layout_inputs: vec![],
             positional_types: vec![],

@@ -2550,7 +2550,7 @@ impl Checker<'_, '_> {
                 )
             })
             .collect::<Vec<_>>();
-        let prepared = self.planned_declaration_inputs(owner, inputs, span, &parameters, None)?;
+        let prepared = self.planned_declaration_inputs(owner, inputs, span, parameters, None)?;
         let ty = if prepared.diverges() {
             p(P::Never)
         } else {

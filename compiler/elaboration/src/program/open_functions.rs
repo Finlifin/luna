@@ -245,20 +245,23 @@ pub(super) struct Definition {
     checked: bool,
 }
 impl Definition {
+    pub(super) fn input_domain_refs(&self) -> impl Iterator<Item = (Sort, Option<&Term>)> {
+        self.parameters.iter().map(|(sort, annotation)| {
+            (
+                *sort,
+                match annotation {
+                    Annotation::Known(ty) => Some(ty),
+                    Annotation::Pending(_)
+                    | Annotation::InputType { .. }
+                    | Annotation::Suspended { .. } => None,
+                },
+            )
+        })
+    }
+
     pub(super) fn input_domains(&self) -> Vec<(Sort, Option<Term>)> {
-        self.parameters
-            .iter()
-            .map(|(sort, annotation)| {
-                (
-                    *sort,
-                    match annotation {
-                        Annotation::Known(ty) => Some(ty.clone()),
-                        Annotation::Pending(_)
-                        | Annotation::InputType { .. }
-                        | Annotation::Suspended { .. } => None,
-                    },
-                )
-            })
+        self.input_domain_refs()
+            .map(|(sort, ty)| (sort, ty.cloned()))
             .collect()
     }
     pub(super) fn input_sorts(&self) -> Vec<Sort> {

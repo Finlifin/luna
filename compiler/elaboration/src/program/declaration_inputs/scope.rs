@@ -6,10 +6,7 @@ use super::*;
 #[must_use = "leave the input scope in its original checker"]
 pub(super) struct Scope {
     locals: BTreeMap<n::LocalId, Term>,
-    bindings: BTreeMap<DeclarationId, (n::LocalId, Term)>,
-    types: BTreeMap<DeclarationId, std::sync::Arc<Term>>,
-    type_values: BTreeMap<DeclarationId, n::LocalId>,
-    context: crate::ptc::Context,
+    environment: environment::Environment,
     owner: Option<OwnerId>,
     mode: bool,
     input_scope: Option<Vec<(Sort, Option<Term>)>>,
@@ -17,37 +14,49 @@ pub(super) struct Scope {
 }
 
 impl Scope {
-    pub(super) fn enter(checker: &mut Checker<'_, '_>) -> Self {
-        let locals = checker.locals.clone();
-        let bindings = checker.normal_default_bindings.clone();
-        let types = checker.alias_substitution.clone();
-        let type_values = checker.alias_value_bindings.clone();
-        let context = checker.context.clone();
-        let owner = checker.signature_owner;
-        let mode = checker.in_required_comptime;
-        let caller_scope = checker.call_inference_domains();
+    pub(super) fn enter(checker: &mut Checker<'_, '_>, span: Span) -> Result<Self, Error> {
+        // No lexical state changes until every retained component is ready.
+        // Failure still consumes its work budget, as ordinary checking does.
+        let mut fuel = checker.required_steps;
+        let retained = (|| {
+            environment::charge(&mut fuel, checker.locals.len(), span)?;
+            let locals = checker
+                .locals
+                .iter()
+                .map(|(id, ty)| Ok((*id, environment::copy_term(ty, &mut fuel, span)?)))
+                .collect::<Result<_, Error>>()?;
+            let environment = environment::Environment::retain(
+                &nominal::InputEnvironment {
+                    substitution: &checker.alias_substitution,
+                    bindings: &checker.alias_value_bindings,
+                    normal_bindings: &checker.normal_default_bindings,
+                    context: &checker.context,
+                },
+                &mut fuel,
+                span,
+            )?;
+            let caller_scope =
+                environment::copy_domains(checker.call_inference_domain_refs(), &mut fuel, span)?;
+            Ok::<_, Error>((locals, environment, caller_scope))
+        })();
+        checker.required_steps = fuel;
+        let (locals, environment, caller_scope) = retained?;
         let caller_owner = checker.default_input_owner.or(checker.signature_owner);
         let input_owner = std::mem::replace(&mut checker.default_input_owner, caller_owner);
         let input_scope = checker.default_input_scope.replace(caller_scope);
-        Self {
+        Ok(Self {
             locals,
-            bindings,
-            types,
-            type_values,
-            context,
-            owner,
-            mode,
+            environment,
+            owner: checker.signature_owner,
+            mode: checker.in_required_comptime,
             input_scope,
             input_owner,
-        }
+        })
     }
 
     pub(super) fn leave(self, checker: &mut Checker<'_, '_>) {
         checker.locals = self.locals;
-        checker.normal_default_bindings = self.bindings;
-        checker.alias_substitution = self.types;
-        checker.alias_value_bindings = self.type_values;
-        checker.context = self.context;
+        self.environment.restore(checker);
         checker.signature_owner = self.owner;
         checker.in_required_comptime = self.mode;
         checker.default_input_scope = self.input_scope;
@@ -73,18 +82,6 @@ impl std::fmt::Display for Scope {
         for (binding, ty) in &self.locals {
             write!(f, " (binding {binding} {ty})")?;
         }
-        f.write_str(") (defaults")?;
-        for (parameter, (binding, ty)) in &self.bindings {
-            write!(f, " (binding {parameter} {binding} {ty})")?;
-        }
-        f.write_str(") (types")?;
-        for (parameter, ty) in &self.types {
-            write!(f, " (binding {parameter} {ty})")?;
-        }
-        f.write_str(") (type-values")?;
-        for (parameter, binding) in &self.type_values {
-            write!(f, " (binding {parameter} {binding})")?;
-        }
         f.write_str(") (input-scope")?;
         if let Some(inputs) = &self.input_scope {
             for (sort, ty) in inputs {
@@ -95,7 +92,7 @@ impl std::fmt::Display for Scope {
                 f.write_str(")")?;
             }
         }
-        write!(f, ") {})", self.context)
+        write!(f, ") {})", self.environment)
     }
 }
 
@@ -111,12 +108,24 @@ mod tests {
             local: 3,
         };
         let local = n::LocalId { owner: 1, index: 4 };
+        let types = BTreeMap::from([(id, std::sync::Arc::new(Term::String("caller\"\n".into())))]);
+        let values = BTreeMap::from([(id, local)]);
+        let defaults = BTreeMap::from([(id, (local, p(P::Str)))]);
+        let context = crate::ptc::Context::default();
+        let environment = environment::Environment::retain(
+            &nominal::InputEnvironment {
+                substitution: &types,
+                bindings: &values,
+                normal_bindings: &defaults,
+                context: &context,
+            },
+            &mut 100,
+            Span::default(),
+        )
+        .unwrap();
         let scope = Scope {
             locals: BTreeMap::from([(local, p(P::Str))]),
-            bindings: BTreeMap::from([(id, (local, p(P::Str)))]),
-            types: BTreeMap::from([(id, std::sync::Arc::new(Term::String("caller\"\n".into())))]),
-            type_values: BTreeMap::from([(id, local)]),
-            context: crate::ptc::Context::default(),
+            environment,
             owner: Some(owner),
             mode: true,
             input_scope: Some(vec![

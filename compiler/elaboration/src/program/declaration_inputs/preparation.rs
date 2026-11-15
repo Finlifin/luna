@@ -3,9 +3,9 @@
 use super::*;
 use request::Request;
 
-enum Phase<'a, 'h> {
-    Routing(Box<routing::Frame<'a, 'h>>),
-    Checking(Box<slots::Frame<'a, 'h, 'h>>),
+enum Phase<'h> {
+    Routing(Box<routing::Frame<'h>>),
+    Checking(Box<slots::Frame<'h, 'h>>),
     Finished,
 }
 
@@ -16,29 +16,29 @@ enum Poll<'h> {
 }
 
 #[must_use = "drive input preparation and restore its original caller scope"]
-pub(super) struct Frame<'a, 'h> {
+pub(super) struct Frame<'h> {
     owner: OwnerId,
     span: Span,
     clauses: Option<Vec<hir::clause::ClauseParam<'h>>>,
-    defaults: Option<&'a nominal::InputEnvironment<'a>>,
+    defaults: Option<environment::Environment>,
     checking: InputChecking,
     scope: Option<scope::Scope>,
-    phase: Phase<'a, 'h>,
+    phase: Phase<'h>,
     waiting: bool,
 }
 
-impl<'a, 'h> Frame<'a, 'h> {
+impl<'h> Frame<'h> {
     pub(super) fn new(
         checker: &mut Checker<'_, '_>,
         owner: OwnerId,
         inputs: &[Arg<'h>],
         span: Span,
-        parameters: &'a [(DeclarationId, Sort, Term)],
+        parameters: Parameters,
         clauses: Vec<hir::clause::ClauseParam<'h>>,
-        defaults: Option<&'a nominal::InputEnvironment<'a>>,
+        defaults: Option<environment::Environment>,
         checking: InputChecking,
     ) -> Result<Self, Error> {
-        let scope = scope::Scope::enter(checker);
+        let scope = scope::Scope::enter(checker, span)?;
         let routing = match routing::Frame::new(checker, owner, inputs, span, parameters, &clauses)
         {
             Ok(routing) => routing,
@@ -79,7 +79,7 @@ impl<'a, 'h> Frame<'a, 'h> {
                         checker,
                         self.owner,
                         self.clauses.take().expect("routing clause telescope"),
-                        self.defaults,
+                        self.defaults.take(),
                         self.checking,
                     )?;
                     self.phase = Phase::Checking(Box::new(frame));
@@ -159,7 +159,7 @@ impl<'a, 'h> Frame<'a, 'h> {
     }
 }
 
-impl std::fmt::Display for Frame<'_, '_> {
+impl std::fmt::Display for Frame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -176,6 +176,10 @@ impl std::fmt::Display for Frame<'_, '_> {
         f.write_str(") (caller")?;
         if let Some(scope) = &self.scope {
             write!(f, " {scope}")?;
+        }
+        f.write_str(") (default-provider")?;
+        if let Some(defaults) = &self.defaults {
+            write!(f, " {defaults}")?;
         }
         f.write_str("))")
     }

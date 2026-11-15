@@ -316,25 +316,53 @@ impl Checker<'_, '_> {
         Ok((known, arguments, values, collected))
     }
 
-    pub(super) fn call_inference_domains(&self) -> Vec<(Sort, Option<Term>)> {
-        if let Some(domains) = self
+    /// Borrow before choosing a retention policy. Pending descriptions keep
+    /// their positions; they are not a truncated known signature prefix.
+    pub(super) fn call_inference_domain_refs(&self) -> impl Iterator<Item = (Sort, Option<&Term>)> {
+        let declared = self
             .signature_owner
             .and_then(|owner| self.signature_domains.get(&owner))
-        {
-            return domains.clone();
-        }
-        if let Some(scope) = &self.default_input_scope {
-            return scope.clone();
-        }
-        if let Some(definition) = self
+            .or(self.default_input_scope.as_ref());
+        let open = self
             .signature_owner
             .and_then(|owner| self.open_functions.get(&owner))
-        {
-            return definition.input_domains();
-        }
-        self.call_inference_scope()
+            .filter(|_| declared.is_none());
+        let parameters = if declared.is_none() && open.is_none() {
+            self.signature_owner.and_then(|owner| {
+                self.signature_prefixes
+                    .get(&owner)
+                    .map(Vec::as_slice)
+                    .or_else(|| {
+                        self.signatures
+                            .get(&owner)
+                            .or_else(|| self.interface_signatures.get(&owner))
+                            .and_then(|signature| match signature.callable_signature() {
+                                Term::Function { parameters, .. } => Some(parameters.as_slice()),
+                                _ => None,
+                            })
+                    })
+            })
+        } else {
+            None
+        };
+        declared
             .into_iter()
-            .map(|parameter| (parameter.sort, Some(parameter.ty)))
+            .flat_map(|domains| domains.iter().map(|(sort, ty)| (*sort, ty.as_ref())))
+            .chain(
+                open.into_iter()
+                    .flat_map(|definition| definition.input_domain_refs()),
+            )
+            .chain(
+                parameters
+                    .into_iter()
+                    .flatten()
+                    .map(|parameter| (parameter.sort, Some(&parameter.ty))),
+            )
+    }
+
+    pub(super) fn call_inference_domains(&self) -> Vec<(Sort, Option<Term>)> {
+        self.call_inference_domain_refs()
+            .map(|(sort, ty)| (sort, ty.cloned()))
             .collect()
     }
 

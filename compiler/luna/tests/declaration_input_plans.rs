@@ -390,6 +390,35 @@ fn member_input_plans_keep_caller_arguments_and_selected_parent_defaults() {
 }
 
 #[test]
+fn sibling_input_preparations_retain_distinct_selected_parent_environments() {
+    check_both(
+        "
+        comptime fn copied() -> bool
+        where flag: bool, .copy: bool = flag
+        { copy }
+        struct Holder where seed: bool {
+            pub newtype Packet<value: bool, .copy: bool = copied<seed>(),
+                               ...flags: meta.List<bool>> = bool;
+            pub comptime fn Build() -> Type {
+                let first = Holder<false>.Packet<seed, ...[seed]>;
+                let second = Holder<true>.Packet<seed, ...[seed]>;
+                if seed { first } else { second }
+            }
+        }
+        comptime fn check() -> bool {
+            let first = Holder<true>.Build();
+            let second = Holder<false>.Build();
+            first == Holder<false>.Packet<true, .copy = false, .flags = [true]>
+                and second == Holder<true>.Packet<false, .copy = true, .flags = [false]>
+        }
+        ",
+        &[
+            "check", "Build", "copied", "copied", "Build", "copied", "copied",
+        ],
+    );
+}
+
+#[test]
 fn nominal_collectors_reject_wrong_or_mixed_supplies_and_keep_opaque_identity() {
     let source = "
         newtype Flags<...values: meta.List<bool>> = bool;

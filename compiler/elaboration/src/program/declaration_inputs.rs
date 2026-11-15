@@ -2,6 +2,7 @@
 use super::*;
 mod collections;
 mod domain;
+mod environment;
 mod preparation;
 mod progress;
 mod request;
@@ -16,6 +17,10 @@ enum InputChecking {
     Contextual,
     Typed,
 }
+
+// Shared only within this preparation and its typed-result adapter. Domain
+// values move out of the caller's temporary telescope instead of borrowing it.
+type Parameters = std::sync::Arc<[(DeclarationId, Sort, Term)]>;
 
 pub(super) struct PreparedDeclarationInputs {
     pub arguments: Vec<n::NormalFormArgument>,
@@ -373,14 +378,15 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         inputs: &[Arg<'_>],
         span: Span,
-        parameters: &[(DeclarationId, Sort, Term)],
+        parameters: Vec<(DeclarationId, Sort, Term)>,
         defaults: Option<&nominal::InputEnvironment<'_>>,
     ) -> Result<PreparedDeclarationInputs, Error> {
+        environment::charge(&mut self.required_steps, parameters.len(), span)?;
         self.plan_declaration_inputs(
             owner,
             inputs,
             span,
-            parameters,
+            parameters.into(),
             defaults,
             InputChecking::Contextual,
         )
@@ -391,18 +397,20 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         inputs: &[Arg<'_>],
         span: Span,
-        parameters: &[(DeclarationId, Sort, Term)],
+        parameters: Vec<(DeclarationId, Sort, Term)>,
         defaults: Option<&nominal::InputEnvironment<'_>>,
     ) -> Result<CheckedDeclarationInputs, Error> {
+        environment::charge(&mut self.required_steps, parameters.len(), span)?;
+        let parameters: Parameters = parameters.into();
         self.plan_declaration_inputs(
             owner,
             inputs,
             span,
-            parameters,
+            parameters.clone(),
             defaults,
             InputChecking::Typed,
         )?
-        .into_typed(parameters, span)
+        .into_typed(&parameters, span)
     }
 
     fn plan_declaration_inputs(
@@ -410,7 +418,7 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         inputs: &[Arg<'_>],
         span: Span,
-        parameters: &[(DeclarationId, Sort, Term)],
+        parameters: Parameters,
         defaults: Option<&nominal::InputEnvironment<'_>>,
         checking: InputChecking,
     ) -> Result<PreparedDeclarationInputs, Error> {
@@ -418,6 +426,9 @@ impl Checker<'_, '_> {
         if parameters.len() != clauses.len() {
             return Err(error(span, "declaration input telescope arity mismatch"));
         }
+        let defaults = defaults
+            .map(|view| environment::Environment::retain(view, &mut self.required_steps, span))
+            .transpose()?;
         preparation::Frame::new(
             self, owner, inputs, span, parameters, clauses, defaults, checking,
         )?

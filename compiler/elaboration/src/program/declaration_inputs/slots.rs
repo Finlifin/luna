@@ -17,12 +17,12 @@ pub(super) enum Poll<'b, 'h> {
     Complete,
 }
 
-pub(super) struct Frame<'a, 'b, 'h> {
+pub(super) struct Frame<'b, 'h> {
     owner: OwnerId,
     span: Span,
-    parameters: &'a [(DeclarationId, Sort, Term)],
+    parameters: Parameters,
     clauses: Vec<hir::clause::ClauseParam<'h>>,
-    defaults: Option<&'a nominal::InputEnvironment<'a>>,
+    defaults: Option<environment::Environment>,
     checking: InputChecking,
     routed: Vec<Option<RoutedDeclarationInput<'b, 'h>>>,
     bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
@@ -36,13 +36,13 @@ pub(super) struct Frame<'a, 'b, 'h> {
     complete: bool,
 }
 
-impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
+impl<'b, 'h: 'b> Frame<'b, 'h> {
     pub(super) fn new(
         owner: OwnerId,
         span: Span,
-        parameters: &'a [(DeclarationId, Sort, Term)],
+        parameters: Parameters,
         clauses: Vec<hir::clause::ClauseParam<'h>>,
-        defaults: Option<&'a nominal::InputEnvironment<'a>>,
+        defaults: Option<environment::Environment>,
         checking: InputChecking,
         routed: Vec<Option<RoutedDeclarationInput<'b, 'h>>>,
         bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
@@ -83,7 +83,7 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
             if let Some(slot) = collection.domain_slot() {
                 self.dependencies = Some(domain::Frame::new(
                     slot,
-                    self.parameters,
+                    &self.parameters,
                     &mut checker.required_steps,
                     self.span,
                 )?);
@@ -133,14 +133,14 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
         }
         let dependent = checker.declaration_domain_pending(
             &self.parameters[slot].2,
-            self.parameters,
+            &self.parameters,
             self.progress.observed_parameters(),
             self.span,
         )?;
         if matches!(&self.routed[slot], Some(RoutedDeclarationInput::Source(_))) && dependent {
             self.dependencies = Some(domain::Frame::new(
                 slot,
-                self.parameters,
+                &self.parameters,
                 &mut checker.required_steps,
                 self.span,
             )?);
@@ -162,7 +162,7 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
         let dependencies = self.dependencies.as_mut().expect("active domain check");
         match dependencies.poll(
             checker,
-            self.parameters,
+            &self.parameters,
             &mut self.routed,
             &mut self.bindings,
             &mut self.progress,
@@ -319,11 +319,8 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
         checker: &mut Checker<'_, '_>,
         slot: usize,
     ) -> Result<&'h Expr<'h>, Error> {
-        if let Some(defaults) = self.defaults {
-            checker.alias_substitution = defaults.substitution.clone();
-            checker.alias_value_bindings = defaults.bindings.clone();
-            checker.normal_default_bindings = defaults.normal_bindings.clone();
-            checker.context = defaults.context.clone();
+        if let Some(defaults) = &self.defaults {
+            defaults.install(checker, self.span)?;
         }
         // Only preceding declaration inputs enter a default. Their observations
         // never replace the executable producers retained in source order.
@@ -458,7 +455,7 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
     }
 }
 
-impl std::fmt::Display for Frame<'_, '_, '_> {
+impl std::fmt::Display for Frame<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -517,6 +514,10 @@ impl std::fmt::Display for Frame<'_, '_, '_> {
                 preparation.before, preparation.expression
             )?;
         }
+        f.write_str(") (default-provider")?;
+        if let Some(defaults) = &self.defaults {
+            write!(f, " {defaults}")?;
+        }
         f.write_str("))")
     }
 }
@@ -546,7 +547,7 @@ mod tests {
         let mut frame = Frame::new(
             owner,
             span,
-            &parameters,
+            parameters.into(),
             vec![],
             None,
             InputChecking::Typed,
