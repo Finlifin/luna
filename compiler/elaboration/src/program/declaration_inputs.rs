@@ -1,5 +1,6 @@
 //! Shared source-order input plans, independent of the eventual type constructor.
 use super::*;
+mod domain;
 mod progress;
 mod slots;
 
@@ -288,83 +289,8 @@ impl Checker<'_, '_> {
         progress: &mut progress::Progress,
         span: Span,
     ) -> Result<DeclarationInputDomain, Error> {
-        let domain = &parameters[slot].2;
-        let mut needed = domain
-            .rigid_parameters()
-            .map_err(|_| error(span, "invalid normal-form input domain"))?;
-        for previous in (0..slot).rev() {
-            if needed.contains_key(&parameters[previous].0) {
-                needed.extend(
-                    parameters[previous]
-                        .2
-                        .rigid_parameters()
-                        .map_err(|_| error(span, "invalid normal-form input dependency"))?,
-                );
-            }
-        }
-        for previous in 0..slot {
-            if progress.is_prepared(previous)
-                || !needed.contains_key(&parameters[previous].0)
-                || !matches!(
-                    routed[previous],
-                    Some(RoutedDeclarationInput::Source(_) | RoutedDeclarationInput::Prepared(_))
-                )
-            {
-                continue;
-            }
-            if self.declaration_domain_pending(
-                &parameters[previous].2,
-                parameters,
-                progress.observed_parameters(),
-                span,
-            )? {
-                continue;
-            }
-            let expected = self.instantiate_input_types(
-                &parameters[previous].2,
-                progress.observed_parameters(),
-                progress.observed_values(),
-                span,
-            )?;
-            let value = match routed[previous].take().expect("routed dependency") {
-                RoutedDeclarationInput::Source(input) => self.expr(input, Some(&expected))?,
-                RoutedDeclarationInput::Prepared(value) => {
-                    self.require_expression(&value.ty, &expected, span)?;
-                    value
-                }
-                RoutedDeclarationInput::Collected(_) => unreachable!("fixed dependency input"),
-            };
-            let identity = self.preserved_input_identity(
-                &value,
-                bindings
-                    .iter()
-                    .map(|(binding, term)| (*binding, term.as_ref())),
-                span,
-            )?;
-            let ty = value.ty.clone();
-            self.record_declaration_input(
-                progress,
-                previous,
-                n::NormalFormArgument::Value(value),
-                identity,
-                ty,
-                bindings,
-                span,
-            )?;
-        }
-        let pending = self.declaration_domain_pending(
-            domain,
-            parameters,
-            progress.observed_parameters(),
-            span,
-        )?;
-        let ty = self.instantiate_input_types(
-            domain,
-            progress.observed_parameters(),
-            progress.observed_values(),
-            span,
-        )?;
-        Ok(DeclarationInputDomain { ty, pending })
+        domain::Frame::new(slot, parameters, &mut self.required_steps, span)?
+            .drive(self, parameters, routed, bindings, progress)
     }
 
     fn record_declaration_input(

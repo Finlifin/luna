@@ -30,6 +30,7 @@ struct Pending<'b, 'h> {
 enum Poll<'b, 'h> {
     Continue,
     Child(Request<'b, 'h>),
+    Dependency(domain::Request<'b, 'h>),
     Complete,
 }
 
@@ -45,6 +46,7 @@ pub(super) struct Frame<'a, 'b, 'h> {
     progress: progress::Progress,
     preparations: Vec<n::NormalFormPreparation>,
     pending: Option<Pending<'b, 'h>>,
+    dependencies: Option<domain::Frame<'b, 'h>>,
     observations: Option<constants::PreparedObservations>,
     active_default: Option<usize>,
     complete: bool,
@@ -75,6 +77,7 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
             progress,
             preparations,
             pending: None,
+            dependencies: None,
             observations: None,
             active_default: None,
             complete: false,
@@ -87,6 +90,9 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
                 self.span,
                 "declaration slot check is pending or complete",
             ));
+        }
+        if self.dependencies.is_some() {
+            return self.poll_dependencies(checker);
         }
         let Some(slot) = self.progress.current() else {
             self.complete = true;
@@ -134,27 +140,51 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
             self.progress.observed_parameters(),
             self.span,
         )?;
-        let domain =
-            if matches!(&self.routed[slot], Some(RoutedDeclarationInput::Source(_))) && dependent {
-                checker.declaration_input_domain(
-                    slot,
-                    self.parameters,
-                    &mut self.routed,
-                    &mut self.bindings,
-                    &mut self.progress,
-                    self.span,
-                )?
-            } else {
-                DeclarationInputDomain {
-                    ty: checker.instantiate_input_types(
-                        &self.parameters[slot].2,
-                        self.progress.observed_parameters(),
-                        self.progress.observed_values(),
-                        self.span,
-                    )?,
-                    pending: dependent,
-                }
-            };
+        if matches!(&self.routed[slot], Some(RoutedDeclarationInput::Source(_))) && dependent {
+            self.dependencies = Some(domain::Frame::new(
+                slot,
+                self.parameters,
+                &mut checker.required_steps,
+                self.span,
+            )?);
+            return self.poll_dependencies(checker);
+        }
+        let domain = DeclarationInputDomain {
+            ty: checker.instantiate_input_types(
+                &self.parameters[slot].2,
+                self.progress.observed_parameters(),
+                self.progress.observed_values(),
+                self.span,
+            )?,
+            pending: dependent,
+        };
+        self.check_slot(checker, slot, domain)
+    }
+
+    fn poll_dependencies(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b, 'h>, Error> {
+        let dependencies = self.dependencies.as_mut().expect("active domain check");
+        match dependencies.poll(
+            checker,
+            self.parameters,
+            &mut self.routed,
+            &mut self.bindings,
+            &mut self.progress,
+        )? {
+            domain::Poll::Continue => Ok(Poll::Continue),
+            domain::Poll::Child(request) => Ok(Poll::Dependency(request)),
+            domain::Poll::Complete(domain) => {
+                let slot = self.dependencies.take().unwrap().slot();
+                self.check_slot(checker, slot, domain)
+            }
+        }
+    }
+
+    fn check_slot(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        slot: usize,
+        domain: DeclarationInputDomain,
+    ) -> Result<Poll<'b, 'h>, Error> {
         let explicit = self.routed[slot].take();
         let declaration_default = explicit.is_none()
             && matches!(
@@ -392,6 +422,13 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
                         let result = request.check(checker);
                         self.accept(checker, result)?;
                     }
+                    Poll::Dependency(request) => {
+                        let result = request.check(checker);
+                        self.dependencies
+                            .as_mut()
+                            .expect("active domain check")
+                            .accept(checker, &mut self.bindings, &mut self.progress, result)?;
+                    }
                     Poll::Complete => break Ok(()),
                 }
             }
@@ -426,6 +463,10 @@ impl std::fmt::Display for Frame<'_, '_, '_> {
                     source(input.span)
                 )?;
             }
+        }
+        f.write_str(") (dependencies")?;
+        if let Some(dependencies) = &self.dependencies {
+            write!(f, " {dependencies}")?;
         }
         f.write_str(") (active-default")?;
         if let Some(slot) = self.active_default {

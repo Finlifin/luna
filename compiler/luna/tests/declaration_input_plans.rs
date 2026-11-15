@@ -147,6 +147,76 @@ fn all_constructors_keep_early_return_before_later_producers() {
 }
 
 #[test]
+fn nested_domain_prechecks_resume_their_consumer_without_reordering_execution() {
+    for declaration in CONSTRUCTORS {
+        check_both(
+            &format!(
+                "
+                {declaration}
+                comptime fn first() -> bool {{ true }}
+                comptime fn inner_first() -> bool {{ true }}
+                comptime fn inner_last() -> bool {{ true }}
+                comptime fn last() -> bool {{ true }}
+                comptime fn take() -> bool
+                where T, .values: meta.List<T> = []
+                {{ values.length() == 1 }}
+                comptime fn check() -> bool {{
+                    let selected = Packet<
+                        .values = do {{ first(); [1, 255] }},
+                        do {{
+                            let inner = take<
+                                .values = do {{ inner_first(); [true] }},
+                                do {{ inner_last(); bool }}
+                            >;
+                            let valid = inner();
+                            last();
+                            u8
+                        }}
+                    >;
+                    selected == Packet<u8, .values = [1, 255]>
+                }}
+                "
+            ),
+            &[
+                "check",
+                "first",
+                "inner_first",
+                "inner_last",
+                "take",
+                "last",
+            ],
+        );
+    }
+}
+
+#[test]
+fn nested_dependency_failure_is_not_hidden_by_an_early_outer_return() {
+    for declaration in CONSTRUCTORS {
+        let failure = sysroot::compile(&format!(
+            "
+            {declaration}
+            comptime fn take() -> bool
+            where T, .values: meta.List<T> = []
+            {{ values.length() == 1 }}
+            comptime fn check() -> bool {{
+                let selected = Packet<
+                    .values = do {{ return true; [1] }},
+                    do {{ let inner = take<.values = [256], u8>; u8 }}
+                >;
+                false
+            }}
+            "
+        ))
+        .err()
+        .expect("unreachable execution must not hide an invalid dependency input");
+        assert!(
+            failure.contains("does not fit the requested fixed-width representation"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
 fn nested_slot_defaults_keep_each_prefix_and_caller_names_separate() {
     check_both(
         "
