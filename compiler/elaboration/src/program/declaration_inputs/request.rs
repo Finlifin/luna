@@ -1,23 +1,51 @@
-//! Source child requests shared by slots, dependency checks and collectors.
+//! Source child requests shared by routing, slots, dependencies and collectors.
 use super::*;
 
-pub(super) struct Request<'b, 'h> {
-    pub(super) input: &'b Expr<'h>,
-    pub(super) expected: Option<Term>,
-    pub(super) contextual: bool,
+pub(super) enum Demand {
+    Ordinary(Option<Term>),
+    Input(crate::calls::InputContext),
+    Contextual,
 }
 
-impl Request<'_, '_> {
+pub(super) struct Request<'b, 'h> {
+    input: &'b Expr<'h>,
+    demand: Demand,
+}
+
+impl<'b, 'h> Request<'b, 'h> {
+    pub(super) fn ordinary(input: &'b Expr<'h>, expected: Option<Term>) -> Self {
+        Self {
+            input,
+            demand: Demand::Ordinary(expected),
+        }
+    }
+
+    pub(super) fn input(input: &'b Expr<'h>, context: crate::calls::InputContext) -> Self {
+        Self {
+            input,
+            demand: Demand::Input(context),
+        }
+    }
+
+    pub(super) fn contextual(input: &'b Expr<'h>) -> Self {
+        Self {
+            input,
+            demand: Demand::Contextual,
+        }
+    }
+
     pub(super) fn check(
         self,
         checker: &mut Checker<'_, '_>,
     ) -> Result<n::NormalFormArgument, Error> {
-        if self.contextual {
-            checker.dependent_normal_argument(self.input, 0)
-        } else {
-            checker
-                .expr(self.input, self.expected.as_ref())
-                .map(n::NormalFormArgument::Value)
+        match self.demand {
+            Demand::Ordinary(expected) => checker
+                .expr(self.input, expected.as_ref())
+                .map(n::NormalFormArgument::Value),
+            Demand::Input(context) => checker
+                .input_context_expression(self.input, &context)
+                .map(n::NormalFormArgument::Value),
+            Demand::Contextual => checker.dependent_normal_argument(self.input, 0),
         }
     }
 }
@@ -26,14 +54,21 @@ impl std::fmt::Display for Request<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(declaration-input-request (source {} {}) (contextual {}) (expected",
+            "(declaration-input-request (source {} {}) ",
             self.input.hir_id,
-            source(self.input.span),
-            self.contextual
+            source(self.input.span)
         )?;
-        if let Some(expected) = &self.expected {
-            write!(f, " {expected}")?;
+        match &self.demand {
+            Demand::Ordinary(expected) => {
+                f.write_str("(ordinary (expected")?;
+                if let Some(expected) = expected {
+                    write!(f, " {expected}")?;
+                }
+                f.write_str("))")?;
+            }
+            Demand::Input(context) => write!(f, "(input {context})")?,
+            Demand::Contextual => f.write_str("(contextual)")?,
         }
-        f.write_str("))")
+        f.write_str(")")
     }
 }

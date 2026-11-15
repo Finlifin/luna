@@ -135,7 +135,7 @@ where T, flag: bool
 
 | 现有生产入口 | 当前已经保留 | 本次需要贯通的交接 |
 | --- | --- | --- |
-| `declaration_inputs.rs` | 路由、源码求值顺序、默认值、前置域与形成义务；Progress 独占 producer、身份，检查完成次序与源码 schedule 已分离；槽位帧保留子检查目标、输入事实退出与默认 guard，依赖域帧保留 consumer、传递依赖游标与子结果位置，槽位与收集器共用；收集帧保留普通探测、contextual 回退及各源码位置的 preparation，三类子检查共用请求与驱动；已检查 producer 按所有权交付；NF 默认代码连接本次前缀绑定，由 VM 取得实际前缀后实例化 | 路由／展开及子请求驱动仍同步；共用输入驱动尚不接收 VM 产物。须让 `InputChecking::Typed` 不再迫使待定域立即产出完整 Expr，并接入原源码与执行区域 |
+| `declaration_inputs.rs` | 路由、源码求值顺序、默认值、前置域与形成义务；Progress 独占 producer、身份，检查完成次序与源码 schedule 已分离；槽位帧保留子检查目标、输入事实退出与默认 guard，依赖域帧保留 consumer、传递依赖游标与子结果位置，槽位与收集器共用；收集帧保留普通探测、contextual 回退及各源码位置的 preparation，路由帧保留展开包检查与源码位置，准备帧拥有阶段交接及 caller scope，四类子检查共用请求与驱动；字面量列表展开不再递归重建整次准备；已检查 producer 按所有权交付；NF 默认代码连接本次前缀绑定，由 VM 取得实际前缀后实例化 | 布局提示扫描与子请求驱动仍同步；caller scope 仍沿用词法复制，共用输入驱动尚不接收 VM 产物。须让 `InputChecking::Typed` 不再迫使待定域立即产出完整 Expr，并接入原源码与执行区域 |
 | `dynamic_instances.rs` | packet 的实际表达式、已观察身份及 pending 参数分别保存 | pending 参数影响签名时保留尚未发布的调用准备，不能把 rigid 当作已完成 callable 类型 |
 | `type_computations.rs::Session` | committed 推断世界、单输出发布许可、可恢复 invocation 及已有签名任务 | 形成的 Type 结果需回到其源表达式区域，关联原参数位置、词法环境及真实生产者 |
 | `invocation/host.rs::InvocationSession` | 独占执行现场、关联／方法选择与定义准备请求、线性响应及取消 | 一般前端表达式检查仍需接入；不把同步回调或另起一次求值当成恢复 |

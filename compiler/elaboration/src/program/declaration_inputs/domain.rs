@@ -111,11 +111,10 @@ impl<'b, 'h> Frame<'b, 'h> {
             });
             let expected = &self.pending.as_ref().unwrap().expected;
             return match input {
-                RoutedDeclarationInput::Source(input) => Ok(Poll::Child(Request {
+                RoutedDeclarationInput::Source(input) => Ok(Poll::Child(Request::ordinary(
                     input,
-                    expected: Some(checker.copy_alias_type(expected, self.span)?),
-                    contextual: false,
-                })),
+                    Some(checker.copy_alias_type(expected, self.span)?),
+                ))),
                 RoutedDeclarationInput::Prepared(value) => {
                     let result = checker
                         .require_expression(&value.ty, expected, self.span)

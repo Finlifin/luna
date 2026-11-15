@@ -11,7 +11,7 @@ struct Pending<'b, 'h> {
     input: Option<&'b Expr<'h>>,
 }
 
-enum Poll<'b, 'h> {
+pub(super) enum Poll<'b, 'h> {
     Continue,
     Child(Request<'b, 'h>),
     Complete,
@@ -69,7 +69,7 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
         }
     }
 
-    fn poll(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b, 'h>, Error> {
+    pub(super) fn poll(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b, 'h>, Error> {
         if self.complete || self.pending.is_some() {
             return Err(error(
                 self.span,
@@ -273,10 +273,11 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
                 self.span,
             )?);
         }
-        Ok(Poll::Child(Request {
-            input: input.expect("source or declaration default"),
-            expected,
-            contextual,
+        let input = input.expect("source or declaration default");
+        Ok(Poll::Child(if contextual {
+            Request::contextual(input)
+        } else {
+            Request::ordinary(input, expected)
         }))
     }
 
@@ -423,7 +424,7 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
         )
     }
 
-    fn unwind(&mut self, checker: &mut Checker<'_, '_>) {
+    pub(super) fn unwind(&mut self, checker: &mut Checker<'_, '_>) {
         if let Some(observations) = self.observations.take() {
             observations.leave(checker);
         }
@@ -432,7 +433,7 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
         }
     }
 
-    fn accept_child(
+    pub(super) fn accept_child(
         &mut self,
         checker: &mut Checker<'_, '_>,
         result: Result<n::NormalFormArgument, Error>,
@@ -446,24 +447,13 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
         }
     }
 
-    pub(super) fn drive(
-        mut self,
-        checker: &mut Checker<'_, '_>,
-    ) -> Result<PreparedDeclarationInputs, Error> {
-        let result = (|| {
-            loop {
-                match self.poll(checker)? {
-                    Poll::Continue => {}
-                    Poll::Child(request) => {
-                        let result = request.check(checker);
-                        self.accept_child(checker, result)?;
-                    }
-                    Poll::Complete => break Ok(()),
-                }
-            }
-        })();
-        self.unwind(checker);
-        result?;
+    pub(super) fn finish(self) -> Result<PreparedDeclarationInputs, Error> {
+        if !self.complete || self.pending.is_some() {
+            return Err(error(
+                self.span,
+                "declaration inputs are not completely checked",
+            ));
+        }
         self.progress.finish(self.preparations, self.span)
     }
 }
@@ -512,21 +502,7 @@ impl std::fmt::Display for Frame<'_, '_, '_> {
         f.write_str(") (routed")?;
         for (slot, input) in self.routed.iter().enumerate() {
             if let Some(input) = input {
-                write!(f, " (slot {slot} ")?;
-                match input {
-                    RoutedDeclarationInput::Source(input) => {
-                        write!(f, "(source {} {})", input.hir_id, source(input.span))?
-                    }
-                    RoutedDeclarationInput::Prepared(value) => write!(f, "(prepared {value})")?,
-                    RoutedDeclarationInput::Collected(items) => {
-                        f.write_str("(collected")?;
-                        for item in items {
-                            write!(f, " {item}")?;
-                        }
-                        f.write_str(")")?;
-                    }
-                }
-                f.write_str(")")?;
+                write!(f, " (slot {slot} {input})")?;
             }
         }
         f.write_str(") (bindings")?;
@@ -596,11 +572,7 @@ mod tests {
             },
             input: Some(&source_expr),
         });
-        let request = Request {
-            input: &source_expr,
-            expected: Some(domain),
-            contextual: false,
-        };
+        let request = Request::ordinary(&source_expr, Some(domain));
         let dump = frame.to_string();
         for fragment in [
             "(checking typed)",
@@ -615,7 +587,7 @@ mod tests {
         assert!(!dump.contains('\n'), "{dump}");
         let request = request.to_string();
         assert!(
-            request.contains("(contextual false) (expected (primitive str))"),
+            request.contains("(ordinary (expected (primitive str)))"),
             "{request}"
         );
         assert!(!request.contains("prepared"), "{request}");

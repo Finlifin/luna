@@ -98,11 +98,9 @@ impl<'b, 'h> Frame<'b, 'h> {
     pub(super) fn poll(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b, 'h>, Error> {
         if self.state == State::RetryContextual {
             self.state = State::ContextualLiteral;
-            return Ok(Poll::Child(Request {
-                input: self.pending.as_ref().expect("contextual retry input").input,
-                expected: None,
-                contextual: true,
-            }));
+            return Ok(Poll::Child(Request::contextual(
+                self.pending.as_ref().expect("contextual retry input").input,
+            )));
         }
         if self.state != State::Ready || self.pending.is_some() {
             return Err(error(self.span, "collection check is pending or complete"));
@@ -139,12 +137,15 @@ impl<'b, 'h> Frame<'b, 'h> {
             } else {
                 State::Ordinary
             };
-            let request = Request {
-                input: pending.input,
-                expected: (!domain.pending)
-                    .then(|| checker.copy_alias_type(expected, self.span))
-                    .transpose()?,
-                contextual: state == State::ContextualTail,
+            let request = if state == State::ContextualTail {
+                Request::contextual(pending.input)
+            } else {
+                Request::ordinary(
+                    pending.input,
+                    (!domain.pending)
+                        .then(|| checker.copy_alias_type(expected, self.span))
+                        .transpose()?,
+                )
             };
             if state == State::Probe {
                 // Begin after all fallible request preparation. Every returned

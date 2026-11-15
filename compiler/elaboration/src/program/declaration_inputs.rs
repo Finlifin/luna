@@ -2,8 +2,11 @@
 use super::*;
 mod collections;
 mod domain;
+mod preparation;
 mod progress;
 mod request;
+mod routing;
+mod scope;
 mod slots;
 
 /// Consumers that cannot yet suspend frontend checking require ordinary typed
@@ -157,6 +160,22 @@ enum RoutedDeclarationInput<'a, 'h> {
     Source(&'a Expr<'h>),
     Prepared(n::Expr),
     Collected(Vec<n::NormalFormArgument>),
+}
+
+impl std::fmt::Display for RoutedDeclarationInput<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Source(input) => write!(f, "(source {} {})", input.hir_id, source(input.span)),
+            Self::Prepared(value) => write!(f, "(prepared {value})"),
+            Self::Collected(items) => {
+                f.write_str("(collected")?;
+                for item in items {
+                    write!(f, " {item}")?;
+                }
+                f.write_str(")")
+            }
+        }
+    }
 }
 
 /// Source references awaiting collection checking, not another expression IR.
@@ -399,302 +418,10 @@ impl Checker<'_, '_> {
         if parameters.len() != clauses.len() {
             return Err(error(span, "declaration input telescope arity mismatch"));
         }
-        let saved_locals = self.locals.clone();
-        let saved_bindings = self.normal_default_bindings.clone();
-        let saved_types = self.alias_substitution.clone();
-        let saved_type_values = self.alias_value_bindings.clone();
-        let saved_context = self.context.clone();
-        let saved_owner = self.signature_owner;
-        let saved_mode = self.in_required_comptime;
-        let caller_scope = self.call_inference_domains();
-        let caller_owner = self.default_input_owner.or(self.signature_owner);
-        let saved_input_owner = self.default_input_owner;
-        self.default_input_owner = caller_owner;
-        let saved_input_scope = self.default_input_scope.replace(caller_scope);
-        let result = (|| {
-            // Layout hints establish only positions. Actual packet checking
-            // still validates the tuple and its element types. Do not expose
-            // a head's unresolved Type binders as caller-side expectations.
-            let positional_types = parameters
-                .iter()
-                .zip(&clauses)
-                .filter(|(_, clause)| {
-                    !matches!(
-                        clause.kind,
-                        hir::clause::ClauseParamKind::Optional(..)
-                            | hir::clause::ClauseParamKind::Varadic(..)
-                    )
-                })
-                .map(|((_, _, ty), _)| ty.clone())
-                .collect::<Vec<_>>();
-            let collector = self.clause_has_collector(owner).then(|| clauses.len() - 1);
-            let whole_collector = collector.is_some_and(|slot| {
-                inputs.iter().any(|input|
-                matches!(input, Arg::Named(name, _) if name.name == clauses[slot].name.name))
-            });
-            let mut layout_inputs = inputs.to_vec();
-            let mut list_spreads = BTreeSet::new();
-            let mut remaining = Some(positional_types.len());
-            let mut layout_fuel = 10_000;
-            if let Some(slot) = collector.filter(|_| !whole_collector) {
-                for (index, input) in inputs.iter().enumerate() {
-                    match input {
-                        Arg::Positional(value) if remaining == Some(0) => {
-                            layout_inputs[index] = Arg::Named(clauses[slot].name, value);
-                        }
-                        Arg::Expand(value) if remaining == Some(0) => {
-                            layout_inputs[index] = Arg::Named(clauses[slot].name, value);
-                            list_spreads.insert(index);
-                        }
-                        Arg::Positional(_) => remaining = remaining.map(|n| n.saturating_sub(1)),
-                        Arg::Expand(value) => {
-                            remaining =
-                                match (remaining, self.spread_width(value, &mut layout_fuel, 0)?) {
-                                    (Some(left), Some(width)) if width <= left => {
-                                        Some(left - width)
-                                    }
-                                    _ => None,
-                                };
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            // Flatten only literal list spreads already routed to the
-            // collector. Their elements then use the ordinary positional
-            // preparation path, preserving effects before later arguments.
-            if list_spreads.iter().any(|index| matches!(&inputs[*index], Arg::Expand(value) if matches!(value.kind, H::List(_)))) {
-                let mut expanded = Vec::new();
-                for (index, input) in inputs.iter().enumerate() {
-                    self.required_steps = self.required_steps.checked_sub(1)
-                        .ok_or_else(|| error(span, "normal-form collection routing budget exhausted"))?;
-                    if list_spreads.contains(&index)
-                        && let Arg::Expand(value) = input
-                        && let H::List(elements) = value.kind
-                    {
-                        self.required_steps = self.required_steps.checked_sub(elements.len() as u64)
-                            .ok_or_else(|| error(span, "normal-form collection routing budget exhausted"))?;
-                        expanded.extend(elements.iter().map(Arg::Positional));
-                    } else {
-                        expanded.push(input.clone());
-                    }
-                }
-                return self.plan_declaration_inputs(owner, &expanded, span, parameters, defaults, checking);
-            }
-            let packet_contexts = if inputs.iter().any(|input| matches!(input, Arg::Expand(_))) {
-                self.spread_packet_layout(&layout_inputs, &positional_types, span)?
-            } else {
-                vec![None; inputs.len()]
-            };
-            let mut routed = (0..parameters.len()).map(|_| None).collect::<Vec<_>>();
-            let mut preparations = vec![Vec::new(); inputs.len()];
-            let mut order = Vec::new();
-            let mut routing = clause_inputs::ClauseInputRouting::new(&clauses, inputs, span)?;
-            let mut pending_collection = Vec::new();
-            let mut prepared_bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>> = BTreeMap::new();
-            for (input_index, input) in inputs.iter().enumerate() {
-                if let Arg::Expand(packet) = input {
-                    if list_spreads.contains(&input_index) {
-                        routing.slot(None, packet.span)?;
-                        pending_collection.push(PendingDeclarationCollection {
-                            source_index: input_index,
-                            before: order.len(),
-                            input: packet,
-                            spread: true,
-                        });
-                        continue;
-                    }
-
-                    let context = if let Some(fields) = &packet_contexts[input_index] {
-                        use crate::calls::InputContext as C;
-                        let pending = fields
-                            .iter()
-                            .map(|ty| self.declaration_domain_pending(ty, parameters, &[], span))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        if pending.iter().any(|pending| *pending) {
-                            let fields = fields
-                                .iter()
-                                .zip(pending)
-                                .map(|(ty, pending)| {
-                                    if pending {
-                                        C::Unknown
-                                    } else {
-                                        C::Known(ty.clone())
-                                    }
-                                })
-                                .collect();
-                            Some(match self.bound_tuple_head(packet.span)? {
-                                Some(head) => C::NormalTuple {
-                                    head,
-                                    fields,
-                                    list_domain: self.bound_tuple_list_domain(),
-                                },
-                                None => C::Tuple(fields),
-                            })
-                        } else {
-                            Some(C::Known(
-                                self.tuple_value_type(fields.clone(), packet.span)?,
-                            ))
-                        }
-                    } else {
-                        None
-                    };
-                    let value = match context {
-                        Some(context) => self.input_context_expression(packet, &context)?,
-                        None => self.expr(packet, None)?,
-                    };
-                    let fields = self.prepared_packet_fields(
-                        &value,
-                        &layout_inputs,
-                        input_index,
-                        &positional_types,
-                        packet.span,
-                    )?;
-                    let observed = self.preserved_input_identity(
-                        &value,
-                        prepared_bindings
-                            .iter()
-                            .map(|(binding, term)| (*binding, term.as_ref())),
-                        packet.span,
-                    )?;
-                    let mut observed_fields = match observed {
-                        Some(Term::TupleValue(values)) if values.len() == fields.len() => {
-                            Some(values.into_iter())
-                        }
-                        _ => None,
-                    };
-                    let before = order.len();
-                    let mut pattern = Vec::new();
-                    for ty in fields {
-                        let slot = routing.packet_slot(packet.span)?;
-                        let binding = self.spread_binding(packet.span)?;
-                        if let Some(known) = observed_fields.as_mut().and_then(Iterator::next) {
-                            prepared_bindings.insert(binding, std::sync::Arc::new(known));
-                        }
-                        self.locals.insert(binding, ty.clone());
-                        pattern.push(n::Pattern::Binding {
-                            binding,
-                            inner: Box::new(n::Pattern::Wild),
-                        });
-                        let input = n::Expr {
-                            source: value.source,
-                            ty,
-                            kind: K::Local(binding),
-                        };
-                        let cell = routed
-                            .get_mut(slot)
-                            .ok_or_else(|| error(span, "normal-form argument count mismatch"))?;
-                        if cell
-                            .replace(RoutedDeclarationInput::Prepared(input))
-                            .is_some()
-                        {
-                            return Err(error(span, "duplicate normal-form argument"));
-                        }
-                        order.push(slot);
-                    }
-                    preparations[input_index].push(n::NormalFormPreparation {
-                        before,
-                        expression: n::Expr {
-                            source: n::SourceRange {
-                                start: value.source.end,
-                                end: value.source.end,
-                            },
-                            ty: if is_never(&value.ty) {
-                                p(P::Never)
-                            } else {
-                                p(P::Void)
-                            },
-                            kind: K::LetPattern {
-                                pattern: n::Pattern::Tuple(pattern),
-                                value: Box::new(value),
-                                guard: None,
-                                otherwise: None,
-                            },
-                        },
-                    });
-                    continue;
-                }
-                let (slot, value) = match input {
-                    Arg::Positional(value) => {
-                        let slot = routing.slot(None, span)?;
-                        if collector == Some(slot) {
-                            pending_collection.push(PendingDeclarationCollection {
-                                source_index: input_index,
-                                before: order.len(),
-                                input: value,
-                                spread: false,
-                            });
-                            continue;
-                        }
-                        (slot, *value)
-                    }
-                    Arg::Named(name, value) => (routing.slot(Some(*name), span)?, *value),
-                    _ => {
-                        return Err(error(
-                            span,
-                            "normal-form input expansion is not yet implemented",
-                        ));
-                    }
-                };
-                let cell = routed
-                    .get_mut(slot)
-                    .ok_or_else(|| error(span, "normal-form argument count mismatch"))?;
-                if cell
-                    .replace(RoutedDeclarationInput::Source(value))
-                    .is_some()
-                {
-                    return Err(error(span, "duplicate normal-form argument"));
-                }
-                order.push(slot);
-            }
-            // Routing fixes execution order before any dependency-driven checks.
-            // Nonempty collection elements occupy the final collected slot; their
-            // earlier effects remain in preparations at their source positions.
-            if !pending_collection.is_empty() {
-                order.push(collector.expect("collected inputs have a collector"));
-            }
-            let bindings = (0..parameters.len())
-                .map(|_| self.spread_binding(span))
-                .collect::<Result<Vec<_>, _>>()?;
-            let progress = progress::Progress::new(
-                parameters,
-                bindings,
-                order,
-                &mut self.required_steps,
-                span,
-            )?;
-            let collection = collections::Frame::new(
-                span,
-                checking,
-                collector,
-                inputs.len(),
-                pending_collection,
-                preparations,
-            );
-            slots::Frame::new(
-                owner,
-                span,
-                parameters,
-                clauses,
-                defaults,
-                checking,
-                routed,
-                prepared_bindings,
-                progress,
-                collection,
-            )
-            .drive(self)
-        })();
-        self.locals = saved_locals;
-        self.normal_default_bindings = saved_bindings;
-        self.alias_substitution = saved_types;
-        self.alias_value_bindings = saved_type_values;
-        self.context = saved_context;
-        self.signature_owner = saved_owner;
-        self.in_required_comptime = saved_mode;
-        self.default_input_scope = saved_input_scope;
-        self.default_input_owner = saved_input_owner;
-        result
+        preparation::Frame::new(
+            self, owner, inputs, span, parameters, clauses, defaults, checking,
+        )?
+        .drive(self)
     }
 }
 

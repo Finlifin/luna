@@ -106,6 +106,87 @@ fn returning_packet_skips_its_tail_and_remaining_clause_producers() {
 }
 
 #[test]
+fn nested_packet_checks_restore_caller_bindings_before_outer_defaults() {
+    check(
+        "
+        comptime fn copied() -> bool
+        where flag: bool, .copy: bool = flag
+        { copy }
+        comptime fn packet(flag: bool) -> R
+        where R, requires R == Tuple<bool, bool>
+        { (flag, flag) }
+        comptime fn empty() -> Tuple<> { () }
+        comptime fn take() -> bool
+        where first: bool, second: bool, .copy: bool = copied<second>()
+        { first and second and copy }
+        comptime fn check() -> bool {
+            let first = false;
+            let second = false;
+            let copy = false;
+            let result = take<
+                ...empty(),
+                ...do { let flag = copied<true>(); packet(flag) },
+                ...empty()
+            >();
+            result and not first and not second and not copy
+        }
+        ",
+        &[
+            "check", "empty", "copied", "packet", "empty", "copied", "take",
+        ],
+    );
+}
+
+#[test]
+fn nested_packet_exit_preserves_prior_effects_and_skips_outer_defaults() {
+    check(
+        "
+        comptime fn copied() -> bool
+        where flag: bool, .copy: bool = flag
+        { copy }
+        comptime fn packet(flag: bool) -> R
+        where R, requires R == Tuple<bool, bool>
+        { (flag, flag) }
+        comptime fn empty() -> Tuple<> { () }
+        comptime fn take() -> bool
+        where first: bool, second: bool, .copy: bool = copied<second>()
+        { first and second and copy }
+        comptime fn check() -> bool {
+            take<
+                ...empty(),
+                ...do { let flag = copied<true>(); return flag; packet(false) },
+                ...empty()
+            >()
+        }
+        ",
+        &["check", "empty", "copied"],
+    );
+}
+
+#[test]
+fn nested_packet_failure_is_checked_after_an_earlier_source_exit() {
+    let source = "
+        comptime fn wrong() -> u8 { 7 }
+        comptime fn copied() -> bool
+        where flag: bool, .copy: bool = flag
+        { copy }
+        comptime fn packet(flag: bool) -> R
+        where R, requires R == Tuple<bool, bool>
+        { (flag, flag) }
+        comptime fn empty() -> Tuple<> { () }
+        comptime fn take() -> bool where first: bool, second: bool { first and second }
+        comptime fn check() -> bool {
+            take<
+                ...do { return true; empty() },
+                ...do { let flag = copied<wrong()>(); packet(flag) }
+            >()
+        }
+        ";
+    let failure = sysroot::compile(source).unwrap_err();
+    assert!(failure.contains("mismatch"), "{failure}");
+}
+
+#[test]
 fn packet_context_does_not_override_producer_requirements_or_field_domains() {
     let source = "
         comptime fn packet() -> T
