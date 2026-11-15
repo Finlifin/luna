@@ -1,4 +1,4 @@
-//! Ordered contextual arms retain their own lexical and type-fact boundaries.
+//! Ordered arms retain their lexical, type-fact and delivery boundaries.
 //! Conditions and bodies return through the same driver as blocks and ifs.
 use super::*;
 use driver::{Request, Step};
@@ -10,12 +10,22 @@ enum State {
     Complete,
 }
 
+struct Ordinary {
+    branch_type: Option<Term>,
+    fallback: bool,
+    selection: Option<usize>,
+    suppressed: bool,
+    callee: Option<hir::HirId>,
+    preserve_effect: Option<bool>,
+}
+
 pub(super) struct Frame<'b, 'h> {
     source: &'b Expr<'h>,
     arms: &'h [hir::expr::CondictionArm<'h>],
-    depth: usize,
+    destination: Destination,
+    ordinary: Option<Ordinary>,
     state: State,
-    branches: Vec<(Option<n::Expr>, n::NormalFormArgument)>,
+    branches: Vec<(Option<n::Expr>, CheckedBlock)>,
     scope: LexicalScope,
     branch: Option<LexicalScope>,
     premise: Option<refinements::TypeConditionScope>,
@@ -53,10 +63,85 @@ impl<'b, 'h> Frame<'b, 'h> {
         Ok(Self {
             source,
             arms,
-            depth,
+            destination: Destination::Contextual(ContextualTail { depth }),
+            ordinary: None,
             state: State::Ready,
             branches: Vec::new(),
             scope: LexicalScope::enter(checker, source.span)?,
+            branch: None,
+            premise: None,
+        })
+    }
+
+    pub(super) fn ordinary(
+        checker: &mut Checker<'_, '_>,
+        source: &'b Expr<'h>,
+        destination: Destination,
+        own_effect_delivery: bool,
+    ) -> Result<Self, Error> {
+        let H::When(arms) = source.kind else {
+            return Err(error(source.span, "when requires ordered arms"));
+        };
+        let fallback = arms.iter().position(|arm| arm.cond.is_none());
+        if fallback.is_some_and(|index| index + 1 != arms.len()) {
+            return Err(error(source.span, "when fallback must be the final arm"));
+        }
+        let view = destination.ordinary_view().ok_or_else(|| {
+            error(
+                source.span,
+                "ordinary when requires an ordinary destination",
+            )
+        })?;
+        // This adapter retains the common bounded probe search and its
+        // rollback rules. Probes see the same ordered premises as final checks.
+        let inferred = if view.expected.is_none() && fallback.is_some() {
+            match view.input {
+                Some(context) => checker.optional_branch_context(source.span, context, arms.len(), |checker, index| {
+                    for (prior, arm) in arms[..=index].iter().enumerate() {
+                        checker.optional_branch_probe_budget = checker.optional_branch_probe_budget.checked_sub(1)
+                            .ok_or_else(|| error(source.span, "optional branch inference budget exhausted; add a type annotation"))?;
+                        if let Some(condition) = arm.cond {
+                            let condition = checker.expr(condition, Some(&p(P::Bool)))?;
+                            checker.assume_type_condition(&condition, prior == index, arm.body.span)?;
+                        }
+                    }
+                    checker.input_context_expression(arms[index].body, context)
+                })?,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let destination = if let Some(inferred) = inferred.as_ref() {
+            destination.with_expected(checker, Some(inferred), source.span)?
+        } else {
+            destination
+        };
+        checker.required_steps = checker
+            .required_steps
+            .checked_sub(1)
+            .ok_or_else(|| error(source.span, "when checking budget exhausted"))?;
+        let scope = LexicalScope::enter(checker, source.span)?;
+        let ordinary = Ordinary {
+            branch_type: fallback.and_then(|_| destination.expected().cloned()),
+            fallback: fallback.is_some(),
+            selection: checker
+                .inline_selection
+                .filter(|(id, _)| *id == source.hir_id)
+                .map(|(_, index)| index),
+            suppressed: checker.in_unselected_inline,
+            callee: checker.comptime_callee_result,
+            preserve_effect: own_effect_delivery
+                .then(|| std::mem::take(&mut checker.preserve_effect_value)),
+        };
+        Ok(Self {
+            source,
+            arms,
+            destination,
+            ordinary: Some(ordinary),
+            state: State::Ready,
+            branches: Vec::new(),
+            scope,
             branch: None,
             premise: None,
         })
@@ -71,12 +156,18 @@ impl<'b, 'h> Frame<'b, 'h> {
         match (state, returned) {
             (State::Ready, None) => {
                 let Some(arm) = self.arms.get(self.branches.len()) else {
-                    return self.finish();
+                    return self.finish(checker);
                 };
                 checker.required_steps = checker
                     .required_steps
                     .checked_sub(1)
                     .ok_or_else(|| error(arm.span, "when checking budget exhausted"))?;
+                if let Some(ordinary) = &self.ordinary {
+                    checker.in_unselected_inline = ordinary.suppressed
+                        || ordinary
+                            .selection
+                            .is_some_and(|selected| selected != self.branches.len());
+                }
                 if let Some(condition) = arm.cond {
                     let destination = Destination::ordinary(
                         checker,
@@ -99,21 +190,29 @@ impl<'b, 'h> Frame<'b, 'h> {
             }
             (State::Body(condition), Some(value)) => {
                 let arm = &self.arms[self.branches.len()];
-                let body = value.contextual(arm.body.span)?;
+                let body = if let Some(ordinary) = &mut self.ordinary {
+                    let mut body = value.ordinary(arm.body.span)?;
+                    if ordinary.branch_type.is_none() && !is_never(&body.ty) {
+                        ordinary.branch_type = Some(body.ty.clone());
+                    }
+                    if !ordinary.fallback {
+                        body = discard_result(body);
+                    }
+                    CheckedBlock::Ordinary(body)
+                } else {
+                    CheckedBlock::Contextual(n::NormalFormArgument::Block {
+                        source: source(arm.span),
+                        statements: Vec::new(),
+                        result: Some(Box::new(value.contextual(arm.body.span)?)),
+                    })
+                };
                 self.leave_branch(checker);
                 if let Some(condition) = &condition {
                     // Later conditions see the failure of every earlier arm,
                     // but never the positive premise used to check its body.
                     checker.assume_type_condition(condition, false, arm.body.span)?;
                 }
-                self.branches.push((
-                    condition,
-                    n::NormalFormArgument::Block {
-                        source: source(arm.span),
-                        statements: Vec::new(),
-                        result: Some(Box::new(body)),
-                    },
-                ));
+                self.branches.push((condition, body));
                 self.state = State::Ready;
                 Ok(Step::Continue)
             }
@@ -130,36 +229,137 @@ impl<'b, 'h> Frame<'b, 'h> {
         condition: Option<n::Expr>,
     ) -> Result<Step<'b, 'h>, Error> {
         let arm = &self.arms[self.branches.len()];
+        if self
+            .ordinary
+            .as_ref()
+            .is_some_and(|ordinary| ordinary.selection.is_some())
+            && !checker.checking_open_behavior
+            && let Some(condition) = &condition
+        {
+            checker.check_inline_input_availability(condition, &BTreeSet::new(), arm.body.span)?;
+        }
         if let Some(condition) = &condition {
             self.premise = Some(checker.enter_type_condition(condition, true, arm.body.span)?);
         }
         // Install each exit before any subsequent fallible step. Error unwinding
         // leaves the lexical child first, then the positive type premise.
         self.branch = Some(LexicalScope::enter(checker, arm.span)?);
+        let destination = if let Some(ordinary) = &self.ordinary {
+            if ordinary.callee == Some(self.source.hir_id) {
+                checker.comptime_callee_result = Some(arm.body.hir_id);
+            }
+            if ordinary.fallback {
+                self.destination.with_expected(
+                    checker,
+                    ordinary.branch_type.as_ref(),
+                    arm.body.span,
+                )?
+            } else {
+                Destination::ordinary(
+                    checker,
+                    OrdinaryTail {
+                        expected: ordinary.branch_type.as_ref(),
+                        partial: None,
+                        input: None,
+                    },
+                    arm.body.span,
+                )?
+            }
+        } else {
+            self.destination.clone()
+        };
         self.state = State::Body(condition);
-        Ok(Step::Child(Request::Expression(
-            arm.body,
-            Destination::Contextual(ContextualTail { depth: self.depth }),
-        )))
+        Ok(Step::Child(Request::Expression(arm.body, destination)))
     }
 
-    fn finish(&mut self) -> Result<Step<'b, 'h>, Error> {
+    fn finish(&mut self, checker: &mut Checker<'_, '_>) -> Result<Step<'b, 'h>, Error> {
+        if self.ordinary.is_some() {
+            return self.finish_ordinary(checker);
+        }
         let mut branches = std::mem::take(&mut self.branches).into_iter().rev();
-        let (_, mut tail) = branches
+        let (_, tail) = branches
             .next()
             .ok_or_else(|| error(self.source.span, "when fallback is missing"))?;
+        let mut tail = tail.contextual(self.source.span)?;
         for (condition, body) in branches {
             tail = n::NormalFormArgument::If {
                 source: source(self.source.span),
                 condition: condition.expect("validated ordered arms"),
-                then_input: Box::new(body),
+                then_input: Box::new(body.contextual(self.source.span)?),
                 else_input: Box::new(tail),
             };
         }
         Ok(Step::Completed(CheckedBlock::Contextual(tail)))
     }
 
+    fn finish_ordinary(&mut self, checker: &mut Checker<'_, '_>) -> Result<Step<'b, 'h>, Error> {
+        let ordinary = self.ordinary.as_ref().unwrap();
+        // Branch-local premises justify their own deliveries, not the join.
+        checker.context = self.scope.context.clone();
+        let mut branches = Vec::with_capacity(self.branches.len());
+        for (condition, body) in std::mem::take(&mut self.branches) {
+            branches.push((condition, body.ordinary(self.source.span)?));
+        }
+        let unit = || n::Expr {
+            ty: p(P::Void),
+            source: source(self.source.span),
+            kind: K::Unit,
+        };
+        let selected_body = if let Some(index) = ordinary.selection {
+            Some(if let Some((_, body)) = branches.get(index) {
+                constants::charge_copy(body, &mut checker.required_steps, self.source.span)?;
+                body.clone()
+            } else {
+                unit()
+            })
+        } else {
+            None
+        };
+        let mut tail = unit();
+        for (condition, body) in branches.into_iter().rev() {
+            let Some(condition) = condition else {
+                tail = body;
+                continue;
+            };
+            let ty = if control::conditional_never(&condition, &body.ty, &tail.ty) {
+                p(P::Never)
+            } else if ordinary.fallback && ordinary.branch_type.is_some() {
+                ordinary.branch_type.clone().unwrap()
+            } else if is_never(&body.ty) {
+                tail.ty.clone()
+            } else if is_never(&tail.ty) {
+                body.ty.clone()
+            } else {
+                checker.require(&tail.ty, &body.ty, self.source.span)?;
+                body.ty.clone()
+            };
+            tail = n::Expr {
+                ty,
+                source: source(self.source.span),
+                kind: K::If {
+                    condition: Box::new(condition),
+                    then_branch: Box::new(body),
+                    else_branch: Some(Box::new(tail)),
+                },
+            };
+        }
+        if let Some(expected) = self.destination.expected() {
+            checker.require(&tail.ty, expected, self.source.span)?;
+        }
+        let value = selected_body.unwrap_or(tail);
+        let value = if ordinary.preserve_effect == Some(false) {
+            checker.run_computation(value, self.destination.expected(), self.source.span)?
+        } else {
+            value
+        };
+        Ok(Step::Completed(CheckedBlock::Ordinary(value)))
+    }
+
     fn leave_branch(&mut self, checker: &mut Checker<'_, '_>) {
+        if let Some(ordinary) = &self.ordinary {
+            checker.comptime_callee_result = ordinary.callee;
+            checker.in_unselected_inline = ordinary.suppressed;
+        }
         if let Some(scope) = self.branch.take() {
             scope.leave(checker);
         }
@@ -174,13 +374,39 @@ impl<'b, 'h> Frame<'b, 'h> {
     }
 }
 
+impl std::fmt::Display for Ordinary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(when-delivery (fallback {}) (suppressed {}) (branch-type",
+            self.fallback, self.suppressed
+        )?;
+        if let Some(ty) = &self.branch_type {
+            write!(f, " {ty}")?;
+        }
+        f.write_str(") (selection")?;
+        if let Some(selection) = self.selection {
+            write!(f, " {selection}")?;
+        }
+        f.write_str(") (callee")?;
+        if let Some(callee) = self.callee {
+            write!(f, " {callee}")?;
+        }
+        f.write_str(") (preserve-effect")?;
+        if let Some(preserve) = self.preserve_effect {
+            write!(f, " {preserve}")?;
+        }
+        f.write_str("))")
+    }
+}
+
 impl std::fmt::Display for Frame<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(when-check (source {}) (depth {}) (next {}) ",
+            "(when-check (source {}) {} (next {}) ",
             source(self.source.span),
-            self.depth,
+            self.destination,
             self.branches.len()
         )?;
         match &self.state {
@@ -195,7 +421,11 @@ impl std::fmt::Display for Frame<'_, '_> {
             }
             State::Complete => f.write_str("(phase complete)"),
         }?;
-        f.write_str(" (branches")?;
+        f.write_str(" (ordinary")?;
+        if let Some(ordinary) = &self.ordinary {
+            write!(f, " {ordinary}")?;
+        }
+        f.write_str(") (branches")?;
         for (condition, body) in &self.branches {
             f.write_str(" (arm (condition")?;
             if let Some(condition) = condition {
@@ -220,6 +450,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ordinary_delivery_dump_keeps_selection_and_join_requirements() {
+        let delivery = Ordinary {
+            branch_type: Some(p(P::Bool)),
+            fallback: true,
+            selection: Some(2),
+            suppressed: false,
+            callee: None,
+            preserve_effect: Some(true),
+        };
+        assert_eq!(
+            delivery.to_string(),
+            "(when-delivery (fallback true) (suppressed false) (branch-type (primitive bool)) (selection 2) (callee) (preserve-effect true))"
+        );
+    }
+
+    #[test]
     fn dump_keeps_completed_arms_and_pending_condition_separate() {
         let source_expr = Expr {
             hir_id: hir::HirId::INVALID,
@@ -234,15 +480,16 @@ mod tests {
         let frame = Frame {
             source: &source_expr,
             arms: &[],
-            depth: 3,
+            destination: Destination::Contextual(ContextualTail { depth: 3 }),
+            ordinary: None,
             state: State::Condition,
             branches: vec![(
                 Some(condition),
-                n::NormalFormArgument::Value(n::Expr {
+                CheckedBlock::Contextual(n::NormalFormArgument::Value(n::Expr {
                     source: source(source_expr.span),
                     ty: p(P::Str),
                     kind: K::Literal(n::Literal::String("arm\"\n".into())),
-                }),
+                })),
             )],
             scope: LexicalScope {
                 locals: BTreeMap::new(),
@@ -257,7 +504,7 @@ mod tests {
         let dump = frame.to_string();
         assert!(dump.starts_with("(when-check (source "), "{dump}");
         assert!(
-            dump.contains("(depth 3) (next 1) (phase condition-child)"),
+            dump.contains("(next 1) (phase condition-child)") && dump.contains("(depth 3)"),
             "{dump}"
         );
         assert!(dump.contains("(branches (arm (condition "), "{dump}");

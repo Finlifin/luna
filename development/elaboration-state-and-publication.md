@@ -229,8 +229,8 @@ Waiting 与 Unresolved 不混用。没有就绪任务时，先区分外部请求
 
 | 入口 | 已有责任 | 未完成部分 |
 | --- | --- | --- |
-| `elaboration/src/program/block_regions/driver.rs` 与 `driver/region.rs` | 普通、contextual、部分结构输入共用 Region；帧栈、子请求及返回值由逐步状态持有，同步入口只负责驱动 | 仍使用原活动 Checker，没有可移交的外部等待权限；普通 when／match 与模式子检查尚未迁移 |
-| `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；普通 when／match 共用适配 | 不提供执行前缀恢复，普通 when／match 子检查仍同步 |
+| `elaboration/src/program/block_regions/driver.rs` 与 `driver/region.rs` | 普通、contextual、部分结构输入共用 Region；帧栈、子请求及返回值由逐步状态持有，同步入口只负责驱动 | 仍使用原活动 Checker，没有可移交的外部等待权限；普通 match 与模式子检查尚未迁移；部分 when 的预探测仍同步 |
+| `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；普通 when／match 共用适配 | 不提供执行前缀恢复；部分 when 的预探测及普通 match 子检查仍同步 |
 | `elaboration/src/program/dependent_inputs/tasks.rs` | 参数域、默认引用和默认值完成的显式后继 | 源码子检查和 required 求值仍同步 |
 | `elaboration/src/program/declaration_inputs/progress.rs` | producer、身份、检查次序与源码 schedule 分开 | Typed 路径仍要求普通完整 Expr，Contextual 仍保留 NormalFormArgument |
 | `elaboration/src/program/dynamic_instances.rs` | callable packet 保留实际 producer、静态身份与 pending 集合 | 签名仍提及 pending 参数时直接拒绝发布 |
@@ -306,6 +306,31 @@ contextual when 的条件与主体也进入同一帧栈。`when::Frame` 保存�
 把前支的绑定或正前提带入后支。生成的每个 NormalFormArgument 分支仍保留原有
 Block 作用域，源码未选中的分支仍检查；这不是提前执行条件或用运行结果替代检查。
 无 fallback 的 when 继续采用普通语句规则，不伪造一个 contextual 值。
+
+普通 `when` 的条件与 arm 主体现也进入同一个 `when::Frame`，原 program.rs 的
+同步分支循环已退役。帧显式保存完整目标、当前分支结果域、fallback、有序 inline
+选择、父 callee 位置及 effect 交付责任。普通与 contextual 路径共用条件检查、
+正／负类型前提、每个 arm 的词法边界和失败退出；没有用运行结果免除未选 arm 检查。
+
+有 fallback 时，完成分支沿已有目标检查，缺少目标时从首个非 Never 分支取得后续域；
+没有 fallback 时保留普通语句的结果丢弃和 void 尾部。连接分支前恢复原事实上下文，
+不把某个 arm 的正前提带到连接点之外。inline 选择保留原有条件可用性检查与未选
+分支抑制；最终选中主体的复制纳入已有预算。嵌套普通 when 经同一交付前置检查进入
+父 Region，callees 仍只把交付位置传给 arm 结果，不能把条件或普通实参变成 callee。
+
+深嵌套验收还暴露了检查后的另一条递归链：comptime 局部量的初始化信息观察会在
+`observe_normal_input_in` 中为每层分支和块保留完整值构造器的宿主帧。32 层 when
+已完成 Region 检查后，仍在这里栈溢出。现在 `normal/control_observations.rs` 迭代
+跟随已知条件、匹配 arm 和块结果，独立维护观察用的局部绑定；值构造器只在非控制
+节点进入。深度、步数、绑定复制和模式／guard 的预算保持原义，未知调用、赋值和
+控制转移仍不给出值观察。这是静态证据路径的修复，不执行初始化器，也不补造结果。
+模式、条件、局部初始化及值构造的子观察尚未全部帧化，不能据此声称全前端已消除
+递归。参考树解释器另有 64 层宿主递归保护，深层源码验收与双引擎对照分别标明范围。
+
+部分输入上下文仍用共同 `optional_branch_context` 有界探测来取得候选域，其内部
+子检查尚未帧化；最终条件和主体则交给 when 帧。普通 match 的选择、绑定和清理
+来源也仍需单独迁移。本步不改变外部 Type 等待、源码 activation 或模板发布的
+未完成状态。
 
 contextual match 的 selector 和主体也交给同一驱动；`matches::Frame` 保留受检
 selector、当前模式、已完成 arms 及各 arm 的词法／匹配事实退出责任。模式与 guard
@@ -843,6 +868,40 @@ match 迁移发现的失败为 `normal_record_defaults_follow_evaluated_value_pr
 `/tmp/luna-tools-hwu9z154/result.json` 同样退出 101，仍报 `215..222` 的 comptime
 局部输入 `(local 4294967295 1)` 不可用。已原样恢复补丁并检查一致性。这个对照
 证明缺口先于 match 迁移；下述声明默认代码交接修复其根因，原合法用例保持不变。
+
+#### 普通 when 的共同帧与静态观察
+
+在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 900 --` 运行：
+
+- `test -p elaboration --lib -p luna --test contextual_input_regions --test execution --test inline_control --test comptime_clause_inputs --no-fail-fast -- when --test-threads=1`：
+  `/tmp/luna-tools-t5qn7lqp/result.json` 退出 0，30 项通过。新增嵌套 callee 求值次数、
+  有序前提隔离和提前返回用例；32 层源码与字节码成功，8 层作双引擎对照。
+- `test -p elaboration --lib -- normal:: block_regions --test-threads=1`：
+  `/tmp/luna-tools-kdm9zsgd/result.json` 退出 0，33 项通过，覆盖帧 dump、值观察的
+  未知／预算边界、普通列表域及 opaque head 身份。
+- `test -p luna --test execution --test contextual_input_regions --no-fail-fast -- partial_ --test-threads=1`：
+  `/tmp/luna-tools-c8chfow2/result.json` 退出 0，40 项通过，覆盖部分输入候选搜索、
+  嵌套失败恢复、错误结果与分支交付。
+
+- `test -p luna --test clause_packet_preparation --test scoped_input_observation --test captured_input_observations --no-fail-fast -- --test-threads=1`：
+  `/tmp/luna-tools-97qdg8up/result.json` 退出 101；前两组 19 项通过，捕获输入用例在
+  创建 VM 时因没有提供源码查询服务而报 `UnmaterializedDispatch`，尚未执行默认值。
+  将该 fixture 迁至公共 `sysroot::with_comptime`，仍检查三次调用的默认值次数、
+  显式供应跳过默认值、两引擎结果及错误域拒绝。
+- 最终 `test -p luna --test captured_input_observations --test nesting --no-fail-fast -- member_defaults_observe_parent_value_indices_in_their_annotations nested_when_preserves_return_through_the_pipeline --test-threads=1`：
+  `/tmp/luna-tools-y45fxzwn/result.json` 退出 0，两项通过；runtime 32 层 when 分别
+  经过 AST、HIR、NIR 与执行。没有重复全 workspace 测试。
+
+本阶段修改的 Rust 文件定向 rustfmt `--check` 退出 0，报告为
+`/tmp/luna-tools-il7y6hvf/result.json` 与 `/tmp/luna-tools-7_s2ojio/result.json`；
+`git diff --check` 通过。上述检查不覆盖外部 Type 恢复或完整格式化 println。
+
+初次 32 层 comptime 源码用例在检查后的值观察中发生宿主栈溢出，
+`/tmp/luna-tools-1rds7ruo/result.json` 退出 101；诊断版日志
+`/tmp/luna-tools-qhmg4bh6/stderr.log` 确认全部 when 帧已退出，随后普通值观察在
+深度 62 溢出。静态控制路径迭代化后该崩溃已消除。参考树解释器仍受独立的 64 层
+宿主递归保护，不把扩大 invocation 预算当作修复：生产深度限制未改，32 层字节码
+验收保留，双引擎对照明确限制为 8 层。临时诊断输出已移除。
 
 #### 声明默认代码与调用前缀的交接
 

@@ -2,6 +2,7 @@
 use super::*;
 use observation::Failure;
 mod arguments;
+mod control_observations;
 pub(super) mod known_patterns;
 pub(super) mod known_scalars;
 pub(super) mod observation;
@@ -902,17 +903,16 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    pub(in crate::program) fn observe_normal_input_in(
+    // Control observation owns its traversal in control_observations. Keep
+    // value constructors in a separate frame, entered only for non-control nodes.
+    #[inline(never)]
+    fn observe_normal_value_in(
         &self,
         expr: &n::Expr,
         depth: usize,
         budget: &mut comptime_runtime::Budget,
         bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
     ) -> Result<Term, Failure> {
-        if depth >= 128 {
-            return Err(Failure::Depth);
-        }
-        budget.consume(1)?;
         match &expr.kind {
             K::TypeValue(ty) | K::ComptimeValue(ty) | K::StagedValue(ty) => {
                 copy_observed_term(ty, budget)
@@ -1431,77 +1431,6 @@ impl Checker<'_, '_> {
                     return Err(Failure::Unavailable);
                 };
                 op.evaluate(&left, &right, budget).map_err(Failure::from)
-            }
-            K::Match { value, arms } => {
-                let value = self.observe_normal_input_in(value, depth + 1, budget, bindings)?;
-                for arm in arms {
-                    budget.consume(bindings.len().saturating_add(1))?;
-                    let mut scoped = bindings.clone();
-                    if !self.observe_normal_pattern(
-                        &arm.pattern,
-                        &value,
-                        depth + 1,
-                        budget,
-                        &mut scoped,
-                    )? {
-                        continue;
-                    }
-                    if let Some(guard) = &arm.guard {
-                        let Term::Bool(accepted) =
-                            self.observe_normal_input_in(guard, depth + 1, budget, &scoped)?
-                        else {
-                            return Err(Failure::Unavailable);
-                        };
-                        if !accepted {
-                            continue;
-                        }
-                    }
-                    return self.observe_normal_input_in(&arm.body, depth + 1, budget, &scoped);
-                }
-                Err(Failure::Unavailable)
-            }
-            K::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                // Inspect only a known condition and its selected branch. The
-                // original expression remains in the input plan for execution;
-                // this never evaluates calls or guesses the result of effects.
-                let Term::Bool(condition) =
-                    self.observe_normal_input_in(condition, depth + 1, budget, bindings)?
-                else {
-                    return Err(Failure::Unavailable);
-                };
-                if condition {
-                    self.observe_normal_input_in(then_branch, depth + 1, budget, bindings)
-                } else {
-                    match else_branch {
-                        Some(branch) => {
-                            self.observe_normal_input_in(branch, depth + 1, budget, bindings)
-                        }
-                        None => Ok(Term::Unit),
-                    }
-                }
-            }
-            K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                // Only immutable local construction is inspected. Calls,
-                // assignments and control transfer retain invocation-time work.
-                if statements.len() > budget.steps {
-                    return Err(Failure::Steps);
-                }
-                budget.consume(bindings.len())?;
-                let mut scoped = bindings.clone();
-                for statement in statements {
-                    budget.consume(1)?;
-                    self.observe_normal_binding(statement, depth, budget, &mut scoped)?;
-                }
-                match result {
-                    Some(result) => {
-                        self.observe_normal_input_in(result, depth + 1, budget, &scoped)
-                    }
-                    None => Ok(Term::Unit),
-                }
             }
             K::Local(binding) => {
                 if let Some(value) = bindings.get(binding) {

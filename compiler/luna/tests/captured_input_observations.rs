@@ -2,7 +2,7 @@
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
-use comptime_interpretor::{Budget, Event, Interpreter};
+use comptime_interpretor::Event;
 
 #[test]
 fn member_defaults_observe_parent_value_indices_in_their_annotations() {
@@ -31,45 +31,41 @@ fn member_defaults_observe_parent_value_indices_in_their_annotations() {
             .declaration
     };
     for tree in [false, true] {
-        let make = || {
-            if tree {
-                Interpreter::for_comptime_tree(&package, Budget::default())
-            } else {
-                Interpreter::for_comptime(&package, Budget::default())
-            }
-            .unwrap()
-        };
-        let mut actual_vm = make();
-        let mut expected_vm = make();
-        for (iteration, (entry, expected)) in [
-            ("Enabled", "ExpectedEnabled"),
-            ("Disabled", "ExpectedDisabled"),
-            ("Enabled", "ExpectedEnabled"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let actual = actual_vm.invoke(id(entry), vec![]).unwrap();
-            let expected = expected_vm.invoke(id(expected), vec![]).unwrap();
-            assert_eq!(actual, expected, "{entry}, tree={tree}");
-            assert_eq!(
-                actual_vm
-                    .events()
-                    .iter()
-                    .filter(|event| {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |actual_vm| {
+            sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |expected_vm| {
+                for (iteration, (entry, expected)) in [
+                    ("Enabled", "ExpectedEnabled"),
+                    ("Disabled", "ExpectedDisabled"),
+                    ("Enabled", "ExpectedEnabled"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let actual = actual_vm.invoke(id(entry), vec![]).unwrap();
+                    let expected = expected_vm.invoke(id(expected), vec![]).unwrap();
+                    assert_eq!(actual, expected, "{entry}, tree={tree}");
+                    let default_calls = actual_vm
+                        .events()
+                        .iter()
+                        .filter(|event| {
+                            matches!(event, Event::EnterFunction(found) if *found == id("compute_flag"))
+                        })
+                        .count();
+                    assert_eq!(
+                        default_calls,
+                        iteration + 1,
+                        "the default producer runs once"
+                    );
+                    let expected_called_default = expected_vm.events().iter().any(|event| {
                         matches!(event, Event::EnterFunction(found) if *found == id("compute_flag"))
-                    })
-                    .count(),
-                iteration + 1,
-                "the default producer runs once"
-            );
-            assert!(
-                !expected_vm.events().iter().any(|event| {
-                    matches!(event, Event::EnterFunction(found) if *found == id("compute_flag"))
-                }),
-                "an explicit argument skips its default"
-            );
-        }
+                    });
+                    assert!(
+                        !expected_called_default,
+                        "an explicit argument skips its default"
+                    );
+                }
+            });
+        });
     }
     let wrong = source.replace(
         "Config<false> { flag: false }>",

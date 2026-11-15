@@ -27,6 +27,12 @@ fn nested_expression_child() {
             });
             format!("fn run()->bool {{{body}}}")
         }
+        "when" => {
+            let body = (0..32).fold("do { return true; false }".to_owned(), |body, _| {
+                format!("when {{ false => false, else => {body}, }}")
+            });
+            format!("fn run()->bool {{ let value: bool = {body}; not value }}")
+        }
         "not" => format!(
             "fn run()->bool {{{}true{}}}",
             "not (".repeat(32),
@@ -138,7 +144,7 @@ fn nested_expression_child() {
 
 #[test]
 fn nested_scalar_operators_survive_frontend_and_execution() {
-    for case in [
+    check_cases(&[
         "blocks",
         "branches",
         "not",
@@ -154,7 +160,16 @@ fn nested_scalar_operators_survive_frontend_and_execution() {
         "open-arithmetic",
         "open-compare",
         "open-concat",
-    ] {
+    ]);
+}
+
+#[test]
+fn nested_when_preserves_return_through_the_pipeline() {
+    check_cases(&["when"]);
+}
+
+fn check_cases(cases: &[&str]) {
+    for case in cases {
         for stage in ["ast", "hir", "nir"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([

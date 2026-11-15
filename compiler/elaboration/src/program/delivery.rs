@@ -119,23 +119,25 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    /// The region may enter an if rule only after its value-delivery protocol.
-    /// Two-arm conditionals deliver the complete target to both branches.
+    /// The region enters a branch rule only after its value-delivery protocol.
+    /// Two-arm ifs and ordered whens deliver the complete target to their arms.
     /// A one-arm expression with a structured target may instead need a whole
     /// value probe/conversion, so that entry stays with the general adapter.
-    pub(super) fn prepare_region_if_delivery(
+    pub(super) fn prepare_region_branch_delivery(
         &mut self,
         expr: &Expr<'_>,
         target: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<bool, Error> {
-        let H::If(_, _, otherwise) = expr.kind else {
-            return Ok(false);
+        let directed = match expr.kind {
+            H::If(_, _, otherwise) => otherwise.is_some(),
+            H::When(_) => true,
+            _ => return Ok(false),
         };
         let Some(target) = target.filter(|target| !matches!(target, Term::Primitive(_))) else {
             return Ok(true);
         };
-        if otherwise.is_none() {
+        if !directed {
             return Ok(false);
         }
         self.charge_expression_delivery(expr.span)?;
@@ -143,7 +145,7 @@ impl Checker<'_, '_> {
             Step::Unadapted(_) => Ok(true),
             _ => Err(error(
                 expr.span,
-                "two-arm conditional lost its directed delivery rule",
+                "branch expression lost its directed delivery rule",
             )),
         }
     }

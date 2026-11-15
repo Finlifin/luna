@@ -23,7 +23,8 @@ fn check_in_engines(source: &str, calls: &[&str], budget: Budget, engines: &[boo
     for &tree in engines {
         sysroot::with_comptime(&package, budget, tree, |vm| {
             assert_eq!(
-                vm.invoke(entry, vec![]).unwrap(),
+                vm.invoke(entry, vec![])
+                    .unwrap_or_else(|failure| panic!("tree={tree}: {failure:?}")),
                 Value::Bool(true),
                 "tree={tree}"
             );
@@ -974,5 +975,78 @@ fn declaration_defaults_keep_actual_domain_checks_and_recover_after_rejection() 
                 ["Invalid", "prefix", "Valid", "prefix", "field", "later"]
             );
         });
+    }
+}
+
+#[test]
+fn ordinary_when_frames_keep_nested_callee_delivery_and_single_evaluation() {
+    check_both(
+        "
+        struct Counter { count: Integer }
+        impl Counter {
+            comptime fn no(self) -> bool { self.count += 1; false }
+            comptime fn yes(self) -> bool { self.count += 1; true }
+            comptime fn next(self) -> u8 { self.count += 1; 7 }
+        }
+        comptime fn identity(value: T) -> T where T { value }
+        comptime fn check() -> bool {
+            var counter = Counter { count: 0 };
+            let selected = (when {
+                counter.no() => identity<u8>,
+                counter.yes() => when { true => identity<u8>, else => identity<u8>, },
+                counter.yes() => identity<u8>,
+                else => identity<u8>,
+            })(counter.next());
+            selected == 7 and counter.count == 3
+        }
+        ",
+        &["check", "no", "yes", "next", "identity"],
+    );
+}
+
+#[test]
+fn ordinary_when_frames_join_under_ordered_premises_without_exporting_them() {
+    check_both(
+        "
+        comptime fn choose(value: T) -> T
+        where T
+        {
+            when {
+                T == bool => when { value => true, else => false, },
+                else => value,
+            }
+        }
+        comptime fn check() -> bool { choose<bool>(true) and choose<u8>(7) == 7 }
+        ",
+        &["check", "choose", "choose"],
+    );
+    let failure = sysroot::compile(
+        "comptime fn invalid(value: T) -> bool
+        where T
+        {
+            let selected = when { T == bool => do { let valid: bool = value; valid }, else => false, };
+            let escaped: bool = value;
+            selected and escaped
+        }",
+    ).unwrap_err();
+    assert!(failure.contains("type mismatch"), "{failure}");
+}
+
+#[test]
+fn nested_ordinary_when_frames_preserve_the_original_return_target() {
+    // The reference engine has a separate 64-level native recursion guard.
+    // Compare both engines inside it; keep 32 source levels for bytecode and
+    // frontend observation on the default host thread stack.
+    for (levels, engines) in [(8, &[false, true][..]), (32, &[false][..])] {
+        let mut nested = "do { return true; false }".to_string();
+        for _ in 0..levels {
+            nested = format!("when {{ false => false, else => {nested}, }}");
+        }
+        check_in_engines(
+            &format!("comptime fn check() -> bool {{ let value: bool = {nested}; not value }}"),
+            &["check"],
+            sysroot::COMPTIME_BUDGET,
+            engines,
+        );
     }
 }

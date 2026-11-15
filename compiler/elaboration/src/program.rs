@@ -3268,174 +3268,6 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
-    fn when_expr(
-        &mut self,
-        expr: &Expr<'_>,
-        arms: &[hir::expr::CondictionArm<'_>],
-        expected: Option<&Term>,
-        partial: Option<&crate::calls::CallableContext>,
-    ) -> Result<n::Expr, Error> {
-        self.when_expr_with_input(expr, arms, expected, partial, None)
-    }
-    fn when_expr_with_input(
-        &mut self,
-        expr: &Expr<'_>,
-        arms: &[hir::expr::CondictionArm<'_>],
-        expected: Option<&Term>,
-        partial: Option<&crate::calls::CallableContext>,
-        input_context: Option<&crate::calls::InputContext>,
-    ) -> Result<n::Expr, Error> {
-        let parent = self.context.clone();
-        let result = self.when_expr_in_context(expr, arms, expected, partial, input_context);
-        self.context = parent;
-        result
-    }
-    fn when_expr_in_context(
-        &mut self,
-        expr: &Expr<'_>,
-        arms: &[hir::expr::CondictionArm<'_>],
-        expected: Option<&Term>,
-        partial: Option<&crate::calls::CallableContext>,
-        input_context: Option<&crate::calls::InputContext>,
-    ) -> Result<n::Expr, Error> {
-        let fallback = arms.iter().position(|arm| arm.cond.is_none());
-        if fallback.is_some_and(|index| index + 1 != arms.len()) {
-            return Err(error(expr.span, "when fallback must be the final arm"));
-        }
-        let inferred = if expected.is_none() && fallback.is_some() {
-            match input_context {
-                Some(context) => self.optional_branch_context(expr.span, context, arms.len(), |checker, index| {
-                    // The probe must see the same ordered path as the final
-                    // check. checking_attempt rolls all these facts back.
-                    for (prior, arm) in arms[..=index].iter().enumerate() {
-                        checker.optional_branch_probe_budget=checker.optional_branch_probe_budget.checked_sub(1)
-                            .ok_or_else(||error(expr.span,"optional branch inference budget exhausted; add a type annotation"))?;
-                        if let Some(condition)=arm.cond {
-                            let condition=checker.expr(condition,Some(&p(P::Bool)))?;
-                            checker.assume_type_condition(&condition,prior==index,arm.body.span)?;
-                        }
-                    }
-                    checker.input_context_expression(arms[index].body, context)
-                })?,
-                None => None,
-            }
-        } else {
-            None
-        };
-        let expected = expected.or(inferred.as_ref());
-        let mut branches = Vec::new();
-        let join_context = self.context.clone();
-        let mut branch_type = if fallback.is_some() {
-            expected.cloned()
-        } else {
-            None
-        };
-        let selection = self
-            .inline_selection
-            .filter(|(id, _)| *id == expr.hir_id)
-            .map(|(_, index)| index);
-        for (index, arm) in arms.iter().enumerate() {
-            let suppressed = self.in_unselected_inline;
-            self.in_unselected_inline =
-                suppressed || selection.is_some_and(|selected| selected != index);
-            let checked = (|| {
-                let condition = arm
-                    .cond
-                    .map(|cond| self.expr(cond, Some(&p(P::Bool))))
-                    .transpose()?;
-                if selection.is_some() && !self.checking_open_behavior {
-                    if let Some(condition) = &condition {
-                        self.check_inline_input_availability(
-                            condition,
-                            &BTreeSet::new(),
-                            arm.body.span,
-                        )?;
-                    }
-                }
-                let check = |checker: &mut Self| {
-                    checker.with_callee_delivery(expr.hir_id, Some(arm.body.hir_id), |checker| {
-                        match input_context {
-                            Some(input_context) if fallback.is_some() && branch_type.is_none() => {
-                                checker.input_context_expression(arm.body, input_context)
-                            }
-                            _ => checker.expr_context(
-                                arm.body,
-                                branch_type.as_ref(),
-                                if fallback.is_some() { partial } else { None },
-                            ),
-                        }
-                    })
-                };
-                let mut body = match &condition {
-                    Some(condition) => {
-                        self.under_type_condition(condition, true, arm.body.span, check)?
-                    }
-                    None => check(self)?,
-                };
-                if branch_type.is_none() && !is_never(&body.ty) {
-                    branch_type = Some(body.ty.clone());
-                }
-                if fallback.is_none() {
-                    body = discard_result(body);
-                }
-                if let Some(condition) = &condition {
-                    self.assume_type_condition(condition, false, arm.body.span)?;
-                }
-                Ok((condition, body))
-            })();
-            self.in_unselected_inline = suppressed;
-            branches.push(checked?);
-        }
-        self.context = join_context;
-        let selected_body = selection.map(|index| {
-            branches
-                .get(index)
-                .map(|(_, body)| body.clone())
-                .unwrap_or(n::Expr {
-                    ty: p(P::Void),
-                    source: source(expr.span),
-                    kind: K::Unit,
-                })
-        });
-        let mut tail = n::Expr {
-            ty: p(P::Void),
-            source: source(expr.span),
-            kind: K::Unit,
-        };
-        for (condition, body) in branches.into_iter().rev() {
-            let Some(condition) = condition else {
-                tail = body;
-                continue;
-            };
-            let ty = if control::conditional_never(&condition, &body.ty, &tail.ty) {
-                p(P::Never)
-            } else if fallback.is_some() && branch_type.is_some() {
-                // Each completing arm was checked against this context under
-                // its own ordered type facts, including a sole surviving arm.
-                branch_type.clone().unwrap()
-            } else if is_never(&body.ty) {
-                tail.ty.clone()
-            } else if is_never(&tail.ty) {
-                body.ty.clone()
-            } else {
-                self.require(&tail.ty, &body.ty, expr.span)?;
-                body.ty.clone()
-            };
-            tail = n::Expr {
-                ty,
-                source: source(expr.span),
-                kind: K::If {
-                    condition: Box::new(condition),
-                    then_branch: Box::new(body),
-                    else_branch: Some(Box::new(tail)),
-                },
-            };
-        }
-        if let Some(expected) = expected {
-            self.require(&tail.ty, expected, expr.span)?;
-        }
-        Ok(selected_body.unwrap_or(tail))
-    }
     fn is_type_head(&self, expr: &Expr<'_>) -> bool {
         if self.associated_reference_is_type(expr) {
             return true;
@@ -5435,8 +5267,8 @@ impl Checker<'_, '_> {
                 | C::Record(_)
                 | C::Nominal { .. }
                 | C::ErrorResult { .. },
-                H::When(arms),
-            ) => self.when_expr_with_input(input, arms, None, None, Some(context)),
+                H::When(_),
+            ) => self.check_ordinary_when_region(input, None, None, Some(context)),
             (
                 C::Optional(_)
                 | C::Tuple(_)
@@ -7862,7 +7694,7 @@ impl Checker<'_, '_> {
                 }
                 H::If(..) => self.check_ordinary_if_region(expr, expected, partial),
                 H::Match(value, arms) => self.match_expr(expr, value, arms, expected, partial),
-                H::When(arms) => self.when_expr(expr, arms, expected, partial),
+                H::When(_) => self.check_ordinary_when_region(expr, expected, partial, None),
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "enum_group_paths" | "enum_variant_paths" | "enum_variant_shapes" | "enum_variant_field_names" | "enum_variant_field_types" | "enum_symbol_values" | "enum_bit_width" | "enum_bit_base_type" | "enum_bit_masks" | "enum_bit_values" | "enum_bit_offsets")) => {
                     self.enum_reflection_builtin(expr, callee, args, expected)
                 }

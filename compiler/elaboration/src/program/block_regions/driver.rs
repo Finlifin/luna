@@ -302,6 +302,27 @@ impl Checker<'_, '_> {
             .contextual(expr.span)
     }
 
+    pub(in crate::program) fn check_ordinary_when_region(
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        input: Option<&crate::calls::InputContext>,
+    ) -> Result<n::Expr, Error> {
+        let destination = Destination::ordinary(
+            self,
+            OrdinaryTail {
+                expected,
+                partial,
+                input,
+            },
+            expr.span,
+        )?;
+        let frame = when::Frame::ordinary(self, expr, destination, false)?;
+        self.drive_check_region(RegionFrame::When(frame))?
+            .ordinary(expr.span)
+    }
+
     pub(in crate::program) fn check_contextual_when_region(
         &mut self,
         expr: &Expr<'_>,
