@@ -7,6 +7,7 @@ mod comparisons;
 mod conditionals;
 mod destinations;
 mod driver;
+mod logical;
 mod matches;
 mod tails;
 mod when;

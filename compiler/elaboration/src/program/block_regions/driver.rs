@@ -1,5 +1,6 @@
 //! Block checking owns its unfinished children and lexical exits.
-//! Blocks, branches and comparisons share this stack. Other expression rules
+//! Blocks, branches, comparisons and logical operators share this stack.
+//! Other expression rules
 //! remain atomic adapters until their continuations can join the region.
 use super::*;
 mod region;
@@ -146,6 +147,7 @@ enum RegionFrame<'b, 'h> {
     When(when::Frame<'b, 'h>),
     Match(matches::Frame<'b, 'h>),
     Comparison(comparisons::Frame<'b, 'h>),
+    Logical(logical::Frame<'b, 'h>),
 }
 
 impl RegionFrame<'_, '_> {
@@ -156,6 +158,7 @@ impl RegionFrame<'_, '_> {
             Self::When(frame) => frame.unwind(checker),
             Self::Match(frame) => frame.unwind(checker),
             Self::Comparison(_) => {}
+            Self::Logical(frame) => frame.unwind(checker),
         }
     }
 }
@@ -168,6 +171,7 @@ impl std::fmt::Display for RegionFrame<'_, '_> {
             Self::When(frame) => frame.fmt(f),
             Self::Match(frame) => frame.fmt(f),
             Self::Comparison(frame) => frame.fmt(f),
+            Self::Logical(frame) => frame.fmt(f),
         }
     }
 }
@@ -237,6 +241,25 @@ impl<'b, 'h> BlockFrame<'b, 'h> {
 }
 
 impl Checker<'_, '_> {
+    pub(in crate::program) fn logical_expression(
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let destination = Destination::ordinary(
+            self,
+            OrdinaryTail {
+                expected,
+                partial: None,
+                input: None,
+            },
+            expr.span,
+        )?;
+        let frame = logical::Frame::new(self, expr, destination, false)?;
+        self.drive_check_region(RegionFrame::Logical(frame))?
+            .ordinary(expr.span)
+    }
+
     pub(in crate::program) fn comparison_expression(
         &mut self,
         expr: &Expr<'_>,

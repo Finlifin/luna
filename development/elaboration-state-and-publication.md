@@ -370,10 +370,18 @@ staged 描述；对外层写入造成的输入事实失效仍按共同词法边�
 的 bool 上下文也不作为操作数域。词法退出先于探测回退，域错误与预算错误仍向外
 传播。完成后复用原 Eq／Ord 协议选择、标量降码和 effect 交付规则。
 
-算术与逻辑运算的同步适配器使用同一个 Progress，不保留第二套上下文搜索算法；
-它们的子检查尚未迁入比较帧。Progress 保存的是代码而非已执行的值，两侧检查
-先后仍不改变源码执行顺序；块内 return 仍指向原函数，未执行的右侧也须通过检查。
-这一步尚未提供等待外部 Type 响应的入口，不解除待定 callable／列表域正例的 ignore。
+`and/or` 的操作数现由 `logical::Frame` 保留并进入同一 Region，原同步递归与左链
+单独展开循环已删除。帧先尝试左侧的既有上下文；缺少上下文才交给共同的
+`operators::peers::Progress`。Never 不提供域，右侧先在无结果上下文下探测；若
+右侧仍需上下文，再使用正常的 peer/default 规则，不能把整个表达式的结果域强加
+给已经具有类型的右操作数。
+
+bool 右侧在已检查左侧的相应真／假类型前提内检查，帧独占该前提的退出责任；
+子检查正常完成或失败时先退出前提，完成整个结果交付或外层探测回退。BitVec
+不安装 bool 前提，保留双侧求值。域选择只决定检查，不执行操作数、不改源码顺序，
+块内 return 仍指向原函数，短路跳过的右侧也须通过源码检查。算术运算仍通过
+同一个 Progress 的同步适配器检查子项；这一步尚未提供等待外部 Type 响应的入口，
+不解除待定 callable／列表域正例的 ignore。
 
 检查驱动的帧栈与返回值已从局部循环移入 `driver::region::Region`。一次正常 poll
 完成一个帧转换，返回 Continue、子表达式请求或完整结果；尚未迁移的原子表达式
@@ -879,6 +887,7 @@ callable 签名对实际 Type 的消费。只增加 owner、请求枚举或可�
 | 扩展分支验收 | `/tmp/luna-tools-j385q075/result.json`：490 通过、1 个新 fixture 阶段声明错误；修正后该用例 `/tmp/luna-tools-qe9dsshx/result.json` 退出 0；32 层 CLI 用例 `/tmp/luna-tools-sjdhryg0/result.json` 退出 0 |
 | 比较后继与共同操作数搜索 | 在 `/home/fin/luna` 经 `development/check.py --timeout 900 -- test -p luna --test contextual_input_regions --test ordering_protocol --test control_boundaries --no-fail-fast -- --test-threads=1` 运行，`/tmp/luna-tools-v_kmth4v/result.json` 退出 0，35 项通过；涵盖左右上下文补足、块与分支作用域、原 return 出口及一次性生产顺序 |
 | 比较协议、资源及 dump 回归 | 同目录与入口，`test -p luna --test arithmetic_contexts --test equality_protocol --test comparison_resources --test library_comptime_comparison --no-fail-fast -- --test-threads=1`，`/tmp/luna-tools-a43rzqwr/result.json` 退出 0，36 项通过；`test -p elaboration --lib -p luna --test contextual_input_regions --no-fail-fast -- comparison_regions peer_progress_dump --test-threads=1`，`/tmp/luna-tools-3g6y5qi2/result.json` 退出 0，dump 与两个新增源码用例通过，后两项亦包含在上一行中 |
+| 逻辑运算后继、短路前提与宿主回归 | 在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 900 -- test -p luna --test contextual_input_regions --test pure_bitvec --test nesting --test control_boundaries --test library_std --test library_std_format --no-fail-fast -- --test-threads=1` 运行，`/tmp/luna-tools-egjfuqg3/result.json` 退出 0，95 项通过；nesting 的子进程入口单独标为 ignored，由父测试实际调用。覆盖短路与 BitVec 次数／顺序、类型前提退出、上下文失败回退、原 return 目标、48 层混合嵌套及 LLVM O0/O3。相同入口运行 `test -p elaboration --lib -- logical_frame_dump --test-threads=1`，`/tmp/luna-tools-5s9x59gq/result.json` 退出 0；已修改 Rust 文件 scoped rustfmt 检查退出 0，`/tmp/luna-tools-snlvmkvx/result.json`。完整格式化接口与外部 Type 恢复不在本组完成范围内 |
 | VM 主体阶段的代码所有权 | 在 `/home/fin/luna` 经 `development/check.py --timeout 900 -- test -p comptime_interpretor --lib -p luna --test invocation_host_requests --test method_host_requests --test prepared_invocations --test declaration_contracts --no-fail-fast -- --test-threads=1` 运行，`/tmp/luna-tools-oki5n2vh/result.json` 退出 0，718 项通过；涵盖两条执行路径、契约失败／取消／迟到响应、原参数存储及代码缓存与调用结果隔离。源码待定 Type 的两个 ignored 未在此组重跑，不据此声称源区域恢复已完成 |
 | 受检声明／主体拆分：编译与核心实现 | 基线 `115d2d9e` 加本次工作区，在 `/home/fin/luna` 使用 `python3 -B development/check.py --timeout 900 --`：`check --workspace --all-targets` 退出 0，`/tmp/luna-tools-65gozkq3/result.json`；`test -p nir -p iir -p materialization -p comptime_interpretor -p elaboration -p program_verification -p type_resolution --lib --no-fail-fast -- --test-threads=1` 退出 0，1,183 项通过，`/tmp/luna-tools-h1ufip5h/result.json` |
 | 受检声明／主体拆分：所有权、替换与预算 | 同目录、同入口运行 `test -p nir -p iir -p materialization -p elaboration -p type_resolution --test function_declarations --test copy_budget --test phases --test types --test runtime_instances --test dependent_staging --test expansion_boundary --test scoped_dispatch_inputs --test type_computation_demands --test callable_world --no-fail-fast -- --test-threads=1`，退出 0，189 项通过，`/tmp/luna-tools-_otv3vp2/result.json`；独立声明测试覆盖无主体的契约／默认值替换、失败后重试、输入身份与 Display 转义 |

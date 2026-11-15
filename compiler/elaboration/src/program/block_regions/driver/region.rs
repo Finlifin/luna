@@ -73,6 +73,7 @@ impl<'b, 'h> Region<'b, 'h> {
                 RegionFrame::When(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::Match(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::Comparison(frame) => frame.step(checker, returned.take())?,
+                RegionFrame::Logical(frame) => frame.step(checker, returned.take())?,
             };
             let request = match step {
                 Step::Continue => return Ok(Poll::Continue),
@@ -104,20 +105,29 @@ impl<'b, 'h> Region<'b, 'h> {
                     Request::Expression(expr, destination) => {
                         // Nonprimitive targets first pass through ordinary
                         // delivery adaptation, which enters the same frame.
-                        if comparisons::is_comparison(expr)
+                        if (comparisons::is_comparison(expr) || logical::is_logical(expr))
                             && let Some(view) = destination.ordinary_view()
                             && view.input.is_none()
                             && view
                                 .expected
                                 .is_none_or(|ty| matches!(ty, Term::Primitive(_)))
                         {
-                            self.frames
-                                .push(RegionFrame::Comparison(comparisons::Frame::new(
+                            let frame = if logical::is_logical(expr) {
+                                RegionFrame::Logical(logical::Frame::new(
                                     checker,
                                     expr,
                                     destination,
                                     true,
-                                )?));
+                                )?)
+                            } else {
+                                RegionFrame::Comparison(comparisons::Frame::new(
+                                    checker,
+                                    expr,
+                                    destination,
+                                    true,
+                                )?)
+                            };
+                            self.frames.push(frame);
                             return Ok(Poll::Continue);
                         }
                         // Retain the input rule and its delivery boundary;
@@ -295,6 +305,9 @@ impl<'b, 'h> Region<'b, 'h> {
                         }
                         RegionFrame::Comparison(comparison) => {
                             Some(comparison.recover(checker, failure.take().unwrap()))
+                        }
+                        RegionFrame::Logical(frame) => {
+                            Some(frame.recover(checker, failure.take().unwrap()))
                         }
                         _ => None,
                     };

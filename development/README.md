@@ -59,7 +59,7 @@
 | --- | --- | --- |
 | 声明输入与调用供应 | `lexical_inputs` 按声明根及调用闭包收集依赖；`declaration_inputs` 的同一计划服务普通 callable、NF、别名及名义类型；完整供应与局部提示共用入口游标，旧 type_input_slot 已删除 | typed 消费者仍要求立即取得可检查域；完整 ContextualExpr 尚未替换 NormalFormArgument |
 | 函数值的公开入口 | 普通调用和子句已从 HIR 提取独立入口描述，分别保留预留、到达与源码位置 | 描述尚未跨 callable Type／值传送；动态 NF 具名供应仍失败；[接口设计](callable-input-interfaces.md)明确准入、提供者和编码的共同迁移边界 |
-| 参数域与源码控制 | 声明／trait 输入在替换前识别 callee 依赖；块、if、contextual when/match 与比较保留检查帧；控制状态和输入事实分别管理整体回滚及词法退出 | 整个 Checker 尚非可挂起区域；内部 Probe 回退不是源执行恢复，已知符号身份不代表 invocation 生产者已执行 |
+| 参数域与源码控制 | 声明／trait 输入在替换前识别 callee 依赖；块、if、when/match、比较与 and/or 保留检查帧；逻辑帧保留短路前提，控制状态和输入事实分别管理整体回滚及词法退出 | 整个 Checker 尚非可挂起区域；内部 Probe 回退不是源执行恢复，已知符号身份不代表 invocation 生产者已执行 |
 | 词法参数与代码签名 | 普通表达式、contextual 签名和捕获共用可见声明输入；关联常量将主体与捕获一起按实例替换 | 这不能使尚未执行的 Type 生产者提前变成已完成输入 |
 | 值传递与接收世界 | 通用准入保留域、phase 和身份；跨 VM callable 在接收世界完成方法选择及关联签名观察 | 活动值、权限及选择证据不随 CodeSession 共享；完整统一值传送协议仍有待迁移 |
 | 跨阶段 runtime 交付 | 常量与 comptime 调用结果可选择普通 runtime Splice；实际构造次数已有 native 对照 | comptime 参数直接作为 runtime 结果仍按源域报错，残留读取还会重建为 runtime Let，quote 数据重建也会跳过转换；[交付设计](runtime-value-delivery.md)规定共同消费边界及退役条件，尚未实现 |

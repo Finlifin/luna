@@ -388,137 +388,39 @@ impl Checker<'_, '_> {
         Ok(None)
     }
 
-    #[inline(never)]
-    pub(super) fn logical_expression(
+    pub(super) fn finish_logical_expression(
         &mut self,
         expr: &Expr<'_>,
         expected: Option<&Term>,
+        mut left: n::Expr,
+        mut right: n::Expr,
+        operand_ty: Term,
     ) -> Result<n::Expr, Error> {
-        // Check left-associated prefixes bottom-up. Keep the first prefix in
-        // the ordinary input transaction: if its domain needs a later peer,
-        // roll it back and retain the existing peer-inference path. A ready
-        // prefix supplies exactly the evidence the recursive left check did.
-        let mut pending = Vec::new();
-        let mut current = expr;
-        while let H::Binary(BinOp::And | BinOp::Or, left, _) = &current.kind {
-            pending.push(current);
-            current = left;
-        }
-        if pending.len() <= 1 {
-            return self.logical_expression_step(expr, expected, None);
-        }
-        let first = pending.pop().unwrap();
-        let attempted =
-            self.checking_attempt(first.span, false, CheckingDisposition::Commit, |checker| {
-                checker.logical_expression_step(first, expected, None)
-            })?;
-        let Some(mut checked) = attempted else {
-            return self.logical_expression_step(expr, expected, None);
+        let H::Binary(op, _, _) = expr.kind else {
+            unreachable!("validated logical expression")
         };
-        while let Some(node) = pending.pop() {
-            checked = self.logical_expression_step(node, expected, Some(checked))?;
+        let right_ty = if is_never(&operand_ty) {
+            p(P::Bool)
+        } else {
+            operand_ty.clone()
+        };
+        if !is_never(&left.ty) {
+            left.ty = operand_ty.clone();
         }
-        Ok(checked)
-    }
-
-    #[inline(never)]
-    fn logical_expression_step(
-        &mut self,
-        expr: &Expr<'_>,
-        expected: Option<&Term>,
-        checked_left: Option<n::Expr>,
-    ) -> Result<n::Expr, Error> {
-        let (ty, kind) = match &expr.kind {
-            H::Binary(op @ (BinOp::And | BinOp::Or), a, b) => {
-                // Do not default a leading integer mask before the other
-                // operand can supply its BitVec width. Keep the ordinary Bool
-                // path separate so its right side still sees short-circuit
-                // type premises from the already checked left side.
-                let left_source = a;
-                let attempted = match checked_left {
-                    Some(value) => Some(value),
-                    None => self.argument_attempt(a, expected, None)?,
-                };
-                let (a, ready_right) = match attempted {
-                    Some(a) => (a, None),
-                    None => {
-                        let (a, b) = self.peer_operands(a, b, expected, None)?;
-                        (a, Some(b))
-                    }
-                };
-                // A diverging left operand supplies no operation domain. Let
-                // the right peer (or its contextual literal type) select Bool
-                // versus BitVec without rechecking the already lowered prefix.
-                let (mut a, ready_right, operand_ty) = if is_never(&a.ty) {
-                    // The whole expression never delivers a result, so its
-                    // expected type cannot constrain an already typed peer.
-                    // Retain it only for a peer that still needs context.
-                    let ready_right = match ready_right {
-                        Some(value) => Some(value),
-                        None => self.argument_attempt(b, None, None)?,
-                    };
-                    let (left, right) = self.peer_operands_with_ready(
-                        left_source,
-                        b,
-                        expected,
-                        None,
-                        Some(a),
-                        ready_right,
-                    )?;
-                    let domain = self.structural_type(&right.ty, expr.span)?;
-                    (left, Some(right), domain)
-                } else {
-                    let domain = self.structural_type(&a.ty, expr.span)?;
-                    (a, ready_right, domain)
-                };
-                if !matches!(
-                    operand_ty,
-                    Term::Primitive(P::Bool | P::BitVec(_) | P::Never)
-                ) {
-                    return Err(error(
-                        expr.span,
-                        "and/or require bool or equal-width BitVec operands",
-                    ));
-                }
-                let right_ty = if is_never(&operand_ty) {
-                    p(P::Bool)
-                } else {
-                    operand_ty.clone()
-                };
-                let mut b = if let Some(b) = ready_right {
-                    b
-                } else if operand_ty == p(P::Bool) {
-                    self.under_type_condition(&a, *op == BinOp::And, expr.span, |checker| {
-                        checker.expr(b, Some(&right_ty))
-                    })?
-                } else {
-                    self.expr(b, Some(&right_ty))?
-                };
-                if !is_never(&a.ty) {
-                    a.ty = operand_ty.clone();
-                }
-                if !is_never(&b.ty) {
-                    b.ty = right_ty;
-                }
-                // Bool short-circuits; BitVec evaluates both operands.
-                let evaluates_right = if operand_ty == p(P::Bool) {
-                    super::control::boolean(&a) == Some(*op == BinOp::And)
-                } else {
-                    matches!(operand_ty, Term::Primitive(P::BitVec(_)))
-                };
-                let ty = if is_never(&a.ty) || (evaluates_right && is_never(&b.ty)) {
-                    p(P::Never)
-                } else {
-                    operand_ty
-                };
-                let kind = if *op == BinOp::And {
-                    K::And(Box::new(a), Box::new(b))
-                } else {
-                    K::Or(Box::new(a), Box::new(b))
-                };
-                (ty, kind)
-            }
-            _ => unreachable!("operator dispatcher selected an incompatible expression"),
+        if !is_never(&right.ty) {
+            right.ty = right_ty;
+        }
+        // Bool short-circuits; BitVec evaluates both operands. Checking a
+        // child's domain does not authorize changing its execution position.
+        let evaluates_right = if operand_ty == p(P::Bool) {
+            super::control::boolean(&left) == Some(op == BinOp::And)
+        } else {
+            matches!(operand_ty, Term::Primitive(P::BitVec(_)))
+        };
+        let ty = if is_never(&left.ty) || (evaluates_right && is_never(&right.ty)) {
+            p(P::Never)
+        } else {
+            operand_ty
         };
         if let Some(expected) = expected {
             self.require_expression(&ty, expected, expr.span)?;
@@ -526,7 +428,11 @@ impl Checker<'_, '_> {
         Ok(n::Expr {
             ty,
             source: source(expr.span),
-            kind,
+            kind: if op == BinOp::And {
+                K::And(Box::new(left), Box::new(right))
+            } else {
+                K::Or(Box::new(left), Box::new(right))
+            },
         })
     }
     #[inline(never)]

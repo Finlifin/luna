@@ -52,6 +52,95 @@ fn check_in_engines(source: &str, calls: &[&str], budget: Budget, engines: &[boo
 }
 
 #[test]
+fn logical_regions_scope_type_premises_through_nested_children() {
+    check_both(
+        "
+        comptime fn accept(value: bool) -> bool { value }
+        comptime fn both(value: T) -> bool where T {
+            T == bool and (do { if true { accept(value) } else { false } })
+        }
+        comptime fn either(value: T) -> bool where T {
+            T != bool or (false or (true match { true => accept(value), false => false }))
+        }
+        comptime fn check() -> bool {
+            both<bool>(true) and not both<u8>(7)
+                and either<bool>(true) and either<u8>(7)
+        }
+        ",
+        &[
+            "check", "both", "accept", "both", "either", "accept", "either",
+        ],
+    );
+    for condition in ["T == bool and value", "T != bool or value"] {
+        let source = format!(
+            "comptime fn invalid(value: T) -> bool where T {{
+                let local = {condition};
+                let escaped: bool = value;
+                local and escaped
+            }}"
+        );
+        let failure = sysroot::compile(&source).unwrap_err();
+        assert!(failure.contains("type mismatch"), "{failure}");
+    }
+}
+
+#[test]
+fn logical_regions_preserve_short_circuit_and_early_return_order() {
+    check_both(
+        "
+        comptime fn skipped() -> bool { false }
+        comptime fn early() -> bool {
+            let result = true and (false or (do { return true; false }));
+            skipped()
+        }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let left = (do { trace = trace * 10 + 1; false })
+                and (do { trace = 99; true });
+            let right = (do { trace = trace * 10 + 2; true })
+                or (do { trace = 99; false });
+            let nested = (left or (do { trace = trace * 10 + 3; true }))
+                and (right and (do { trace = trace * 10 + 4; true }));
+            nested and trace == 1234 and early()
+        }
+        ",
+        &["check", "early"],
+    );
+    // Short-circuit execution does not skip source type checking.
+    for expression in ["false and 7", "true or 7"] {
+        assert!(sysroot::compile(&format!("fn invalid() -> bool {{ {expression} }}")).is_err());
+    }
+}
+
+#[test]
+fn logical_regions_recover_peer_context_without_replaying_runtime_inputs() {
+    check_both(
+        "
+        comptime fn bits(value: BitVec<8>) -> BitVec<8> { value }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let mask = (do { trace = trace * 10 + 1; 15 })
+                and bits(do { trace = trace * 10 + 2; 240 });
+            let filled = (do { trace = trace * 10 + 3; 255 })
+                or bits(do { trace = trace * 10 + 4; 0 });
+            mask == 0 and filled == 255 and trace == 1234
+        }
+        ",
+        &["check", "bits", "bits"],
+    );
+    for expression in ["15 and bits()", "15 or bits()"] {
+        let failure = sysroot::compile(&format!(
+            "fn bits() -> BitVec<3> {{ 0 }} fn invalid() -> bool {{ let value = {expression}; true }}"
+        )).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+        assert!(
+            failure.contains("range") || failure.contains("fit"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
 fn comparison_regions_keep_peer_context_and_producer_order_across_nested_blocks() {
     check_both(
         "

@@ -73,6 +73,15 @@ fn nested_expression_child() {
             });
             format!("fn run()->bool {{{body}}}")
         }
+        "logical-regions" => {
+            let body = (0..48).fold("true".to_owned(), |body, index| match index % 4 {
+                0 => format!("true and ({body})"),
+                1 => format!("false or ({body})"),
+                2 => format!("when {{ false => false, else => {body} }}"),
+                _ => format!("({body}) == true"),
+            });
+            format!("fn run() -> bool {{ {body} }}")
+        }
         "equal" => {
             let body = (0..32).fold("true".to_owned(), |body, _| format!("({body}) == true"));
             format!("fn run()->bool {{{body}}}")
@@ -195,6 +204,11 @@ fn nested_match_preserves_return_through_the_pipeline() {
 #[test]
 fn nested_partial_arm_probes_survive_frontend_and_execution() {
     check_cases(&["partial-arms"]);
+}
+
+#[test]
+fn nested_logical_regions_preserve_mixed_control_children() {
+    check_cases(&["logical-regions"]);
 }
 
 fn check_cases(cases: &[&str]) {
