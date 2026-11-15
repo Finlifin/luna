@@ -619,6 +619,17 @@ VM 已把普通输入的 body 重绑定放在 Entry → Body 转换：入口程�
 该接线不是定义端源码延迟检查。新主体服务必须沿同一 activation 取得代码，不能
 为了允许缺失 body 而删掉定义检查或阶段准入。
 
+VM 的 `contracts::Progress::Body` 现直接持有已准备的 Body 与其代码缓存键，
+不再由 InvocationFrame 在 Entry／Body／Exit 之外保留一个始终可回退执行的 body。
+Entry → Body 先取得并按普通输入准备代码，成功后一次交付这个阶段状态；Exit
+保留结果和原 source，用于结果交付、后置条件及清理。树执行与字节码执行共用
+InvocationFrame 的当前代码选择，不在入口或出口缺少 condition 时回退到主体。
+dump 区分 package-body／owned-body 及相应缓存键。
+
+此处只拆开了活动调用的执行状态。被调用的 Function／Closure 仍可保留完整的
+已检查源码；签名准入的来源位置目前仍取自原 body。声明参数特化、函数收集和
+RequiredWorld 尚未因此接受缺少主体的源码模板，也没有新增源码主体的外部请求。
+
 接线要共同改变函数收集、required 根和 VM 主体取得。当前 RequiredWorld 只有完成
 的 NIR 声明；只给 InvocationProgress 增加请求变体无法让未完成源码抵达它。
 源服务不能提供某种模板时明确报告缺口，不转而解释 HIR，不将所有函数改为首调用时
@@ -671,6 +682,7 @@ callable 签名对实际 Type 的消费。只增加 owner、请求枚举或可�
 | 扩展分支验收 | `/tmp/luna-tools-j385q075/result.json`：490 通过、1 个新 fixture 阶段声明错误；修正后该用例 `/tmp/luna-tools-qe9dsshx/result.json` 退出 0；32 层 CLI 用例 `/tmp/luna-tools-sjdhryg0/result.json` 退出 0 |
 | 比较后继与共同操作数搜索 | 在 `/home/fin/luna` 经 `development/check.py --timeout 900 -- test -p luna --test contextual_input_regions --test ordering_protocol --test control_boundaries --no-fail-fast -- --test-threads=1` 运行，`/tmp/luna-tools-v_kmth4v/result.json` 退出 0，35 项通过；涵盖左右上下文补足、块与分支作用域、原 return 出口及一次性生产顺序 |
 | 比较协议、资源及 dump 回归 | 同目录与入口，`test -p luna --test arithmetic_contexts --test equality_protocol --test comparison_resources --test library_comptime_comparison --no-fail-fast -- --test-threads=1`，`/tmp/luna-tools-a43rzqwr/result.json` 退出 0，36 项通过；`test -p elaboration --lib -p luna --test contextual_input_regions --no-fail-fast -- comparison_regions peer_progress_dump --test-threads=1`，`/tmp/luna-tools-3g6y5qi2/result.json` 退出 0，dump 与两个新增源码用例通过，后两项亦包含在上一行中 |
+| VM 主体阶段的代码所有权 | 在 `/home/fin/luna` 经 `development/check.py --timeout 900 -- test -p comptime_interpretor --lib -p luna --test invocation_host_requests --test method_host_requests --test prepared_invocations --test declaration_contracts --no-fail-fast -- --test-threads=1` 运行，`/tmp/luna-tools-oki5n2vh/result.json` 退出 0，718 项通过；涵盖两条执行路径、契约失败／取消／迟到响应、原参数存储及代码缓存与调用结果隔离。源码待定 Type 的两个 ignored 未在此组重跑，不据此声称源区域恢复已完成 |
 
 match 迁移发现的失败为 `normal_record_defaults_follow_evaluated_value_prefixes_once`。
 临时撤回本次四个生产文件的补丁后，在 `a68e3087` 源码上按同入口执行

@@ -76,7 +76,7 @@ fn entry_body_and_exit_share_a_suspendable_activation() {
             .unwrap();
         for (member, phase) in [
             (2, "(entry (next 0))"),
-            (3, "(body)"),
+            (3, "(body (cache-key "),
             (4, "(exit (next 0)"),
         ] {
             let request = request_at(&mut active, member);

@@ -2,9 +2,12 @@
 //! Preparing a condition specializes code; it never executes that condition.
 use super::*;
 
-pub(super) enum Progress {
+pub(super) enum Progress<'a> {
     Entry(usize),
-    Body,
+    Body {
+        code: Body<'a>,
+        cache_key: Option<DeclarationId>,
+    },
     Exit {
         next: usize,
         value: Value,
@@ -12,11 +15,26 @@ pub(super) enum Progress {
     },
 }
 
-impl fmt::Display for Progress {
+impl Progress<'_> {
+    pub(super) fn body(&self) -> Option<(&Body<'_>, Option<DeclarationId>)> {
+        match self {
+            Self::Body { code, cache_key } => Some((code, *cache_key)),
+            Self::Entry(_) | Self::Exit { .. } => None,
+        }
+    }
+}
+
+impl fmt::Display for Progress<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Entry(next) => write!(f, "(entry (next {next}))"),
-            Self::Body => f.write_str("(body)"),
+            Self::Body { code, cache_key } => {
+                f.write_str("(body (cache-key")?;
+                if let Some(identity) = cache_key {
+                    write!(f, " {identity}")?;
+                }
+                write!(f, ") {code})")
+            }
             Self::Exit {
                 next,
                 returned,
@@ -31,17 +49,17 @@ impl fmt::Display for Progress {
     }
 }
 
-impl Interpreter<'_> {
+impl<'a> Interpreter<'a> {
     /// Select the next expression without leaving this invocation's scope.
     /// A completed exit returns its retained result; no body is replayed.
     pub(super) fn prepare_invocation_step(
         &mut self,
-        frame: &mut InvocationFrame<'_>,
+        frame: &mut InvocationFrame<'a>,
     ) -> Result<Option<Value>, Error> {
         frame.condition = None;
         let condition = match &frame.progress {
             Progress::Entry(index) => Some((true, *index)),
-            Progress::Body => None,
+            Progress::Body { .. } => None,
             Progress::Exit { next, .. } if self.cleanup_schedule.is_none() => Some((false, *next)),
             Progress::Exit { .. } => None,
         };
@@ -72,20 +90,20 @@ impl Interpreter<'_> {
         }
         match &mut frame.progress {
             Progress::Entry(_) => {
-                self.prepare_invocation_body(frame)?;
-                frame.progress = Progress::Body;
+                let (code, cache_key) = self.prepare_invocation_body(frame)?;
+                frame.progress = Progress::Body { code, cache_key };
                 if let Some(origin) = frame.origin {
                     self.events.push(Event::EnterFunction(origin));
                 }
                 Ok(None)
             }
-            Progress::Body => Ok(None),
+            Progress::Body { .. } => Ok(None),
             Progress::Exit {
                 value, returned, ..
             } => {
                 if !*returned {
                     self.cleanup_site(
-                        frame.body.expression().source,
+                        frame.source,
                         iir::cleanup::Boundary::FunctionEnd,
                         &mut frame.environment,
                     )?;
@@ -97,14 +115,13 @@ impl Interpreter<'_> {
 
     pub(super) fn accept_invocation_step(
         &mut self,
-        frame: &mut InvocationFrame<'_>,
+        frame: &mut InvocationFrame<'a>,
         flow: Flow,
     ) -> Result<Option<Value>, Error> {
         let source = frame
             .condition
             .as_deref()
-            .unwrap_or_else(|| frame.body.expression())
-            .source;
+            .map_or(frame.source, |condition| condition.source);
         match &mut frame.progress {
             Progress::Entry(index) | Progress::Exit { next: index, .. } => {
                 if !matches!(flow, Flow::Value(Value::Unit)) {
@@ -112,7 +129,7 @@ impl Interpreter<'_> {
                 }
                 *index += 1;
             }
-            Progress::Body => {
+            Progress::Body { .. } => {
                 let (value, returned) = match flow {
                     Flow::Value(value) => (value, false),
                     Flow::Return(value) => (value, true),

@@ -20,17 +20,42 @@ impl Body<'_> {
         }
     }
 }
+impl fmt::Display for Body<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Package(body) => write!(f, "(package-body {body})"),
+            Self::Owned(body) => write!(f, "(owned-body {body})"),
+        }
+    }
+}
 
 struct InvocationFrame<'a> {
     function: Value,
     environment: Environment,
-    body: Body<'a>,
+    source: SourceRange,
     result_type: Term,
     type_scope: Option<nir::FunctionInputBinding>,
     origin: Option<DeclarationId>,
-    stable_code: Option<DeclarationId>,
-    progress: contracts::Progress,
+    progress: contracts::Progress<'a>,
     condition: Option<Arc<Expr>>,
+}
+
+impl InvocationFrame<'_> {
+    /// Only the active contract or the admitted body can supply execution code.
+    /// Entry and exit states do not retain a fallback body expression.
+    fn parts(&mut self) -> (&Expr, Option<DeclarationId>, &mut Environment) {
+        let (expression, identity) = match self.condition.as_deref() {
+            Some(condition) => (condition, None),
+            None => {
+                let (body, identity) = self
+                    .progress
+                    .body()
+                    .expect("invocation step must prepare its execution code");
+                (body.expression(), identity)
+            }
+        };
+        (expression, identity, &mut self.environment)
+    }
 }
 
 // The monotonic effect identity allocator and pending transfers are intentionally
@@ -76,21 +101,7 @@ impl Execution<'_> {
                 environment,
                 ..
             } => (activation.expression.expression(), None, environment),
-            Self::Invocation(activation) => {
-                let frame = &mut activation.frame;
-                (
-                    frame
-                        .condition
-                        .as_deref()
-                        .unwrap_or_else(|| frame.body.expression()),
-                    frame
-                        .condition
-                        .is_none()
-                        .then_some(frame.stable_code)
-                        .flatten(),
-                    &mut frame.environment,
-                )
-            }
+            Self::Invocation(activation) => activation.frame.parts(),
             Self::Contract {
                 expression,
                 environment,
@@ -165,12 +176,8 @@ impl<'a> Interpreter<'a> {
             // Tree execution must not retain the large linear VM dispatcher
             // frame at every native recursive call. Admission, completion and
             // restoration still use the shared invocation boundaries.
-            let frame = &mut activation.frame;
-            let expression = frame
-                .condition
-                .as_deref()
-                .unwrap_or_else(|| frame.body.expression());
-            let result = self.eval(expression, &mut frame.environment);
+            let (expression, _, environment) = activation.frame.parts();
+            let result = self.eval(expression, environment);
             return self.complete_invocation(activation, result);
         }
         match Session::invocation(self, activation).run()? {
@@ -356,19 +363,15 @@ impl<'a> Interpreter<'a> {
 
     fn complete_invocation(
         &mut self,
-        mut activation: Box<Activation<'_>>,
+        mut activation: Box<Activation<'a>>,
         result: Result<Flow, Error>,
     ) -> Result<Value, Error> {
         let mut result = result;
         let completed = loop {
             match result.and_then(|flow| self.accept_invocation_step(&mut activation.frame, flow)) {
                 Ok(None) => {
-                    let frame = &mut activation.frame;
-                    let expression = frame
-                        .condition
-                        .as_deref()
-                        .unwrap_or_else(|| frame.body.expression());
-                    result = self.eval(expression, &mut frame.environment);
+                    let (expression, _, environment) = activation.frame.parts();
+                    result = self.eval(expression, environment);
                 }
                 outcome => break outcome.map(|value| value.expect("completed invocation")),
             }
@@ -525,9 +528,23 @@ impl<'a> Interpreter<'a> {
 
     /// Entry contracts have succeeded. Complete executable body preparation
     /// once, without replacing the activation or its argument storage.
-    fn prepare_invocation_body(&mut self, frame: &mut InvocationFrame<'_>) -> Result<(), Error> {
+    fn prepare_invocation_body(
+        &mut self,
+        frame: &InvocationFrame<'a>,
+    ) -> Result<(Body<'a>, Option<DeclarationId>), Error> {
+        let mut body = match &frame.function {
+            Value::Function(id) => Body::Package(
+                &self
+                    .functions
+                    .get(id)
+                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(frame.source)))?
+                    .body,
+            ),
+            Value::Closure(closure) => Body::Owned(closure.body.clone()),
+            _ => return Err(self.failure(ErrorKind::Type, Some(frame.source))),
+        };
         let independent = if let Some(scope) = &frame.type_scope {
-            let (body, independent) = match &frame.body {
+            let (prepared, independent) = match &body {
                 Body::Package(body) => {
                     let declaration = match &frame.function {
                         Value::Function(id) => Some(*id),
@@ -537,16 +554,16 @@ impl<'a> Interpreter<'a> {
                 }
                 Body::Owned(body) => self.prepare_owned_input_body(body, scope)?,
             };
-            frame.body = Body::Owned(body);
+            body = Body::Owned(prepared);
             independent
         } else {
             true
         };
-        frame.stable_code = match &frame.function {
+        let stable_code = match &frame.function {
             Value::Function(id) if independent => Some(*id),
             _ => None,
         };
-        Ok(())
+        Ok((body, stable_code))
     }
 
     fn prepare_invocation(
@@ -555,7 +572,7 @@ impl<'a> Interpreter<'a> {
         arguments: Vec<Value>,
         origin: Option<DeclarationId>,
     ) -> Result<InvocationFrame<'a>, Error> {
-        let (parameters, mut environment, body, signature) = match &function {
+        let (parameters, mut environment, source, signature) = match &function {
             Value::Function(id) => {
                 let definition = self
                     .functions
@@ -575,7 +592,7 @@ impl<'a> Interpreter<'a> {
                 (
                     definition.parameters.as_slice(),
                     Environment::with_capacity(definition.parameters.len()),
-                    &definition.body,
+                    definition.body.source,
                     &definition.signature,
                 )
             }
@@ -587,7 +604,7 @@ impl<'a> Interpreter<'a> {
                 (
                     closure.parameters.as_slice(),
                     self.clone_invocation_environment(&closure.environment, closure.body.source)?,
-                    closure.body.as_ref(),
+                    closure.body.source,
                     signature,
                 )
             }
@@ -605,7 +622,7 @@ impl<'a> Interpreter<'a> {
             arguments,
             signature,
             &mut environment,
-            body.source,
+            source,
         )?;
         if self.comptime_only || matches!(function, Value::Function(_)) {
             if let Some(id) = origin {
@@ -622,25 +639,20 @@ impl<'a> Interpreter<'a> {
                         definition,
                         generic_arguments,
                         requirement,
-                        body.source,
+                        source,
                     )?;
                     let requirement = self
-                        .bind_invocation_contract(
-                            &requirement,
-                            type_scope.as_ref(),
-                            body.source,
-                            0,
-                        )?
+                        .bind_invocation_contract(&requirement, type_scope.as_ref(), source, 0)?
                         .ok_or_else(|| {
-                            self.failure(ErrorKind::TypeContractUnresolved, Some(body.source))
+                            self.failure(ErrorKind::TypeContractUnresolved, Some(source))
                         })?;
-                    self.check_type_contract(&requirement, body.source)?;
+                    self.check_type_contract(&requirement, source)?;
                 }
                 self.check_invocation_capabilities(
                     definition,
                     generic_arguments,
                     type_scope.as_ref(),
-                    body.source,
+                    source,
                 )?;
             }
         }
@@ -652,8 +664,8 @@ impl<'a> Interpreter<'a> {
         result_type
             .check_scope(&[])
             .map_err(|_| self.failure(ErrorKind::Type, None))?;
-        let result_type = self.selected_type_view(&result_type, Some(body.source))?;
-        self.check_comptime_domain(&result_type, body.source)?;
+        let result_type = self.selected_type_view(&result_type, Some(source))?;
+        self.check_comptime_domain(&result_type, source)?;
         if let Term::Computation { effects, .. } = &result_type {
             self.check_effect_environment(effects, None)?;
         } else {
@@ -673,24 +685,15 @@ impl<'a> Interpreter<'a> {
                 environment.insert(snapshot.binding, value);
             }
         }
-        // Retain the checked source until entry contracts have completed.
-        // Binding inputs and admitting a signature do not prepare executable
-        // body code; that transition belongs to this same activation.
-        let body = match &function {
-            Value::Function(id) => {
-                Body::Package(&self.functions.get(id).expect("admitted function").body)
-            }
-            Value::Closure(closure) => Body::Owned(closure.body.clone()),
-            _ => unreachable!("callable admitted before binding"),
-        };
+        // Entry has no prepared execution body. The callable still retains its
+        // source; Entry -> Body acquires execution code only after success.
         Ok(InvocationFrame {
             function,
             environment,
-            body,
+            source,
             result_type,
             type_scope,
             origin,
-            stable_code: None,
             progress: contracts::Progress::Entry(0),
             condition: None,
         })

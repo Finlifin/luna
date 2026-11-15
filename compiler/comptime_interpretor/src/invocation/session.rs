@@ -595,12 +595,10 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 Execution::Invocation(activation) if activation.frame.condition.is_some() => {
                     activation.frame.condition.clone()
                 }
-                Execution::Invocation(activation) if activation.frame.stable_code.is_none() => {
-                    match &activation.frame.body {
-                        Body::Owned(body) => Some(body.clone()),
-                        Body::Package(_) => None,
-                    }
-                }
+                Execution::Invocation(activation) => match activation.frame.progress.body() {
+                    Some((Body::Owned(body), None)) => Some(body.clone()),
+                    _ => None,
+                },
                 Execution::Default { expression, .. } | Execution::Contract { expression, .. } => {
                     Some(expression.clone())
                 }
