@@ -229,7 +229,7 @@ Waiting 与 Unresolved 不混用。没有就绪任务时，先区分外部请求
 
 | 入口 | 已有责任 | 未完成部分 |
 | --- | --- | --- |
-| `elaboration/src/program/block_regions/driver.rs` | 普通、contextual、部分结构输入的块／if，以及 contextual when／match 共用显式检查帧 | 帧栈仍在同步驱动内，活动 Checker 不能离开后再装回；普通 when／match 与模式子检查尚未迁移 |
+| `elaboration/src/program/block_regions/driver.rs` 与 `driver/region.rs` | 普通、contextual、部分结构输入共用 Region；帧栈、子请求及返回值由逐步状态持有，同步入口只负责驱动 | 仍使用原活动 Checker，没有可移交的外部等待权限；普通 when／match 与模式子检查尚未迁移 |
 | `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；普通 when／match 共用适配 | 不提供执行前缀恢复，普通 when／match 子检查仍同步 |
 | `elaboration/src/program/dependent_inputs/tasks.rs` | 参数域、默认引用和默认值完成的显式后继 | 源码子检查和 required 求值仍同步 |
 | `elaboration/src/program/declaration_inputs/progress.rs` | producer、身份、检查次序与源码 schedule 分开 | Typed 路径仍要求普通完整 Expr，Contextual 仍保留 NormalFormArgument |
@@ -324,6 +324,37 @@ selector、当前模式、已完成 arms 及各 arm 的词法／匹配事实退�
 它们的子检查尚未迁入比较帧。Progress 保存的是代码而非已执行的值，两侧检查
 先后仍不改变源码执行顺序；块内 return 仍指向原函数，未执行的右侧也须通过检查。
 这一步尚未提供等待外部 Type 响应的入口，不解除待定 callable／列表域正例的 ignore。
+
+检查驱动的帧栈与返回值已从局部循环移入 `driver::region::Region`。一次正常 poll
+完成一个帧转换，返回 Continue、子表达式请求或完整结果；尚未迁移的原子表达式
+仍由同步适配器调用同一 `Destination::check_expression`，然后把结果交回原 Region。
+父帧、目标域、已检查分支和退出责任在两次 poll 之间保持原所有权，不复制活动树。
+
+子请求发出后为 Waiting，保留原源码位置；只有该状态接受一个结果。重复结果、
+无请求交付与结束后交付均被拒绝，原已接收结果或错误保留。失败作为数据交回原父帧；
+下一步先退出内部词法帧，再由最近的既有 Attempt 决定能否恢复搜索。交接本身不重发
+已完成子请求；Probe 是否尝试另一上下文仍由原搜索规则决定。域错误或预算不足不能
+转成缺少上下文。最终完成或不可恢复失败都会终止 Region。
+Region 与推进结果提供 S-expression dump，保留嵌套帧、返回值和错误位置。
+
+这个私有协议当前仅由同一同步适配器消费，不是跨世界消息端口。HIR 和 Checker 的
+活动状态仍由原调用保活，尚无完整源区域 owner、取消接口或外部 Type 响应票据。
+因此不能把 Region 放入 CodeSession，也不能离开当前词法环境后给它灌入任意响应。
+后续须把子规则、活动 Checker 所有权、原 VM activation 和响应准入一并接通。
+
+本次 Region 拆分的检查（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test contextual_input_regions --test control_boundaries --test comparison_resources --test contextual_spreads --test declaration_input_plans --test prepared_input_dependencies --no-fail-fast -- --test-threads=1`：
+  `/tmp/luna-tools-ak238bls/result.json` 退出 0，77 项通过。包含原有源码顺序与次数、
+  嵌套返回、match guard、分支事实、Probe 恢复、错误域拒绝与默认供应检查。
+  这组对应 Region 拆分后、为 Waiting 增补源码位置及新增 dump/交付单测之前的版本。
+- 增补后运行 `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -- block_regions --test-threads=1`：
+  `/tmp/luna-tools-_tnhf93p/result.json` 退出 0，10 项通过。覆盖嵌套帧与转义 dump、
+  重复交付保留原结果／错误，以及无请求或结束后交付拒绝。
+- 最终版本经同一入口运行 `test -p luna --test contextual_input_regions -- partial_probe_recovery_does_not_hide_errors_or_publish_branch_locals --exact --test-threads=1`：
+  `/tmp/luna-tools-d1hcienv/result.json` 退出 0，确认探测失败不隐藏错误或泄漏分支绑定。
+  已修改 Rust 的定向 rustfmt 检查退出 0（`/tmp/luna-tools-nxl043_c/result.json`）。
+  未执行全 workspace 检查。
 
 部分 optional／error 输入的 `Search` 先遍历实际类型证据，再允许数字默认类型；
 Never 和只有错误出口的结果不提供成功域证据。`Probe` 保留 Attempt 与父探测模式；
@@ -730,8 +761,9 @@ RefCell／Mutex 后从回调重入，或增加 unsafe Send／延长 HIR 生命�
 call plan 提供用到的默认值，不能强制准备未使用项。
 
 VM 已把普通输入的 body 重绑定放在 Entry → Body 转换：入口程序契约通过后才准备
-这份执行代码，等待／取消不重新 begin_invocation。声明参数实例化等成本仍可能更早，
-该接线不是定义端源码延迟检查。新主体服务必须沿同一 activation 取得代码，不能
+这份执行代码，等待／取消不重新 begin_invocation。源码命名实例的声明参数主体替换
+也已移入这一阶段；域、签名与形成条件检查仍在调用准备时完成。该接线不是定义端
+源码延迟检查。新主体服务必须沿同一 activation 取得代码，不能
 为了允许缺失 body 而删掉定义检查或阶段准入。
 
 VM 的 `contracts::Progress::Body` 现直接持有已准备的 Body 与其代码缓存键，

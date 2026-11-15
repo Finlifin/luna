@@ -2,6 +2,7 @@
 //! Blocks, branches and comparisons share this stack. Other expression rules
 //! remain atomic adapters until their continuations can join the region.
 use super::*;
+mod region;
 
 struct ExpressionBoundary {
     callee: Option<hir::HirId>,
@@ -365,193 +366,16 @@ impl Checker<'_, '_> {
     }
 
     fn drive_check_region(&mut self, root: RegionFrame<'_, '_>) -> Result<CheckedBlock, Error> {
-        let mut frames = vec![root];
-        let statement_destination = Destination::statement();
-        let mut returned: Option<CheckedBlock> = None;
+        let mut region = region::Region::new(root);
         loop {
-            let result = (|| {
-                loop {
-                    let step = match frames.last_mut().expect("active checking frame") {
-                        RegionFrame::Block(frame) => {
-                            frame.step(self, returned.take(), &statement_destination)?
-                        }
-                        RegionFrame::Conditional(frame) => frame.step(self, returned.take())?,
-                        RegionFrame::When(frame) => frame.step(self, returned.take())?,
-                        RegionFrame::Match(frame) => frame.step(self, returned.take())?,
-                        RegionFrame::Comparison(frame) => frame.step(self, returned.take())?,
-                    };
-                    let request = match step {
-                        Step::Continue => continue,
-                        Step::Tail(tail) => {
-                            let RegionFrame::Block(frame) = frames.pop().unwrap() else {
-                                unreachable!("only blocks complete a tail")
-                            };
-                            let value = frame.finish(self, tail)?;
-                            if frames.is_empty() {
-                                return Ok(value);
-                            }
-                            returned = Some(value);
-                            continue;
-                        }
-                        Step::Completed(value) => {
-                            // The owning frame restores its remaining branch/region boundaries.
-                            frames.pop().unwrap().unwind(self);
-                            if frames.is_empty() {
-                                return Ok(value);
-                            }
-                            returned = Some(value);
-                            continue;
-                        }
-                        Step::Child(request) => request,
-                    };
-                    let (block, destination, boundary) = match request {
-                        Request::Block(block, destination) => (block, destination, None),
-                        Request::Expression(expr, destination) => {
-                            // Nonprimitive targets first pass through ordinary
-                            // delivery adaptation, which enters the same frame.
-                            if comparisons::is_comparison(expr)
-                                && let Some(view) = destination.ordinary_view()
-                                && view.input.is_none()
-                                && view
-                                    .expected
-                                    .is_none_or(|ty| matches!(ty, Term::Primitive(_)))
-                            {
-                                frames.push(RegionFrame::Comparison(comparisons::Frame::new(
-                                    self,
-                                    expr,
-                                    destination,
-                                    true,
-                                )?));
-                                continue;
-                            }
-                            // Retain the input rule and its delivery boundary;
-                            // probes use the same child driver as final checks.
-                            if destination.structural_input().is_some()
-                                && matches!(expr.kind, H::If(_, _, Some(_)))
-                            {
-                                frames.push(RegionFrame::Conditional(
-                                    conditionals::Frame::partial(self, expr, destination, true)?,
-                                ));
-                                continue;
-                            }
-                            if let Destination::Contextual(tail) = &destination
-                                && matches!(expr.kind, H::Match(..))
-                            {
-                                frames.push(RegionFrame::Match(matches::Frame::new(
-                                    self,
-                                    expr,
-                                    tail.depth + 1,
-                                )?));
-                                continue;
-                            }
-                            if let Destination::Contextual(tail) = &destination
-                                && let H::When(arms) = expr.kind
-                                && arms.iter().any(|arm| arm.cond.is_none())
-                            {
-                                frames.push(RegionFrame::When(when::Frame::new(
-                                    self,
-                                    expr,
-                                    tail.depth + 1,
-                                )?));
-                                continue;
-                            }
-                            // Ordinary branches enter after delivery prepares the
-                            // complete target, as in expr_context.
-                            if let Destination::Contextual(tail) = &destination
-                                && matches!(expr.kind, H::If(_, _, Some(_)))
-                            {
-                                frames.push(RegionFrame::Conditional(conditionals::Frame::new(
-                                    self,
-                                    expr,
-                                    tail.depth + 1,
-                                )?));
-                                continue;
-                            }
-                            if matches!(expr.kind, H::If(..))
-                                && let Some(view) = destination.ordinary_view()
-                                && (view.input.is_none() || view.expected.is_some())
-                                && self.prepare_region_if_delivery(
-                                    expr,
-                                    view.expected,
-                                    view.partial,
-                                )?
-                            {
-                                frames.push(RegionFrame::Conditional(
-                                    conditionals::Frame::ordinary(self, expr, destination, true)?,
-                                ));
-                                continue;
-                            }
-                            if let Some(nested) = destination.nested(expr)? {
-                                let H::Block(block) = expr.kind else {
-                                    unreachable!("nested block destination")
-                                };
-                                let boundary =
-                                    matches!(nested, Destination::Ordinary(_)).then(|| {
-                                        ExpressionBoundary::enter(
-                                            self,
-                                            expr,
-                                            block,
-                                            nested.structural_input().is_some(),
-                                        )
-                                    });
-                                (block, nested, boundary)
-                            } else {
-                                returned = Some(destination.check_expression(self, expr)?);
-                                continue;
-                            }
-                        }
-                    };
-                    let scope = match self
-                        .charge_block_frame(block.span)
-                        .and_then(|()| LexicalScope::enter(self, block.span))
-                    {
-                        Ok(scope) => scope,
-                        Err(error) => {
-                            if let Some(boundary) = &boundary {
-                                boundary.leave(self);
-                            }
-                            return Err(error);
-                        }
-                    };
-                    frames.push(RegionFrame::Block(BlockFrame {
-                        progress: Progress::new(block, destination),
-                        scope,
-                        boundary,
-                    }));
+            match region.poll(self)? {
+                region::Poll::Continue => {}
+                region::Poll::Child(child) => {
+                    let span = child.expr.span;
+                    let result = child.destination.check_expression(self, child.expr);
+                    region.accept(result, span)?;
                 }
-            })();
-            match result {
-                Ok(value) => return Ok(value),
-                Err(failure) => {
-                    returned = None;
-                    let mut failure = Some(failure);
-                    // Lexical exits must run before their enclosing checkpoint.
-                    // Only a recoverable context request resumes a branch search.
-                    while let Some(mut frame) = frames.pop() {
-                        let recovered = match &mut frame {
-                            RegionFrame::Conditional(conditional) => {
-                                Some(conditional.recover_probe(self, failure.take().unwrap()))
-                            }
-                            RegionFrame::Comparison(comparison) => {
-                                Some(comparison.recover(self, failure.take().unwrap()))
-                            }
-                            _ => None,
-                        };
-                        if let Some(recovered) = recovered {
-                            match recovered {
-                                Ok(()) => {
-                                    frames.push(frame);
-                                    break;
-                                }
-                                Err(error) => failure = Some(error),
-                            }
-                        }
-                        frame.unwind(self);
-                    }
-                    if let Some(failure) = failure {
-                        return Err(failure);
-                    }
-                }
+                region::Poll::Completed(value) => return Ok(value),
             }
         }
     }
@@ -609,6 +433,11 @@ mod tests {
         assert!(dump.contains("(preserve-effect true) (callee"), "{dump}");
         assert!(dump.contains("scope\\\"\\n"), "{dump}");
         assert!(!dump.contains('\n'), "{dump}");
+        let region = region::Region::new(RegionFrame::Block(frame));
+        assert_eq!(
+            region.to_string(),
+            format!("(checking-region (state ready) (frames {dump}))")
+        );
         assert_eq!(
             tails::TailCheck::<n::Expr>::Child.to_string(),
             "(tail-check child)"
