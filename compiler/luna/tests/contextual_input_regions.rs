@@ -51,6 +51,60 @@ fn check_in_engines(source: &str, calls: &[&str], budget: Budget, engines: &[boo
 }
 
 #[test]
+fn comparison_regions_keep_peer_context_and_producer_order_across_nested_blocks() {
+    check_both(
+        "
+        comptime fn sample(value: u8) -> u8 { value }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let peer = (do { trace = trace * 10 + 1; 7 })
+                == sample(do { trace = trace * 10 + 2; 7 });
+            let nested = ((peer == true)
+                == (do { trace = trace * 10 + 3; true })) == true;
+            nested and trace == 123
+        }
+        ",
+        &["check", "sample"],
+    );
+}
+
+#[test]
+fn comparison_regions_restore_branch_scopes_and_keep_original_return_targets() {
+    check_both(
+        "
+        comptime fn skipped() -> bool { false }
+        comptime fn early() -> bool {
+            let unused = (do { return true; }) == skipped();
+            false
+        }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let known: u8 = 7;
+            let candidate = (if true {
+                do { trace = trace + 1; 6 }
+            } else { 8 }) < known;
+            let nested = do {
+                let known: u8 = 8;
+                (candidate == true) != (known == 7)
+            };
+            nested and early() and trace == 1 and known == 7
+        }
+        ",
+        &["check", "early"],
+    );
+    for invalid in [
+        "(do { return true; }) == wrong(true)",
+        "(if true { 1 } else { 256 }) == wrong(1)",
+    ] {
+        let source = format!(
+            "comptime fn wrong(value: u8) -> u8 {{ value }}
+             comptime fn check() -> bool {{ {invalid} }}"
+        );
+        assert!(sysroot::compile(&source).is_err(), "accepted {invalid}");
+    }
+}
+
+#[test]
 fn pending_blocks_keep_continuation_type_facts_and_source_order() {
     check_both(
         "

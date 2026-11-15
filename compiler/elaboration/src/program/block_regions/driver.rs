@@ -1,5 +1,5 @@
 //! Block checking owns its unfinished children and lexical exits.
-//! Blocks and conditionals share this stack. Other expression rules
+//! Blocks, branches and comparisons share this stack. Other expression rules
 //! remain atomic adapters until their continuations can join the region.
 use super::*;
 
@@ -144,6 +144,7 @@ enum RegionFrame<'b, 'h> {
     Conditional(conditionals::Frame<'b, 'h>),
     When(when::Frame<'b, 'h>),
     Match(matches::Frame<'b, 'h>),
+    Comparison(comparisons::Frame<'b, 'h>),
 }
 
 impl RegionFrame<'_, '_> {
@@ -153,6 +154,7 @@ impl RegionFrame<'_, '_> {
             Self::Conditional(frame) => frame.unwind(checker),
             Self::When(frame) => frame.unwind(checker),
             Self::Match(frame) => frame.unwind(checker),
+            Self::Comparison(_) => {}
         }
     }
 }
@@ -164,6 +166,7 @@ impl std::fmt::Display for RegionFrame<'_, '_> {
             Self::Conditional(frame) => frame.fmt(f),
             Self::When(frame) => frame.fmt(f),
             Self::Match(frame) => frame.fmt(f),
+            Self::Comparison(frame) => frame.fmt(f),
         }
     }
 }
@@ -233,6 +236,25 @@ impl<'b, 'h> BlockFrame<'b, 'h> {
 }
 
 impl Checker<'_, '_> {
+    pub(in crate::program) fn comparison_expression(
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let destination = Destination::ordinary(
+            self,
+            OrdinaryTail {
+                expected,
+                partial: None,
+                input: None,
+            },
+            expr.span,
+        )?;
+        let frame = comparisons::Frame::new(self, expr, destination, false)?;
+        self.drive_check_region(RegionFrame::Comparison(frame))?
+            .ordinary(expr.span)
+    }
+
     fn charge_block_frame(&mut self, span: Span) -> Result<(), Error> {
         self.required_steps = self
             .required_steps
@@ -356,6 +378,7 @@ impl Checker<'_, '_> {
                         RegionFrame::Conditional(frame) => frame.step(self, returned.take())?,
                         RegionFrame::When(frame) => frame.step(self, returned.take())?,
                         RegionFrame::Match(frame) => frame.step(self, returned.take())?,
+                        RegionFrame::Comparison(frame) => frame.step(self, returned.take())?,
                     };
                     let request = match step {
                         Step::Continue => continue,
@@ -384,6 +407,23 @@ impl Checker<'_, '_> {
                     let (block, destination, boundary) = match request {
                         Request::Block(block, destination) => (block, destination, None),
                         Request::Expression(expr, destination) => {
+                            // Nonprimitive targets first pass through ordinary
+                            // delivery adaptation, which enters the same frame.
+                            if comparisons::is_comparison(expr)
+                                && let Some(view) = destination.ordinary_view()
+                                && view.input.is_none()
+                                && view
+                                    .expected
+                                    .is_none_or(|ty| matches!(ty, Term::Primitive(_)))
+                            {
+                                frames.push(RegionFrame::Comparison(comparisons::Frame::new(
+                                    self,
+                                    expr,
+                                    destination,
+                                    true,
+                                )?));
+                                continue;
+                            }
                             // Retain the input rule and its delivery boundary;
                             // probes use the same child driver as final checks.
                             if destination.structural_input().is_some()
@@ -488,8 +528,17 @@ impl Checker<'_, '_> {
                     // Lexical exits must run before their enclosing checkpoint.
                     // Only a recoverable context request resumes a branch search.
                     while let Some(mut frame) = frames.pop() {
-                        if let RegionFrame::Conditional(conditional) = &mut frame {
-                            match conditional.recover_probe(self, failure.take().unwrap()) {
+                        let recovered = match &mut frame {
+                            RegionFrame::Conditional(conditional) => {
+                                Some(conditional.recover_probe(self, failure.take().unwrap()))
+                            }
+                            RegionFrame::Comparison(comparison) => {
+                                Some(comparison.recover(self, failure.take().unwrap()))
+                            }
+                            _ => None,
+                        };
+                        if let Some(recovered) = recovered {
+                            match recovered {
                                 Ok(()) => {
                                     frames.push(frame);
                                     break;

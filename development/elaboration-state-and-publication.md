@@ -314,6 +314,17 @@ selector、当前模式、已完成 arms 及各 arm 的词法／匹配事实退�
 词法作用域；所有 arms 检查完成后仍运行共同的覆盖性检查。匹配事实的进入／退出
 服务同时供现有同步适配器使用，不建立帧专用的另一套类型事实提取规则。
 
+普通比较的左右操作数也进入同一帧栈。`operators::peers::Progress` 保存两侧源码、
+已检查代码、上下文搜索位置及默认类型策略；比较帧持有当前 Attempt，子检查结束
+后消费一次，再决定是否借用另一侧类型继续检查。Never 不提供操作数域，比较结果
+的 bool 上下文也不作为操作数域。词法退出先于探测回退，域错误与预算错误仍向外
+传播。完成后复用原 Eq／Ord 协议选择、标量降码和 effect 交付规则。
+
+算术与逻辑运算的同步适配器使用同一个 Progress，不保留第二套上下文搜索算法；
+它们的子检查尚未迁入比较帧。Progress 保存的是代码而非已执行的值，两侧检查
+先后仍不改变源码执行顺序；块内 return 仍指向原函数，未执行的右侧也须通过检查。
+这一步尚未提供等待外部 Type 响应的入口，不解除待定 callable／列表域正例的 ignore。
+
 部分 optional／error 输入的 `Search` 先遍历实际类型证据，再允许数字默认类型；
 Never 和只有错误出口的结果不提供成功域证据。`Probe` 保留 Attempt 与父探测模式；
 条件帧保存搜索位置及当前 Probe，不在移动阶段状态时丢弃恢复责任。探测后仍正式
@@ -564,6 +575,8 @@ callable 签名对实际 Type 的消费。只增加 owner、请求枚举或可�
 | 检查帧 dump | 同工作目录与入口，`test -p elaboration --lib program::block_regions -- --test-threads=1`，`/tmp/luna-tools-j2oi2f4c/result.json` 退出 0，8 项通过；检查待检查条件／selector、已完成分支和转义后的 S-expression |
 | contextual match 后继 | 同工作目录与入口，`test -p luna --test contextual_input_regions --test normal_patterns --no-fail-fast -- --test-threads=1`，`/tmp/luna-tools-97cot4g5/result.json` 退出 101：contextual 22 项通过，normal_patterns 41 项通过、1 项失败；新增用例验证 selector／失败 guard 顺序、模式事实隔离、覆盖性与提前返回 |
 | 扩展分支验收 | `/tmp/luna-tools-j385q075/result.json`：490 通过、1 个新 fixture 阶段声明错误；修正后该用例 `/tmp/luna-tools-qe9dsshx/result.json` 退出 0；32 层 CLI 用例 `/tmp/luna-tools-sjdhryg0/result.json` 退出 0 |
+| 比较后继与共同操作数搜索 | 在 `/home/fin/luna` 经 `development/check.py --timeout 900 -- test -p luna --test contextual_input_regions --test ordering_protocol --test control_boundaries --no-fail-fast -- --test-threads=1` 运行，`/tmp/luna-tools-v_kmth4v/result.json` 退出 0，35 项通过；涵盖左右上下文补足、块与分支作用域、原 return 出口及一次性生产顺序 |
+| 比较协议、资源及 dump 回归 | 同目录与入口，`test -p luna --test arithmetic_contexts --test equality_protocol --test comparison_resources --test library_comptime_comparison --no-fail-fast -- --test-threads=1`，`/tmp/luna-tools-a43rzqwr/result.json` 退出 0，36 项通过；`test -p elaboration --lib -p luna --test contextual_input_regions --no-fail-fast -- comparison_regions peer_progress_dump --test-threads=1`，`/tmp/luna-tools-3g6y5qi2/result.json` 退出 0，dump 与两个新增源码用例通过，后两项亦包含在上一行中 |
 
 match 迁移发现的失败为 `normal_record_defaults_follow_evaluated_value_prefixes_once`。
 临时撤回本次四个生产文件的补丁后，在 `a68e3087` 源码上按同入口执行

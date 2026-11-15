@@ -6908,18 +6908,9 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         fallback: Option<&Term>,
     ) -> Result<(n::Expr, n::Expr), Error> {
-        let a = self.argument_attempt(left, expected, None)?;
-        self.peer_operands_with_left(left, right, expected, fallback, a)
-    }
-    fn peer_operands_with_left(
-        &mut self,
-        left: &Expr<'_>,
-        right: &Expr<'_>,
-        expected: Option<&Term>,
-        fallback: Option<&Term>,
-        a: Option<n::Expr>,
-    ) -> Result<(n::Expr, n::Expr), Error> {
-        self.peer_operands_with_ready(left, right, expected, fallback, a, None)
+        let progress =
+            operators::peers::Progress::new(self, [left, right], expected, fallback, None)?;
+        self.drive_peer_operands(progress)
     }
     fn peer_operands_with_ready(
         &mut self,
@@ -6927,45 +6918,12 @@ impl Checker<'_, '_> {
         right: &Expr<'_>,
         expected: Option<&Term>,
         fallback: Option<&Term>,
-        mut a: Option<n::Expr>,
-        mut b: Option<n::Expr>,
+        a: Option<n::Expr>,
+        b: Option<n::Expr>,
     ) -> Result<(n::Expr, n::Expr), Error> {
-        let defaults = self.numeric_defaults;
-        let context = expected.or_else(|| a.as_ref().filter(|a| !is_never(&a.ty)).map(|a| &a.ty));
-        if b.is_none() {
-            b = self.argument_attempt(right, context, None)?;
-        }
-        if a.is_none() {
-            if let Some(b) = b.as_ref().filter(|b| !is_never(&b.ty)) {
-                a = self.argument_attempt(left, Some(&b.ty), None)?;
-            }
-        }
-        if b.is_none() {
-            if let Some(a) = a.as_ref().filter(|a| !is_never(&a.ty)) {
-                b = self.argument_attempt(right, Some(&a.ty), None)?;
-            }
-        }
-        if a.is_none() || b.is_none() {
-            if !defaults {
-                return Err(context_error(
-                    left.span,
-                    "numeric operands await a shared type context",
-                ));
-            }
-            if a.is_none() {
-                let context = expected
-                    .or_else(|| b.as_ref().filter(|b| !is_never(&b.ty)).map(|b| &b.ty))
-                    .or(fallback);
-                a = Some(self.expr(left, context)?);
-            }
-            if b.is_none() {
-                let context = expected
-                    .or_else(|| a.as_ref().filter(|a| !is_never(&a.ty)).map(|a| &a.ty))
-                    .or(fallback);
-                b = Some(self.expr(right, context)?);
-            }
-        }
-        Ok((a.unwrap(), b.unwrap()))
+        let progress =
+            operators::peers::Progress::new(self, [left, right], expected, fallback, Some([a, b]))?;
+        self.drive_peer_operands(progress)
     }
 
     fn float_associated_constant(

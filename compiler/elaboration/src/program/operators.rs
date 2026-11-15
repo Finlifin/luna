@@ -1,6 +1,7 @@
-//! Scalar operator recursion stays outside the large general expression dispatcher.
-//! Keep these entry frames separate even in unoptimized compiler builds.
+//! Scalar selection and lowering share one operand-context search. Comparisons
+//! obtain checked children from region frames; other scalar rules use its adapter.
 use super::*;
+pub(in crate::program) mod peers;
 
 pub(super) fn native_arithmetic_operand(
     op: &BinOp,
@@ -529,14 +530,16 @@ impl Checker<'_, '_> {
         })
     }
     #[inline(never)]
-    pub(super) fn comparison_expression(
+    pub(super) fn finish_comparison_expression(
         &mut self,
         expr: &Expr<'_>,
         expected: Option<&Term>,
+        left: n::Expr,
+        right: n::Expr,
     ) -> Result<n::Expr, Error> {
         let (ty, kind) = match &expr.kind {
-            H::Binary(op @ (BinOp::Eq | BinOp::Ne), a, b) => {
-                let (a, b) = self.peer_operands(a, b, None, None)?;
+            H::Binary(op @ (BinOp::Eq | BinOp::Ne), _, _) => {
+                let (a, b) = (left, right);
                 // Both operands have been checked. A nonreturning left side
                 // supplies no equality domain and prevents the RHS and operator
                 // from executing, including the not wrapper used for !=.
@@ -587,10 +590,7 @@ impl Checker<'_, '_> {
                 return Ok(result);
             }
 
-            H::Binary(op @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), left, right) => {
-                let fallback =
-                    (is_numeric_literal(left) && !is_float_literal(left)).then(|| p(P::Integer));
-                let (left, right) = self.peer_operands(left, right, None, fallback.as_ref())?;
+            H::Binary(op @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), _, _) => {
                 if is_never(&left.ty) {
                     if let Some(expected) = expected {
                         self.require_expression(&left.ty, expected, expr.span)?;

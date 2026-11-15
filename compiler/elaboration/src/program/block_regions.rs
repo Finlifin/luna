@@ -3,6 +3,7 @@
 //! neither path executes a producer while preparing this region.
 use super::*;
 use constants::StagedPatternSnapshot;
+mod comparisons;
 mod conditionals;
 mod destinations;
 mod driver;
