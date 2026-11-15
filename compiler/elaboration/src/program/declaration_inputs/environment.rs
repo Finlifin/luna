@@ -3,7 +3,7 @@
 //! remain shared. Installation publishes only a fully prepared copy.
 use super::*;
 
-pub(super) struct Environment {
+pub(in crate::program) struct Environment {
     substitution: BTreeMap<DeclarationId, std::sync::Arc<Term>>,
     bindings: BTreeMap<DeclarationId, n::LocalId>,
     normal_bindings: BTreeMap<DeclarationId, (n::LocalId, Term)>,
@@ -47,6 +47,29 @@ pub(super) fn copy_domains<'a>(
 }
 
 impl Environment {
+    pub(in crate::program) fn retain_prefix(
+        source: &nominal::InputEnvironment<'_>,
+        parameters: &[DeclarationId],
+        prefix: &[Term],
+        fuel: &mut u64,
+        span: Span,
+    ) -> Result<Self, Error> {
+        if prefix.len() > parameters.len() {
+            return Err(error(span, "clause input prefix arity mismatch"));
+        }
+        let mut retained = Self::retain(source, fuel, span)?;
+        for (parameter, value) in parameters.iter().zip(prefix) {
+            charge(fuel, 1, span)?;
+            let value = copy_term(value, fuel, span)?;
+            retained
+                .substitution
+                .insert(*parameter, std::sync::Arc::new(value));
+            retained.bindings.remove(parameter);
+            retained.normal_bindings.remove(parameter);
+        }
+        Ok(retained)
+    }
+
     pub(super) fn retain(
         source: &nominal::InputEnvironment<'_>,
         fuel: &mut u64,
@@ -152,6 +175,68 @@ mod tests {
         let dump = environment.to_string();
         assert!(dump.contains("parent\\\"\\n"), "{dump}");
         assert!(!dump.contains('\n'), "{dump}");
+    }
+
+    #[test]
+    fn selected_prefix_is_budgeted_and_does_not_mutate_caller_bindings() {
+        let first = DeclarationId {
+            package: 1,
+            local: 2,
+        };
+        let next = DeclarationId {
+            package: 1,
+            local: 3,
+        };
+        let local = n::LocalId { owner: 1, index: 4 };
+        let types = BTreeMap::from([(first, Arc::new(Term::Bool(false)))]);
+        let values = BTreeMap::from([(first, local), (next, local)]);
+        let defaults = BTreeMap::from([(first, (local, p(P::Bool))), (next, (local, p(P::Bool)))]);
+        let context = crate::ptc::Context::default();
+        let view = nominal::InputEnvironment {
+            substitution: &types,
+            bindings: &values,
+            normal_bindings: &defaults,
+            context: &context,
+        };
+        let prefix = [Term::Tuple(vec![Term::Bool(true); 16])];
+        let mut fuel = 1_000;
+        let retained =
+            Environment::retain_prefix(&view, &[first, next], &prefix, &mut fuel, Span::default())
+                .unwrap();
+        assert_eq!(*retained.substitution[&first], prefix[0]);
+        assert!(!retained.bindings.contains_key(&first));
+        assert!(!retained.normal_bindings.contains_key(&first));
+        assert_eq!(retained.bindings[&next], local);
+        assert_eq!(retained.normal_bindings[&next], (local, p(P::Bool)));
+        let cost = 1_000 - fuel;
+        for limit in 0..cost {
+            let mut remaining = limit;
+            let failure = Environment::retain_prefix(
+                &view,
+                &[first, next],
+                &prefix,
+                &mut remaining,
+                Span::default(),
+            );
+            assert!(failure.is_err(), "budget {limit}");
+            assert_eq!(*types[&first], Term::Bool(false));
+            assert_eq!(values[&first], local);
+            assert_eq!(defaults[&first], (local, p(P::Bool)));
+        }
+        let mut remaining = cost;
+        let recovered = Environment::retain_prefix(
+            &view,
+            &[first, next],
+            &prefix,
+            &mut remaining,
+            Span::default(),
+        )
+        .unwrap();
+        assert_eq!(remaining, 0);
+        assert_eq!(retained.to_string(), recovered.to_string());
+        assert!(
+            Environment::retain_prefix(&view, &[], &prefix, &mut 1_000, Span::default()).is_err()
+        );
     }
 
     #[test]

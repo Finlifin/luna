@@ -29,6 +29,153 @@ impl std::fmt::Display for CallableClausePacket {
     }
 }
 
+/// Retained consumer of a clause preparation. Formation and final domain checks
+/// must run in the restored caller scope before a callable packet can escape.
+struct CallableCompletion {
+    owner: OwnerId,
+    parameters: Vec<DeclarationId>,
+    domains: Vec<Term>,
+    prefix: Vec<Term>,
+}
+
+impl CallableCompletion {
+    fn retain(
+        checker: &mut Checker<'_, '_>,
+        owner: OwnerId,
+        parameters: &[DeclarationId],
+        domains: &[Term],
+        prefix: &[Term],
+        span: Span,
+    ) -> Result<Self, Error> {
+        if parameters.len() != domains.len() || prefix.len() > parameters.len() {
+            return Err(error(span, "clause input prefix arity mismatch"));
+        }
+        checker.required_steps = checker
+            .required_steps
+            .checked_sub(parameters.len() as u64)
+            .ok_or_else(|| error(span, "callable input retention budget exhausted"))?;
+        let mut retained_domains = Vec::new();
+        for domain in domains {
+            retained_domains.push(checker.copy_alias_type(domain, span)?);
+        }
+        let mut retained_prefix = Vec::new();
+        for value in prefix {
+            retained_prefix.push(checker.copy_alias_type(value, span)?);
+        }
+        Ok(Self {
+            owner,
+            parameters: parameters.to_vec(),
+            domains: retained_domains,
+            prefix: retained_prefix,
+        })
+    }
+}
+
+impl declaration_inputs::Completion for CallableCompletion {
+    const CHECKING: declaration_inputs::InputChecking = declaration_inputs::InputChecking::Typed;
+    type Output = CallableClausePacket;
+
+    fn finish(
+        self,
+        checker: &mut Checker<'_, '_>,
+        telescope: &[(DeclarationId, Sort, Term)],
+        inputs: declaration_inputs::PreparedDeclarationInputs,
+        span: Span,
+    ) -> Result<Self::Output, Error> {
+        let Self {
+            owner,
+            parameters,
+            domains,
+            prefix,
+        } = self;
+        let prepared = inputs.into_typed(telescope, span)?;
+        let mut symbols = Vec::new();
+        for value in &prefix {
+            symbols.push(checker.copy_alias_type(value, span)?);
+        }
+        symbols.extend(prepared.formation.terms);
+        let pending = prepared.formation.deferred;
+        let mut operands = Vec::new();
+        for (value, domain) in prefix.into_iter().zip(&domains) {
+            operands.push(n::Expr {
+                source: source(span),
+                ty: checker.copy_alias_type(domain, span)?,
+                kind: if *domain == p(P::Type) {
+                    K::TypeValue(value)
+                } else {
+                    K::ComptimeValue(value)
+                },
+            });
+        }
+        let statements = prepared.statements;
+        operands.extend(prepared.arguments);
+        let formation = FormationInputs {
+            terms: symbols
+                .iter()
+                .map(|value| checker.copy_alias_type(value, span))
+                .collect::<Result<_, _>>()?,
+            deferred: parameters
+                .iter()
+                .zip(&domains)
+                .filter_map(|(id, domain)| {
+                    (*domain != p(P::Type) || pending.contains(id)).then_some(*id)
+                })
+                .collect(),
+            environment: BTreeMap::new(),
+        };
+        let formation_deferred = !formation.deferred.is_empty();
+        checker.check_formation_application(owner, formation, span)?;
+        // Named Type inputs may occur after their value inputs. Once routing
+        // completes, validate every retained value against the completed domain
+        // even if this function is never invoked.
+        for (operand, domain) in operands.iter().zip(&domains) {
+            let domain = checker.instantiate_input_types(domain, &parameters, &symbols, span)?;
+            checker.require(&operand.ty, &domain, span)?;
+        }
+        let ty = Term::Tuple(
+            operands
+                .iter()
+                .map(|value| checker.copy_alias_type(&value.ty, span))
+                .collect::<Result<_, _>>()?,
+        );
+        Ok(CallableClausePacket {
+            expression: n::Expr {
+                source: source(span),
+                ty: checker.copy_alias_type(&ty, span)?,
+                kind: K::Block {
+                    statements,
+                    result: Some(Box::new(n::Expr {
+                        source: source(span),
+                        ty,
+                        kind: K::Tuple(operands),
+                    })),
+                },
+            },
+            identities: symbols,
+            pending,
+            formation_deferred,
+        })
+    }
+}
+
+impl std::fmt::Display for CallableCompletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(callable-input-completion (owner {}) (parameters",
+            self.owner
+        )?;
+        for (parameter, domain) in self.parameters.iter().zip(&self.domains) {
+            write!(f, " (input {parameter} {domain})")?;
+        }
+        f.write_str(") (prefix")?;
+        for value in &self.prefix {
+            write!(f, " {value}")?;
+        }
+        f.write_str("))")
+    }
+}
+
 impl Checker<'_, '_> {
     /// Definition-side evidence only: pending values retain declaration rigids.
     /// The invocation packet remains the authority for their actual snapshots.
@@ -205,92 +352,43 @@ impl Checker<'_, '_> {
         {
             return Err(error(expr.span, "clause input prefix arity mismatch"));
         }
-        // Prefix identities are already supplied by lexical capture. They
-        // specialize declaration defaults, never the explicit caller sources.
-        let mut substitution = self.alias_substitution.clone();
-        let mut value_bindings = self.alias_value_bindings.clone();
-        let mut default_bindings = self.normal_default_bindings.clone();
-        for (parameter, value) in parameters.iter().zip(prefix) {
-            substitution.insert(*parameter, std::sync::Arc::new(value.clone()));
-            value_bindings.remove(parameter);
-            default_bindings.remove(parameter);
-        }
-        let context = self.context.clone();
-        let defaults = nominal::InputEnvironment {
-            substitution: &substitution,
-            bindings: &value_bindings,
-            normal_bindings: &default_bindings,
-            context: &context,
-        };
-        let telescope = self
+        // Prefix identities specialize declaration defaults, never explicit
+        // caller sources. Keep one budgeted owned environment, not a temporary
+        // unbounded clone followed by another retention inside preparation.
+        let defaults = declaration_inputs::Environment::retain_prefix(
+            &nominal::InputEnvironment {
+                substitution: &self.alias_substitution,
+                bindings: &self.alias_value_bindings,
+                normal_bindings: &self.normal_default_bindings,
+                context: &self.context,
+            },
+            parameters,
+            prefix,
+            &mut self.required_steps,
+            expr.span,
+        )?;
+        let completion =
+            CallableCompletion::retain(self, owner, parameters, domains, prefix, expr.span)?;
+        let mut telescope = Vec::new();
+        for (binder, domain) in self
             .input_binders(&parameters[prefix.len()..])
             .into_iter()
             .zip(&domains[prefix.len()..])
-            .map(|(binder, domain)| (binder.declaration, binder.sort, domain.clone()))
-            .collect::<Vec<_>>();
-        let prepared = self.planned_typed_declaration_inputs(
+        {
+            telescope.push((
+                binder.declaration,
+                binder.sort,
+                self.copy_alias_type(domain, expr.span)?,
+            ));
+        }
+        self.complete_declaration_inputs(
             owner,
             args,
             expr.span,
             telescope,
-            Some(&defaults),
-        )?;
-        let mut symbols = prefix.to_vec();
-        symbols.extend(prepared.formation.terms);
-        let pending = prepared.formation.deferred;
-        let mut operands = prefix
-            .iter()
-            .zip(domains)
-            .map(|(value, domain)| n::Expr {
-                source: source(expr.span),
-                ty: domain.clone(),
-                kind: if *domain == p(P::Type) {
-                    K::TypeValue(value.clone())
-                } else {
-                    K::ComptimeValue(value.clone())
-                },
-            })
-            .collect::<Vec<_>>();
-        let statements = prepared.statements;
-        operands.extend(prepared.arguments);
-        let formation = FormationInputs {
-            terms: symbols.clone(),
-            deferred: parameters
-                .iter()
-                .zip(domains)
-                .filter_map(|(id, domain)| {
-                    (*domain != p(P::Type) || pending.contains(id)).then_some(*id)
-                })
-                .collect(),
-            environment: BTreeMap::new(),
-        };
-        let formation_deferred = !formation.deferred.is_empty();
-        self.check_formation_application(owner, formation, expr.span)?;
-        // Named Type inputs may occur after their value inputs. Once routing
-        // completes, validate every retained value against the completed domain
-        // even if this function is never invoked.
-        for (operand, domain) in operands.iter().zip(domains) {
-            let domain = self.instantiate_input_types(domain, parameters, &symbols, expr.span)?;
-            self.require(&operand.ty, &domain, expr.span)?;
-        }
-        let ty = Term::Tuple(operands.iter().map(|value| value.ty.clone()).collect());
-        Ok(CallableClausePacket {
-            expression: n::Expr {
-                source: source(expr.span),
-                ty: ty.clone(),
-                kind: K::Block {
-                    statements,
-                    result: Some(Box::new(n::Expr {
-                        source: source(expr.span),
-                        ty,
-                        kind: K::Tuple(operands),
-                    })),
-                },
-            },
-            identities: symbols,
-            pending,
-            formation_deferred,
-        })
+            Some(defaults),
+            completion,
+        )
     }
 
     fn callable_clause_domains(
@@ -391,6 +489,31 @@ impl Checker<'_, '_> {
 #[cfg(test)]
 mod packet_tests {
     use super::*;
+
+    #[test]
+    fn callable_completion_dump_keeps_parent_prefix_and_full_domains() {
+        let parameter = DeclarationId {
+            package: 1,
+            local: 2,
+        };
+        let completion = CallableCompletion {
+            owner: hir::OwnerId::new(hir::LocalDefId::new(3)),
+            parameters: vec![parameter],
+            domains: vec![p(P::Str)],
+            prefix: vec![Term::String("parent\"\n".into())],
+        };
+        let dump = completion.to_string();
+        assert!(
+            dump.starts_with("(callable-input-completion (owner "),
+            "{dump}"
+        );
+        assert!(
+            dump.contains(&format!("(input {parameter} {})", p(P::Str))),
+            "{dump}"
+        );
+        assert!(dump.contains("parent\\\"\\n"), "{dump}");
+        assert!(!dump.contains('\n'), "{dump}");
+    }
 
     #[test]
     fn callable_packet_dump_retains_producer_and_orders_pending_identities() {

@@ -9,25 +9,26 @@ enum Phase<'h> {
     Finished,
 }
 
-enum Poll<'h> {
+enum Poll<'h, T> {
     Continue,
     Child(Request<'h, 'h>),
-    Complete(PreparedDeclarationInputs),
+    Complete(T),
 }
 
 #[must_use = "drive input preparation and restore its original caller scope"]
-pub(super) struct Frame<'h> {
+pub(super) struct Frame<'h, C: Completion> {
     owner: OwnerId,
     span: Span,
     clauses: Option<Vec<hir::clause::ClauseParam<'h>>>,
     defaults: Option<environment::Environment>,
-    checking: InputChecking,
+    parameters: Parameters,
+    completion: Option<C>,
     scope: Option<scope::Scope>,
     phase: Phase<'h>,
     waiting: bool,
 }
 
-impl<'h> Frame<'h> {
+impl<'h, C: Completion> Frame<'h, C> {
     pub(super) fn new(
         checker: &mut Checker<'_, '_>,
         owner: OwnerId,
@@ -36,30 +37,31 @@ impl<'h> Frame<'h> {
         parameters: Parameters,
         clauses: Vec<hir::clause::ClauseParam<'h>>,
         defaults: Option<environment::Environment>,
-        checking: InputChecking,
+        completion: C,
     ) -> Result<Self, Error> {
         let scope = scope::Scope::enter(checker, span)?;
-        let routing = match routing::Frame::new(checker, owner, inputs, span, parameters, &clauses)
-        {
-            Ok(routing) => routing,
-            Err(failure) => {
-                scope.leave(checker);
-                return Err(failure);
-            }
-        };
+        let routing =
+            match routing::Frame::new(checker, owner, inputs, span, parameters.clone(), &clauses) {
+                Ok(routing) => routing,
+                Err(failure) => {
+                    scope.leave(checker);
+                    return Err(failure);
+                }
+            };
         Ok(Self {
             owner,
             span,
             clauses: Some(clauses),
             defaults,
-            checking,
+            parameters,
+            completion: Some(completion),
             scope: Some(scope),
             phase: Phase::Routing(Box::new(routing)),
             waiting: false,
         })
     }
 
-    fn poll(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'h>, Error> {
+    fn poll(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'h, C::Output>, Error> {
         if self.waiting {
             return Err(error(
                 self.span,
@@ -80,7 +82,7 @@ impl<'h> Frame<'h> {
                         self.owner,
                         self.clauses.take().expect("routing clause telescope"),
                         self.defaults.take(),
-                        self.checking,
+                        C::CHECKING,
                     )?;
                     self.phase = Phase::Checking(Box::new(frame));
                     return Ok(Poll::Continue);
@@ -96,7 +98,16 @@ impl<'h> Frame<'h> {
                         unreachable!()
                     };
                     frame.unwind(checker);
-                    return (*frame).finish().map(Poll::Complete);
+                    let inputs = (*frame).finish()?;
+                    // Formation and result conversion belong to the caller,
+                    // never to the last default provider or input observation.
+                    self.leave(checker);
+                    return self
+                        .completion
+                        .take()
+                        .expect("input completion is consumed once")
+                        .finish(checker, &self.parameters, inputs, self.span)
+                        .map(Poll::Complete);
                 }
             },
             Phase::Finished => {
@@ -140,10 +151,7 @@ impl<'h> Frame<'h> {
         }
     }
 
-    pub(super) fn drive(
-        mut self,
-        checker: &mut Checker<'_, '_>,
-    ) -> Result<PreparedDeclarationInputs, Error> {
+    pub(super) fn drive(mut self, checker: &mut Checker<'_, '_>) -> Result<C::Output, Error> {
         let result = (|| loop {
             match self.poll(checker)? {
                 Poll::Continue => {}
@@ -159,7 +167,7 @@ impl<'h> Frame<'h> {
     }
 }
 
-impl std::fmt::Display for Frame<'_> {
+impl<C: Completion> std::fmt::Display for Frame<'_, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -180,6 +188,10 @@ impl std::fmt::Display for Frame<'_> {
         f.write_str(") (default-provider")?;
         if let Some(defaults) = &self.defaults {
             write!(f, " {defaults}")?;
+        }
+        f.write_str(") (completion")?;
+        if let Some(completion) = &self.completion {
+            write!(f, " {completion}")?;
         }
         f.write_str("))")
     }

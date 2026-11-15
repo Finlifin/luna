@@ -1,6 +1,7 @@
 //! Shared source-order input plans, independent of the eventual type constructor.
 use super::*;
 mod collections;
+mod completion;
 mod domain;
 mod environment;
 mod preparation;
@@ -13,12 +14,15 @@ mod slots;
 /// Consumers that cannot yet suspend frontend checking require ordinary typed
 /// expressions. Both consumers retain the same routing and execution plan.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum InputChecking {
+pub(super) enum InputChecking {
     Contextual,
     Typed,
 }
 
-// Shared only within this preparation and its typed-result adapter. Domain
+pub(super) use completion::Completion;
+pub(super) use environment::Environment;
+
+// Shared only within this preparation and its result consumer. Domain
 // values move out of the caller's temporary telescope instead of borrowing it.
 type Parameters = std::sync::Arc<[(DeclarationId, Sort, Term)]>;
 
@@ -63,7 +67,7 @@ impl std::fmt::Display for CheckedDeclarationInputs {
 }
 
 impl PreparedDeclarationInputs {
-    fn into_typed(
+    pub(super) fn into_typed(
         self,
         parameters: &[(DeclarationId, Sort, Term)],
         span: Span,
@@ -381,14 +385,13 @@ impl Checker<'_, '_> {
         parameters: Vec<(DeclarationId, Sort, Term)>,
         defaults: Option<&nominal::InputEnvironment<'_>>,
     ) -> Result<PreparedDeclarationInputs, Error> {
-        environment::charge(&mut self.required_steps, parameters.len(), span)?;
         self.plan_declaration_inputs(
             owner,
             inputs,
             span,
-            parameters.into(),
+            parameters,
             defaults,
-            InputChecking::Contextual,
+            completion::Contextual,
         )
     }
 
@@ -400,37 +403,47 @@ impl Checker<'_, '_> {
         parameters: Vec<(DeclarationId, Sort, Term)>,
         defaults: Option<&nominal::InputEnvironment<'_>>,
     ) -> Result<CheckedDeclarationInputs, Error> {
-        environment::charge(&mut self.required_steps, parameters.len(), span)?;
-        let parameters: Parameters = parameters.into();
-        self.plan_declaration_inputs(
-            owner,
-            inputs,
-            span,
-            parameters.clone(),
-            defaults,
-            InputChecking::Typed,
-        )?
-        .into_typed(&parameters, span)
+        self.plan_declaration_inputs(owner, inputs, span, parameters, defaults, completion::Typed)
     }
 
-    fn plan_declaration_inputs(
+    fn plan_declaration_inputs<C: Completion>(
         &mut self,
         owner: OwnerId,
         inputs: &[Arg<'_>],
         span: Span,
-        parameters: Parameters,
+        parameters: Vec<(DeclarationId, Sort, Term)>,
         defaults: Option<&nominal::InputEnvironment<'_>>,
-        checking: InputChecking,
-    ) -> Result<PreparedDeclarationInputs, Error> {
+        completion: C,
+    ) -> Result<C::Output, Error> {
+        let defaults = defaults
+            .map(|view| Environment::retain(view, &mut self.required_steps, span))
+            .transpose()?;
+        self.complete_declaration_inputs(owner, inputs, span, parameters, defaults, completion)
+    }
+
+    pub(super) fn complete_declaration_inputs<C: Completion>(
+        &mut self,
+        owner: OwnerId,
+        inputs: &[Arg<'_>],
+        span: Span,
+        parameters: Vec<(DeclarationId, Sort, Term)>,
+        defaults: Option<Environment>,
+        completion: C,
+    ) -> Result<C::Output, Error> {
         let clauses = self.type_clause_params(owner);
         if parameters.len() != clauses.len() {
             return Err(error(span, "declaration input telescope arity mismatch"));
         }
-        let defaults = defaults
-            .map(|view| environment::Environment::retain(view, &mut self.required_steps, span))
-            .transpose()?;
+        environment::charge(&mut self.required_steps, parameters.len(), span)?;
         preparation::Frame::new(
-            self, owner, inputs, span, parameters, clauses, defaults, checking,
+            self,
+            owner,
+            inputs,
+            span,
+            parameters.into(),
+            clauses,
+            defaults,
+            completion,
         )?
         .drive(self)
     }

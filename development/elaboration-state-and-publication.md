@@ -489,7 +489,7 @@ Progress，`RoutedDeclarationInput` 不再可 Clone，不为交付重新复制�
 槽位检查失败与正常完成均恢复同一调用者环境；槽位退出先处理临时观察和默认 guard。
 恢复范围保持原有词法边界，不恢复 input_facts 或存储，不退还已用预算。
 准备帧不再借用调用函数栈上的参数望远镜或默认值环境。望远镜从消费者移入当前
-准备，仅与 typed 结果适配器共享；路由完成后原数据转交槽位检查，不复制整组域。
+准备，与完成消费者共享；路由完成后原数据转交槽位检查，不复制整组域。
 默认提供者通过 `environment::Environment` 持有独立绑定表，绑定的不可变 Term
 与 PTC context 继续共享。显式输入仍在 caller 环境检查，默认值才安装选定父项。
 这些数据只属于当前活动准备，不是稳定缓存或跨世界发布；HIR 仍借用原源码 owner。
@@ -500,6 +500,19 @@ Progress，`RoutedDeclarationInput` 不再可 Clone，不为交付重新复制�
 增加容量，不根据未获预算的完整 size hint 预分配。caller 域先按原优先级借用，
 保留 open annotation 中未知槽位的位置，再由接收者决定复制策略；不是把未知域
 截断为已知前缀。这里仍然复制词法表，尚未改为增量环境，亦未预算化外围所有消费者。
+
+准备帧还拥有完成消费者 `Completion`，由消费者确定 contextual／typed 检查模式和
+交付类型。typed 计划转换不再借用外层临时望远镜；callable 消费者保留完整声明域、
+词法前缀与参数身份，在槽位准备完成后依次进行形成检查、最终实参域校验及 packet
+组装。先退出本包观察、默认 guard 和 caller scope，才运行完成消费者；完成失败
+不能交付半个 packet，也不重复恢复旧环境覆盖完成阶段产生的合法失效。
+
+callable 默认环境直接经有预算的 `Environment::retain_prefix` 保留一次，前缀只
+覆盖选定声明的默认提供者，显式源码仍在调用者环境检查。前缀覆盖移除同身份旧的
+value/default 绑定，未覆盖项保留；失败不改原表。完成消费者保留的域与前缀、形成
+证据及 packet 类型复制同样使用检查预算。该消费者及准备帧的 dump 包含尚未消费
+的完成步骤。形成检查仍是同步操作，这项迁移没有把 pending 身份变成真实 VM 值，
+也没有允许尚依赖 invocation 输入的 callable 签名发布。
 
 路由、收集、依赖域与槽位已有共同子检查后继，帧仍借用同一 Checker 与 HIR。
 布局提示扫描仍是同步操作，子请求仍由同步适配器检查并要求完整结果。这里还没有
@@ -938,6 +951,7 @@ callable 签名对实际 Type 的消费。只增加 owner、请求枚举或可�
 | 共用输入驱动中的收集检查 | 在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 900 -- test -p luna --test declaration_input_plans --test ordinary_callable_types --test ordinary_clause_collectors --test normal_input_plans --test library_std_format --no-fail-fast -- --test-threads=1`，`/tmp/luna-tools-x_6qo3mo/result.json` 退出 0，93 项通过，两个原待定 Type 正例仍 ignored；新增交错探测／字面量回退、空展开、源码早退和普通类型错误传播。初轮拒绝 fixture 使用 `1u8` 时先报 LiteralInto 未绑定（`/tmp/luna-tools-9pa2g49v/result.json`）；改用返回 u8 的普通函数供应错误实参后，仍断言类型不匹配且不落入 contextual 回退诊断，不宣称修复字面量后缀。`test -p elaboration --lib declaration_inputs -- --test-threads=1` 经相同 wrapper，`/tmp/luna-tools-anrhcita/result.json` 退出 0，7 项通过，含未完成收集不得发布及 dump。已改 Rust 的 scoped rustfmt 检查退出 0，`/tmp/luna-tools-vk36a4ey/result.json`。源码／VM 交织恢复仍未完成 |
 | 完整输入准备与调用者环境退出 | 在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 900 -- test -p luna --test clause_packet_preparation --test declaration_input_plans --test ordinary_callable_types --test ordinary_clause_collectors --test normal_input_plans --test library_std_format --no-fail-fast -- --test-threads=1`，`/tmp/luna-tools-_ic5srl0/result.json` 退出 0，112 项通过、两个原待定 Type 正例仍 ignored；新增嵌套包默认值作用域、空包和提前返回的执行次数／顺序，以及提前返回后仍拒绝错误输入。初轮拒绝 fixture 的裸整数先触发 runtime proxy 目标诊断（`/tmp/luna-tools-u9oicu0r/result.json`），改用返回 u8 的普通函数隔离 bool 参数的域错误，保持 mismatch 断言。`test -p elaboration --lib declaration_inputs -- --test-threads=1` 经相同 wrapper，`/tmp/luna-tools-o4tltuu2/result.json` 退出 0，9 项通过，含路由和 caller scope 的 dump。已改 Rust 的 scoped rustfmt 检查退出 0，`/tmp/luna-tools-etsbuahp/result.json`。这些结果验证同步路径的迁移，不证明源码／VM Type 响应恢复或目标 println 完成 |
 | 输入环境所有权与保留预算 | 在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 1200 -- test -p elaboration --test invocation_budget -p luna --test declaration_input_plans --test normal_input_plans --test ordinary_callable_types --test ordinary_clause_collectors --test required_input_scopes --test library_std_format --no-fail-fast -- --test-threads=1`，`/tmp/luna-tools-iq4dupri/result.json` 退出 101：103 项通过，两个原 Type 等待正例保持 ignored，另两项 required scope 测试在旧助手创建 VM 时报 UnmaterializedDispatch。仅将本轮所属编译器文件替换为 `cf859929` 的对照复现同样两项失败（`/tmp/luna-tools-3jyglitp/result.json`），其余已有工作区修改保留；全部本轮源码随后恢复。`a9f8edc1` 将助手接回已有源码查询服务，原预算、双引擎、契约与失败后重试断言不变：对照编译器通过（`/tmp/luna-tools-_qp14jug/result.json`），恢复本轮实现后过滤 `required_and_published` 复验两项通过（`/tmp/luna-tools-81wzyksq/result.json`）。同入口运行 `test -p elaboration --lib declaration_inputs -- --test-threads=1`，`/tmp/luna-tools-k68oz8to/result.json` 退出 0，14 项通过，覆盖快照隔离、逐项预算、深度耗尽、未知槽位与巨大 size hint；`open_functions` 四项 open clause／default／interleaved domain 过滤检查退出 0（`/tmp/luna-tools-a06zyus1/result.json`，完整过滤名见报告）。已改 Rust 的 scoped rustfmt 检查退出 0（`/tmp/luna-tools-ssw__ww1/result.json`）。本阶段移除了准备帧对临时望远镜／默认环境的借用，不代表 VM Type 响应恢复完成 |
+| 输入完成消费者与 callable 形成 | 在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 1200 -- test -p elaboration --test invocation_budget -p luna --test declaration_input_plans --test normal_input_plans --test ordinary_callable_types --test ordinary_clause_collectors --test required_input_scopes --test library_std_format --no-fail-fast -- --test-threads=1`，`/tmp/luna-tools-015xk8ez/result.json` 退出 0：106 项通过，两个原待定 Type 正例保持 ignored。在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -- --test-threads=1 declaration_inputs dynamic_instances`，`/tmp/luna-tools-tlsy0sji/result.json` 退出 0，17 项通过，含前缀覆盖隔离、预算耗尽／重试及 completion dump。`check -p elaboration` 退出 0（`/tmp/luna-tools-pctqrnjy/result.json`）；本轮六个 Rust 文件的 scoped rustfmt 检查退出 0（`/tmp/luna-tools-lq_znlsz/result.json`）。新增集成用例最初使用 `requires copied == seed`，在取得函数值时触发已有的程序前置条件擦除拒绝（`/tmp/luna-tools-0_cbhuyo/result.json`）；用例随后将形成检查改为独立的 `requires T == u8`，保留两个父实例、调用者显式输入和恰好一次执行断言，另检查非法 T 的具体诊断。程序前置条件随函数值传递仍未实现，不将该拒绝视为修复。 |
 | 路由与源码适配 | `program/input_routing` 单元测试及 `luna/tests/{default_calls,type_spreads,cmtt_methods}.rs`；`/tmp/luna-tools-2x37n5o8/result.json`，退出 0，仍含两项 ignored |
 | required 依赖发现 | `program/required/dependencies.rs` 及 `luna/tests/required_input_scopes.rs`；`/tmp/luna-tools-zrknan4h/result.json`，退出 0 |
 | 帧绑定交接 | `bytecode::input_preparation_tests` 及 `luna/tests/clause_packet_preparation.rs`；`/tmp/luna-tools-r52uh6us/result.json`，退出 0 |

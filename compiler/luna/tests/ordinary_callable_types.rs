@@ -23,6 +23,41 @@ fn check_both(source: &str) {
 }
 
 #[test]
+fn sibling_callable_defaults_keep_selected_parent_and_caller_inputs_separate() {
+    let source = "
+        struct Holder where seed: bool {
+            pub comptime fn pick() -> bool
+            where value: bool, .copied: bool = seed, .T: Type = u8, requires T == u8
+            {
+                value == copied
+            }
+            pub comptime fn evaluate() -> bool {
+                var trace: Integer = 0;
+                let yes = Holder<true>.pick<do { trace = trace * 10 + 1; seed }>;
+                let no = Holder<false>.pick<do { trace = trace * 10 + 2; seed }>;
+                yes() == seed and no() != seed and yes() == seed and trace == 12
+            }
+        }
+        comptime fn check() -> bool {
+            Holder<true>.evaluate() and Holder<false>.evaluate()
+        }
+    ";
+    check_both(source);
+    // Formation remains mandatory even for an unused callable. A previous
+    // successful sibling must not supply evidence for this selected parent.
+    let invalid = source.replace(
+        "let no = Holder<false>.pick<do { trace = trace * 10 + 2; seed }>;",
+        "let unused = Holder<false>.pick<seed, .T = bool>;\nlet no = Holder<false>.pick<seed>;",
+    );
+    let failure = sysroot::compile(&invalid).unwrap_err();
+    assert!(
+        failure.contains("type requirement is not satisfied"),
+        "{failure}"
+    );
+    check_both(source);
+}
+
+#[test]
 fn nominal_type_inputs_form_callables_without_executing_the_input_plan() {
     let source = "
         struct Key where T, value: T, .other: T = value { payload: bool }
