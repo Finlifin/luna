@@ -2007,8 +2007,8 @@ OpenDefinition/WorldView 已经落地。冻结入口、实际执行入口及 IIR
 执行额度内构造普通 `ExprKind::Call`，按参数顺序装入默认表达式和原参数绑定，
 交给已有默认参数调用计划处理。查找、容器宽度、类型与表达式复制在分配前预检；
 完整代码才保留为 Arc，不给它编造 DeclarationId，也不为它修改 Package。
-无默认参数的零参数入口仍直接调用原声明。源码无旧 dispatch 表时，
-PreparedInvocation 现在连带默认参数的入口也直接保活调用方提供的 Arc。
+无默认参数的零参数入口仍直接调用原声明。PreparedInvocation 连带默认参数的
+入口也直接保活调用方提供的 Arc，不要求物理 package 没有旧 dispatch 表。
 
 VM 的 owned expression 入口复用同一个不可变表达式作为代码身份，每次调用仍执行
 阶段／unsafe 检查，创建新的匿名闭包帧，保留默认参数求值顺序、提前返回和失败传播。
@@ -2017,12 +2017,12 @@ VM 的 owned expression 入口复用同一个不可变表达式作为代码身�
 资源协议版本在建立 VM 前统一源码 owner，避免 VM 与查询服务分别持有两份复制品；
 builder 发布服务继续按本次调用绑定。
 
-显式入口的源码捕获也已改用共同的 `DeclarationSource::retain_declarations`：
-仅复制声明载荷，不先克隆整包再清空 dispatch。借用源若需要资源 owner 或移除旧
-dispatch，一次捕获即同时满足两者；捕获预检、默认调用准备和 VM 执行消费同一个
-invocation 额度。可复用入口在构造时保留原 Arc，将必要投影推迟到首次执行；完整
-投影成功后才替换 owner 与代码 session。失败捕获不安装半成品；后续执行失败允许
-保留已经完成的声明投影，不保留权限或执行结果。
+普通显式入口与 PreparedInvocation 现借用原包的逻辑声明视图，VM 在准入、索引和
+查询中排除物理 dispatch，不再为此复制源码或替换代码 session。原 Arc 及其执行表
+随 session 保活，语义上排除不等于物理释放。需要资源 owner 的兼容入口仍通过
+`DeclarationSource::retain_declarations` 有界捕获声明载荷；该捕获、默认调用准备和
+VM 执行消费同一 invocation 额度。完整边界与验证见
+[源码声明视图](world-storage-and-lifetimes.md#110-源码声明视图与物理执行表分开)。
 
 入口选择现在逐项计入函数扫描与名称比较成本，默认槽位完整性用线性扫描完成，
 不再为每个参数遍历所有默认值；重复或越界槽位在准备阶段拒绝。单次 invocation

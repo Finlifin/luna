@@ -103,6 +103,9 @@ predicate 等混合问题验证组合入口，不能只用各 theory 的独立�
 局部声明输入需求、调用供应及 required 残余已沿同一词法依赖机制接线；普通 callable、
 NF、名义类型和透明别名共享声明输入准备，原 Type-only 和名义成员的独立循环已退役。
 contextual 签名、普通值读取与捕获共用父声明输入；跨 VM callable 在接收世界核验。
+源码 VM 与普通显式 invocation 已借用原包的逻辑声明视图，避免为剔除旧 dispatch
+复制整包；封闭执行和源码查询仍保持独立准入、索引及权限，详见
+[所有权边界](world-storage-and-lifetimes.md#110-源码声明视图与物理执行表分开)。
 这些是 M1–M3 的部分纵向交付，不是通用 Region、ContextualExpr 或发布协议已经完成。
 当前入口及证据集中在 [README](README.md#当前生产接线与下一步)，不再安排重做旧 flag
 helper 调查或已完成的停用 crate 删除。

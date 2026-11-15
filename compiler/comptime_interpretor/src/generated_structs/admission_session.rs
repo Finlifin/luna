@@ -64,7 +64,8 @@ impl<'world> DefinitionAdmissionSession<'world> {
         let mut reserved = *budget;
         budget.steps = 0;
         // Descriptors need declaration/layout admission, not a transitive
-        // execution table. This VM is private and never invokes source code;
+        // execution table, including one physically retained in the package.
+        // This VM is private and never invokes source code;
         // lacking proof evidence still rejects an unestablished formation.
         let inspection = invocation_budget::prepare_phase_inspection(package, &mut reserved)?;
         let mut vm = Interpreter::with_assumptions_and_index(

@@ -56,14 +56,6 @@ impl PreparedInvocation {
         if fuel == 0 {
             return Err("invocation fuel must be positive".into());
         }
-        let mut fuel = fuel;
-        if !self.source.package().dispatch_instances.is_empty() {
-            // Publish only a complete source projection. A failed capture leaves
-            // the original owner available for a later invocation with fuel.
-            let source = retain_source(DeclarationSource::Snapshot(&self.source), &mut fuel)?;
-            self.code = comptime_interpretor::CodeSession::new(source.package().clone());
-            self.source = source;
-        }
         execute_prepared(
             DeclarationSource::Snapshot(&self.source),
             &mut self.invocation,
@@ -127,15 +119,9 @@ pub(crate) fn invoke_selected_with_publisher(
     let mut fuel = fuel;
     let function = entry::select_in(package, entry, FunctionPhase::Comptime, identity, &mut fuel)?;
     let mut invocation = entry::Entry::new(function);
-    // Selected dispatch needs projection before the VM and query services
-    // borrow the source. Comptime execution needs no runtime resource binding.
-    let retained;
-    let source = if !package.dispatch_instances.is_empty() {
-        retained = retain_source(DeclarationSource::Borrowed(package), &mut fuel)?;
-        DeclarationSource::Snapshot(&retained)
-    } else {
-        DeclarationSource::Borrowed(package)
-    };
+    // Source resolvers select a declaration view of this exact package. The VM
+    // excludes preselected dispatch without copying unrelated bodies or inputs.
+    let source = DeclarationSource::Borrowed(package);
     execute_prepared(
         source,
         &mut invocation,
@@ -145,17 +131,6 @@ pub(crate) fn invoke_selected_with_publisher(
         None,
         &mut InvocationStats::default(),
     )
-}
-
-fn retain_source(
-    source: DeclarationSource<'_>,
-    fuel: &mut u64,
-) -> Result<DeclarationSnapshot, String> {
-    let mut remaining = usize::try_from(*fuel)
-        .map_err(|_| "source retention fuel does not fit the host counter")?;
-    let result = source.retain_declarations(&mut remaining);
-    *fuel = remaining as u64;
-    result.map_err(|error| format!("invocation source retention budget exhausted: {error:?}"))
 }
 
 fn execute_prepared(

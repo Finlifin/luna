@@ -134,8 +134,9 @@ Arc，继续只复用代码；每次执行仍创建新 VM。缓存准入、资�
 同一个缓存调用为不同输入类型建立 Eq／Hash binding 时，也共享这个 owner，不再
 为每种协议复制 package 或另建目录。binding 的值接纳 token 仍分别建立：目录共享
 不允许协议 A 接受协议 B 的值快照，资源与用户契约也仍需各自检查。共享协议入口
-要求源码已移除预选 dispatch 表，并在准备阶段拒绝混入闭合执行表的快照；按需 VM
-仍保留同一拒绝，不把既有执行表当作声明证据。
+要求源码已移除预选 dispatch 表，并在准备阶段拒绝混入闭合执行表的快照。按需 VM
+现可借用物理上含该表的 package，但声明视图不读取该表；两种入口的当前区别见
+第 1.10 节，不能把既有执行表当作声明证据。
 
 带默认参数的 comptime 入口也保留原 source owner，不再为一次宿主调用复制整包、
 分配假声明 ID 并追加包装函数。入口持有独立的普通 Call 表达式，其默认实参和绑定
@@ -147,19 +148,19 @@ owner，VM 和协议查询借用同一个 package，不再在查询准备中暗�
 一次声明捕获，消耗本次 invocation 额度；runtime／native 默认入口包装尚未迁移。
 实现与本阶段验证见[显式 invocation](values-staging-and-publication.md#当前显式-invocation-迁移统一源世界-vm)。
 
-`DeclarationSource::retain_declarations` 统一 staged、显式 invocation、结果缓存与
-Eq／Hash 准备的所有权边界。干净 snapshot 只收取句柄保留成本并共享完整目录；
-借用源或含 dispatch 的 snapshot 预检后取得仅含声明的私有源码，直接省略执行表，
+`DeclarationSource::retain_declarations` 统一 staged、资源协议、结果缓存与
+Eq／Hash 准备中需要私有源码的所有权边界。干净 snapshot 只收取句柄保留成本并
+共享完整目录；借用源或含 dispatch 的 snapshot 预检后取得仅含声明的私有源码，直接省略执行表，
 新目录保持 pending，不继承被投影来源的证明或执行选择。复制失败不安装部分源码，
 低额度调用之后可以重试。已有 owner 的缓存调用可用 `Invocation::prepare_in_source`
 避免兼容借用入口的复制；它与 Eq／Hash 的共享入口一样拒绝预选 dispatch。
 
-PreparedInvocation 构造只保活输入 Arc；若包含旧 dispatch，在首次 invoke 的额度内
-完成投影后替换 source 与代码 session。捕获失败保留原 owner；捕获成功而后续调用
-失败可以保留声明数据，但不能保留调用结果或许可。后续调用不再承担这次复制，丢弃
-的执行表也不因准备对象继续保活。单次 invocation 的捕获、默认参数准备与 VM 共用
-额度。缓存调用和 Eq／Hash 兼容准备现也把捕获、上下文、参数／契约处理及协议批次
-串在一份剩余额度内；相关接线与求解器内部仍有的限制见
+PreparedInvocation 保活输入 Arc，并在每次 invoke 使用它的声明视图，不再为剔除
+dispatch 复制整包、替换 source 或重建代码 session。原包的物理执行表仍随 owner
+保活，但不进入源码准入与查询；不会提前释放这部分内存。单次普通 invocation 直接
+借用调用方源码，默认参数准备、上下文与 VM 共用额度。缓存调用和 Eq／Hash 兼容
+准备现也把必要捕获、上下文、参数／契约处理及协议批次串在一份剩余额度内；
+相关接线与求解器内部仍有的限制见
 [缓存 invocation](values-staging-and-publication.md#当前缓存-invocation-迁移去掉-type-输入专门化世界)。
 
 最后一个 snapshot／CodeSession／源码 Arc 消费者释放后，目录和源码可分别回收；
@@ -437,9 +438,10 @@ body 的 Arc，只检查实际复制的捕获初始化器、参数和类型部�
 body 的执行许可。所有复制都在完整预检之后发生，失败不返回部分 Package。原有
 source owner 快路径仍只保留句柄，不因兼容入口需要复制而重收其载荷成本。
 
-源码分块与借用的 dispatch 投影视图尚未实现：两个兼容入口仍复制所保留的声明
-数据，只是这次捕获已经有完整预检且不再复制被丢弃的 dispatch。其他子系统的
-Package 捕获不因新增此入口而自动完成预算迁移。共享 owner 路径已消除这次复制，
+源码分块尚未实现。需要私有源码的兼容入口仍复制所保留的声明数据，但捕获有完整
+预检且不复制被丢弃的 dispatch。源码 VM 与普通显式 invocation 现使用借用声明
+视图，见第 1.10 节；这不自动消除 staged／缓存的所有权捕获。其他子系统的 Package
+捕获不因新增此入口而自动完成预算迁移。共享 owner 路径已消除这次复制，
 不能据此声称所有源码捕获均已修复。携带作用域前提的 CodeSession 与 phase 目录
 接线见第 1.6–1.7 节。类型／资源正确性仍由上游保证；没有整体性能收益结论。
 
@@ -459,11 +461,11 @@ Package 捕获不因新增此入口而自动完成预算迁移。共享 owner �
 
 ### 源码世界准入与参考执行互相独立
 
-真实 sysroot 的前端产物可以携带已选择的 dispatch；它不能直接交给要求纯声明
-世界的 resolving 构造器。调用消费者先通过 `DeclarationSource::retain_declarations`
-取得独立声明快照，再从同一 owner 建立 Context、查询服务与 VM。不能只清空输入包
-的表，也不能先走 closed 构造器、待其成功后才安装源码解析回调：前者混淆所有权，
-后者在准入时已经选错了世界协议。源码投影不签发执行许可，阶段检查仍由 VM 完成。
+真实 sysroot 的前端产物可以携带已选择的 dispatch。resolving 构造器现在选择不含
+该表的逻辑声明视图，从同一原包建立 Context、查询服务与 VM，不需要先复制源码。
+不能修改输入包清空表，也不能先走 closed 构造器、待其成功后才安装源码解析回调：
+前者混淆所有权，后者在准入时已经选错了世界协议。视图不签发执行许可，声明和阶段
+检查仍由 VM 完成。必须取得私有源码的消费者继续使用有界的 retain_declarations。
 
 `Interpreter::with_reference_execution` 只在已构造的 VM 上关闭字节码路由。
 它不改变 universe、源码 owner、输入前提、查询服务或预算；closed 和 IIR 的既有
@@ -471,7 +473,7 @@ reference 构造器也共用这个选择。它用于显式差分检查，不是�
 更不代表最终架构要保留两套语言语义。
 
 调用分期、输入身份、声明输入计划与 contextual 区域的源码测试现在共用这条入口。
-每种引擎各建自己的完整源码服务，捕获、上下文、准入与执行都扣同一额度；语义测试
+每种引擎各建自己的完整源码服务，上下文、准入与执行都扣同一额度；语义测试
 明确使用一百万步的 sysroot allowance，不改变生产 VM 默认值。查询拒绝、实际选择、
 零预算拒绝仍由独立用例检查。调用分期还核对字节码执行计数，防止所谓“两引擎”
 实际上都走同一路径；原有事件顺序、producer 次数与提前返回断言保持不变。
@@ -491,9 +493,9 @@ reference 构造器也共用这个选择。它用于显式差分检查，不是�
 ### 1.6 Staged VM 索引与当前调用权限分离
 
 按需源码入口拆成独立的声明准备与当前调用准入。前者验证精确 source package，
-建立没有调用者前提或抽象参数权限的基础 VM；该模式禁止预选 dispatch 表，因此
-声明准入不需要借用调用者前提来补齐表。后者每次重新展开当前 trait 前提（含父约束
-和 capability），授予当前 Type／普通 comptime 值参数的显式权限，并安装本次宿主
+建立没有调用者前提或抽象参数权限的基础 VM；该模式将物理预选 dispatch 表排除在
+声明视图之外，因此声明准入不需要借用调用者前提来补齐表。后者每次重新展开当前
+trait 前提（含父约束和 capability），授予当前 Type／普通 comptime 值参数的显式权限，并安装本次宿主
 证明、方法及关联项服务。这里的前提只授予已有证明，不生成方法实现。
 
 `for_comptime_resolving_in_scope_in_session` 只复用同一 Arc 所拥有的精确 package。
@@ -704,6 +706,79 @@ owner 集合拼出。它包括函数体、默认值和合同的阶段检查，�
   unwind 恢复和未查询时不建立目录。两组去重共 1,037 项；不是全 workspace 验收。
 - 12 个修改的 Rust 文件格式检查退出 0，`/tmp/luna-tools-byj4q648/result.json`；
   `git diff --check` 通过。这里验证的是检查复用及语义边界，没有宣称整体性能倍数。
+
+### 1.10 源码声明视图与物理执行表分开
+
+源码查询和封闭执行需要不同的证据，不能由物理 Package 是否恰好保留一张执行表
+决定。`SourceDispatch::instances` 现在统一选择该模式可见的表：Resolving 与内部
+Admission 的视图为空，Closed 仍取得完整表并执行原有检查。源码模式的世界计费、
+方法索引、关联常量／初始化器目录、capability 与 dispatch 输入准入都使用此视图。
+这不清空原包、不复制函数体，也不把封闭实例的选择或证明带入当前调用。
+
+声明结构、函数阶段、当前调用前提与实际输入仍分别检查。方法和关联项按需向同源
+服务请求，拒绝不能回退到物理表中的旧答案。CodeSession 仍将 closed 与 resolving
+索引分槽；phase receipt 可以共享精确源码的检查，不能让一种模式复用另一种模式
+的选择权限。原 `retain_declarations` 所承担的私有所有权捕获继续保留，不能把
+借用视图当作取消所有复制预算或任意延长引用寿命的理由。
+
+`luna::invocation` 的单次入口直接借用原包，PreparedInvocation 直接保留原 Arc，
+不再为删除 dispatch 整包复制、替换 owner 和重建代码 session。测试的真实 sysroot
+入口使用同样的三个查询服务。代价是原 Arc 中物理存在的执行表仍会随 session
+保活；本次减少复制和遍历，没有实现分块回收或减少所有常驻内存。
+
+成本对照使用真实 sysroot、四种输入规模与两种执行路由；预算单位是解释器工作步，
+不是墙钟时间。旧投影路径的冷准备为 159,025，其中声明复制 65,234、Context 755、
+VM 准入 93,036；新路径冷准备为 93,791。192 个 producer 的 bytecode 调用成本
+仍为 67,728，其中编译 11,579；reference 为 46,435。没有少执行 producer，也没有
+调整 192 次 spread 回归的 200,000 步额度。原始测量见
+`/tmp/luna-tools-rmxp3z6x/result.json`，新测量见
+`/tmp/luna-tools-wkmg47ga/stderr.log`。后者的成本组通过，但同次 builder 组失败，
+不能把该命令写为通过；后续验证单独列出。
+
+已执行的联合检查在 `/home/fin/luna`：
+
+```text
+python3 -B development/check.py --timeout 900 -- test \
+  -p comptime_interpretor --lib -p luna \
+  --test contextual_input_costs --test normal_input_plans \
+  --test prepared_invocations --test method_host_requests \
+  --test invocation_host_requests --no-fail-fast -- --test-threads=1
+```
+
+`/tmp/luna-tools-ysz7n68a/result.json` 退出 101。VM 单测 604、luna 单测 87、成本 1、
+normal_input_plans 24、prepared_invocations 10、method_host_requests 4 均通过；
+invocation_host_requests 为 5 通过、1 失败。新增检查覆盖物理表与干净源在多种预算
+下的一致行为、失败后的恢复、原包不变和最后 owner 释放；交替使用同一 session 的
+closed／source VM，确认 source 的关联项拒绝不能借用旧表。封闭模式仍拒绝非法
+dispatch，源码模式仍拒绝非法声明。原 192 次 spread 失败在此轮已消除。
+
+builder 失败揭示了两层混用：测试最初用 closed VM 执行真实 sysroot；改为源码服务
+后，发布器的私有 Admission 仍遍历物理 dispatch，在首次 BuildNewtype 准备时因
+与本次描述无关的选择失败。现将 Admission 也纳入声明视图；它只通过类型服务取得
+形成证明，没有执行方法或初始化器的入口。无求解服务的兼容发布器仍按 closed
+契约检查基线，不能借此忽略其表。源码测试使用同源 type solver 构造发布器，与
+required 的 invoke_publishing 保持一致。形成证明的拒绝、Unknown、失败后重试和
+成功提交另有回归；排除执行表绝不等于默认批准生成定义。
+
+修复后的针对性检查 `/tmp/luna-tools-jovkz85v/result.json` 退出 0，两个声明视图／
+形成证明单测和原 builder 用例通过。随后在同一工作目录执行最终回归：
+
+```text
+python3 -B development/check.py --timeout 900 -- test \
+  -p comptime_interpretor --lib -p luna \
+  --test invocation_host_requests --test method_host_requests \
+  --test prepared_invocations --test comptime_call_staging \
+  --test ordinary_input_identity --test declaration_input_plans \
+  --no-fail-fast -- --test-threads=1
+```
+
+`/tmp/luna-tools-gw04j4t6/result.json` 退出 0：VM 单测 605、luna 单测 87，以及调用
+分期 7、声明输入计划 13、invocation 宿主请求 6、方法宿主请求 4、普通输入身份 13、
+prepared invocation 10 全部通过。13 个改动 Rust 文件通过 scoped rustfmt check，
+报告 `/tmp/luna-tools-0x2euj7s/result.json` 退出 0；`git diff --check` 通过。
+此轮在 `8d9922ec` 加本次改动及工作区已有修改上执行；已有修改未纳入本次提交。
+未执行全 workspace 或墙钟性能基准，不以这条所有权清理宣称源检查恢复或完整
+`std.fmt.Parse` 已实现。
 
 ## 2. 目标物理结构
 

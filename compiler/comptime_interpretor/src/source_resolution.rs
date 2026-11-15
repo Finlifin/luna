@@ -20,12 +20,28 @@ pub(super) enum SourceDispatch<'a> {
     Admission,
 }
 
+impl SourceDispatch<'_> {
+    /// A source query observes declarations in this physical package, not a
+    /// previously selected execution table. Descriptor admission asks its type
+    /// service for formation evidence; only closed execution admits the table.
+    pub(super) fn instances<'a>(
+        &self,
+        package: &'a Package,
+    ) -> &'a [nir::program::DispatchInstance] {
+        match self {
+            Self::Resolving(_) | Self::Admission => &[],
+            Self::Closed => &package.dispatch_instances,
+        }
+    }
+}
+
 impl<'a> Interpreter<'a> {
     /// Execute checked source with demand-driven selection in its exact world.
-    /// No preselected dispatch table is accepted: each new member demand goes
-    /// through the supplied services. Declaration shape and phase validation
-    /// remain mandatory; source bodies are neither traversed for dependencies
-    /// nor executed during construction. Failed construction reserves its fuel.
+    /// The declaration view excludes preselected dispatch: each new member
+    /// demand goes through the supplied services. Declaration shape and phase
+    /// validation remain mandatory; source bodies are neither traversed for
+    /// dependencies nor executed during construction. Failed construction
+    /// reserves its fuel.
     pub fn for_comptime_resolving_in_budget(
         package: &'a Package,
         assumptions: &[nir::program::TraitRequirement],
@@ -42,20 +58,15 @@ impl<'a> Interpreter<'a> {
         Ok(interpreter)
     }
 
-    /// Source declarations carry no caller authority. This mode rejects closed
-    /// dispatch tables, so their admission cannot depend on invocation premises.
+    /// Source declarations carry no caller authority. Selecting the declaration
+    /// view leaves physical closed tables outside admission and lookup; it does
+    /// not copy the package or transfer their evidence to invocation premises.
     pub(super) fn prepare_resolving_source(
         package: &'a Package,
         resolvers: SourceResolvers<'a>,
         mut reserved: Budget,
         phase: Option<&nir::phases::PhaseCheckedPackage<'a>>,
     ) -> Result<Self, Error> {
-        if !package.dispatch_instances.is_empty() {
-            return Err(Error {
-                kind: ErrorKind::InvalidCallPlan,
-                source: None,
-            });
-        }
         let inspection = invocation_budget::phase_inspection(package, phase, &mut reserved)?;
         let mut interpreter = Self::with_assumptions_and_index(
             package,

@@ -44,7 +44,11 @@ pub(super) fn phase_inspection<'a>(
 
 /// Reserve top-level world traversal and indexing before allocating VM tables.
 /// Nested type, contract and substitution work keeps its separate existing cost.
-pub(super) fn charge_world_tables(package: &Package, budget: &mut Budget) -> Result<(), Error> {
+pub(super) fn charge_world_tables(
+    package: &Package,
+    dispatch_count: usize,
+    budget: &mut Budget,
+) -> Result<(), Error> {
     let Package {
         builtin_implementation_packages,
         target: _,
@@ -60,7 +64,7 @@ pub(super) fn charge_world_tables(package: &Package, budget: &mut Budget) -> Res
         effects,
         runtime_function_identities,
         normal_forms,
-        dispatch_instances,
+        dispatch_instances: _,
         traits,
         implementations,
         functions,
@@ -81,7 +85,7 @@ pub(super) fn charge_world_tables(package: &Package, budget: &mut Budget) -> Res
         effects.len(),
         runtime_function_identities.len(),
         normal_forms.len(),
-        dispatch_instances.len(),
+        dispatch_count,
         traits.len(),
         implementations.len(),
         functions.len(),

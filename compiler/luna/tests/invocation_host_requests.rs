@@ -5,7 +5,9 @@ mod sysroot;
 use comptime_interpretor::{
     Budget, CodeSession, Event, Interpreter, InvocationProgress, SourceResolvers, Value,
 };
-use elaboration::materialization::{DeclarationSource, SourceInvocationQueries};
+use elaboration::materialization::{
+    DeclarationSnapshot, DeclarationSource, SourceInvocationQueries,
+};
 use std::cell::Cell;
 
 #[test]
@@ -68,9 +70,8 @@ fn source_selection(deferred: bool, contracts: bool) {
         source
     };
     let package = sysroot::compile(&source).unwrap();
-    let source = DeclarationSource::Borrowed(&package)
-        .retain_declarations(&mut 1_000_000)
-        .unwrap();
+    assert!(!package.dispatch_instances.is_empty());
+    let source = DeclarationSnapshot::new(std::sync::Arc::new(package));
     let package = source.package();
     let id = |name: &str| {
         package
@@ -256,7 +257,14 @@ fn public_builders_suspend_cross_kind_publication_and_reuse_completed_types() {
         .find(|f| f.name == "Build")
         .unwrap()
         .declaration;
-    let publisher = AllocatedDefinitionPublisher::new(&package, 9900, 1, 10_000_000);
+    let context = elaboration::ptc::Context::from_package(&package).unwrap();
+    let queries =
+        SourceInvocationQueries::in_source(DeclarationSource::Borrowed(&package), &context, &[]);
+    let solver = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
+        queries.check(predicate, Default::default(), fuel)
+    };
+    let publisher =
+        AllocatedDefinitionPublisher::new_with_type_solver(&package, 9900, 1, 10_000_000, &solver);
     let structs = |r: &comptime_interpretor::StructBuildRequest, steps: &mut u64| {
         publisher.prepare_struct(r, steps)
     };
@@ -266,9 +274,19 @@ fn public_builders_suspend_cross_kind_publication_and_reuse_completed_types() {
     let newtypes = |r: &comptime_interpretor::NewtypeBuildRequest, steps: &mut u64| {
         publisher.prepare_newtype(r, steps)
     };
-    let mut vm = Interpreter::for_comptime(
+    let methods = |callee: &nir::program::Expr, fuel: &mut u64| queries.resolve(callee, fuel);
+    let associated = |access: &nir::program::Expr, fuel: &mut u64| queries.associated(access, fuel);
+    let mut vm = Interpreter::for_comptime_resolving_in_budget(
         &package,
-        Budget {
+        &[],
+        &[],
+        &[],
+        SourceResolvers {
+            types: &solver,
+            methods: &methods,
+            associated: &associated,
+        },
+        &mut Budget {
             steps: 10_000_000,
             depth: 128,
         },
@@ -305,6 +323,12 @@ fn public_builders_suspend_cross_kind_publication_and_reuse_completed_types() {
                 InvocationProgress::Complete(value) => {
                     results.push(value);
                     break;
+                }
+                InvocationProgress::Method(request) => {
+                    active.resume_method(request.prepare()).unwrap();
+                }
+                InvocationProgress::Associated(request) => {
+                    active.resume(request.resolve(&associated)).unwrap();
                 }
                 other => panic!("unexpected host work: {other}"),
             }

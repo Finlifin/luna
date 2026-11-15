@@ -1113,7 +1113,8 @@ impl<'a> Interpreter<'a> {
                 return Self::from_source_indexes(package, budget, index.clone());
             }
         }
-        invocation_budget::charge_world_tables(package, &mut budget)?;
+        let dispatch_instances = dispatch.instances(package);
+        invocation_budget::charge_world_tables(package, dispatch_instances.len(), &mut budget)?;
         // Phase inspection already prepared these structural facts. Reuse
         // them only in the exact source owner; this carries no caller premises
         // or permission to skip body, scope or method admission.
@@ -1488,7 +1489,7 @@ impl<'a> Interpreter<'a> {
         }
         let mut associated_values = associated_catalog::Catalog::source(package);
         let mut associated_initializers = associated_catalog::Catalog::source(package);
-        for (dispatch, instance) in package.dispatch_instances.iter().enumerate() {
+        for (dispatch, instance) in dispatch_instances.iter().enumerate() {
             for (position, (member, _)) in instance.associated.iter().enumerate() {
                 if associated_values
                     .insert_at(
@@ -1510,7 +1511,7 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        for (dispatch, instance) in package.dispatch_instances.iter().enumerate() {
+        for (dispatch, instance) in dispatch_instances.iter().enumerate() {
             for (position, (member, _)) in instance.associated_initializers.iter().enumerate() {
                 let key = (
                     instance.interface_instance(),
@@ -1545,7 +1546,7 @@ impl<'a> Interpreter<'a> {
             source: Some(source),
         };
         let mut instance_keys = HashSet::new();
-        for instance in &package.dispatch_instances {
+        for instance in dispatch_instances {
             if !instance_keys.insert((instance.interface_instance(), instance.subject.clone())) {
                 return Err(invalid());
             }
@@ -1849,7 +1850,7 @@ impl<'a> Interpreter<'a> {
             }
             worlds.insert(key, instance.implementation);
         }
-        for instance in &package.dispatch_instances {
+        for instance in dispatch_instances {
             let implementation = implementations
                 .get(&instance.implementation)
                 .copied()
@@ -1998,7 +1999,7 @@ impl<'a> Interpreter<'a> {
             interpreter.authorize_abstract_type_parameters(scope.types)?;
             interpreter.authorize_abstract_value_parameters(scope.values)?;
         }
-        interpreter.admit_dispatch_inputs(&package.dispatch_instances, &implementations)?;
+        interpreter.admit_dispatch_inputs(dispatch_instances, &implementations)?;
         if let SourceDispatch::Resolving(resolvers) = dispatch {
             interpreter.type_solver = Some(TypeSolver::Budgeted(resolvers.types));
             interpreter.method_resolver = Some(resolvers.methods);

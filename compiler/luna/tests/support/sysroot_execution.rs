@@ -7,7 +7,7 @@ use luna::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Covers full sysroot retention, phase validation, queries and test execution.
+/// Covers the sysroot declaration view, phase validation, queries and execution.
 /// Callers testing exhaustion supply their own allowance instead.
 #[allow(dead_code)]
 pub(crate) const COMPTIME_BUDGET: Budget = Budget {
@@ -67,14 +67,12 @@ pub(crate) fn with_comptime<T>(
     action: impl FnOnce(&mut Interpreter<'_>) -> T,
 ) -> T {
     let mut remaining = usize::try_from(budget.steps).unwrap();
-    let source = DeclarationSource::Borrowed(package)
-        .retain_declarations(&mut remaining)
-        .unwrap();
-    let package = source.package();
+    // Source execution selects its declaration view inside the VM, just as the
+    // CLI does. Borrow the exact package while all three query services live.
+    let source = DeclarationSource::Borrowed(package);
     let context = elaboration::ptc::Context::from_package_metered(package, &mut remaining).unwrap();
     budget.steps = remaining as u64;
-    let queries =
-        SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&source), &context, &[]);
+    let queries = SourceInvocationQueries::in_source(source, &context, &[]);
     let solver = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
         queries.check(predicate, Default::default(), fuel)
     };

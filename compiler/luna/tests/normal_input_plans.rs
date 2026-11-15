@@ -514,10 +514,9 @@ fn ordinary_collection_assembly_preserves_many_inline_spread_producers() {
     calls.extend(std::iter::repeat_n("part", count));
     /*
      * Preserve the existing combined admission/execution ceiling. With the
-     * complete sysroot query services, this workload currently exceeds it even
-     * on the pre-default-migration compiler; see the baseline evidence in
-     * development/elaboration-state-and-publication.md. Resolver wiring must
-     * not silently relax the cost contract or skip any of the 192 calls.
+     * complete sysroot query services, the source declaration view avoids a
+     * whole-package copy while preserving query and admission costs. Do not
+     * relax this ceiling or skip any of the 192 calls to hide regressions.
      * Scaling is also checked separately in contextual_input_costs.
      */
     trace_both_in_budget(

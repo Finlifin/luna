@@ -200,9 +200,11 @@ fn default_entries_preserve_unrelated_runtime_traits_in_the_source() {
 }
 
 #[test]
-fn dispatch_projection_is_deferred_budgeted_and_never_authorizes_execution() {
-    use elaboration::materialization::DeclarationSource;
-    let mut package = support::compile("comptime fn run(.flag:bool=true)->bool {flag}");
+fn declaration_view_ignores_selected_tables_without_copying_or_authorizing_them() {
+    let clean = Arc::new(support::compile(
+        "comptime fn run(.flag:bool=true)->bool {flag}",
+    ));
+    let mut package = clean.as_ref().clone();
     package
         .dispatch_instances
         .push(nir::program::DispatchInstance {
@@ -223,50 +225,43 @@ fn dispatch_projection_is_deferred_budgeted_and_never_authorizes_execution() {
         });
     let original = package.to_string();
     let package = Arc::new(package);
-    let mut fuel = 100_000;
-    DeclarationSource::Borrowed(&package)
-        .retain_declarations(&mut fuel)
-        .unwrap();
-    let capture_cost = 100_000 - fuel;
-    let weak = Arc::downgrade(&package);
-    let mut prepared = PreparedInvocation::new(package.clone(), "run", None).unwrap();
-    assert!(
-        Arc::strong_count(&package) > 1,
-        "construction retains the original source"
-    );
-    for _ in 0..2 {
-        let error = prepared.invoke((capture_cost - 1) as u64).unwrap_err();
-        assert!(
-            error.contains("source retention budget exhausted"),
-            "{error}"
+    // Physical dispatch payloads do not affect source construction or execution
+    // fuel. Every allowance keeps the same success/failure as the clean view.
+    for fuel in [1, 16, 64, 128, 512, 1024, 100_000] {
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", fuel),
+            luna::invocation::invoke(&clean, "run", fuel),
+            "one-shot fuel={fuel}",
+        );
+        let mut selected = PreparedInvocation::new(package.clone(), "run", None).unwrap();
+        let mut plain = PreparedInvocation::new(clean.clone(), "run", None).unwrap();
+        assert_eq!(
+            selected.invoke(fuel),
+            plain.invoke(fuel),
+            "cold fuel={fuel}"
+        );
+        assert_eq!(selected.invoke(100_000).unwrap(), Value::Bool(true));
+        assert_eq!(plain.invoke(100_000).unwrap(), Value::Bool(true));
+        assert_eq!(
+            selected.invoke(fuel),
+            plain.invoke(fuel),
+            "warm fuel={fuel}"
         );
     }
-    // Capture consumes the whole allowance; type context preparation cannot reuse it.
-    let error = prepared.invoke(capture_cost as u64).unwrap_err();
-    assert!(
-        error.contains("cannot prepare invocation type context")
-            && error.contains("budget exhausted"),
-        "{error}"
-    );
+    let weak = Arc::downgrade(&package);
+    let mut prepared = PreparedInvocation::new(package.clone(), "run", None).unwrap();
     assert_eq!(prepared.invoke(100_000).unwrap(), Value::Bool(true));
     assert_eq!(prepared.invoke(100_000).unwrap(), Value::Bool(true));
     assert_eq!(prepared.last_stats().bytecode_compilations, 0);
-    let error = luna::invocation::invoke(&package, "run", (capture_cost - 1) as u64).unwrap_err();
-    assert!(
-        error.contains("source retention budget exhausted"),
-        "{error}"
-    );
-    assert_eq!(
-        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
-        Value::Bool(true)
-    );
     assert_eq!(package.to_string(), original);
     drop(package);
     assert!(
-        weak.upgrade().is_none(),
-        "projection no longer owns the discarded execution table"
+        weak.upgrade().is_some(),
+        "the session retains its exact source owner"
     );
     assert_eq!(prepared.invoke(100_000).unwrap(), Value::Bool(true));
+    drop(prepared);
+    assert!(weak.upgrade().is_none());
 }
 
 #[test]

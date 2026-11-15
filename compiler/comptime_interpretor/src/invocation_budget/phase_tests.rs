@@ -333,3 +333,127 @@ fn failed_phase_preparation_cannot_publish_session_evidence() {
         }
     }
 }
+
+#[test]
+fn resolving_view_excludes_physical_dispatch_without_weakening_closed_admission() {
+    let clean = package(0);
+    let mut polluted = clean.clone();
+    let id = DeclarationId {
+        package: 99,
+        local: 99,
+    };
+    polluted.dispatch_instances.push(DispatchInstance {
+        interface: id,
+        interface_arguments: vec![Term::Tuple(vec![Term::Bool(false); 4096])],
+        subject: Term::Primitive(Primitive::Bool),
+        implementation: id,
+        arguments: vec![],
+        methods: vec![],
+        associated: vec![],
+        associated_initializers: vec![],
+    });
+    for source in [&clean, &polluted] {
+        let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+        let mut budget = Budget::default();
+        let mut vm = Interpreter::for_comptime_resolving_in_budget(
+            source,
+            &[],
+            &[],
+            &[],
+            SourceResolvers {
+                types: &solver,
+                methods: &unavailable,
+                associated: &unavailable,
+            },
+            &mut budget,
+        )
+        .unwrap();
+        assert!(vm.method_bodies.is_empty());
+        assert!(vm.implemented_interfaces.is_empty());
+        assert!(vm.associated_values.is_empty());
+        assert!(vm.associated_initializers.is_empty());
+        assert_eq!(
+            vm.invoke(source.functions[0].declaration, vec![]).unwrap(),
+            crate::Value::Bool(true)
+        );
+        let mut reference = Budget::default();
+        construct(2, &clean, &mut reference).unwrap();
+        assert_eq!(
+            budget.steps, reference.steps,
+            "unused table has no admission work"
+        );
+        let mut admission_budget = Budget::default();
+        construct(3, source, &mut admission_budget).unwrap();
+        let mut reference = Budget::default();
+        construct(3, &clean, &mut reference).unwrap();
+        assert_eq!(admission_budget.steps, reference.steps);
+    }
+    let failure = Interpreter::for_comptime(&polluted, Budget::default())
+        .err()
+        .unwrap();
+    assert_eq!(failure.kind, ErrorKind::InvalidCallPlan);
+    polluted.functions[0].body.kind = ExprKind::ComptimeValue(Term::Symbol("wrong domain".into()));
+    assert!(
+        construct(2, &polluted, &mut Budget::default()).is_err(),
+        "declaration phase checking remains mandatory"
+    );
+    assert!(construct(3, &polluted, &mut Budget::default()).is_err());
+}
+
+#[test]
+fn source_definition_admission_demands_proof_and_recovers_without_publication() {
+    use std::{cell::Cell, sync::Arc};
+    let source = package(0);
+    let obligation = TypePredicate::Trait(TraitRequirement {
+        interface: DeclarationId {
+            package: 99,
+            local: 1,
+        },
+        subject: Term::Primitive(Primitive::Bool),
+        interface_arguments: vec![],
+    });
+    let result = Cell::new(ContractOutcome::Rejected);
+    let calls = Cell::new(0);
+    let solver = |predicate: &TypePredicate, steps: &mut u64| {
+        assert_eq!(predicate, &obligation);
+        calls.set(calls.get() + 1);
+        *steps = steps.checked_sub(1).unwrap();
+        result.get()
+    };
+    let mut session =
+        DefinitionAdmissionSession::new_with_type_solver(&source, &solver, &mut Budget::default())
+            .unwrap();
+    let definitions: Arc<[Struct]> = vec![Struct {
+        declaration: DeclarationId {
+            package: 99,
+            local: 2,
+        },
+        name: "Checked".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        requirements: vec![obligation.clone()],
+        capabilities: vec![],
+        fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
+    }]
+    .into();
+    for (outcome, expected) in [
+        (ContractOutcome::Rejected, ErrorKind::TypeContractRejected),
+        (ContractOutcome::Unknown, ErrorKind::TypeContractUnresolved),
+    ] {
+        result.set(outcome);
+        assert_eq!(
+            session
+                .prepare(definitions.clone(), &mut Budget::default())
+                .err()
+                .unwrap()
+                .kind,
+            expected
+        );
+    }
+    result.set(ContractOutcome::Satisfied);
+    let ready = session
+        .prepare(definitions, &mut Budget::default())
+        .unwrap();
+    session.commit_with(ready, || Ok::<_, ()>(())).unwrap();
+    assert_eq!(calls.get(), 3);
+}

@@ -2,7 +2,7 @@
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
-use comptime_interpretor::{Budget, Event, Interpreter, Value};
+use comptime_interpretor::{Budget, Event, Value};
 
 #[test]
 fn spread_producer_preparation_and_execution_scale_with_input_size() {
@@ -37,51 +37,50 @@ fn spread_producer_preparation_and_execution_scale_with_input_size() {
                 steps: 1_000_000,
                 ..Default::default()
             };
-            let mut vm = if tree {
-                Interpreter::for_comptime_tree(&package, budget)
-            } else {
-                Interpreter::for_comptime(&package, budget)
-            }
-            .unwrap();
-            let before = vm.remaining_steps();
-            assert!(matches!(
-                vm.invoke(id(&format!("Build{count}")), vec![]).unwrap(),
-                Value::Type(_)
-            ));
-            let work = before - vm.remaining_steps();
-            let compilation = vm.bytecode_compilation_steps();
-            assert_eq!(
-                vm.events()
-                    .iter()
-                    .filter(|event| matches!(event, Event::EnterFunction(id) if *id == producer))
-                    .count(),
-                count
-            );
-            assert!(work > compilation);
-            if tree {
-                assert_eq!(compilation, 0);
-            } else {
-                assert!(compilation > 0);
-            }
-            if let Some((prior_work, prior_compilation)) = previous {
-                // Doubling real producers permits linear overhead variation,
-                // and guards against quadratic growth in charged work.
-                assert!(
-                    work > prior_work && work * 10 <= prior_work * 23,
-                    "tree={tree}, size={count}, work={prior_work}->{work}"
+            sysroot::with_comptime(&package, budget, tree, |vm| {
+                let before = vm.remaining_steps();
+                let cold = budget.steps - before;
+                assert!(matches!(
+                    vm.invoke(id(&format!("Build{count}")), vec![]).unwrap(),
+                    Value::Type(_)
+                ));
+                let work = before - vm.remaining_steps();
+                let compilation = vm.bytecode_compilation_steps();
+                assert_eq!(
+                    vm.events()
+                        .iter()
+                        .filter(
+                            |event| matches!(event, Event::EnterFunction(id) if *id == producer)
+                        )
+                        .count(),
+                    count
                 );
-                if !tree {
-                    assert!(
-                        compilation > prior_compilation
-                            && compilation * 10 <= prior_compilation * 23,
-                        "size={count}, compilation={prior_compilation}->{compilation}"
-                    );
+                assert!(work > compilation);
+                if tree {
+                    assert_eq!(compilation, 0);
+                } else {
+                    assert!(compilation > 0);
                 }
-            }
-            eprintln!(
-                "tree={tree}, size={count}, invocation_work={work}, compilation_work={compilation}"
-            );
-            previous = Some((work, compilation));
+                if let Some((prior_work, prior_compilation)) = previous {
+                    // Doubling real producers permits linear overhead variation,
+                    // and guards against quadratic growth in charged work.
+                    assert!(
+                        work > prior_work && work * 10 <= prior_work * 23,
+                        "tree={tree}, size={count}, work={prior_work}->{work}"
+                    );
+                    if !tree {
+                        assert!(
+                            compilation > prior_compilation
+                                && compilation * 10 <= prior_compilation * 23,
+                            "size={count}, compilation={prior_compilation}->{compilation}"
+                        );
+                    }
+                }
+                eprintln!(
+                    "tree={tree}, size={count}, cold_work={cold}, invocation_work={work}, compilation_work={compilation}"
+                );
+                previous = Some((work, compilation));
+            });
         }
     }
 }

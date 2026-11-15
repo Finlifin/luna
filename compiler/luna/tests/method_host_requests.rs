@@ -7,7 +7,9 @@ use comptime_interpretor::{
     Budget, CodeSession, ErrorKind, Event, Interpreter, InvocationProgress as Progress,
     InvocationSession, MethodHostRequest, SourceResolvers, Value,
 };
-use elaboration::materialization::{DeclarationSource, SourceInvocationQueries};
+use elaboration::materialization::{
+    DeclarationSnapshot, DeclarationSource, SourceInvocationQueries,
+};
 use nir::{Primitive, Term};
 use std::cell::Cell;
 
@@ -49,9 +51,8 @@ fn in_worlds(
     ",
     )
     .unwrap();
-    let source = DeclarationSource::Borrowed(&package)
-        .retain_declarations(&mut 1_000_000)
-        .unwrap();
+    assert!(!package.dispatch_instances.is_empty());
+    let source = DeclarationSnapshot::new(std::sync::Arc::new(package));
     let package = source.package();
     let context = elaboration::ptc::Context::from_package(package).unwrap();
     let queries =

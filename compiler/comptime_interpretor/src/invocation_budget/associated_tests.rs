@@ -172,3 +172,65 @@ fn associated_preparation_still_rejects_payloads_from_another_selection() {
         assert!(Interpreter::new(&source, Budget::default()).is_ok());
     }
 }
+
+#[test]
+fn source_and_closed_sessions_do_not_share_selected_associated_evidence() {
+    use crate::{CodeSession, ContractOutcome, SourceResolvers, Value};
+    use std::{cell::Cell, sync::Arc};
+    let source = Arc::new(package(false, 0, 1));
+    let mut code = CodeSession::new(source.clone());
+    let requests = Cell::new(0);
+    let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    let methods = |expr: &Expr, _: &mut u64| {
+        Err(crate::Error {
+            kind: ErrorKind::UnmaterializedDispatch,
+            source: Some(expr.source),
+        })
+    };
+    let associated = |expr: &Expr, _: &mut u64| {
+        requests.set(requests.get() + 1);
+        Err(crate::Error {
+            kind: ErrorKind::TypeContractRejected,
+            source: Some(expr.source),
+        })
+    };
+    let access = Expr {
+        source: SourceRange { start: 10, end: 20 },
+        ty: Term::Primitive(Primitive::Type),
+        kind: ExprKind::AssociatedValue {
+            interface: source.dispatch_instances[0].interface_instance(),
+            member: source.traits[0].associated[0].declaration,
+            subject: Term::Primitive(Primitive::Bool),
+        },
+    };
+    for resolving in [false, true, false, true] {
+        let mut budget = Budget::default();
+        let mut vm = if resolving {
+            Interpreter::for_comptime_resolving_in_session(
+                &source,
+                &mut code,
+                SourceResolvers {
+                    types: &solver,
+                    methods: &methods,
+                    associated: &associated,
+                },
+                &mut budget,
+            )
+        } else {
+            Interpreter::for_comptime_in_session(&source, &mut code, &mut budget)
+        }
+        .unwrap();
+        assert_eq!(vm.associated_values.is_empty(), resolving);
+        let result = vm.with_code_session(&mut code, |vm| vm.invoke_comptime_expression(&access));
+        if resolving {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::TypeContractRejected);
+        } else {
+            assert!(matches!(result.unwrap(), Value::Type(_)));
+        }
+    }
+    assert_eq!(
+        requests.get(),
+        2,
+        "source demands must reach their own services"
+    );
+}
