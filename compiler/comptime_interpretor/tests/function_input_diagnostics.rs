@@ -124,7 +124,20 @@ fn missing_symbolic_evidence_is_not_created_by_rejection() {
     vm.authorize_abstract_value_parameters(&[(id(99), boolean())])
         .unwrap();
     let function = vm.invoke(id(10), vec![]).unwrap();
-    assert!(matches!(function, Value::Closure(_)));
+    let Value::FunctionInstance {
+        declaration,
+        arguments,
+    } = function
+    else {
+        panic!("expected a named callable identity");
+    };
+    assert!(!vm.events().iter().any(|event| matches!(event,
+        Event::InstantiateFunction { declaration, .. } if *declaration == id(1))));
+    assert_eq!(
+        vm.invoke_instantiated(declaration, arguments, vec![])
+            .unwrap(),
+        Value::Bool(true)
+    );
     assert!(vm.events().iter().any(|event| matches!(event,
         Event::InstantiateFunction { declaration, .. } if *declaration == id(1))));
 }

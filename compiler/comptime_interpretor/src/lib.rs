@@ -253,6 +253,19 @@ impl fmt::Display for ObjectValue {
 }
 pub use nir::TraitMethodIdentity;
 impl Value {
+    /// Named identity carried by data or a retained concrete callable. This
+    /// observation grants no phase, formation or executable-body authority.
+    fn declaration_instance(&self) -> Option<(DeclarationId, &[Term])> {
+        match self {
+            Self::FunctionInstance {
+                declaration,
+                arguments,
+            } => Some((*declaration, arguments)),
+            Self::Closure(closure) => closure.declaration_instance(),
+            _ => None,
+        }
+    }
+
     /// Inspect the owned invocation graph without copying storage or executing
     /// callbacks. Shared closures and storage are visited once. Weak pointers
     /// are leaves: inspecting a value does not dereference borrowed memory.
@@ -2442,9 +2455,7 @@ impl<'a> Interpreter<'a> {
         function: &Value,
     ) -> Result<Expr, Error> {
         let arguments = match function {
-            Value::Closure(closure) if self.graph.is_none() => {
-                closure.instance_arguments.as_deref()
-            }
+            value if self.graph.is_none() => value.declaration_instance().map(|(_, inputs)| inputs),
             _ => None,
         };
         match arguments {
@@ -4897,10 +4908,13 @@ impl<'a> Interpreter<'a> {
     #[inline(never)]
     fn call_parameters(&self, callee: &Value, source: SourceRange) -> Result<Vec<LocalId>, Error> {
         match callee {
-            Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_) => {
+            Value::RuntimeTraitMethod(_) => {
                 Err(self.failure(ErrorKind::PhaseMismatch, Some(source)))
             }
-            Value::Function(id) => self
+            Value::Function(id)
+            | Value::FunctionInstance {
+                declaration: id, ..
+            } => self
                 .functions
                 .get(id)
                 .map(|f| f.parameters.clone())
@@ -5038,9 +5052,7 @@ impl<'a> Interpreter<'a> {
         let callee = this.resolve_invocation_identity(callee)?;
         // Spread preparation can retain an already-created instance in a local.
         // Anonymous closure environments have no declaration substitution.
-        let dynamic_defaults = dynamic_defaults
-            && matches!(&callee,
-            Value::Closure(closure) if closure.declaration_instance().is_some());
+        let dynamic_defaults = dynamic_defaults && callee.declaration_instance().is_some();
         if retain_callee {
             this.retain_residual(callee_source, &callee)?;
         }

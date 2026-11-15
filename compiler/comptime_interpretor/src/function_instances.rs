@@ -130,13 +130,63 @@ impl Interpreter<'_> {
                 arguments: arguments.to_vec(),
             });
         }
+        self.admit_callable_identity(declaration, arguments, source)?;
         let definition = self
             .functions
             .get(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        self.admit_function_inputs(&definition.type_parameters, arguments, source)?;
+        let signature =
+            self.specialize_function_signature(&definition.interface, arguments, source)?;
+        if !self.observe_same_type(&signature, output, source)? {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        // A named value carries identity and checked inputs, never executable
+        // code. Its receiving world rechecks formation when it is invoked.
+        self.charge_copy_work(Some(source), |fuel| {
+            for argument in arguments {
+                nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;
+            }
+            Ok(())
+        })?;
+        Ok(Value::FunctionInstance {
+            declaration,
+            arguments: arguments.to_vec(),
+        })
+    }
+
+    pub(super) fn specialize_function_signature(
+        &mut self,
+        declaration: &nir::program::FunctionDeclaration,
+        arguments: &[Term],
+        source: SourceRange,
+    ) -> Result<Term, Error> {
+        let binders = self.input_binders(&declaration.type_parameters);
+        self.charge_copy_work(Some(source), |fuel| {
+            nir::copy_budget::charge_type_substitution(
+                &declaration.signature,
+                &binders,
+                arguments,
+                fuel,
+            )
+        })?;
         let substitution =
-            self.function_substitution(&definition.type_parameters, arguments, source)?;
+            self.function_substitution(&declaration.type_parameters, arguments, source)?;
+        Ok(substitution
+            .instantiate(&declaration.signature)
+            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?
+            .with_comptime_phase(declaration.phase == nir::program::FunctionPhase::Comptime)
+            .with_unsafe_call_requirement(declaration.is_unsafe))
+    }
+
+    /// Acquire immutable declaration-specialized code only after this
+    /// activation's admission and entry predicates succeeded. Cache entries
+    /// contain neither ordinary input values nor invocation results.
+    pub(super) fn prepare_function_instance_body(
+        &mut self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        source: SourceRange,
+    ) -> Result<Arc<Expr>, Error> {
         let before_key = self.budget.steps;
         self.charge_copy_work(Some(source), |fuel| {
             for argument in arguments {
@@ -145,123 +195,75 @@ impl Interpreter<'_> {
             Ok(())
         })?;
         let key_work = before_key - self.budget.steps;
-        let existing = self.instances.lookup(declaration, arguments).cloned();
+        if let Some(instance) = self.instances.lookup(declaration, arguments) {
+            return Ok(instance.body.clone());
+        }
         let persistent = self.abstract_type_parameters.is_empty()
             && self.abstract_value_parameters.is_empty()
             && arguments
                 .iter()
                 .all(|argument| argument.check_scope(&[]).is_ok());
-        let shared = if persistent && existing.is_none() {
-            self.prepared_instance_cache
+        if persistent
+            && let Some(instance) = self
+                .prepared_instance_cache
                 .lookup(declaration, arguments, key_work, &mut self.budget.steps)
                 .map_err(|()| self.failure(ErrorKind::StepsExhausted, Some(source)))?
-        } else {
-            None
-        };
-        let before_preparation = self.budget.steps;
-        if self.comptime_only {
-            let definition = self
-                .functions
-                .get(&declaration)
-                .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-            for requirement in &definition.requirements {
-                // Cached bodies do not suppress current invocation obligations.
-                let requirement =
-                    self.specialize_function_predicate(definition, arguments, requirement, source)?;
-                if let Some(requirement) =
-                    self.bind_invocation_contract(&requirement, None, source, 0)?
-                {
-                    self.check_type_contract(&requirement, source)?;
-                }
-            }
-        }
-        for capability in &definition.capabilities {
-            let bound =
-                self.specialize_function_requirement(definition, arguments, capability, source)?;
-            let open = bound.subject.check_scope(&[]).is_err()
-                || bound
-                    .interface_arguments
-                    .iter()
-                    .any(|ty| ty.check_scope(&[]).is_err());
-            if self.comptime_only && open {
-                continue;
-            }
-            self.check_capability_contract(&bound, source)?;
-        }
-        let prepared = existing.is_none() && shared.is_none();
-        let instance = if let Some(instance) = existing.or(shared) {
-            instance
-        } else {
-            let definition = self
-                .functions
-                .get(&declaration)
-                .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-            let binders = self.input_binders(&definition.type_parameters);
-            self.charge_copy_work(Some(source), |fuel| {
-                *fuel = fuel
-                    .checked_sub(definition.parameters.len())
-                    .ok_or(nir::copy_budget::CopyBudgetExhausted::Steps)?;
-                nir::copy_budget::charge_type_substitution(
-                    &definition.signature,
-                    &binders,
-                    arguments,
-                    fuel,
-                )
-            })?;
-            let signature = substitution
-                .instantiate(&definition.signature)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-            // Body types live under the function's parameter telescope;
-            // a declaration substitution must retain that frame.
-            let Term::Function { parameters, .. } = signature.callable_signature() else {
-                return Err(self.failure(ErrorKind::Type, Some(source)));
-            };
-            let frames = vec![parameters.iter().map(|p| p.sort).collect()];
-            let body = self.specialize_function_expression(
-                &definition.body,
-                &definition.type_parameters,
-                arguments,
-                &frames,
-            )?;
-            Arc::new(Closure {
-                definition_source: None,
-                origin: Some(declaration),
-                instance_arguments: Some(Arc::from(arguments)),
-                parameters: definition.parameters.clone(),
-                environment: Environment::new(),
-                capture_order: vec![],
-                body: Arc::new(body),
-                ty: signature
-                    .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime)
-                    .with_unsafe_call_requirement(definition.is_unsafe),
-            })
-        };
-        if !self.observe_same_type(&instance.ty, output, source)? {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
-        // Preparation and signature observation are one publication boundary.
-        // A rejected output or missing view must not warm either instance cache.
-        if prepared {
+        {
             let key = (
                 declaration,
                 instance.instance_arguments.as_ref().unwrap().clone(),
             );
-            self.events.push(Event::InstantiateFunction {
-                declaration,
-                arguments: arguments.to_vec(),
-            });
-            if persistent && self.budget.steps >= key_work {
-                self.budget.steps -= key_work;
-                self.prepared_instance_cache.insert(
-                    key.clone(),
-                    instance.clone(),
-                    key_work,
-                    before_preparation - self.budget.steps,
-                );
-            }
-            self.instances.insert(key, instance.clone());
+            let body = instance.body.clone();
+            self.instances.insert(key, instance);
+            return Ok(body);
         }
-        Ok(Value::Closure(instance))
+        let before_preparation = self.budget.steps;
+        let definition = self
+            .functions
+            .get(&declaration)
+            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
+        let signature =
+            self.specialize_function_signature(&definition.interface, arguments, source)?;
+        let Term::Function { parameters, .. } = signature.callable_signature() else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        let frames = vec![parameters.iter().map(|parameter| parameter.sort).collect()];
+        let body = Arc::new(self.specialize_function_expression(
+            &definition.body,
+            &definition.type_parameters,
+            arguments,
+            &frames,
+        )?);
+        self.effect_charge(definition.parameters.len(), Some(source))?;
+        let instance = Arc::new(Closure {
+            definition_source: None,
+            origin: Some(declaration),
+            instance_arguments: Some(Arc::from(arguments)),
+            parameters: definition.parameters.clone(),
+            environment: Environment::new(),
+            capture_order: vec![],
+            body: body.clone(),
+            ty: signature,
+        });
+        let key = (
+            declaration,
+            instance.instance_arguments.as_ref().unwrap().clone(),
+        );
+        if persistent && self.budget.steps >= key_work {
+            self.budget.steps -= key_work;
+            self.prepared_instance_cache.insert(
+                key.clone(),
+                instance.clone(),
+                key_work,
+                before_preparation - self.budget.steps,
+            );
+        }
+        self.instances.insert(key, instance);
+        self.events.push(Event::InstantiateFunction {
+            declaration,
+            arguments: arguments.to_vec(),
+        });
+        Ok(body)
     }
 }
 
@@ -358,8 +360,11 @@ mod frame_tests {
             );
         }
         mode.set(2);
-        vm.function_instance_value(declaration, &[], &output, source)
+        let value = vm
+            .function_instance_value(declaration, &[], &output, source)
             .unwrap();
+        assert!(vm.instances.is_empty());
+        assert_eq!(vm.invoke_value(value, vec![]).unwrap(), Value::Bool(true));
         assert_eq!(vm.instances.len(), 1);
         assert!(vm.method_bodies.is_empty());
         assert!(vm.resolved_method_bodies.is_empty());
@@ -538,19 +543,22 @@ mod frame_tests {
                     .any(|event| matches!(event, Event::InstantiateFunction { .. }))
             );
         }
-        let Value::Closure(first) = vm
+        let first = vm
             .function_instance_value(declaration, &arguments, &output, source)
-            .unwrap()
-        else {
-            panic!("missing code instance")
-        };
-        let Value::Closure(second) = vm
+            .unwrap();
+        let second = vm
             .function_instance_value(declaration, &arguments, &output, source)
+            .unwrap();
+        assert_eq!(first, second);
+        assert!(matches!(first, Value::FunctionInstance { .. }));
+        assert!(vm.instances.is_empty());
+        assert_eq!(vm.invoke_value(first, vec![]).unwrap(), Value::Bool(true));
+        let prepared = vm
+            .instances
+            .lookup(declaration, &arguments)
             .unwrap()
-        else {
-            panic!("missing cached instance")
-        };
-        assert!(Arc::ptr_eq(&first, &second));
+            .clone();
+        assert_eq!(vm.invoke_value(second, vec![]).unwrap(), Value::Bool(true));
         let wrong = Term::Function {
             parameters: vec![],
             result: Box::new(Term::Primitive(Primitive::Char)),
@@ -564,7 +572,7 @@ mod frame_tests {
         assert_eq!(vm.prepared_instance_cache.count, 1);
         assert!(Arc::ptr_eq(
             vm.instances.lookup(declaration, &arguments).unwrap(),
-            &first
+            &prepared
         ));
         assert_eq!(vm.instances.len(), 1);
         assert_eq!(
@@ -585,8 +593,170 @@ mod frame_tests {
         assert!(matches!(
             vm.function_instance_value(declaration, &arguments, &output, source)
                 .unwrap(),
-            Value::Closure(_)
+            Value::FunctionInstance { .. }
         ));
+    }
+
+    #[test]
+    fn named_formation_and_rejected_entry_do_not_prepare_generic_bodies() {
+        let declaration = DeclarationId {
+            package: 96,
+            local: 1,
+        };
+        let parameter = DeclarationId {
+            package: 96,
+            local: 2,
+        };
+        let flag = LocalId {
+            owner: 96,
+            index: 0,
+        };
+        let source = SourceRange { start: 10, end: 20 };
+        let mut formation_cost = None;
+        for width in [0, 4096] {
+            let output = Expr {
+                source,
+                ty: Term::Primitive(Primitive::Type),
+                kind: K::TypeValue(Term::Rigid {
+                    declaration: parameter,
+                    sort: nir::Sort::Type,
+                }),
+            };
+            let function = nir::program::Function {
+                interface: nir::program::FunctionDeclaration {
+                    declaration,
+                    name: "guarded-type".into(),
+                    phase: nir::program::FunctionPhase::Comptime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    type_parameters: vec![parameter],
+                    parameters: vec![flag],
+                    signature: Term::Function {
+                        parameters: vec![nir::Parameter {
+                            sort: nir::Sort::ComptimeValue,
+                            ty: Term::Primitive(Primitive::Bool),
+                        }],
+                        result: Box::new(output.ty.clone()),
+                    },
+                    preconditions: vec![Expr {
+                        source,
+                        ty: Term::Primitive(Primitive::Bool),
+                        kind: K::Local(flag),
+                    }],
+                    postconditions: vec![],
+                    result_binding: None,
+                    entry_snapshots: vec![],
+                    defaults: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                },
+                body: Expr {
+                    source,
+                    ty: output.ty.clone(),
+                    kind: K::Block {
+                        statements: vec![
+                            Expr {
+                                source,
+                                ty: Term::Primitive(Primitive::Void),
+                                kind: K::Unit
+                            };
+                            width
+                        ],
+                        result: Some(Box::new(output)),
+                    },
+                },
+            };
+            let signature = function.callable_type();
+            let package = Package {
+                functions: vec![function],
+                ..Default::default()
+            };
+            for tree in [false, true] {
+                let mut vm = if tree {
+                    Interpreter::for_comptime_tree(&package, Budget::default())
+                } else {
+                    Interpreter::for_comptime(&package, Budget::default())
+                }
+                .unwrap();
+                vm.budget.steps = 1000;
+                let callable = vm
+                    .function_instance_value(
+                        declaration,
+                        &[Term::Primitive(Primitive::Bool)],
+                        &signature,
+                        source,
+                    )
+                    .unwrap();
+                let cost = 1000 - vm.budget.steps;
+                if let Some(previous) = formation_cost {
+                    assert_eq!(cost, previous);
+                } else {
+                    formation_cost = Some(cost);
+                }
+                assert!(vm.instances.is_empty());
+                assert_eq!(vm.prepared_instance_cache.count, 0);
+                vm.effect_state.invocation = 41;
+                let failure = vm
+                    .invoke_value(callable.clone(), vec![Value::Bool(false)])
+                    .unwrap_err();
+                assert_eq!(failure.kind, ErrorKind::ProgramContractRejected);
+                assert_eq!(failure.source, Some(source));
+                assert!(vm.instances.is_empty());
+                assert_eq!(vm.prepared_instance_cache.count, 0);
+                assert_eq!(vm.invocation_depth, 0);
+                assert_eq!(vm.effect_state.invocation, 41);
+                assert!(!vm.events.iter().any(|event| matches!(
+                    event,
+                    Event::InstantiateFunction { .. } | Event::EnterFunction(_)
+                )));
+
+                vm.budget.steps = 1_000_000;
+                assert_eq!(
+                    vm.invoke_value(callable.clone(), vec![Value::Bool(true)])
+                        .unwrap(),
+                    Value::Type(Term::Primitive(Primitive::Bool))
+                );
+                assert_eq!(vm.instances.len(), 1);
+                let cache = vm
+                    .instances
+                    .lookup(declaration, &[Term::Primitive(Primitive::Bool)])
+                    .unwrap()
+                    .clone();
+                vm.budget.steps = 1000;
+                assert_eq!(
+                    vm.invoke_value(callable.clone(), vec![Value::Bool(false)])
+                        .unwrap_err()
+                        .kind,
+                    ErrorKind::ProgramContractRejected
+                );
+                assert!(Arc::ptr_eq(
+                    &cache,
+                    vm.instances
+                        .lookup(declaration, &[Term::Primitive(Primitive::Bool)])
+                        .unwrap()
+                ));
+                assert_eq!(
+                    vm.events
+                        .iter()
+                        .filter(|event| matches!(event, Event::EnterFunction(_)))
+                        .count(),
+                    1
+                );
+                vm.budget.steps = 1_000_000;
+                assert_eq!(
+                    vm.invoke_value(callable, vec![Value::Bool(true)]).unwrap(),
+                    Value::Type(Term::Primitive(Primitive::Bool))
+                );
+                assert_eq!(
+                    vm.events
+                        .iter()
+                        .filter(|event| matches!(event, Event::InstantiateFunction { .. }))
+                        .count(),
+                    1
+                );
+            }
+        }
     }
 
     #[test]

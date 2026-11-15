@@ -583,6 +583,47 @@ Function；不先建立 Unit 占位再替换。以上是声明消费者的迁移
   时仍保留指针读取，并拒绝不成立的结果或范围契约。已修改 Rust 文件的定向 rustfmt
   检查退出 0，`/tmp/luna-tools-x4i57saa/result.json`。未执行全 workspace 测试。
 
+#### 命名函数形成不再准备泛型主体
+
+源码 VM 中，命名泛型函数值现在使用 `Value::FunctionInstance`，只携带声明身份与
+按声明域检查后的普通 comptime 实参。形成该值仍检查签名、形成条件、能力要求与
+接收域，但不再为此复制、替换整个主体，也不把命名函数包装为带代码的 Closure。
+真正捕获环境的闭包继续保留自己的环境与代码；具体 IIR 的执行载体尚未迁移。
+
+调用先在接收 VM 的声明世界核验身份与阶段；仅有 runtime 身份摘要或 IIR 的传送
+证据不能授权源码调用。普通输入、类型要求、能力和入口快照由声明完成准备，程序
+入口条件仍在同一次 activation 中逐项执行。只有 Entry 成功转入 Body，才按声明
+实参替换主体并取得执行代码。默认供应和契约替换通过共同的声明实例观察取得实参，
+不再要求 callee 恰好采用 Closure 表示。
+
+实例代码缓存仍只保存稳定代码，不保存普通输入、结果或当前调用的证明。冷缓存的
+入口失败不会准备主体；热缓存的调用仍重新检查当前契约。内部缓存暂沿用空捕获的
+Closure 代码载体，与 IIR 共用已有存储，不把这个实现细节重新暴露为命名源码值。
+
+这一步解除“取得函数值就准备主体”的耦合，不等于源码可以不检查未调用定义。
+VM 注册表仍依赖完整受检 Function，初始化仍检查包；大主体的形成成本测试是在
+初始化完成后测量，不能据此宣称包准入成本与主体大小无关。源码检查 continuation、
+独立模板发布和原 activation 的 Type 响应仍未接通，`Parse(format)` 仍未完成。
+
+本阶段验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test prepared_invocations --test normal_form_domains --test clause_packet_preparation --test comptime_bytecode_defaults --test scoped_comptime_callables --test library_comptime_comparison --test staged_invocation_reuse --no-fail-fast -- --test-threads=1`：
+  `/tmp/luna-tools-8q7lz18j/result.json` 退出 0，65 项通过。覆盖默认值与 producer
+  顺序、返回的 comptime 函数身份、普通 runtime 转交、跨次代码复用及当前契约拒绝。
+- clause packet 的首次单项复现 `/tmp/luna-tools-qm02jgz2/result.json` 退出 101，
+  在旧测试 helper 的 VM 初始化处报告 `UnmaterializedDispatch`，尚未进入调用。
+  该 helper 对真实 sysroot 使用 closed 构造入口，已改用现有 `with_comptime`，
+  同时提供当前包的类型、方法与关联项查询。采用 helper 既有的 sysroot 准备预算，
+  保留两种引擎及全部结果、顺序和次数断言，不删除依赖或假造选择结果。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p elaboration --lib --test function_types --test instance_budget --test runtime_function_identities --test callable_reflection --test normal_values --test function_input_diagnostics --test type_computation_demands --no-fail-fast -- --test-threads=1`：
+  `/tmp/luna-tools-h2ac0sg3/result.json` 退出 0，939 项通过。包含 606 项 VM 单元、
+  241 项 elaboration 单元和 92 项接口用例。0/4096 语句主体在包初始化后的命名值
+  形成成本相同；入口拒绝不准备代码，恢复后正常执行，热缓存不免除契约。
+  首次 `/tmp/luna-tools-jdxmzj9d/result.json` 因外部测试误用私有 `invoke_value`
+  编译失败；改用既有公开 `invoke_instantiated`，没有扩大生产 API。
+
+未运行全 workspace 检查；这些证据不覆盖待实现的源码挂起和 Type 描述准入。
+
 #### 实际调用链与替换边界
 
 `3fd323ca` 上的生产链如下。箭头表示当前同步调用／数据依赖，不表示已经存在

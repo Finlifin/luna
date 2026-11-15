@@ -1,5 +1,5 @@
 //! Clause packets retain ordinary domains and execute their producers once.
-use comptime_interpretor::{Budget, Interpreter, Value};
+use comptime_interpretor::Value;
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
@@ -15,31 +15,27 @@ fn check(source: &str, calls: &[&str]) {
             .declaration
     };
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime(&package, Budget::default())
-        }
-        .unwrap();
-        let actual = vm.invoke(id("check"), vec![]).unwrap();
-        let observed = vm
-            .events()
-            .iter()
-            .filter_map(|event| match event {
-                comptime_interpretor::Event::EnterFunction(declaration)
-                    if declaration.package == id("check").package =>
-                {
-                    package
-                        .functions
-                        .iter()
-                        .find(|function| function.declaration == *declaration)
-                        .map(|function| function.name.as_str())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(observed, calls, "tree={tree}");
-        assert_eq!(actual, Value::Bool(true), "tree={tree}");
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            let actual = vm.invoke(id("check"), vec![]).unwrap();
+            let observed = vm
+                .events()
+                .iter()
+                .filter_map(|event| match event {
+                    comptime_interpretor::Event::EnterFunction(declaration)
+                        if declaration.package == id("check").package =>
+                    {
+                        package
+                            .functions
+                            .iter()
+                            .find(|function| function.declaration == *declaration)
+                            .map(|function| function.name.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(observed, calls, "tree={tree}");
+            assert_eq!(actual, Value::Bool(true), "tree={tree}");
+        });
     }
 }
 

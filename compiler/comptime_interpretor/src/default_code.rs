@@ -119,10 +119,7 @@ impl Interpreter<'_> {
             )
             .map_err(key_error)?;
             (Key::Interface(binders.clone(), arguments.clone()), work)
-        } else if dynamic
-            && let Value::Closure(closure) = callee
-            && let Some((declaration, arguments)) = closure.declaration_instance()
-        {
+        } else if dynamic && let Some((declaration, arguments)) = callee.declaration_instance() {
             let definition = self
                 .functions
                 .get(&declaration)

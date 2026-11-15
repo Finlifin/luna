@@ -328,37 +328,23 @@ impl<'a> Interpreter<'a> {
     /// A transported name has no executable environment. Resolve it against
     /// this VM's authority and specialize through the ordinary formation path.
     pub(super) fn resolve_invocation_identity(&mut self, function: Value) -> Result<Value, Error> {
-        let Value::FunctionInstance {
+        if let Value::FunctionInstance {
             declaration,
             arguments,
-        } = function
-        else {
-            return Ok(function);
-        };
-        // Runtime identities and retained IIR evidence are transport-only.
-        // A signature, including a forged comptime qualifier, is not authority.
-        let definition = self
-            .functions
-            .get(&declaration)
-            .filter(|definition| definition.phase == nir::program::FunctionPhase::Comptime)
-            .ok_or_else(|| self.failure(ErrorKind::PhaseMismatch, None))?;
-        let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let before = fuel;
-        let signature = self.normal_callable_signature(declaration, &arguments, &[], &mut fuel);
-        self.budget.steps -= (before - fuel) as u64;
-        let signature = signature.ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-        let expression = Expr {
-            source: definition.body.source,
-            ty: signature,
-            kind: K::FunctionInstance {
-                declaration,
-                arguments,
-            },
-        };
-        match self.eval_function_instance(&expression, &mut Environment::new())? {
-            Flow::Value(Value::Closure(closure)) => Ok(Value::Closure(closure)),
-            _ => Err(self.failure(ErrorKind::PhaseMismatch, Some(expression.source))),
+        } = &function
+        {
+            let definition = self
+                .functions
+                .get(declaration)
+                .filter(|definition| {
+                    definition.phase != nir::program::FunctionPhase::NormalForm
+                        && (!self.comptime_only
+                            || definition.phase == nir::program::FunctionPhase::Comptime)
+                })
+                .ok_or_else(|| self.failure(ErrorKind::PhaseMismatch, None))?;
+            self.admit_callable_identity(*declaration, arguments, definition.body.source)?;
         }
+        Ok(function)
     }
 
     fn complete_invocation(
@@ -385,14 +371,14 @@ impl<'a> Interpreter<'a> {
         function: &Value,
         context: Option<&(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<Option<DeclarationId>, Error> {
-        if matches!(
-            function,
-            Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_)
-        ) {
+        if matches!(function, Value::RuntimeTraitMethod(_)) {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
         let origin = match &function {
-            Value::Function(id) => Some(*id),
+            Value::Function(id)
+            | Value::FunctionInstance {
+                declaration: id, ..
+            } => Some(*id),
             Value::Closure(closure) => closure.origin,
             _ => None,
         };
@@ -405,7 +391,10 @@ impl<'a> Interpreter<'a> {
                     .is_some_and(|f| f.phase == nir::program::FunctionPhase::Comptime)
             };
             let authorized = match &function {
-                Value::Function(id) => declared_comptime(*id),
+                Value::Function(id)
+                | Value::FunctionInstance {
+                    declaration: id, ..
+                } => declared_comptime(*id),
                 Value::Closure(closure) => {
                     closure.ty.is_comptime_callable()
                         && closure.origin.is_none_or(declared_comptime)
@@ -419,6 +408,10 @@ impl<'a> Interpreter<'a> {
         if self.cleanup_schedule.is_some() && context.is_none() {
             let named_instance = match &function {
                 Value::Function(declaration) => Some((*declaration, &[][..])),
+                Value::FunctionInstance {
+                    declaration,
+                    arguments,
+                } => Some((*declaration, arguments.as_slice())),
                 Value::Closure(closure) => closure.origin.map(|declaration| {
                     (
                         declaration,
@@ -487,6 +480,7 @@ impl<'a> Interpreter<'a> {
                     Value::Closure(closure) => {
                         closure.instance_arguments.clone().unwrap_or_default()
                     }
+                    Value::FunctionInstance { arguments, .. } => Arc::from(arguments.as_slice()),
                     _ => Arc::from([]),
                 })
                 .into(),
@@ -540,6 +534,14 @@ impl<'a> Interpreter<'a> {
                     .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(frame.source)))?
                     .body,
             ),
+            Value::FunctionInstance {
+                declaration,
+                arguments,
+            } => Body::Owned(self.prepare_function_instance_body(
+                *declaration,
+                arguments,
+                frame.source,
+            )?),
             Value::Closure(closure) => Body::Owned(closure.body.clone()),
             _ => return Err(self.failure(ErrorKind::Type, Some(frame.source))),
         };
@@ -593,7 +595,26 @@ impl<'a> Interpreter<'a> {
                     definition.parameters.as_slice(),
                     Environment::with_capacity(definition.parameters.len()),
                     definition.body.source,
-                    &definition.signature,
+                    std::borrow::Cow::Borrowed(&definition.signature),
+                )
+            }
+            Value::FunctionInstance {
+                declaration,
+                arguments,
+            } => {
+                let definition = self
+                    .functions
+                    .get(declaration)
+                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
+                let source = definition.body.source;
+                self.admit_function_inputs(&definition.type_parameters, arguments, source)?;
+                let signature =
+                    self.specialize_function_signature(&definition.interface, arguments, source)?;
+                (
+                    definition.parameters.as_slice(),
+                    Environment::with_capacity(definition.parameters.len()),
+                    source,
+                    std::borrow::Cow::Owned(signature),
                 )
             }
             Value::Closure(closure) => {
@@ -605,7 +626,7 @@ impl<'a> Interpreter<'a> {
                     closure.parameters.as_slice(),
                     self.clone_invocation_environment(&closure.environment, closure.body.source)?,
                     closure.body.source,
-                    signature,
+                    std::borrow::Cow::Borrowed(signature),
                 )
             }
             _ => return Err(self.failure(ErrorKind::Type, None)),
@@ -620,11 +641,16 @@ impl<'a> Interpreter<'a> {
         let type_scope = self.bind_invocation_inputs(
             parameters,
             arguments,
-            signature,
+            &signature,
             &mut environment,
             source,
         )?;
-        if self.comptime_only || matches!(function, Value::Function(_)) {
+        if self.comptime_only
+            || matches!(
+                function,
+                Value::Function(_) | Value::FunctionInstance { .. }
+            )
+        {
             if let Some(id) = origin {
                 let definition = self
                     .invocation_declaration(id, &function)
@@ -632,6 +658,7 @@ impl<'a> Interpreter<'a> {
                 let generic_arguments = match &function {
                     _ if self.graph.is_some() => &[][..],
                     Value::Closure(closure) => closure.instance_arguments.as_deref().unwrap_or(&[]),
+                    Value::FunctionInstance { arguments, .. } => arguments.as_slice(),
                     _ => &[],
                 };
                 for requirement in &definition.requirements {
@@ -672,7 +699,10 @@ impl<'a> Interpreter<'a> {
             self.effect_state.environment.clear();
         }
         let origin = match &function {
-            Value::Function(id) => Some(*id),
+            Value::Function(id)
+            | Value::FunctionInstance {
+                declaration: id, ..
+            } => Some(*id),
             Value::Closure(closure) => closure.origin,
             _ => None,
         };

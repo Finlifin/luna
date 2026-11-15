@@ -245,10 +245,7 @@ impl Interpreter<'_> {
         expression: &Expr,
         callee: &Value,
     ) -> Result<Expr, Error> {
-        let Value::Closure(closure) = callee else {
-            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(construction)));
-        };
-        let (declaration, arguments) = closure
+        let (declaration, arguments) = callee
             .declaration_instance()
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(construction)))?;
         let definition = self
@@ -658,7 +655,10 @@ mod tests {
                     vm.eval(&body, &mut env)
                 };
                 if valid {
-                    assert!(matches!(result.unwrap(), Flow::Value(Value::Closure(_))));
+                    assert!(matches!(
+                        result.unwrap(),
+                        Flow::Value(Value::FunctionInstance { .. })
+                    ));
                 } else {
                     assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
                 }
@@ -682,10 +682,12 @@ mod tests {
         );
         assert!(vm.instances.is_empty());
         env.insert(LocalId { owner: 2, index: 0 }, Value::Bool(true));
-        assert!(matches!(
-            vm.eval(&expression(&package), &mut env).unwrap(),
-            Flow::Value(Value::Closure(_))
-        ));
+        let Flow::Value(value) = vm.eval(&expression(&package), &mut env).unwrap() else {
+            panic!("instance formation returned control")
+        };
+        assert!(matches!(value, Value::FunctionInstance { .. }));
+        assert!(vm.instances.is_empty());
+        assert_eq!(vm.invoke_value(value, vec![]).unwrap(), Value::Bool(true));
         assert_eq!(vm.instances.len(), 1);
         vm.comptime_only = false;
         assert_eq!(
@@ -725,9 +727,20 @@ mod tests {
                         vm.eval(&body, env)
                     }
                 };
-                let Flow::Value(Value::Closure(first)) = execute(&mut vm, &mut env).unwrap() else {
+                let Flow::Value(first) = execute(&mut vm, &mut env).unwrap() else {
                     panic!("expected formed function instance")
                 };
+                assert!(matches!(first, Value::FunctionInstance { .. }));
+                assert!(vm.instances.is_empty());
+                assert_eq!(
+                    vm.invoke_value(first.clone(), vec![]).unwrap(),
+                    Value::Bool(true)
+                );
+                let prepared = vm
+                    .instances
+                    .lookup(package.functions[0].declaration, &[Term::Bool(true)])
+                    .unwrap()
+                    .clone();
                 assert_eq!(vm.instances.len(), 1);
                 outcome.set(ContractOutcome::Rejected);
                 assert_eq!(
@@ -736,11 +749,20 @@ mod tests {
                 );
                 assert_eq!(vm.instances.len(), 1);
                 outcome.set(ContractOutcome::Satisfied);
-                let Flow::Value(Value::Closure(recovered)) = execute(&mut vm, &mut env).unwrap()
-                else {
+                let Flow::Value(recovered) = execute(&mut vm, &mut env).unwrap() else {
                     panic!("expected recovered function instance")
                 };
-                assert!(Arc::ptr_eq(&first, &recovered));
+                assert_eq!(first, recovered);
+                assert_eq!(
+                    vm.invoke_value(recovered, vec![]).unwrap(),
+                    Value::Bool(true)
+                );
+                assert!(Arc::ptr_eq(
+                    &prepared,
+                    vm.instances
+                        .lookup(package.functions[0].declaration, &[Term::Bool(true)])
+                        .unwrap()
+                ));
                 assert_eq!(vm.instances.len(), 1);
             }
         }

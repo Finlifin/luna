@@ -64,7 +64,7 @@
 | 值传递与接收世界 | 通用准入保留域、phase 和身份；跨 VM callable 在接收世界完成方法选择及关联签名观察 | 活动值、权限及选择证据不随 CodeSession 共享；完整统一值传送协议仍有待迁移 |
 | 跨阶段 runtime 交付 | 常量与 comptime 调用结果可选择普通 runtime Splice；实际构造次数已有 native 对照 | comptime 参数直接作为 runtime 结果仍按源域报错，残留读取还会重建为 runtime Let，quote 数据重建也会跳过转换；[交付设计](runtime-value-delivery.md)规定共同消费边界及退役条件，尚未实现 |
 | 稳定世界与执行 | DeclarationSnapshot 保活声明与索引；source invocation 借用原包并隔离已选实例，保留 CodeSession；关联选择、方法选择及具体定义准备可交接宿主请求；Type 输出由单次发布许可保护 | 普通前端检查请求、通用 Region/Candidate 所有权及任意定义发布尚未全线接通；共享声明世界不等于共享活动 VM |
-| 源码主体与调用入口 | 普通收集和 required 共用 check_source_function；VM 在入口契约成功后才按普通输入重绑定主体 | 仍要求完整受检 NIR 主体，尚无待决源码主体请求；声明参数实例化不等于已移到契约之后 |
+| 源码主体与调用入口 | 声明与已检查主体分开存储；源码命名实例只携带身份和声明实参，入口契约成功后才替换泛型主体并按普通输入重绑定 | 注册表仍要求完整受检 NIR 主体；源码模板独立发布、待决主体请求及原 activation 的 Type 响应尚未接通 |
 | TypeRef 与 IIR | core/substitution 已有实现，闭合 callable/template 有消费者 | 普通函数仍以 NIR Function 为实例载体；runtime_bindings 不能替代带域的 EnvironmentPlan |
 | 六包与资源 | 已有真实 sysroot 的 builder、列表、反射及两阶段方法；Linux 文件/字节 I/O、Layout、文本与单值输出已接通；Display/ByteWriter 位于 builtin；FormatPlan 已能扫描格式串 | `println(comptime format: str, ...varargs: defer std.fmt.Parse(format))` 尚未实现；runtime 文本来源、阶段输入重建、allocator、抽象 Copy 仍须贯通 |
 
