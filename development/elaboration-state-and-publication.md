@@ -528,6 +528,61 @@ S-expression Display，完整函数的既有 dump 结构保持不变。
 当前 Package 与 VM 注册表仍只收录完整函数。不能因为声明类型不含 body 就宣称
 未调用定义可跳过检查，或已经能在等待 Type 时恢复同一次 invocation。
 
+#### 程序契约使用声明，不制造可执行主体
+
+`MethodContract::program_summary_declaration_inputs` 交付独立 FunctionDeclaration，
+`CallableProgram::declaration` 只观察声明根。接口摘要不再制造 Unit 主体；调用分析
+分别持有实现主体与公开接口声明，不能通过扫描一个假主体推导参数稳定性。
+公开方法契约的输入属于独立调用帧，实现局部变量的重绑定不会重写这个帧；指针
+所指存储是否稳定仍须通过完整 memory summary 另行证明。普通直接调用仍检查
+真实主体中的参数写入和取址。声明摘要本身不授予内存访问或执行权限。
+
+trait 契约继承的私有 overlay 只复制和替换 FunctionDeclaration，保持原实现
+主体的所有权与存储；复制预检计入签名、默认值、形成条件和程序契约，不遍历
+不需要复制的实现主体。整批有效契约准备好后才证明显式前置条件的弱化，失败或
+unwind 恢复所有声明，绑定分配游标也只在整批成功后提交。
+
+程序验证的 `flow::prove_implication` 直接在同一参数状态下证明前提蕴含结论，
+不构造 Unit、return 或虚假结果值。它复用普通验证的输入域、谓词 definedness、
+算术与内存事实检查；拒绝结果绑定、入口快照和默认供应这些需要调用执行语境的
+载荷。trait 继承和 contextual code 方法细化共同使用该入口。预算耗尽继续返回
+Unknown，不能被包装成“实现加强了前置条件”。所有程序命题仍由程序验证层处理。
+
+memory 方法组合确实需要执行实现调用，因此只在真实 Call 构造完成后组合
+Function；不先建立 Unit 占位再替换。以上是声明消费者的迁移，并不表示源码
+检查已能挂起、恢复原 VM activation，或 `defer std.fmt.Parse(format)` 已接通。
+
+本阶段验证（工作目录均为 `/home/fin/luna`）：
+
+- 经 `python3 -B development/check.py --timeout 900 --` 运行
+  `test -p nir -p program_verification --lib --test calls --test code_interfaces --test copy_budget --no-fail-fast -- --test-threads=1`，
+  `/tmp/luna-tools-8hwye2qw/result.json` 退出 0，321 项通过。覆盖声明观察与复制预算、
+  10,000 条语句主体下不增加契约继承成本、失败回滚与重试、蕴含证明逐预算耗尽。
+  首次构建 `/tmp/luna-tools-841m65mx/result.json` 因新测试对无 Debug 的 Report 使用
+  unwrap_err 而失败；测试改为显式提取 Err 后得到上述结果，未修改生产类型迁就测试。
+- 同入口运行
+  `test -p luna --test method_memory_contracts --test cmtt_methods --test declaration_contracts --test prepared_invocations --no-fail-fast -- --test-threads=1`，
+  `/tmp/luna-tools-1vzwo67y/result.json` 退出 101：188 项通过、1 项失败。
+  失败为 `cmtt_methods::transported_runtime_methods_preserve_clause_domains_and_nested_storage`，
+  408..419 的方法选择报告 no-applicable-candidate。
+- 为区分回归，将本阶段七个生产文件临时还原为 `9bc7b5a2` 的内容，仅运行上述
+  失败测试（`test -p luna --test cmtt_methods -- transported_runtime_methods_preserve_clause_domains_and_nested_storage --exact --test-threads=1`）。
+  `/tmp/luna-tools-lviozzbq/result.json` 退出 101，复现相同位置与诊断；随后按保存内容
+  逐字节恢复本阶段生产文件。其他工作区修改未触碰。该既有失败仍未修复，不能将
+  集成组整体记为通过，也不改变测试预期。
+
+- 指针观察扩展检查：同入口运行 `test -p luna --test execution -- pointer_observations --test-threads=1`，
+  `/tmp/luna-tools-ac4abr98/result.json` 退出 101，10 项通过；
+  `external_pointer_observations_track_nested_field_paths` 在要求拒绝右字段写入时失败。
+  使用相同隔离与恢复方式，在 `9bc7b5a2` 上以该测试名加 `--exact` 复测，
+  `/tmp/luna-tools-ll9y52z_/result.json` 同样退出 101。该用例与已实现的同根不相交
+  字段观察保留存在预期冲突（见[标量存储更新](solvers-resources-and-lowering.md#64-标量存储更新与读取事实的有效期)），
+  本阶段未调整其断言；区分既有不一致与本次回归。
+- `test -p luna --test execution -- bodyless_trait_contracts_preserve_pointer_reads_during_receiver_substitution --exact --test-threads=1`
+  在本阶段代码上退出 0，`/tmp/luna-tools-wvqtc1te/result.json`；确认接口摘要没有主体
+  时仍保留指针读取，并拒绝不成立的结果或范围契约。已修改 Rust 文件的定向 rustfmt
+  检查退出 0，`/tmp/luna-tools-x4i57saa/result.json`。未执行全 workspace 测试。
+
 #### 实际调用链与替换边界
 
 `3fd323ca` 上的生产链如下。箭头表示当前同步调用／数据依赖，不表示已经存在

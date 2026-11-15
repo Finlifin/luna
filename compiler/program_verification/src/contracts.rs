@@ -33,10 +33,13 @@ fn preparation(source: SourceRange, error: nir::type_computations::Error) -> flo
         _ => failure(source, "invalid contract declaration substitution"),
     }
 }
-fn copy_function(value: &Function, limits: &mut Limits) -> Result<Function, flow::Error> {
-    nir::copy_budget::charge_function_substitution(value, &[], &[], &mut limits.arithmetic.steps)
-        .map_err(|_| budget(value.body.source))?;
-    Ok(value.clone())
+fn copy_declaration(
+    value: &FunctionDeclaration,
+    source: SourceRange,
+    limits: &mut Limits,
+) -> Result<FunctionDeclaration, flow::Error> {
+    nir::copy_budget::clone_function_declaration(value, &mut limits.arithmetic.steps)
+        .map_err(|_| budget(source))
 }
 fn copy_expression(value: &Expr, limits: &mut Limits) -> Result<Expr, flow::Error> {
     nir::copy_budget::charge_substitution(value, &[], &[], &mut limits.arithmetic.steps)
@@ -69,17 +72,18 @@ fn remap(
 }
 
 /// Private overlay under an exclusive package borrow. No snapshot can escape
-/// validation; errors or unwinding restore every replaced function.
+/// validation; errors or unwinding restore every replaced declaration.
+/// Executable bodies stay in place.
 struct Overlay<'a> {
     package: &'a mut Package,
-    originals: Vec<(usize, Function)>,
+    originals: Vec<(usize, FunctionDeclaration)>,
     committed: bool,
 }
 impl Drop for Overlay<'_> {
     fn drop(&mut self) {
         if !self.committed {
             for (index, original) in self.originals.drain(..) {
-                self.package.functions[index] = original;
+                self.package.functions[index].interface = original;
             }
         }
     }
@@ -106,14 +110,14 @@ pub fn inherit_with_limits(
         committed: false,
     };
     for (index, draft) in drafts {
-        let original = std::mem::replace(&mut overlay.package.functions[index], draft);
+        let original = std::mem::replace(&mut overlay.package.functions[index].interface, draft);
         overlay.originals.push((index, original));
     }
-    for obligation in obligations {
-        flow::analyze_in_package(overlay.package, &obligation, limits).map_err(|error| {
+    for (source, obligation) in obligations {
+        flow::prove_implication(&obligation, source, Some(overlay.package), limits).map_err(|error| {
             match error.reason {
                 flow::Reason::Unknown(_) | flow::Reason::DepthLimit => error,
-                _ => failure(obligation.body.source, "implementation strengthens trait program preconditions or their definedness is not proven"),
+                _ => failure(source, "implementation strengthens trait program preconditions or their definedness is not proven"),
             }
         })?;
     }
@@ -126,7 +130,13 @@ fn prepare(
     package: &Package,
     next: &mut u32,
     limits: &mut Limits,
-) -> Result<(BTreeMap<usize, Function>, Vec<Function>), flow::Error> {
+) -> Result<
+    (
+        BTreeMap<usize, FunctionDeclaration>,
+        Vec<(SourceRange, FunctionDeclaration)>,
+    ),
+    flow::Error,
+> {
     let metadata = super::declarations::Metadata::new(Some(package));
     let source = SourceRange { start: 0, end: 0 };
     let domains = metadata
@@ -214,14 +224,17 @@ fn prepare(
                     "implementation contract body is missing",
                 ));
             };
-            let mut actual = copy_function(
-                drafts.get(&index).unwrap_or(&package.functions[index]),
+            let source = package.functions[index].body.source;
+            let mut actual = copy_declaration(
+                drafts
+                    .get(&index)
+                    .unwrap_or(&package.functions[index].interface),
+                source,
                 limits,
             )?;
             // Omitting the spelling on an override does not weaken the
             // interface behavior promise. The complete body is checked later.
             actual.pure |= method.pure;
-            let source = actual.body.source;
             limits
                 .step(
                     definition
@@ -292,14 +305,14 @@ fn prepare(
                     &mut limits.arithmetic.steps,
                 )
                 .map_err(|error| preparation(source, error))?;
-            if method.parameter_bindings.len() != actual.interface.parameters.len() {
+            if method.parameter_bindings.len() != actual.parameters.len() {
                 return Err(failure(source, "trait program contract arity mismatch"));
             }
             let mut bindings: BTreeMap<_, _> = method
                 .parameter_bindings
                 .iter()
                 .copied()
-                .zip(actual.interface.parameters.iter().copied())
+                .zip(actual.parameters.iter().copied())
                 .collect();
             remap(&mut contract.preconditions, &bindings, limits)?;
             let inherited_domain = actual.preconditions.is_empty();
@@ -307,22 +320,13 @@ fn prepare(
                 // An omitted program entry clause uses the interface domain.
                 actual.preconditions = copy_expressions(&contract.preconditions, limits)?;
             } else {
-                let mut obligation = copy_function(&actual, limits)?;
-                let Term::Function { result, .. } = &mut obligation.signature else {
-                    return Err(failure(source, "invalid implementation signature"));
-                };
-                *result = Box::new(Term::Primitive(Primitive::Void));
-                obligation.body = Expr {
-                    source,
-                    ty: Term::Primitive(Primitive::Void),
-                    kind: ExprKind::Unit,
-                };
+                let mut obligation = copy_declaration(&actual, source, limits)?;
                 obligation.preconditions = copy_expressions(&contract.preconditions, limits)?;
                 obligation.postconditions = copy_expressions(&actual.preconditions, limits)?;
                 obligation.result_binding = None;
                 obligation.entry_snapshots.clear();
                 obligation.defaults.clear();
-                obligations.push(obligation);
+                obligations.push((source, obligation));
             }
             if let Some(binding) = contract.result_binding {
                 let destination = match actual.result_binding {
@@ -337,13 +341,12 @@ fn prepare(
             }
             for snapshot in contract.entry_snapshots {
                 limits
-                    .step(actual.interface.entry_snapshots.len().saturating_add(1))
+                    .step(actual.entry_snapshots.len().saturating_add(1))
                     .map_err(|_| budget(source))?;
                 let parameter = *bindings.get(&snapshot.parameter).ok_or_else(|| {
                     failure(source, "trait snapshot does not refer to a parameter")
                 })?;
                 let binding = if let Some(snapshot) = actual
-                    .interface
                     .entry_snapshots
                     .iter()
                     .find(|s| s.parameter == parameter)
@@ -352,7 +355,6 @@ fn prepare(
                 } else {
                     let binding = fresh(next, source)?;
                     actual
-                        .interface
                         .entry_snapshots
                         .push(EntrySnapshot { parameter, binding });
                     binding
@@ -368,12 +370,11 @@ fn prepare(
             }
             let mut entry = BTreeMap::new();
             if !contract.preconditions.is_empty() && !contract.postconditions.is_empty() {
-                for parameter in &actual.interface.parameters {
+                for parameter in &actual.parameters {
                     limits
-                        .step(actual.interface.entry_snapshots.len().saturating_add(1))
+                        .step(actual.entry_snapshots.len().saturating_add(1))
                         .map_err(|_| budget(source))?;
                     let binding = if let Some(snapshot) = actual
-                        .interface
                         .entry_snapshots
                         .iter()
                         .find(|s| s.parameter == *parameter)
@@ -381,7 +382,7 @@ fn prepare(
                         snapshot.binding
                     } else {
                         let binding = fresh(next, source)?;
-                        actual.interface.entry_snapshots.push(EntrySnapshot {
+                        actual.entry_snapshots.push(EntrySnapshot {
                             parameter: *parameter,
                             binding,
                         });

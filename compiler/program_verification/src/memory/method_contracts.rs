@@ -151,30 +151,23 @@ pub fn prepare_method_invocation(
         )
         .ok_or("composed memory frame budget exhausted")?;
     bound_type(selected.ty.callable_signature(), fuel)?;
-    let mut composed = Function {
-        interface: nir::program::FunctionDeclaration {
-            phase: FunctionPhase::Runtime,
-            inline: false,
-            pure: contract.pure,
-            is_unsafe: contract.is_unsafe,
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            capabilities: vec![],
-            requirements: vec![],
-            type_parameters: vec![],
-            declaration: *declaration,
-            name: body.name.clone(),
-            signature: selected.ty.callable_signature().clone(),
-            parameters: body.parameters.clone(),
-            defaults: vec![],
-        },
-        body: Expr {
-            source: callee.source,
-            ty: Term::Primitive(Primitive::Void),
-            kind: K::Unit,
-        },
+    let mut composed = nir::program::FunctionDeclaration {
+        phase: FunctionPhase::Runtime,
+        inline: false,
+        pure: contract.pure,
+        is_unsafe: contract.is_unsafe,
+        preconditions: vec![],
+        postconditions: vec![],
+        result_binding: None,
+        entry_snapshots: vec![],
+        capabilities: vec![],
+        requirements: vec![],
+        type_parameters: vec![],
+        declaration: *declaration,
+        name: body.name.clone(),
+        signature: selected.ty.callable_signature().clone(),
+        parameters: body.parameters.clone(),
+        defaults: vec![],
     };
 
     let parameters: Vec<_> = definition
@@ -207,7 +200,7 @@ pub fn prepare_method_invocation(
     let plan = program
         .binding_alignment(
             &contract.parameter_bindings,
-            &composed.interface.parameters,
+            &composed.parameters,
             None,
             &[],
             fuel,
@@ -222,15 +215,14 @@ pub fn prepare_method_invocation(
         // A failed candidate is discarded; it cannot authorize a body-only call.
         nir::contracts::remap_predicate(predicate, &plan.aliases).map_err(str::to_owned)?;
     }
-    let Term::Function { parameters, result } = composed.interface.signature.callable_signature()
-    else {
+    let Term::Function { parameters, result } = composed.signature.callable_signature() else {
         return Err("composed memory method lacks a runtime signature".into());
     };
     if parameters.iter().any(|p| p.sort != nir::Sort::Runtime) {
         return Err("method memory composition requires a runtime-only parameter frame".into());
     }
     for requirement in &contract.requirements {
-        composed.interface.requirements.push(
+        composed.requirements.push(
             substitution
                 .instantiate_predicate_bounded(requirement, fuel)
                 .map_err(|error| error.to_string())?,
@@ -239,17 +231,11 @@ pub fn prepare_method_invocation(
     // Keep the implementation invocation as a call boundary. In particular,
     // interface exit observations follow the implementation's own postchecks
     // and cleanup, rather than being spliced into its local exit frame.
-    if parameters.len() != composed.interface.parameters.len() {
+    if parameters.len() != composed.parameters.len() {
         return Err("composed memory parameter layout mismatch".into());
     }
     let mut call_arguments = Vec::with_capacity(parameters.len());
-    for (parameter, (binding, input)) in composed
-        .interface
-        .parameters
-        .iter()
-        .zip(parameters)
-        .enumerate()
-    {
+    for (parameter, (binding, input)) in composed.parameters.iter().zip(parameters).enumerate() {
         bound_type(&input.ty, fuel)?;
         call_arguments.push(nir::program::CallArgument {
             passing: Default::default(),
@@ -265,13 +251,13 @@ pub fn prepare_method_invocation(
     bound_type(result, fuel)?;
     nir::copy_budget::charge_substitution(&selected, &[], &[], fuel)
         .map_err(|_| "composed memory invocation budget exhausted")?;
-    composed.body = Expr {
+    let body = Expr {
         source: callee.source,
         ty: (**result).clone(),
         kind: K::Call {
             callee: Box::new(selected.clone()),
             arguments: call_arguments,
-            parameter_bindings: composed.interface.parameters.clone(),
+            parameter_bindings: composed.parameters.clone(),
         },
     };
     composed.defaults.clear();
@@ -288,6 +274,9 @@ pub fn prepare_method_invocation(
             declaration: *declaration,
             arguments: arguments.clone().into(),
         },
-        function: composed,
+        function: Function {
+            interface: composed,
+            body,
+        },
     })
 }

@@ -824,3 +824,30 @@ fn callable_code_copy_bounds_retained_fields_and_preserves_shared_bodies() {
         Err(CopyBudgetExhausted::Steps)
     );
 }
+
+#[test]
+fn declaration_copy_bounds_metadata_without_visiting_executable_code() {
+    let mut value = function();
+    value.body = large();
+    let mut fuel = 1000;
+    let declaration =
+        nir::copy_budget::clone_function_declaration(&value.interface, &mut fuel).unwrap();
+    assert_eq!(declaration, value.interface);
+    assert!(fuel < 1000);
+    assert!(nir::copy_budget::charge_function_substitution(&value, &[], &[], &mut 1000).is_err());
+    assert!(nir::copy_budget::clone_function_declaration(&value.interface, &mut 0).is_err());
+    for case in 0..4 {
+        let mut header = value.interface.clone();
+        match case {
+            0 => header.defaults.push((0, large())),
+            1 => header.preconditions.push(large()),
+            2 => header.postconditions.push(large()),
+            _ => header.name = "n".repeat(2048),
+        }
+        assert!(nir::copy_budget::clone_function_declaration(&header, &mut 1000).is_err());
+        assert_eq!(
+            nir::copy_budget::clone_function_declaration(&header, &mut 10000).unwrap(),
+            header
+        );
+    }
+}

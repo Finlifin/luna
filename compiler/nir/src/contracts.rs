@@ -2,8 +2,7 @@
 mod alignment;
 mod program_view;
 use crate::program::{
-    EntrySnapshot, Expr, ExprKind as K, Function, FunctionPhase, LocalId, MethodContract,
-    SourceRange,
+    EntrySnapshot, Expr, ExprKind as K, FunctionDeclaration, FunctionPhase, LocalId, MethodContract,
 };
 use crate::{DeclarationId, Term, TypeError};
 pub use alignment::BindingAlignment;
@@ -133,7 +132,7 @@ impl fmt::Display for ProgramContract {
     }
 }
 impl MethodContract {
-    /// Specialize an interface summary using declaration domains, keeping
+    /// Specialize a body-free interface summary using declaration domains, keeping
     /// caller type frames and the method's ordinary input frame distinct.
     pub fn program_summary_declaration_inputs(
         &self,
@@ -142,7 +141,7 @@ impl MethodContract {
         arguments: &[Term],
         caller_frames: &[Vec<crate::Sort>],
         fuel: &mut usize,
-    ) -> Result<Function, crate::type_computations::Error> {
+    ) -> Result<FunctionDeclaration, crate::type_computations::Error> {
         use crate::type_computations::Error;
         let signature = self.signature.ordinary().map_err(Error::Scope)?;
         let substitution = crate::DeclarationSubstitution::bounded(
@@ -211,35 +210,28 @@ impl MethodContract {
         };
         crate::type_computations::charge_term(completed_signature.callable_signature(), fuel)?;
         let signature = completed_signature.callable_signature().clone();
-        Ok(Function {
-            interface: crate::program::FunctionDeclaration {
-                declaration: self.declaration,
-                name: self.name.clone(),
-                phase,
-                inline: false,
-                pure: self.pure,
-                is_unsafe: self.is_unsafe,
-                signature,
-                parameters: self.parameter_bindings.clone(),
-                preconditions: program.preconditions,
-                postconditions: program.postconditions,
-                result_binding: program.result_binding,
-                entry_snapshots: program.entry_snapshots,
-                capabilities,
-                requirements,
-                type_parameters: self
-                    .type_parameters
-                    .iter()
-                    .copied()
-                    .filter(|id| !parameters.contains(id))
-                    .collect(),
-                defaults: vec![],
-            },
-            body: Expr {
-                source: SourceRange { start: 0, end: 0 },
-                ty: Term::Primitive(crate::Primitive::Void),
-                kind: K::Unit,
-            },
+        Ok(FunctionDeclaration {
+            declaration: self.declaration,
+            name: self.name.clone(),
+            phase,
+            inline: false,
+            pure: self.pure,
+            is_unsafe: self.is_unsafe,
+            signature,
+            parameters: self.parameter_bindings.clone(),
+            preconditions: program.preconditions,
+            postconditions: program.postconditions,
+            result_binding: program.result_binding,
+            entry_snapshots: program.entry_snapshots,
+            capabilities,
+            requirements,
+            type_parameters: self
+                .type_parameters
+                .iter()
+                .copied()
+                .filter(|id| !parameters.contains(id))
+                .collect(),
+            defaults: vec![],
         })
     }
 }

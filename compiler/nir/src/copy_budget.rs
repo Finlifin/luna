@@ -96,6 +96,16 @@ pub fn charge_function_substitution(
     charge_node_substitution(Node::Function(value), parameters, arguments, fuel)
 }
 
+/// Copy declaration metadata after a complete preflight, without inspecting
+/// or copying executable bodies. This grants no invocation or proof authority.
+pub fn clone_function_declaration(
+    value: &n::FunctionDeclaration,
+    fuel: &mut usize,
+) -> Result<n::FunctionDeclaration, CopyBudgetExhausted> {
+    charge_node_substitution(Node::FunctionDeclaration(value), &[], &[], fuel)?;
+    Ok(value.clone())
+}
+
 pub fn charge_predicate_substitution(
     value: &n::TypePredicate,
     parameters: &[crate::DeclarationParameter],
@@ -154,6 +164,7 @@ pub fn charge_argument_type_rewrite(
 }
 enum Node<'a> {
     Function(&'a n::Function),
+    FunctionDeclaration(&'a n::FunctionDeclaration),
     CallableCode(&'a n::Function),
     Predicate(&'a n::TypePredicate),
     Requirement(&'a n::TraitRequirement),
@@ -388,6 +399,11 @@ fn charge_node_observed(
                 0
             }
             Node::Function(function) => {
+                work.push((Node::Expr(&function.body), depth));
+                work.push((Node::FunctionDeclaration(&function.interface), depth));
+                0
+            }
+            Node::FunctionDeclaration(function) => {
                 for width in [
                     function.name.len(),
                     function.parameters.len(),
@@ -402,7 +418,6 @@ fn charge_node_observed(
                     charge_width(steps, width)?;
                 }
                 work.push((Node::Type(&function.signature), depth));
-                work.push((Node::Expr(&function.body), depth));
                 work.extend(
                     function
                         .preconditions

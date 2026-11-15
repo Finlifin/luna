@@ -198,3 +198,107 @@ fn weakening_observes_all_effective_callee_contracts_in_either_method_order() {
         assert_eq!(next, 100);
     }
 }
+
+#[test]
+fn inheritance_cost_and_body_storage_do_not_depend_on_body_size() {
+    let mut small = package();
+    small.functions[1].preconditions = vec![boolean(true)];
+    let mut large = small.clone();
+    large.functions[1].body.kind = ExprKind::Block {
+        statements: vec![boolean(true); 10_000],
+        result: Some(Box::new(boolean(true))),
+    };
+    let body_storage = |package: &Package| match &package.functions[1].body.kind {
+        ExprKind::Block { statements, .. } => statements.as_ptr(),
+        _ => panic!("expected block body"),
+    };
+    let storage = body_storage(&large);
+    let mut small_limits = Limits::default();
+    let initial = small_limits.arithmetic.steps;
+    inherit_with_limits(&mut small, &mut 100, &mut small_limits).unwrap();
+    let spent = initial - small_limits.arithmetic.steps;
+    let mut large_limits = Limits::default();
+    large_limits.arithmetic.steps = spent;
+    inherit_with_limits(&mut large, &mut 100, &mut large_limits).unwrap();
+    assert_eq!(large_limits.arithmetic.steps, 0);
+    assert_eq!(
+        body_storage(&large),
+        storage,
+        "inheritance replaced executable storage"
+    );
+    assert_eq!(large.functions[1].interface, small.functions[1].interface);
+
+    // Late proof failure rolls back headers without replacing body storage.
+    let mut rejected = package();
+    rejected.functions[1].body = large.functions[1].body.clone();
+    rejected.functions[1].preconditions = vec![boolean(false)];
+    let storage = body_storage(&rejected);
+    let before = rejected.clone();
+    let mut next = 100;
+    let error = inherit(&mut rejected, &mut next).unwrap_err();
+    assert!(error.to_string().contains("strengthens"), "{error}");
+    assert_eq!(next, 100);
+    assert_eq!(rejected, before);
+    assert_eq!(body_storage(&rejected), storage);
+    rejected.functions[1].preconditions = vec![boolean(true)];
+    inherit(&mut rejected, &mut next).unwrap();
+    assert_eq!(next, 102);
+    assert_eq!(body_storage(&rejected), storage);
+}
+
+#[test]
+fn implication_proof_needs_no_body_and_preserves_budget_failure() {
+    let mut declaration = package().functions.remove(0).interface;
+    declaration.preconditions = vec![boolean(true)];
+    declaration.postconditions = vec![boolean(true)];
+    let source = boolean(true).source;
+    let mut full = Limits::default();
+    let initial = full.arithmetic.steps;
+    flow::prove_implication(&declaration, source, None, &mut full).unwrap();
+    let spent = initial - full.arithmetic.steps;
+    assert!(spent > 0);
+    for allowance in 0..spent {
+        let mut limits = Limits::default();
+        limits.arithmetic.steps = allowance;
+        let error = flow::prove_implication(&declaration, source, None, &mut limits)
+            .err()
+            .expect("implication must be rejected");
+        assert!(
+            matches!(
+                error.reason,
+                flow::Reason::Unknown(super::super::Unknown::Arithmetic(
+                    comptime_runtime::Error::BudgetExhausted
+                ))
+            ),
+            "allowance {allowance}: {error}"
+        );
+    }
+    flow::prove_implication(&declaration, source, None, &mut Limits::default()).unwrap();
+    declaration.postconditions = vec![boolean(false)];
+    let error = flow::prove_implication(&declaration, source, None, &mut Limits::default())
+        .err()
+        .expect("implication must be rejected");
+    assert_eq!(error.reason, flow::Reason::MissingPostconditionProof);
+}
+
+#[test]
+fn implication_rejects_execution_only_bindings_and_defaults() {
+    let declaration = package().functions.remove(0).interface;
+    let binding = LocalId { owner: 1, index: 0 };
+    for case in 0..3 {
+        let mut invalid = declaration.clone();
+        match case {
+            0 => invalid.result_binding = Some(binding),
+            1 => invalid.entry_snapshots.push(EntrySnapshot {
+                parameter: binding,
+                binding,
+            }),
+            _ => invalid.defaults.push((0, boolean(true))),
+        }
+        let error =
+            flow::prove_implication(&invalid, boolean(true).source, None, &mut Limits::default())
+                .err()
+                .expect("implication must be rejected");
+        assert_eq!(error.reason, flow::Reason::InvalidSignature);
+    }
+}

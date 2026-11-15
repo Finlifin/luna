@@ -23,7 +23,10 @@ use super::{
 use comptime_runtime::Integer;
 use nir::{
     Term,
-    program::{Expr, ExprKind as K, Function, IntegerOp, Literal, LocalId, SourceRange},
+    program::{
+        Expr, ExprKind as K, Function, FunctionDeclaration, IntegerOp, Literal, LocalId,
+        SourceRange,
+    },
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -682,14 +685,14 @@ fn bind_place(
 }
 
 pub fn analyze(function: &Function, limits: &mut Limits) -> Result<Report, Error> {
-    analyze_impl(function, None, limits, true)
+    analyze_impl(Analysis::Body(function), None, limits, true)
 }
 pub fn analyze_in_package(
     package: &nir::program::Package,
     function: &Function,
     limits: &mut Limits,
 ) -> Result<Report, Error> {
-    analyze_impl(function, Some(package), limits, true)
+    analyze_impl(Analysis::Body(function), Some(package), limits, true)
 }
 
 /// Recheck program contracts, machine arithmetic and bit endpoints after
@@ -750,17 +753,89 @@ pub fn validate_residual_contracts(
         },
     })?;
     if required {
-        analyze_impl(function, Some(package), limits, false)?;
+        analyze_impl(Analysis::Body(function), Some(package), limits, false)?;
     }
     Ok(())
 }
+/// Prove entry predicates imply the listed conclusions in the same parameter
+/// state. No executable body, return value or exit snapshot is manufactured.
+/// Preconditions and conclusions must already be checked program predicates.
+pub fn prove_implication(
+    declaration: &FunctionDeclaration,
+    source: SourceRange,
+    package: Option<&nir::program::Package>,
+    limits: &mut Limits,
+) -> Result<Report, Error> {
+    if declaration.result_binding.is_some()
+        || !declaration.entry_snapshots.is_empty()
+        || !declaration.defaults.is_empty()
+    {
+        return Err(Error {
+            source,
+            reason: Reason::InvalidSignature,
+        });
+    }
+    analyze_impl(
+        Analysis::Implication {
+            declaration,
+            source,
+        },
+        package,
+        limits,
+        true,
+    )
+}
+
+enum Analysis<'a> {
+    Body(&'a Function),
+    Implication {
+        declaration: &'a FunctionDeclaration,
+        source: SourceRange,
+    },
+}
+impl<'a> Analysis<'a> {
+    fn declaration(&self) -> &'a FunctionDeclaration {
+        match self {
+            Self::Body(function) => &function.interface,
+            Self::Implication { declaration, .. } => declaration,
+        }
+    }
+    fn source(&self) -> SourceRange {
+        match self {
+            Self::Body(function) => function.body.source,
+            Self::Implication { source, .. } => *source,
+        }
+    }
+    fn program(&self) -> nir::contracts::CallableProgram<'a> {
+        match self {
+            Self::Body(function) => nir::contracts::CallableProgram::function(function),
+            Self::Implication {
+                declaration,
+                source,
+            } => nir::contracts::CallableProgram::declaration(declaration, *source),
+        }
+    }
+}
+impl fmt::Display for Analysis<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Body(function) => write!(f, "(analyze-body {function})"),
+            Self::Implication {
+                declaration,
+                source,
+            } => write!(f, "(prove-implication (source {source}) {declaration})"),
+        }
+    }
+}
+
 fn analyze_impl(
-    function: &Function,
+    analysis: Analysis<'_>,
     package: Option<&nir::program::Package>,
     limits: &mut Limits,
     collect_points: bool,
 ) -> Result<Report, Error> {
-    let source = function.body.source;
+    let source = analysis.source();
+    let function = analysis.declaration();
     let error = |reason| Error { source, reason };
     let Term::Function { parameters, result } = function.signature.callable_signature() else {
         return Err(error(Reason::InvalidSignature));
@@ -835,29 +910,34 @@ fn analyze_impl(
     // contracts and defaults; future address-taking is conservatively included.
     let mut addressed_locals = BTreeSet::new();
     let mut written_locals = BTreeSet::new();
-    iir::visit::expressions(function, &mut limits.arithmetic.steps, |expr, fuel| {
-        if let K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. } =
-            &expr.kind
-        {
-            written_locals.insert(place.root);
-        }
-        if let K::EffectHandle { handlers, .. } = &expr.kind {
-            for handler in handlers {
-                for arm in &handler.arms {
-                    addressed_locals.extend(patterns::handler_arm_writes(arm, fuel)?);
+    nir::visit::program_expressions(
+        analysis.program(),
+        &mut limits.arithmetic.steps,
+        |expr, fuel| {
+            if let K::Assign { place, .. }
+            | K::BitAssign { place, .. }
+            | K::BitUpdate { place, .. } = &expr.kind
+            {
+                written_locals.insert(place.root);
+            }
+            if let K::EffectHandle { handlers, .. } = &expr.kind {
+                for handler in handlers {
+                    for arm in &handler.arms {
+                        addressed_locals.extend(patterns::handler_arm_writes(arm, fuel)?);
+                    }
                 }
             }
-        }
-        if let K::AddressOf(value) = &expr.kind {
-            iir::visit::expression(value, fuel, |operand, _| {
-                if let K::Local(binding) = operand.kind {
-                    addressed_locals.insert(binding);
-                }
-                Ok(())
-            })?;
-        }
-        Ok(())
-    })
+            if let K::AddressOf(value) = &expr.kind {
+                iir::visit::expression(value, fuel, |operand, _| {
+                    if let K::Local(binding) = operand.kind {
+                        addressed_locals.insert(binding);
+                    }
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        },
+    )
     .map_err(|_| {
         error(Reason::Unknown(
             comptime_runtime::Error::BudgetExhausted.into(),
@@ -943,15 +1023,26 @@ fn analyze_impl(
             .frozen
             .insert(place(snapshot.binding), parameters[index].ty.clone());
     }
-    if function.postconditions.is_empty() {
-        walker.eval(&function.body, &mut state, 0)?;
-    } else {
-        walker
-            .tail(&function.body, &mut state, 0)
-            .map_err(|reason| Error {
-                source: walker.failure_source.unwrap_or(source),
-                reason,
-            })?;
+    match analysis {
+        Analysis::Body(function) if function.postconditions.is_empty() => {
+            walker.eval(&function.body, &mut state, 0)?;
+        }
+        Analysis::Body(function) => {
+            walker
+                .tail(&function.body, &mut state, 0)
+                .map_err(|reason| Error {
+                    source: walker.failure_source.unwrap_or(source),
+                    reason,
+                })?;
+        }
+        Analysis::Implication { .. } => {
+            walker
+                .check_conclusions(&function.postconditions, &mut state, 0)
+                .map_err(|reason| Error {
+                    source: walker.failure_source.unwrap_or(source),
+                    reason,
+                })?;
+        }
     }
     Ok(Report {
         points: walker.points,
@@ -3144,6 +3235,17 @@ impl Walker<'_> {
                 }
             }
         }
+        self.check_conclusions(conditions, state, depth)
+    }
+    fn check_conclusions(
+        &mut self,
+        conditions: &[Expr],
+        state: &mut State,
+        depth: usize,
+    ) -> Result<(), Reason> {
+        if !state.facts.is_reachable() {
+            return Ok(());
+        }
         for predicate in conditions {
             self.failure_source = Some(predicate.source);
             let checked = self.child(predicate, state, depth)?;
@@ -3151,7 +3253,12 @@ impl Walker<'_> {
             state
                 .facts
                 .check_condition(&condition, true, self.limits)
-                .map_err(|_| Reason::MissingPostconditionProof)?;
+                .map_err(|error| match error {
+                    Unknown::Arithmetic(comptime_runtime::Error::BudgetExhausted) => {
+                        Reason::Unknown(error)
+                    }
+                    _ => Reason::MissingPostconditionProof,
+                })?;
             state.facts.assume(&condition, true, self.limits)?;
             self.record(predicate, state, PointKind::Postcondition, None)?;
         }
@@ -3412,12 +3519,11 @@ impl Walker<'_> {
                         .ok_or(Reason::InvalidSignature)?,
                 )
             }
-            _ => match &callee.kind {
-                K::TraitMethod { .. } => method_summary.as_ref().map(|f| (f, &[][..])),
-                _ => None,
-            },
+            _ => None,
         };
-        let target = selected_target.map(|(function, _)| function);
+        let target = selected_target
+            .map(|(function, _)| &function.interface)
+            .or(method_summary.as_ref());
         // A residual instance already substituted both clause and ordinary
         // staged inputs. Its key identifies it, but must not substitute again.
         let target_arguments = selected_target
@@ -3497,7 +3603,7 @@ impl Walker<'_> {
         }
         let mut stable_postcondition_parameters = pointer_postconditions;
         if stable_postcondition_parameters {
-            if let Some(target) = target {
+            if let Some((target, _)) = selected_target {
                 iir::visit::expression(
                     &target.body,
                     &mut self.limits.arithmetic.steps,
@@ -3521,7 +3627,10 @@ impl Walker<'_> {
                 )
                 .map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
             } else {
-                stable_postcondition_parameters = false;
+                // Public interface inputs belong to this invocation frame,
+                // not the implementation's mutable locals. Pointee stability
+                // still requires the independent memory summary below.
+                stable_postcondition_parameters = method_summary.is_some();
             }
         }
         let readonly_postconditions = stable_postcondition_parameters

@@ -2,7 +2,10 @@
 //! Inspection does not specialize the contract or invent an executable body.
 use crate::{
     DeclarationId, Term, TypeError,
-    program::{EntrySnapshot, Expr, Function, FunctionPhase, LocalId, MethodContract, SourceRange},
+    program::{
+        EntrySnapshot, Expr, Function, FunctionDeclaration, FunctionPhase, LocalId, MethodContract,
+        SourceRange,
+    },
 };
 use std::fmt;
 
@@ -26,14 +29,22 @@ pub struct CallableProgram<'a> {
 impl<'a> CallableProgram<'a> {
     pub fn function(function: &'a Function) -> Self {
         Self {
+            body: Some(&function.body),
+            ..Self::declaration(&function.interface, function.body.source)
+        }
+    }
+
+    /// Inspect a specialized declaration without inventing executable code.
+    pub fn declaration(function: &'a FunctionDeclaration, source: SourceRange) -> Self {
+        Self {
             declaration: Some(function.declaration),
             phase: function.phase,
             is_unsafe: function.is_unsafe,
             signature: &function.signature,
             type_parameters: &function.type_parameters,
             parameters: &function.parameters,
-            body: Some(&function.body),
-            source: function.body.source,
+            body: None,
+            source,
             defaults: &function.defaults,
             preconditions: &function.preconditions,
             postconditions: &function.postconditions,
@@ -266,6 +277,25 @@ mod tests {
     }
 
     #[test]
+    fn specialized_method_view_has_only_declaration_roots() {
+        let declaration = method()
+            .program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000)
+            .unwrap();
+        let view = CallableProgram::declaration(&declaration, flag(90).source);
+        assert!(view.body.is_none());
+        let roots: Vec<_> = view.roots().collect();
+        assert_eq!(roots.len(), 2);
+        assert!(std::ptr::eq(roots[0], &declaration.preconditions[0]));
+        assert!(std::ptr::eq(roots[1], &declaration.postconditions[0]));
+        assert!(
+            declaration
+                .to_string()
+                .starts_with("(function-declaration ")
+        );
+        assert!(!declaration.to_string().contains("(body"));
+    }
+
+    #[test]
     fn detached_body_borrows_code_without_a_declaration_identity() {
         let body = flag(90);
         let signature = Term::Function {
@@ -288,16 +318,17 @@ mod tests {
 
     #[test]
     fn contract_specialization_does_not_copy_unrequested_body_or_defaults() {
-        let mut function = method()
+        let interface = method()
             .program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000)
             .unwrap();
-        function.body = Expr {
+        let body = Expr {
             kind: K::Block {
                 statements: (0..2000).map(flag).collect(),
                 result: Some(Box::new(flag(2001))),
             },
             ..flag(0)
         };
+        let mut function = Function { interface, body };
         function.defaults = vec![(0, function.body.clone())];
         let substitution =
             crate::DeclarationSubstitution::bounded(&[], &[], &[], &[], &mut 100).unwrap();
@@ -331,10 +362,13 @@ mod tests {
 
     #[test]
     fn ordinary_program_roots_include_defaults_body_and_both_contract_sides() {
-        let mut function = method()
+        let interface = method()
             .program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000)
             .unwrap();
-        function.body = flag(30);
+        let mut function = Function {
+            interface,
+            body: flag(30),
+        };
         function.defaults = vec![(0, flag(40))];
         let view = CallableProgram::function(&function);
         assert!(std::ptr::eq(view.body.unwrap(), &function.body));

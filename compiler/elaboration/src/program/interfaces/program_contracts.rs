@@ -133,44 +133,42 @@ impl Checker<'_, '_> {
             // This is a private, data-only implication obligation, NOT the
             // code method's callable type. No quote or contextual port enters
             // it, and it is never published in an execution package.
-            let obligation = n::Function {
-                interface: nir::program::FunctionDeclaration {
-                    declaration: actual.declaration,
-                    name: format!("{} program-domain refinement", actual.name),
-                    phase: n::FunctionPhase::Comptime,
-                    inline: false,
-                    pure: true,
-                    is_unsafe: false,
-                    signature: Term::Function {
-                        parameters: inputs
-                            .values()
-                            .map(|ty| Parameter {
-                                sort: Sort::Runtime,
-                                ty: ty.clone(),
-                            })
-                            .collect(),
-                        result: Box::new(p(P::Void)),
-                    },
-                    parameters: inputs.keys().copied().collect(),
-                    preconditions,
-                    postconditions: actual.program.preconditions.clone(),
-                    result_binding: None,
-                    entry_snapshots: vec![],
-                    capabilities: vec![],
-                    requirements: vec![],
-                    type_parameters: vec![],
-                    defaults: vec![],
+            let obligation = n::FunctionDeclaration {
+                declaration: actual.declaration,
+                name: format!("{} program-domain refinement", actual.name),
+                phase: n::FunctionPhase::Comptime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: inputs
+                        .values()
+                        .map(|ty| Parameter {
+                            sort: Sort::Runtime,
+                            ty: ty.clone(),
+                        })
+                        .collect(),
+                    result: Box::new(p(P::Void)),
                 },
-                body: n::Expr {
-                    source: source(span),
-                    ty: p(P::Void),
-                    kind: K::Unit,
-                },
+                parameters: inputs.keys().copied().collect(),
+                preconditions,
+                postconditions: actual.program.preconditions.clone(),
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                defaults: vec![],
             };
             let mut limits = crate::verification::Limits::default();
             limits.arithmetic.steps = limits.arithmetic.steps.min(fuel);
             let available = limits.arithmetic.steps;
-            let checked = crate::verification::flow::analyze(&obligation, &mut limits);
+            let checked = crate::verification::flow::prove_implication(
+                &obligation,
+                source(span),
+                None,
+                &mut limits,
+            );
             fuel -= available - limits.arithmetic.steps;
             checked
                 .map_err(|e| format!("method `{}` strengthens trait program preconditions or their definedness is not proven: {e}", actual.name))?;
