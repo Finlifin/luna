@@ -1,7 +1,9 @@
 //! Shared source-order input plans, independent of the eventual type constructor.
 use super::*;
+mod collections;
 mod domain;
 mod progress;
+mod request;
 mod slots;
 
 /// Consumers that cannot yet suspend frontend checking require ordinary typed
@@ -276,21 +278,6 @@ impl Checker<'_, '_> {
             ty,
             kind: K::Local(binding),
         })
-    }
-
-    // Check domain dependencies without invoking input code. A later source
-    // input can become checked first, but Progress retains its execution slot.
-    fn declaration_input_domain(
-        &mut self,
-        slot: usize,
-        parameters: &[(DeclarationId, Sort, Term)],
-        routed: &mut [Option<RoutedDeclarationInput<'_, '_>>],
-        bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-        progress: &mut progress::Progress,
-        span: Span,
-    ) -> Result<DeclarationInputDomain, Error> {
-        domain::Frame::new(slot, parameters, &mut self.required_steps, span)?
-            .drive(self, parameters, routed, bindings, progress)
     }
 
     fn record_declaration_input(
@@ -669,117 +656,21 @@ impl Checker<'_, '_> {
             let bindings = (0..parameters.len())
                 .map(|_| self.spread_binding(span))
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut progress = progress::Progress::new(
+            let progress = progress::Progress::new(
                 parameters,
                 bindings,
                 order,
                 &mut self.required_steps,
                 span,
             )?;
-            // A contiguous source suffix can execute inside the final
-            // collection. Earlier inputs need preparations at their original
-            // positions, including around zero-width packet producers.
-            let mut tail_start = inputs.len();
-            for input in pending_collection.iter().rev() {
-                if input.source_index + 1 != tail_start {
-                    break;
-                }
-                tail_start = input.source_index;
-            }
-            // Routing is complete, and collection temporaries cannot be
-            // referenced by declaration inputs. Observe the same receiver
-            // domain once instead of rechecking its telescope per element.
-            let collection_domain = if pending_collection.is_empty() {
-                None
-            } else {
-                let slot = collector.expect("collected input has a collector");
-                Some(self.declaration_input_domain(
-                    slot,
-                    parameters,
-                    &mut routed,
-                    &mut prepared_bindings,
-                    &mut progress,
-                    span,
-                )?)
-            };
-            let mut collected = Vec::with_capacity(pending_collection.len());
-            for pending in pending_collection {
-                let domain = collection_domain
-                    .as_ref()
-                    .expect("observed collection domain");
-                let expected = if pending.spread {
-                    &domain.ty
-                } else {
-                    self.list_element_type(&domain.ty).ok_or_else(|| {
-                        error(
-                            pending.input.span,
-                            "variadic input requires a bound meta.List<T>",
-                        )
-                    })?
-                };
-                let dependent = domain.pending;
-                let at_tail = pending.source_index >= tail_start;
-                let value = if dependent && !pending.spread && checking == InputChecking::Contextual
-                {
-                    if at_tail {
-                        collected.push(self.dependent_normal_argument(pending.input, 0)?);
-                        continue;
-                    }
-                    // Contextual literals have no producer effects. General
-                    // contextual control flow still needs a resumable source
-                    // preparation before it can cross another input's slot.
-                    if matches!(pending.input.kind, H::Unit) {
-                        collected.push(n::NormalFormArgument::Unit {
-                            source: source(pending.input.span),
-                        });
-                        continue;
-                    }
-                    match self.checking_attempt(
-                        pending.input.span,
-                        false,
-                        CheckingDisposition::Commit,
-                        |checker| checker.expr(pending.input, None),
-                    )? {
-                        Some(value) => value,
-                        None => match self.dependent_normal_argument(pending.input, 0)? {
-                            argument @ (n::NormalFormArgument::Integer { .. }
-                            | n::NormalFormArgument::Null { .. }) => {
-                                collected.push(argument);
-                                continue;
-                            }
-                            _ => {
-                                return Err(context_error(
-                                    pending.input.span,
-                                    "structured collection input requires an element type context",
-                                ));
-                            }
-                        },
-                    }
-                } else {
-                    self.expr(pending.input, (!dependent).then_some(expected))?
-                };
-                let value = if at_tail {
-                    value
-                } else {
-                    self.prepare_declaration_collection_input(
-                        value,
-                        pending.before,
-                        &mut preparations[pending.source_index],
-                        &mut prepared_bindings,
-                        span,
-                    )?
-                };
-                collected.push(if pending.spread {
-                    n::NormalFormArgument::ListSpread(value)
-                } else {
-                    n::NormalFormArgument::Value(value)
-                });
-            }
-            let preparations: Vec<_> = preparations.into_iter().flatten().collect();
-            if !collected.is_empty() {
-                let slot = collector.expect("collected inputs have a collector");
-                routed[slot] = Some(RoutedDeclarationInput::Collected(collected));
-            }
+            let collection = collections::Frame::new(
+                span,
+                checking,
+                collector,
+                inputs.len(),
+                pending_collection,
+                preparations,
+            );
             slots::Frame::new(
                 owner,
                 span,
@@ -790,7 +681,7 @@ impl Checker<'_, '_> {
                 routed,
                 prepared_bindings,
                 progress,
-                preparations,
+                collection,
             )
             .drive(self)
         })();

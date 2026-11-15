@@ -423,6 +423,55 @@ fn dynamic_contiguous_collections_keep_contextual_branches_and_mixed_producer_or
 }
 
 #[test]
+fn collection_child_handoffs_preserve_probes_empty_spreads_and_source_exits() {
+    let package = sysroot::compile(
+        "
+        pure comptime fn Packet<T, .tag: bool = true, ...values: meta.List<T>> -> Type { bool }
+        comptime fn Byte() -> Type { u8 }
+        comptime fn first() -> u8 { 5 }
+        comptime fn second() -> u8 { 6 }
+        comptime fn empty() -> meta.List<u8> { [] }
+        comptime fn mark() -> bool { true }
+        comptime fn Direct() -> Type { Packet<u8, 1, 5, 2, 3, 6, 4> }
+        comptime fn Build() -> Type {
+            Packet<Byte(), 1, first(), ...empty(), 2, .tag = mark(), 3, second(), 4>
+        }
+        comptime fn Exit() -> Type {
+            Packet<Byte(), 1, do { return Direct(); first() }, .tag = mark(), second()>
+        }
+        ",
+    )
+    .unwrap();
+    let direct = invoke_both(&package, "Direct");
+    trace_both(
+        &package,
+        "Build",
+        &direct,
+        &["Build", "Byte", "first", "empty", "mark", "second"],
+    );
+    trace_both(&package, "Exit", &direct, &["Exit", "Byte", "Direct"]);
+}
+
+#[test]
+fn collection_probe_does_not_turn_domain_failures_into_missing_context() {
+    let failure = sysroot::compile(
+        "
+        pure comptime fn Packet<T, .tag: bool = true, ...values: meta.List<T>> -> Type { bool }
+        comptime fn Byte() -> Type { u8 }
+        comptime fn wrong() -> u8 { 1 }
+        comptime fn accept(value: bool) -> u8 { 1 }
+        comptime fn Bad() -> Type { Packet<Byte(), accept(wrong()), .tag = true, 2> }
+        ",
+    )
+    .unwrap_err();
+    assert!(failure.contains("type mismatch"), "{failure}");
+    assert!(
+        !failure.contains("structured collection input requires"),
+        "{failure}"
+    );
+}
+
+#[test]
 fn collection_preparations_snapshot_reads_and_keep_empty_spread_effects() {
     let package = sysroot::compile(
         "

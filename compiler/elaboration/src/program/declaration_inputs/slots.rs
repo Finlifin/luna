@@ -1,25 +1,9 @@
-//! Declaration-slot checking after source routing and collection preparation.
+//! Routed declaration inputs retain collection, dependency and slot checks.
 //! The active slot owns its child demand and temporary observation/default
 //! boundaries. Checked producers are moved into Progress, never replayed here.
 use super::*;
 
-pub(super) struct Request<'b, 'h> {
-    input: &'b Expr<'h>,
-    expected: Option<Term>,
-    contextual: bool,
-}
-
-impl Request<'_, '_> {
-    fn check(self, checker: &mut Checker<'_, '_>) -> Result<n::NormalFormArgument, Error> {
-        if self.contextual {
-            checker.dependent_normal_argument(self.input, 0)
-        } else {
-            checker
-                .expr(self.input, self.expected.as_ref())
-                .map(n::NormalFormArgument::Value)
-        }
-    }
-}
+use request::Request;
 
 struct Pending<'b, 'h> {
     slot: usize,
@@ -30,7 +14,6 @@ struct Pending<'b, 'h> {
 enum Poll<'b, 'h> {
     Continue,
     Child(Request<'b, 'h>),
-    Dependency(domain::Request<'b, 'h>),
     Complete,
 }
 
@@ -45,6 +28,7 @@ pub(super) struct Frame<'a, 'b, 'h> {
     bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
     progress: progress::Progress,
     preparations: Vec<n::NormalFormPreparation>,
+    collection: Option<collections::Frame<'b, 'h>>,
     pending: Option<Pending<'b, 'h>>,
     dependencies: Option<domain::Frame<'b, 'h>>,
     observations: Option<constants::PreparedObservations>,
@@ -63,7 +47,7 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
         routed: Vec<Option<RoutedDeclarationInput<'b, 'h>>>,
         bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
         progress: progress::Progress,
-        preparations: Vec<n::NormalFormPreparation>,
+        collection: collections::Frame<'b, 'h>,
     ) -> Self {
         Self {
             owner,
@@ -75,7 +59,8 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
             routed,
             bindings,
             progress,
-            preparations,
+            preparations: Vec::new(),
+            collection: Some(collection),
             pending: None,
             dependencies: None,
             observations: None,
@@ -93,6 +78,18 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
         }
         if self.dependencies.is_some() {
             return self.poll_dependencies(checker);
+        }
+        if let Some(collection) = &self.collection {
+            if let Some(slot) = collection.domain_slot() {
+                self.dependencies = Some(domain::Frame::new(
+                    slot,
+                    self.parameters,
+                    &mut checker.required_steps,
+                    self.span,
+                )?);
+                return self.poll_dependencies(checker);
+            }
+            return self.poll_collection(checker);
         }
         let Some(slot) = self.progress.current() else {
             self.complete = true;
@@ -171,10 +168,35 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
             &mut self.progress,
         )? {
             domain::Poll::Continue => Ok(Poll::Continue),
-            domain::Poll::Child(request) => Ok(Poll::Dependency(request)),
+            domain::Poll::Child(request) => Ok(Poll::Child(request)),
             domain::Poll::Complete(domain) => {
                 let slot = self.dependencies.take().unwrap().slot();
-                self.check_slot(checker, slot, domain)
+                if let Some(collection) = &mut self.collection {
+                    collection.accept_domain(domain)?;
+                    Ok(Poll::Continue)
+                } else {
+                    self.check_slot(checker, slot, domain)
+                }
+            }
+        }
+    }
+
+    fn poll_collection(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b, 'h>, Error> {
+        match self
+            .collection
+            .as_mut()
+            .expect("active collection")
+            .poll(checker)?
+        {
+            collections::Poll::Child(request) => Ok(Poll::Child(request)),
+            collections::Poll::Complete => {
+                let (slot, collected, preparations) = self.collection.take().unwrap().finish()?;
+                if !collected.is_empty() {
+                    self.routed[slot.expect("collected inputs have a collector")] =
+                        Some(RoutedDeclarationInput::Collected(collected));
+                }
+                self.preparations = preparations;
+                Ok(Poll::Continue)
             }
         }
     }
@@ -410,6 +432,20 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
         }
     }
 
+    fn accept_child(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        result: Result<n::NormalFormArgument, Error>,
+    ) -> Result<(), Error> {
+        if let Some(dependencies) = &mut self.dependencies {
+            dependencies.accept(checker, &mut self.bindings, &mut self.progress, result)
+        } else if let Some(collection) = &mut self.collection {
+            collection.accept(checker, &mut self.bindings, result)
+        } else {
+            self.accept(checker, result)
+        }
+    }
+
     pub(super) fn drive(
         mut self,
         checker: &mut Checker<'_, '_>,
@@ -420,14 +456,7 @@ impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
                     Poll::Continue => {}
                     Poll::Child(request) => {
                         let result = request.check(checker);
-                        self.accept(checker, result)?;
-                    }
-                    Poll::Dependency(request) => {
-                        let result = request.check(checker);
-                        self.dependencies
-                            .as_mut()
-                            .expect("active domain check")
-                            .accept(checker, &mut self.bindings, &mut self.progress, result)?;
+                        self.accept_child(checker, result)?;
                     }
                     Poll::Complete => break Ok(()),
                 }
@@ -467,6 +496,10 @@ impl std::fmt::Display for Frame<'_, '_, '_> {
         f.write_str(") (dependencies")?;
         if let Some(dependencies) = &self.dependencies {
             write!(f, " {dependencies}")?;
+        }
+        f.write_str(") (collection")?;
+        if let Some(collection) = &self.collection {
+            write!(f, " {collection}")?;
         }
         f.write_str(") (active-default")?;
         if let Some(slot) = self.active_default {
@@ -512,22 +545,6 @@ impl std::fmt::Display for Frame<'_, '_, '_> {
     }
 }
 
-impl std::fmt::Display for Request<'_, '_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "(declaration-slot-request (source {} {}) (contextual {}) (expected",
-            self.input.hir_id,
-            source(self.input.span),
-            self.contextual
-        )?;
-        if let Some(expected) = &self.expected {
-            write!(f, " {expected}")?;
-        }
-        f.write_str("))")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,15 +577,17 @@ mod tests {
             vec![None],
             BTreeMap::new(),
             progress,
-            vec![n::NormalFormPreparation {
-                before: 0,
-                expression: n::Expr {
-                    source: source(span),
-                    ty: domain.clone(),
-                    kind: K::Literal(n::Literal::String("prepared\"\n".into())),
-                },
-            }],
+            collections::Frame::new(span, InputChecking::Typed, None, 0, vec![], vec![]),
         );
+        frame.collection = None;
+        frame.preparations = vec![n::NormalFormPreparation {
+            before: 0,
+            expression: n::Expr {
+                source: source(span),
+                ty: domain.clone(),
+                kind: K::Literal(n::Literal::String("prepared\"\n".into())),
+            },
+        }];
         frame.pending = Some(Pending {
             slot: 0,
             domain: DeclarationInputDomain {

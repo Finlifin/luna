@@ -2,16 +2,7 @@
 //! source input first never changes the execution schedule owned by Progress.
 use super::*;
 
-pub(super) struct Request<'b, 'h> {
-    input: &'b Expr<'h>,
-    expected: Term,
-}
-
-impl Request<'_, '_> {
-    pub(super) fn check(self, checker: &mut Checker<'_, '_>) -> Result<n::Expr, Error> {
-        checker.expr(self.input, Some(&self.expected))
-    }
-}
+use request::Request;
 
 struct Pending<'b, 'h> {
     slot: usize,
@@ -122,12 +113,13 @@ impl<'b, 'h> Frame<'b, 'h> {
             return match input {
                 RoutedDeclarationInput::Source(input) => Ok(Poll::Child(Request {
                     input,
-                    expected: checker.copy_alias_type(expected, self.span)?,
+                    expected: Some(checker.copy_alias_type(expected, self.span)?),
+                    contextual: false,
                 })),
                 RoutedDeclarationInput::Prepared(value) => {
                     let result = checker
                         .require_expression(&value.ty, expected, self.span)
-                        .map(|()| value);
+                        .map(|()| n::NormalFormArgument::Value(value));
                     self.accept(checker, bindings, progress, result)?;
                     Ok(Poll::Continue)
                 }
@@ -156,13 +148,18 @@ impl<'b, 'h> Frame<'b, 'h> {
         checker: &mut Checker<'_, '_>,
         bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
         progress: &mut progress::Progress,
-        result: Result<n::Expr, Error>,
+        result: Result<n::NormalFormArgument, Error>,
     ) -> Result<(), Error> {
         let pending = self
             .pending
             .take()
             .ok_or_else(|| error(self.span, "declaration domain has no pending child"))?;
-        let value = result?;
+        let n::NormalFormArgument::Value(value) = result? else {
+            return Err(error(
+                self.span,
+                "domain dependency requires an ordinary expression",
+            ));
+        };
         let identity = checker.preserved_input_identity(
             &value,
             bindings
@@ -180,28 +177,6 @@ impl<'b, 'h> Frame<'b, 'h> {
             bindings,
             self.span,
         )
-    }
-
-    /// The collection planner still requires a synchronous domain. It drives
-    /// the same rules as slot checking, without another recursive precheck.
-    pub(super) fn drive(
-        mut self,
-        checker: &mut Checker<'_, '_>,
-        parameters: &[(DeclarationId, Sort, Term)],
-        routed: &mut [Option<RoutedDeclarationInput<'b, 'h>>],
-        bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-        progress: &mut progress::Progress,
-    ) -> Result<DeclarationInputDomain, Error> {
-        loop {
-            match self.poll(checker, parameters, routed, bindings, progress)? {
-                Poll::Continue => {}
-                Poll::Child(request) => {
-                    let result = request.check(checker);
-                    self.accept(checker, bindings, progress, result)?;
-                }
-                Poll::Complete(domain) => return Ok(domain),
-            }
-        }
     }
 }
 
@@ -230,18 +205,6 @@ impl std::fmt::Display for Frame<'_, '_> {
             }
         }
         f.write_str("))")
-    }
-}
-
-impl std::fmt::Display for Request<'_, '_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "(declaration-domain-request (source {} {}) (expected {}))",
-            self.input.hir_id,
-            source(self.input.span),
-            self.expected
-        )
     }
 }
 
