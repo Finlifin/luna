@@ -6482,21 +6482,24 @@ mod memory_summary_cache_tests {
         };
         let package = nir::program::Package {
             functions: vec![Function {
-                phase: nir::program::FunctionPhase::Runtime,
-                inline: false,
-                pure: false,
-                is_unsafe: false,
-                preconditions: vec![],
-                postconditions: vec![],
-                result_binding: None,
-                entry_snapshots: vec![],
-                capabilities: vec![],
-                requirements: vec![],
-                type_parameters: vec![],
-                declaration,
-                name: "work".into(),
-                signature: signature.clone(),
-                parameters: vec![],
+                interface: nir::program::FunctionDeclaration {
+                    phase: nir::program::FunctionPhase::Runtime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    declaration,
+                    name: "work".into(),
+                    signature: signature.clone(),
+                    parameters: vec![],
+                    defaults: vec![],
+                },
                 body: Expr {
                     kind: K::Block {
                         statements: (0..100).map(|_| unit()).collect(),
@@ -6504,7 +6507,6 @@ mod memory_summary_cache_tests {
                     },
                     ..unit()
                 },
-                defaults: vec![],
             }],
             ..Default::default()
         };

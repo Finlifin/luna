@@ -43,25 +43,27 @@ impl Checker<'_, '_> {
             let id = declaration(package, &self.package_identities, owner);
             output.tests.push(id);
             output.functions.push(n::Function {
-                phase: n::FunctionPhase::Runtime,
-                inline: false,
-                pure: false,
-                is_unsafe: false,
-                declaration: id,
-                name: item.ident.name.to_string(),
-                signature: Term::Function {
+                interface: nir::program::FunctionDeclaration {
+                    phase: n::FunctionPhase::Runtime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    declaration: id,
+                    name: item.ident.name.to_string(),
+                    signature: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(p(P::Void)),
+                    },
                     parameters: vec![],
-                    result: Box::new(p(P::Void)),
+                    type_parameters: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    defaults: vec![],
+                    preconditions: contract.preconditions,
+                    postconditions: contract.postconditions,
+                    entry_snapshots: contract.entry_snapshots,
+                    result_binding: contract.result_binding,
                 },
-                parameters: vec![],
-                type_parameters: vec![],
-                requirements: vec![],
-                capabilities: vec![],
-                defaults: vec![],
-                preconditions: contract.preconditions,
-                postconditions: contract.postconditions,
-                entry_snapshots: contract.entry_snapshots,
-                result_binding: contract.result_binding,
                 body: value,
             });
         }

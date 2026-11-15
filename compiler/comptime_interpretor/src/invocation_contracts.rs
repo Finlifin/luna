@@ -66,7 +66,7 @@ impl Interpreter<'_> {
     #[inline(never)]
     pub(super) fn check_invocation_capabilities(
         &mut self,
-        definition: &nir::program::Function,
+        definition: &nir::program::FunctionDeclaration,
         arguments: &[Term],
         scope: Option<&nir::FunctionInputBinding>,
         source: SourceRange,

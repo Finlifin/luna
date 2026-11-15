@@ -180,35 +180,37 @@ mod tests {
     fn identity() -> Function {
         let parameter = LocalId { owner: 1, index: 0 };
         Function {
-            declaration: DeclarationId {
-                package: 1,
-                local: 1,
+            interface: crate::program::FunctionDeclaration {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                name: "quoted \"name\"\nnext".into(),
+                phase: FunctionPhase::Comptime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![Parameter {
+                        sort: Sort::Runtime,
+                        ty: flag().ty,
+                    }],
+                    result: Box::new(flag().ty),
+                },
+                parameters: vec![parameter],
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
             },
-            name: "quoted \"name\"\nnext".into(),
-            phase: FunctionPhase::Comptime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            signature: Term::Function {
-                parameters: vec![Parameter {
-                    sort: Sort::Runtime,
-                    ty: flag().ty,
-                }],
-                result: Box::new(flag().ty),
-            },
-            parameters: vec![parameter],
-            type_parameters: vec![],
             body: Expr {
                 kind: K::Local(parameter),
                 ..flag()
             },
-            defaults: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            requirements: vec![],
-            capabilities: vec![],
         }
     }
     fn call(function: &Function) -> Expr {

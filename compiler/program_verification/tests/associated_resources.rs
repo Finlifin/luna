@@ -20,24 +20,26 @@ fn projection(ty: Term) -> Expr {
 }
 fn function(body: Expr) -> Function {
     Function {
-        declaration: id(3),
-        name: "read".into(),
-        phase: FunctionPhase::Runtime,
-        inline: false,
-        pure: true,
-        is_unsafe: false,
-        type_parameters: vec![],
-        requirements: vec![],
-        capabilities: vec![],
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        parameters: vec![],
-        defaults: vec![],
-        signature: Term::Function {
+        interface: nir::program::FunctionDeclaration {
+            declaration: id(3),
+            name: "read".into(),
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: true,
+            is_unsafe: false,
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
             parameters: vec![],
-            result: Box::new(body.ty.clone()),
+            defaults: vec![],
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(body.ty.clone()),
+            },
         },
         body,
     }

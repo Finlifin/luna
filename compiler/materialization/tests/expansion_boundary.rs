@@ -186,24 +186,26 @@ fn nominal_formation_uses_instantiated_parameter_domains() {
 fn fixture() -> (n::Package, iir::InstanceKey) {
     let boolean = Term::Primitive(Primitive::Bool);
     let function = n::Function {
-        declaration: id(1),
-        name: "run".into(),
-        phase: n::FunctionPhase::Runtime,
-        inline: false,
-        pure: true,
-        is_unsafe: false,
-        type_parameters: vec![],
-        requirements: vec![],
-        capabilities: vec![],
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        parameters: vec![],
-        defaults: vec![],
-        signature: Term::Function {
+        interface: nir::program::FunctionDeclaration {
+            declaration: id(1),
+            name: "run".into(),
+            phase: n::FunctionPhase::Runtime,
+            inline: false,
+            pure: true,
+            is_unsafe: false,
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
             parameters: vec![],
-            result: Box::new(boolean.clone()),
+            defaults: vec![],
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(boolean.clone()),
+            },
         },
         body: n::Expr {
             ty: boolean,
@@ -390,7 +392,7 @@ fn retained_source_reuses_the_directory_but_rebuilds_each_instance_graph() {
     Arc::make_mut(&mut changed).functions[0].body.kind = n::ExprKind::Call {
         callee: Box::new(n::Expr {
             source: n::SourceRange { start: 1, end: 2 },
-            ty: prototype.signature,
+            ty: prototype.interface.signature,
             kind: n::ExprKind::Function(id(900)),
         }),
         arguments: vec![],

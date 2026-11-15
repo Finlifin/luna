@@ -16,28 +16,30 @@ fn captured_integer_facts_check_domains_budgets_and_symbolic_inputs() {
             kind,
         };
         Function {
-            declaration: DeclarationId {
-                package: 1,
-                local: 1,
-            },
-            name: "increment".into(),
-            phase: FunctionPhase::Runtime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                name: "increment".into(),
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(ty.clone()),
+                },
                 parameters: vec![],
-                result: Box::new(ty.clone()),
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
             },
-            parameters: vec![],
-            type_parameters: vec![],
-            defaults: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            capabilities: vec![],
-            requirements: vec![],
             body: expression(K::IntegerBinary {
                 op: IntegerOp::Add,
                 left: Box::new(expression(K::ComptimeValue(value))),
@@ -167,31 +169,33 @@ fn checked_nonzero_division_preserves_both_signs_and_machine_obligations() {
             ));
         }
         Function {
-            declaration: DeclarationId {
-                package: 1,
-                local: 1,
+            interface: nir::program::FunctionDeclaration {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                name: "checked_division".into(),
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![Parameter {
+                        sort: Sort::Runtime,
+                        ty: ty.clone(),
+                    }],
+                    result: Box::new(ty.clone()),
+                },
+                parameters: vec![divisor],
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
             },
-            name: "checked_division".into(),
-            phase: FunctionPhase::Runtime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            signature: Term::Function {
-                parameters: vec![Parameter {
-                    sort: Sort::Runtime,
-                    ty: ty.clone(),
-                }],
-                result: Box::new(ty.clone()),
-            },
-            parameters: vec![divisor],
-            type_parameters: vec![],
-            defaults: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            capabilities: vec![],
-            requirements: vec![],
             body: expression(
                 K::Block {
                     statements,

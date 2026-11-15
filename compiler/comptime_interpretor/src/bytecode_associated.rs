@@ -719,24 +719,26 @@ fn associated_input_domains_admit_values_and_reject_mismatches() {
 fn selected_associated_body_observes_its_domain_once_before_execution() {
     let type_type = Term::Primitive(Primitive::Type);
     let function = nir::program::Function {
-        declaration: id(9),
-        name: "Domain".into(),
-        phase: nir::program::FunctionPhase::Comptime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        type_parameters: vec![],
-        requirements: vec![],
-        capabilities: vec![],
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        parameters: vec![],
-        defaults: vec![],
-        signature: Term::Function {
+        interface: nir::program::FunctionDeclaration {
+            declaration: id(9),
+            name: "Domain".into(),
+            phase: nir::program::FunctionPhase::Comptime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
             parameters: vec![],
-            result: Box::new(type_type.clone()),
+            defaults: vec![],
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(type_type.clone()),
+            },
         },
         body: Expr {
             source: SOURCE,

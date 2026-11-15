@@ -9666,8 +9666,9 @@ fn scheduled_named_callback_contract_failure_uses_callee_scope() {
             .unwrap();
         if precondition {
             function
+                .interface
                 .preconditions
-                .push(function.postconditions[0].clone());
+                .push(function.interface.postconditions[0].clone());
         }
         let condition = if precondition {
             &mut function.preconditions[0]

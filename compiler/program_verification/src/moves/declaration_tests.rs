@@ -23,23 +23,25 @@ fn expr(ty: Term, kind: K) -> Expr {
 }
 fn function(local: u32, body: Expr) -> Function {
     Function {
-        declaration: id(local),
-        name: format!("f{local}"),
-        phase: FunctionPhase::Runtime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        type_parameters: vec![],
-        parameters: vec![],
-        signature: signature(body.ty.clone()),
+        interface: nir::program::FunctionDeclaration {
+            declaration: id(local),
+            name: format!("f{local}"),
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            type_parameters: vec![],
+            parameters: vec![],
+            signature: signature(body.ty.clone()),
+            requirements: vec![],
+            capabilities: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            defaults: vec![],
+        },
         body,
-        requirements: vec![],
-        capabilities: vec![],
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        defaults: vec![],
     }
 }
 fn reference(local: u32, result: Term, arguments: Vec<Term>) -> Expr {

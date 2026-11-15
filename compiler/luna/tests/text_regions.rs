@@ -739,7 +739,8 @@ fn error_row_transport_moves_view_slots_without_rewriting_origins() {
     );
     for name in ["reordered", "product_slots"] {
         let function = package.functions.iter().find(|f| f.name == name).unwrap();
-        let nir::Term::Function { parameters, result } = function.signature.callable_signature()
+        let nir::Term::Function { parameters, result } =
+            function.interface.signature.callable_signature()
         else {
             panic!("signature")
         };
@@ -790,7 +791,7 @@ fn error_row_transport_moves_view_slots_without_rewriting_origins() {
         .iter_mut()
         .find(|f| f.name == "product_slots")
         .unwrap();
-    let nir::Term::Function { result, .. } = &mut function.signature else {
+    let nir::Term::Function { result, .. } = &mut function.interface.signature else {
         panic!("function")
     };
     let nir::Term::NormalForm { arguments, .. } = result.as_mut() else {
@@ -987,7 +988,7 @@ fn contracts_observe_entry_snapshots_and_all_normal_return_origins() {
             kind: K::Local(id),
         };
         let result = LocalId {
-            owner: function.parameters[0].owner,
+            owner: function.interface.parameters[0].owner,
             index: u32::MAX - 1,
         };
         let saved = LocalId {
@@ -1008,27 +1009,28 @@ fn contracts_observe_entry_snapshots_and_all_normal_return_origins() {
         };
         match function.name.as_str() {
             "required" => function
+                .interface
                 .preconditions
-                .push(equals_x(function.parameters[0])),
+                .push(equals_x(function.interface.parameters[0])),
             "ensured" => {
                 function.result_binding = Some(result);
-                function.postconditions.push(equals_x(result));
+                function.interface.postconditions.push(equals_x(result));
             }
             "old" => {
                 function.result_binding = Some(result);
-                function.entry_snapshots.push(EntrySnapshot {
-                    parameter: function.parameters[0],
+                function.interface.entry_snapshots.push(EntrySnapshot {
+                    parameter: function.interface.parameters[0],
                     binding: saved,
                 });
-                function.postconditions.push(Expr {
+                function.interface.postconditions.push(Expr {
                     source,
                     ty: Term::Primitive(P::Bool),
                     kind: K::Or(Box::new(local(saved, P::Bool)), Box::new(equals_x(result))),
                 });
             }
             "changed" | "saved" => {
-                let a = function.parameters[1];
-                let b = function.parameters[2];
+                let a = function.interface.parameters[1];
+                let b = function.interface.parameters[2];
                 let K::Block { statements, .. } = &mut function.body.kind else {
                     panic!("expected function block");
                 };
@@ -1044,23 +1046,23 @@ fn contracts_observe_entry_snapshots_and_all_normal_return_origins() {
                     },
                 });
                 if function.name == "saved" {
-                    function.entry_snapshots.push(EntrySnapshot {
+                    function.interface.entry_snapshots.push(EntrySnapshot {
                         parameter: a,
                         binding: saved,
                     });
-                    function.postconditions.push(equals_x(saved));
+                    function.interface.postconditions.push(equals_x(saved));
                 } else {
-                    function.postconditions.push(equals_x(a));
+                    function.interface.postconditions.push(equals_x(a));
                 }
             }
             "diverged" => {
                 function.result_binding = Some(result);
-                function.postconditions.push(Expr {
+                function.interface.postconditions.push(Expr {
                     source,
                     ty: Term::Primitive(P::Bool),
                     kind: K::ScalarEqual(
                         Box::new(local(result, P::Str)),
-                        Box::new(local(function.parameters[0], P::Str)),
+                        Box::new(local(function.interface.parameters[0], P::Str)),
                     ),
                 });
             }
@@ -1222,7 +1224,7 @@ fn immediate_closures_preserve_capture_order_and_local_return_boundaries() {
         index: u32::MAX - 1,
     };
     returning.result_binding = Some(result);
-    returning.postconditions.push(nir::program::Expr {
+    returning.interface.postconditions.push(nir::program::Expr {
         source: returning.body.source,
         ty: nir::Term::Primitive(nir::Primitive::Bool),
         kind: nir::program::ExprKind::ScalarEqual(

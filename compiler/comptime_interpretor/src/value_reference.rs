@@ -659,31 +659,33 @@ mod call_tests {
     fn setter() -> Function {
         let binding = LocalId { owner: 2, index: 0 };
         Function {
-            phase: FunctionPhase::Comptime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            capabilities: vec![],
-            requirements: vec![],
-            type_parameters: vec![],
-            declaration: DeclarationId {
-                package: 1,
-                local: 2,
+            interface: nir::program::FunctionDeclaration {
+                phase: FunctionPhase::Comptime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 2,
+                },
+                name: "set".into(),
+                signature: Term::Function {
+                    parameters: vec![nir::Parameter {
+                        sort: nir::Sort::Runtime,
+                        ty: Term::Primitive(Primitive::Bool),
+                    }],
+                    result: Box::new(Term::Primitive(Primitive::Bool)),
+                },
+                parameters: vec![binding],
+                defaults: vec![],
             },
-            name: "set".into(),
-            signature: Term::Function {
-                parameters: vec![nir::Parameter {
-                    sort: nir::Sort::Runtime,
-                    ty: Term::Primitive(Primitive::Bool),
-                }],
-                result: Box::new(Term::Primitive(Primitive::Bool)),
-            },
-            parameters: vec![binding],
-            defaults: vec![],
             body: expr(K::Block {
                 statements: vec![Expr {
                     ty: Term::Primitive(Primitive::Void),

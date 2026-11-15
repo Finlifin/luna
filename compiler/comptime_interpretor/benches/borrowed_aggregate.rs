@@ -42,27 +42,29 @@ fn main() {
             };
             let mut package = Package {
                 functions: vec![Function {
-                    declaration: id,
-                    name: "observe".into(),
-                    phase: FunctionPhase::Comptime,
-                    inline: false,
-                    pure: false,
-                    is_unsafe: false,
-                    preconditions: vec![],
-                    postconditions: vec![],
-                    result_binding: None,
-                    entry_snapshots: vec![],
-                    type_parameters: vec![],
-                    requirements: vec![],
-                    capabilities: vec![],
-                    parameters: vec![LocalId { owner: 1, index: 0 }],
-                    defaults: vec![],
-                    signature: Term::Function {
-                        parameters: vec![Parameter {
-                            sort: Sort::Runtime,
-                            ty: ty.clone(),
-                        }],
-                        result: Box::new(boolean.clone()),
+                    interface: nir::program::FunctionDeclaration {
+                        declaration: id,
+                        name: "observe".into(),
+                        phase: FunctionPhase::Comptime,
+                        inline: false,
+                        pure: false,
+                        is_unsafe: false,
+                        preconditions: vec![],
+                        postconditions: vec![],
+                        result_binding: None,
+                        entry_snapshots: vec![],
+                        type_parameters: vec![],
+                        requirements: vec![],
+                        capabilities: vec![],
+                        parameters: vec![LocalId { owner: 1, index: 0 }],
+                        defaults: vec![],
+                        signature: Term::Function {
+                            parameters: vec![Parameter {
+                                sort: Sort::Runtime,
+                                ty: ty.clone(),
+                            }],
+                            result: Box::new(boolean.clone()),
+                        },
                     },
                     body: Expr {
                         source: SourceRange { start: 1, end: 2 },

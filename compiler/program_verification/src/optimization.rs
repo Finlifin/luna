@@ -143,7 +143,7 @@ pub(crate) fn elide_function_checks(
             };
             expr.kind = K::Discard(condition);
             eliminated.push(ElidedCheck {
-                function: candidate.declaration,
+                function: candidate.interface.declaration,
                 source: expr.source,
                 proof,
             });

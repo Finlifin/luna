@@ -310,24 +310,26 @@ pub(crate) fn prepare_entry_in_package<'a>(
             });
         }
         let wrapper = Function {
-            declaration,
-            name: "<command-line-invocation>".into(),
-            phase,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            type_parameters: vec![],
-            requirements: vec![],
-            capabilities: vec![],
-            parameters: vec![],
-            defaults: vec![],
-            signature: nir::Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration,
+                name: "<command-line-invocation>".into(),
+                phase,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
                 parameters: vec![],
-                result: result.clone(),
+                defaults: vec![],
+                signature: nir::Term::Function {
+                    parameters: vec![],
+                    result: result.clone(),
+                },
             },
             body: Expr {
                 source,

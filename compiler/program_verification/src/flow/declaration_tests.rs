@@ -15,24 +15,26 @@ fn value(kind: K, primitive: P) -> Expr {
 
 fn function(local: u32, body: Expr) -> Function {
     Function {
-        declaration: id(local),
-        name: format!("function_{local}"),
-        phase: nir::program::FunctionPhase::Runtime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        type_parameters: vec![],
-        parameters: vec![],
-        defaults: vec![],
-        requirements: vec![],
-        capabilities: vec![],
-        preconditions: vec![],
-        postconditions: vec![],
-        entry_snapshots: vec![],
-        result_binding: None,
-        signature: Term::Function {
+        interface: nir::program::FunctionDeclaration {
+            declaration: id(local),
+            name: format!("function_{local}"),
+            phase: nir::program::FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            type_parameters: vec![],
             parameters: vec![],
-            result: Box::new(body.ty.clone()),
+            defaults: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            entry_snapshots: vec![],
+            result_binding: None,
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(body.ty.clone()),
+            },
         },
         body,
     }

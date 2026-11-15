@@ -5,27 +5,29 @@ fn source() -> n::Package {
     let boolean = Term::Primitive(nir::Primitive::Bool);
     n::Package {
         quote_templates: vec![n::Function {
-            declaration: Id {
-                package: 1,
-                local: 1,
-            },
-            name: "retained".into(),
-            phase: n::FunctionPhase::Runtime,
-            inline: false,
-            pure: true,
-            is_unsafe: false,
-            type_parameters: vec![],
-            requirements: vec![n::TypePredicate::Bool(false)],
-            capabilities: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            parameters: vec![],
-            defaults: vec![],
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration: Id {
+                    package: 1,
+                    local: 1,
+                },
+                name: "retained".into(),
+                phase: n::FunctionPhase::Runtime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                type_parameters: vec![],
+                requirements: vec![n::TypePredicate::Bool(false)],
+                capabilities: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
                 parameters: vec![],
-                result: Box::new(boolean.clone()),
+                defaults: vec![],
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(boolean.clone()),
+                },
             },
             body: n::Expr {
                 source: n::SourceRange { start: 0, end: 1 },

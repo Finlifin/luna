@@ -743,27 +743,29 @@ mod tests {
         let mut predicate = expr(K::EnsurePredicate(Box::new(value)), void.clone());
         predicate.source = SourceRange { start: 30, end: 40 };
         Function {
-            declaration: nir::DeclarationId {
-                package: 0,
-                local: 1,
-            },
-            name: "nested_write".into(),
-            phase: nir::program::FunctionPhase::Runtime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            type_parameters: vec![],
-            parameters: vec![],
-            defaults: vec![],
-            requirements: vec![],
-            capabilities: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            entry_snapshots: vec![],
-            result_binding: None,
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration: nir::DeclarationId {
+                    package: 0,
+                    local: 1,
+                },
+                name: "nested_write".into(),
+                phase: nir::program::FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                type_parameters: vec![],
                 parameters: vec![],
-                result: Box::new(void.clone()),
+                defaults: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                entry_snapshots: vec![],
+                result_binding: None,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(void.clone()),
+                },
             },
             body: expr(
                 K::Block {

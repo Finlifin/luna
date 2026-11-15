@@ -25,28 +25,6 @@ fn package() -> Package {
                 })
                 .collect::<Vec<_>>();
             Function {
-                declaration: id(count),
-                name: format!("Factory{count}"),
-                phase: FunctionPhase::Comptime,
-                inline: false,
-                pure: false,
-                is_unsafe: false,
-                preconditions: vec![],
-                postconditions: vec![],
-                result_binding: None,
-                entry_snapshots: vec![],
-                type_parameters: vec![],
-                requirements: vec![],
-                capabilities: vec![],
-                signature: Term::Function {
-                    parameters: (0..count)
-                        .map(|_| nir::Parameter {
-                            sort: Sort::Type,
-                            ty: Term::Primitive(P::Type),
-                        })
-                        .collect(),
-                    result: Box::new(Term::Primitive(P::Type)),
-                },
                 body: Expr {
                     ty: Term::Primitive(P::Type),
                     source,
@@ -56,8 +34,32 @@ fn package() -> Package {
                         K::Local(parameters[0])
                     },
                 },
-                parameters,
-                defaults: vec![],
+                interface: nir::program::FunctionDeclaration {
+                    declaration: id(count),
+                    name: format!("Factory{count}"),
+                    phase: FunctionPhase::Comptime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    entry_snapshots: vec![],
+                    type_parameters: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    signature: Term::Function {
+                        parameters: (0..count)
+                            .map(|_| nir::Parameter {
+                                sort: Sort::Type,
+                                ty: Term::Primitive(P::Type),
+                            })
+                            .collect(),
+                        result: Box::new(Term::Primitive(P::Type)),
+                    },
+                    parameters,
+                    defaults: vec![],
+                },
             }
         })
         .collect();

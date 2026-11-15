@@ -218,29 +218,31 @@ fn captured_comptime_values_charge_payloads_and_rewrite_identities() {
 
 fn function() -> nir::program::Function {
     nir::program::Function {
-        phase: nir::program::FunctionPhase::Runtime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        capabilities: vec![],
-        requirements: vec![],
-        type_parameters: vec![],
-        declaration: DeclarationId {
-            package: 1,
-            local: 0,
-        },
-        name: "example".into(),
-        signature: Term::Function {
+        interface: nir::program::FunctionDeclaration {
+            phase: nir::program::FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration: DeclarationId {
+                package: 1,
+                local: 0,
+            },
+            name: "example".into(),
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(P::Str)),
+            },
             parameters: vec![],
-            result: Box::new(Term::Primitive(P::Str)),
+            defaults: vec![],
         },
-        parameters: vec![],
         body: small(),
-        defaults: vec![],
     }
 }
 
@@ -747,8 +749,8 @@ fn function_specialization_separates_closed_signature_and_ordinary_input_frames(
         source: template.body.source,
         kind: K::TypeValue(bound.clone()),
     };
-    template.defaults.push((0, template.body.clone()));
-    template.preconditions.push(template.body.clone());
+    template.interface.defaults.push((0, template.body.clone()));
+    template.interface.preconditions.push(template.body.clone());
     let run = |template: &nir::program::Function| {
         template.instantiate_declaration_parameters(
             &[Term::Primitive(P::Type)],
@@ -758,10 +760,10 @@ fn function_specialization_separates_closed_signature_and_ordinary_input_frames(
     };
     let specialized = run(&template).unwrap();
     assert_eq!(specialized.body, template.body);
-    assert_eq!(specialized.defaults, template.defaults);
-    assert_eq!(specialized.preconditions, template.preconditions);
+    assert_eq!(specialized.defaults, template.interface.defaults);
+    assert_eq!(specialized.preconditions, template.interface.preconditions);
     assert!(
-        matches!(specialized.signature, Term::Function { result, .. } if *result == Term::Primitive(P::Bool))
+        matches!(specialized.interface.signature, Term::Function { result, .. } if *result == Term::Primitive(P::Bool))
     );
     template.body.ty = Term::Bound {
         depth: 0,
@@ -801,7 +803,7 @@ fn callable_code_copy_bounds_retained_fields_and_preserves_shared_bodies() {
         charge(&definition, &mut 128),
         Err(CopyBudgetExhausted::Steps)
     );
-    definition.signature = function().signature;
+    definition.signature = function().interface.signature;
     let body = std::sync::Arc::new(large());
     definition.body = expr(K::Closure {
         parameters: vec![],

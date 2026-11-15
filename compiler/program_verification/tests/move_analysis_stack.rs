@@ -40,28 +40,30 @@ fn nested_bindings(layers: u32) -> Function {
         );
     }
     Function {
-        declaration: DeclarationId {
-            package: 1,
-            local: 1,
-        },
-        name: "nested_bindings".into(),
-        phase: FunctionPhase::Runtime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        signature: Term::Function {
+        interface: nir::program::FunctionDeclaration {
+            declaration: DeclarationId {
+                package: 1,
+                local: 1,
+            },
+            name: "nested_bindings".into(),
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(boolean),
+            },
             parameters: vec![],
-            result: Box::new(boolean),
+            type_parameters: vec![],
+            defaults: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
         },
-        parameters: vec![],
-        type_parameters: vec![],
-        defaults: vec![],
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        capabilities: vec![],
-        requirements: vec![],
         body,
     }
 }

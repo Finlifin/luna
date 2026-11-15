@@ -40,45 +40,47 @@ fn dependent_inputs_rebind_body_contracts_defaults_and_trait_arguments() {
         subject: t.clone(),
     };
     let template = Function {
-        declaration: DeclarationId {
-            package: 1,
-            local: 1,
-        },
-        name: "identity".into(),
-        phase: FunctionPhase::Comptime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        signature: Term::Function {
-            parameters: vec![
-                Parameter {
-                    sort: Sort::Type,
-                    ty: p(Primitive::Type),
-                },
-                Parameter {
-                    sort: Sort::Runtime,
-                    ty: t.clone(),
-                },
-                Parameter {
-                    sort: Sort::Runtime,
-                    ty: t.clone(),
-                },
-            ],
-            result: Box::new(t.clone()),
-        },
-        parameters: vec![id(0), id(1), id(2)],
         body: expr(K::Local(id(2)), t.clone()),
-        defaults: vec![(2, expr(K::Local(id(1)), t.clone()))],
-        preconditions: vec![observation.clone()],
-        postconditions: vec![observation],
-        requirements: vec![TypePredicate::And(vec![
-            TypePredicate::Equal(t.clone(), t),
-            TypePredicate::Trait(capability.clone()),
-        ])],
-        capabilities: vec![capability],
-        result_binding: None,
-        entry_snapshots: vec![],
-        type_parameters: vec![],
+        interface: nir::program::FunctionDeclaration {
+            declaration: DeclarationId {
+                package: 1,
+                local: 1,
+            },
+            name: "identity".into(),
+            phase: FunctionPhase::Comptime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            signature: Term::Function {
+                parameters: vec![
+                    Parameter {
+                        sort: Sort::Type,
+                        ty: p(Primitive::Type),
+                    },
+                    Parameter {
+                        sort: Sort::Runtime,
+                        ty: t.clone(),
+                    },
+                    Parameter {
+                        sort: Sort::Runtime,
+                        ty: t.clone(),
+                    },
+                ],
+                result: Box::new(t.clone()),
+            },
+            parameters: vec![id(0), id(1), id(2)],
+            defaults: vec![(2, expr(K::Local(id(1)), t.clone()))],
+            preconditions: vec![observation.clone()],
+            postconditions: vec![observation],
+            requirements: vec![TypePredicate::And(vec![
+                TypePredicate::Equal(t.clone(), t),
+                TypePredicate::Trait(capability.clone()),
+            ])],
+            capabilities: vec![capability],
+            result_binding: None,
+            entry_snapshots: vec![],
+            type_parameters: vec![],
+        },
     };
     let original = template.clone();
     let inputs = vec![
@@ -123,50 +125,52 @@ fn dependent_default_values_receive_concrete_types_before_evaluation_or_runtime_
             sort: Sort::Type,
         };
         let template = Function {
-            declaration: DeclarationId {
-                package: 1,
-                local: 2,
-            },
-            name: "copy".into(),
-            phase: FunctionPhase::Runtime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            signature: Term::Function {
-                parameters: vec![
-                    Parameter {
-                        sort: Sort::Type,
-                        ty: p(Primitive::Type),
-                    },
-                    Parameter {
-                        sort: if staged {
-                            Sort::ComptimeValue
-                        } else {
-                            Sort::Runtime
+            interface: nir::program::FunctionDeclaration {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 2,
+                },
+                name: "copy".into(),
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![
+                        Parameter {
+                            sort: Sort::Type,
+                            ty: p(Primitive::Type),
                         },
-                        ty: t.clone(),
-                    },
-                    Parameter {
-                        sort: if staged {
-                            Sort::ComptimeValue
-                        } else {
-                            Sort::Runtime
+                        Parameter {
+                            sort: if staged {
+                                Sort::ComptimeValue
+                            } else {
+                                Sort::Runtime
+                            },
+                            ty: t.clone(),
                         },
-                        ty: t.clone(),
-                    },
-                ],
-                result: Box::new(t.clone()),
+                        Parameter {
+                            sort: if staged {
+                                Sort::ComptimeValue
+                            } else {
+                                Sort::Runtime
+                            },
+                            ty: t.clone(),
+                        },
+                    ],
+                    result: Box::new(t.clone()),
+                },
+                parameters: vec![id(0), id(1), id(2)],
+                defaults: vec![(2, expr(K::Local(id(1)), t.clone()))],
+                preconditions: vec![],
+                postconditions: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                type_parameters: vec![],
             },
-            parameters: vec![id(0), id(1), id(2)],
             body: expr(K::Local(id(2)), t.clone()),
-            defaults: vec![(2, expr(K::Local(id(1)), t.clone()))],
-            preconditions: vec![],
-            postconditions: vec![],
-            requirements: vec![],
-            capabilities: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            type_parameters: vec![],
         };
         let values = [
             expr(K::TypeValue(p(Primitive::Bool)), p(Primitive::Type)),
@@ -290,29 +294,31 @@ fn dependent_defaults_do_not_recharge_unrelated_completed_payloads() {
         })
         .collect();
     let template = Function {
-        declaration: DeclarationId {
-            package: 1,
-            local: 3,
+        interface: nir::program::FunctionDeclaration {
+            declaration: DeclarationId {
+                package: 1,
+                local: 3,
+            },
+            name: "defaults".into(),
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            signature: Term::Function {
+                parameters,
+                result: Box::new(t.clone()),
+            },
+            parameters: bindings.clone(),
+            defaults: defaults.clone(),
+            preconditions: vec![],
+            postconditions: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            type_parameters: vec![],
         },
-        name: "defaults".into(),
-        phase: FunctionPhase::Runtime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        signature: Term::Function {
-            parameters,
-            result: Box::new(t.clone()),
-        },
-        parameters: bindings.clone(),
         body: expr(K::Local(*bindings.last().unwrap()), t),
-        defaults: defaults.clone(),
-        preconditions: vec![],
-        postconditions: vec![],
-        requirements: vec![],
-        capabilities: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        type_parameters: vec![],
     };
     let payload = "x".repeat(8192);
     let mut arguments = vec![
@@ -398,48 +404,50 @@ fn dependent_type_value_domains_rebind_body_and_contracts_compositionally() {
         subject: opaque.clone(),
     };
     let template = Function {
-        declaration: DeclarationId {
-            package: 1,
-            local: 4,
-        },
-        name: "Reify".into(),
-        phase: FunctionPhase::Comptime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        signature: Term::Function {
-            parameters: vec![
-                Parameter {
-                    sort: Sort::Type,
-                    ty: p(Primitive::Type),
-                },
-                Parameter {
-                    sort: Sort::ComptimeValue,
-                    ty: Term::Bound {
-                        depth: 0,
-                        index: 0,
-                        sort: Sort::Type,
-                    },
-                },
-            ],
-            result: Box::new(p(Primitive::Type)),
-        },
-        parameters: vec![id(0), id(1)],
         body: expr(K::TypeValue(opaque.clone()), p(Primitive::Type)),
-        defaults: vec![],
-        preconditions: vec![expr(
-            K::TypeEqual(
-                Box::new(expr(K::TypeValue(opaque.clone()), p(Primitive::Type))),
-                Box::new(expr(K::TypeValue(opaque.clone()), p(Primitive::Type))),
-            ),
-            p(Primitive::Bool),
-        )],
-        postconditions: vec![],
-        requirements: vec![TypePredicate::Equal(opaque.clone(), opaque)],
-        capabilities: vec![requirement],
-        result_binding: None,
-        entry_snapshots: vec![],
-        type_parameters: vec![],
+        interface: nir::program::FunctionDeclaration {
+            declaration: DeclarationId {
+                package: 1,
+                local: 4,
+            },
+            name: "Reify".into(),
+            phase: FunctionPhase::Comptime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            signature: Term::Function {
+                parameters: vec![
+                    Parameter {
+                        sort: Sort::Type,
+                        ty: p(Primitive::Type),
+                    },
+                    Parameter {
+                        sort: Sort::ComptimeValue,
+                        ty: Term::Bound {
+                            depth: 0,
+                            index: 0,
+                            sort: Sort::Type,
+                        },
+                    },
+                ],
+                result: Box::new(p(Primitive::Type)),
+            },
+            parameters: vec![id(0), id(1)],
+            defaults: vec![],
+            preconditions: vec![expr(
+                K::TypeEqual(
+                    Box::new(expr(K::TypeValue(opaque.clone()), p(Primitive::Type))),
+                    Box::new(expr(K::TypeValue(opaque.clone()), p(Primitive::Type))),
+                ),
+                p(Primitive::Bool),
+            )],
+            postconditions: vec![],
+            requirements: vec![TypePredicate::Equal(opaque.clone(), opaque)],
+            capabilities: vec![requirement],
+            result_binding: None,
+            entry_snapshots: vec![],
+            type_parameters: vec![],
+        },
     };
     let input_type = expr(K::TypeValue(p(Primitive::Type)), p(Primitive::Type));
     let input_value = expr(K::TypeValue(p(Primitive::Bool)), p(Primitive::Type));

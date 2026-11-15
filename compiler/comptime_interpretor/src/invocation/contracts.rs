@@ -67,7 +67,7 @@ impl<'a> Interpreter<'a> {
             && let Some(origin) = frame.origin
         {
             let definition = self
-                .invocation_definition(origin, &frame.function)
+                .invocation_declaration(origin, &frame.function)
                 .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
             let conditions = if entry {
                 &definition.preconditions
@@ -147,7 +147,7 @@ impl<'a> Interpreter<'a> {
                     }
                 } else if let Some(origin) = frame.origin {
                     let definition = self
-                        .invocation_definition(origin, &frame.function)
+                        .invocation_declaration(origin, &frame.function)
                         .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
                     if !definition.postconditions.is_empty()
                         && let Some(binding) = definition.result_binding

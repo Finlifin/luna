@@ -203,9 +203,9 @@ fn bind_inputs_with_type_view<'layout>(
     let mut result = template.clone();
     result.signature = scope.signature().clone();
     for root in std::iter::once(&mut result.body)
-        .chain(&mut result.preconditions)
-        .chain(&mut result.postconditions)
-        .chain(result.defaults.iter_mut().map(|(_, value)| value))
+        .chain(&mut result.interface.preconditions)
+        .chain(&mut result.interface.postconditions)
+        .chain(result.interface.defaults.iter_mut().map(|(_, value)| value))
     {
         root.rewrite_types(&mut |ty| {
             charge(fuel, 1)?;
@@ -264,13 +264,14 @@ fn bind_inputs_with_type_view<'layout>(
     substitute_forwarded_inputs(heads, &mut result, &bindings, fuel)?;
     wrap(heads, &mut result.body, &bindings, fuel)?;
     for expression in result
+        .interface
         .preconditions
         .iter_mut()
-        .chain(&mut result.postconditions)
+        .chain(&mut result.interface.postconditions)
     {
         wrap(heads, expression, &bindings, fuel)?;
     }
-    let defaults = std::mem::take(&mut result.defaults);
+    let defaults = std::mem::take(&mut result.interface.defaults);
     for (index, expression) in &defaults {
         let slot = slots
             .get(*index)
@@ -278,7 +279,7 @@ fn bind_inputs_with_type_view<'layout>(
         if let Some(slot) = slot {
             let mut expression = expression.clone();
             wrap(heads, &mut expression, &bindings, fuel)?;
-            result.defaults.push((*slot, expression));
+            result.interface.defaults.push((*slot, expression));
         }
     }
     Ok(result)
@@ -376,9 +377,9 @@ fn substitute_forwarded_inputs<'layout>(
     let heads = heads.into();
     let mut unavailable = BTreeSet::new();
     for root in std::iter::once(&function.body)
-        .chain(&function.preconditions)
-        .chain(&function.postconditions)
-        .chain(function.defaults.iter().map(|(_, expr)| expr))
+        .chain(&function.interface.preconditions)
+        .chain(&function.interface.postconditions)
+        .chain(function.interface.defaults.iter().map(|(_, expr)| expr))
     {
         forwarding_writes(root, &BTreeSet::new(), &mut unavailable, fuel, 0)?;
     }
@@ -388,9 +389,9 @@ fn substitute_forwarded_inputs<'layout>(
         completed.insert(*binding, value.clone());
     }
     for root in std::iter::once(&function.body)
-        .chain(&function.preconditions)
-        .chain(&function.postconditions)
-        .chain(function.defaults.iter().map(|(_, expr)| expr))
+        .chain(&function.interface.preconditions)
+        .chain(&function.interface.postconditions)
+        .chain(function.interface.defaults.iter().map(|(_, expr)| expr))
     {
         collect_forwarded_locals(heads, root, &mut completed, &unavailable, fuel)?;
     }
@@ -399,9 +400,9 @@ fn substitute_forwarded_inputs<'layout>(
         .map(|(binding, value)| (*binding, value))
         .collect();
     for root in std::iter::once(&mut function.body)
-        .chain(&mut function.preconditions)
-        .chain(&mut function.postconditions)
-        .chain(function.defaults.iter_mut().map(|(_, expr)| expr))
+        .chain(&mut function.interface.preconditions)
+        .chain(&mut function.interface.postconditions)
+        .chain(function.interface.defaults.iter_mut().map(|(_, expr)| expr))
     {
         substitute_forwarded_expression(
             heads,

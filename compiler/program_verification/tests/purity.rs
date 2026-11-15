@@ -107,29 +107,31 @@ fn nonterminating_private_loop_is_p4_but_not_a_stable_default() {
     };
     let package = Package {
         functions: vec![Function {
-            phase: FunctionPhase::Runtime,
-            inline: false,
-            pure: true,
-            is_unsafe: false,
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            capabilities: vec![],
-            requirements: vec![],
-            type_parameters: vec![],
-            declaration: DeclarationId {
-                package: 0,
-                local: 0,
-            },
-            name: "spin".into(),
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration: DeclarationId {
+                    package: 0,
+                    local: 0,
+                },
+                name: "spin".into(),
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(body.ty.clone()),
+                },
                 parameters: vec![],
-                result: Box::new(body.ty.clone()),
+                defaults: vec![],
             },
-            parameters: vec![],
             body: body.clone(),
-            defaults: vec![],
         }],
         ..Default::default()
     };

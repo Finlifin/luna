@@ -661,9 +661,15 @@ fn build(
     if let Roots::Annotations(function) = roots {
         function.signature = builder.staging_type_view(&function.signature)?;
         for expression in std::iter::once(&mut function.body)
-            .chain(function.defaults.iter_mut().map(|(_, value)| value))
-            .chain(&mut function.preconditions)
-            .chain(&mut function.postconditions)
+            .chain(
+                function
+                    .interface
+                    .defaults
+                    .iter_mut()
+                    .map(|(_, value)| value),
+            )
+            .chain(&mut function.interface.preconditions)
+            .chain(&mut function.interface.postconditions)
         {
             expression.rewrite_with(&mut InlineAnnotationRewriter(|ty: &Term| {
                 builder.staging_type_view(ty)
@@ -968,11 +974,13 @@ impl Builder<'_> {
             )?;
             self.normalize_expression(&mut function.body)?;
             for expression in function
+                .interface
                 .preconditions
                 .iter_mut()
-                .chain(&mut function.postconditions)
+                .chain(&mut function.interface.postconditions)
                 .chain(
                     function
+                        .interface
                         .defaults
                         .iter_mut()
                         .map(|(_, expression)| expression),
@@ -987,9 +995,10 @@ impl Builder<'_> {
             // input expression. Each predicate executes at a distinct boundary,
             // even when those copies retain the same original source range.
             for predicate in function
+                .interface
                 .preconditions
                 .iter_mut()
-                .chain(&mut function.postconditions)
+                .chain(&mut function.interface.postconditions)
             {
                 nir::error_results::specialize::anchor_expression_copy(
                     predicate,
@@ -999,10 +1008,11 @@ impl Builder<'_> {
                 )?;
             }
             for expression in std::iter::once(&mut function.body)
-                .chain(&mut function.preconditions)
-                .chain(&mut function.postconditions)
+                .chain(&mut function.interface.preconditions)
+                .chain(&mut function.interface.postconditions)
                 .chain(
                     function
+                        .interface
                         .defaults
                         .iter_mut()
                         .map(|(_, expression)| expression),
@@ -1017,10 +1027,11 @@ impl Builder<'_> {
         }
         self.expr(&function.body, 0)?;
         for expression in function
+            .interface
             .preconditions
             .iter()
-            .chain(&function.postconditions)
-            .chain(function.defaults.iter().map(|(_, e)| e))
+            .chain(&function.interface.postconditions)
+            .chain(function.interface.defaults.iter().map(|(_, e)| e))
         {
             self.expr(expression, 0)?;
         }
@@ -1772,8 +1783,14 @@ impl Builder<'_> {
     ) {
         function.requirements.extend(requirements);
         function.capabilities.extend(capabilities);
-        function.preconditions.extend(program.preconditions);
-        function.postconditions.extend(program.postconditions);
+        function
+            .interface
+            .preconditions
+            .extend(program.preconditions);
+        function
+            .interface
+            .postconditions
+            .extend(program.postconditions);
         function.result_binding = function.result_binding.or(program.result_binding);
         for snapshot in program.entry_snapshots {
             if !function

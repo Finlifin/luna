@@ -158,7 +158,7 @@ impl Interpreter<'_> {
 
     pub(super) fn specialize_function_predicate(
         &mut self,
-        definition: &nir::program::Function,
+        definition: &nir::program::FunctionDeclaration,
         arguments: &[Term],
         predicate: &nir::program::TypePredicate,
         source: SourceRange,
@@ -170,7 +170,7 @@ impl Interpreter<'_> {
 
     pub(super) fn specialize_function_requirement(
         &mut self,
-        definition: &nir::program::Function,
+        definition: &nir::program::FunctionDeclaration,
         arguments: &[Term],
         requirement: &nir::program::TraitRequirement,
         source: SourceRange,
@@ -182,7 +182,7 @@ impl Interpreter<'_> {
 
     fn with_function_contract_scope<T>(
         &mut self,
-        definition: &nir::program::Function,
+        definition: &nir::program::FunctionDeclaration,
         arguments: &[Term],
         source: SourceRange,
         observe: impl FnOnce(
@@ -557,25 +557,27 @@ mod tests {
                 domains: vec![Term::Primitive(Primitive::Bool)],
             }],
             functions: vec![nir::program::Function {
-                declaration: id,
-                name: "select".into(),
-                phase: nir::program::FunctionPhase::Comptime,
-                inline: false,
-                pure: false,
-                is_unsafe: false,
-                signature: Term::Function {
+                interface: nir::program::FunctionDeclaration {
+                    declaration: id,
+                    name: "select".into(),
+                    phase: nir::program::FunctionPhase::Comptime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    signature: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(Term::Primitive(Primitive::Bool)),
+                    },
                     parameters: vec![],
-                    result: Box::new(Term::Primitive(Primitive::Bool)),
+                    type_parameters: vec![parameter],
+                    defaults: vec![],
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
                 },
-                parameters: vec![],
-                type_parameters: vec![parameter],
-                defaults: vec![],
-                preconditions: vec![],
-                postconditions: vec![],
-                result_binding: None,
-                entry_snapshots: vec![],
-                capabilities: vec![],
-                requirements: vec![],
                 body: Expr {
                     source: SourceRange { start: 1, end: 2 },
                     ty: Term::Primitive(Primitive::Bool),

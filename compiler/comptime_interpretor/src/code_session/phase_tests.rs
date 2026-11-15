@@ -13,30 +13,32 @@ fn package() -> Arc<Package> {
     Arc::new(Package {
         functions: (0..100)
             .map(|local| Function {
-                declaration: DeclarationId { package: 8, local },
-                name: format!("function{local}"),
-                phase: if local == 99 {
-                    FunctionPhase::Runtime
-                } else {
-                    FunctionPhase::Comptime
-                },
-                inline: false,
-                pure: false,
-                is_unsafe: false,
-                signature: Term::Function {
+                interface: nir::program::FunctionDeclaration {
+                    declaration: DeclarationId { package: 8, local },
+                    name: format!("function{local}"),
+                    phase: if local == 99 {
+                        FunctionPhase::Runtime
+                    } else {
+                        FunctionPhase::Comptime
+                    },
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    signature: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(flag(true).ty),
+                    },
                     parameters: vec![],
-                    result: Box::new(flag(true).ty),
+                    type_parameters: vec![],
+                    defaults: vec![],
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    entry_snapshots: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
                 },
-                parameters: vec![],
-                type_parameters: vec![],
                 body: flag(true),
-                defaults: vec![],
-                preconditions: vec![],
-                postconditions: vec![],
-                result_binding: None,
-                entry_snapshots: vec![],
-                requirements: vec![],
-                capabilities: vec![],
             })
             .collect(),
         ..Default::default()

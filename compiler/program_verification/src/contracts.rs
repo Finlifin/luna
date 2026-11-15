@@ -292,14 +292,14 @@ fn prepare(
                     &mut limits.arithmetic.steps,
                 )
                 .map_err(|error| preparation(source, error))?;
-            if method.parameter_bindings.len() != actual.parameters.len() {
+            if method.parameter_bindings.len() != actual.interface.parameters.len() {
                 return Err(failure(source, "trait program contract arity mismatch"));
             }
             let mut bindings: BTreeMap<_, _> = method
                 .parameter_bindings
                 .iter()
                 .copied()
-                .zip(actual.parameters.iter().copied())
+                .zip(actual.interface.parameters.iter().copied())
                 .collect();
             remap(&mut contract.preconditions, &bindings, limits)?;
             let inherited_domain = actual.preconditions.is_empty();
@@ -337,12 +337,13 @@ fn prepare(
             }
             for snapshot in contract.entry_snapshots {
                 limits
-                    .step(actual.entry_snapshots.len().saturating_add(1))
+                    .step(actual.interface.entry_snapshots.len().saturating_add(1))
                     .map_err(|_| budget(source))?;
                 let parameter = *bindings.get(&snapshot.parameter).ok_or_else(|| {
                     failure(source, "trait snapshot does not refer to a parameter")
                 })?;
                 let binding = if let Some(snapshot) = actual
+                    .interface
                     .entry_snapshots
                     .iter()
                     .find(|s| s.parameter == parameter)
@@ -351,6 +352,7 @@ fn prepare(
                 } else {
                     let binding = fresh(next, source)?;
                     actual
+                        .interface
                         .entry_snapshots
                         .push(EntrySnapshot { parameter, binding });
                     binding
@@ -366,11 +368,12 @@ fn prepare(
             }
             let mut entry = BTreeMap::new();
             if !contract.preconditions.is_empty() && !contract.postconditions.is_empty() {
-                for parameter in &actual.parameters {
+                for parameter in &actual.interface.parameters {
                     limits
-                        .step(actual.entry_snapshots.len().saturating_add(1))
+                        .step(actual.interface.entry_snapshots.len().saturating_add(1))
                         .map_err(|_| budget(source))?;
                     let binding = if let Some(snapshot) = actual
+                        .interface
                         .entry_snapshots
                         .iter()
                         .find(|s| s.parameter == *parameter)
@@ -378,7 +381,7 @@ fn prepare(
                         snapshot.binding
                     } else {
                         let binding = fresh(next, source)?;
-                        actual.entry_snapshots.push(EntrySnapshot {
+                        actual.interface.entry_snapshots.push(EntrySnapshot {
                             parameter: *parameter,
                             binding,
                         });

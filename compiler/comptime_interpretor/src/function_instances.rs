@@ -286,30 +286,32 @@ mod frame_tests {
             subject: Term::Primitive(Primitive::Bool),
         };
         let function = nir::program::Function {
-            declaration,
-            name: "guarded".into(),
-            phase: nir::program::FunctionPhase::Comptime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            type_parameters: vec![],
-            parameters: vec![],
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration,
+                name: "guarded".into(),
+                phase: nir::program::FunctionPhase::Comptime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                type_parameters: vec![],
                 parameters: vec![],
-                result: Box::new(Term::Primitive(Primitive::Bool)),
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(Term::Primitive(Primitive::Bool)),
+                },
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                requirements: vec![],
+                capabilities: vec![requirement.clone()],
+                result_binding: None,
+                entry_snapshots: vec![],
             },
             body: Expr {
                 source,
                 ty: Term::Primitive(Primitive::Bool),
                 kind: K::Literal(Literal::Bool(true)),
             },
-            defaults: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            requirements: vec![],
-            capabilities: vec![requirement.clone()],
-            result_binding: None,
-            entry_snapshots: vec![],
         };
         let output = function.callable_type();
         let package = Package {
@@ -456,30 +458,32 @@ mod frame_tests {
         };
         let source = SourceRange { start: 2, end: 9 };
         let function = nir::program::Function {
-            phase: nir::program::FunctionPhase::Runtime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            declaration,
-            name: "not-retained-by-closure".repeat(10_000),
-            type_parameters: vec![parameter],
-            parameters: vec![],
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                phase: nir::program::FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                declaration,
+                name: "not-retained-by-closure".repeat(10_000),
+                type_parameters: vec![parameter],
                 parameters: vec![],
-                result: Box::new(Term::Primitive(Primitive::Bool)),
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(Term::Primitive(Primitive::Bool)),
+                },
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
             },
             body: Expr {
                 source,
                 ty: Term::Primitive(Primitive::Bool),
                 kind: K::Literal(Literal::Bool(true)),
             },
-            defaults: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            requirements: vec![],
-            capabilities: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
         };
         let output = function.callable_type();
         let package = Package {

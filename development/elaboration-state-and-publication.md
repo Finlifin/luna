@@ -509,6 +509,25 @@ loop id 穿过 Program。目标协议显式声明外部控制目标与需退出�
 NIR Function 继续代表已检查产物；不能给 body 塞占位表达式或活动源码句柄。
 源码服务分别持有接口与模板，活动任务归当前区域，完成片段才可进入执行器。
 
+当前受检 NIR 已将声明字段收拢为 `program::FunctionDeclaration`：它持有身份、
+签名 telescope、阶段／责任、参数绑定、形成条件、程序契约、入口快照及默认值。
+`Function` 只组合这份 `interface` 和已检查 `body`，没有第二份字段副本。
+旧字段投影通过 Deref 借用同一份声明；需要拆开可变借用或转移字段所有权的消费者
+显式访问 interface，不通过额外 clone 规避所有权边界。
+
+`check_source_function` 在检查主体之前组装受检声明，主体成功后才交付完整 Function；
+失败仍恢复 Type 输入事实与 quote 检查状态，不把声明塞入执行函数表。VM 的
+`invocation_declaration` 以及程序／类型契约的替换、能力检查只接收 FunctionDeclaration，
+主体仍沿独立的
+Entry → Body 路径取得。required 收集生成的 runtime 函数身份时只复制所需声明字段，
+不再先复制整个主体；需要执行的依赖仍保留完整代码。声明和完整函数分别具有
+S-expression Display，完整函数的既有 dump 结构保持不变。
+
+这是已有受检产物的所有权拆分，尚非完整公开供应接口。公开参数名／默认提供者的
+跨值传送、源码模板的独立发布、未完成主体请求及原区域 Type 响应仍待接通；
+当前 Package 与 VM 注册表仍只收录完整函数。不能因为声明类型不含 body 就宣称
+未调用定义可跳过检查，或已经能在等待 Type 时恢复同一次 invocation。
+
 #### 实际调用链与替换边界
 
 `3fd323ca` 上的生产链如下。箭头表示当前同步调用／数据依赖，不表示已经存在
@@ -683,6 +702,12 @@ callable 签名对实际 Type 的消费。只增加 owner、请求枚举或可�
 | 比较后继与共同操作数搜索 | 在 `/home/fin/luna` 经 `development/check.py --timeout 900 -- test -p luna --test contextual_input_regions --test ordering_protocol --test control_boundaries --no-fail-fast -- --test-threads=1` 运行，`/tmp/luna-tools-v_kmth4v/result.json` 退出 0，35 项通过；涵盖左右上下文补足、块与分支作用域、原 return 出口及一次性生产顺序 |
 | 比较协议、资源及 dump 回归 | 同目录与入口，`test -p luna --test arithmetic_contexts --test equality_protocol --test comparison_resources --test library_comptime_comparison --no-fail-fast -- --test-threads=1`，`/tmp/luna-tools-a43rzqwr/result.json` 退出 0，36 项通过；`test -p elaboration --lib -p luna --test contextual_input_regions --no-fail-fast -- comparison_regions peer_progress_dump --test-threads=1`，`/tmp/luna-tools-3g6y5qi2/result.json` 退出 0，dump 与两个新增源码用例通过，后两项亦包含在上一行中 |
 | VM 主体阶段的代码所有权 | 在 `/home/fin/luna` 经 `development/check.py --timeout 900 -- test -p comptime_interpretor --lib -p luna --test invocation_host_requests --test method_host_requests --test prepared_invocations --test declaration_contracts --no-fail-fast -- --test-threads=1` 运行，`/tmp/luna-tools-oki5n2vh/result.json` 退出 0，718 项通过；涵盖两条执行路径、契约失败／取消／迟到响应、原参数存储及代码缓存与调用结果隔离。源码待定 Type 的两个 ignored 未在此组重跑，不据此声称源区域恢复已完成 |
+| 受检声明／主体拆分：编译与核心实现 | 基线 `115d2d9e` 加本次工作区，在 `/home/fin/luna` 使用 `python3 -B development/check.py --timeout 900 --`：`check --workspace --all-targets` 退出 0，`/tmp/luna-tools-65gozkq3/result.json`；`test -p nir -p iir -p materialization -p comptime_interpretor -p elaboration -p program_verification -p type_resolution --lib --no-fail-fast -- --test-threads=1` 退出 0，1,183 项通过，`/tmp/luna-tools-h1ufip5h/result.json` |
+| 受检声明／主体拆分：所有权、替换与预算 | 同目录、同入口运行 `test -p nir -p iir -p materialization -p elaboration -p type_resolution --test function_declarations --test copy_budget --test phases --test types --test runtime_instances --test dependent_staging --test expansion_boundary --test scoped_dispatch_inputs --test type_computation_demands --test callable_world --no-fail-fast -- --test-threads=1`，退出 0，189 项通过，`/tmp/luna-tools-_otv3vp2/result.json`；独立声明测试覆盖无主体的契约／默认值替换、失败后重试、输入身份与 Display 转义 |
+| 受检声明／主体拆分：源码与公开库 | 同目录、同入口运行 `test -p luna --lib --test declaration_contracts --test prepared_invocations --test scoped_comptime_callables --test sysroot_preludes --test quote_functions --test library_std_format --test library_std --no-fail-fast -- --test-threads=1`，退出 0，264 项通过，`/tmp/luna-tools-2vvq0vyr/result.json`；含真实 sysroot、LLVM 宿主输出、文件资源、格式扫描、quote 展开及两阶段方法。两项待定 Type 的 ignored 未在此组重跑；格式扫描不等于完整 println |
+
+本次修改文件的 scoped rustfmt `--check` 退出 0，`/tmp/luna-tools-zjfbc4e9/result.json`。
+上述是本次选定检查的证据，原有工作区改动保留，不称为干净 HEAD 或全语言验收。
 
 match 迁移发现的失败为 `normal_record_defaults_follow_evaluated_value_prefixes_once`。
 临时撤回本次四个生产文件的补丁后，在 `a68e3087` 源码上按同入口执行

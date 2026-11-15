@@ -248,41 +248,43 @@ mod tests {
     fn function(local: u32) -> Function {
         let ty = Term::Primitive(Primitive::Bool);
         Function {
-            declaration: DeclarationId { package: 1, local },
-            name: "input".into(),
-            phase: FunctionPhase::Runtime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            type_parameters: vec![],
-            requirements: vec![],
-            capabilities: vec![],
-            signature: Term::Function {
-                parameters: vec![Parameter {
-                    sort: Sort::Runtime,
-                    ty: ty.clone(),
-                }],
-                result: Box::new(ty.clone()),
-            },
-            parameters: vec![LocalId {
-                owner: local,
-                index: 0,
-            }],
-            defaults: vec![(
-                0,
-                Expr {
-                    source: SourceRange {
-                        start: local,
-                        end: local + 1,
-                    },
-                    ty: ty.clone(),
-                    kind: ExprKind::Literal(crate::program::Literal::Bool(true)),
+            interface: crate::program::FunctionDeclaration {
+                declaration: DeclarationId { package: 1, local },
+                name: "input".into(),
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                signature: Term::Function {
+                    parameters: vec![Parameter {
+                        sort: Sort::Runtime,
+                        ty: ty.clone(),
+                    }],
+                    result: Box::new(ty.clone()),
                 },
-            )],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
+                parameters: vec![LocalId {
+                    owner: local,
+                    index: 0,
+                }],
+                defaults: vec![(
+                    0,
+                    Expr {
+                        source: SourceRange {
+                            start: local,
+                            end: local + 1,
+                        },
+                        ty: ty.clone(),
+                        kind: ExprKind::Literal(crate::program::Literal::Bool(true)),
+                    },
+                )],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+            },
             body: Expr {
                 source: SourceRange {
                     start: local,
@@ -396,12 +398,13 @@ mod tests {
             let mut invalid = value.clone();
             match case {
                 0 => invalid.result_binding = Some(input),
-                1 => invalid.entry_snapshots[0].parameter = result,
-                2 => invalid.entry_snapshots[0].binding = input,
-                3 => invalid.entry_snapshots[0].binding = result,
+                1 => invalid.interface.entry_snapshots[0].parameter = result,
+                2 => invalid.interface.entry_snapshots[0].binding = input,
+                3 => invalid.interface.entry_snapshots[0].binding = result,
                 _ => invalid
+                    .interface
                     .entry_snapshots
-                    .push(invalid.entry_snapshots[0].clone()),
+                    .push(invalid.interface.entry_snapshots[0].clone()),
             }
             let Err(Failure::Invalid(error)) = InspectionFrame::new(
                 crate::contracts::CallableProgram::function(&invalid),
@@ -448,7 +451,10 @@ mod tests {
         validate_frame(&value, true, &mut 1000).unwrap();
 
         let mut duplicate = value.clone();
-        duplicate.parameters.push(duplicate.parameters[0]);
+        duplicate
+            .interface
+            .parameters
+            .push(duplicate.interface.parameters[0]);
         let Term::Function { parameters, .. } = &mut duplicate.signature else {
             unreachable!()
         };

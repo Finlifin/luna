@@ -16,22 +16,24 @@ fn main() {
             result: Box::new(boolean.clone()),
         };
         let function = Function {
-            declaration: id(0),
-            name: "entry".into(),
-            phase: FunctionPhase::Comptime,
-            inline: false,
-            pure: true,
-            is_unsafe: false,
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            capabilities: vec![],
-            requirements: vec![],
-            type_parameters: vec![],
-            signature: signature.clone(),
-            parameters: vec![],
-            defaults: vec![],
+            interface: nir::program::FunctionDeclaration {
+                declaration: id(0),
+                name: "entry".into(),
+                phase: FunctionPhase::Comptime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                signature: signature.clone(),
+                parameters: vec![],
+                defaults: vec![],
+            },
             body: Expr {
                 source: SourceRange { start: 1, end: 2 },
                 ty: boolean,
@@ -40,9 +42,10 @@ fn main() {
         };
         let package = Package {
             functions: (0..count)
-                .map(|i| Function {
-                    declaration: id(i),
-                    ..function.clone()
+                .map(|i| {
+                    let mut instance = function.clone();
+                    instance.interface.declaration = id(i);
+                    instance
                 })
                 .collect(),
             runtime_function_identities: (0..count)

@@ -101,27 +101,29 @@ fn package(reads: usize, mode: &str, query: Option<ObjectQueryKind>, reference: 
 
     let mut package = Package {
         functions: vec![Function {
-            declaration: id(1),
-            name: "observe".into(),
-            phase: FunctionPhase::Comptime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            type_parameters: vec![],
-            requirements: vec![],
-            capabilities: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            parameters: vec![binding],
-            defaults: vec![],
-            signature: Term::Function {
-                parameters: vec![Parameter {
-                    sort: Sort::Runtime,
-                    ty: object_type,
-                }],
-                result: Box::new(result.clone()),
+            interface: nir::program::FunctionDeclaration {
+                declaration: id(1),
+                name: "observe".into(),
+                phase: FunctionPhase::Comptime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                parameters: vec![binding],
+                defaults: vec![],
+                signature: Term::Function {
+                    parameters: vec![Parameter {
+                        sort: Sort::Runtime,
+                        ty: object_type,
+                    }],
+                    result: Box::new(result.clone()),
+                },
             },
             body: Expr {
                 source,

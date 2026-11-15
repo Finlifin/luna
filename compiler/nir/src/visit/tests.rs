@@ -147,26 +147,28 @@ fn metadata_scans_are_bounded_even_without_expression_children() {
 #[test]
 fn excluded_function_defaults_leave_the_root_budget_untouched() {
     let function = Function {
-        phase: FunctionPhase::Runtime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        capabilities: vec![],
-        requirements: vec![],
-        type_parameters: vec![],
-        declaration: DeclarationId {
-            package: 0,
-            local: 1,
+        interface: crate::program::FunctionDeclaration {
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration: DeclarationId {
+                package: 0,
+                local: 1,
+            },
+            name: "scope".into(),
+            signature: Term::Primitive(Primitive::Void),
+            parameters: vec![],
+            defaults: vec![(0, expr(K::Tuple(vec![expr(K::Unit); 8]))); WIDTH],
         },
-        name: "scope".into(),
-        signature: Term::Primitive(Primitive::Void),
-        parameters: vec![],
         body: expr(K::Unit),
-        defaults: vec![(0, expr(K::Tuple(vec![expr(K::Unit); 8]))); WIDTH],
     };
     expressions_in_scope(&function, &mut 1, |_, _| Ok(())).unwrap();
     assert!(expressions(&function, &mut 8, |_, _| Ok(())).is_err());

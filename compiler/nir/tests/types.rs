@@ -2031,36 +2031,38 @@ fn function_specialization_covers_contracts_defaults_and_preserves_local_identit
         ),
     };
     let template = Function {
-        phase: FunctionPhase::Runtime,
-        inline: false,
-        pure: true,
-        is_unsafe: false,
-        declaration: IDENTITY,
-        name: "template".into(),
-        type_parameters: vec![],
-        signature: Term::Function {
-            parameters: vec![Parameter {
-                sort: Sort::Runtime,
-                ty: ty.clone(),
-            }],
-            result: Box::new(ty.clone()),
-        },
-        parameters: vec![local],
         body: expression.clone(),
-        defaults: vec![(0, expression)],
-        preconditions: vec![predicate.clone()],
-        postconditions: vec![predicate],
-        result_binding: Some(LocalId { owner: 3, index: 2 }),
-        entry_snapshots: vec![EntrySnapshot {
-            parameter: local,
-            binding: LocalId { owner: 3, index: 3 },
-        }],
-        capabilities: vec![TraitRequirement {
-            interface: SENSOR,
-            subject: ty.clone(),
-            interface_arguments: vec![ty.clone()],
-        }],
-        requirements: vec![TypePredicate::Equal(ty.clone(), ty)],
+        interface: nir::program::FunctionDeclaration {
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: true,
+            is_unsafe: false,
+            declaration: IDENTITY,
+            name: "template".into(),
+            type_parameters: vec![],
+            signature: Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Runtime,
+                    ty: ty.clone(),
+                }],
+                result: Box::new(ty.clone()),
+            },
+            parameters: vec![local],
+            defaults: vec![(0, expression)],
+            preconditions: vec![predicate.clone()],
+            postconditions: vec![predicate],
+            result_binding: Some(LocalId { owner: 3, index: 2 }),
+            entry_snapshots: vec![EntrySnapshot {
+                parameter: local,
+                binding: LocalId { owner: 3, index: 3 },
+            }],
+            capabilities: vec![TraitRequirement {
+                interface: SENSOR,
+                subject: ty.clone(),
+                interface_arguments: vec![ty.clone()],
+            }],
+            requirements: vec![TypePredicate::Equal(ty.clone(), ty)],
+        },
     };
     let original = template.clone();
     let specialized = template

@@ -16,25 +16,27 @@ fn expr(ty: Term, kind: K) -> Expr {
 }
 fn function(local: u32, body: Expr, result: Term) -> Function {
     Function {
-        declaration: id(local),
-        name: format!("run{local}"),
-        phase: FunctionPhase::Runtime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        type_parameters: vec![],
-        requirements: vec![],
-        capabilities: vec![],
-        signature: Term::Function {
+        interface: nir::program::FunctionDeclaration {
+            declaration: id(local),
+            name: format!("run{local}"),
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(result),
+            },
             parameters: vec![],
-            result: Box::new(result),
+            defaults: vec![],
         },
-        parameters: vec![],
-        defaults: vec![],
         body,
     }
 }

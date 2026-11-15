@@ -224,11 +224,28 @@ mod tests {
         });
         Package {
             functions: vec![nir::program::Function {
-                declaration: id(1),
-                name: "Guarded".into(),
-                phase: nir::program::FunctionPhase::Comptime,
-                signature,
-                parameters: vec![parameter(0), parameter(1)],
+                interface: nir::program::FunctionDeclaration {
+                    declaration: id(1),
+                    name: "Guarded".into(),
+                    phase: nir::program::FunctionPhase::Comptime,
+                    signature,
+                    parameters: vec![parameter(0), parameter(1)],
+                    preconditions: vec![Expr {
+                        source: SourceRange { start: 3, end: 4 },
+                        ty: Term::Primitive(Primitive::Bool),
+                        kind: K::Local(parameter(1)),
+                    }],
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    type_parameters: vec![],
+                    defaults: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    entry_snapshots: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                },
                 body: Expr {
                     source: result.source,
                     ty: result.ty.clone(),
@@ -244,21 +261,6 @@ mod tests {
                         result: Some(Box::new(result)),
                     },
                 },
-                preconditions: vec![Expr {
-                    source: SourceRange { start: 3, end: 4 },
-                    ty: Term::Primitive(Primitive::Bool),
-                    kind: K::Local(parameter(1)),
-                }],
-                inline: false,
-                pure: false,
-                is_unsafe: false,
-                type_parameters: vec![],
-                defaults: vec![],
-                postconditions: vec![],
-                result_binding: None,
-                entry_snapshots: vec![],
-                requirements: vec![],
-                capabilities: vec![],
             }],
             ..Default::default()
         }

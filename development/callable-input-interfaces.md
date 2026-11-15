@@ -67,7 +67,7 @@ typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
 | --- | --- | --- |
 | `elaboration/program/function_types.rs` | NF 变参改作依赖位置参数，只额外保存 collector 索引 | 形成 callable Type 时保存公开供应描述，依赖绑定仍按位置抽象 |
 | `nir/types.rs::Parameter` | 仅有 sort 与 ty | 不能把这份 telescope 当成完整调用接口 |
-| `nir/program.rs::Function` | 有主体、参数 LocalId 与 defaults；`callable_type` 只合成签名及阶段／责任修饰 | 稳定接口与可执行主体分离；接口协议不能依赖借用 body |
+| `nir/program/function.rs` | FunctionDeclaration 独立持有受检声明字段，Function 组合声明与 body；`callable_type` 仍只合成 telescope 及阶段／责任修饰 | 所有权已拆开；公开供应协议及源码模板发布仍须迁移，不能把受检声明结构当成协议传送完成 |
 | `elaboration/program/input_routing` | 入口描述、完整值预留、源码实参位置已共用 | 当前 Entry 是路由投影，不包含默认提供者、协议证据及世界依赖，不能直接当完整发布格式 |
 | `elaboration/program/normal.rs` | 动态 NF 仍按 collector 索引合成列表 | 消费实际接口产生同一 ArgumentPlan，不能另造 Es 专用入口 |
 | `comptime_interpretor/callable_domains.rs` | 从接收世界取得声明／方法的签名，且不执行源码 | 返回的准入依据须包含相应公开接口；缺失与预算失败继续分开 |

@@ -436,7 +436,7 @@ fn source_sessions_reuse_metadata_without_reusing_closed_dispatch_or_host_author
         .iter_mut()
         .find(|f| f.declaration == entry)
         .unwrap();
-    run.defaults.push((99, run.body.clone()));
+    run.interface.defaults.push((99, run.body.clone()));
     assert!(matches!(
         Interpreter::for_comptime_resolving_in_session(
             &changed,

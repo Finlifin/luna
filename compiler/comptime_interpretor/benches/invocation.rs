@@ -60,31 +60,33 @@ fn main() {
             };
             let package = Package {
                 functions: vec![Function {
-                    declaration: id,
-                    name: "bench".into(),
-                    phase: FunctionPhase::Comptime,
-                    inline: false,
-                    pure: true,
-                    is_unsafe: false,
-                    preconditions: vec![],
-                    postconditions: vec![],
-                    result_binding: None,
-                    entry_snapshots: vec![],
-                    type_parameters: vec![],
-                    requirements: vec![],
-                    capabilities: vec![],
-                    signature: Term::Function {
-                        parameters: parameters
-                            .iter()
-                            .map(|_| Parameter {
-                                sort: Sort::Runtime,
-                                ty: boolean.clone(),
-                            })
-                            .collect(),
-                        result: Box::new(boolean),
+                    interface: nir::program::FunctionDeclaration {
+                        declaration: id,
+                        name: "bench".into(),
+                        phase: FunctionPhase::Comptime,
+                        inline: false,
+                        pure: true,
+                        is_unsafe: false,
+                        preconditions: vec![],
+                        postconditions: vec![],
+                        result_binding: None,
+                        entry_snapshots: vec![],
+                        type_parameters: vec![],
+                        requirements: vec![],
+                        capabilities: vec![],
+                        signature: Term::Function {
+                            parameters: parameters
+                                .iter()
+                                .map(|_| Parameter {
+                                    sort: Sort::Runtime,
+                                    ty: boolean.clone(),
+                                })
+                                .collect(),
+                            result: Box::new(boolean),
+                        },
+                        parameters,
+                        defaults: vec![],
                     },
-                    parameters,
-                    defaults: vec![],
                     body,
                 }],
                 ..Default::default()

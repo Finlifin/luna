@@ -212,27 +212,29 @@ impl MethodContract {
         crate::type_computations::charge_term(completed_signature.callable_signature(), fuel)?;
         let signature = completed_signature.callable_signature().clone();
         Ok(Function {
-            declaration: self.declaration,
-            name: self.name.clone(),
-            phase,
-            inline: false,
-            pure: self.pure,
-            is_unsafe: self.is_unsafe,
-            signature,
-            parameters: self.parameter_bindings.clone(),
-            preconditions: program.preconditions,
-            postconditions: program.postconditions,
-            result_binding: program.result_binding,
-            entry_snapshots: program.entry_snapshots,
-            capabilities,
-            requirements,
-            type_parameters: self
-                .type_parameters
-                .iter()
-                .copied()
-                .filter(|id| !parameters.contains(id))
-                .collect(),
-            defaults: vec![],
+            interface: crate::program::FunctionDeclaration {
+                declaration: self.declaration,
+                name: self.name.clone(),
+                phase,
+                inline: false,
+                pure: self.pure,
+                is_unsafe: self.is_unsafe,
+                signature,
+                parameters: self.parameter_bindings.clone(),
+                preconditions: program.preconditions,
+                postconditions: program.postconditions,
+                result_binding: program.result_binding,
+                entry_snapshots: program.entry_snapshots,
+                capabilities,
+                requirements,
+                type_parameters: self
+                    .type_parameters
+                    .iter()
+                    .copied()
+                    .filter(|id| !parameters.contains(id))
+                    .collect(),
+                defaults: vec![],
+            },
             body: Expr {
                 source: SourceRange { start: 0, end: 0 },
                 ty: Term::Primitive(crate::Primitive::Void),

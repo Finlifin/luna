@@ -22,36 +22,38 @@ fn package(left: u128, in_default: bool) -> Package {
     let local = LocalId { owner: 1, index: 0 };
     Package {
         functions: vec![Function {
-            declaration: DeclarationId {
-                package: 1,
-                local: 1,
-            },
-            name: "arithmetic".into(),
-            phase: FunctionPhase::Comptime,
-            inline: false,
-            pure: true,
-            is_unsafe: false,
-            signature: Term::Function {
-                parameters: if in_default {
-                    vec![Parameter {
-                        sort: Sort::Runtime,
-                        ty: integer(0).ty,
-                    }]
-                } else {
-                    vec![]
-                },
-                result: Box::new(integer(0).ty),
-            },
-            parameters: if in_default { vec![local] } else { vec![] },
-            type_parameters: vec![],
             body: if in_default { integer(0) } else { body.clone() },
-            defaults: if in_default { vec![(0, body)] } else { vec![] },
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            requirements: vec![],
-            capabilities: vec![],
+            interface: nir::program::FunctionDeclaration {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                name: "arithmetic".into(),
+                phase: FunctionPhase::Comptime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: if in_default {
+                        vec![Parameter {
+                            sort: Sort::Runtime,
+                            ty: integer(0).ty,
+                        }]
+                    } else {
+                        vec![]
+                    },
+                    result: Box::new(integer(0).ty),
+                },
+                parameters: if in_default { vec![local] } else { vec![] },
+                type_parameters: vec![],
+                defaults: if in_default { vec![(0, body)] } else { vec![] },
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
         }],
         ..Default::default()
     }

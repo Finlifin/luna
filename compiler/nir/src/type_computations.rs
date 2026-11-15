@@ -117,25 +117,27 @@ pub fn expression_entry(
     let result = body.ty.clone();
     let (parameters, types): (Vec<_>, Vec<_>) = inputs.into_iter().unzip();
     Ok(crate::program::Function {
-        declaration,
-        name,
-        phase: crate::program::FunctionPhase::Comptime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        type_parameters: vec![],
-        requirements: vec![],
-        capabilities: vec![],
-        signature: Term::Function {
-            parameters: types,
-            result: Box::new(result),
+        interface: crate::program::FunctionDeclaration {
+            declaration,
+            name,
+            phase: crate::program::FunctionPhase::Comptime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            signature: Term::Function {
+                parameters: types,
+                result: Box::new(result),
+            },
+            parameters,
+            defaults: vec![],
         },
-        parameters,
-        defaults: vec![],
         body,
     })
 }

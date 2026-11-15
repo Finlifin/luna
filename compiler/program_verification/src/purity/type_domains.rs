@@ -253,30 +253,32 @@ mod tests {
         };
         (
             n::Function {
-                declaration: DeclarationId {
-                    package: 7,
-                    local: 2,
-                },
-                name: "finite".into(),
-                phase: n::FunctionPhase::Runtime,
-                inline: false,
-                pure: true,
-                is_unsafe: false,
-                type_parameters: vec![id],
-                parameters: vec![],
-                defaults: vec![],
-                requirements: vec![n::TypePredicate::Or(vec![
-                    n::TypePredicate::Equal(ty.clone(), p(P::F32)),
-                    n::TypePredicate::Equal(ty.clone(), p(P::F64)),
-                ])],
-                capabilities: vec![],
-                preconditions: vec![],
-                postconditions: vec![],
-                entry_snapshots: vec![],
-                result_binding: None,
-                signature: Term::Function {
+                interface: nir::program::FunctionDeclaration {
+                    declaration: DeclarationId {
+                        package: 7,
+                        local: 2,
+                    },
+                    name: "finite".into(),
+                    phase: n::FunctionPhase::Runtime,
+                    inline: false,
+                    pure: true,
+                    is_unsafe: false,
+                    type_parameters: vec![id],
                     parameters: vec![],
-                    result: Box::new(p(P::Bool)),
+                    defaults: vec![],
+                    requirements: vec![n::TypePredicate::Or(vec![
+                        n::TypePredicate::Equal(ty.clone(), p(P::F32)),
+                        n::TypePredicate::Equal(ty.clone(), p(P::F64)),
+                    ])],
+                    capabilities: vec![],
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    entry_snapshots: vec![],
+                    result_binding: None,
+                    signature: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(p(P::Bool)),
+                    },
                 },
                 body: n::Expr {
                     source: n::SourceRange { start: 0, end: 1 },

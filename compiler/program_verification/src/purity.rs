@@ -229,24 +229,26 @@ mod behavior_code_snapshot_tests {
             kind: K::Literal(n::Literal::Bool(true)),
         };
         let function = |id, body: n::Expr| n::Function {
-            declaration: id,
-            name: format!("f{}", id.local),
-            phase: n::FunctionPhase::Runtime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            type_parameters: vec![],
-            parameters: vec![],
-            defaults: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            capabilities: vec![],
-            requirements: vec![],
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration: id,
+                name: format!("f{}", id.local),
+                phase: n::FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                type_parameters: vec![],
                 parameters: vec![],
-                result: Box::new(body.ty.clone()),
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(body.ty.clone()),
+                },
             },
             body,
         };
@@ -859,30 +861,32 @@ impl<'a> Analysis<'a> {
             return false;
         }
         let function = n::Function {
-            declaration,
-            name: "default-observation".into(),
-            phase: n::FunctionPhase::Runtime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            type_parameters: vec![],
-            parameters: types.keys().copied().collect(),
-            defaults: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            capabilities: vec![],
-            requirements: vec![],
-            signature: Term::Function {
-                parameters: types
-                    .values()
-                    .map(|ty| nir::Parameter {
-                        sort: Sort::Runtime,
-                        ty: (*ty).clone(),
-                    })
-                    .collect(),
-                result: Box::new(value.ty.clone()),
+            interface: nir::program::FunctionDeclaration {
+                declaration,
+                name: "default-observation".into(),
+                phase: n::FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                type_parameters: vec![],
+                parameters: types.keys().copied().collect(),
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                signature: Term::Function {
+                    parameters: types
+                        .values()
+                        .map(|ty| nir::Parameter {
+                            sort: Sort::Runtime,
+                            ty: (*ty).clone(),
+                        })
+                        .collect(),
+                    result: Box::new(value.ty.clone()),
+                },
             },
             body: value.clone(),
         };
@@ -4545,25 +4549,27 @@ mod resource_world_tests {
         let mut package = n::Package::default();
         for local in 0..16 {
             package.functions.push(n::Function {
-                phase: n::FunctionPhase::Runtime,
-                inline: false,
-                pure: true,
-                is_unsafe: false,
-                declaration: DeclarationId { package: 1, local },
-                name: format!("scalar_{local}"),
-                signature: Term::Function {
+                interface: nir::program::FunctionDeclaration {
+                    phase: n::FunctionPhase::Runtime,
+                    inline: false,
+                    pure: true,
+                    is_unsafe: false,
+                    declaration: DeclarationId { package: 1, local },
+                    name: format!("scalar_{local}"),
+                    signature: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(p(P::Bool)),
+                    },
                     parameters: vec![],
-                    result: Box::new(p(P::Bool)),
+                    type_parameters: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    entry_snapshots: vec![],
+                    defaults: vec![],
                 },
-                parameters: vec![],
-                type_parameters: vec![],
-                requirements: vec![],
-                capabilities: vec![],
-                preconditions: vec![],
-                postconditions: vec![],
-                result_binding: None,
-                entry_snapshots: vec![],
-                defaults: vec![],
                 body: n::Expr {
                     source: n::SourceRange { start: 0, end: 1 },
                     ty: p(P::Bool),

@@ -1851,11 +1851,10 @@ impl Checker<'_, '_> {
                     .generated_functions
                     .iter()
                     .find(|function| function.declaration == id)
-                    .cloned()
                 {
                     if function.phase == n::FunctionPhase::Runtime {
                         if !function.preconditions.is_empty()
-                            && !matches!(&function.signature, Term::Function { parameters, .. }
+                            && !matches!(&function.interface.signature, Term::Function { parameters, .. }
                                 if parameters.iter().any(|p| p.sort != Sort::Runtime))
                         {
                             return Err(error(
@@ -1865,10 +1864,12 @@ impl Checker<'_, '_> {
                         }
                         runtime_function_identities.push(n::RuntimeFunctionIdentity {
                             declaration: id,
-                            type_parameters: function.type_parameters,
+                            type_parameters: function.interface.type_parameters.clone(),
                             signature: function
+                                .interface
                                 .signature
-                                .with_unsafe_call_requirement(function.is_unsafe),
+                                .clone()
+                                .with_unsafe_call_requirement(function.interface.is_unsafe),
                         });
                     } else {
                         queue.extend(
@@ -1880,7 +1881,7 @@ impl Checker<'_, '_> {
                             )
                             .map_err(|failure| error(expr.span, failure.to_string()))?,
                         );
-                        functions.push(function);
+                        functions.push(function.clone());
                     }
                     continue;
                 }

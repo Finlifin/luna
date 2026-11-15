@@ -19,33 +19,35 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
     };
     let byte = Term::Primitive(P::U8);
     let destructor = Function {
-        phase: FunctionPhase::Runtime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        capabilities: vec![],
-        requirements: vec![],
-        type_parameters: vec![],
-        declaration,
-        name: "observe_cleanup".into(),
-        signature: Term::Function {
-            parameters: vec![nir::Parameter {
-                sort: Sort::Runtime,
-                ty: Term::Pointer(Box::new(byte.clone())),
-            }],
-            result: Box::new(Term::Primitive(P::Void)),
+        interface: nir::program::FunctionDeclaration {
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration,
+            name: "observe_cleanup".into(),
+            signature: Term::Function {
+                parameters: vec![nir::Parameter {
+                    sort: Sort::Runtime,
+                    ty: Term::Pointer(Box::new(byte.clone())),
+                }],
+                result: Box::new(Term::Primitive(P::Void)),
+            },
+            parameters: vec![binding],
+            defaults: vec![],
         },
-        parameters: vec![binding],
         body: Expr {
             source: source(0),
             ty: Term::Primitive(P::Void),
             kind: K::Unit,
         },
-        defaults: vec![],
     };
     let graph = iir::Package {
         functions: vec![iir::FunctionInstance {

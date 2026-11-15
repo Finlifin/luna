@@ -29,9 +29,15 @@ pub fn bind(
         .chain(&mut package.quote_templates)
     {
         for root in std::iter::once(&mut function.body)
-            .chain(&mut function.preconditions)
-            .chain(&mut function.postconditions)
-            .chain(function.defaults.iter_mut().map(|(_, value)| value))
+            .chain(&mut function.interface.preconditions)
+            .chain(&mut function.interface.postconditions)
+            .chain(
+                function
+                    .interface
+                    .defaults
+                    .iter_mut()
+                    .map(|(_, value)| value),
+            )
         {
             nir::visit::expression_mut(root, fuel, |expr, _| {
                 if let nir::program::ExprKind::Intrinsic {

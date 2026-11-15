@@ -224,7 +224,7 @@ fn nested_calls_check_contracts_and_recover_after_failure() {
         .iter_mut()
         .find(|f| f.declaration == checked)
         .unwrap();
-    function.preconditions.push(function.body.clone());
+    function.interface.preconditions.push(function.body.clone());
     let broken = support::id(&package, "bad_exit");
     let function = package
         .functions

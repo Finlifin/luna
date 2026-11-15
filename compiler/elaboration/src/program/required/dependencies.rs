@@ -82,18 +82,40 @@ mod tests {
     }
     fn function() -> n::Function {
         n::Function {
-            declaration: id(90),
-            name: "dependencies".into(),
-            phase: n::FunctionPhase::Comptime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration: id(90),
+                name: "dependencies".into(),
+                phase: n::FunctionPhase::Comptime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(p(P::Bool)),
+                },
                 parameters: vec![],
-                result: Box::new(p(P::Bool)),
+                type_parameters: vec![],
+                defaults: vec![(0, expr(K::Function(id(3))))],
+                preconditions: vec![expr(K::TraitMethod {
+                    method_arguments: vec![],
+                    interface_arguments: vec![],
+                    interface: id(20),
+                    member: id(4),
+                    subject: p(P::Bool),
+                })],
+                postconditions: vec![expr(K::AssociatedValue {
+                    interface: n::InterfaceInstance {
+                        declaration: id(20),
+                        arguments: vec![],
+                    },
+                    member: id(5),
+                    subject: p(P::Bool),
+                })],
+                result_binding: None,
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
             },
-            parameters: vec![],
-            type_parameters: vec![],
             body: expr(K::LetPattern {
                 pattern: n::Pattern::Tuple(vec![
                     n::Pattern::CodeEvidence { outputs: vec![] },
@@ -113,26 +135,6 @@ mod tests {
                 guard: None,
                 otherwise: None,
             }),
-            defaults: vec![(0, expr(K::Function(id(3))))],
-            preconditions: vec![expr(K::TraitMethod {
-                method_arguments: vec![],
-                interface_arguments: vec![],
-                interface: id(20),
-                member: id(4),
-                subject: p(P::Bool),
-            })],
-            postconditions: vec![expr(K::AssociatedValue {
-                interface: n::InterfaceInstance {
-                    declaration: id(20),
-                    arguments: vec![],
-                },
-                member: id(5),
-                subject: p(P::Bool),
-            })],
-            result_binding: None,
-            entry_snapshots: vec![],
-            requirements: vec![],
-            capabilities: vec![],
         }
     }
 

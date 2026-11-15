@@ -192,31 +192,33 @@ fn identity_package() -> Package {
     let ty = Term::Primitive(Primitive::Object);
     Package {
         functions: vec![nir::program::Function {
-            declaration: DeclarationId {
-                package: 1,
-                local: 0,
+            interface: nir::program::FunctionDeclaration {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 0,
+                },
+                name: "forward".into(),
+                phase: nir::program::FunctionPhase::Comptime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                signature: Term::Function {
+                    parameters: vec![nir::Parameter {
+                        sort: nir::Sort::Runtime,
+                        ty: ty.clone(),
+                    }],
+                    result: Box::new(ty.clone()),
+                },
+                parameters: vec![local],
+                defaults: vec![],
             },
-            name: "forward".into(),
-            phase: nir::program::FunctionPhase::Comptime,
-            inline: false,
-            pure: true,
-            is_unsafe: false,
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            type_parameters: vec![],
-            requirements: vec![],
-            capabilities: vec![],
-            signature: Term::Function {
-                parameters: vec![nir::Parameter {
-                    sort: nir::Sort::Runtime,
-                    ty: ty.clone(),
-                }],
-                result: Box::new(ty.clone()),
-            },
-            parameters: vec![local],
-            defaults: vec![],
             body: Expr {
                 ty,
                 source: SourceRange { start: 0, end: 1 },

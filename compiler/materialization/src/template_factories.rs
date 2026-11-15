@@ -177,7 +177,8 @@ impl Builder<'_> {
         if targets.is_empty() {
             return Ok(false);
         }
-        transformed.signature = transformed
+        transformed.interface.signature = transformed
+            .interface
             .signature
             .with_callable_result(tag_type.clone())
             .ok_or("template factory signature is not callable")?;

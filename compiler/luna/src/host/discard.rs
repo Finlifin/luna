@@ -68,24 +68,26 @@ pub fn llvm_ir_discarding_result(
         Term::Primitive(Primitive::Void)
     };
     let wrapper = Function {
-        declaration,
-        name: "<host-discard-result>".into(),
-        phase: FunctionPhase::Runtime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        type_parameters: vec![],
-        requirements: vec![],
-        capabilities: vec![],
-        parameters: vec![],
-        defaults: vec![],
-        signature: Term::Function {
+        interface: nir::program::FunctionDeclaration {
+            declaration,
+            name: "<host-discard-result>".into(),
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
             parameters: vec![],
-            result: Box::new(Term::Primitive(Primitive::Void)),
+            defaults: vec![],
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(Primitive::Void)),
+            },
         },
         body: Expr {
             source: SourceRange { start: 0, end: 2 },

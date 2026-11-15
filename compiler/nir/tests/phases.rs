@@ -13,39 +13,41 @@ fn flag(kind: K) -> Expr {
 }
 fn function(local: u32, phase: Phase, inputs: &[Sort]) -> Function {
     Function {
-        declaration: DeclarationId { package: 1, local },
-        name: format!("function{local}"),
-        phase,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        signature: Term::Function {
+        interface: nir::program::FunctionDeclaration {
+            declaration: DeclarationId { package: 1, local },
+            name: format!("function{local}"),
+            phase,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            signature: Term::Function {
+                parameters: inputs
+                    .iter()
+                    .map(|sort| Parameter {
+                        sort: *sort,
+                        ty: Term::Primitive(Primitive::Bool),
+                    })
+                    .collect(),
+                result: Box::new(Term::Primitive(Primitive::Bool)),
+            },
             parameters: inputs
                 .iter()
-                .map(|sort| Parameter {
-                    sort: *sort,
-                    ty: Term::Primitive(Primitive::Bool),
+                .enumerate()
+                .map(|(index, _)| LocalId {
+                    owner: local,
+                    index: index as u32,
                 })
                 .collect(),
-            result: Box::new(Term::Primitive(Primitive::Bool)),
+            type_parameters: vec![],
+            defaults: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
         },
-        parameters: inputs
-            .iter()
-            .enumerate()
-            .map(|(index, _)| LocalId {
-                owner: local,
-                index: index as u32,
-            })
-            .collect(),
         body: flag(K::Literal(Literal::Bool(true))),
-        type_parameters: vec![],
-        defaults: vec![],
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        capabilities: vec![],
-        requirements: vec![],
     }
 }
 
@@ -388,7 +390,7 @@ fn default_expressions_only_read_available_parameter_bindings() {
             },
         ] {
             let mut invalid = target.clone();
-            invalid.defaults[0].1 = flag(K::Local(unavailable));
+            invalid.interface.defaults[0].1 = flag(K::Local(unavailable));
             let error = nir::phases::validate(&package(invalid)).unwrap_err();
             assert!(error.message.contains("default"), "{error:?}");
             nir::phases::validate(&package(target.clone())).unwrap();
@@ -544,6 +546,7 @@ fn closure_frames_reject_ambiguous_bindings_and_environment_arity() {
             index: 2,
         };
         let signature = function(95, phase, &[Sort::Runtime; 2])
+            .interface
             .signature
             .with_comptime_phase(phase == Phase::Comptime);
         let body = Expr {
@@ -935,8 +938,11 @@ fn ordinary_function_frames_reject_inconsistent_bindings_and_defaults() {
                 }
                 1 => invalid.parameters[1] = invalid.parameters[0],
                 2 => invalid.signature = Term::Primitive(Primitive::Bool),
-                3 => invalid.defaults.push(invalid.defaults[0].clone()),
-                4 => invalid.defaults[0].0 = 2,
+                3 => invalid
+                    .interface
+                    .defaults
+                    .push(invalid.interface.defaults[0].clone()),
+                4 => invalid.interface.defaults[0].0 = 2,
                 _ => unreachable!(),
             }
             package.functions[0] = invalid;
@@ -967,8 +973,11 @@ fn retained_quote_templates_validate_parameter_frame_identity() {
             }
             1 => invalid.parameters[1] = invalid.parameters[0],
             2 => invalid.signature = Term::Primitive(Primitive::Bool),
-            3 => invalid.defaults.push(invalid.defaults[0].clone()),
-            4 => invalid.defaults[0].0 = 2,
+            3 => invalid
+                .interface
+                .defaults
+                .push(invalid.interface.defaults[0].clone()),
+            4 => invalid.interface.defaults[0].0 = 2,
             _ => unreachable!(),
         }
         package.quote_templates[0] = invalid;
@@ -994,10 +1003,13 @@ fn retained_quote_contract_bindings_cannot_alias_inputs_or_each_other() {
         index: 2,
     };
     template.result_binding = Some(result);
-    template.entry_snapshots.push(nir::program::EntrySnapshot {
-        parameter: template.parameters[0],
-        binding: frozen,
-    });
+    template
+        .interface
+        .entry_snapshots
+        .push(nir::program::EntrySnapshot {
+            parameter: template.interface.parameters[0],
+            binding: frozen,
+        });
     let mut package = Package {
         quote_templates: vec![template.clone()],
         ..Default::default()
@@ -1007,12 +1019,13 @@ fn retained_quote_contract_bindings_cannot_alias_inputs_or_each_other() {
         let mut invalid = template.clone();
         match mutation {
             0 => invalid.result_binding = Some(invalid.parameters[0]),
-            1 => invalid.entry_snapshots[0].parameter = result,
-            2 => invalid.entry_snapshots[0].binding = invalid.parameters[0],
-            3 => invalid.entry_snapshots[0].binding = result,
+            1 => invalid.interface.entry_snapshots[0].parameter = result,
+            2 => invalid.interface.entry_snapshots[0].binding = invalid.parameters[0],
+            3 => invalid.interface.entry_snapshots[0].binding = result,
             4 => invalid
+                .interface
                 .entry_snapshots
-                .push(invalid.entry_snapshots[0].clone()),
+                .push(invalid.interface.entry_snapshots[0].clone()),
             _ => unreachable!(),
         }
         package.quote_templates[0] = invalid;
@@ -1058,7 +1071,7 @@ fn retained_quote_templates_reject_identity_collisions_and_wrong_phase() {
         .push(nir::program::RuntimeFunctionIdentity {
             declaration: template.declaration,
             type_parameters: vec![],
-            signature: template.signature,
+            signature: template.interface.signature,
         });
     assert!(
         nir::phases::validate(&package)
@@ -2124,6 +2137,7 @@ fn borrowed_method_contracts_keep_predicate_and_snapshot_admission() {
                 },
                 name: "check".into(),
                 signature: function(80, Phase::Runtime, &[Sort::Runtime])
+                    .interface
                     .signature
                     .into(),
                 phase: Default::default(),

@@ -126,26 +126,28 @@ mod tests {
 
     fn function(local: u32, phase: FunctionPhase, is_unsafe: bool) -> Function {
         Function {
-            declaration: DeclarationId { package: 1, local },
-            name: format!("function{local}"),
-            phase,
-            inline: false,
-            pure: false,
-            is_unsafe,
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration: DeclarationId { package: 1, local },
+                name: format!("function{local}"),
+                phase,
+                inline: false,
+                pure: false,
+                is_unsafe,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(flag(true).ty),
+                },
                 parameters: vec![],
-                result: Box::new(flag(true).ty),
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
             },
-            parameters: vec![],
-            type_parameters: vec![],
             body: flag(true),
-            defaults: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            requirements: vec![],
-            capabilities: vec![],
         }
     }
 

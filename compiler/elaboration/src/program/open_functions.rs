@@ -2354,26 +2354,32 @@ impl Checker<'_, '_> {
                         .chain(abstract_inputs.keys().copied())
                         .collect();
                     this.ordinary_behavior_functions.push(n::Function {
-                        declaration: declaration(this.package, &this.package_identities, owner),
-                        name: format!("{} [ordinary]", item.ident.name),
-                        phase: n::FunctionPhase::Runtime,
-                        pure: sig.modifiers.is_pure,
-                        is_unsafe: sig.modifiers.is_unsafe,
-                        inline: false,
-                        signature: Term::Function {
-                            parameters,
-                            result: Box::new(result_type),
+                        interface: nir::program::FunctionDeclaration {
+                            declaration: declaration(this.package, &this.package_identities, owner),
+                            name: format!("{} [ordinary]", item.ident.name),
+                            phase: n::FunctionPhase::Runtime,
+                            pure: sig.modifiers.is_pure,
+                            is_unsafe: sig.modifiers.is_unsafe,
+                            inline: false,
+                            signature: Term::Function {
+                                parameters,
+                                result: Box::new(result_type),
+                            },
+                            parameters: bindings,
+                            defaults: vec![],
+                            type_parameters: this.type_parameters[&owner].clone(),
+                            preconditions,
+                            postconditions,
+                            entry_snapshots,
+                            result_binding: sig.return_binding.map(local),
+                            requirements: this.definition_requirements(owner),
+                            capabilities: this
+                                .capabilities
+                                .get(&owner)
+                                .cloned()
+                                .unwrap_or_default(),
                         },
-                        parameters: bindings,
                         body: behavior,
-                        defaults: vec![],
-                        type_parameters: this.type_parameters[&owner].clone(),
-                        preconditions,
-                        postconditions,
-                        entry_snapshots,
-                        result_binding: sig.return_binding.map(local),
-                        requirements: this.definition_requirements(owner),
-                        capabilities: this.capabilities.get(&owner).cloned().unwrap_or_default(),
                     });
                 }
                 Ok(())
@@ -2651,33 +2657,35 @@ impl Checker<'_, '_> {
             }
         }
         functions.push(n::Function {
-            declaration: DeclarationId {
-                package: u64::MAX,
-                local: u32::MAX,
+            interface: nir::program::FunctionDeclaration {
+                declaration: DeclarationId {
+                    package: u64::MAX,
+                    local: u32::MAX,
+                },
+                name: "<ordinary-deferred-region>".into(),
+                phase: if self.in_staged_input || sig.modifiers.is_comptime {
+                    n::FunctionPhase::Comptime
+                } else {
+                    n::FunctionPhase::Runtime
+                },
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters,
+                    result: Box::new(value.ty.clone()),
+                },
+                parameters: bindings,
+                defaults: vec![],
+                type_parameters: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                entry_snapshots: vec![],
+                result_binding: None,
+                requirements,
+                capabilities,
             },
-            name: "<ordinary-deferred-region>".into(),
-            phase: if self.in_staged_input || sig.modifiers.is_comptime {
-                n::FunctionPhase::Comptime
-            } else {
-                n::FunctionPhase::Runtime
-            },
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            signature: Term::Function {
-                parameters,
-                result: Box::new(value.ty.clone()),
-            },
-            parameters: bindings,
             body: value.clone(),
-            defaults: vec![],
-            type_parameters: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            entry_snapshots: vec![],
-            result_binding: None,
-            requirements,
-            capabilities,
         });
         let mut runtime_function_identities: Vec<_> = self.signatures.iter().filter_map(|(owner, signature)| {
             matches!(&self.package.item(*owner)?.kind, ItemKind::Fn(sig, _) if !sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head)
@@ -8807,34 +8815,36 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(span, "missing open function body"))?;
             let value = this.function_body(owner, body.value, result)?;
             Ok(n::Function {
-                declaration: id,
-                name: item.ident.name.as_str().into(),
-                phase: if sig.modifiers.is_comptime {
-                    n::FunctionPhase::Comptime
-                } else {
-                    n::FunctionPhase::Runtime
+                interface: nir::program::FunctionDeclaration {
+                    declaration: id,
+                    name: item.ident.name.as_str().into(),
+                    phase: if sig.modifiers.is_comptime {
+                        n::FunctionPhase::Comptime
+                    } else {
+                        n::FunctionPhase::Runtime
+                    },
+                    inline: sig.modifiers.is_inline,
+                    pure: sig.modifiers.is_pure,
+                    is_unsafe: sig.modifiers.is_unsafe,
+                    signature: signature.clone(),
+                    parameters: sig
+                        .params
+                        .iter()
+                        .map(|parameter| local(parameter.hir_id))
+                        .collect(),
+                    preconditions,
+                    postconditions,
+                    entry_snapshots,
+                    result_binding,
+                    type_parameters: captures
+                        .iter()
+                        .map(|(parameter, _)| parameter.declaration)
+                        .collect(),
+                    requirements: this.specialized_open_requirements(owner, symbols, span)?,
+                    capabilities: this.specialized_open_capabilities(owner, symbols, span)?,
+                    defaults: vec![],
                 },
-                inline: sig.modifiers.is_inline,
-                pure: sig.modifiers.is_pure,
-                is_unsafe: sig.modifiers.is_unsafe,
-                signature: signature.clone(),
-                parameters: sig
-                    .params
-                    .iter()
-                    .map(|parameter| local(parameter.hir_id))
-                    .collect(),
                 body: value,
-                preconditions,
-                postconditions,
-                entry_snapshots,
-                result_binding,
-                type_parameters: captures
-                    .iter()
-                    .map(|(parameter, _)| parameter.declaration)
-                    .collect(),
-                requirements: this.specialized_open_requirements(owner, symbols, span)?,
-                capabilities: this.specialized_open_capabilities(owner, symbols, span)?,
-                defaults: vec![],
             })
         });
         match saved_signature {

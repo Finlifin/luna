@@ -613,26 +613,28 @@ mod tests {
     }
     fn function(local: u32, body: Expr) -> Function {
         Function {
-            phase: FunctionPhase::Runtime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            capabilities: vec![],
-            requirements: vec![],
-            type_parameters: vec![],
-            declaration: id(local),
-            name: format!("f{local}"),
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration: id(local),
+                name: format!("f{local}"),
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(Term::Primitive(Primitive::Void)),
+                },
                 parameters: vec![],
-                result: Box::new(Term::Primitive(Primitive::Void)),
+                defaults: vec![],
             },
-            parameters: vec![],
             body,
-            defaults: vec![],
         }
     }
     #[test]
@@ -867,7 +869,7 @@ mod tests {
 
     #[test]
     fn context_inputs_use_declared_sorts_and_keep_cleanup_cache_separate() {
-        let signature = function(99, expr(K::Unit)).signature;
+        let signature = function(99, expr(K::Unit)).interface.signature;
         let context = Term::contextual_closure(
             Term::Rigid {
                 declaration: id(10),

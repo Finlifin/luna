@@ -6883,7 +6883,10 @@ fn bit_writeback_resource_analysis_rejects_malformed_place_and_width_metadata() 
             1 => *end = 17,
             2 => *storage_type = nir::Term::Primitive(nir::Primitive::Bool),
             3 => place.fields[0].1 = 99,
-            4 => place.fields[0].0 = nir::program::FieldOwner::Nominal(function.declaration),
+            4 => {
+                place.fields[0].0 =
+                    nir::program::FieldOwner::Nominal(function.interface.declaration)
+            }
             5 => value.ty = nir::Term::Primitive(nir::Primitive::BitVec(7)),
             _ => unreachable!(),
         }
@@ -9789,7 +9792,7 @@ fn enum_return_domains_survive_postconditions_and_exclude_failures() {
         .iter_mut()
         .find(|f| f.name == "make")
         .unwrap();
-    make.postconditions.push(nir::program::Expr {
+    make.interface.postconditions.push(nir::program::Expr {
         source: make.body.source,
         ty: nir::Term::Primitive(nir::Primitive::Bool),
         kind: nir::program::ExprKind::Literal(nir::program::Literal::Bool(true)),

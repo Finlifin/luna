@@ -134,31 +134,33 @@ impl Checker<'_, '_> {
             // code method's callable type. No quote or contextual port enters
             // it, and it is never published in an execution package.
             let obligation = n::Function {
-                declaration: actual.declaration,
-                name: format!("{} program-domain refinement", actual.name),
-                phase: n::FunctionPhase::Comptime,
-                inline: false,
-                pure: true,
-                is_unsafe: false,
-                signature: Term::Function {
-                    parameters: inputs
-                        .values()
-                        .map(|ty| Parameter {
-                            sort: Sort::Runtime,
-                            ty: ty.clone(),
-                        })
-                        .collect(),
-                    result: Box::new(p(P::Void)),
+                interface: nir::program::FunctionDeclaration {
+                    declaration: actual.declaration,
+                    name: format!("{} program-domain refinement", actual.name),
+                    phase: n::FunctionPhase::Comptime,
+                    inline: false,
+                    pure: true,
+                    is_unsafe: false,
+                    signature: Term::Function {
+                        parameters: inputs
+                            .values()
+                            .map(|ty| Parameter {
+                                sort: Sort::Runtime,
+                                ty: ty.clone(),
+                            })
+                            .collect(),
+                        result: Box::new(p(P::Void)),
+                    },
+                    parameters: inputs.keys().copied().collect(),
+                    preconditions,
+                    postconditions: actual.program.preconditions.clone(),
+                    result_binding: None,
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    defaults: vec![],
                 },
-                parameters: inputs.keys().copied().collect(),
-                preconditions,
-                postconditions: actual.program.preconditions.clone(),
-                result_binding: None,
-                entry_snapshots: vec![],
-                capabilities: vec![],
-                requirements: vec![],
-                type_parameters: vec![],
-                defaults: vec![],
                 body: n::Expr {
                     source: source(span),
                     ty: p(P::Void),

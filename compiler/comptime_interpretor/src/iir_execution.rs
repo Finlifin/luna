@@ -262,19 +262,20 @@ impl<'a> Interpreter<'a> {
         })
     }
 
-    pub(super) fn invocation_definition(
+    pub(super) fn invocation_declaration(
         &self,
         id: DeclarationId,
         value: &Value,
-    ) -> Option<&'a nir::program::Function> {
+    ) -> Option<&'a nir::program::FunctionDeclaration> {
         if self.graph.is_some() {
             let arguments = match value {
                 Value::Closure(c) => c.instance_arguments.as_deref().unwrap_or_default(),
                 _ => &[],
             };
             self.iir_function_definition(id, arguments)
+                .map(|function| &function.interface)
         } else {
-            self.functions.get(&id)
+            self.functions.get(&id).map(|function| &function.interface)
         }
     }
 
@@ -506,30 +507,32 @@ mod callable_budget_tests {
                     arguments: vec![Term::Primitive(Primitive::Bool)].into(),
                 },
                 function: nir::program::Function {
-                    declaration,
-                    name,
-                    phase: nir::program::FunctionPhase::Runtime,
-                    inline: false,
-                    pure: false,
-                    is_unsafe: false,
-                    type_parameters: vec![],
-                    parameters: vec![],
-                    signature: Term::Function {
+                    interface: nir::program::FunctionDeclaration {
+                        declaration,
+                        name,
+                        phase: nir::program::FunctionPhase::Runtime,
+                        inline: false,
+                        pure: false,
+                        is_unsafe: false,
+                        type_parameters: vec![],
                         parameters: vec![],
-                        result: Box::new(Term::Primitive(Primitive::Bool)),
+                        signature: Term::Function {
+                            parameters: vec![],
+                            result: Box::new(Term::Primitive(Primitive::Bool)),
+                        },
+                        defaults: vec![],
+                        preconditions: vec![],
+                        postconditions: vec![],
+                        requirements: vec![],
+                        capabilities: vec![],
+                        result_binding: None,
+                        entry_snapshots: vec![],
                     },
                     body: Expr {
                         source: SourceRange { start: 2, end: 9 },
                         ty: Term::Primitive(Primitive::Bool),
                         kind: K::Literal(Literal::Bool(true)),
                     },
-                    defaults: vec![],
-                    preconditions: vec![],
-                    postconditions: vec![],
-                    requirements: vec![],
-                    capabilities: vec![],
-                    result_binding: None,
-                    entry_snapshots: vec![],
                 },
             }],
             ..Default::default()

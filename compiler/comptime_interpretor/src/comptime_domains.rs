@@ -148,30 +148,32 @@ mod tests {
         let binding = LocalId { owner: 1, index: 0 };
         Package {
             functions: vec![nir::program::Function {
-                declaration: DeclarationId {
-                    package: 81,
-                    local: 1,
-                },
-                name: "accept".into(),
-                phase: nir::program::FunctionPhase::Comptime,
-                inline: false,
-                pure: false,
-                is_unsafe: false,
-                type_parameters: vec![],
-                requirements: vec![],
-                capabilities: vec![],
-                preconditions: vec![],
-                postconditions: vec![],
-                result_binding: None,
-                entry_snapshots: vec![],
-                parameters: vec![binding],
-                defaults: vec![],
-                signature: Term::Function {
-                    parameters: vec![nir::Parameter {
-                        sort: nir::Sort::Runtime,
-                        ty: Term::Primitive(Primitive::Object),
-                    }],
-                    result: Box::new(Term::Primitive(Primitive::Bool)),
+                interface: nir::program::FunctionDeclaration {
+                    declaration: DeclarationId {
+                        package: 81,
+                        local: 1,
+                    },
+                    name: "accept".into(),
+                    phase: nir::program::FunctionPhase::Comptime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    type_parameters: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    entry_snapshots: vec![],
+                    parameters: vec![binding],
+                    defaults: vec![],
+                    signature: Term::Function {
+                        parameters: vec![nir::Parameter {
+                            sort: nir::Sort::Runtime,
+                            ty: Term::Primitive(Primitive::Object),
+                        }],
+                        result: Box::new(Term::Primitive(Primitive::Bool)),
+                    },
                 },
                 body: Expr {
                     source: SourceRange { start: 1, end: 2 },

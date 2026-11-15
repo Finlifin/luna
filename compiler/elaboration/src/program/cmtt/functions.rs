@@ -481,11 +481,11 @@ impl Expansion<'_> {
             .zip(template.parameters.iter().copied())
             .collect();
         if let Some(result) = program.result_binding {
-            let target = if let Some(binding) = template.result_binding {
+            let target = if let Some(binding) = template.interface.result_binding {
                 binding
             } else {
                 let binding = self.fresh(at(expression.source))?;
-                template.result_binding = Some(binding);
+                template.interface.result_binding = Some(binding);
                 binding
             };
             aliases.insert(result, target);
@@ -498,6 +498,7 @@ impl Expansion<'_> {
                 )
             })?;
             let binding = if let Some(old) = template
+                .interface
                 .entry_snapshots
                 .iter()
                 .find(|old| old.parameter == parameter)
@@ -506,6 +507,7 @@ impl Expansion<'_> {
             } else {
                 let binding = self.fresh(at(expression.source))?;
                 template
+                    .interface
                     .entry_snapshots
                     .push(n::EntrySnapshot { parameter, binding });
                 binding
@@ -529,8 +531,14 @@ impl Expansion<'_> {
                 at(expression.source),
             )?;
         }
-        template.preconditions.splice(0..0, program.preconditions);
-        template.postconditions.extend(program.postconditions);
+        template
+            .interface
+            .preconditions
+            .splice(0..0, program.preconditions);
+        template
+            .interface
+            .postconditions
+            .extend(program.postconditions);
         Ok(())
     }
     fn expand_template(
@@ -670,7 +678,7 @@ impl Expansion<'_> {
         let Term::Function { parameters, .. } = template.signature.callable_signature() else {
             return Err(error(span, "quote template signature is not callable"));
         };
-        for snapshot in &template.entry_snapshots {
+        for snapshot in &template.interface.entry_snapshots {
             let index = template
                 .parameters
                 .iter()
@@ -694,7 +702,7 @@ impl Expansion<'_> {
                 expression.source,
             )?);
         }
-        for mut predicate in template.preconditions {
+        for mut predicate in template.interface.preconditions {
             freshen(
                 &mut predicate,
                 connections.clone(),
@@ -722,8 +730,8 @@ impl Expansion<'_> {
         )?;
         Ok(Box::new(PreparedTemplate {
             body,
-            postconditions: template.postconditions,
-            result_binding: template.result_binding,
+            postconditions: template.interface.postconditions,
+            result_binding: template.interface.result_binding,
             connections,
             effects,
             delivered_type,
@@ -1154,11 +1162,12 @@ pub(in crate::program) fn expand_retained_quote_functions(
             expansion.charge(&function.body, at(function.body.source))?;
             function.body.rewrite_with(&mut expansion)?;
             for value in function
+                .interface
                 .defaults
                 .iter_mut()
                 .map(|(_, value)| value)
-                .chain(function.preconditions.iter_mut())
-                .chain(function.postconditions.iter_mut())
+                .chain(function.interface.preconditions.iter_mut())
+                .chain(function.interface.postconditions.iter_mut())
             {
                 value.rewrite_with(&mut expansion)?;
             }

@@ -599,26 +599,28 @@ mod tests {
         };
         let package = n::Package {
             functions: vec![n::Function {
-                phase: n::FunctionPhase::Comptime,
-                inline: false,
-                pure: true,
-                is_unsafe: false,
-                preconditions: vec![],
-                postconditions: vec![],
-                result_binding: None,
-                entry_snapshots: vec![],
-                capabilities: vec![],
-                requirements: vec![],
-                type_parameters: vec![],
-                declaration: entry,
-                name: "prepared".into(),
-                signature: Term::Function {
+                interface: nir::program::FunctionDeclaration {
+                    phase: n::FunctionPhase::Comptime,
+                    inline: false,
+                    pure: true,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    declaration: entry,
+                    name: "prepared".into(),
+                    signature: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(result_type.clone()),
+                    },
                     parameters: vec![],
-                    result: Box::new(result_type.clone()),
+                    defaults: vec![],
                 },
-                parameters: vec![],
                 body,
-                defaults: vec![],
             }],
             ..Default::default()
         };

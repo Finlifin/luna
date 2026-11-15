@@ -113,24 +113,26 @@ fn tree_and_staged_input_scopes_restore_depth_after_method_host_unwind() {
 
 fn function(declaration: u32, result: Term, body: Expr) -> Function {
     Function {
-        declaration: id(declaration),
-        name: format!("method_test_{declaration}"),
-        phase: FunctionPhase::Comptime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        type_parameters: vec![],
-        requirements: vec![],
-        capabilities: vec![],
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        parameters: vec![],
-        defaults: vec![],
-        signature: Term::Function {
+        interface: nir::program::FunctionDeclaration {
+            declaration: id(declaration),
+            name: format!("method_test_{declaration}"),
+            phase: FunctionPhase::Comptime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
             parameters: vec![],
-            result: Box::new(result),
+            defaults: vec![],
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(result),
+            },
         },
         body,
     }

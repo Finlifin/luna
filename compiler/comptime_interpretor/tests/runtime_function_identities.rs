@@ -25,22 +25,24 @@ fn package() -> Package {
             }),
         }],
         functions: vec![Function {
-            declaration: id(1),
-            name: "obtain".into(),
-            phase: FunctionPhase::Comptime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            capabilities: vec![],
-            requirements: vec![],
-            type_parameters: vec![],
-            signature: signature(callable.clone()),
-            parameters: vec![],
-            defaults: vec![],
+            interface: nir::program::FunctionDeclaration {
+                declaration: id(1),
+                name: "obtain".into(),
+                phase: FunctionPhase::Comptime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                signature: signature(callable.clone()),
+                parameters: vec![],
+                defaults: vec![],
+            },
             body: Expr {
                 source: SourceRange { start: 1, end: 2 },
                 ty: callable,
@@ -840,9 +842,10 @@ fn runtime_identity_freezing_is_bounded_and_keeps_aggregate_structure() {
 fn indexed_world_lookup_preserves_late_function_collisions_and_duplicate_bodies() {
     let mut world = package();
     let prototype = world.functions[0].clone();
-    world.functions.extend((100..612).map(|local| Function {
-        declaration: id(local),
-        ..prototype.clone()
+    world.functions.extend((100..612).map(|local| {
+        let mut function = prototype.clone();
+        function.interface.declaration = id(local);
+        function
     }));
     let mut vm = Interpreter::for_comptime(&world, Budget::default()).unwrap();
     assert!(

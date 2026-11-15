@@ -54,70 +54,71 @@ impl Checker<'_, '_> {
         }
         self.control.result = Some((**result).clone());
         let checked = (|| {
+            let Term::Function { result, .. } = &signature else {
+                unreachable!("source function signature was checked above")
+            };
             let preconditions = self.program_preconditions(owner)?;
             let result_binding = sig.return_binding.map(local);
             let (postconditions, entry_snapshots) =
                 self.program_postconditions(owner, result_binding, result)?;
+            let interface = n::FunctionDeclaration {
+                declaration: declaration(self.package, &self.package_identities, owner),
+                name: item.ident.name.as_str().into(),
+                phase: if sig.modifiers.is_normal_form_head {
+                    n::FunctionPhase::NormalForm
+                } else if sig.modifiers.is_comptime {
+                    n::FunctionPhase::Comptime
+                } else {
+                    n::FunctionPhase::Runtime
+                },
+                inline: sig.modifiers.is_inline,
+                pure: sig.modifiers.is_pure,
+                is_unsafe: sig.modifiers.is_unsafe,
+                preconditions,
+                postconditions,
+                entry_snapshots,
+                result_binding,
+                requirements: self.definition_requirements(owner),
+                capabilities: self.capabilities.get(&owner).cloned().unwrap_or_default(),
+                type_parameters: self.type_parameters[&owner].clone(),
+                parameters: if sig.modifiers.is_normal_form_head {
+                    self.normal_parameters[&owner]
+                        .iter()
+                        .filter(|(_, _, ty)| *ty != p(P::Type))
+                        .map(|(_, binding, _)| *binding)
+                        .collect()
+                } else {
+                    sig.params
+                        .iter()
+                        .map(|parameter| local(parameter.hir_id))
+                        .collect()
+                },
+                defaults: match defaults {
+                    Defaults::Definition => self.defaults[&owner]
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, value)| value.clone().map(|value| (index, value)))
+                        .collect(),
+                    // Forcing unused defaults here introduces dependencies
+                    // even when the actual call supplies every input.
+                    Defaults::CallPlan => vec![],
+                },
+                signature,
+            };
+            let Term::Function { result, .. } = &interface.signature else {
+                unreachable!("source function signature was checked above")
+            };
             let saved_code = std::mem::replace(&mut self.in_code_body, sig.modifiers.is_quote);
             let saved_holes = std::mem::take(&mut self.quote_holes);
             let checked = self.function_body(owner, body.value, result);
             self.in_code_body = saved_code;
             self.quote_holes = saved_holes;
-            let body = checked?;
-            Ok((
-                preconditions,
-                postconditions,
-                entry_snapshots,
-                result_binding,
-                body,
-            ))
+            Ok(n::Function {
+                interface,
+                body: checked?,
+            })
         })();
         self.input_facts.types = saved_types;
-        let (preconditions, postconditions, entry_snapshots, result_binding, body) = checked?;
-        Ok(n::Function {
-            declaration: declaration(self.package, &self.package_identities, owner),
-            name: item.ident.name.as_str().into(),
-            phase: if sig.modifiers.is_normal_form_head {
-                n::FunctionPhase::NormalForm
-            } else if sig.modifiers.is_comptime {
-                n::FunctionPhase::Comptime
-            } else {
-                n::FunctionPhase::Runtime
-            },
-            inline: sig.modifiers.is_inline,
-            pure: sig.modifiers.is_pure,
-            is_unsafe: sig.modifiers.is_unsafe,
-            preconditions,
-            postconditions,
-            entry_snapshots,
-            result_binding,
-            requirements: self.definition_requirements(owner),
-            capabilities: self.capabilities.get(&owner).cloned().unwrap_or_default(),
-            type_parameters: self.type_parameters[&owner].clone(),
-            parameters: if sig.modifiers.is_normal_form_head {
-                self.normal_parameters[&owner]
-                    .iter()
-                    .filter(|(_, _, ty)| *ty != p(P::Type))
-                    .map(|(_, binding, _)| *binding)
-                    .collect()
-            } else {
-                sig.params
-                    .iter()
-                    .map(|parameter| local(parameter.hir_id))
-                    .collect()
-            },
-            defaults: match defaults {
-                Defaults::Definition => self.defaults[&owner]
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, value)| value.clone().map(|value| (index, value)))
-                    .collect(),
-                // Forcing unused defaults here introduces dependencies
-                // even when the actual call supplies every input.
-                Defaults::CallPlan => vec![],
-            },
-            signature,
-            body,
-        })
+        checked
     }
 }

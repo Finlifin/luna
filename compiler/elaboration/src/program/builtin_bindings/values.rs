@@ -54,27 +54,29 @@ impl Checker<'_, '_> {
             nir::copy_budget::charge_expression(&body, &mut self.required_steps)
                 .map_err(|_| error(span, "compiler operation body budget exhausted"))?;
             self.generated_functions.push(n::Function {
-                declaration: identity,
-                name: format!("<compiler-operation.{}>", name.as_str()),
-                phase: if matches!(ty, Term::ComptimeFunction(_)) {
-                    n::FunctionPhase::Comptime
-                } else {
-                    n::FunctionPhase::Runtime
+                interface: nir::program::FunctionDeclaration {
+                    declaration: identity,
+                    name: format!("<compiler-operation.{}>", name.as_str()),
+                    phase: if matches!(ty, Term::ComptimeFunction(_)) {
+                        n::FunctionPhase::Comptime
+                    } else {
+                        n::FunctionPhase::Runtime
+                    },
+                    inline: false,
+                    pure: !signatures::publishes_definition(name.as_str()),
+                    is_unsafe: false,
+                    signature: ty.callable_signature().clone(),
+                    parameters: bindings,
+                    defaults: vec![],
+                    type_parameters: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    entry_snapshots: vec![],
                 },
-                inline: false,
-                pure: !signatures::publishes_definition(name.as_str()),
-                is_unsafe: false,
-                signature: ty.callable_signature().clone(),
-                parameters: bindings,
                 body,
-                defaults: vec![],
-                type_parameters: vec![],
-                requirements: vec![],
-                capabilities: vec![],
-                preconditions: vec![],
-                postconditions: vec![],
-                result_binding: None,
-                entry_snapshots: vec![],
             });
         }
         Ok(Some(n::Expr {

@@ -7,33 +7,35 @@ fn id(local: u32) -> DeclarationId {
 fn function() -> Function {
     let ty = Term::Primitive(Primitive::Bool);
     Function {
-        declaration: id(1),
-        name: "identity".into(),
-        phase: FunctionPhase::Runtime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        capabilities: vec![],
-        requirements: vec![],
-        type_parameters: vec![],
-        signature: Term::Function {
-            parameters: vec![Parameter {
-                sort: Sort::Runtime,
-                ty: ty.clone(),
-            }],
-            result: Box::new(ty.clone()),
+        interface: nir::program::FunctionDeclaration {
+            declaration: id(1),
+            name: "identity".into(),
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            signature: Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Runtime,
+                    ty: ty.clone(),
+                }],
+                result: Box::new(ty.clone()),
+            },
+            parameters: vec![LocalId { owner: 1, index: 0 }],
+            defaults: vec![],
         },
-        parameters: vec![LocalId { owner: 1, index: 0 }],
         body: Expr {
             ty,
             source: SourceRange { start: 0, end: 1 },
             kind: ExprKind::Local(LocalId { owner: 1, index: 0 }),
         },
-        defaults: vec![],
     }
 }
 

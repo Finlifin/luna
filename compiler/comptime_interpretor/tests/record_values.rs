@@ -24,31 +24,33 @@ fn identity(ty: Term) -> Package {
     let binding = LocalId { owner: 1, index: 0 };
     Package {
         functions: vec![Function {
-            declaration: DeclarationId {
-                package: 1,
-                local: 0,
+            interface: nir::program::FunctionDeclaration {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 0,
+                },
+                name: "identity".into(),
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                signature: Term::Function {
+                    parameters: vec![Parameter {
+                        sort: Sort::Runtime,
+                        ty: ty.clone(),
+                    }],
+                    result: Box::new(ty.clone()),
+                },
+                parameters: vec![binding],
+                defaults: vec![],
             },
-            name: "identity".into(),
-            phase: FunctionPhase::Runtime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            type_parameters: vec![],
-            requirements: vec![],
-            capabilities: vec![],
-            signature: Term::Function {
-                parameters: vec![Parameter {
-                    sort: Sort::Runtime,
-                    ty: ty.clone(),
-                }],
-                result: Box::new(ty.clone()),
-            },
-            parameters: vec![binding],
-            defaults: vec![],
             body: Expr {
                 ty,
                 kind: K::Local(binding),

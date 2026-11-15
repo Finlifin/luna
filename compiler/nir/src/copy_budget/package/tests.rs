@@ -24,26 +24,28 @@ fn text() -> n::Expr {
 }
 fn function() -> n::Function {
     n::Function {
-        phase: n::FunctionPhase::Comptime,
-        inline: false,
-        pure: true,
-        is_unsafe: false,
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        capabilities: vec![],
-        requirements: vec![],
-        type_parameters: vec![],
-        declaration: id(1),
-        name: "run".into(),
-        signature: Term::Function {
+        interface: crate::program::FunctionDeclaration {
+            phase: n::FunctionPhase::Comptime,
+            inline: false,
+            pure: true,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration: id(1),
+            name: "run".into(),
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(boolean()),
+            },
             parameters: vec![],
-            result: Box::new(boolean()),
+            defaults: vec![],
         },
-        parameters: vec![],
         body: expr(),
-        defaults: vec![],
     }
 }
 fn interface() -> n::Trait {
@@ -76,7 +78,7 @@ fn method() -> n::MethodContract {
         by_reference_receiver: false,
         declaration: id(4),
         name: "run".into(),
-        signature: function().signature.into(),
+        signature: function().interface.signature.into(),
         requirements: vec![],
         default: None,
     }
@@ -179,7 +181,7 @@ fn packages() -> Vec<(&'static str, n::Package)> {
         name: "effect".into(),
         type_parameters: vec![],
         parameter_types: vec![],
-        signature: function().signature,
+        signature: function().interface.signature,
         abi: crate::effects::Abi::Direct,
         inline: true,
         requirements: vec![],

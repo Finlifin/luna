@@ -2438,7 +2438,7 @@ impl<'a> Interpreter<'a> {
     fn copy_invocation_condition(
         &mut self,
         condition: &Expr,
-        definition: &nir::program::Function,
+        definition: &nir::program::FunctionDeclaration,
         function: &Value,
     ) -> Result<Expr, Error> {
         let arguments = match function {

@@ -30,31 +30,33 @@ fn equality(value: char, frozen: bool) -> Expr {
 }
 fn function(preconditions: Vec<Expr>, postconditions: Vec<Expr>) -> Function {
     Function {
-        declaration: DeclarationId {
-            package: 5,
-            local: 1,
+        interface: nir::program::FunctionDeclaration {
+            declaration: DeclarationId {
+                package: 5,
+                local: 1,
+            },
+            name: "character contract".into(),
+            phase: FunctionPhase::Comptime,
+            inline: false,
+            pure: true,
+            is_unsafe: false,
+            signature: Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Runtime,
+                    ty: local().ty,
+                }],
+                result: Box::new(Term::Primitive(Primitive::Void)),
+            },
+            parameters: vec![LocalId { owner: 1, index: 0 }],
+            type_parameters: vec![],
+            defaults: vec![],
+            preconditions,
+            postconditions,
+            result_binding: None,
+            entry_snapshots: vec![],
+            requirements: vec![],
+            capabilities: vec![],
         },
-        name: "character contract".into(),
-        phase: FunctionPhase::Comptime,
-        inline: false,
-        pure: true,
-        is_unsafe: false,
-        signature: Term::Function {
-            parameters: vec![Parameter {
-                sort: Sort::Runtime,
-                ty: local().ty,
-            }],
-            result: Box::new(Term::Primitive(Primitive::Void)),
-        },
-        parameters: vec![LocalId { owner: 1, index: 0 }],
-        type_parameters: vec![],
-        defaults: vec![],
-        preconditions,
-        postconditions,
-        result_binding: None,
-        entry_snapshots: vec![],
-        requirements: vec![],
-        capabilities: vec![],
         body: expr(K::Unit, Primitive::Void),
     }
 }

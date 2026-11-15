@@ -12,28 +12,30 @@ fn expr(ty: P, kind: K) -> Expr {
 fn package(body: Expr) -> Package {
     Package {
         functions: vec![Function {
-            declaration: DeclarationId {
-                package: 1,
-                local: 0,
-            },
-            name: "compare".into(),
-            phase: FunctionPhase::Comptime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            type_parameters: vec![],
-            requirements: vec![],
-            capabilities: vec![],
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 0,
+                },
+                name: "compare".into(),
+                phase: FunctionPhase::Comptime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(body.ty.clone()),
+                },
                 parameters: vec![],
-                result: Box::new(body.ty.clone()),
+                defaults: vec![],
             },
-            parameters: vec![],
-            defaults: vec![],
             body,
         }],
         ..Default::default()

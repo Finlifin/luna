@@ -401,7 +401,7 @@ impl<'a> Interpreter<'a> {
         }
         if self.comptime_only {
             let declared_comptime = |id| {
-                self.invocation_definition(id, &function)
+                self.invocation_declaration(id, &function)
                     .is_some_and(|f| f.phase == nir::program::FunctionPhase::Comptime)
             };
             let authorized = match &function {
@@ -437,7 +437,7 @@ impl<'a> Interpreter<'a> {
             }
             if let Some(declaration) = origin {
                 let definition = self
-                    .invocation_definition(declaration, &function)
+                    .invocation_declaration(declaration, &function)
                     .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
                 if matches!(definition.signature.callable_signature(), Term::Function {parameters,..} if parameters.iter().any(|p|matches!(p.ty.callable_signature(),Term::Function {..})))
                 {
@@ -627,7 +627,7 @@ impl<'a> Interpreter<'a> {
         if self.comptime_only || matches!(function, Value::Function(_)) {
             if let Some(id) = origin {
                 let definition = self
-                    .invocation_definition(id, &function)
+                    .invocation_declaration(id, &function)
                     .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
                 let generic_arguments = match &function {
                     _ if self.graph.is_some() => &[][..],
@@ -678,7 +678,7 @@ impl<'a> Interpreter<'a> {
         };
         if let Some(id) = origin {
             let definition = self
-                .invocation_definition(id, &function)
+                .invocation_declaration(id, &function)
                 .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
             for snapshot in &definition.entry_snapshots {
                 let value = self.local_value(&environment, snapshot.parameter, None)?;

@@ -95,7 +95,7 @@ fn charge_function(function: &n::Function, fuel: &mut usize) -> Result<(), Strin
     iir::visit::expressions(function, fuel, |expr, fuel| {
         nir::type_computations::charge_term(&expr.ty, fuel).map_err(|error| error.to_string())
     })?;
-    nir::type_computations::charge_term(&function.signature, fuel)
+    nir::type_computations::charge_term(&function.interface.signature, fuel)
         .map_err(|error| error.to_string())
 }
 
@@ -196,7 +196,7 @@ impl Builder<'_> {
             let Term::Function {
                 parameters,
                 result: output,
-            } = function.signature.callable_signature()
+            } = function.interface.signature.callable_signature()
             else {
                 return Ok(false);
             };
@@ -416,7 +416,8 @@ impl Builder<'_> {
                 }
                 Ok(true)
             })?;
-            function.signature = function
+            function.interface.signature = function
+                .interface
                 .signature
                 .with_callable_result(tag_type.clone())
                 .unwrap();
@@ -503,6 +504,7 @@ fn encode(
             callee.kind = K::Function(identities[index]);
             callee.ty = nodes[index]
                 .function
+                .interface
                 .signature
                 .clone()
                 .with_callable_result(Term::Primitive(nir::Primitive::U64))

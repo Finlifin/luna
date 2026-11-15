@@ -48,30 +48,32 @@ mod tests {
 
     fn entry() -> n::Function {
         n::Function {
-            declaration: id(1),
-            name: "scope".into(),
-            phase: n::FunctionPhase::Comptime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration: id(1),
+                name: "scope".into(),
+                phase: n::FunctionPhase::Comptime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(p(P::Bool)),
+                },
                 parameters: vec![],
-                result: Box::new(p(P::Bool)),
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
             },
-            parameters: vec![],
-            type_parameters: vec![],
             body: n::Expr {
                 source: source(Span::default()),
                 ty: p(P::Bool),
                 kind: K::ComptimeValue(value(2)),
             },
-            defaults: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            requirements: vec![],
-            capabilities: vec![],
         }
     }
 

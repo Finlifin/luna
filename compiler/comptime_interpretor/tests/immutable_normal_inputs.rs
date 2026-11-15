@@ -11,32 +11,34 @@ fn boolean() -> Term {
 }
 fn function(local: u32, parameters: Vec<LocalId>, body: Expr) -> Function {
     Function {
-        phase: FunctionPhase::Comptime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        capabilities: vec![],
-        requirements: vec![],
-        type_parameters: vec![],
-        declaration: id(local),
-        name: format!("f{local}"),
-        signature: Term::Function {
-            parameters: parameters
-                .iter()
-                .map(|_| nir::Parameter {
-                    sort: nir::Sort::Runtime,
-                    ty: body.ty.clone(),
-                })
-                .collect(),
-            result: Box::new(body.ty.clone()),
+        interface: nir::program::FunctionDeclaration {
+            phase: FunctionPhase::Comptime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration: id(local),
+            name: format!("f{local}"),
+            signature: Term::Function {
+                parameters: parameters
+                    .iter()
+                    .map(|_| nir::Parameter {
+                        sort: nir::Sort::Runtime,
+                        ty: body.ty.clone(),
+                    })
+                    .collect(),
+                result: Box::new(body.ty.clone()),
+            },
+            parameters,
+            defaults: vec![],
         },
-        parameters,
         body,
-        defaults: vec![],
     }
 }
 fn callable() -> Term {
@@ -418,8 +420,8 @@ fn frozen_callable_type_inputs_check_contracts_phase_and_safety() {
                 .runtime_function_identities
                 .push(nir::program::RuntimeFunctionIdentity {
                     declaration: runtime.declaration,
-                    type_parameters: runtime.type_parameters,
-                    signature: runtime.signature,
+                    type_parameters: runtime.interface.type_parameters,
+                    signature: runtime.interface.signature,
                 });
         }
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();

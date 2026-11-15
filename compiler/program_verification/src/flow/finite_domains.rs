@@ -11,9 +11,15 @@ pub(super) fn complete_literals(
 ) -> Result<(), Error> {
     for function in instances {
         for value in std::iter::once(&mut function.body)
-            .chain(&mut function.preconditions)
-            .chain(&mut function.postconditions)
-            .chain(function.defaults.iter_mut().map(|(_, value)| value))
+            .chain(&mut function.interface.preconditions)
+            .chain(&mut function.interface.postconditions)
+            .chain(
+                function
+                    .interface
+                    .defaults
+                    .iter_mut()
+                    .map(|(_, value)| value),
+            )
         {
             nir::integer_formation::complete(value, target, &mut limits.arithmetic.steps).map_err(
                 |message| Error {
@@ -240,49 +246,51 @@ mod tests {
             })
             .collect();
         Function {
-            phase: FunctionPhase::Runtime,
-            inline: false,
-            pure: true,
-            is_unsafe: false,
-            declaration: DeclarationId {
-                package: 1,
-                local: 100,
-            },
-            name: "finite".into(),
-            parameters: (0..count)
-                .map(|index| LocalId { owner: 100, index })
-                .collect(),
-            signature: Term::Function {
-                parameters: types
+            interface: nir::program::FunctionDeclaration {
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 100,
+                },
+                name: "finite".into(),
+                parameters: (0..count)
+                    .map(|index| LocalId { owner: 100, index })
+                    .collect(),
+                signature: Term::Function {
+                    parameters: types
+                        .iter()
+                        .map(|ty| Parameter {
+                            sort: Sort::Runtime,
+                            ty: ty.clone(),
+                        })
+                        .collect(),
+                    result: Box::new(Term::Primitive(P::Bool)),
+                },
+                requirements: types
                     .iter()
-                    .map(|ty| Parameter {
-                        sort: Sort::Runtime,
-                        ty: ty.clone(),
+                    .map(|ty| {
+                        Q::Or(vec![
+                            Q::Equal(ty.clone(), Term::Primitive(P::I8)),
+                            Q::Equal(ty.clone(), Term::Primitive(P::I16)),
+                        ])
                     })
                     .collect(),
-                result: Box::new(Term::Primitive(P::Bool)),
+                type_parameters: ids,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                defaults: vec![],
             },
-            requirements: types
-                .iter()
-                .map(|ty| {
-                    Q::Or(vec![
-                        Q::Equal(ty.clone(), Term::Primitive(P::I8)),
-                        Q::Equal(ty.clone(), Term::Primitive(P::I16)),
-                    ])
-                })
-                .collect(),
-            type_parameters: ids,
             body: Expr {
                 ty: Term::Primitive(P::Bool),
                 source: SourceRange { start: 0, end: 1 },
                 kind: K::Literal(Literal::Bool(true)),
             },
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            capabilities: vec![],
-            defaults: vec![],
         }
     }
 
@@ -296,10 +304,11 @@ mod tests {
                 .len(),
             4
         );
-        let Term::Function { parameters, .. } = &f.signature else {
+        let Term::Function { parameters, .. } = &f.interface.signature else {
             unreachable!()
         };
-        f.requirements
+        f.interface
+            .requirements
             .push(Q::Equal(parameters[0].ty.clone(), parameters[1].ty.clone()));
         let instances = integer_instances(&f, &mut Limits::default())
             .unwrap()
@@ -307,7 +316,7 @@ mod tests {
         assert_eq!(instances.len(), 2);
         for instance in instances {
             assert!(instance.type_parameters.is_empty());
-            let Term::Function { parameters, .. } = instance.signature else {
+            let Term::Function { parameters, .. } = instance.interface.signature else {
                 unreachable!()
             };
             assert_eq!(parameters[0].ty, parameters[1].ty);
@@ -322,7 +331,7 @@ mod tests {
                 .is_some()
         );
         assert!(integer_instances(&template(7), &mut Limits::default()).is_err());
-        f.requirements.clear();
+        f.interface.requirements.clear();
         assert!(
             integer_instances(&f, &mut Limits::default())
                 .unwrap()
@@ -352,7 +361,8 @@ mod tests {
                 instances
                     .iter()
                     .filter(|instance| {
-                        let Term::Function { parameters, .. } = &instance.signature else {
+                        let Term::Function { parameters, .. } = &instance.interface.signature
+                        else {
                             unreachable!()
                         };
                         parameters[0].ty == Term::Primitive(primitive)
@@ -385,7 +395,8 @@ mod tests {
                 instances
                     .iter()
                     .filter(|instance| {
-                        let Term::Function { parameters, .. } = &instance.signature else {
+                        let Term::Function { parameters, .. } = &instance.interface.signature
+                        else {
                             unreachable!()
                         };
                         parameters[0].ty == Term::Primitive(primitive)
@@ -399,10 +410,10 @@ mod tests {
     #[test]
     fn mentioned_candidates_require_a_proved_cover_and_aliases_use_fallback() {
         let mut f = template(1);
-        let Term::Function { parameters, .. } = &f.signature else {
+        let Term::Function { parameters, .. } = &f.interface.signature else {
             unreachable!()
         };
-        f.requirements = vec![Q::Not(Box::new(Q::Equal(
+        f.interface.requirements = vec![Q::Not(Box::new(Q::Equal(
             parameters[0].ty.clone(),
             Term::Primitive(P::I8),
         )))];
@@ -413,10 +424,10 @@ mod tests {
         );
 
         let mut f = template(2);
-        let Term::Function { parameters, .. } = &f.signature else {
+        let Term::Function { parameters, .. } = &f.interface.signature else {
             unreachable!()
         };
-        f.requirements = vec![
+        f.interface.requirements = vec![
             Q::Equal(parameters[0].ty.clone(), parameters[1].ty.clone()),
             Q::Equal(parameters[1].ty.clone(), Term::Primitive(P::I8)),
         ];
@@ -433,11 +444,12 @@ mod tests {
     #[test]
     fn correlated_domains_are_pruned_before_the_instance_limit() {
         let mut f = template(8);
-        let Term::Function { parameters, .. } = &f.signature else {
+        let Term::Function { parameters, .. } = &f.interface.signature else {
             unreachable!()
         };
         for parameter in &parameters[1..] {
-            f.requirements
+            f.interface
+                .requirements
                 .push(Q::Equal(parameters[0].ty.clone(), parameter.ty.clone()));
         }
         let instances = integer_instances(&f, &mut Limits::default())
@@ -445,7 +457,7 @@ mod tests {
             .unwrap();
         assert_eq!(instances.len(), 2);
         for instance in instances {
-            let Term::Function { parameters, .. } = instance.signature else {
+            let Term::Function { parameters, .. } = instance.interface.signature else {
                 unreachable!()
             };
             assert!(parameters.iter().all(|p| p.ty == parameters[0].ty));

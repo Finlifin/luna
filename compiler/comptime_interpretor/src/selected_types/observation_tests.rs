@@ -51,24 +51,26 @@ fn call(declaration: u32) -> Expr {
 }
 fn function(local: u32, body: Expr) -> Function {
     Function {
-        declaration: id(local),
-        name: format!("Domain{local}"),
-        phase: FunctionPhase::Comptime,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        type_parameters: vec![],
-        requirements: vec![],
-        capabilities: vec![],
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        parameters: vec![],
-        defaults: vec![],
-        signature: Term::Function {
+        interface: nir::program::FunctionDeclaration {
+            declaration: id(local),
+            name: format!("Domain{local}"),
+            phase: FunctionPhase::Comptime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
             parameters: vec![],
-            result: Box::new(ty(Primitive::Type)),
+            defaults: vec![],
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(ty(Primitive::Type)),
+            },
         },
         body,
     }

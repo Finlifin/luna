@@ -480,28 +480,30 @@ mod tests {
         };
         let source = Arc::new(Package {
             functions: vec![nir::program::Function {
-                declaration: DeclarationId {
-                    package: 1,
-                    local: 1,
-                },
-                name: "answer".into(),
-                phase: nir::program::FunctionPhase::Comptime,
-                inline: false,
-                pure: false,
-                is_unsafe: false,
-                preconditions: vec![],
-                postconditions: vec![],
-                result_binding: None,
-                entry_snapshots: vec![],
-                capabilities: vec![],
-                requirements: vec![],
-                type_parameters: vec![],
-                signature: Term::Function {
+                interface: nir::program::FunctionDeclaration {
+                    declaration: DeclarationId {
+                        package: 1,
+                        local: 1,
+                    },
+                    name: "answer".into(),
+                    phase: nir::program::FunctionPhase::Comptime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    signature: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(Term::Primitive(Primitive::Bool)),
+                    },
                     parameters: vec![],
-                    result: Box::new(Term::Primitive(Primitive::Bool)),
+                    defaults: vec![],
                 },
-                parameters: vec![],
-                defaults: vec![],
                 body: body.clone(),
             }],
             ..Default::default()

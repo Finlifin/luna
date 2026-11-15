@@ -50,27 +50,29 @@ fn package() -> Package {
             },
         ],
         functions: vec![Function {
-            declaration: id(3),
-            name: "BuildTuple".into(),
-            phase: FunctionPhase::Comptime,
-            inline: false,
-            pure: true,
-            is_unsafe: false,
-            type_parameters: vec![],
-            requirements: vec![],
-            capabilities: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            parameters: vec![binding],
-            defaults: vec![],
-            signature: Term::Function {
-                parameters: vec![Parameter {
-                    sort: Sort::ComptimeValue,
-                    ty: list_type(),
-                }],
-                result: Box::new(ty(P::Type)),
+            interface: nir::program::FunctionDeclaration {
+                declaration: id(3),
+                name: "BuildTuple".into(),
+                phase: FunctionPhase::Comptime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                parameters: vec![binding],
+                defaults: vec![],
+                signature: Term::Function {
+                    parameters: vec![Parameter {
+                        sort: Sort::ComptimeValue,
+                        ty: list_type(),
+                    }],
+                    result: Box::new(ty(P::Type)),
+                },
             },
             body: Expr {
                 ty: ty(P::Type),
@@ -132,7 +134,7 @@ fn reads_package(reads: usize, local_index: bool, index: &str, storage: bool) ->
             ty: ty(P::Void),
             kind: K::Assign {
                 place: nir::program::Place {
-                    root: f.parameters[0],
+                    root: f.interface.parameters[0],
                     fields: vec![],
                 },
                 value: Box::new(Expr {
@@ -257,7 +259,7 @@ fn effectful_index_keeps_the_list_snapshot_from_before_index_evaluation() {
             ty: ty(P::Void),
             kind: K::Assign {
                 place: nir::program::Place {
-                    root: f.parameters[0],
+                    root: f.interface.parameters[0],
                     fields: vec![],
                 },
                 value: Box::new(Expr {

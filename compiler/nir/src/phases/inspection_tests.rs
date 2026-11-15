@@ -11,26 +11,28 @@ fn flag() -> Expr {
 }
 fn function(local: u32, phase: Phase) -> Function {
     Function {
-        declaration: crate::DeclarationId { package: 1, local },
-        name: format!("function{local}"),
-        phase,
-        inline: false,
-        pure: false,
-        is_unsafe: false,
-        signature: Term::Function {
+        interface: crate::program::FunctionDeclaration {
+            declaration: crate::DeclarationId { package: 1, local },
+            name: format!("function{local}"),
+            phase,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(Primitive::Bool)),
+            },
             parameters: vec![],
-            result: Box::new(Term::Primitive(Primitive::Bool)),
+            type_parameters: vec![],
+            defaults: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            requirements: vec![],
+            capabilities: vec![],
         },
-        parameters: vec![],
-        type_parameters: vec![],
         body: flag(),
-        defaults: vec![],
-        preconditions: vec![],
-        postconditions: vec![],
-        result_binding: None,
-        entry_snapshots: vec![],
-        requirements: vec![],
-        capabilities: vec![],
     }
 }
 fn run(package: &Package, fuel: &mut usize) -> Result<BTreeSet<crate::DeclarationId>, Error> {

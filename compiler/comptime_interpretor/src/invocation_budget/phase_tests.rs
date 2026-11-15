@@ -14,21 +14,30 @@ fn flag() -> Expr {
 fn package(width: usize) -> Package {
     Package {
         functions: vec![Function {
-            declaration: DeclarationId {
-                package: 9,
-                local: 1,
-            },
-            name: "entry".into(),
-            phase: FunctionPhase::Comptime,
-            inline: false,
-            pure: false,
-            is_unsafe: false,
-            signature: Term::Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration: DeclarationId {
+                    package: 9,
+                    local: 1,
+                },
+                name: "entry".into(),
+                phase: FunctionPhase::Comptime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(flag().ty),
+                },
                 parameters: vec![],
-                result: Box::new(flag().ty),
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
             },
-            parameters: vec![],
-            type_parameters: vec![],
             body: Expr {
                 kind: ExprKind::Block {
                     statements: vec![flag(); width],
@@ -36,13 +45,6 @@ fn package(width: usize) -> Package {
                 },
                 ..flag()
             },
-            defaults: vec![],
-            preconditions: vec![],
-            postconditions: vec![],
-            result_binding: None,
-            entry_snapshots: vec![],
-            requirements: vec![],
-            capabilities: vec![],
         }],
         ..Default::default()
     }
