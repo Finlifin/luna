@@ -1,0 +1,563 @@
+//! Declaration-slot checking after source routing and collection preparation.
+//! The active slot owns its child demand and temporary observation/default
+//! boundaries. Checked producers are moved into Progress, never replayed here.
+use super::*;
+
+pub(super) struct Request<'b, 'h> {
+    input: &'b Expr<'h>,
+    expected: Option<Term>,
+    contextual: bool,
+}
+
+impl Request<'_, '_> {
+    fn check(self, checker: &mut Checker<'_, '_>) -> Result<n::NormalFormArgument, Error> {
+        if self.contextual {
+            checker.dependent_normal_argument(self.input, 0)
+        } else {
+            checker
+                .expr(self.input, self.expected.as_ref())
+                .map(n::NormalFormArgument::Value)
+        }
+    }
+}
+
+struct Pending<'b, 'h> {
+    slot: usize,
+    domain: DeclarationInputDomain,
+    input: Option<&'b Expr<'h>>,
+}
+
+enum Poll<'b, 'h> {
+    Continue,
+    Child(Request<'b, 'h>),
+    Complete,
+}
+
+pub(super) struct Frame<'a, 'b, 'h> {
+    owner: OwnerId,
+    span: Span,
+    parameters: &'a [(DeclarationId, Sort, Term)],
+    clauses: Vec<hir::clause::ClauseParam<'h>>,
+    defaults: Option<&'a nominal::InputEnvironment<'a>>,
+    checking: InputChecking,
+    routed: Vec<Option<RoutedDeclarationInput<'b, 'h>>>,
+    bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+    progress: progress::Progress,
+    preparations: Vec<n::NormalFormPreparation>,
+    pending: Option<Pending<'b, 'h>>,
+    observations: Option<constants::PreparedObservations>,
+    active_default: Option<usize>,
+    complete: bool,
+}
+
+impl<'a, 'b, 'h: 'b> Frame<'a, 'b, 'h> {
+    pub(super) fn new(
+        owner: OwnerId,
+        span: Span,
+        parameters: &'a [(DeclarationId, Sort, Term)],
+        clauses: Vec<hir::clause::ClauseParam<'h>>,
+        defaults: Option<&'a nominal::InputEnvironment<'a>>,
+        checking: InputChecking,
+        routed: Vec<Option<RoutedDeclarationInput<'b, 'h>>>,
+        bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        progress: progress::Progress,
+        preparations: Vec<n::NormalFormPreparation>,
+    ) -> Self {
+        Self {
+            owner,
+            span,
+            parameters,
+            clauses,
+            defaults,
+            checking,
+            routed,
+            bindings,
+            progress,
+            preparations,
+            pending: None,
+            observations: None,
+            active_default: None,
+            complete: false,
+        }
+    }
+
+    fn poll(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b, 'h>, Error> {
+        if self.complete || self.pending.is_some() {
+            return Err(error(
+                self.span,
+                "declaration slot check is pending or complete",
+            ));
+        }
+        let Some(slot) = self.progress.current() else {
+            self.complete = true;
+            return Ok(Poll::Complete);
+        };
+        if self.routed[slot].is_none()
+            && matches!(
+                self.clauses[slot].kind,
+                hir::clause::ClauseParamKind::Varadic(..)
+            )
+        {
+            let ty = checker.instantiate_input_types(
+                &self.parameters[slot].2,
+                self.progress.observed_parameters(),
+                self.progress.observed_values(),
+                self.span,
+            )?;
+            if checker.list_element_type(&ty).is_none() {
+                return Err(error(
+                    self.span,
+                    "normal-form variadic collector requires meta.List<T>",
+                ));
+            }
+            let identity =
+                checker.checked_collected_list_in(&[], &ty, &self.bindings, self.span)?;
+            checker
+                .locals
+                .insert(self.progress.binding(slot), ty.clone());
+            self.progress.record(
+                slot,
+                n::NormalFormArgument::Value(n::Expr {
+                    source: source(self.span),
+                    ty,
+                    kind: K::TypeList(Vec::new()),
+                }),
+                identity,
+                &mut checker.required_steps,
+                self.span,
+            )?;
+            return Ok(Poll::Continue);
+        }
+        let dependent = checker.declaration_domain_pending(
+            &self.parameters[slot].2,
+            self.parameters,
+            self.progress.observed_parameters(),
+            self.span,
+        )?;
+        let domain =
+            if matches!(&self.routed[slot], Some(RoutedDeclarationInput::Source(_))) && dependent {
+                checker.declaration_input_domain(
+                    slot,
+                    self.parameters,
+                    &mut self.routed,
+                    &mut self.bindings,
+                    &mut self.progress,
+                    self.span,
+                )?
+            } else {
+                DeclarationInputDomain {
+                    ty: checker.instantiate_input_types(
+                        &self.parameters[slot].2,
+                        self.progress.observed_parameters(),
+                        self.progress.observed_values(),
+                        self.span,
+                    )?,
+                    pending: dependent,
+                }
+            };
+        let explicit = self.routed[slot].take();
+        let declaration_default = explicit.is_none()
+            && matches!(
+                self.clauses[slot].kind,
+                hir::clause::ClauseParamKind::Optional(..)
+            )
+            && self.checking == InputChecking::Contextual
+            && checker.normal_parameters.contains_key(&self.owner);
+        let input = match &explicit {
+            Some(RoutedDeclarationInput::Source(input)) => Some(*input),
+            Some(_) => None,
+            None if declaration_default => None,
+            None => Some(self.enter_default(checker, slot)?),
+        };
+        if explicit.is_none() {
+            if checker.active_type_defaults.len() >= 64
+                || !checker.active_type_defaults.insert((self.owner, slot))
+            {
+                return Err(error(
+                    self.span,
+                    "cyclic or excessively deep normal-form default",
+                ));
+            }
+            self.active_default = Some(slot);
+        }
+        self.pending = Some(Pending {
+            slot,
+            domain,
+            input,
+        });
+        let domain = &self.pending.as_ref().unwrap().domain;
+        let immediate = if declaration_default {
+            Some(
+                checker
+                    .connected_normal_default(self.owner, slot, &self.progress, self.span)
+                    .map(n::NormalFormArgument::Value),
+            )
+        } else {
+            match explicit {
+                Some(RoutedDeclarationInput::Collected(items)) => {
+                    Some(self.collection(checker, items))
+                }
+                Some(RoutedDeclarationInput::Prepared(value)) => Some((|| {
+                    if !domain.pending {
+                        checker.require_expression(&value.ty, &domain.ty, self.span)?;
+                    }
+                    Ok(n::NormalFormArgument::Value(value))
+                })()),
+                _ => None,
+            }
+        };
+        if let Some(value) = immediate {
+            self.accept(checker, value)?;
+            return Ok(Poll::Continue);
+        }
+        let contextual = domain.pending && self.checking == InputChecking::Contextual;
+        let expected = (!domain.pending)
+            .then(|| checker.copy_alias_type(&domain.ty, self.span))
+            .transpose()?;
+        if !contextual {
+            self.observations = Some(constants::PreparedObservations::enter(
+                checker,
+                &self.bindings,
+                self.span,
+            )?);
+        }
+        Ok(Poll::Child(Request {
+            input: input.expect("source or declaration default"),
+            expected,
+            contextual,
+        }))
+    }
+
+    fn collection(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        items: Vec<n::NormalFormArgument>,
+    ) -> Result<n::NormalFormArgument, Error> {
+        let domain = &self.pending.as_ref().unwrap().domain;
+        if (!domain.pending || self.checking == InputChecking::Typed)
+            && items.iter().all(|item| {
+                matches!(
+                    item,
+                    n::NormalFormArgument::Value(_) | n::NormalFormArgument::ListSpread(_)
+                )
+            })
+        {
+            let mut collection = clause_inputs::ClauseCollection::default();
+            for item in items {
+                match item {
+                    n::NormalFormArgument::Value(value) => collection.push_element(value),
+                    n::NormalFormArgument::ListSpread(value) => collection.push_spread(value),
+                    _ => unreachable!("checked collection input"),
+                }
+            }
+            checker
+                .clause_collection_expression(collection, domain.ty.clone(), self.span)
+                .map(n::NormalFormArgument::Value)
+        } else {
+            Ok(n::NormalFormArgument::List {
+                source: source(self.span),
+                items,
+            })
+        }
+    }
+
+    fn enter_default(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        slot: usize,
+    ) -> Result<&'h Expr<'h>, Error> {
+        if let Some(defaults) = self.defaults {
+            checker.alias_substitution = defaults.substitution.clone();
+            checker.alias_value_bindings = defaults.bindings.clone();
+            checker.normal_default_bindings = defaults.normal_bindings.clone();
+            checker.context = defaults.context.clone();
+        }
+        // Only preceding declaration inputs enter a default. Their observations
+        // never replace the executable producers retained in source order.
+        for previous in 0..slot {
+            let parameter = self.parameters[previous].0;
+            checker.alias_substitution.remove(&parameter);
+            checker.alias_value_bindings.remove(&parameter);
+            checker.normal_default_bindings.remove(&parameter);
+            if !self.progress.is_prepared(previous) {
+                return Err(error(
+                    self.span,
+                    "normal-form default awaits preceding input",
+                ));
+            }
+            if self.parameters[previous].2 == p(P::Type) {
+                if let Some(ty) = self.progress.identity(previous) {
+                    checker
+                        .alias_substitution
+                        .insert(parameter, std::sync::Arc::new(ty.clone()));
+                } else {
+                    checker
+                        .alias_value_bindings
+                        .insert(parameter, self.progress.binding(previous));
+                }
+            } else {
+                if let Some(value) = self.progress.identity(previous) {
+                    let value = checker.copy_alias_type(value, self.span)?;
+                    checker
+                        .alias_substitution
+                        .insert(parameter, std::sync::Arc::new(value));
+                }
+                let ty = checker.instantiate_input_types(
+                    &checker.locals[&self.progress.binding(previous)],
+                    self.progress.observed_parameters(),
+                    self.progress.observed_values(),
+                    self.span,
+                )?;
+                checker
+                    .normal_default_bindings
+                    .insert(parameter, (self.progress.binding(previous), ty));
+            }
+        }
+        checker.signature_owner = Some(self.owner);
+        checker.context = checker.binder_context(self.owner);
+        checker.in_required_comptime = true;
+        let hir::clause::ClauseParamKind::Optional(_, _, default) = self.clauses[slot].kind else {
+            return Err(error(self.span, "normal-form argument count mismatch"));
+        };
+        Ok(default)
+    }
+
+    fn accept(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        result: Result<n::NormalFormArgument, Error>,
+    ) -> Result<(), Error> {
+        let pending = self
+            .pending
+            .take()
+            .ok_or_else(|| error(self.span, "declaration slot has no pending child"))?;
+        self.unwind(checker);
+        let slot = pending.slot;
+        let value = result.map_err(|mut failure| {
+            if self.parameters[slot].2 != p(P::Type) && failure.message.contains("type mismatch") {
+                failure.message = format!(
+                    "normal-form value argument type mismatch: {}",
+                    failure.message
+                );
+            }
+            failure
+        })?;
+        let identity = match &value {
+            n::NormalFormArgument::List { items, .. } if !pending.domain.pending => checker
+                .checked_collected_list_in(items, &pending.domain.ty, &self.bindings, self.span)?,
+            _ => match value.expression() {
+                Some(value) => checker.preserved_input_identity(
+                    value,
+                    self.bindings
+                        .iter()
+                        .map(|(binding, term)| (*binding, term.as_ref())),
+                    self.span,
+                )?,
+                None => None,
+            },
+        };
+        let ty = value
+            .expression()
+            .map(|expr| expr.ty.clone())
+            .unwrap_or(pending.domain.ty);
+        checker.record_declaration_input(
+            &mut self.progress,
+            slot,
+            value,
+            identity,
+            ty,
+            &mut self.bindings,
+            self.span,
+        )
+    }
+
+    fn unwind(&mut self, checker: &mut Checker<'_, '_>) {
+        if let Some(observations) = self.observations.take() {
+            observations.leave(checker);
+        }
+        if let Some(slot) = self.active_default.take() {
+            checker.active_type_defaults.remove(&(self.owner, slot));
+        }
+    }
+
+    pub(super) fn drive(
+        mut self,
+        checker: &mut Checker<'_, '_>,
+    ) -> Result<PreparedDeclarationInputs, Error> {
+        let result = (|| {
+            loop {
+                match self.poll(checker)? {
+                    Poll::Continue => {}
+                    Poll::Child(request) => {
+                        let result = request.check(checker);
+                        self.accept(checker, result)?;
+                    }
+                    Poll::Complete => break Ok(()),
+                }
+            }
+        })();
+        self.unwind(checker);
+        result?;
+        self.progress.finish(self.preparations, self.span)
+    }
+}
+
+impl std::fmt::Display for Frame<'_, '_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(declaration-slot-frame (owner {}) (source {}) (checking {}) (complete {}) {} (pending",
+            self.owner,
+            source(self.span),
+            match self.checking {
+                InputChecking::Contextual => "contextual",
+                InputChecking::Typed => "typed",
+            },
+            self.complete,
+            self.progress
+        )?;
+        if let Some(pending) = &self.pending {
+            write!(f, " (slot {} {})", pending.slot, pending.domain)?;
+            if let Some(input) = pending.input {
+                write!(
+                    f,
+                    " (child {} (source {}))",
+                    input.hir_id,
+                    source(input.span)
+                )?;
+            }
+        }
+        f.write_str(") (active-default")?;
+        if let Some(slot) = self.active_default {
+            write!(f, " {slot}")?;
+        }
+        f.write_str(") (observations")?;
+        if let Some(observations) = &self.observations {
+            write!(f, " {observations}")?;
+        }
+        f.write_str(") (routed")?;
+        for (slot, input) in self.routed.iter().enumerate() {
+            if let Some(input) = input {
+                write!(f, " (slot {slot} ")?;
+                match input {
+                    RoutedDeclarationInput::Source(input) => {
+                        write!(f, "(source {} {})", input.hir_id, source(input.span))?
+                    }
+                    RoutedDeclarationInput::Prepared(value) => write!(f, "(prepared {value})")?,
+                    RoutedDeclarationInput::Collected(items) => {
+                        f.write_str("(collected")?;
+                        for item in items {
+                            write!(f, " {item}")?;
+                        }
+                        f.write_str(")")?;
+                    }
+                }
+                f.write_str(")")?;
+            }
+        }
+        f.write_str(") (bindings")?;
+        for (binding, value) in &self.bindings {
+            write!(f, " (binding {binding} {value})")?;
+        }
+        f.write_str(") (preparations")?;
+        for preparation in &self.preparations {
+            write!(
+                f,
+                " (before {} {})",
+                preparation.before, preparation.expression
+            )?;
+        }
+        f.write_str("))")
+    }
+}
+
+impl std::fmt::Display for Request<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(declaration-slot-request (source {} {}) (contextual {}) (expected",
+            self.input.hir_id,
+            source(self.input.span),
+            self.contextual
+        )?;
+        if let Some(expected) = &self.expected {
+            write!(f, " {expected}")?;
+        }
+        f.write_str("))")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declaration_slot_dump_keeps_source_demand_and_prepared_code_separate() {
+        let span = Span::default();
+        let owner = hir::OwnerId::new(hir::LocalDefId::new(1));
+        let source_expr = Expr {
+            hir_id: hir::HirId::new(owner, hir::ItemLocalId::new(2)),
+            span,
+            kind: H::Unit,
+        };
+        let declaration = DeclarationId {
+            package: 7,
+            local: 1,
+        };
+        let binding = n::LocalId { owner: 1, index: 3 };
+        let domain = p(P::Str);
+        let parameters = [(declaration, Sort::ComptimeValue, domain.clone())];
+        let progress =
+            progress::Progress::new(&parameters, vec![binding], vec![0], &mut 100, span).unwrap();
+        let mut frame = Frame::new(
+            owner,
+            span,
+            &parameters,
+            vec![],
+            None,
+            InputChecking::Typed,
+            vec![None],
+            BTreeMap::new(),
+            progress,
+            vec![n::NormalFormPreparation {
+                before: 0,
+                expression: n::Expr {
+                    source: source(span),
+                    ty: domain.clone(),
+                    kind: K::Literal(n::Literal::String("prepared\"\n".into())),
+                },
+            }],
+        );
+        frame.pending = Some(Pending {
+            slot: 0,
+            domain: DeclarationInputDomain {
+                ty: domain.clone(),
+                pending: false,
+            },
+            input: Some(&source_expr),
+        });
+        let request = Request {
+            input: &source_expr,
+            expected: Some(domain),
+            contextual: false,
+        };
+        let dump = frame.to_string();
+        for fragment in [
+            "(checking typed)",
+            "(unprepared)",
+            "(child ",
+            "(pending false)",
+            "(preparations (before 0",
+            "prepared\\\"\\n",
+        ] {
+            assert!(dump.contains(fragment), "missing {fragment}: {dump}");
+        }
+        assert!(!dump.contains('\n'), "{dump}");
+        let request = request.to_string();
+        assert!(
+            request.contains("(contextual false) (expected (primitive str))"),
+            "{request}"
+        );
+        assert!(!request.contains("prepared"), "{request}");
+    }
+}

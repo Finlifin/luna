@@ -450,6 +450,22 @@ cell 身份和 owned graph，使用既有预算，不调用源语言 Copy／Clon
 完整计划才可交付，重复／越界／预算失败不能留下半份身份前缀。prepared_bindings
 在记录成功后更新，不在轮到源码位置时再克隆和重观察已保存的 producer。
 
+路由与收集完成后，`declaration_inputs::slots::Frame` 逐步检查声明槽位。它保留
+当前域及 pending 状态、原始子表达式、准备计划和默认值 guard；普通与 contextual
+子检查由同一个请求交回结果。已检查的展开字段与收集项直接移入 Progress，
+`RoutedDeclarationInput` 不再可 Clone，不为交付重新复制整段 producer 代码。
+这条路径同时服务普通 callable、NF、名义输入与透明别名，原槽位同步循环已退役。
+
+`constants::PreparedObservations` 独占本次输入事实的临时安装／退出，完整安装前
+的预算失败也须撤销已安装部分。退出只恢复本包涉及的 partial 与 immutable 项，
+不恢复整张表、复活子检查已失效的外围存储事实，且不退还已消费的预算。
+普通子检查结束或失败后，先退出观察与本帧默认值 guard，再观察并记录结果身份。
+
+当前调用者环境仍由外层 `plan_declaration_inputs` 保存和恢复；槽位帧借用同一
+Checker 与 HIR。路由、展开、收集和依赖域预检仍同步，子请求的驱动适配器仍要求
+完整检查结果。这里还没有跨 VM 的响应收据、可迁移 Checker 或待定 Type 的执行
+入口；失败终止本次准备，不能把保留的检查位置称为已支持外部补值／补预算恢复。
+
 pending 根据**原始 callee 域**中依赖本次尚未供应参数的交集判断，再在 caller 域中
 检查实际值。含 rigid 不自动 pending；调用者的合法泛型域不必闭合。依赖在替换前
 识别，避免递归／换参时 caller 与 callee 同号声明导致二次误判；观察结果不重复替换。
@@ -877,6 +893,7 @@ callable 签名对实际 Type 的消费。只增加 owner、请求枚举或可�
 | 控制／输入事实边界 | `luna/tests/{control_boundaries,scoped_input_observation,required_input_scopes}.rs`；`/tmp/luna-tools-6u3qftz2/result.json`，退出 0 |
 | 声明输入与已知泛型域 | `luna/tests/{clause_source_dependencies,clause_packet_preparation,normal_input_plans,trait_domain_substitution}.rs`；`/tmp/luna-tools-zy_crm7s/result.json`、`/tmp/luna-tools-timkx462/result.json`，退出 0 |
 | 输入依赖后继 | `luna/tests/ordinary_dependency_tasks.rs`，含 72 层无环默认链及根调用次数；`/tmp/luna-tools-sdgv1vw8/result.json`，退出 0 |
+| 声明槽位后继与临时观察退出 | 在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 900 -- test -p luna --test declaration_input_plans --test ordinary_clause_collectors --test ordinary_callable_types --test normal_input_plans --test type_spreads --test default_calls --test library_std_format --no-fail-fast -- --test-threads=1`，`/tmp/luna-tools-k8_euqcn/result.json` 退出 101：217 项通过，7 项在 VM 初始化失败，2 项原待定 Type 正例保持 ignored。7 项在 `1800a2bf` 编译器基线同样报 UnmaterializedDispatch（`/tmp/luna-tools-9kbmtex2/result.json`）；`b4872073` 为真实 sysroot 测试接回已有源码查询服务，原断言、两引擎选择及预算不变，基线复验 7 项通过（`/tmp/luna-tools-q2ecn5e_/result.json`）。恢复本次实现后，以同入口运行 elaboration/lib、ordinary_callable_types、ordinary_clause_collectors、contextual_input_regions、library_std 的相关过滤项，`/tmp/luna-tools-3tfwc5vz/result.json` 退出 0，15 项通过，覆盖上述 7 项、默认值退出、宿主输出、观察安装失败与 dump；完整参数见报告。已改 Rust 的 scoped rustfmt 检查退出 0，`/tmp/luna-tools-6yied94m/result.json`。这些结果不代表外部 Type 响应接线完成 |
 | 路由与源码适配 | `program/input_routing` 单元测试及 `luna/tests/{default_calls,type_spreads,cmtt_methods}.rs`；`/tmp/luna-tools-2x37n5o8/result.json`，退出 0，仍含两项 ignored |
 | required 依赖发现 | `program/required/dependencies.rs` 及 `luna/tests/required_input_scopes.rs`；`/tmp/luna-tools-zrknan4h/result.json`，退出 0 |
 | 帧绑定交接 | `bytecode::input_preparation_tests` 及 `luna/tests/clause_packet_preparation.rs`；`/tmp/luna-tools-r52uh6us/result.json`，退出 0 |

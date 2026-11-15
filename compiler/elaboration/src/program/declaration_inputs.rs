@@ -1,6 +1,7 @@
 //! Shared source-order input plans, independent of the eventual type constructor.
 use super::*;
 mod progress;
+mod slots;
 
 /// Consumers that cannot yet suspend frontend checking require ordinary typed
 /// expressions. Both consumers retain the same routing and execution plan.
@@ -149,7 +150,6 @@ impl std::fmt::Display for PreparedDeclarationInputs {
     }
 }
 
-#[derive(Clone)]
 enum RoutedDeclarationInput<'a, 'h> {
     Source(&'a Expr<'h>),
     Prepared(n::Expr),
@@ -573,7 +573,7 @@ impl Checker<'_, '_> {
             } else {
                 vec![None; inputs.len()]
             };
-            let mut routed = vec![None; parameters.len()];
+            let mut routed = (0..parameters.len()).map(|_| None).collect::<Vec<_>>();
             let mut preparations = vec![Vec::new(); inputs.len()];
             let mut order = Vec::new();
             let mut routing = clause_inputs::ClauseInputRouting::new(&clauses, inputs, span)?;
@@ -854,250 +854,19 @@ impl Checker<'_, '_> {
                 let slot = collector.expect("collected inputs have a collector");
                 routed[slot] = Some(RoutedDeclarationInput::Collected(collected));
             }
-            while let Some(slot) = progress.current() {
-                if routed[slot].is_none()
-                    && matches!(
-                        clauses[slot].kind,
-                        hir::clause::ClauseParamKind::Varadic(..)
-                    )
-                {
-                    // An unsupplied collector has zero elements, not a missing
-                    // required input. Keep it in the normal-form telescope.
-                    let ty = self.instantiate_input_types(
-                        &parameters[slot].2,
-                        progress.observed_parameters(),
-                        progress.observed_values(),
-                        span,
-                    )?;
-                    if self.list_element_type(&ty).is_none() {
-                        return Err(error(
-                            span,
-                            "normal-form variadic collector requires meta.List<T>",
-                        ));
-                    }
-                    let identity =
-                        self.checked_collected_list_in(&[], &ty, &prepared_bindings, span)?;
-                    self.locals.insert(progress.binding(slot), ty.clone());
-                    progress.record(
-                        slot,
-                        n::NormalFormArgument::Value(n::Expr {
-                            source: source(span),
-                            ty,
-                            kind: K::TypeList(Vec::new()),
-                        }),
-                        identity,
-                        &mut self.required_steps,
-                        span,
-                    )?;
-                    continue;
-                }
-                let mut dependent = self.declaration_domain_pending(
-                    &parameters[slot].2,
-                    parameters,
-                    progress.observed_parameters(),
-                    span,
-                )?;
-                let ty = if matches!(&routed[slot], Some(RoutedDeclarationInput::Source(_)))
-                    && dependent
-                {
-                    let domain = self.declaration_input_domain(
-                        slot,
-                        parameters,
-                        &mut routed,
-                        &mut prepared_bindings,
-                        &mut progress,
-                        span,
-                    )?;
-                    dependent = domain.pending;
-                    domain.ty
-                } else {
-                    self.instantiate_input_types(
-                        &parameters[slot].2,
-                        progress.observed_parameters(),
-                        progress.observed_values(),
-                        span,
-                    )?
-                };
-                let explicit = routed[slot].as_ref();
-                let declaration_default = explicit.is_none()
-                    && matches!(
-                        clauses[slot].kind,
-                        hir::clause::ClauseParamKind::Optional(..)
-                    )
-                    && checking == InputChecking::Contextual
-                    && self.normal_parameters.contains_key(&owner);
-                let input = match explicit {
-                    Some(RoutedDeclarationInput::Source(input)) => Some(*input),
-                    Some(
-                        RoutedDeclarationInput::Prepared(_) | RoutedDeclarationInput::Collected(_),
-                    ) => None,
-                    None if declaration_default => None,
-                    None => {
-                        // Defaults use the declaration environment; explicit inputs
-                        // retain the caller environment, including member projections.
-                        if let Some(defaults) = defaults {
-                            self.alias_substitution = defaults.substitution.clone();
-                            self.alias_value_bindings = defaults.bindings.clone();
-                            self.normal_default_bindings = defaults.normal_bindings.clone();
-                            self.context = defaults.context.clone();
-                        }
-                        // Only preceding declaration inputs enter this default.
-                        for previous in 0..slot {
-                            self.alias_substitution.remove(&parameters[previous].0);
-                            self.alias_value_bindings.remove(&parameters[previous].0);
-                            self.normal_default_bindings.remove(&parameters[previous].0);
-                            if !progress.is_prepared(previous) {
-                                return Err(error(
-                                    span,
-                                    "normal-form default awaits preceding input",
-                                ));
-                            }
-                            if parameters[previous].2 == p(P::Type) {
-                                if let Some(ty) = progress.identity(previous) {
-                                    self.alias_substitution.insert(
-                                        parameters[previous].0,
-                                        std::sync::Arc::new(ty.clone()),
-                                    );
-                                } else {
-                                    self.alias_value_bindings
-                                        .insert(parameters[previous].0, progress.binding(previous));
-                                }
-                            } else {
-                                // A value prefix contributes to later type identities
-                                // as well as to executable default expressions. Keep
-                                // the local for evaluation and the known term for
-                                // dependent nominal domains; neither runs input code.
-                                if let Some(value) = progress.identity(previous) {
-                                    let value = self.copy_alias_type(value, span)?;
-                                    self.alias_substitution
-                                        .insert(parameters[previous].0, std::sync::Arc::new(value));
-                                }
-                                self.normal_default_bindings.insert(
-                                    parameters[previous].0,
-                                    (
-                                        progress.binding(previous),
-                                        self.instantiate_input_types(
-                                            &self.locals[&progress.binding(previous)],
-                                            progress.observed_parameters(),
-                                            progress.observed_values(),
-                                            span,
-                                        )?,
-                                    ),
-                                );
-                            }
-                        }
-                        self.signature_owner = Some(owner);
-                        self.context = self.binder_context(owner);
-                        self.in_required_comptime = true;
-                        let hir::clause::ClauseParamKind::Optional(_, _, default) =
-                            clauses[slot].kind
-                        else {
-                            return Err(error(span, "normal-form argument count mismatch"));
-                        };
-                        Some(default)
-                    }
-                };
-                if explicit.is_none()
-                    && (self.active_type_defaults.len() >= 64
-                        || !self.active_type_defaults.insert((owner, slot)))
-                {
-                    return Err(error(
-                        span,
-                        "cyclic or excessively deep normal-form default",
-                    ));
-                }
-                let checked = (|| {
-                    let checked = if declaration_default {
-                        self.connected_normal_default(owner, slot, &progress, span)
-                            .map(n::NormalFormArgument::Value)
-                    } else if let Some(RoutedDeclarationInput::Collected(items)) = explicit {
-                        if (!dependent || checking == InputChecking::Typed)
-                            && items.iter().all(|item| {
-                                matches!(
-                                    item,
-                                    n::NormalFormArgument::Value(_)
-                                        | n::NormalFormArgument::ListSpread(_)
-                                )
-                            })
-                        {
-                            let mut collection = super::clause_inputs::ClauseCollection::default();
-                            for item in items {
-                                match item {
-                                    n::NormalFormArgument::Value(value) => {
-                                        collection.push_element(value.clone())
-                                    }
-                                    n::NormalFormArgument::ListSpread(value) => {
-                                        collection.push_spread(value.clone())
-                                    }
-                                    _ => unreachable!("checked collection input"),
-                                }
-                            }
-                            self.clause_collection_expression(collection, ty.clone(), span)
-                                .map(n::NormalFormArgument::Value)
-                        } else {
-                            Ok(n::NormalFormArgument::List {
-                                source: source(span),
-                                items: items.clone(),
-                            })
-                        }
-                    } else if let Some(RoutedDeclarationInput::Prepared(value)) = explicit {
-                        if !dependent {
-                            self.require_expression(&value.ty, &ty, span)?;
-                        }
-                        Ok(n::NormalFormArgument::Value(value.clone()))
-                    } else if dependent && checking == InputChecking::Contextual {
-                        self.dependent_normal_argument(input.unwrap(), 0)
-                    } else {
-                        self.with_prepared_input_observations(&prepared_bindings, span, |this| {
-                            this.expr(input.unwrap(), (!dependent).then_some(&ty))
-                        })
-                        .map(n::NormalFormArgument::Value)
-                    };
-                    checked.map(|value| (value, dependent))
-                })();
-                if explicit.is_none() {
-                    self.active_type_defaults.remove(&(owner, slot));
-                }
-                let (value, dependent) = checked.map_err(|mut failure| {
-                    if parameters[slot].2 != p(P::Type) && failure.message.contains("type mismatch")
-                    {
-                        failure.message = format!(
-                            "normal-form value argument type mismatch: {}",
-                            failure.message
-                        );
-                    }
-                    failure
-                })?;
-                let identity = match &value {
-                    n::NormalFormArgument::List { items, .. } if !dependent => {
-                        self.checked_collected_list_in(items, &ty, &prepared_bindings, span)?
-                    }
-                    _ => match value.expression() {
-                        Some(value) => self.preserved_input_identity(
-                            value,
-                            prepared_bindings
-                                .iter()
-                                .map(|(binding, term)| (*binding, term.as_ref())),
-                            span,
-                        )?,
-                        None => None,
-                    },
-                };
-                let ty = value.expression().map(|expr| expr.ty.clone()).unwrap_or(ty);
-                self.record_declaration_input(
-                    &mut progress,
-                    slot,
-                    value,
-                    identity,
-                    ty,
-                    &mut prepared_bindings,
-                    span,
-                )?;
-            }
-            self.signature_owner = saved_owner;
-            self.context = saved_context.clone();
-            self.in_required_comptime = saved_mode;
-            progress.finish(preparations, span)
+            slots::Frame::new(
+                owner,
+                span,
+                parameters,
+                clauses,
+                defaults,
+                checking,
+                routed,
+                prepared_bindings,
+                progress,
+                preparations,
+            )
+            .drive(self)
         })();
         self.locals = saved_locals;
         self.normal_default_bindings = saved_bindings;

@@ -147,6 +147,37 @@ fn all_constructors_keep_early_return_before_later_producers() {
 }
 
 #[test]
+fn nested_slot_defaults_keep_each_prefix_and_caller_names_separate() {
+    check_both(
+        "
+        comptime fn copied() -> bool
+        where value: bool, .copy: bool = value
+        { copy }
+        comptime fn select() -> bool
+        where first: bool, .second: bool = copied<first>(), .third: bool = second
+        { first and second and third }
+        struct Mark
+        where first: bool, .second: bool = copied<first>(), .third: bool = second
+        {}
+        comptime fn check() -> bool {
+            let first = false;
+            let second = false;
+            let third = false;
+            let yes = select<true>;
+            let no = select<false>;
+            let positive = yes();
+            let negative = no();
+            let marker = Mark<true>;
+            positive and not negative
+                and marker == Mark<true, .second = true, .third = true>
+                and not first and not second and not third
+        }
+        ",
+        &["check", "copied", "copied", "select", "select", "copied"],
+    );
+}
+
+#[test]
 fn callable_packet_prefix_receives_context_before_a_list_collector() {
     check_both(
         "

@@ -3,7 +3,9 @@
 use super::*;
 use comptime_interpretor::{ClosureIdentity, Value};
 mod observations;
+mod prepared_observations;
 use observations::ObservationScope;
+pub(super) use prepared_observations::PreparedObservations;
 
 #[cfg(test)]
 mod input_fact_tests;
@@ -1938,40 +1940,9 @@ impl Checker<'_, '_> {
         span: Span,
         check: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let mut saved = Vec::new();
-        let result = (|| {
-            for (binding, identity) in facts {
-                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let before = fuel;
-                let copied = nir::copy_budget::clone_term(identity, &mut fuel);
-                self.required_steps -= (before - fuel) as u64;
-                let copied = copied.map_err(|failure| {
-                    error(
-                        span,
-                        format!("prepared input observation failed: {failure:?}"),
-                    )
-                })?;
-                let previous = self
-                    .input_facts
-                    .partial
-                    .insert(*binding, PartialStagedValue::known(copied));
-                let newly_immutable = self.immutable.insert(*binding);
-                saved.push((*binding, previous, newly_immutable));
-            }
-            check(self)
-        })();
-        // Restore only this packet's entries. Writes to unrelated enclosing
-        // storage must keep their ordinary observation invalidations.
-        for (binding, previous, newly_immutable) in saved {
-            if let Some(previous) = previous {
-                self.input_facts.partial.insert(binding, previous);
-            } else {
-                self.input_facts.partial.remove(&binding);
-            }
-            if newly_immutable {
-                self.immutable.remove(&binding);
-            }
-        }
+        let scope = PreparedObservations::enter(self, facts, span)?;
+        let result = check(self);
+        scope.leave(self);
         result
     }
 
