@@ -101,6 +101,29 @@ thread_local 且入口保存/恢复外层控制指针；这不等于一般跨激
 指针布局；lambda/模板缺精确依赖，签名阶段就捕获整个外层。下游无法可靠补回丢掉的信息。
 必须由首次知道事实的生产者交付证据，再由变换维护；拒绝不应靠不断补白名单解除。
 
+开放定义曾用 `describable_open_type` 递归列举可以描述的 NF 输入语法，随后却
+无条件把应用头解构为 `ResolvedDef`。这个列表接受函数参数／局部变量头，因此
+`factory<input>` 会在定义检查中 panic；它又遗漏 `when` 等已具备正常检查规则的
+表达式，使语法形状错误地决定检查路径。`open_normal_form_inputs` 在修复前的
+当前工作树复现该 panic（`/tmp/luna-tools-29af7rms/result.json`，退出 101）。
+
+该白名单现已删除。仅直接声明头进入声明望远镜描述；函数值头通过已有普通 NF
+callable 检查取得签名证据。声明参数的控制流和子表达式直接接受正常的开放表达式
+检查，保留域、数量与定义端拒绝。实际返回值仍带原 NF 头及普通实参；不从函数体
+推导头的展开或不等性。这里没有完成开放定义的整个语义路径统一：成员依赖分支、
+NF 声明域描述与通用输入准备仍须继续合并，动态 NF 具名接口与源码／VM 恢复也
+仍未接通。这个修复不能计作完整 `Parse(format)` 的实现。
+
+验证工作目录为 `/home/fin/luna`。经
+`python3 -B development/check.py --timeout 900 -- test -p luna --test open_normal_form_inputs --test open_functions --test comptime_bytecode_types --no-fail-fast -- --test-threads=1 normal`
+运行，`/tmp/luna-tools-3lyx3mua/result.json` 退出 0，26 项通过。随后同入口运行
+`test -p luna --test open_normal_form_inputs --test comptime_bytecode_types --no-fail-fast -- --test-threads=1 open_declaration_inputs_use_ordinary_control_flow_checks dynamic_type_factories`，
+`/tmp/luna-tools-nispudgn/result.json` 退出 0，补验 2 项；两轮合计覆盖新增六项及相关
+22 项既有行为。新增用例使用真实 sysroot，bool 正例核对两引擎与具体 IIR 路径；
+Type 返回用例直接断言两引擎产生的 Type 值的头和实参，不把 `Identity<T> != T` 的可证明性
+当作头不展开的前提。定向 rustfmt 检查退出 0（`/tmp/luna-tools-4d9sij_o/result.json`）。
+保留工作区原有修改，未执行全量测试。
+
 ### 4.3 一个可变检查器承担太多事务
 
 手工保存 owner、locals、captures、returns、context、pending obligations 的方式，使

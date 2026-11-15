@@ -146,50 +146,6 @@ fn annotation_source<'h>(sig: &hir::item::FnSig<'h>, slot: usize) -> Option<&'h 
     }
 }
 
-fn describable_open_type(expr: &Expr<'_>, depth: usize) -> bool {
-    if depth >= 128 {
-        return false;
-    }
-    match expr.kind {
-        H::ResolvedLocal(..) | H::ResolvedFnParam(..) | H::ResolvedClauseParam(..) | H::Builtin(_)
-        | H::TyType | H::TyVoid | H::TyNoReturn | H::Lit(_)
-        | H::Break(_) | H::BreakTo(_) | H::Continue(_) | H::ContinueTo(_) => true,
-        // A resolved, unapplied declaration is checked by type_expr when the
-        // structure resumes. Merely referring to it does not unfold its head.
-        H::ResolvedDef { has_clause_param: false, .. } => true,
-        H::Tuple(items) | H::List(items) => items.iter().all(|item| describable_open_type(item, depth + 1)),
-        H::Application(head, arguments) | H::NFApplication(head, arguments) => matches!(head.kind, H::ResolvedDef { .. } | H::ResolvedFnParam(..) | H::ResolvedLocal(..) | H::Projection(..))
-            && arguments.iter().all(|argument| match argument {
-                Arg::Positional(value) | Arg::Named(_, value) => describable_open_type(value, depth + 1),
-                Arg::Expand(value) => match value.kind {
-                    H::Tuple(fields) => fields.iter().all(|field| describable_open_type(field, depth + 1)),
-                    H::Unit => true,
-                    _ => describable_open_type(value, depth + 1),
-                },
-                _ => false,
-            }),
-        H::Match(value, arms) => describable_open_type(value, depth + 1)
-            && arms.iter().all(|arm| arm.guard.is_none_or(|guard| describable_open_type(guard, depth + 1))
-                && describable_open_type(arm.body, depth + 1)),
-        H::Let(binding) => [binding.ty, binding.init, binding.guard, binding.otherwise]
-            .into_iter().flatten().all(|value| describable_open_type(value, depth + 1)),
-        H::Semi(value) => describable_open_type(value, depth + 1),
-        H::Assign(left, right) => describable_open_type(left, depth + 1) && describable_open_type(right, depth + 1),
-        H::Block(block) | H::Loop(block) => block.stmts.iter().chain(block.expr).all(|value| describable_open_type(value, depth + 1)),
-        H::If(condition, yes, no) => describable_open_type(condition, depth + 1)
-            && yes.stmts.iter().chain(yes.expr).all(|value| describable_open_type(value, depth + 1))
-            && no.is_none_or(|value| describable_open_type(value, depth + 1)),
-        H::Unary(UnOp::Not | UnOp::Neg, value) => describable_open_type(value, depth + 1),
-        H::Binary(_, left, right) => describable_open_type(left, depth + 1) && describable_open_type(right, depth + 1),
-        H::TyFnArrow(a, b) => describable_open_type(a, depth + 1) && describable_open_type(b, depth + 1),
-        H::TyPtr(inner) | H::TyOptional(inner) | H::Projection(inner, _) => describable_open_type(inner, depth + 1),
-        H::TyFn(parameters) => parameters.iter().all(|parameter| {
-            matches!(parameter.kind, TyParamKind::Positional(ty) if describable_open_type(ty, depth + 1))
-        }),
-        _ => false,
-    }
-}
-
 #[derive(Clone)]
 pub(super) enum Annotation {
     Known(Term),
@@ -3061,16 +3017,20 @@ impl Checker<'_, '_> {
                 // argument list, routing, defaults and formation requirements.
                 D::Any
             }
-            H::NFApplication(head, arguments) if describable_open_type(expr, 0) => {
+            H::NFApplication(head, arguments) => {
+                // A callable's signature is evidence even when its value is
+                // supplied by a parameter or local. Only declaration heads
+                // use the declaration telescope below; source syntax does not
+                // establish that a callable has a known declaration identity.
+                let H::ResolvedDef { def_id, .. } = head.kind else {
+                    return self.describe_known_region(expr, expected);
+                };
                 let inputs = self.source_expression_inputs(expr.hir_id.owner, expr)?;
                 // Source locals and captures of referenced local declarations
                 // remain dependencies even without a direct parameter node.
                 if inputs.is_empty() {
                     return self.describe_known_region(expr, expected);
                 }
-                let H::ResolvedDef { def_id, .. } = head.kind else {
-                    unreachable!()
-                };
                 let owner = self
                     .package
                     .definition_owner(def_id)
