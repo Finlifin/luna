@@ -1372,3 +1372,82 @@ fn nested_ordinary_match_frames_preserve_the_original_return_target() {
         );
     }
 }
+
+#[test]
+fn callable_clause_regions_preserve_nested_producers_and_value_delivery() {
+    check_both(
+        "comptime fn leaf() -> bool { true }
+         comptime fn forward() -> bool
+         where next: comptime fn() -> bool
+         { next() }
+         comptime fn check() -> bool {
+             var trace: Integer = 0;
+             let callback = forward<do {
+                 trace = trace * 10 + 1;
+                 forward<do { trace = trace * 10 + 2; leaf }>
+             }>;
+             callback() and trace == 12
+         }",
+        &["check", "forward", "forward", "leaf"],
+    );
+}
+
+#[test]
+fn callable_clause_regions_keep_early_return_before_instance_publication() {
+    check_both(
+        "comptime fn leaf() -> bool { false }
+         comptime fn forward() -> bool
+         where next: comptime fn() -> bool
+         { next() }
+         comptime fn check() -> bool {
+             let callback = forward<do { return true; forward<leaf> }>;
+             callback()
+         }",
+        &["check"],
+    );
+}
+
+#[test]
+fn callable_clause_regions_reject_nested_domains_and_preserve_outer_scope() {
+    let declarations = "
+        comptime fn leaf() -> bool { true }
+        comptime fn forward() -> bool
+        where next: comptime fn() -> bool
+        { next() }
+    ";
+    let invalid =
+        format!("{declarations} comptime fn check() -> bool {{ forward<forward<false>>() }}");
+    let failure = sysroot::compile(&invalid).unwrap_err();
+    assert!(failure.contains("type mismatch"), "{failure}");
+    check_both(
+        &format!(
+            "{declarations}
+            comptime fn check() -> bool {{
+                let next = true;
+                let callback = forward<forward<leaf>>;
+                callback() and next
+            }}"
+        ),
+        &["check", "forward", "forward", "leaf"],
+    );
+}
+
+#[test]
+fn callable_clause_regions_check_deeply_nested_callable_inputs() {
+    let depth = 16;
+    let mut value = "leaf".to_owned();
+    for _ in 0..depth {
+        value = format!("forward<{value}>");
+    }
+    let source = format!(
+        "comptime fn leaf() -> bool {{ true }}
+         comptime fn forward() -> bool
+         where next: comptime fn() -> bool
+         {{ next() }}
+         comptime fn check() -> bool {{ let callback = {value}; callback() }}"
+    );
+    let mut calls = vec!["check"];
+    calls.extend(std::iter::repeat_n("forward", depth));
+    calls.push("leaf");
+    check_both(&source, &calls);
+}

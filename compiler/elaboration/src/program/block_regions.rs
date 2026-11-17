@@ -6,6 +6,7 @@ use constants::StagedPatternSnapshot;
 pub(super) mod arithmetic;
 mod comparisons;
 mod conditionals;
+mod declaration_applications;
 mod destinations;
 mod driver;
 mod logical;

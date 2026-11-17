@@ -571,6 +571,39 @@ NF 准备。`begin` 是同步与区域消费者共同的有预算准入入口。
 带捕获声明的供应、生成器数据处理及非 primitive 交付适配仍先经过原有前置规则，
 不会因源头看起来是 NF 就跳过它们。
 
+普通 comptime callable 的子句准备现也进入这个 Region 栈。原先
+`comptime_function_instance` 同步调用整个输入驱动，再在宿主栈上保留签名收尾；
+现在 `InstanceCompletion` 拥有原表达式来源、声明 packet 完成步骤、签名、期望类型
+及函数值交付责任。参数准备完成并退出调用者环境边界后，才消费这一完成步骤。
+旧同步入口只驱动同一个区域帧；不保留第二套函数实例组装逻辑。
+
+opaque NF 与普通 callable 共享 `declaration_applications::Frame` 的子请求、
+结果交回、探测失败处理和 scope 退出，完成规则仍分别检查各自的形成语义。
+直接声明的嵌套 callable 应用可留在同一检查栈，包含 comptime 函数类型作为参数域
+的情况；这些域仍经过普通 delivery 前置规则，不跳过 optional／error 适配。
+声明的词法前缀仍由已有入口取得，显式输入继续在 caller 环境检查，默认值在其
+提供者环境检查；方法与其他未迁移入口仍先走已有解析，再驱动共同准备。
+
+源码回归新增 16 层 callable 输入、嵌套写入、提前 return、错误内层参数与外层
+同名绑定保留，使用真实 sysroot，并由两种 VM 引擎检查最终值及函数进入次序。
+这项迁移只保留检查后继：一般普通实参准备、源码 continuation 与原 VM 片段交接
+仍未完成。尤其 pending Type 影响最终签名时仍拒绝交付，不能提前冻结或执行
+producer 来使此边界看似完成。
+
+验证以 `38f79806` 加本次改动为基线，工作目录 `/home/fin/luna`。
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna
+--test ordinary_callable_types --test type_input_execution_order
+--test ordinary_clause_collectors --test staged_callable_freezing --test default_calls
+--test ordinary_input_identity --test library_std_format --no-fail-fast -- --test-threads=1`
+退出 0，报告 `/tmp/luna-tools-_pyiz32b/result.json`。随后补齐捕获／delivery 前置
+边界，执行 `python3 -B development/check.py --timeout 900 -- test -p luna
+--test contextual_input_regions --test ordinary_callable_types -- callable_clause_regions
+declaration_default early_default_domain sibling_callable_defaults --test-threads=1`，
+两组共 10 项通过，报告 `/tmp/luna-tools-zpf_oc6x/result.json` 退出 0。
+输出锚点均为各组 `test result: ok`；已知 ignored 正例未改成通过断言。
+修改文件的 rustfmt 报告为 `/tmp/luna-tools-c3qruebj/result.json` 和最后调整后的
+`/tmp/luna-tools-da_mecsa/result.json`，均退出 0；未修改正式 docs 或工作区原有文件。
+
 路由、收集、依赖域与槽位已有共同子检查后继，帧仍借用同一 Checker 与 HIR。
 布局提示扫描、其他表达式种类及非 NF 消费者仍有同步适配；新区域帧没有 VM 响应
 收据、可迁移 Checker 或待定 Type 的执行入口。失败终止本次准备，不能把保留的

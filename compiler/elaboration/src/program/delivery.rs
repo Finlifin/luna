@@ -150,6 +150,30 @@ impl Checker<'_, '_> {
         }
     }
 
+    /// Closed callable shapes cannot require optional/error injection. Still
+    /// run their ordinary delivery prelude before entering a retained region.
+    pub(super) fn prepare_region_callable_delivery(
+        &mut self,
+        expr: &Expr<'_>,
+        target: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<bool, Error> {
+        let Some(target) = target.filter(|target| !matches!(target, Term::Primitive(_))) else {
+            return Ok(true);
+        };
+        if !target.is_comptime_callable() {
+            return Ok(false);
+        }
+        self.charge_expression_delivery(expr.span)?;
+        match self.prepare_delivery(expr, Cow::Borrowed(target), partial)? {
+            Step::Unadapted(_) => Ok(true),
+            _ => Err(error(
+                expr.span,
+                "callable expression lost its direct delivery rule",
+            )),
+        }
+    }
+
     /// The synchronous adapter drives the same post-child rules. General
     /// expression checking is still an atomic call here; no suspended source
     /// region or external Type response is manufactured by this adapter.

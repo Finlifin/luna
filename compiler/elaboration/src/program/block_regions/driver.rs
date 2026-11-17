@@ -150,6 +150,9 @@ enum RegionFrame<'b, 'h> {
     Comparison(comparisons::Frame<'b, 'h>),
     Logical(logical::Frame<'b, 'h>),
     NormalApplication(normal_applications::Frame<'h>),
+    CallableApplication(
+        declaration_applications::Frame<'h, dynamic_instances::InstanceCompletion<'h>>,
+    ),
 }
 
 impl RegionFrame<'_, '_> {
@@ -162,6 +165,7 @@ impl RegionFrame<'_, '_> {
             Self::Comparison(_) | Self::Arithmetic(_) => {}
             Self::Logical(frame) => frame.unwind(checker),
             Self::NormalApplication(frame) => frame.unwind(checker),
+            Self::CallableApplication(frame) => frame.unwind(checker),
         }
     }
 }
@@ -177,6 +181,7 @@ impl std::fmt::Display for RegionFrame<'_, '_> {
             Self::Arithmetic(frame) => frame.fmt(f),
             Self::Logical(frame) => frame.fmt(f),
             Self::NormalApplication(frame) => frame.fmt(f),
+            Self::CallableApplication(frame) => frame.fmt(f),
         }
     }
 }
@@ -246,6 +251,23 @@ impl<'b, 'h> BlockFrame<'b, 'h> {
 }
 
 impl<'a, 'arena> Checker<'a, 'arena> {
+    pub(in crate::program) fn check_callable_application_region<'h>(
+        &mut self,
+        preparation: declaration_inputs::preparation::Frame<
+            'h,
+            dynamic_instances::InstanceCompletion<'h>,
+        >,
+        span: Span,
+    ) -> Result<n::Expr, Error>
+    where
+        'a: 'h,
+        'arena: 'h,
+    {
+        self.drive_check_region(RegionFrame::CallableApplication(
+            declaration_applications::Frame::from_preparation(span, preparation),
+        ))?
+        .ordinary(span)
+    }
     pub(in crate::program) fn logical_expression(
         &mut self,
         expr: &Expr<'_>,

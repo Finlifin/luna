@@ -213,7 +213,10 @@ impl<'h, C: Completion> Frame<'h, C> {
         }
     }
 
-    pub(super) fn drive(mut self, checker: &mut Checker<'_, '_>) -> Result<C::Output, Error> {
+    pub(in crate::program) fn drive(
+        mut self,
+        checker: &mut Checker<'_, '_>,
+    ) -> Result<C::Output, Error> {
         let result = (|| loop {
             match self.poll(checker)? {
                 Poll::Continue => {}

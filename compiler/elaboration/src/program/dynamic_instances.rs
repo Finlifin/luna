@@ -186,7 +186,83 @@ impl std::fmt::Display for CallableCompletion {
     }
 }
 
-impl Checker<'_, '_> {
+/// The final consumer survives every clause-input child check. No signature is
+/// published before both the packet and its declaration-side checks complete.
+pub(super) struct InstanceCompletion<'h> {
+    packet: CallableCompletion,
+    expr: Expr<'h>,
+    signature: Term,
+    expected: Option<Term>,
+    allow_optional: bool,
+    delivery: Option<bool>,
+}
+
+impl declaration_inputs::Completion for InstanceCompletion<'_> {
+    const CHECKING: declaration_inputs::InputChecking = declaration_inputs::InputChecking::Typed;
+    type Output = n::Expr;
+
+    fn finish(
+        self,
+        checker: &mut Checker<'_, '_>,
+        telescope: &[(DeclarationId, Sort, Term)],
+        inputs: declaration_inputs::PreparedDeclarationInputs,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let owner = self.packet.owner;
+        checker.required_steps = checker
+            .required_steps
+            .checked_sub(self.packet.parameters.len() as u64)
+            .ok_or_else(|| error(span, "callable completion budget exhausted"))?;
+        let parameters = self.packet.parameters.clone();
+        let packet = self.packet.finish(checker, telescope, inputs, span)?;
+        let value = checker.finish_comptime_function_instance(
+            &self.expr,
+            owner,
+            &parameters,
+            self.signature,
+            packet,
+            self.expected.as_ref(),
+            self.allow_optional,
+        )?;
+        let Some(preserve_effect) = self.delivery else {
+            return Ok(value);
+        };
+        let value = checker.callable_value_view(value, self.expected.as_ref(), span)?;
+        if preserve_effect {
+            Ok(value)
+        } else {
+            checker.run_computation(value, self.expected.as_ref(), span)
+        }
+    }
+}
+
+impl std::fmt::Display for InstanceCompletion<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(callable-instance-completion (source {} {}) {} (signature {}) (expected",
+            self.expr.hir_id,
+            source(self.expr.span),
+            self.packet,
+            self.signature
+        )?;
+        if let Some(expected) = &self.expected {
+            write!(f, " {expected}")?;
+        }
+        write!(
+            f,
+            ") (allow-optional {}) (delivery {}))",
+            self.allow_optional,
+            match self.delivery {
+                None => "caller",
+                Some(true) => "preserve",
+                Some(false) => "consume",
+            }
+        )
+    }
+}
+
+impl<'a, 'arena> Checker<'a, 'arena> {
     /// A negative proof rejects an already known conflict. Failure to prove a
     /// conflict does not admit the value: the receiving invocation or required
     /// input consumer must check the actual completed domain before publication.
@@ -294,6 +370,36 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         allow_optional: bool,
     ) -> Result<Option<n::Expr>, Error> {
+        let Some(preparation) = self.begin_comptime_function_instance(
+            expr,
+            owner,
+            args,
+            prefix,
+            expected,
+            allow_optional,
+            None,
+        )?
+        else {
+            return Ok(None);
+        };
+        self.check_callable_application_region(preparation, expr.span)
+            .map(Some)
+    }
+
+    pub(super) fn begin_comptime_function_instance<'h>(
+        &mut self,
+        expr: &Expr<'h>,
+        owner: OwnerId,
+        args: &[Arg<'h>],
+        prefix: &[Term],
+        expected: Option<&Term>,
+        allow_optional: bool,
+        delivery: Option<bool>,
+    ) -> Result<Option<declaration_inputs::preparation::Frame<'h, InstanceCompletion<'h>>>, Error>
+    where
+        'a: 'h,
+        'arena: 'h,
+    {
         if self.runtime_value_context() || self.in_code_body {
             return Ok(None);
         }
@@ -347,7 +453,40 @@ impl Checker<'_, '_> {
             arguments::require_function_value_parameters(sig.params, expr.span)?;
         }
         let packet =
-            self.prepare_callable_clause_packet(expr, owner, args, prefix, &parameters, &domains)?;
+            CallableCompletion::retain(self, owner, &parameters, &domains, prefix, expr.span)?;
+        let expected = expected
+            .map(|ty| self.copy_alias_type(ty, expr.span))
+            .transpose()?;
+        let completion = InstanceCompletion {
+            packet,
+            expr: expr.clone(),
+            signature,
+            expected,
+            allow_optional,
+            delivery,
+        };
+        self.begin_callable_clause_packet(
+            expr,
+            owner,
+            args,
+            prefix,
+            &parameters,
+            &domains,
+            completion,
+        )
+        .map(Some)
+    }
+
+    fn finish_comptime_function_instance(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        parameters: &[DeclarationId],
+        signature: Term,
+        packet: CallableClausePacket,
+        expected: Option<&Term>,
+        allow_optional: bool,
+    ) -> Result<n::Expr, Error> {
         let signature =
             self.instantiate_input_types(&signature, &parameters, &packet.identities, expr.span)?;
         if packet
@@ -367,22 +506,26 @@ impl Checker<'_, '_> {
             // Only an already checked static application can use the direct
             // instance and declaration-side default substitution. An observed
             // identity cannot erase producers or complete deferred contracts.
-            return self
-                .function_instance(expr, owner, packet.identities, expected, allow_optional)
-                .map(Some);
+            return self.function_instance(
+                expr,
+                owner,
+                packet.identities,
+                expected,
+                allow_optional,
+            );
         }
         let ty = self.callable_type(owner, signature);
         if let Some(expected) = expected {
             self.require(&ty, expected, expr.span)?;
         }
-        Ok(Some(n::Expr {
+        Ok(n::Expr {
             source: source(expr.span),
             ty,
             kind: K::ComptimeFunctionInstance {
                 declaration: declaration(self.package, &self.package_identities, owner),
                 subject: Box::new(packet.expression),
             },
-        }))
+        })
     }
 
     /// Prepare ordinary clause values without choosing their execution time or
@@ -397,6 +540,28 @@ impl Checker<'_, '_> {
         parameters: &[DeclarationId],
         domains: &[Term],
     ) -> Result<CallableClausePacket, Error> {
+        let completion =
+            CallableCompletion::retain(self, owner, parameters, domains, prefix, expr.span)?;
+        self.begin_callable_clause_packet(
+            expr, owner, args, prefix, parameters, domains, completion,
+        )?
+        .drive(self)
+    }
+
+    fn begin_callable_clause_packet<'h, C: declaration_inputs::Completion>(
+        &mut self,
+        expr: &Expr<'h>,
+        owner: OwnerId,
+        args: &[Arg<'h>],
+        prefix: &[Term],
+        parameters: &[DeclarationId],
+        domains: &[Term],
+        completion: C,
+    ) -> Result<declaration_inputs::preparation::Frame<'h, C>, Error>
+    where
+        'a: 'h,
+        'arena: 'h,
+    {
         if parameters.len() != domains.len()
             || prefix.len() + self.type_clause_params(owner).len() != parameters.len()
         {
@@ -417,8 +582,6 @@ impl Checker<'_, '_> {
             &mut self.required_steps,
             expr.span,
         )?;
-        let completion =
-            CallableCompletion::retain(self, owner, parameters, domains, prefix, expr.span)?;
         let mut telescope = Vec::new();
         for (binder, domain) in self
             .input_binders(&parameters[prefix.len()..])
@@ -431,7 +594,8 @@ impl Checker<'_, '_> {
                 self.copy_alias_type(domain, expr.span)?,
             ));
         }
-        self.complete_declaration_inputs(
+        declaration_inputs::preparation::Frame::begin(
+            self,
             owner,
             args,
             expr.span,
@@ -580,6 +744,30 @@ mod packet_tests {
         );
         assert!(
             dump.contains(&format!("(input {parameter} {})", p(P::Str))),
+            "{dump}"
+        );
+        assert!(dump.contains("parent\\\"\\n"), "{dump}");
+        assert!(!dump.contains('\n'), "{dump}");
+        let instance = InstanceCompletion {
+            expr: Expr {
+                hir_id: hir::HirId::new(completion.owner, hir::ItemLocalId::new(0)),
+                span: Span::default(),
+                kind: H::Unit,
+            },
+            packet: completion,
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(p(P::Bool)),
+            },
+            expected: None,
+            allow_optional: false,
+            delivery: Some(true),
+        };
+        let dump = instance.to_string();
+        assert!(dump.starts_with("(callable-instance-completion"), "{dump}");
+        assert!(dump.contains("(signature (function"), "{dump}");
+        assert!(
+            dump.contains("(allow-optional false) (delivery preserve)"),
             "{dump}"
         );
         assert!(dump.contains("parent\\\"\\n"), "{dump}");
