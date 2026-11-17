@@ -5,6 +5,34 @@ mod sysroot;
 use comptime_interpretor::Value;
 
 #[test]
+fn distinct_pointer_slots_can_observe_the_same_pointee() {
+    for (domain, read, write, argument) in [
+        ("Links", "links.left.*", "links.right.*", "links"),
+        ("*Links", "links.left.*.*", "links.right.*.*", "links.ref"),
+    ] {
+        let source = format!(
+            "struct Links {{ left: *u8, right: *u8 }}
+            fn stable(links: {domain}, value: u8) -> bool {{
+                let before = {read};
+                {write} = value;
+                before == {read}
+            }}
+            fn run() -> bool {{
+                var byte: u8 = 41;
+                let links = Links {{ left: byte.ref, right: byte.ref }};
+                not stable({argument}, 0) and byte == 0
+            }}"
+        );
+        // An executable counterexample establishes why field names cannot
+        // prove pointee separation, independently of the verifier's rejection.
+        assert_eq!(sysroot::run(&source), Value::Bool(true), "{domain}");
+        let invalid = source.replacen("-> bool {", "-> result: bool where ensures result {", 1);
+        let failure = sysroot::compile(&invalid).unwrap_err();
+        assert!(failure.contains("postcondition"), "{domain}: {failure}");
+    }
+}
+
+#[test]
 fn sibling_stores_preserve_nested_and_aliased_observations() {
     let source = r#"
         struct Pair { left: u8, right: u8 }

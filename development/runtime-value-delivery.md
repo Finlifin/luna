@@ -159,7 +159,8 @@ comptime callable 传入 runtime 参数。生成器形参或局部数据未供�
 
 - 改动前重跑旧 CMTT 传送及嵌套指针观察用例，
   `/tmp/luna-tools-owx5nn8n/result.json` 退出 101，两项均复现；指针观察用例未在
-  本阶段修改，仍需按标量存储的分离规则核对其旧拒绝断言。
+  本阶段修改；其旧拒绝断言随后已按
+  [结构字段与 pointee 分离](solvers-resources-and-lowering.md#指针观察旧拒绝预期的纠正)分别核对。
 - 新投影 callee 对照在改动方法探查前失败于 `data.callback` 的 Nominal 转换，
   `/tmp/luna-tools-smbaezwr/result.json` 退出 101；显式函数转换对照通过。
 - `-p luna --test cmtt_methods --test library_std --no-fail-fast -- --test-threads=1`：

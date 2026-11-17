@@ -479,6 +479,43 @@ union/重叠 view 也不能复用普通 record 的字段分离判定。
 Rust 改动使用 rustfmt edition 2024、skip_children=true 格式化，最后一轮测试文件
 格式化证据 `/tmp/luna-tools-w9_mghwg/result.json`；工作区原有改动没有纳入提交。
 
+#### 指针观察旧拒绝预期的纠正
+
+`external_pointer_observations_track_nested_field_paths` 曾要求写入
+`p.right.value` 后不能证明 `p.left.value` 保持不变。它与正式
+[视图分离契约](../docs/resource-management/memory-views.md#分离性)冲突：例中两者
+是同一个普通结构的独立字段，没有加载另一指针或经过重叠表示，布局足以证明
+这次标量写入不覆盖左字段。错误断言不应推动检查器重新对所有写入执行全量失效。
+
+该用例现分别写入外层兄弟 `p.right.value` 与内层兄弟 `p.left.other`，要求原
+左字段后置条件成立，并在执行后核对被写字段确实变为 0。负例改为覆盖实际观察的
+`p.left.value`；改绑到另一个根、读取错误字段和调用错误子字段的负例仍保留，
+并区分 precondition 与 postcondition 诊断，不以任意编译错误充当契约拒绝。
+
+真实 sysroot 的对照在 Links 的两个指针槽中保存同一个字节地址。无“不变”承诺时
+执行能观察到左指针读出的值被右指针写入改变；加入该后置条件则拒绝。按值 Links
+与 `*Links` 间接加载都如此。这个可执行反例独立说明字段名分离不等于 pointee
+分离，不能把结构字段的正例推广到它们。
+
+11 项原指针观察测试现位于 `compiler/luna/tests/pointer_observations.rs`，其中
+10 项逐字保留正文；唯一语义预期修正如上。这样可以单独检查读事实、调用／默认值
+副作用、析构、别名与字段路径，而不必反复编译大型 execution 测试集。本项未修改
+生产验证器，PTC、资源存活与内存权限规则也未改变。
+
+验证目录 `/home/fin/luna`，统一经 `development/check.py --timeout 900 --`：
+
+- 修改前 `test -p luna --test execution -- pointer_observations --test-threads=1`：
+  10 项通过、一项旧断言失败，退出 101，`/tmp/luna-tools-wtvmabuk/result.json`。
+- 修改后 `test -p luna --test pointer_observations --test scalar_store_facts
+  --no-fail-fast -- --test-threads=1`：11 项观察测试及 3 项存储事实测试全部通过，
+  退出 0，`/tmp/luna-tools-3l2v7ecw/result.json`；stdout 的 `test result:` 为输出锚点。
+- `test -p luna --test execution --no-run`：剩余的大型测试目标编译通过，退出 0，
+  `/tmp/luna-tools-6lmtix8j/result.json`。没有运行全量 execution 或 workspace。
+
+三份 Rust 文件格式检查通过，`/tmp/luna-tools-xz8qp8n6/result.json`；抽取前后
+核对原 11 个测试名字与 10 份未改正文一致，diff 检查通过。上述结果包含保留的
+原有工作区改动；不声称完成一般内存足迹或指针来源分析。
+
 ## 7. 纯度的优化使用方式
 
 分析输出应包含层级、适用区间、依赖版本、读写/身份足迹、完成性和控制风险。

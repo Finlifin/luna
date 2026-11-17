@@ -788,6 +788,8 @@ Function；不先建立 Unit 占位再替换。以上是声明消费者的迁移
   `/tmp/luna-tools-ll9y52z_/result.json` 同样退出 101。该用例与已实现的同根不相交
   字段观察保留存在预期冲突（见[标量存储更新](solvers-resources-and-lowering.md#64-标量存储更新与读取事实的有效期)），
   本阶段未调整其断言；区分既有不一致与本次回归。
+  后续已按正式字段分离契约纠正该旧拒绝预期，并保留同字段覆盖及可能别名的拒绝；
+  11 项观察测试移入独立目标，见[核对与反例](solvers-resources-and-lowering.md#指针观察旧拒绝预期的纠正)。
 - `test -p luna --test execution -- bodyless_trait_contracts_preserve_pointer_reads_during_receiver_substitution --exact --test-threads=1`
   在本阶段代码上退出 0，`/tmp/luna-tools-wvqtc1te/result.json`；确认接口摘要没有主体
   时仍保留指针读取，并拒绝不成立的结果或范围契约。已修改 Rust 文件的定向 rustfmt
