@@ -1183,7 +1183,7 @@ impl<'a> Session<'a> {
         } else {
             let failed = &mut self.failed;
             self.interpreter.with_code_session(code, |vm| {
-                execution::drive(vm, context, pending, failed, output, &mut resolve);
+                execution::drive(vm, context, pending, failed, output, Some(&mut resolve));
             });
         }
         Ok(&self.pending[&output].state)
@@ -1261,39 +1261,32 @@ impl<'a> Session<'a> {
         if !matches!(pending.state, State::Waiting(_)) {
             return Ok(&pending.state);
         }
-        let result = (|| {
-            // Check this before invocation so an externally assigned output
-            // cannot cause effects followed by a failed publication.
-            if context.is_assigned(output)? {
-                return Err(Error::Inference(InferenceError::AlreadyAssigned(output)));
-            }
-            if let Some(dependency) = waiting.intersection(&self.failed).next() {
-                return Err(Error::DependencyFailed(*dependency));
-            }
-            if !waiting.is_empty() {
-                return Ok(State::Waiting(waiting));
-            }
-            let permit = context.reserve_assignment(output)?;
-            let arguments = execution::arguments(&mut self.interpreter, pending, context)?;
-            let value = self
-                .interpreter
-                .invoke_with_prepared_arguments(pending.target, arguments)
-                .map_err(Error::Invocation)?;
-            let ty = execution::publish(
-                context,
-                &permit,
-                value,
-                self.interpreter.remaining_steps(),
-                |work| self.interpreter.charge_preparation(work),
-            )?;
-            Ok(State::Complete(ty))
-        })();
-        pending.state = match result {
-            Ok(state) => state,
-            Err(error) => State::Failed(error),
+        // Dependency failures and externally assigned outputs settle before
+        // consuming inputs or entering an invocation. Ready work uses the same
+        // owner and publication boundary as explicitly suspended execution.
+        let failure = match context.is_assigned(output) {
+            Err(error) => Some(Error::Inference(error)),
+            Ok(true) => Some(Error::Inference(InferenceError::AlreadyAssigned(output))),
+            Ok(false) => waiting
+                .intersection(&self.failed)
+                .next()
+                .copied()
+                .map(Error::DependencyFailed),
         };
-        if matches!(pending.state, State::Failed(_)) {
+        if let Some(error) = failure {
+            pending.state = State::Failed(error);
             self.failed.insert(output);
+        } else if !waiting.is_empty() {
+            pending.state = State::Waiting(waiting);
+        } else {
+            execution::drive(
+                &mut self.interpreter,
+                context,
+                pending,
+                &mut self.failed,
+                output,
+                None,
+            );
         }
         Ok(&pending.state)
     }

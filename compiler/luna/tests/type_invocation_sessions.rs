@@ -702,3 +702,216 @@ fn generated_type_output_remains_reserved_until_its_receipt_is_installed() {
         }
     );
 }
+
+#[test]
+fn synchronous_and_owned_type_demands_share_selection_failure_and_recovery() {
+    use comptime_interpretor::{Error as VmError, ErrorKind};
+    use elaboration::MetaId;
+    use std::cell::Cell;
+
+    fn drive(
+        session: &mut Session<'_>,
+        context: &mut InferenceContext,
+        producer: MetaId,
+        dependent: MetaId,
+        mode: usize,
+    ) {
+        if mode == 2 {
+            session
+                .resume_dependencies(context, dependent, &mut 100_000)
+                .unwrap();
+            return;
+        }
+        for output in [producer, dependent] {
+            match mode {
+                0 => {
+                    session.resume(context, output).unwrap();
+                }
+                1 => {
+                    session
+                        .resume_bounded(context, output, &mut 100_000)
+                        .unwrap();
+                }
+                3 => {
+                    if let Start::Invocation(mut active) =
+                        session.start(context, output, &mut 100_000).unwrap()
+                    {
+                        loop {
+                            match active.poll(context).unwrap() {
+                                Progress::Running => {}
+                                Progress::Associated(request) => {
+                                    let response = request.prepare();
+                                    // Resolving the request does not resume the producer or
+                                    // grant permission to publish its Type ahead of execution.
+                                    assert!(!context.is_assigned(output).unwrap());
+                                    assert!(matches!(
+                                        active.poll(context).unwrap(),
+                                        Progress::Waiting
+                                    ));
+                                    active.resume(response).unwrap();
+                                }
+                                Progress::Definition(request) => {
+                                    active.resume_definition(request.prepare()).unwrap();
+                                }
+                                Progress::Method(request) => {
+                                    active.resume_method(request.prepare()).unwrap();
+                                }
+                                Progress::Settled(_) => break,
+                                Progress::Waiting => panic!("no undelivered response"),
+                            }
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    let package = sysroot::compile(SOURCE).unwrap();
+    let source = DeclarationSource::Borrowed(&package)
+        .retain_declarations(&mut 1_000_000)
+        .unwrap();
+    let package = source.package();
+    let theory = elaboration::ptc::Context::from_package(package).unwrap();
+    let queries =
+        SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&source), &theory, &[]);
+    let types = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
+        queries.check(predicate, Default::default(), fuel)
+    };
+    let methods = |callee: &nir::program::Expr, fuel: &mut u64| queries.resolve(callee, fuel);
+    for mode in 0..4 {
+        let reject = Cell::new(true);
+        let selections = Cell::new(0);
+        let associated = |access: &nir::program::Expr, fuel: &mut u64| {
+            selections.set(selections.get() + 1);
+            if reject.get() {
+                Err(VmError {
+                    kind: ErrorKind::UnmaterializedDispatch,
+                    source: Some(access.source),
+                })
+            } else {
+                queries.associated(access, fuel)
+            }
+        };
+        let mut context = InferenceContext::default();
+        let mut code = CodeSession::new(package.clone());
+        let mut session = Session::new_resolving_in_scope(
+            package,
+            &context,
+            &mut code,
+            &mut Budget {
+                steps: 1_000_000,
+                depth: 128,
+            },
+            &[],
+            &[],
+            &[],
+            SourceResolvers {
+                types: &types,
+                methods: &methods,
+                associated: &associated,
+            },
+        )
+        .unwrap();
+        for rejecting in [true, false] {
+            reject.set(rejecting);
+            let output = session
+                .enqueue(&mut context, id(package, "Output"), vec![])
+                .unwrap();
+            let dependent = session
+                .enqueue(
+                    &mut context,
+                    id(package, "Pass"),
+                    vec![Input {
+                        ty: I::Stable(Term::Primitive(P::Type)),
+                        value: I::Meta(output),
+                    }],
+                )
+                .unwrap();
+            // A single-output poll must not run its unresolved dependency.
+            assert!(matches!(
+                session.resume(&mut context, dependent).unwrap(),
+                State::Waiting(_)
+            ));
+            let before = selections.get();
+            drive(&mut session, &mut context, output, dependent, mode);
+            assert_eq!(selections.get(), before + 1, "mode {mode}");
+            if rejecting {
+                assert!(matches!(
+                    session.state(output),
+                    Some(State::Failed(Error::Invocation(_)))
+                ));
+                assert!(
+                    matches!(session.state(dependent), Some(State::Failed(Error::DependencyFailed(id))) if *id == output)
+                );
+                assert!(!context.is_assigned(output).unwrap());
+                assert!(!context.is_assigned(dependent).unwrap());
+                assert_eq!(enters(&session, id(package, "initialize")), 0);
+                assert_eq!(enters(&session, id(package, "Pass")), 0);
+            } else {
+                assert_eq!(
+                    context.freeze(&I::Meta(dependent)).unwrap(),
+                    Term::Primitive(P::U8)
+                );
+                assert_eq!(enters(&session, id(package, "initialize")), 1);
+                assert_eq!(enters(&session, id(package, "Pass")), 1);
+            }
+            let remaining = session.remaining_steps();
+            let events = session.events().len();
+            drive(&mut session, &mut context, output, dependent, mode);
+            assert_eq!(selections.get(), before + 1);
+            assert_eq!(session.remaining_steps(), remaining);
+            assert_eq!(session.events().len(), events);
+        }
+        assert_eq!(enters(&session, id(package, "Output")), 2);
+    }
+}
+
+#[test]
+fn synchronous_type_host_unwind_cancels_the_owner_without_replaying_effects() {
+    // This source helper deliberately configures a panicking selection service.
+    // Unwinding a convenience drive must terminate the same owner as Drop on
+    // an explicitly suspended handle, even before a host response exists.
+    in_source(|package, _, mut context, mut session| {
+        let output = session
+            .enqueue(&mut context, id(package, "Output"), vec![])
+            .unwrap();
+        let dependent = session
+            .enqueue(
+                &mut context,
+                id(package, "Pass"),
+                vec![Input {
+                    ty: I::Stable(Term::Primitive(P::Type)),
+                    value: I::Meta(output),
+                }],
+            )
+            .unwrap();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session.resume(&mut context, output).unwrap();
+        }));
+        assert!(unwound.is_err());
+        assert!(matches!(
+            session.state(output),
+            Some(State::Failed(Error::Cancelled))
+        ));
+        assert!(!context.is_assigned(output).unwrap());
+        assert_eq!(enters(&session, id(package, "Output")), 1);
+        assert_eq!(enters(&session, id(package, "initialize")), 0);
+        assert_eq!(
+            session.remaining_steps(),
+            0,
+            "lost host fuel is not refunded"
+        );
+        assert!(matches!(
+            session.resume(&mut context, output).unwrap(),
+            State::Failed(Error::Cancelled)
+        ));
+        assert!(
+            matches!(session.resume_dependencies(&mut context, dependent, &mut 100_000).unwrap(),
+            State::Failed(Error::DependencyFailed(failed)) if *failed == output)
+        );
+        assert_eq!(enters(&session, id(package, "Output")), 1);
+        assert_eq!(enters(&session, id(package, "Pass")), 0);
+        assert!(!context.is_assigned(dependent).unwrap());
+    });
+}

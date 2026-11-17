@@ -212,14 +212,8 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             if external {
                 return Ok(Poll::Pending);
             }
-            let resolver = self.vm.associated_resolver;
             let request = self.take_host_request()?.expect("associated request");
-            let response = request.resolve(|access, steps| {
-                resolver.ok_or(Error {
-                    kind: ErrorKind::UnmaterializedDispatch,
-                    source: Some(access.source),
-                })?(access, steps)
-            });
+            let response = request.prepare();
             self.receive_host_response(response)
                 .map_err(|failure| failure.error().clone())?;
             return Ok(Poll::Pending);
@@ -317,7 +311,11 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             granted,
         });
         Ok(Some(AssociatedHostRequest::new(
-            ticket, world, request, granted,
+            ticket,
+            world,
+            request,
+            self.vm.associated_resolver,
+            granted,
         )))
     }
 

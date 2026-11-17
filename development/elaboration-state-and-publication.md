@@ -1463,14 +1463,16 @@ pending producer、VM 可变存储或候选等待者，也不进入 RequiredWorl
 
 ### Type 生产者的 invocation 与发布边界
 
-此前 Type 计算队列保存了输入等待者，但就绪后的 `resume_prepared` 一次性调用 VM，
-不能将主体或普通函数契约中的关联选择交回队列外的驱动者。现在 `Session::start`
+Type 计算队列的所有执行入口现共用同一 invocation owner。`Session::start`
 沿用有界依赖预检，再返回独占的 `Invocation`；等待输入或已有终态直接返回 `Settled`。
+`resume`、有预算的单输出恢复、依赖批量驱动及 required code-session 入口也都驱动
+这一 owner；旧 `resume_prepared` 中直接调用 VM 后自行发布 Type 的分支已删除。
 活动句柄拥有该输出的 Pending、失败集合和单输出发布许可，不再借用整个推断
 上下文，也不把执行现场序列化进 Type、残余调用或 code cache。其 Display 显示
 输出、许可的上下文身份及内部执行阶段。
 
-`poll` 区分 Running、Waiting、Associated 和 Settled。Associated 请求使用已有
+`poll` 区分 Running、Waiting、Associated、Method、Definition 和 Settled。
+Associated 请求使用已有
 VM session ticket、源世界和预算所有权；等待期间再次 poll 不重发请求、不执行前缀。
 宿主响应经原 VM 接收检查恢复同一个 activation。仅当 VM 完成、返回值确为 Type
 或合法 Type binder，并完成有界结果传递后，才向输出 meta 赋值并保存 Complete。
@@ -1484,10 +1486,16 @@ VM session ticket、源世界和预算所有权；等待期间再次 poll 不重
 
 源码 required Type 路径已通过 `resume_with_code_session` 使用这一驱动：代码会话
 覆盖执行的完整生命周期，关联选择在 VM 外处理，完成后才发布结果。参数冻结、
-prepared value 准入和结果发布与旧同步接口共用；Live 值保留图与域信息，所有 Live
-输入先通过准入，随后才执行 Normal 输入工厂。没有因接入会话而改成全量 Term 化。
+prepared value 准入和结果发布只由该 owner 的模块完成；Live 值保留图与域信息，
+所有 Live 输入先通过准入，随后才执行 Normal 输入工厂。没有因接入会话而改成
+全量 Term 化，也没有将调用结果放进代码缓存。
 
-边界仍然明确：旧 `resume`／依赖批量驱动保留同步入口；输入工厂、类型准入、方法
+Associated 请求现在与方法请求一样携带来源世界配置的 resolver，并提供 `prepare`。
+同步便利驱动在 VM 外准备答案，显式驱动仍可保留请求或用 `resolve` 回答；两者均须
+经过原票据／世界／预算检查才能交付。准备响应不会执行关联初始化器或发布输出 Type。
+没有配置服务时明确返回 UnmaterializedDispatch，不静默改用其他世界的选择结果。
+
+边界仍然明确：`resume`／依赖批量驱动继续是同步便利入口；输入工厂、类型准入、方法
 解析和 builder 服务还没有全部变成可恢复请求。暂停中可以进行独立推断，多个独立
 Type 会话也可交错发布到同一上下文；一个会话的 VM 和队列仍由活动句柄独占，
 required 的便利驱动仍同步处理宿主请求至完成。
@@ -1516,6 +1524,46 @@ required Type 调用到运行时值的路径；这些不是整个普通 callable
 
 本轮保留了作者的资源分析修改，是工作区验证；没有执行全 workspace、性能基准或
 纯 HEAD 验收。`compiler/fmt`、正式 docs 和既有库文档改动不属于本次提交范围。
+
+#### 同步入口合流的当前验证
+
+此次真实 sysroot 对照让普通恢复、有预算恢复、依赖图驱动和显式暂停执行同一个
+Type producer。首次宿主选择拒绝时输出不赋值，依赖不执行；之后同一会话的新计算
+可以成功。终态重复驱动不消耗 VM fuel、不再查询宿主、不重放 producer 或初始化器。
+显式路径在 prepare 后再次 poll 仍是 Waiting，只有响应交付后才继续执行。
+
+首轮 `type_invocation_sessions` 退出 101，11 项通过、builder 用例失败：
+`/tmp/luna-tools-v5vyi8ys/result.json`。将本次五个文件临时恢复至 `65e8e1a0`，
+原 builder 单项仍在创建封闭 VM 时以 UnmaterializedDispatch 失败，见
+`/tmp/luna-tools-hmf3xz04/result.json`。其它工作区改动保持不动。
+`65015814` 将该真实 sysroot 用例接回源码查询服务，publisher 使用同一类型查询，
+保留原预算、receipt 安装与输出保留断言；基线单项通过，
+`/tmp/luna-tools-82k3j2wq/result.json`。中间只迁 VM 尚不足以给 publisher 提供
+源码查询，`/tmp/luna-tools-647jz1sk/result.json` 记录其失败，不算通过证据。
+之后候选实现已逐字节恢复，新增用例使用的仍是真实源码与 sysroot。
+
+恢复后的扩大检查在 `/home/fin/luna` 通过
+`python3 -B development/check.py --timeout 900 -- test -p elaboration
+-p comptime_interpretor -p luna --lib --test type_computation_demands
+--test type_invocation_sessions --test invocation_host_requests --test
+method_host_requests --test builder_invocations --no-fail-fast -- --test-threads=1`，
+退出 0，1,074 项通过，`/tmp/luna-tools-be66upgd/result.json`。覆盖实际 builder
+发布、方法/关联选择、依赖预检、图输入和终态重试，没有放宽任何拒绝或跳过断言。
+首次扩大命令重复给出 `--lib`，Cargo 在检查前退出 1；已修正参数，
+`/tmp/luna-tools-mburfyof/result.json` 不是执行证据。
+
+随后补充宿主 resolver unwind 回归：同步入口的 invocation owner 在 Drop 时将
+输出标为 Cancelled，依赖沿失败边终止；生产者前缀不重放，丢失的宿主额度不退款。
+`python3 -B development/check.py --timeout 900 -- test -p luna --test execution
+--test type_invocation_sessions -- --test-threads=1 deferred_signature
+ deferred_runtime_signatures live_type_computations synchronous_type_host_unwind`
+退出 0，11 项签名/Live 图用例和新增 unwind 用例通过，
+`/tmp/luna-tools-x56z9_89/result.json`。这个 catch_unwind 测试验证内部宿主异常的
+清理责任，不新增 Flurry 异常语义。生产文件在扩大检查后未再修改；五个 Rust 文件
+的 scoped rustfmt 检查退出 0（`/tmp/luna-tools-46k9heux/result.json`），新增测试
+之后单文件格式化退出 0（`/tmp/luna-tools-fq5wler9/result.json`），diff 检查通过。
+未运行全 workspace、native 或性能测试，未将同步便利驱动称为一般源码恢复完成。
+
 
 ### 单输出发布许可允许暂停中的独立推断
 

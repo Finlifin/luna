@@ -29,6 +29,7 @@ pub struct AssociatedHostRequest<'world> {
     ticket: Ticket,
     world: &'world Package,
     request: associated_execution::Request,
+    resolver: Option<&'world AssociatedResolver<'world>>,
     granted: u64,
     remaining: u64,
 }
@@ -53,12 +54,14 @@ impl<'world> AssociatedHostRequest<'world> {
         ticket: Ticket,
         world: &'world Package,
         request: associated_execution::Request,
+        resolver: Option<&'world AssociatedResolver<'world>>,
         granted: u64,
     ) -> Self {
         Self {
             ticket,
             world,
             request,
+            resolver,
             granted,
             remaining: granted,
         }
@@ -96,6 +99,18 @@ impl<'world> AssociatedHostRequest<'world> {
     ) -> AssociatedHostResponse<'world> {
         let selection = resolver(self.request.access(), &mut self.remaining);
         self.respond(selection)
+    }
+
+    /// Resolve through the originating world's configured service. Preparing
+    /// does not deliver the answer or publish a value in the waiting VM.
+    pub fn prepare(self) -> AssociatedHostResponse<'world> {
+        let resolver = self.resolver;
+        self.resolve(|access, fuel| {
+            resolver.ok_or(Error {
+                kind: ErrorKind::UnmaterializedDispatch,
+                source: Some(access.source),
+            })?(access, fuel)
+        })
     }
 }
 

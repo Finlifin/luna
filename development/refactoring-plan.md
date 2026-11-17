@@ -137,7 +137,7 @@ where T, flag: bool
 | --- | --- | --- |
 | `declaration_inputs.rs` | 路由、源码求值顺序、默认值、前置域与形成义务；Progress 独占 producer、身份，检查完成次序与源码 schedule 已分离；槽位帧保留子检查目标、输入事实退出与默认 guard，依赖域帧保留 consumer 与传递依赖游标，显式／默认依赖均交给同一槽位检查，收集器共用；收集帧保留普通探测、contextual 回退及各源码位置的 preparation，路由帧保留展开包检查与源码位置，准备帧拥有阶段交接及 caller scope，参数望远镜与默认环境不再借用外层临时变量，四类子检查共用请求与驱动；字面量列表展开不再递归重建整次准备；已检查 producer 按所有权交付；NF 默认代码连接本次前缀绑定，由 VM 取得实际前缀后实例化；声明 NF 应用现持有准备帧并通过共同 Region 栈交接参数子检查、失败恢复和形成完成，直接嵌套声明／常量头不再同步递归驱动准备；动态 NF 位置调用也已接入同一槽位和收集计划，源码默认提供者与入口投影分离，域替换使用本次持有的 telescope，不再依赖声明域回查 | 布局提示扫描、非 NF 消费者及未迁移子表达式仍同步；caller scope 与默认环境已经按预算保留，但仍复制词法表；共用输入驱动尚不接收 VM 产物。须让 `InputChecking::Typed` 不再迫使待定域立即产出完整 Expr，并接入原源码与执行区域 |
 | `dynamic_instances.rs` | packet 的实际表达式、已观察身份及 pending 参数分别保存；完成消费者由共用准备帧持有，caller scope 恢复后才检查形成义务及最终域并组装 packet；词法前缀及默认环境按预算保留 | pending 参数影响签名时保留尚未发布的调用准备，不能把 rigid 当作已完成 callable 类型 |
-| `type_computations.rs::Session` | committed 推断世界、单输出发布许可、可恢复 invocation 及已有签名任务 | 形成的 Type 结果需回到其源表达式区域，关联原参数位置、词法环境及真实生产者 |
+| `type_computations.rs::Session` | committed 推断世界、单输出发布许可、同步／显式恢复共用的 invocation owner 及已有签名任务 | 形成的 Type 结果需回到其源表达式区域，关联原参数位置、词法环境及真实生产者 |
 | `invocation/host.rs::InvocationSession` | 独占执行现场、关联／方法选择与定义准备请求、线性响应及取消 | 一般前端表达式检查仍需接入；不把同步回调或另起一次求值当成恢复 |
 | `invocation/session.rs` | 生产 invocation／plan 在 session 内拥有执行帧；输入准备通过帧绑定契约整体移动导出值；借用根帧的 fragment 入口仅用于测试 | 源 activation 接收后继受检片段，保留环境、原控制出口及一次性执行位置；不能把测试入口公开后当作源区域接线 |
 | `required.rs` / `required/prepared.rs` | 完整根 Expr 的准备、冻结声明目录、单次输入及代码缓存所有者 | 在完整根形成前启动源区域；世界可共享，活动前端区域、等待者及本次值不得冻结到代码缓存 |

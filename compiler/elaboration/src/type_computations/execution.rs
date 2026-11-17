@@ -154,7 +154,7 @@ impl fmt::Display for Invocation<'_, '_> {
     }
 }
 
-pub(super) fn publish(
+fn publish(
     context: &mut InferenceContext,
     permit: &type_resolution::AssignmentPermit,
     value: Value,
@@ -178,7 +178,7 @@ pub(super) fn publish(
     Ok(ty)
 }
 
-pub(super) fn arguments(
+fn arguments(
     vm: &mut Interpreter<'_>,
     pending: &mut Pending,
     context: &InferenceContext,
@@ -254,12 +254,14 @@ pub(super) fn drive(
     pending: &mut Pending,
     failed: &mut BTreeSet<MetaId>,
     output: MetaId,
-    resolve: &mut dyn FnMut(
-        &nir::program::Expr,
-        &mut u64,
-    ) -> Result<
-        comptime_interpretor::AssociatedSelection,
-        comptime_interpretor::Error,
+    mut resolve: Option<
+        &mut dyn FnMut(
+            &nir::program::Expr,
+            &mut u64,
+        ) -> Result<
+            comptime_interpretor::AssociatedSelection,
+            comptime_interpretor::Error,
+        >,
     >,
 ) {
     let Start::Invocation(mut execution) = begin(vm, context, pending, failed, output) else {
@@ -276,7 +278,10 @@ pub(super) fn drive(
         match progress {
             Progress::Running => {}
             Progress::Associated(request) => {
-                let response = request.resolve(&mut *resolve);
+                let response = match &mut resolve {
+                    Some(resolve) => request.resolve(&mut **resolve),
+                    None => request.prepare(),
+                };
                 if let Err(rejected) = execution.resume(response) {
                     execution.settle(Err(Error::Invocation(rejected.error().clone())));
                 }
