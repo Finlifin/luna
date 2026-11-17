@@ -1,6 +1,6 @@
 //! Checked source computations, separated from their invocation. This is an
 //! owned preparation result, not a Type or an inference-variable snapshot.
-use super::restore::{restore_required_packet, restore_required_type_input};
+use super::restore::restore_required_packet;
 use super::*;
 use crate::materialization::{DeclarationSnapshot, DeclarationSource};
 use comptime_interpretor::{CodeSession, InvocationValue};
@@ -382,91 +382,9 @@ impl PreparedRequired {
             |access: &n::Expr, remaining: &mut u64| source_queries.associated(access, remaining);
         let method_resolver =
             |callee: &n::Expr, remaining: &mut u64| source_queries.resolve(callee, remaining);
-        if result_type == p(P::Type) {
-            // Required Type computations use the same committed scheduler as
-            // saved residual calls. Source capture has already excluded any
-            // unavailable runtime input; no provisional Type is manufactured.
-            use crate::type_computations::{PreparedInput, Session, State};
-            let mut context = crate::InferenceContext::default();
-            let mut budget = Budget {
-                steps: *steps,
-                depth: 128,
-            };
-            let session = Session::new_resolving_in_scope(
-                &package,
-                &context,
-                code.session(),
-                &mut budget,
-                &invocation_assumptions,
-                &abstract_parameters,
-                &abstract_value_parameters,
-                comptime_interpretor::SourceResolvers {
-                    types: &type_solver,
-                    methods: &method_resolver,
-                    associated: &associated_resolver,
-                },
-            );
-            *steps = budget.steps;
-            let mut session = session.map_err(|failure| {
-                error(
-                    span,
-                    format!("required comptime preparation failed: {failure}"),
-                )
-            })?;
-            if builder.is_some() {
-                session = session
-                    .with_struct_builder(&build)
-                    .with_enum_builder(&build_enum)
-                    .with_newtype_builder(&build_newtype);
-            }
-            let output = session
-                .enqueue_prepared(
-                    &mut context,
-                    entry,
-                    inputs
-                        .into_iter()
-                        .map(|(ty, value)| PreparedInput {
-                            ty: crate::InferenceTerm::Stable(ty),
-                            value,
-                        })
-                        .collect(),
-                )
-                .map_err(|failure| {
-                    error(
-                        span,
-                        format!("required type computation could not be queued: {failure}"),
-                    )
-                })?;
-            let result = match session.resume_with_code_session(
-                &mut context,
-                output,
-                code.session(),
-                &associated_resolver,
-            ) {
-                Ok(State::Complete(ty)) => Ok(Value::Type(ty.clone())),
-                Ok(State::Failed(failure)) => {
-                    Err(format!("required comptime evaluation failed: {failure}"))
-                }
-                Err(failure) => Err(format!("required comptime evaluation failed: {failure}")),
-                Ok(State::Waiting(_)) => {
-                    Err("required type computation has unresolved inputs".into())
-                }
-            };
-            *steps = session.remaining_steps();
-            let value = result.map_err(|message| error(span, message))?;
-            let Value::Type(ty) = value else {
-                unreachable!()
-            };
-            let ty = restore_required_type_input(
-                steps,
-                ty,
-                &scoped_parameters,
-                &scoped_arguments,
-                &input_frames,
-                span,
-            )?;
-            return Ok((Value::Type(ty), result_type));
-        }
+        // Inputs are already complete. Type results use the ordinary invocation
+        // and packet restoration path; no inference output is needed merely to
+        // return comptime data. Dependency-driven consumers own their own queue.
         let mut preparation_budget = Budget {
             steps: std::mem::take(steps),
             depth: 128,
@@ -661,6 +579,52 @@ mod tests {
                 ..Default::default()
             };
             assert!(world.source.prepare(&mut empty).is_err());
+        }
+    }
+
+    #[test]
+    fn required_type_results_preserve_opaque_identity_and_restore_the_caller_scope() {
+        let declaration = DeclarationId {
+            package: 7,
+            local: 90,
+        };
+        let rigid = Term::Rigid {
+            declaration,
+            sort: Sort::Type,
+        };
+        let bound = Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        };
+        for scoped in [false, true] {
+            let mut prepared = literal_preparation(true);
+            prepared.abstract_parameters.push(declaration);
+            prepared.edit_package(|package| {
+                package.functions[0].body.kind = K::TypeValue(rigid.clone());
+            });
+            if scoped {
+                prepared.scoped_parameters.push(nir::DeclarationParameter {
+                    declaration,
+                    sort: Sort::Type,
+                });
+                prepared.scoped_arguments.push(bound.clone());
+                prepared.input_frames.push(vec![Sort::Type]);
+            }
+            let mut steps = 100_000;
+            assert_eq!(
+                prepared.fork().invoke(&mut steps, Span::default()).unwrap(),
+                (
+                    Value::Type(if scoped { bound.clone() } else { rigid.clone() }),
+                    p(P::Type)
+                )
+            );
+            assert!(steps < 100_000);
+            // The retained source/code does not authorize an unknown Type input.
+            let mut denied = prepared.fork();
+            denied.abstract_parameters.clear();
+            assert!(denied.invoke(&mut 100_000, Span::default()).is_err());
+            assert!(prepared.invoke(&mut 100_000, Span::default()).is_ok());
         }
     }
 

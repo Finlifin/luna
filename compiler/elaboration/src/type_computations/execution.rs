@@ -254,15 +254,6 @@ pub(super) fn drive(
     pending: &mut Pending,
     failed: &mut BTreeSet<MetaId>,
     output: MetaId,
-    mut resolve: Option<
-        &mut dyn FnMut(
-            &nir::program::Expr,
-            &mut u64,
-        ) -> Result<
-            comptime_interpretor::AssociatedSelection,
-            comptime_interpretor::Error,
-        >,
-    >,
 ) {
     let Start::Invocation(mut execution) = begin(vm, context, pending, failed, output) else {
         return;
@@ -278,10 +269,7 @@ pub(super) fn drive(
         match progress {
             Progress::Running => {}
             Progress::Associated(request) => {
-                let response = match &mut resolve {
-                    Some(resolve) => request.resolve(&mut **resolve),
-                    None => request.prepare(),
-                };
+                let response = request.prepare();
                 if let Err(rejected) = execution.resume(response) {
                     execution.settle(Err(Error::Invocation(rejected.error().clone())));
                 }

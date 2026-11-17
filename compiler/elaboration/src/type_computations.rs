@@ -314,32 +314,6 @@ impl<'a> Session<'a> {
     ) -> Result<Self, Error> {
         Ok(Self::new(package, context, budget)?.with_struct_builder(builder))
     }
-    pub(crate) fn with_newtype_builder(
-        mut self,
-        builder: &'a dyn Fn(
-            &comptime_interpretor::NewtypeBuildRequest,
-            &mut u64,
-        ) -> Result<
-            comptime_interpretor::PreparedNewtypeBuild<'a>,
-            comptime_interpretor::Error,
-        >,
-    ) -> Self {
-        self.interpreter = self.interpreter.with_newtype_builder(builder);
-        self
-    }
-    pub(crate) fn with_enum_builder(
-        mut self,
-        builder: &'a dyn Fn(
-            &comptime_interpretor::EnumBuildRequest,
-            &mut u64,
-        ) -> Result<
-            comptime_interpretor::PreparedEnumBuild<'a>,
-            comptime_interpretor::Error,
-        >,
-    ) -> Self {
-        self.interpreter = self.interpreter.with_enum_builder(builder);
-        self
-    }
     pub(crate) fn with_struct_builder(
         mut self,
         builder: &'a dyn Fn(
@@ -1158,37 +1132,6 @@ impl<'a> Session<'a> {
         ))
     }
 
-    /// Production required Type invocation drives owned host requests outside
-    /// the VM while retaining code-session ownership and publication authority.
-    pub(crate) fn resume_with_code_session(
-        &mut self,
-        context: &mut InferenceContext,
-        output: MetaId,
-        code: &mut comptime_interpretor::CodeSession,
-        mut resolve: impl FnMut(
-            &nir::program::Expr,
-            &mut u64,
-        ) -> Result<
-            comptime_interpretor::AssociatedSelection,
-            comptime_interpretor::Error,
-        >,
-    ) -> Result<&State, Error> {
-        let mut fuel = DEFAULT_SCHEDULING_STEPS;
-        let Some(waiting) = self.prepare_resume(context, output, &mut fuel)? else {
-            return Ok(&self.pending[&output].state);
-        };
-        let pending = self.pending.get_mut(&output).unwrap();
-        if !waiting.is_empty() {
-            pending.state = State::Waiting(waiting);
-        } else {
-            let failed = &mut self.failed;
-            self.interpreter.with_code_session(code, |vm| {
-                execution::drive(vm, context, pending, failed, output, Some(&mut resolve));
-            });
-        }
-        Ok(&self.pending[&output].state)
-    }
-
     fn is_waiting(&self, output: MetaId) -> Result<bool, Error> {
         self.pending
             .get(&output)
@@ -1285,7 +1228,6 @@ impl<'a> Session<'a> {
                 pending,
                 &mut self.failed,
                 output,
-                None,
             );
         }
         Ok(&pending.state)

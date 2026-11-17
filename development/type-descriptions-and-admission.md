@@ -165,6 +165,12 @@ IIR/runtime 只接收其阶段允许的类型与值。Any 没有自动 tagged un
 [`AnnotationState::Ready`](../compiler/elaboration/src/type_computations.rs)也直接借用
 这个 Term。因此不能仅将 `Value::Type` 的字段换成描述图，然后沿用现有完成路径。
 
+随后已清理输入齐备的 required invocation：Type 返回值与其他 comptime 数据共用
+普通 VM 调用和 packet 恢复，不再为其新建空推断上下文及临时输出变量。具体接线见
+[状态与发布协议](elaboration-state-and-publication.md#type-生产者的-invocation-与发布边界)。
+这解除了一处生产路径的人工耦合；上面的真实依赖队列仍以 MetaId 表示输出，完整
+描述载体与多消费者准入尚未实现，不能据此宣布第 2 节的 TypeValue 协议已经落地。
+
 迁移后的所有权分为三部分；以下为目标协议，不是现有 API：
 
 | 所有者 | 完成产物 | 失败影响 |

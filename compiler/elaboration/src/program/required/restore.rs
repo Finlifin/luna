@@ -10,6 +10,21 @@ pub(super) fn restore_required_packet(
     span: Span,
     depth: usize,
 ) -> Result<Value, Error> {
+    // The VM may retain an authorized opaque Type input as TypeParameter.
+    // Deliver the same identity carrier for root results as for restored data;
+    // this conversion does not assign an inference variable or prove a trait.
+    let value = match value {
+        Value::TypeParameter(declaration) => {
+            *steps = steps
+                .checked_sub(1)
+                .ok_or_else(|| error(span, "required Type result restoration budget exhausted"))?;
+            Value::Type(Term::Rigid {
+                declaration,
+                sort: Sort::Type,
+            })
+        }
+        value => value,
+    };
     if parameters.is_empty() {
         return Ok(value);
     }
@@ -26,37 +41,40 @@ pub(super) fn restore_required_packet(
         })
 }
 
-pub(super) fn restore_required_type_input(
-    steps: &mut u64,
-    ty: Term,
-    parameters: &[nir::DeclarationParameter],
-    arguments: &[Term],
-    frames: &[Vec<Sort>],
-    span: Span,
-) -> Result<Term, Error> {
-    if parameters.is_empty() {
-        return Ok(ty);
-    }
-    let mut fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
-    let before = fuel;
-    let bounded = (|| {
-        nir::type_computations::charge_term(&ty, &mut fuel)?;
-        fuel = fuel
-            .checked_sub(parameters.len())
-            .ok_or(nir::type_computations::Error::Budget)?;
-        Ok::<_, nir::type_computations::Error>(())
-    })();
-    *steps -= (before - fuel) as u64;
-    bounded.map_err(|e| error(span, e.to_string()))?;
-    ty.instantiate_parameters_in_scope(parameters, arguments, frames)
-        .map_err(|e| error(span, e.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use comptime_interpretor::{ObjectValue, Storage};
     use comptime_runtime::object::{Entry, Object};
+
+    #[test]
+    fn root_opaque_type_delivery_is_metered_without_inference_assignment() {
+        let declaration = DeclarationId {
+            package: 99,
+            local: 3,
+        };
+        let deliver = |steps: &mut u64| {
+            restore_required_packet(
+                steps,
+                Value::TypeParameter(declaration),
+                &[],
+                &[],
+                &[],
+                Span::default(),
+                0,
+            )
+        };
+        assert!(deliver(&mut 0).is_err());
+        let mut steps = 1;
+        assert_eq!(
+            deliver(&mut steps).unwrap(),
+            Value::Type(Term::Rigid {
+                declaration,
+                sort: Sort::Type
+            })
+        );
+        assert_eq!(steps, 0);
+    }
 
     #[test]
     fn object_entry_domains_and_nested_values_restore_without_mutating_storage() {

@@ -1465,7 +1465,7 @@ pending producer、VM 可变存储或候选等待者，也不进入 RequiredWorl
 
 Type 计算队列的所有执行入口现共用同一 invocation owner。`Session::start`
 沿用有界依赖预检，再返回独占的 `Invocation`；等待输入或已有终态直接返回 `Settled`。
-`resume`、有预算的单输出恢复、依赖批量驱动及 required code-session 入口也都驱动
+`resume`、有预算的单输出恢复及依赖批量驱动也都驱动
 这一 owner；旧 `resume_prepared` 中直接调用 VM 后自行发布 Type 的分支已删除。
 活动句柄拥有该输出的 Pending、失败集合和单输出发布许可，不再借用整个推断
 上下文，也不把执行现场序列化进 Type、残余调用或 code cache。其 Display 显示
@@ -1484,11 +1484,25 @@ VM session ticket、源世界和预算所有权；等待期间再次 poll 不重
 句柄或另一会话时原样拒绝，不消费接收方当前等待者。新的独立会话有独立预算，
 不能借重试给原会话补充额度。失败前未耗尽额度的会话仍能处理独立计算。
 
-源码 required Type 路径已通过 `resume_with_code_session` 使用这一驱动：代码会话
-覆盖执行的完整生命周期，关联选择在 VM 外处理，完成后才发布结果。参数冻结、
-prepared value 准入和结果发布只由该 owner 的模块完成；Live 值保留图与域信息，
-所有 Live 输入先通过准入，随后才执行 Normal 输入工厂。没有因接入会话而改成
-全量 Term 化，也没有将调用结果放进代码缓存。
+队列内参数冻结和推断输出发布由该 owner 的模块完成；prepared value 准入使用
+VM 的普通输入协议。Live 值保留图与域信息，所有 Live 输入先通过准入，随后才
+执行 Normal 输入工厂。没有因接入会话而改成全量 Term 化，也没有将调用结果
+放进代码缓存。
+
+输入已齐备的源码 required invocation 与等待推断的队列现已分开。前者此前为
+Type 返回值临时创建空 InferenceContext、预留 MetaId、排队执行，再赋值并取回
+结果；这没有真实推断消费者，只是将 Type 数据传递绑在身份赋值上。现与其他
+comptime 返回值共用 `PreparedRequired::invoke_in_world` 中的普通 VM 调用、
+源世界选择服务、代码租借、builder 服务和结果 packet 恢复，删除了这一分支及
+其专用 `resume_with_code_session` 接线。VM 仍由已有 invocation session 保存
+活动帧并完成输入、契约、主体及宿主请求；没有增加第二个解释器或结果缓存。
+
+根结果中的授权 TypeParameter 在共同恢复边界转为同身份的 rigid Type 值，并
+按调用方 telescope 替换；转换本身计费，不建立类型相等事实或授予未知 binder。
+旧 Type 专用恢复函数与队列中只为该路径存在的 enum/newtype 配置适配器已退役。
+真实 Type 队列的发布许可、等待／取消／终态规则保持有效，不为立即返回数据
+伪造一个推断需求。这也没有接通含 Any/refinement 的 TypeValue、通用源码主体
+请求或尚待 VM 响应的普通参数检查。
 
 Associated 请求现在与方法请求一样携带来源世界配置的 resolver，并提供 `prepare`。
 同步便利驱动在 VM 外准备答案，显式驱动仍可保留请求或用 `resolve` 回答；两者均须
@@ -1563,6 +1577,33 @@ method_host_requests --test builder_invocations --no-fail-fast -- --test-threads
 的 scoped rustfmt 检查退出 0（`/tmp/luna-tools-46k9heux/result.json`），新增测试
 之后单文件格式化退出 0（`/tmp/luna-tools-fq5wler9/result.json`），diff 检查通过。
 未运行全 workspace、native 或性能测试，未将同步便利驱动称为一般源码恢复完成。
+
+#### 输入齐备 Type 数据交付的验证
+
+删除 required Type 的临时推断路径后，新增检查覆盖授权的不透明 Type 身份、
+调用方 telescope 恢复，以及复用代码会话时撤销授权仍必须拒绝。根 TypeParameter
+转换另外验证零预算拒绝、一单位预算交付；不通过结果恢复创建推断事实。
+
+本次在 `/home/fin/luna` 使用
+`python3 -B development/check.py --timeout 900 -- test` 验证，日志输出锚点
+为 `test result:`。初次编译因新增测试误给 DeclarationParameter 指定不存在的
+`ty` 字段失败（`/tmp/luna-tools-3en4smra/result.json`，退出 101）；修正测试构造后：
+
+- `-p elaboration --lib program::required -- --test-threads=1`：
+  `/tmp/luna-tools-zsi3jlvj/result.json`，退出 0，42 项通过。
+- `-p elaboration -p luna --lib --test type_computation_demands
+  --test type_invocation_sessions --test builder_invocations --test required_input_scopes
+  --test invocation_host_requests --test method_host_requests --test library_std_format
+  --no-fail-fast -- --test-threads=1`：
+  `/tmp/luna-tools-a3t96ejn/result.json`，退出 0，九组共 484 项通过。
+- 四个修改 Rust 文件的 scoped `rustfmt --check` 退出 0：
+  `/tmp/luna-tools-389ko2kj/result.json`；`git diff --check` 通过。
+
+这是保留工作区既有改动的验证，没有执行全 workspace、native 或性能基准。
+`library_std_format` 覆盖现有扫描器，不证明作者要求的
+`println(comptime format: str, ...varargs: defer std.fmt.Parse(format))` 已完成。
+Any/refinement 描述、描述结果的普通 VM 传送与参数准入仍按
+[类型描述设计](type-descriptions-and-admission.md)继续实现。
 
 
 ### 单输出发布许可允许暂停中的独立推断

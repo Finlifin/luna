@@ -141,8 +141,10 @@ invocation，不能给待决主体放空 Block，也不能重新执行 packet �
 
 报告第 7.10 节已纠正主体的这项判断。当前
 `elaboration/src/program/required/prepared.rs::RequiredWorld` 持有代码会话，
-required 值与 Type 计算通过租借调用；`type_computations::Session` 有
-`resume_with_code_session` 生产接线。不能再据主体第 2.2 节安排一次相同接线。
+required 值与 Type 计算通过租借调用。输入齐备的 Type 调用现已与其他返回值
+共用普通 VM 和 packet 恢复，原来只为临时推断输出存在的
+`type_computations::Session::resume_with_code_session` 已退役；这不取消代码会话。
+不能再据主体第 2.2 节安排一次相同接线。
 
 仍然缺少的是跨稳定查询的活动执行所有权和完整依赖复用，不是所有调用都必须共用
 一台可变 Interpreter。代码缓存、结果缓存和活动帧分别有不同生命周期。作者已限定
@@ -337,8 +339,9 @@ query 和 std 的实际接口仍未完成；报告中的局部能力不能替代
 原先失败的证据保留于前一小节；当前验证单独记录，没有跳过或放宽该正例。
 
 Type 生产队列还有一个实际断点：保留输入等待者之后，就绪计算仍通过同步 VM 调用
-一次执行到底。现已增加队列拥有的 invocation 进度，并将 required Type 的生产路径
-迁入该驱动；关联选择可交给 VM 外处理，完成后才发布 Type。取消与失败终结原计算，
+一次执行到底。现已增加队列拥有的 invocation 进度；关联选择可交给 VM 外处理，
+完成后才发布推断输出。输入齐备的 required Type 已改走普通值调用，无需临时
+创建推断变量；两种入口仍共用 VM invocation 状态机。取消与失败终结原计算，
 迟到响应不消费新等待者，代码缓存也不持有活动推断状态。详见
 [Type 生产者的 invocation 与发布边界](elaboration-state-and-publication.md#type-生产者的-invocation-与发布边界)。
 活动句柄随后已改为单输出发布许可：暂停期间可在同一上下文继续独立推断或提交
