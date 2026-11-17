@@ -166,65 +166,7 @@ impl Checker<'_, '_> {
     }
 
     #[inline(never)]
-    pub(super) fn unary_expression(
-        &mut self,
-        expr: &Expr<'_>,
-        expected: Option<&Term>,
-    ) -> Result<n::Expr, Error> {
-        let (operator, operand) = match &expr.kind {
-            H::Unary(UnOp::Neg, value) => (crate::arithmetic::Operator::Negate, *value),
-            H::Unary(UnOp::Not, value) => (crate::arithmetic::Operator::Invert, *value),
-            _ => unreachable!("unary operator dispatcher"),
-        };
-        // Keep signed literal formation intact: the positive magnitude of a
-        // minimum signed value need not fit its final negative type.
-        let signed_literal =
-            operator == crate::arithmetic::Operator::Negate && is_numeric_literal(operand);
-        let mut checked = None;
-        if !signed_literal {
-            if let Some(protocol) = self.protocols.arithmetic[operator as usize] {
-                checked = self.argument_attempt(operand, None, None)?;
-                // The probe disabled numeric defaults. Without a destination
-                // or newly enabled defaults, retrying the same child has no
-                // additional information and repeats every nested failed probe.
-                if checked.is_none() && expected.is_none() && !self.numeric_defaults {
-                    return Err(context_error(
-                        expr.span,
-                        "unary operand requires a type context",
-                    ));
-                }
-                if checked.as_ref().is_some_and(|value| !is_never(&value.ty)) {
-                    if let Some(result) = self.unary_protocol_result(
-                        expr,
-                        expected,
-                        operator,
-                        protocol,
-                        &mut checked,
-                    )? {
-                        return Ok(result);
-                    }
-                }
-            }
-        }
-        // Only an immediate literal is formed with its sign as one operation.
-        // `- -1` still checks the inner negation as an ordinary operand, even
-        // though literal recognition suppresses protocol lookup for both.
-        let immediate_literal = operator == crate::arithmetic::Operator::Negate
-            && matches!(
-                operand.kind,
-                H::Lit(hir::Lit {
-                    kind: hir::LitKind::Integer(_) | hir::LitKind::Float(_),
-                    ..
-                })
-            );
-        if checked.is_none() && !immediate_literal {
-            checked = Some(self.expr(operand, expected)?);
-        }
-        self.native_unary_expression(expr, expected, checked)
-    }
-
-    #[inline(never)]
-    fn native_unary_expression(
+    pub(super) fn native_unary_expression(
         &mut self,
         expr: &Expr<'_>,
         expected: Option<&Term>,
@@ -321,7 +263,7 @@ impl Checker<'_, '_> {
         })
     }
     #[inline(never)]
-    fn unary_protocol_result(
+    pub(super) fn unary_protocol_result(
         &mut self,
         expr: &Expr<'_>,
         expected: Option<&Term>,

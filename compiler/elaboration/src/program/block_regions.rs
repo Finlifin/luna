@@ -13,6 +13,7 @@ mod logical;
 mod matches;
 mod normal_applications;
 mod tails;
+mod unary;
 mod when;
 use destinations::{CheckedBlock, Destination};
 pub(super) use tails::{ContextualTail, OrdinaryTail};

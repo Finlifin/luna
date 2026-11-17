@@ -52,6 +52,71 @@ fn check_in_engines(source: &str, calls: &[&str], budget: Budget, engines: &[boo
 }
 
 #[test]
+fn unary_regions_keep_operand_effects_and_return_targets() {
+    check_both(
+        "
+        comptime fn observe(value: bool) -> bool { value }
+        comptime fn early() -> bool {
+            let unused = not (do { return true; false });
+            observe(false)
+        }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let flag = not (do {
+                trace = trace * 10 + 1;
+                not observe(do { trace = trace * 10 + 2; true })
+            });
+            let number: i8 = -(do { trace = trace * 10 + 3; 7 });
+            flag and number == -7 and trace == 123 and early()
+        }
+        ",
+        &["check", "observe", "early"],
+    );
+}
+
+#[test]
+fn unary_regions_restore_probe_context_and_literal_boundaries() {
+    check_both(
+        "
+        comptime fn check() -> bool {
+            let outside = true;
+            let minimum: i8 = -(if outside { 127 } else { 1 });
+            let endpoint: i8 = -128;
+            let positive: i8 = - -1;
+            let scoped = not (do { let outside = false; outside });
+            let defaulted = -(-(-(-1)));
+            minimum == -127 and endpoint < minimum and positive == 1
+                and defaulted == 1 and scoped and outside
+        }
+        ",
+        &["check"],
+    );
+    for source in [
+        "comptime fn invalid() -> i8 { -129 }",
+        "comptime fn invalid() -> bool { not 1 }",
+        "comptime fn invalid() -> i8 { -(if true { 1 } else { false }) }",
+        "comptime fn invalid() -> bool { not (do { let hidden = false; hidden }); hidden }",
+    ] {
+        assert!(sysroot::compile(source).is_err(), "accepted {source}");
+    }
+}
+
+#[test]
+fn unary_regions_share_nested_branch_and_block_continuations() {
+    let mut expression = "observe(true)".to_owned();
+    for _ in 0..12 {
+        expression = format!("not (if true {{ do {{ {expression} }} }} else {{ false }})");
+    }
+    check_both(
+        &format!(
+            "comptime fn observe(value: bool) -> bool {{ value }}
+            comptime fn check() -> bool {{ {expression} }}"
+        ),
+        &["check", "observe"],
+    );
+}
+
+#[test]
 fn arithmetic_regions_preserve_operand_order_and_original_return_targets() {
     check_both(
         "

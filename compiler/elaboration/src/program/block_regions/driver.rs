@@ -146,6 +146,7 @@ enum RegionFrame<'b, 'h> {
     Conditional(conditionals::Frame<'b, 'h>),
     When(when::Frame<'b, 'h>),
     Match(matches::Frame<'b, 'h>),
+    Unary(unary::Frame<'b, 'h>),
     Arithmetic(arithmetic::Frame<'b, 'h>),
     Comparison(comparisons::Frame<'b, 'h>),
     Logical(logical::Frame<'b, 'h>),
@@ -162,7 +163,7 @@ impl RegionFrame<'_, '_> {
             Self::Conditional(frame) => frame.unwind(checker),
             Self::When(frame) => frame.unwind(checker),
             Self::Match(frame) => frame.unwind(checker),
-            Self::Comparison(_) | Self::Arithmetic(_) => {}
+            Self::Comparison(_) | Self::Arithmetic(_) | Self::Unary(_) => {}
             Self::Logical(frame) => frame.unwind(checker),
             Self::NormalApplication(frame) => frame.unwind(checker),
             Self::CallableApplication(frame) => frame.unwind(checker),
@@ -179,6 +180,7 @@ impl std::fmt::Display for RegionFrame<'_, '_> {
             Self::Match(frame) => frame.fmt(f),
             Self::Comparison(frame) => frame.fmt(f),
             Self::Arithmetic(frame) => frame.fmt(f),
+            Self::Unary(frame) => frame.fmt(f),
             Self::Logical(frame) => frame.fmt(f),
             Self::NormalApplication(frame) => frame.fmt(f),
             Self::CallableApplication(frame) => frame.fmt(f),
@@ -303,6 +305,25 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         )?;
         let frame = comparisons::Frame::new(self, expr, destination, false)?;
         self.drive_check_region(RegionFrame::Comparison(frame))?
+            .ordinary(expr.span)
+    }
+
+    pub(in crate::program) fn unary_expression(
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let destination = Destination::ordinary(
+            self,
+            OrdinaryTail {
+                expected,
+                partial: None,
+                input: None,
+            },
+            expr.span,
+        )?;
+        let frame = unary::Frame::new(self, expr, destination, false)?;
+        self.drive_check_region(RegionFrame::Unary(frame))?
             .ordinary(expr.span)
     }
 

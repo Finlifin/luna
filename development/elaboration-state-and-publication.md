@@ -398,6 +398,37 @@ trait RHS 上下文及最终 peer 搜索的后继，拥有已检查操作数、�
 提前退出仍使用原函数出口；右侧源码依旧检查。此迁移没有放宽身份观察的未知
 效果边界，也没有修复未知前缀 Type 默认值的提前冻结问题。
 
+一元 `-`／`not` 也由同一 Region 持有操作数探测与完成后继，原同步
+`unary_expression` 检查流程已删除。帧保存协议选择、Attempt、已检查操作数、
+目标域和 effect 交付责任；只对缺少上下文的探测回退，恢复 numeric defaults 后
+才决定是否取得了重试依据。成功探测的操作数直接复用，关联 Output 由原协议规则
+检查，不假定它与输入同型。primitive 或无目标域的嵌套一元运算直接压入共同栈；
+其他目标继续先经普通交付适配，再进入同一规则。
+
+立即负数字面量仍连同符号形成，避免先要求正幅值装入有符号目标；嵌套负号仍分别
+检查，不能将 `- -1` 合并成一次字面量构造。操作数的 return 沿原函数退出，协议
+探测不执行用户代码。S-expression 显示阶段、等待项、协议、事务和保留的操作数。
+这一迁移不改变静态身份观察，也未补齐未知默认值所需的原 invocation continuation。
+
+一元迁移的本轮证据（工作目录 `/home/fin/luna`，入口
+`python3 -B development/check.py --timeout 900 --`）：
+
+- `test -p elaboration --lib -p luna --test contextual_input_regions
+  -- unary_ --test-threads=1`：退出 0，
+  `/tmp/luna-tools-v359vkwd/result.json`；帧的 dump／重复响应拒绝及三个源码用例通过。
+  源码用例在两种执行器中检查操作数次数、提前返回、探测恢复、字面量范围及嵌套分支。
+- `test -p elaboration --lib -p luna --test contextual_input_regions
+  --test arithmetic_contexts --test library_std_format --no-fail-fast
+  -- --test-threads=1`：退出 0，`/tmp/luna-tools-zs43cah4/result.json`；
+  elaboration／luna 单元、区域、算术上下文和真实 sysroot 格式扫描用例通过。
+- `test -p luna --test execution --test inline_control --test library_protocols
+  --no-fail-fast -- unary nested_negation --test-threads=1`：退出 0，
+  `/tmp/luna-tools-3u3mrxbm/result.json`；七项既有用例覆盖关联输出、effect 边界、
+  inline 求值次数、溢出／phase 检查和嵌套操作数的执行／物化限制。
+- 六个修改／新增 Rust 文件 scoped rustfmt `--check` 退出 0，
+  `/tmp/luna-tools-pxtjrxx8/result.json`。这些检查不证明源码—VM continuation 或
+  `defer std.fmt.Parse(format)` 已实现。
+
 这些规则仍在原活动 Checker 中同步驱动，尚未提供等待外部 Type 响应的入口，
 不解除待定 callable／列表域正例的 ignore。源码状态迁移和原 VM activation
 交接必须继续共同推进，不能把内部上下文试探当作已执行前缀的恢复。

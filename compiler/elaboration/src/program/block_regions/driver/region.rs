@@ -77,6 +77,7 @@ impl<'b, 'h> Region<'b, 'h> {
                 RegionFrame::Match(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::Comparison(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::Arithmetic(frame) => frame.step(checker, returned.take())?,
+                RegionFrame::Unary(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::Logical(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::NormalApplication(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::CallableApplication(frame) => frame.step(checker, returned.take())?,
@@ -198,14 +199,17 @@ impl<'b, 'h> Region<'b, 'h> {
                     // delivery adaptation, which enters the same frame.
                     if (comparisons::is_comparison(expr)
                         || logical::is_logical(expr)
-                        || arithmetic::operator(expr).is_some())
+                        || arithmetic::operator(expr).is_some()
+                        || unary::operator(expr).is_some())
                         && let Some(view) = destination.ordinary_view()
                         && view.input.is_none()
                         && view
                             .expected
                             .is_none_or(|ty| matches!(ty, Term::Primitive(_)))
                     {
-                        let frame = if logical::is_logical(expr) {
+                        let frame = if unary::operator(expr).is_some() {
+                            RegionFrame::Unary(unary::Frame::new(checker, expr, destination, true)?)
+                        } else if logical::is_logical(expr) {
                             RegionFrame::Logical(logical::Frame::new(
                                 checker,
                                 expr,
@@ -406,6 +410,9 @@ impl<'b, 'h> Region<'b, 'h> {
                         }
                         RegionFrame::Comparison(comparison) => {
                             Some(comparison.recover(checker, failure.take().unwrap()))
+                        }
+                        RegionFrame::Unary(frame) => {
+                            Some(frame.recover(checker, failure.take().unwrap()))
                         }
                         RegionFrame::Arithmetic(frame) => {
                             Some(frame.recover(checker, failure.take().unwrap()))
