@@ -2179,6 +2179,46 @@ test -p comptime_interpretor --lib -p luna --test comptime_bytecode_closures
 VM 609、luna 单元 87、闭包环境 23、字节码闭包 2、快照契约 2 项通过；捕获 cell 的
 独立性、重复调用更新及入口快照保持原断言。没有执行全 workspace 或性能基准。
 
+### 源码调用结果中的命名函数冻结
+
+staged 输入的私有 source VM 已检查表达式阶段、输入、返回域和契约，返回的
+`Value::FunctionInstance` 可以指向 runtime 或 comptime 函数。此前 materialization
+只允许 runtime 签名通过这一分支，却允许等价的命名 Closure 使用 comptime 签名，
+造成泛型工厂直接返回或经 struct、enum、newtype 传送回调时被错误拒绝。
+
+冻结现在保留声明、普通实例实参及原 Expr.ty，两种阶段走同一命名身份分支。
+实参的预算与完成性检查保留；没有执行 callback 主体，也没有把 comptime 签名
+改为 runtime。调用许可仍由阶段检查与具体实例化决定，RuntimeTraitMethod 的
+runtime 边界和带捕获 Closure 的图冻结未改变。
+
+修改前的四项失败及生产源码对照见[退役核验](module-boundaries-and-retirement.md#9-gradual-测试模型与生产域观察分离)。
+修改后在 `/home/fin/luna` 通过 `development/check.py --timeout 900 --` 验证：
+
+- `test -p luna --test staged_callable_freezing --test open_functions
+  --test scoped_comptime_callables --no-fail-fast -- --test-threads=1`：退出 0，
+  4、390、20 项通过，`/tmp/luna-tools-0ccmo673/result.json`，原四项恢复通过。
+- 新增真实 sysroot 用例后，单独执行 `test -p luna --test staged_callable_freezing
+  -- --test-threads=1`：退出 0，5 项通过，`/tmp/luna-tools-uuz6fh3g/result.json`。
+  该组覆盖两阶段 callback 执行、不同实例实参、nominal 字段、未使用主体不执行、
+  错误阶段拒绝，以及 builtin Splice 交付隐式 comptime 调用结果。
+- `test -p materialization --test scoped_dispatch_inputs --test expansion_boundary
+  -p luna --test library_protocols --test library_std_format --no-fail-fast
+  -- --test-threads=1`：退出 0，`/tmp/luna-tools-_wypw28m/result.json`，
+  10、9、27、4 项通过。不是全 workspace、native 或性能验收。
+
+隔离 fixture 没有配置 Splice 时，隐式跨阶段调用失败不能直接当作真实 sysroot
+缺口。实际完整执行已通过上述新增用例；没有因此放宽 phase 检查。反之，
+[普通值子句复现](repros/staged-callable-value-input.fl) 在真实 sysroot 仍失败：
+`run -p luna -- check development/repros/staged-callable-value-input.fl --sysroot
+library --build-target x86_64 linux 64` 退出 1，
+`/tmp/luna-tools-mmp9ohpy/result.json`，报 `staged argument cannot be frozen: Type`。
+
+这项尚缺的是 source 输入依赖的等待：`freeze_staged_call_inputs` 尚未把普通值
+子句的未决输入可靠交给 deferral，再以空 scope 尝试导出实例身份。应补共同依赖
+观察与原检查后继；不能放宽完成性检查、允许自由值参数逸出，或把失败转成 Any。
+本次修复不完成该恢复协议，也不完成 Parse 的描述值或目标 println。
+Rust 格式检查退出 0，`/tmp/luna-tools-73jvm22f/result.json`。
+
 ### 既有键预算与复制视图的验证
 
 两项新回归在 `ff7194b2` 基线上失败：热缓存零预算返回成功，长而未保留的声明

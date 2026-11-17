@@ -1,0 +1,12 @@
+{-
+    Pending source deferral: a callable factory carries an ordinary bool clause
+    input. Its result must wait for that input before freezing the identity.
+    Current elaboration reports "staged argument cannot be frozen: Type".
+-}
+use builtin.prelude.*;
+
+comptime fn selected() -> bool where flag: bool { flag }
+comptime fn make() -> comptime fn() -> bool where flag: bool { selected<flag> }
+fn apply(comptime action: comptime fn() -> bool) -> bool { action() }
+fn forward() -> bool where flag: bool { apply(make<flag>()) }
+fn run() -> bool { forward<true>() and not forward<false>() }

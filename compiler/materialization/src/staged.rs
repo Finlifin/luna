@@ -141,9 +141,10 @@ impl Builder<'_> {
             Value::FunctionInstance {
                 declaration,
                 arguments,
-            } if !ty.is_comptime_callable()
-                && matches!(ty.callable_signature(), Term::Function { .. }) =>
-            {
+            } if matches!(ty.callable_signature(), Term::Function { .. }) => {
+                // The source VM has checked this result against `ty`. Named
+                // identities can belong to either phase; freezing preserves
+                // the original signature rather than granting runtime entry.
                 for argument in arguments {
                     nir::type_computations::charge_term(argument, &mut self.fuel)
                         .map_err(|error| error.to_string())?;
