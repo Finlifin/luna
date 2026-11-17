@@ -41,6 +41,96 @@ fn check_events(source: &str, events: &[(&str, usize)]) {
 const FLAG: &str = "trait Flag {} impl Flag for bool {}";
 
 #[test]
+fn unobserved_dependencies_do_not_start_an_isolated_invocation() {
+    // These remain valid source-checking requests, not language rejection
+    // cases. Until source/VM continuation exists, fail at the missing boundary
+    // instead of running Selected (which would index past the list) while checking.
+    for (parameters, call) in [
+        ("comptime T: Type, value: T", "accept(Selected(), true)"),
+        (
+            "comptime T: Type, value: T",
+            "do { let target = accept; target(Selected(), true) }",
+        ),
+        (
+            "comptime .T: Type = bool, value: T",
+            "accept(do { return true; true }, .T = Selected())",
+        ),
+    ] {
+        let failure = sysroot::compile(&format!(
+            "comptime fn Selected() -> Type {{
+                let items: meta.List<Type> = [bool];
+                items[1]
+            }}
+            comptime fn accept({parameters}) -> bool {{ true }}
+            comptime fn check() -> bool {{ {call} }}"
+        ))
+        .unwrap_err();
+        assert!(
+            failure.contains("dependent call input needs its original comptime invocation"),
+            "{call}: {failure}"
+        );
+    }
+}
+
+#[test]
+fn unobserved_default_dependencies_report_the_missing_continuation() {
+    let failure = sysroot::compile(&format!(
+        "{FLAG}
+        comptime fn mark() -> bool {{ true }}
+        comptime fn accept(comptime .T: Type = bool,
+            comptime .U: Type = T,
+            comptime .V: Type = do {{ mark(); U }}, value: V) -> bool
+        where requires V :- Flag
+        {{ true }}
+        comptime fn check() -> bool {{ accept(true) }}"
+    ))
+    .unwrap_err();
+    assert!(
+        failure.contains("dependent call input needs its original comptime invocation"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn explicit_constant_evaluation_remains_an_execution_boundary() {
+    assert_eq!(
+        sysroot::run(&format!(
+            "{FLAG}
+            comptime fn Selected() -> Type {{ bool }}
+            comptime fn accept(comptime T: Type, value: T) -> bool
+            where requires T :- Flag
+            {{ true }}
+            fn run() -> bool {{
+                const selected = Selected();
+                const result = accept(selected, true);
+                result
+            }}"
+        )),
+        Value::Bool(true),
+    );
+}
+
+#[test]
+fn immutable_local_identities_do_not_need_required_execution() {
+    check_both(
+        &format!(
+            "{FLAG}
+            trait Enabled where flag: bool {{}}
+            impl Enabled<true> for bool {{}}
+            comptime fn accept(comptime T: Type, comptime flag: bool, value: T) -> bool
+            where requires T :- Flag and bool :- Enabled<flag>
+            {{ flag }}
+            comptime fn check() -> bool {{
+                let selected = bool;
+                let enabled = true;
+                accept(selected, enabled, true)
+            }}"
+        ),
+        1,
+    );
+}
+
+#[test]
 #[ignore = "unknown default prefixes need source execution continuation, not eager freezing"]
 fn dependent_default_unknown_prefix_runs_in_the_original_invocation() {
     check_events(
@@ -189,7 +279,7 @@ fn effectful_prefixes_invalidate_old_facts_and_keep_shadowing_lexical() {
         ))
         .unwrap_err();
         assert!(
-            failure.contains("not available in this invocation")
+            failure.contains("dependent call input needs its original comptime invocation")
                 || failure.contains("not established"),
             "{failure}"
         );
@@ -336,7 +426,8 @@ fn tail_observation_cannot_reuse_a_local_value_from_before_the_prefix() {
     // This source is invalid, but the current conservative path can still
     // stop before proving the missing Flag implementation for char.
     assert!(
-        failure.contains("not available in this invocation") || failure.contains("not established"),
+        failure.contains("dependent call input needs its original comptime invocation")
+            || failure.contains("not established"),
         "{failure}"
     );
 }

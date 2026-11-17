@@ -686,14 +686,50 @@ S-expression，分别显示保留的生产者／身份／默认值与本次子�
 参数路由和 HIR，源码子检查仍在同一 Checker 中完成；没有跨 owner 的响应权限，
 也没有借此实现 VM 暂停、补预算恢复或一般普通调用的全部规则帧化。
 
-本次验证还发现一个此前未覆盖的真实断点：三级普通 Type 默认值转发中，最后一项
+此前验证发现一个真实断点：三级普通 Type 默认值转发中，最后一项
 为 `do { mark(); U }`，实际调用轨迹没有执行 `mark`。未知前缀使输入身份观察失效，
-现有 `freeze_dependency_input` 路径会执行 required 求值并替换生产者；这个回退
+原 `freeze_dependency_input` 回退会执行 required 求值并替换生产者；这个回退
 不等于在原调用中暂停并取得 Type。不能通过放宽未知效果的事实保留规则来修补。
 合法用例保存在 `ordinary_input_identity.rs` 的
 `dependent_default_unknown_prefix_runs_in_the_original_invocation`，保留两种执行器、
 重复 invocation 的原次数预期，并明确 ignored 等待源码 continuation。
 另一个纯转发依赖链用例将普通默认调用放在非 Type 依赖槽，独立验证已支持路径。
+
+现在普通调用依赖帧在观察失败后检查被调用者的 callable phase：comptime callable
+的输入属于将来那次源 invocation，不能在类型检查的依赖次序中另开 invocation。
+这条路径明确报告缺少 source execution continuation，不执行或冻结输入；Type
+字面量、已有合法身份与可以静态观察的结果仍保留原生产者。判断来自被调用者类型，
+不来自 `in_required_comptime`：检查 required 根引用的函数体也没有执行该函数的
+权限。runtime 正文的局部 `const` 所建立的 required 求值边界仍然有效；comptime
+正文的数据 `const` 属于每次 invocation 的绑定，不能据关键字声称其已经求值。
+局部读取也进入共同的身份观察器，读取已有不可变绑定事实并保留 Local；未知初始化、
+可变绑定和失效事实不会因此成为已完成值。此前对所有 Local 跳过观察的路径已移除，
+不再为取得现有局部身份而求值。
+
+这是停止错误执行的阶段，不是待定 Type 调用已经可用：上述正例继续保留原预期和
+ignore，临时诊断的回归另行检查。输入检查必须能等待原 invocation，接收实际值后
+再继续域、能力与后续参数检查；未知不自动成为 Any、fresh rigid 或已完成值。
+本阶段仅覆盖已经形成 callable 的普通调用依赖帧，不宣称开放函数的其他 required
+准备路径已经统一，也不改变 runtime callable 的 staged 输入交付。
+
+停止错误执行的定向验证在 `/home/fin/luna`，通过
+`python3 -B development/check.py --timeout 900 -- test -p luna --test ordinary_input_identity --no-fail-fast -- --test-threads=1`：
+`/tmp/luna-tools-uj9hqcbi/result.json` 退出 0，18 项通过，原未知默认值正例仍 ignored。
+直接／存储的 callee、提前 return 后的未执行 Type 生产者均在缺少恢复处停止；
+runtime const、不可变局部身份、失效事实拒绝及原次数／顺序断言通过。
+初轮新 fixture 混淆了两阶段 const 并使用了未声明的具名入口，已按现行契约修正。
+
+以同一入口运行 `source_input_dependencies`、`prepared_input_dependencies`、
+`ordinary_dependency_tasks`，前两组共 6 项通过，后两项在 VM 构造时
+`UnmaterializedDispatch`（`/tmp/luna-tools-40fhlius/result.json`，退出 101）。仅把
+本次生产文件换回 `36773353` 后复现相同失败
+（`/tmp/luna-tools-isdqihh3/result.json`，退出 101），随后逐字节恢复。
+默认链用例现使用已有 `sysroot::with_comptime` 的源码查询服务及统一语义测试预算，
+保持两种引擎、72 层依赖、调用次数、顺序与拒绝断言；该组复核退出 0
+（`/tmp/luna-tools-mcc4581j/result.json`）。这不是预算性能验收，未提高生产默认额度。
+三项 Rust 文件的定向格式检查退出 0，报告为
+`/tmp/luna-tools-c3dig1cb/result.json` 与 `/tmp/luna-tools-6mqbqc5h/result.json`。
+没有运行全 workspace，也不把临时诊断通过计为待定 Type 正例完成。
 
 取证目录 `/home/fin/luna`：新未知前缀用例在帧化实现上失败于 `mark` 实际 0 次、
 预期 1 次（`/tmp/luna-tools-48surjz6/result.json`，退出 101）。只将本次两个实现

@@ -349,6 +349,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 checker.complete_type_dependency(
                     slot,
                     owner,
+                    callee,
                     source,
                     route.is_some(),
                     value,
@@ -396,7 +397,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     None
                 };
                 checker.complete_type_dependency(
-                    slot, owner, source, false, value, bindings, forwarded, prepared,
+                    slot, owner, callee, source, false, value, bindings, forwarded, prepared,
                 )?;
                 progress.complete(slot, source.span)?;
             }
@@ -416,6 +417,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         checker.complete_type_dependency(
             slot,
             self.owner,
+            self.callee,
             self.source,
             true,
             value,
@@ -494,6 +496,7 @@ impl Checker<'_, '_> {
         &mut self,
         slot: usize,
         owner: Option<OwnerId>,
+        callee: &n::Expr,
         source: &Expr<'_>,
         has_source: bool,
         value: n::Expr,
@@ -501,7 +504,7 @@ impl Checker<'_, '_> {
         forwarded_default: Option<Term>,
         prepared: &mut PreparedInputs,
     ) -> Result<(), Error> {
-        let observed = if matches!(value.kind, K::TypeValue(_) | K::Local(_)) {
+        let observed = if matches!(value.kind, K::TypeValue(_)) {
             None
         } else {
             self.preserved_input_identity(
@@ -580,16 +583,41 @@ impl Checker<'_, '_> {
                     } else {
                         match self.spread_input_symbol(*binding, &value.ty, source)? {
                             Some(symbol) => (value, symbol),
-                            None => self.freeze_dependency_input(source, value, bindings)?,
+                            None => self
+                                .complete_unobserved_call_input(callee, source, value, bindings)?,
                         }
                     }
                 }
-                _ => self.freeze_dependency_input(source, value, bindings)?,
+                _ => self.complete_unobserved_call_input(callee, source, value, bindings)?,
             }
         };
         prepared.values[slot] = Some(value);
         prepared.symbols[slot] = Some(symbol);
         Ok(())
+    }
+
+    fn complete_unobserved_call_input(
+        &mut self,
+        callee: &n::Expr,
+        source: &Expr<'_>,
+        value: n::Expr,
+        bindings: Vec<(n::LocalId, Term, Term)>,
+    ) -> Result<(n::Expr, Term), Error> {
+        let callable = self.structural_type(&callee.ty, source.span)?;
+        let callable = self.callable_input_view(&callable, source.span)?;
+        if callable.is_comptime_callable() {
+            // The dependency walk is not the invocation's execution order.
+            // In particular, bindings above are identity evidence, not values
+            // delivered by an executed prefix. A separate required invocation
+            // would consume effects here and replace the original producer.
+            // Until source checking can wait on that invocation, report the
+            // missing continuation rather than silently changing its behavior.
+            return Err(context_error(
+                source.span,
+                "dependent call input needs its original comptime invocation; source execution continuation is not yet implemented",
+            ));
+        }
+        self.freeze_dependency_input(source, value, bindings)
     }
 }
 

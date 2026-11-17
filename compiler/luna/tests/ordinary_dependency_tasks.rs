@@ -2,7 +2,7 @@
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
-use comptime_interpretor::{Budget, Event, Interpreter, Value};
+use comptime_interpretor::{Event, Value};
 
 #[test]
 fn long_default_dependency_chains_are_acyclic_and_keep_producers_once() {
@@ -36,26 +36,22 @@ fn long_default_dependency_chains_are_acyclic_and_keep_producers_once() {
         .unwrap()
         .declaration;
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime(&package, Budget::default())
-        }
-        .unwrap();
-        assert_eq!(
-            vm.invoke(entry, vec![]).unwrap(),
-            Value::Bool(true),
-            "tree={tree}"
-        );
-        let enters = vm
-            .events()
-            .iter()
-            .filter(|event| matches!(event, Event::EnterFunction(id) if *id == marker))
-            .count();
-        assert_eq!(
-            enters, 2,
-            "tree={tree}: each invocation executes its root default once"
-        );
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            assert_eq!(
+                vm.invoke(entry, vec![]).unwrap(),
+                Value::Bool(true),
+                "tree={tree}"
+            );
+            let enters = vm
+                .events()
+                .iter()
+                .filter(|event| matches!(event, Event::EnterFunction(id) if *id == marker))
+                .count();
+            assert_eq!(
+                enters, 2,
+                "tree={tree}: each invocation executes its root default once"
+            );
+        });
     }
 }
 
@@ -81,17 +77,13 @@ fn value_index_dependencies_preserve_source_order_and_default_forwarding() {
         .unwrap()
         .declaration;
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime(&package, Budget::default())
-        }
-        .unwrap();
-        assert_eq!(
-            vm.invoke(entry, vec![]).unwrap(),
-            Value::Bool(true),
-            "tree={tree}"
-        );
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            assert_eq!(
+                vm.invoke(entry, vec![]).unwrap(),
+                Value::Bool(true),
+                "tree={tree}"
+            );
+        });
     }
     let invalid = source.replace("false }, Flag<false>", "false }, Flag<true>");
     assert!(sysroot::compile(&invalid).is_err());
