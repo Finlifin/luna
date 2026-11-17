@@ -387,6 +387,46 @@ callee 可以在“调用者提供有效视图”的显式前提下形成条件�
 调用与清理，拒绝例必须在错误访问发生前诊断。不能用现有 Static 正例替代拥有存储
 和生命周期反例。这里规定的是待实现契约，本轮只执行了独立来源分析。
 
+### 借用布局的显式遍历
+
+Pointer 与 Text 的共同叶布局现由
+[`memory/borrowed_layout.rs`](../compiler/program_verification/src/memory/borrowed_layout.rs)
+提供，原 `memory` API 再导出同一入口。遍历栈保存字段／变体游标及路径恢复位置，
+按原声明顺序逐项推进；逻辑路径、物理路径和外到内 guards 只在交付叶时复制。
+空变体仍消费 guard 工作，指针 newtype 的物理解包层数也保留。借用的 closure
+环境直接观察，已经实例化的字段按所有权移动，不为每个待办子项复制整条路径。
+
+这替换了递归布局 walk，没有改变类型形成服务、路径深度限制或预算策略。
+旧实现虽然限制逻辑路径长度，仍会为每层保留宿主栈帧。新增用例在 96 KiB 线程栈
+上枚举 127 层名义结构，并验证第 128 层按原限制返回诊断；将同一用例临时切回
+`79e3d971` 的旧 walk 后发生 stack overflow／SIGABRT，候选实现则通过。
+这份证据只证明布局遍历的栈帧问题，不声称所有类型复制、分析和源码路径都已无递归。
+
+混合文本／指针用例另以独立 storage projection 核对叶域和 guards，逐个不足预算
+验证不交付结果，再用足够额度完成同一查询。已有条件载荷、空变体及错误名义实参
+仍由共同布局和形成检查处理；没有通过过滤 Text 叶把它伪装成无借用值。
+此处是布局基础的实现，仍不提供 backing region 的存活、访问权限或 cleanup 证据，
+runtime str 的生产接线继续遵守前述迁移闭包。
+
+验证工作目录 `/home/fin/luna`，均通过
+`python3 -B development/check.py --timeout 900 -- test` 执行：
+
+- `-p program_verification --lib memory::borrowed_layout -- --test-threads=1`：
+  `/tmp/luna-tools-j8b42oro/result.json` 退出 0，四项通过。
+- 临时切回旧 walk、其余工作区保持原样，单独执行上述深层用例：
+  `/tmp/luna-tools-h8wzr13y/result.json` 退出 101，stderr 记录 stack overflow
+  和 SIGABRT。随后恢复候选文件；未放宽深度、预算或用例的线程栈大小。
+- 最终 `-p program_verification -p luna --lib --test text_regions --test text_bytes
+  --no-fail-fast -- --test-threads=1`：`/tmp/luna-tools-0_c0_onz/result.json`
+  退出 0，四组共 296 项通过，输出锚点为 `test result:`。
+- `-p luna --test resources -- --exact
+  borrowed_string_views_do_not_gain_pointer_free_layout_from_copy --test-threads=1`：
+  `/tmp/luna-tools-fex3zkpk/result.json` 退出 0，原拒绝用例通过。
+
+两个 Rust 文件的 scoped rustfmt 检查退出 0，
+`/tmp/luna-tools-a170389s/result.json`；diff 检查通过。未运行全 workspace、native
+或性能测量，也未改动作者已有的 moves/effects 修改；结果属于当前工作区验证。
+
 ### 6.4 标量存储更新与读取事实的有效期
 
 [writer 范围复现](repros/writer-sibling-range.fl)暴露了一条通用精度缺口：
