@@ -55,6 +55,13 @@ NF 参数、Any 容器、生成定义属性、冻结恢复。检查值域、顺�
 再改其中一个值的域、声明世界或代码类别，必须在正确接收边界拒绝。
 不能只测试 JSON/Term round trip 而不走源码及真实 sysroot。
 
+Type 载荷再分别采用具体身份、显式 Any 和含 Itself 要求的描述。容器元素域为
+Type 不等于它的载荷可直接作为 PTC 身份项；同一描述的数据共享不共享调用准入。
+验证两个位置引用同一 Any 节点时仍可接受不同具体类型，刚性 binder 的重复引用
+仍保留同一身份；嵌套要求的 subject 不能被外围同号参数替换。普通函数输入绑定、
+NF 参数和旧 wire 边界都参加这组检查，不能只证明 VM 内 enum 能装下描述。
+具体迁移见[共同冻结载体](type-descriptions-and-admission.md#9-共同冻结载体与-binder-的实施选择)。
+
 另将同一普通源值经常量、comptime 参数、函数结果与闭包送入 runtime：源域可以
 不同于 Splice.RuntimeTarget；检查转换次数、未选分支、目标资源责任和同阶段投影。
 当前常量/显式调用通过，参数直接返回仍失败，见[阶段交付](runtime-value-delivery.md)。

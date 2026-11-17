@@ -39,6 +39,14 @@ M2 先接通[统一值准入](comptime-value-admission.md)及普通参数的真�
 带域 list 编码和闭包共享快照；再让 M3 的宿主响应、代码值与发布使用相应传送契约。
 不能先删除 normal_terms/normal_values 中的检查，或把活动值引用统一复制成冻结数据。
 
+Type 描述迁移跨 M2/M3，完整接线按
+[共同冻结载体与 binder](type-descriptions-and-admission.md#9-共同冻结载体与-binder-的实施选择)
+推进：VM 返回、聚合／NF 数据边、普通输入绑定、身份消费者和源码注解一起闭合。
+`627ab804` 已让输入齐备的 required Type 返回走普通调用，不再临时建立推断输出；
+真实 Type 队列仍是具体身份消费者。不能继续给每种描述加一个队列状态就宣布完成，
+也不能只放宽 List 的 sort 检查；冻结值及调用绑定必须先能保留描述的实际含义。
+这条迁移与下面的待定域源码恢复共同支撑 Parse，二者都不由 scanner 代替。
+
 源输入已经形成也不等于 runtime 值已经构造。[阶段交付设计](runtime-value-delivery.md)
 把参数/常量/结果的消费角色放在 M2，把受检 Splice 调用、捕获和契约残余接入 M4，
 再与 M5 的目标存储来源和真实文本 writer 贯通。现有 `iir::staging::wrap` 不能先删：

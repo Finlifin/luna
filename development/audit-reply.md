@@ -1,6 +1,6 @@
 # 审查报告回复：当前判断与历史依据
 
-2026-11-17 核对至 `c127b11a` 及本次动态 NF 输入准备改动，工作分支 dev。
+当前判断以 `c127b11a` 的报告为起点，纳入至 `627ab804` 的相关源码迁移，工作分支 dev。
 最新对照 `ai_dev_logs/comptime_type_vm_divergence_report_2026-11-17_noon.md`
 （报告基线 `c127b11a`），保留 11-12、11-11 晚报的有效纠正与具体取证。
 报告用于发现偏差，语言依据仍是作者确认与正式 docs；本轮不修改 docs。
@@ -52,9 +52,17 @@ builtin.math 与 meta.math 是作者要求的不同阶段接口。继续采用�
 专用 tuple、Any 列表或绕过定义检查的入口。具体边界见
 [可计算类型描述](type-descriptions-and-admission.md)。
 
-午报 S14 提出的独立 `anar` 可执行文件与单 CLI 约定的冲突是另一项真实待处理
-事项；本次未改编辑器／LSP 交付。源码注册表仍要求完整 Function、runtime str
-来源仍缺失、TypeRef／lift／符号位宽等问题也没有被本次输入准备迁移解除。
+后续 `627ab804` 删除了输入齐备 required Type 调用的临时推断输出，但 VM 及
+冻结层仍用 Term 承载 Type 数据；列表元素编码、普通函数 binder 和解码共同依赖
+这一约定。不能将其误判为只缺 Any 绑定。现已明确
+[共同载体迁移](type-descriptions-and-admission.md#9-共同冻结载体与-binder-的实施选择)：
+TypeData 是带域数据，具体身份通过消费者取得；描述替换、NF 输入、旧 wire 和
+调用方准入必须一起维护。该方案尚未实现，不计为 println 或 Any 的交付。
+
+午报 S14 提出的独立 `anar` 可执行文件冲突已由 `403dcc22` 收入 `luna lsp`，
+随后 `65e8e1a0` 将独立 formatter 收入 `luna fmt`。内部 crate 继续保留职责，
+不能再把独立二进制列为待处理；对应证据保留在文末。源码注册表仍要求完整 Function、
+runtime str 来源仍缺失、TypeRef／lift／符号位宽等问题没有被输入准备迁移解除。
 不以报告的代码行数或测试数作为完成比例。
 
 ### 属性前缀边界的诊断回归

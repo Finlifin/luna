@@ -1,7 +1,7 @@
 # 可计算类型描述与调用准入
 
-状态：重构设计；源码核对基线 `e1c57dc9`。这里不声明新语言规则，也不声称 Any
-已进入 VM。目标是支撑作者指定的
+状态：重构设计；初始源码核对基线 `e1c57dc9`，第 9 节按 `627ab804` 复核值载体
+和输入绑定。这里不声明新语言规则，也不声称 Any 已进入 VM。目标是支撑作者指定的
 `fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format))`，
 同时适用于用户类型工厂、别名、容器和普通函数。正式 docs 保持不动。
 
@@ -249,7 +249,191 @@ scope 检查、substitution、预算计费和 Display 都必须按同一载体�
 拒绝、取消与恢复证据。公开格式化接口未接通前，`FormatPlan.parse` 仍只是扫描器，
 现有 `println(comptime text: str)` 仍是待替换接口，不能通过改名报告目标已完成。
 
-## 9. 实施闭包与验收
+## 9. 共同冻结载体与 binder 的实施选择
+
+这一节是实现方案，不是已经存在的 Rust API。按 `627ab804` 核对，真正需要替换
+的不只是 `Value::Type(Term)`。当前三个边界共同把 Type 数据等同于身份项：
+
+- `nir::comptime_values::encode_admitted_list` 依据元素域是否为 Type，要求元素分别
+  使用 `Sort::Type` 或 `Sort::ComptimeValue`；其 `validate_scoped` 则明确拒绝 Type 域。
+- `normal_values::normal_pattern_value_at` 在接收域为 Type 时，把输入 Term 检查后
+  直接包成 `Value::Type`；`normal_terms` 反向导出同一身份载体。
+- `types::input_binding::input_sort` 在已形成参数域为 Type 时，将 comptime 槽位
+  解释为 `Sort::Type`；`replace_scope` 随后按这个 sort 替换。仅修改列表元素检查，
+  仍会在普通函数输入绑定处丢失描述，或把描述错误送入身份替换。
+
+此外，`Term::NormalForm.arguments`、名义实参、函数值实参和普通聚合字段都还是
+Term；[现行 wire](../compiler/luna/src/build_context/metadata/wire.rs)直接编码这些
+字段。因此不能给 List 单独加一个 Description 元素分支，也不能给 Type 返回额外
+开一个不经过普通参数绑定的入口。
+
+### 9.1 数据边与身份边分开建模
+
+采用[通用值传送](comptime-value-admission.md)中的带域冻结图，Type 载荷是其中
+一种普通数据。以下表示各模块必须共同保留的信息，不规定内存布局或新增语言类型：
+
+```text
+FrozenValueRef = graph owner + node
+FrozenValueNode = checked value domain + payload + stable dependencies
+Payload = scalar / aggregate / callable / type-data / other admitted data
+TypeData = identity(TypeRef) / description(DescriptionRef)
+Description = explicit-any
+            / construction(checked head or constructor, ordered operands)
+            / refinement(base, scoped requirement)
+Operand = frozen value / authorized scoped input
+```
+
+图引用按拥有它的冻结单元解释；数字节点索引不是跨世界身份。TypeData 自己的值域
+是 Type，载荷才是被描述的类型。装有 Any 的 Type 值不是一个“域为 Any 的未知
+值”，更不是未完成的计算。普通聚合的每条元素边都指向值节点，保留该元素自己的
+域；列表的声明域及元素协议仍由普通形成检查提供。
+
+只把已完成且获准传送的数据放入 FrozenValue。`Operand` 中的 scoped input 是
+明确绑定的符号引用，用于合法的开放描述，不是伪装成完成值的待执行 producer。
+引用必须带可核对的 telescope 及声明来源；缺少域或归属的输入继续留在活动任务。
+描述含有合法符号引用时也不能据此作为闭合缓存结果或 runtime 布局输入。保留
+合法 runtime 依赖身份不授权 comptime 读取其值；对应环境仍按
+[TypeRef 与环境取得](type-references-and-environments.md)交付。
+
+身份消费者继续接收已检查的 TypeRef／身份项。它从 TypeData 取得身份要经过显式
+转换；Description 不提供不检查的 `as_term`。具体描述完成该消费者要求的形成
+与义务交付后，才可向旧身份路径交付；仍含 Any、缺少输入或无法形成合法交付时，
+返回该消费边界的等待／拒绝原因。需要保留到后续程序检查的义务不能被丢弃，也
+不能误要求所有 runtime 谓词在 comptime 证明。数据转发消费者无需取得身份。
+
+内部继续可以对身份、普通值和 runtime 输入使用不同 sort；这不是要求把所有
+`Sort::Type` 改为 `Sort::ComptimeValue`。应删除的是“Type 值出现在哪里，就天然
+是求解器类型项”的隐含转换。PTC 的 Type 变量、相等及 congruence 入口只消费
+身份视图，不直接消费 FrozenValue 或 Description 节点编号。
+
+NF 输入依旧按函数签名接收普通值。具体身份中的稳定参数以受检值引用保留，而不再
+要求每个普通值都借用身份 Term 编码。含描述输入的构造先形成描述应用，保留原头
+与完整输入；不能为了构造 TypeRef 丢掉 Any/refinement，也不能执行 NF 头的主体。
+已获得的具体身份可适配进新通道，旧 Term 编码只能作为**具体子集**的边界适配器。
+没有表示能力时明确失败，不得选一个具体类型替换描述后继续输出旧格式。
+
+### 9.2 普通调用先绑定数据，再按用途消费
+
+同一个 Type 输入可能既被返回、放入容器，又被用作后续参数的类型。调用计划应
+保存一次已检查的数据供应，再为每种用途创建消费者，不能在供应点就强制解析身份：
+
+| 使用点 | 需要的检查 | 不应发生的动作 |
+| --- | --- | --- |
+| `comptime T: Type` 的实参供应 | 实际值属于 Type，描述来源及 scope 合法 | 因 T 的域是 Type 就直接赋值 PTC meta |
+| 返回 T、保存局部量或列表元素 | 按接收边界传送同一 TypeData | 再执行生产者、选择 Any 的具体实例 |
+| 后续参数 `value: T` | 用 T 的描述在该调用方检查实际输入及要求 | 使用定义侧假设证明调用方已满足 trait |
+| 需要布局、ABI 或具体类型相等 | 取得该消费者获准使用的具体身份与相关环境 | 把相容关系变成身份相等或任意选布局 |
+| 保存 NF 应用 | 绑定普通实参、保留头及数据依赖 | 按 Tuple/List 名称决定参数种类 |
+
+这要求输入槽位分开保存阶段、已经形成的值域和供应状态。阶段为 comptime 不等于
+域已经是 Type；取得 Type 域也不等于其实际载荷是具体身份。现有
+`FunctionInputBuilder` 的前缀域检查、失败不更新前缀、原始位置和去除 staged 槽位
+的职责仍须保留，但替换操作需区分“数据引用替换”和“身份使用处形成”。
+
+例如前置域计算依次得到 `Type`、`bool` 时，后续供应按不同域检查；收到 bool 值
+之后，若再把它用于类型位置，须在该位置拒绝。不能通过给 pending 槽位预填 Any
+绕过这一检查，也不能让 Type 值转发因为尚无具体布局而失败。
+
+### 9.3 替换、refinement 与共享图
+
+描述的替换必须走共同的有作用域遍历，并同时处理节点域、构造实参及要求代码。
+原 TypeTerm 的 binder 算法可以服务身份叶子，但不能只替换叶子而漏掉外围数据图。
+每次遍历显式持有源 telescope、目标 telescope、替换表和所属世界；缓存键包含
+这些环境，不能仅按节点编号复用另一调用的替换结果。
+
+refinement 的 Itself 是要求自己的 subject binder。外围参数替换进入要求时要
+跨过这一层，不能把 Itself 与同号外部参数混淆。要求保存受检表达式、自由依赖及
+适用的阶段；构造时检查它能够合法保存，准入时才把 subject 绑定到当前实际输入。
+PTC 只接收其中可提取的类型命题；程序谓词由程序验证／规定的执行检查处理。
+
+共享描述数据不共享准入状态。图中两个元素可指向同一份显式 Any 数据，接受它们
+的两个槽位仍分别检查实际类型；刚性类型 binder 的重复引用则继续保留同一个
+声明身份。节点去重不能把这两种关系都实现成“为该节点创建一个推断变量”。
+已经准入的实例也不能把实际类型写回共享节点，影响另一个独立调用。
+
+遇到局部声明引用时，传送计划必须保活合法来源或提供受检重定位；没有这种能力
+就拒绝该传送边界。TypeData 中有 nominal 引用不使 nominal 定义自身成为描述图
+的递归子节点。冻结的描述和值数据使用有界 DAG 遍历；活动可变存储及其循环继续
+交给现有存储传送规则，不能借 Type 描述图获得任意冻结许可。
+
+### 9.4 编码相同、类型相等与可缓存分别判断
+
+描述图可以按规范化数据编码比较／去重，目的仅是共享不可变存储和记录依赖。
+这不定义源语言 Type 的 Eq/Hash，不向 PTC 添加相等式，也不决定高阶函数公开
+参数名是否参与 Type 相等。后者仍按[公开入口设计](callable-input-interfaces.md)
+保留尚待决定的边界，不能借此次换载体悄悄作出选择。
+
+冻结与解冻共享节点、深度、字符串／整数载荷及依赖数量的预算。遍历先收费再分配，
+失败不安装半张图；释放未发布图不靠重新补充执行额度。重复子图可共享内部处理结果，
+但用户可观察的 comptime 调用次数不因此减少。跨世界导入先核对声明依赖与域，再
+让消费者使用；来源世界的一次 impl 选择不自动成为接收世界的证明。
+
+metadata 当前仍是版本化的 Term 协议。新图应有独立、明确版本的编码入口及完整
+接收检查，不能把旧 tag 下的 Type Term 偷换成 Description。具体子集的转换可
+继续输出旧版本；不能表达的描述必须报告不支持该版本。解码不执行 factory、
+refinement 或生产者，不根据相同数字 DeclarationId 授权引用。共享代码缓存保持
+现有职责，结果缓存仍单独检查纯性、Type 结果策略、源 Eq/Hash 和传送资格。
+
+### 9.5 一次迁移必须接通的路径
+
+实施从真实源码的普通 Type 值传递开始，同时替换下面五条边。可以分提交落地，
+但不得在它们闭合前宣称描述值已经可用：
+
+1. 集中绑定和普通表达式形成 TypeData；alias、函数返回及值引用沿共同 VM 值
+   通道保存它，错误值域与来源在入口拒绝。
+2. 聚合、普通函数输入和 NF 输入使用带域数据边；同时迁移
+   `comptime_values`、`normal_terms`、`normal_values`、`input_binding` 及 scope
+   visitor。List、Object、用户 comptime struct 不能各有独立 Type 旁路。
+3. 共同输出先发布 TypeData；真实推断队列成为身份消费者适配器，保留许可检查。
+   参数描述消费者不需要预留 MetaId。消费失败不撤销已完成数据、不重放生产者。
+4. 源码注解与待定域检查接收描述，保存原规则后继及调用方环境，再检查具体输入。
+   单独给 `AnnotationState` 增加 ReadyDescription 不算接通这条边。
+5. 真实 `std.fmt.Parse` 构造带要求的参数描述，println 沿普通调用准备、收集协议
+   和 writer 输出；实现前文的定义证据与一次求值约束，保持资源检查有效。
+
+冻结方案还须检查 CMTT 的 Type 数据输入，但不把 Type 描述当作 expr/pattern/arm
+的代码见证；代码类别、Ψ 和控制接口仍由其传送协议检查。TypeRef/IIR、程序验证
+和后端只消费该阶段合法的身份及环境，不能让新描述图成为绕过形成检查的后门。
+
+这一闭包的最小回归同时包含：描述经普通函数和至少两种普通容器往返；相同描述
+用于两组不同实际类型；错误域拒绝后独立调用仍成功；嵌套 refinement 的 subject
+及外层 binder 替换；外世界同号引用拒绝；预算失败不发布；旧具体身份子集往返；
+以及真实 sysroot 的格式化正反例。已有具体身份和 scanner 的通过记录不覆盖这些
+要求。本节未新增代码实现或改变现行 wire 版本。
+
+### 9.6 Parse 的一次数据交付推演
+
+以下是目标内部 dump 的结构示意，声明名只为阅读，实际引用仍须包含世界归属。
+`Parse("{} {}")` 完成后，数据可以表达为：
+
+```text
+(type-production p0
+  (complete
+    (type-data
+      (description
+        (application (head Tuple)
+          (argument Es
+            (value (domain (List Type))
+              (elements
+                (type-data (refinement (any) (subject s0) (requires (Display s0))))
+                (type-data (refinement (any) (subject s1) (requires (Display s1))))))))))))
+```
+
+Tuple 的 Es 是一个完整供应的普通列表值；列表元素各自属于 Type。这里没有把
+元素数组当作 Tuple 的特殊参数列表，也没有通过 Tuple 的实现体展开身份。
+该结果可先存入局部量，再传给普通函数，之后才出现需要具体输入的消费者。
+
+检查两个 runtime 实参时，参数准备器分别取得它们的实际域，例如 u32 与 bool。
+消费者 c0 以这两个域分别检查描述和 Display 要求，通过后形成保留 Tuple 头及
+普通 Es 值的具体类型引用，同时保存该调用的交付与资源证据。p0 的数据不被改写。
+另一消费者 c1 收到缺少 Display 的实际类型时，在其准入处拒绝；p0 仍已完成，
+c0 仍有效。c1 不通过重跑 Parse 或沿用 c0 的 impl 选择恢复成功。
+
+如果 p0 尚未完成，消费者等待其真实执行；如果 Parse 已返回完整数据而 c1 尚未
+取得实参域，等待归 c1。二者在 dump 和错误来源中必须可区分。运行时值的源码
+执行次序仍由普通调用计划保存，描述检查先后不授权提前执行或重复执行实参。
+
+## 10. 实施闭包与验收
 
 | 闭包 | 必须共同接通 | 完成前不得宣称 |
 | --- | --- | --- |
