@@ -22,7 +22,7 @@ Any 与 bool、u8 分别相容，不产生 bool == u8，也不产生二者间的
 | `gradual::FrozenDescription::{Known, Any}` | 定义侧的稳定信息观察；Computed 注解可被观察为 Any | 不是已经求值的 Type 数据，不能直接放入 VM 作为返回值 |
 | `open_functions::Annotation` | 已知域、待执行计算、前置 Type 输入、待恢复源码 | 没有已完成但仍含 Any/refinement 的参数描述状态 |
 | `Value::Type(Term)` / `TypeParameter` | 完整或受作用域授权的抽象类型身份 | 不能保存未知描述节点、复合描述与待准入要求 |
-| `type_computations::execution::publish` | 将 invocation 的 Term 结果写入保留的推断变量 | 把完成计算和解出 Type 身份绑定到同一步 |
+| `PreparedRequired::invoke_in_world` / `restore_required_packet` | Type 与其他结果共用普通 VM 调用及调用方 scope 恢复，不分配临时推断输出 | Type 载荷仍为身份 Term；尚不能传送完整描述或恢复未完成源码区域 |
 | `type_expr` 的 `RefinedType` | 取得 base，证明要求，返回 base | 不能先保留针对未知描述的要求，再于实例准入时检查 |
 | `comptime_values::encode_admitted_list` | 已准入列表的普通稳定编码 | 元素仍为 Term，描述数据不能靠 Type 列表专用旁路接入 |
 | `normal_types`、值准入与 nominal formation | 按接收世界检查身份和普通实参 | 描述应用不能直接借旧身份/布局接口伪造完成 |
@@ -157,19 +157,19 @@ IIR/runtime 只接收其阶段允许的类型与值。Any 没有自动 tagged un
 
 ## 7. 生产完成与消费者完成分别发布
 
-`3567aefe` 已使 Type invocation 的同步与挂起路径使用同一个执行 owner；它解决
-取消与恢复的一致性，尚未拆开 Type 数据生产和具体身份赋值。当前
-[`execution::Invocation`](../compiler/elaboration/src/type_computations/execution.rs)
-在收到 VM `Complete(value)` 后立即调用 `publish`，取得 `Term` 并执行
-`assign_reserved`，再将队列项置为 `State::Complete(Term)`。
-[`AnnotationState::Ready`](../compiler/elaboration/src/type_computations.rs)也直接借用
-这个 Term。因此不能仅将 `Value::Type` 的字段换成描述图，然后沿用现有完成路径。
+`3567aefe` 曾统一 Type 队列的同步与挂起 owner；其中 VM 完成后立即取得 Term、
+`assign_reserved` 再发布 `State::Complete(Term)`，注解直接借用该身份。
+但 `627ab804` 清理输入齐备的 required invocation 后，这个队列已没有前端生产
+调用者，不能再称为“当前真实依赖队列”。旧调度器现只保存在
+[共享测试支持](../compiler/elaboration/test_support/type_computations/mod.rs)，用于
+检验独立的依赖、预算、取消和不重放契约，不是待定源码 Type 响应的接线终点。
 
-随后已清理输入齐备的 required invocation：Type 返回值与其他 comptime 数据共用
-普通 VM 调用和 packet 恢复，不再为其新建空推断上下文及临时输出变量。具体接线见
+真实 `PreparedRequired` 将 Type 返回值与其他 comptime 数据共用普通 VM 调用和
+packet 恢复，不再新建空推断上下文及临时输出变量。具体接线见
 [状态与发布协议](elaboration-state-and-publication.md#type-生产者的-invocation-与发布边界)。
-这解除了一处生产路径的人工耦合；上面的真实依赖队列仍以 MetaId 表示输出，完整
-描述载体与多消费者准入尚未实现，不能据此宣布第 2 节的 TypeValue 协议已经落地。
+该通道仍要求预先完成根 Expr；完整描述载体、多消费者准入和原源码区域恢复尚未
+实现。后续应在这一普通值通道保留生产结果，再让有身份需求的消费者持有赋值权限，
+不能为了复用旧测试模型而重新为每次 Type 生产分配 MetaId。
 
 迁移后的所有权分为三部分；以下为目标协议，不是现有 API：
 
@@ -217,8 +217,9 @@ dump 应显示生产状态及各消费边，例如下面的结构示意，而不
 
 ## 8. 同一次迁移必须覆盖的值通道
 
-下面按 `3567aefe` 的源码核对列出入口。它补足第 3 节的载体要求，不把这些函数
-当前接受的 Term 范围提升为语言规则。仅新增 VM enum 分支或注册 Any 名称，会在
+下面以 `3567aefe` 的载体核对为基础，纳入 required 普通返回及测试队列退役后的
+生产入口。它补足第 3 节的载体要求，不把这些函数当前接受的 Term 范围提升为语言规则。
+仅新增 VM enum 分支或注册 Any 名称，会在
 后续容器、冻结或签名路径再次丢失信息。
 
 | 当前入口 | 当前边界 | 目标职责与退役条件 |
@@ -230,7 +231,7 @@ dump 应显示生产状态及各消费边，例如下面的结构示意，而不
 | [`normal_values`](../compiler/comptime_interpretor/src/normal_values/mod.rs) | Type 域将输入 Term 解码成 `Value::Type` | 解码后仍区分身份与描述，不根据接收域为 Type 就将任意载荷当作身份 |
 | [`nir::comptime_values`](../compiler/nir/src/comptime_values.rs) | 列表字段是 Term；Type 元素用 `Sort::Type`，普通值验证入口拒绝 Type 域 | 迁移共同冻结值与域检查；不得添加仅用于 List&lt;Type&gt; 的描述字段或宽松 sort 绕行 |
 | [`deferred_signatures`](../compiler/nir/src/deferred_signatures.rs) | 稳定注解为 Known(Term) 或 Computed 索引 | 保存稳定描述与计算计划；活动生产、准入事务与等待者仍留在 elaboration |
-| [`type_computations::execution`](../compiler/elaboration/src/type_computations/execution.rs) | invocation 完成即赋值身份变量 | 按上一节拆分生产完成与各消费者完成；具体身份路径仍保留原赋值权限检查 |
+| [`required::prepared`](../compiler/elaboration/src/program/required/prepared.rs) / [`restore`](../compiler/elaboration/src/program/required/restore.rs) | 完整根的普通结果返回与 scope 恢复；Type 仍限于现有载荷 | 保留完整 Type 数据，再由描述或身份消费者准入；与原源码区域及 VM activation 交接，不恢复旧队列旁路 |
 
 共同冻结载体需要独立表达“这个值属于 Type”与“这个载荷是具体类型身份”。不能
 靠将 Any 声明为 `Primitive`、沿用当前按 `Sort::Type` 接入身份等式的路径，或删除

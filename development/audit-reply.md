@@ -59,6 +59,13 @@ builtin.math 与 meta.math 是作者要求的不同阶段接口。继续采用�
 TypeData 是带域数据，具体身份通过消费者取得；描述替换、NF 输入、旧 wire 和
 调用方准入必须一起维护。该方案尚未实现，不计为 println 或 Any 的交付。
 
+继续按实际调用者复核发现：`627ab804` 之后，旧 `type_computations::Session`
+只由独立协议测试使用，已没有普通前端生产消费者。它现已移至共享测试支持并取消
+生产导出，原依赖、签名、预算与取消断言保留。此前将它列为“现有生产入口”或
+“真实依赖队列”的开发文档定位已纠正；不能在这个模型上继续扩展 Type 结果，再把
+模型测试当作 `defer` 的接线证据。真实后续边界是完整根 `PreparedRequired`、
+源码 Region、原 VM activation 与参数消费者，见[退役范围](module-boundaries-and-retirement.md#8-type-依赖队列退出生产模块)。
+
 午报 S14 提出的独立 `anar` 可执行文件冲突已由 `403dcc22` 收入 `luna lsp`，
 随后 `65e8e1a0` 将独立 formatter 收入 `luna fmt`。内部 crate 继续保留职责，
 不能再把独立二进制列为待处理；对应证据保留在文末。源码注册表仍要求完整 Function、

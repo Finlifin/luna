@@ -1,9 +1,14 @@
 //! Demand planning is bounded independently of invocation, and never replays it.
+#[path = "../test_support/type_computations/mod.rs"]
+#[allow(dead_code)]
+mod type_computations;
+use elaboration::gradual;
+
 use comptime_interpretor::{Budget, Event};
-use elaboration::type_computations::{Error, Input, Session, State};
 use elaboration::{InferenceContext, InferenceTerm as I};
 use nir::program::{Expr, ExprKind as K, Function, FunctionPhase, LocalId, Package, SourceRange};
 use nir::{DeclarationId, Primitive as P, Sort, Term};
+use type_computations::{Error, Input, Session, State};
 
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 93, local }
@@ -256,7 +261,7 @@ fn annotation_task(
     session: &mut Session<'_>,
     context: &mut InferenceContext,
     inputs: &[elaboration::MetaId],
-) -> elaboration::type_computations::SignatureTask {
+) -> type_computations::SignatureTask {
     use nir::deferred_signatures::{Annotation, Input as SignatureInput, Signature};
     let signature = Signature::new(
         inputs
@@ -292,7 +297,7 @@ fn annotation_task(
 
 #[test]
 fn one_annotation_preflights_all_producers_before_executing_a_ready_sibling() {
-    use elaboration::type_computations::AnnotationState;
+    use type_computations::AnnotationState;
     let package = package();
     let mut context = InferenceContext::default();
     let mut session = Session::new(&package, &context, Budget::default()).unwrap();
@@ -347,7 +352,7 @@ fn one_annotation_preflights_all_producers_before_executing_a_ready_sibling() {
 
 #[test]
 fn one_annotation_detects_failed_descendants_before_running_independent_roots() {
-    use elaboration::type_computations::AnnotationState;
+    use type_computations::AnnotationState;
     let package = package();
     let mut context = InferenceContext::default();
     let mut session = Session::new(&package, &context, Budget::default()).unwrap();
@@ -379,7 +384,7 @@ fn one_annotation_detects_failed_descendants_before_running_independent_roots() 
 
 #[test]
 fn one_annotation_shares_producers_and_retains_progress_across_external_waits() {
-    use elaboration::type_computations::AnnotationState;
+    use type_computations::AnnotationState;
     let package = package();
     let mut context = InferenceContext::default();
     let mut session = Session::new(&package, &context, Budget::default()).unwrap();
@@ -419,7 +424,7 @@ fn one_annotation_shares_producers_and_retains_progress_across_external_waits() 
 
 #[test]
 fn annotation_preflight_exhaustion_cannot_execute_an_earlier_root() {
-    use elaboration::type_computations::{AdmissionError, AnnotationState};
+    use type_computations::{AdmissionError, AnnotationState};
     let package = package();
     let mut context = InferenceContext::default();
     let mut session = Session::new(&package, &context, Budget::default()).unwrap();
@@ -460,4 +465,42 @@ fn annotation_preflight_exhaustion_cannot_execute_an_earlier_root() {
             1
         );
     }
+}
+
+#[test]
+fn failed_session_world_creation_keeps_the_allowance_reserved() {
+    let package = Package::default();
+    let context = InferenceContext::default();
+    let assumptions = [nir::program::TraitRequirement {
+        interface_arguments: vec![],
+        subject: Term::Primitive(nir::Primitive::Bool),
+        interface: DeclarationId {
+            package: 1,
+            local: 999,
+        },
+    }];
+    let mut budget = Budget {
+        steps: 100,
+        depth: 128,
+    };
+    let failed = Session::new_in_scope_in_budget(
+        &package,
+        &context,
+        &mut budget,
+        &assumptions,
+        &[],
+        &[],
+        None,
+    );
+    assert!(matches!(failed, Err(Error::Invocation(_))));
+    assert_eq!(budget.steps, 0);
+    assert_eq!(budget.depth, 128);
+    budget.steps = 100;
+    let session =
+        Session::new_in_scope_in_budget(&package, &context, &mut budget, &[], &[], &[], None)
+            .unwrap();
+    assert_eq!(session.remaining_steps(), budget.steps);
+    // Successful scope authorization can consume work even in an empty
+    // declaration world. Synchronize the actual remainder, not the grant.
+    assert!(budget.steps > 0 && budget.steps <= 100);
 }

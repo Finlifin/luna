@@ -1,8 +1,9 @@
-//! Invocation-local waiters for ordinary comptime functions returning Type.
-//! These are elaboration state, not normal-form heads or serializable NIR types.
-//! Calls run only in the committed inference context. A failed call is terminal:
-//! retrying inference must not replay its comptime effects.
-use crate::{InferenceContext, InferenceError, InferenceTerm, MetaId};
+//! Isolated dependency-scheduler harness for inference and VM protocol tests.
+//! This is not the source checker's invocation owner. Production required calls
+//! return ordinary values without allocating a Type inference output. Retain
+//! this model to exercise dependency planning, cancellation and non-replay; it
+//! does not demonstrate source-region suspension or Type-description admission.
+use super::gradual;
 use comptime_interpretor::{Budget, Interpreter, InvocationValue, Value};
 use nir::program::{FunctionPhase, Package};
 use nir::{DeclarationId, Primitive, Sort, Term};
@@ -10,9 +11,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
+use type_resolution::{InferenceContext, InferenceError, InferenceTerm, MetaId};
 
 mod demand;
 mod execution;
+#[allow(unused_imports)] // Each integration target uses a different protocol subset.
 pub use execution::{Invocation, Progress as InvocationProgress, Start as InvocationStart};
 
 const DEFAULT_SCHEDULING_STEPS: usize = 100_000;
@@ -217,15 +220,15 @@ impl SignatureTask {
     pub fn definition_signature(
         &self,
         fuel: &mut usize,
-    ) -> Result<crate::gradual::SignatureDescription, Error> {
-        crate::gradual::SignatureDescription::from_residual(&self.signature, fuel).map_err(
-            |error| match error {
-                crate::gradual::Error::Scope(error) => {
+    ) -> Result<gradual::SignatureDescription, Error> {
+        gradual::SignatureDescription::from_residual(&self.signature, fuel).map_err(|error| {
+            match error {
+                gradual::Error::Scope(error) => {
                     Error::Signature(nir::deferred_signatures::Error::Scope(error))
                 }
                 _ => Error::SchedulingBudget,
-            },
-        )
+            }
+        })
     }
 
     /// Ordinary checking observes stable declaration information, never the
@@ -236,7 +239,7 @@ impl SignatureTask {
         &self,
         slot: usize,
         fuel: &mut usize,
-    ) -> Result<crate::gradual::FrozenDescription, Error> {
+    ) -> Result<gradual::FrozenDescription, Error> {
         if slot > self.signature.inputs().len() {
             return Err(Error::InvalidAnnotation(slot));
         }
@@ -246,13 +249,11 @@ impl SignatureTask {
             .get(slot)
             .map(|input| &input.annotation)
             .unwrap_or_else(|| self.signature.result());
-        crate::gradual::FrozenDescription::from_annotation(annotation, fuel).map_err(|error| {
-            match error {
-                crate::gradual::Error::Scope(error) => {
-                    Error::Signature(nir::deferred_signatures::Error::Scope(error))
-                }
-                _ => Error::SchedulingBudget,
+        gradual::FrozenDescription::from_annotation(annotation, fuel).map_err(|error| match error {
+            gradual::Error::Scope(error) => {
+                Error::Signature(nir::deferred_signatures::Error::Scope(error))
             }
+            _ => Error::SchedulingBudget,
         })
     }
 }
@@ -375,7 +376,7 @@ impl<'a> Session<'a> {
             interpreter = interpreter.with_type_solver(solver);
         }
         Ok(Self {
-            identity: crate::unique(),
+            identity: type_resolution::fresh_identity(),
             package,
             context: context.identity(),
             interpreter,
@@ -412,7 +413,7 @@ impl<'a> Session<'a> {
         )
         .map_err(Error::Invocation)?;
         Ok(Self {
-            identity: crate::unique(),
+            identity: type_resolution::fresh_identity(),
             package,
             context: context.identity(),
             interpreter,
@@ -1277,48 +1278,5 @@ impl fmt::Display for Session<'_> {
             write!(f, ") {})", pending.state)?;
         }
         write!(f, ")")
-    }
-}
-
-#[cfg(test)]
-mod admission_budget_tests {
-    use super::*;
-
-    #[test]
-    fn failed_session_world_creation_keeps_the_allowance_reserved() {
-        let package = Package::default();
-        let context = InferenceContext::default();
-        let assumptions = [nir::program::TraitRequirement {
-            interface_arguments: vec![],
-            subject: Term::Primitive(nir::Primitive::Bool),
-            interface: DeclarationId {
-                package: 1,
-                local: 999,
-            },
-        }];
-        let mut budget = Budget {
-            steps: 100,
-            depth: 128,
-        };
-        let failed = Session::new_in_scope_in_budget(
-            &package,
-            &context,
-            &mut budget,
-            &assumptions,
-            &[],
-            &[],
-            None,
-        );
-        assert!(matches!(failed, Err(Error::Invocation(_))));
-        assert_eq!(budget.steps, 0);
-        assert_eq!(budget.depth, 128);
-        budget.steps = 100;
-        let session =
-            Session::new_in_scope_in_budget(&package, &context, &mut budget, &[], &[], &[], None)
-                .unwrap();
-        assert_eq!(session.remaining_steps(), budget.steps);
-        // Successful scope authorization can consume work even in an empty
-        // declaration world. Synchronize the actual remainder, not the grant.
-        assert!(budget.steps > 0 && budget.steps <= 100);
     }
 }

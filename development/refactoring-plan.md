@@ -43,7 +43,7 @@ Type 描述迁移跨 M2/M3，完整接线按
 [共同冻结载体与 binder](type-descriptions-and-admission.md#9-共同冻结载体与-binder-的实施选择)
 推进：VM 返回、聚合／NF 数据边、普通输入绑定、身份消费者和源码注解一起闭合。
 `627ab804` 已让输入齐备的 required Type 返回走普通调用，不再临时建立推断输出；
-真实 Type 队列仍是具体身份消费者。不能继续给每种描述加一个队列状态就宣布完成，
+旧 Type 队列仅保留为独立测试模型，已退出生产模块。不能继续给每种描述加一个队列状态就宣布完成，
 也不能只放宽 List 的 sort 检查；冻结值及调用绑定必须先能保留描述的实际含义。
 这条迁移与下面的待定域源码恢复共同支撑 Parse，二者都不由 scanner 代替。
 
@@ -145,16 +145,19 @@ where T, flag: bool
 | --- | --- | --- |
 | `declaration_inputs.rs` | 路由、源码求值顺序、默认值、前置域与形成义务；Progress 独占 producer、身份，检查完成次序与源码 schedule 已分离；槽位帧保留子检查目标、输入事实退出与默认 guard，依赖域帧保留 consumer 与传递依赖游标，显式／默认依赖均交给同一槽位检查，收集器共用；收集帧保留普通探测、contextual 回退及各源码位置的 preparation，路由帧保留展开包检查与源码位置，准备帧拥有阶段交接及 caller scope，参数望远镜与默认环境不再借用外层临时变量，四类子检查共用请求与驱动；字面量列表展开不再递归重建整次准备；已检查 producer 按所有权交付；NF 默认代码连接本次前缀绑定，由 VM 取得实际前缀后实例化；声明 NF 应用现持有准备帧并通过共同 Region 栈交接参数子检查、失败恢复和形成完成，直接嵌套声明／常量头不再同步递归驱动准备；动态 NF 位置调用也已接入同一槽位和收集计划，源码默认提供者与入口投影分离，域替换使用本次持有的 telescope，不再依赖声明域回查 | 布局提示扫描、非 NF 消费者及未迁移子表达式仍同步；caller scope 与默认环境已经按预算保留，但仍复制词法表；共用输入驱动尚不接收 VM 产物。须让 `InputChecking::Typed` 不再迫使待定域立即产出完整 Expr，并接入原源码与执行区域 |
 | `dynamic_instances.rs` | packet 的实际表达式、已观察身份及 pending 参数分别保存；完成消费者由共用准备帧持有，caller scope 恢复后才检查形成义务及最终域并组装 packet；词法前缀及默认环境按预算保留 | pending 参数影响签名时保留尚未发布的调用准备，不能把 rigid 当作已完成 callable 类型 |
-| `type_computations.rs::Session` | committed 推断世界、单输出发布许可、同步／显式恢复共用的 invocation owner 及已有签名任务 | 形成的 Type 结果需回到其源表达式区域，关联原参数位置、词法环境及真实生产者 |
 | `invocation/host.rs::InvocationSession` | 独占执行现场、关联／方法选择与定义准备请求、线性响应及取消 | 一般前端表达式检查仍需接入；不把同步回调或另起一次求值当成恢复 |
 | `invocation/session.rs` | 生产 invocation／plan 在 session 内拥有执行帧；输入准备通过帧绑定契约整体移动导出值；借用根帧的 fragment 入口仅用于测试 | 源 activation 接收后继受检片段，保留环境、原控制出口及一次性执行位置；不能把测试入口公开后当作源区域接线 |
-| `required.rs` / `required/prepared.rs` | 完整根 Expr 的准备、冻结声明目录、单次输入及代码缓存所有者 | 在完整根形成前启动源区域；世界可共享，活动前端区域、等待者及本次值不得冻结到代码缓存 |
+| `required.rs` / `required/prepared.rs` | 完整根 Expr 的准备、冻结声明目录、单次输入及代码缓存所有者；Type 与普通值共用 VM 返回及 scope 恢复，不分配临时推断输出 | 在完整根形成前启动源区域；Type 产物回到原参数位置与消费者；世界可共享，活动前端区域、等待者及本次值不得冻结到代码缓存 |
 | `function_bodies.rs::check_source_function` / VM `prepare_invocation` | 普通收集与 required 依赖共用主体检查和发布规则，当前仍只交付完整 Expr 的 Function | 分开声明接口、稳定源码模板、活动主体任务和可执行产物；保持原 activation 等待代码，不提前执行定义或发布假主体 |
 
 先使用已有 HIR 身份、telescope、声明输入计划和 VM activation；不建立第二份
 可修改的值表或以 AST 地址为键的全局等待表。具体所有权和响应提交沿
 [状态协议](elaboration-state-and-publication.md)，表达式检查与执行依赖的区别沿
 [调用期域边界](values-staging-and-publication.md#invocation-才能取得的域必须同时接通检查与执行)。
+
+旧 `type_computations::Session` 已移入共享测试支持：它的唯一输出身份曾被用于
+required Type 旁路，`627ab804` 后不再有生产调用者。保留其协议测试不等于选择它
+作为新源码调度器；不能先重构这套孤立 API，再以其测试通过声称实际接线推进。
 
 下一批不继续把“新增一个 owner／请求变体”单独当成恢复主干的交付。按
 [源 activation 与片段交接](elaboration-state-and-publication.md#源检查与执行的交接目标)

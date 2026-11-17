@@ -1,3 +1,8 @@
+#[path = "../../elaboration/test_support/type_computations/mod.rs"]
+#[allow(dead_code)]
+mod type_computations;
+use elaboration::gradual;
+
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
 use comptime_interpretor::{Interpreter, Value};
@@ -755,8 +760,8 @@ fn invocation_keeps_source_bindings_without_runtime_resource_permissions() {
 
 #[test]
 fn type_computation_session_shares_generated_catalog_and_never_replays_publication() {
-    use elaboration::type_computations::{Input, Session, State};
     use elaboration::{InferenceContext, InferenceTerm};
+    use type_computations::{Input, Session, State};
     let fixture = Fixture::new(&format!(
         "{PREFIX}
         comptime fn ready() -> bool {{true}}
@@ -852,8 +857,8 @@ fn type_computation_session_shares_generated_catalog_and_never_replays_publicati
 
 #[test]
 fn failed_type_computation_does_not_replay_builder_or_poison_independent_calls() {
-    use elaboration::type_computations::{Input, Session, State};
     use elaboration::{InferenceContext, InferenceTerm};
+    use type_computations::{Input, Session, State};
     let fixture = Fixture::new(&format!(
         "{PREFIX}
         comptime fn ready() -> bool {{true}}
@@ -929,7 +934,7 @@ fn failed_type_computation_does_not_replay_builder_or_poison_independent_calls()
         )
         .unwrap();
     assert!(
-        matches!(session.resume(&mut context, dependent).unwrap(), State::Failed(elaboration::type_computations::Error::DependencyFailed(id)) if *id == first)
+        matches!(session.resume(&mut context, dependent).unwrap(), State::Failed(type_computations::Error::DependencyFailed(id)) if *id == first)
     );
     assert_eq!(attempts.get(), 1);
     let repaired = session
@@ -945,7 +950,7 @@ fn failed_type_computation_does_not_replay_builder_or_poison_independent_calls()
 
 #[test]
 fn checked_snapshot_publisher_generates_from_source_types_without_reelaboration() {
-    use elaboration::type_computations::{Session, State};
+    use type_computations::{Session, State};
     let fixture = Fixture::new(&format!(
         "{PREFIX}
         comptime fn ready() -> bool {{true}}

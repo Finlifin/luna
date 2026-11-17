@@ -236,13 +236,17 @@ Waiting 与 Unresolved 不混用。没有就绪任务时，先区分外部请求
 | `elaboration/src/program/dynamic_instances.rs` | callable packet 保留实际 producer、静态身份与 pending 集合 | 签名仍提及 pending 参数时直接拒绝发布 |
 | `elaboration/src/program/function_bodies.rs` | 最终函数与 required 依赖共用主体检查 | 必须检查出完整 body 才能构造 NIR Function |
 | `elaboration/src/program/required.rs`、`required/prepared.rs` | 完整根、输入准入、冻结声明世界和代码缓存所有权 | build 必须返回完整 Expr；没有源区域的增量根 |
-| `elaboration/src/type_computations.rs` | 单输出发布、依赖预检、签名任务与可恢复 invocation | 普通源码待定域／签名尚未接入其恢复接口 |
 | `comptime_interpretor/src/invocation/{host,session}.rs` | 同次 activation、契约进度、方法／关联／定义宿主请求 | 没有取得下一段受检源码的生产入口；Fragment 根仅供测试 |
 | `comptime_interpretor/src/bytecode/bindings.rs` | 帧持有导入／导出绑定，完整验证后移动交付 | 不提供源作用域、外部控制出口或任意切点许可 |
 
-#### Type 需求预检
+#### Type 需求预检的独立测试模型
 
-`type_computations/demand.rs` 对单输出、依赖恢复及同一注解的多个根共用有界预检。
+`627ab804` 之后的调用点核对确认：旧 Type Session 已没有前端生产消费者。
+它现位于 `compiler/elaboration/test_support/type_computations/`，仅由测试显式
+加载；生产 elaboration 不再导出这个模块。下述预检和签名 API 是独立协议模型，
+不是普通 `defer` 已有的挂起路径；实际所有者仍见上表的 required 与源码区域。
+
+测试模型的 `demand.rs` 对单输出、依赖恢复及同一注解的多个根共用有界预检。
 计划保留依赖边、根归属、外部等待和已失败生产者；完整预检前不进入生产者。
 共同依赖只执行一次，失败沿原边传播，无关兄弟可独立使用。后续根已有错误或循环
 时，不能先运行较早根，再发现整体不可交付。
@@ -1466,7 +1470,11 @@ pending producer、VM 可变存储或候选等待者，也不进入 RequiredWorl
 
 ### Type 生产者的 invocation 与发布边界
 
-Type 计算队列的所有执行入口现共用同一 invocation owner。`Session::start`
+本节区分两条路径：普通前端使用 PreparedRequired；Type 计算队列在 `627ab804`
+之后仅由独立协议测试使用，现已移入 `test_support`，不再属于生产导出。
+下述队列行为及历史验证仍保留，但不能作为普通源码域已能恢复的证据。
+
+测试队列的所有执行入口共用同一 invocation owner。`Session::start`
 沿用有界依赖预检，再返回独占的 `Invocation`；等待输入或已有终态直接返回 `Settled`。
 `resume`、有预算的单输出恢复及依赖批量驱动也都驱动
 这一 owner；旧 `resume_prepared` 中直接调用 VM 后自行发布 Type 的分支已删除。
@@ -1479,7 +1487,7 @@ Associated 请求使用已有
 VM session ticket、源世界和预算所有权；等待期间再次 poll 不重发请求、不执行前缀。
 宿主响应经原 VM 接收检查恢复同一个 activation。仅当 VM 完成、返回值确为 Type
 或合法 Type binder，并完成有界结果传递后，才向输出 meta 赋值并保存 Complete。
-后续观察终态不再次执行生产者。公开的 `new_resolving_in_scope` 使用 retained source
+后续观察终态不再次执行生产者。模型的 `new_resolving_in_scope` 使用 retained source
 及选择服务，避免为使用该协议先急切物化整个 dispatch 世界。
 
 取消、Drop、宿主错误、执行或发布预算耗尽都会终结本次计算；依赖它的生产者沿原
@@ -1503,7 +1511,7 @@ comptime 返回值共用 `PreparedRequired::invoke_in_world` 中的普通 VM 调
 根结果中的授权 TypeParameter 在共同恢复边界转为同身份的 rigid Type 值，并
 按调用方 telescope 替换；转换本身计费，不建立类型相等事实或授予未知 binder。
 旧 Type 专用恢复函数与队列中只为该路径存在的 enum/newtype 配置适配器已退役。
-真实 Type 队列的发布许可、等待／取消／终态规则保持有效，不为立即返回数据
+测试队列的发布许可、等待／取消／终态规则保持有效，不为立即返回数据
 伪造一个推断需求。这也没有接通含 Any/refinement 的 TypeValue、通用源码主体
 请求或尚待 VM 响应的普通参数检查。
 
@@ -1520,10 +1528,18 @@ required 的便利驱动仍同步处理宿主请求至完成。
 两个既有普通调用正例仍 ignored。此次没有提前求值 Type 生产者、重跑调用 AST，
 也没有放宽原正例或更改正式 docs。
 
-真实 sysroot 的 `type_invocation_sessions` 验证 Type 源码前缀只执行一次、关联
+`type_invocation_sessions` 从真实 sysroot 编译源码，再由独立模型驱动 VM，验证
+Type 源码前缀只执行一次、关联
 初始化器在恢复后执行一次、等待保持现场、终态不重放、取消传播、迟到响应拒绝、
 宿主失败／耗尽，以及 Live 输入等待和域拒绝后的独立工作。直接源码案例另覆盖
 required Type 调用到运行时值的路径；这些不是整个普通 callable 恢复能力的验收。
+
+生产 `Checker::invoke_required_publishing` 调用 `PreparedRequired::invoke_publishing`，
+取得普通 `(Value, domain)` 和新定义，再由 `publication::Receiver` 注册定义。
+这里的 publishing 指 builder 生成定义的检查与注册，不是向 Type metavariable
+赋值。两者不能因为名称相近而共用完成状态或失败责任。完整 Type 描述应沿普通
+packet 和 scope 恢复传送，身份消费者另持其赋值权限；仍未形成的源输入则需要
+原区域继续检查，不能借测试模型另起一次已完成根的求值。
 
 验证工作目录为 `/home/fin/luna`，Cargo 均使用
 `python3 -B development/check.py --timeout 900 -- test`，输出锚点为各日志的

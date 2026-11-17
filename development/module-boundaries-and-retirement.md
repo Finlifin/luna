@@ -214,3 +214,50 @@ CMTT generator、pattern generator 和展开参数已使用能接收完整上下
 
 源码格式检查 `/tmp/luna-tools-oxx4gx0n/result.json` 退出 0。上述为包含原有资源分析
 修改的工作区验证，未运行全 workspace 或性能基准。
+
+## 8. Type 依赖队列退出生产模块
+
+按 `30d62729` 的调用者核对，`elaboration::type_computations::Session` 在
+`627ab804` 移除 required Type 专用分支后，只剩测试消费者：elaboration 的
+`type_computation_demands`、required/prepared 内联测试，以及 luna 的 execution、
+builder_invocations 和 type_invocation_sessions。正常前端、CLI 和库源码路径
+均不调用它。不能把测试编译出的完整 NIR 包交给队列的实验当作源 Region 恢复。
+
+三个文件现整体移至 `compiler/elaboration/test_support/type_computations/`。
+elaboration 仅在 cfg(test) 中私有加载；各集成测试显式加载同一份测试模块，复用
+gradual 描述、type_resolution 的真实推断和赋值权限，以及真实 VM。共享模块原有
+的 admission budget 单测移到 type_computation_demands，避免每个加载者重复注册。
+生产库不再
+导出该队列，也不再保留只供它使用的 fresh_identity 导入。没有新增 Cargo feature、
+替代解释器或复制语义实现；所有旧断言与 S-expression dump 保留。
+
+`nir::type_computations` 未迁移：它的残余调用、scope 替换、依赖检查及预算辅助
+仍有大量生产消费者。type_resolution 的 AssignmentPermit 也继续作为独立的
+受检赋值能力保留；本项删除的是把每个 Type invocation 绑定一个输出 MetaId 的
+旧调度器生产身份，不是撤销身份消费者需要的权限检查。
+
+源码普通 Type 返回继续走 PreparedRequired 和通用 packet 恢复。完整根依赖、
+源码／VM 挂起恢复、Type 描述数据和多消费者准入仍未接通；清理后不能重新用旧
+队列填充这些位置，也不以本次构建和协议测试通过声称恢复功能完成。
+
+本阶段在 `/home/fin/luna` 经 `development/check.py --timeout 900 --` 验证：
+
+- `test -p elaboration --lib --test type_computation_demands --no-fail-fast -- --test-threads=1`：
+  最终 266 项单元测试、9 项需求测试通过，退出 0，
+  `/tmp/luna-tools-jf8_6a7a/result.json`。最初路径迁移因子模块查找目录错误而
+  编译失败（`/tmp/luna-tools-eawhxm3y/result.json`）；改为目录内 mod.rs 后修复。
+- `test -p luna --test builder_invocations --test type_invocation_sessions --no-fail-fast -- --test-threads=1`：
+  两组通过，退出 0，`/tmp/luna-tools-qqaddiy_/result.json`，输出分别为 87 和
+  14 项。该次各组还注册了同一个共享 admission budget 单测，随后将它移至需求
+  测试且在上一项最终检查中通过；不将重复注册计作新的覆盖。
+- `test -p luna --test execution -- --test-threads=1` 加报告 command 中列出的
+  26 个队列消费者过滤项：退出 0，26 项通过，
+  `/tmp/luna-tools-h9m67mo3/result.json`。未执行整个 execution 测试集。
+- `check -p luna --lib --bin luna`：默认生产构建检查通过，退出 0，
+  `/tmp/luna-tools-3x316uuq/result.json`；不通过 feature 重新导出测试调度器。
+
+各报告的 stdout 保留 `test result:`，check 的 stderr 保留构建完成位置。
+两个子模块 demand/execution 与迁移前字节相同；mod.rs 除模块说明、导入路径、
+测试注册位置外保持原实现，测试预期未变。9 个改动 Rust 文件的 scoped rustfmt
+检查退出 0（`/tmp/luna-tools-yc532qm3/result.json`），已更新开发文档的本地链接
+目标全部存在。未运行全 workspace；原有工作区改动保留，docs 未修改。

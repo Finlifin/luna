@@ -1,6 +1,5 @@
 //! HIR elaboration and language protocol coordination.
 
-use type_resolution::fresh_identity as unique;
 pub use type_resolution::{InferenceContext, InferenceError, InferenceTerm, MetaId};
 pub use type_resolution::{associated, calls, capabilities, implementation, matching, obligations};
 
@@ -31,7 +30,12 @@ pub mod key_protocols;
 
 pub mod arithmetic;
 pub mod gradual;
-pub mod type_computations;
+// The old inference-output scheduler has no frontend consumer. Its dependency
+// and cancellation contracts remain exercised by shared test support only.
+#[cfg(test)]
+#[path = "../test_support/type_computations/mod.rs"]
+#[allow(dead_code)]
+mod type_computations;
 
 pub mod indexing;
 pub mod list_patterns;

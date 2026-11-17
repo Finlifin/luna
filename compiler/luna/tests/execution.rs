@@ -1,5 +1,10 @@
 //! Source -> shared frontend -> owned NIR -> concrete interpreter behavior.
 //! These tests do not authorize runtime functions for comptime invocation.
+#[path = "../../elaboration/test_support/type_computations/mod.rs"]
+#[allow(dead_code)]
+mod type_computations;
+use elaboration::gradual;
+
 #[path = "support/frozen_lists.rs"]
 mod frozen_lists;
 use comptime_interpretor::{Budget, ErrorKind, Event, Interpreter, Value};
@@ -37063,8 +37068,8 @@ fn type_list_indexing_direct_type_annotations_preserve_opaque_identity() {
 
 #[test]
 fn pending_type_computations_wait_resume_and_publish_opaque_types_once() {
-    use elaboration::type_computations::{Error, Input, Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
+    use type_computations::{Error, Input, Session, State};
     let source = "typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;
         pure comptime fn List<T>->Type {List<T>}
         pure comptime fn Tuple<...Es:List<Type>>->Type {Tuple<...Es>}
@@ -37472,9 +37477,9 @@ fn explicit_defer_type_clause_defaults_check_contracts_and_skip_overrides() {
 
 #[test]
 fn residual_type_invocations_recreate_isolated_waiters_without_runtime_dependencies() {
-    use elaboration::type_computations::{Error, Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::type_computations::{Input, Invocation};
+    use type_computations::{Error, Session, State};
     let package = compile(
         "typealias Type=.Type'builtin;
         comptime fn Select(flag:bool)->Type {if flag {.u8'builtin} else {bool}}",
@@ -37544,9 +37549,9 @@ fn residual_type_invocations_recreate_isolated_waiters_without_runtime_dependenc
 
 #[test]
 fn residual_list_calls_capture_source_construction_and_resume_after_inputs_arrive() {
-    use elaboration::type_computations::{Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::type_computations::Invocation;
+    use type_computations::{Session, State};
     let source = "typealias Type=.Type'builtin; typealias Byte=.u8'builtin;
         pure comptime fn List<T>->Type {T}
         comptime fn Select(values:List<bool>)->Type {if values[0] {bool} else {Byte}}
@@ -37624,9 +37629,9 @@ fn residual_list_calls_capture_source_construction_and_resume_after_inputs_arriv
 
 #[test]
 fn checked_type_calls_capture_residuals_from_source_and_preserve_argument_routing() {
-    use elaboration::type_computations::{Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::type_computations::Invocation;
+    use type_computations::{Session, State};
     let source="typealias Type=.Type'builtin;
         comptime fn Select(.first:bool=false,.second:bool=false)->Type {if first {if second {.u8'builtin} else {bool}} else {.char'builtin}}
         comptime fn Template(comptime flag:bool)->Type {Select(.second=false,.first=flag)}
@@ -37710,9 +37715,9 @@ fn checked_type_calls_capture_residuals_from_source_and_preserve_argument_routin
 
 #[test]
 fn residual_complete_bodies_preserve_control_flow_local_state_and_single_execution() {
-    use elaboration::type_computations::{Error, Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::type_computations::Invocation;
+    use type_computations::{Error, Session, State};
     let package = compile(
         "typealias Type=.Type'builtin;
         comptime fn Poison()->Type {Poison()}
@@ -37832,9 +37837,9 @@ fn residual_complete_bodies_preserve_control_flow_local_state_and_single_executi
 
 #[test]
 fn checked_expression_entries_share_required_and_residual_invocation_representation() {
-    use elaboration::type_computations::{Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::type_computations::{Invocation, expression_entry};
+    use type_computations::{Session, State};
     let mut package = compile(
         "typealias Type=.Type'builtin;
         comptime fn Select(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
@@ -37917,9 +37922,9 @@ fn residual_capture_analysis_discovers_only_lexical_source_inputs() {
 
 #[test]
 fn compact_residual_entries_prune_unused_runtime_inputs_and_execute_captured_closures() {
-    use elaboration::type_computations::{Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::type_computations::{Invocation, capture_entry};
+    use type_computations::{Session, State};
     let mut package = compile(
         "typealias Type=.Type'builtin;
         comptime fn Select(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
@@ -37994,10 +37999,10 @@ fn compact_residual_entries_prune_unused_runtime_inputs_and_execute_captured_clo
 
 #[test]
 fn compact_residual_entries_preserve_tuple_head_and_single_collected_type_list() {
-    use elaboration::type_computations::{Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::type_computations::capture_entry;
     use nir::{Primitive, Sort, Term};
+    use type_computations::{Session, State};
     let mut package = compile_with_source_bindings(
         "typealias Type=.Type'builtin;
         pure comptime fn List<T>->Type {List<T>}
@@ -38122,9 +38127,9 @@ fn compact_residual_entries_preserve_tuple_head_and_single_collected_type_list()
 
 #[test]
 fn demanded_type_computations_drive_shared_dependencies_without_replay() {
-    use elaboration::type_computations::{Error, Input, Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::{Primitive, Sort, Term};
+    use type_computations::{Error, Input, Session, State};
     let package = compile(
         "typealias Type=.Type'builtin;
         comptime fn Select(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
@@ -38220,9 +38225,9 @@ fn demanded_type_computations_drive_shared_dependencies_without_replay() {
 
 #[test]
 fn demanded_type_computations_propagate_failure_and_preflight_cycles() {
-    use elaboration::type_computations::{Error, Input, Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::{Primitive, Sort, Term};
+    use type_computations::{Error, Input, Session, State};
     let package = compile(
         "typealias Type=.Type'builtin;
         comptime fn Poison()->Type {Poison()}
@@ -38306,9 +38311,9 @@ fn demanded_type_computations_propagate_failure_and_preflight_cycles() {
 
 #[test]
 fn failed_type_demands_do_not_execute_unneeded_siblings() {
-    use elaboration::type_computations::{Error, Input, Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::{Primitive, Term};
+    use type_computations::{Error, Input, Session, State};
     let package = compile(
         "typealias Type=.Type'builtin;
         comptime fn Poison()->Type {Poison()}
@@ -38393,9 +38398,9 @@ fn failed_type_demands_do_not_execute_unneeded_siblings() {
 fn deferred_type_descriptions_wait_for_invocation_without_becoming_any() {
     use elaboration::gradual::{self, Compatibility as C, Description as D};
     use elaboration::ptc::{Budget as ProofBudget, Context, Outcome};
-    use elaboration::type_computations::{Input, Session};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::{Primitive, Sort, Term};
+    use type_computations::{Input, Session};
     let package = compile(
         "typealias Type=.Type'builtin;
         comptime fn Select(flag:bool)->Type {if flag {bool} else {.u8'builtin}}",
@@ -39139,9 +39144,9 @@ fn abstract_type_admission_preserves_nested_formation_requirements() {
 #[test]
 fn scoped_type_computations_resume_with_declaration_evidence_without_replay() {
     use comptime_interpretor::ContractOutcome;
-    use elaboration::type_computations::{Error, Input, Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::{DeclarationId, Primitive, Sort, Term};
+    use type_computations::{Error, Input, Session, State};
     let source = "typealias Type=.Type'builtin;
         pure comptime fn List<T>->Type {List<T>}
         pure comptime fn Tuple<...Es:List<Type>>->Type {Tuple<...Es>}
@@ -39288,11 +39293,11 @@ fn scoped_type_computations_resume_with_declaration_evidence_without_replay() {
 
 #[test]
 fn deferred_signature_tasks_wait_resolve_tuple_types_and_preserve_execution_order() {
-    use elaboration::type_computations::{Error, Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::deferred_signatures::{Annotation as A, Input, Signature};
     use nir::type_computations::{Input as Argument, Invocation};
     use nir::{Primitive, Sort, Term};
+    use type_computations::{Error, Session, State};
     let source = "typealias Type=.Type'builtin;
         pure comptime fn List<T>->Type {List<T>}
         pure comptime fn Tuple<...Es:List<Type>>->Type {Tuple<...Es>}
@@ -39470,14 +39475,12 @@ fn deferred_signature_tasks_wait_resolve_tuple_types_and_preserve_execution_orde
         if empty {
             assert!(matches!(
                 first,
-                elaboration::type_computations::AnnotationState::Failed(Error::DependencyFailed(_))
+                type_computations::AnnotationState::Failed(Error::DependencyFailed(_))
             ));
         } else {
             assert!(matches!(
                 first,
-                elaboration::type_computations::AnnotationState::Ready(Term::Primitive(
-                    Primitive::Bool
-                ))
+                type_computations::AnnotationState::Ready(Term::Primitive(Primitive::Bool))
             ));
         }
         assert_eq!(
@@ -39520,7 +39523,7 @@ fn deferred_signature_tasks_wait_resolve_tuple_types_and_preserve_execution_orde
             session
                 .resume_signature_annotation(&mut context, &mut task, 0, &mut 0)
                 .unwrap(),
-            elaboration::type_computations::AnnotationState::Failed(Error::DependencyFailed(_))
+            type_computations::AnnotationState::Failed(Error::DependencyFailed(_))
         ));
         assert_eq!(session.events().len(), events);
     }
@@ -39528,9 +39531,9 @@ fn deferred_signature_tasks_wait_resolve_tuple_types_and_preserve_execution_orde
 
 #[test]
 fn type_computations_charge_input_expansion_before_invocation() {
-    use elaboration::type_computations::{Error, Input, Session, State};
     use elaboration::{InferenceContext, InferenceError, InferenceTerm as I};
     use nir::{Parameter, Primitive, Sort, Term};
+    use type_computations::{Error, Input, Session, State};
     let package = compile("typealias Type=.Type'builtin;comptime fn Pass(T:Type)->Type {T}");
     let wide = Term::Function {
         parameters: vec![
@@ -39585,11 +39588,11 @@ fn type_computations_charge_input_expansion_before_invocation() {
 
 #[test]
 fn deferred_signature_annotations_advance_only_the_demanded_prefix() {
-    use elaboration::type_computations::{AnnotationState as S, Error, Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::deferred_signatures::{Annotation as A, Input, Signature};
     use nir::type_computations::{Input as Argument, Invocation};
     use nir::{Primitive, Sort, Term};
+    use type_computations::{AnnotationState as S, Error, Session, State};
     let package = compile(
         "typealias Type=.Type'builtin;
         comptime fn First(T:Type)->Type {T}
@@ -40578,11 +40581,11 @@ fn optional_branch_probes_use_scoped_type_facts() {
 fn deferred_signature_refinement_admission_stops_later_invocations() {
     use elaboration::gradual::{Description, Refinement, RefinementCheck};
     use elaboration::ptc::{Context, Formula, Outcome};
-    use elaboration::type_computations::{AdmissionError, AnnotationState as S, Error, Session};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::deferred_signatures::{Annotation as A, Input, Signature};
     use nir::type_computations::{Input as Argument, Invocation};
     use nir::{DeclarationId, Primitive, Sort, Term};
+    use type_computations::{AdmissionError, AnnotationState as S, Error, Session};
     let package = compile(
         "typealias Type=.Type'builtin;
         comptime fn First(T:Type)->Type {T}
@@ -41296,11 +41299,11 @@ fn primitive_arithmetic_contextual_lambda_preserves_captures() {
 
 #[test]
 fn deferred_signature_caller_annotations_wait_substitute_and_admit_in_order() {
-    use elaboration::type_computations::{AdmissionError, AnnotationState, Error, Session};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::deferred_signatures::{Annotation as A, Input, Signature};
     use nir::type_computations::Invocation;
     use nir::{Primitive as P, Sort, Term};
+    use type_computations::{AdmissionError, AnnotationState, Error, Session};
     let package = compile("typealias Type=.Type'builtin; comptime fn Later()->Type {bool}");
     let known = Term::Bound {
         depth: 0,
@@ -41470,10 +41473,10 @@ fn deferred_signature_caller_annotations_wait_substitute_and_admit_in_order() {
 
 #[test]
 fn deferred_signature_caller_substitution_preserves_nested_tuple_identity_and_guards() {
-    use elaboration::type_computations::{AdmissionError, AnnotationState, Error, Session};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::deferred_signatures::{Annotation as A, Input, Signature};
     use nir::{Parameter, Primitive as P, Sort, Term};
+    use type_computations::{AdmissionError, AnnotationState, Error, Session};
     let package = compile_with_source_bindings(
         "typealias Type=.Type'builtin;
         pure comptime fn List<T>->Type {List<T>}
@@ -41604,11 +41607,11 @@ fn deferred_signature_caller_substitution_preserves_nested_tuple_identity_and_gu
 
 #[test]
 fn deferred_signature_known_annotations_drive_only_demanded_type_producers() {
-    use elaboration::type_computations::{AnnotationState, Input as Argument, Session};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::deferred_signatures::{Annotation as A, Input, Signature};
     use nir::type_computations::Invocation;
     use nir::{Primitive as P, Sort, Term};
+    use type_computations::{AnnotationState, Input as Argument, Session};
     let package = compile(
         "typealias Type=.Type'builtin;
         comptime fn First(T:Type)->Type {T}
@@ -41764,11 +41767,11 @@ fn deferred_signature_known_annotations_drive_only_demanded_type_producers() {
 
 #[test]
 fn deferred_signature_known_annotation_producer_failures_are_terminal() {
-    use elaboration::type_computations::{AnnotationState, Error, Input as Argument, Session};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::deferred_signatures::{Annotation as A, Input, Signature};
     use nir::type_computations::Invocation;
     use nir::{Primitive as P, Sort, Term};
+    use type_computations::{AnnotationState, Error, Input as Argument, Session};
     let package = compile(
         "typealias Type=.Type'builtin;
         comptime fn Fail(flag:bool)->Type {assumes flag;bool}
@@ -41883,10 +41886,10 @@ fn deferred_signature_known_annotation_producer_failures_are_terminal() {
 
 #[test]
 fn demanded_type_computation_waiters_report_live_external_leaves() {
-    use elaboration::type_computations::{Input, Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::{Primitive as P, Sort, Term};
     use std::collections::BTreeSet;
+    use type_computations::{Input, Session, State};
     let package = compile(
         "typealias Type=.Type'builtin;
         comptime fn Left(T:Type)->Type {T}
@@ -44132,13 +44135,11 @@ fn writing_pointer_postconditions_export_joint_result_memory_relations() {
 
 #[test]
 fn deferred_runtime_signatures_wait_admit_and_erase_staged_inputs() {
-    use elaboration::type_computations::{
-        AdmissionError, Error, RuntimeSignatureState as R, Session,
-    };
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::deferred_signatures::{Annotation as A, Input, Signature};
     use nir::type_computations::{Input as Argument, Invocation};
     use nir::{Parameter, Primitive as P, Sort, Term};
+    use type_computations::{AdmissionError, Error, RuntimeSignatureState as R, Session};
     let package = compile_with_source_bindings(
         "typealias Type=.Type'builtin;
         pure comptime fn List<T>->Type {List<T>}
@@ -44340,12 +44341,10 @@ fn deferred_runtime_signatures_wait_admit_and_erase_staged_inputs() {
 
 #[test]
 fn deferred_runtime_signatures_substitute_before_removing_type_parameters() {
-    use elaboration::type_computations::{
-        AdmissionError, Error, RuntimeSignatureState as R, Session,
-    };
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::deferred_signatures::{Annotation as A, Input, Signature};
     use nir::{Parameter, Primitive as P, Sort, Term};
+    use type_computations::{AdmissionError, Error, RuntimeSignatureState as R, Session};
     let package = compile("fn entry()->bool {true}");
     let callable = |ty| Term::Function {
         parameters: vec![Parameter {
@@ -45806,9 +45805,9 @@ fn known_type_list_index_failures_remain_invocation_failures() {
 
 #[test]
 fn live_type_computations_preserve_mutable_captures_and_never_replay() {
-    use elaboration::type_computations::{Error, LiveInput, Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::{Primitive as P, Sort, Term};
+    use type_computations::{Error, LiveInput, Session, State};
     let package = compile(
         "typealias Type=.Type'builtin;
         typealias Selector=%{flag:bool} comptime fn()->Type;
@@ -45907,9 +45906,9 @@ fn live_type_computations_preserve_mutable_captures_and_never_replay() {
 
 #[test]
 fn live_type_computations_reject_invalid_contexts_and_cycles_before_effects() {
-    use elaboration::type_computations::{Error, LiveInput, Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};
     use nir::{Primitive as P, Sort, Term};
+    use type_computations::{Error, LiveInput, Session, State};
     let package = compile(
         "typealias Type=.Type'builtin;
         typealias Selector=%{flag:bool} comptime fn()->Type;

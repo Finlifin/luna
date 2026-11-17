@@ -1,16 +1,21 @@
 //! Type publication follows the completed owned invocation, including host work.
+#[path = "../../elaboration/test_support/type_computations/mod.rs"]
+#[allow(dead_code)]
+mod type_computations;
+use elaboration::gradual;
+
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
 
 use comptime_interpretor::{Budget, CodeSession, Event, SourceResolvers};
 use elaboration::materialization::{DeclarationSource, SourceInvocationQueries};
-use elaboration::type_computations::{
+use elaboration::{InferenceContext, InferenceTerm as I};
+use nir::{DeclarationId, Primitive as P, Sort, Term};
+use type_computations::{
     Error, Input, Invocation, InvocationProgress as Progress, InvocationStart as Start, Session,
     State,
 };
-use elaboration::{InferenceContext, InferenceTerm as I};
-use nir::{DeclarationId, Primitive as P, Sort, Term};
 
 const SOURCE: &str = "
     trait Selected { assoc enabled: bool; }
@@ -405,7 +410,7 @@ fn live_input_admission_rejects_wrong_domains_before_execution_and_allows_next_w
             .enqueue_live(
                 &mut context,
                 id(package, "Pass"),
-                vec![elaboration::type_computations::LiveInput {
+                vec![type_computations::LiveInput {
                     ty: I::Stable(Term::Primitive(P::Type)),
                     value: comptime_interpretor::Value::Bool(true),
                 }],
@@ -422,7 +427,7 @@ fn live_input_admission_rejects_wrong_domains_before_execution_and_allows_next_w
             .enqueue_live(
                 &mut context,
                 id(package, "Pass"),
-                vec![elaboration::type_computations::LiveInput {
+                vec![type_computations::LiveInput {
                     ty: I::Meta(domain),
                     value: comptime_interpretor::Value::Type(Term::Primitive(P::Bool)),
                 }],

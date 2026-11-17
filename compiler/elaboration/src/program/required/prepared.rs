@@ -384,7 +384,7 @@ impl PreparedRequired {
             |callee: &n::Expr, remaining: &mut u64| source_queries.resolve(callee, remaining);
         // Inputs are already complete. Type results use the ordinary invocation
         // and packet restoration path; no inference output is needed merely to
-        // return comptime data. Dependency-driven consumers own their own queue.
+        // return comptime data. Identity consumers perform their own checks.
         let mut preparation_budget = Budget {
             steps: std::mem::take(steps),
             depth: 128,
