@@ -57,6 +57,30 @@ builtin.math 与 meta.math 是作者要求的不同阶段接口。继续采用�
 来源仍缺失、TypeRef／lift／符号位宽等问题也没有被本次输入准备迁移解除。
 不以报告的代码行数或测试数作为完成比例。
 
+### 属性前缀边界的诊断回归
+
+动态 NF 检查曾发现 `parameter_attributes_preserve_bindings_defaults_and_roles`
+在连续 `^attrs...` 处失败。根因不是属性消费者：Pratt 表达式的外语习惯诊断在
+属性前缀的结束边界以前运行，把下一层 `^` 误判成中缀 XOR。按正式 multi 与
+`attr_param` 规则，属性表达式现显式在同层后续 caret 处结束；参数及类型子句
+参数复用同一前缀解析，保留完整路径跨度与具名参数边界。嵌套调用、括号和对象
+内部重新采用自己的表达式边界，非法 XOR 继续报错，不整体禁用诊断。
+
+`/home/fin/luna` 上通过 `development/check.py --timeout 900 --` 执行
+`test -p parse --tests -- --test-threads=1`，109 项通过、退出 0，
+证据 `/tmp/luna-tools-mowp4m4a/result.json`；覆盖属性层次、所属目标、兄弟实参、
+参数修饰符、扩展调用以及现有六包源码解析。首轮新增用例将属性放在函数类型的
+`comptime` 内层，语法只为该列表元素提供 multi 前缀；已改为外层合法前缀，未扩展
+语言语法。直接参数和类型子句参数的 AttrParam 结构另有独立断言。
+
+现有参数属性 CLI 回归单独通过，`/tmp/luna-tools-7r70h3yt/result.json`。扩大检查
+发现配置缺值用例仍查找旧文案；HEAD 的 parser 和直接 CLI 复现均已报告 E2002、
+具体 `.mode` 及缺值位置（`/tmp/luna-tools-07jckb02/result.json`，预期退出 1）。
+该断言现同时核对错误码、缺值原因和逗号位置，保留拒绝要求。随后
+`test -p luna --test frontend_cli attribute -- --test-threads=1` 的 16 项均通过，
+退出 0，证据 `/tmp/luna-tools-o2ykdv2r/result.json`。原参数属性用例未改断言；
+这项修复不使尚未实现的通用属性执行、ABI 降码或 println 接线自动可用。
+
 ## 11-15 复核与下一处交接
 
 在 `/home/fin/luna` 执行：

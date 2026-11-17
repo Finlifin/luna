@@ -8,6 +8,17 @@ impl Parser<'_> {
     // Try parse a single attribute prefix: `^ expr`.
     // Returns 0 (and consumes nothing) if the next token is not `^`.
     pub fn try_attribute_prefix(&mut self) -> ParseResult {
+        self.try_attribute_prefix_with_option(super::expressions::ExprOption::default())
+    }
+
+    pub(crate) fn try_attribute_prefix_with_option(
+        &mut self,
+        mut option: super::expressions::ExprOption,
+    ) -> ParseResult {
+        // Prefix chains have their own expression boundary. Do not let an
+        // infix-operator diagnostic consume the next attribute's caret.
+        option.stop_at_attribute = true;
+        option.stop_at_named_parameter = true;
         self.scoped(|p| {
             if p.peek_next_token().kind != TokenKind::Caret {
                 return Ok(0);
@@ -17,8 +28,6 @@ impl Parser<'_> {
             let expression_start = p.next_token_span().lo();
             // A following named input belongs to the attributed element,
             // not to the attribute's postfix projection chain.
-            let mut option = super::expressions::ExprOption::default();
-            option.stop_at_named_parameter = true;
             let expr = p.try_expr_with_option(option)?;
             if expr == 0 {
                 return Err(ParseError::invalid_syntax(

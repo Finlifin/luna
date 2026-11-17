@@ -195,15 +195,9 @@ impl Parser<'_> {
 
             // ^expr parameter (attribute parameter)
             if p.peek(TokenKind::Caret.as_ref()) {
-                p.eat_tokens(1); // consume '^'
-                let attr_expr = p.try_expr_without_extended_call()?;
-                if attr_expr == 0 {
-                    return Err(ParseError::invalid_syntax(
-                        "Expected attribute expression after `^`".to_string(),
-                        p.peek_next_token().kind,
-                        p.current_span(),
-                    ));
-                }
+                let attr_expr = p.try_attribute_prefix_with_option(
+                    super::expressions::ExprOption::new().with_no_extended_call(true),
+                )?;
                 let inner = p.try_param()?;
                 if inner == 0 {
                     return Err(ParseError::invalid_syntax(
@@ -311,15 +305,9 @@ impl Parser<'_> {
 
             // ^expr parameter (attribute parameter)
             if p.peek(TokenKind::Caret.as_ref()) {
-                p.eat_tokens(1); // consume '^'
-                let attr_expr = p.try_expr_without_extended_call()?;
-                if attr_expr == 0 {
-                    return Err(ParseError::invalid_syntax(
-                        "Expected attribute expression after `^`".to_string(),
-                        p.peek_next_token().kind,
-                        p.current_span(),
-                    ));
-                }
+                let attr_expr = p.try_attribute_prefix_with_option(
+                    super::expressions::ExprOption::new().with_no_extended_call(true),
+                )?;
                 let inner = p.try_type_param()?;
                 if inner == 0 {
                     return Err(ParseError::invalid_syntax(

@@ -145,6 +145,40 @@ fn assert_clean(source: &str) {
     );
 }
 
+#[test]
+fn chained_attribute_boundaries_precede_infix_habit_diagnostics() {
+    for source in [
+        "^attrs.first ^attrs.second fn f() {}",
+        "^attrs.first(1) ^attrs.second(2) fn f() {}",
+        "^attrs.first + attrs.second ^attrs.third fn f() {}",
+        "fn f(^attrs.first ^attrs.second value: bool) {}",
+        "fn f(comptime ^attrs.first ^attrs.second value: bool) {}",
+        "typealias Callback = fn(^attrs.first ^attrs.second comptime value: bool);",
+        "fn f(^attrs.first.enabled ^attrs.second .value: bool = true) {}",
+        "fn f() { ^attrs.first ^attrs.second let value = true; }",
+        "fn f() { consume(^attrs.first ^attrs.second true, false); }",
+        "fn f() { consume(^attrs.first(^attrs.inner ^attrs.last true) ^attrs.second false); }",
+        "fn f() { consume(^{ mark: true } ^attrs.second true); }",
+        "struct S { ^attrs.first ^attrs.second value: bool, other: bool }",
+        "effect enum E { ^attrs.first ^attrs.second read() -> bool, }",
+        "fn f() { true match { ^attrs.first ^attrs.second true => false, false => true } }",
+        "^attrs.first\n^attrs.second fn f() {}",
+    ] {
+        assert_clean(source);
+    }
+    // Attribute boundaries apply only at the prefix's own expression level.
+    // Nested operands and the attributed target keep the ordinary diagnostics.
+    for source in [
+        "^attrs.first(mask ^ 1) ^attrs.second fn f() {}",
+        "^(mask ^ 1) ^attrs.second fn f() {}",
+        "^{ mark: mask ^ 1 } ^attrs.second fn f() {}",
+        "fn f() { ^attrs.first ^attrs.second let value = mask ^ 1; }",
+        "fn f() { consume(^attrs.first ^attrs.second mask ^ 1); }",
+    ] {
+        assert_error_with_code(source, PARSE_FOREIGN_HABIT, "bit_xor");
+    }
+}
+
 // =============================================================================
 // 1. Whitespace-Separated Operators & Sensitive Syntax Forms
 // =============================================================================

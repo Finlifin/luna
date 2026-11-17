@@ -16,6 +16,8 @@ pub struct ExprOption {
     pub stop_at_type_qualifier: bool,
     pub stop_at_call: bool,
     pub stop_at_named_parameter: bool,
+    /// A following caret starts the next prefix on the same attributed element.
+    pub stop_at_attribute: bool,
 }
 
 impl ExprOption {
@@ -29,6 +31,7 @@ impl ExprOption {
             stop_at_type_qualifier: false,
             stop_at_call: false,
             stop_at_named_parameter: false,
+            stop_at_attribute: false,
         }
     }
 
@@ -80,6 +83,9 @@ impl Parser<'_> {
             // 循环处理操作符和右操作数
             loop {
                 let token = p.peek_next_token();
+                if option.stop_at_attribute && token.kind == TokenKind::Caret {
+                    break;
+                }
                 if option.stop_at_named_parameter
                     && p.peek(&[TokenKind::Dot, TokenKind::Id, TokenKind::Colon])
                 {

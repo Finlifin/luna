@@ -5455,10 +5455,13 @@ fn configurations_belong_to_the_enclosing_definition_before_prefix_attributes() 
     ] {
         sandbox.write("bad.fl", source);
         let result = sandbox.run(&["bad.fl", "--emit", "ast"]);
-        assert!(!result.status.success(), "{source}");
+        failure(&result, 1);
+        let diagnostic = String::from_utf8_lossy(&result.stderr);
         assert!(
-            String::from_utf8_lossy(&result.stderr)
-                .contains("Expected a value after configuration name")
+            diagnostic.contains("error[E2002]")
+                && diagnostic.contains("expected a value expression after configuration `.mode`")
+                && diagnostic.contains("unexpected `,` here"),
+            "{source}: {diagnostic}"
         );
     }
 }
