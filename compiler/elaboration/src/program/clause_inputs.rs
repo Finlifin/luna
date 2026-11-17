@@ -51,8 +51,16 @@ impl ClauseInputRouting {
         inputs: &[Arg<'_>],
         span: Span,
     ) -> Result<Self, Error> {
-        let cursor =
-            routing_cursor(clauses, inputs).map_err(|failure| Self::failure(failure.kind, span))?;
+        Self::from_entries(entries(clauses), inputs, span)
+    }
+
+    pub(super) fn from_entries(
+        entries: Vec<input_routing::Entry<hir::Symbol>>,
+        inputs: &[Arg<'_>],
+        span: Span,
+    ) -> Result<Self, Error> {
+        let cursor = input_routing::Cursor::new(entries, &supplies(inputs), None)
+            .map_err(|failure| Self::failure(failure.kind, span))?;
         Ok(Self { cursor })
     }
 

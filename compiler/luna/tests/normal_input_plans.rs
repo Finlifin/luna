@@ -53,6 +53,45 @@ fn assert_ordinary_reordered_inputs(package: &Package, name: &str) {
 }
 
 #[test]
+fn fixed_packet_layout_does_not_absorb_collector_sources() {
+    let package = sysroot::compile(
+        "
+        pure comptime fn Packet<T, tag: u8, ...values: meta.List<T>> -> Type { bool }
+        comptime fn prefix() -> Tuple<Type, u8> { let tag: u8 = 7; (u8, tag) }
+        comptime fn tail() -> meta.List<u8> { [2, 3] }
+        comptime fn last() -> u8 { 4 }
+        comptime fn Direct() -> Type { Packet<u8, 7, 1, 2, 3, 4> }
+        comptime fn Mixed() -> Type { Packet<...prefix(), 1, ...tail(), last()> }
+        comptime fn Literal() -> Type {
+            let tag: u8 = 7;
+            Packet<...(u8, tag), ...[1, 2], 3, 4>
+        }
+        comptime fn Whole() -> Type { Packet<.values = [1, 2, 3, 4], ...prefix()> }
+        comptime fn Exit() -> Type {
+            let tag: u8 = 7;
+            Packet<...do { return bool; (u8, tag) }, 1, ...tail(), last()>
+        }
+        ",
+    )
+    .unwrap();
+    let expected = invoke_both(&package, "Direct");
+    trace_both(
+        &package,
+        "Mixed",
+        &expected,
+        &["Mixed", "prefix", "tail", "last"],
+    );
+    trace_both(&package, "Literal", &expected, &["Literal"]);
+    trace_both(&package, "Whole", &expected, &["Whole", "prefix"]);
+    trace_both(
+        &package,
+        "Exit",
+        &Value::Type(nir::Term::Primitive(nir::Primitive::Bool)),
+        &["Exit"],
+    );
+}
+
+#[test]
 fn late_static_domains_contextualize_whole_collections_as_ordinary_expressions() {
     let package = sysroot::compile(
         "

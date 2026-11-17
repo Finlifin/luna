@@ -99,6 +99,42 @@ typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
 接口。只让 `.Items = items` 通过路由、只新增一个未被消费的接口结构，或仅让
 新的 Term 能往返编码，均不能计为这条纵向交付完成。
 
+### 共同准备器的路由边界
+
+在 `cfab85f6` 后的迁移中，`declaration_inputs::routing::Frame` 的构造直接接收
+参数入口描述与域 telescope，不再接收源码 owner 或读取 ClauseParam。源码入口
+在准备器外层将已确认声明投影成 Entry；公开名字仅来自这份投影，不能为了布局
+推算而临时创造一个名字。默认供应的源码环境仍由后续槽位检查持有，这一步没有
+把整个准备器或默认提供者转换为可序列化接口。
+
+此前为避免收集器尾部参与固定参数包的宽度计算，路由器把这些输入临时改写成
+`Arg::Named`。现改为独立的源码位置排除集合：列表元素与列表展开贡献零个固定
+参数槽，但保留自己的原始供应类别、检查入口和执行位置。字面量列表的逐项收集
+仍沿共同路径；布局排除本身不执行展开或准入。展开包若提前退出，使用当次请求
+已保存的元素上下文检查不可达后继，不在子检查返回后重新扫描另一份改写 HIR。
+
+这消除了路由层对“收集器一定有一个源码名字”的依赖，为函数值接口进入同一
+准备器提供了边界。**动态 NF 调用仍未迁入**：`normal.rs` 的临时列表组装路径
+还存在，具名动态供应、公开接口传送与待定 Type 恢复仍未实现。不能把 Entry
+当成完整 callable 接口发布，也不能从所选函数主体补回已经丢失的公开名字。
+
+接下来的接线须把源码默认提供者与参数槽描述分开，并让 callable telescope 的
+位置绑定进入同一域依赖检查；临时绑定必须在本次准备内消除，不能冻结为声明身份。
+完成消费者须先保留 callee，再按原计划取得实参，并通过现有 NF 形成契约检查；
+不能只把列表合成代码换个文件，或为了使用准备器伪造源码声明。接口身份的未决
+关系与已确认的按槽位适配继续分开，不能用此处的布局重构替作者决定 Type 相等。
+
+验证在 `/home/fin/luna` 使用 `python3 -B development/check.py --timeout 900 --
+test -p elaboration --lib -p luna --test normal_input_plans --test
+clause_packet_preparation --test declaration_input_plans --test
+ordinary_clause_collectors --no-fail-fast -- --test-threads=1`，退出 0，447 项通过，
+1 项既有待定 Type 正例保持 ignored。原检查在暂停期间完成，恢复后核实其终态；
+证据为 `/tmp/luna-tools-8v04w0hp/result.json`。新增用例通过真实 sysroot 在两个
+VM 路径比较 NF 身份及调用事件，覆盖固定前缀包、混合尾部、完整具名供应和提前
+返回。首轮用例误用了尚未绑定协议的数字后缀，改为显式类型绑定后通过，没有改变
+检查规则。所改 Rust 文件格式检查退出 0，
+`/tmp/luna-tools-urglu3rj/result.json`。此范围不包含公开 callable 接口传送。
+
 ### 已接通：共同的声明 telescope 构造
 
 公开入口传送尚未实现；其下层的依赖绑定形成已从两个独立循环迁到

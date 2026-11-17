@@ -13,8 +13,6 @@ pub(super) struct Frame<'h> {
     span: Span,
     parameters: Parameters,
     inputs: Vec<Arg<'h>>,
-    layout_inputs: Vec<Arg<'h>>,
-    positional_types: Vec<Term>,
     packet_contexts: Vec<Option<Vec<Term>>>,
     list_spreads: BTreeSet<usize>,
     collector: Option<usize>,
@@ -32,48 +30,42 @@ pub(super) struct Frame<'h> {
 impl<'h> Frame<'h> {
     pub(super) fn new(
         checker: &mut Checker<'_, '_>,
-        owner: OwnerId,
         inputs: &[Arg<'h>],
         span: Span,
         parameters: Parameters,
-        clauses: &[hir::clause::ClauseParam<'h>],
+        entries: Vec<input_routing::Entry<hir::Symbol>>,
     ) -> Result<Self, Error> {
+        if parameters.len() != entries.len() {
+            return Err(error(span, "input routing interface arity mismatch"));
+        }
         let mut inputs = inputs.to_vec();
         // Layout hints establish only positions. Actual packet checking
         // still validates the tuple and its element types. Do not expose
         // a head's unresolved Type binders as caller-side expectations.
         let positional_types = parameters
             .iter()
-            .zip(clauses)
-            .filter(|(_, clause)| {
-                !matches!(
-                    clause.kind,
-                    hir::clause::ClauseParamKind::Optional(..)
-                        | hir::clause::ClauseParamKind::Varadic(..)
-                )
-            })
+            .zip(&entries)
+            .filter(|(_, entry)| !entry.optional && !entry.variadic)
             .map(|((_, _, ty), _)| ty.clone())
             .collect::<Vec<_>>();
-        let collector = checker
-            .clause_has_collector(owner)
-            .then(|| clauses.len() - 1);
+        let collector = entries.iter().position(|entry| entry.variadic);
         loop {
             let whole_collector = collector.is_some_and(|slot| {
                 inputs.iter().any(|input|
-                matches!(input, Arg::Named(name, _) if name.name == clauses[slot].name.name))
+                matches!(input, Arg::Named(name, _) if Some(name.name) == entries[slot].name))
             });
-            let mut layout_inputs = inputs.to_vec();
+            let mut excluded = BTreeSet::new();
             let mut list_spreads = BTreeSet::new();
             let mut remaining = Some(positional_types.len());
             let mut layout_fuel = 10_000;
-            if let Some(slot) = collector.filter(|_| !whole_collector) {
+            if collector.is_some() && !whole_collector {
                 for (index, input) in inputs.iter().enumerate() {
                     match input {
-                        Arg::Positional(value) if remaining == Some(0) => {
-                            layout_inputs[index] = Arg::Named(clauses[slot].name, value);
+                        Arg::Positional(_) if remaining == Some(0) => {
+                            excluded.insert(index);
                         }
-                        Arg::Expand(value) if remaining == Some(0) => {
-                            layout_inputs[index] = Arg::Named(clauses[slot].name, value);
+                        Arg::Expand(_) if remaining == Some(0) => {
+                            excluded.insert(index);
                             list_spreads.insert(index);
                         }
                         Arg::Positional(_) => remaining = remaining.map(|n| n.saturating_sub(1)),
@@ -113,20 +105,23 @@ impl<'h> Frame<'h> {
                 continue;
             }
             let packet_contexts = if inputs.iter().any(|input| matches!(input, Arg::Expand(_))) {
-                checker.spread_packet_layout(&layout_inputs, &positional_types, span)?
+                checker.spread_packet_layout_excluding(
+                    &inputs,
+                    &positional_types,
+                    span,
+                    &excluded,
+                )?
             } else {
                 vec![None; inputs.len()]
             };
 
-            let routing = clause_inputs::ClauseInputRouting::new(clauses, &inputs, span)?;
+            let routing = clause_inputs::ClauseInputRouting::from_entries(entries, &inputs, span)?;
             let preparations = vec![Vec::new(); inputs.len()];
             let routed = (0..parameters.len()).map(|_| None).collect();
             return Ok(Self {
                 span,
                 parameters,
                 inputs,
-                layout_inputs,
-                positional_types,
                 packet_contexts,
                 list_spreads,
                 collector,
@@ -264,9 +259,7 @@ impl<'h> Frame<'h> {
         let span = self.span;
         let fields = checker.prepared_packet_fields(
             &value,
-            &self.layout_inputs,
-            input_index,
-            &self.positional_types,
+            self.packet_contexts[input_index].as_deref(),
             packet.span,
         )?;
         let observed = checker.preserved_input_identity(
@@ -452,8 +445,6 @@ mod tests {
             span,
             parameters: Vec::new().into(),
             inputs: vec![Arg::Expand(&input), Arg::Expand(&input)],
-            layout_inputs: vec![],
-            positional_types: vec![],
             packet_contexts: vec![],
             list_spreads: BTreeSet::new(),
             collector: None,

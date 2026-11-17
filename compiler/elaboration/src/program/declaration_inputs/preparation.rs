@@ -66,14 +66,19 @@ impl<'h, C: Completion> Frame<'h, C> {
         completion: C,
     ) -> Result<Self, Error> {
         let scope = scope::Scope::enter(checker, span)?;
-        let routing =
-            match routing::Frame::new(checker, owner, inputs, span, parameters.clone(), &clauses) {
-                Ok(routing) => routing,
-                Err(failure) => {
-                    scope.leave(checker);
-                    return Err(failure);
-                }
-            };
+        let routing = match routing::Frame::new(
+            checker,
+            inputs,
+            span,
+            parameters.clone(),
+            clause_inputs::entries(&clauses),
+        ) {
+            Ok(routing) => routing,
+            Err(failure) => {
+                scope.leave(checker);
+                return Err(failure);
+            }
+        };
         Ok(Self {
             owner,
             span,

@@ -114,9 +114,7 @@ impl<'h> Checker<'_, 'h> {
     pub(super) fn prepared_packet_fields(
         &mut self,
         packet: &n::Expr,
-        args: &[Arg<'_>],
-        index: usize,
-        domains: &[Term],
+        context: Option<&[Term]>,
         span: Span,
     ) -> Result<Vec<Term>, Error> {
         // Early exit does not erase the checked type of an unreachable tail.
@@ -133,14 +131,12 @@ impl<'h> Checker<'_, 'h> {
         if let Term::Tuple(fields) = self.structural_type(&shape.ty, span)? {
             Ok(fields)
         } else if is_never(&shape.ty) {
-            self.spread_packet_layout(args, domains, span)?[index]
-                .clone()
-                .ok_or_else(|| {
-                    error(
-                        span,
-                        "diverging type input spread has ambiguous packet width",
-                    )
-                })
+            context.map(<[Term]>::to_vec).ok_or_else(|| {
+                error(
+                    span,
+                    "diverging type input spread has ambiguous packet width",
+                )
+            })
         } else {
             Err(error(span, "type input spread requires a tuple"))
         }
