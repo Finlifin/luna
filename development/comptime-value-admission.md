@@ -2207,17 +2207,57 @@ runtime 边界和带捕获 Closure 的图冻结未改变。
   10、9、27、4 项通过。不是全 workspace、native 或性能验收。
 
 隔离 fixture 没有配置 Splice 时，隐式跨阶段调用失败不能直接当作真实 sysroot
-缺口。实际完整执行已通过上述新增用例；没有因此放宽 phase 检查。反之，
-[普通值子句复现](repros/staged-callable-value-input.fl) 在真实 sysroot 仍失败：
+缺口。实际完整执行已通过上述新增用例；没有因此放宽 phase 检查。而
+[普通值子句复现](repros/staged-callable-value-input.fl) 在 `0a4f5ba1` 的真实 sysroot 曾失败：
 `run -p luna -- check development/repros/staged-callable-value-input.fl --sysroot
 library --build-target x86_64 linux 64` 退出 1，
 `/tmp/luna-tools-mmp9ohpy/result.json`，报 `staged argument cannot be frozen: Type`。
 
-这项尚缺的是 source 输入依赖的等待：`freeze_staged_call_inputs` 尚未把普通值
-子句的未决输入可靠交给 deferral，再以空 scope 尝试导出实例身份。应补共同依赖
-观察与原检查后继；不能放宽完成性检查、允许自由值参数逸出，或把失败转成 Any。
-本次修复不完成该恢复协议，也不完成 Parse 的描述值或目标 println。
-Rust 格式检查退出 0，`/tmp/luna-tools-73jvm22f/result.json`。
+命名函数冻结这一阶段没有解决输入等待；其 Rust 格式检查退出 0，
+`/tmp/luna-tools-73jvm22f/result.json`。下面是随后对普通值依赖的实际修复。
+
+#### 值输入的可用性与动态声明应用
+
+原判定只取当前 owner 的 type_parameters，遗漏 normal_parameters、声明前缀和
+外层值输入；还没有遍历动态声明应用的输入包，遇到该节点就判断为非结构化。
+因此扩大可见参数集合本身仍不能修复复现。当前两个冻结准备入口改用 invocation
+已有的 visible_comptime_parameters，保留当前声明与父声明的完整可见输入。
+
+结构检查使用共同的受预算 term_inputs 观察每个表达式的域、身份操作数及 Type／
+普通值载荷，替换逐个参数的 mentions_rigid 和会重建项的 substitution_parameters。
+只出现于空 nominal 的域中的值输入也能触发推迟。外层 scoped slot 与声明身份
+分别保留，观察失败正常传播；没有执行 producer、展开 NF 头或制造完成的值。
+
+动态声明应用继续检查整个输入包；形成 runtime／comptime 函数身份都可以是
+comptime 数据，实际 Call 仍独立拒绝执行 runtime 代码。具体实例化取得输入后，
+materialization 将动态声明应用交给普通 source VM，完成后才冻结身份和运行默认
+供应。它不再被误交给只处理已知常量的折叠入口，也不执行被返回函数的主体。
+冻结端的作用域、完成性、预算与阶段检查均保留。
+
+这只是把已有的可保留输入推迟到具体实例化，未增加可挂起的源码检查帧，也没有
+退役所有结构判定／折叠路径。任意 Type producer 的恢复、完整 Type 描述及目标
+println 仍未完成；不能把本项推迟判定称为整个 elaboration／VM 交织协议。
+
+`staged_callable_freezing` 新增真实 sysroot 的 ordinary value 子句、两阶段命名身份、
+默认值转发、父声明值输入、空 nominal 域、工厂失败与合法输入，以及 runtime 读取
+拒绝。原复现现在直接作为执行回归，检查 true／false 两个实例各自的结果。
+
+本阶段工作目录 `/home/fin/luna`，统一经 `development/check.py --timeout 900 --`：
+
+- `test -p luna --test staged_callable_freezing -- --test-threads=1`：最终 11 项
+  通过，退出 0，`/tmp/luna-tools-wne2y1fw/result.json`。此前空 nominal 的域与
+  动态身份默认链两个有效正例分别失败于过早冻结和 canonical constant 入口；
+  `/tmp/luna-tools-cz08aa2u/result.json` 保留失败证据。新 fixture 曾误用可选参数
+  声明／必填参数的命名供应，已按现有规则修正；没有修改解析器或调用协议。
+- `test -p elaboration --lib -p luna --test open_functions --test scoped_comptime_callables
+  --test nominal_staging --test default_calls --test staged_invocation_reuse
+  --test library_protocols -p materialization --test scoped_dispatch_inputs
+  --test expansion_boundary --no-fail-fast -- --test-threads=1`：退出 0，
+  `/tmp/luna-tools-1o_yxq7g/result.json`。包含三 crate 单元测试及指定集成目标，
+  未运行全 workspace。构建期间未修改相关 Rust 源码。
+- 三个 Rust 文件的 scoped rustfmt 检查退出 0，
+  `/tmp/luna-tools-o19e16s3/result.json`；没有修改正式 docs 或提交原有工作区改动。
+
 
 ### 既有键预算与复制视图的验证
 

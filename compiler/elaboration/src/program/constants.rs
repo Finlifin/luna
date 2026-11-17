@@ -473,6 +473,29 @@ fn completed_subject_evidence(
     Ok(values.pop().unwrap_or((true, BTreeMap::new())))
 }
 
+// Pending identity inputs are observations, not permission to execute or export
+// an abstract value. The enclosing structural/phase checks remain independent.
+fn staged_term_is_pending(
+    value: &Term,
+    declaration_inputs: &[DeclarationId],
+    steps: &mut u64,
+    span: Span,
+) -> Result<bool, Error> {
+    let inputs = input_observation::term_inputs(value, steps, span)?;
+    if !inputs.parameters.is_empty() {
+        return Ok(true);
+    }
+    for declaration in declaration_inputs {
+        *steps = steps
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "staged input dependency budget exhausted"))?;
+        if inputs.declarations.contains_key(declaration) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl Checker<'_, '_> {
     pub(super) fn materialize_local_constant(
         &mut self,
@@ -2902,11 +2925,7 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(source.span, "staged local dependency budget exhausted"))?;
             staged_bindings.extend(self.open_staged_locals.iter().copied());
         }
-        let type_bindings = self
-            .signature_owner
-            .and_then(|owner| self.type_parameters.get(&owner))
-            .cloned()
-            .unwrap_or_default();
+        let declaration_inputs = self.visible_comptime_parameters(source.span)?;
         let mut inputs = Vec::new();
         let mut prepared: BTreeMap<n::LocalId, n::Expr> = BTreeMap::new();
         let mut deferred_bindings = BTreeSet::new();
@@ -2932,7 +2951,7 @@ impl Checker<'_, '_> {
                 argument.is_default,
                 &deferred_bindings,
                 &staged_bindings,
-                &type_bindings,
+                &declaration_inputs,
                 source.span,
             )?;
             if deferred {
@@ -2988,7 +3007,7 @@ impl Checker<'_, '_> {
         is_default: bool,
         deferred_bindings: &BTreeSet<n::LocalId>,
         staged_bindings: &BTreeSet<n::LocalId>,
-        type_bindings: &[nir::DeclarationId],
+        declaration_inputs: &[nir::DeclarationId],
         span: Span,
     ) -> Result<bool, Error> {
         let mut deferred = false;
@@ -3001,6 +3020,15 @@ impl Checker<'_, '_> {
                 .required_steps
                 .checked_sub(1)
                 .ok_or_else(|| error(span, "staged input structure budget exhausted"))?;
+            // Empty aggregates can depend on declaration values solely through
+            // their domain. Observe every construction's domain as well as
+            // the explicit identity operands below, without reading a value.
+            deferred |= staged_term_is_pending(
+                &value.ty,
+                declaration_inputs,
+                &mut self.required_steps,
+                span,
+            )?;
             match &value.kind {
                 K::Local(binding) if is_default && deferred_bindings.contains(binding) => {
                     deferred = true
@@ -3030,7 +3058,11 @@ impl Checker<'_, '_> {
                         "callable type is unavailable in this execution phase: runtime call in a comptime input",
                     ));
                 }
-                K::Function(_) if value.ty.is_comptime_callable() => {}
+                // Forming a named identity does not execute its body. Both
+                // callable phases may be data inputs; the Call arm above
+                // independently rejects execution of runtime code.
+                K::Function(_) => {}
+                K::ComptimeFunctionInstance { subject, .. } => pending.push(subject),
                 K::Closure { captures, .. } if value.ty.is_comptime_callable() => {
                     // The body is separately phase-checked. Its parameters
                     // belong to invocation; only environment construction
@@ -3038,7 +3070,6 @@ impl Checker<'_, '_> {
                     // the same provenance as direct argument references;
                     // specialization still checks writes/address escape
                     // before installing an owned capture snapshot.
-                    deferred |= type_bindings.iter().any(|id| value.ty.mentions_rigid(*id));
                     for capture in captures {
                         self.required_steps =
                             self.required_steps.checked_sub(1).ok_or_else(|| {
@@ -3056,28 +3087,45 @@ impl Checker<'_, '_> {
                         }
                     }
                 }
-                K::FunctionInstance { arguments, .. } if value.ty.is_comptime_callable() => {
-                    deferred |= arguments
-                        .iter()
-                        .any(|ty| type_bindings.iter().any(|id| ty.mentions_rigid(*id)));
+                K::FunctionInstance { arguments, .. } => {
+                    for argument in arguments {
+                        deferred |= staged_term_is_pending(
+                            argument,
+                            declaration_inputs,
+                            &mut self.required_steps,
+                            span,
+                        )?;
+                    }
                 }
                 K::TraitMethod {
                     subject,
                     interface_arguments,
                     method_arguments,
                     ..
-                } if value.ty.is_comptime_callable() => {
-                    deferred |= std::iter::once(subject)
+                } => {
+                    for argument in std::iter::once(subject)
                         .chain(interface_arguments)
                         .chain(method_arguments)
-                        .any(|ty| type_bindings.iter().any(|id| ty.mentions_rigid(*id)));
+                    {
+                        deferred |= staged_term_is_pending(
+                            argument,
+                            declaration_inputs,
+                            &mut self.required_steps,
+                            span,
+                        )?;
+                    }
                 }
                 K::AssociatedValue {
                     interface, subject, ..
                 } => {
-                    deferred |= std::iter::once(subject)
-                        .chain(&interface.arguments)
-                        .any(|ty| type_bindings.iter().any(|id| ty.mentions_rigid(*id)));
+                    for argument in std::iter::once(subject).chain(&interface.arguments) {
+                        deferred |= staged_term_is_pending(
+                            argument,
+                            declaration_inputs,
+                            &mut self.required_steps,
+                            span,
+                        )?;
+                    }
                 }
                 K::TypeList(values)
                 | K::Tuple(values)
@@ -3235,11 +3283,12 @@ impl Checker<'_, '_> {
                     pending.extend(otherwise.as_deref());
                 }
                 K::TypeValue(ty) | K::ComptimeValue(ty) | K::StagedValue(ty) => {
-                    deferred |= type_bindings.iter().any(|id| ty.mentions_rigid(*id));
-                    deferred |= !ty
-                        .substitution_parameters()
-                        .map_err(|e| error(span, e.to_string()))?
-                        .is_empty();
+                    deferred |= staged_term_is_pending(
+                        ty,
+                        declaration_inputs,
+                        &mut self.required_steps,
+                        span,
+                    )?;
                 }
                 K::NormalFormType {
                     arguments, plan, ..
@@ -3314,17 +3363,13 @@ impl Checker<'_, '_> {
                 _ => BTreeSet::new(),
             })
             .unwrap_or_default();
-        let type_bindings = self
-            .signature_owner
-            .and_then(|owner| self.type_parameters.get(&owner))
-            .cloned()
-            .unwrap_or_default();
+        let declaration_inputs = self.visible_comptime_parameters(source.span)?;
         if self.staged_input_can_defer(
             &plan.expression,
             false,
             &BTreeSet::new(),
             &staged_bindings,
-            &type_bindings,
+            &declaration_inputs,
             source.span,
         )? {
             return Ok(expression);

@@ -2115,6 +2115,10 @@ impl Builder<'_> {
                     invokes |= matches!(
                         expr.kind,
                         K::Call { .. }
+                            // A declaration application computes the identity
+                            // from its input packet. It still needs invocation
+                            // when the resulting function belongs to runtime.
+                            | K::ComptimeFunctionInstance { .. }
                             | K::NormalFormType { .. }
                             | K::Assign { .. }
                             | K::Loop { .. }
