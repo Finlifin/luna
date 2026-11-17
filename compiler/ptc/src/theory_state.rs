@@ -1,6 +1,7 @@
 //! Query-local reversible equality closure, validated type facts and integer
 //! potentials. Checkers and conflict minimization use fresh theory state.
 use super::{Atom, Search, TheoryModel, TypeKind, UnknownReason, integer};
+mod members;
 mod propagation;
 #[cfg(test)]
 mod reuse_tests;
@@ -15,6 +16,9 @@ pub(super) enum Check {
 pub(super) struct Classes {
     parent: Vec<usize>,
     size: Vec<usize>,
+    // Disjoint circular lists. Swapping two roots' links joins their classes;
+    // the same swap undoes that join after later merges have been reverted.
+    next: Vec<usize>,
     undo: Vec<(usize, usize)>,
 }
 impl Classes {
@@ -22,6 +26,7 @@ impl Classes {
         Self {
             parent: (0..count).collect(),
             size: vec![1; count],
+            next: (0..count).collect(),
             undo: Vec::new(),
         }
     }
@@ -44,6 +49,7 @@ impl Classes {
         self.undo.push((b, a));
         self.parent[b] = a;
         self.size[a] += self.size[b];
+        self.next.swap(a, b);
         true
     }
     fn checkpoint(&self) -> usize {
@@ -54,12 +60,14 @@ impl Classes {
             let (child, parent) = self.undo.pop().unwrap();
             self.size[parent] -= self.size[child];
             self.parent[child] = child;
+            self.next.swap(parent, child);
         }
     }
     fn snapshot(&self) -> Self {
         Self {
             parent: self.parent.clone(),
             size: self.size.clone(),
+            next: self.next.clone(),
             undo: Vec::new(),
         }
     }
@@ -69,6 +77,10 @@ impl fmt::Display for Classes {
         write!(f, "(equality-classes (roots")?;
         for i in 0..self.parent.len() {
             write!(f, " {}", self.root(i))?;
+        }
+        write!(f, ") (next")?;
+        for next in &self.next {
+            write!(f, " {next}")?;
         }
         write!(f, ") (undo")?;
         for (child, parent) in &self.undo {
@@ -111,7 +123,7 @@ impl State {
     ) -> Result<Self, UnknownReason> {
         charge(
             fuel,
-            count.saturating_mul(2).saturating_add(assignment.len()),
+            count.saturating_mul(3).saturating_add(assignment.len()),
         )?;
         Ok(Self {
             classes: Classes::new(count),
@@ -331,7 +343,7 @@ impl Search<'_> {
                 .saturating_mul(2)
                 .saturating_add(1)
                 .saturating_add(if capture_model {
-                    self.terms.nodes.len().saturating_mul(2)
+                    self.terms.nodes.len().saturating_mul(3)
                 } else {
                     0
                 });
@@ -573,7 +585,7 @@ mod tests {
         classes.rollback(0);
         assert_eq!(
             classes.to_string(),
-            "(equality-classes (roots 0 1 2 3 4 5) (undo))"
+            "(equality-classes (roots 0 1 2 3 4 5) (next 0 1 2 3 4 5) (undo))"
         );
         assert_eq!(classes.size, vec![1; 6]);
     }

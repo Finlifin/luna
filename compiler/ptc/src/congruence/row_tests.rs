@@ -49,6 +49,52 @@ fn compare(warm: Check, fresh: Option<crate::TheoryModel>, count: usize) {
 }
 
 #[test]
+fn row_observation_cost_does_not_include_unrelated_type_classes() {
+    let mut terms = Terms::default();
+    for i in 1..513 {
+        terms.insert(&variable(i));
+    }
+    let byte = Term::Primitive(Primitive::U8);
+    let character = Term::Primitive(Primitive::Char);
+    let effect = |result| Term::Computation {
+        effects: vec![Operation {
+            declaration: DeclarationId {
+                package: 109,
+                local: 1000,
+            },
+            arguments: vec![byte.clone()],
+        }],
+        result: Box::new(result),
+    };
+    let error = |result| Term::error_result(vec![byte.clone()], result);
+    let left = terms.insert(&effect(variable(0)));
+    let right = terms.insert(&effect(byte.clone()));
+    let different = terms.insert(&effect(character));
+    let error_left = terms.insert(&error(variable(0)));
+    let error_right = terms.insert(&error(byte.clone()));
+    let mut classes = crate::Classes::new(terms.nodes.len());
+    classes.merge(terms.ids[&variable(0)], terms.ids[&byte]);
+    let context = Context::default();
+    let formula = Formula::True;
+    let mut search = search(&context, &formula, &[], &terms);
+    search.steps = 128;
+    assert_eq!(
+        search.computation_congruent(left, right, &classes, &[]),
+        Ok(true)
+    );
+    search.steps = 128;
+    assert_eq!(
+        search.computation_distinct(left, different, &classes, &[]),
+        Ok(true)
+    );
+    search.steps = 128;
+    assert_eq!(
+        search.error_result_congruent(error_left, error_right, &classes),
+        Ok(true)
+    );
+}
+
+#[test]
 fn sparse_rows_do_not_force_a_full_structural_pair_scan() {
     let mut formulas: Vec<_> = (0..96)
         .map(|i| {

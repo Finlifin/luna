@@ -1563,6 +1563,10 @@ impl Search<'_> {
         &mut self,
         assignment: &[Option<bool>],
     ) -> Result<Option<TheoryModel>, UnknownReason> {
+        self.steps = self
+            .steps
+            .checked_sub(self.terms.nodes.len().saturating_mul(3))
+            .ok_or(UnknownReason::BudgetExhausted)?;
         let mut classes = Classes::new(self.terms.nodes.len());
         let Some(kinds) = self.type_theory_with_classes(assignment, &mut classes, None)? else {
             return Ok(None);
@@ -1742,13 +1746,12 @@ impl Search<'_> {
                 continue;
             };
             let root = classes.root(self.terms.ids[&query.ty]);
-            for (id, term) in self.terms.nodes.iter().enumerate() {
+            for id in classes.ordered_members(root, &mut self.steps)? {
                 self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
-                if classes.root(id) == root
-                    && self
-                        .context
-                        .evaluate_kind(query.kind, term)
-                        .is_some_and(|actual| actual != *value)
+                if self
+                    .context
+                    .evaluate_kind(query.kind, &self.terms.nodes[id])
+                    .is_some_and(|actual| actual != *value)
                 {
                     return Ok(None);
                 }

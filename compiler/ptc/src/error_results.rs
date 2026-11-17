@@ -25,16 +25,14 @@ impl Search<'_> {
         // An opaque success can add labels, but cannot remove an explicit one.
         // Absence needs a closed destination, not a closed source residual.
         let mut closed = [false; 2];
-        for (index, term) in self.terms.nodes.iter().enumerate() {
-            self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
-            if constructor(term).is_some()
-                || matches!(term, Term::Record(_))
-                || self.context.is_tuple_type(term)
-                || self.context.is_list_type(term)
-            {
-                let root = classes.root(index);
-                closed[0] |= root == lr;
-                closed[1] |= root == rr;
+        for (slot, root) in [lr, rr].into_iter().enumerate() {
+            for index in classes.ordered_members(root, &mut self.steps)? {
+                self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
+                let term = &self.terms.nodes[index];
+                closed[slot] |= constructor(term).is_some()
+                    || matches!(term, Term::Record(_))
+                    || self.context.is_tuple_type(term)
+                    || self.context.is_list_type(term);
             }
         }
         if closed.into_iter().all(|known| known)
@@ -119,11 +117,10 @@ impl Search<'_> {
             }
             let mut next = None;
             let mut cyclic = false;
-            for index in std::iter::once(result).chain(0..terms.nodes.len()) {
+            for index in
+                std::iter::once(result).chain(classes.ordered_members(root, &mut self.steps)?)
+            {
                 self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
-                if classes.root(index) != root {
-                    continue;
-                }
                 // An ordinary representative closes the residual even when a
                 // contradictory branch also equates it with an error wrapper.
                 // Following that wrapper would hide the contradiction in a

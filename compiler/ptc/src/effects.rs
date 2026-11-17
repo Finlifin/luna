@@ -103,12 +103,11 @@ impl<'a> Search<'a> {
         // opaque definition body or an assumed empty tail.
         let residuals = [lr, rr];
         let mut concrete = [false; 2];
-        for (index, term) in self.terms.nodes.iter().enumerate() {
-            self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
-            if constructor(term).is_some() || matches!(term, Term::Record(_)) {
-                for slot in 0..2 {
-                    concrete[slot] |= classes.root(index) == residuals[slot];
-                }
+        for slot in 0..2 {
+            for index in classes.ordered_members(residuals[slot], &mut self.steps)? {
+                self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
+                let term = &self.terms.nodes[index];
+                concrete[slot] |= constructor(term).is_some() || matches!(term, Term::Record(_));
             }
         }
         if !concrete.into_iter().all(|known| known) {
@@ -175,11 +174,10 @@ impl<'a> Search<'a> {
             let mut cyclic = false;
             // Start from the actual result when possible; all alternatives
             // belong to the same class and require explicit branch evidence.
-            for index in std::iter::once(result).chain(0..terms.nodes.len()) {
+            for index in
+                std::iter::once(result).chain(classes.ordered_members(root, &mut self.steps)?)
+            {
                 self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
-                if classes.root(index) != root {
-                    continue;
-                }
                 let Term::Computation { effects, result } = &terms.nodes[index] else {
                     continue;
                 };
@@ -289,20 +287,17 @@ impl<'a> Search<'a> {
         let mut right_index = None;
         let mut left_record = false;
         let mut right_record = false;
-        for (index, term) in self.terms.nodes.iter().enumerate() {
-            self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
-            let root = classes.root(index);
-            if root == a {
-                left_record |= matches!(term, Term::Record(_));
-                if let Some(head) = constructor(term) {
-                    left_head = Some(head);
-                    left_index = Some(index);
-                }
-            } else if root == b {
-                right_record |= matches!(term, Term::Record(_));
-                if let Some(head) = constructor(term) {
-                    right_head = Some(head);
-                    right_index = Some(index);
+        for (root, head, selected, record) in [
+            (a, &mut left_head, &mut left_index, &mut left_record),
+            (b, &mut right_head, &mut right_index, &mut right_record),
+        ] {
+            for index in classes.ordered_members(root, &mut self.steps)? {
+                self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
+                let term = &self.terms.nodes[index];
+                *record |= matches!(term, Term::Record(_));
+                if let Some(found) = constructor(term) {
+                    *head = Some(found);
+                    *selected = Some(index);
                 }
             }
         }

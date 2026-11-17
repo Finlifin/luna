@@ -128,13 +128,11 @@ impl Search<'_> {
                         }
                     }
                     if inferred.is_none() {
-                        for (id, term) in self.terms.nodes.iter().enumerate() {
+                        for id in state.classes.ordered_members(root, fuel).ok()? {
                             charge(fuel, 1)?;
-                            if state.classes.metered_root(id, fuel)? == root {
-                                inferred = self.context.evaluate_kind(query, term);
-                                if inferred.is_some() {
-                                    break;
-                                }
+                            inferred = self.context.evaluate_kind(query, &self.terms.nodes[id]);
+                            if inferred.is_some() {
+                                break;
                             }
                         }
                     }

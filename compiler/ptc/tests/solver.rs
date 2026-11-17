@@ -1811,21 +1811,46 @@ fn metered_proofs_preserve_remaining_work_on_all_outcomes() {
             steps: used,
             max_depth: 128,
         };
-        let repeated = context.prove_metered(goal, &mut exact);
+        let repeated = context.prove_metered(goal.clone(), &mut exact);
         assert_eq!(
             std::mem::discriminant(&repeated),
             std::mem::discriminant(&expected)
         );
-        assert_eq!(exact.steps, 0);
+        // Conflict minimization receives a fraction of the remaining budget.
+        // A smaller allowance can therefore do less optional work while still
+        // producing the same checked conclusion. It need not spend every step.
+        assert!(exact.steps < used);
+        let mut same_allowance = Budget {
+            steps: used,
+            max_depth: 128,
+        };
+        let same = context.prove_metered(goal, &mut same_allowance);
+        assert_eq!(same.to_string(), repeated.to_string());
+        assert_eq!(same_allowance.steps, exact.steps);
+        match &repeated {
+            Outcome::Entailed(proof) => context.verify_proof(proof, Budget::default()).unwrap(),
+            Outcome::NotEntailed(witness) => {
+                context.verify_witness(witness, Budget::default()).unwrap()
+            }
+            Outcome::IllFormed(_) => {}
+            other => panic!("bounded repeat lost its conclusion: {other:?}"),
+        }
     }
+    let repeated_goal = eq(ty(P::Bool), ty(P::Bool));
+    let mut probe = Budget::default();
+    assert!(matches!(
+        context.prove_metered(repeated_goal.clone(), &mut probe),
+        Outcome::Entailed(_)
+    ));
+    let allowance = (Budget::default().steps - probe.steps) * 4;
     let mut budget = Budget {
-        steps: 64,
+        steps: allowance,
         max_depth: 128,
     };
     let mut completed = 0;
     loop {
         let before = budget.steps;
-        let outcome = context.prove_metered(eq(ty(P::Bool), ty(P::Bool)), &mut budget);
+        let outcome = context.prove_metered(repeated_goal.clone(), &mut budget);
         assert!(budget.steps <= before);
         if matches!(
             outcome,
@@ -1839,10 +1864,20 @@ fn metered_proofs_preserve_remaining_work_on_all_outcomes() {
         assert!(matches!(outcome, Outcome::Entailed(_)));
         assert!(budget.steps < before);
         completed += 1;
-        assert!(completed <= 64);
+        assert!(completed <= allowance);
     }
     assert!(completed > 1);
-    assert_eq!(budget.steps, 0);
+    // An atomic reservation can fail with a small unused remainder. Retrying
+    // with that remainder must neither refill the allowance nor prove the goal.
+    let remaining = budget.steps;
+    assert!(matches!(
+        context.prove_metered(repeated_goal, &mut budget),
+        Outcome::Unknown {
+            reason: UnknownReason::BudgetExhausted,
+            ..
+        }
+    ));
+    assert!(budget.steps <= remaining);
 }
 
 #[test]
