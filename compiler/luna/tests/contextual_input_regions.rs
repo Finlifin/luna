@@ -52,6 +52,51 @@ fn check_in_engines(source: &str, calls: &[&str], budget: Budget, engines: &[boo
 }
 
 #[test]
+fn arithmetic_regions_preserve_operand_order_and_original_return_targets() {
+    check_both(
+        "
+        comptime fn sample(value: Integer) -> Integer { value }
+        comptime fn early() -> bool {
+            let unused = (do { return true; 1 }) + sample(9);
+            false
+        }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let value = sample(do { trace = trace * 10 + 1; 1 })
+                + ((do { trace = trace * 10 + 2; 2 })
+                    * sample(do { trace = trace * 10 + 3; 3 }));
+            value == 7 and trace == 123 and early()
+        }
+        ",
+        &["check", "sample", "sample", "early"],
+    );
+    let failure = sysroot::compile(
+        "comptime fn invalid() -> bool { let unused = (do { return true; 1 }) + false; false }",
+    )
+    .unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+}
+
+#[test]
+fn arithmetic_regions_retain_nested_peer_context_across_branch_searches() {
+    let mut expression = "do { trace = trace + 1; 1 }".to_owned();
+    for _ in 0..16 {
+        expression = format!("(0 + (if true {{ {expression} }} else {{ 0 }}))");
+    }
+    check_both(
+        &format!(
+            "comptime fn accept(value: Integer) -> Integer {{ value }}
+             comptime fn check() -> bool {{
+                 var trace: Integer = 0;
+                 let result = accept({expression});
+                 result == 1 and trace == 1
+             }}"
+        ),
+        &["check", "accept"],
+    );
+}
+
+#[test]
 fn logical_regions_scope_type_premises_through_nested_children() {
     check_both(
         "

@@ -6718,33 +6718,6 @@ impl Checker<'_, '_> {
         })
     }
 
-    /// Let either operand supply a type before committing numeric defaults.
-    /// Incomplete attempts use the generic-call transaction to restore scope.
-    fn peer_operands(
-        &mut self,
-        left: &Expr<'_>,
-        right: &Expr<'_>,
-        expected: Option<&Term>,
-        fallback: Option<&Term>,
-    ) -> Result<(n::Expr, n::Expr), Error> {
-        let progress =
-            operators::peers::Progress::new(self, [left, right], expected, fallback, None)?;
-        self.drive_peer_operands(progress)
-    }
-    fn peer_operands_with_ready(
-        &mut self,
-        left: &Expr<'_>,
-        right: &Expr<'_>,
-        expected: Option<&Term>,
-        fallback: Option<&Term>,
-        a: Option<n::Expr>,
-        b: Option<n::Expr>,
-    ) -> Result<(n::Expr, n::Expr), Error> {
-        let progress =
-            operators::peers::Progress::new(self, [left, right], expected, fallback, Some([a, b]))?;
-        self.drive_peer_operands(progress)
-    }
-
     fn float_associated_constant(
         &self,
         ty: &Term,
@@ -7233,135 +7206,18 @@ impl Checker<'_, '_> {
     fn expr(&mut self, expr: &Expr<'_>, expected: Option<&Term>) -> Result<n::Expr, Error> {
         self.expr_context(expr, expected, None)
     }
-    #[inline(never)]
-    fn arithmetic_expression(
+    fn finish_arithmetic_expression(
         &mut self,
         expr: &Expr<'_>,
-        op: &BinOp,
-        left: &Expr<'_>,
-        right: &Expr<'_>,
+        left: n::Expr,
+        right: n::Expr,
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
-        let operator = match op {
-            BinOp::Add => crate::arithmetic::Operator::Add,
-            BinOp::Sub => crate::arithmetic::Operator::Subtract,
-            BinOp::Mul => crate::arithmetic::Operator::Multiply,
-            BinOp::Div => crate::arithmetic::Operator::Divide,
-            BinOp::Rem => crate::arithmetic::Operator::Remainder,
-            _ => unreachable!(),
+        let H::Binary(op, _, _) = &expr.kind else {
+            return Err(error(expr.span, "arithmetic requires two source operands"));
         };
-        let mut checked_right = None;
-        let checked_left = if let Some(protocol) = self.protocols.arithmetic[operator as usize] {
-            let checked = self.argument_attempt(left, None, None)?;
-            if let Some(value) = checked.as_ref().filter(|value| !is_never(&value.ty)) {
-                let shape = match self
-                    .context
-                    .structural_view_with_heads_metered(
-                        &value.ty,
-                        crate::ptc::Budget::default(),
-                        |head| Some(head) == self.protocols.tuple,
-                    )
-                    .0
-                {
-                    Ok(view) => view.map(|(ty, _)| ty).unwrap_or_else(|| value.ty.clone()),
-                    Err(crate::ptc::UnknownReason::UnvalidatedModel) => value.ty.clone(),
-                    Err(reason) => {
-                        return Err(error(
-                            left.span,
-                            format!("arithmetic operand view remains unresolved: {reason:?}"),
-                        ));
-                    }
-                };
-                let native = self.native_arithmetic_type(op, &shape);
-                // A native left operand does not imply a homogeneous RHS.
-                // Probe it without a fabricated left-type requirement, and
-                // retain successful work for either the protocol or core path.
-                checked_right = self.argument_attempt(right, None, None)?;
-                // Try the native operand context transactionally before asking
-                // for a protocol context. This preserves numeric literal
-                // inference (including nested literals), while an incompatible
-                // enum/callable context can be retried through a unique trait
-                // RHS even inside a block, branch, or generic call. Never use
-                // semantic errors or solver exhaustion as candidate evidence.
-                let mut native_failure = None;
-                if checked_right.is_none() && native {
-                    match self.argument_attempt(right, Some(&value.ty), None) {
-                        Ok(value) => checked_right = value,
-                        Err(failure) if failure.incompatible_context => {
-                            native_failure = Some(failure)
-                        }
-                        Err(failure) => return Err(failure),
-                    }
-                }
-                if checked_right.is_none() {
-                    if let Some(rhs) =
-                        self.protocol_argument_context(&value.ty, protocol, expr.span)?
-                    {
-                        checked_right = Some(self.expr(right, Some(&rhs))?);
-                    } else if let Some(mut failure) = native_failure {
-                        failure
-                            .message
-                            .push_str("; arithmetic RHS has no unique protocol context");
-                        return Err(failure);
-                    }
-                }
-                let homogeneous = match checked_right.as_ref() {
-                    Some(rhs) if !is_never(&rhs.ty) && rhs.ty != value.ty => {
-                        match self.context.prove(
-                            crate::ptc::Formula::equal(value.ty.clone(), rhs.ty.clone()),
-                            crate::ptc::Budget::default(),
-                        ) {
-                            crate::ptc::Outcome::Entailed(_) => true,
-                            crate::ptc::Outcome::NotEntailed(_)
-                            | crate::ptc::Outcome::Unknown {
-                                reason: crate::ptc::UnknownReason::UnvalidatedModel,
-                                ..
-                            } => false,
-                            outcome => {
-                                return Err(error(
-                                    expr.span,
-                                    format!(
-                                        "arithmetic operand equality remains unresolved: {outcome}"
-                                    ),
-                                ));
-                            }
-                        }
-                    }
-                    _ => true,
-                };
-                if !native || !homogeneous {
-                    let right = match checked_right.take() {
-                        Some(right) => right,
-                        None => self.expr(right, None)?,
-                    };
-                    return self.finish_binary_protocol_call(
-                        expr,
-                        protocol,
-                        operator.method(),
-                        checked.unwrap(),
-                        right,
-                        expected,
-                    );
-                }
-            }
-            Some(checked)
-        } else {
-            None
-        };
-        let hint = self.arithmetic_operand_hint(expected, expr.span)?;
-        let hint = hint.as_ref();
-        let fallback = (is_numeric_literal(left) && !is_float_literal(left)).then(|| p(P::Integer));
-        let (left, right) = match checked_left {
-            Some(checked) => self.peer_operands_with_ready(
-                left,
-                right,
-                hint,
-                fallback.as_ref(),
-                checked,
-                checked_right,
-            )?,
-            None => self.peer_operands(left, right, hint, fallback.as_ref())?,
-        };
+        let operator = block_regions::arithmetic::operator(expr)
+            .ok_or_else(|| error(expr.span, "expected an arithmetic operator"))?;
         // No operator or RHS executes after a nonreturning left operand.
         // Both source operands were still elaborated above. In particular,
         // do not invent a rounding protocol from the unreachable RHS type.
@@ -7600,11 +7456,9 @@ impl Checker<'_, '_> {
         let value = match &expr.kind {
             H::Unary(_, _) => self.unary_expression(expr, expected),
             H::Binary(BinOp::And | BinOp::Or, _, _) => self.logical_expression(expr, expected),
-            H::Binary(
-                op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem),
-                a,
-                b,
-            ) => self.arithmetic_expression(expr, op, a, b, expected),
+            H::Binary(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem, _, _) => {
+                self.arithmetic_expression(expr, expected)
+            }
             _ => self.comparison_expression(expr, expected),
         }?;
         if preserve {

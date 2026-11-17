@@ -1,4 +1,4 @@
-//! One operand-context search shared by synchronous adapters and region frames.
+//! One operand-context search shared by arithmetic and comparison region frames.
 //! Checked operands remain code; none of these transitions executes a producer.
 use super::*;
 
@@ -221,22 +221,5 @@ mod tests {
             assert!(dump.contains(fragment), "missing {fragment}: {dump}");
         }
         assert!(!dump.contains('\n'), "{dump}");
-    }
-}
-
-impl Checker<'_, '_> {
-    pub(in crate::program) fn drive_peer_operands(
-        &mut self,
-        mut progress: Progress<'_, '_>,
-    ) -> Result<(n::Expr, n::Expr), Error> {
-        while let Some(request) = progress.next()? {
-            let value = if request.attempt {
-                self.argument_attempt(request.input, request.expected, None)?
-            } else {
-                Some(self.expr(request.input, request.expected)?)
-            };
-            progress.accept(value)?;
-        }
-        progress.finish()
     }
 }

@@ -383,9 +383,39 @@ staged 描述；对外层写入造成的输入事实失效仍按共同词法边�
 bool 右侧在已检查左侧的相应真／假类型前提内检查，帧独占该前提的退出责任；
 子检查正常完成或失败时先退出前提，完成整个结果交付或外层探测回退。BitVec
 不安装 bool 前提，保留双侧求值。域选择只决定检查，不执行操作数、不改源码顺序，
-块内 return 仍指向原函数，短路跳过的右侧也须通过源码检查。算术运算仍通过
-同一个 Progress 的同步适配器检查子项；这一步尚未提供等待外部 Type 响应的入口，
-不解除待定 callable／列表域正例的 ignore。
+块内 return 仍指向原函数，短路跳过的右侧也须通过源码检查。
+
+普通算术现也进入同一 Region。帧持有左侧探测、右侧无上下文探测、原生域试探、
+trait RHS 上下文及最终 peer 搜索的后继，拥有已检查操作数、当前 Attempt 和原生域
+不相容诊断。只有原生 RHS 试探允许在事务恢复后用独立的 trait 域再检查；预算、
+语义错误与恢复失败不变成候选证据。已成功检查的操作数直接交付原有协议选择／
+标量构造；native 左侧不意味着 RHS 同型，关联 Output 也不等于输入域。原独立
+同步算术探测流程及 peer 驱动适配器已经删除。
+
+嵌套算术在普通 primitive 目标下直接压入共同帧栈；非 primitive 目标仍先走普通
+交付适配，再进入相同算术规则。每个帧提供稳定 S-expression，保留源码位置、
+阶段、等待项、已检查代码和失败诊断。检查先后仍不改变操作数执行顺序，左侧
+提前退出仍使用原函数出口；右侧源码依旧检查。此迁移没有放宽身份观察的未知
+效果边界，也没有修复未知前缀 Type 默认值的提前冻结问题。
+
+这些规则仍在原活动 Checker 中同步驱动，尚未提供等待外部 Type 响应的入口，
+不解除待定 callable／列表域正例的 ignore。源码状态迁移和原 VM activation
+交接必须继续共同推进，不能把内部上下文试探当作已执行前缀的恢复。
+
+算术迁移的验证目录为 `/home/fin/luna`，执行入口均为
+`python3 -B development/check.py --timeout 900 --`：
+
+- `test -p elaboration --lib -p luna --test arithmetic_contexts
+  --test contextual_input_regions --no-fail-fast -- --test-threads=1`：退出 0，
+  `/tmp/luna-tools-oxnachfj/result.json`。elaboration／luna 单元与算术上下文、
+  共同 Region 用例通过；新增源码用例在两种执行器中检查生产者顺序、嵌套 peer
+  上下文及原函数提前返回。没有解除既有 Type 等待用例的 ignore。
+- `test -p luna --test execution --test library_std_format --no-fail-fast
+  -- --test-threads=1 arithmetic numeric_peer_context format_plan`：退出 0，
+  `/tmp/luna-tools-qku264vc/result.json`。22 项执行回归及 4 项格式扫描通过，
+  包含原生／异构 RHS、关联输出、上下文 lambda、effect 交付、数值精度及溢出拒绝。
+- 八个修改／新增 Rust 文件的 scoped rustfmt 检查退出 0，
+  `/tmp/luna-tools-x1cm_fiz/result.json`。没有运行全 workspace 或性能基准。
 
 检查驱动的帧栈与返回值已从局部循环移入 `driver::region::Region`。一次正常 poll
 完成一个帧转换，返回 Continue、子表达式请求或完整结果；尚未迁移的原子表达式

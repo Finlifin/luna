@@ -76,6 +76,7 @@ impl<'b, 'h> Region<'b, 'h> {
                 RegionFrame::When(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::Match(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::Comparison(frame) => frame.step(checker, returned.take())?,
+                RegionFrame::Arithmetic(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::Logical(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::NormalApplication(frame) => frame.step(checker, returned.take())?,
             };
@@ -153,7 +154,9 @@ impl<'b, 'h> Region<'b, 'h> {
                         }
                         // Nonprimitive targets first pass through ordinary
                         // delivery adaptation, which enters the same frame.
-                        if (comparisons::is_comparison(expr) || logical::is_logical(expr))
+                        if (comparisons::is_comparison(expr)
+                            || logical::is_logical(expr)
+                            || arithmetic::operator(expr).is_some())
                             && let Some(view) = destination.ordinary_view()
                             && view.input.is_none()
                             && view
@@ -162,6 +165,13 @@ impl<'b, 'h> Region<'b, 'h> {
                         {
                             let frame = if logical::is_logical(expr) {
                                 RegionFrame::Logical(logical::Frame::new(
+                                    checker,
+                                    expr,
+                                    destination,
+                                    true,
+                                )?)
+                            } else if arithmetic::operator(expr).is_some() {
+                                RegionFrame::Arithmetic(arithmetic::Frame::new(
                                     checker,
                                     expr,
                                     destination,
@@ -346,6 +356,9 @@ impl<'b, 'h> Region<'b, 'h> {
                         }
                         RegionFrame::Comparison(comparison) => {
                             Some(comparison.recover(checker, failure.take().unwrap()))
+                        }
+                        RegionFrame::Arithmetic(frame) => {
+                            Some(frame.recover(checker, failure.take().unwrap()))
                         }
                         RegionFrame::Logical(frame) => {
                             Some(frame.recover(checker, failure.take().unwrap()))

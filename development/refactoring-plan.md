@@ -201,8 +201,9 @@ when／match 的候选域探测现也由所属帧持有 Search 与 Attempt，条
 选择与绑定物化、成功 payload 恢复和独立清理来源保留。模式、guard 与 inline
 选择内部仍复用同步服务，不声称这些子工作已有外部等待后继。
 普通比较与 and/or 现在由同一帧栈交接左右操作数，保留上下文搜索与检查事务；
-逻辑帧另外持有 bool 短路前提与退出责任，BitVec 仍双侧求值。算术适配器共用同一
-搜索实现。它消除了这些规则持有子检查 Rust 栈的需要，但尚不支持
+逻辑帧另外持有 bool 短路前提与退出责任，BitVec 仍双侧求值。算术帧也已接入同一
+Region，保留原生／trait RHS 试探及共同 peer 搜索，原同步探测与 peer 适配器退役。
+它消除了这些已迁移规则持有子检查 Rust 栈的需要，但尚不支持
 暂停并接收外部 Type 响应，两个待定域正例仍未解除 ignore。
 帧栈及子检查返回值已迁入 `block_regions::driver::region::Region`，由同一同步入口
 逐步 poll/accept；Waiting 和完成状态拒绝重复交付，失败仍沿原帧退出与 Probe 恢复。

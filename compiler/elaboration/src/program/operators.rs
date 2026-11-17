@@ -1,5 +1,5 @@
 //! Scalar selection and lowering share one operand-context search. Comparisons
-//! obtain checked children from region frames; other scalar rules use its adapter.
+//! and arithmetic obtain checked children from the same region driver.
 use super::*;
 pub(in crate::program) mod peers;
 
