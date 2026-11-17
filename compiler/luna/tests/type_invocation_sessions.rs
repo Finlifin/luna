@@ -623,19 +623,34 @@ fn generated_type_output_remains_reserved_until_its_receipt_is_installed() {
     ",
     )
     .unwrap();
-    let publisher = AllocatedDefinitionPublisher::new(&package, 9900, 1, 10_000_000);
-    let builder = |request: &comptime_interpretor::StructBuildRequest, fuel: &mut u64| {
-        publisher.prepare_struct(request, fuel)
+    let theory = elaboration::ptc::Context::from_package(&package).unwrap();
+    let queries =
+        SourceInvocationQueries::in_source(DeclarationSource::Borrowed(&package), &theory, &[]);
+    let types = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
+        queries.check(predicate, Default::default(), fuel)
     };
+    let methods = |callee: &nir::program::Expr, fuel: &mut u64| queries.resolve(callee, fuel);
+    let associated = |access: &nir::program::Expr, fuel: &mut u64| queries.associated(access, fuel);
+    let publisher =
+        AllocatedDefinitionPublisher::new_with_type_solver(&package, 9900, 1, 10_000_000, &types);
     let mut context = InferenceContext::default();
-    let mut session = Session::new_with_struct_builder(
+    let mut code = CodeSession::new(package.clone().into());
+    let mut session = Session::new_resolving_in_scope(
         &package,
         &context,
-        Budget {
+        &mut code,
+        &mut Budget {
             steps: 10_000_000,
             depth: 128,
         },
-        &builder,
+        &[],
+        &[],
+        &[],
+        SourceResolvers {
+            types: &types,
+            methods: &methods,
+            associated: &associated,
+        },
     )
     .unwrap();
     let output = session
@@ -647,15 +662,28 @@ fn generated_type_output_remains_reserved_until_its_receipt_is_installed() {
         else {
             panic!("ready")
         };
-        let request = loop {
+        let mut request = loop {
             match active.poll(&mut context).unwrap() {
                 Progress::Running => {}
                 Progress::Definition(request) => break request,
+                Progress::Associated(request) => {
+                    active.resume(request.resolve(&associated)).unwrap();
+                }
+                Progress::Method(request) => active.resume_method(request.prepare()).unwrap(),
                 _ => panic!("definition producer must suspend"),
             }
         };
         assert!(!context.is_assigned(output).unwrap());
-        let response = request.prepare();
+        let comptime_interpretor::DefinitionBuildRequest::Struct(descriptor) = request.descriptor()
+        else {
+            panic!("expected struct construction")
+        };
+        let mut fuel = request.remaining_steps();
+        let prepared = publisher
+            .prepare_struct(descriptor, &mut fuel)
+            .map(comptime_interpretor::PreparedDefinitionBuild::Struct);
+        *request.remaining_steps_mut() = fuel;
+        let response = request.respond(prepared);
         assert!(!context.is_assigned(output).unwrap());
         active.resume_definition(response).unwrap();
         assert!(!context.is_assigned(output).unwrap());
