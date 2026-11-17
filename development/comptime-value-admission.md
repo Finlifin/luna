@@ -2128,6 +2128,19 @@ VM 的 callable。这违反已有的接收方准入约定：世界和代码相�
 本地 Closure 身份。两个 VM 可以共享 body Arc，但其 callable Arc 必须不同。
 普通身份传送继续由接收方重建 callable，不通过复制旧 VM 的 handle 获得准入。
 
+共同表示复制也必须保留这个身份。`cleanup::clone_representation` 的旧闭包分支
+无条件创建新 Arc，即使命名 callable 没有捕获存储；本 VM 的值经过 copy 或
+checkpoint 后反而无法通过 `validate_immutable_input`。现在命名 callable 的
+复制共享原句柄，仍检查本次深度和步数；嵌套聚合走同一规则。外来句柄复制后仍是
+外来句柄，不会进入接收 VM 的 iir_callables。匿名／带捕获闭包继续复制所需环境，
+没有把运行时 Copy 权限或可变捕获存储变为共享代码权限。
+
+注意这里的不可变输入准入与 `InvocationValue::Live` 不是同一种载荷约定。
+Live 可以保留闭包及值引用图，`prepare_invocation_arguments` 检查其公开域，
+实际调用还通过 `bind_invocation_inputs` 检查接收域、表示与嵌入 Type。不能为了
+统一 API 名称，把只接受不可变值的检查套在整个 Live 图上；也不能据此宣称跨世界
+闭包代码来源、捕获图及活动权限的完整统一传送已经实现。
+
 新回归 `shared_code_does_not_admit_another_vms_callable` 在修改实现前实际失败：
 第二个 VM 的 `validate_immutable_input` 返回 Ok 而非 Type 错误，报告
 `/tmp/luna-tools-8056tesk/result.json`，退出 101。修复后检查本地值可准入、
@@ -2153,6 +2166,18 @@ python3 -B development/check.py --timeout 900 -- test \
 仍不等于完整 println。本轮没有执行全 workspace、native 或性能基准；保留工作区
 原有改动，未修改正式 docs。下面的 `ff7194b2` 等结果属于此前键预算修正。
 源码注册表、完整包检查凭证及一般源码恢复缺口未由本次缓存修复解除。
+
+复制回归在 `f25a84f2` 上实际失败于本地 copied callable 的准入，报告
+`/tmp/luna-tools-ysv3gorr/result.json`，退出 101。持久用例
+`copying_named_callables_preserves_local_admission_without_importing_handles`
+覆盖 copy、checkpoint、tuple 内复制、本地正常调用、外来值继续拒绝和零预算拒绝。
+
+修复后在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 900 --
+test -p comptime_interpretor --lib -p luna --test comptime_bytecode_closures
+--test snapshot_contracts --test closure_environment_parameters --no-fail-fast
+-- --test-threads=1` 验证，退出 0，报告 `/tmp/luna-tools-rbn_68w5/result.json`。
+VM 609、luna 单元 87、闭包环境 23、字节码闭包 2、快照契约 2 项通过；捕获 cell 的
+独立性、重复调用更新及入口快照保持原断言。没有执行全 workspace 或性能基准。
 
 ### 既有键预算与复制视图的验证
 

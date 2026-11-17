@@ -728,6 +728,12 @@ impl<'a> Interpreter<'a> {
                 )?))
             }
             Value::Closure(closure) => {
+                if closure.declaration_instance().is_some() {
+                    // Named callables have no captured storage to duplicate.
+                    // Keep their VM-local handle identity through both copy
+                    // and checkpoint; sharing code never imports a new handle.
+                    return Ok(Value::Closure(closure.clone()));
+                }
                 self.copy_work(closure.environment.len(), source)?;
                 self.copy_work(closure.parameters.len(), source)?;
                 self.copy_work(closure.capture_order.len(), source)?;

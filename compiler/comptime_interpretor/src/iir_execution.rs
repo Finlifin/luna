@@ -659,6 +659,52 @@ mod callable_budget_tests {
     }
 
     #[test]
+    fn copying_named_callables_preserves_local_admission_without_importing_handles() {
+        let graph = graph("run".into());
+        let key = &graph.functions[0].key;
+        let domain = graph.functions[0].function.callable_type();
+        let source = graph.functions[0].function.body.source;
+        let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        let local = vm.iir_callable(key).unwrap();
+        let mut other = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        let foreign = other.iir_callable(key).unwrap();
+        let copied = vm.copy_representation(&local, source, 0).unwrap();
+        let checkpoint = vm.checkpoint_representation(&local, source).unwrap();
+        let container = Value::Tuple(vec![local.clone()]);
+        let nested = vm.copy_representation(&container, source, 0).unwrap();
+        let Value::Tuple(nested) = nested else {
+            panic!("tuple copy lost structure")
+        };
+        for copy in [copied, checkpoint, nested[0].clone()] {
+            vm.validate_immutable_input(&copy, &domain).unwrap();
+            let (Value::Closure(original), Value::Closure(copied)) = (&local, &copy) else {
+                panic!("expected concrete callable")
+            };
+            assert!(Arc::ptr_eq(original, copied));
+            assert_eq!(vm.invoke_value(copy, vec![]).unwrap(), Value::Bool(true));
+        }
+        // Copying an imported handle cannot turn it into this VM's own handle.
+        for preserve in [false, true] {
+            let copied = if preserve {
+                vm.checkpoint_representation(&foreign, source).unwrap()
+            } else {
+                vm.copy_representation(&foreign, source, 0).unwrap()
+            };
+            assert_eq!(
+                vm.validate_immutable_input(&copied, &domain)
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::Type
+            );
+        }
+        vm.budget.steps = 0;
+        assert_eq!(
+            vm.copy_representation(&local, source, 0).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+    }
+
+    #[test]
     fn warm_body_cache_still_charges_local_callable_bindings() {
         let mut source = graph("wide".into());
         let definition = &mut source.functions[0].function;
