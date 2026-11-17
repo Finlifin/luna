@@ -820,7 +820,7 @@ trait 的分支，没有把 trait 方法伪装成已选中的 impl 方法。
 明确给出了闭包及其零参数调用接口，但 T 的接收域尚待早前输入确定。现有
 `describe_open_expression` 没有闭包描述分支，会退到普通 typed region；普通
 `closure_body` 又要求完整参数、结果和捕获类型。只修复依赖发现，不能解除这个
-表示层循环。`FrozenDescription::Any` 不提供完整函数类型，不能把 Any 或 Type
+表示层循环。`TypeObservation::Unknown` 不提供完整函数类型，不能把 Any 或 Type
 临时塞进 NIR 的函数类型字段，也不能调用 Domain 生产者来猜测定义侧类型。
 
 目标是在共同 ContextualExpr 中分别保留以下信息，具体 Rust 表示尚未落地：
@@ -842,7 +842,7 @@ non-callable 值必须共同决定可用接口，不能任选一个分支的签�
 comptime 值引用与 runtime 资源约束；描述器不执行主体。每次实际调用仍按普通
 规则只准备一次实参，再进入闭包的独立 return 边界。待定区域保存检查进度和
 求值位置，已有生产者结果不因域恢复而重放；活动 capture frame、等待者和候选
-事务仍由 region 所有，不能塞进 FrozenDescription 或全局描述缓存。
+事务仍由 region 所有，不能塞进 TypeObservation 或全局描述缓存。
 
 迁移顺序应先让共同区域表达式支持带待定域的 binder、捕获和主体义务，再让
 闭包构造及动态 callee 消费同一接口；域就绪后由普通检查产生完整 NIR。不能只

@@ -1,8 +1,11 @@
 //! Demand planning is bounded independently of invocation, and never replays it.
+#[path = "../test_support/gradual.rs"]
+#[allow(dead_code)]
+mod gradual;
 #[path = "../test_support/type_computations/mod.rs"]
 #[allow(dead_code)]
 mod type_computations;
-use elaboration::gradual;
+use elaboration::ptc;
 
 use comptime_interpretor::{Budget, Event};
 use elaboration::{InferenceContext, InferenceTerm as I};

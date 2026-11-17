@@ -1,8 +1,11 @@
 //! Type publication follows the completed owned invocation, including host work.
+#[path = "../../elaboration/test_support/gradual.rs"]
+#[allow(dead_code)]
+mod gradual;
 #[path = "../../elaboration/test_support/type_computations/mod.rs"]
 #[allow(dead_code)]
 mod type_computations;
-use elaboration::gradual;
+use elaboration::ptc;
 
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]

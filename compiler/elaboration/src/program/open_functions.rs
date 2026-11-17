@@ -4,9 +4,10 @@
 use super::dependent_inputs::PreparedInputs;
 use super::required::prepared::PreparedRequired;
 use super::*;
-use crate::gradual::FrozenDescription as D;
+use observations::TypeObservation as D;
 use std::sync::Arc;
 
+mod observations;
 mod scalar_descriptions;
 
 /// Transfers observed during ordinary definition checking, keyed by the
@@ -168,7 +169,7 @@ impl Annotation {
     fn description(&self) -> D {
         match self {
             Self::Known(ty) => D::Known(ty.clone()),
-            Self::Pending(_) | Self::InputType { .. } | Self::Suspended { .. } => D::Any,
+            Self::Pending(_) | Self::InputType { .. } | Self::Suspended { .. } => D::Unknown,
         }
     }
 }
@@ -390,7 +391,7 @@ impl Checker<'_, '_> {
                 // Only a source description escapes. Concrete specialization
                 // performs all applications/requirements and evaluates inputs
                 // in source order, including only the selected defaults.
-                return Ok(Some(D::Any));
+                return Ok(Some(D::Unknown));
             }
         }
         let arguments = self.function_clause_arguments(expr, owner, clauses)?;
@@ -418,9 +419,9 @@ impl Checker<'_, '_> {
                     Annotation::Pending(code)
                         if self.open_computation_uses_clauses(code, &unresolved, expr.span)? =>
                     {
-                        return Ok(Some(D::Any));
+                        return Ok(Some(D::Unknown));
                     }
-                    Annotation::Suspended { .. } => return Ok(Some(D::Any)),
+                    Annotation::Suspended { .. } => return Ok(Some(D::Unknown)),
                     _ => {}
                 }
             }
@@ -760,7 +761,7 @@ impl Checker<'_, '_> {
     ) -> Result<bool, Error> {
         // This is a meet over value-producing branches, not a scan for any
         // staged occurrence. A staged condition alone cannot authorize member
-        // access on an unrelated Any result. Branches retain their original
+        // access on an unrelated unknown result. Branches retain their original
         // source expressions for instance-side checking.
         // Local aliases inside a result branch have already left the checker's
         // live scope. Follow their HIR binding identities, never their names;
@@ -910,7 +911,7 @@ impl Checker<'_, '_> {
         depth: usize,
     ) -> Result<D, Error> {
         // Contextual values have dedicated interfaces, not ordinary callable
-        // results or Any descriptions. Keep their witnesses in the same code
+        // results or unknown observations. Keep their witnesses in the same code
         // binding path used by a direct splice in this definition.
         if binding.comptime
             && binding
@@ -939,7 +940,7 @@ impl Checker<'_, '_> {
                         H::ResolvedLocal(_, id)
                         if this.open_staged_locals.contains(&local(id))
                             && !this.generator_data.get(&local(id)).is_some_and(Option::is_some)
-                            && matches!(locals.get(&local(id)), Some(D::Any) | Some(D::Known(Term::Primitive(P::Type)))));
+                            && matches!(locals.get(&local(id)), Some(D::Unknown) | Some(D::Known(Term::Primitive(P::Type)))));
                     Ok(member || alias)
                 })?;
                 if pending {
@@ -956,7 +957,7 @@ impl Checker<'_, '_> {
                     // without establishing the identity of its inputs.
                     // Keep the entire source annotation for the instance.
                     pending_annotation.set(true);
-                    return Ok(D::Any);
+                    return Ok(D::Unknown);
                 }
                 self.signature_annotation(ty)
                     .map(|annotation| annotation.description())
@@ -988,7 +989,7 @@ impl Checker<'_, '_> {
                 | hir::pattern::PatternKind::Wild
         ) && binding.guard.is_none()
             && binding.otherwise.is_none();
-        if !plain && matches!(actual, D::Known(_)) && !matches!(annotation, Some(D::Any)) {
+        if !plain && matches!(actual, D::Known(_)) && !matches!(annotation, Some(D::Unknown)) {
             // Reuse pattern protocols, refutability, guard scope and
             // immutable-binding checks in the ordinary checker.
             let D::Known(ty) = &actual else {
@@ -1037,11 +1038,11 @@ impl Checker<'_, '_> {
         if binding.guard.is_some() || binding.otherwise.is_some() {
             return Err(error(
                 expr.span,
-                "guarded binding on Any requires established pattern evidence",
+                "guarded binding with an unknown domain requires established pattern evidence",
             ));
         }
         let diverges = matches!(&actual, D::Known(ty) if is_never(ty));
-        let pending_input = matches!(actual, D::Any);
+        let pending_input = matches!(actual, D::Unknown);
         let member_origin =
             pending_input && !binding.mutable && self.pending_member_origin(init, locals)?;
         // A pending source annotation is rechecked at invocation.
@@ -1129,7 +1130,7 @@ impl Checker<'_, '_> {
             _ => {
                 return Err(error(
                     binding.pattern.span,
-                    "destructuring an Any definition requires established pattern evidence",
+                    "destructuring an unknown definition domain requires established pattern evidence",
                 ));
             }
         }
@@ -1765,7 +1766,7 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(source.span, "annotation input observation budget exhausted"))?;
         let pending_inputs = locals
             .iter()
-            .filter_map(|(binding, domain)| matches!(domain, D::Any).then_some(*binding))
+            .filter_map(|(binding, domain)| matches!(domain, D::Unknown).then_some(*binding))
             .collect();
         let pending_domain = self.annotation_may_use_pending_inputs(value, &pending_inputs)?;
         self.with_staged_input(true, |this| {
@@ -2128,16 +2129,16 @@ impl Checker<'_, '_> {
                             )?;
                             if !sig.modifiers.is_comptime
                                 && *sort == Sort::Runtime
-                                && matches!(actual, D::Any)
+                                && matches!(actual, D::Unknown)
                             {
                                 return Err(error(
                                     default.span,
-                                    "Any supplies no P3 stability evidence for this default",
+                                    "an unknown domain supplies no P3 stability evidence for this default",
                                 ));
                             }
                             let expected = match &description {
                                 D::Known(ty) => Some(ty),
-                                D::Any => None,
+                                D::Unknown => None,
                             };
                             let saved_call =
                                 std::mem::replace(&mut this.describing_open_call, true);
@@ -2255,11 +2256,11 @@ impl Checker<'_, '_> {
             };
             this.control.result = match &result {
                 D::Known(ty) => Some(ty.clone()),
-                D::Any => None,
+                D::Unknown => None,
             };
             let template_result = match &declared_result {
                 D::Known(ty) => Some(ty.clone()),
-                D::Any => None,
+                D::Unknown => None,
             };
             let check_body = |this: &mut Self| -> Result<(), Error> {
                 this.describe_open_expression(
@@ -2921,12 +2922,12 @@ impl Checker<'_, '_> {
         {
             return Ok(description);
         }
-        if matches!(expected, Some(D::Any))
+        if matches!(expected, Some(D::Unknown))
             && self.protocols.arithmetic[crate::arithmetic::Operator::Invert as usize].is_none()
         {
             // An integer literal has no committed operand type yet. Preserve
             // contextual builtin inversion until the result domain is known;
-            // this grants no operation on an Any-valued variable. The original
+            // this grants no operation on a variable with an unknown domain. The original
             // source is rechecked when forming each concrete function instance.
             let mut literal = expr;
             let mut inversions = 0usize;
@@ -2955,7 +2956,7 @@ impl Checker<'_, '_> {
                 // Parse and validate the literal now, without fabricating a
                 // BitVec width or publishing a placeholder operand type.
                 self.describe_known_region(literal, None)?;
-                return Ok(D::Any);
+                return Ok(D::Unknown);
             }
         }
         match &expr.kind {
@@ -2999,7 +3000,7 @@ impl Checker<'_, '_> {
                 }
                 let description =
                     self.describe_open_expression(head, locals, returns, None, depth + 1)?;
-                if !matches!(description, D::Any) {
+                if !matches!(description, D::Unknown) {
                     return self.describe_known_region(expr, expected);
                 }
                 for argument in *arguments {
@@ -3015,7 +3016,7 @@ impl Checker<'_, '_> {
                 // The member signature and even its result domain depend on
                 // the container identity. Concrete checking retains the full
                 // argument list, routing, defaults and formation requirements.
-                D::Any
+                D::Unknown
             }
             H::NFApplication(head, arguments) => {
                 // A callable's signature is evidence even when its value is
@@ -3139,7 +3140,7 @@ impl Checker<'_, '_> {
                         .map_err(|failure| error(span, failure.to_string()))?;
                     let inputs = self.term_declaration_inputs(&domain, span)?;
                     let description = if parameters.iter().any(|(id, _, _)| inputs.contains(id)) {
-                        D::Any
+                        D::Unknown
                     } else {
                         D::Known(domain)
                     };
@@ -3490,7 +3491,7 @@ impl Checker<'_, '_> {
                     && match target.kind {
                         H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
                             (!self.in_staged_input && locals.contains_key(&local(id)))
-                                || matches!(locals.get(&local(id)), Some(D::Any))
+                                || matches!(locals.get(&local(id)), Some(D::Unknown))
                                 || (self.in_staged_input
                                     && self.open_staged_locals.contains(&local(id)))
                         }
@@ -3526,7 +3527,7 @@ impl Checker<'_, '_> {
                 )?;
                 if !self.in_staged_input
                     && matches!(target_type, D::Known(_))
-                    && matches!(value, D::Any)
+                    && matches!(value, D::Unknown)
                 {
                     return Err(error(
                         expr.span,
@@ -3660,7 +3661,7 @@ impl Checker<'_, '_> {
                 let D::Known(condition_ty) = condition_ty else {
                     return Err(error(
                         condition.span,
-                        "Any supplies no evidence for a boolean condition",
+                        "an unknown domain supplies no evidence for a boolean condition",
                     ));
                 };
                 self.require_expression(&condition_ty, &p(P::Bool), condition.span)?;
@@ -3722,7 +3723,7 @@ impl Checker<'_, '_> {
                         self.require_expression(a, b, expr.span)?;
                         yes
                     }
-                    _ => D::Any,
+                    _ => D::Unknown,
                 };
                 if diverges {
                     D::Known(p(P::Never))
@@ -3839,7 +3840,7 @@ impl Checker<'_, '_> {
                     if staged && (type_root || self.pending_member_origin(receiver, locals)?) {
                         // A previous staged member can itself select a Type
                         // or a value. Preserve the chain for instance checking.
-                        return Ok(D::Any);
+                        return Ok(D::Unknown);
                     }
                     return Err(error(
                         receiver.span,
@@ -3867,7 +3868,7 @@ impl Checker<'_, '_> {
                             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id)
                             if !self.generator_data.get(&local(id)).is_some_and(Option::is_some))
                     {
-                        return Ok(D::Any);
+                        return Ok(D::Unknown);
                     }
                     // Associated type/member lookup needs the receiver's
                     // identity, not merely its Type domain.
@@ -3947,7 +3948,7 @@ impl Checker<'_, '_> {
                 self.control.return_observations,
                 Some(ReturnObservations::Deferred)
             )
-            .then_some(D::Any)
+            .then_some(D::Unknown)
         });
         let mut locals = self
             .locals
@@ -4413,7 +4414,7 @@ impl Checker<'_, '_> {
                                 self.require_expression(a, b, expr.span)?;
                                 body
                             }
-                            _ => D::Any,
+                            _ => D::Unknown,
                         };
                         if diverges {
                             D::Known(p(P::Never))
@@ -4451,7 +4452,7 @@ impl Checker<'_, '_> {
             let D::Known(ty) = description else {
                 return Err(error(
                     value.span,
-                    "matching Any requires definition-side pattern evidence",
+                    "matching an unknown domain requires definition-side pattern evidence",
                 ));
             };
             if ty != p(P::Type) {
@@ -4495,7 +4496,8 @@ impl Checker<'_, '_> {
             .map_err(|mut failure| {
                 if failure.message == "local binding is unavailable in this scope" {
                     failure.message =
-                        "matching Any requires definition-side pattern evidence".into();
+                        "matching an unknown domain requires definition-side pattern evidence"
+                            .into();
                 }
                 failure
             })?;
@@ -4565,7 +4567,7 @@ impl Checker<'_, '_> {
                         self.require_expression(b, a, arm.span)?;
                         result
                     }
-                    _ => D::Any,
+                    _ => D::Unknown,
                 };
                 patterns.push(pattern);
             }
@@ -4614,7 +4616,7 @@ impl Checker<'_, '_> {
                 }
             }
             // Validate the typed selector/pattern program separately from the
-            // described bodies. Unit arms discard matches; no Any Type is made.
+            // described bodies. Unit arms discard matches; no Type value is manufactured.
             let probe = n::Expr {
                 source: source(expr.span),
                 ty: p(P::Void),
@@ -4986,7 +4988,7 @@ impl Checker<'_, '_> {
         let value = value.map_err(|mut failure| {
             if failure.message == "local binding is unavailable in this scope" {
                 failure.message =
-                    "operation on Any requires definition-side type or trait evidence".into();
+                    "operation on an unknown domain requires definition-side type or trait evidence".into();
             }
             failure
         })?;
@@ -5250,7 +5252,7 @@ impl Checker<'_, '_> {
             // source-ordered preparation, including open targets whose staged
             // inputs can be completed here. Unknown staged inputs still need
             // a description-only telescope; they must not be fabricated.
-            // Any still lacks structural evidence for packet layout.
+            // An unknown domain still lacks structural evidence for packet layout.
             let saved = std::mem::replace(&mut self.describing_open_spread, true);
             let saved_call = std::mem::replace(&mut self.describing_open_call, true);
             let result = self.describe_known_region(expr, expected);
@@ -5513,16 +5515,16 @@ impl Checker<'_, '_> {
             .map(|(_, context)| context.clone());
         let candidate = if infer_clauses {
             let saved = std::mem::replace(&mut self.describing_open_spread, true);
-            let saved_returns = if matches!(returns, Some(D::Any)) && self.control.result.is_none()
-            {
-                Some(
-                    self.control
-                        .return_observations
-                        .replace(ReturnObservations::Deferred),
-                )
-            } else {
-                None
-            };
+            let saved_returns =
+                if matches!(returns, Some(D::Unknown)) && self.control.result.is_none() {
+                    Some(
+                        self.control
+                            .return_observations
+                            .replace(ReturnObservations::Deferred),
+                    )
+                } else {
+                    None
+                };
             let candidate = self.with_open_reachability(false, expr.span, |this| {
                 this.open_spread_candidate(
                     owner,
@@ -5574,7 +5576,8 @@ impl Checker<'_, '_> {
             .checked_sub(self.open_loop_transfers.len() as u64)
             .ok_or_else(|| error(expr.span, "spread completion description budget exhausted"))?;
         let saved = std::mem::replace(&mut self.describing_open_spread, true);
-        let saved_returns = if matches!(returns, Some(D::Any)) && self.control.result.is_none() {
+        let saved_returns = if matches!(returns, Some(D::Unknown)) && self.control.result.is_none()
+        {
             Some(
                 self.control
                     .return_observations
@@ -5703,7 +5706,7 @@ impl Checker<'_, '_> {
                                 Annotation::Known(ty) => D::Known(
                                     self.specialize_open_clause_type(owner, ty, expr.span)?,
                                 ),
-                                _ => D::Any,
+                                _ => D::Unknown,
                             },
                         ))
                     })
@@ -5712,7 +5715,7 @@ impl Checker<'_, '_> {
                     Annotation::Known(ty) => {
                         D::Known(self.specialize_open_clause_type(owner, ty, expr.span)?)
                     }
-                    _ => D::Any,
+                    _ => D::Unknown,
                 },
             )
         } else {
@@ -5771,7 +5774,7 @@ impl Checker<'_, '_> {
             let (sort, ty) = &parameters[route.parameter];
             let expected = match substitute_description(ty, &symbols, expr.span)? {
                 D::Known(ty) => D::Known(self.callable_input_view(&ty, expr.span)?),
-                D::Any => D::Any,
+                D::Unknown => D::Unknown,
             };
             if route.is_collected() {
                 let fields = match &expected {
@@ -5788,12 +5791,12 @@ impl Checker<'_, '_> {
                         }
                         Some(fields)
                     }
-                    D::Any => None,
+                    D::Unknown => None,
                 };
                 for (field, (position, input)) in route.source_inputs().enumerate() {
                     let expected = fields
                         .as_ref()
-                        .map_or(D::Any, |fields| D::Known(fields[field].clone()));
+                        .map_or(D::Unknown, |fields| D::Known(fields[field].clone()));
                     inputs.push((position, input.clone(), *sort, expected));
                 }
             } else {
@@ -5844,7 +5847,7 @@ impl Checker<'_, '_> {
         self.admit_open_type_requirements(owner, &symbols, false, expr.span)?;
         let result = match substitute_description(&result, &symbols, expr.span)? {
             D::Known(ty) => D::Known(self.callable_input_view(&ty, expr.span)?),
-            D::Any => D::Any,
+            D::Unknown => D::Unknown,
         };
         Ok(if diverges {
             D::Known(p(P::Never))
@@ -5876,7 +5879,7 @@ impl Checker<'_, '_> {
             .or_else(|| self.interface_signatures.get(&owner))
             .ok_or_else(|| error(expr.span, "generic call requires a formed signature"))?;
         // Runtime capability admission needs evidence about the operand's
-        // actual domain. A result-directed guess cannot turn Any into that
+        // actual domain. A result-directed guess cannot turn an unknown domain into that
         // evidence; retain ordinary typed checking for constrained calls.
         let constrained = self.capabilities.get(&owner).is_some_and(|r| !r.is_empty())
             || self.requirements.get(&owner).is_some_and(|r| !r.is_empty());
@@ -6036,7 +6039,7 @@ impl Checker<'_, '_> {
                     matches!(&description, D::Known(ty) if is_never(ty));
                 *locals = attempt_locals;
                 checked[route.parameter] = true;
-                unknown[route.parameter] = matches!(description, D::Any);
+                unknown[route.parameter] = matches!(description, D::Unknown);
                 progress = true;
                 if let D::Known(ty) = description {
                     if is_never(&ty) {
@@ -6168,7 +6171,7 @@ impl Checker<'_, '_> {
                 } else {
                     initial
                         .result_type()
-                        .map(|ty| ty.map_or(D::Any, D::Known))
+                        .map(|ty| ty.map_or(D::Unknown, D::Known))
                         .map_err(|e| call_inference_error(expr.span, e))
                 };
             }
@@ -7327,7 +7330,7 @@ impl Checker<'_, '_> {
                 if route.property_fields().is_some() && !staged {
                     let saved_returns = if description
                         .as_ref()
-                        .is_some_and(|(_, returns, _)| matches!(returns, Some(D::Any)))
+                        .is_some_and(|(_, returns, _)| matches!(returns, Some(D::Unknown)))
                         && self.control.result.is_none()
                     {
                         Some(
@@ -7388,7 +7391,7 @@ impl Checker<'_, '_> {
                     **locals = attempt_locals;
                     match value {
                         D::Known(ty) if !is_never(&ty) => actual[index] = Some(ty),
-                        D::Any => {
+                        D::Unknown => {
                             unknown.insert(index);
                         }
                         _ => {}
@@ -7485,9 +7488,9 @@ impl Checker<'_, '_> {
                             candidate
                                 .result_type()
                                 .map_err(|e| call_inference_error(expr.span, e))?
-                                .map_or(D::Any, D::Known)
+                                .map_or(D::Unknown, D::Known)
                         } else {
-                            D::Any
+                            D::Unknown
                         };
                         return Ok(OpenClauseInference::Pending(result));
                     }
@@ -8845,7 +8848,7 @@ impl Checker<'_, '_> {
 fn open_contract_error(mut failure: Error) -> Error {
     if failure.message == "local binding is unavailable in this scope" {
         failure.message =
-            "contract operation on Any requires definition-side type or trait evidence".into();
+            "contract operation on an unknown domain requires definition-side type or trait evidence".into();
     }
     failure
 }
@@ -8856,7 +8859,7 @@ fn substitute_description(
     span: Span,
 ) -> Result<D, Error> {
     match description {
-        D::Any => Ok(D::Any),
+        D::Unknown => Ok(D::Unknown),
         D::Known(ty) => ty
             .substitute_partial(symbols)
             .map(D::Known)

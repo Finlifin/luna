@@ -19,7 +19,7 @@ Any 与 bool、u8 分别相容，不产生 bool == u8，也不产生二者间的
 
 | 当前载体或入口 | 已有职责 | 尚缺的能力 |
 | --- | --- | --- |
-| `gradual::FrozenDescription::{Known, Any}` | 定义侧的稳定信息观察；Computed 注解可被观察为 Any | 不是已经求值的 Type 数据，不能直接放入 VM 作为返回值 |
+| `open_functions::observations::TypeObservation::{Known, Unknown}` | 定义侧的有限域观察；待定注解观察为 Unknown | 不持有生产状态，也不是已经求值的 Type 数据 |
 | `open_functions::Annotation` | 已知域、待执行计算、前置 Type 输入、待恢复源码 | 没有已完成但仍含 Any/refinement 的参数描述状态 |
 | `Value::Type(Term)` / `TypeParameter` | 完整或受作用域授权的抽象类型身份 | 不能保存未知描述节点、复合描述与待准入要求 |
 | `PreparedRequired::invoke_in_world` / `restore_required_packet` | Type 与其他结果共用普通 VM 调用及调用方 scope 恢复，不分配临时推断输出 | Type 载荷仍为身份 Term；尚不能传送完整描述或恢复未完成源码区域 |
@@ -54,8 +54,10 @@ InputAdmission
 ```
 
 TypeObservation 回答检查器知道什么；TypeProduction 回答计算进行到哪里；TypeValue
-是已经得到的普通 comptime 数据。现有 FrozenDescription 只承担第一种职责，
-其 Any 可能来自一个仍未完成的计算，不能直接移到 VM 当作第三种职责。
+是已经得到的普通 comptime 数据。当前源码检查使用私有 TypeObservation，只承担
+第一种职责；Unknown 可能来自仍未完成的计算，不能移到 VM 当作第三种职责。
+旧 FrozenDescription 与 compatibility/refinement 模型已整体移至 test_support，
+不再从 elaboration 生产库导出；模型测试不能证明源 Any 或描述准入已经实现。
 
 Type producer 应完成到 TypeValue。需要具体身份的消费者再请求身份形成，不能让
 所有 Type 数据返回都必须占有一个最终 PTC metavariable。AssignmentPermit 继续
@@ -106,8 +108,8 @@ Any 塞进普通 Sort::Type 身份等式以省去改造。消费身份的地方�
 
 描述携带要求，不携带“所有将来实参已经通过”的证明。定义检查可在假设要求成立
 的子上下文中检查操作；调用准入必须在原调用方上下文证明实际类型满足要求。
-不能用定义端自己安装的假设自证。现有 RefinementScope 的上下文分工应保留，
-但它存在不说明源码描述和 VM 传递已经接通。
+不能用定义端自己安装的假设自证。test_support 中 RefinementScope 的上下文分工
+保留为协议回归，但没有源码或 VM 生产消费者；未来接线须实际实现这一职责。
 
 Itself 上可提取的类型命题交给 PTC；关于 runtime 值、内存与状态的谓词仍属于
 程序验证及规定的运行时检查。不可提取的谓词不提供静态事实。两类义务都保留
@@ -385,7 +387,8 @@ refinement 或生产者，不根据相同数字 DeclarationId 授权引用。共
 2. 聚合、普通函数输入和 NF 输入使用带域数据边；同时迁移
    `comptime_values`、`normal_terms`、`normal_values`、`input_binding` 及 scope
    visitor。List、Object、用户 comptime struct 不能各有独立 Type 旁路。
-3. 共同输出先发布 TypeData；真实推断队列成为身份消费者适配器，保留许可检查。
+3. 共同输出先发布 TypeData；需要推断赋值的消费者单独取得身份并保留许可检查。
+   已退役的测试队列不是生产接线位置，也不要求恢复每次调用独占输出 MetaId。
    参数描述消费者不需要预留 MetaId。消费失败不撤销已完成数据、不重放生产者。
 4. 源码注解与待定域检查接收描述，保存原规则后继及调用方环境，再检查具体输入。
    单独给 `AnnotationState` 增加 ReadyDescription 不算接通这条边。
@@ -445,8 +448,9 @@ c0 仍有效。c1 不通过重跑 Parse 或沿用 c0 的 impl 选择恢复成功
 | 格式化库 | Parse、收集、writer 输出、错误/清理与实际 demo | scanner 或 println_value 等于 println |
 
 旧 Value::Type(Term) 在所有消费者迁移前不能草率删除，也不能让新旧路径按库名
-分流。FrozenDescription 可保留为有限的观察载体，但必须与已完成数据分开且保留
-所需约束。具体 Type 快路径复用共同的形成、传送与预算契约，不再重复实现。
+分流。TypeObservation 继续只描述检查器掌握的信息；增加结构和要求观察时仍须与
+已完成数据及生产状态分开。具体 Type 快路径复用共同的形成、传送与预算契约，
+不再重复实现。
 
 必须成组验收，以下是未完成要求，不是通过记录：
 

@@ -261,3 +261,54 @@ gradual 描述、type_resolution 的真实推断和赋值权限，以及真实 V
 测试注册位置外保持原实现，测试预期未变。9 个改动 Rust 文件的 scoped rustfmt
 检查退出 0（`/tmp/luna-tools-yc532qm3/result.json`），已更新开发文档的本地链接
 目标全部存在。未运行全 workspace；原有工作区改动保留，docs 未修改。
+
+
+## 9. Gradual 测试模型与生产域观察分离
+
+在 `c01ed925` 上核对调用者，`elaboration::gradual` 的 compatibility、join、
+RefinementScope、冻结和签名 API 均只被测试使用。生产中唯一引用是
+`open_functions` 借用 FrozenDescription 的两态枚举；Pending、InputType 与
+Suspended 注解都被观察为 Any。该名字混淆了“没有域证据”和“求得显式 Any”。
+
+普通源码检查现在直接使用私有 `TypeObservation::{Known, Unknown}`，保留原有
+各处检查与拒绝条件，只将未知域诊断改为准确的表述。观察类型有独立 S-expression
+Display，不拥有调用状态，不提供描述相容性或 refinement 准入 API，也不作为
+VM 的 Type 值载荷。显式 Any 仍需要共同数据、作用域与调用方准入接线。
+
+原 gradual 模块整体移到 `compiler/elaboration/test_support/gradual.rs`；除模块
+说明与导入路径外实现不变。elaboration 单元测试与五个集成测试根加载同一模型，
+仍使用真实 type_resolution 与 PTC。生产 crate 不再导出它，不增加 feature、
+替代解释器或库名特判；旧模型验证继续保留，不冒充普通源程序的验收。
+
+
+本阶段工作目录 `/home/fin/luna`，使用 `development/check.py --timeout 900 --`：
+
+- `test -p elaboration --lib --test gradual --test type_computation_demands
+  --no-fail-fast -- --test-threads=1`：三组通过（266、20、9），退出 0，
+  `/tmp/luna-tools-_rpilfa4/result.json`。
+- `test -p luna --test ordinary_callable_types --test ordinary_clause_collectors
+  --test open_input_observation --test open_functions --test builder_invocations
+  --test type_invocation_sessions --test library_std_format --no-fail-fast --
+  --test-threads=1`：除下述 open_functions 的 4 项外通过，两个原有待定 Type
+  正例仍 ignored，整体退出 101，`/tmp/luna-tools-rcgs8503/result.json`。
+
+失败分别为 `runtime_staged_callbacks_prepare_factories_after_generic_substitution`、
+`runtime_staged_callback_aggregates_prepare_generic_producers`、
+`runtime_staged_callback_aggregates_prepare_enum_producers` 和
+`runtime_staged_newtypes_keep_callback_dependencies`；均在运行入口报
+`staged invocation result cannot yet be frozen as an instance input`。
+
+为隔离回归，临时将本次独占的 lib.rs、open_functions.rs 和 gradual.rs 换回
+`c01ed925` 内容，保留其余工作区文件，按这四个名字过滤同一 open_functions
+测试目标；4 项仍以相同错误失败，退出 101，
+`/tmp/luna-tools-08klmabm/result.json`。随后三处源码逐字恢复本次版本。
+这是修改前后对照，不是纯 HEAD 或完整语言验证；没有修改失败测试或忽略标记。
+冻结边界的既存缺口仍需修复，不能用本次清理掩盖。
+
+9 个 Rust 文件 scoped rustfmt 检查退出 0，
+`/tmp/luna-tools-5sqc02ay/result.json`；正式 docs 与原有工作区改动未纳入提交。
+
+旧调度器的 26 个 execution 消费者按既有过滤名单执行，退出 0，
+`/tmp/luna-tools-mw5ajn01/result.json`；未运行整个 execution 集。
+`check -p luna --lib --bin luna` 也退出 0，
+`/tmp/luna-tools-yt3ohe06/result.json`，确认正常生产构建不依赖测试模型导出。

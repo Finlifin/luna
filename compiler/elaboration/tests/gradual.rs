@@ -1,6 +1,10 @@
-use elaboration::gradual::{self, Compatibility as C, Description as D, Join};
+#[path = "../test_support/gradual.rs"]
+#[allow(dead_code)]
+mod gradual;
+use elaboration::ptc;
 use elaboration::ptc::{Budget, Context, Formula, Outcome};
 use elaboration::{InferenceContext, InferenceTerm as I};
+use gradual::{Compatibility as C, Description as D, Join};
 use nir::{DeclarationId, Primitive, Sort, Term};
 fn known(ty: Term) -> D {
     D::Known(I::Stable(ty))

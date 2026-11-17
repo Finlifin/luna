@@ -1,9 +1,12 @@
 //! Source -> shared frontend -> owned NIR -> concrete interpreter behavior.
 //! These tests do not authorize runtime functions for comptime invocation.
+#[path = "../../elaboration/test_support/gradual.rs"]
+#[allow(dead_code)]
+mod gradual;
 #[path = "../../elaboration/test_support/type_computations/mod.rs"]
 #[allow(dead_code)]
 mod type_computations;
-use elaboration::gradual;
+use elaboration::ptc;
 
 #[path = "support/frozen_lists.rs"]
 mod frozen_lists;
@@ -38064,7 +38067,7 @@ fn compact_residual_entries_preserve_tuple_head_and_single_collected_type_list()
         package: u64::MAX,
         local: 1,
     };
-    let refinement = elaboration::gradual::Refinement {
+    let refinement = gradual::Refinement {
         subject,
         requirement: elaboration::ptc::Formula::kind(
             Term::Rigid {
@@ -38075,7 +38078,7 @@ fn compact_residual_entries_preserve_tuple_head_and_single_collected_type_list()
         ),
     };
     let types = elaboration::ptc::Context::from_package(&package).unwrap();
-    let description = elaboration::gradual::Description::Known(I::Meta(output));
+    let description = gradual::Description::Known(I::Meta(output));
     assert!(matches!(
         refinement
             .check(
@@ -38085,10 +38088,9 @@ fn compact_residual_entries_preserve_tuple_head_and_single_collected_type_list()
                 &mut elaboration::ptc::Budget::default()
             )
             .unwrap(),
-        elaboration::gradual::RefinementCheck::Checked(elaboration::ptc::Outcome::Entailed(_))
+        gradual::RefinementCheck::Checked(elaboration::ptc::Outcome::Entailed(_))
     ));
-    let scalar =
-        elaboration::gradual::Description::Known(I::Stable(Term::Primitive(Primitive::Bool)));
+    let scalar = gradual::Description::Known(I::Stable(Term::Primitive(Primitive::Bool)));
     assert!(matches!(
         refinement
             .check(
@@ -38098,7 +38100,7 @@ fn compact_residual_entries_preserve_tuple_head_and_single_collected_type_list()
                 &mut elaboration::ptc::Budget::default()
             )
             .unwrap(),
-        elaboration::gradual::RefinementCheck::Checked(elaboration::ptc::Outcome::NotEntailed(_))
+        gradual::RefinementCheck::Checked(elaboration::ptc::Outcome::NotEntailed(_))
     ));
 }
 
@@ -38373,9 +38375,9 @@ fn failed_type_demands_do_not_execute_unneeded_siblings() {
 
 #[test]
 fn deferred_type_descriptions_wait_for_invocation_without_becoming_any() {
-    use elaboration::gradual::{self, Compatibility as C, Description as D};
     use elaboration::ptc::{Budget as ProofBudget, Context, Outcome};
     use elaboration::{InferenceContext, InferenceTerm as I};
+    use gradual::{self, Compatibility as C, Description as D};
     use nir::{Primitive, Sort, Term};
     use type_computations::{Input, Session};
     let package = compile(
@@ -40556,9 +40558,9 @@ fn optional_branch_probes_use_scoped_type_facts() {
 
 #[test]
 fn deferred_signature_refinement_admission_stops_later_invocations() {
-    use elaboration::gradual::{Description, Refinement, RefinementCheck};
     use elaboration::ptc::{Context, Formula, Outcome};
     use elaboration::{InferenceContext, InferenceTerm as I};
+    use gradual::{Description, Refinement, RefinementCheck};
     use nir::deferred_signatures::{Annotation as A, Input, Signature};
     use nir::type_computations::{Input as Argument, Invocation};
     use nir::{DeclarationId, Primitive, Sort, Term};
@@ -41320,11 +41322,11 @@ fn deferred_signature_caller_annotations_wait_substitute_and_admit_in_order() {
         .unwrap();
     assert_eq!(
         task.definition_description(1, &mut 1000).unwrap(),
-        elaboration::gradual::FrozenDescription::Known(known.clone())
+        gradual::FrozenDescription::Known(known.clone())
     );
     assert_eq!(
         task.definition_description(2, &mut 1000).unwrap(),
-        elaboration::gradual::FrozenDescription::Any
+        gradual::FrozenDescription::Any
     );
     assert!(matches!(
         task.definition_description(3, &mut 1000),
@@ -41436,7 +41438,7 @@ fn deferred_signature_caller_annotations_wait_substitute_and_admit_in_order() {
     );
     assert_eq!(
         task.definition_description(2, &mut 1000).unwrap(),
-        elaboration::gradual::FrozenDescription::Any,
+        gradual::FrozenDescription::Any,
         "a completed invocation must not rewrite the ordinary description for every future instance"
     );
     let dump = task.to_string();
@@ -43926,7 +43928,7 @@ fn deferred_runtime_signatures_wait_admit_and_erase_staged_inputs() {
     assert_eq!(session.events().len(), events);
     assert_eq!(
         task.definition_description(1, &mut 1000).unwrap(),
-        elaboration::gradual::FrozenDescription::Any
+        gradual::FrozenDescription::Any
     );
     assert_eq!(task.definition_signature(&mut 1000).unwrap(), definition);
     let mut failed = session

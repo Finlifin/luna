@@ -1,11 +1,11 @@
-//! Definition-side type descriptions, distinct from immutable type identity.
-//! Any is intentional loss of precision, never an unsolved inference variable
-//! or an equality axiom. Compatibility alone supplies no runtime conversion,
-//! layout, member lookup, or trait evidence.
-use crate::ptc::{self, Context, Formula, Outcome};
-use crate::{InferenceContext, InferenceError, InferenceTerm, MetaId};
+//! Isolated gradual-description protocol model, not the source checker's
+//! observation or a completed Type data representation. Tests retain its
+//! compatibility, inference waiting and refinement hypothesis contracts; no
+//! production source or invocation consumer uses this model.
+use super::ptc::{self, Context, Formula, Outcome};
 use nir::{Sort, Term};
 use std::{collections::BTreeSet, fmt};
+use type_resolution::{InferenceContext, InferenceError, InferenceTerm, MetaId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Description {

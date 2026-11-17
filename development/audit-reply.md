@@ -59,6 +59,12 @@ builtin.math 与 meta.math 是作者要求的不同阶段接口。继续采用�
 TypeData 是带域数据，具体身份通过消费者取得；描述替换、NF 输入、旧 wire 和
 调用方准入必须一起维护。该方案尚未实现，不计为 println 或 Any 的交付。
 
+继续核对 gradual 的真实消费者：相容性、join、refinement 和冻结 API 只用于
+测试；普通源码检查器此前仅借用 FrozenDescription，并把待定域记为 Any。现在
+源码检查使用私有 Known/Unknown 观察，旧模型整体移到 test_support，不再从
+生产库导出。RefinementScope 的测试仍保留，但不是源码调用方准入的实现证据；
+这项退役没有补齐显式 Any 的值载体、Parse 或待决源码恢复。
+
 继续按实际调用者复核发现：`627ab804` 之后，旧 `type_computations::Session`
 只由独立协议测试使用，已没有普通前端生产消费者。它现已移至共享测试支持并取消
 生产导出，原依赖、签名、预算与取消断言保留。此前将它列为“现有生产入口”或
