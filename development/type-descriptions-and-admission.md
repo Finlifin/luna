@@ -155,7 +155,95 @@ IIR/runtime 只接收其阶段允许的类型与值。Any 没有自动 tagged un
 或动态分派 ABI。返回 Any 的函数可在具体调用中形成合法单态结果；如果 runtime
 分支没有满足共同目标及表示的交付，就在该边界拒绝，不能任选一支的布局。
 
-## 7. 实施闭包与验收
+## 7. 生产完成与消费者完成分别发布
+
+`3567aefe` 已使 Type invocation 的同步与挂起路径使用同一个执行 owner；它解决
+取消与恢复的一致性，尚未拆开 Type 数据生产和具体身份赋值。当前
+[`execution::Invocation`](../compiler/elaboration/src/type_computations/execution.rs)
+在收到 VM `Complete(value)` 后立即调用 `publish`，取得 `Term` 并执行
+`assign_reserved`，再将队列项置为 `State::Complete(Term)`。
+[`AnnotationState::Ready`](../compiler/elaboration/src/type_computations.rs)也直接借用
+这个 Term。因此不能仅将 `Value::Type` 的字段换成描述图，然后沿用现有完成路径。
+
+迁移后的所有权分为三部分；以下为目标协议，不是现有 API：
+
+| 所有者 | 完成产物 | 失败影响 |
+| --- | --- | --- |
+| 当前调用的 Type producer | 经域、scope/world 检查的不可变 TypeValue | invocation 错误使依赖该次生产的消费者失败 |
+| 参数描述消费者 | 描述及其结构观察，实际输入到达后形成实例准入结果 | 参数数量、实际域或 refinement 拒绝仅使该消费者失败 |
+| 身份消费者 | 合法具体身份及相应推断赋值 | 无法取得身份或赋值冲突使该消费者失败，不改写已经完成的 TypeValue |
+
+producer 的身份必须独立于 `MetaId`。一次生产可以没有推断赋值消费者，例如将
+结果保存到局部变量或普通容器；一个结果也可以被多个后续操作读取。具体实现可以
+保留专用于身份需求的适配器，但不能继续让每次 Type 返回天然预留一个 PTC 变量。
+同一个源码调用的依赖边可以引用同一生产结果；两个独立源码调用不因此合并，尤其
+不能借此给不纯调用增加隐式 memoization。
+
+执行完成先检查返回值确实属于 Type，并检验描述图内部的绑定、世界和已知身份，
+再发布完整结果。未通过检查不发布，不能把任意宿主构造的图标成已完成。描述中的
+refinement 在这里检查保存是否合法，不证明所有未来实参都满足要求。
+消费者随后在自己的调用方环境中实例化要求；不能把实例变量、impl 选择和证明
+写回共享描述，也不能用一次消费者的失败覆盖生产结果。
+
+例如同一份“两项 Display 参数”的描述先用于 bool/u32，再用于另一对实际类型。
+第二次若没有 Display 实现，它应在准入处拒绝；第一次的结果与描述本身仍有效。
+反过来，描述生产过程中发生错误时，不存在可供任一消费者继续使用的半成品。
+这一分工同样适用于普通用户函数，不识别 Parse 或 println 名称。
+
+恢复时由原执行 owner 保留 VM 栈、宿主请求和剩余预算。身份消费者只在取得合法
+身份后通过自己的 `AssignmentPermit` 发布；过期许可不得撤销已完成生产。
+放弃某个消费者不应借其析构取消其他存活依赖仍需要的 producer；真正取消 producer
+则终止该次执行，丢弃未发布结果，并使其依赖明确收到取消。即使执行已产生副作用，
+也不能因消费者重试而重放。这里的读取共享与未来跨调用结果缓存是两件事。
+
+dump 应显示生产状态及各消费边，例如下面的结构示意，而不将所有状态都打印成
+`complete Type`：
+
+```text
+(type-production p0
+  (complete (type-value (description d0)))
+  (consumer c0 (admitted (identity t0)))
+  (consumer c1 (rejected (slot 1) "missing Display evidence")))
+```
+
+`p0`、`d0`、`c0`、`t0` 是示意 owner/节点标记，不是可持久化的全局编号。
+保存诊断与观察不授予执行权；稳定描述中不嵌入消费者或活动生产队列。
+
+## 8. 同一次迁移必须覆盖的值通道
+
+下面按 `3567aefe` 的源码核对列出入口。它补足第 3 节的载体要求，不把这些函数
+当前接受的 Term 范围提升为语言规则。仅新增 VM enum 分支或注册 Any 名称，会在
+后续容器、冻结或签名路径再次丢失信息。
+
+| 当前入口 | 当前边界 | 目标职责与退役条件 |
+| --- | --- | --- |
+| [`Interpreter::type_description_term`](../compiler/comptime_interpretor/src/lib.rs) | 从 Type/授权 TypeParameter 取得 Term | 消费者明确请求 Type 数据或具体身份；数据转发不强制形成身份 |
+| [`value_types::has_type_at`](../compiler/comptime_interpretor/src/value_types.rs) | Type 域的值走 `inspect_type_description` | 检查合法 TypeValue 成员资格；不将数据检查等同于实际参数准入 |
+| [`admission::admit_value_types`](../compiler/comptime_interpretor/src/admission.rs) | Type 载荷走接收世界的 `admit_type` | 遍历描述中的身份、要求和绑定；身份引用仍须在接收世界有效，实际输入的 trait 选择另行进行 |
+| [`normal_terms`](../compiler/comptime_interpretor/src/normal_terms.rs) | Type 值冻结为身份 Term | 共同冻结载体保留描述载荷及依赖；容器、Object 与捕获递归走同一规则 |
+| [`normal_values`](../compiler/comptime_interpretor/src/normal_values/mod.rs) | Type 域将输入 Term 解码成 `Value::Type` | 解码后仍区分身份与描述，不根据接收域为 Type 就将任意载荷当作身份 |
+| [`nir::comptime_values`](../compiler/nir/src/comptime_values.rs) | 列表字段是 Term；Type 元素用 `Sort::Type`，普通值验证入口拒绝 Type 域 | 迁移共同冻结值与域检查；不得添加仅用于 List&lt;Type&gt; 的描述字段或宽松 sort 绕行 |
+| [`deferred_signatures`](../compiler/nir/src/deferred_signatures.rs) | 稳定注解为 Known(Term) 或 Computed 索引 | 保存稳定描述与计算计划；活动生产、准入事务与等待者仍留在 elaboration |
+| [`type_computations::execution`](../compiler/elaboration/src/type_computations/execution.rs) | invocation 完成即赋值身份变量 | 按上一节拆分生产完成与各消费者完成；具体身份路径仍保留原赋值权限检查 |
+
+共同冻结载体需要独立表达“这个值属于 Type”与“这个载荷是具体类型身份”。不能
+靠将 Any 声明为 `Primitive`、沿用当前按 `Sort::Type` 接入身份等式的路径，或删除
+列表字段的 sort 检查来迁移；这些做法会使 PTC、布局或正常 NF 参数比较误收描述为身份。
+旧具体身份可以由单向适配器注入新 TypeValue 通道；反方向转换必须显式要求身份，
+并允许等待或拒绝，不能提供不检查的 `Description -> Term` 转换。
+
+冻结与解冻只保留数据及其合法依赖，不保留调用方的准入成功。持久编码、哈希、
+scope 检查、substitution、预算计费和 Display 都必须按同一载体迁移；某个描述尚
+不能合法冻结时明确拒绝该传输边界，不能丢弃 refinement 后缓存更宽松的结果。
+这也不要求所有 invocation 都缓存：仍只有既有策略允许的 Type 结果可参与，且
+其纯性、输入键、世界依赖及可传送条件必须成立。
+
+先验证不涉及格式器的普通 Type 返回、转发与容器往返，再以两项不同实际类型的
+延迟参数检查生产与准入分离；最后接通 std 的真实入口和 native 输出。各层应保留
+拒绝、取消与恢复证据。公开格式化接口未接通前，`FormatPlan.parse` 仍只是扫描器，
+现有 `println(comptime text: str)` 仍是待替换接口，不能通过改名报告目标已完成。
+
+## 9. 实施闭包与验收
 
 | 闭包 | 必须共同接通 | 完成前不得宣称 |
 | --- | --- | --- |
