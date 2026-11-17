@@ -512,11 +512,12 @@ fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format))
    writer 的短写、失败前已输出前缀与清理规则继续适用。
 
 当前通用缺口并不只在 std：`FrozenDescription` 主要是普通定义检查中的
-Any/Known 观察；`type_computations::State::Complete` 保存具体 Term，
-`execution::publish` 直接把 Type 结果写入类型求解变量；`type_expr` 的 refinement
-先要求具体 base，再证明要求并返回 base。它们不能直接承担可计算、可嵌套、带
-约束的未知描述。应扩展描述数据及其 VM 交付与参数准入边界，分别保留“描述
-已计算完成”与“runtime 类型已具体化”两个事实，不能只在 publish 放宽匹配。
+Any/Known 观察；VM／冻结层仍以具体 Term 承载 Type 数据；`type_expr` 的
+refinement 先要求具体 base，再证明要求并返回 base。它们不能直接承担可计算、
+可嵌套、带约束的未知描述。required Type 结果已走普通值返回，旧推断输出队列
+只存在于 test_support；不能继续把其 `State::Complete` 或 `execution::publish`
+当作 Parse 的生产接线位置。应扩展共同描述数据及其 VM 交付与参数准入边界，
+分别保留“描述已计算完成”与“runtime 类型已具体化”两个事实。
 具体函数类型和 runtime IR 的发布仍要求所需布局与义务完整。
 
 完整的状态和数据分工见[可计算类型描述与调用准入](type-descriptions-and-admission.md)。

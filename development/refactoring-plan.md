@@ -170,6 +170,12 @@ activation 在同一存储中执行已获准片段并交回控制结果；callab
 函数内区域归原调用持有，不为片段另造函数。接口／模板、调用准备、activation 和
 可执行主体的完成条件分别见上述状态协议；这一所有权顺序是接线约束，不是已有 API。
 
+完整包 phase 与 safe 检查也是这次纵向迁移的一部分，具体生产消费者见
+[凭证迁移边界](elaboration-state-and-publication.md#完整包检查凭证也是迁移边界)。
+保留完整根快路径，不以部分声明目录伪造整包检查凭证；片段只有在原上下文下完成
+相应检查才可交付同一 activation。builder 的 DefinitionHostRequest 不承载源码
+主体请求，测试用 Type 队列也不承担源执行所有权。
+
 实施分解见[普通检查 continuation](elaboration-state-and-publication.md#所有权与规则推进)
 及其后的词法、绑定和控制交接协议。同步检查入口改为驱动同一规则的适配器，不能
 另留一套只支持少数输入形状的检查器。Progress 已允许依赖项先完成检查并保留源码

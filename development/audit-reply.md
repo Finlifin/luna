@@ -1,6 +1,6 @@
 # 审查报告回复：当前判断与历史依据
 
-当前判断以 `c127b11a` 的报告为起点，纳入至 `627ab804` 的相关源码迁移，工作分支 dev。
+当前判断以 `c127b11a` 的报告为起点，纳入至 `97918570` 的相关源码迁移，工作分支 dev。
 最新对照 `ai_dev_logs/comptime_type_vm_divergence_report_2026-11-17_noon.md`
 （报告基线 `c127b11a`），保留 11-12、11-11 晚报的有效纠正与具体取证。
 报告用于发现偏差，语言依据仍是作者确认与正式 docs；本轮不修改 docs。
@@ -65,6 +65,15 @@ TypeData 是带域数据，具体身份通过消费者取得；描述替换、NF
 “真实依赖队列”的开发文档定位已纠正；不能在这个模型上继续扩展 Type 结果，再把
 模型测试当作 `defer` 的接线证据。真实后续边界是完整根 `PreparedRequired`、
 源码 Region、原 VM activation 与参数消费者，见[退役范围](module-boundaries-and-retirement.md#8-type-依赖队列退出生产模块)。
+
+在 `97918570` 上进一步核对 D02／D03：现有 DefinitionHostRequest 只处理三类
+builder；源码主体服务仍不存在。完整 Function 注册表之外，required 世界构造还
+依赖整包 PhaseCheckedPackage 及独立算术安全验证；把目录改成只含接口不能沿用
+这份整包凭证。生产入口、凭证与恢复时机的共同迁移范围见
+[完整包检查凭证](elaboration-state-and-publication.md#完整包检查凭证也是迁移边界)。
+两个 ignored 正例本次显式执行后仍失败（退出 101，
+`/tmp/luna-tools-b79xm5lh/result.json`），分别停在 callable 签名和列表域检查，
+并未到达 VM 主体等待点。此处是取证及设计修正，没有声称恢复或 println 已实现。
 
 午报 S14 提出的独立 `anar` 可执行文件冲突已由 `403dcc22` 收入 `luna lsp`，
 随后 `65e8e1a0` 将独立 formatter 收入 `luna fmt`。内部 crate 继续保留职责，
@@ -380,7 +389,7 @@ publisher 内部步骤尚未因此获得恢复能力。范围及验证见
 Type 队列另已删除同步恢复中独立的调用／发布分支，所有恢复入口共用可暂停
 invocation owner，参数传递与发布函数不再暴露给队列自行调用。关联选择请求可使用
 来源世界配置的服务准备答案，再经原响应准入交付。具体行为及基线 builder 测试
-接线纠正见[Type 同步入口合流](elaboration-state-and-publication.md#同步入口合流的当前验证)。
+接线纠正见[队列退役与赋值权限](elaboration-state-and-publication.md#已退役队列与仍保留的赋值权限)。
 这收束了恢复实现的责任，不等于 Typed 源检查已经能接收 VM 的 Type 响应。
 
 CMTT 存储服务另修复了入口快照使用空声明世界的问题：真实 sysroot 中 Object
