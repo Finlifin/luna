@@ -76,6 +76,136 @@ mod tests {
     }
 
     #[test]
+    fn staged_type_construction_uses_source_invocation() {
+        let source = n::SourceRange { start: 10, end: 20 };
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let type_domain = Term::Primitive(nir::Primitive::Type);
+        let declaration = Id {
+            package: 1,
+            local: 1,
+        };
+        let binding = n::LocalId { owner: 1, index: 0 };
+        let function = n::Function {
+            interface: n::FunctionDeclaration {
+                declaration,
+                name: "consume".into(),
+                phase: n::FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                type_parameters: vec![],
+                parameters: vec![binding],
+                defaults: vec![],
+                signature: Term::Function {
+                    parameters: vec![nir::Parameter {
+                        sort: nir::Sort::Type,
+                        ty: type_domain.clone(),
+                    }],
+                    result: Box::new(boolean.clone()),
+                },
+                requirements: vec![],
+                capabilities: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+            },
+            body: n::Expr {
+                source,
+                ty: boolean.clone(),
+                kind: K::Literal(n::Literal::Bool(true)),
+            },
+        };
+        let callee = n::Expr {
+            source,
+            ty: function.signature.clone(),
+            kind: K::Function(declaration),
+        };
+        let input = n::Expr {
+            source,
+            ty: type_domain.clone(),
+            kind: K::PointerType(Box::new(n::Expr {
+                source,
+                ty: type_domain,
+                kind: K::TypeValue(boolean.clone()),
+            })),
+        };
+        let mut call = n::Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Call {
+                callee: Box::new(callee),
+                parameter_bindings: vec![binding],
+                arguments: vec![n::CallArgument {
+                    passing: n::ArgumentPassing::Value,
+                    parameter: 0,
+                    value: input,
+                    is_default: false,
+                }],
+            },
+        };
+        let package = n::Package {
+            functions: vec![function],
+            ..Default::default()
+        };
+        let mut builder = builder(&package);
+        builder.stage_direct_call(&mut call).unwrap();
+        assert!(
+            builder
+                .staged_functions
+                .contains_key(&(declaration, vec![Term::Pointer(Box::new(boolean))]))
+        );
+        assert!(builder.invocation_snapshot.is_some());
+    }
+
+    #[test]
+    fn staged_data_copy_does_not_invoke_or_retry_invalid_data() {
+        let package = n::Package::default();
+        let mut builder = builder(&package);
+        let flag = n::Expr {
+            source: n::SourceRange { start: 10, end: 20 },
+            ty: Term::Primitive(nir::Primitive::Bool),
+            kind: K::Literal(n::Literal::Bool(true)),
+        };
+        let data = n::Expr {
+            source: flag.source,
+            ty: Term::Optional(Box::new(flag.ty.clone())),
+            kind: K::OptionalPresent(Box::new(flag.clone())),
+        };
+        assert_eq!(builder.complete_staged_input(&data).unwrap(), data);
+        assert!(builder.invocation_snapshot.is_none());
+
+        let invalid = n::Expr {
+            ty: Term::Primitive(nir::Primitive::Char),
+            ..flag.clone()
+        };
+        assert!(builder.complete_staged_input(&invalid).is_err());
+        assert!(builder.invocation_snapshot.is_none());
+
+        let wide = n::Expr {
+            source: flag.source,
+            ty: Term::Primitive(nir::Primitive::Symbol),
+            kind: K::Literal(n::Literal::Symbol("x".repeat(10_000))),
+        };
+        builder.fuel = 32;
+        let failure = builder.complete_staged_input(&wide).unwrap_err();
+        assert!(failure.contains("budget"), "{failure}");
+        assert!(builder.invocation_snapshot.is_none());
+        builder.fuel = 100_000;
+        assert_eq!(builder.complete_staged_input(&wide).unwrap(), wide);
+        assert!(builder.invocation_snapshot.is_none());
+
+        let computation = n::Expr {
+            kind: K::Not(Box::new(flag.clone())),
+            ..flag.clone()
+        };
+        let result = builder.complete_staged_input(&computation).unwrap();
+        assert_eq!(result.ty, flag.ty);
+        assert_eq!(result.kind, K::Literal(n::Literal::Bool(false)));
+        assert!(builder.invocation_snapshot.is_some());
+    }
+
+    #[test]
     fn staged_snapshot_reuses_declarations_without_retaining_entry_state() {
         let package = n::Package {
             normal_forms: vec![nir::normal_forms::Head {

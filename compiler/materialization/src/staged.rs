@@ -28,6 +28,54 @@ struct FrozenGraph {
 }
 
 impl Builder<'_> {
+    /// Keep completed data cheap; all computation uses the ordinary source VM.
+    /// Shape recognition does not validate a value. Validation/copy failures
+    /// propagate directly and must never trigger a second execution attempt.
+    pub(super) fn complete_staged_input(
+        &mut self,
+        expression: &n::Expr,
+    ) -> Result<n::Expr, String> {
+        let mut data = true;
+        iir::visit::expression_pruned(expression, &mut self.fuel, |expr, _| {
+            if !data {
+                return Ok(false);
+            }
+            data = matches!(
+                expr.kind,
+                K::Unit
+                    | K::TypeValue(_)
+                    | K::Function(_)
+                    | K::FunctionInstance { .. }
+                    | K::TraitMethod { .. }
+                    | K::Tuple(_)
+                    | K::TypeList(_)
+                    | K::Record { .. }
+                    | K::AnonymousRecord { .. }
+                    | K::Variant { .. }
+                    | K::OptionalAbsent
+                    | K::OptionalPresent(_)
+                    | K::Literal(_)
+            ) && !matches!(
+                expr.kind,
+                K::Literal(n::Literal::PendingInteger { .. } | n::Literal::PendingFloat { .. })
+            );
+            Ok(data)
+        })?;
+        if !data {
+            return self.invoke_staged_input(expression);
+        }
+        iir::staging::canonical_input_with_layouts(
+            self.package.into(),
+            expression,
+            &mut self.fuel,
+        )?;
+        let mut remaining = self.fuel as u64;
+        let copied = nir::copy_budget::charge_expression(expression, &mut remaining);
+        self.fuel = usize::try_from(remaining).unwrap_or(usize::MAX);
+        copied.map_err(|limit| format!("staged data copy budget exhausted: {limit:?}"))?;
+        Ok(expression.clone())
+    }
+
     pub(super) fn invoke_staged_input(&mut self, expression: &n::Expr) -> Result<n::Expr, String> {
         self.tick(0)?;
         let mut snapshot = match self.invocation_snapshot.take() {

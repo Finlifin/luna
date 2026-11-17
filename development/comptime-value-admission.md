@@ -2259,6 +2259,33 @@ println 仍未完成；不能把本项推迟判定称为整个 elaboration／VM 
   `/tmp/luna-tools-o19e16s3/result.json`；没有修改正式 docs 或提交原有工作区改动。
 
 
+### staged 输入统一计算入口
+
+materialization 不再维护“这些操作才需要 invocation”的表达式名单。该名单曾将
+普通 PointerType 计算误交给只接受部分常量的 IIR 折叠器，实际调用实例化因此
+失败。现在完整的不可变数据经过 canonical 检查和复制预算后直接交付；其余计算
+统一使用现有 source VM。新增操作不需要加入另一份执行名单才能取得相同语义。
+数据检查或预算失败直接返回，不能转入 VM 重试；形状观察也不执行生产者。
+
+这里构造的是 runtime 指针的 Type 值，没有引入 comptime 指针。IIR 内部其他
+绑定／准备阶段的折叠工具仍在；本次没有完成任意源码 continuation 或完整类型
+描述的传递。`println(comptime format: str, ...varargs: defer std.fmt.Parse(format))`
+仍需后两项通用能力，不能把此项重构或格式扫描通过视作该接口完成。
+
+验证目录 `/home/fin/luna`，入口 `development/check.py --timeout 900 --`：
+
+- 实际 `stage_direct_call` 的 Type 构造回归先失败于 canonical constant：
+  `/tmp/luna-tools-qc1tsytx/result.json`，退出 101；修复后原测试通过：
+  `/tmp/luna-tools-m34thpz1/result.json`，退出 0。
+- `test -p materialization --lib --test scoped_dispatch_inputs --test expansion_boundary
+  -p luna --test default_calls --test staged_callable_freezing --test open_functions
+  --test nominal_staging --test library_protocols --test library_std_format
+  --no-fail-fast -- --test-threads=1`：退出 0，
+  `/tmp/luna-tools-72szj7or/result.json`。新增测试还覆盖数据不启动 VM、非法数据
+  不重试、低复制预算失败及充足新预算恢复、普通布尔计算走 VM。
+- 三个修改的 Rust 文件 scoped rustfmt 退出 0：
+  `/tmp/luna-tools-23929nxc/result.json`。没有执行全 workspace、native 或性能基准。
+
 ### 既有键预算与复制视图的验证
 
 两项新回归在 `ff7194b2` 基线上失败：热缓存零预算返回成功，长而未保留的声明

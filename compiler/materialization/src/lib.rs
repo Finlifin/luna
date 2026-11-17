@@ -2110,67 +2110,8 @@ impl Builder<'_> {
             &mut fuel,
             self,
             |this, input, fuel| {
-                let mut invokes = false;
-                iir::visit::expression(input, fuel, |expr, _| {
-                    invokes |= matches!(
-                        expr.kind,
-                        K::Call { .. }
-                            // A declaration application computes the identity
-                            // from its input packet. It still needs invocation
-                            // when the resulting function belongs to runtime.
-                            | K::ComptimeFunctionInstance { .. }
-                            | K::NormalFormType { .. }
-                            | K::Assign { .. }
-                            | K::Loop { .. }
-                            | K::Break(_)
-                            | K::Continue(_)
-                            | K::CheckPredicate(_)
-                            | K::Match { .. }
-                            | K::LetPattern { .. }
-                            | K::Field { .. }
-                            | K::AnonymousField { .. }
-                            | K::CallPreparation { .. }
-                            | K::Closure { .. }
-                    );
-                    invokes |= matches!(
-                        expr.kind,
-                        K::EnumName(_)
-                            | K::TextQuery { subject: _, .. }
-                            | K::IntegerRepresentation(_)
-                            | K::ComptimeIntegerConvert(_)
-                            | K::SymbolName(_)
-                            | K::TakeBits(_)
-                            | K::BitConvert(_)
-                            | K::ErrorConvert { value: _, .. }
-                            | K::NewtypeConvert(_)
-                            | K::BitSlice { .. }
-                            | K::BitEqual(..)
-                            | K::BitWritePointer { .. }
-                            | K::BitUpdate { .. }
-                            | K::BitWindow { .. }
-                            | K::BitIndex(..)
-                            | K::BitConcat(..)
-                            | K::BitAssign { .. }
-                    ) || (matches!(expr.kind, K::Not(_) | K::And(..) | K::Or(..))
-                        && matches!(expr.ty, Term::Primitive(nir::Primitive::BitVec(_))));
-                    invokes |= matches!(expr.kind, K::IntegerNegate(_) | K::IntegerBinary { .. })
-                        && expr.ty == Term::Primitive(nir::Primitive::Integer);
-                    // Mathematical Integer comparisons produce Bool, so their
-                    // execution domain cannot be selected from result type alone.
-                    invokes |= matches!(&expr.kind, K::IntegerBinary {op,..} if op.is_comparison());
-                    invokes |= matches!(expr.kind, K::FloatNegate(_) | K::FloatBinary { .. });
-                    invokes |= matches!(&expr.kind,
-                    K::ScalarEqual(left,_) | K::ScalarLess(left,_) | K::ScalarLessEqual(left,_)
-                    | K::ScalarGreater(left,_) | K::ScalarGreaterEqual(left,_)
-                        if matches!(left.ty,Term::Primitive(nir::Primitive::F32 | nir::Primitive::F64)));
-                    Ok(())
-                })?;
                 this.fuel = *fuel;
-                let result = if invokes {
-                    this.invoke_staged_input(input)
-                } else {
-                    iir::staging::fold_value_with_layouts(this.package, input, &mut this.fuel)
-                };
+                let result = this.complete_staged_input(input);
                 *fuel = this.fuel;
                 result
             },
