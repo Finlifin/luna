@@ -218,6 +218,7 @@ impl<'a> Interpreter<'a> {
             associated_initializers,
             active_associated_initializers: HashSet::new(),
             instances: Default::default(),
+            iir_callables: Default::default(),
             functions,
             runtime_function_identities,
             graph_indexes: None,

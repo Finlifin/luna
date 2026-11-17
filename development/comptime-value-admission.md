@@ -1919,10 +1919,11 @@ materialization 的普通函数选择统一使用此入口；已完成的 staged
 
 ## 33. Invocation 代码实例与表达式代入内核
 
-源码 VM 的 closure 实例实际保留签名、参数身份和主体，程序契约与 capability 仍在
-调用路径检查。该生产者不再预检随后不复制的整份 Function；签名／参数身份单独
-受限，主体、实例默认表达式和 invocation condition 共享声明表达式代入内核。
-完整函数发布继续使用第 32 节的完整视图，两者不能互相冒充。
+源码命名函数值保留 FunctionInstance 身份和声明实参；入口契约通过后才取得
+泛型主体。主体缓存现只保留不可变 Expr，不再为此创建含空环境、签名与参数副本的
+Closure。签名特化仍用于建立主体的 binder frames，程序契约与 capability 仍在
+每次调用路径检查。主体、实例默认表达式和 invocation condition 共享声明表达式
+代入内核；完整函数发布继续使用第 32 节的完整视图，两者不能互相冒充。
 
 内核返回 `ExpressionInstantiationError`，区分复制步数、复制深度与 scope 失败。
 VM 将它们分别映射为 StepsExhausted、DepthExhausted、Type；剩余预算为正不代表
@@ -2105,12 +2106,55 @@ IIR 的 `iir_callable` 在取得函数定义、计算实例键 hash 或查询本
 先检查键的结构成本与深度；无参数键也至少消耗一次查询预算。原来热缓存直接
 返回，零预算亦可成功；未知但很宽／很深的键则先经过 graph lookup，过晚才有
 机会检查。现在预算不足与结构深度失败先于查询，足额预算下不存在的键仍报告
-UnknownFunction；已缓存 closure 的 Arc 身份与合法重试保持不变。
+UnknownFunction。同一 VM 内重复查询保留 callable 的 Arc 身份；跨 VM 只共享
+不可变主体代码，各自建立本地 callable，见下面的所有权修正。
 
-`copy_budget::charge_callable_code` 只预检 closure 真正拥有的签名、参数身份和
-主体。它不复制声明名称、默认模板或契约，嵌套 closure body 按 Arc clone 行为
-保留共享。IIR 的完整实例验证仍在 graph 接收边界，程序契约继续在 invocation
-路径检查；这个复制视图不是验证证据，也不改变 callable phase 或运行权限。
+`copy_budget::charge_callable_bindings` 预检本地 callable 拥有的签名与参数身份，
+主体首次复制另走 `charge_expression`。命中共享主体缓存仍须支付本地绑定的复制
+成本；旧 `charge_callable_code` 及其混合 walker 分支已删除。未复制的声明名称、
+默认模板和契约不计入这个视图，嵌套 closure body 仍按 Arc clone 行为共享。
+IIR 的完整实例验证在 graph 接收边界，程序契约继续在 invocation 路径检查；
+复制预检不是验证证据，也不改变 callable phase 或运行权限。
+
+### 共享主体不传递 VM 本地 callable 的准入权
+
+在 `6e9ec513` 上复核发现，旧 `function_instances::Cache` 实际保存 Arc<Closure>。
+同一 CodeSession 的两个 VM 会取得相同 Arc，并分别放入本地实例表。随后
+`validate_immutable_input` 通过指针相等检查所属 VM，第二个 VM 因而会接受第一个
+VM 的 callable。这违反已有的接收方准入约定：世界和代码相同不等于本地值权限相同。
+
+缓存现在只接受 Arc<Expr> 和实例键，不保存 VM callable 句柄、活动参数存储、调用结果或
+当前契约证据。源码 VM 的本地 instances 也只持有主体；IIR 的 iir_callables 独占
+本地 Closure 身份。两个 VM 可以共享 body Arc，但其 callable Arc 必须不同。
+普通身份传送继续由接收方重建 callable，不通过复制旧 VM 的 handle 获得准入。
+
+新回归 `shared_code_does_not_admit_another_vms_callable` 在修改实现前实际失败：
+第二个 VM 的 `validate_immutable_input` 返回 Ok 而非 Type 错误，报告
+`/tmp/luna-tools-8056tesk/result.json`，退出 101。修复后检查本地值可准入、
+外来值被拒绝、body 仍共享，并让两个 VM 分别以 false／true 实参得到各自结果。
+另一个回归让热主体配合宽参数表耗尽预算，确认不安装半成品 callable，补充本次
+测试额度后可恢复且继续共享原 body；不将缓存命中等同于免费复制绑定。
+
+本阶段在 `/home/fin/luna` 执行
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+--lib -p nir --test copy_budget --no-fail-fast -- --test-threads=1`，退出 0；
+VM 608、NIR 单元 73、复制预算 24 项通过，报告
+`/tmp/luna-tools-ijr7sh6j/result.json`。同一入口的集成检查：
+
+```sh
+python3 -B development/check.py --timeout 900 -- test \
+  -p comptime_interpretor --test instance_budget --test runtime_function_identities \
+  -p luna --test prepared_invocations --test staged_invocation_reuse \
+  --test library_protocols --test library_std_format --no-fail-fast -- --test-threads=1
+```
+
+退出 0，报告 `/tmp/luna-tools-g6jz7wm6/result.json`；六组依次为 8、46、27、4、
+10、4 项通过。编译器测试之外保留真实 sysroot 的协议和格式计划验证，但扫描器
+仍不等于完整 println。本轮没有执行全 workspace、native 或性能基准；保留工作区
+原有改动，未修改正式 docs。下面的 `ff7194b2` 等结果属于此前键预算修正。
+源码注册表、完整包检查凭证及一般源码恢复缺口未由本次缓存修复解除。
+
+### 既有键预算与复制视图的验证
 
 两项新回归在 `ff7194b2` 基线上失败：热缓存零预算返回成功，长而未保留的声明
 名称耗尽代码复制预算；`/tmp/luna-tools-veiha0gl/result.json`，退出 101。修复后

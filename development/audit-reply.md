@@ -66,6 +66,13 @@ TypeData 是带域数据，具体身份通过消费者取得；描述替换、NF
 模型测试当作 `defer` 的接线证据。真实后续边界是完整根 `PreparedRequired`、
 源码 Region、原 VM activation 与参数消费者，见[退役范围](module-boundaries-and-retirement.md#8-type-依赖队列退出生产模块)。
 
+D02 的代码缓存还发现了一个独立的权限问题：两个 IIR VM 复用相同 Arc<Closure>
+后，第二个 VM 会将第一个 VM 的 callable 当作本地值接纳。已用实际失败回归
+确认，并将共享缓存收窄为不可变主体、IIR callable 改为各 VM 独占；源码泛型
+实例也不再为缓存制造空闭包。接线和验证见
+[共享主体与本地准入](comptime-value-admission.md#共享主体不传递-vm-本地-callable-的准入权)。
+这修复的是代码复用与值权限混淆，不是 invocation 结果缓存或完整源码恢复。
+
 在 `97918570` 上进一步核对 D02／D03：现有 DefinitionHostRequest 只处理三类
 builder；源码主体服务仍不存在。完整 Function 注册表之外，required 世界构造还
 依赖整包 PhaseCheckedPackage 及独立算术安全验证；把目录改成只含接口不能沿用

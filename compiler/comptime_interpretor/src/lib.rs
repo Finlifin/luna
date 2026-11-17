@@ -1047,7 +1047,9 @@ pub struct Interpreter<'a> {
     associated_values: associated_catalog::Catalog<'a>,
     associated_initializers: associated_catalog::Catalog<'a>,
     active_associated_initializers: HashSet<(InterfaceInstance, Term, DeclarationId)>,
-    instances: function_instances::Instances,
+    // Source specializations retain code, while IIR handles carry VM-local identity.
+    instances: function_instances::Instances<Expr>,
+    iir_callables: function_instances::Instances<Closure>,
     functions: declaration_index::Functions<'a>,
     runtime_function_identities: declaration_index::RuntimeIdentities<'a>,
     graph_indexes: Option<Arc<iir_execution::GraphIndexes>>,

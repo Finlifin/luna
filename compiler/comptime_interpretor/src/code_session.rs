@@ -20,6 +20,7 @@ pub struct CodeSession {
     inputs: input_bodies::Cache,
     defaults: default_code::Cache,
     contextual: contextual_code::Cache,
+    // Specialized bodies only; callable identity belongs to each VM.
     instances: function_instances::Cache,
 }
 enum CodeWorld {

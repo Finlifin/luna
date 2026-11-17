@@ -2,12 +2,19 @@
 use super::*;
 
 // Separate declaration lookup allows borrowed slice queries without constructing
-// an owned tuple key. Stored frames are immutable and shared with their closure.
-#[derive(Default)]
-pub(super) struct Instances {
-    entries: HashMap<DeclarationId, HashMap<Arc<[Term]>, Arc<Closure>>>,
+// an owned tuple key. Each VM owns its admitted bodies and callable handles;
+// only immutable body code may also enter the persistent cache below.
+pub(super) struct Instances<T> {
+    entries: HashMap<DeclarationId, HashMap<Arc<[Term]>, Arc<T>>>,
 }
-impl Instances {
+impl<T> Default for Instances<T> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+}
+impl<T> Instances<T> {
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.entries.values().map(HashMap::len).sum()
@@ -17,14 +24,10 @@ impl Instances {
         self.entries.is_empty()
     }
 
-    pub(super) fn lookup(
-        &self,
-        declaration: DeclarationId,
-        arguments: &[Term],
-    ) -> Option<&Arc<Closure>> {
+    pub(super) fn lookup(&self, declaration: DeclarationId, arguments: &[Term]) -> Option<&Arc<T>> {
         self.entries.get(&declaration)?.get(arguments)
     }
-    pub(super) fn insert(&mut self, key: (DeclarationId, Arc<[Term]>), code: Arc<Closure>) {
+    pub(super) fn insert(&mut self, key: (DeclarationId, Arc<[Term]>), code: Arc<T>) {
         self.entries.entry(key.0).or_default().insert(key.1, code);
     }
 }
@@ -36,7 +39,7 @@ pub(super) struct Cache {
     weight: u64,
 }
 struct Retained {
-    code: Arc<Closure>,
+    code: Arc<Expr>,
     weight: u64,
 }
 impl Cache {
@@ -48,19 +51,21 @@ impl Cache {
         arguments: &[Term],
         key_work: u64,
         fuel: &mut u64,
-    ) -> Result<Option<Arc<Closure>>, ()> {
+    ) -> Result<Option<(Arc<[Term]>, Arc<Expr>)>, ()> {
         *fuel = fuel.checked_sub(1).ok_or(())?;
         let Some(entries) = self.entries.get(&declaration) else {
             return Ok(None);
         };
         *fuel = fuel.checked_sub(key_work).ok_or(())?;
-        Ok(entries.get(arguments).map(|entry| entry.code.clone()))
+        Ok(entries
+            .get_key_value(arguments)
+            .map(|(inputs, entry)| (inputs.clone(), entry.code.clone())))
     }
 
     pub(super) fn insert(
         &mut self,
         key: (DeclarationId, Arc<[Term]>),
-        code: Arc<Closure>,
+        code: Arc<Expr>,
         key_work: u64,
         work: u64,
     ) {
@@ -196,7 +201,7 @@ impl Interpreter<'_> {
         })?;
         let key_work = before_key - self.budget.steps;
         if let Some(instance) = self.instances.lookup(declaration, arguments) {
-            return Ok(instance.body.clone());
+            return Ok(instance.clone());
         }
         let persistent = self.abstract_type_parameters.is_empty()
             && self.abstract_value_parameters.is_empty()
@@ -204,17 +209,12 @@ impl Interpreter<'_> {
                 .iter()
                 .all(|argument| argument.check_scope(&[]).is_ok());
         if persistent
-            && let Some(instance) = self
+            && let Some((inputs, body)) = self
                 .prepared_instance_cache
                 .lookup(declaration, arguments, key_work, &mut self.budget.steps)
                 .map_err(|()| self.failure(ErrorKind::StepsExhausted, Some(source)))?
         {
-            let key = (
-                declaration,
-                instance.instance_arguments.as_ref().unwrap().clone(),
-            );
-            let body = instance.body.clone();
-            self.instances.insert(key, instance);
+            self.instances.insert((declaration, inputs), body.clone());
             return Ok(body);
         }
         let before_preparation = self.budget.steps;
@@ -234,31 +234,17 @@ impl Interpreter<'_> {
             arguments,
             &frames,
         )?);
-        self.effect_charge(definition.parameters.len(), Some(source))?;
-        let instance = Arc::new(Closure {
-            definition_source: None,
-            origin: Some(declaration),
-            instance_arguments: Some(Arc::from(arguments)),
-            parameters: definition.parameters.clone(),
-            environment: Environment::new(),
-            capture_order: vec![],
-            body: body.clone(),
-            ty: signature,
-        });
-        let key = (
-            declaration,
-            instance.instance_arguments.as_ref().unwrap().clone(),
-        );
+        let key = (declaration, Arc::from(arguments));
         if persistent && self.budget.steps >= key_work {
             self.budget.steps -= key_work;
             self.prepared_instance_cache.insert(
                 key.clone(),
-                instance.clone(),
+                body.clone(),
                 key_work,
                 before_preparation - self.budget.steps,
             );
         }
-        self.instances.insert(key, instance);
+        self.instances.insert(key, body.clone());
         self.events.push(Event::InstantiateFunction {
             declaration,
             arguments: arguments.to_vec(),
@@ -766,22 +752,10 @@ mod frame_tests {
             local: 1,
         };
         let frame: Arc<[Term]> = vec![Term::Bool(true)].into();
-        let code = Arc::new(Closure {
-            definition_source: None,
-            origin: Some(declaration),
-            instance_arguments: Some(frame.clone()),
-            parameters: vec![],
-            environment: Environment::new(),
-            capture_order: vec![],
-            body: Arc::new(Expr {
-                source: SourceRange { start: 0, end: 1 },
-                ty: Term::Primitive(Primitive::Void),
-                kind: K::Unit,
-            }),
-            ty: Term::Function {
-                parameters: vec![],
-                result: Box::new(Term::Primitive(Primitive::Void)),
-            },
+        let code = Arc::new(Expr {
+            source: SourceRange { start: 0, end: 1 },
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::Unit,
         });
         let mut instances = Instances::default();
         instances.insert((declaration, frame.clone()), code.clone());
@@ -791,10 +765,7 @@ mod frame_tests {
         let (retained, _) = instances.entries[&declaration]
             .get_key_value(query.as_slice())
             .unwrap();
-        assert!(Arc::ptr_eq(
-            retained,
-            found.instance_arguments.as_ref().unwrap()
-        ));
+        assert!(Arc::ptr_eq(retained, &frame));
         assert!(
             instances
                 .lookup(declaration, &[Term::Bool(false)])
@@ -818,15 +789,12 @@ mod frame_tests {
             &frame
         ));
         assert!(cache.lookup(declaration, &query, 1, &mut 0).is_err());
-        let restored = cache
+        let (restored_inputs, restored) = cache
             .lookup(declaration, &query, 1, &mut 100)
             .unwrap()
             .unwrap();
         assert!(Arc::ptr_eq(&restored, &code));
-        assert!(Arc::ptr_eq(
-            restored.instance_arguments.as_ref().unwrap(),
-            &frame
-        ));
+        assert!(Arc::ptr_eq(&restored_inputs, &frame));
         for local in 2..=64 {
             cache.insert(
                 (

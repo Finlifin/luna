@@ -205,6 +205,7 @@ impl<'a> Interpreter<'a> {
             associated_initializers: Default::default(),
             active_associated_initializers: HashSet::new(),
             instances: Default::default(),
+            iir_callables: Default::default(),
             functions: Default::default(),
             normal_forms: declaration_index::NormalForms::new(
                 &graph.normal_forms,
@@ -320,10 +321,10 @@ impl<'a> Interpreter<'a> {
             .iir_function_definition(key.declaration, &key.arguments)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
         let cache_key = (key.declaration, key.arguments.clone());
-        if let Some(callable) = self.instances.lookup(key.declaration, &key.arguments) {
+        if let Some(callable) = self.iir_callables.lookup(key.declaration, &key.arguments) {
             return Ok(Value::Closure(callable.clone()));
         }
-        if let Some(callable) = self
+        let cached = self
             .prepared_instance_cache
             .lookup(
                 key.declaration,
@@ -331,18 +332,29 @@ impl<'a> Interpreter<'a> {
                 key_work,
                 &mut self.budget.steps,
             )
-            .map_err(|()| self.failure(ErrorKind::StepsExhausted, Some(definition.body.source)))?
-        {
-            self.instances.insert(cache_key, callable.clone());
-            return Ok(Value::Closure(callable));
-        }
-        let before_preparation = self.budget.steps;
+            .map_err(|()| self.failure(ErrorKind::StepsExhausted, Some(definition.body.source)))?;
+        // Even a warm body needs a fresh VM-local callable. Copy only its
+        // parameter bindings and signature; contracts remain in the graph.
         self.charge_copy_work(Some(definition.body.source), |fuel| {
             let mut steps = *fuel as u64;
-            let result = nir::copy_budget::charge_callable_code(definition, &mut steps);
+            let result =
+                nir::copy_budget::charge_callable_bindings(&definition.interface, &mut steps);
             *fuel = steps as usize;
             result
         })?;
+        let before_preparation = self.budget.steps;
+        let is_new = cached.is_none();
+        let body = if let Some((_, body)) = cached {
+            body
+        } else {
+            self.charge_copy_work(Some(definition.body.source), |fuel| {
+                let mut steps = *fuel as u64;
+                let result = nir::copy_budget::charge_expression(&definition.body, &mut steps);
+                *fuel = steps as usize;
+                result
+            })?;
+            Arc::new(definition.body.clone())
+        };
         let callable = Arc::new(Closure {
             definition_source: None,
             origin: Some(key.declaration),
@@ -350,19 +362,19 @@ impl<'a> Interpreter<'a> {
             parameters: definition.parameters.clone(),
             environment: Environment::new(),
             capture_order: vec![],
-            body: Arc::new(definition.body.clone()),
+            body: body.clone(),
             ty: definition.callable_type(),
         });
-        if self.budget.steps >= key_work {
+        if is_new && self.budget.steps >= key_work {
             self.budget.steps -= key_work;
             self.prepared_instance_cache.insert(
                 cache_key.clone(),
-                callable.clone(),
+                body,
                 key_work,
                 before_preparation - self.budget.steps,
             );
         }
-        self.instances.insert(cache_key, callable.clone());
+        self.iir_callables.insert(cache_key, callable.clone());
         Ok(Value::Closure(callable))
     }
 
@@ -589,8 +601,105 @@ mod callable_budget_tests {
             vm.iir_callable(&deep_key).unwrap_err().kind,
             ErrorKind::DepthExhausted
         );
-        assert_eq!(vm.instances.len(), 1);
+        assert_eq!(vm.iir_callables.len(), 1);
         assert!(matches!(vm.iir_callable(key).unwrap(), Value::Closure(_)));
+    }
+
+    #[test]
+    fn shared_code_does_not_admit_another_vms_callable() {
+        let mut source = graph("run".into());
+        let input = LocalId { owner: 1, index: 0 };
+        source.functions[0].function.parameters.push(input);
+        let Term::Function { parameters, .. } = &mut source.functions[0].function.signature else {
+            panic!("expected function signature")
+        };
+        parameters.push(nir::Parameter {
+            sort: nir::Sort::Runtime,
+            ty: Term::Primitive(Primitive::Bool),
+        });
+        source.functions[0].function.body.kind = K::Local(input);
+        let graph = Arc::new(source);
+        let key = &graph.functions[0].key;
+        let domain = graph.functions[0].function.callable_type();
+        let mut cache = CodeSession::for_iir(graph.clone());
+        let mut first = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        let foreign = first
+            .with_code_session(&mut cache, |vm| vm.iir_callable(key))
+            .unwrap();
+        first.validate_immutable_input(&foreign, &domain).unwrap();
+        let mut second = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        let local = second
+            .with_code_session(&mut cache, |vm| vm.iir_callable(key))
+            .unwrap();
+        second.validate_immutable_input(&local, &domain).unwrap();
+        assert_eq!(
+            second
+                .validate_immutable_input(&foreign, &domain)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+        let (Value::Closure(foreign), Value::Closure(local)) = (&foreign, &local) else {
+            panic!("concrete IIR calls must retain their local callable")
+        };
+        assert!(!Arc::ptr_eq(foreign, local));
+        assert!(Arc::ptr_eq(&foreign.body, &local.body));
+        assert_eq!(
+            second
+                .invoke_value(Value::Closure(local.clone()), vec![Value::Bool(false)])
+                .unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            first
+                .invoke_value(Value::Closure(foreign.clone()), vec![Value::Bool(true)])
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn warm_body_cache_still_charges_local_callable_bindings() {
+        let mut source = graph("wide".into());
+        let definition = &mut source.functions[0].function;
+        definition.parameters = (0..256).map(|index| LocalId { owner: 1, index }).collect();
+        let Term::Function { parameters, .. } = &mut definition.signature else {
+            panic!("expected function signature")
+        };
+        parameters.extend((0..256).map(|_| nir::Parameter {
+            sort: nir::Sort::Runtime,
+            ty: Term::Primitive(Primitive::Bool),
+        }));
+        let graph = Arc::new(source);
+        let key = &graph.functions[0].key;
+        let mut cache = CodeSession::for_iir(graph.clone());
+        let mut first = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        let Value::Closure(initial) = first
+            .with_code_session(&mut cache, |vm| vm.iir_callable(key))
+            .unwrap()
+        else {
+            panic!("missing initial callable")
+        };
+        let mut second = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        second.budget.steps = 64;
+        assert_eq!(
+            second
+                .with_code_session(&mut cache, |vm| vm.iir_callable(key))
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+        assert!(second.iir_callables.is_empty());
+        second.budget.steps = 100_000;
+        let Value::Closure(recovered) = second
+            .with_code_session(&mut cache, |vm| vm.iir_callable(key))
+            .unwrap()
+        else {
+            panic!("missing recovered callable")
+        };
+        assert!(!Arc::ptr_eq(&initial, &recovered));
+        assert!(Arc::ptr_eq(&initial.body, &recovered.body));
+        assert_eq!(second.iir_callables.len(), 1);
     }
 
     #[test]

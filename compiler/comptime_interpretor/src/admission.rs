@@ -232,10 +232,10 @@ impl Interpreter<'_> {
                 let (declaration, arguments) = closure
                     .declaration_instance()
                     .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                // Prepared bodies are session-owned handles. A matching type or
-                // declaration id cannot authorize a body imported from another
-                // VM. Normal-term transport reconstructs instances separately.
-                let current = self.instances.lookup(declaration, arguments);
+                // IIR callables are VM-owned handles. Shared body code, a
+                // matching type or a declaration ID cannot authorize another
+                // VM's callable. Normal-term transport reconstructs identities.
+                let current = self.iir_callables.lookup(declaration, arguments);
                 if !current.is_some_and(|current| Arc::ptr_eq(current, closure)) {
                     return Err(self.failure(ErrorKind::Type, None));
                 }

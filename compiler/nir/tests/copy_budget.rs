@@ -778,19 +778,18 @@ fn function_specialization_separates_closed_signature_and_ordinary_input_frames(
 }
 
 #[test]
-fn callable_code_copy_bounds_retained_fields_and_preserves_shared_bodies() {
-    use nir::copy_budget::charge_callable_code as charge;
+fn callable_bindings_bound_owned_metadata_independently_of_body_code() {
+    use nir::copy_budget::charge_callable_bindings;
+    let charge = |definition: &nir::program::Function, fuel: &mut u64| {
+        charge_callable_bindings(&definition.interface, fuel)
+    };
     let mut definition = function();
     definition.name = "unused".repeat(1000);
     definition.defaults.push((0, large()));
     definition.preconditions.push(large());
-    charge(&definition, &mut 128).unwrap();
     definition.body = large();
-    assert_eq!(
-        charge(&definition, &mut 128),
-        Err(CopyBudgetExhausted::Steps)
-    );
-    definition.body = small();
+    charge(&definition, &mut 128).unwrap();
+    assert_eq!(charge(&definition, &mut 0), Err(CopyBudgetExhausted::Steps));
     definition.signature = Term::Function {
         parameters: vec![],
         result: Box::new(Term::Record(
@@ -804,18 +803,6 @@ fn callable_code_copy_bounds_retained_fields_and_preserves_shared_bodies() {
         Err(CopyBudgetExhausted::Steps)
     );
     definition.signature = function().interface.signature;
-    let body = std::sync::Arc::new(large());
-    definition.body = expr(K::Closure {
-        parameters: vec![],
-        captures: vec![],
-        body: body.clone(),
-    });
-    charge(&definition, &mut 128).unwrap();
-    let copy = definition.body.clone();
-    let K::Closure { body: copied, .. } = copy.kind else {
-        panic!("closure lost")
-    };
-    assert!(std::sync::Arc::ptr_eq(&body, &copied));
     definition.parameters = (0..256)
         .map(|index| nir::program::LocalId { owner: 1, index })
         .collect();
