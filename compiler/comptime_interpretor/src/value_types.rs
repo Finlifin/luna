@@ -711,7 +711,7 @@ impl Interpreter<'_> {
             (
                 Value::Function(id),
                 ty @ (Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)),
-            ) => self.functions.get(id).is_some_and(|f| {
+            ) => self.functions.interface(id).is_some_and(|f| {
                 f.type_parameters.is_empty()
                     && f.phase != nir::program::FunctionPhase::NormalForm
                     && (self.comptime_only

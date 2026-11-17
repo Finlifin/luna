@@ -122,7 +122,7 @@ impl Interpreter<'_> {
         } else if dynamic && let Some((declaration, arguments)) = callee.declaration_instance() {
             let definition = self
                 .functions
-                .get(&declaration)
+                .interface(&declaration)
                 .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(construction)))?;
             let type_domain = Term::Primitive(Primitive::Type);
             let domains = definition.type_parameters.iter().map(|parameter| {

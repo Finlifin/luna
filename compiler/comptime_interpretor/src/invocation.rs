@@ -335,14 +335,15 @@ impl<'a> Interpreter<'a> {
         {
             let definition = self
                 .functions
-                .get(declaration)
-                .filter(|definition| {
+                .declaration(declaration)
+                .filter(|view| {
+                    let definition = view.interface;
                     definition.phase != nir::program::FunctionPhase::NormalForm
                         && (!self.comptime_only
                             || definition.phase == nir::program::FunctionPhase::Comptime)
                 })
                 .ok_or_else(|| self.failure(ErrorKind::PhaseMismatch, None))?;
-            self.admit_callable_identity(*declaration, arguments, definition.body.source)?;
+            self.admit_callable_identity(*declaration, arguments, definition.source)?;
         }
         Ok(function)
     }
@@ -528,11 +529,9 @@ impl<'a> Interpreter<'a> {
     ) -> Result<(Body<'a>, Option<DeclarationId>), Error> {
         let mut body = match &frame.function {
             Value::Function(id) => Body::Package(
-                &self
-                    .functions
-                    .get(id)
-                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(frame.source)))?
-                    .body,
+                self.functions
+                    .body(id)
+                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(frame.source)))?,
             ),
             Value::FunctionInstance {
                 declaration,
@@ -576,10 +575,11 @@ impl<'a> Interpreter<'a> {
     ) -> Result<InvocationFrame<'a>, Error> {
         let (parameters, mut environment, source, signature) = match &function {
             Value::Function(id) => {
-                let definition = self
+                let view = self
                     .functions
-                    .get(id)
+                    .declaration(id)
                     .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
+                let definition = view.interface;
                 if !definition.type_parameters.is_empty() {
                     return Err(self.failure(ErrorKind::Type, None));
                 }
@@ -589,12 +589,12 @@ impl<'a> Interpreter<'a> {
                 if !self.comptime_only
                     && (!definition.requirements.is_empty() || !definition.capabilities.is_empty())
                 {
-                    self.admit_callable_identity(*id, &[], definition.body.source)?;
+                    self.admit_callable_identity(*id, &[], view.source)?;
                 }
                 (
                     definition.parameters.as_slice(),
                     Environment::with_capacity(definition.parameters.len()),
-                    definition.body.source,
+                    view.source,
                     std::borrow::Cow::Borrowed(&definition.signature),
                 )
             }
@@ -602,14 +602,15 @@ impl<'a> Interpreter<'a> {
                 declaration,
                 arguments,
             } => {
-                let definition = self
+                let view = self
                     .functions
-                    .get(declaration)
+                    .declaration(declaration)
                     .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
-                let source = definition.body.source;
+                let definition = view.interface;
+                let source = view.source;
                 self.admit_function_inputs(&definition.type_parameters, arguments, source)?;
                 let signature =
-                    self.specialize_function_signature(&definition.interface, arguments, source)?;
+                    self.specialize_function_signature(definition, arguments, source)?;
                 (
                     definition.parameters.as_slice(),
                     Environment::with_capacity(definition.parameters.len()),

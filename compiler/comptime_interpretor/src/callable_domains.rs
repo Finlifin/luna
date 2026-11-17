@@ -175,11 +175,7 @@ impl Interpreter<'_> {
             if let Some(identity) = self.runtime_function_identities.get(&declaration) {
                 (&identity.type_parameters, &identity.signature, None)
             } else {
-                let Some(function) = self
-                    .functions
-                    .get(&declaration)
-                    .map(|function| &function.interface)
-                else {
+                let Some(function) = self.functions.interface(&declaration) else {
                     return Ok(None);
                 };
                 (

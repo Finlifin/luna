@@ -35,23 +35,20 @@ impl Interpreter<'_> {
             (Term::String(value), _) => Value::String(value.clone()),
             (Term::Symbol(value), _) => Value::Symbol(value.clone()),
             (Term::ClosureSnapshot { factory, arguments }, ty) if ty.is_comptime_callable() => {
-                let function = self
+                let view = self
                     .functions
-                    .get(factory)
+                    .declaration(factory)
                     .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                let function = view.interface;
                 if function.phase != nir::program::FunctionPhase::Comptime {
                     return Err(self.failure(ErrorKind::Type, None));
                 }
                 for argument in arguments {
                     self.check_type_description(argument, None)?;
                 }
-                self.admit_function_inputs(
-                    &function.type_parameters,
-                    arguments,
-                    function.body.source,
-                )?;
+                self.admit_function_inputs(&function.type_parameters, arguments, view.source)?;
                 let binders = self.input_binders(&function.type_parameters);
-                self.charge_copy_work(Some(function.body.source), |fuel| {
+                self.charge_copy_work(Some(view.source), |fuel| {
                     nir::copy_budget::charge_type_substitution(
                         &function.signature,
                         &binders,
@@ -59,11 +56,8 @@ impl Interpreter<'_> {
                         fuel,
                     )
                 })?;
-                let substitution = self.function_substitution(
-                    &function.type_parameters,
-                    arguments,
-                    function.body.source,
-                )?;
+                let substitution =
+                    self.function_substitution(&function.type_parameters, arguments, view.source)?;
                 let signature = substitution
                     .instantiate(&function.signature)
                     .map_err(|_| self.failure(ErrorKind::Type, None))?;
@@ -73,7 +67,7 @@ impl Interpreter<'_> {
                     return Err(self.failure(ErrorKind::Type, None));
                 }
                 let expression = Expr {
-                    source: function.body.source,
+                    source: view.source,
                     ty: signature.with_comptime_phase(true),
                     kind: K::FunctionInstance {
                         declaration: *factory,
@@ -120,10 +114,11 @@ impl Interpreter<'_> {
                         }
                         SourceRange { start: 0, end: 0 }
                     } else {
-                        let function = self
+                        let view = self
                             .functions
-                            .get(declaration)
+                            .declaration(declaration)
                             .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                        let function = view.interface;
                         if function.phase == nir::program::FunctionPhase::NormalForm
                             || (function.phase == nir::program::FunctionPhase::Comptime)
                                 != ty.is_comptime_callable()
@@ -131,7 +126,7 @@ impl Interpreter<'_> {
                         {
                             return Err(self.failure(ErrorKind::Type, None));
                         }
-                        function.body.source
+                        view.source
                     };
                 for argument in arguments {
                     let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);

@@ -276,7 +276,7 @@ impl<'a> Interpreter<'a> {
             self.iir_function_definition(id, arguments)
                 .map(|function| &function.interface)
         } else {
-            self.functions.get(&id).map(|function| &function.interface)
+            self.functions.interface(&id)
         }
     }
 

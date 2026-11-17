@@ -103,6 +103,48 @@ fn source() -> Arc<Package> {
         ..Default::default()
     })
 }
+
+#[test]
+fn source_declaration_views_preserve_provenance_without_dumping_code() {
+    let mut package = (*source()).clone();
+    let function = &mut package.quote_templates[0];
+    function.interface.name = "quoted\"name\n".into();
+    function.body.source = SourceRange { start: 17, end: 29 };
+    let id = function.declaration;
+    let functions = Functions::new(&package.quote_templates, None, |function| {
+        function.declaration
+    })
+    .unwrap();
+    let view = functions.declaration(&id).unwrap();
+    assert!(std::ptr::eq(
+        view.interface,
+        &package.quote_templates[0].interface
+    ));
+    assert_eq!(view.source, SourceRange { start: 17, end: 29 });
+    assert!(std::ptr::eq(
+        functions.interface(&id).unwrap(),
+        view.interface
+    ));
+    assert!(std::ptr::eq(
+        functions.body(&id).unwrap(),
+        &package.quote_templates[0].body
+    ));
+    let dump = view.to_string();
+    assert!(
+        dump.starts_with("(source-declaration (source 17 29) (function-declaration "),
+        "{dump}"
+    );
+    assert!(dump.contains("quoted\\\"name\\n"), "{dump}");
+    assert!(!dump.contains("(body "), "{dump}");
+    assert_eq!(view.to_string(), dump);
+    let absent = DeclarationId {
+        package: 97,
+        local: 9999,
+    };
+    assert!(functions.declaration(&absent).is_none());
+    assert!(functions.interface(&absent).is_none());
+    assert!(functions.body(&absent).is_none());
+}
 fn structure(identity: DeclarationId) -> nir::program::Struct {
     nir::program::Struct {
         declaration: identity,

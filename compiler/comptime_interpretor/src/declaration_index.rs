@@ -50,6 +50,45 @@ impl<T> Default for Declarations<'_, T> {
     }
 }
 pub(super) type Functions<'a> = Declarations<'a, nir::program::Function>;
+
+/// Declaration observation grants no access to the function body. The current
+/// package adapter derives the diagnostic location from its checked body; a
+/// future source service must provide that location with the declaration.
+#[derive(Clone, Copy)]
+pub(super) struct FunctionDeclarationView<'a> {
+    pub(super) interface: &'a nir::program::FunctionDeclaration,
+    pub(super) source: SourceRange,
+}
+
+impl std::fmt::Display for FunctionDeclarationView<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(source-declaration (source {} {}) {})",
+            self.source.start, self.source.end, self.interface
+        )
+    }
+}
+
+impl<'a> Functions<'a> {
+    pub(super) fn declaration(&self, id: &DeclarationId) -> Option<FunctionDeclarationView<'a>> {
+        self.get(id).map(|function| FunctionDeclarationView {
+            interface: &function.interface,
+            source: function.body.source,
+        })
+    }
+
+    pub(super) fn interface(
+        &self,
+        id: &DeclarationId,
+    ) -> Option<&'a nir::program::FunctionDeclaration> {
+        self.declaration(id).map(|view| view.interface)
+    }
+
+    pub(super) fn body(&self, id: &DeclarationId) -> Option<&'a Expr> {
+        self.get(id).map(|function| &function.body)
+    }
+}
 pub(super) type RuntimeIdentities<'a> = Declarations<'a, nir::program::RuntimeFunctionIdentity>;
 
 pub(super) type Effects<'a> = Declarations<'a, nir::effects::Declaration>;

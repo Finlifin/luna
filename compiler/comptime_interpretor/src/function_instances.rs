@@ -138,10 +138,9 @@ impl Interpreter<'_> {
         self.admit_callable_identity(declaration, arguments, source)?;
         let definition = self
             .functions
-            .get(&declaration)
+            .interface(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        let signature =
-            self.specialize_function_signature(&definition.interface, arguments, source)?;
+        let signature = self.specialize_function_signature(definition, arguments, source)?;
         if !self.observe_same_type(&signature, output, source)? {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
@@ -220,16 +219,19 @@ impl Interpreter<'_> {
         let before_preparation = self.budget.steps;
         let definition = self
             .functions
-            .get(&declaration)
+            .interface(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        let signature =
-            self.specialize_function_signature(&definition.interface, arguments, source)?;
+        let signature = self.specialize_function_signature(definition, arguments, source)?;
         let Term::Function { parameters, .. } = signature.callable_signature() else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };
         let frames = vec![parameters.iter().map(|parameter| parameter.sort).collect()];
+        let code = self
+            .functions
+            .body(&declaration)
+            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
         let body = Arc::new(self.specialize_function_expression(
-            &definition.body,
+            code,
             &definition.type_parameters,
             arguments,
             &frames,

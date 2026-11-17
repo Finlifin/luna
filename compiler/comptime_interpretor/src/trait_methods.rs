@@ -356,7 +356,7 @@ impl Interpreter<'_> {
         }
         let definition = self
             .functions
-            .get(&body)
+            .interface(&body)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
         if pending {
             if definition.phase == nir::program::FunctionPhase::NormalForm {

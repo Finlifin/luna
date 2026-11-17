@@ -52,7 +52,7 @@ impl Interpreter<'_> {
         }
         let definition = self
             .functions
-            .get(&declaration)
+            .interface(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
         self.admit_function_inputs(&definition.type_parameters, arguments, source)?;
         for requirement in &definition.requirements {
@@ -250,7 +250,7 @@ impl Interpreter<'_> {
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(construction)))?;
         let definition = self
             .functions
-            .get(&declaration)
+            .interface(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(construction)))?;
         self.specialize_function_expression(expression, &definition.type_parameters, arguments, &[])
     }
@@ -373,7 +373,7 @@ impl Interpreter<'_> {
         }
         let definition = self
             .functions
-            .get(&declaration)
+            .interface(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
         if definition.phase != nir::program::FunctionPhase::Comptime
             || !output.is_comptime_callable()

@@ -2534,10 +2534,11 @@ impl<'a> Interpreter<'a> {
                 .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, None))?;
         }
 
-        let definition = self
+        let view = self
             .functions
-            .get(&function)
+            .declaration(&function)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
+        let definition = view.interface;
         let binders = self.input_binders(&definition.type_parameters);
         if binders.len() != types.len() {
             return Err(self.failure(ErrorKind::Type, None));
@@ -2555,19 +2556,16 @@ impl<'a> Interpreter<'a> {
                 fuel,
             )
         })?;
-        self.admit_function_inputs(&definition.type_parameters, &types, definition.body.source)?;
-        let substitution = self.function_substitution(
-            &definition.type_parameters,
-            &types,
-            definition.body.source,
-        )?;
+        self.admit_function_inputs(&definition.type_parameters, &types, view.source)?;
+        let substitution =
+            self.function_substitution(&definition.type_parameters, &types, view.source)?;
         let signature = substitution
             .instantiate(&definition.signature)
             .map_err(|_| self.failure(ErrorKind::Type, None))?
             .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime)
             .with_unsafe_call_requirement(definition.is_unsafe);
         let expression = Expr {
-            source: definition.body.source,
+            source: view.source,
             ty: signature,
             kind: K::FunctionInstance {
                 declaration: function,
@@ -4918,7 +4916,7 @@ impl<'a> Interpreter<'a> {
                 declaration: id, ..
             } => self
                 .functions
-                .get(id)
+                .interface(id)
                 .map(|f| f.parameters.clone())
                 .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source))),
             Value::Closure(closure) => Ok(closure.parameters.clone()),

@@ -955,7 +955,8 @@ InvocationFrame 的当前代码选择，不在入口或出口缺少 condition �
 dump 区分 package-body／owned-body 及相应缓存键。
 
 此处只拆开了活动调用的执行状态。被调用的 Function／Closure 仍可保留完整的
-已检查源码；签名准入的来源位置目前仍取自原 body。声明参数特化、函数收集和
+已检查源码；签名准入现通过下面的声明视图取得来源，完整包适配器仍从 body 提取
+该位置。声明参数特化、函数收集和
 RequiredWorld 尚未因此接受缺少主体的源码模板，也没有新增源码主体的外部请求。
 
 接线要共同改变函数收集、required 根和 VM 主体取得。当前 RequiredWorld 只有完成
@@ -967,6 +968,49 @@ RequiredWorld 尚未因此接受缺少主体的源码模板，也没有新增源
 CodeSession 的包指针后复用旧准入。活动任务、receipt 和 VM cell 不进入 RequiredWorld、
 代码缓存或 Type 结果缓存。相同源码的两次 invocation 只共享稳定模板、接口与合法
 代码，不共享执行状态。NF 头始终不展开，实际 Type 响应也不改变它的身份规则。
+
+#### VM 声明消费者与主体查询分开
+
+当前源码函数目录提供 `FunctionDeclarationView`：借用的 `FunctionDeclaration`
+和独立交付的诊断位置，不带函数主体、Closure 或执行环境；默认值和程序契约代码
+仍是声明接口的一部分。命名函数准入、普通／泛型
+调用入口、参数绑定、签名特化、trait 方法选择、默认代码的接口选择、值域检查及
+冻结函数值恢复都通过声明查询取得元数据；程序契约沿 `invocation_declaration`
+取得同一接口。消费者不再为访问接口字段而接收完整 Function。
+
+命名函数的主体取得有独立 `body` 查询，仍发生在已存在的 Entry → Body 转换中；
+泛型主体特化也先读取声明，再在主体阶段单独取得代码。恢复 ClosureSnapshot 时
+仍需按原规则实际调用 factory，声明观察本身不会代替这次执行。闭包继续拥有其
+捕获环境和代码，本次没有把匿名闭包强改为命名声明。
+
+该视图保留原包借用期限，查询不复制接口或建立新的声明目录，也不授予阶段、
+形成条件或契约许可。Display 输出 `(source-declaration (source start end) ...)`
+及声明元数据，转义名称且不输出主体。名称／域／默认值仍来自原声明，未新增
+normal-form 展开规则或依赖缓存。
+
+**物理目录仍以完整 Package 为来源。** 当前适配器从完整 Function 借用 interface，
+从其 body 取得原诊断范围；尚不能注册缺少代码的源码模板。因此这是消费接口的
+拆分，不是懒检查服务，也不能证明两个待定 Type 正例已可执行。后续源码服务须
+直接提供声明位置及 owning snapshot，再以受控响应满足主体需求，不能把当前
+adapter 的成功当作部分包拥有完整 phase 凭证。完整包和代码缓存规则继续保留。
+
+本阶段验证目录 `/home/fin/luna`，统一使用 `development/check.py --timeout 900 --`：
+
+- `check -p comptime_interpretor`：退出 0，`/tmp/luna-tools-eofeqvab/result.json`。
+- `test -p comptime_interpretor --lib --test runtime_function_identities
+  --test instance_budget -p luna --test ordinary_callable_types --test default_calls
+  --test staged_callable_freezing --test library_protocols --test library_std_format
+  --no-fail-fast -- --test-threads=1`：退出 0，
+  `/tmp/luna-tools-7m994kvp/result.json`。其中原有的待定签名正例仍标记 ignored；
+  新声明视图测试检查借用来源、未知身份与稳定转义 dump，不声称验证缺少主体的目录。
+- 单独执行两个 ignored Type 正例，命令使用 `test -p luna
+  --test ordinary_callable_types --test ordinary_clause_collectors --no-fail-fast
+  -- --ignored --test-threads=1 pending_clause_domains_can_wait_for_a_type_producer
+  computed_type_inputs_can_complete_a_dependent_callable_signature`：退出 101，
+  `/tmp/luna-tools-9tua589f/result.json`。仍分别失败于 `159..181` 的待定 callable
+  签名和 `193..201` 的缺少列表元素域，与此前取证相同；没有更改预期或隐藏失败。
+- 修改的 Rust 文件格式检查退出 0，`/tmp/luna-tools-7exef8xd/result.json`。
+  没有执行全 workspace、native 或性能基准。
 
 #### 完整包检查凭证也是迁移边界
 
@@ -980,7 +1024,7 @@ CodeSession 的包指针后复用旧准入。活动任务、receipt 和 VM cell 
 | `required.rs` 的 `check_package_with_evidence` 与 `validate_machine_operations_checked` | 整包 phase 完成证据及独立的算术安全检查 | 完整根保留现有快路径；源码片段交付须带与实际片段、binder 和世界匹配的检查证据 |
 | `RequiredWorld::with_phase`／`CodeSession::with_phase_checked_source` | 对同一个不可变 Package 的整包凭证 | 不把部分目录升级为 PhaseCheckedPackage；源码服务和活动任务使用独立 owner，不伪造完整包 |
 | `declaration_index::Functions` | `Declarations<Function>` | 声明观察与代码取得分别查询；未知身份、已知合法模板及可执行代码是不同状态 |
-| `prepare_invocation` | 通过完整 Function 读接口，且用 `body.source` 取得诊断位置 | 声明来源必须独立可得；签名、输入准入、形成条件与入口快照不要求借到主体 |
+| `prepare_invocation` | 通过 FunctionDeclarationView 读取接口及来源；底层适配器仍依赖完整 Function | 源码服务须直接发布声明来源；消费端已不接收主体，但尚未解除目录的完整代码要求 |
 | `prepare_invocation_step` 的 Entry → Body | 同步取得、特化和重绑定完整主体 | 入口契约成功后在原 activation 等待代码，响应不得再次 bind inputs、运行入口契约或建立新调用 |
 
 `nir::phases::Inspection` 与 `PhaseCheckedPackage` 也必须区别：前者拥有相同
