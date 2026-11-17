@@ -183,7 +183,20 @@ impl Checker<'_, '_> {
                 }),
                 "splice",
                 expr.span,
-            )?
+            )
+            .map_err(|mut failure| {
+                // Preserve the selection failure and its retry classification.
+                // The implicit conversion otherwise looks like a failed lookup
+                // of the source field or method at this same source range.
+                failure.notes.push(DiagnosticNote {
+                    source: source(expr.span),
+                    message: format!(
+                        "while selecting cross-stage Splice conversion from {}",
+                        value.ty
+                    ),
+                });
+                failure
+            })?
             .ok_or_else(|| error(expr.span, "Splice conversion has no selected method"))?;
         // A prepared prefix is already an elaborated input; finish_call still
         // checks ordinary contracts, specializes staged inputs and preserves

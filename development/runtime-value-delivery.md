@@ -125,6 +125,54 @@ Value 也不意味着一律属于 runtime。两者均持有原域和程序；Dis
 所有权仍依赖既有调用/检查后继；这不是新的全局阶段推断器。特别是不能用 Source
 标记掩盖输入未完成，也不能根据最终期望类型去猜测该读源域还是目标域。
 
+### callable 字段的观察与调用
+
+嵌套 callee `data.callback.apply(false)` 暴露了字段入口之外的旧路径：
+`resolve_receiver` 先通过普通 expr 交付 `data.callback`，然后才发现 `apply`
+是数据字段。因此即使 callback 只供源字段观察，也会错误地要求它具有 Splice。
+方法探查现在先取得相同的 Operand；未指定显式接口、无上下文接口且源结构确有该
+字段时，退回字段调用路径。真正的方法接收者仍按交付及接口选择规则检查；不存在
+字段、转换失败与接口选择失败不能互相吞掉。名义和匿名记录复用字段判断。
+
+`invocation_callee` 对已排除关联值／静态方法的投影保留 callee 消费标记。取得
+comptime callable 后，在源阶段调用，只交付结果；runtime callable 仍选择其
+Splice。该标记只覆盖本次表达式检查，成功与失败均恢复外层状态。
+
+旧 `transported_runtime_methods_preserve_clause_domains_and_nested_storage` 的
+408..419 恰为 `value.apply`，并非 Factory.make。真实 sysroot 缺少该函数类型的
+Splice；这不是关联签名传送失败。该原正例保留原有断言，标为缺库实现而 ignored，
+不把缺失能力改成语言禁止，也不添加任意函数免转换规则。
+`runtime_method_field_transport_obeys_explicit_conversion` 使用本地 Transfer 协议
+隔离传送，保留方法／普通函数、true／false 子句与关联结果域，并检查删除实现时
+拒绝、转换返回另一个函数时生成程序确实调用另一个函数。它不是六包公开接口验收。
+Splice 选择失败现在附注实际源域，保留原选择错误、位置和重试分类，避免将隐式
+转换错误误认作同位置的用户方法查找错误。
+
+真实 sysroot 的 `projected_comptime_callees_are_invoked_before_result_delivery`
+检查已完成顶层常量中的嵌套 comptime callable，包括 quote 内调用，并拒绝向该
+comptime callable 传入 runtime 参数。生成器形参或局部数据未供应时的相同表达式
+仍受定义检查提前索值阻塞，复现见
+[待供应生成器 callee](repros/projected-callee-generator-input.fl)；本阶段不跳过该检查，
+也不声称已完成源码／VM 后继。
+
+验证工作目录 `/home/fin/luna`，使用 `development/check.py --timeout 900 -- test`：
+
+- 改动前重跑旧 CMTT 传送及嵌套指针观察用例，
+  `/tmp/luna-tools-owx5nn8n/result.json` 退出 101，两项均复现；指针观察用例未在
+  本阶段修改，仍需按标量存储的分离规则核对其旧拒绝断言。
+- 新投影 callee 对照在改动方法探查前失败于 `data.callback` 的 Nominal 转换，
+  `/tmp/luna-tools-smbaezwr/result.json` 退出 101；显式函数转换对照通过。
+- `-p luna --test cmtt_methods --test library_std --no-fail-fast -- --test-threads=1`：
+  `/tmp/luna-tools-mzo4a0lb/result.json` 退出 101。方法组 162 项通过、一项原库
+  缺口 ignored；新增测试中的生成器局部 const 暴露上述提前索值缺口。标准库组
+  14 项全部通过，包括 LLVM O0/O3 字段观察与转换次数、文件资源和实际输出。
+- 将正例明确为已完成的顶层源常量、保留生成器缺口复现，并增加 runtime 参数
+  拒绝后，以 `-p luna --test cmtt_methods -- --test-threads=1
+  projected_comptime_callees_are_invoked_before_result_delivery
+  runtime_method_field_transport_obeys_explicit_conversion` 复验，
+  `/tmp/luna-tools-uemewopj/result.json` 退出 0，两项通过。生产实现与上项相同；
+  不把分次检查记为完整方法组一次全绿，也不把本地 Transfer 当作 builtin 接线。
+
 ### 生成器定义检查与实际调用的交接
 
 `check_code_generator` 以 `Argument::Data(None)` 检查尚无实际输入的定义，再通过

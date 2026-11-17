@@ -2349,18 +2349,35 @@ impl Checker<'_, '_> {
         };
         // Keep a dereferenced receiver as a provisional place. Selection may
         // cancel this read when the chosen method needs its original address.
-        let mut receiver = if let Some(pointer) = self.dereferenced_place(base)? {
+        let operand = if let Some(pointer) = self.dereferenced_place(base)? {
             let Term::Pointer(ty) = &pointer.ty else {
                 unreachable!()
             };
-            n::Expr {
+            splicing::Operand::Value(n::Expr {
                 ty: (**ty).clone(),
                 source: source(base.span),
                 kind: K::ReadPointer(Box::new(pointer)),
-            }
+            })
         } else {
-            self.expr(base, None)?
+            self.field_operand(base)?
         };
+        // A source aggregate is observed before its field is delivered. Method
+        // probing must not convert a nested receiver just to discover that the
+        // callee is a stored field. Explicit interfaces keep their priority.
+        if let splicing::Operand::Source(receiver) = &operand
+            && interface.is_none()
+            && domain_method.is_none()
+        {
+            let subject = self.method_subject_view(&receiver.ty, base.span)?;
+            if self
+                .context_member_interface(&subject, name.name.as_str(), expr.span)?
+                .is_none()
+                && self.receiver_has_field(&subject, name.name.as_str(), base.span)?
+            {
+                return Ok(None);
+            }
+        }
+        let mut receiver = self.deliver_operand(base, operand, None)?;
         let interface_source = interface;
         let interface = interface
             .map(|expr| self.interface_expr_for(expr, &receiver.ty))
@@ -2387,17 +2404,10 @@ impl Checker<'_, '_> {
                 None => self.context_member_interface(&subject, name.name.as_str(), expr.span)?,
             };
             // Structural callable fields keep their source priority.
-            if candidate_interface.is_none() {
-                self.ensure_nominal_type(&subject, base.span)?;
-                if let Term::Nominal { declaration, .. } = &subject {
-                    if self.structs.get(declaration).is_some_and(|s| {
-                        s.fields
-                            .iter()
-                            .any(|(field, _)| field == name.name.as_str())
-                    }) {
-                        return Ok(None);
-                    }
-                }
+            if candidate_interface.is_none()
+                && self.receiver_has_field(&subject, name.name.as_str(), base.span)?
+            {
+                return Ok(None);
             }
             let absent_at_pointer = if let Some(interface) = &candidate_interface {
                 matches!(subject, Term::Pointer(_))
@@ -2544,6 +2554,24 @@ impl Checker<'_, '_> {
         }
         self.require(&receiver.ty, target, base.span)?;
         Ok(Some((method, vec![receiver])))
+    }
+
+    fn receiver_has_field(
+        &mut self,
+        subject: &Term,
+        name: &str,
+        span: Span,
+    ) -> Result<bool, Error> {
+        self.ensure_nominal_type(subject, span)?;
+        let fields = match subject {
+            Term::Nominal { declaration, .. } => self
+                .structs
+                .get(declaration)
+                .map(|definition| &definition.fields),
+            Term::Record(fields) => Some(fields),
+            _ => None,
+        };
+        Ok(fields.is_some_and(|fields| fields.iter().any(|(field, _)| field == name)))
     }
 }
 
@@ -2969,6 +2997,13 @@ impl Checker<'_, '_> {
             {
                 return Ok(method);
             }
+            // A projected comptime callable is an invocation input, just like
+            // a directly named one. Only its result enters runtime data flow;
+            // runtime callable fields still require their selected conversion.
+            let saved = self.comptime_callee_result.replace(callee.hir_id);
+            let value = self.expr(callee, None);
+            self.comptime_callee_result = saved;
+            return value;
         }
         self.expr(callee, None)
     }

@@ -773,6 +773,9 @@ Function；不先建立 Unit 占位再替换。以上是声明消费者的迁移
   `/tmp/luna-tools-lviozzbq/result.json` 退出 101，复现相同位置与诊断；随后按保存内容
   逐字节恢复本阶段生产文件。其他工作区修改未触碰。该既有失败仍未修复，不能将
   集成组整体记为通过，也不改变测试预期。
+  后续[callable 字段核对](runtime-value-delivery.md#callable-字段的观察与调用)将
+  这一失败定位为缺少库 Splice，保留原正例为待实现验收；它与新发现的嵌套源接收者
+  过早交付、comptime callee 角色丢失分别处理。
 
 - 指针观察扩展检查：同入口运行 `test -p luna --test execution -- pointer_observations --test-threads=1`，
   `/tmp/luna-tools-ac4abr98/result.json` 退出 101，10 项通过；

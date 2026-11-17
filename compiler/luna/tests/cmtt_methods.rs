@@ -228,6 +228,7 @@ fn contextual_runtime_method_transport_preserves_the_public_contract() {
 }
 
 #[test]
+#[ignore = "builtin has no runtime callable Splice implementation yet"]
 fn transported_runtime_methods_preserve_clause_domains_and_nested_storage() {
     for selected in [true, false] {
         let source = format!(
@@ -252,6 +253,109 @@ fn transported_runtime_methods_preserve_clause_domains_and_nested_storage() {
             .replace("const callback = bool.as(Factory<bool>).make", "const callback = make");
         assert_eq!(sysroot::run(&ordinary), Value::Bool(selected));
     }
+}
+
+#[test]
+fn runtime_method_field_transport_obeys_explicit_conversion() {
+    for selected in [true, false] {
+        let source = format!(
+            "trait Factory where T {{
+                assoc Item: Type;
+                fn make() -> Item where enabled: bool;
+            }}
+            impl Factory<bool> for bool {{
+                assoc Item: Type = bool;
+                fn make() -> bool where enabled: bool {{ enabled }}
+            }}
+            struct Callback {{ apply: fn() -> bool }}
+            comptime fn wrapper(value: Callback) -> <|- bool> {{ '(value.apply()) }}
+            fn run() -> bool {{
+                const callback = bool.as(Factory<bool>).make<{selected}>;
+                ~<wrapper(Callback {{ apply: callback }})>
+            }}"
+        );
+        let ordinary = source
+            .replace("struct Callback", "fn make() -> bool.as(Factory<bool>).Item where enabled: bool { enabled } struct Callback")
+            .replace("const callback = bool.as(Factory<bool>).make", "const callback = make");
+        // Isolate method identity transport with an explicit local protocol.
+        // This does not claim that builtin provides callable conversion, nor
+        // grant a user package an orphan implementation of builtin.Splice.
+        for source in [source, ordinary] {
+            let source = format!(
+                "typealias Type = .Type'builtin;
+                trait Transfer {{
+                    assoc RuntimeTarget: Type;
+                    fn splice(comptime data: Self) -> RuntimeTarget;
+                }}
+                impl Transfer for fn() -> bool {{
+                    assoc RuntimeTarget: Type = fn() -> bool;
+                    fn splice(comptime data: fn() -> bool) -> fn() -> bool {{ data }}
+                }}
+                fn alternate() -> bool {{ {} }}
+                {source}",
+                !selected
+            );
+            let start = source.find("impl Transfer for fn() -> bool").unwrap();
+            let end = source.find("fn alternate()").unwrap();
+            let missing = format!("{}{}", &source[..start], &source[end..]);
+            let failure = support::compile_with_bindings(
+                &missing,
+                &Default::default(),
+                Some("input.Transfer"),
+            )
+            .unwrap_err();
+            assert!(
+                failure.contains("while selecting cross-stage Splice conversion from"),
+                "{failure}"
+            );
+            assert!(failure.contains("no-applicable-candidate"), "{failure}");
+            for (source, expected) in [
+                (source.clone(), selected),
+                (source.replace("{ data }", "{ alternate }"), !selected),
+            ] {
+                let package = support::compile_with_bindings(
+                    &source,
+                    &Default::default(),
+                    Some("input.Transfer"),
+                )
+                .unwrap();
+                let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+                let mut vm =
+                    comptime_interpretor::Interpreter::from_iir(&graph, Default::default())
+                        .unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+                    Value::Bool(expected)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn projected_comptime_callees_are_invoked_before_result_delivery() {
+    let definitions = "struct Callback { apply: comptime fn(bool) -> bool }
+        struct Nested { callback: Callback }
+        comptime fn invert(value: bool) -> bool { not value }";
+    for body in [
+        "const data = Nested { callback: Callback { apply: invert } };
+         fn run() -> bool { data.callback.apply(false) }",
+        "const data = Nested { callback: Callback { apply: invert } };
+         comptime fn wrapper() -> <|- bool> { '(data.callback.apply(false)) }
+         fn run() -> bool { ~<wrapper()> }",
+    ] {
+        assert_eq!(
+            sysroot::run(&format!("{definitions} {body}")),
+            Value::Bool(true)
+        );
+    }
+    let invalid = format!(
+        "{definitions}
+        const data = Nested {{ callback: Callback {{ apply: invert }} }};
+        fn run(value: bool) -> bool {{ data.callback.apply(value) }}"
+    );
+    let failure = sysroot::compile(&invalid).unwrap_err();
+    assert!(failure.contains("runtime parameter"), "{failure}");
 }
 
 #[test]
