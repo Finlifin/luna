@@ -56,100 +56,26 @@ pub(super) fn domains(
 }
 
 pub(super) fn validate_frame<'a>(
-    function: &'a crate::program::Function,
+    function: crate::contracts::CallableProgram<'a>,
     quote: bool,
     fuel: &mut usize,
 ) -> Result<&'a [crate::Parameter], Failure> {
-    let messages = if quote {
-        [
-            "quote template parameter frame has no callable signature",
-            "quote template parameter frame arity mismatch",
-            "duplicate quote template parameter identity",
-            "invalid quote template parameter default slot",
-        ]
-    } else {
-        [
-            "function parameter frame has no callable signature",
-            "function parameter frame arity mismatch",
-            "duplicate function parameter identity",
-            "invalid function parameter default slot",
-        ]
-    };
-    let source = function.body.source;
-    let fail = |index: usize| {
-        Failure::Invalid(super::Error {
-            kind: super::ErrorKind::Invalid,
-            source,
-            message: messages[index],
-        })
-    };
-    let budget = || {
-        Failure::Budget(super::Error {
-            kind: super::ErrorKind::Budget,
-            source,
-            message: "function parameter frame validation budget exhausted",
-        })
-    };
-    *fuel = fuel
-        .checked_sub(function.parameters.len().saturating_add(1))
-        .ok_or_else(budget)?;
-    *fuel = fuel
-        .checked_sub(function.defaults.len())
-        .ok_or_else(budget)?;
-    crate::type_computations::charge_term(&function.signature, fuel).map_err(|_| budget())?;
-    let Term::Function { parameters, .. } = function.signature.callable_signature() else {
-        return Err(fail(0));
-    };
-    if parameters.len() != function.parameters.len() {
-        return Err(fail(1));
-    }
-    let mut positions = BTreeMap::new();
-    for (slot, binding) in function.parameters.iter().enumerate() {
-        if positions.insert(*binding, slot).is_some() {
-            return Err(fail(2));
+    function.validate_input_frame(fuel).map_err(|failure| {
+        let diagnostic = super::Error {
+            kind: if failure.is_budget() {
+                super::ErrorKind::Budget
+            } else {
+                super::ErrorKind::Invalid
+            },
+            source: failure.source,
+            message: failure.message(quote),
+        };
+        if failure.is_budget() {
+            Failure::Budget(diagnostic)
+        } else {
+            Failure::Invalid(diagnostic)
         }
-    }
-    let mut defaults = BTreeSet::new();
-    if function
-        .defaults
-        .iter()
-        .any(|(slot, _)| *slot >= parameters.len() || !defaults.insert(*slot))
-    {
-        return Err(fail(3));
-    }
-    for (slot, value) in &function.defaults {
-        let free = crate::free_bindings::collect(value, fuel).map_err(|reason| {
-            let diagnostic = |kind, message| super::Error {
-                kind,
-                source: value.source,
-                message,
-            };
-            match reason {
-                crate::free_bindings::Error::Budget(_) | crate::free_bindings::Error::Depth(_) => {
-                    Failure::Budget(diagnostic(
-                        super::ErrorKind::Budget,
-                        "function default binding analysis budget exhausted",
-                    ))
-                }
-                crate::free_bindings::Error::Invalid(_) => Failure::Invalid(diagnostic(
-                    super::ErrorKind::Invalid,
-                    "invalid function default binding scope",
-                )),
-            }
-        })?;
-        if free.iter().any(|binding| {
-            positions
-                .get(binding)
-                .is_none_or(|position| position >= slot)
-        }) {
-            return Err(Failure::Invalid(super::Error {
-                kind: super::ErrorKind::Invalid,
-                source: value.source,
-                message: "function default references an unavailable parameter binding",
-            }));
-        }
-    }
-    Ok(parameters)
+    })
 }
 
 /// Per-callable inspection data. It borrows the original telescope and owns
@@ -433,22 +359,46 @@ mod tests {
     fn frame_indices_defaults_and_signatures_share_the_callers_budget() {
         let value = function(10);
         let mut generous = 1000;
-        validate_frame(&value, false, &mut generous).unwrap();
+        validate_frame(
+            crate::contracts::CallableProgram::declaration(&value.interface, value.body.source),
+            false,
+            &mut generous,
+        )
+        .unwrap();
         let cost = 1000 - generous;
         assert!(cost > 0);
         let mut fuel = cost;
-        validate_frame(&value, false, &mut fuel).unwrap();
+        validate_frame(
+            crate::contracts::CallableProgram::declaration(&value.interface, value.body.source),
+            false,
+            &mut fuel,
+        )
+        .unwrap();
         assert_eq!(fuel, 0);
         assert!(matches!(
-            validate_frame(&value, true, &mut fuel),
+            validate_frame(
+                crate::contracts::CallableProgram::declaration(&value.interface, value.body.source),
+                true,
+                &mut fuel
+            ),
             Err(Failure::Budget(_))
         ));
         let mut fuel = cost - 1;
-        let failure = validate_frame(&value, false, &mut fuel).unwrap_err();
+        let failure = validate_frame(
+            crate::contracts::CallableProgram::declaration(&value.interface, value.body.source),
+            false,
+            &mut fuel,
+        )
+        .unwrap_err();
         assert!(matches!(failure, Failure::Budget(_)));
         assert_eq!(failure.into_diagnostic().source, value.defaults[0].1.source);
         assert_eq!(fuel, 0);
-        validate_frame(&value, true, &mut 1000).unwrap();
+        validate_frame(
+            crate::contracts::CallableProgram::declaration(&value.interface, value.body.source),
+            true,
+            &mut 1000,
+        )
+        .unwrap();
 
         let mut duplicate = value.clone();
         duplicate
@@ -461,7 +411,14 @@ mod tests {
         parameters.push(parameters[0].clone());
         for quote in [false, true] {
             assert!(matches!(
-                validate_frame(&duplicate, quote, &mut 1000),
+                validate_frame(
+                    crate::contracts::CallableProgram::declaration(
+                        &duplicate.interface,
+                        duplicate.body.source
+                    ),
+                    quote,
+                    &mut 1000
+                ),
                 Err(Failure::Invalid(_))
             ));
         }

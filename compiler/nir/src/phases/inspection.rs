@@ -100,6 +100,13 @@ impl<'a> Inspection<'a> {
             .map(|declarations| Arc::clone(&declarations.parameter_domains))
     }
 
+    /// Structural input-frame admission in this exact immutable source. This
+    /// says nothing about executable bodies, phases or invocation arguments.
+    /// Querying evidence never initiates preparation or publishes partial work.
+    pub fn admitted_callable_frames(&self, package: &Package) -> bool {
+        std::ptr::eq(self.package(), package) && self.declarations.get().is_some()
+    }
+
     pub fn check(&self, body: &Expr, fuel: &mut usize) -> Result<(), Error> {
         let declarations = self.declarations(body.source, fuel)?;
         PhaseContext::new(self.package(), declarations).check_comptime(body, fuel)
@@ -253,11 +260,15 @@ mod tests {
     fn completed_phase_evidence_requires_all_bodies_and_retains_exact_source() {
         let source = source();
         let inspection = Inspection::new(&source);
+        assert!(!inspection.admitted_callable_frames(&source));
         assert!(inspection.check_package_with_evidence(&mut 2).is_err());
+        assert!(!inspection.admitted_callable_frames(&source));
         let checked = inspection
             .check_package_with_evidence(&mut 100_000)
             .unwrap();
+        assert!(inspection.admitted_callable_frames(&source));
         let copied = Arc::new(source.as_ref().clone());
+        assert!(!inspection.admitted_callable_frames(&copied));
         assert!(checked.inspection_for(&copied).is_none());
         assert!(checked.retain_in(copied).is_none());
         let retained = checked.retain_in(source.clone()).unwrap();
@@ -285,6 +296,7 @@ mod tests {
         // A complete declaration directory cannot certify invalid bodies.
         inspection.check(&flag(), &mut 100_000).unwrap();
         assert!(inspection.admitted_parameter_domains(&invalid).is_some());
+        assert!(inspection.admitted_callable_frames(&invalid));
         for _ in 0..2 {
             assert!(matches!(
                 inspection.check_package_with_evidence(&mut 100_000),

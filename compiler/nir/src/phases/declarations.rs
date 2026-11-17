@@ -76,8 +76,12 @@ impl Declarations {
                     message: "invalid or duplicate quote template identity",
                 });
             }
-            let parameters = parameters::validate_frame(template, true, declaration_fuel)
-                .map_err(parameters::Failure::into_diagnostic)?;
+            let parameters = parameters::validate_frame(
+                CallableProgram::declaration(&template.interface, template.body.source),
+                true,
+                declaration_fuel,
+            )
+            .map_err(parameters::Failure::into_diagnostic)?;
             if parameters
                 .iter()
                 .any(|parameter| parameter.sort != Sort::Runtime)
@@ -113,7 +117,25 @@ impl Declarations {
             message: error.message(),
         })?;
         for function in &package.functions {
-            parameters::validate_frame(function, false, declaration_fuel)
+            parameters::validate_frame(
+                CallableProgram::declaration(&function.interface, function.body.source),
+                false,
+                declaration_fuel,
+            )
+            .map_err(parameters::Failure::into_diagnostic)?;
+        }
+        for method in package
+            .traits
+            .iter()
+            .flat_map(|interface| &interface.methods)
+        {
+            let view = CallableProgram::method(method).map_err(|_| {
+                Error::invalid(
+                    SourceRange { start: 0, end: 0 },
+                    "invalid trait program contract signature",
+                )
+            })?;
+            parameters::validate_frame(view, false, declaration_fuel)
                 .map_err(parameters::Failure::into_diagnostic)?;
         }
         let functions: BTreeMap<_, _> = package

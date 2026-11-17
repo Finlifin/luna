@@ -1246,6 +1246,11 @@ impl<'a> Interpreter<'a> {
         if positions.is_none() && admitted_domains.is_none() {
             invocation_budget::validate_opaque_metadata(package, &mut budget)?;
         }
+        if positions.is_none()
+            && !inspection.is_some_and(|inspection| inspection.admitted_callable_frames(package))
+        {
+            invocation_budget::validate_callable_frames(package, &mut budget)?;
+        }
         let completed_tuple_heads = package
             .normal_forms
             .iter()
@@ -1265,20 +1270,6 @@ impl<'a> Interpreter<'a> {
                     member.signature.ordinary(),
                     Ok(Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_))
                 ) {
-                    return Err(invalid());
-                }
-                let Ok(Term::Function { parameters, .. }) = member.signature.callable_signature()
-                else {
-                    return Err(invalid());
-                };
-                if member.parameter_bindings.len() != parameters.len()
-                    || member
-                        .parameter_bindings
-                        .iter()
-                        .collect::<BTreeSet<_>>()
-                        .len()
-                        != parameters.len()
-                {
                     return Err(invalid());
                 }
                 if !names.insert(&member.name) || !members.insert(member.declaration) {

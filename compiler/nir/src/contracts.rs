@@ -1,11 +1,13 @@
 //! Program specifications, kept separate from type predicates and trait selection.
 mod alignment;
+mod input_frame;
 mod program_view;
 use crate::program::{
     EntrySnapshot, Expr, ExprKind as K, FunctionDeclaration, FunctionPhase, LocalId, MethodContract,
 };
 use crate::{DeclarationId, Term, TypeError};
 pub use alignment::BindingAlignment;
+pub use input_frame::{InputFrameError, InputFrameErrorKind};
 pub use program_view::CallableProgram;
 use std::{collections::BTreeMap, fmt};
 

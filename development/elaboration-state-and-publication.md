@@ -898,6 +898,45 @@ S-expression Display，完整函数的既有 dump 结构保持不变。
 当前 Package 与 VM 注册表仍只收录完整函数。不能因为声明类型不含 body 就宣称
 未调用定义可跳过检查，或已经能在等待 Type 时恢复同一次 invocation。
 
+普通输入帧的结构准入现在使用
+`CallableProgram::validate_input_frame`，直接接收声明视图：检查 callable telescope、
+绑定数量及唯一性、默认供应槽位，以及默认表达式只能读取已经声明的前序参数。
+默认内部的局部绑定仍由共同 free-bindings 遍历处理。返回值借用原声明的参数域，
+不复制签名、不读取或执行主体，也不为接口制造 Unit 代码。
+
+phase 声明目录与 VM 冷构造共用此入口，覆盖普通函数、quote template 和没有主体
+的 trait 方法接口。VM 原独立的方法绑定计数／去重检查已删除；原先未经 phase
+凭据的直接 VM 构造没有统一检查普通函数帧，现在在发布 VM 前拒绝错误帧。只有
+同一不可变 source owner 已完成的 phase 目录或 SourceIndexes 可以省略重复准入；
+VM 通过 `Inspection::admitted_callable_frames` 单独查询该事实，不把参数域表本身
+当作准入凭据。查询不发起准备，错误帧／未完成目录不发布事实，别的 source 即使
+内容相同也不能复用；完整目录仍不能证明一个不合法主体可执行。
+预算失败与无效绑定分别报告；默认表达式分析错误保留默认值自身的位置。
+
+这只证明输入帧的结构和默认绑定可见性。默认值的类型、result／entry snapshot
+约束、程序契约、phase、资源及代码安全仍由各自检查负责；没有新增执行授权。
+现有 Package adapter 仍从已检查 body 取得诊断位置，源码声明独立发布和未完成
+主体取得尚未实现。VM 构造成本不随主体语句数增加的测试，只证明该准入不扫描
+主体，不能推导完整编译成本或一般源码 continuation 已完成。
+
+验证基线 `a10c82c5`，工作目录 `/home/fin/luna`，统一经
+`python3 -B development/check.py --timeout 900 --`：
+
+- `test -p nir --lib -p comptime_interpretor --test callable_frame_admission
+  --no-fail-fast -- --test-threads=1`：首轮与显式证据查询接线后的最终复核均退出 0，
+  `/tmp/luna-tools-eecyeo_7/result.json`、`/tmp/luna-tools-7tao7ocd/result.json`。
+  包含无主体声明、错误帧在注册时拒绝、逐预算耗尽／恢复、quote 不获执行权，
+  以及已有 source owner、缓存权限和 VM 驱动回归。
+- `test -p nir -p comptime_interpretor -p luna --test phases
+  --test runtime_function_identities --test instance_budget --test default_calls
+  --test declaration_contracts --test staged_callable_freezing --test library_std_format
+  --no-fail-fast -- --test-threads=1`：退出 0，
+  `/tmp/luna-tools-pt2f9npd/result.json`，覆盖 phase、运行时身份、实例预算、源码
+  默认值和契约、冻结 callable 及真实 sysroot 格式扫描；随后仅将复用条件改为上述
+  显式同源证据查询，并完成前一项的最终复核。没有修改失败预期或解除 ignored。
+- 九个修改／新增 Rust 文件定向 rustfmt `--check` 退出 0，
+  `/tmp/luna-tools-fesekzri/result.json`；未运行全 workspace 检查。
+
 #### 程序契约使用声明，不制造可执行主体
 
 `MethodContract::program_summary_declaration_inputs` 交付独立 FunctionDeclaration，
