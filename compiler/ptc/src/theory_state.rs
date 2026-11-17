@@ -1,7 +1,9 @@
-//! Query-local reversible equality closure and integer potentials. Checkers and
-//! conflict minimization use fresh theory state rather than this acceleration.
-use super::{Atom, Search, TheoryModel, UnknownReason, integer};
+//! Query-local reversible equality closure, validated type facts and integer
+//! potentials. Checkers and conflict minimization use fresh theory state.
+use super::{Atom, Search, TheoryModel, TypeKind, UnknownReason, integer};
 mod propagation;
+#[cfg(test)]
+mod reuse_tests;
 use std::{collections::BTreeSet, fmt};
 
 pub(super) enum Check {
@@ -84,6 +86,10 @@ struct Layer {
 pub(super) struct State {
     classes: Classes,
     integers: integer::State,
+    // Successful type-theory synchronization for the retained facts/classes.
+    // Integer additions do not change this closure. Retractions invalidate it;
+    // a failed extension must never replace the last committed summary.
+    kinds: Option<Vec<(usize, TypeKind, bool)>>,
     // Each admitted atom has exactly one introduction layer, not one copy in
     // every later layer. Pending atoms have not yet earned retained evidence.
     facts: Vec<Option<(bool, usize)>>,
@@ -110,6 +116,7 @@ impl State {
         Ok(Self {
             classes: Classes::new(count),
             integers: integer::State::new(atoms, fuel)?,
+            kinds: None,
             facts: vec![None; assignment.len()],
             layers: Vec::new(),
             pending: assignment
@@ -170,6 +177,7 @@ impl State {
         }
         self.classes.rollback(checkpoint);
         self.integers.rollback(integers);
+        self.kinds = None;
         Ok(())
     }
     // Caller reserves pending traversal and snapshot work before publication.
@@ -200,7 +208,21 @@ impl State {
 }
 impl fmt::Display for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(theory-state {} {} (facts", self.classes, self.integers)?;
+        write!(
+            f,
+            "(theory-state {} {} (type-summary",
+            self.classes, self.integers
+        )?;
+        match &self.kinds {
+            None => write!(f, " pending")?,
+            Some(kinds) => {
+                write!(f, " checked")?;
+                for (root, kind, truth) in kinds {
+                    write!(f, " (kind {root} {kind:?} {truth})")?;
+                }
+            }
+        }
+        write!(f, ") (facts")?;
         for (atom, fact) in self.facts.iter().enumerate() {
             if let Some((value, layer)) = fact {
                 write!(f, " (atom {atom} {value} (layer {layer}))")?;
@@ -260,27 +282,35 @@ impl Search<'_> {
         }
         let checkpoint = state.classes.checkpoint();
         let integers = state.integers.checkpoint();
-        // Building roots, dependency vectors and a first dirty frontier costs
-        // at least four linear passes. Small catalogs are cheaper to scan.
-        let count = self.terms.nodes.len();
-        let pair_count = count.saturating_mul(count.saturating_sub(1)) / 2;
-        let baseline = if state.layers.is_empty() || pair_count <= count.saturating_mul(4) {
-            Ok(None)
-        } else if let Some(remaining) = self.steps.checked_sub(self.terms.nodes.len()) {
-            self.steps = remaining;
-            Ok(Some(
-                (0..self.terms.nodes.len())
-                    .map(|id| state.classes.root(id))
-                    .collect(),
-            ))
-        } else {
-            Err(UnknownReason::BudgetExhausted)
-        };
         let result = (|| {
-            let Some(kinds) =
-                self.type_theory_with_classes(assignment, &mut state.classes, baseline?)?
-            else {
-                return Ok(Check::Conflict);
+            let mut type_changed = state.kinds.is_none();
+            for &index in &state.pending {
+                charge(&mut self.steps, 1)?;
+                if state.facts[index].is_none() && assignment[index].is_some() {
+                    // Only IntLe is independent of this type closure. New atom
+                    // kinds must be rechecked unless their separation is known.
+                    type_changed |= !matches!(self.atoms[index], Atom::IntLe(_));
+                }
+            }
+            let next_kinds = if type_changed {
+                // Building roots, dependency vectors and a first dirty frontier
+                // costs at least four passes. Small catalogs are cheaper to scan.
+                let count = self.terms.nodes.len();
+                let pair_count = count.saturating_mul(count.saturating_sub(1)) / 2;
+                let baseline = if state.layers.is_empty() || pair_count <= count.saturating_mul(4) {
+                    None
+                } else {
+                    charge(&mut self.steps, count)?;
+                    Some((0..count).map(|id| state.classes.root(id)).collect())
+                };
+                let Some(kinds) =
+                    self.type_theory_with_classes(assignment, &mut state.classes, baseline)?
+                else {
+                    return Ok(Check::Conflict);
+                };
+                Some(kinds)
+            } else {
+                None
             };
             for &index in &state.pending {
                 charge(&mut self.steps, 1)?;
@@ -307,15 +337,23 @@ impl Search<'_> {
                 });
             charge(&mut self.steps, cost)?;
             let result = if capture_model {
+                let kinds = next_kinds
+                    .as_ref()
+                    .or(state.kinds.as_ref())
+                    .expect("checked type closure");
+                charge(&mut self.steps, kinds.len())?;
                 Check::Model(TheoryModel {
                     classes: state.classes.snapshot(),
-                    kinds,
+                    kinds: kinds.clone(),
                     integers: state.integers.model(&mut self.steps)?,
                 })
             } else {
                 Check::Consistent
             };
             state.commit(assignment);
+            if let Some(kinds) = next_kinds {
+                state.kinds = Some(kinds);
+            }
             Ok(result)
         })();
         if matches!(result, Err(_) | Ok(Check::Conflict)) {
