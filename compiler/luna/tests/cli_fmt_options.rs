@@ -1,3 +1,4 @@
+//! Formatter configuration, I/O and failure contracts through the public CLI.
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ impl TempDir {
     fn new(prefix: &str) -> Self {
         let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "flurryfmt_stage3_{prefix}_{}_{id}",
+            "luna_fmt_options_{prefix}_{}_{id}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
@@ -38,17 +39,13 @@ impl Drop for TempDir {
     }
 }
 
-fn flurryfmt_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_flurryfmt")
+fn luna_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_luna")
 }
 
-fn run_flurryfmt(
-    args: &[&str],
-    stdin_data: Option<&str>,
-    cwd: Option<&Path>,
-) -> (i32, String, String) {
-    let mut cmd = Command::new(flurryfmt_bin());
-    cmd.args(args);
+fn run_fmt(args: &[&str], stdin_data: Option<&str>, cwd: Option<&Path>) -> (i32, String, String) {
+    let mut cmd = Command::new(luna_bin());
+    cmd.arg("fmt").args(args);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -60,7 +57,7 @@ fn run_flurryfmt(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().expect("spawn flurryfmt");
+    let mut child = cmd.spawn().expect("spawn luna fmt");
     if let Some(data) = stdin_data {
         child
             .stdin
@@ -69,7 +66,7 @@ fn run_flurryfmt(
             .write_all(data.as_bytes())
             .expect("write stdin");
     }
-    let out = child.wait_with_output().expect("wait flurryfmt");
+    let out = child.wait_with_output().expect("wait luna fmt");
     let code = out.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -77,15 +74,15 @@ fn run_flurryfmt(
 }
 
 #[test]
-fn stdin_default_and_dash_format_to_stdout() {
+fn explicit_stdin_and_emit_stdout_format_without_touching_files() {
     let input = "pub inline pure fn add(a:i32,b:i32)->i32{a + b}\n";
     let expected = "pub pure inline fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
 
-    let (code1, out1, err1) = run_flurryfmt(&[], Some(input), None);
+    let (code1, out1, err1) = run_fmt(&["-"], Some(input), None);
     assert_eq!(code1, 0, "stderr: {err1}");
     assert_eq!(out1, expected);
 
-    let (code2, out2, err2) = run_flurryfmt(&["-"], Some(input), None);
+    let (code2, out2, err2) = run_fmt(&["-", "--emit", "stdout"], Some(input), None);
     assert_eq!(code2, 0, "stderr: {err2}");
     assert_eq!(out2, expected);
 }
@@ -100,7 +97,7 @@ fn check_diff_color_and_files_with_diff_modes() {
     let file_b = tmp.write("b.fl", "fn clean(x: i32) -> i32 {\n    x\n}\n");
 
     // `--check --color never` exits 1 and prints unified diff header & +/- lines.
-    let (code, out, err) = run_flurryfmt(
+    let (code, out, err) = run_fmt(
         &[
             "--check",
             "--color",
@@ -131,7 +128,7 @@ fn check_diff_color_and_files_with_diff_modes() {
     );
 
     // `--check --color always` emits ANSI color escapes.
-    let (code_c, out_c, _) = run_flurryfmt(
+    let (code_c, out_c, _) = run_fmt(
         &["--check", "--color=always", file_a.to_str().unwrap()],
         None,
         None,
@@ -142,7 +139,7 @@ fn check_diff_color_and_files_with_diff_modes() {
     assert!(out_c.contains("\x1b[32m+"), "stdout:\n{out_c}");
 
     // `--check -l` prints only the path with diffs.
-    let (code_l, out_l, _) = run_flurryfmt(
+    let (code_l, out_l, _) = run_fmt(
         &[
             "--check",
             "-l",
@@ -164,7 +161,7 @@ fn inplace_backup_and_clean_check_roundtrip() {
     let file_a = tmp.write("a.fl", orig_a);
     let file_b = tmp.write("b.fl", orig_b);
 
-    let (code, out, err) = run_flurryfmt(
+    let (code, out, err) = run_fmt(
         &[
             "--backup",
             "-l",
@@ -189,7 +186,7 @@ fn inplace_backup_and_clean_check_roundtrip() {
     );
 
     // Re-running `--check` now exits 0 with empty stdout!
-    let (code2, out2, err2) = run_flurryfmt(&["--check", file_a.to_str().unwrap()], None, None);
+    let (code2, out2, err2) = run_fmt(&["--check", file_a.to_str().unwrap()], None, None);
     assert_eq!(code2, 0, "stderr: {err2}");
     assert!(out2.is_empty());
 }
@@ -207,7 +204,7 @@ fn directory_walk_respects_hidden_target_config_and_ignore() {
     let hidden_file = tmp.write(".git/hooks.fl", "fn untouched3(){1}\n");
     let target_file = tmp.write("target/build.fl", "fn untouched4(){1}\n");
 
-    let (code, _, err) = run_flurryfmt(&[tmp.path.to_str().unwrap()], None, None);
+    let (code, _, err) = run_fmt(&[tmp.path.to_str().unwrap()], None, None);
     assert_eq!(code, 0, "stderr: {err}");
 
     // `src/lib.fl` formatted using `tab_spaces = 2` from `flurryfmt.fl`!
@@ -241,8 +238,8 @@ fn stdin_filepath_discovers_config_and_honors_ignore() {
     let virtual_active = tmp.path.join("src/virtual.fl");
     let virtual_ignored = tmp.path.join("vendor/third_party.fl");
 
-    let (c1, out1, err1) = run_flurryfmt(
-        &["--stdin-filepath", virtual_active.to_str().unwrap()],
+    let (c1, out1, err1) = run_fmt(
+        &["-", "--stdin-filepath", virtual_active.to_str().unwrap()],
         Some("fn demo(){call()}\n"),
         None,
     );
@@ -251,16 +248,17 @@ fn stdin_filepath_discovers_config_and_honors_ignore() {
 
     // Ignored `--stdin-filepath` passes input through unchanged and exits 0 even under `--check`!
     let unformatted = "fn demo(){call()}\n";
-    let (c2, out2, _) = run_flurryfmt(
-        &["--stdin-filepath", virtual_ignored.to_str().unwrap()],
+    let (c2, out2, _) = run_fmt(
+        &["-", "--stdin-filepath", virtual_ignored.to_str().unwrap()],
         Some(unformatted),
         None,
     );
     assert_eq!(c2, 0);
     assert_eq!(out2, unformatted);
 
-    let (c3, out3, _) = run_flurryfmt(
+    let (c3, out3, _) = run_fmt(
         &[
+            "-",
             "--check",
             "--stdin-filepath",
             virtual_ignored.to_str().unwrap(),
@@ -277,11 +275,11 @@ fn print_config_emit_stdout_quiet_and_exit_codes() {
     let tmp = TempDir::new("print_and_errors");
     tmp.write("flurryfmt.fl", ".max_width 88,\n");
 
-    let (c_min, out_min, _) = run_flurryfmt(&["--print-config", "minimal"], None, Some(&tmp.path));
+    let (c_min, out_min, _) = run_fmt(&["--print-config", "minimal"], None, Some(&tmp.path));
     assert_eq!(c_min, 0);
     assert_eq!(out_min, ".max_width 88,\n");
 
-    let (c_def, out_def, _) = run_flurryfmt(&["--print-config=default"], None, Some(&tmp.path));
+    let (c_def, out_def, _) = run_fmt(&["--print-config=default"], None, Some(&tmp.path));
     assert_eq!(c_def, 0);
     assert!(out_def.contains(".max_width 100,"));
     assert!(out_def.contains(".tab_spaces 4,"));
@@ -289,7 +287,7 @@ fn print_config_emit_stdout_quiet_and_exit_codes() {
     // Syntax error exits 1 without modifying the broken file, while still formatting valid siblings!
     let broken = tmp.write("broken.fl", "fn oops( {\n");
     let valid = tmp.write("valid.fl", "fn ok(x:i32)->i32{x}\n");
-    let (c_err, _, stderr_err) = run_flurryfmt(
+    let (c_err, _, stderr_err) = run_fmt(
         &[broken.to_str().unwrap(), valid.to_str().unwrap()],
         None,
         None,
@@ -304,53 +302,51 @@ fn print_config_emit_stdout_quiet_and_exit_codes() {
 
     // Unknown `--%` directive warns on stderr normally, suppressed with `-q`.
     let warn_src = "fn w() {\n    --% .not_a_real_directive\n    let x = 1;\n}\n";
-    let (cw1, _, ew1) = run_flurryfmt(&[], Some(warn_src), None);
+    let (cw1, _, ew1) = run_fmt(&["-"], Some(warn_src), None);
     assert_eq!(cw1, 0);
     assert!(
         ew1.contains("unknown `--%` formatter directive `.not_a_real_directive`"),
         "stderr: {ew1}"
     );
 
-    let (cw2, _, ew2) = run_flurryfmt(&["-q"], Some(warn_src), None);
+    let (cw2, _, ew2) = run_fmt(&["-", "-q"], Some(warn_src), None);
     assert_eq!(cw2, 0);
     assert!(ew2.is_empty(), "expected quiet stderr, got: {ew2}");
 
     // Invalid CLI flags and invalid `--config` return exit code 2!
-    let (bad1, _, _) = run_flurryfmt(&["--definitely-unknown"], None, None);
+    let (bad1, _, _) = run_fmt(&["--definitely-unknown"], None, None);
     assert_eq!(bad1, 2);
 
-    let (bad2, _, _) = run_flurryfmt(&["--config", "max_width=not_a_num"], None, None);
+    let (bad2, _, _) = run_fmt(&["--config", "max_width=not_a_num"], None, None);
     assert_eq!(bad2, 2);
 
-    let (bad3, _, _) = run_flurryfmt(&["-", valid.to_str().unwrap()], None, None);
+    let (bad3, _, _) = run_fmt(&["-", valid.to_str().unwrap()], None, None);
     assert_eq!(bad3, 2);
 
-    let (bad4, _, _) = run_flurryfmt(&["--check", "--emit", "files"], None, None);
+    let (bad4, _, _) = run_fmt(&["--check", "--emit", "files"], None, None);
     assert_eq!(bad4, 2);
 
     // `--help` and `--version` exit 0.
-    let (ch, out_h, _) = run_flurryfmt(&["--help"], None, None);
+    let (ch, out_h, _) = run_fmt(&["--help"], None, None);
     assert_eq!(ch, 0);
-    assert!(out_h.contains("Usage: flurryfmt"));
+    assert!(out_h.contains("Usage: luna fmt"));
 
-    let (cv, out_v, _) = run_flurryfmt(&["--version"], None, None);
+    let (cv, out_v, _) = run_fmt(&["--version"], None, None);
     assert_eq!(cv, 0);
-    assert!(out_v.starts_with("flurryfmt "));
+    assert!(out_v.starts_with("luna fmt "));
 }
 
 #[test]
-fn shared_driver_supports_luna_fmt_default_cwd_and_dash_stdin() {
+fn library_driver_formats_explicit_streams_and_directories() {
     let tmp = TempDir::new("luna_mode");
     let f = tmp.write("sub/mod.fl", "fn f(a:i32)->i32{a}\n");
 
-    // Explicit `-` in `default_to_cwd = true` reads stdin -> stdout.
+    // Explicit `-` reads stdin and writes stdout.
     let mut stdin_buf: &[u8] = b"fn s(x:i32)->i32{x}\n";
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
     let code = fmt::run_cli_with_io(
         ["-"],
-        "luna fmt",
-        true,
         &mut stdin_buf,
         &mut stdout_buf,
         &mut stderr_buf,
@@ -369,8 +365,6 @@ fn shared_driver_supports_luna_fmt_default_cwd_and_dash_stdin() {
     let mut err2 = Vec::new();
     let code2 = fmt::run_cli_with_io(
         [tmp.path.to_str().unwrap()],
-        "luna fmt",
-        true,
         &mut empty_in,
         &mut out2,
         &mut err2,

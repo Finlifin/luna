@@ -1,4 +1,4 @@
-//! Shared CLI driver for standalone `flurryfmt` and `luna fmt`.
+//! The `luna fmt` driver, shared with stream-based library tests.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -96,9 +96,8 @@ impl Default for CliOptions {
 
 /// Entry point using standard process stdio streams.
 ///
-/// - When `default_to_cwd` is `false` (`flurryfmt`), omitting path arguments formats `stdin` -> `stdout`.
-/// - When `default_to_cwd` is `true` (`luna fmt`), omitting path arguments recursively formats `.`.
-pub fn run_cli<I, S>(args: I, bin_name: &str, default_to_cwd: bool) -> ExitCode
+/// Omitted paths recursively format `.`; explicit `-` reads stdin.
+pub fn run_cli<I, S>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = S>,
     S: Into<OsString>,
@@ -110,8 +109,6 @@ where
     let mut stderr = io::stderr().lock();
     let code = run_cli_with_io(
         args,
-        bin_name,
-        default_to_cwd,
         &mut stdin,
         &mut stdout,
         &mut stderr,
@@ -122,11 +119,8 @@ where
 }
 
 /// Testable CLI driver accepting explicit `Read` / `Write` handles and TTY flags.
-#[allow(clippy::too_many_arguments)]
 pub fn run_cli_with_io<I, S>(
     args: I,
-    bin_name: &str,
-    default_to_cwd: bool,
     stdin: &mut dyn Read,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -146,18 +140,18 @@ where
         Ok(o) => o,
         Err(msg) => {
             let _ = writeln!(stderr, "error: {msg}");
-            let _ = writeln!(stderr, "For more information, try '{bin_name} --help'.");
+            let _ = writeln!(stderr, "For more information, try 'luna fmt --help'.");
             return EXIT_CLI_OR_CONFIG_ERR;
         }
     };
 
     if opts.help {
-        let _ = write!(stdout, "{}", render_help(bin_name, default_to_cwd));
+        let _ = write!(stdout, "{}", render_help());
         return EXIT_OK;
     }
 
     if opts.version {
-        let _ = writeln!(stdout, "{bin_name} {}", env!("CARGO_PKG_VERSION"));
+        let _ = writeln!(stdout, "luna fmt {}", env!("CARGO_PKG_VERSION"));
         return EXIT_OK;
     }
 
@@ -225,7 +219,7 @@ where
         return EXIT_CLI_OR_CONFIG_ERR;
     }
 
-    let stdin_mode = has_dash || (opts.inputs.is_empty() && !default_to_cwd);
+    let stdin_mode = has_dash;
 
     if !stdin_mode && opts.stdin_filepath.is_some() {
         let _ = writeln!(
@@ -826,20 +820,15 @@ fn take_opt_value(args: &[String], idx: &mut usize, flag: &str) -> Result<Option
     Ok(None)
 }
 
-pub fn render_help(bin_name: &str, default_to_cwd: bool) -> String {
-    let default_target_desc = if default_to_cwd {
-        "If no paths are given, recursively formats `.fl` files in the current directory.\nUse `-` to format from stdin to stdout."
-    } else {
-        "If no paths are given (or `-` is passed), formats Flurry code from stdin to stdout.\nDirectory arguments are traversed recursively for `.fl` files."
-    };
-
-    format!(
+pub fn render_help() -> String {
+    String::from(
         "\
 Format Flurry source code according to official style rules.
 
-Usage: {bin_name} [OPTIONS] [PATH...]
+Usage: luna fmt [OPTIONS] [PATH...]
 
-{default_target_desc}
+If no paths are given, recursively formats `.fl` files in the current directory.
+Use `-` to format from stdin to stdout.
 
 Options:
       --check                       Run in 'check' mode; exit with 1 if formatting differs
@@ -855,6 +844,6 @@ Options:
   -q, --quiet                       Suppress warnings and non-error output
   -h, --help                        Print help information
   -V, --version                     Print version information
-"
+",
     )
 }

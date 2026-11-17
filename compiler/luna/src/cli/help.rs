@@ -50,7 +50,7 @@ fn command_help(name: &str) -> Result<String, String> {
         return Ok(anar::cli::help());
     }
     if name == "fmt" {
-        return Ok(fmt::render_help("luna fmt", true));
+        return Ok(fmt::render_help());
     }
     let usage = match name {
         "check" => {

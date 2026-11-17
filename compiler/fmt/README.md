@@ -1,4 +1,4 @@
-# `fmt` / `flurryfmt`
+# `fmt` / `luna fmt`
 
 Official source code formatter for the Flurry programming language.
 
@@ -6,51 +6,36 @@ This crate provides:
 
 - The `fmt` library crate (`format_source`, configuration discovery, `--%` directive scanning,
   line-based diff generation, and post-format AST/comment verification).
-- The standalone `flurryfmt` CLI binary (`rustfmt`-style ergonomics).
-- The shared CLI driver (`fmt::run_cli`) backing `luna fmt`.
+- The CLI driver (`fmt::run_cli`) backing `luna fmt` inside the single luna executable.
 
 ## CLI Usage
 
-### `flurryfmt`
+Build with `python3 -B development/cargo.py build -p luna`. The internal fmt crate
+has no executable target. Replace old `flurryfmt` commands with `luna fmt`; add
+`-` for stdin, including when using `--stdin-filepath`. With no paths, luna fmt
+formats the current directory recursively. The configuration name remains
+`flurryfmt.fl`.
 
 ```sh
-# Format stdin -> stdout (default when no path arguments are given, or with `-`)
-flurryfmt < input.fl > output.fl
-cat input.fl | flurryfmt --stdin-filepath src/lib.fl
+# Format stdin to stdout
+luna fmt - < input.fl > output.fl
+luna fmt - --stdin-filepath src/lib.fl < input.fl
 
-# Format specific files or recursively format `.fl` files in directories
-flurryfmt src/main.fl library/meta
-flurryfmt .
-
-# Check formatting without modifying files (prints unified line diffs, exits 1 on diff)
-flurryfmt --check src/
-
-# Print only file paths that require formatting
-flurryfmt --check -l src/
-
-# Create `.bk` backups before overwriting changed files
-flurryfmt --backup src/main.fl
-
-# Override configuration options on the command line
-flurryfmt --config max_width=80,reorder_imports=false src/
-flurryfmt --config ".max_width 80, .reorder_imports false" src/
-
-# Inspect effective or default configuration in `flurryfmt.fl` syntax
-flurryfmt --print-config default
-flurryfmt --print-config minimal
-flurryfmt --print-config current
-```
-
-### `luna fmt`
-
-`luna fmt` accepts the exact same flags as `flurryfmt`, except omitting path arguments formats
-the current working directory (`.`) recursively instead of reading `stdin` (pass `-` to read
-`stdin`):
-
-```sh
+# Format files or directories; with no paths, format the current directory
+luna fmt src/main.fl library/meta
 luna fmt
-luna fmt --check
-luna fmt - < snippet.fl
+
+# Check without modifying files, optionally printing only differing paths
+luna fmt --check src/
+luna fmt --check -l src/
+
+# Back up changed files; override or inspect configuration
+luna fmt --backup src/main.fl
+luna fmt --config max_width=80,reorder_imports=false src/
+luna fmt --config ".max_width 80, .reorder_imports false" src/
+luna fmt --print-config default
+luna fmt --print-config minimal
+luna fmt --print-config current
 ```
 
 ### Exit Codes
@@ -63,7 +48,7 @@ luna fmt - < snippet.fl
 
 ## Configuration (`flurryfmt.fl`)
 
-`flurryfmt` searches upward from each target file's directory (or `--stdin-filepath` / current
+`luna fmt` searches upward from each target file's directory (or `--stdin-filepath` / current
 directory for `stdin`, unless `--config-path` is given) for `flurryfmt.fl`.
 
 Configuration files use Flurry top-level `.key value` configuration syntax:

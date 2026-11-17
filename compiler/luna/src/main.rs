@@ -18,7 +18,7 @@ fn main() -> ExitCode {
     };
 
     if let Command::Fmt(sub_args) = command {
-        return fmt::run_cli(sub_args, "luna fmt", true);
+        return fmt::run_cli(sub_args);
     }
     if let Command::Lsp(sub_args) = command {
         return anar::cli::run(sub_args);

@@ -990,10 +990,27 @@ LUNA_BIN=/tmp/luna-dev-002/target/debug/luna node eco/vscode-flurry/test/smoke_t
 中的旧 luna 并退出 101。显式指定本轮共享缓存产物后通过。测试现记录所选路径
 及服务 stderr，显式 LUNA_BIN 无效时拒绝，不悄悄改用别处的旧文件。
 
-本次只退役独立语言服务入口。核对发现 `compiler/fmt` 仍定义独立 `flurryfmt`
-目标；它也是同一约定下的待清理项，不能据此声称整个 workspace 已达成单二进制。
-格式化 CLI 的原有覆盖需要迁至 luna 后才能删除该目标。Type 描述／待决检查恢复、
-动态 callable 公开入口和完整 println 的缺口与此无关，均未因本项清理消失。
+语言服务阶段提交为 `403dcc22`。随后对同一约定核对发现 `compiler/fmt` 仍定义
+独立 `flurryfmt` 目标，现已一并退役；库接口和 LSP 的进程内格式化继续保留。
+格式器驱动删除独立入口才使用的 bin_name/default_to_cwd 模式：唯一 CLI 为
+`luna fmt`，不传路径时遍历当前目录，显式 `-` 读取 stdin。配置文件仍是
+`flurryfmt.fl`，没有改动格式化规则。
+
+原 standalone CLI 的 7 项测试迁入 luna，检查真实子命令的配置发现、ignore、
+备份、diff、颜色、静默、文件保护和退出码。原来隐式读取 stdin 的输入显式增加
+`-`；现有 luna 默认目录测试继续覆盖原行为，没有恢复已退役入口的默认语义。
+通过 `python3 -B development/check.py --timeout 900 -- test -p luna --test
+cli_fmt --test cli_fmt_options --test cli_lsp --test subcommands --no-fail-fast
+-- --test-threads=1`，退出 0，21 项通过，证据
+`/tmp/luna-tools-jarr175r/result.json`。之后只恢复两处未改动函数的原 clippy 注解，
+没有改变执行逻辑。最终 Rust 文件格式检查退出 0，见 `/tmp/luna-tools-yioqch4x/result.json`。
+
+工作目录下 `cargo metadata --no-deps --format-version 1 --locked --offline`
+退出 0，检查全部 workspace member 的 bin targets，唯一结果为
+`compiler/luna/src/main.rs` 的 luna；本机结果保存在
+`/tmp/luna-workspace-binaries.json`。这是构建目标核验，不保证用户机器上没有旧
+缓存可执行文件；编辑器仍需指向当前构建。Type 描述／待决检查恢复、动态 callable
+公开入口和完整 println 的缺口与此无关，均未因本项清理消失。
 
 ## 4. 本次证据与限制
 

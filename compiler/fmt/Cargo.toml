@@ -2,14 +2,11 @@
 name = "fmt"
 version = "0.1.0"
 edition = "2024"
+autobins = false
 
 [lib]
 name = "fmt"
 path = "src/lib.rs"
-
-[[bin]]
-name = "flurryfmt"
-path = "src/main.rs"
 
 [dependencies]
 ast = { path = "../ast" }

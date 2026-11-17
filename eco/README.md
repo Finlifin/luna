@@ -7,7 +7,7 @@ This directory hosts editor integrations and syntax tooling for the **Flurry** p
 | **Tree-sitter Grammar** | [`eco/tree-sitter-flurry`](./tree-sitter-flurry) | Complete Tree-sitter grammar, C external scanner (nested `{- ... -}` block comments, raw strings, disambiguated range/variadic dots), and queries (`highlights.scm`, `locals.scm`, `indents.scm`, `folds.scm`, `tags.scm`) for Neovim, Helix, Zed, Emacs, and GitHub. |
 | **VS Code Extension** | [`eco/vscode-flurry`](./vscode-flurry) | Zero-dependency Visual Studio Code extension providing TextMate highlighting, language configuration, idiomatic Flurry snippets, and LSP client integration with `luna lsp`. |
 | **Language Server (`luna lsp`)** | [`compiler/anar`](../compiler/anar) | Fast, resilient HIR-stage Language Server Protocol (`LSP 3.17`) service inside luna modeled after Zig's `zls`, supporting multi-package + 6-sysroot-package resolution, hover, navigation, references, rename, completion, signature help, symbols, semantic tokens, folding, and formatting. |
-| **Source Formatter (`luna fmt`)** | [`compiler/fmt`](../compiler/fmt) | Comment-preserving Wadler-Lindig Flurry code formatter (`luna fmt`, `flurryfmt.toml`, and `--%` directives), shared by CLI workflows and `anar` document formatting. |
+| **Source Formatter (`luna fmt`)** | [`compiler/fmt`](../compiler/fmt) | Comment-preserving Wadler-Lindig Flurry code formatter (`luna fmt`, `flurryfmt.fl`, and `--%` directives), shared by CLI workflows and `anar` document formatting. |
 
 ## Quick Verification
 

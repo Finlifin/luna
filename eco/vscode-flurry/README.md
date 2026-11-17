@@ -18,7 +18,7 @@ Official Visual Studio Code language extension for the **Flurry** programming la
   - Context-aware Completion (`.` member/module projection, `'` builtin/label suffix, `%` splice, and lexical/prelude scope bindings)
   - Signature Help (`(`, `,`)
   - Folding Ranges & Idiomatic Flurry Snippets
-- **Code Formatting**: Built-in `Format Document` (`Shift+Alt+F`) backed by `compiler/fmt` (`flurryfmt.toml` discovery and `--%` directive support).
+- **Code Formatting**: Built-in `Format Document` (`Shift+Alt+F`) backed by `compiler/fmt` (`flurryfmt.fl` discovery and `--%` directive support).
 
 ## Zero External Dependencies
 
