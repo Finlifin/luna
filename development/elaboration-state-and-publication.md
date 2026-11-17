@@ -751,6 +751,38 @@ comptime fn check() -> bool {
 组装，全部输入及形成条件完成后才进入 count。不是 List／Tuple 语法白名单允许跳过
 源序；列表元素若含需上下文选择的调用，须保留相应执行依赖，不能套用这一时序。
 
+已经接通的较窄路径是：前项自身可形成完整受检表达式，例如在同一 `do` 内声明
+`let packet: meta.List<u8> = [1, 255];` 并返回 packet，后项才执行 Byte。
+`CallableCompletion` 在路由完成时区分已知域和仍依赖本次生产者的域：已知域继续
+严格检查；待定域只提前拒绝已证明的类型冲突，不把尚未执行的 Type rigid 当作
+完整参数。未证明冲突不构成相等或准入证据；预算耗尽和无效命题仍报错。
+
+comptime callable 由原 VM 在所有实际参数齐备后替换声明望远镜并检查准入，成功后
+才形成函数值、进入主体。runtime callable 的 required 输入消费者在原 packet
+执行后，用完整实参替换声明域，与 packet 保留的受检类型比较，然后才交付实例形成。
+后一路径原来只检查形成条件；放开待定域的提前相等检查后，必须在此补齐最终域
+检查，否则会引入漏检。本次一并接通，不重跑生产者。
+这不是一般源码等待／恢复机制：需要 Type 上下文才能检查的列表字面量，以及依赖
+该 Type 才能形成的函数签名，仍未接通。
+
+源码回归集中在
+[`type_input_execution_order`](../compiler/luna/tests/type_input_execution_order.rs)：
+直接观察 Type 的对照、已受检 packet 的前置写入与旧值快照、错误输入在主体前拒绝、
+同一 VM 内失败后恢复，以及 required runtime callable 的正反例。comptime 路径
+在两种执行引擎中重复调用并检查函数进入次序。三个尚未实现的源码等待正例保留原
+成功断言并显式 ignored；不能把改写成显式类型 packet 后的成功当作它们已完成。
+
+验证基线为 `f0abe655` 加本次限定改动，工作目录 `/home/fin/luna`。
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna
+--test type_input_execution_order --test ordinary_callable_types
+--test ordinary_clause_collectors --test source_input_dependencies
+--test prepared_input_dependencies --test staged_callable_freezing --test default_calls
+--test library_std_format --no-fail-fast -- --test-threads=1` 退出 0；报告
+`/tmp/luna-tools-qggsb50x/result.json`，输出锚点为各测试组的 `test result: ok`。
+本次新增组 8 项通过、3 项明确未实现并 ignored；其他组也保留原有 ignored，未将其
+计作成功。修改的三个 Rust 文件经 rustfmt，报告
+`/tmp/luna-tools-86h0ck1m/result.json` 退出 0。工作区已有修改未纳入本次提交。
+
 较早输入中的读取、调用、失败检查、所有权交付和域相关转换均占有执行位置。
 读取可变字段后等待域，必须保留读取时依法取得的值；不能在后项写入后重读，也不能
 凭 pure 标记取消顺序边。没有合法读取／保留规则就继续等待，真实闭环与未实现规则

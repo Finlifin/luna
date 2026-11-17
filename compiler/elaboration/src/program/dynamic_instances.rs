@@ -125,12 +125,22 @@ impl declaration_inputs::Completion for CallableCompletion {
         };
         let formation_deferred = !formation.deferred.is_empty();
         checker.check_formation_application(owner, formation, span)?;
-        // Named Type inputs may occur after their value inputs. Once routing
-        // completes, validate every retained value against the completed domain
-        // even if this function is never invoked.
+        // Routing completion is not execution completion. Known domains are
+        // checked even in unused definitions; domains still depending on this
+        // packet's producers retain their declaration-side admission obligation.
+        // The VM, or the required-input consumer for a runtime callable, checks
+        // the completed telescope before forming a callable value.
         for (operand, domain) in operands.iter().zip(&domains) {
+            let awaits_input = checker
+                .term_declaration_inputs(domain, span)?
+                .iter()
+                .any(|parameter| pending.contains(parameter));
             let domain = checker.instantiate_input_types(domain, &parameters, &symbols, span)?;
-            checker.require(&operand.ty, &domain, span)?;
+            if awaits_input {
+                checker.check_pending_callable_domain(&operand.ty, &domain, span)?;
+            } else {
+                checker.require(&operand.ty, &domain, span)?;
+            }
         }
         let ty = Term::Tuple(
             operands
@@ -177,6 +187,46 @@ impl std::fmt::Display for CallableCompletion {
 }
 
 impl Checker<'_, '_> {
+    /// A negative proof rejects an already known conflict. Failure to prove a
+    /// conflict does not admit the value: the receiving invocation or required
+    /// input consumer must check the actual completed domain before publication.
+    fn check_pending_callable_domain(
+        &self,
+        actual: &Term,
+        expected: &Term,
+        span: Span,
+    ) -> Result<(), Error> {
+        if is_never(actual) {
+            return Ok(());
+        }
+        let (actual_view, expected_view) = self.scoped_equality_operands(actual, expected, span)?;
+        let outcome = self.context.prove(
+            crate::ptc::Formula::equal(actual_view, expected_view).negate(),
+            crate::ptc::Budget::default(),
+        );
+        match outcome {
+            crate::ptc::Outcome::Entailed(_) => Err(error(
+                span,
+                format!("type mismatch: expected {expected}, found {actual}"),
+            )),
+            crate::ptc::Outcome::NotEntailed(_)
+            | crate::ptc::Outcome::Unknown {
+                reason: crate::ptc::UnknownReason::UnvalidatedModel,
+                ..
+            } => Ok(()),
+            crate::ptc::Outcome::Unknown { reason, .. } => Err(error(
+                span,
+                format!(
+                    "pending input domain observation failed ({reason:?}): expected {expected}, found {actual}"
+                ),
+            )),
+            crate::ptc::Outcome::IllFormed(reason) => Err(error(
+                span,
+                format!("ill-formed pending input domain: {reason}"),
+            )),
+        }
+    }
+
     /// Definition-side evidence only: pending values retain declaration rigids.
     /// The invocation packet remains the authority for their actual snapshots.
     pub(super) fn comptime_instance_clause_evidence(
@@ -431,9 +481,9 @@ impl Checker<'_, '_> {
         }
     }
 
-    /// Execute only the prepared input packet. Forming the eventual runtime
-    /// callable still uses ordinary function-instance admission; no runtime
-    /// function body is admitted to the comptime interpreter by this operation.
+    /// Execute only the prepared input packet, then discharge its domain checks
+    /// with the completed arguments. The eventual runtime callable still needs
+    /// ordinary formation checks; this operation never invokes its body.
     pub(super) fn required_callable_clause_arguments(
         &mut self,
         expr: &Expr<'_>,
@@ -462,7 +512,7 @@ impl Checker<'_, '_> {
                     .map(|packet| packet.expression)
             },
         )?;
-        let (value, _) =
+        let (value, packet_type) =
             self.invoke_required_publishing(prepared, Vec::new(), expr.hir_id.owner, expr.span)?;
         let comptime_interpretor::Value::Tuple(values) = value else {
             return Err(error(
@@ -473,7 +523,7 @@ impl Checker<'_, '_> {
         if values.len() != parameters.len() {
             return Err(error(expr.span, "clause input packet arity mismatch"));
         }
-        values
+        let arguments = values
             .into_iter()
             .map(|value| match value {
                 comptime_interpretor::Value::TypeParameter(declaration) => Ok(Term::Rigid {
@@ -482,7 +532,28 @@ impl Checker<'_, '_> {
                 }),
                 value => self.required_normal_term(value, expr.span),
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        let Term::Tuple(actual_domains) = packet_type else {
+            return Err(error(
+                expr.span,
+                "clause input packet has no checked domains",
+            ));
+        };
+        if actual_domains.len() != domains.len() {
+            return Err(error(
+                expr.span,
+                "clause input packet domain arity mismatch",
+            ));
+        }
+        // Required input execution returns the original checked packet's types.
+        // Its completed values now substitute every declaration input at once;
+        // no producer is inspected again or rerun to recover this evidence.
+        for (actual, domain) in actual_domains.iter().zip(&domains) {
+            let expected =
+                self.instantiate_input_types(domain, &parameters, &arguments, expr.span)?;
+            self.require(actual, &expected, expr.span)?;
+        }
+        Ok(arguments)
     }
 }
 

@@ -4655,13 +4655,13 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
-    fn require(&self, actual: &Term, expected: &Term, span: Span) -> Result<(), Error> {
-        // Diverging control flow is admissible at a result position; this does
-        // not assert the false type equation Never = expected.
-        if is_never(actual) {
-            return Ok(());
-        }
-        use crate::ptc::{Budget, Formula, Outcome};
+    /// Equality observations keep caller telescope slots in their original scope.
+    fn scoped_equality_operands(
+        &self,
+        actual: &Term,
+        expected: &Term,
+        span: Span,
+    ) -> Result<(Term, Term), Error> {
         // PTC receives well-scoped type propositions. Preserve the enclosing
         // telescope instead of submitting its body as a free bound variable.
         let scoped = |ty: &Term| -> Result<Term, Error> {
@@ -4683,11 +4683,21 @@ impl Checker<'_, '_> {
                 .map_err(|e| error(span, e.to_string()))?
                 .is_empty();
         let frames = self.call_input_frames();
-        let (left, right) = if has_inputs && self.context.scope() != frames.as_slice() {
+        Ok(if has_inputs && self.context.scope() != frames.as_slice() {
             (scoped(actual)?, scoped(expected)?)
         } else {
             (actual.clone(), expected.clone())
-        };
+        })
+    }
+
+    fn require(&self, actual: &Term, expected: &Term, span: Span) -> Result<(), Error> {
+        // Diverging control flow is admissible at a result position; this does
+        // not assert the false type equation Never = expected.
+        if is_never(actual) {
+            return Ok(());
+        }
+        use crate::ptc::{Budget, Formula, Outcome};
+        let (left, right) = self.scoped_equality_operands(actual, expected, span)?;
         let mut outcome = self.context.prove(
             Formula::equal(left.clone(), right.clone()),
             Budget::default(),
