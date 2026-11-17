@@ -72,6 +72,187 @@ fn call(callee: Expr, values: Vec<Expr>, ty: Term) -> Expr {
     )
 }
 
+fn publication_input() -> Expr {
+    expr(
+        K::CallPreparation {
+            statements: vec![
+                bind(0, value(true)),
+                bind(1, value(false)),
+                bind(
+                    2,
+                    call(callable(10, &[], boolean(), false), vec![], boolean()),
+                ),
+            ],
+            result: Some(Box::new(call(
+                callable(
+                    11,
+                    &[Sort::ComptimeValue, Sort::ComptimeValue, Sort::Runtime],
+                    boolean(),
+                    false,
+                ),
+                vec![read(0), read(1), read(2)],
+                boolean(),
+            ))),
+        },
+        boolean(),
+    )
+}
+
+#[test]
+fn preparation_publication_is_atomic_across_budget_failures() {
+    let original = publication_input();
+    let mut failed = false;
+    let mut succeeded = false;
+    for budget in 0..512 {
+        let mut input = original.clone();
+        let plan = iir::staging::preparation(&input, &mut 10000)
+            .unwrap()
+            .unwrap();
+        let completed = expr(
+            K::Tuple(vec![value(true), value(false)]),
+            plan.expression.ty.clone(),
+        );
+        let mut remaining = budget;
+        match plan.apply(&mut input, completed, &mut remaining) {
+            Err(error) => {
+                failed = true;
+                assert_eq!(
+                    input, original,
+                    "failed publication changed input at budget {budget}: {error}"
+                );
+            }
+            Ok(()) => {
+                succeeded = true;
+                let K::CallPreparation {
+                    statements,
+                    result: Some(result),
+                } = &input.kind
+                else {
+                    panic!()
+                };
+                assert_eq!(statements.len(), 1);
+                let K::Call { arguments, .. } = &result.kind else {
+                    panic!()
+                };
+                assert_eq!(arguments[0].value, value(true));
+                assert_eq!(arguments[1].value, value(false));
+                assert_eq!(arguments[2].value, read(2));
+                assert_eq!(
+                    statements[0],
+                    bind(
+                        2,
+                        call(callable(10, &[], boolean(), false), vec![], boolean())
+                    )
+                );
+            }
+        }
+    }
+    assert!(failed && succeeded);
+}
+
+#[test]
+fn preparation_publication_rejects_changed_inputs_without_partial_writes() {
+    for invalid_index in [false, true] {
+        let mut input = publication_input();
+        let plan = iir::staging::preparation(&input, &mut 10000)
+            .unwrap()
+            .unwrap();
+        let completed = expr(
+            K::Tuple(vec![value(true), value(false)]),
+            plan.expression.ty.clone(),
+        );
+        let K::CallPreparation {
+            result: Some(call), ..
+        } = &mut input.kind
+        else {
+            panic!()
+        };
+        let K::Call { arguments, .. } = &mut call.kind else {
+            panic!()
+        };
+        if invalid_index {
+            arguments[1].parameter = usize::MAX;
+        } else {
+            arguments[1].value.ty = Term::Primitive(Primitive::Char);
+        }
+        let before = input.clone();
+        let error = plan.apply(&mut input, completed, &mut 10000).unwrap_err();
+        assert!(
+            error.contains(if invalid_index {
+                "index out of range"
+            } else {
+                "type mismatch"
+            }),
+            "{error}"
+        );
+        assert_eq!(input, before);
+    }
+
+    let mut input = publication_input();
+    let plan = iir::staging::preparation(&input, &mut 10000)
+        .unwrap()
+        .unwrap();
+    let completed = expr(
+        K::Tuple(vec![value(true), value(false)]),
+        plan.expression.ty.clone(),
+    );
+    let K::CallPreparation { statements, .. } = &mut input.kind else {
+        panic!()
+    };
+    statements.clear();
+    let before = input.clone();
+    let error = plan.apply(&mut input, completed, &mut 10000).unwrap_err();
+    assert!(error.contains("statement index out of range"), "{error}");
+    assert_eq!(input, before);
+}
+
+#[test]
+fn preparation_copy_accounts_for_payload_before_copying_producers() {
+    let symbol = Term::Primitive(Primitive::Symbol);
+    let wide = expr(
+        K::Literal(Literal::Symbol("x".repeat(10_000))),
+        symbol.clone(),
+    );
+    let callee = expr(
+        K::Function(DeclarationId {
+            package: 1,
+            local: 11,
+        }),
+        Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::ComptimeValue,
+                ty: symbol.clone(),
+            }],
+            result: Box::new(boolean()),
+        },
+    );
+    let mut input = expr(
+        K::CallPreparation {
+            statements: vec![bind(0, wide.clone())],
+            result: Some(Box::new(call(
+                callee,
+                vec![expr(K::Local(local(0)), symbol.clone())],
+                boolean(),
+            ))),
+        },
+        boolean(),
+    );
+    let error = iir::staging::preparation(&input, &mut 1000)
+        .err()
+        .expect("wide payload must consume copy budget");
+    assert!(error.contains("copy budget"), "{error}");
+    let plan = iir::staging::preparation(&input, &mut 100_000)
+        .unwrap()
+        .unwrap();
+    let completed = expr(K::Tuple(vec![wide]), Term::Tuple(vec![symbol]));
+    plan.apply(&mut input, completed, &mut 100_000).unwrap();
+    assert!(
+        iir::staging::preparation(&input, &mut 1000)
+            .unwrap()
+            .is_none()
+    );
+}
+
 #[test]
 fn selected_packet_has_one_producer_and_preserves_runtime_siblings() {
     let pair = Term::Tuple(vec![boolean(), boolean()]);

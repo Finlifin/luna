@@ -126,6 +126,42 @@ O0/O3 结果和可观察轨迹应一致，且每条测试启用真实资源协�
 而降级使用它。对不同实际输入形成的两个空 telescope residual，缓存仍区分调用实例。
 `d3b0f288` 的拒绝传播修复仅覆盖这一消费者，不能据此宣布所有下游已共用选择证据。
 
+### 2.8 已执行准备结果的回填也必须原子发布
+
+VM 返回完成值不意味着接收方已成功安装。`iir::staging::Preparation` 的旧回填
+先逐项修改原调用，再检查剩余实参和残余局部引用；预算在第二项耗尽时，第一项已
+替换成常量，原准备语句却仍在。这会把未完成转换暴露给调用方，后续若以修改后的
+IR 重试，就可能混淆原执行与新准备，不能靠“通常报错后会丢弃整包”保证边界。
+
+当前回填先在局部副本中完成调用实参替换，核对参数索引、结果域及残余引用，再
+同时安装调用和准备语句。原语句按原次序移动，runtime 的兄弟生产者不执行也不
+消失；Type／Integer 等只用于实例选择的绑定仍不会成为 runtime 存储。准备表达式、
+其结果域及回填时新增副本使用共同复制预算，先计费再复制载荷。失败消耗已用预算，
+但不改写调用方 IR；不需要执行用户代码来恢复旧 IR。
+
+这不是撤销已经发生的 VM 副作用，也没有许可重新执行原 producer。当前 API 仍
+消费本次计划与完成值，尚不是可挂起的源码检查会话或跨世界版本化安装收据。
+其他 IIR 代入／折叠路径的预算与发布边界须分别核对，不能由此宣称全部迁移完成。
+
+实际反例与验收：`compiler/iir/tests/staged_preparation.rs` 的预算扫描在旧实现的
+预算 7 处复现半回填，`/tmp/luna-tools-rnc2802n/result.json`，退出 101。修复后
+逐项检查失败时原 IR 完整保留、充足预算成功安装、runtime 兄弟不变；额外检查
+第二实参域错误、参数／语句索引越界及长 Symbol 载荷的复制预算。
+工作目录 `/home/fin/luna`，
+`python3 -B development/check.py --timeout 900 -- test -p iir --test staged_preparation`
+退出 0，`/tmp/luna-tools-lsx_sh9m/result.json`。
+
+受影响的消费者检查同样退出 0：`/tmp/luna-tools-l3bdsaho/result.json`，命令为
+`python3 -B development/check.py --timeout 900 -- test -p iir --lib
+--test staged_preparation --test dependent_staging -p materialization
+--test expansion_boundary --test scoped_dispatch_inputs -p luna --test default_calls
+--test staged_callable_freezing --test open_functions --test library_protocols
+--test library_std_format --no-fail-fast -- --test-threads=1`。最初命令重复指定
+`--lib` 被 Cargo 参数检查拒绝（`/tmp/luna-tools-fi5pxbe6/result.json`，退出 1），
+修正后才实际执行这组检查。修改的两个 Rust 文件格式检查退出 0，
+`/tmp/luna-tools-zhv_ask8/result.json`。未执行全 workspace、native 或性能基准，
+这些结果也不是任意 invocation 恢复或完整 println 验收。
+
 ## 3. 证据的有效期
 
 | 证据 | 失效事件 | 处理 |

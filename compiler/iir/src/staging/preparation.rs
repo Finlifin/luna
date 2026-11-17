@@ -25,28 +25,35 @@ pub fn preparation_with_layouts<'layout>(
     let K::CallPreparation { statements, .. } = &expr.kind else {
         unreachable!()
     };
-    let values = bindings
-        .iter()
-        .map(|(_, binding, ty)| Expr {
+    let mut values = Vec::new();
+    let mut types = Vec::new();
+    for (_, binding, ty) in &bindings {
+        types.push(
+            nir::copy_budget::clone_term(ty, fuel)
+                .map_err(|error| format!("preparation type copy budget exhausted: {error:?}"))?,
+        );
+        values.push(Expr {
             source: expr.source,
-            ty: ty.clone(),
+            ty: nir::copy_budget::clone_term(ty, fuel)
+                .map_err(|error| format!("preparation type copy budget exhausted: {error:?}"))?,
             kind: K::Local(*binding),
-        })
-        .collect::<Vec<_>>();
-    let ty = Term::Tuple(bindings.iter().map(|(_, _, ty)| ty.clone()).collect());
+        });
+    }
+    let ty = Term::Tuple(types);
+    let result_ty = nir::copy_budget::clone_term(&ty, fuel)
+        .map_err(|error| format!("preparation type copy budget exhausted: {error:?}"))?;
     let mut selected = Vec::new();
     for &index in &indices {
-        crate::visit::expression(&statements[index], fuel, |_, _| Ok(()))?;
-        selected.push(statements[index].clone());
+        selected.push(copy_expression(&statements[index], fuel)?);
     }
     let expression = Expr {
         source: expr.source,
-        ty: ty.clone(),
+        ty,
         kind: K::Block {
             statements: selected,
             result: Some(Box::new(Expr {
                 source: expr.source,
-                ty,
+                ty: result_ty,
                 kind: K::Tuple(values),
             })),
         },
@@ -71,6 +78,16 @@ impl Preparation {
         fuel: &mut usize,
     ) -> Result<(), String> {
         let heads = heads.into();
+        let K::CallPreparation {
+            statements,
+            result: Some(call),
+        } = &mut expr.kind
+        else {
+            return Err("preparation changed before application".into());
+        };
+        if self.indices.iter().any(|index| *index >= statements.len()) {
+            return Err("preparation statement index out of range".into());
+        }
         if completed.ty != self.expression.ty {
             return Err("completed preparation type mismatch".into());
         }
@@ -87,7 +104,7 @@ impl Preparation {
                 return Err("completed preparation binding type mismatch".into());
             }
             delivery_constant(heads, &value, fuel)?;
-            replacements.insert(binding, value.clone());
+            replacements.insert(binding, copy_expression(&value, fuel)?);
             groups.entry(index).or_default().push(Expr {
                 source: value.source,
                 ty: Term::Primitive(Primitive::Void),
@@ -97,16 +114,12 @@ impl Preparation {
                 },
             });
         }
-        let K::CallPreparation {
-            statements,
-            result: Some(call),
-        } = &mut expr.kind
-        else {
-            return Err("preparation changed before application".into());
-        };
+        // No caller-owned IR changes until substitution and liveness complete.
+        // Copy only the result call, not the enclosing preparation statements.
+        let mut replacement_call = copy_expression(call, fuel)?;
         let K::Call {
             callee, arguments, ..
-        } = &mut call.kind
+        } = &mut replacement_call.kind
         else {
             return Err("preparation call changed before application".into());
         };
@@ -114,7 +127,10 @@ impl Preparation {
             return Err("preparation callee is not callable".into());
         };
         for argument in arguments {
-            if parameters[argument.parameter].sort != Sort::Runtime && !argument.is_default {
+            let parameter = parameters
+                .get(argument.parameter)
+                .ok_or("preparation argument index out of range")?;
+            if parameter.sort != Sort::Runtime && !argument.is_default {
                 argument.value =
                     prepare_input_with_layouts(heads, &argument.value, &replacements, fuel)?;
             }
@@ -122,7 +138,7 @@ impl Preparation {
         // Completed inputs needed only for instance selection must not leave
         // Type/Integer-only bindings in runtime storage. Reconstruct only data
         // still referenced by the runtime preparation and result call.
-        let mut live = nir::preparation::references(call, fuel)?;
+        let mut live = nir::preparation::references(&replacement_call, fuel)?;
         for (index, statement) in statements.iter().enumerate() {
             if !self.indices.contains(&index) {
                 live.extend(nir::preparation::references(statement, fuel)?);
@@ -140,8 +156,17 @@ impl Preparation {
             }
         }
         *statements = result;
+        **call = replacement_call;
         Ok(())
     }
+}
+
+fn copy_expression(expression: &Expr, fuel: &mut usize) -> Result<Expr, String> {
+    let mut remaining = *fuel as u64;
+    let copied = nir::copy_budget::charge_expression(expression, &mut remaining);
+    *fuel = usize::try_from(remaining).unwrap_or(usize::MAX);
+    copied.map_err(|error| format!("preparation expression copy budget exhausted: {error:?}"))?;
+    Ok(expression.clone())
 }
 
 // Delivery can include function identity without requiring a symbolic Term for
