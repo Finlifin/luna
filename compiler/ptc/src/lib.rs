@@ -1593,16 +1593,7 @@ impl Search<'_> {
         baseline: Option<Vec<usize>>,
     ) -> Result<Option<Vec<(usize, TypeKind, bool)>>, UnknownReason> {
         let mut agenda = if let Some(roots) = baseline {
-            let mut has_rows = false;
-            for term in &self.terms.nodes {
-                self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
-                has_rows |= matches!(term, Term::Computation { .. } | Term::ErrorResult { .. });
-            }
-            if has_rows {
-                None
-            } else {
-                Some(congruence::Agenda::new(self.terms, roots, &mut self.steps)?)
-            }
+            Some(congruence::Agenda::new(self.terms, roots, &mut self.steps)?)
         } else {
             None
         };

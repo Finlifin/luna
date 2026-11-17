@@ -1,12 +1,15 @@
 //! Revisit structural pairs whose representatives or child representatives
-//! changed. Row theories retain the full scan until their dependencies join
-//! this agenda; their equality rules also consult explicit disequalities.
+//! changed. Row nodes remain active because their rules also read explicit
+//! disequalities and class aliases; unrelated structural pairs stay dormant.
 use super::{Classes, Terms, UnknownReason};
+#[cfg(test)]
+mod row_tests;
 
 pub(super) struct Agenda {
     parents: Vec<Vec<usize>>,
     roots: Vec<usize>,
     dirty: Vec<bool>,
+    rows: Vec<usize>,
 }
 fn charge(fuel: &mut usize, work: usize) -> Result<(), UnknownReason> {
     *fuel = fuel
@@ -24,22 +27,46 @@ impl Agenda {
                 parents[child].push(parent);
             }
         }
+        charge(fuel, terms.nodes.len())?;
+        let rows = terms
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(id, term)| {
+                matches!(
+                    term,
+                    nir::Term::Computation { .. } | nir::Term::ErrorResult { .. }
+                )
+                .then_some(id)
+            })
+            .collect();
         Ok(Self {
             dirty: vec![false; roots.len()],
             parents,
             roots,
+            rows,
         })
     }
     pub fn refresh(&mut self, classes: &Classes, fuel: &mut usize) -> Result<(), UnknownReason> {
         charge(fuel, self.roots.len())?;
         self.dirty.fill(false);
         let mut pending = Vec::new();
+        // A new label disequality may permit row commutation without merging
+        // any classes. Keep every row and its structural parents in the agenda
+        // until row observations carry their own finer dependency evidence.
+        charge(fuel, self.rows.len())?;
+        for &id in &self.rows {
+            self.dirty[id] = true;
+            pending.push(id);
+        }
         for (id, root) in self.roots.iter_mut().enumerate() {
             let current = classes.root(id);
             if *root != current {
                 *root = current;
-                self.dirty[id] = true;
-                pending.push(id);
+                if !self.dirty[id] {
+                    self.dirty[id] = true;
+                    pending.push(id);
+                }
             }
         }
         while let Some(child) = pending.pop() {

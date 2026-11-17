@@ -26,7 +26,7 @@ builtin.math 与 meta.math 是作者要求的不同阶段接口。继续采用�
 | D04：公开 callable 输入 | 共同路由、telescope 和动态 NF 位置输入准备已接通，独立列表合成已删除；公开具名接口仍未传送 | 作者已允许按槽位适配，入口名字与默认供应由目标接口决定；[接口迁移](callable-input-interfaces.md)仍需跨 Type、值、世界与 wire 接通 |
 | D05：NF 与普通值 | 聚合索引字段查询和抽象错误结果恒等交付已有修复；这没有退役 Role／BuiltinCallable 的专用职责 | 不透明头、普通 comptime 参数和值准入必须共同迁移；不能从布局视图反推 NF 等式，见[值准入](comptime-value-admission.md) |
 | D06–D08：runtime 类型 | TypeRef 的现有 IIR 消费者仍用空 substitution；抽象 BitVec 位宽在形成边界仍明确拒绝。新增解析／排版支持不是 lift 的语义接线 | TypeCore、环境取得、lift、符号布局及消费端尚需共同迁移，见[类型引用与环境](type-references-and-environments.md) |
-| D09：PTC | 保留增量整数图；现已复用事实未变或仅增加 IntLe 时的已验证类型闭包，新增类型事实与回跳后仍重查；`model_search::witness` 遇 Trait 仍无见证 | 摘要只用于当前查询的搜索加速，不能充当实现世界证据；联合理论与模型重放仍未完成，见[理论证据](type-models-and-theory-evidence.md) |
+| D09：PTC | 保留增量整数图与未变类型闭包摘要；行项已进入重查调度，不再迫使无关结构全量两两比较；新增事实与回跳仍按依赖重查；`model_search::witness` 遇 Trait 仍无见证 | 行视图及标签依赖仍为保守重查；搜索摘要不能充当实现世界证据；联合模型仍未完成，见[理论证据](type-models-and-theory-evidence.md) |
 | D10：query | `middle::Providers` 和 QueryCaches 仍只登记 hir_package | 声明级按需 elaboration、跨会话依赖与产物失效不是 CodeSession 的别名；见[查询与构建交付](build-and-artifact-delivery.md) |
 | D11：CMTT 与构造 | 已有 Splice、quote 阶段边界与源字段观察；11-12 之后的片段检查迁移没有补齐通用 builder、宏或外部 ABI | 同步维护[跨阶段值交付](runtime-value-delivery.md)，不拿具体 quote 成功掩盖普通 comptime 参数交付缺口 |
 | D12：库与宿主 | `std` 已有 Linux 文件／字节 I/O、Layout、Display 输出和 FormatPlan 扫描；`memory::pointer_input_layout` 仍明确拒绝没有来源交付的 str | 动态文本、分配器及完整格式化尚未完成。`println` 必须消费 `defer std.fmt.Parse(format)`；scanner 与单值输出不能替代它 |
