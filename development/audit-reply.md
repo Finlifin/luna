@@ -81,6 +81,23 @@ builtin.math 与 meta.math 是作者要求的不同阶段接口。继续采用�
 退出 0，证据 `/tmp/luna-tools-o2ykdv2r/result.json`。原参数属性用例未改断言；
 这项修复不使尚未实现的通用属性执行、ABI 降码或 println 接线自动可用。
 
+### 数学 host 默认绑定改用完整 sysroot 验收
+
+另一项旧基线失败 `sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override`
+源于测试的部分 sysroot：只复制 math 等文件，却从完整 manifest 引入全部 host
+selector，缺少 `std.platform.linux.target.System`。现直接复制仓库六包和原始配置，
+不再手写 builtin.prelude、伪造空 std 或删选协议配置；显式使用 x86_64/linux/64
+构建上下文。测试修改坏 selector 前确认真实 manifest 含该项，避免替换失效后
+误测正常配置。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 900 -- test
+-p luna --test frontend_cli sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override
+-- --exact --test-threads=1`，退出 0，证据
+`/tmp/luna-tools-kxg955y_/result.json`。保持原有行为断言：实际 O0/O3 原生构建和
+执行 fma/sqrt/wrapping_abs，坏配置拒绝且保留旧产物，两种 CLI selector 覆盖，
+数学模块别名／遮蔽与 Eq/Ord 协议身份去重，以及未导出的裸 sqrt 拒绝。
+这验证真实库的现有 math/host 接线，不是新增 LLVM 功能或全库完成。
+
 ## 11-15 复核与下一处交接
 
 在 `/home/fin/luna` 执行：

@@ -9256,45 +9256,8 @@ fn sysroot_incomplete_resource_defaults_never_fall_back_to_unchecked_execution()
 #[test]
 fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override() {
     let sandbox = Sandbox::new();
-    for name in ["builtin/protocols", "builtin/numeric", "std"] {
-        fs::create_dir_all(sandbox.path(format!("library/{name}"))).unwrap();
-    }
-    sandbox.write(
-        "library/builtin/lib.fl",
-        "use numeric.{comparison,math_intrinsics}; pub use primitives.*; pub mod math {pub use comparison.{Eq,Ord,Order};pub use math_intrinsics.*;} pub mod prelude {pub use math;pub use primitives.*;pub use math.{Eq,Ord,Order};}",
-    );
-    sandbox.write(
-        "library/builtin/protocols/resources.fl",
-        include!("support/resources_source.rs"),
-    );
-    sandbox.write(
-        "library/builtin/primitives.fl",
-        include_str!("../../../library/builtin/primitives.fl"),
-    );
-    fs::create_dir_all(sandbox.path("library/attrs")).unwrap();
-    sandbox.write("library/attrs/lib.fl", include!("support/attrs_source.rs"));
-    sandbox.write(
-        "library/builtin/numeric/comparison.fl",
-        include_str!("../../../library/builtin/numeric/comparison.fl"),
-    );
-    sandbox.write("library/std/lib.fl", "pub mod prelude {}");
-    sandbox.write(
-        "library/builtin/numeric/math_intrinsics.fl",
-        include_str!("../../../library/builtin/numeric/math_intrinsics.fl"),
-    );
-    let config = include_str!("../../../library/language-items.conf")
-        .lines()
-        .filter(|line| {
-            line.starts_with("version")
-                || line.starts_with("host-intrinsic.")
-                || line.starts_with("copy-protocol")
-                || line.starts_with("drop-protocol")
-                || line.starts_with("eq-protocol")
-                || line.starts_with("ord-protocol")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    sandbox.write("library/language-items.conf", &config);
+    sandbox.copy_sysroot();
+    let config = fs::read_to_string(sandbox.path("library/language-items.conf")).unwrap();
     sandbox.write(
         "input.fl",
         "fn run()->bool {
@@ -9304,12 +9267,10 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
     }",
     );
     for level in ["0", "3"] {
-        success(&sandbox.run(&[
+        success(&sandbox.run_with_sysroot(&[
             "input.fl",
             "--fuel",
             "1000000",
-            "--sysroot",
-            "library",
             "--build",
             "run",
             "--opt-level",
@@ -9324,18 +9285,14 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
         "host-intrinsic.sqrt = builtin.numeric.math_intrinsics.target.Scalar.sqrt",
         "host-intrinsic.sqrt = missing.Ops.sqrt",
     );
-    sandbox.write("library/language-items.conf", &bad);
+    assert_ne!(
+        bad, config,
+        "sqrt selector must be present in the real manifest"
+    );
+    sandbox.write_exact("library/language-items.conf", &bad);
     let previous = fs::read(sandbox.path("native")).unwrap();
-    let output = sandbox.run(&[
-        "input.fl",
-        "--fuel",
-        "1000000",
-        "--sysroot",
-        "library",
-        "--build",
-        "run",
-        "--output",
-        "native",
+    let output = sandbox.run_with_sysroot(&[
+        "input.fl", "--fuel", "1000000", "--build", "run", "--output", "native",
     ]);
     failure(&output, 1);
     assert!(
@@ -9354,39 +9311,23 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
         ],
     ] {
         let mut args = vec![
-            "input.fl",
-            "--fuel",
-            "1000000",
-            "--sysroot",
-            "library",
-            "--build",
-            "run",
-            "--output",
-            "native",
+            "input.fl", "--fuel", "1000000", "--build", "run", "--output", "native",
         ];
         args.extend(override_args);
-        success(&sandbox.run(&args));
+        success(&sandbox.run_with_sysroot(&args));
         assert_eq!(
             success(&Command::new(sandbox.path("native")).output().unwrap()).trim(),
             "(bool true)"
         );
     }
-    sandbox.write("library/language-items.conf", &config);
+    sandbox.write_exact("library/language-items.conf", &config);
     for source in [
         "use builtin.math as explicit_math; use math.sqrt as square_root; fn run()->bool { explicit_math.sqrt<f64>(4.0) == square_root<f64>(4.0) }",
         "mod math { fn marker()->bool {true} } use builtin.math as explicit_math; fn run()->bool { math.marker() and explicit_math.sqrt<f64>(4.0) == 2.0 }",
     ] {
         sandbox.write("input.fl", source);
-        success(&sandbox.run(&[
-            "input.fl",
-            "--fuel",
-            "1000000",
-            "--sysroot",
-            "library",
-            "--build",
-            "run",
-            "--output",
-            "native",
+        success(&sandbox.run_with_sysroot(&[
+            "input.fl", "--fuel", "1000000", "--build", "run", "--output", "native",
         ]));
         assert_eq!(
             success(&Command::new(sandbox.path("native")).output().unwrap()).trim(),
@@ -9411,15 +9352,19 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
         }",
     );
     assert_eq!(
-        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        success(&sandbox.run_with_sysroot(&[
+            "input.fl",
+            "--fuel",
+            "1000000",
+            "--interpret",
+            "run"
+        ]))
+        .trim(),
         "(bool true)"
     );
     // Exporting the module does not introduce all mathematical function names.
     sandbox.write("input.fl", "fn run()->f64 {sqrt<f64>(4.0)}");
-    failure(
-        &sandbox.run(&["input.fl", "--sysroot", "library", "--emit", "nir"]),
-        1,
-    );
+    failure(&sandbox.run_with_sysroot(&["input.fl", "--emit", "nir"]), 1);
 }
 
 #[test]
