@@ -3,6 +3,7 @@ use super::*;
 use observation::Failure;
 mod arguments;
 mod control_observations;
+mod dynamic_inputs;
 pub(super) mod known_patterns;
 pub(super) mod known_scalars;
 pub(super) mod observation;
@@ -528,60 +529,6 @@ impl Checker<'_, '_> {
             .owner(identity)
             .map(Some)
             .ok_or_else(|| error(head.span, "normal-form callable declaration is unavailable"))
-    }
-
-    pub(super) fn dynamic_normal_form_application(
-        &mut self,
-        expr: &Expr<'_>,
-        callee: n::Expr,
-        inputs: &[Arg<'_>],
-        expected: Option<&Term>,
-    ) -> Result<n::Expr, Error> {
-        let Term::NormalFormFunction(_, collector) = &callee.ty else {
-            return Err(error(
-                expr.span,
-                "normal-form application requires a normal-form callable",
-            ));
-        };
-        let Some(index) = *collector else {
-            return self.finish_prepared_call(expr, callee, inputs, Vec::new(), expected, None);
-        };
-        if inputs.len() < index {
-            return Err(error(expr.span, "normal-form argument count mismatch"));
-        }
-        self.required_steps = self
-            .required_steps
-            .checked_sub(inputs.len() as u64)
-            .ok_or_else(|| {
-                error(
-                    expr.span,
-                    "normal-form argument preparation budget exhausted",
-                )
-            })?;
-        if let [Arg::Expand(value)] = &inputs[index..] {
-            let mut arguments = inputs[..index].to_vec();
-            arguments.push(Arg::Positional(value));
-            return self.finish_prepared_call(expr, callee, &arguments, Vec::new(), expected, None);
-        }
-        let mut elements = Vec::new();
-        for input in &inputs[index..] {
-            match input {
-                Arg::Positional(value) => elements.push((**value).clone()),
-                _ => {
-                    return Err(error(
-                        expr.span,
-                        "dynamic normal-form collection currently requires positional elements",
-                    ));
-                }
-            }
-        }
-        let collected = Expr {
-            kind: H::List(&elements),
-            ..expr.clone()
-        };
-        let mut arguments = inputs[..index].to_vec();
-        arguments.push(Arg::Positional(&collected));
-        self.finish_prepared_call(expr, callee, &arguments, Vec::new(), expected, None)
     }
 
     /// Type positions consume the same checked input plan as value positions.

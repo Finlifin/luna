@@ -1,13 +1,13 @@
 # 审查报告回复：当前判断与历史依据
 
-2026-11-15 核对至 `3fd323ca`，工作分支 dev。本轮主要对照
-`ai_dev_logs/comptime_type_vm_divergence_report_2026-11-12_evening.md`
-（报告基线 `3fba208b`），并保留 11-11 晚报的有效纠正与具体取证。
+2026-11-17 核对至 `c127b11a` 及本次动态 NF 输入准备改动，工作分支 dev。
+最新对照 `ai_dev_logs/comptime_type_vm_divergence_report_2026-11-17_noon.md`
+（报告基线 `c127b11a`），保留 11-12、11-11 晚报的有效纠正与具体取证。
 报告用于发现偏差，语言依据仍是作者确认与正式 docs；本轮不修改 docs。
 
 原引言持续追加不同基线的迁移记录，容易把历史失败、当前接线和目标设计混为一谈。
 现收敛为下面的当前判断；后面的编号 1–4 节是旧基线的取证及纠正，不能把其中
-“本次”“当前”当成 11-15 新执行结果。被删的过程性引言可从 Git 历史查看，
+“本次”“当前”当成 11-17 新执行结果。被删的过程性引言可从 Git 历史查看，
 重要技术结论与证据入口保留在对应专题。解析器、格式器与编辑器的独立交付不算作
 本主线的 Type 恢复、源码执行或库接口完成。
 
@@ -22,8 +22,8 @@ builtin.math 与 meta.math 是作者要求的不同阶段接口。继续采用�
 | --- | --- | --- |
 | D01：字节码与参考执行 | `bytecode.rs::invocation_code` 传播编译错误；`invocation/contracts.rs` 用 Entry/Body/Exit 推进声明契约。`bytecode_invocation_available` 仍有 phase、cleanup 与 effect 门控 | 保留共同语义；受限路径和完整 NIR 依赖仍在，不称为无树载体的完整 VM |
 | D02：世界与复用 | `6895cdd7` 让 source invocation 借用原声明包，以 `SourceDispatch::instances` 隔离已选实例；CLI 不再为移除实例表而复制整包，原 CodeSession 可以保留 | 不等于共享活动 Interpreter、缓存任意调用结果或完成增量 query；见[声明视图](world-storage-and-lifetimes.md) |
-| D03：源码交织 | 块、if、contextual when/match 及比较已保留检查后继；两个待定 Type 正例本轮仍失败 | 当前帧仍同步，不能与可挂起的 VM 宿主请求混称；见下节及[交接协议](elaboration-state-and-publication.md#实际调用链与替换边界) |
-| D04：公开 callable 输入 | 共同路由与 telescope 已接通；`normal.rs` 的动态 NF 具名供应仍报 positional-only 缺口 | 作者已允许按槽位适配，入口名字与默认供应由目标接口决定；[接口迁移](callable-input-interfaces.md)仍需跨 Type、值、世界与 wire 接通 |
+| D03：源码交织 | 块、if、when/match、比较、逻辑短路及声明 NF 已保留检查后继；待定 Type 正例仍未接通，动态计算包另有一个明确 ignored 的正例 | 当前帧仍同步，不能与可挂起的 VM 宿主请求混称；见下节及[交接协议](elaboration-state-and-publication.md#实际调用链与替换边界) |
+| D04：公开 callable 输入 | 共同路由、telescope 和动态 NF 位置输入准备已接通，独立列表合成已删除；公开具名接口仍未传送 | 作者已允许按槽位适配，入口名字与默认供应由目标接口决定；[接口迁移](callable-input-interfaces.md)仍需跨 Type、值、世界与 wire 接通 |
 | D05：NF 与普通值 | 聚合索引字段查询和抽象错误结果恒等交付已有修复；这没有退役 Role／BuiltinCallable 的专用职责 | 不透明头、普通 comptime 参数和值准入必须共同迁移；不能从布局视图反推 NF 等式，见[值准入](comptime-value-admission.md) |
 | D06–D08：runtime 类型 | TypeRef 的现有 IIR 消费者仍用空 substitution；抽象 BitVec 位宽在形成边界仍明确拒绝。新增解析／排版支持不是 lift 的语义接线 | TypeCore、环境取得、lift、符号布局及消费端尚需共同迁移，见[类型引用与环境](type-references-and-environments.md) |
 | D09：PTC | `integer::State` 的增量差分图应保留；`model_search::witness` 仍在遇到 Trait atom 时返回无见证 | Type 模型搜索不能借任意 EUF 代表充数；联合理论与模型重放仍未完成，见[理论证据](type-models-and-theory-evidence.md) |
@@ -36,7 +36,28 @@ builtin.math 与 meta.math 是作者要求的不同阶段接口。继续采用�
 例如有 TypeRef 数据结构与闭合消费者，不证明 runtime 环境取得已完成；有待决
 注解的定义检查，也不证明任意源码执行区域已经能够恢复。
 
-## 本轮复核与下一处交接
+## 11-17 午报与本次交付范围
+
+午报 D04 记录的是 `c127b11a` 的已提交基线，动态 NF 当时仍独立合成列表。
+本次将其位置输入迁入共同准备器，默认提供者与源声明域的隐式依赖也已拆开。
+这纠正了该条的一个实际断点，但不解除公开名字／默认协议的传送，也未完成
+源码—VM 间的 Type 响应恢复。新增和既有执行证据见
+[共同准备器](callable-input-interfaces.md#共同准备器的路由边界)；不能把局部帧化
+计作交织协议完成。
+
+午报 D12 对目标 println 的六处缺口继续成立。`FormatPlan.parse` 扫描器不是
+`std.fmt.Parse` 类型描述生产者，当前纯文本 println 和 println_value 也不是
+作者要求的 `fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format))`。
+接下来须贯通已完成 Type 描述、逐项准入与原调用区域继续检查，不能为格式化添加
+专用 tuple、Any 列表或绕过定义检查的入口。具体边界见
+[可计算类型描述](type-descriptions-and-admission.md)。
+
+午报 S14 提出的独立 `anar` 可执行文件与单 CLI 约定的冲突是另一项真实待处理
+事项；本次未改编辑器／LSP 交付。源码注册表仍要求完整 Function、runtime str
+来源仍缺失、TypeRef／lift／符号位宽等问题也没有被本次输入准备迁移解除。
+不以报告的代码行数或测试数作为完成比例。
+
+## 11-15 复核与下一处交接
 
 在 `/home/fin/luna` 执行：
 

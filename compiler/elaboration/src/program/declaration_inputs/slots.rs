@@ -18,10 +18,9 @@ pub(super) enum Poll<'b, 'h> {
 }
 
 pub(super) struct Frame<'b, 'h> {
-    owner: OwnerId,
     span: Span,
     parameters: Parameters,
-    clauses: Vec<hir::clause::ClauseParam<'h>>,
+    interface: interface::Interface<'h>,
     defaults: Option<environment::Environment>,
     checking: InputChecking,
     routed: Vec<Option<RoutedDeclarationInput<'b, 'h>>>,
@@ -32,17 +31,16 @@ pub(super) struct Frame<'b, 'h> {
     pending: Option<Pending<'b, 'h>>,
     dependencies: Option<domain::Frame>,
     observations: Option<constants::PreparedObservations>,
-    active_default: Option<usize>,
+    active_default: Option<(OwnerId, usize)>,
     default_scope: Option<scope::Scope>,
     complete: bool,
 }
 
 impl<'b, 'h: 'b> Frame<'b, 'h> {
     pub(super) fn new(
-        owner: OwnerId,
         span: Span,
         parameters: Parameters,
-        clauses: Vec<hir::clause::ClauseParam<'h>>,
+        interface: interface::Interface<'h>,
         defaults: Option<environment::Environment>,
         checking: InputChecking,
         routed: Vec<Option<RoutedDeclarationInput<'b, 'h>>>,
@@ -51,10 +49,9 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         collection: collections::Frame<'b, 'h>,
     ) -> Self {
         Self {
-            owner,
             span,
             parameters,
-            clauses,
+            interface,
             defaults,
             checking,
             routed,
@@ -103,12 +100,9 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             return self.poll_dependencies(checker);
         }
         let domain = DeclarationInputDomain {
-            ty: checker.instantiate_input_types(
-                &self.parameters[slot].2,
-                self.progress.observed_parameters(),
-                self.progress.observed_values(),
-                self.span,
-            )?,
+            ty: self
+                .progress
+                .instantiate(checker, &self.parameters[slot].2, self.span)?,
             pending: dependent,
         };
         self.check_slot(checker, slot, domain)
@@ -123,11 +117,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             slot,
             &self.parameters,
             |previous| {
-                self.routed[previous].is_none()
-                    && matches!(
-                        self.clauses[previous].kind,
-                        hir::clause::ClauseParamKind::Optional(..)
-                    )
+                self.routed[previous].is_none() && self.interface.default(previous).is_some()
             },
             &mut checker.required_steps,
             self.span,
@@ -176,18 +166,10 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         slot: usize,
         domain: DeclarationInputDomain,
     ) -> Result<Poll<'b, 'h>, Error> {
-        if self.routed[slot].is_none()
-            && matches!(
-                self.clauses[slot].kind,
-                hir::clause::ClauseParamKind::Varadic(..)
-            )
-        {
-            let ty = checker.instantiate_input_types(
-                &self.parameters[slot].2,
-                self.progress.observed_parameters(),
-                self.progress.observed_values(),
-                self.span,
-            )?;
+        if self.routed[slot].is_none() && self.interface.is_collector(slot) {
+            let ty = self
+                .progress
+                .instantiate(checker, &self.parameters[slot].2, self.span)?;
             if checker.list_element_type(&ty).is_none() {
                 return Err(error(
                     self.span,
@@ -213,32 +195,34 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             return Ok(Poll::Continue);
         }
         let explicit = self.routed[slot].take();
+        let provider = self.interface.default(slot);
         let declaration_default = explicit.is_none()
-            && matches!(
-                self.clauses[slot].kind,
-                hir::clause::ClauseParamKind::Optional(..)
-            )
             && self.checking == InputChecking::Contextual
-            && checker.normal_parameters.contains_key(&self.owner);
+            && provider
+                .is_some_and(|provider| checker.normal_parameters.contains_key(&provider.owner));
         let input = match &explicit {
             Some(RoutedDeclarationInput::Source(input)) => Some(*input),
             Some(_) => None,
             None if declaration_default => None,
             None => {
+                let provider = provider
+                    .ok_or_else(|| error(self.span, "normal-form argument count mismatch"))?;
                 self.default_scope = Some(scope::Scope::enter(checker, self.span)?);
-                Some(self.enter_default(checker, slot)?)
+                Some(self.enter_default(checker, slot, provider)?)
             }
         };
         if explicit.is_none() {
+            let provider = provider.expect("omitted input has a default provider");
+            let guard = (provider.owner, provider.slot);
             if checker.active_type_defaults.len() >= 64
-                || !checker.active_type_defaults.insert((self.owner, slot))
+                || !checker.active_type_defaults.insert(guard)
             {
                 return Err(error(
                     self.span,
                     "cyclic or excessively deep normal-form default",
                 ));
             }
-            self.active_default = Some(slot);
+            self.active_default = Some(guard);
         }
         self.pending = Some(Pending {
             slot,
@@ -247,9 +231,15 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         });
         let domain = &self.pending.as_ref().unwrap().domain;
         let immediate = if declaration_default {
+            let provider = provider.expect("declaration default provider");
             Some(
                 checker
-                    .connected_normal_default(self.owner, slot, &self.progress, self.span)
+                    .connected_normal_default(
+                        provider.owner,
+                        provider.slot,
+                        &self.progress,
+                        self.span,
+                    )
                     .map(n::NormalFormArgument::Value),
             )
         } else {
@@ -326,6 +316,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         &self,
         checker: &mut Checker<'_, '_>,
         slot: usize,
+        provider: interface::DefaultSource<'h>,
     ) -> Result<&'h Expr<'h>, Error> {
         if let Some(defaults) = &self.defaults {
             defaults.install(checker, self.span)?;
@@ -360,24 +351,21 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                         .alias_substitution
                         .insert(parameter, std::sync::Arc::new(value));
                 }
-                let ty = checker.instantiate_input_types(
+                let domain = environment::copy_term(
                     &checker.locals[&self.progress.binding(previous)],
-                    self.progress.observed_parameters(),
-                    self.progress.observed_values(),
+                    &mut checker.required_steps,
                     self.span,
                 )?;
+                let ty = self.progress.instantiate(checker, &domain, self.span)?;
                 checker
                     .normal_default_bindings
                     .insert(parameter, (self.progress.binding(previous), ty));
             }
         }
-        checker.signature_owner = Some(self.owner);
-        checker.context = checker.binder_context(self.owner);
+        checker.signature_owner = Some(provider.owner);
+        checker.context = checker.binder_context(provider.owner);
         checker.in_required_comptime = true;
-        let hir::clause::ClauseParamKind::Optional(_, _, default) = self.clauses[slot].kind else {
-            return Err(error(self.span, "normal-form argument count mismatch"));
-        };
-        Ok(default)
+        Ok(provider.expression)
     }
 
     fn accept(
@@ -436,8 +424,8 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         if let Some(scope) = self.default_scope.take() {
             scope.leave(checker);
         }
-        if let Some(slot) = self.active_default.take() {
-            checker.active_type_defaults.remove(&(self.owner, slot));
+        if let Some(guard) = self.active_default.take() {
+            checker.active_type_defaults.remove(&guard);
         }
     }
 
@@ -470,8 +458,8 @@ impl std::fmt::Display for Frame<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(declaration-slot-frame (owner {}) (source {}) (checking {}) (complete {}) {} (pending",
-            self.owner,
+            "(declaration-slot-frame {} (source {}) (checking {}) (complete {}) {} (pending",
+            self.interface,
             source(self.span),
             match self.checking {
                 InputChecking::Contextual => "contextual",
@@ -500,8 +488,8 @@ impl std::fmt::Display for Frame<'_, '_> {
             write!(f, " {collection}")?;
         }
         f.write_str(") (active-default")?;
-        if let Some(slot) = self.active_default {
-            write!(f, " {slot}")?;
+        if let Some((owner, slot)) = self.active_default {
+            write!(f, " (owner {owner}) (slot {slot})")?;
         }
         f.write_str(") (default-scope")?;
         if let Some(scope) = &self.default_scope {
@@ -557,13 +545,18 @@ mod tests {
         let binding = n::LocalId { owner: 1, index: 3 };
         let domain = p(P::Str);
         let parameters = [(declaration, Sort::ComptimeValue, domain.clone())];
-        let progress =
-            progress::Progress::new(&parameters, vec![binding], vec![0], &mut 100, span).unwrap();
+        let progress = progress::Progress::new(
+            parameters.to_vec().into(),
+            vec![binding],
+            vec![0],
+            &mut 100,
+            span,
+        )
+        .unwrap();
         let mut frame = Frame::new(
-            owner,
             span,
             parameters.into(),
-            vec![],
+            interface::Interface::positional(1, None, span).unwrap(),
             None,
             InputChecking::Typed,
             vec![None],

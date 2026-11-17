@@ -17,9 +17,8 @@ pub(in crate::program) enum Poll<'h, T> {
 
 #[must_use = "drive input preparation and restore its original caller scope"]
 pub(in crate::program) struct Frame<'h, C: Completion> {
-    owner: OwnerId,
     span: Span,
-    clauses: Option<Vec<hir::clause::ClauseParam<'h>>>,
+    interface: Option<interface::Interface<'h>>,
     defaults: Option<environment::Environment>,
     parameters: Parameters,
     completion: Option<C>,
@@ -45,23 +44,42 @@ impl<'h, C: Completion> Frame<'h, C> {
         environment::charge(&mut checker.required_steps, parameters.len(), span)?;
         Self::new(
             checker,
-            owner,
             inputs,
             span,
             parameters.into(),
-            clauses,
+            interface::Interface::declaration(owner, &clauses),
             defaults,
+            completion,
+        )
+    }
+
+    pub(super) fn positional(
+        checker: &mut Checker<'_, '_>,
+        inputs: &[Arg<'h>],
+        span: Span,
+        parameters: Vec<(DeclarationId, Sort, Term)>,
+        collector: Option<usize>,
+        completion: C,
+    ) -> Result<Self, Error> {
+        environment::charge(&mut checker.required_steps, parameters.len(), span)?;
+        let interface = interface::Interface::positional(parameters.len(), collector, span)?;
+        Self::new(
+            checker,
+            inputs,
+            span,
+            parameters.into(),
+            interface,
+            None,
             completion,
         )
     }
 
     fn new(
         checker: &mut Checker<'_, '_>,
-        owner: OwnerId,
         inputs: &[Arg<'h>],
         span: Span,
         parameters: Parameters,
-        clauses: Vec<hir::clause::ClauseParam<'h>>,
+        interface: interface::Interface<'h>,
         defaults: Option<environment::Environment>,
         completion: C,
     ) -> Result<Self, Error> {
@@ -71,7 +89,7 @@ impl<'h, C: Completion> Frame<'h, C> {
             inputs,
             span,
             parameters.clone(),
-            clause_inputs::entries(&clauses),
+            interface.entries().to_vec(),
         ) {
             Ok(routing) => routing,
             Err(failure) => {
@@ -80,9 +98,8 @@ impl<'h, C: Completion> Frame<'h, C> {
             }
         };
         Ok(Self {
-            owner,
             span,
-            clauses: Some(clauses),
+            interface: Some(interface),
             defaults,
             parameters,
             completion: Some(completion),
@@ -113,8 +130,7 @@ impl<'h, C: Completion> Frame<'h, C> {
                     };
                     let frame = (*frame).finish(
                         checker,
-                        self.owner,
-                        self.clauses.take().expect("routing clause telescope"),
+                        self.interface.take().expect("routing input interface"),
                         self.defaults.take(),
                         C::CHECKING,
                     )?;
@@ -217,8 +233,7 @@ impl<C: Completion> std::fmt::Display for Frame<'_, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(declaration-input-preparation (owner {}) (source {}) (waiting {}) (phase ",
-            self.owner,
+            "(declaration-input-preparation (source {}) (waiting {}) (phase ",
             source(self.span),
             self.waiting
         )?;
@@ -226,6 +241,10 @@ impl<C: Completion> std::fmt::Display for Frame<'_, C> {
             Phase::Routing(frame) => frame.fmt(f)?,
             Phase::Checking(frame) => frame.fmt(f)?,
             Phase::Finished => f.write_str("finished")?,
+        }
+        f.write_str(") (interface")?;
+        if let Some(interface) = &self.interface {
+            write!(f, " {interface}")?;
         }
         f.write_str(") (caller")?;
         if let Some(scope) = &self.scope {

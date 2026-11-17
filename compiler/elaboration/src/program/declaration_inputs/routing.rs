@@ -334,8 +334,7 @@ impl<'h> Frame<'h> {
     pub(super) fn finish(
         mut self,
         checker: &mut Checker<'_, '_>,
-        owner: OwnerId,
-        clauses: Vec<hir::clause::ClauseParam<'h>>,
+        interface: interface::Interface<'h>,
         defaults: Option<environment::Environment>,
         checking: InputChecking,
     ) -> Result<slots::Frame<'h, 'h>, Error> {
@@ -351,7 +350,7 @@ impl<'h> Frame<'h> {
             .map(|_| checker.spread_binding(self.span))
             .collect::<Result<Vec<_>, _>>()?;
         let progress = progress::Progress::new(
-            &self.parameters,
+            self.parameters.clone(),
             bindings,
             self.order,
             &mut checker.required_steps,
@@ -366,10 +365,9 @@ impl<'h> Frame<'h> {
             self.preparations,
         );
         Ok(slots::Frame::new(
-            owner,
             self.span,
             self.parameters,
-            clauses,
+            interface,
             defaults,
             checking,
             self.routed,

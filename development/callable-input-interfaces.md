@@ -1,7 +1,7 @@
 # 函数值的参数入口、接口与传送
 
 状态：基于 `d6950e39` 的实现设计，接口身份和消费者核对至 `9e3509d7`。
-供应路由已合并，函数值的公开参数协议仍未接通。
+供应路由及动态 NF 的位置输入准备已合并，函数值的公开参数协议仍未接通。
 本文规定后续迁移应共同保存的信息和验收边界，不声明新的语言语法或已实现 API。
 
 ## 1. 语义依据与不能混同的身份
@@ -69,7 +69,7 @@ typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
 | `nir/types.rs::Parameter` | 仅有 sort 与 ty | 不能把这份 telescope 当成完整调用接口 |
 | `nir/program/function.rs` | FunctionDeclaration 独立持有受检声明字段，Function 组合声明与 body；`callable_type` 仍只合成 telescope 及阶段／责任修饰 | 所有权已拆开；公开供应协议及源码模板发布仍须迁移，不能把受检声明结构当成协议传送完成 |
 | `elaboration/program/input_routing` | 入口描述、完整值预留、源码实参位置已共用 | 当前 Entry 是路由投影，不包含默认提供者、协议证据及世界依赖，不能直接当完整发布格式 |
-| `elaboration/program/normal.rs` | 动态 NF 仍按 collector 索引合成列表 | 消费实际接口产生同一 ArgumentPlan，不能另造 Es 专用入口 |
+| `elaboration/program/normal/dynamic_inputs.rs` | 动态 NF 的位置输入已进入共同准备器；callee 先保存，固定包、收集和依赖域沿同一计划检查 | 接入实际公开接口，而非从所选主体补名字；待定域仍须交回原执行区域 |
 | `comptime_interpretor/callable_domains.rs` | 从接收世界取得声明／方法的签名，且不执行源码 | 返回的准入依据须包含相应公开接口；缺失与预算失败继续分开 |
 | `nir/value_admission.rs`、VM `value_types.rs` | callable 准入比较签名／关联类型视图 | 不能只证明 telescope 相容，就接受缺少供应协议的值 |
 | `luna/build_context/metadata/wire.rs` | tag 35 只传 NF 签名与可选 collector 索引 | 不能让新接口通过旧格式静默丢掉入口、默认值或协议依赖 |
@@ -113,16 +113,33 @@ typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
 仍沿共同路径；布局排除本身不执行展开或准入。展开包若提前退出，使用当次请求
 已保存的元素上下文检查不可达后继，不在子检查返回后重新扫描另一份改写 HIR。
 
-这消除了路由层对“收集器一定有一个源码名字”的依赖，为函数值接口进入同一
-准备器提供了边界。**动态 NF 调用仍未迁入**：`normal.rs` 的临时列表组装路径
-还存在，具名动态供应、公开接口传送与待定 Type 恢复仍未实现。不能把 Entry
-当成完整 callable 接口发布，也不能从所选函数主体补回已经丢失的公开名字。
+这消除了路由层对“收集器一定有一个源码名字”的依赖。`c127b11a` 后进一步将
+默认提供者的源码 owner、槽位和表达式从入口投影中分离：普通位置输入不需要
+源码 owner，只有真正进入默认供应时才安装提供者环境及递归 guard。活动投影
+保存源码引用，因此仍属于检查区域，不能当成完整 callable 接口冻结或发布。
 
-接下来的接线须把源码默认提供者与参数槽描述分开，并让 callable telescope 的
-位置绑定进入同一域依赖检查；临时绑定必须在本次准备内消除，不能冻结为声明身份。
-完成消费者须先保留 callee，再按原计划取得实参，并通过现有 NF 形成契约检查；
-不能只把列表合成代码换个文件，或为了使用准备器伪造源码声明。接口身份的未决
-关系与已确认的按槽位适配继续分开，不能用此处的布局重构替作者决定 Type 相等。
+动态 NF 位置调用已接入该准备器，原先临时合成 HIR 列表与仅接收单个展开的分支
+删除。参数 telescope 的位置绑定打开为本次准备私有的依赖键；Progress 共享原始
+参数域，使用带预算的 DeclarationSubstitution 兑现已观察输入，不再按这些私有
+键回查源码声明域并默认成 Type。普通源码、名义类型和动态调用共同使用这一域
+替换边界，默认代码连接也沿同一规则进行。
+
+结果使用既有 CallPreparation 与 Call：先保存 callee，再按原始计划取得显式
+输入，最后交付完整参数。选择函数和可变 callee 读取不会被推迟到实参之后；
+提前返回保留此前副作用并跳过后继。NF 头与形成契约仍交给既有调用／VM 路径，
+不执行头的函数体。没有为 Tuple、List 或特定实参拼写增加入口规则。
+
+**具名动态供应、完整公开接口传送与待定 Type 恢复仍未实现。** 若计算得到的
+固定包中含 Type，而后面的字面量需要该 Type 才能检查，Typed 消费者仍不能
+恢复等待；`dynamic_normal_inputs_wait_for_a_type_inside_a_computed_packet` 保存
+这个尚未实现的正例并明确 ignored，不将其拒绝写成语义要求。已形成域的计算包、
+可静态观察 Type 的包以及列表展开另有执行验证，不能据此宣称所有动态输入完成。
+接口身份的未决关系与已确认的按槽位适配继续分开，不能用本次迁移替作者决定
+Type 相等，也不能从所选函数主体补回已经丢失的公开名字。
+
+当前 NF 元数据和 VM 形成服务仍只交付 Type 结果；动态准备入口对非 Type 结果
+保留明确的未实现诊断。这是当前实现范围，不是语言要求所有范式头只能返回 Type；
+后续普通值范式须同时接通结果域代入、值表示与准入，不能执行头主体代替。
 
 验证在 `/home/fin/luna` 使用 `python3 -B development/check.py --timeout 900 --
 test -p elaboration --lib -p luna --test normal_input_plans --test
@@ -134,6 +151,31 @@ VM 路径比较 NF 身份及调用事件，覆盖固定前缀包、混合尾部�
 返回。首轮用例误用了尚未绑定协议的数字后缀，改为显式类型绑定后通过，没有改变
 检查规则。所改 Rust 文件格式检查退出 0，
 `/tmp/luna-tools-urglu3rj/result.json`。此范围不包含公开 callable 接口传送。
+
+动态位置调用迁移的检查继续使用同一工作目录与 `development/check.py --timeout
+900 --`。筛选 `declaration_inputs`、`dynamic_normal_inputs`、
+`dynamic_type_factories`、`normal_form_callable`、`open_normal_` 和 `defaults`，
+运行 elaboration/luna 的 lib 及 `normal_input_plans`、`clause_packet_preparation`、
+`declaration_input_plans`、`open_normal_form_inputs`、`frontend_cli`、
+`comptime_bytecode_types`：66 项通过，2 项失败，1 项新增待定 Type 正例 ignored，
+总退出 101，`/tmp/luna-tools-tlrp32iu/result.json`。动态 NF 字节码用例确认形成
+约束仍拒绝不合法类型，失败后可再次调用，并且不会进入头函数体。
+
+两项失败分别是 `parameter_attributes_preserve_bindings_defaults_and_roles` 的
+连续属性解析，以及 `sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override`
+的 host intrinsic 枚举选择器缺失。临时恢复本次七个已跟踪生产文件到 `c127b11a`
+后，原两个测试仍以相同诊断失败，退出 101，
+`/tmp/luna-tools-f3jujdtj/result.json`；其余工作区改动未动，结束后七个文件均已
+逐字节恢复。本次不修改它们的断言或将其忽略，亦不把扩大检查表述为全通过。
+
+随后完整运行 `test -p luna --test normal_input_plans --test open_normal_form_inputs
+--test ordinary_clause_collectors --no-fail-fast -- --test-threads=1`，退出 0，
+73 项通过、2 项待定 Type 正例 ignored；证据
+`/tmp/luna-tools-8e5gslxu/result.json`。新增动态调用在真实 sysroot 的字节码与
+参考 VM 中覆盖混合标量／列表展开、Type 列表、计算包、callee 的可变读取和提前
+退出；没有重跑两项已确认的无关基线失败。十个修改的 Rust 文件格式检查退出 0，
+证据 `/tmp/luna-tools-bry_acpz/result.json`。此后仅将非 Type NF 结果的诊断明确为
+“未实现”，避免将当前实现范围表述成语言规则；执行逻辑未变。
 
 ### 已接通：共同的声明 telescope 构造
 

@@ -102,12 +102,7 @@ impl Frame {
             progress.observed_parameters(),
             span,
         )?;
-        let ty = checker.instantiate_input_types(
-            domain,
-            progress.observed_parameters(),
-            progress.observed_values(),
-            span,
-        )?;
+        let ty = progress.instantiate(checker, domain, span)?;
         Ok(DeclarationInputDomain { ty, pending })
     }
 }

@@ -15,17 +15,19 @@ struct Slot {
 }
 
 pub(super) struct Progress {
+    parameters: Parameters,
     slots: Vec<Slot>,
     schedule: Vec<usize>,
     checked_prefix: usize,
     checked_order: Vec<usize>,
     observed_parameters: Vec<DeclarationId>,
     observed_values: Vec<Term>,
+    observed_slots: Vec<usize>,
 }
 
 impl Progress {
     pub fn new(
-        parameters: &[(DeclarationId, Sort, Term)],
+        parameters: Parameters,
         bindings: Vec<n::LocalId>,
         mut explicit: Vec<usize>,
         fuel: &mut u64,
@@ -67,14 +69,40 @@ impl Progress {
             checked_order: Vec::new(),
             observed_parameters: Vec::new(),
             observed_values: Vec::new(),
+            observed_slots: Vec::new(),
+            parameters,
         })
     }
 
     pub fn observed_parameters(&self) -> &[DeclarationId] {
         &self.observed_parameters
     }
-    pub fn observed_values(&self) -> &[Term] {
-        &self.observed_values
+    pub(super) fn instantiate(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        ty: &Term,
+        span: Span,
+    ) -> Result<Term, Error> {
+        let domains = self
+            .observed_slots
+            .iter()
+            .map(|slot| {
+                environment::copy_term(&self.parameters[*slot].2, &mut checker.required_steps, span)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let frames = checker.call_input_frames();
+        let before = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = nir::DeclarationSubstitution::bounded(
+            &self.observed_parameters,
+            &domains,
+            &self.observed_values,
+            &frames,
+            &mut fuel,
+        )
+        .and_then(|substitution| substitution.instantiate_bounded(ty, &mut fuel));
+        checker.required_steps -= (before - fuel) as u64;
+        result.map_err(|failure| error(span, failure.to_string()))
     }
 
     // This is the first unfinished check in source order, not an execution PC.
@@ -125,6 +153,7 @@ impl Progress {
             })?;
             self.observed_parameters.push(self.slots[slot].declaration);
             self.observed_values.push(value.clone());
+            self.observed_slots.push(slot);
         }
         self.slots[slot].prepared = Some(Prepared { producer, identity });
         self.checked_order.push(slot);
@@ -194,8 +223,8 @@ impl std::fmt::Display for Progress {
         for (index, slot) in self.slots.iter().enumerate() {
             write!(
                 f,
-                " (slot {index} {} {} (binding {})",
-                slot.declaration, slot.sort, slot.binding
+                " (slot {index} {} {} (binding {}) (domain {})",
+                slot.declaration, slot.sort, slot.binding, self.parameters[index].2
             )?;
             if let Some(prepared) = &slot.prepared {
                 write!(f, " (producer {}) (identity", prepared.producer)?;
@@ -244,8 +273,14 @@ mod tests {
     fn dependency_checks_retain_source_producers_and_execution_order() {
         let (parameters, bindings) = inputs();
         let span = Span::default();
-        let mut progress =
-            Progress::new(&parameters, bindings.clone(), vec![2, 0], &mut 100, span).unwrap();
+        let mut progress = Progress::new(
+            parameters.to_vec().into(),
+            bindings.clone(),
+            vec![2, 0],
+            &mut 100,
+            span,
+        )
+        .unwrap();
         assert_eq!(progress.current(), Some(2));
         let pending = progress.to_string();
         assert!(
@@ -340,10 +375,35 @@ mod tests {
         let (parameters, bindings) = inputs();
         let span = Span::default();
         for order in [vec![3], vec![1, 1]] {
-            assert!(Progress::new(&parameters, bindings.clone(), order, &mut 100, span).is_err());
+            assert!(
+                Progress::new(
+                    parameters.to_vec().into(),
+                    bindings.clone(),
+                    order,
+                    &mut 100,
+                    span
+                )
+                .is_err()
+            );
         }
-        assert!(Progress::new(&parameters, bindings.clone(), vec![2, 0], &mut 0, span).is_err());
-        let progress = Progress::new(&parameters, bindings, vec![2, 0], &mut 100, span).unwrap();
+        assert!(
+            Progress::new(
+                parameters.to_vec().into(),
+                bindings.clone(),
+                vec![2, 0],
+                &mut 0,
+                span
+            )
+            .is_err()
+        );
+        let progress = Progress::new(
+            parameters.to_vec().into(),
+            bindings,
+            vec![2, 0],
+            &mut 100,
+            span,
+        )
+        .unwrap();
         assert!(progress.finish(vec![], span).is_err());
     }
 }

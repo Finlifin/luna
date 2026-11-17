@@ -4,6 +4,7 @@ mod collections;
 mod completion;
 mod domain;
 mod environment;
+mod interface;
 pub(super) mod preparation;
 mod progress;
 pub(super) mod request;
@@ -227,6 +228,24 @@ impl std::fmt::Display for DeclarationInputDomain {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn planned_positional_inputs(
+        &mut self,
+        inputs: &[Arg<'_>],
+        span: Span,
+        parameters: Vec<(DeclarationId, Sort, Term)>,
+        collector: Option<usize>,
+    ) -> Result<CheckedDeclarationInputs, Error> {
+        preparation::Frame::positional(
+            self,
+            inputs,
+            span,
+            parameters,
+            collector,
+            completion::Typed,
+        )?
+        .drive(self)
+    }
+
     // Inspect the original callee domain before substitution. A supplied
     // caller parameter may have the same declaration identity as another
     // callee input in a recursive call; it is not another pending dependency.
@@ -365,14 +384,7 @@ impl Checker<'_, '_> {
             &mut self.expansion_sources,
             span,
         )?;
-        value.rewrite_types(&mut |ty| {
-            self.instantiate_input_types(
-                ty,
-                progress.observed_parameters(),
-                progress.observed_values(),
-                span,
-            )
-        })?;
+        value.rewrite_types(&mut |ty| progress.instantiate(self, ty, span))?;
         Ok(value)
     }
 

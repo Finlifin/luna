@@ -53,6 +53,131 @@ fn assert_ordinary_reordered_inputs(package: &Package, name: &str) {
 }
 
 #[test]
+fn dynamic_normal_inputs_share_packets_collections_and_callee_order() {
+    let package = sysroot::compile(
+        "
+        typealias Factory = pure comptime fn<T: Type, tag: u8, ...values: meta.List<T>> -> Type;
+        pure comptime fn Packet<T, tag: u8, ...values: meta.List<T>> -> Type { bool }
+        comptime fn select() -> Factory { Packet }
+        comptime fn tail() -> meta.List<u8> { [2, 3] }
+        comptime fn last() -> u8 { 4 }
+        comptime fn Direct() -> Type { Packet<u8, 7, 1, 2, 3, 4> }
+        comptime fn Mixed() -> Type { select()<...(u8, 7), 1, ...tail(), last()> }
+        comptime fn EmptyDirect() -> Type { Packet<u8, 7> }
+        comptime fn Empty() -> Type { select()<...(u8, 7)> }
+        comptime fn TypesDirect() -> Type { Packet<Type, 7, bool, u8> }
+        comptime fn Types() -> Type { select()<...(Type, 7), bool, ...[u8]> }
+        comptime fn Exit() -> Type {
+            select()<...(u8, 7), do { return bool; 1 }, ...tail(), last()>
+        }
+        ",
+    )
+    .unwrap();
+    let expected = invoke_both(&package, "Direct");
+    trace_both(
+        &package,
+        "Mixed",
+        &expected,
+        &["Mixed", "select", "tail", "last"],
+    );
+    trace_both(
+        &package,
+        "Empty",
+        &invoke_both(&package, "EmptyDirect"),
+        &["Empty", "select"],
+    );
+    trace_both(
+        &package,
+        "Types",
+        &invoke_both(&package, "TypesDirect"),
+        &["Types", "select"],
+    );
+    trace_both(
+        &package,
+        "Exit",
+        &Value::Type(nir::Term::Primitive(nir::Primitive::Bool)),
+        &["Exit", "select"],
+    );
+}
+
+#[test]
+fn dynamic_normal_inputs_preserve_computed_packets_and_mutable_callee_reads() {
+    let package = sysroot::compile(
+        "
+        typealias Factory = pure comptime fn<tag: u8, ...values: meta.List<u8>> -> Type;
+        pure comptime fn First<tag: u8, ...values: meta.List<u8>> -> Type { bool }
+        pure comptime fn Second<tag: u8, ...values: meta.List<u8>> -> Type { bool }
+        comptime fn select() -> Factory { First }
+        comptime fn prefix() -> Tuple<u8> { (7,) }
+        comptime fn tail() -> meta.List<u8> { [2, 3] }
+        comptime fn Direct() -> Type { First<7, 1, 2, 3> }
+        comptime fn Build() -> Type { select()<...prefix(), 1, ...tail()> }
+        comptime fn Snapshot() -> Type {
+            var factory: Factory = First;
+            factory<7, do { factory = Second; 1 }, ...tail()>
+        }
+        ",
+    )
+    .unwrap();
+    let expected = invoke_both(&package, "Direct");
+    trace_both(
+        &package,
+        "Build",
+        &expected,
+        &["Build", "select", "prefix", "tail"],
+    );
+    trace_both(&package, "Snapshot", &expected, &["Snapshot", "tail"]);
+}
+
+#[test]
+#[ignore = "dynamic NF input domains still need an invocation-time packet Type response"]
+fn dynamic_normal_inputs_wait_for_a_type_inside_a_computed_packet() {
+    let package = sysroot::compile(
+        "
+        typealias Factory = pure comptime fn<T: Type, ...values: meta.List<T>> -> Type;
+        pure comptime fn Packet<T, ...values: meta.List<T>> -> Type { bool }
+        comptime fn prefix() -> Tuple<Type> { (u8,) }
+        comptime fn Direct() -> Type { Packet<u8, 1, 255> }
+        comptime fn Build() -> Type {
+            let factory: Factory = Packet;
+            factory<...prefix(), 1, 255>
+        }
+        ",
+    )
+    .unwrap();
+    trace_both(
+        &package,
+        "Build",
+        &invoke_both(&package, "Direct"),
+        &["Build", "prefix"],
+    );
+}
+
+#[test]
+fn dynamic_normal_inputs_reject_wrong_domains_and_unknown_names() {
+    for (inputs, diagnostic) in [
+        ("u8, true", "type mismatch"),
+        ("u8, ...[false]", "type mismatch"),
+        ("u8, 256", "does not fit"),
+        (".missing = [1], u8", "unknown named"),
+    ] {
+        let input = format!(
+            "
+            typealias Factory = pure comptime fn<T: Type, ...values: meta.List<T>> -> Type;
+            pure comptime fn Packet<T, ...values: meta.List<T>> -> Type {{ bool }}
+            comptime fn select() -> Factory {{ Packet }}
+            comptime fn Invalid() -> Type {{ select()<{inputs}> }}
+        "
+        );
+        let failure = match sysroot::compile(&input) {
+            Ok(_) => panic!("accepted {input}"),
+            Err(failure) => failure,
+        };
+        assert!(failure.contains(diagnostic), "{inputs}: {failure}");
+    }
+}
+
+#[test]
 fn fixed_packet_layout_does_not_absorb_collector_sources() {
     let package = sysroot::compile(
         "
