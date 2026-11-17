@@ -601,19 +601,19 @@ impl Checker<'_, '_> {
             );
             prepared.defaults[parameter] = Some(value);
         }
-        for slot in demanded {
-            self.prepare_type_dependency(
-                slot,
-                parameters,
-                callee,
-                direct,
-                routes,
-                offset,
-                expr,
-                &mut prepared,
-            )?;
+        let mut frame = tasks::Frame::new(
+            self, demanded, parameters, callee, direct, routes, offset, expr, prepared,
+        )?;
+        loop {
+            match frame.poll(self)? {
+                tasks::Poll::Continue => {}
+                tasks::Poll::Child(request) => {
+                    let (slot, checked) = request.check(self);
+                    frame.accept(self, slot, checked)?;
+                }
+                tasks::Poll::Complete => return frame.finish(),
+            }
         }
-        Ok(prepared)
     }
 
     pub(super) fn call_default(

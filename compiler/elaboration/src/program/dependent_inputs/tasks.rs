@@ -37,6 +37,7 @@ struct Progress {
     active: BTreeSet<usize>,
 }
 impl Progress {
+    #[cfg(test)]
     fn new(slot: usize) -> Self {
         Self {
             tasks: vec![Task::Enter(slot)],
@@ -118,174 +119,377 @@ fn copy_evidence(value: &Term, steps: &mut u64, span: Span) -> Result<Term, Erro
     })
 }
 
-impl Checker<'_, '_> {
-    pub(in crate::program) fn prepare_type_dependency(
-        &mut self,
-        slot: usize,
-        parameters: &[Parameter],
-        callee: &n::Expr,
+/// The parent owns checked inputs and default continuations across child checks.
+/// Source borrows still belong to the enclosing checking region, not a VM task.
+#[must_use = "drive the input frame to completion or discard its uncommitted results"]
+pub(super) struct Frame<'b, 'h> {
+    parameters: &'b [Parameter],
+    callee: &'b n::Expr,
+    owner: Option<OwnerId>,
+    routes: &'b [arguments::RoutedArgument<'h>],
+    offset: usize,
+    source: &'b Expr<'h>,
+    prepared: PreparedInputs,
+    progress: Progress,
+    phase: Phase,
+}
+
+#[derive(Clone, Copy)]
+enum Phase {
+    Ready,
+    Child(usize),
+    Failed,
+    Complete,
+}
+
+pub(super) enum Poll<'b> {
+    Continue,
+    Child(Request<'b>),
+    Complete,
+}
+
+pub(super) struct Request<'b> {
+    slot: usize,
+    input: Expr<'b>,
+    expected: Term,
+}
+
+impl Request<'_> {
+    pub(super) fn check(self, checker: &mut Checker<'_, '_>) -> (usize, Result<n::Expr, Error>) {
+        let checked = checker.with_staged_input(true, |checker| {
+            checker.expr(&self.input, Some(&self.expected))
+        });
+        (self.slot, checked)
+    }
+}
+
+impl std::fmt::Display for Request<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(dependent-input-request (slot {}) (source {} {}) (expected {}))",
+            self.slot,
+            self.input.hir_id,
+            source(self.input.span),
+            self.expected
+        )
+    }
+}
+
+impl<'b, 'h: 'b> Frame<'b, 'h> {
+    pub(super) fn new(
+        checker: &mut Checker<'_, '_>,
+        demanded: BTreeSet<usize>,
+        parameters: &'b [Parameter],
+        callee: &'b n::Expr,
         owner: Option<OwnerId>,
-        routes: &[arguments::RoutedArgument<'_>],
+        routes: &'b [arguments::RoutedArgument<'h>],
         offset: usize,
-        source: &Expr<'_>,
-        prepared: &mut PreparedInputs,
-    ) -> Result<(), Error> {
-        let mut progress = Progress::new(slot);
-        while let Some(task) = progress.next(&mut self.required_steps, source.span)? {
-            match task {
-                Task::Enter(slot) => {
-                    if prepared.symbols.get(slot).is_some_and(Option::is_some) {
-                        continue;
-                    }
-                    let parameter = parameters
-                        .get(slot)
-                        .ok_or_else(|| error(source.span, "invalid dependent input slot"))?;
-                    if parameter.sort == Sort::Runtime {
-                        return Err(error(
-                            source.span,
-                            "dependent comptime input cannot read a runtime argument",
-                        ));
-                    }
-                    progress.enter(slot, source.span)?;
-                    let dependencies = self.term_substitution_inputs(&parameter.ty, source.span)?;
-                    progress.after(
-                        dependencies.into_keys(),
-                        Task::Check(slot),
-                        &mut self.required_steps,
-                        source.span,
-                    )?;
-                }
-                Task::Check(slot) => {
-                    let binding =
-                        self.prepare_call_binding(parameters, &prepared.symbols, source.span)?;
-                    let expected = binding
-                        .substitute(&parameters[slot].ty)
-                        .map_err(|e| error(source.span, e.to_string()))?;
-                    let expected = self.callable_input_view(&expected, source.span)?;
-                    let route = routes.iter().find(|route| route.parameter + offset == slot);
-                    let value = if let Some(value) = &prepared.values[slot] {
-                        nir::copy_budget::charge_expression(value, &mut self.required_steps)
-                            .map_err(|failure| error(source.span, format!("dependent input producer copy budget exhausted: {failure:?}")))?;
-                        value.clone()
-                    } else if let Some(route) = route {
-                        route.require_collection_type(self, &expected, source.span)?;
-                        let value = route.expression(source);
-                        self.with_staged_input(true, |this| this.expr(&value, Some(&expected)))?
-                    } else {
-                        let owner = owner.ok_or_else(|| {
-                            error(
-                                source.span,
-                                "dependent default needs declaration parameter metadata",
-                            )
-                        })?;
-                        let value = match prepared.defaults[slot].take() {
-                            Some(value) => value,
-                            None => self.call_default(owner, slot, callee, source.span)?,
-                        };
-                        let item = self.package.item(owner).unwrap();
-                        let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind
-                        else {
-                            return Err(error(
-                                source.span,
-                                "dependent default needs function parameter metadata",
-                            ));
-                        };
-                        spend(&mut self.required_steps, sig.params.len(), source.span)?;
-                        let ids: BTreeMap<_, _> = sig
-                            .params
-                            .iter()
-                            .enumerate()
-                            .map(|(slot, parameter)| (local(parameter.hir_id), slot))
-                            .collect();
-                        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                        let mut fuel = before;
-                        let references = nir::preparation::references(&value, &mut fuel);
-                        self.required_steps -= (before - fuel) as u64;
-                        let references = references.map_err(|e| error(source.span, e))?;
-                        spend(
-                            &mut self.required_steps,
-                            references.len().saturating_mul(2),
-                            source.span,
-                        )?;
-                        let references: Vec<_> = references
-                            .into_iter()
-                            .filter_map(|binding| ids.get(&binding).map(|slot| (binding, *slot)))
-                            .collect();
-                        // Own the checked default while its referenced inputs are
-                        // prepared. Resuming does not rebuild or invoke the default.
-                        let dependencies: Vec<_> =
-                            references.iter().map(|(_, slot)| *slot).collect();
-                        progress.after(
-                            dependencies.into_iter(),
-                            Task::Default {
-                                slot,
-                                value,
-                                references,
-                            },
-                            &mut self.required_steps,
-                            source.span,
-                        )?;
-                        continue;
-                    };
-                    self.complete_type_dependency(
-                        slot,
-                        owner,
-                        source,
-                        route.is_some(),
-                        value,
-                        vec![],
-                        None,
-                        prepared,
-                    )?;
-                    progress.complete(slot, source.span)?;
-                }
-                Task::Default {
-                    slot,
-                    mut value,
-                    references,
-                } => {
-                    let mut bindings = Vec::new();
-                    for (binding, dependency) in &references {
-                        let value = prepared.values[*dependency].as_ref().ok_or_else(|| {
-                            error(source.span, "dependent default producer is incomplete")
-                        })?;
-                        let symbol = prepared.symbols[*dependency].as_ref().ok_or_else(|| {
-                            error(source.span, "dependent default identity is incomplete")
-                        })?;
-                        bindings.push((
-                            *binding,
-                            copy_evidence(&value.ty, &mut self.required_steps, source.span)?,
-                            copy_evidence(symbol, &mut self.required_steps, source.span)?,
-                        ));
-                    }
-                    let binding =
-                        self.prepare_call_binding(parameters, &prepared.symbols, source.span)?;
-                    value
-                        .rewrite_types(&mut |ty| binding.substitute(ty))
-                        .map_err(|e| error(source.span, e.to_string()))?;
-                    value.rewrite_types(&mut |ty| self.callable_input_view(ty, source.span))?;
-                    let forwarded = if let K::Local(binding) = value.kind {
-                        references
-                            .iter()
-                            .find(|(id, _)| *id == binding)
-                            .and_then(|(_, dependency)| prepared.symbols[*dependency].as_ref())
-                            .map(|symbol| {
-                                copy_evidence(symbol, &mut self.required_steps, source.span)
-                            })
-                            .transpose()?
-                    } else {
-                        None
-                    };
-                    self.complete_type_dependency(
-                        slot, owner, source, false, value, bindings, forwarded, prepared,
-                    )?;
-                    progress.complete(slot, source.span)?;
-                }
+        source: &'b Expr<'h>,
+        prepared: PreparedInputs,
+    ) -> Result<Self, Error> {
+        spend(&mut checker.required_steps, demanded.len(), source.span)?;
+        Ok(Self {
+            parameters,
+            callee,
+            owner,
+            routes,
+            offset,
+            source,
+            prepared,
+            progress: Progress {
+                tasks: demanded.into_iter().rev().map(Task::Enter).collect(),
+                path: vec![],
+                active: BTreeSet::new(),
+            },
+            phase: Phase::Ready,
+        })
+    }
+
+    pub(super) fn poll(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b>, Error> {
+        match self.phase {
+            Phase::Ready => {}
+            Phase::Child(_) => {
+                return Err(error(
+                    self.source.span,
+                    "dependent input frame awaits its child",
+                ));
+            }
+            Phase::Failed | Phase::Complete => {
+                return Err(error(
+                    self.source.span,
+                    "dependent input frame is no longer active",
+                ));
             }
         }
+        let result = self.step(checker);
+        if result.is_err() {
+            self.phase = Phase::Failed;
+        }
+        result
+    }
+
+    fn step(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b>, Error> {
+        let parameters = self.parameters;
+        let callee = self.callee;
+        let owner = self.owner;
+        let routes = self.routes;
+        let offset = self.offset;
+        let source = self.source;
+        let prepared = &mut self.prepared;
+        let progress = &mut self.progress;
+        let Some(task) = progress.next(&mut checker.required_steps, source.span)? else {
+            self.phase = Phase::Complete;
+            return Ok(Poll::Complete);
+        };
+        match task {
+            Task::Enter(slot) => {
+                if prepared.symbols.get(slot).is_some_and(Option::is_some) {
+                    return Ok(Poll::Continue);
+                }
+                let parameter = parameters
+                    .get(slot)
+                    .ok_or_else(|| error(source.span, "invalid dependent input slot"))?;
+                if parameter.sort == Sort::Runtime {
+                    return Err(error(
+                        source.span,
+                        "dependent comptime input cannot read a runtime argument",
+                    ));
+                }
+                progress.enter(slot, source.span)?;
+                let dependencies = checker.term_substitution_inputs(&parameter.ty, source.span)?;
+                progress.after(
+                    dependencies.into_keys(),
+                    Task::Check(slot),
+                    &mut checker.required_steps,
+                    source.span,
+                )?;
+            }
+            Task::Check(slot) => {
+                let binding =
+                    checker.prepare_call_binding(parameters, &prepared.symbols, source.span)?;
+                let expected = binding
+                    .substitute(&parameters[slot].ty)
+                    .map_err(|e| error(source.span, e.to_string()))?;
+                let expected = checker.callable_input_view(&expected, source.span)?;
+                let route = routes.iter().find(|route| route.parameter + offset == slot);
+                let value = if let Some(value) = &prepared.values[slot] {
+                    nir::copy_budget::charge_expression(value, &mut checker.required_steps)
+                        .map_err(|failure| {
+                            error(
+                                source.span,
+                                format!(
+                                    "dependent input producer copy budget exhausted: {failure:?}"
+                                ),
+                            )
+                        })?;
+                    value.clone()
+                } else if let Some(route) = route {
+                    route.require_collection_type(checker, &expected, source.span)?;
+                    self.phase = Phase::Child(slot);
+                    return Ok(Poll::Child(Request {
+                        slot,
+                        input: route.expression(source),
+                        expected,
+                    }));
+                } else {
+                    let owner = owner.ok_or_else(|| {
+                        error(
+                            source.span,
+                            "dependent default needs declaration parameter metadata",
+                        )
+                    })?;
+                    let value = match prepared.defaults[slot].take() {
+                        Some(value) => value,
+                        None => checker.call_default(owner, slot, callee, source.span)?,
+                    };
+                    let item = checker.package.item(owner).unwrap();
+                    let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
+                        return Err(error(
+                            source.span,
+                            "dependent default needs function parameter metadata",
+                        ));
+                    };
+                    spend(&mut checker.required_steps, sig.params.len(), source.span)?;
+                    let ids: BTreeMap<_, _> = sig
+                        .params
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, parameter)| (local(parameter.hir_id), slot))
+                        .collect();
+                    let before = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);
+                    let mut fuel = before;
+                    let references = nir::preparation::references(&value, &mut fuel);
+                    checker.required_steps -= (before - fuel) as u64;
+                    let references = references.map_err(|e| error(source.span, e))?;
+                    spend(
+                        &mut checker.required_steps,
+                        references.len().saturating_mul(2),
+                        source.span,
+                    )?;
+                    let references: Vec<_> = references
+                        .into_iter()
+                        .filter_map(|binding| ids.get(&binding).map(|slot| (binding, *slot)))
+                        .collect();
+                    // Own the checked default while its referenced inputs are
+                    // prepared. Resuming does not rebuild or invoke the default.
+                    let dependencies: Vec<_> = references.iter().map(|(_, slot)| *slot).collect();
+                    progress.after(
+                        dependencies.into_iter(),
+                        Task::Default {
+                            slot,
+                            value,
+                            references,
+                        },
+                        &mut checker.required_steps,
+                        source.span,
+                    )?;
+                    return Ok(Poll::Continue);
+                };
+                checker.complete_type_dependency(
+                    slot,
+                    owner,
+                    source,
+                    route.is_some(),
+                    value,
+                    vec![],
+                    None,
+                    prepared,
+                )?;
+                progress.complete(slot, source.span)?;
+            }
+            Task::Default {
+                slot,
+                mut value,
+                references,
+            } => {
+                let mut bindings = Vec::new();
+                for (binding, dependency) in &references {
+                    let value = prepared.values[*dependency].as_ref().ok_or_else(|| {
+                        error(source.span, "dependent default producer is incomplete")
+                    })?;
+                    let symbol = prepared.symbols[*dependency].as_ref().ok_or_else(|| {
+                        error(source.span, "dependent default identity is incomplete")
+                    })?;
+                    bindings.push((
+                        *binding,
+                        copy_evidence(&value.ty, &mut checker.required_steps, source.span)?,
+                        copy_evidence(symbol, &mut checker.required_steps, source.span)?,
+                    ));
+                }
+                let binding =
+                    checker.prepare_call_binding(parameters, &prepared.symbols, source.span)?;
+                value
+                    .rewrite_types(&mut |ty| binding.substitute(ty))
+                    .map_err(|e| error(source.span, e.to_string()))?;
+                value.rewrite_types(&mut |ty| checker.callable_input_view(ty, source.span))?;
+                let forwarded = if let K::Local(binding) = value.kind {
+                    references
+                        .iter()
+                        .find(|(id, _)| *id == binding)
+                        .and_then(|(_, dependency)| prepared.symbols[*dependency].as_ref())
+                        .map(|symbol| {
+                            copy_evidence(symbol, &mut checker.required_steps, source.span)
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
+                checker.complete_type_dependency(
+                    slot, owner, source, false, value, bindings, forwarded, prepared,
+                )?;
+                progress.complete(slot, source.span)?;
+            }
+        }
+
+        Ok(Poll::Continue)
+    }
+
+    pub(super) fn accept(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        slot: usize,
+        checked: Result<n::Expr, Error>,
+    ) -> Result<(), Error> {
+        self.begin_accept(slot)?;
+        let value = checked?;
+        checker.complete_type_dependency(
+            slot,
+            self.owner,
+            self.source,
+            true,
+            value,
+            vec![],
+            None,
+            &mut self.prepared,
+        )?;
+        self.progress.complete(slot, self.source.span)?;
+        self.phase = Phase::Ready;
         Ok(())
     }
 
+    fn begin_accept(&mut self, slot: usize) -> Result<(), Error> {
+        if !matches!(self.phase, Phase::Child(expected) if expected == slot) {
+            return Err(error(
+                self.source.span,
+                "dependent input received an unsolicited child",
+            ));
+        }
+        // Successful completion must explicitly reopen the frame. A child or
+        // identity-observation error cannot be retried as a fresh source check.
+        self.phase = Phase::Failed;
+        Ok(())
+    }
+
+    pub(super) fn finish(self) -> Result<PreparedInputs, Error> {
+        if !matches!(self.phase, Phase::Complete) {
+            return Err(error(
+                self.source.span,
+                "dependent input frame is incomplete",
+            ));
+        }
+        Ok(self.prepared)
+    }
+}
+
+impl std::fmt::Display for Frame<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(dependent-input-frame (source {}) (phase ",
+            source(self.source.span)
+        )?;
+        match self.phase {
+            Phase::Ready => f.write_str("ready")?,
+            Phase::Child(slot) => write!(f, "(child {slot})")?,
+            Phase::Failed => f.write_str("failed")?,
+            Phase::Complete => f.write_str("complete")?,
+        }
+        write!(f, ") {} (inputs", self.progress)?;
+        for (slot, value) in self.prepared.values.iter().enumerate() {
+            write!(f, " (slot {slot} (producer")?;
+            if let Some(value) = value {
+                write!(f, " {value}")?;
+            }
+            f.write_str(") (identity")?;
+            if let Some(value) = &self.prepared.symbols[slot] {
+                write!(f, " {value}")?;
+            }
+            write!(
+                f,
+                ") (live {}) (default",
+                self.prepared.live[slot].is_some()
+            )?;
+            if let Some(value) = &self.prepared.defaults[slot] {
+                write!(f, " {value}")?;
+            }
+            f.write_str("))")?;
+        }
+        f.write_str("))")
+    }
+}
+
+impl Checker<'_, '_> {
     fn complete_type_dependency(
         &mut self,
         slot: usize,
@@ -392,6 +596,71 @@ impl Checker<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_frame_keeps_pending_results_private_and_checks_child_ownership() {
+        let span = Span::default();
+        let source_expr = Expr {
+            hir_id: hir::HirId::new(
+                hir::OwnerId::new(hir::LocalDefId::new(1)),
+                hir::ItemLocalId::new(2),
+            ),
+            span,
+            kind: H::Unit,
+        };
+        let value = n::Expr {
+            source: source(span),
+            ty: p(P::Str),
+            kind: K::Literal(n::Literal::String("retained\"\n".into())),
+        };
+        let mut prepared = PreparedInputs::new(2);
+        prepared.values[0] = Some(value.clone());
+        prepared.symbols[0] = Some(Term::String("retained\"\n".into()));
+        prepared.defaults[1] = Some(value.clone());
+        let mut frame = Frame {
+            parameters: &[],
+            callee: &value,
+            owner: None,
+            routes: &[],
+            offset: 0,
+            source: &source_expr,
+            prepared,
+            progress: Progress::new(1),
+            phase: Phase::Child(1),
+        };
+        let dump = frame.to_string();
+        assert!(dump.starts_with("(dependent-input-frame "), "{dump}");
+        for text in [
+            "(phase (child 1))",
+            "(slot 0 (producer",
+            "(slot 1 (producer)",
+            "retained\\\"\\n",
+        ] {
+            assert!(dump.contains(text), "missing {text}: {dump}");
+        }
+        assert!(!dump.contains('\n'), "{dump}");
+        assert!(frame.begin_accept(0).is_err());
+        assert_eq!(
+            frame.to_string(),
+            dump,
+            "a wrong child consumed the waiting parent"
+        );
+        frame.begin_accept(1).unwrap();
+        assert!(
+            frame.begin_accept(1).is_err(),
+            "a child result was accepted twice"
+        );
+        assert!(frame.finish().is_err(), "an unfinished preparation escaped");
+        let request = Request {
+            slot: 1,
+            input: source_expr,
+            expected: p(P::Str),
+        }
+        .to_string();
+        assert!(request.contains("(slot 1)"), "{request}");
+        assert!(request.contains("(expected (primitive str))"), "{request}");
+        assert!(!request.contains("retained"), "{request}");
+    }
 
     #[test]
     fn dependency_cycles_are_distinct_from_budget_exhaustion() {

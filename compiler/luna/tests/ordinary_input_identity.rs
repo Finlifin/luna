@@ -41,6 +41,57 @@ fn check_events(source: &str, events: &[(&str, usize)]) {
 const FLAG: &str = "trait Flag {} impl Flag for bool {}";
 
 #[test]
+#[ignore = "unknown default prefixes need source execution continuation, not eager freezing"]
+fn dependent_default_unknown_prefix_runs_in_the_original_invocation() {
+    check_events(
+        &format!(
+            "{FLAG}
+        comptime fn mark() -> bool {{ true }}
+        comptime fn accept(comptime .T: Type = bool,
+            comptime .U: Type = T,
+            comptime .V: Type = do {{ mark(); U }}, value: V) -> bool
+        where requires V :- Flag
+        {{ true }}
+        comptime fn check() -> bool {{
+            var trace: Integer = 0;
+            let result = accept(
+                do {{ trace = trace * 10 + 1; true }},
+                .T = do {{ trace = trace * 10 + 2; bool }}
+            );
+            result and trace == 12
+        }}
+    "
+        ),
+        &[("accept", 1), ("mark", 1)],
+    );
+}
+
+#[test]
+fn nested_dependent_defaults_keep_checked_inputs_and_source_order() {
+    check_events(
+        &format!(
+            "{FLAG}
+        comptime fn mark() -> bool {{ true }}
+        comptime fn accept(comptime .T: Type = bool,
+            comptime .U: Type = T, comptime .V: Type = U,
+            value: V, .last: bool = mark()) -> bool
+        where requires V :- Flag
+        {{ last }}
+        comptime fn check() -> bool {{
+            var trace: Integer = 0;
+            let result = accept(
+                do {{ trace = trace * 10 + 1; true }},
+                .T = do {{ trace = trace * 10 + 2; bool }}
+            );
+            result and trace == 12
+        }}
+    "
+        ),
+        &[("accept", 1), ("mark", 1)],
+    );
+}
+
+#[test]
 fn new_facts_after_effects_support_both_type_and_value_inputs() {
     check_both(
         &format!(

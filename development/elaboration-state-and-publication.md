@@ -231,7 +231,7 @@ Waiting 与 Unresolved 不混用。没有就绪任务时，先区分外部请求
 | --- | --- | --- |
 | `elaboration/src/program/block_regions/driver.rs` 与 `driver/region.rs` | 普通、contextual、部分结构输入共用 Region；帧栈、子请求及返回值由逐步状态持有，同步入口只负责驱动 | 仍使用原活动 Checker，没有可移交的外部等待权限；模式／guard 子检查仍同步 |
 | `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；if／when／match 帧持有搜索位置与当前事务 | 不提供执行前缀恢复或外部 Type 等待 |
-| `elaboration/src/program/dependent_inputs/tasks.rs` | 参数域、默认引用和默认值完成的显式后继 | 源码子检查和 required 求值仍同步 |
+| `elaboration/src/program/dependent_inputs/tasks.rs` | 依赖帧持有准备结果、活动路径、默认后继与待检查槽，poll/accept 交接源码子检查 | 入口仍同步驱动；required 求值、一般调用和外部 Type 响应尚未并入共同 Region |
 | `elaboration/src/program/declaration_inputs/progress.rs` | producer、身份、检查次序与源码 schedule 分开 | Typed 路径仍要求普通完整 Expr，Contextual 仍保留 NormalFormArgument |
 | `elaboration/src/program/dynamic_instances.rs` | callable packet 保留实际 producer、静态身份与 pending 集合 | 签名仍提及 pending 参数时直接拒绝发布 |
 | `elaboration/src/program/function_bodies.rs` | 最终函数与 required 依赖共用主体检查 | 必须检查出完整 body 才能构造 NIR Function |
@@ -578,6 +578,43 @@ trait 参数与普通输入共用该原则。符号、元组／列表值先走�
 证据，转发默认值保留 Local 读取，不复制生产者。只有再次进入当前活动路径才是环，
 不把无环 64 层以上依赖叫循环。推进和复制用共同额度；整个同步准备失败仍终止，
 不能把“不消费下一个待办项”说成已经支持外部补预算恢复。
+
+普通调用现在用同一个依赖帧持有整次 `PreparedInputs`，不再逐个需求进入一个拥有
+局部结果的同步任务循环。`poll` 在 Ready 状态推进参数域／默认值依赖，遇到实际
+源码输入时返回带槽位、源表达式和预期域的 Request；父帧保留当前路径及剩余默认
+后继。同步入口用原 staged 检查规则处理子表达式，恢复调用者阶段后交给 `accept`。
+已检查值和静态身份各自保留，默认转发仍引用原输入，检查次序不改变源码求值次序。
+
+错槽响应不消费等待状态；接受匹配响应时先关闭再次接收的权限，只有身份观察和
+路径完成都成功才回到 Ready。子检查／观察失败使帧终止，不能把同一源表达式作为
+新任务重试。`finish` 只在所有任务完成后交付准备结果。Frame 和 Request 都提供
+S-expression，分别显示保留的生产者／身份／默认值与本次子需求。帧仍借用当前
+参数路由和 HIR，源码子检查仍在同一 Checker 中完成；没有跨 owner 的响应权限，
+也没有借此实现 VM 暂停、补预算恢复或一般普通调用的全部规则帧化。
+
+本次验证还发现一个此前未覆盖的真实断点：三级普通 Type 默认值转发中，最后一项
+为 `do { mark(); U }`，实际调用轨迹没有执行 `mark`。未知前缀使输入身份观察失效，
+现有 `freeze_dependency_input` 路径会执行 required 求值并替换生产者；这个回退
+不等于在原调用中暂停并取得 Type。不能通过放宽未知效果的事实保留规则来修补。
+合法用例保存在 `ordinary_input_identity.rs` 的
+`dependent_default_unknown_prefix_runs_in_the_original_invocation`，保留两种执行器、
+重复 invocation 的原次数预期，并明确 ignored 等待源码 continuation。
+另一个纯转发依赖链用例将普通默认调用放在非 Type 依赖槽，独立验证已支持路径。
+
+取证目录 `/home/fin/luna`：新未知前缀用例在帧化实现上失败于 `mark` 实际 0 次、
+预期 1 次（`/tmp/luna-tools-48surjz6/result.json`，退出 101）。只将本次两个实现
+文件临时换为 `70a458e1` 内容，保持用例不变，复现相同失败
+（`/tmp/luna-tools-rld212zj/result.json`，退出 101），随后恢复本次实现；没有改动
+他人的工作区文件。帧协议／dump 局部测试退出 0，
+`/tmp/luna-tools-37hqg2jp/result.json`。最初编译因迁移漏改一个 Checker 实参而
+失败（`/tmp/luna-tools-tktyptf4/result.json`），修正的是宿主代码类型错误。
+
+最终检查在同一目录执行
+`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test ordinary_input_identity --test default_calls --test source_input_dependencies --test prepared_input_dependencies --test staged_variadic_inputs --test extended_calls --test library_protocols --test library_std_format --test open_functions --no-fail-fast -- --test-threads=1`，
+退出 0（`/tmp/luna-tools-k6n38naf/result.json`）。新纯转发链用例通过；上述未知
+前缀用例明确 ignored，不计为通过。依赖帧、默认供应、源码次序、扩展调用、真实
+sysroot 格式扫描等已有路径没有发现回归；这些结果不证明目标变参 println 已接通。
+三个修改的 Rust 文件格式检查退出 0（`/tmp/luna-tools-7kns5c70/result.json`）。
 
 #### required 世界与绑定交接
 
