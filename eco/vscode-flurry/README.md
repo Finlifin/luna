@@ -1,6 +1,6 @@
 # Flurry for Visual Studio Code (`vscode-flurry`)
 
-Official Visual Studio Code language extension for the **Flurry** programming language (`.fl`), powered by the [`anar`](../../compiler/anar) language server.
+Official Visual Studio Code language extension for the **Flurry** programming language (`.fl`), powered by `luna lsp` and its internal [`anar`](../../compiler/anar) service.
 
 ## Features
 
@@ -26,9 +26,9 @@ Official Visual Studio Code language extension for the **Flurry** programming la
 
 ## Development & Local Usage
 
-1. Build `anar`:
+1. Build `luna`:
    ```bash
-   python3 -B development/cargo.py build -p anar
+   python3 -B development/cargo.py build -p luna
    ```
 2. Launch VS Code with this extension loaded:
    ```bash
@@ -41,14 +41,24 @@ Official Visual Studio Code language extension for the **Flurry** programming la
 | Setting | Default | Description |
 |---|---|---|
 | `flurry.anar.enable` | `true` | Enable the `anar` language server. |
-| `flurry.anar.path` | `""` | Explicit path to the `anar` binary (auto-discovers workspace `target/{release,debug}/anar` and `PATH` when empty). |
+| `flurry.anar.path` | `""` | Explicit path to `luna`, launched as `luna lsp --stdio` (auto-discovers workspace builds, the shared dev cache and `PATH` when empty). |
 | `flurry.anar.sysroot` | `""` | Explicit path to Flurry's `library/` directory (auto-discovered when empty). |
-| `flurry.anar.extraArgs` | `[]` | Additional CLI flags passed to `anar`. |
+| `flurry.anar.extraArgs` | `[]` | Additional CLI flags passed to `luna lsp`. |
 | `flurry.format.enable` | `true` | Enable document formatting through `anar`. |
 | `flurry.trace.server` | `"off"` | Trace JSON-RPC traffic (`"off"`, `"messages"`, `"verbose"`) in the output channel. |
 
 ## Verification
 
 ```bash
-node eco/vscode-flurry/test/smoke_test.js
+LUNA_BIN=/tmp/luna-dev-002/target/debug/luna node eco/vscode-flurry/test/smoke_test.js
 ```
+
+Set `LUNA_BIN` to the executable built for the current checkout when validating
+the live protocol. An invalid explicit path fails rather than falling back to an
+older workspace binary. Without it, the smoke test discovers a binary and skips
+the live portion if none exists.
+
+The `flurry.anar.*` setting names are retained for the service configuration.
+If `flurry.anar.path` previously pointed to a standalone `anar`, change it to
+`luna` or clear it for discovery. No second executable is launched. Navigation
+and diagnostics use syntax and HIR evidence, not the full elaboration pipeline.

@@ -215,12 +215,12 @@ async function startLanguageServer(context, notifyUser) {
     return;
   }
 
-  const binaryPath = resolveAnarBinary(context.extensionPath, cfg.get("anar.path", ""));
+  const binaryPath = resolveLunaBinary(context.extensionPath, cfg.get("anar.path", ""));
   if (!binaryPath) {
     const msg =
-      "Could not find the `anar` language server binary. Build `anar` (`cargo build -p anar`) or set `flurry.anar.path` in Settings.";
+      "Could not find the `luna` executable. Build luna with `python3 -B development/cargo.py build -p luna` or set `flurry.anar.path` to luna in Settings.";
     logLine(`[warn] ${msg}`);
-    updateStatusBar("$(warning) Flurry: anar not found", msg);
+    updateStatusBar("$(warning) Flurry: luna not found", msg);
     if (notifyUser) {
       vscode.window.showWarningMessage(msg);
     }
@@ -229,23 +229,13 @@ async function startLanguageServer(context, notifyUser) {
 
   const sysrootPath = resolveSysroot(context.extensionPath, cfg.get("anar.sysroot", ""));
   const extraArgs = cfg.get("anar.extraArgs", []);
-  const args = ["--stdio"];
-  if (sysrootPath) {
-    args.push("--sysroot", sysrootPath);
-  }
-  if (Array.isArray(extraArgs)) {
-    for (const arg of extraArgs) {
-      if (typeof arg === "string" && arg.length > 0) {
-        args.push(arg);
-      }
-    }
-  }
+  const args = serverArguments(sysrootPath, extraArgs);
 
   const workspaceFolders = vscode.workspace.workspaceFolders || [];
   const cwd =
     workspaceFolders.length > 0 ? workspaceFolders[0].uri.fsPath : context.extensionPath;
 
-  logLine(`[info] Starting anar: ${binaryPath} ${args.join(" ")}`);
+  logLine(`[info] Starting luna lsp: ${binaryPath} ${args.join(" ")}`);
   updateStatusBar("$(sync~spin) Flurry: starting", `Starting ${binaryPath}`);
 
   const client = new LspClient({
@@ -698,14 +688,30 @@ function handlePublishDiagnostics(params) {
   diagnosticCollection.set(uri, converted);
 }
 
+/** Build the single CLI's LSP subcommand without invoking a shell. */
+function serverArguments(sysrootPath, extraArgs) {
+  const args = ["lsp", "--stdio"];
+  if (sysrootPath) {
+    args.push("--sysroot", sysrootPath);
+  }
+  if (Array.isArray(extraArgs)) {
+    for (const arg of extraArgs) {
+      if (typeof arg === "string" && arg.length > 0) {
+        args.push(arg);
+      }
+    }
+  }
+  return args;
+}
+
 /**
- * Discover the `anar` executable across explicit setting, workspace builds, dev cache, and PATH.
+ * Discover the `luna` executable across explicit setting, workspace builds, dev cache, and PATH.
  * @param {string} extensionPath
  * @param {string} configuredPath
  * @returns {string | null}
  */
-function resolveAnarBinary(extensionPath, configuredPath) {
-  const exeName = process.platform === "win32" ? "anar.exe" : "anar";
+function resolveLunaBinary(extensionPath, configuredPath) {
+  const exeName = process.platform === "win32" ? "luna.exe" : "luna";
   if (configuredPath && configuredPath.trim().length > 0) {
     const expanded = configuredPath.trim();
     if (isExecutableFile(expanded)) {
@@ -1013,6 +1019,7 @@ function logLine(line) {
 module.exports = {
   activate,
   deactivate,
-  resolveAnarBinary,
+  resolveLunaBinary,
+  serverArguments,
   resolveSysroot,
 };

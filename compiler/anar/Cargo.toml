@@ -2,14 +2,11 @@
 name = "anar"
 version = "0.1.0"
 edition = "2024"
+autobins = false
 
 [lib]
 name = "anar"
 path = "src/lib.rs"
-
-[[bin]]
-name = "anar"
-path = "src/main.rs"
 
 [dependencies]
 ast = { path = "../ast" }

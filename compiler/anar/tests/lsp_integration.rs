@@ -1,9 +1,8 @@
 //! End-to-end LSP 3.17 integration tests for `anar`.
 
 use std::fs;
-use std::io::{BufReader, Cursor, Read, Write};
+use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anar::json::JsonValue;
@@ -519,67 +518,4 @@ pub fn keep_raw(a:i32)->i32{a}
     assert!(!sem.is_empty() && sem.len() % 5 == 0);
     let ws_syms = analyzer.workspace_symbols("messy");
     assert!(!ws_syms.is_empty());
-}
-
-#[test]
-fn cli_stdio_process_roundtrip_and_version() {
-    let bin = env!("CARGO_BIN_EXE_anar");
-
-    // `--version` flag
-    let ver = Command::new(bin).arg("--version").output().unwrap();
-    assert!(ver.status.success());
-    assert!(String::from_utf8_lossy(&ver.stdout).starts_with("anar "));
-
-    // Spawn `anar --stdio` subprocess and run `initialize` -> `shutdown` -> `exit`
-    let mut child = Command::new(bin)
-        .arg("--stdio")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-
-    let payload = encode_messages(&[
-        JsonValue::object([
-            ("jsonrpc", JsonValue::from("2.0")),
-            ("id", JsonValue::from(1)),
-            ("method", JsonValue::from("initialize")),
-            ("params", JsonValue::object([("rootUri", JsonValue::Null)])),
-        ]),
-        JsonValue::object([
-            ("jsonrpc", JsonValue::from("2.0")),
-            ("id", JsonValue::from(2)),
-            ("method", JsonValue::from("shutdown")),
-            ("params", JsonValue::Null),
-        ]),
-        JsonValue::object([
-            ("jsonrpc", JsonValue::from("2.0")),
-            ("method", JsonValue::from("exit")),
-            ("params", JsonValue::Null),
-        ]),
-    ]);
-
-    {
-        let stdin = child.stdin.as_mut().unwrap();
-        stdin.write_all(&payload).unwrap();
-        stdin.flush().unwrap();
-    }
-    drop(child.stdin.take());
-
-    let mut out = Vec::new();
-    child
-        .stdout
-        .as_mut()
-        .unwrap()
-        .read_to_end(&mut out)
-        .unwrap();
-    let status = child.wait().unwrap();
-    assert!(status.success());
-
-    let msgs = decode_messages(&out);
-    let init = find_response(&msgs, 1);
-    assert_eq!(
-        init.get("serverInfo").and_then(|s| s.get_str("name")),
-        Some("anar")
-    );
 }

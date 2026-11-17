@@ -20,9 +20,12 @@ fn main() -> ExitCode {
     if let Command::Fmt(sub_args) = command {
         return fmt::run_cli(sub_args, "luna fmt", true);
     }
+    if let Command::Lsp(sub_args) = command {
+        return anar::cli::run(sub_args);
+    }
 
     let result = match command {
-        Command::Fmt(_) => unreachable!(),
+        Command::Fmt(_) | Command::Lsp(_) => unreachable!(),
         Command::PackageStream { capacity } => {
             luna::package_stream::serve(&mut io::stdin().lock(), &mut io::stdout().lock(), capacity)
         }

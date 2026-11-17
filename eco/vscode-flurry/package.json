@@ -75,12 +75,12 @@
         "flurry.anar.enable": {
           "type": "boolean",
           "default": true,
-          "description": "Enable the anar Flurry language server."
+          "description": "Enable the HIR-stage Flurry language server through luna lsp."
         },
         "flurry.anar.path": {
           "type": "string",
           "default": "",
-          "description": "Explicit path to the anar executable. When empty, searches workspace build outputs and PATH."
+          "description": "Explicit path to the luna executable, invoked as luna lsp. When empty, searches workspace build outputs and PATH."
         },
         "flurry.anar.sysroot": {
           "type": "string",
@@ -93,7 +93,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Additional command-line arguments passed when spawning anar."
+          "description": "Additional command-line arguments passed to luna lsp."
         },
         "flurry.format.enable": {
           "type": "boolean",

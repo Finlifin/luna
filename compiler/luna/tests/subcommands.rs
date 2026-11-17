@@ -147,6 +147,7 @@ fn package_and_stream_commands_keep_versioned_input_contracts() {
         "build",
         "test",
         "fmt",
+        "lsp",
         "dump",
         "comptime",
         "interpret",

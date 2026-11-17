@@ -7,6 +7,7 @@
 //! and formatting) without invoking heavy comptime/elaboration passes.
 
 pub mod analysis;
+pub mod cli;
 pub mod index;
 pub mod json;
 pub mod position;

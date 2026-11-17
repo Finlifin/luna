@@ -84,6 +84,9 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
     if first == "fmt" {
         return Ok(Command::Fmt(args.into_iter().skip(1).collect()));
     }
+    if first == "lsp" {
+        return Ok(Command::Lsp(args.into_iter().skip(1).collect()));
+    }
     let packages = first == "packages";
     let mut start = if packages { 2 } else { 1 };
     let command = if packages {
@@ -97,7 +100,7 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
         return Err("bindings is a help topic; use luna help bindings".into());
     }
     help(&[command])?;
-    if matches!(command, "packages" | "serve" | "fmt") {
+    if matches!(command, "packages" | "serve" | "fmt" | "lsp") {
         return Err(format!("unsupported packages action '{command}'"));
     }
     if packages && args.len() == 3 && args[2] == "--help" {

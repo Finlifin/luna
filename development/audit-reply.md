@@ -962,6 +962,39 @@ true，具名完整供应仍被拒绝；不能只在调用表达式上挂名字�
 使用相同公开入口作为基础对照；不同名字按槽位适配现已得到作者确认，目标入口
 与实际代码的受检映射仍须随传送保留，不能把当前名字擦除当作已经实现适配。
 
+### 11-17 午报 S14：语言服务并入 luna
+
+报告指出独立 `anar` 二进制违反单 CLI 约定，该项成立。现在保留 `anar` 作为
+内部服务 crate，取消其二进制目标与 main；实际入口改为进程内 `luna lsp`。
+`luna help lsp`、stdio 协议、一次性 HIR 检查和退出状态由同一个 luna 承载，
+编辑器也直接启动 `luna lsp --stdio`，不启动第二个服务可执行文件。
+
+原 CLI 协议测试迁入 luna，保留初始化／关闭握手，并增加异常退出、错误选项、
+帮助、缺失路径、诊断流和源文件不变的检查。批量 HIR 检查借用 snapshot，删除
+只为打印诊断而复制整个 snapshot 的操作。路径输入使用 OsString；协议模式
+stdout 只承载 JSON-RPC，批量诊断写 stderr。`flurry.anar.*` 设置名继续保留，
+其中 path 现在应指向 luna。语言服务仍仅有语法、早期解析和 HIR 证据，不能
+代替 `luna check` 的类型检查、comptime invocation 或程序验证。
+
+本轮工作目录 `/home/fin/luna`。Rust 验证通过
+`python3 -B development/check.py --timeout 900 -- test -p anar --lib --test
+lsp_integration -p luna --test cli_lsp --test subcommands --test cli_fmt
+--no-fail-fast -- --test-threads=1` 执行，证据见
+`/tmp/luna-tools-p4oxzgw2/result.json`，退出 0，108 项通过。编辑器测试使用
+`python3 -B development/command.py --timeout 120 -- env
+LUNA_BIN=/tmp/luna-dev-002/target/debug/luna node eco/vscode-flurry/test/smoke_test.js`，
+退出 0，`/tmp/luna-tools-b9j7ndyc/result.json`；实际执行了分片 JSON-RPC 模拟测试
+以及真实服务的初始化、打开文件、诊断、符号、格式化和关闭，不是跳过 live 检查。
+
+测试最初受沙箱 Node 子进程 EPERM 限制；经授权后，自动发现又选择到仓库 target
+中的旧 luna 并退出 101。显式指定本轮共享缓存产物后通过。测试现记录所选路径
+及服务 stderr，显式 LUNA_BIN 无效时拒绝，不悄悄改用别处的旧文件。
+
+本次只退役独立语言服务入口。核对发现 `compiler/fmt` 仍定义独立 `flurryfmt`
+目标；它也是同一约定下的待清理项，不能据此声称整个 workspace 已达成单二进制。
+格式化 CLI 的原有覆盖需要迁至 luna 后才能删除该目标。Type 描述／待决检查恢复、
+动态 callable 公开入口和完整 println 的缺口与此无关，均未因本项清理消失。
+
 ## 4. 本次证据与限制
 
 工作目录 `/home/fin/luna`；所有检查通过 `development/check.py --timeout 900 -- test`。

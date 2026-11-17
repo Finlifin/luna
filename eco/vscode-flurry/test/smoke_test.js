@@ -97,6 +97,7 @@ async function testChunkedMockJsonRpc() {
   const client = new LspClient({
     command: process.execPath,
     args: ["-e", mockServerScript],
+    logger: (line) => console.error(line),
   });
 
   const diagPromise = new Promise((resolve) => {
@@ -143,6 +144,8 @@ function testExtensionModuleLoadsWithStubVscode() {
     const ext = require(path.join(EXT_ROOT, "src", "extension.js"));
     assert.strictEqual(typeof ext.activate, "function");
     assert.strictEqual(typeof ext.deactivate, "function");
+    assert.deepStrictEqual(ext.serverArguments("/tmp/library path", ["--trace", "", null]),
+      ["lsp", "--stdio", "--sysroot", "/tmp/library path", "--trace"]);
     const sysroot = ext.resolveSysroot(EXT_ROOT, "");
     assert.strictEqual(sysroot, path.join(REPO_ROOT, "library"));
   } finally {
@@ -150,13 +153,17 @@ function testExtensionModuleLoadsWithStubVscode() {
   }
 }
 
-function findRealAnarBinary() {
+function findRealLunaBinary() {
+  if (process.env.LUNA_BIN) {
+    const explicit = path.resolve(process.env.LUNA_BIN);
+    fs.accessSync(explicit, fs.constants.X_OK);
+    return explicit;
+  }
   const candidates = [
-    process.env.ANAR_BIN,
-    path.join(REPO_ROOT, "target", "debug", "anar"),
-    path.join(REPO_ROOT, "target", "release", "anar"),
-    "/tmp/luna-dev-002/target/debug/anar",
-    "/tmp/luna-dev-002/target/release/anar",
+    path.join(REPO_ROOT, "target", "debug", "luna"),
+    path.join(REPO_ROOT, "target", "release", "luna"),
+    "/tmp/luna-dev-002/target/debug/luna",
+    "/tmp/luna-dev-002/target/release/luna",
   ].filter(Boolean);
 
   for (const candidate of candidates) {
@@ -170,13 +177,14 @@ function findRealAnarBinary() {
   return null;
 }
 
-async function testLiveAnarRoundtripIfAvailable() {
-  const anarBin = findRealAnarBinary();
-  if (!anarBin) {
-    console.log("[smoke_test] real `anar` binary not found in target cache; skipping live binary check");
+async function testLiveLunaRoundtripIfAvailable() {
+  const lunaBin = findRealLunaBinary();
+  if (!lunaBin) {
+    console.log("[smoke_test] real `luna` binary not found in target cache; skipping live binary check");
     return;
   }
 
+  console.log(`[smoke_test] testing live luna lsp: ${lunaBin}`);
   const { LspClient } = require(path.join(EXT_ROOT, "src", "lsp_client.js"));
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vscode-flurry-smoke-"));
   const filePath = path.join(tmpDir, "main.fl");
@@ -185,9 +193,10 @@ async function testLiveAnarRoundtripIfAvailable() {
   const fileUri = pathToFileURL(filePath).toString();
 
   const client = new LspClient({
-    command: anarBin,
-    args: ["--stdio", "--sysroot", path.join(REPO_ROOT, "library")],
+    command: lunaBin,
+    args: require(path.join(EXT_ROOT, "src", "extension.js")).serverArguments(path.join(REPO_ROOT, "library"), []),
     cwd: tmpDir,
+    logger: (line) => console.error(line),
   });
 
   try {
@@ -226,7 +235,7 @@ async function testLiveAnarRoundtripIfAvailable() {
     assert.ok(Array.isArray(edits) && edits.length === 1);
     assert.ok(edits[0].newText.includes("pub fn square(x: i32) -> i32"));
 
-    console.log(`[smoke_test] verified live LspClient <-> anar (${anarBin}) round-trip`);
+    console.log(`[smoke_test] verified live LspClient <-> luna lsp (${lunaBin}) round-trip`);
   } finally {
     await client.stop();
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -237,7 +246,7 @@ async function main() {
   verifyStaticAssets();
   testExtensionModuleLoadsWithStubVscode();
   await testChunkedMockJsonRpc();
-  await testLiveAnarRoundtripIfAvailable();
+  await testLiveLunaRoundtripIfAvailable();
   console.log("[smoke_test] all checks passed");
 }
 

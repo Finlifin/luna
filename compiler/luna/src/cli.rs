@@ -60,6 +60,7 @@ pub enum Command {
     Help,
     HelpTopic(String),
     Fmt(Vec<OsString>),
+    Lsp(Vec<OsString>),
     Check(Options),
     CheckPackages(Box<crate::package_cli::Request>),
     Packages(Box<crate::package_cli::Request>),

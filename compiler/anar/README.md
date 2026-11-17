@@ -1,6 +1,6 @@
 # `anar` — Flurry Language Server
 
-`anar` is the official Language Server Protocol (LSP 3.17) implementation for the Flurry programming language.
+`anar` is the internal Language Server Protocol (LSP 3.17) library used by `luna lsp`. The service runs inside `luna`; this crate does not build a separate `anar` executable.
 
 Because Flurry's full semantic pipeline involves dependent normal forms, staged comptime evaluation, algebraic effects, and program verification, `anar` follows the architecture of Zig's `zls`: a fast, resilient **syntax + multi-package early resolution + HIR-stage** language server with zero external runtime dependencies.
 
@@ -24,15 +24,21 @@ Because Flurry's full semantic pipeline involves dependent normal forms, staged 
 
 ## CLI Usage
 
+Build with `python3 -B development/cargo.py build -p luna`.
+
+`--check` reports syntax, early name-resolution and HIR diagnostics only. Use
+`luna check` for the typed compiler pipeline. Neither LSP startup nor HIR
+navigation runs comptime invocation or proves program contracts.
+
 ```bash
 # Run as an LSP server over stdio (default):
-anar --stdio
+luna lsp --stdio
 
 # Override the `library/` sysroot path explicitly:
-anar --stdio --sysroot /path/to/luna/library
+luna lsp --stdio --sysroot /path/to/luna/library
 
 # Run a one-shot batch syntax/resolve/HIR check on a package or file:
-anar --check path/to/lib.fl
+luna lsp --check path/to/lib.fl
 ```
 
 ## Editor Setup
@@ -45,7 +51,7 @@ anar --check path/to/lib.fl
     callback = function(ev)
       vim.lsp.start({
         name = "anar",
-        cmd = { "anar", "--stdio" },
+        cmd = { "luna", "lsp", "--stdio" },
         root_dir = vim.fs.root(ev.buf, { "lib.fl", "main.fl", ".git" }),
       })
     end,
@@ -54,8 +60,8 @@ anar --check path/to/lib.fl
 - **Helix (`languages.toml`)**:
   ```toml
   [language-server.anar]
-  command = "anar"
-  args = ["--stdio"]
+  command = "luna"
+  args = ["lsp", "--stdio"]
 
   [[language]]
   name = "flurry"
