@@ -1,6 +1,8 @@
 //! Shared preflight for materialized constants and contextual input templates.
 use crate::{Term, program as n, program::ExprKind as K};
+mod callable_inputs;
 mod package;
+pub use callable_inputs::retained_callable_inputs;
 pub use package::{
     charge_implementation_metadata, charge_normal_form_payload, charge_representation_metadata,
     charge_trait_metadata, clone_declaration_source,
@@ -217,6 +219,7 @@ pub(crate) enum Node<'a> {
     Region(&'a n::DefinitionRegion),
     Function(&'a n::Function),
     FunctionDeclaration(&'a n::FunctionDeclaration),
+    RuntimeIdentity(&'a n::RuntimeFunctionIdentity),
     CallableBindings(&'a n::FunctionDeclaration),
     Predicate(&'a n::TypePredicate),
     Requirement(&'a n::TraitRequirement),
@@ -262,15 +265,6 @@ pub fn expression_declaration_inputs(
     steps: &mut u64,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, CopyBudgetExhausted> {
     declaration_inputs(Node::Expr(value), steps)
-}
-
-/// Observe carried function code and contracts, without treating declared
-/// binder identities themselves as uses or unfolding referenced declarations.
-pub fn function_declaration_inputs(
-    value: &n::Function,
-    steps: &mut u64,
-) -> Result<std::collections::BTreeSet<crate::DeclarationId>, CopyBudgetExhausted> {
-    declaration_inputs(Node::Function(value), steps)
 }
 
 fn declaration_inputs(
@@ -555,6 +549,22 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         .iter()
                         .map(|r| (Node::Requirement(r), depth)),
                 );
+                0
+            }
+            Node::RuntimeIdentity(identity) => {
+                let n::RuntimeFunctionIdentity {
+                    declaration: _,
+                    type_parameters,
+                    signature,
+                    requirements,
+                    capabilities,
+                } = identity;
+                charge_width(steps, type_parameters.len())?;
+                charge_width(steps, requirements.len())?;
+                charge_width(steps, capabilities.len())?;
+                work.push((Node::Type(signature), depth));
+                work.extend(requirements.iter().map(|p| (Node::Predicate(p), depth)));
+                work.extend(capabilities.iter().map(|r| (Node::Requirement(r), depth)));
                 0
             }
             Node::Function(function) => {

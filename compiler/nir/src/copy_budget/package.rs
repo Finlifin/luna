@@ -173,16 +173,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         meter.contracts(requirements, capabilities)?;
     }
     for identity in runtime_function_identities {
-        let n::RuntimeFunctionIdentity {
-            requirements,
-            capabilities,
-            declaration: _,
-            type_parameters,
-            signature,
-        } = identity;
-        meter.contracts(requirements, capabilities)?;
-        meter.width(type_parameters.len())?;
-        meter.node(Node::Type(signature))?;
+        meter.node(Node::RuntimeIdentity(identity))?;
     }
     for head in normal_forms {
         meter.head(head)?;

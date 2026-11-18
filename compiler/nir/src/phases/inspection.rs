@@ -31,6 +31,19 @@ impl<'a> PhaseCheckedPackage<'a> {
         self.inspection.package()
     }
 
+    /// Includes domains inherited from nominal and implementation telescopes.
+    /// A completed package traversal already owns this exact source directory.
+    pub fn parameter_domains(
+        &self,
+    ) -> &std::collections::BTreeMap<crate::DeclarationId, crate::Term> {
+        &self
+            .inspection
+            .declarations
+            .get()
+            .expect("phase-checked declaration directory")
+            .parameter_domains
+    }
+
     pub fn machine_arithmetic_functions(
         &self,
     ) -> &std::collections::BTreeSet<crate::DeclarationId> {

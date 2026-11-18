@@ -4,7 +4,7 @@ use super::restore::restore_required_packet;
 use super::*;
 use crate::materialization::{DeclarationSnapshot, DeclarationSource};
 use comptime_interpretor::{CodeSession, InvocationValue};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 mod inputs;
 
 /// Own the declarations and their derived index together. Once published into
@@ -13,6 +13,7 @@ pub(super) struct RequiredWorld {
     source: DeclarationSnapshot,
     phase: Option<nir::phases::PhaseCheckedPackage<'static>>,
     code: Mutex<Option<CodeSession>>,
+    free_inputs: OnceLock<BTreeSet<DeclarationId>>,
 }
 
 // A lease never holds a lock while invoking source code or a host callback.
@@ -49,6 +50,7 @@ impl RequiredWorld {
             source: DeclarationSnapshot::new(Arc::new(package)),
             phase: None,
             code: Mutex::new(None),
+            free_inputs: OnceLock::new(),
         })
     }
 
@@ -66,7 +68,42 @@ impl RequiredWorld {
             source: DeclarationSnapshot::new(package),
             phase: Some(phase),
             code: Mutex::new(None),
+            free_inputs: OnceLock::new(),
         }))
+    }
+
+    pub(super) fn free_inputs(
+        &self,
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<&BTreeSet<DeclarationId>, Error> {
+        *steps = steps
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "required source input observation budget exhausted"))?;
+        if let Some(inputs) = self.free_inputs.get() {
+            return Ok(inputs);
+        }
+        let package = self.package();
+        let owned;
+        let domains = match &self.phase {
+            Some(checked) => checked.parameter_domains(),
+            None => {
+                let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let result = package.declaration_parameter_domains_checked(&mut fuel);
+                *steps -= (before - fuel) as u64;
+                owned = result.map_err(|failure| error(span, failure.to_string()))?;
+                &owned
+            }
+        };
+        let completed = nir::copy_budget::retained_callable_inputs(
+            &package.functions,
+            &package.runtime_function_identities,
+            domains,
+            steps,
+        )
+        .map_err(|limit| input_observation::structural_limit(limit, span))?;
+        Ok(self.free_inputs.get_or_init(|| completed))
     }
 
     fn code(&self) -> RequiredCode<'_> {
@@ -109,14 +146,21 @@ pub(in crate::program) struct PreparedRequired {
     pub entry: DeclarationId,
     pub inputs: Vec<(n::LocalId, Term, Option<Term>)>,
     pub result_type: Term,
-    pub scoped_parameters: Vec<nir::DeclarationParameter>,
-    pub scoped_arguments: Vec<Term>,
-    pub input_frames: Vec<Vec<Sort>>,
-    pub invocation_assumptions: Vec<n::TraitRequirement>,
-    pub abstract_parameters: Vec<DeclarationId>,
-    pub abstract_value_parameters: Vec<(DeclarationId, Term)>,
-    pub context: crate::ptc::Context,
-    pub in_signature: bool,
+    pub(super) scope: Arc<InvocationScope>,
+}
+
+/// Lexical evidence of a checked computation. Reusing the preparation shares
+/// these immutable premises; supplying captures never edits the proof scope.
+#[cfg_attr(test, derive(Clone))]
+pub(super) struct InvocationScope {
+    pub(super) scoped_parameters: Vec<nir::DeclarationParameter>,
+    pub(super) scoped_arguments: Vec<Term>,
+    pub(super) input_frames: Vec<Vec<Sort>>,
+    pub(super) invocation_assumptions: Vec<n::TraitRequirement>,
+    pub(super) abstract_parameters: Vec<DeclarationId>,
+    pub(super) abstract_value_parameters: Vec<(DeclarationId, Term)>,
+    pub(super) context: crate::ptc::Context,
+    pub(super) in_signature: bool,
 }
 
 impl PreparedRequired {
@@ -160,24 +204,25 @@ impl PreparedRequired {
             .iter()
             .flat_map(|(_, domain, value)| std::iter::once(domain).chain(value))
             .chain(std::iter::once(&self.result_type))
-            .chain(&self.scoped_arguments)
-            .chain(self.invocation_assumptions.iter().flat_map(|requirement| {
-                std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
-            }));
+            .chain(&self.scope.scoped_arguments)
+            .chain(
+                self.scope
+                    .invocation_assumptions
+                    .iter()
+                    .flat_map(|requirement| {
+                        std::iter::once(&requirement.subject)
+                            .chain(&requirement.interface_arguments)
+                    }),
+            );
         for term in terms {
             if !input_observation::term(term, steps, span)?.is_disjoint(&declarations) {
                 return Ok(true);
             }
         }
-        // The preparation has already selected its callable closure. Inspect
-        // the contracts/defaults carried with those functions as well as their
-        // signatures and bodies; do not scan the surrounding declaration world.
-        for function in &self.world.package().functions {
-            if !input_observation::function(function, steps, span)?.is_disjoint(&declarations) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(!self
+            .world
+            .free_inputs(steps, span)?
+            .is_disjoint(&declarations))
     }
 
     pub(in crate::program) fn fork(&self) -> Self {
@@ -186,14 +231,7 @@ impl PreparedRequired {
             entry: self.entry,
             inputs: self.inputs.clone(),
             result_type: self.result_type.clone(),
-            scoped_parameters: self.scoped_parameters.clone(),
-            scoped_arguments: self.scoped_arguments.clone(),
-            input_frames: self.input_frames.clone(),
-            invocation_assumptions: self.invocation_assumptions.clone(),
-            abstract_parameters: self.abstract_parameters.clone(),
-            abstract_value_parameters: self.abstract_value_parameters.clone(),
-            context: self.context.clone(),
-            in_signature: self.in_signature,
+            scope: self.scope.clone(),
         }
     }
 
@@ -270,7 +308,7 @@ impl PreparedRequired {
         let world = Arc::clone(&self.world);
         // The receiver installs concrete descriptors into the package. Only the
         // invocation itself may use its lexical premises and trait assumptions.
-        let context = self.context.theory_context();
+        let context = self.scope.context.theory_context();
         let queries = crate::materialization::SourceInvocationQueries::in_source(
             DeclarationSource::Snapshot(&world.source),
             &context,
@@ -332,21 +370,23 @@ impl PreparedRequired {
                 .prepare_enum(request, fuel)
         };
         let PreparedRequired {
-            world: _,
             entry,
             inputs,
             result_type,
+            scope,
+            ..
+        } = self;
+        let InvocationScope {
             scoped_parameters,
             scoped_arguments,
             input_frames,
             invocation_assumptions,
             abstract_parameters,
             abstract_value_parameters,
-            context,
+            context: invocation_type_context,
             in_signature,
-        } = self;
+        } = scope.as_ref();
         let inputs = inputs::complete(inputs, values, span)?;
-        let invocation_type_context = &context;
         let scoped_context = if scoped_parameters.is_empty() {
             None
         } else {
@@ -359,7 +399,7 @@ impl PreparedRequired {
         let source_queries = crate::materialization::SourceInvocationQueries::in_source(
             DeclarationSource::Snapshot(&world.source),
             invocation_type_context,
-            &invocation_assumptions,
+            invocation_assumptions,
         );
         let type_solver = |predicate: &n::TypePredicate, remaining: &mut u64| {
             use comptime_interpretor::ErrorKind;
@@ -371,8 +411,8 @@ impl PreparedRequired {
                 let mut fuel = before;
                 let charged = nir::copy_budget::charge_predicate_substitution(
                     predicate,
-                    &scoped_parameters,
-                    &scoped_arguments,
+                    scoped_parameters,
+                    scoped_arguments,
                     &mut fuel,
                 );
                 *remaining -= (before - fuel) as u64;
@@ -382,9 +422,9 @@ impl PreparedRequired {
                 })?;
                 restored = predicate
                     .instantiate_parameters_in_scope(
-                        &scoped_parameters,
-                        &scoped_arguments,
-                        &input_frames,
+                        scoped_parameters,
+                        scoped_arguments,
+                        input_frames,
                     )
                     .map_err(|error| ErrorKind::InvalidTypeContract(error.to_string()))?;
                 (&restored, scoped_context.as_ref().unwrap())
@@ -410,9 +450,9 @@ impl PreparedRequired {
         let prepared = Interpreter::for_comptime_resolving_in_scope_in_session(
             &package,
             code.session(),
-            &invocation_assumptions,
-            &abstract_parameters,
-            &abstract_value_parameters,
+            invocation_assumptions,
+            abstract_parameters,
+            abstract_value_parameters,
             comptime_interpretor::SourceResolvers {
                 types: &type_solver,
                 methods: &method_resolver,
@@ -436,7 +476,7 @@ impl PreparedRequired {
         *steps = interpreter.remaining_steps();
         let value=value.map_err(|e| {
             if e.kind == comptime_interpretor::ErrorKind::MissingBinding
-                && in_signature {
+                && *in_signature {
                 return error(span,"type computation depends on an unavailable function input; invocation-time type elaboration is not yet implemented");
             }
             error(span,format!("required comptime evaluation failed: {e}"))
@@ -444,9 +484,9 @@ impl PreparedRequired {
         let value = restore_required_packet(
             steps,
             value,
-            &scoped_parameters,
-            &scoped_arguments,
-            &input_frames,
+            scoped_parameters,
+            scoped_arguments,
+            input_frames,
             span,
             0,
         )?;
@@ -470,7 +510,12 @@ impl std::fmt::Display for PreparedRequired {
             write!(f, ")")?;
         }
         write!(f, ") (scope-substitution")?;
-        for (parameter, argument) in self.scoped_parameters.iter().zip(&self.scoped_arguments) {
+        for (parameter, argument) in self
+            .scope
+            .scoped_parameters
+            .iter()
+            .zip(&self.scope.scoped_arguments)
+        {
             write!(
                 f,
                 " (binding {} {} {argument})",
@@ -478,7 +523,7 @@ impl std::fmt::Display for PreparedRequired {
             )?;
         }
         write!(f, ") (input-frames")?;
-        for frame in &self.input_frames {
+        for frame in &self.scope.input_frames {
             write!(f, " (frame")?;
             for sort in frame {
                 write!(f, " {sort}")?;
@@ -486,21 +531,21 @@ impl std::fmt::Display for PreparedRequired {
             write!(f, ")")?;
         }
         write!(f, ") (assumptions")?;
-        for assumption in &self.invocation_assumptions {
+        for assumption in &self.scope.invocation_assumptions {
             write!(f, " {assumption}")?;
         }
         write!(f, ") (abstract-parameters")?;
-        for parameter in &self.abstract_parameters {
+        for parameter in &self.scope.abstract_parameters {
             write!(f, " {parameter}")?;
         }
         write!(f, ") (abstract-value-parameters")?;
-        for (id, domain) in &self.abstract_value_parameters {
+        for (id, domain) in &self.scope.abstract_value_parameters {
             write!(f, " ({id} {domain})")?;
         }
         write!(
             f,
             ") (in-signature {}) (context {}) (source {})",
-            self.in_signature, self.context, self.world.source
+            self.scope.in_signature, self.scope.context, self.world.source
         )?;
         write!(f, ")")
     }
@@ -511,6 +556,10 @@ mod tests {
     use super::*;
 
     impl PreparedRequired {
+        fn edit_scope(&mut self) -> &mut InvocationScope {
+            Arc::make_mut(&mut self.scope)
+        }
+
         fn edit_package(&mut self, edit: impl FnOnce(&mut n::Package)) {
             assert_eq!(Arc::strong_count(&self.world), 1, "unique test fixture");
             let mut package = self.world.package().clone();
@@ -566,14 +615,16 @@ mod tests {
             entry,
             inputs: vec![],
             result_type,
-            scoped_parameters: vec![],
-            scoped_arguments: vec![],
-            input_frames: vec![],
-            invocation_assumptions: vec![],
-            abstract_parameters: vec![],
-            abstract_value_parameters: vec![],
-            context: crate::ptc::Context::default(),
-            in_signature: false,
+            scope: Arc::new(InvocationScope {
+                scoped_parameters: vec![],
+                scoped_arguments: vec![],
+                input_frames: vec![],
+                invocation_assumptions: vec![],
+                abstract_parameters: vec![],
+                abstract_value_parameters: vec![],
+                context: crate::ptc::Context::default(),
+                in_signature: false,
+            }),
         }
     }
 
@@ -676,17 +727,20 @@ mod tests {
         };
         for scoped in [false, true] {
             let mut prepared = literal_preparation(true);
-            prepared.abstract_parameters.push(declaration);
+            prepared.edit_scope().abstract_parameters.push(declaration);
             prepared.edit_package(|package| {
                 package.functions[0].body.kind = K::TypeValue(rigid.clone());
             });
             if scoped {
-                prepared.scoped_parameters.push(nir::DeclarationParameter {
-                    declaration,
-                    sort: Sort::Type,
-                });
-                prepared.scoped_arguments.push(bound.clone());
-                prepared.input_frames.push(vec![Sort::Type]);
+                prepared
+                    .edit_scope()
+                    .scoped_parameters
+                    .push(nir::DeclarationParameter {
+                        declaration,
+                        sort: Sort::Type,
+                    });
+                prepared.edit_scope().scoped_arguments.push(bound.clone());
+                prepared.edit_scope().input_frames.push(vec![Sort::Type]);
             }
             let mut steps = 100_000;
             assert_eq!(
@@ -699,7 +753,7 @@ mod tests {
             assert!(steps < 100_000);
             // The retained source/code does not authorize an unknown Type input.
             let mut denied = prepared.fork();
-            denied.abstract_parameters.clear();
+            denied.edit_scope().abstract_parameters.clear();
             assert!(denied.invoke(&mut 100_000, Span::default()).is_err());
             assert!(prepared.invoke(&mut 100_000, Span::default()).is_ok());
         }
@@ -753,6 +807,7 @@ mod tests {
             // This local premise suffices while evaluating the operand. The
             // global descriptor gets its own formation check after reservation.
             prepared
+                .edit_scope()
                 .context
                 .assume(crate::ptc::Formula::equal(p(actual), p(P::Bool)));
             let mut next = 60;
@@ -777,7 +832,7 @@ mod tests {
         let predicate = n::TypePredicate::Equal(p(P::Bool), p(P::Bool));
         let queries = crate::materialization::SourceInvocationQueries::in_source(
             DeclarationSource::Snapshot(&prepared.world.source),
-            &prepared.context,
+            &prepared.scope.context,
             &[],
         );
         let mut tiny = 1;
@@ -860,7 +915,7 @@ mod tests {
                 .0;
             let queries = crate::materialization::SourceInvocationQueries::in_source(
                 DeclarationSource::Snapshot(&prepared.world.source),
-                &prepared.context,
+                &prepared.scope.context,
                 &[],
             );
             let solver = |predicate: &n::TypePredicate, fuel: &mut u64| {
@@ -941,9 +996,10 @@ mod tests {
                 });
                 package.functions[0].capabilities.push(premise.clone());
             });
-            prepared.context = crate::ptc::Context::from_package(prepared.world.package()).unwrap();
+            prepared.edit_scope().context =
+                crate::ptc::Context::from_package(prepared.world.package()).unwrap();
             let mut granted = prepared.fork();
-            granted.invocation_assumptions.push(premise);
+            granted.edit_scope().invocation_assumptions.push(premise);
             let expected = granted
                 .fork()
                 .invoke(&mut 100_000, Span::default())
@@ -1052,9 +1108,10 @@ mod tests {
         let mut first = prepared.fork();
         let mut second = prepared.fork();
         assert!(Arc::ptr_eq(&prepared.world, &first.world));
+        assert!(Arc::ptr_eq(&first.scope, &second.scope));
         assert!(std::ptr::eq(
-            first.world.capabilities(&[], &first.context).index,
-            second.world.capabilities(&[], &second.context).index
+            first.world.capabilities(&[], &first.scope.context).index,
+            second.world.capabilities(&[], &second.scope.context).index
         ));
         assert!(
             first
@@ -1113,7 +1170,7 @@ mod tests {
                     vec![n::TypePredicate::Equal(p(P::Bool), p(P::Bool))];
             });
             let source = DeclarationSource::Snapshot(&prepared.world.source);
-            let context = &prepared.context;
+            let context = &prepared.scope.context;
             prepared
                 .world
                 .source
@@ -1260,20 +1317,22 @@ mod tests {
                     Some(term),
                 ))
             },
-            |p, term| p.scoped_arguments.push(term),
+            |p, term| p.edit_scope().scoped_arguments.push(term),
             |p, term| {
-                p.invocation_assumptions.push(n::TraitRequirement {
+                let requirement = n::TraitRequirement {
                     subject: term,
                     interface: p.entry,
                     interface_arguments: vec![],
-                })
+                };
+                p.edit_scope().invocation_assumptions.push(requirement);
             },
             |p, term| {
-                p.invocation_assumptions.push(n::TraitRequirement {
+                let requirement = n::TraitRequirement {
                     subject: p.result_type.clone(),
                     interface: p.entry,
                     interface_arguments: vec![term],
-                })
+                };
+                p.edit_scope().invocation_assumptions.push(requirement);
             },
             |p, term| p.edit_package(|package| package.functions[0].signature = term),
             |p, term| {
@@ -1341,19 +1400,117 @@ mod tests {
     }
 
     #[test]
+    fn projected_function_inputs_belong_to_their_source_and_lexical_telescope() {
+        let mut prepared = literal_preparation(true);
+        let id = |local| DeclarationId { package: 7, local };
+        let ty = |local| Term::Rigid {
+            declaration: id(local),
+            sort: Sort::Type,
+        };
+        let span = Span::default();
+        prepared.edit_package(|package| {
+            package
+                .runtime_function_identities
+                .push(n::RuntimeFunctionIdentity {
+                    declaration: id(20),
+                    type_parameters: vec![id(21), id(26)],
+                    signature: Term::Function {
+                        parameters: vec![nir::Parameter {
+                            sort: Sort::Runtime,
+                            ty: ty(21),
+                        }],
+                        result: Box::new(ty(22)),
+                    },
+                    requirements: vec![n::TypePredicate::Equal(ty(21), ty(23))],
+                    capabilities: vec![n::TraitRequirement {
+                        subject: ty(21),
+                        interface: id(90),
+                        interface_arguments: vec![ty(24)],
+                    }],
+                });
+            package.structs.push(n::Struct {
+                declaration: id(31),
+                name: "Container".into(),
+                type_parameters: vec![id(30)],
+                parameter_types: vec![ty(28)],
+                capabilities: vec![],
+                requirements: vec![],
+                fields: vec![],
+            });
+            package
+                .runtime_function_identities
+                .push(n::RuntimeFunctionIdentity {
+                    declaration: id(32),
+                    type_parameters: vec![id(30)],
+                    signature: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(p(P::Bool)),
+                    },
+                    requirements: vec![],
+                    capabilities: vec![],
+                });
+            package.function_parameters = vec![
+                nir::function_parameters::Declaration {
+                    declaration: id(20),
+                    parameters: vec![id(21), id(26)],
+                    domains: vec![p(P::Type), ty(25)],
+                },
+                nir::function_parameters::Declaration {
+                    declaration: id(80),
+                    parameters: vec![id(81)],
+                    domains: vec![ty(82)],
+                },
+            ];
+        });
+
+        let expected = BTreeSet::from([id(22), id(23), id(24), id(25), id(28)]);
+        assert!(prepared.world.free_inputs(&mut 3, span).is_err());
+        assert_eq!(
+            prepared.world.free_inputs(&mut 1000, span).unwrap(),
+            &expected
+        );
+        let fork = prepared.fork();
+        assert_eq!(fork.world.free_inputs(&mut 1, span).unwrap(), &expected);
+        assert!(fork.world.free_inputs(&mut 0, span).is_err());
+        assert!(
+            fork.uses_declaration_inputs(&[id(24)], &mut 100, span)
+                .unwrap()
+        );
+        assert!(
+            !fork
+                .uses_declaration_inputs(&[id(21), id(26), id(30), id(82), id(90)], &mut 100, span)
+                .unwrap()
+        );
+        drop(fork);
+        // The same rigid is free at the call site even if it is bound in the callee.
+        prepared.edit_package(|package| package.functions[0].body.kind = K::TypeValue(ty(21)));
+        assert!(
+            prepared
+                .uses_declaration_inputs(&[id(21)], &mut 1000, span)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn prepared_input_observation_ignores_ambient_authority_and_declaration_names() {
         let input = DeclarationId {
             package: 7,
             local: 90,
         };
         let mut prepared = literal_preparation(true);
-        prepared.abstract_parameters.push(input);
-        prepared.abstract_value_parameters.push((input, p(P::Bool)));
-        prepared.scoped_parameters.push(nir::DeclarationParameter {
-            declaration: input,
-            sort: Sort::Type,
-        });
-        prepared.scoped_arguments.push(p(P::U8));
+        prepared.edit_scope().abstract_parameters.push(input);
+        prepared
+            .edit_scope()
+            .abstract_value_parameters
+            .push((input, p(P::Bool)));
+        prepared
+            .edit_scope()
+            .scoped_parameters
+            .push(nir::DeclarationParameter {
+                declaration: input,
+                sort: Sort::Type,
+            });
+        prepared.edit_scope().scoped_arguments.push(p(P::U8));
         prepared.edit_package(|package| {
             let function = &mut package.functions[0];
             function.type_parameters.push(input);
@@ -1480,7 +1637,7 @@ mod tests {
         };
         for observe in [false, true] {
             let mut prepared = literal_preparation(true);
-            prepared.abstract_value_parameters = vec![(declaration, p(P::Bool))];
+            prepared.edit_scope().abstract_value_parameters = vec![(declaration, p(P::Bool))];
             prepared.inputs = vec![(
                 binding,
                 p(P::Bool),
@@ -1640,8 +1797,8 @@ mod tests {
                 package: 7,
                 local: 90,
             };
-            prepared.abstract_parameters = vec![id];
-            prepared.abstract_value_parameters = vec![(id, p(P::Bool))];
+            prepared.edit_scope().abstract_parameters = vec![id];
+            prepared.edit_scope().abstract_value_parameters = vec![(id, p(P::Bool))];
             let mut steps = 1000;
             assert!(prepared.invoke(&mut steps, Span::default()).is_err());
             assert!(steps < 1000, "failed scope setup refunded its work");
@@ -2136,17 +2293,19 @@ mod tests {
                 Some(Term::String("quoted \"value\"\\\n(parentheses)".into())),
             )],
             result_type: p(P::Type),
-            scoped_parameters: vec![nir::DeclarationParameter {
-                declaration,
-                sort: Sort::Type,
-            }],
-            scoped_arguments: vec![tuple.clone()],
-            input_frames: vec![vec![Sort::Type, Sort::ComptimeValue]],
-            invocation_assumptions: vec![],
-            abstract_parameters: vec![declaration],
-            abstract_value_parameters: vec![],
-            context: crate::ptc::Context::default(),
-            in_signature: true,
+            scope: Arc::new(InvocationScope {
+                scoped_parameters: vec![nir::DeclarationParameter {
+                    declaration,
+                    sort: Sort::Type,
+                }],
+                scoped_arguments: vec![tuple.clone()],
+                input_frames: vec![vec![Sort::Type, Sort::ComptimeValue]],
+                invocation_assumptions: vec![],
+                abstract_parameters: vec![declaration],
+                abstract_value_parameters: vec![],
+                context: crate::ptc::Context::default(),
+                in_signature: true,
+            }),
         };
         let dump = prepared.to_string();
         assert_eq!(dump, prepared.to_string());

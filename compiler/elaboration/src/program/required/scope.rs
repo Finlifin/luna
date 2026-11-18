@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn retain_abstract_values(
     authority: &mut Vec<(DeclarationId, Term)>,
-    entry: &n::Function,
+    world: &prepared::RequiredWorld,
     inputs: &[(n::LocalId, Term, Option<Term>)],
     live: &BTreeSet<DeclarationId>,
     steps: &mut u64,
@@ -13,9 +13,8 @@ pub(super) fn retain_abstract_values(
     if authority.is_empty() {
         return Ok(());
     }
-    // Sparse local capture does not collect constants embedded in the body.
-    // Include those terms, the entry contract and its captured parameter types.
-    let mut used = input_observation::function(entry, steps, span)?;
+    let source = world.free_inputs(steps, span)?;
+    let mut used = BTreeSet::new();
     for (_, _, value) in inputs {
         *steps = steps
             .checked_sub(1)
@@ -28,7 +27,7 @@ pub(super) fn retain_abstract_values(
         .checked_sub(authority.len() as u64)
         .ok_or_else(|| error(span, "required value scope selection budget exhausted"))?;
     // Commit selection only after every carrier has been observed successfully.
-    authority.retain(|(id, _)| used.contains(id) || live.contains(id));
+    authority.retain(|(id, _)| source.contains(id) || used.contains(id) || live.contains(id));
     Ok(())
 }
 
@@ -78,6 +77,13 @@ mod tests {
         }
     }
 
+    fn world(entry: n::Function) -> std::sync::Arc<prepared::RequiredWorld> {
+        prepared::RequiredWorld::new(n::Package {
+            functions: vec![entry],
+            ..Default::default()
+        })
+    }
+
     #[test]
     fn residual_and_transported_uses_select_only_existing_authority() {
         let entry = entry();
@@ -93,7 +99,7 @@ mod tests {
         )];
         retain_abstract_values(
             &mut authority,
-            &entry,
+            &world(entry.clone()),
             &inputs,
             &BTreeSet::new(),
             &mut 1000,
@@ -107,6 +113,49 @@ mod tests {
             functions: vec![entry],
             ..Default::default()
         };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_abstract_value_parameters(&authority)
+            .unwrap();
+        assert_eq!(
+            vm.invoke(id(1), vec![]).unwrap(),
+            Value::AbstractValue {
+                declaration: id(2),
+                ty: p(P::Bool),
+            }
+        );
+    }
+
+    #[test]
+    fn nested_source_can_use_a_lexical_value_without_an_entry_capture() {
+        let mut root = entry();
+        let mut helper = entry();
+        helper.interface.declaration = id(8);
+        root.body.kind = K::Call {
+            callee: Box::new(n::Expr {
+                source: root.body.source,
+                ty: helper.signature.clone().with_comptime_phase(true),
+                kind: K::Function(id(8)),
+            }),
+            arguments: vec![],
+            parameter_bindings: vec![],
+        };
+        let package = n::Package {
+            functions: vec![root, helper],
+            ..Default::default()
+        };
+        let world = prepared::RequiredWorld::new(package.clone());
+        let mut authority = vec![(id(2), p(P::Bool)), (id(7), p(P::Bool))];
+        retain_abstract_values(
+            &mut authority,
+            &world,
+            &[],
+            &BTreeSet::new(),
+            &mut 1000,
+            Span::default(),
+        )
+        .unwrap();
+        assert_eq!(authority, [(id(2), p(P::Bool))]);
         let mut vm = Interpreter::for_comptime(&package, Budget::default())
             .unwrap()
             .with_abstract_value_parameters(&authority)
@@ -152,7 +201,7 @@ mod tests {
         let mut authority = vec![(id(3), p(P::Bool)), (id(4), p(P::Bool))];
         retain_abstract_values(
             &mut authority,
-            &entry(),
+            &world(entry()),
             &[],
             &observed.values,
             &mut 1000,
@@ -176,7 +225,7 @@ mod tests {
         assert!(
             retain_abstract_values(
                 &mut authority,
-                &entry,
+                &world(entry.clone()),
                 &inputs,
                 &BTreeSet::new(),
                 &mut steps,
@@ -188,7 +237,7 @@ mod tests {
         assert_eq!(authority, original);
         retain_abstract_values(
             &mut authority,
-            &entry,
+            &world(entry.clone()),
             &inputs,
             &BTreeSet::new(),
             &mut 100_000,

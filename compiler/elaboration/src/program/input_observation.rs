@@ -3,7 +3,7 @@
 use super::*;
 use normal::observation::{self, Failure};
 
-fn structural_limit(limit: nir::copy_budget::CopyBudgetExhausted, span: Span) -> Error {
+pub(super) fn structural_limit(limit: nir::copy_budget::CopyBudgetExhausted, span: Span) -> Error {
     error(
         span,
         match limit {
@@ -48,15 +48,6 @@ pub(super) fn expression(
     span: Span,
 ) -> Result<BTreeSet<DeclarationId>, Error> {
     nir::copy_budget::expression_declaration_inputs(value, steps)
-        .map_err(|limit| structural_limit(limit, span))
-}
-
-pub(super) fn function(
-    value: &n::Function,
-    steps: &mut u64,
-    span: Span,
-) -> Result<BTreeSet<DeclarationId>, Error> {
-    nir::copy_budget::function_declaration_inputs(value, steps)
         .map_err(|limit| structural_limit(limit, span))
 }
 
