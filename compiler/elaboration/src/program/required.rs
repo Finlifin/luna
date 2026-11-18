@@ -1435,6 +1435,7 @@ impl Checker<'_, '_> {
                     .protocols
                     .builtin_implementation_packages
                     .clone(),
+                refinements: self.refinements.clone(),
                 definition_identity_cursor: self.next_definition_identity,
                 target: self.target,
                 runtime_function_identities,

@@ -144,7 +144,7 @@ impl Checker<'_, '_> {
                     .required_steps
                     .checked_sub(1)
                     .ok_or_else(|| error(span, "type alias expansion budget exhausted"))?;
-                Ok(CompletedType::Description(*leaf))
+                Ok(CompletedType::Description(leaf.clone()))
             }
         }
     }

@@ -342,6 +342,32 @@ fn observe_inputs(
     Ok(inputs)
 }
 
+/// Check that every free input of a stored predicate is its subject.
+pub(crate) fn closed_refinement(
+    predicate: &n::TypePredicate,
+    binder: crate::DeclarationParameter,
+    steps: &mut u64,
+) -> Result<bool, CopyBudgetExhausted> {
+    let mut closed = true;
+    charge_node_observed(
+        Node::Predicate(predicate),
+        steps,
+        true,
+        None,
+        &mut |term, nesting| {
+            closed &= match term {
+                Term::Rigid { declaration, sort } => {
+                    *declaration == binder.declaration && *sort == binder.sort
+                }
+                Term::Bound { depth, .. } => *depth < nesting,
+                Term::Runtime(_) | Term::Hole { .. } => false,
+                _ => true,
+            };
+        },
+    )?;
+    Ok(closed)
+}
+
 fn charge_node_observed(
     root: Node<'_>,
     steps: &mut u64,

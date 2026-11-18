@@ -88,16 +88,24 @@ impl Checker<'_, '_> {
             if self.in_staged_input && !sig.modifiers.is_comptime && *sort == Sort::Runtime {
                 continue;
             }
-            if let Annotation::Known(ty) = annotation {
+            let domain = match annotation {
+                Annotation::Known(ty) => Some(ty.clone()),
+                _ => self
+                    .definition_refinements
+                    .subjects
+                    .get(&local(parameter.hir_id))
+                    .map(|binder| Term::Rigid {
+                        declaration: binder.declaration,
+                        sort: binder.sort,
+                    }),
+            };
+            if let Some(ty) = domain {
                 mapping[slot] = Some(Term::Bound {
                     depth: 0,
                     index: parameters.len(),
                     sort: *sort,
                 });
-                parameters.push(Parameter {
-                    sort: *sort,
-                    ty: ty.clone(),
-                });
+                parameters.push(Parameter { sort: *sort, ty });
                 bindings.push(local(parameter.hir_id));
             }
         }
@@ -151,6 +159,7 @@ impl Checker<'_, '_> {
         let requirements = self
             .definition_requirements(owner)
             .iter()
+            .chain(&self.definition_refinements.requirements)
             .map(|requirement| {
                 required::map_requirement(
                     requirement,
@@ -208,7 +217,12 @@ impl Checker<'_, '_> {
                 },
                 parameters: bindings,
                 defaults: vec![],
-                type_parameters: vec![],
+                type_parameters: self
+                    .definition_refinements
+                    .subjects
+                    .values()
+                    .map(|b| b.declaration)
+                    .collect(),
                 preconditions: vec![],
                 postconditions: vec![],
                 entry_snapshots: vec![],

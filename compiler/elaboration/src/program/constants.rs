@@ -1108,7 +1108,17 @@ impl Checker<'_, '_> {
                 }
                 result
             }
-            Value::Description(n::DescriptionLiteral::Any) => Ok(()),
+            Value::Description(data) => {
+                self.refinements
+                    .contains(data)
+                    .then_some(())
+                    .ok_or_else(|| {
+                        error(
+                            span,
+                            "captured refinement belongs to a different declaration world",
+                        )
+                    })
+            }
             Value::TypeParameter(_)
             | Value::Type(_)
             | Value::Unit
@@ -3657,7 +3667,7 @@ impl Checker<'_, '_> {
                 if ty != p(P::Type) {
                     return Err(error(span, "type description requires the Type domain"));
                 }
-                K::Literal(n::Literal::Description(*description))
+                K::Literal(n::Literal::Description(description.clone()))
             }
             Value::Unit => K::Unit,
             scalar @ (Value::Bool(_)

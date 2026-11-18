@@ -453,6 +453,8 @@ fn elaborate_with_attributes(
         pending_default_stability: Vec::new(),
         pending_predicate_stability: Vec::new(),
         active_signatures: BTreeSet::new(),
+        refinements: Default::default(),
+        definition_refinements: Default::default(),
         refinement_subjects: Vec::new(),
         pending_refinements: Vec::new(),
         executable_refinement_owner: None,
@@ -1368,6 +1370,7 @@ fn elaborate_candidate<'a, 'h>(
         .functions
         .extend(std::mem::take(&mut checker.generated_functions).into_bodies());
     output.alias_contracts = checker.alias_contracts.values().cloned().collect();
+    output.refinements = std::mem::take(&mut checker.refinements);
     output.expansion_sources = std::mem::take(&mut checker.expansion_sources);
     crate::verification::contracts::inherit(&mut output, &mut checker.next_temporary_binding)
         .map_err(|mut failure| {
@@ -1546,6 +1549,8 @@ struct Checker<'a, 'h> {
     pending_default_stability: Vec<purity::StableObservation>,
     pending_predicate_stability: Vec<purity::StableObservation>,
     active_signatures: BTreeSet<OwnerId>,
+    refinements: nir::refinements::Refinements,
+    definition_refinements: refinements::DefinitionRefinements,
     refinement_subjects: Vec<Term>,
     pending_refinements: Vec<refinements::Pending>,
     executable_refinement_owner: Option<OwnerId>,

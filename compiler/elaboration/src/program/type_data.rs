@@ -28,19 +28,6 @@ impl CompletedType {
         }
     }
 
-    /// An already concrete annotation supplies its own checking direction.
-    /// An explicit description admits a domain supplied by this consumer.
-    /// The supplier can elaborate an operand, so only execute it when needed.
-    pub(super) fn admit_with(
-        self,
-        actual: impl FnOnce() -> Result<Term, Error>,
-    ) -> Result<Term, Error> {
-        match self {
-            Self::Identity(ty) => Ok(ty),
-            Self::Description(n::DescriptionLiteral::Any) => actual(),
-        }
-    }
-
     pub(super) fn identity(self, span: Span) -> Result<Term, Error> {
         match self {
             Self::Identity(ty) => Ok(ty),
@@ -64,6 +51,28 @@ impl CompletedType {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn fresh_type_binder(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<nir::DeclarationParameter, Error> {
+        self.required_steps = self
+            .required_steps
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "Type binder budget exhausted"))?;
+        let index = self.next_definition_identity;
+        self.next_definition_identity = index
+            .checked_add(1)
+            .ok_or_else(|| error(span, "Type binder identity space exhausted"))?;
+        Ok(nir::DeclarationParameter {
+            declaration: DeclarationId {
+                package: declaration(self.package, &self.package_identities, owner).package,
+                local: index,
+            },
+            sort: Sort::Type,
+        })
+    }
+
     pub(super) fn type_expr(&mut self, expr: &Expr<'_>) -> Result<Term, Error> {
         self.completed_type(expr)?.identity(expr.span)
     }
@@ -132,12 +141,7 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(expr.span, "Itself has no active refinement subject"));
         }
         if let H::RefinedType { requirement, base } = &expr.kind {
-            let base = self.type_expr(base)?;
-            self.refinement_subjects.push(base.clone());
-            let requirement_result = self.check_refinement_expression(requirement);
-            self.refinement_subjects.pop();
-            requirement_result?;
-            return Ok(CompletedType::Identity(base));
+            return self.complete_refined_type(expr, base, requirement);
         }
         if let H::Defer(value) = &expr.kind {
             // Signature annotations prepare open computations separately. Other
@@ -168,7 +172,7 @@ impl Checker<'_, '_> {
                     Some(Some(n::Expr {
                         kind: K::Literal(n::Literal::Description(leaf)),
                         ..
-                    })) => Ok(CompletedType::Description(*leaf)),
+                    })) => Ok(CompletedType::Description(leaf.clone())),
                     _ => Err(error(
                         expr.span,
                         "local constant used as a type must contain a completed Type value",

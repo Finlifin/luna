@@ -316,7 +316,7 @@ impl Checker<'_, '_> {
                 if parameter.ty.is_comptime()
                     && matches!(&input, Input::Data(ty) if *ty == p(P::Type))
                 {
-                    let binder = self.fresh_generator_type_binder(owner, parameter.span)?;
+                    let binder = self.fresh_type_binder(owner, parameter.span)?;
                     self.input_facts.types.insert(
                         local(parameter.hir_id),
                         Term::Rigid {

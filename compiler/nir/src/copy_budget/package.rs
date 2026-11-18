@@ -76,6 +76,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     // Exhaustive destructuring makes a new package field require an explicit
     // ownership/accounting decision here, rather than inheriting a hidden clone.
     let n::Package {
+        refinements,
         builtin_implementation_packages,
         target,
         tests,
@@ -213,6 +214,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     // No clone above this point. Failure leaves the caller's source untouched
     // and cannot expose a partially captured declaration world.
     Ok(n::Package {
+        refinements: refinements.clone(),
         builtin_implementation_packages: builtin_implementation_packages.clone(),
         target: *target,
         tests: tests.clone(),

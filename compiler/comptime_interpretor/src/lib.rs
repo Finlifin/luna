@@ -2372,10 +2372,17 @@ impl<'a> Interpreter<'a> {
             )
         }
     }
+    fn admits_description(&self, data: &nir::program::DescriptionLiteral) -> bool {
+        self.comptime_only
+            && self
+                .declaration_world
+                .is_some_and(|world| world.refinements.contains(data))
+    }
+
     fn type_data(&self, value: Value, source: SourceRange) -> Result<Value, Error> {
         match value {
             Value::Type(_) => Ok(value),
-            Value::Description(_) if self.comptime_only => Ok(value),
+            Value::Description(ref data) if self.admits_description(data) => Ok(value),
             Value::TypeParameter(declaration)
                 if self.abstract_type_parameters.contains(&declaration) =>
             {
@@ -3837,7 +3844,10 @@ impl<'a> Interpreter<'a> {
                 if !self.comptime_only {
                     return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
                 }
-                Value::Description(*description)
+                if !self.admits_description(description) {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+                Value::Description(description.clone())
             }
             Literal::Bool(v) => Value::Bool(*v),
             Literal::Char(v) => Value::Char(*v),

@@ -50,6 +50,7 @@ pub(super) fn charge_world_tables(
     budget: &mut Budget,
 ) -> Result<(), Error> {
     let Package {
+        refinements: _, // Borrowed immutable registry; no VM index is constructed.
         builtin_implementation_packages,
         target: _,
         tests,

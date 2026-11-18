@@ -250,3 +250,84 @@ fn an_annotation_completed_for_an_earlier_source_argument_runs_once() {
     "#;
     assert_eq!(support::run(source), Value::Bool(true));
 }
+
+#[test]
+fn produced_refinements_bind_each_call_subject_in_the_receiving_world() {
+    let source = r#"
+        trait Mark {}
+        impl Mark for bool {}
+        impl Mark for u8 {}
+        impl Mark for u16 {}
+        comptime fn Marked() -> Type { refines { Itself :- Mark } Any }
+        comptime fn Small() -> Type {
+            refines { Itself == u8 or Itself == bool } Marked()
+        }
+        typealias Field = Small();
+        const fields: meta.List<Type> = [Field];
+        comptime fn Load() -> Type { fields[0] }
+        fn accept(value: defer Load()) -> bool { true }
+        fn run() -> bool { let byte: u8 = 42; accept(byte) and accept(true) }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    for invalid in [
+        source.replace("byte: u8", "byte: u16"),
+        source.replace("impl Mark for bool {}", ""),
+    ] {
+        let error = support::compile(&invalid).unwrap_err();
+        assert!(
+            error.contains("refinement requirement is not established"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn foreign_refinement_at_the_same_slot_cannot_cross_vm_worlds() {
+    let source = r#"
+        trait Valid {}
+        comptime fn Field() -> Type { refines { Itself :- Valid } Any }
+        comptime fn Echo(value: Type) -> Type { value }
+    "#;
+    let first = support::compile(source).unwrap();
+    let second = support::compile(source).unwrap();
+    let entry = |pkg: &nir::program::Package, name| {
+        pkg.functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    for reference in [false, true] {
+        let field = support::with_comptime(&first, support::COMPTIME_BUDGET, reference, |vm| {
+            vm.invoke(entry(&first, "Field"), vec![]).unwrap()
+        });
+        support::with_comptime(&second, support::COMPTIME_BUDGET, reference, |vm| {
+            let local = vm.invoke(entry(&second, "Field"), vec![]).unwrap();
+            assert_ne!(field, local);
+            assert!(vm.invoke(entry(&second, "Echo"), vec![field]).is_err());
+            assert_eq!(
+                vm.invoke(entry(&second, "Echo"), vec![local.clone()])
+                    .unwrap(),
+                local
+            );
+        });
+    }
+}
+
+#[test]
+fn a_parameter_refinement_supplies_body_evidence_without_proving_the_caller() {
+    let source = r#"
+        trait Flag { fn flag(self) -> bool; }
+        impl Flag for bool { fn flag(self) -> bool { self } }
+        typealias Field = refines { Itself :- Flag } Any;
+        fn read(value: Field) -> bool { value.flag() }
+        fn run() -> bool { read(true) }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    let invalid = source.replace("read(true)", "do { let byte: u8 = 1; read(byte) }");
+    let error = support::compile(&invalid).unwrap_err();
+    assert!(
+        error.contains("refinement requirement is not established"),
+        "{error}"
+    );
+}

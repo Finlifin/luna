@@ -84,28 +84,6 @@ impl Checker<'_, '_> {
 }
 
 impl Checker<'_, '_> {
-    pub(in crate::program::cmtt) fn fresh_generator_type_binder(
-        &mut self,
-        owner: OwnerId,
-        span: Span,
-    ) -> Result<nir::DeclarationParameter, Error> {
-        self.required_steps = self
-            .required_steps
-            .checked_sub(1)
-            .ok_or_else(|| error(span, "contextual input binder budget exhausted"))?;
-        let index = self.next_definition_identity;
-        self.next_definition_identity = index
-            .checked_add(1)
-            .ok_or_else(|| error(span, "contextual input identity space exhausted"))?;
-        Ok(nir::DeclarationParameter {
-            declaration: DeclarationId {
-                package: declaration(self.package, &self.package_identities, owner).package,
-                local: index,
-            },
-            sort: Sort::Type,
-        })
-    }
-
     pub(in crate::program::cmtt) fn freshen_generator_signature<
         O: nir::code_interfaces::SignatureOutput + Clone,
     >(
@@ -121,7 +99,7 @@ impl Checker<'_, '_> {
         let mut parameters = Vec::new();
         let mut arguments = Vec::new();
         for (slot, old) in &signature.input_binders {
-            let fresh = self.fresh_generator_type_binder(owner, span)?;
+            let fresh = self.fresh_type_binder(owner, span)?;
             parameters.push(*old);
             arguments.push(Term::Rigid {
                 declaration: fresh.declaration,

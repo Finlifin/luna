@@ -482,7 +482,7 @@ impl Checker<'_, '_> {
                     ));
                 }
                 if parameter.ty.is_comptime() && ty == p(P::Type) {
-                    let binder = this.fresh_generator_type_binder(owner, parameter.span)?;
+                    let binder = this.fresh_type_binder(owner, parameter.span)?;
                     this.input_facts.types.insert(
                         local(parameter.hir_id),
                         Term::Rigid {

@@ -501,35 +501,31 @@ impl Checker<'_, '_> {
                     Annotation::Pending(_) => Annotation::Suspended { owner, slot },
                     other => other.clone(),
                 };
-                let ty = self
-                    .instantiate_open_annotation(
-                        owner,
-                        slot,
-                        &annotation,
-                        sig,
-                        &symbols,
-                        &parameters,
-                        expr.span,
-                    )?
-                    .admit_with(|| {
-                        let Some(Term::Function { parameters, result }) =
-                            expected.map(Term::callable_signature)
-                        else {
-                            return Err(context_error(
-                                expr.span,
-                                "gradual function value needs a concrete callable target",
-                            ));
-                        };
-                        if parameters.len() != sig.params.len() {
-                            return Err(error(
-                                expr.span,
-                                "callable target parameter count mismatch",
-                            ));
-                        }
-                        Ok(parameters
-                            .get(slot)
-                            .map_or_else(|| (**result).clone(), |p| p.ty.clone()))
-                    })?;
+                let ty = self.instantiate_open_annotation(
+                    owner,
+                    slot,
+                    &annotation,
+                    sig,
+                    &symbols,
+                    &parameters,
+                    expr.span,
+                )?;
+                let ty = self.admit_type_data(ty, expr.span, |_| {
+                    let Some(Term::Function { parameters, result }) =
+                        expected.map(Term::callable_signature)
+                    else {
+                        return Err(context_error(
+                            expr.span,
+                            "gradual function value needs a concrete callable target",
+                        ));
+                    };
+                    if parameters.len() != sig.params.len() {
+                        return Err(error(expr.span, "callable target parameter count mismatch"));
+                    }
+                    Ok(parameters
+                        .get(slot)
+                        .map_or_else(|| (**result).clone(), |p| p.ty.clone()))
+                })?;
                 if slot == sig.params.len() {
                     result = Some(Box::new(ty));
                 } else {
@@ -1803,6 +1799,7 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         check: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        let saved_refinements = std::mem::take(&mut self.definition_refinements);
         let saved_behavior_inputs = std::mem::take(&mut self.ordinary_behavior_inputs);
         let saved_behavior = std::mem::replace(&mut self.checking_open_behavior, false);
         let saved_call = std::mem::replace(&mut self.describing_open_call, false);
@@ -1832,6 +1829,7 @@ impl Checker<'_, '_> {
         let saved_resume = self.effect_resume_result.take();
         self.context = self.definition_context(owner);
         let result = check(self);
+        self.definition_refinements = saved_refinements;
         self.ordinary_behavior_inputs = saved_behavior_inputs;
         self.checking_open_behavior = saved_behavior;
         self.describing_open_call = saved_call;
@@ -2018,6 +2016,15 @@ impl Checker<'_, '_> {
                     );
                 }
                 locals.insert(local(parameter.hir_id), description);
+            }
+            // Defaults are suppliers. Their checks must not borrow a premise
+            // that only holds after binding the parameter at function entry.
+            for (parameter, (_, annotation)) in sig.params.iter().zip(&definition.parameters) {
+                if let Annotation::Description(description @ n::DescriptionLiteral::Refined(_)) = annotation {
+                    let subject = this.assume_parameter_refinement(parameter.hir_id, description, parameter.span)?;
+                    this.locals.insert(local(parameter.hir_id), subject.clone());
+                    locals.insert(local(parameter.hir_id), D::Known(subject));
+                }
             }
             this.check_suspended_annotation(&definition.result, sig, &mut locals)?;
             let preconditions = this
@@ -7028,14 +7035,14 @@ impl Checker<'_, '_> {
                     *sort != Sort::Runtime || sig.modifiers.is_comptime,
                 )?
             } else {
-                ty.admit_with(|| {
+                self.admit_type_data(ty, expr.span, |this| {
                     let default = definition.default_types.get(&slot).ok_or_else(|| {
                         error(
                             expr.span,
                             "gradual parameter needs a concrete domain from its default",
                         )
                     })?;
-                    self.specialize_open_clause_type(owner, default, expr.span)?
+                    this.specialize_open_clause_type(owner, default, expr.span)?
                         .substitute_partial(&symbols)
                         .map_err(|failure| error(expr.span, failure.to_string()))
                 })?
@@ -7140,18 +7147,17 @@ impl Checker<'_, '_> {
             }
         }
         self.admit_open_type_requirements(owner, &symbols, false, expr.span)?;
-        let result = self
-            .instantiate_open_annotation_with_live(
-                owner,
-                sig.params.len(),
-                &definition.result,
-                sig,
-                &symbols,
-                &parameters,
-                &live,
-                expr.span,
-            )?
-            .admit_with(|| expected.cloned().ok_or_else(|| context_error(
+        let result = self.instantiate_open_annotation_with_live(
+            owner,
+            sig.params.len(),
+            &definition.result,
+            sig,
+            &symbols,
+            &parameters,
+            &live,
+            expr.span,
+        )?;
+        let result = self.admit_type_data(result, expr.span, |_| expected.cloned().ok_or_else(|| context_error(
                 expr.span, "gradual result requires a concrete delivery domain; no result context was supplied",
             )))?;
         let signature = Term::Function {

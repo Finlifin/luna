@@ -253,12 +253,12 @@ impl Checker<'_, '_> {
         prepared: &mut Option<n::Expr>,
         staged: bool,
     ) -> Result<Term, Error> {
-        data.admit_with(|| {
+        self.admit_type_data(data, call.span, |this| {
             if let Some(value) = prepared.as_ref() {
                 return Ok(value.ty.clone());
             }
             let input = route.expression(call);
-            let checked = self.with_staged_input(staged, |this| this.expr(&input, None))?;
+            let checked = this.with_staged_input(staged, |this| this.expr(&input, None))?;
             let actual = checked.ty.clone();
             *prepared = Some(checked);
             Ok(actual)
@@ -414,7 +414,7 @@ impl Checker<'_, '_> {
     ) -> Result<CompletedType, Error> {
         let ty = match annotation {
             Annotation::Known(ty) => CompletedType::Identity(ty.clone()),
-            Annotation::Description(data) => CompletedType::Description(*data),
+            Annotation::Description(data) => CompletedType::Description(data.clone()),
             Annotation::Suspended { owner, slot } => {
                 let source = annotation_source(sig, *slot)
                     .ok_or_else(|| error(span, "missing suspended annotation"))?;

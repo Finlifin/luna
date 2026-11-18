@@ -158,15 +158,17 @@ impl fmt::Display for ExpansionSource {
         )
     }
 }
-/// A closed description leaf is data of domain Type. It has no identity Term.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Completed descriptions are data of domain Type, separate from identity terms.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DescriptionLiteral {
     Any,
+    Refined(crate::refinements::Refinement),
 }
 impl fmt::Display for DescriptionLiteral {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Any => f.write_str("(type-value (description any))"),
+            Self::Refined(reference) => write!(f, "(type-value (description {reference}))"),
         }
     }
 }
@@ -1920,6 +1922,7 @@ impl fmt::Display for TraitRequirement {
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
+    pub refinements: crate::refinements::Refinements,
     /// Driver-authorized builtin implementation packages retained across snapshots.
     pub builtin_implementation_packages: std::collections::BTreeSet<u64>,
     /// Explicit compilation target facts. None is target-independent; it must
@@ -3402,6 +3405,9 @@ impl fmt::Display for ExprKind {
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(nir-package")?;
+        if !self.refinements.is_empty() {
+            write!(f, "\n {}", self.refinements)?;
+        }
         if !self.builtin_implementation_packages.is_empty() {
             f.write_str(" (builtin-implementation-packages")?;
             for package in &self.builtin_implementation_packages {

@@ -510,16 +510,11 @@ impl Checker<'_, '_> {
                 }));
             }
             H::RefinedType { .. } | H::RefinementSubject => {
-                let value = self.type_expr(expr)?;
-                let ty = p(P::Type);
+                let value = self.completed_type(expr)?.into_expression(expr.span);
                 if let Some(expected) = expected {
-                    self.require_expression(&ty, expected, expr.span)?;
+                    self.require_expression(&value.ty, expected, expr.span)?;
                 }
-                return Ok(Some(n::Expr {
-                    source: source(expr.span),
-                    ty,
-                    kind: K::TypeValue(value),
-                }));
+                return Ok(Some(value));
             }
             H::TyOptional(inner) => {
                 let inner = self.expr(inner, Some(&p(P::Type)))?;

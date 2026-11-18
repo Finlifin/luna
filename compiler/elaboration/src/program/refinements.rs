@@ -2,6 +2,138 @@
 //! Retain their declaration context, never a caller's later assumptions.
 use super::*;
 
+/// Skolem subjects and premises exist only while checking an open definition.
+#[derive(Default)]
+pub(super) struct DefinitionRefinements {
+    pub(super) subjects: BTreeMap<n::LocalId, nir::DeclarationParameter>,
+    pub(super) requirements: Vec<n::TypePredicate>,
+}
+
+impl Checker<'_, '_> {
+    pub(super) fn complete_refined_type(
+        &mut self,
+        expr: &Expr<'_>,
+        base: &Expr<'_>,
+        requirement: &Expr<'_>,
+    ) -> Result<CompletedType, Error> {
+        match self.completed_type(base)? {
+            CompletedType::Identity(base) => {
+                self.refinement_subjects.push(base.clone());
+                let checked = self.check_refinement_expression(requirement);
+                self.refinement_subjects.pop();
+                checked?;
+                Ok(CompletedType::Identity(base))
+            }
+            CompletedType::Description(base) => {
+                if !self.extracted_refinement(requirement) {
+                    return Err(error(
+                        requirement.span,
+                        "storing an executable refinement requires a captured comptime computation",
+                    ));
+                }
+                let binder = self.fresh_type_binder(expr.hir_id.owner, expr.span)?;
+                self.refinement_subjects.push(Term::Rigid {
+                    declaration: binder.declaration,
+                    sort: binder.sort,
+                });
+                let predicate = self.type_predicate(requirement);
+                self.refinement_subjects.pop();
+                let data = self
+                    .refinements
+                    .publish(
+                        base,
+                        binder,
+                        predicate?,
+                        source(expr.span),
+                        &mut self.required_steps,
+                    )
+                    .map_err(|message| error(expr.span, message))?;
+                Ok(CompletedType::Description(data))
+            }
+        }
+    }
+    /// Concrete annotations supply their own checking direction. Gradual
+    /// inputs evaluate the actual supplier once, then check its requirements
+    /// in the receiving context before publishing a specialized signature.
+    pub(super) fn admit_type_data(
+        &mut self,
+        data: CompletedType,
+        span: Span,
+        actual: impl FnOnce(&mut Self) -> Result<Term, Error>,
+    ) -> Result<Term, Error> {
+        let CompletedType::Description(description) = data else {
+            return data.identity(span);
+        };
+        let actual = actual(self)?;
+        if matches!(description, n::DescriptionLiteral::Any) {
+            return Ok(actual);
+        }
+        let assumptions = self.capability_assumptions();
+        self.for_each_refinement(&description, &actual, span, |this, predicate| {
+            this.prove_source_refinement(&predicate, &this.context, &assumptions, span)
+        })?;
+        Ok(actual)
+    }
+
+    pub(super) fn assume_parameter_refinement(
+        &mut self,
+        parameter: hir::HirId,
+        description: &n::DescriptionLiteral,
+        span: Span,
+    ) -> Result<Term, Error> {
+        let binder = self.fresh_type_binder(parameter.owner, span)?;
+        let subject = Term::Rigid {
+            declaration: binder.declaration,
+            sort: binder.sort,
+        };
+        self.for_each_refinement(description, &subject, span, |this, predicate| {
+            let fact = crate::ptc::Formula::from_predicate(&predicate);
+            this.context
+                .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                .map_err(|e| error(span, e.to_string()))?;
+            this.context.assume(fact);
+            this.definition_refinements.requirements.push(predicate);
+            Ok(())
+        })?;
+        self.definition_refinements
+            .subjects
+            .insert(local(parameter), binder);
+        Ok(subject)
+    }
+
+    fn for_each_refinement(
+        &mut self,
+        description: &n::DescriptionLiteral,
+        actual: &Term,
+        span: Span,
+        mut consume: impl FnMut(&mut Self, n::TypePredicate) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let registry = self.refinements.clone();
+        let requirements = registry
+            .requirements(description)
+            .ok_or_else(|| error(span, "refinement belongs to a different declaration world"))?;
+        let mut chain = Vec::new();
+        for requirement in requirements {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(span, "refinement admission budget exhausted"))?;
+            chain.push(requirement);
+        }
+        let frames = self.call_input_frames();
+        for requirement in chain.into_iter().rev() {
+            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let before = fuel;
+            let predicate = requirement.instantiate(actual, &frames, &mut fuel);
+            self.required_steps -= (before - fuel) as u64;
+            let predicate = predicate
+                .map_err(|e| error(span, format!("refinement substitution failed: {e:?}")))?;
+            consume(self, predicate)?;
+        }
+        Ok(())
+    }
+}
+
 /// A branch premise lasts only until its child check finishes or fails. This
 /// boundary changes type facts, not runtime input facts or lexical bindings.
 pub(super) struct TypeConditionScope {
