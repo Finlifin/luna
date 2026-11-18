@@ -292,17 +292,23 @@ impl std::fmt::Display for DeclarationSubstitution<'_> {
         for (parameter, argument) in self.parameters.iter().zip(self.arguments.iter()) {
             write!(f, " (input {parameter} {argument})")?;
         }
-        f.write_str(") (frames")?;
-        for frame in self.frames.iter() {
-            f.write_str(" (frame")?;
-            for sort in frame {
-                write!(f, " {sort}")?;
-            }
-            f.write_str(")")?;
-        }
-        f.write_str("))")
+        f.write_str(") ")?;
+        display_frames(f, &self.frames)?;
+        f.write_str(")")
     }
 }
+fn display_frames(f: &mut std::fmt::Formatter<'_>, frames: &[Vec<Sort>]) -> std::fmt::Result {
+    f.write_str("(frames")?;
+    for frame in frames {
+        f.write_str(" (frame")?;
+        for sort in frame {
+            write!(f, " {sort}")?;
+        }
+        f.write_str(")")?;
+    }
+    f.write_str(")")
+}
+
 impl<'a> DeclarationSubstitution<'a> {
     pub fn new(
         ids: &[DeclarationId],
@@ -363,12 +369,9 @@ impl<'a> DeclarationSubstitution<'a> {
         fuel: &mut usize,
     ) -> Result<Self, crate::type_computations::Error> {
         use crate::type_computations::{Error, charge_parameter_substitution, charge_term};
-        *fuel = fuel
-            .checked_sub(ids.len().saturating_add(frames.len()))
-            .ok_or(Error::Budget)?;
-        for frame in frames {
-            *fuel = fuel.checked_sub(frame.len()).ok_or(Error::Budget)?;
-        }
+        // Scope checks borrow the caller's frames and look up referenced slots.
+        // Retaining an owned copy is charged by into_owned.
+        *fuel = fuel.checked_sub(ids.len()).ok_or(Error::Budget)?;
         for domain in domains {
             charge_term(domain, fuel)?;
         }
@@ -553,6 +556,7 @@ impl<'a> DeclarationSubstitution<'a> {
 pub struct AdmittedArguments<'a> {
     parameters: Vec<DeclarationParameter>,
     arguments: &'a [Term],
+    frames: &'a [Vec<Sort>],
 }
 impl std::fmt::Display for AdmittedArguments<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -560,6 +564,8 @@ impl std::fmt::Display for AdmittedArguments<'_> {
         for (parameter, argument) in self.parameters.iter().zip(self.arguments) {
             write!(f, " (input {parameter} {argument})")?;
         }
+        f.write_str(" ")?;
+        display_frames(f, self.frames)?;
         f.write_str(")")
     }
 }
@@ -575,8 +581,12 @@ impl AdmittedArguments<'_> {
             self.arguments,
             fuel,
         )?;
-        term.instantiate_admitted_parameters(&self.parameters, self.arguments)
-            .map_err(crate::type_computations::Error::Scope)
+        term.instantiate_domain_checked_parameters_in_scope(
+            &self.parameters,
+            self.arguments,
+            self.frames,
+        )
+        .map_err(crate::type_computations::Error::Scope)
     }
     pub fn instantiate_requirement(
         &self,
@@ -690,6 +700,19 @@ pub fn admit_with_queries_in<'a>(
     fuel: &mut usize,
     queries: &mut crate::value_admission::DomainQueries<'_, '_>,
 ) -> Result<AdmittedArguments<'a>, AdmissionError> {
+    admit_in_scope(parameters, domains, arguments, &[], fuel, queries)
+}
+
+/// Admit arguments in the enclosing callable telescope. Keep that scope with
+/// the evidence so subsequent formation checks use the same binder depths.
+pub fn admit_in_scope<'a>(
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &'a [Term],
+    frames: &'a [Vec<Sort>],
+    fuel: &mut usize,
+    queries: &mut crate::value_admission::DomainQueries<'_, '_>,
+) -> Result<AdmittedArguments<'a>, AdmissionError> {
     *fuel = fuel
         .checked_sub(parameters.len())
         .ok_or(AdmissionError::Budget)?;
@@ -702,7 +725,7 @@ pub fn admit_with_queries_in<'a>(
     }
     for argument in arguments {
         crate::type_computations::charge_term(argument, fuel)?;
-        argument.check_scope(&[]).map_err(|e| e.to_string())?;
+        argument.check_scope(frames).map_err(|e| e.to_string())?;
     }
     let mut ready = BTreeSet::new();
     let mut admitted_parameters = Vec::new();
@@ -735,7 +758,11 @@ pub fn admit_with_queries_in<'a>(
                 fuel,
             )?;
             let domain = domain
-                .instantiate_admitted_parameters(&admitted_parameters, &admitted_arguments)
+                .instantiate_domain_checked_parameters_in_scope(
+                    &admitted_parameters,
+                    &admitted_arguments,
+                    frames,
+                )
                 .map_err(|e| e.to_string())?;
             let argument = &arguments[index];
             let expected = if domain == Term::Primitive(Primitive::Type) {
@@ -747,7 +774,7 @@ pub fn admit_with_queries_in<'a>(
                 return Err("nominal argument sort mismatch".into());
             }
             if expected != Sort::Type {
-                crate::value_admission::validate(argument, &domain, &[], fuel, queries)?;
+                crate::value_admission::validate(argument, &domain, frames, fuel, queries)?;
             }
             crate::type_computations::charge_term(argument, fuel)?;
             admitted_parameters.push(*parameter);
@@ -761,6 +788,7 @@ pub fn admit_with_queries_in<'a>(
     Ok(AdmittedArguments {
         parameters,
         arguments,
+        frames,
     })
 }
 

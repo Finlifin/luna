@@ -106,6 +106,7 @@ fn nf_description_queries_preserve_typed_failures_with_positive_fuel() {
         let calls = std::cell::Cell::new(0);
         let result = inspect(
             &ty,
+            &[],
             &heads,
             &BTreeSet::new(),
             &BTreeMap::new(),
@@ -126,6 +127,7 @@ fn nf_description_queries_preserve_typed_failures_with_positive_fuel() {
     assert_eq!(
         inspect(
             &ty,
+            &[],
             &heads,
             &BTreeSet::new(),
             &BTreeMap::new(),
@@ -145,6 +147,7 @@ fn expensive_queries_do_not_change_the_structural_size_of_an_nf_description() {
     let mut fuel = 1_000_000;
     inspect(
         &ty,
+        &[],
         &heads,
         &BTreeSet::new(),
         &BTreeMap::new(),
@@ -162,6 +165,7 @@ fn expensive_queries_do_not_change_the_structural_size_of_an_nf_description() {
     assert_eq!(
         inspect(
             &ty,
+            &[],
             &heads,
             &BTreeSet::new(),
             &BTreeMap::new(),
@@ -223,4 +227,62 @@ fn active_nf_admission_preserves_failed_reservations_and_can_retry() {
         ErrorKind::Type
     );
     assert!(vm.events.is_empty());
+}
+
+#[test]
+fn successive_dependent_domains_do_not_rescan_the_parameter_prefix() {
+    let descriptor = Head {
+        declaration: id(1),
+        role: Role::Opaque,
+        collector: None,
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: id(2),
+            binding: LocalId { owner: 1, index: 0 },
+            kind: Kind::Value,
+            ty: Term::Primitive(Primitive::Bool),
+        }],
+    };
+    let package = Package {
+        normal_forms: vec![descriptor],
+        ..Default::default()
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let measure = |vm: &mut Interpreter<'_>, width| {
+        let mut parameters = Vec::new();
+        for _ in 0..width {
+            let index = parameters.len();
+            parameters.push(nir::Parameter {
+                sort: nir::Sort::ComptimeValue,
+                ty: Term::Primitive(Primitive::Bool),
+            });
+            parameters.push(nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: Term::NormalForm {
+                    head: id(1),
+                    sort: nir::Sort::Type,
+                    arguments: vec![Term::Bound {
+                        depth: 0,
+                        index,
+                        sort: nir::Sort::ComptimeValue,
+                    }],
+                },
+            });
+        }
+        let signature = Term::Function {
+            parameters,
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let start = 1_000_000;
+        vm.budget.steps = start;
+        vm.check_type_description(&signature, None).unwrap();
+        let inspected = start - vm.remaining_steps();
+        vm.budget.steps = start;
+        vm.admit_type(&signature, 0).unwrap();
+        (inspected, start - vm.remaining_steps())
+    };
+    let (inspect, admit) = measure(&mut vm, 128);
+    let (twice_inspect, twice_admit) = measure(&mut vm, 256);
+    assert!(twice_inspect <= 2 * inspect, "{inspect} -> {twice_inspect}");
+    assert!(twice_admit <= 2 * admit, "{admit} -> {twice_admit}");
 }

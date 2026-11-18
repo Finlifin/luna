@@ -849,9 +849,11 @@ impl Term {
                 actual: arguments.len(),
             }));
         }
-        validate(self, &[], &mut Vec::new(), true, false).map_err(CallError::Shape)?;
+        validate(self, &[], &mut ValidationFrames::default(), true, false)
+            .map_err(CallError::Shape)?;
         for argument in arguments {
-            validate(argument, &[], &mut Vec::new(), true, false).map_err(CallError::Shape)?;
+            validate(argument, &[], &mut ValidationFrames::default(), true, false)
+                .map_err(CallError::Shape)?;
         }
         let mut type_slots = BTreeSet::new();
         let mut expected_types = Vec::with_capacity(parameters.len());
@@ -877,7 +879,7 @@ impl Term {
 
     /// Validate stable term shape and binder scope without changing its head.
     pub fn check_scope(&self, frames: &[Vec<Sort>]) -> Result<(), TypeError> {
-        validate(self, &[], &mut frames.to_vec(), false, false)
+        validate(self, &[], &mut ValidationFrames::new(frames), false, false)
     }
 
     pub fn sort(&self) -> Sort {
@@ -1163,17 +1165,6 @@ impl Term {
         })
     }
 
-    /// Internal substitution for a domain-admitted declaration instance. The
-    /// caller must establish each replacement's domain before using this path.
-    /// Occurrences still have to match the declaration's original sort.
-    pub(crate) fn instantiate_admitted_parameters(
-        &self,
-        parameters: &[DeclarationParameter],
-        arguments: &[Term],
-    ) -> Result<Term, TypeError> {
-        self.instantiate_domain_checked_parameters_in_scope(parameters, arguments, &[])
-    }
-
     /// Structural callers establish the replacement sorts from parameter domains;
     /// completed-value callers additionally carry full domain-admission evidence.
     pub(crate) fn instantiate_domain_checked_parameters_in_scope(
@@ -1303,6 +1294,12 @@ impl Term {
             })
             .collect();
         self.instantiate_parameters(&parameters, arguments)
+    }
+
+    /// Observe this domain beneath additional enclosing function binders.
+    /// Its internal binders and all declaration identities keep their meaning.
+    pub fn under_binders(&self, count: u32) -> Result<Term, TypeError> {
+        self.shift(count, 0)
     }
 
     fn shift(&self, amount: u32, cutoff: u32) -> Result<Term, TypeError> {
@@ -1721,10 +1718,16 @@ impl TypeInterner {
             .map_err(|_| TypeError::ConstructionBudget)?;
         for (index, hole) in holes.iter().enumerate() {
             require_sort(&hole.ty, Sort::Type)?;
-            validate(&hole.ty, &holes[..index], &mut Vec::new(), false, true)?;
+            validate(
+                &hole.ty,
+                &holes[..index],
+                &mut ValidationFrames::default(),
+                false,
+                true,
+            )?;
         }
         require_sort(&body, Sort::Type)?;
-        validate(&body, &holes, &mut Vec::new(), false, true)?;
+        validate(&body, &holes, &mut ValidationFrames::default(), false, true)?;
         let core = Arc::new(TypeCore { holes, body });
         if let Some(existing) = self.cores.get(&core) {
             return Ok(existing.clone());
@@ -1781,7 +1784,7 @@ impl TypeRef {
             require_sort(argument, hole.sort)?;
             // Open surrounding binder references are allowed. Core holes in a
             // reference-side value are not: they have no unambiguous owner.
-            validate(argument, &[], &mut Vec::new(), true, false)?;
+            validate(argument, &[], &mut ValidationFrames::default(), true, false)?;
         }
         Ok(Self { core, arguments })
     }
@@ -1873,7 +1876,7 @@ impl TypeRef {
     /// to innermost; each contains the semantic sorts of its available binders.
     /// This is shape/scope validation, not dependent contract checking.
     pub fn check_scope(&self, frames: &[Vec<Sort>]) -> Result<(), TypeError> {
-        let mut frames = frames.to_vec();
+        let mut frames = ValidationFrames::new(frames);
         for argument in &self.arguments {
             validate(argument, &[], &mut frames, false, false)?;
         }
@@ -2079,10 +2082,53 @@ fn expand_holes(term: &Term, arguments: &[Term]) -> Result<Term, TypeError> {
     })
 }
 
-fn validate(
-    term: &Term,
+/// Outer frames belong to the caller. Nested frames borrow the visible prefix
+/// of the function currently being checked, including an empty prefix.
+#[derive(Default)]
+struct ValidationFrames<'outer, 'term> {
+    outer: &'outer [Vec<Sort>],
+    nested: Vec<&'term [Parameter]>,
+}
+
+impl<'outer> ValidationFrames<'outer, '_> {
+    fn new(outer: &'outer [Vec<Sort>]) -> Self {
+        Self {
+            outer,
+            nested: Vec::new(),
+        }
+    }
+
+    fn check_bound(
+        &self,
+        depth: u32,
+        index: usize,
+        actual: Sort,
+        allow_free: bool,
+    ) -> Result<(), TypeError> {
+        let distance = depth as usize;
+        let missing = TypeError::InvalidBound { depth, index };
+        let expected = if distance < self.nested.len() {
+            self.nested[self.nested.len() - 1 - distance]
+                .get(index)
+                .map(|p| p.sort)
+        } else {
+            let Some(frame) = self.outer.iter().rev().nth(distance - self.nested.len()) else {
+                return if allow_free { Ok(()) } else { Err(missing) };
+            };
+            frame.get(index).copied()
+        }
+        .ok_or(missing)?;
+        if expected != actual {
+            return Err(TypeError::WrongSort { expected, actual });
+        }
+        Ok(())
+    }
+}
+
+fn validate<'term>(
+    term: &'term Term,
     holes: &[Parameter],
-    frames: &mut Vec<Vec<Sort>>,
+    frames: &mut ValidationFrames<'_, 'term>,
     allow_free: bool,
     core: bool,
 ) -> Result<(), TypeError> {
@@ -2112,27 +2158,7 @@ fn validate(
             }
         }
         Term::Bound { depth, index, sort } => {
-            if let Some(frame) = (*depth as usize)
-                .checked_add(1)
-                .and_then(|distance| frames.len().checked_sub(distance))
-                .map(|i| &frames[i])
-            {
-                let expected = *frame.get(*index).ok_or(TypeError::InvalidBound {
-                    depth: *depth,
-                    index: *index,
-                })?;
-                if expected != *sort {
-                    return Err(TypeError::WrongSort {
-                        expected,
-                        actual: *sort,
-                    });
-                }
-            } else if !allow_free {
-                return Err(TypeError::InvalidBound {
-                    depth: *depth,
-                    index: *index,
-                });
-            }
+            frames.check_bound(*depth, *index, *sort, allow_free)?;
         }
         Term::UnsafeFunction(signature) => {
             if !matches!(
@@ -2162,17 +2188,17 @@ fn validate(
         }
         Term::Runtime(id) if core => return Err(TypeError::RuntimeInCore(*id)),
         Term::Function { parameters, result } => {
-            frames.push(Vec::new());
+            frames.nested.push(&[]);
             let checked = (|| {
-                for parameter in parameters {
+                for (index, parameter) in parameters.iter().enumerate() {
                     require_sort(&parameter.ty, Sort::Type)?;
                     validate(&parameter.ty, holes, frames, allow_free, core)?;
-                    frames.last_mut().unwrap().push(parameter.sort);
+                    *frames.nested.last_mut().unwrap() = &parameters[..=index];
                 }
                 require_sort(result, Sort::Type)?;
                 validate(result, holes, frames, allow_free, core)
             })();
-            frames.pop();
+            frames.nested.pop();
             checked?;
         }
         Term::ClosureContextValue(fields) => {

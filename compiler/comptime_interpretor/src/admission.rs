@@ -2,6 +2,8 @@
 //! authorization to duplicate resources or reuse an equality-sensitive query.
 use super::*;
 
+mod formation;
+
 #[cfg(test)]
 mod tests;
 
@@ -36,25 +38,24 @@ impl Interpreter<'_> {
         &self,
         check: impl FnOnce(&mut nir::value_admission::DomainQueries<'_, '_>) -> R,
     ) -> R {
+        self.with_scoped_queries(&[], check)
+    }
+
+    fn with_scoped_queries<R>(
+        &self,
+        frames: &[&[nir::Parameter]],
+        check: impl FnOnce(&mut nir::value_admission::DomainQueries<'_, '_>) -> R,
+    ) -> R {
         check(&mut nir::value_admission::DomainQueries {
             layout: &mut |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
             declared: &mut |value, domain, fuel| {
-                *fuel = fuel
-                    .checked_sub(1)
-                    .ok_or(nir::NominalAdmissionError::Budget)?;
-                let Term::Rigid {
-                    declaration,
-                    sort: nir::Sort::ComptimeValue,
-                } = value
-                else {
-                    return Ok(false);
-                };
-                let Some(expected) = self.abstract_value_parameters.get(declaration) else {
-                    return Ok(false);
-                };
-                nir::type_computations::charge_term(expected, fuel)?;
-                nir::type_computations::charge_term(domain, fuel)?;
-                Ok(expected == domain)
+                type_descriptions::declared_domain_matches(
+                    frames,
+                    &self.abstract_value_parameters,
+                    value,
+                    domain,
+                    fuel,
+                )
             },
             collection: &mut |domain, fuel| self.admitted_collection_domain(domain, fuel),
             callable: &mut |value, frames, fuel| {
@@ -309,359 +310,6 @@ impl Interpreter<'_> {
                 }
             }
             _ => {} // Representation admission already rejected storage and captures.
-        }
-        Ok(())
-    }
-    pub(super) fn admit_type(&mut self, ty: &Term, depth: usize) -> Result<(), Error> {
-        if depth >= 128 {
-            return Err(self.failure(ErrorKind::DepthExhausted, None));
-        }
-        self.tick(None)?;
-        let source = SourceRange { start: 0, end: 0 };
-        match ty {
-            Term::Nominal {
-                declaration,
-                arguments,
-            } => {
-                if self.graph.is_some() {
-                    let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-                    let mut fuel = before;
-                    let charged = nir::type_computations::charge_term(ty, &mut fuel);
-                    self.budget.steps -= (before - fuel) as u64;
-                    charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, None))?;
-                    let definition = self
-                        .concrete_nominal(ty)
-                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                    // Concrete descriptors already substituted their declaration telescope.
-                    let (requirements, capabilities) = match &definition {
-                        ConcreteNominal::Struct(d) => (&d.requirements, &d.capabilities),
-                        ConcreteNominal::Enum(d) => (&d.requirements, &d.capabilities),
-                        ConcreteNominal::Newtype(d) => (&d.requirements, &d.capabilities),
-                    };
-                    for predicate in requirements {
-                        self.tick(None)?;
-                        self.check_type_contract(predicate, source)?;
-                    }
-                    for predicate in capabilities {
-                        self.check_capability_contract(predicate, source)?;
-                    }
-                    for argument in arguments {
-                        self.admit_type(argument, depth + 1)?;
-                    }
-                    return Ok(());
-                }
-                let (parameters, domains, requirements, capabilities) =
-                    if let Some(s) = self.structs.get(declaration) {
-                        (
-                            &s.type_parameters,
-                            &s.parameter_types,
-                            &s.requirements,
-                            &s.capabilities,
-                        )
-                    } else if let Some(e) = self.enums.get(declaration) {
-                        (
-                            &e.type_parameters,
-                            &e.parameter_types,
-                            &e.requirements,
-                            &e.capabilities,
-                        )
-                    } else if let Some(n) = self.newtypes.get(declaration) {
-                        (
-                            &n.type_parameters,
-                            &n.parameter_types,
-                            &n.requirements,
-                            &n.capabilities,
-                        )
-                    } else {
-                        return Err(self.failure(ErrorKind::Type, None));
-                    };
-                // Prove formation even for phantom arguments with no fields.
-                let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-                let mut remaining = before;
-                let valid = if let Some(definition) = self.newtypes.get(declaration) {
-                    definition.validate_completed_arguments_with_collections_in(
-                        arguments,
-                        &mut remaining,
-                        |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                        |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
-                        |domain, fuel| self.admitted_collection_domain(domain, fuel),
-                        self.target,
-                    )
-                } else {
-                    nir::validate_declaration_arguments_with_collections_in(
-                        parameters,
-                        domains,
-                        arguments,
-                        &mut remaining,
-                        |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                        |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
-                        |domain, fuel| self.admitted_collection_domain(domain, fuel),
-                        self.target,
-                    )
-                };
-                self.budget.steps -= (before - remaining) as u64;
-                valid.map_err(|error| {
-                    self.failure(
-                        match error {
-                            nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
-                            nir::NominalAdmissionError::Unresolved(_) => {
-                                ErrorKind::TypeContractUnresolved
-                            }
-                            nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
-                        },
-                        None,
-                    )
-                })?;
-                let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-                let mut remaining = before;
-                let contracts = (|| {
-                    let substitution = nir::DeclarationSubstitution::bounded(
-                        parameters,
-                        domains,
-                        arguments,
-                        &[],
-                        &mut remaining,
-                    )?;
-                    let requirements = requirements
-                        .iter()
-                        .map(|predicate| {
-                            substitution.instantiate_predicate_bounded(predicate, &mut remaining)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let capabilities = capabilities
-                        .iter()
-                        .map(|requirement| {
-                            substitution
-                                .instantiate_requirement_bounded(requirement, &mut remaining)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok::<_, nir::type_computations::Error>((requirements, capabilities))
-                })();
-                self.budget.steps -= (before - remaining) as u64;
-                let (requirements, capabilities) = contracts.map_err(|failure| {
-                    self.failure(
-                        if failure == nir::type_computations::Error::Budget {
-                            ErrorKind::StepsExhausted
-                        } else {
-                            ErrorKind::Type
-                        },
-                        None,
-                    )
-                })?;
-                for p in requirements {
-                    self.tick(None)?;
-                    self.check_type_contract(&p, source)?;
-                }
-                for p in capabilities {
-                    self.check_capability_contract(&p, source)?;
-                }
-                for ty in arguments {
-                    self.admit_type(ty, depth + 1)?;
-                }
-            }
-            Term::NormalForm {
-                head, arguments, ..
-            } => {
-                let metadata = self
-                    .normal_forms
-                    .get(head)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-                let before = fuel;
-                let checked = self.with_admission_queries(|queries| {
-                    metadata.check_arguments(arguments, &[], &mut fuel, queries)
-                });
-                self.budget.steps -= (before - fuel) as u64;
-                checked.map_err(|error| {
-                    self.failure(
-                        match error {
-                            nir::normal_forms::ApplicationError::Budget { .. } => {
-                                ErrorKind::StepsExhausted
-                            }
-                            nir::normal_forms::ApplicationError::Unresolved { .. } => {
-                                ErrorKind::TypeContractUnresolved
-                            }
-                            _ => ErrorKind::Type,
-                        },
-                        None,
-                    )
-                })?;
-                self.check_normal_requirements(metadata, arguments, source)?;
-                for ty in arguments {
-                    self.admit_type(ty, depth + 1)?;
-                }
-            }
-            Term::MethodValue(method) => {
-                self.admit_runtime_method_identity(method)?;
-                for argument in method.terms() {
-                    self.admit_type(argument, depth + 1)?;
-                }
-            }
-            Term::FunctionValue {
-                declaration,
-                arguments,
-            } => {
-                self.admit_callable_identity(*declaration, arguments, source)?;
-                for argument in arguments {
-                    self.admit_type(argument, depth + 1)?;
-                }
-            }
-            Term::Tuple(types) | Term::ClosureContextValue(types) | Term::TupleValue(types) => {
-                for ty in types {
-                    self.admit_type(ty, depth + 1)?;
-                }
-            }
-            Term::OptionalValue { ty, value } => {
-                self.admit_type(ty, depth + 1)?;
-                if let Some(value) = value {
-                    self.admit_type(value, depth + 1)?;
-                }
-            }
-            Term::ErrorValue { ty, label, value } => {
-                self.admit_type(ty, depth + 1)?;
-                if let Some(label) = label {
-                    self.admit_type(label, depth + 1)?;
-                }
-                self.admit_type(value, depth + 1)?;
-            }
-            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
-                self.admit_type(ty, depth + 1)?;
-                for field in fields {
-                    self.admit_type(field, depth + 1)?;
-                }
-            }
-            Term::Record(fields) | Term::RecordValue(fields) => {
-                for (_, ty) in fields {
-                    self.admit_type(ty, depth + 1)?;
-                }
-            }
-            Term::Optional(ty)
-            | Term::Pointer(ty)
-            | Term::ComptimeFunction(ty)
-            | Term::NormalFormFunction(ty, _)
-            | Term::UnsafeFunction(ty) => self.admit_type(ty, depth + 1)?,
-            Term::Function { parameters, result } => {
-                for p in parameters {
-                    self.admit_type(&p.ty, depth + 1)?;
-                }
-                self.admit_type(result, depth + 1)?;
-            }
-            Term::Closure {
-                environment,
-                signature,
-            } => {
-                for ty in environment {
-                    self.admit_type(ty, depth + 1)?;
-                }
-                self.admit_type(signature, depth + 1)?;
-            }
-            Term::ContextualClosure { context, signature } => {
-                self.admit_type(context, depth + 1)?;
-                self.admit_type(signature, depth + 1)?;
-            }
-            Term::ErrorResult { errors, result } => {
-                for label in errors {
-                    self.admit_type(label, depth + 1)?;
-                }
-                self.admit_type(result, depth + 1)?;
-            }
-            Term::Computation { effects, result } => {
-                // Row entries preserve declaration identity, order and repeated
-                // occurrences. Formation does not install a handler or grant an
-                // effect invocation capability.
-                for operation in effects {
-                    self.tick(None)?;
-                    let declaration = self
-                        .effect_declarations
-                        .get(&operation.declaration)
-                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                    let mut fuel = usize::try_from(self.budget.steps)
-                        .unwrap_or(usize::MAX)
-                        .min(100_000);
-                    let before = fuel;
-                    let checked = nir::validate_declaration_arguments_with_collections_in(
-                        &declaration.type_parameters,
-                        &declaration.parameter_types,
-                        &operation.arguments,
-                        &mut fuel,
-                        |ty, variant, fuel| self.query_normal_value_fields(ty, variant, fuel),
-                        |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
-                        |domain, fuel| self.admitted_collection_domain(domain, fuel),
-                        self.target,
-                    );
-                    self.budget.steps -= (before - fuel) as u64;
-                    checked.map_err(|error| {
-                        self.failure(
-                            match error {
-                                nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
-                                nir::NominalAdmissionError::Unresolved(_) => {
-                                    ErrorKind::TypeContractUnresolved
-                                }
-                                nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
-                            },
-                            None,
-                        )
-                    })?;
-                    let signature = declaration
-                        .signature
-                        .instantiate_parameters(
-                            &declaration
-                                .parameter_binders()
-                                .map_err(|_| self.failure(ErrorKind::Type, None))?,
-                            &operation.arguments,
-                        )
-                        .map_err(|_| self.failure(ErrorKind::Type, None))?;
-                    self.check_type_description(&signature, None)?;
-                    signature
-                        .check_scope(&[])
-                        .map_err(|_| self.failure(ErrorKind::Type, None))?;
-                    for predicate in &declaration.requirements {
-                        self.tick(None)?;
-                        let predicate = predicate
-                            .instantiate_parameters(
-                                &declaration
-                                    .parameter_binders()
-                                    .map_err(|_| self.failure(ErrorKind::Type, None))?,
-                                &operation.arguments,
-                            )
-                            .map_err(|_| self.failure(ErrorKind::Type, None))?;
-                        self.check_type_contract(&predicate, source)?;
-                    }
-                    for capability in &declaration.capabilities {
-                        self.tick(None)?;
-                        let capability = capability
-                            .instantiate_parameters(
-                                &declaration
-                                    .parameter_binders()
-                                    .map_err(|_| self.failure(ErrorKind::Type, None))?,
-                                &operation.arguments,
-                            )
-                            .map_err(|_| self.failure(ErrorKind::Type, None))?;
-                        self.check_type_contract(
-                            &nir::program::TypePredicate::Trait(capability),
-                            source,
-                        )?;
-                    }
-                    for argument in &operation.arguments {
-                        self.admit_type(argument, depth + 1)?;
-                    }
-                }
-                self.admit_type(result, depth + 1)?;
-            }
-            Term::Rigid {
-                declaration,
-                sort: nir::Sort::Type,
-            } if self.abstract_type_parameters.contains(declaration) => {}
-            Term::Rigid {
-                declaration,
-                sort: nir::Sort::ComptimeValue,
-            } if self.abstract_value_parameters.contains_key(declaration) => {}
-            Term::AssociatedType { .. }
-            | Term::Rigid { .. }
-            | Term::Runtime(_)
-            | Term::Value { .. }
-            | Term::Hole { .. } => return Err(self.failure(ErrorKind::Type, None)),
-            _ => {}
         }
         Ok(())
     }

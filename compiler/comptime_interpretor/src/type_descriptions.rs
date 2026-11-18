@@ -20,8 +20,18 @@ impl Interpreter<'_> {
         term: &Term,
         fuel: &mut usize,
     ) -> Result<(), ErrorKind> {
+        self.inspect_scoped_term(term, &[], fuel)
+    }
+
+    pub(super) fn inspect_scoped_term(
+        &self,
+        term: &Term,
+        enclosing: &[&[nir::Parameter]],
+        fuel: &mut usize,
+    ) -> Result<(), ErrorKind> {
         inspect(
             term,
+            enclosing,
             &self.normal_forms,
             &self.abstract_type_parameters,
             &self.abstract_value_parameters,
@@ -39,6 +49,7 @@ impl Interpreter<'_> {
     ) -> Result<(), ErrorKind> {
         inspect(
             term,
+            &[],
             &self.normal_forms,
             &BTreeSet::new(),
             &BTreeMap::new(),
@@ -107,13 +118,7 @@ pub(super) fn spend(fuel: &mut usize, amount: usize) -> Result<(), ErrorKind> {
     *fuel = fuel.checked_sub(amount).ok_or(ErrorKind::StepsExhausted)?;
     Ok(())
 }
-fn computation_error(error: nir::type_computations::Error) -> ErrorKind {
-    match error {
-        nir::type_computations::Error::Budget => ErrorKind::StepsExhausted,
-        _ => ErrorKind::Type,
-    }
-}
-fn application_error(error: nir::normal_forms::ApplicationError) -> ErrorKind {
+pub(super) fn application_error(error: nir::normal_forms::ApplicationError) -> ErrorKind {
     match error {
         nir::normal_forms::ApplicationError::Budget { .. } => ErrorKind::StepsExhausted,
         nir::normal_forms::ApplicationError::Unresolved { .. } => ErrorKind::TypeContractUnresolved,
@@ -121,8 +126,95 @@ fn application_error(error: nir::normal_forms::ApplicationError) -> ErrorKind {
     }
 }
 
+/// Each frame exposes only parameters whose own domains have been checked.
+/// The sort view feeds NIR substitution; the typed view supplies domain evidence.
+#[derive(Default)]
+pub(super) struct Telescope<'t> {
+    pub(super) parameters: Vec<&'t [nir::Parameter]>,
+    pub(super) sorts: Vec<Vec<nir::Sort>>,
+}
+
+impl<'t> Telescope<'t> {
+    pub(super) fn enter(&mut self) {
+        self.parameters.push(&[]);
+        self.sorts.push(Vec::new());
+    }
+
+    pub(super) fn advance(&mut self, parameters: &'t [nir::Parameter], index: usize) {
+        *self.parameters.last_mut().unwrap() = &parameters[..=index];
+        self.sorts.last_mut().unwrap().push(parameters[index].sort);
+    }
+
+    pub(super) fn leave(&mut self) {
+        self.parameters.pop();
+        self.sorts.pop();
+    }
+
+    fn enclosing(frames: &[&'t [nir::Parameter]], fuel: &mut usize) -> Result<Self, ErrorKind> {
+        let mut scope = Self::default();
+        for frame in frames {
+            spend(fuel, frame.len() + 1)?;
+            scope.enter();
+            for index in 0..frame.len() {
+                scope.advance(frame, index);
+            }
+        }
+        Ok(scope)
+    }
+}
+
+/// Resolve just the requested value binder. A parameter domain is relative to
+/// its declaration frame, so lift its outer references to the observation site.
+pub(super) fn declared_domain_matches(
+    frames: &[&[nir::Parameter]],
+    values: &BTreeMap<DeclarationId, Term>,
+    value: &Term,
+    domain: &Term,
+    fuel: &mut usize,
+) -> Result<bool, AdmissionError> {
+    *fuel = fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
+    let (expected, distance) = match value {
+        Term::Rigid {
+            declaration,
+            sort: nir::Sort::ComptimeValue,
+        } => {
+            let Some(expected) = values.get(declaration) else {
+                return Ok(false);
+            };
+            (expected, 0)
+        }
+        Term::Bound {
+            depth,
+            index,
+            sort: nir::Sort::ComptimeValue,
+        } => {
+            let parameter = frames
+                .iter()
+                .rev()
+                .nth(*depth as usize)
+                .and_then(|frame| frame.get(*index));
+            let Some(parameter) = parameter.filter(|p| p.sort == nir::Sort::ComptimeValue) else {
+                return Ok(false);
+            };
+            (&parameter.ty, *depth)
+        }
+        _ => return Ok(false),
+    };
+    nir::type_computations::charge_term(expected, fuel)?;
+    nir::type_computations::charge_term(domain, fuel)?;
+    if distance == 0 {
+        Ok(expected == domain)
+    } else {
+        Ok(expected
+            .under_binders(distance)
+            .map_err(|error| error.to_string())?
+            == *domain)
+    }
+}
+
 pub(super) fn inspect<'signature>(
     ty: &Term,
+    enclosing: &[&[nir::Parameter]],
     heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
@@ -136,15 +228,50 @@ pub(super) fn inspect<'signature>(
     target: Option<nir::target::TargetData>,
     fuel: &mut usize,
 ) -> Result<(), ErrorKind> {
-    // A leaf needs neither a heap traversal stack nor an empty shared frame.
-    // Allocate pending nodes only for children, and shared binder frames only
-    // when entering a function telescope. Query work does not enlarge the
-    // structural description-size counter.
+    enum Work<'t> {
+        Visit(&'t Term, usize),
+        Parameter {
+            parameters: &'t [nir::Parameter],
+            next: usize,
+            result: &'t Term,
+            depth: usize,
+        },
+        Leave,
+    }
+    let mut scope = Telescope::enclosing(enclosing, fuel)?;
     let mut pending = Vec::new();
-    let mut first = Some((ty, 0usize, None::<std::rc::Rc<Vec<&[nir::Parameter]>>>));
+    let mut first = Some(Work::Visit(ty, 0));
     let mut work = 0usize;
-    while let Some((ty, depth, frames)) = first.take().or_else(|| pending.pop()) {
-        let frame_slice = frames.as_deref().map_or(&[][..], Vec::as_slice);
+    while let Some(action) = first.take().or_else(|| pending.pop()) {
+        let (ty, depth) = match action {
+            Work::Visit(term, depth) => (term, depth),
+            Work::Leave => {
+                scope.leave();
+                continue;
+            }
+            Work::Parameter {
+                parameters,
+                next,
+                result,
+                depth,
+            } => {
+                if next > 0 {
+                    scope.advance(parameters, next - 1);
+                }
+                if let Some(parameter) = parameters.get(next) {
+                    pending.push(Work::Parameter {
+                        parameters,
+                        next: next + 1,
+                        result,
+                        depth,
+                    });
+                    (&parameter.ty, depth)
+                } else {
+                    pending.push(Work::Leave);
+                    (result, depth)
+                }
+            }
+        };
         spend(fuel, 1)?;
         work += 1;
         if depth > 128 {
@@ -242,33 +369,10 @@ pub(super) fn inspect<'signature>(
                 if *sort != nir::Sort::Type {
                     return Err(ErrorKind::Type);
                 }
-                let mut bound_domains = BTreeMap::new();
-                for (frame_depth, frame) in frame_slice.iter().rev().enumerate() {
-                    spend(fuel, frame.len().saturating_add(1))?;
-                    for (index, parameter) in frame.iter().enumerate() {
-                        if parameter.sort != nir::Sort::ComptimeValue {
-                            continue;
-                        }
-                        nir::type_computations::charge_term(&parameter.ty, fuel)
-                            .map_err(computation_error)?;
-                        let mut domain = parameter.ty.clone();
-                        for _ in 0..frame_depth {
-                            nir::type_computations::charge_term(&domain, fuel)
-                                .map_err(computation_error)?;
-                            domain = domain
-                                .abstract_parameters(&[])
-                                .map_err(|_| ErrorKind::Type)?;
-                        }
-                        bound_domains.insert((frame_depth as u32, index), domain);
-                    }
-                }
                 metadata
                     .check_arguments(
                         arguments,
-                        &frame_slice
-                            .iter()
-                            .map(|frame| frame.iter().map(|p| p.sort).collect())
-                            .collect::<Vec<_>>(),
+                        &scope.sorts,
                         fuel,
                         &mut nir::value_admission::DomainQueries {
                             layout: &mut |ty, variant, fuel| {
@@ -284,19 +388,14 @@ pub(super) fn inspect<'signature>(
                                 }
                                 nominal_fields(ty, variant, fuel)
                             },
-                            declared: &mut |value, domain, _| {
-                                Ok(match value {
-                                    Term::Rigid {
-                                        declaration,
-                                        sort: nir::Sort::ComptimeValue,
-                                    } => value_parameters.get(declaration) == Some(domain),
-                                    Term::Bound {
-                                        depth,
-                                        index,
-                                        sort: nir::Sort::ComptimeValue,
-                                    } => bound_domains.get(&(*depth, *index)) == Some(domain),
-                                    _ => false,
-                                })
+                            declared: &mut |value, domain, fuel| {
+                                declared_domain_matches(
+                                    &scope.parameters,
+                                    value_parameters,
+                                    value,
+                                    domain,
+                                    fuel,
+                                )
                             },
                             collection: &mut |domain, fuel| {
                                 let Term::NormalForm { head, .. } = domain else {
@@ -321,31 +420,27 @@ pub(super) fn inspect<'signature>(
         }
         match ty {
             Term::MethodValue(method) => {
-                pending.extend(method.terms().map(|term| (term, depth + 1, frames.clone())));
+                pending.extend(method.terms().map(|term| Work::Visit(term, depth + 1)));
             }
             Term::OptionalValue { ty, value } => {
-                pending.push((ty, depth + 1, frames.clone()));
+                pending.push(Work::Visit(ty, depth + 1));
                 if let Some(value) = value {
-                    pending.push((value, depth + 1, frames.clone()));
+                    pending.push(Work::Visit(value, depth + 1));
                 }
             }
             Term::ErrorValue { ty, label, value } => {
-                pending.push((ty, depth + 1, frames.clone()));
+                pending.push(Work::Visit(ty, depth + 1));
                 if let Some(label) = label {
-                    pending.push((label, depth + 1, frames.clone()));
+                    pending.push(Work::Visit(label, depth + 1));
                 }
-                pending.push((value, depth + 1, frames.clone()));
+                pending.push(Work::Visit(value, depth + 1));
             }
             Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
-                pending.push((ty, depth + 1, frames.clone()));
-                pending.extend(
-                    fields
-                        .iter()
-                        .map(|field| (field, depth + 1, frames.clone())),
-                );
+                pending.push(Work::Visit(ty, depth + 1));
+                pending.extend(fields.iter().map(|field| Work::Visit(field, depth + 1)));
             }
             Term::Record(fields) | Term::RecordValue(fields) => {
-                pending.extend(fields.iter().map(|(_, ty)| (ty, depth + 1, frames.clone())));
+                pending.extend(fields.iter().map(|(_, ty)| Work::Visit(ty, depth + 1)));
             }
             Term::Rigid {
                 declaration,
@@ -374,20 +469,20 @@ pub(super) fn inspect<'signature>(
             | Term::NormalForm {
                 arguments: items, ..
             } => {
-                pending.extend(items.iter().map(|t| (t, depth + 1, frames.clone())));
+                pending.extend(items.iter().map(|t| Work::Visit(t, depth + 1)));
             }
             Term::ErrorResult { errors, result } => {
-                pending.push((result, depth + 1, frames.clone()));
-                pending.extend(errors.iter().map(|ty| (ty, depth + 1, frames.clone())));
+                pending.push(Work::Visit(result, depth + 1));
+                pending.extend(errors.iter().map(|ty| Work::Visit(ty, depth + 1)));
             }
             Term::Computation { effects, result } => {
-                pending.push((result, depth + 1, frames.clone()));
+                pending.push(Work::Visit(result, depth + 1));
                 for operation in effects {
                     pending.extend(
                         operation
                             .arguments
                             .iter()
-                            .map(|t| (t, depth + 1, frames.clone())),
+                            .map(|t| Work::Visit(t, depth + 1)),
                     );
                 }
             }
@@ -395,36 +490,26 @@ pub(super) fn inspect<'signature>(
                 environment,
                 signature,
             } => {
-                pending.extend(environment.iter().map(|t| (t, depth + 1, frames.clone())));
-                pending.push((signature, depth + 1, frames.clone()));
+                pending.extend(environment.iter().map(|t| Work::Visit(t, depth + 1)));
+                pending.push(Work::Visit(signature, depth + 1));
             }
             Term::ContextualClosure { context, signature } => {
-                pending.push((context, depth + 1, frames.clone()));
-                pending.push((signature, depth + 1, frames.clone()));
+                pending.push(Work::Visit(context, depth + 1));
+                pending.push(Work::Visit(signature, depth + 1));
             }
             Term::Optional(inner)
             | Term::Pointer(inner)
             | Term::ComptimeFunction(inner)
             | Term::NormalFormFunction(inner, _)
-            | Term::UnsafeFunction(inner) => pending.push((inner, depth + 1, frames.clone())),
+            | Term::UnsafeFunction(inner) => pending.push(Work::Visit(inner, depth + 1)),
             Term::Function { parameters, result } => {
-                let frame_work = frame_slice.len().saturating_add(1);
-                work = work
-                    .checked_add(frame_work)
-                    .ok_or(ErrorKind::RepresentationSizeLimit)?;
-                if work > 100_000 {
-                    return Err(ErrorKind::RepresentationSizeLimit);
-                }
-                spend(fuel, frame_work)?;
-                let mut nested = frame_slice.to_vec();
-                nested.push(parameters);
-                let frames = Some(std::rc::Rc::new(nested));
-                pending.extend(
-                    parameters
-                        .iter()
-                        .map(|p| (&p.ty, depth + 1, frames.clone())),
-                );
-                pending.push((result, depth + 1, frames.clone()));
+                scope.enter();
+                pending.push(Work::Parameter {
+                    parameters,
+                    next: 0,
+                    result,
+                    depth: depth + 1,
+                });
             }
             Term::Primitive(_)
             | Term::ClosureContextType
@@ -443,7 +528,7 @@ pub(super) fn inspect<'signature>(
             | Term::Float(_) => {}
         }
     }
-    ty.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
+    ty.check_scope(&scope.sorts).map_err(|_| ErrorKind::Type)?;
     Ok(())
 }
 

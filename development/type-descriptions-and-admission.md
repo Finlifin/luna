@@ -33,6 +33,39 @@ Any 与 bool、u8 分别相容，不产生 bool == u8，也不产生二者间的
 `488303ff` 的准备阶段修复、`e1c57dc9` 的 scanner 和现有 println_value 都不能
 证明完整格式化接口完成。
 
+### 已接通的函数类型值传送
+
+一个闭合的函数类型可以在签名内部绑定自己的参数。例如下面的 `Reader` 可作为
+`meta.List<Type>` 的元素，`read` 可作为 `meta.List<Reader>` 的元素。取出同一个
+函数值后，两个调用各自绑定自己的 `T`。
+
+```flurry
+struct Packet where T { payload: T }
+typealias Reader = comptime fn(comptime T: Type, Packet<T>) -> T;
+comptime fn read(comptime T: Type, packet: Packet<T>) -> T { packet.payload }
+
+comptime fn evaluate() -> bool {
+    let readers: meta.List<Reader> = [read];
+    let domains: meta.List<Type> = [Reader];
+    domains[0] == Reader and readers[0](bool, Packet<bool> { payload: true })
+        and readers[0](u8, Packet<u8> { payload: 7 }) == 7
+}
+```
+
+VM 在检查参数域后才把这个参数加入当前签名的可见前缀；返回类型可见整个前缀。
+嵌套签名引用外层值索引时，先把它的声明域移入当前位置，再与要求的域比较。
+例如外层 `tag: T` 进入内层 `U` 的作用域后，仍只为外层的 `T` 提供值域证据。
+这个规则用于被传送签名中的普通名义声明、NF 应用和效应操作实参。作用域检查借用
+外层参数，NIR 准入结果携带同一作用域供后续替换使用。
+
+类型形成本身仍须检查声明的要求。依赖签名局部参数、无法在本地判定的命题，
+目前返回 `TypeContractUnresolved`。现有证明回调只能接收当前 invocation 的命题，
+传入一个属于内层签名的自由槽位会造成变量捕获。具体调用完成绑定后可以检查闭合要求。
+
+真实 sysroot 用例在 `compiler/luna/tests/staged_callable_freezing.rs`。
+这里传送的都是具有类型身份的值。`refines { Itself :- Display } Any` 的描述载体、
+按实际参数逐项准入和 `std.fmt.Parse` 仍待实现。
+
 ## 2. 三种未知与两个完成点
 
 必须区分：显式 Any 是已经得到的描述；尚未取得输入的计算仍在等待；刚性 Type

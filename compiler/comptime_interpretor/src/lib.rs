@@ -3275,7 +3275,7 @@ impl<'a> Interpreter<'a> {
         else {
             unreachable!()
         };
-        self.check_normal_requirements(metadata, values, source)?;
+        self.check_normal_requirements(metadata, values, &[], source)?;
         Ok(Value::Type(ty))
     }
 
@@ -3283,6 +3283,7 @@ impl<'a> Interpreter<'a> {
         &mut self,
         metadata: &nir::normal_forms::Head,
         values: &[Term],
+        frames: &[Vec<nir::Sort>],
         source: SourceRange,
     ) -> Result<(), Error> {
         if metadata.requirements.is_empty() {
@@ -3291,7 +3292,7 @@ impl<'a> Interpreter<'a> {
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = before;
         let prepared = (|| {
-            let substitution = metadata.input_substitution(values, &[], &mut remaining)?;
+            let substitution = metadata.input_substitution(values, frames, &mut remaining)?;
             metadata
                 .requirements
                 .iter()
@@ -3312,7 +3313,7 @@ impl<'a> Interpreter<'a> {
             )
         })?;
         for predicate in predicates {
-            self.check_type_contract(&predicate, source)?;
+            self.check_formation_predicate(&predicate, !frames.is_empty(), source)?;
         }
         Ok(())
     }
@@ -6065,6 +6066,7 @@ fn scoped_term_value_work_with_callables_in<'signature>(
     let mut fuel = 100_000;
     type_descriptions::inspect(
         ty,
+        &[],
         heads,
         parameters,
         value_parameters,

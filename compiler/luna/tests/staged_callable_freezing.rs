@@ -175,3 +175,20 @@ fn staged_nominal_domains_retain_value_inputs_without_payload_reads() {
     "#;
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn dependent_callable_domains_survive_comptime_container_transport() {
+    let source = r#"
+        struct Packet where T { payload: T }
+        typealias Reader = comptime fn(comptime T: Type, Packet<T>) -> T;
+        comptime fn read(comptime T: Type, packet: Packet<T>) -> T { packet.payload }
+        comptime fn evaluate() -> bool {
+            let readers: meta.List<Reader> = [read];
+            let domain: meta.List<Type> = [Reader];
+            domain[0] == Reader and readers[0](bool, Packet<bool> { payload: true })
+                and readers[0](u8, Packet<u8> { payload: 7 }) == 7
+        }
+        fn run() -> bool { evaluate() }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}

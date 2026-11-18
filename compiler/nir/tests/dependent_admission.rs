@@ -190,6 +190,40 @@ fn structural_substitution_checks_completed_sorts_and_preserves_caller_scope() {
     };
     assert_eq!(substitution.instantiate(&nested).unwrap(), expected_nested);
     assert!(substitution.to_string().contains("(frames (frame type))"));
+    // The evidence returned by completed domain admission has to preserve
+    // exactly the same outer frame when the receiver later uses it.
+    let mut queries = nir::value_admission::DomainQueries {
+        layout: &mut |_, _, _| Err("unexpected layout query".into()),
+        declared: &mut |_, _, _| Ok(false),
+        collection: &mut |_, _| Ok(None),
+        callable: &mut |_, _, _| Ok(None),
+        target: None,
+    };
+    let admitted = nir::admit_declaration_arguments_in_scope(
+        &ids,
+        &domains,
+        &arguments,
+        &frames,
+        &mut 10000,
+        &mut queries,
+    )
+    .unwrap();
+    assert_eq!(
+        admitted.instantiate(&nested, &mut 10000).unwrap(),
+        expected_nested
+    );
+    assert!(admitted.to_string().contains("(frames (frame type))"));
+    assert!(
+        nir::admit_declaration_arguments_in_scope(
+            &ids,
+            &domains,
+            &arguments,
+            &[],
+            &mut 10000,
+            &mut queries
+        )
+        .is_err()
+    );
     assert!(nir::DeclarationSubstitution::new(&ids, &domains, &arguments, &[]).is_err());
     assert!(
         nir::DeclarationSubstitution::bounded(&ids, &domains, &arguments, &frames, &mut 0).is_err()
