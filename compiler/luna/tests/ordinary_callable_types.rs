@@ -23,6 +23,46 @@ fn check_both(source: &str) {
 }
 
 #[test]
+fn recursive_clause_calls_keep_caller_identities_out_of_callee_dependencies() {
+    let source = "
+        comptime fn Byte() -> Type { u8 }
+        comptime fn rotate(again: bool) -> ?A where A, B, flag: bool {
+            if again { let ignored = rotate<B, Byte(), false>(false); };
+            null
+        }
+        comptime fn check() -> bool {
+            let value = rotate<u16, bool, true>(true);
+            value matches null
+        }
+    ";
+    check_both(source);
+    // With an actual B = bool the recursive result is ?bool. An unrelated
+    // pending slot cannot make that result admissible as an arbitrary type.
+    let wrong = source.replace("let ignored = rotate", "let ignored: u32 = rotate");
+    assert!(sysroot::compile(&wrong).is_err());
+}
+
+#[test]
+fn selected_parent_inputs_and_member_supplies_substitute_simultaneously() {
+    let source = "
+        struct Holder where Outer {
+            pub comptime fn recurse(witness: A) -> bool
+            where A, value: Outer, again: bool
+            {
+                if again { Holder<A>.recurse<bool, witness, false>(true) } else { true }
+            }
+        }
+        comptime fn check() -> bool {
+            let byte: u8 = 3;
+            Holder<bool>.recurse<u8, true, true>(byte)
+        }
+    ";
+    check_both(source);
+    let wrong = source.replace("recurse<bool, witness, false>", "recurse<bool, true, false>");
+    assert!(sysroot::compile(&wrong).is_err());
+}
+
+#[test]
 fn early_default_domain_checks_restore_caller_before_later_explicit_inputs() {
     check_both(
         "

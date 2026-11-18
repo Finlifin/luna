@@ -121,8 +121,9 @@ impl<'b, 'h> Frame<'b, 'h> {
                     )
                 })?
             };
-            let contextual =
-                domain.pending && !pending.spread && self.checking == InputChecking::Contextual;
+            let contextual = !domain.pending.is_empty()
+                && !pending.spread
+                && self.checking == InputChecking::Contextual;
             let state = if contextual {
                 if pending.source_index >= self.tail_start {
                     State::ContextualTail
@@ -142,7 +143,9 @@ impl<'b, 'h> Frame<'b, 'h> {
             } else {
                 Request::ordinary(
                     pending.input,
-                    (!domain.pending)
+                    domain
+                        .pending
+                        .is_empty()
                         .then(|| checker.copy_alias_type(expected, self.span))
                         .transpose()?,
                 )

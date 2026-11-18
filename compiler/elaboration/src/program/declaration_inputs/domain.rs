@@ -10,6 +10,39 @@ pub(super) enum Poll {
     Complete(DeclarationInputDomain),
 }
 
+/// Edges refer to callee slots, never to names in the caller's replacement
+/// terms. External declaration inputs remain in their enclosing telescope.
+pub(super) struct Dependencies(Vec<Vec<usize>>);
+
+impl Dependencies {
+    pub(super) fn new(
+        parameters: &[(DeclarationId, Sort, Term)],
+        fuel: &mut u64,
+        span: Span,
+    ) -> Result<Self, Error> {
+        environment::charge(fuel, parameters.len(), span)?;
+        let positions: BTreeMap<_, _> = parameters
+            .iter()
+            .enumerate()
+            .map(|(index, (id, _, _))| (*id, index))
+            .collect();
+        let mut edges = Vec::with_capacity(parameters.len());
+        for (_, _, domain) in parameters {
+            let refs = input_observation::term_inputs(domain, fuel, span)?.declarations;
+            edges.push(
+                refs.keys()
+                    .filter_map(|id| positions.get(id).copied())
+                    .collect(),
+            );
+        }
+        Ok(Self(edges))
+    }
+
+    pub(super) fn direct(&self, slot: usize) -> &[usize] {
+        &self.0[slot]
+    }
+}
+
 pub(super) struct Frame {
     slot: usize,
     span: Span,
@@ -21,34 +54,32 @@ pub(super) struct Frame {
 impl Frame {
     pub(super) fn new(
         slot: usize,
-        parameters: &[(DeclarationId, Sort, Term)],
+        edges: &Dependencies,
         uses_default: impl Fn(usize) -> bool,
         fuel: &mut u64,
         span: Span,
     ) -> Result<Self, Error> {
-        let Some((_, _, domain)) = parameters.get(slot) else {
-            return Err(error(span, "declaration domain slot is out of range"));
-        };
-        let mut needed = input_observation::term_inputs(domain, fuel, span)?.declarations;
+        let mut work = BTreeSet::new();
+        // Process from the consumer back toward its declaration prefix. A
+        // selected default additionally needs every earlier binding in scope.
         let mut dependencies = Vec::new();
-        let mut prefix = 0;
-        for previous in (0..slot).rev() {
-            *fuel = fuel
-                .checked_sub(1)
-                .ok_or_else(|| error(span, "input domain dependency budget exhausted"))?;
-            if previous < prefix || needed.contains_key(&parameters[previous].0) {
-                needed.extend(
-                    input_observation::term_inputs(&parameters[previous].2, fuel, span)?
-                        .declarations,
-                );
-                // Default providers bind their preceding declaration telescope.
-                // Prepare that prefix, including its own dependencies, without
-                // moving any producer in the execution schedule.
-                if uses_default(previous) {
-                    prefix = prefix.max(previous);
-                }
-                dependencies.push(previous);
+        let mut current = slot;
+        let mut default_prefix = 0;
+        loop {
+            let direct = edges.direct(current);
+            environment::charge(fuel, direct.len(), span)?;
+            work.extend(direct.iter().copied().filter(|&input| input < current));
+            if current != slot && uses_default(current) && default_prefix < current {
+                environment::charge(fuel, current - default_prefix, span)?;
+                work.extend(default_prefix..current);
+                default_prefix = current;
             }
+            let Some(previous) = work.pop_last() else {
+                break;
+            };
+            environment::charge(fuel, 1, span)?;
+            dependencies.push(previous);
+            current = previous;
         }
         dependencies.reverse();
         Ok(Self {
@@ -96,12 +127,7 @@ impl Frame {
         span: Span,
     ) -> Result<DeclarationInputDomain, Error> {
         let domain = &parameters[slot].2;
-        let pending = checker.declaration_domain_pending(
-            domain,
-            parameters,
-            progress.observed_parameters(),
-            span,
-        )?;
+        let pending = progress.pending_inputs(slot, &mut checker.required_steps, span)?;
         let ty = progress.instantiate(checker, domain, span)?;
         Ok(DeclarationInputDomain { ty, pending })
     }
@@ -148,11 +174,12 @@ mod tests {
             (id(3), Sort::ComptimeValue, dependency(2)),
         ];
         let span = Span::default();
+        let edges = Dependencies::new(&parameters, &mut 100, span).unwrap();
         let mut short = 1;
-        assert!(Frame::new(3, &parameters, |_| false, &mut short, span).is_err());
+        assert!(Frame::new(3, &edges, |_| false, &mut short, span).is_err());
         assert_eq!(short, 0);
         let mut fuel = 100;
-        let mut frame = Frame::new(3, &parameters, |_| false, &mut fuel, span).unwrap();
+        let mut frame = Frame::new(3, &edges, |_| false, &mut fuel, span).unwrap();
         assert!(fuel < 100);
         assert_eq!(frame.dependencies, [0, 2]);
         assert_eq!(frame.slot(), 3);
@@ -172,10 +199,10 @@ mod tests {
             (id(3), Sort::ComptimeValue, p(P::Bool)),
             (id(4), Sort::ComptimeValue, dependency(2)),
         ];
-        let frame =
-            Frame::new(4, &parameters, |slot| slot == 2, &mut 100, Span::default()).unwrap();
+        let edges = Dependencies::new(&parameters, &mut 100, Span::default()).unwrap();
+        let frame = Frame::new(4, &edges, |slot| slot == 2, &mut 100, Span::default()).unwrap();
         assert_eq!(frame.dependencies, [0, 1, 2]);
-        let overridden = Frame::new(4, &parameters, |_| false, &mut 100, Span::default()).unwrap();
+        let overridden = Frame::new(4, &edges, |_| false, &mut 100, Span::default()).unwrap();
         assert_eq!(overridden.dependencies, [2]);
     }
 
@@ -189,6 +216,6 @@ mod tests {
             },
         ]);
         let parameters = [(id(0), Sort::Type, p(P::Type)), (id(1), Sort::Type, domain)];
-        assert!(Frame::new(1, &parameters, |_| false, &mut 100, Span::default()).is_err());
+        assert!(Dependencies::new(&parameters, &mut 100, Span::default()).is_err());
     }
 }

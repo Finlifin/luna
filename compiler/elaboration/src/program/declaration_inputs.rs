@@ -5,7 +5,9 @@ mod completion;
 mod domain;
 mod environment;
 mod interface;
+mod observations;
 pub(super) mod preparation;
+pub(super) use observations::{CallableBindings, KnownInputs, Observations};
 mod progress;
 pub(super) mod request;
 mod routing;
@@ -31,7 +33,7 @@ type Parameters = std::sync::Arc<[(DeclarationId, Sort, Term)]>;
 pub(super) struct PreparedDeclarationInputs {
     pub arguments: Vec<n::NormalFormArgument>,
     pub plan: n::NormalFormInputPlan,
-    pub formation: FormationInputs,
+    pub observations: Observations,
 }
 
 /// Typed consumers receive ordinary NIR only, with execution statements separate
@@ -39,7 +41,7 @@ pub(super) struct PreparedDeclarationInputs {
 pub(super) struct CheckedDeclarationInputs {
     pub arguments: Vec<n::Expr>,
     pub statements: Vec<n::Expr>,
-    pub formation: FormationInputs,
+    pub observations: Observations,
 }
 
 impl std::fmt::Display for CheckedDeclarationInputs {
@@ -52,28 +54,12 @@ impl std::fmt::Display for CheckedDeclarationInputs {
         for argument in &self.arguments {
             write!(f, " {argument}")?;
         }
-        f.write_str(") (identities")?;
-        for term in &self.formation.terms {
-            write!(f, " {term}")?;
-        }
-        f.write_str(") (deferred")?;
-        for parameter in &self.formation.deferred {
-            write!(f, " {parameter}")?;
-        }
-        f.write_str(") (environment")?;
-        for (parameter, value) in &self.formation.environment {
-            write!(f, " (input {parameter} {value})")?;
-        }
-        f.write_str("))")
+        write!(f, ") {})", self.observations)
     }
 }
 
 impl PreparedDeclarationInputs {
-    pub(super) fn into_typed(
-        self,
-        parameters: &[(DeclarationId, Sort, Term)],
-        span: Span,
-    ) -> Result<CheckedDeclarationInputs, Error> {
+    pub(super) fn into_typed(self, span: Span) -> Result<CheckedDeclarationInputs, Error> {
         let n::NormalFormInputPlan {
             order,
             preparations,
@@ -93,7 +79,6 @@ impl PreparedDeclarationInputs {
             let Some(n::NormalFormArgument::Value(value)) = sources[slot].take() else {
                 return Err(error(span, "typed declaration input was not checked"));
             };
-            let parameter = parameters[slot].0;
             let ty = value.ty.clone();
             let output = if matches!(value.kind, K::TypeValue(_)) {
                 value
@@ -113,14 +98,14 @@ impl PreparedDeclarationInputs {
                 });
                 n::Expr {
                     source: location,
-                    ty,
-                    kind: if parameters[slot].2 == p(P::Type)
-                        && !self.formation.deferred.contains(&parameter)
+                    kind: if ty == p(P::Type)
+                        && let Some(identity) = self.observations.identity(slot)
                     {
-                        K::TypeValue(self.formation.terms[slot].clone())
+                        K::TypeValue(identity.clone())
                     } else {
                         K::Local(bindings[slot])
                     },
+                    ty,
                 }
             };
             outputs[slot] = Some(output);
@@ -129,7 +114,7 @@ impl PreparedDeclarationInputs {
         Ok(CheckedDeclarationInputs {
             arguments: outputs.into_iter().map(Option::unwrap).collect(),
             statements,
-            formation: self.formation,
+            observations: self.observations,
         })
     }
 
@@ -151,19 +136,7 @@ impl std::fmt::Display for PreparedDeclarationInputs {
         for argument in &self.arguments {
             write!(f, " {argument}")?;
         }
-        write!(f, ") {} (identities", self.plan)?;
-        for term in &self.formation.terms {
-            write!(f, " {term}")?;
-        }
-        f.write_str(") (deferred")?;
-        for parameter in &self.formation.deferred {
-            write!(f, " {parameter}")?;
-        }
-        f.write_str(") (environment")?;
-        for (parameter, value) in &self.formation.environment {
-            write!(f, " (input {parameter} {value})")?;
-        }
-        f.write_str("))")
+        write!(f, ") {} {})", self.plan, self.observations)
     }
 }
 
@@ -215,15 +188,15 @@ impl std::fmt::Display for PendingDeclarationCollection<'_, '_> {
 /// dependencies are supplied. Pending refers to callee inputs, not rigidity.
 struct DeclarationInputDomain {
     ty: Term,
-    pending: bool,
+    pending: BTreeSet<DeclarationId>,
 }
 impl std::fmt::Display for DeclarationInputDomain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "(declaration-input-domain (pending {}) (type {}))",
-            self.pending, self.ty
-        )
+        f.write_str("(declaration-input-domain (pending")?;
+        for input in &self.pending {
+            write!(f, " {input}")?;
+        }
+        write!(f, ") (type {}))", self.ty)
     }
 }
 
@@ -249,29 +222,6 @@ impl Checker<'_, '_> {
     // Inspect the original callee domain before substitution. A supplied
     // caller parameter may have the same declaration identity as another
     // callee input in a recursive call; it is not another pending dependency.
-    fn declaration_domain_pending(
-        &mut self,
-        domain: &Term,
-        parameters: &[(DeclarationId, Sort, Term)],
-        completed: &[DeclarationId],
-        span: Span,
-    ) -> Result<bool, Error> {
-        self.required_steps = self
-            .required_steps
-            .checked_sub(completed.len() as u64)
-            .ok_or_else(|| error(span, "input domain completion budget exhausted"))?;
-        let completed = completed.iter().copied().collect::<BTreeSet<_>>();
-        input_observation::pending_domain_inputs(
-            domain,
-            parameters
-                .iter()
-                .map(|(id, _, _)| (*id, completed.contains(id))),
-            &mut self.required_steps,
-            span,
-        )
-        .map(|pending| !pending.is_empty())
-    }
-
     fn prepare_declaration_collection_input(
         &mut self,
         value: n::Expr,
@@ -443,8 +393,17 @@ impl Checker<'_, '_> {
         defaults: Option<Environment>,
         completion: C,
     ) -> Result<C::Output, Error> {
-        preparation::Frame::begin(self, owner, inputs, span, parameters, defaults, completion)?
-            .drive(self)
+        preparation::Frame::begin(
+            self,
+            owner,
+            inputs,
+            span,
+            parameters,
+            KnownInputs::default(),
+            defaults,
+            completion,
+        )?
+        .drive(self)
     }
 }
 
@@ -471,11 +430,13 @@ mod tests {
                 bindings: vec![n::LocalId { owner: 4, index: 2 }],
                 preparations: vec![],
             },
-            formation: FormationInputs {
-                terms: vec![p(P::U8)],
-                deferred: BTreeSet::from([id]),
-                environment: BTreeMap::new(),
-            },
+            observations: Observations::new(vec![(
+                nir::DeclarationParameter {
+                    declaration: id,
+                    sort: Sort::ComptimeValue,
+                },
+                None,
+            )]),
         };
         let dump = inputs.to_string();
         assert!(
@@ -486,15 +447,10 @@ mod tests {
         assert!(dump.contains("quote\\\"\\n"), "{dump}");
         assert!(dump.contains("(order 0)"), "{dump}");
         assert!(dump.contains("(bindings (local 4 2))"), "{dump}");
-        assert!(dump.contains("(identities (primitive u8))"), "{dump}");
-        assert!(
-            dump.contains("(deferred (declaration (package 1) (local 7)))"),
-            "{dump}"
-        );
+        assert!(dump.contains("(pending)"), "{dump}");
+        assert!(dump.contains(&id.to_string()), "{dump}");
         assert!(!dump.contains('\n'), "unescaped newline: {dump}");
-        let checked = inputs
-            .into_typed(&[(id, Sort::ComptimeValue, p(P::Str))], Span::default())
-            .unwrap();
+        let checked = inputs.into_typed(Span::default()).unwrap();
         let dump = checked.to_string();
         assert!(
             dump.starts_with("(checked-declaration-inputs (statements "),
@@ -503,7 +459,7 @@ mod tests {
         assert!(dump.contains("quote\\\"\\n"), "{dump}");
         assert!(dump.contains("(arguments (expr"), "{dump}");
         assert!(dump.contains("(local 4 2)"), "{dump}");
-        assert!(dump.contains("(identities (primitive u8))"), "{dump}");
+        assert!(dump.contains("(pending)"), "{dump}");
         assert!(!dump.contains('\n'), "unescaped newline: {dump}");
     }
 }

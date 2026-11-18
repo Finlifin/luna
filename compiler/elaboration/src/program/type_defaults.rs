@@ -324,8 +324,9 @@ impl<'h> Checker<'_, 'h> {
                 if let ItemKind::TypeAlias(value, ..) = &self.package.item(owner).unwrap().kind {
                     self.alias_value_expression(owner, value, arguments, span)?
                 } else {
-                    let mut terms = prepared.formation.terms;
-                    let mut deferred = prepared.formation.deferred;
+                    let formation = prepared.observations.into_formation();
+                    let mut terms = formation.terms;
+                    let mut deferred = formation.deferred;
                     deferred.extend(
                         self.nominal_captures(owner, span)?
                             .into_iter()

@@ -316,7 +316,7 @@ impl Checker<'_, '_> {
             if alias.is_some() {
                 self.ensure_alias_formation_contract(owner, span)?;
             }
-            self.check_formation_application(owner, prepared.formation, span)?;
+            self.check_formation_application(owner, prepared.observations.into_formation(), span)?;
             let mut arguments = prepared.arguments;
             arguments.extend(
                 self.nominal_capture_expressions(owner, span)?

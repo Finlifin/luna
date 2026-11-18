@@ -12,6 +12,7 @@ pub(super) enum Poll<'h> {
 pub(super) struct Frame<'h> {
     span: Span,
     parameters: Parameters,
+    prefix: KnownInputs,
     inputs: Vec<Arg<'h>>,
     packet_contexts: Vec<Option<Vec<Term>>>,
     list_spreads: BTreeSet<usize>,
@@ -33,6 +34,7 @@ impl<'h> Frame<'h> {
         inputs: &[Arg<'h>],
         span: Span,
         parameters: Parameters,
+        prefix: KnownInputs,
         entries: Vec<input_routing::Entry<hir::Symbol>>,
     ) -> Result<Self, Error> {
         if parameters.len() != entries.len() {
@@ -121,6 +123,7 @@ impl<'h> Frame<'h> {
             return Ok(Self {
                 span,
                 parameters,
+                prefix,
                 inputs,
                 packet_contexts,
                 list_spreads,
@@ -160,12 +163,25 @@ impl<'h> Frame<'h> {
                 self.next += 1;
                 return Ok(Poll::Continue);
             }
-            let context = if let Some(fields) = &self.packet_contexts[input_index] {
+            let context = if let Some(fields) = &mut self.packet_contexts[input_index] {
                 use crate::calls::InputContext as C;
                 let pending = fields
                     .iter()
-                    .map(|ty| checker.declaration_domain_pending(ty, &self.parameters, &[], span))
+                    .map(|ty| {
+                        input_observation::pending_domain_inputs(
+                            ty,
+                            self.parameters.iter().map(|(id, _, _)| (*id, false)),
+                            &mut checker.required_steps,
+                            span,
+                        )
+                        .map(|pending| !pending.is_empty())
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
+                if !self.prefix.values.is_empty() {
+                    for domain in fields.iter_mut() {
+                        *domain = self.prefix.instantiate(checker, domain, span)?;
+                    }
+                }
                 if pending.iter().any(|pending| *pending) {
                     let fields = fields
                         .iter()
@@ -353,6 +369,7 @@ impl<'h> Frame<'h> {
             self.parameters.clone(),
             bindings,
             self.order,
+            self.prefix,
             &mut checker.required_steps,
             self.span,
         )?;
@@ -440,6 +457,7 @@ mod tests {
             kind: H::Unit,
         };
         let frame = Frame {
+            prefix: KnownInputs::default(),
             span,
             parameters: Vec::new().into(),
             inputs: vec![Arg::Expand(&input), Arg::Expand(&input)],

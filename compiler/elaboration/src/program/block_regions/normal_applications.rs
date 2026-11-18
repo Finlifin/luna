@@ -25,7 +25,11 @@ impl Completion for Complete {
         } else {
             p(P::Type)
         };
-        checker.check_formation_application(self.owner, inputs.formation, span)?;
+        checker.check_formation_application(
+            self.owner,
+            inputs.observations.into_formation(),
+            span,
+        )?;
         if let Some(expected) = self.destination.expected() {
             checker.require_expression(&ty, expected, span)?;
         }
@@ -99,8 +103,16 @@ impl<'h> Frame<'h> {
             preserve_effect: own_effect_delivery
                 .then(|| std::mem::take(&mut checker.preserve_effect_value)),
         };
-        let preparation =
-            preparation::Frame::begin(checker, owner, inputs, span, parameters, None, completion)?;
+        let preparation = preparation::Frame::begin(
+            checker,
+            owner,
+            inputs,
+            span,
+            parameters,
+            declaration_inputs::KnownInputs::default(),
+            None,
+            completion,
+        )?;
         Ok(Self::from_preparation(span, preparation))
     }
 }

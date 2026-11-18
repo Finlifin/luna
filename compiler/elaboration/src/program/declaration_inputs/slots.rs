@@ -89,13 +89,10 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             self.complete = true;
             return Ok(Poll::Complete);
         };
-        let dependent = checker.declaration_domain_pending(
-            &self.parameters[slot].2,
-            &self.parameters,
-            self.progress.observed_parameters(),
-            self.span,
-        )?;
-        if self.routed[slot].is_some() && dependent {
+        let pending = self
+            .progress
+            .pending_inputs(slot, &mut checker.required_steps, self.span)?;
+        if self.routed[slot].is_some() && !pending.is_empty() {
             self.dependencies = Some(self.domain_frame(checker, slot)?);
             return self.poll_dependencies(checker);
         }
@@ -103,7 +100,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             ty: self
                 .progress
                 .instantiate(checker, &self.parameters[slot].2, self.span)?,
-            pending: dependent,
+            pending,
         };
         self.check_slot(checker, slot, domain)
     }
@@ -115,7 +112,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
     ) -> Result<domain::Frame, Error> {
         domain::Frame::new(
             slot,
-            &self.parameters,
+            &self.progress.dependencies,
             |previous| {
                 self.routed[previous].is_none() && self.interface.default(previous).is_some()
             },
@@ -248,7 +245,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     Some(self.collection(checker, items))
                 }
                 Some(RoutedDeclarationInput::Prepared(value)) => Some((|| {
-                    if !domain.pending {
+                    if domain.pending.is_empty() {
                         checker.require_expression(&value.ty, &domain.ty, self.span)?;
                     }
                     Ok(n::NormalFormArgument::Value(value))
@@ -260,8 +257,8 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             self.accept(checker, value)?;
             return Ok(Poll::Continue);
         }
-        let contextual = domain.pending && self.checking == InputChecking::Contextual;
-        let expected = (!domain.pending)
+        let contextual = !domain.pending.is_empty() && self.checking == InputChecking::Contextual;
+        let expected = (domain.pending.is_empty())
             .then(|| checker.copy_alias_type(&domain.ty, self.span))
             .transpose()?;
         if !contextual {
@@ -285,7 +282,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         items: Vec<n::NormalFormArgument>,
     ) -> Result<n::NormalFormArgument, Error> {
         let domain = &self.pending.as_ref().unwrap().domain;
-        if (!domain.pending || self.checking == InputChecking::Typed)
+        if (domain.pending.is_empty() || self.checking == InputChecking::Typed)
             && items.iter().all(|item| {
                 matches!(
                     item,
@@ -334,7 +331,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     "normal-form default awaits preceding input",
                 ));
             }
-            if self.parameters[previous].2 == p(P::Type) {
+            if checker.locals[&self.progress.binding(previous)] == p(P::Type) {
                 if let Some(ty) = self.progress.identity(previous) {
                     checker
                         .alias_substitution
@@ -356,10 +353,9 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     &mut checker.required_steps,
                     self.span,
                 )?;
-                let ty = self.progress.instantiate(checker, &domain, self.span)?;
                 checker
                     .normal_default_bindings
-                    .insert(parameter, (self.progress.binding(previous), ty));
+                    .insert(parameter, (self.progress.binding(previous), domain));
             }
         }
         checker.signature_owner = Some(provider.owner);
@@ -389,8 +385,14 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             failure
         })?;
         let identity = match &value {
-            n::NormalFormArgument::List { items, .. } if !pending.domain.pending => checker
-                .checked_collected_list_in(items, &pending.domain.ty, &self.bindings, self.span)?,
+            n::NormalFormArgument::List { items, .. } if pending.domain.pending.is_empty() => {
+                checker.checked_collected_list_in(
+                    items,
+                    &pending.domain.ty,
+                    &self.bindings,
+                    self.span,
+                )?
+            }
             _ => match value.expression() {
                 Some(value) => checker.preserved_input_identity(
                     value,
@@ -549,6 +551,7 @@ mod tests {
             parameters.to_vec().into(),
             vec![binding],
             vec![0],
+            KnownInputs::default(),
             &mut 100,
             span,
         )
@@ -577,7 +580,7 @@ mod tests {
             slot: 0,
             domain: DeclarationInputDomain {
                 ty: domain.clone(),
-                pending: false,
+                pending: BTreeSet::new(),
             },
             input: Some(&source_expr),
         });
@@ -587,7 +590,7 @@ mod tests {
             "(checking typed)",
             "(unprepared)",
             "(child ",
-            "(pending false)",
+            "(pending)",
             "(preparations (before 0",
             "prepared\\\"\\n",
         ] {

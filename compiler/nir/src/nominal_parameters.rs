@@ -388,6 +388,28 @@ impl<'a> DeclarationSubstitution<'a> {
         }
         Self::from_parameters(parameters, domains, arguments, frames).map_err(Error::Scope)
     }
+    /// Check and take ownership of the caller's existing buffers. Unlike
+    /// retaining a borrowed substitution, this does not copy any terms.
+    pub fn bounded_owned(
+        ids: &[DeclarationId],
+        domains: &[Term],
+        arguments: Vec<Term>,
+        frames: Vec<Vec<Sort>>,
+        fuel: &mut usize,
+    ) -> Result<DeclarationSubstitution<'static>, crate::type_computations::Error> {
+        let parameters =
+            DeclarationSubstitution::bounded(ids, domains, &arguments, &frames, fuel)?.parameters;
+        Ok(DeclarationSubstitution {
+            parameters,
+            arguments: Cow::Owned(arguments),
+            frames: Cow::Owned(frames),
+        })
+    }
+
+    pub fn into_arguments(self) -> Cow<'a, [Term]> {
+        self.arguments
+    }
+
     /// Retain a structurally checked substitution beyond its input buffers.
     /// This owns syntax and scope only, never invocation storage or proof authority.
     /// All borrowed payloads are charged before the first owned copy is made.

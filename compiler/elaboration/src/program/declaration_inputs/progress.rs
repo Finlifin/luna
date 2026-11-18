@@ -4,7 +4,7 @@ use super::*;
 
 struct Prepared {
     producer: n::NormalFormArgument,
-    identity: Option<Term>,
+    observation: Option<usize>,
 }
 
 struct Slot {
@@ -16,13 +16,12 @@ struct Slot {
 
 pub(super) struct Progress {
     parameters: Parameters,
+    pub(super) dependencies: domain::Dependencies,
     slots: Vec<Slot>,
     schedule: Vec<usize>,
     checked_prefix: usize,
     checked_order: Vec<usize>,
-    observed_parameters: Vec<DeclarationId>,
-    observed_values: Vec<Term>,
-    observed_slots: Vec<usize>,
+    known: KnownInputs,
 }
 
 impl Progress {
@@ -30,6 +29,7 @@ impl Progress {
         parameters: Parameters,
         bindings: Vec<n::LocalId>,
         mut explicit: Vec<usize>,
+        known: KnownInputs,
         fuel: &mut u64,
         span: Span,
     ) -> Result<Self, Error> {
@@ -54,6 +54,7 @@ impl Progress {
         // collectors and defaults, so polling cannot skip unfinished checking.
         explicit.extend((0..count).filter(|&slot| !supplied[slot]));
         Ok(Self {
+            dependencies: domain::Dependencies::new(&parameters, fuel, span)?,
             slots: parameters
                 .iter()
                 .zip(bindings)
@@ -67,42 +68,34 @@ impl Progress {
             schedule: explicit,
             checked_prefix: 0,
             checked_order: Vec::new(),
-            observed_parameters: Vec::new(),
-            observed_values: Vec::new(),
-            observed_slots: Vec::new(),
+            known,
             parameters,
         })
     }
 
-    pub fn observed_parameters(&self) -> &[DeclarationId] {
-        &self.observed_parameters
+    pub(super) fn pending_inputs(
+        &self,
+        slot: usize,
+        fuel: &mut u64,
+        span: Span,
+    ) -> Result<BTreeSet<DeclarationId>, Error> {
+        let direct = self.dependencies.direct(slot);
+        environment::charge(fuel, direct.len(), span)?;
+        Ok(direct
+            .iter()
+            .copied()
+            .filter(|&index| self.identity(index).is_none())
+            .map(|index| self.slots[index].declaration)
+            .collect())
     }
+
     pub(super) fn instantiate(
         &self,
         checker: &mut Checker<'_, '_>,
         ty: &Term,
         span: Span,
     ) -> Result<Term, Error> {
-        let domains = self
-            .observed_slots
-            .iter()
-            .map(|slot| {
-                environment::copy_term(&self.parameters[*slot].2, &mut checker.required_steps, span)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let frames = checker.call_input_frames();
-        let before = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let result = nir::DeclarationSubstitution::bounded(
-            &self.observed_parameters,
-            &domains,
-            &self.observed_values,
-            &frames,
-            &mut fuel,
-        )
-        .and_then(|substitution| substitution.instantiate_bounded(ty, &mut fuel));
-        checker.required_steps -= (before - fuel) as u64;
-        result.map_err(|failure| error(span, failure.to_string()))
+        self.known.instantiate(checker, ty, span)
     }
 
     // This is the first unfinished check in source order, not an execution PC.
@@ -120,7 +113,7 @@ impl Progress {
         self.slots[slot]
             .prepared
             .as_ref()
-            .and_then(|value| value.identity.as_ref())
+            .and_then(|value| value.observation.map(|index| &self.known.values[index]))
     }
 
     pub fn record(
@@ -140,10 +133,10 @@ impl Progress {
         *fuel = fuel
             .checked_sub(1)
             .ok_or_else(|| error(span, "declaration input recording budget exhausted"))?;
-        if let Some(value) = &identity {
+        let observation = if let Some(value) = identity {
             let before = usize::try_from(*fuel).unwrap_or(usize::MAX);
             let mut remaining = before;
-            let charged = nir::type_computations::charge_term(value, &mut remaining);
+            let charged = nir::type_computations::charge_term(&value, &mut remaining);
             *fuel -= (before - remaining) as u64;
             charged.map_err(|failure| {
                 error(
@@ -151,11 +144,21 @@ impl Progress {
                     format!("declaration input identity capture failed: {failure}"),
                 )
             })?;
-            self.observed_parameters.push(self.slots[slot].declaration);
-            self.observed_values.push(value.clone());
-            self.observed_slots.push(slot);
-        }
-        self.slots[slot].prepared = Some(Prepared { producer, identity });
+            self.known.domains.push(environment::copy_term(
+                &self.parameters[slot].2,
+                fuel,
+                span,
+            )?);
+            self.known.ids.push(self.slots[slot].declaration);
+            self.known.values.push(value);
+            Some(self.known.values.len() - 1)
+        } else {
+            None
+        };
+        self.slots[slot].prepared = Some(Prepared {
+            producer,
+            observation,
+        });
         self.checked_order.push(slot);
         while self.current().is_some_and(|next| self.is_prepared(next)) {
             self.checked_prefix += 1;
@@ -173,21 +176,24 @@ impl Progress {
         }
         let mut arguments = Vec::with_capacity(self.slots.len());
         let mut bindings = Vec::with_capacity(self.slots.len());
-        let mut terms = Vec::with_capacity(self.slots.len());
-        let mut deferred = BTreeSet::new();
+        let mut slots = Vec::with_capacity(self.slots.len());
+        let mut values: Vec<_> = self.known.values.into_iter().map(Some).collect();
         for slot in self.slots {
             let Some(prepared) = slot.prepared else {
                 return Err(error(span, "missing prepared declaration input"));
             };
             arguments.push(prepared.producer);
             bindings.push(slot.binding);
-            terms.push(prepared.identity.unwrap_or_else(|| {
-                deferred.insert(slot.declaration);
-                Term::Rigid {
-                    declaration: slot.declaration,
-                    sort: slot.sort,
-                }
-            }));
+            let binder = nir::DeclarationParameter {
+                declaration: slot.declaration,
+                sort: slot.sort,
+            };
+            slots.push((
+                binder,
+                prepared
+                    .observation
+                    .map(|index| values[index].take().expect("unique observed input")),
+            ));
         }
         Ok(PreparedDeclarationInputs {
             arguments,
@@ -196,11 +202,7 @@ impl Progress {
                 preparations,
                 bindings,
             },
-            formation: FormationInputs {
-                terms,
-                deferred,
-                environment: BTreeMap::new(),
-            },
+            observations: Observations::new(slots),
         })
     }
 }
@@ -228,7 +230,7 @@ impl std::fmt::Display for Progress {
             )?;
             if let Some(prepared) = &slot.prepared {
                 write!(f, " (producer {}) (identity", prepared.producer)?;
-                match &prepared.identity {
+                match self.identity(index) {
                     Some(value) => write!(f, " {value}")?,
                     None => f.write_str(" pending")?,
                 }
@@ -277,6 +279,7 @@ mod tests {
             parameters.to_vec().into(),
             bindings.clone(),
             vec![2, 0],
+            KnownInputs::default(),
             &mut 100,
             span,
         )
@@ -322,7 +325,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(progress.to_string(), pending);
-        assert!(progress.observed_parameters().is_empty());
+        assert!(progress.known.ids.is_empty());
         progress
             .record(
                 2,
@@ -333,7 +336,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(progress.identity(2), Some(&identity));
-        assert_eq!(progress.observed_parameters, vec![parameters[2].0]);
+        assert_eq!(progress.known.ids, vec![parameters[2].0]);
         assert_eq!(progress.current(), Some(1));
         progress
             .record(1, producer("default"), None, &mut 100, span)
@@ -346,14 +349,12 @@ mod tests {
         let prepared = progress.finish(vec![], span).unwrap();
         assert_eq!(prepared.plan.order, vec![2, 0, 1]);
         assert_eq!(prepared.plan.bindings, bindings);
-        assert_eq!(
-            prepared.formation.deferred,
-            [parameters[0].0, parameters[1].0].into_iter().collect()
-        );
-        assert_eq!(prepared.formation.terms[2], identity);
+        assert!(prepared.observations.identity(0).is_none());
+        assert!(prepared.observations.identity(1).is_none());
+        assert_eq!(prepared.observations.identity(2), Some(&identity));
         // Static observation retains the original source producer. A typed
         // consumer must still execute it in its source position exactly once.
-        let checked = prepared.into_typed(&parameters, span).unwrap();
+        let checked = prepared.into_typed(span).unwrap();
         assert_eq!(checked.statements.len(), 3);
         for (statement, index) in checked.statements.iter().zip([2, 0, 1]) {
             let K::Let { binding, value } = &statement.kind else {
@@ -380,6 +381,7 @@ mod tests {
                     parameters.to_vec().into(),
                     bindings.clone(),
                     order,
+                    KnownInputs::default(),
                     &mut 100,
                     span
                 )
@@ -391,6 +393,7 @@ mod tests {
                 parameters.to_vec().into(),
                 bindings.clone(),
                 vec![2, 0],
+                KnownInputs::default(),
                 &mut 0,
                 span
             )
@@ -400,6 +403,7 @@ mod tests {
             parameters.to_vec().into(),
             bindings,
             vec![2, 0],
+            KnownInputs::default(),
             &mut 100,
             span,
         )
