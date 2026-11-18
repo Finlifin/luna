@@ -37,7 +37,7 @@ pub(super) enum StagedNormalInput {
     Value(Value),
     List {
         key: InputKey,
-        items: Vec<(bool, Self)>,
+        items: Vec<ListField>,
     },
     Literal(InputKey),
     Tuple {
@@ -46,168 +46,27 @@ pub(super) enum StagedNormalInput {
     },
 }
 
-macro_rules! staged_value {
-    ($result:expr) => {
-        match $result? {
-            Flow::Value(value) => value,
-            flow => return Ok(ControlFlow::Break(flow)),
-        }
-    };
+/// Admission of a saved spread or element belongs to its original field.
+pub(super) struct ListField {
+    pub(super) spread: bool,
+    pub(super) source: SourceRange,
+    pub(super) value: StagedNormalInput,
 }
 
-impl Interpreter<'_> {
-    pub(super) fn interpret_staged_argument(
-        &mut self,
-        input: &A,
-        environment: &mut Environment,
-        depth: usize,
-    ) -> Result<ControlFlow<Flow, StagedNormalInput>, Error> {
-        enum Work<'a> {
-            Enter(&'a A, usize, InputKey),
-            Exit(&'a A),
-            List(InputKey, &'a [A], usize),
-            Tuple(InputKey, usize),
-            LeaveScope,
-            Next(&'a [A], usize, InputKey, usize),
-        }
-        let mut scopes: Vec<BTreeSet<LocalId>> = Vec::new();
-        let result = self.with_depth_checkpoint(|vm| {
-            let mut work = vec![Work::Enter(input, depth, InputKey::root())];
-            let mut values = Vec::new();
-            while let Some(next) = work.pop() {
-                match next {
-                    Work::Next(items, depth, key, index) => {
-                        if let Some((item, rest)) = items.split_first() {
-                            work.push(Work::Next(rest, depth, key.clone(), index + 1));
-                            work.push(Work::Enter(item, depth, key.child(index)));
-                        }
-                    }
-                    Work::Exit(input) => {
-                        vm.depth -= 1;
-                        if input.is_diverging() {
-                            return Err(vm.failure(ErrorKind::Type, Some(input.source())));
-                        }
-                    }
-                    Work::LeaveScope => {
-                        let existing = scopes.pop().unwrap();
-                        environment.retain(|id, _| existing.contains(id));
-                    }
-                    Work::List(key, items, start) => {
-                        let children = values.split_off(start);
-                        values.push(StagedNormalInput::List {
-                            key,
-                            items: items
-                                .iter()
-                                .zip(children)
-                                .map(|(item, value)| (matches!(item, A::ListSpread(_)), value))
-                                .collect(),
-                        });
-                    }
-                    Work::Tuple(key, start) => {
-                        let items = values.split_off(start);
-                        values.push(StagedNormalInput::Tuple { key, items });
-                    }
-                    Work::Enter(input, depth, key) => {
-                        if depth >= 128 {
-                            return Err(vm.failure(ErrorKind::DepthExhausted, Some(input.source())));
-                        }
-                        vm.tick(Some(input.source()))?;
-                        vm.depth += 1;
-                        work.push(Work::Exit(input));
-                        match input {
-                            A::ListSpread(value) | A::Value(value) => {
-                                values.push(StagedNormalInput::Value(staged_value!(
-                                    vm.eval(value, environment)
-                                )));
-                            }
-                            A::Integer { .. } | A::Unit { .. } | A::Null { .. } => {
-                                values.push(StagedNormalInput::Literal(key))
-                            }
-                            A::List { items, .. } | A::Tuple { items, .. } => {
-                                work.push(if matches!(input, A::List { .. }) {
-                                    Work::List(key.clone(), items, values.len())
-                                } else {
-                                    Work::Tuple(key.clone(), values.len())
-                                });
-                                work.push(Work::Next(items, depth + 1, key, 0));
-                            }
-                            A::If {
-                                condition,
-                                then_input,
-                                else_input,
-                                ..
-                            } => {
-                                let Value::Bool(flag) =
-                                    staged_value!(vm.eval(condition, environment))
-                                else {
-                                    return Err(vm.failure(ErrorKind::Type, Some(condition.source)));
-                                };
-                                work.push(Work::Enter(
-                                    if flag { then_input } else { else_input },
-                                    depth + 1,
-                                    key.child(usize::from(!flag)),
-                                ));
-                            }
-                            A::Block {
-                                statements, result, ..
-                            } => {
-                                scopes.push(environment.keys().copied().collect());
-                                work.push(Work::LeaveScope);
-                                for statement in statements {
-                                    staged_value!(vm.eval(statement, environment));
-                                }
-                                match result {
-                                    Some(result) => {
-                                        work.push(Work::Enter(result, depth + 1, key.child(0)))
-                                    }
-                                    None => values.push(StagedNormalInput::Value(Value::Unit)),
-                                }
-                            }
-                            A::Match {
-                                source,
-                                value,
-                                arms,
-                            } => {
-                                let value = staged_value!(vm.eval(value, environment));
-                                scopes.push(environment.keys().copied().collect());
-                                let mut selected = None;
-                                for (index, arm) in arms.iter().enumerate() {
-                                    vm.tick(Some(*source))?;
-                                    match vm.match_arm_guard(
-                                        &arm.pattern,
-                                        arm.guard.as_ref(),
-                                        &value,
-                                        environment,
-                                    )? {
-                                        Flow::Value(Value::Bool(false)) => environment
-                                            .retain(|id, _| scopes.last().unwrap().contains(id)),
-                                        Flow::Value(Value::Bool(true)) => {
-                                            selected = Some((index, &arm.body));
-                                            break;
-                                        }
-                                        flow => return Ok(ControlFlow::Break(flow)),
-                                    }
-                                }
-                                let (index, selected) = selected.ok_or_else(|| {
-                                    vm.failure(ErrorKind::NonExhaustiveMatch, Some(*source))
-                                })?;
-                                work.push(Work::LeaveScope);
-                                work.push(Work::Enter(selected, depth + 1, key.child(index)));
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(ControlFlow::Continue(values.pop().unwrap()))
-        });
-        // Transfers and errors bypass completion tasks but must still discard
-        // temporary bindings. Mutations of pre-existing storage remain visible.
-        while let Some(existing) = scopes.pop() {
-            environment.retain(|id, _| existing.contains(id));
-        }
-        result
+impl fmt::Display for ListField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(item {} (spread {}) {})",
+            self.source, self.spread, self.value
+        )
     }
+}
 
+mod delivery;
+mod execution;
+
+impl Interpreter<'_> {
     pub(super) fn finish_staged_normal_argument(
         &mut self,
         staged: StagedNormalInput,
@@ -215,14 +74,15 @@ impl Interpreter<'_> {
         source: SourceRange,
         depth: usize,
     ) -> Result<Value, Error> {
+        use delivery::{Delivery, Ready};
+
         enum Work {
             Enter(StagedNormalInput, usize),
             List {
-                ty: Term,
-                items: std::vec::IntoIter<(bool, StagedNormalInput)>,
-                values: Vec<Value>,
+                list: (Term, Vec<Value>),
+                items: std::vec::IntoIter<ListField>,
                 depth: usize,
-                pending: Option<bool>,
+                pending: Option<(bool, SourceRange)>,
             },
             Tuple {
                 key: InputKey,
@@ -232,6 +92,7 @@ impl Interpreter<'_> {
                 pending: bool,
             },
         }
+        let mut delivery = Ready(literals);
         let mut work = vec![Work::Enter(staged, depth)];
         let mut completed = None;
         while let Some(next) = work.pop() {
@@ -243,23 +104,15 @@ impl Interpreter<'_> {
                     self.tick(Some(source))?;
                     match staged {
                         StagedNormalInput::Value(value) => completed = Some(value),
-                        StagedNormalInput::Literal(key) => match literals.remove(&key) {
-                            Some(PreparedNormalInput::Value(value)) => completed = Some(value),
-                            _ => return Err(self.failure(ErrorKind::Type, Some(source))),
-                        },
-                        StagedNormalInput::List { key, items } => {
-                            let Some(PreparedNormalInput::ListType(ty)) = literals.remove(&key)
-                            else {
-                                return Err(self.failure(ErrorKind::Type, Some(source)));
-                            };
-                            work.push(Work::List {
-                                ty,
-                                items: items.into_iter(),
-                                values: vec![],
-                                depth,
-                                pending: None,
-                            });
+                        StagedNormalInput::Literal(key) => {
+                            completed = Some(delivery.literal(key, source)?);
                         }
+                        StagedNormalInput::List { key, items } => work.push(Work::List {
+                            list: delivery.list(&key, source)?,
+                            items: items.into_iter(),
+                            depth,
+                            pending: None,
+                        }),
                         StagedNormalInput::Tuple { key, items } => work.push(Work::Tuple {
                             key,
                             items: items.into_iter(),
@@ -270,32 +123,30 @@ impl Interpreter<'_> {
                     }
                 }
                 Work::List {
-                    ty,
+                    mut list,
                     mut items,
-                    mut values,
                     depth,
                     pending,
                 } => {
-                    if let Some(spread) = pending {
-                        self.append_normal_list_item(
-                            &ty,
-                            &mut values,
-                            spread,
+                    if let Some((spread, field_source)) = pending {
+                        Ready::append(
+                            &mut list,
+                            self,
                             completed.take().unwrap(),
-                            source,
+                            spread,
+                            field_source,
                         )?;
                     }
-                    if let Some((spread, item)) = items.next() {
+                    if let Some(field) = items.next() {
                         work.push(Work::List {
-                            ty,
+                            list,
                             items,
-                            values,
                             depth,
-                            pending: Some(spread),
+                            pending: Some((field.spread, field.source)),
                         });
-                        work.push(Work::Enter(item, depth + 1));
+                        work.push(Work::Enter(field.value, depth + 1));
                     } else {
-                        completed = Some(self.finish_normal_list(ty, values)?);
+                        completed = Some(Ready::finish_list(list, self)?);
                     }
                 }
                 Work::Tuple {
@@ -318,7 +169,7 @@ impl Interpreter<'_> {
                         });
                         work.push(Work::Enter(item, depth + 1));
                     } else {
-                        completed = Some(Value::Tuple(values));
+                        completed = Some(Ready::tuple(key, values));
                     }
                 }
             }

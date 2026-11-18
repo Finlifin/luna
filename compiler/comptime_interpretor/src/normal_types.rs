@@ -90,12 +90,12 @@ impl Interpreter<'_> {
         inputs.prepared = prepared;
         Ok(())
     }
-    pub(super) fn normal_list_domain(
+    pub(super) fn normal_list_domain<'a>(
         &mut self,
-        expected: &Term,
+        expected: &'a Term,
         count: usize,
         source: SourceRange,
-    ) -> Result<Term, Error> {
+    ) -> Result<&'a Term, Error> {
         if count > 100_000 {
             return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
         }
@@ -109,7 +109,6 @@ impl Interpreter<'_> {
         })?;
         let element = self
             .list_element(expected)
-            .cloned()
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         self.integer_operation(Some(source), |budget| budget.consume(count))?;
         Ok(element)
@@ -121,12 +120,8 @@ impl Interpreter<'_> {
         prepared: &mut BTreeMap<usize, Prepared>,
         depth: usize,
     ) -> Result<(), Error> {
-        let complete = self.prepare_input_domain(
-            input_domains::Node::Compiled(shape),
-            expected,
-            InputKey::Register(shape.slot),
-            depth,
-        )?;
+        let complete =
+            self.prepare_input_domain(input_domains::Node::Compiled(shape), expected, depth)?;
         for (key, value) in complete.into_entries() {
             let InputKey::Register(slot) = key else {
                 unreachable!("compiled input identity")

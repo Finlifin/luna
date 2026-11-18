@@ -580,3 +580,113 @@ fn contextual_domain_budget_failure_preserves_tables_and_allows_retry() {
     }
     assert!(failures > 2 && successes > 0);
 }
+
+#[test]
+fn source_and_bytecode_require_a_concrete_choice_at_the_condition() {
+    let package = Package::default();
+    let local = LocalId { owner: 8, index: 1 };
+    let declaration = DeclarationId {
+        package: 1,
+        local: 4,
+    };
+    let condition_source = SourceRange { start: 22, end: 24 };
+    let boolean = Term::Primitive(Primitive::Bool);
+    let condition = Expr {
+        kind: K::Local(local),
+        ty: boolean.clone(),
+        source: condition_source,
+    };
+    let input = A::If {
+        source: SOURCE,
+        condition,
+        then_input: Box::new(A::Unit { source: SOURCE }),
+        else_input: Box::new(A::Unit { source: SOURCE }),
+    };
+    for reference in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        if reference {
+            vm = vm.with_reference_execution();
+        }
+        vm.authorize_abstract_value_parameters(&[(declaration, boolean.clone())])
+            .unwrap();
+        let mut env = Environment::from([(
+            local,
+            Value::AbstractValue {
+                declaration,
+                ty: boolean.clone(),
+            },
+        )]);
+        for staged in [false, true] {
+            let failure = if staged {
+                vm.stage_normal_argument(&input, &mut env, 0)
+                    .err()
+                    .expect("abstract branch")
+            } else {
+                vm.evaluate_contextual_argument(&input, &Term::Primitive(Primitive::Void), &mut env)
+                    .err()
+                    .expect("abstract branch")
+            };
+            assert_eq!(
+                (failure.kind, failure.source),
+                (ErrorKind::AbstractValueUnresolved, Some(condition_source))
+            );
+            assert_eq!(vm.depth, 0);
+        }
+        env.insert(local, Value::Bool(true));
+        assert!(matches!(
+            vm.evaluate_contextual_argument(&input, &Term::Primitive(Primitive::Void), &mut env),
+            Ok(Flow::Value(Value::Unit))
+        ));
+    }
+}
+
+#[test]
+fn ready_inputs_and_domain_checks_keep_nested_blocks_off_the_host_stack() {
+    std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(|| {
+            let package = Package::default();
+            let mut vm = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
+            let expected = Term::Primitive(Primitive::U8);
+            for depth in [127, 128, 127] {
+                let leaf = SourceRange {
+                    start: 888,
+                    end: 889,
+                };
+                let mut input = A::Integer {
+                    source: leaf,
+                    spelling: "42".into(),
+                    negative: false,
+                };
+                for _ in 0..depth {
+                    input = A::Block {
+                        source: SOURCE,
+                        statements: vec![],
+                        result: Some(Box::new(input)),
+                    };
+                }
+                vm.budget = Budget {
+                    steps: 100_000,
+                    depth: 512,
+                };
+                let result =
+                    vm.evaluate_contextual_argument(&input, &expected, &mut Environment::new());
+                if depth == 128 {
+                    let failure = result.err().expect("logical nesting limit");
+                    assert_eq!(
+                        (failure.kind, failure.source),
+                        (ErrorKind::DepthExhausted, Some(leaf))
+                    );
+                } else {
+                    assert!(matches!(
+                        result,
+                        Ok(Flow::Value(Value::UnsignedInteger(42)))
+                    ));
+                }
+                assert_eq!(vm.depth, 0);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

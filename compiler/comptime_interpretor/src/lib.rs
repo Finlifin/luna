@@ -3546,7 +3546,11 @@ impl<'a> Interpreter<'a> {
         source: SourceRange,
     ) -> Result<(), Error> {
         if spread {
-            self.validate_immutable_input(&value, ty)?;
+            self.validate_immutable_input(&value, ty)
+                .map_err(|mut failure| {
+                    failure.source.get_or_insert(source);
+                    failure
+                })?;
             let elements = match value {
                 Value::List {
                     values: elements, ..
@@ -3591,155 +3595,10 @@ impl<'a> Interpreter<'a> {
         literals: &mut BTreeMap<InputKey, PreparedNormalInput>,
         depth: usize,
     ) -> Result<(), Error> {
-        let prepared = self.prepare_input_domain(
-            input_domains::Node::Source(input, None),
-            expected,
-            InputKey::root(),
-            depth,
-        )?;
+        let prepared =
+            self.prepare_input_domain(input_domains::Node::Source(input, None), expected, depth)?;
         prepared.deliver_literals(literals);
         Ok(())
-    }
-
-    fn eval_normal_argument(
-        &mut self,
-        input: &nir::program::NormalFormArgument,
-        literals: &mut BTreeMap<InputKey, PreparedNormalInput>,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        self.eval_normal_argument_at(input, literals, environment, &InputKey::root())
-    }
-
-    #[inline(never)]
-    fn eval_normal_argument_at(
-        &mut self,
-        input: &nir::program::NormalFormArgument,
-        literals: &mut BTreeMap<InputKey, PreparedNormalInput>,
-        environment: &mut Environment,
-        key: &InputKey,
-    ) -> Result<Flow, Error> {
-        use nir::program::NormalFormArgument as A;
-        self.tick(Some(input.source()))?;
-        let result = self.with_native_depth(|vm| match input {
-            A::ListSpread(value) | A::Value(value) => vm.eval(value, environment),
-            A::Integer { .. } | A::Unit { .. } | A::Null { .. } => literals
-                .remove(key)
-                .and_then(|prepared| match prepared {
-                    PreparedNormalInput::Value(value) => Some(Flow::Value(value)),
-                    PreparedNormalInput::ListType(_) => None,
-                })
-                .ok_or_else(|| vm.failure(ErrorKind::Type, Some(input.source()))),
-            A::If {
-                condition,
-                then_input,
-                else_input,
-                ..
-            } => {
-                let Value::Bool(condition) = Self::concrete_value(
-                    value!(vm.eval(condition, environment)),
-                    condition.source,
-                )?
-                else {
-                    return Err(vm.failure(ErrorKind::Type, Some(condition.source)));
-                };
-                vm.eval_normal_argument_at(
-                    if condition { then_input } else { else_input },
-                    literals,
-                    environment,
-                    &key.child(usize::from(!condition)),
-                )
-            }
-            A::List { items, .. } => {
-                let Some(PreparedNormalInput::ListType(ty)) = literals.remove(key) else {
-                    return Err(vm.failure(ErrorKind::Type, Some(input.source())));
-                };
-                let mut values = Vec::new();
-                for (index, item) in items.iter().enumerate() {
-                    let value = value!(vm.eval_normal_argument_at(
-                        item,
-                        literals,
-                        environment,
-                        &key.child(index)
-                    ));
-                    vm.append_normal_list_item(
-                        &ty,
-                        &mut values,
-                        matches!(item, A::ListSpread(_)),
-                        value,
-                        item.source(),
-                    )?;
-                }
-                vm.finish_normal_list(ty, values).map(Flow::Value)
-            }
-            A::Tuple { items, .. } => {
-                let mut values = Vec::new();
-                for (index, item) in items.iter().enumerate() {
-                    values.push(value!(vm.eval_normal_argument_at(
-                        item,
-                        literals,
-                        environment,
-                        &key.child(index)
-                    )));
-                }
-                Ok(Flow::Value(Value::Tuple(values)))
-            }
-            A::Match {
-                source,
-                value,
-                arms,
-            } => {
-                let value = value!(vm.eval(value, environment));
-                let existing = environment.snapshot();
-                for (index, arm) in arms.iter().enumerate() {
-                    let flow = (|| {
-                        vm.tick(Some(*source))?;
-                        match vm.match_arm_guard(
-                            &arm.pattern,
-                            arm.guard.as_ref(),
-                            &value,
-                            environment,
-                        )? {
-                            Flow::Value(Value::Bool(false)) => return Ok(None),
-                            Flow::Value(Value::Bool(true)) => {}
-                            flow => return Ok(Some(flow)),
-                        }
-                        vm.eval_normal_argument_at(
-                            &arm.body,
-                            literals,
-                            environment,
-                            &key.child(index),
-                        )
-                        .map(Some)
-                    })();
-                    environment.retain(|id, _| existing.contains(id));
-                    if let Some(flow) = flow? {
-                        return Ok(flow);
-                    }
-                }
-                Err(vm.failure(ErrorKind::NonExhaustiveMatch, Some(*source)))
-            }
-            A::Block {
-                statements, result, ..
-            } => {
-                let existing = environment.snapshot();
-                let flow = (|| {
-                    for statement in statements {
-                        value!(vm.eval(statement, environment));
-                    }
-                    if let Some(result) = result {
-                        vm.eval_normal_argument_at(result, literals, environment, &key.child(0))
-                    } else {
-                        Ok(Flow::Value(Value::Unit))
-                    }
-                })();
-                environment.retain(|id, _| existing.contains(id));
-                flow
-            }
-        });
-        if input.is_diverging() && matches!(&result, Ok(Flow::Value(_))) {
-            return Err(self.failure(ErrorKind::Type, Some(input.source())));
-        }
-        result
     }
 
     fn check_type_contract(

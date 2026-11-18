@@ -561,79 +561,94 @@ impl NormalFormArgument {
         }
         patterns
     }
-    pub fn is_diverging(&self) -> bool {
-        enum Work<'a> {
-            Input(&'a NormalFormArgument),
-            All(usize),
-            Any(usize),
+    /// Whether an ordinary expression that this node executes unconditionally
+    /// has no normal result. Contextual children own their own return checks.
+    pub fn has_diverging_operand(&self) -> bool {
+        let never = |expr: &Expr| expr.ty == Term::Primitive(crate::Primitive::Never);
+        match self {
+            Self::Value(expr) | Self::ListSpread(expr) => never(expr),
+            Self::If { condition, .. } => never(condition),
+            Self::Match { value, .. } => never(value),
+            Self::Block { statements, .. } => statements.iter().any(never),
+            Self::List { .. }
+            | Self::Tuple { .. }
+            | Self::Null { .. }
+            | Self::Integer { .. }
+            | Self::Unit { .. } => false,
         }
-        let mut work = vec![Work::Input(self)];
-        let mut results = Vec::new();
-        let never = |e: &Expr| e.ty == Term::Primitive(crate::Primitive::Never);
-        while let Some(next) = work.pop() {
-            match next {
-                Work::All(count) => {
-                    let mut all = true;
-                    for _ in 0..count {
-                        all &= results.pop().unwrap();
+    }
+
+    pub fn is_diverging(&self) -> bool {
+        // Each suspended fold stores the remaining siblings of one parent.
+        // A sequence needs one diverging field; a choice needs every branch.
+        enum Siblings<'a> {
+            Fields(std::slice::Iter<'a, NormalFormArgument>),
+            Arms(std::slice::Iter<'a, NormalMatchArm>),
+            Otherwise(Option<&'a NormalFormArgument>),
+        }
+        let mut parents = Vec::new();
+        let mut input = self;
+        loop {
+            let diverges = if input.has_diverging_operand() {
+                true
+            } else {
+                match input {
+                    Self::If {
+                        then_input,
+                        else_input,
+                        ..
+                    } => {
+                        parents.push(Siblings::Otherwise(Some(else_input)));
+                        input = then_input;
+                        continue;
                     }
-                    results.push(all);
-                }
-                Work::Any(count) => {
-                    let mut any = false;
-                    for _ in 0..count {
-                        any |= results.pop().unwrap();
-                    }
-                    results.push(any);
-                }
-                Work::Input(Self::List { items, .. } | Self::Tuple { items, .. }) => {
-                    work.push(Work::Any(items.len()));
-                    work.extend(items.iter().rev().map(Work::Input));
-                }
-                Work::Input(Self::ListSpread(value) | Self::Value(value)) => {
-                    results.push(never(value))
-                }
-                Work::Input(Self::Integer { .. } | Self::Unit { .. } | Self::Null { .. }) => {
-                    results.push(false)
-                }
-                Work::Input(Self::If {
-                    condition,
-                    then_input,
-                    else_input,
-                    ..
-                }) => {
-                    if never(condition) {
-                        results.push(true);
-                    } else {
-                        work.push(Work::All(2));
-                        work.push(Work::Input(else_input));
-                        work.push(Work::Input(then_input));
-                    }
-                }
-                Work::Input(Self::Match { value, arms, .. }) => {
-                    if never(value) {
-                        results.push(true);
-                    } else {
-                        work.push(Work::All(arms.len()));
-                        for arm in arms.iter().rev() {
-                            work.push(Work::Input(&arm.body));
+                    Self::List { items, .. } | Self::Tuple { items, .. } => {
+                        if let Some((first, rest)) = items.split_first() {
+                            parents.push(Siblings::Fields(rest.iter()));
+                            input = first;
+                            continue;
                         }
+                        false
                     }
-                }
-                Work::Input(Self::Block {
-                    statements, result, ..
-                }) => {
-                    if statements.iter().any(never) {
-                        results.push(true);
-                    } else if let Some(result) = result {
-                        work.push(Work::Input(result));
-                    } else {
-                        results.push(false);
+                    Self::Match { arms, .. } => {
+                        if let Some((first, rest)) = arms.split_first() {
+                            parents.push(Siblings::Arms(rest.iter()));
+                            input = &first.body;
+                            continue;
+                        }
+                        true
                     }
+                    Self::Block {
+                        result: Some(tail), ..
+                    } => {
+                        input = tail;
+                        continue;
+                    }
+                    Self::Value(_)
+                    | Self::ListSpread(_)
+                    | Self::Unit { .. }
+                    | Self::Null { .. }
+                    | Self::Integer { .. }
+                    | Self::Block { result: None, .. } => false,
                 }
+            };
+            loop {
+                let Some(parent) = parents.last_mut() else {
+                    return diverges;
+                };
+                let next = match parent {
+                    Siblings::Fields(fields) if !diverges => fields.next(),
+                    Siblings::Arms(arms) if diverges => arms.next().map(|arm| &arm.body),
+                    Siblings::Otherwise(branch) if diverges => branch.take(),
+                    _ => None,
+                };
+                if let Some(child) = next {
+                    input = child;
+                    break;
+                }
+                parents.pop();
             }
         }
-        results.pop().unwrap()
     }
     pub fn source(&self) -> SourceRange {
         match self {

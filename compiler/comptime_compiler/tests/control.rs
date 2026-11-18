@@ -1188,3 +1188,87 @@ fn borrowed_selectors_share_constant_storage_without_losing_use_sites() {
     );
     assert!(dump.contains("key\\\"\\\\\\n"));
 }
+
+#[test]
+fn contextual_return_paths_agree_in_nir_and_compiled_input_shapes() {
+    use nir::program::{Literal, NormalFormArgument as A, NormalMatchArm, Pattern};
+
+    let source = SourceRange { start: 1, end: 2 };
+    let flag = Expr {
+        source,
+        ty: Term::Primitive(Primitive::Bool),
+        kind: K::Literal(Literal::Bool(true)),
+    };
+    let exit = Expr {
+        source,
+        ty: Term::Primitive(Primitive::Never),
+        kind: K::Return(None),
+    };
+    let unit = A::Unit { source };
+    let never = A::Value(exit.clone());
+    let choice = |condition: Expr, then_input: A, else_input: A| A::If {
+        source,
+        condition,
+        then_input: Box::new(then_input),
+        else_input: Box::new(else_input),
+    };
+    let arms = |bodies: Vec<A>| A::Match {
+        source,
+        value: flag.clone(),
+        arms: bodies
+            .into_iter()
+            .enumerate()
+            .map(|(index, body)| NormalMatchArm {
+                pattern: Pattern::Literal(Literal::Bool(index == 0)),
+                guard: None,
+                body,
+            })
+            .collect(),
+    };
+
+    let returning_choice = choice(flag.clone(), never.clone(), unit.clone());
+    let exiting_choice = choice(flag.clone(), never.clone(), never.clone());
+    for (input, diverges) in [
+        (choice(exit.clone(), unit.clone(), unit.clone()), true),
+        (arms(vec![]), true),
+        (
+            arms(vec![exiting_choice.clone(), returning_choice.clone()]),
+            false,
+        ),
+        (arms(vec![never.clone(), exiting_choice.clone()]), true),
+        (
+            A::Tuple {
+                source,
+                items: vec![returning_choice.clone(), exiting_choice],
+            },
+            true,
+        ),
+        (
+            A::List {
+                source,
+                items: vec![returning_choice.clone(), unit.clone()],
+            },
+            false,
+        ),
+        (
+            A::Block {
+                source,
+                statements: vec![exit],
+                result: Some(Box::new(unit)),
+            },
+            true,
+        ),
+        (
+            A::Block {
+                source,
+                statements: vec![],
+                result: Some(Box::new(returning_choice)),
+            },
+            false,
+        ),
+    ] {
+        assert_eq!(input.is_diverging(), diverges);
+        let (_, shape) = comptime_compiler::compile_staged_input(&input, &mut 10_000).unwrap();
+        assert_eq!(shape.diverges, diverges);
+    }
+}

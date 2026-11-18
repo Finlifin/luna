@@ -191,11 +191,11 @@ pub(super) fn compile_input<'a>(
             }
             Task::Match(argument, slot, start) => {
                 let items: Vec<Shape> = shapes.split_off(start);
-                let A::Match { value, arms, .. } = argument else {
+                let A::Match { arms, .. } = argument else {
                     unreachable!()
                 };
-                let diverges = value.ty == Term::Primitive(Primitive::Never)
-                    || items.iter().all(|item| item.diverges);
+                let diverges =
+                    argument.has_diverging_operand() || items.iter().all(|item| item.diverges);
                 let arms = arms
                     .iter()
                     .zip(items)
@@ -229,7 +229,7 @@ pub(super) fn compile_input<'a>(
                 let A::If { condition, .. } = argument else {
                     unreachable!()
                 };
-                let diverges = condition.ty == Term::Primitive(Primitive::Never)
+                let diverges = argument.has_diverging_operand()
                     || (then_input.diverges && else_input.diverges);
                 shapes.push(Shape {
                     slot,
@@ -389,6 +389,7 @@ pub(super) fn compile_input<'a>(
                         pending.push(Task::Match(argument, slot, shapes.len()));
                         pending.push(Task::Code(Work::Label(done)));
                         pending.push(Task::Code(Work::Emit(*source, Op::NonExhaustiveMatch)));
+                        let diverges = argument.has_diverging_operand();
                         for (index, arm) in arms.iter().enumerate().rev() {
                             let next = labels.len();
                             labels.push(None);
@@ -396,11 +397,7 @@ pub(super) fn compile_input<'a>(
                             pending.push(Task::Code(Work::Label(next)));
                             pending.push(Task::Code(Work::Emit(*source, Op::Jump(done))));
                             pending.push(Task::Code(Work::Emit(*source, Op::LeaveScope)));
-                            pending.push(Task::Transfer(
-                                slot,
-                                value.ty == Term::Primitive(Primitive::Never),
-                                arm.body.source(),
-                            ));
+                            pending.push(Task::Transfer(slot, diverges, arm.body.source()));
                             pending.push(Task::Enter(&arm.body, depth + 1, index));
                             for guard in arm.guard.iter().rev() {
                                 pending.push(Task::Code(Work::Emit(
@@ -444,7 +441,7 @@ pub(super) fn compile_input<'a>(
                         let done = labels.len();
                         labels.push(None);
                         let test = fresh();
-                        let diverges = condition.ty == Term::Primitive(Primitive::Never);
+                        let diverges = argument.has_diverging_operand();
                         code.push(Work::Expression(condition, test));
                         code.push(Work::Emit(
                             condition.source,
@@ -478,9 +475,7 @@ pub(super) fn compile_input<'a>(
                         pending.push(Task::Block(
                             argument,
                             slot,
-                            statements
-                                .iter()
-                                .any(|statement| statement.ty == Term::Primitive(Primitive::Never)),
+                            argument.has_diverging_operand(),
                         ));
                         if let Some(result) = result {
                             pending.push(Task::Enter(result, depth + 1, 0));

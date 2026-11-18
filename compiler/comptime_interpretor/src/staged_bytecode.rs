@@ -1,12 +1,12 @@
 //! Invocation-local staged operands. Contextual literals are never ordinary values.
 use super::*;
 use comptime_compiler::staged_inputs::Instruction as Op;
-use normal_inputs::StagedNormalInput as Input;
+use normal_inputs::{ListField, StagedNormalInput as Input};
 
 #[derive(Default)]
 pub(super) struct State {
     values: BTreeMap<usize, Input>,
-    containers: BTreeMap<usize, Vec<(bool, Input)>>,
+    containers: BTreeMap<usize, Vec<ListField>>,
     pub completed: Option<Input>,
 }
 impl fmt::Display for State {
@@ -18,8 +18,8 @@ impl fmt::Display for State {
         write!(f, ") (containers")?;
         for (slot, values) in &self.containers {
             write!(f, " (%{slot}")?;
-            for (spread, value) in values {
-                write!(f, " (item (spread {spread}) {value})")?;
+            for field in values {
+                write!(f, " {field}")?;
             }
             write!(f, ")")?;
         }
@@ -37,8 +37,8 @@ impl fmt::Display for Input {
             Self::Literal(key) => write!(f, "(staged-literal {key})"),
             Self::List { key, items } => {
                 write!(f, "(staged-list {key}")?;
-                for (spread, value) in items {
-                    write!(f, " (item (spread {spread}) {value})")?;
+                for field in items {
+                    write!(f, " {field}")?;
                 }
                 write!(f, ")")
             }
@@ -112,10 +112,11 @@ impl State {
                 ..
             } => {
                 let input = self.take(*value, slots, source)?;
-                self.containers
-                    .entry(*parent)
-                    .or_default()
-                    .push((*spread, input));
+                self.containers.entry(*parent).or_default().push(ListField {
+                    spread: *spread,
+                    source,
+                    value: input,
+                });
             }
             Op::Container {
                 value, list, path, ..
@@ -129,7 +130,7 @@ impl State {
                 } else {
                     Input::Tuple {
                         key: InputKey::Node(path.clone()),
-                        items: items.into_iter().map(|(_, item)| item).collect(),
+                        items: items.into_iter().map(|field| field.value).collect(),
                     }
                 };
                 self.values.insert(*value, input);

@@ -208,83 +208,139 @@ impl<'a> Node<'a> {
             _ => unreachable!("match guard"),
         }
     }
-    fn child_key(self, index: usize, parent: &InputKey) -> InputKey {
-        match self.child(index) {
+    fn key(self, source_key: impl FnOnce() -> InputKey) -> InputKey {
+        match self {
             Self::Compiled(shape) => InputKey::Register(shape.slot),
-            Self::Source(..) => parent.child(index),
+            Self::Source(..) => source_key(),
         }
     }
 }
 
+/// A frame retains only the parent and its next field. In particular a wide
+/// tuple cannot enqueue all its siblings before the VM charges the first one.
+enum Children<'a> {
+    Same,
+    Match,
+    List { element: &'a Term },
+    Tuple { fields: &'a [Term] },
+}
+
+struct Cursor<'a> {
+    node: Node<'a>,
+    expected: &'a Term,
+    key: InputKey,
+    children: Children<'a>,
+    index: usize,
+    count: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn next(&mut self, vm: &mut Interpreter<'_>) -> Result<(Node<'a>, &'a Term, InputKey), Error> {
+        let index = self.index;
+        self.index += 1;
+        let expected = match self.children {
+            Children::Match => {
+                if let Some((ty, source)) = self.node.guard(index) {
+                    vm.check_input_condition(self.node, ty, source)?;
+                }
+                self.expected
+            }
+            Children::List { element } if !self.node.spread(index) => element,
+            Children::Tuple { fields } => &fields[index],
+            Children::Same | Children::List { .. } => self.expected,
+        };
+        let child = self.node.child(index);
+        Ok((child, expected, child.key(|| self.key.child(index))))
+    }
+
+    fn finish(self) -> Option<(InputKey, Prepared)> {
+        let container = match self.children {
+            Children::List { .. } => Prepared::List {
+                ty: self.expected.clone(),
+                values: vec![],
+            },
+            Children::Tuple { .. } => Prepared::Tuple { values: vec![] },
+            Children::Match | Children::Same => return None,
+        };
+        Some((self.key, container))
+    }
+}
+
 impl Interpreter<'_> {
-    pub(super) fn prepare_input_domain(
+    pub(super) fn prepare_input_domain<'a>(
         &mut self,
-        node: Node<'_>,
-        expected: &Term,
-        key: InputKey,
+        node: Node<'a>,
+        expected: &'a Term,
         depth: usize,
     ) -> Result<Preparation, Error> {
         let mut entries = Vec::new();
-        self.check_input_domain(node, expected, key, depth, &mut entries)?;
-        Ok(Preparation { entries })
+        let mut parents = Vec::<Cursor<'_>>::new();
+        let mut current = (node, expected, node.key(InputKey::root));
+        loop {
+            let (node, expected, key) = current;
+            if depth.saturating_add(parents.len()) >= 128 {
+                return Err(self.failure(ErrorKind::DepthExhausted, Some(node.source())));
+            }
+            if let Some(parent) = self.enter_input_domain(node, expected, key, &mut entries)? {
+                parents.push(parent);
+            }
+
+            loop {
+                let Some(parent) = parents.last_mut() else {
+                    return Ok(Preparation { entries });
+                };
+                if parent.index < parent.count {
+                    current = parent.next(self)?;
+                    break;
+                }
+                let parent = parents.pop().expect("completed domain cursor");
+                if let Some(entry) = parent.finish() {
+                    entries.push(entry);
+                }
+            }
+        }
     }
 
-    fn check_input_domain(
+    fn enter_input_domain<'a>(
         &mut self,
-        node: Node<'_>,
-        expected: &Term,
+        node: Node<'a>,
+        expected: &'a Term,
         key: InputKey,
-        depth: usize,
         entries: &mut Vec<(InputKey, Prepared)>,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<Cursor<'a>>, Error> {
         let source = node.source();
-        if depth >= 128 {
-            return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
-        }
         self.tick(Some(source))?;
-        let value = match node.kind() {
+        let (children, count) = match node.kind() {
             Kind::Value(ty) => {
                 let ty = annotation(self, node.bindings(), ty, source)?;
                 self.prepare_normal_value_type(&ty, expected, source)?;
-                return Ok(());
+                return Ok(None);
             }
             Kind::Null => {
                 let ty = self.prepare_optional(expected, None, source)?;
-                Prepared::Literal(self.complete_optional(&ty, None, source)?)
+                let value = self.complete_optional(&ty, None, source)?;
+                entries.push((key, Prepared::Literal(value)));
+                return Ok(None);
             }
-            Kind::Unit => Prepared::Literal(self.normal_unit_value(expected, source)?),
+            Kind::Unit => {
+                entries.push((
+                    key,
+                    Prepared::Literal(self.normal_unit_value(expected, source)?),
+                ));
+                return Ok(None);
+            }
             Kind::Integer(spelling, negative) => {
-                Prepared::Literal(self.normal_integer_value(expected, spelling, negative, source)?)
+                let value = self.normal_integer_value(expected, spelling, negative, source)?;
+                entries.push((key, Prepared::Literal(value)));
+                return Ok(None);
             }
-            Kind::Choice(condition, condition_source) => {
-                let condition = annotation(self, node.bindings(), condition, condition_source)?;
-                if !matches!(
-                    *condition,
-                    Term::Primitive(Primitive::Bool | Primitive::Never)
-                ) {
-                    return Err(self.failure(ErrorKind::Type, Some(condition_source)));
-                }
-                for index in 0..2 {
-                    self.check_input_domain(
-                        node.child(index),
-                        expected,
-                        node.child_key(index, &key),
-                        depth + 1,
-                        entries,
-                    )?;
-                }
-                return Ok(());
+            Kind::Choice(ty, source) => {
+                self.check_input_condition(node, ty, source)?;
+                (Children::Same, 2)
             }
-            Kind::Block(has_result) => {
-                if has_result {
-                    self.check_input_domain(
-                        node.child(0),
-                        expected,
-                        node.child_key(0, &key),
-                        depth + 1,
-                        entries,
-                    )?;
-                } else if !node.empty_block_diverges(self)? {
+            Kind::Block(true) => (Children::Same, 1),
+            Kind::Block(false) => {
+                if !node.empty_block_diverges(self)? {
                     self.check_type_contract(
                         &nir::program::TypePredicate::Equal(
                             Term::Primitive(Primitive::Void),
@@ -293,67 +349,45 @@ impl Interpreter<'_> {
                         source,
                     )?;
                 }
-                return Ok(());
+                return Ok(None);
             }
-            Kind::Match(count) => {
-                for index in 0..count {
-                    if let Some((ty, source)) = node.guard(index) {
-                        let ty = annotation(self, node.bindings(), ty, source)?;
-                        if !matches!(*ty, Term::Primitive(Primitive::Bool | Primitive::Never)) {
-                            return Err(self.failure(ErrorKind::Type, Some(source)));
-                        }
-                    }
-                    self.check_input_domain(
-                        node.child(index),
-                        expected,
-                        node.child_key(index, &key),
-                        depth + 1,
-                        entries,
-                    )?;
-                }
-                return Ok(());
-            }
+            Kind::Match(count) => (Children::Match, count),
             Kind::List(count) => {
                 let element = self.normal_list_domain(expected, count, source)?;
-                for index in 0..count {
-                    self.check_input_domain(
-                        node.child(index),
-                        if node.spread(index) {
-                            expected
-                        } else {
-                            &element
-                        },
-                        node.child_key(index, &key),
-                        depth + 1,
-                        entries,
-                    )?;
-                }
-                Prepared::List {
-                    ty: expected.clone(),
-                    values: vec![],
-                }
+                (Children::List { element }, count)
             }
             Kind::Tuple(count) => {
-                let types = self
+                let fields = self
                     .tuple_input_elements(expected)
                     .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-                if types.len() != count {
+                if fields.len() != count {
                     return Err(self.failure(ErrorKind::Arity, Some(source)));
                 }
-                for (index, ty) in types.iter().enumerate() {
-                    self.check_input_domain(
-                        node.child(index),
-                        ty,
-                        node.child_key(index, &key),
-                        depth + 1,
-                        entries,
-                    )?;
-                }
-                Prepared::Tuple { values: vec![] }
+                (Children::Tuple { fields }, count)
             }
         };
-        entries.push((key, value));
-        Ok(())
+        Ok(Some(Cursor {
+            node,
+            expected,
+            key,
+            children,
+            index: 0,
+            count,
+        }))
+    }
+
+    fn check_input_condition(
+        &mut self,
+        node: Node<'_>,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let ty = annotation(self, node.bindings(), ty, source)?;
+        if matches!(*ty, Term::Primitive(Primitive::Bool | Primitive::Never)) {
+            Ok(())
+        } else {
+            Err(self.failure(ErrorKind::Type, Some(source)))
+        }
     }
 }
 
@@ -377,7 +411,6 @@ mod tests {
             .prepare_input_domain(
                 Node::Source(&input, None),
                 &Term::Tuple(vec![Term::Primitive(Primitive::U8)]),
-                InputKey::root(),
                 0,
             )
             .unwrap();

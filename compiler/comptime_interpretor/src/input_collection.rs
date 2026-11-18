@@ -235,7 +235,6 @@ impl<S: Source> Frame<S> {
                 let prepared = vm.prepare_input_domain(
                     input_domains::Node::Source(argument, bindings),
                     &expected,
-                    InputKey::root(),
                     0,
                 )?;
                 let mut literals = BTreeMap::new();

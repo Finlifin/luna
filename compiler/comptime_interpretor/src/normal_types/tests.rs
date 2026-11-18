@@ -1407,7 +1407,7 @@ fn explicit_type_factories_accept_scoped_parameters_in_every_input_order() {
 }
 
 #[test]
-fn staged_list_spreads_finish_after_all_operand_effects() {
+fn list_spreads_check_at_domain_delivery_and_report_the_field() {
     let package = container_package();
     let ty = container_list(Term::Primitive(Primitive::U8));
     let seed = LocalId {
@@ -1418,11 +1418,12 @@ fn staged_list_spreads_finish_after_all_operand_effects() {
         owner: 92,
         index: 1,
     };
+    let spread_source = SourceRange { start: 40, end: 45 };
     let input = A::List {
         source: SOURCE,
         items: vec![
             A::ListSpread(Expr {
-                source: SOURCE,
+                source: spread_source,
                 ty: ty.clone(),
                 kind: K::Local(seed),
             }),
@@ -1446,50 +1447,75 @@ fn staged_list_spreads_finish_after_all_operand_effects() {
             },
         ],
     };
-    for invalid in [true, false] {
-        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-        let mut env = Environment::new();
-        env.insert(touched, Value::Bool(false));
-        env.insert(
-            seed,
-            if invalid {
-                Value::List {
-                    ty: container_list(Term::Primitive(Primitive::Bool)),
-                    values: vec![Value::Bool(true)].into(),
+    for reference in [false, true] {
+        for staged in [false, true] {
+            for invalid in [true, false] {
+                let mut vm = if reference {
+                    Interpreter::for_comptime_tree(&package, Budget::default())
+                } else {
+                    Interpreter::for_comptime(&package, Budget::default())
                 }
-            } else {
-                Value::List {
-                    ty: ty.clone(),
-                    values: vec![Value::UnsignedInteger(17), Value::UnsignedInteger(23)].into(),
+                .unwrap();
+                let mut env = Environment::new();
+                env.insert(touched, Value::Bool(false));
+                env.insert(
+                    seed,
+                    if invalid {
+                        Value::List {
+                            ty: container_list(Term::Primitive(Primitive::Bool)),
+                            values: vec![Value::Bool(true)].into(),
+                        }
+                    } else {
+                        Value::List {
+                            ty: ty.clone(),
+                            values: vec![Value::UnsignedInteger(17), Value::UnsignedInteger(23)]
+                                .into(),
+                        }
+                    },
+                );
+                let result = if staged {
+                    let std::ops::ControlFlow::Continue(saved) =
+                        vm.stage_normal_argument(&input, &mut env, 0).unwrap()
+                    else {
+                        panic!("unexpected transfer")
+                    };
+                    assert_eq!(vm.bytecode_staged_inputs(), usize::from(!reference));
+                    let mut prepared = BTreeMap::new();
+                    vm.prepare_normal_argument(&input, &ty, &mut prepared, 0)
+                        .unwrap();
+                    vm.finish_staged_normal_argument(saved, &mut prepared, SOURCE, 0)
+                } else {
+                    vm.evaluate_contextual_argument(&input, &ty, &mut env)
+                        .map(|flow| {
+                            let Flow::Value(value) = flow else {
+                                panic!("unexpected transfer")
+                            };
+                            value
+                        })
+                };
+                assert_eq!(env.get(&touched), Some(&Value::Bool(staged || !invalid)));
+                if invalid {
+                    let failure = result.unwrap_err();
+                    assert_eq!(
+                        (failure.kind, failure.source),
+                        (ErrorKind::Type, Some(spread_source)),
+                        "reference={reference}, staged={staged}"
+                    );
+                } else {
+                    assert_eq!(
+                        result.unwrap(),
+                        Value::List {
+                            ty: ty.clone(),
+                            values: vec![
+                                Value::UnsignedInteger(17),
+                                Value::UnsignedInteger(23),
+                                Value::UnsignedInteger(29)
+                            ]
+                            .into()
+                        }
+                    );
                 }
-            },
-        );
-        let std::ops::ControlFlow::Continue(staged) =
-            vm.stage_normal_argument(&input, &mut env, 0).unwrap()
-        else {
-            panic!("transfer")
-        };
-        assert_eq!(vm.bytecode_staged_inputs(), 1);
-        assert_eq!(env.get(&touched), Some(&Value::Bool(true)));
-        let mut prepared = BTreeMap::new();
-        vm.prepare_normal_argument(&input, &ty, &mut prepared, 0)
-            .unwrap();
-        let result = vm.finish_staged_normal_argument(staged, &mut prepared, SOURCE, 0);
-        if invalid {
-            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
-        } else {
-            assert_eq!(
-                result.unwrap(),
-                Value::List {
-                    ty: ty.clone(),
-                    values: vec![
-                        Value::UnsignedInteger(17),
-                        Value::UnsignedInteger(23),
-                        Value::UnsignedInteger(29)
-                    ]
-                    .into()
-                }
-            );
+            }
         }
     }
 }
