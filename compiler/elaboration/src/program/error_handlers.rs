@@ -519,17 +519,17 @@ impl Checker<'_, '_> {
                         // derive this view by unfolding an opaque Tuple head.
                         let binding = self.spread_binding(span)?;
                         let next = std::mem::replace(field, n::Pattern::Wild);
-                        *field = n::Pattern::Then {
-                            first: Box::new(n::Pattern::Observe {
-                                binding,
-                                inner: Box::new(n::Pattern::Wild),
+                        *field = n::Pattern::Observe {
+                            binding,
+                            inner: Box::new(n::Pattern::Then {
+                                first: Box::new(n::Pattern::Wild),
+                                value: Box::new(self.error_node(
+                                    ty.clone(),
+                                    K::Local(binding),
+                                    span,
+                                )?),
+                                next: Box::new(next),
                             }),
-                            value: Box::new(self.error_node(
-                                ty.clone(),
-                                K::Local(binding),
-                                span,
-                            )?),
-                            next: Box::new(next),
                         };
                     }
                 }

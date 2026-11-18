@@ -235,9 +235,11 @@ pub fn resolve_method_identity_in_context(
 /// definition-side projections remain views; opaque heads retain identity.
 struct StagingAnnotationRewriter<F>(F);
 impl<F: FnMut(&Term) -> Result<Term, String>> n::Rewriter for StagingAnnotationRewriter<F> {
+    const SPECIALIZE: bool = true;
     type Error = String;
-    fn ty(&mut self, ty: &Term) -> Result<Term, String> {
-        (self.0)(ty)
+    fn ty(&mut self, ty: &mut Term) -> Result<(), String> {
+        *ty = (self.0)(ty)?;
+        Ok(())
     }
     fn expression(&mut self, expression: &mut n::Expr) -> Result<bool, String> {
         // An interface reference retains the declaration-side signature. Its

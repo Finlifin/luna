@@ -1002,20 +1002,44 @@ impl Term {
         })
     }
 
-    /// Rebind only demanded slots, preserving the surrounding frame. Missing
-    /// entries are errors if referenced; no dummy type/value fills a pruned slot.
-    pub fn rebind_scope_partial(&self, arguments: &[Option<Term>]) -> Result<Term, TypeError> {
-        self.rewrite(0, &mut |term, nesting| match term {
-            Self::Bound { depth, index, sort } if *depth == nesting => {
-                let value = arguments
-                    .get(*index)
-                    .and_then(Option::as_ref)
-                    .ok_or(TypeError::MissingArgument(*index))?;
-                require_sort(value, *sort)?;
-                value.shift(nesting, 0)
+    /// Rename references to one surrounding frame without substituting values.
+    /// Preserve the stored representation, including physical error tag order.
+    pub fn relocate_slots(&self, slots: &[Option<(usize, Sort)>]) -> Result<Term, TypeError> {
+        let mut relocated = self.clone();
+        relocated.relocate_slots_in_place(slots)?;
+        Ok(relocated)
+    }
+
+    pub(crate) fn relocate_slots_in_place(
+        &mut self,
+        slots: &[Option<(usize, Sort)>],
+    ) -> Result<(), TypeError> {
+        let mut pending = vec![(self, 0u32)];
+        while let Some((term, nesting)) = pending.pop() {
+            if let Self::Bound { depth, index, sort } = term {
+                if *depth == nesting {
+                    let (destination, actual) = slots
+                        .get(*index)
+                        .copied()
+                        .flatten()
+                        .ok_or(TypeError::MissingArgument(*index))?;
+                    if actual != *sort {
+                        return Err(TypeError::WrongSort {
+                            expected: *sort,
+                            actual,
+                        });
+                    }
+                    *index = destination;
+                }
+                continue;
             }
-            _ => Ok(term.clone()),
-        })
+            let nested = nesting + u32::from(matches!(term, Self::Function { .. }));
+            term.visit_children_mut(|child| {
+                pending.push((child, nested));
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     /// Free declaration identities, including those under nested binders.

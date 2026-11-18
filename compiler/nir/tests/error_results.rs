@@ -1409,19 +1409,19 @@ fn completed_identity_pattern_matches_subject_without_acquiring_another_owner() 
         owner: 431,
         index: 0,
     };
-    let make = || Pattern::Then {
-        first: Box::new(Pattern::Observe {
-            binding: alias,
-            inner: Box::new(Pattern::Wild),
-        }),
-        value: Box::new(Expr {
-            source: SourceRange { start: 0, end: 1 },
-            ty: Term::error_result(vec![Term::Primitive(P::Char)], rigid(t)),
-            kind: ExprKind::Local(alias),
-        }),
-        next: Box::new(Pattern::ErrorResult {
-            label: None,
-            inner: Box::new(Pattern::Wild),
+    let make = || Pattern::Observe {
+        binding: alias,
+        inner: Box::new(Pattern::Then {
+            first: Box::new(Pattern::Wild),
+            value: Box::new(Expr {
+                source: SourceRange { start: 0, end: 1 },
+                ty: Term::error_result(vec![Term::Primitive(P::Char)], rigid(t)),
+                kind: ExprKind::Local(alias),
+            }),
+            next: Box::new(Pattern::ErrorResult {
+                label: None,
+                inner: Box::new(Pattern::Wild),
+            }),
         }),
     };
     let complete = |ty: &Term| -> Result<Term, ()> {
@@ -1440,7 +1440,7 @@ fn completed_identity_pattern_matches_subject_without_acquiring_another_owner() 
         .rewrite_types(&mut |ty| Ok::<_, ()>(ty.clone()))
         .unwrap();
     assert!(
-        matches!(pattern, Pattern::Then { .. }),
+        matches!(pattern, Pattern::Observe { .. }),
         "retain the abstract domain until completion"
     );
     pattern.rewrite_types(&mut { complete }).unwrap();
@@ -1485,7 +1485,10 @@ fn completed_identity_pattern_matches_subject_without_acquiring_another_owner() 
     // discarded by the identity simplification.
     for uses_alias in [false, true] {
         let mut pattern = make();
-        let Pattern::Then { value, next, .. } = &mut pattern else {
+        let Pattern::Observe { inner, .. } = &mut pattern else {
+            unreachable!()
+        };
+        let Pattern::Then { value, next, .. } = inner.as_mut() else {
             unreachable!()
         };
         if uses_alias {
@@ -1500,7 +1503,7 @@ fn completed_identity_pattern_matches_subject_without_acquiring_another_owner() 
             });
         }
         pattern.rewrite_types(&mut { complete }).unwrap();
-        assert!(matches!(pattern, Pattern::Then { .. }));
+        assert!(matches!(pattern, Pattern::Observe { .. }));
     }
 }
 

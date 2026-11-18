@@ -128,9 +128,6 @@ struct Installations<'a> {
 }
 impl n::Rewriter for Installations<'_> {
     type Error = String;
-    fn ty(&mut self, ty: &Term) -> Result<Term, String> {
-        Ok(ty.clone())
-    }
     fn expression(&mut self, expression: &mut n::Expr) -> Result<bool, String> {
         if *self.fuel == 0 {
             return Ok(false);
@@ -312,14 +309,16 @@ struct Requests<'a> {
     requests: usize,
 }
 impl n::Rewriter for Requests<'_> {
+    const SPECIALIZE: bool = true;
     type Error = String;
-    fn ty(&mut self, ty: &Term) -> Result<Term, String> {
+    fn ty(&mut self, ty: &mut Term) -> Result<(), String> {
         match ty {
             Term::Computation { effects, result } if self.matches_row(effects) => {
-                Ok(*result.clone())
+                *ty = std::mem::replace(result.as_mut(), Term::Unit);
+                Ok(())
             }
             Term::Computation { .. } => Err("residual computation row".into()),
-            _ => Ok(ty.clone()),
+            _ => Ok(()),
         }
     }
     fn expression(&mut self, expression: &mut n::Expr) -> Result<bool, String> {

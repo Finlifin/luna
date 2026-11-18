@@ -34,6 +34,12 @@ pub enum Error {
     MissingCapture(LocalId),
     Structure(String),
 }
+impl From<crate::copy_budget::CopyBudgetExhausted> for Error {
+    fn from(_: crate::copy_budget::CopyBudgetExhausted) -> Self {
+        Self::Budget
+    }
+}
+
 impl From<crate::free_bindings::Error> for Error {
     fn from(error: crate::free_bindings::Error) -> Self {
         match error {
@@ -105,6 +111,17 @@ pub fn expression_entry(
     if let Some(missing) = free.difference(&bindings).next() {
         return Err(Error::MissingCapture(*missing));
     }
+    entry_with_bound_locals(declaration, name, body, inputs, fuel)
+}
+
+/// The caller has checked free locals against unique input identities.
+fn entry_with_bound_locals(
+    declaration: DeclarationId,
+    name: String,
+    body: Expr,
+    inputs: Vec<(LocalId, crate::Parameter)>,
+    fuel: &mut usize,
+) -> Result<crate::program::Function, Error> {
     crate::visit::expression_checked(&body, fuel, |expr, fuel| {
         bounded(&expr.ty, fuel)?;
         if expr.ty.sort() != Sort::Type {
@@ -623,7 +640,7 @@ pub(crate) fn visit_expanded_term_scoped_for_copy(
     fuel: &mut usize,
     max_depth: usize,
     replacements: &BTreeMap<DeclarationId, &Term>,
-    visit: &mut impl FnMut(&Term, u32),
+    visit: &mut dyn FnMut(&Term, u32),
 ) -> Result<(), crate::copy_budget::CopyBudgetExhausted> {
     use crate::copy_budget::CopyBudgetExhausted as Limit;
     let mut work = vec![(root, 0usize, 0u32, true)];
@@ -716,11 +733,7 @@ impl CapturedEntry {
                     actual: sort,
                 }));
             }
-            mapping.push(Term::Bound {
-                depth: 0,
-                index: slot,
-                sort,
-            });
+            mapping.push(Some((slot, sort)));
         }
         let inputs = compact
             .inputs()
@@ -729,8 +742,8 @@ impl CapturedEntry {
                 bounded(&input.ty, fuel)?;
                 bounded(&input.value, fuel)?;
                 Ok(Input {
-                    ty: input.ty.rebind_scope(&mapping).map_err(Error::Scope)?,
-                    value: input.value.rebind_scope(&mapping).map_err(Error::Scope)?,
+                    ty: input.ty.relocate_slots(&mapping).map_err(Error::Scope)?,
+                    value: input.value.relocate_slots(&mapping).map_err(Error::Scope)?,
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -760,12 +773,15 @@ pub fn capture_entry(
     available: &[(LocalId, crate::Parameter)],
     fuel: &mut usize,
 ) -> Result<CapturedEntry, Error> {
-    *fuel = fuel.checked_sub(available.len()).ok_or(Error::Budget)?;
-    let available = available
-        .iter()
-        .map(|(id, parameter)| (*id, parameter.sort, Some(&parameter.ty)))
-        .collect::<Vec<_>>();
-    capture_entry_domains(declaration, name, body, &available, fuel)
+    capture_entry_domains(
+        declaration,
+        name,
+        body,
+        available
+            .iter()
+            .map(|(id, parameter)| (*id, parameter.sort, Some(&parameter.ty))),
+        fuel,
+    )
 }
 
 /// Capture a source telescope with unresolved domains. Such slots keep their
@@ -778,59 +794,45 @@ pub fn capture_sparse_entry(
     available: &[(LocalId, Sort, Option<Term>)],
     fuel: &mut usize,
 ) -> Result<CapturedEntry, Error> {
-    *fuel = fuel.checked_sub(available.len()).ok_or(Error::Budget)?;
-    let available = available
-        .iter()
-        .map(|(id, sort, domain)| (*id, *sort, domain.as_ref()))
-        .collect::<Vec<_>>();
-    capture_entry_domains(declaration, name, body, &available, fuel)
+    capture_entry_domains(
+        declaration,
+        name,
+        body,
+        available
+            .iter()
+            .map(|(id, sort, domain)| (*id, *sort, domain.as_ref())),
+        fuel,
+    )
 }
 
-fn capture_entry_domains(
+/// Capture from borrowed source domains. Only the selected domains and the
+/// projected body become part of the returned entry.
+pub fn capture_entry_domains<'a>(
     declaration: DeclarationId,
     name: String,
     mut body: Expr,
-    available: &[(LocalId, Sort, Option<&Term>)],
+    domains: impl ExactSizeIterator<Item = (LocalId, Sort, Option<&'a Term>)>,
     fuel: &mut usize,
 ) -> Result<CapturedEntry, Error> {
-    *fuel = fuel.checked_sub(available.len()).ok_or(Error::Budget)?;
+    *fuel = fuel.checked_sub(domains.len()).ok_or(Error::Budget)?;
+    let available: Vec<_> = domains.collect();
     let mut positions = BTreeMap::new();
-    for (slot, (id, sort, domain)) in available.iter().enumerate() {
-        if domain.is_none() && *sort == Sort::Type {
-            return Err(Error::Scope(TypeError::MissingArgument(slot)));
-        }
+    for (slot, (id, _, _)) in available.iter().enumerate() {
         if positions.insert(*id, slot).is_some() {
             return Err(Error::DuplicateBinding(*id));
         }
     }
-    let mut needed = BTreeSet::new();
+    let frames = [available
+        .iter()
+        .map(|(_, sort, _)| *sort)
+        .collect::<Vec<_>>()];
+    let body_slots = crate::copy_budget::expression_capture_slots(&body, &frames, fuel)?;
+    let mut needed = body_slots.clone();
     for id in crate::free_bindings::collect(&body, fuel)? {
         needed.insert(*positions.get(&id).ok_or(Error::MissingCapture(id))?);
     }
-    let frames = vec![
-        available
-            .iter()
-            .map(|(_, sort, _)| *sort)
-            .collect::<Vec<_>>(),
-    ];
-    // Inspect every type-bearing operand, including capture environments and
-    // Type values that mention an input without a corresponding Local read.
-    body.rewrite_types(&mut |ty| {
-        bounded(ty, fuel)?;
-        ty.check_scope(&frames).map_err(Error::Scope)?;
-        needed.extend(
-            ty.substitution_parameters()
-                .map_err(Error::Scope)?
-                .into_keys(),
-        );
-        Ok::<_, Error>(ty.clone())
-    })?;
     let mut work = needed.iter().copied().collect::<Vec<_>>();
-    let mut inspected = BTreeSet::new();
     while let Some(slot) = work.pop() {
-        if !inspected.insert(slot) {
-            continue;
-        }
         let (_, sort, domain) = available
             .get(slot)
             .ok_or(Error::Scope(TypeError::MissingArgument(slot)))?;
@@ -840,13 +842,7 @@ fn capture_entry_domains(
         let domain = domain
             .as_ref()
             .ok_or(Error::Scope(TypeError::MissingArgument(slot)))?;
-        bounded(domain, fuel)?;
-        domain.check_scope(&frames).map_err(Error::Scope)?;
-        for dependency in domain
-            .substitution_parameters()
-            .map_err(Error::Scope)?
-            .into_keys()
-        {
+        for dependency in crate::copy_budget::domain_capture_slots(domain, &frames, fuel)? {
             if needed.insert(dependency) {
                 work.push(dependency);
             }
@@ -855,16 +851,21 @@ fn capture_entry_domains(
     let slots = needed.into_iter().collect::<Vec<_>>();
     let mut mapping = vec![None; available.len()];
     for (new, old) in slots.iter().copied().enumerate() {
-        mapping[old] = Some(Term::Bound {
-            depth: 0,
-            index: new,
-            sort: available[old].1,
-        });
+        mapping[old] = Some((new, available[old].1));
     }
-    body.rewrite_types(&mut |ty| {
-        bounded(ty, fuel)?;
-        ty.rebind_scope_partial(&mapping).map_err(Error::Scope)
-    })?;
+    if slots
+        .iter()
+        .enumerate()
+        .any(|(new, old)| new != *old && body_slots.contains(old))
+    {
+        // Renumbering bound references preserves every expression and pattern
+        // category. No value has been supplied by frame compaction.
+        let mut steps = *fuel as u64;
+        let charged = crate::copy_budget::charge_type_rewrite(&body, &mut steps);
+        *fuel = steps as usize;
+        charged?;
+        body.relocate_slots(&mapping).map_err(Error::Scope)?;
+    }
     let inputs = slots
         .iter()
         .map(|slot| {
@@ -876,13 +877,16 @@ fn capture_entry_domains(
                     ty: domain
                         .as_ref()
                         .ok_or(Error::Scope(TypeError::MissingArgument(*slot)))?
-                        .rebind_scope_partial(&mapping)
+                        .relocate_slots(&mapping)
                         .map_err(Error::Scope)?,
                 },
             ))
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    let function = expression_entry(declaration, name, body, inputs, fuel)?;
+    // The capture closure contains every free local, including reads from
+    // operand preparation. Frame relocation cannot introduce local identities.
+    let function = entry_with_bound_locals(declaration, name, body, inputs, fuel)?;
+    bounded(&function.signature, fuel)?;
     function.signature.check_scope(&[]).map_err(Error::Scope)?;
     Ok(CapturedEntry {
         function,

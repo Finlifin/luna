@@ -854,9 +854,6 @@ impl Expansion<'_> {
 }
 impl n::Rewriter for Expansion<'_> {
     type Error = Error;
-    fn ty(&mut self, ty: &Term) -> Result<Term, Error> {
-        Ok(ty.clone())
-    }
     fn expression(&mut self, expr: &mut n::Expr) -> Result<bool, Error> {
         *self.fuel = self
             .fuel

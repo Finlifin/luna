@@ -414,8 +414,73 @@ fn charge_node_observed(
     steps: &mut u64,
     rewrite: bool,
     replacements: Option<&std::collections::BTreeMap<crate::DeclarationId, &Term>>,
-    observe: &mut impl FnMut(&Term, u32),
+    observe: &mut dyn FnMut(&Term, u32),
 ) -> Result<(), CopyBudgetExhausted> {
+    let empty = std::collections::BTreeMap::new();
+    walk_node_terms(root, steps, rewrite, |ty, depth, fuel| {
+        crate::type_computations::visit_expanded_term_scoped_for_copy(
+            ty,
+            fuel,
+            depth,
+            replacements.unwrap_or(&empty),
+            observe,
+        )
+    })
+}
+
+/// Inspect every stored term in its original frame before projecting the
+/// demanded slots. The complete term is bounded before recursive scope checks.
+fn capture_slots(
+    root: Node<'_>,
+    frames: &[Vec<crate::Sort>],
+    fuel: &mut usize,
+) -> Result<std::collections::BTreeSet<usize>, crate::type_computations::Error> {
+    use crate::type_computations::Error;
+    let mut slots = std::collections::BTreeSet::new();
+    let mut steps = *fuel as u64;
+    let empty = std::collections::BTreeMap::new();
+    let result = walk_node_terms(root, &mut steps, true, |ty, depth, remaining| {
+        crate::type_computations::visit_expanded_term_scoped_for_copy(
+            ty,
+            remaining,
+            depth,
+            &empty,
+            &mut |term, nesting| {
+                if let Term::Bound { depth, index, .. } = term
+                    && *depth == nesting
+                {
+                    slots.insert(*index);
+                }
+            },
+        )?;
+        ty.check_scope(frames).map_err(Error::Scope)
+    });
+    *fuel = steps as usize;
+    result.map(|()| slots)
+}
+
+pub(crate) fn expression_capture_slots(
+    value: &n::Expr,
+    frames: &[Vec<crate::Sort>],
+    fuel: &mut usize,
+) -> Result<std::collections::BTreeSet<usize>, crate::type_computations::Error> {
+    capture_slots(Node::Expr(value), frames, fuel)
+}
+
+pub(crate) fn domain_capture_slots(
+    value: &Term,
+    frames: &[Vec<crate::Sort>],
+    fuel: &mut usize,
+) -> Result<std::collections::BTreeSet<usize>, crate::type_computations::Error> {
+    capture_slots(Node::Type(value), frames, fuel)
+}
+
+fn walk_node_terms<E: From<CopyBudgetExhausted>>(
+    root: Node<'_>,
+    steps: &mut u64,
+    rewrite: bool,
+    mut term: impl FnMut(&Term, usize, &mut usize) -> Result<(), E>,
+) -> Result<(), E> {
     fn charge_width(steps: &mut u64, width: usize) -> Result<(), CopyBudgetExhausted> {
         *steps = steps
             .checked_sub(width as u64)
@@ -437,24 +502,17 @@ fn charge_node_observed(
     let mut work = vec![(root, 0usize)];
     while let Some((node, depth)) = work.pop() {
         if depth >= MAX_COPY_DEPTH {
-            return Err(CopyBudgetExhausted::Depth);
+            return Err(CopyBudgetExhausted::Depth.into());
         }
         if *steps == 0 {
-            return Err(CopyBudgetExhausted::Steps);
+            return Err(CopyBudgetExhausted::Steps.into());
         }
         if let Node::Type(ty) = node {
-            let mut fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
-            let before = fuel;
-            let empty = std::collections::BTreeMap::new();
-            let result = crate::type_computations::visit_expanded_term_scoped_for_copy(
-                ty,
-                &mut fuel,
-                (MAX_COPY_DEPTH - depth).min(128),
-                replacements.unwrap_or(&empty),
-                observe,
-            );
+            let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let inspected = term(ty, (MAX_COPY_DEPTH - depth).min(128), &mut fuel);
             *steps -= (before - fuel) as u64;
-            result?;
+            inspected?;
             continue;
         }
         *steps -= 1;
@@ -1159,7 +1217,7 @@ fn charge_node_observed(
             .checked_sub(size as u64)
             .ok_or_else(|| CopyBudgetExhausted::Steps)?;
         if work.len() as u64 > *steps {
-            return Err(CopyBudgetExhausted::Steps);
+            return Err(CopyBudgetExhausted::Steps.into());
         }
     }
     Ok(())

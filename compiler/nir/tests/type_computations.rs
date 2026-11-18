@@ -617,7 +617,7 @@ fn compact_entries_keep_transitive_domains_and_nested_binder_identity() {
         panic!("type value")
     };
     let expected = nested
-        .rebind_scope_partial(&[None, Some(slot(0, Sort::Type)), None])
+        .relocate_slots(&[None, Some((0, Sort::Type)), None])
         .unwrap();
     assert_eq!(actual, expected);
     let Term::Function { result, .. } = actual else {
@@ -641,7 +641,157 @@ fn compact_entries_keep_transitive_domains_and_nested_binder_identity() {
             }
         ])]
     );
-    assert!(nested.rebind_scope_partial(&[None, None, None]).is_err());
+    assert!(nested.relocate_slots(&[None, None, None]).is_err());
+}
+
+#[test]
+fn capture_projects_shared_code_only_when_a_referenced_slot_moves() {
+    use nir::program::{Expr, ExprKind as K, LocalId, MatchArm, Pattern, SourceRange};
+    use nir::type_computations::capture_entry;
+    use std::sync::Arc;
+
+    let domain = Term::error_result(
+        vec![Term::Primitive(Primitive::U8)],
+        Term::Primitive(Primitive::Bool),
+    );
+    let ty = Term::Primitive(Primitive::Type);
+    let source = SourceRange { start: 17, end: 23 };
+    let param = LocalId { owner: 2, index: 0 };
+    let observed = LocalId { owner: 2, index: 1 };
+    let local = |id| Expr {
+        source,
+        ty: domain.clone(),
+        kind: K::Local(id),
+    };
+    let pattern = Pattern::Observe {
+        binding: observed,
+        inner: Box::new(Pattern::Then {
+            first: Box::new(Pattern::Wild),
+            value: Box::new(local(observed)),
+            next: Box::new(Pattern::Wild),
+        }),
+    };
+    let type_input = (
+        LocalId { owner: 1, index: 4 },
+        nir::Parameter {
+            sort: Sort::Type,
+            ty: ty.clone(),
+        },
+    );
+    let unused = (
+        LocalId { owner: 1, index: 3 },
+        nir::Parameter {
+            sort: Sort::Runtime,
+            ty: domain.clone(),
+        },
+    );
+    for (type_slot, inputs) in [
+        (0, [type_input.clone(), unused.clone()]),
+        (1, [unused, type_input]),
+    ] {
+        let body = Arc::new(Expr {
+            source,
+            ty: ty.clone(),
+            kind: K::Match {
+                value: Box::new(local(param)),
+                arms: vec![MatchArm {
+                    pattern: pattern.clone(),
+                    guard: None,
+                    body: Expr {
+                        source,
+                        ty: ty.clone(),
+                        kind: K::TypeValue(slot(type_slot, Sort::Type)),
+                    },
+                }],
+            },
+        });
+        let root = Expr {
+            source,
+            ty: Term::ComptimeFunction(Box::new(Term::Function {
+                parameters: vec![nir::Parameter {
+                    sort: Sort::Runtime,
+                    ty: domain.clone(),
+                }],
+                result: Box::new(ty.clone()),
+            })),
+            kind: K::Closure {
+                parameters: vec![param],
+                captures: vec![],
+                body: body.clone(),
+            },
+        };
+        let captured =
+            capture_entry(target(), "callback".into(), root, &inputs, &mut 1000).unwrap();
+        assert_eq!(captured.slots, [type_slot]);
+        let K::Closure {
+            body: projected, ..
+        } = captured.function.body.kind
+        else {
+            panic!("closure")
+        };
+        assert_eq!(Arc::ptr_eq(&body, &projected), type_slot == 0);
+        for (code, index) in [(&body, type_slot), (&projected, 0)] {
+            let K::Match { arms, .. } = &code.kind else {
+                panic!("match")
+            };
+            assert_eq!(arms[0].pattern, pattern);
+            assert_eq!(arms[0].body.kind, K::TypeValue(slot(index, Sort::Type)));
+        }
+    }
+}
+
+#[test]
+fn frame_relocation_preserves_physical_error_tags_in_both_directions() {
+    let char_type = Term::Primitive(Primitive::Char);
+    let label = Term::NormalForm {
+        head: target(),
+        arguments: vec![slot(2, Sort::Type)],
+        sort: Sort::Type,
+    };
+    let subject = Term::ErrorValue {
+        ty: Box::new(Term::ErrorResult {
+            errors: vec![char_type.clone(), label.clone()],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        }),
+        label: Some(Box::new(label)),
+        value: Box::new(slot(3, Sort::ComptimeValue)),
+    };
+    let mapping = [
+        None,
+        None,
+        Some((0, Sort::Type)),
+        Some((1, Sort::ComptimeValue)),
+    ];
+    let projected = subject.relocate_slots(&mapping).unwrap();
+    let Term::ErrorValue {
+        ty,
+        label: Some(label),
+        value,
+    } = &projected
+    else {
+        panic!("error")
+    };
+    let Term::ErrorResult { errors, .. } = &**ty else {
+        panic!("row")
+    };
+    assert_eq!(errors, &[char_type, (**label).clone()]);
+    assert_eq!(**value, slot(1, Sort::ComptimeValue));
+    assert_eq!(
+        projected
+            .relocate_slots(&[Some((2, Sort::Type)), Some((3, Sort::ComptimeValue))])
+            .unwrap(),
+        subject
+    );
+    assert!(
+        subject
+            .relocate_slots(&[
+                None,
+                None,
+                Some((0, Sort::ComptimeValue)),
+                Some((1, Sort::ComptimeValue))
+            ])
+            .is_err()
+    );
 }
 
 #[test]
@@ -871,8 +1021,32 @@ fn sparse_capture_keeps_unknown_runtime_positions_without_inventing_domains() {
         )
         .is_err()
     );
+    // An unresolved Type slot may also keep its source position. Demand for
+    // its domain can come solely from another captured parameter's domain.
+    let mut missing_type = available.clone();
+    missing_type[1].2 = None;
+    let type_use = Expr {
+        ty: Term::Primitive(Primitive::Type),
+        kind: K::TypeValue(Term::NormalForm {
+            head: target(),
+            arguments: vec![slot(3, Sort::ComptimeValue)],
+            sort: Sort::Type,
+        }),
+        ..body.clone()
+    };
+    assert!(matches!(
+        capture_sparse_entry(
+            target(),
+            "dependent".into(),
+            type_use,
+            &missing_type,
+            &mut 1000
+        ),
+        Err(Error::Scope(nir::TypeError::MissingArgument(1)))
+    ));
     // A pending staged domain can retain its position, but may not enter the
     // executable capture until its domain is known.
+    missing_type[3].2 = None;
     let independent = Expr {
         ty: Term::Primitive(Primitive::Bool),
         kind: K::Literal(nir::program::Literal::Bool(true)),
@@ -882,12 +1056,12 @@ fn sparse_capture_keeps_unknown_runtime_positions_without_inventing_domains() {
         target(),
         "unused-staged".into(),
         independent,
-        &missing,
+        &missing_type,
         &mut 1000,
     )
     .unwrap();
     assert!(captured.slots.is_empty());
-    assert_eq!(captured.source_scope().len(), missing.len());
+    assert_eq!(captured.source_scope()[1], Sort::Type);
 }
 
 #[test]

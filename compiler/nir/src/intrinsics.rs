@@ -764,17 +764,17 @@ impl Checked {
     /// Concrete evidence is immutable; only a pending type may be substituted.
     pub(crate) fn rewrite_pending<E>(
         &mut self,
-        transform: &mut impl FnMut(&Term) -> Result<Term, E>,
+        specialize: bool,
+        transform: &mut impl FnMut(&mut Term) -> Result<(), E>,
     ) -> Result<(), E> {
-        if let Signature::Pending(ty) = &self.signature {
-            self.signature = match transform(ty)? {
-                Term::Primitive(primitive)
-                    if self.operation.scalar_types().contains(&primitive) =>
-                {
-                    Signature::Concrete(primitive)
-                }
-                ty => Signature::Pending(ty),
-            };
+        if let Signature::Pending(ty) = &mut self.signature {
+            transform(ty)?;
+            if specialize
+                && let Term::Primitive(primitive) = ty
+                && self.operation.scalar_types().contains(primitive)
+            {
+                self.signature = Signature::Concrete(*primitive);
+            }
         }
         Ok(())
     }

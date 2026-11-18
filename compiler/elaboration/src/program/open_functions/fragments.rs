@@ -100,11 +100,7 @@ impl Checker<'_, '_> {
                     }),
             };
             if let Some(ty) = domain {
-                mapping[slot] = Some(Term::Bound {
-                    depth: 0,
-                    index: parameters.len(),
-                    sort: *sort,
-                });
+                mapping[slot] = Some((parameters.len(), *sort));
                 parameters.push(Parameter { sort: *sort, ty });
                 bindings.push(local(parameter.hir_id));
             }
@@ -135,7 +131,7 @@ impl Checker<'_, '_> {
         for parameter in &mut parameters {
             parameter.ty = parameter
                 .ty
-                .rebind_scope_partial(&mapping)
+                .relocate_slots(&mapping)
                 .map_err(|failure| error(span, failure.to_string()))?;
         }
         constants::charge_copy(value, &mut self.required_steps, span)?;
@@ -152,9 +148,17 @@ impl Checker<'_, '_> {
                 };
             }
         }
-        value
-            .rewrite_types(&mut |ty| ty.rebind_scope_partial(&mapping))
-            .map_err(|failure| error(span, failure.to_string()))?;
+        let references =
+            nir::copy_budget::expression_substitution_parameters(&value, &mut self.required_steps)
+                .map_err(|failure| error(span, failure.to_string()))?;
+        if references
+            .into_iter()
+            .any(|(slot, sort)| mapping.get(slot).copied().flatten() != Some((slot, sort)))
+        {
+            value
+                .relocate_slots(&mapping)
+                .map_err(|failure| error(span, failure.to_string()))?;
+        }
         let requirements = self
             .definition_requirements(owner)
             .iter()
@@ -163,7 +167,7 @@ impl Checker<'_, '_> {
                 required::map_requirement(
                     requirement,
                     &mut |ty| {
-                        ty.rebind_scope_partial(&mapping)
+                        ty.relocate_slots(&mapping)
                             .map_err(|failure| error(span, failure.to_string()))
                     },
                     span,
@@ -181,13 +185,13 @@ impl Checker<'_, '_> {
                     interface: requirement.interface,
                     subject: requirement
                         .subject
-                        .rebind_scope_partial(&mapping)
+                        .relocate_slots(&mapping)
                         .map_err(|failure| error(span, failure.to_string()))?,
                     interface_arguments: requirement
                         .interface_arguments
                         .iter()
                         .map(|ty| {
-                            ty.rebind_scope_partial(&mapping)
+                            ty.relocate_slots(&mapping)
                                 .map_err(|failure| error(span, failure.to_string()))
                         })
                         .collect::<Result<Vec<_>, _>>()?,

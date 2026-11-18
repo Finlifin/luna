@@ -1,6 +1,120 @@
 //! Immediate structural edges of type and immutable value terms.
 use crate::Term;
 
+// Both borrow modes expose the same structural edges in the same order.
+macro_rules! visit_children {
+    ($term:expr, $visit:ident, $method_terms:ident $(, $borrow:ident)?) => {{
+        match $term {
+            Self::ErrorResult { errors, result } => {
+                $visit(result)?;
+                for error in errors {
+                    $visit(error)?;
+                }
+            }
+            Self::Computation { effects, result } => {
+                $visit(result)?;
+                for operation in effects {
+                    for argument in & $($borrow)? operation.arguments {
+                        $visit(argument)?;
+                    }
+                }
+            }
+            Self::AssociatedType {
+                arguments, subject, ..
+            } => {
+                $visit(subject)?;
+                for argument in arguments {
+                    $visit(argument)?;
+                }
+            }
+            Self::MethodValue(method) => {
+                for argument in method.$method_terms() {
+                    $visit(argument)?;
+                }
+            }
+            Self::Nominal { arguments, .. }
+            | Self::NormalForm { arguments, .. }
+            | Self::FunctionValue { arguments, .. }
+            | Self::ClosureSnapshot { arguments, .. }
+            | Self::ClosureContextValue(arguments)
+            | Self::Tuple(arguments)
+            | Self::TupleValue(arguments) => {
+                for argument in arguments {
+                    $visit(argument)?;
+                }
+            }
+            Self::ContextualClosure { context, signature } => {
+                $visit(context)?;
+                $visit(signature)?;
+            }
+            Self::Closure {
+                environment,
+                signature,
+            } => {
+                for capture in environment {
+                    $visit(capture)?;
+                }
+                $visit(signature)?;
+            }
+            Self::Record(fields) | Self::RecordValue(fields) => {
+                for (_, field) in fields {
+                    $visit(field)?;
+                }
+            }
+            Self::ListConcat { ty, parts: fields } | Self::NominalValue { ty, fields, .. } => {
+                $visit(ty)?;
+                for field in fields {
+                    $visit(field)?;
+                }
+            }
+            Self::OptionalValue { ty, value } => {
+                $visit(ty)?;
+                if let Some(value) = value {
+                    $visit(value)?;
+                }
+            }
+            Self::ErrorValue { ty, label, value } => {
+                $visit(ty)?;
+                if let Some(label) = label {
+                    $visit(label)?;
+                }
+                $visit(value)?;
+            }
+            Self::Optional(inner)
+            | Self::Pointer(inner)
+            | Self::ComptimeFunction(inner)
+            | Self::NormalFormFunction(inner, _)
+            | Self::UnsafeFunction(inner) => $visit(inner)?,
+            Self::Function { parameters, result } => {
+                for parameter in parameters {
+                    $visit(& $($borrow)? parameter.ty)?;
+                }
+                $visit(result)?;
+            }
+            Self::Primitive(_)
+            | Self::ClosureContextType
+            | Self::Hole { .. }
+            | Self::Bound { .. }
+            | Self::Rigid { .. }
+            | Self::Runtime(_)
+            | Self::Unit
+            | Self::Bool(_)
+            | Self::Char(_)
+            | Self::BitVec(_)
+            | Self::Float16(_)
+            | Self::BFloat16(_)
+            | Self::Float32(_)
+            | Self::Float64(_)
+            | Self::String(_)
+            | Self::Symbol(_)
+            | Self::Integer(_)
+            | Self::Float(_)
+            | Self::Value { .. } => {}
+        }
+        Ok(())
+    }};
+}
+
 impl Term {
     /// Borrow stored terms for unordered dependency queries. Declaration heads
     /// are identities; their supplied arguments are structural children.
@@ -36,113 +150,13 @@ impl Term {
         &'a self,
         mut visit: impl FnMut(&'a Term) -> Result<(), E>,
     ) -> Result<(), E> {
-        match self {
-            Self::ErrorResult { errors, result } => {
-                visit(result)?;
-                for error in errors {
-                    visit(error)?;
-                }
-            }
-            Self::Computation { effects, result } => {
-                visit(result)?;
-                for operation in effects {
-                    for argument in &operation.arguments {
-                        visit(argument)?;
-                    }
-                }
-            }
-            Self::AssociatedType {
-                arguments, subject, ..
-            } => {
-                visit(subject)?;
-                for argument in arguments {
-                    visit(argument)?;
-                }
-            }
-            Self::MethodValue(method) => {
-                for argument in method.terms() {
-                    visit(argument)?;
-                }
-            }
-            Self::Nominal { arguments, .. }
-            | Self::NormalForm { arguments, .. }
-            | Self::FunctionValue { arguments, .. }
-            | Self::ClosureSnapshot { arguments, .. }
-            | Self::ClosureContextValue(arguments)
-            | Self::Tuple(arguments)
-            | Self::TupleValue(arguments) => {
-                for argument in arguments {
-                    visit(argument)?;
-                }
-            }
-            Self::ContextualClosure { context, signature } => {
-                visit(context)?;
-                visit(signature)?;
-            }
-            Self::Closure {
-                environment,
-                signature,
-            } => {
-                for capture in environment {
-                    visit(capture)?;
-                }
-                visit(signature)?;
-            }
-            Self::Record(fields) | Self::RecordValue(fields) => {
-                for (_, field) in fields {
-                    visit(field)?;
-                }
-            }
-            Self::ListConcat { ty, parts: fields } | Self::NominalValue { ty, fields, .. } => {
-                visit(ty)?;
-                for field in fields {
-                    visit(field)?;
-                }
-            }
-            Self::OptionalValue { ty, value } => {
-                visit(ty)?;
-                if let Some(value) = value {
-                    visit(value)?;
-                }
-            }
-            Self::ErrorValue { ty, label, value } => {
-                visit(ty)?;
-                if let Some(label) = label {
-                    visit(label)?;
-                }
-                visit(value)?;
-            }
-            Self::Optional(inner)
-            | Self::Pointer(inner)
-            | Self::ComptimeFunction(inner)
-            | Self::NormalFormFunction(inner, _)
-            | Self::UnsafeFunction(inner) => visit(inner)?,
-            Self::Function { parameters, result } => {
-                for parameter in parameters {
-                    visit(&parameter.ty)?;
-                }
-                visit(result)?;
-            }
-            Self::Primitive(_)
-            | Self::ClosureContextType
-            | Self::Hole { .. }
-            | Self::Bound { .. }
-            | Self::Rigid { .. }
-            | Self::Runtime(_)
-            | Self::Unit
-            | Self::Bool(_)
-            | Self::Char(_)
-            | Self::BitVec(_)
-            | Self::Float16(_)
-            | Self::BFloat16(_)
-            | Self::Float32(_)
-            | Self::Float64(_)
-            | Self::String(_)
-            | Self::Symbol(_)
-            | Self::Integer(_)
-            | Self::Float(_)
-            | Self::Value { .. } => {}
-        }
-        Ok(())
+        visit_children!(self, visit, terms)
+    }
+
+    pub(crate) fn visit_children_mut<'a, E>(
+        &'a mut self,
+        mut visit: impl FnMut(&'a mut Term) -> Result<(), E>,
+    ) -> Result<(), E> {
+        visit_children!(self, visit, terms_mut, mut)
     }
 }

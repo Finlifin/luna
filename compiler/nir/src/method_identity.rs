@@ -30,6 +30,12 @@ impl TraitMethodIdentity {
             .chain(&self.interface.arguments)
             .chain(&self.method_arguments)
     }
+
+    pub(crate) fn terms_mut(&mut self) -> impl Iterator<Item = &mut Term> {
+        std::iter::once(&mut self.subject)
+            .chain(&mut self.interface.arguments)
+            .chain(&mut self.method_arguments)
+    }
 }
 
 /// Borrowed callable identity for declaration-world signature queries.

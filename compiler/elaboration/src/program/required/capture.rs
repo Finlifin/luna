@@ -1,6 +1,7 @@
 //! Capture the source telescope before looking up executable dependencies.
 //! Bound types and parameter domains may select slots without a local read.
 use super::*;
+use std::borrow::Cow;
 
 pub(super) struct Entry<'v> {
     pub(super) function: n::Function,
@@ -16,24 +17,22 @@ enum Supply<'v> {
 impl<'v> Entry<'v> {
     fn capture(
         root: n::Expr,
-        mut slots: Vec<(n::LocalId, Sort, Option<Term>)>,
+        mut slots: Vec<(n::LocalId, Sort, Option<Cow<'_, Term>>)>,
         mut supplies: BTreeMap<n::LocalId, Supply<'v>>,
-        steps: &mut u64,
+        fuel: &mut usize,
     ) -> Result<Self, nir::type_computations::Error> {
-        let before = usize::try_from(*steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let captured = nir::type_computations::capture_sparse_entry(
+        let captured = nir::type_computations::capture_entry_domains(
             DeclarationId {
                 package: u64::MAX,
                 local: u32::MAX,
             },
             "<required-comptime>".into(),
             root,
-            &slots,
-            &mut fuel,
-        );
-        *steps -= (before - fuel) as u64;
-        let captured = captured?;
+            slots
+                .iter()
+                .map(|(id, sort, domain)| (*id, *sort, domain.as_deref())),
+            fuel,
+        )?;
         let mut inputs = Vec::with_capacity(captured.slots.len());
         let mut live_values = Vec::new();
         for index in captured.slots {
@@ -46,11 +45,11 @@ impl<'v> Entry<'v> {
                 }
                 None => None,
             };
-            inputs.push((
-                *binding,
-                domain.take().expect("captured domain checked"),
-                frozen,
-            ));
+            let domain = match domain.take().expect("captured domain checked") {
+                Cow::Owned(ty) => ty,
+                Cow::Borrowed(ty) => nir::copy_budget::clone_term(ty, fuel)?,
+            };
+            inputs.push((*binding, domain, frozen));
         }
         Ok(Self {
             function: captured.function,
@@ -121,11 +120,7 @@ impl Checker<'_, '_> {
                     *source_sort
                 };
                 signature_slots.insert(binding, (slots.len(), staged));
-                let domain = domain
-                    .as_ref()
-                    .map(|ty| inputs::copy(ty, &mut self.required_steps, span))
-                    .transpose()?;
-                slots.push((binding, sort, domain));
+                slots.push((binding, sort, domain.as_ref().map(Cow::Borrowed)));
             }
         }
 
@@ -135,9 +130,9 @@ impl Checker<'_, '_> {
                 if staged {
                     slots[index].1 = staged_sort(&ty);
                 }
-                slots[index].2 = Some(ty);
+                slots[index].2 = Some(Cow::Owned(ty));
             } else {
-                slots.push((binding, staged_sort(&ty), Some(ty)));
+                slots.push((binding, staged_sort(&ty), Some(Cow::Owned(ty))));
             }
             supplies.insert(binding, Supply::Frozen(value));
         }
@@ -149,18 +144,18 @@ impl Checker<'_, '_> {
                 if let Some(expected) = &slots[index].2 {
                     self.require_expression(ty, expected, span)?;
                 }
-                slots[index].2 = Some(inputs::copy(ty, &mut self.required_steps, span)?);
+                slots[index].2 = Some(Cow::Borrowed(ty));
             } else {
-                slots.push((
-                    *binding,
-                    staged_sort(ty),
-                    Some(inputs::copy(ty, &mut self.required_steps, span)?),
-                ));
+                slots.push((*binding, staged_sort(ty), Some(Cow::Borrowed(ty))));
             }
             supplies.insert(*binding, Supply::Live(value));
         }
 
-        Entry::capture(root, slots, supplies, &mut self.required_steps).map_err(|failure| {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let capture = Entry::capture(root, slots, supplies, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        capture.map_err(|failure| {
             use nir::type_computations::Error::MissingCapture;
             let message = match failure {
                 MissingCapture(binding) if self.required_runtime_parameter(binding) => {
@@ -177,6 +172,63 @@ impl Checker<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_cost_depends_on_the_selected_domains() {
+        let boolean = p(P::Bool);
+        let wide = Term::Tuple(vec![boolean.clone(); 2048]);
+        let id = n::LocalId { owner: 1, index: 0 };
+        let root = n::Expr {
+            source: source(Span::default()),
+            ty: boolean.clone(),
+            kind: K::Literal(n::Literal::Bool(true)),
+        };
+        let capture = |root, domain, fuel: &mut usize| {
+            Entry::capture(
+                root,
+                vec![(id, Sort::ComptimeValue, Some(Cow::Borrowed(domain)))],
+                BTreeMap::new(),
+                fuel,
+            )
+        };
+        let mut narrow_fuel = 200;
+        let mut wide_fuel = narrow_fuel;
+        assert!(
+            capture(root.clone(), &boolean, &mut narrow_fuel)
+                .unwrap()
+                .inputs
+                .is_empty()
+        );
+        assert!(
+            capture(root.clone(), &wide, &mut wide_fuel)
+                .unwrap()
+                .inputs
+                .is_empty()
+        );
+        assert_eq!(wide_fuel, narrow_fuel);
+        let read = n::Expr {
+            ty: p(P::Type),
+            kind: K::TypeValue(Term::NormalForm {
+                head: DeclarationId {
+                    package: 1,
+                    local: 18,
+                },
+                sort: Sort::Type,
+                arguments: vec![Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: Sort::ComptimeValue,
+                }],
+            }),
+            ..root
+        };
+        assert!(matches!(
+            capture(read.clone(), &wide, &mut 200),
+            Err(nir::type_computations::Error::Budget)
+        ));
+        let entry = capture(read, &wide, &mut 100_000).unwrap();
+        assert_eq!(entry.inputs, [(id, wide, None)]);
+    }
 
     #[test]
     fn domain_only_captures_contribute_live_and_frozen_code_dependencies() {
@@ -212,9 +264,13 @@ mod tests {
         };
         let slots = vec![
             (binding(0), Sort::Runtime, None),
-            (binding(1), Sort::ComptimeValue, Some(choose.clone())),
-            (binding(2), Sort::ComptimeValue, Some(domain)),
-            (binding(3), Sort::ComptimeValue, Some(choose)),
+            (
+                binding(1),
+                Sort::ComptimeValue,
+                Some(Cow::Owned(choose.clone())),
+            ),
+            (binding(2), Sort::ComptimeValue, Some(Cow::Owned(domain))),
+            (binding(3), Sort::ComptimeValue, Some(Cow::Owned(choose))),
         ];
         assert!(
             nir::free_bindings::collect(&root, &mut 1000)

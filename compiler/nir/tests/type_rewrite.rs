@@ -307,9 +307,10 @@ fn lexical_rewriting_keeps_order_pruning_and_failure_on_an_ordinary_stack() {
                     }
                     Ok(true)
                 }
-                fn ty(&mut self, _: &Term) -> Result<Term, Self::Error> {
+                fn ty(&mut self, ty: &mut Term) -> Result<(), Self::Error> {
                     self.types += 1;
-                    Ok(Term::Primitive(Primitive::Bool))
+                    *ty = Term::Primitive(Primitive::Bool);
+                    Ok(())
                 }
             }
             let node = |index, kind| Expr {
@@ -388,8 +389,9 @@ fn work_stack_preserves_preorder_pruning_and_failure_boundaries() {
             }
             Ok(index != 5)
         }
-        fn ty(&mut self, _: &Term) -> Result<Term, u32> {
-            Ok(Term::Primitive(Primitive::Bool))
+        fn ty(&mut self, ty: &mut Term) -> Result<(), u32> {
+            *ty = Term::Primitive(Primitive::Bool);
+            Ok(())
         }
     }
     let mut rewrite = Rewrite {
@@ -430,9 +432,6 @@ fn conditional_call_and_aggregate_children_keep_source_order() {
         fn expression(&mut self, value: &mut Expr) -> Result<bool, ()> {
             self.0.push(value.source.start);
             Ok(true)
-        }
-        fn ty(&mut self, ty: &Term) -> Result<Term, ()> {
-            Ok(ty.clone())
         }
     }
     let mut tree = node(
@@ -498,8 +497,9 @@ fn capture_failure_does_not_rewrite_later_captures_or_clone_shared_body() {
                 Ok(true)
             }
         }
-        fn ty(&mut self, _: &Term) -> Result<Term, ()> {
-            Ok(Term::Primitive(Primitive::Bool))
+        fn ty(&mut self, ty: &mut Term) -> Result<(), ()> {
+            *ty = Term::Primitive(Primitive::Bool);
+            Ok(())
         }
     }
     assert_eq!(value.rewrite_with(&mut Stop), Err(()));
@@ -688,11 +688,11 @@ fn metadata_selector_binding_rewrite_obeys_entry_failure_order() {
     }
     impl Rewriter for Rewrite {
         type Error = ();
-        fn ty(&mut self, ty: &Term) -> Result<Term, ()> {
+        fn ty(&mut self, ty: &mut Term) -> Result<(), ()> {
             if self.fail && *ty == rigid() {
                 return Err(());
             }
-            Ok(ty.clone())
+            Ok(())
         }
         fn expression(&mut self, expression: &mut Expr) -> Result<bool, ()> {
             if let K::Local(binding) = &mut expression.kind {
@@ -800,4 +800,31 @@ fn value_substitution_preserves_residual_scope_until_inputs_are_bound() {
         .unwrap();
     assert_eq!(value.kind, K::ComptimeValue(Term::Bool(true)));
     nir::completed_values::validate(&value, &mut 100).unwrap();
+}
+
+#[test]
+fn slot_relocation_updates_owned_payloads_in_place() {
+    let mut body = expr(K::TypeValue(Term::Tuple(vec![Term::Bound {
+        depth: 0,
+        index: 2,
+        sort: Sort::Type,
+    }])));
+    let K::TypeValue(Term::Tuple(fields)) = &body.kind else {
+        unreachable!()
+    };
+    let buffer = fields.as_ptr();
+    body.relocate_slots(&[None, None, Some((0, Sort::Type))])
+        .unwrap();
+    let K::TypeValue(Term::Tuple(fields)) = &body.kind else {
+        panic!("type payload")
+    };
+    assert_eq!(fields.as_ptr(), buffer);
+    assert_eq!(
+        fields[0],
+        Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type
+        }
+    );
 }

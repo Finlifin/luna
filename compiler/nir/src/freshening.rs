@@ -57,7 +57,7 @@ impl Renamer<'_> {
 }
 impl n::Rewriter for Renamer<'_> {
     type Error = String;
-    fn ty(&mut self, ty: &Term) -> Result<Term, String> {
+    fn ty(&mut self, ty: &mut Term) -> Result<(), String> {
         let runtime_slots = ty
             .substitution_parameters()
             .map_err(|failure| failure.to_string())?
@@ -66,7 +66,7 @@ impl n::Rewriter for Renamer<'_> {
         if !ty.runtime_dependencies().is_empty() || runtime_slots {
             return Err("runtime-dependent quoted type substitution is not yet implemented".into());
         }
-        Ok(ty.clone())
+        Ok(())
     }
     fn expression(&mut self, expression: &mut n::Expr) -> Result<bool, String> {
         let original = expression.source;
@@ -109,10 +109,10 @@ impl n::Rewriter for Renamer<'_> {
                 captures,
                 body,
             } => {
-                expression.ty = self.ty(&expression.ty)?;
+                self.ty(&mut expression.ty)?;
                 let mut inner = BTreeMap::new();
                 for capture in captures {
-                    capture.ty = self.ty(&capture.ty)?;
+                    self.ty(&mut capture.ty)?;
                     let original = capture.binding;
                     if let Some(value) = &mut capture.value {
                         value.rewrite_with(self)?;
@@ -144,7 +144,7 @@ impl n::Rewriter for Renamer<'_> {
                 arguments,
                 parameter_bindings,
             } => {
-                expression.ty = self.ty(&expression.ty)?;
+                self.ty(&mut expression.ty)?;
                 callee.rewrite_with(self)?;
                 for argument in arguments {
                     if argument.is_default {

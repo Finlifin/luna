@@ -3580,6 +3580,14 @@ impl Expr {
     ) -> Result<(), E> {
         self.rewrite_with(&mut TypeRewriter(transform))
     }
+    /// Move annotations between equivalent binding frames. Only use for maps
+    /// that rename references; supplying values requires ordinary specialization.
+    pub fn relocate_slots(
+        &mut self,
+        slots: &[Option<(usize, crate::Sort)>],
+    ) -> Result<(), crate::TypeError> {
+        self.rewrite_with(&mut SlotRelocation(slots))
+    }
     /// Rewrite a private expression tree, including binding/control identities.
     /// Callbacks run before children. This deliberately shares the exhaustive
     /// traversal used by type substitution so new operations cannot be skipped.
@@ -3598,7 +3606,7 @@ impl Expr {
             let expr = match next {
                 Work::Expr(expr) => expr,
                 Work::Capture(capture) => {
-                    capture.ty = rewriter.ty(&capture.ty)?;
+                    rewriter.ty(&mut capture.ty)?;
                     if let Some(value) = &mut capture.value {
                         work.push(Work::Expr(value));
                     }
@@ -3610,13 +3618,13 @@ impl Expr {
             if !rewriter.expression(expr)? {
                 continue;
             }
-            expr.ty = rewriter.ty(&expr.ty)?;
+            rewriter.ty(&mut expr.ty)?;
             if let ExprKind::Intrinsic {
                 binding: Some(binding),
                 ..
             } = &mut expr.kind
             {
-                binding.rewrite_pending(&mut |ty| rewriter.ty(ty))?;
+                binding.rewrite_pending(R::SPECIALIZE, &mut |ty| rewriter.ty(ty))?;
             }
             if !matches!(
                 &expr.kind,
@@ -3711,7 +3719,7 @@ impl Expr {
                 } => {
                     for (_, _, value) in entries {
                         if let Some(value) = value {
-                            *value = rewriter.ty(value)?;
+                            rewriter.ty(value)?;
                         }
                     }
                     work.push(Work::Expr(selector));
@@ -3860,7 +3868,7 @@ impl Expr {
                 ExprKind::EffectComputation { effects, body } => {
                     for operation in effects {
                         for argument in &mut operation.arguments {
-                            *argument = rewriter.ty(argument)?;
+                            rewriter.ty(argument)?;
                         }
                     }
                     work.push(Work::Expr(body));
@@ -3872,9 +3880,9 @@ impl Expr {
                     ..
                 } => {
                     for argument in &mut operation.arguments {
-                        *argument = rewriter.ty(argument)?;
+                        rewriter.ty(argument)?;
                     }
-                    **signature = rewriter.ty(signature)?;
+                    rewriter.ty(signature)?;
                     work.extend(arguments.iter_mut().rev().map(Work::Expr));
                 }
                 _ => unreachable!("specialized nodes were dispatched before borrowing children"),
@@ -3907,14 +3915,14 @@ impl Expr {
                 computation.rewrite_with(rewriter)?;
                 for operation in outer {
                     for argument in &mut operation.arguments {
-                        *argument = rewriter.ty(argument)?;
+                        rewriter.ty(argument)?;
                     }
                 }
                 for handler in handlers {
                     for argument in &mut handler.operation.arguments {
-                        *argument = rewriter.ty(argument)?;
+                        rewriter.ty(argument)?;
                     }
-                    handler.signature = rewriter.ty(&handler.signature)?;
+                    rewriter.ty(&mut handler.signature)?;
                     for arm in &mut handler.arms {
                         arm.pattern.rewrite_with(rewriter)?;
                         if let Some(guard) = &mut arm.guard {
@@ -3930,7 +3938,7 @@ impl Expr {
             ExprKind::EffectComputation { effects, body } => {
                 for operation in effects {
                     for argument in &mut operation.arguments {
-                        *argument = rewriter.ty(argument)?;
+                        rewriter.ty(argument)?;
                     }
                 }
                 body.rewrite_with(rewriter)?;
@@ -3942,9 +3950,9 @@ impl Expr {
                 ..
             } => {
                 for argument in &mut operation.arguments {
-                    *argument = rewriter.ty(argument)?;
+                    rewriter.ty(argument)?;
                 }
-                **signature = rewriter.ty(signature)?;
+                rewriter.ty(signature)?;
                 for argument in arguments {
                     argument.rewrite_with(rewriter)?;
                 }
@@ -3952,9 +3960,9 @@ impl Expr {
             ExprKind::AssociatedValue {
                 interface, subject, ..
             } => {
-                *subject = rewriter.ty(subject)?;
+                rewriter.ty(subject)?;
                 for argument in &mut interface.arguments {
-                    *argument = rewriter.ty(argument)?;
+                    rewriter.ty(argument)?;
                 }
             }
             ExprKind::BuildMetadata {
@@ -3962,16 +3970,19 @@ impl Expr {
             } => {
                 for (_, _, value) in entries {
                     if let Some(value) = value {
-                        *value = rewriter.ty(value)?;
+                        rewriter.ty(value)?;
                     }
                 }
                 selector.rewrite_with(rewriter)?;
             }
             ExprKind::TypeValue(ty) => {
-                *ty = rewriter.ty(ty)?;
+                rewriter.ty(ty)?;
             }
             ExprKind::ComptimeValue(value) | ExprKind::StagedValue(value) => {
-                *value = rewriter.ty(value)?;
+                rewriter.ty(value)?;
+                if !R::SPECIALIZE {
+                    return Ok(());
+                }
                 // Reclassification moves the rewritten payload; it must not
                 // duplicate a potentially large immutable value graph.
                 let value = std::mem::replace(value, Term::Unit);
@@ -4011,7 +4022,7 @@ impl Expr {
                 value,
                 ..
             } => {
-                *storage_type = rewriter.ty(storage_type)?;
+                rewriter.ty(storage_type)?;
                 for expression in selections
                     .iter_mut()
                     .flat_map(BitSelection::expressions_mut)
@@ -4025,7 +4036,7 @@ impl Expr {
                 value,
                 ..
             } => {
-                *storage_type = rewriter.ty(storage_type)?;
+                rewriter.ty(storage_type)?;
                 (value).rewrite_with(rewriter)?;
             }
             ExprKind::TraitMethod {
@@ -4034,21 +4045,21 @@ impl Expr {
                 method_arguments,
                 ..
             } => {
-                *subject = rewriter.ty(subject)?;
+                rewriter.ty(subject)?;
                 for argument in interface_arguments.iter_mut().chain(method_arguments) {
-                    *argument = rewriter.ty(argument)?;
+                    rewriter.ty(argument)?;
                 }
             }
             ExprKind::FunctionInstance {
                 arguments: types, ..
             } => {
                 for ty in types {
-                    *ty = rewriter.ty(ty)?;
+                    rewriter.ty(ty)?;
                 }
             }
             ExprKind::Closure { captures, body, .. } => {
                 for capture in captures {
-                    capture.ty = rewriter.ty(&capture.ty)?;
+                    rewriter.ty(&mut capture.ty)?;
                     if let Some(value) = &mut capture.value {
                         (value).rewrite_with(rewriter)?;
                     }
@@ -4221,10 +4232,11 @@ impl Expr {
                 end.rewrite_with(rewriter)?;
             }
             ExprKind::Match { value, arms } => {
-                let pattern_domain = value.ty.clone();
+                let pattern_domain = R::SPECIALIZE.then(|| value.ty.clone());
                 let (mut known_errors, projections) = match &value.ty {
                     Term::ErrorResult { errors, result }
-                        if !matches!(result.as_ref(), Term::ErrorResult { .. }) =>
+                        if R::SPECIALIZE
+                            && !matches!(result.as_ref(), Term::ErrorResult { .. }) =>
                     {
                         let projections = arms
                             .iter()
@@ -4242,7 +4254,7 @@ impl Expr {
                 (value).rewrite_with(rewriter)?;
                 for arm in arms.iter_mut() {
                     arm.pattern
-                        .rewrite_with_domain(rewriter, Some(&pattern_domain))?;
+                        .rewrite_with_domain(rewriter, pattern_domain.as_ref())?;
                     if let Some(g) = &mut arm.guard {
                         (g).rewrite_with(rewriter)?;
                     }
@@ -4253,7 +4265,7 @@ impl Expr {
                         .is_some_and(|operand| matches!(operand.ty, Term::ErrorResult { .. }))
                 }) {
                     for label in &mut known_errors {
-                        *label = rewriter.ty(label)?;
+                        rewriter.ty(label)?;
                     }
                     // Preserve the user's arm order. Newly exposed inner
                     // branches belong beside their original success arm.
@@ -4277,8 +4289,8 @@ impl Expr {
                 guard,
                 otherwise,
             } => {
-                let pattern_domain = value.ty.clone();
-                pattern.rewrite_with_domain(rewriter, Some(&pattern_domain))?;
+                let pattern_domain = R::SPECIALIZE.then(|| value.ty.clone());
+                pattern.rewrite_with_domain(rewriter, pattern_domain.as_ref())?;
                 (value).rewrite_with(rewriter)?;
                 if let Some(g) = guard {
                     (g).rewrite_with(rewriter)?;
@@ -4539,8 +4551,12 @@ impl fmt::Display for TypePredicate {
 /// from expression delegates its entire subtree (including types) to the
 /// rewriter. This supports defaults and closures with independent binding frames.
 pub trait Rewriter {
+    /// Specialization can change residual value and error-pattern categories.
+    const SPECIALIZE: bool = false;
     type Error;
-    fn ty(&mut self, ty: &Term) -> Result<Term, Self::Error>;
+    fn ty(&mut self, _ty: &mut Term) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn expression(&mut self, _expression: &mut Expr) -> Result<bool, Self::Error> {
         Ok(true)
     }
@@ -4550,9 +4566,19 @@ pub trait Rewriter {
 }
 struct TypeRewriter<'a, T>(&'a mut T);
 impl<E, T: FnMut(&Term) -> Result<Term, E>> Rewriter for TypeRewriter<'_, T> {
+    const SPECIALIZE: bool = true;
     type Error = E;
-    fn ty(&mut self, ty: &Term) -> Result<Term, E> {
-        (self.0)(ty)
+    fn ty(&mut self, ty: &mut Term) -> Result<(), E> {
+        *ty = (self.0)(ty)?;
+        Ok(())
+    }
+}
+
+struct SlotRelocation<'a>(&'a [Option<(usize, crate::Sort)>]);
+impl Rewriter for SlotRelocation<'_> {
+    type Error = crate::TypeError;
+    fn ty(&mut self, ty: &mut Term) -> Result<(), Self::Error> {
+        ty.relocate_slots_in_place(self.0)
     }
 }
 
@@ -4576,7 +4602,7 @@ impl Pattern {
         domain: Option<&Term>,
     ) -> Result<(), R::Error> {
         rewriter.pattern(self)?;
-        let completion = match (&*self, domain) {
+        let completion = match (&*self, domain.filter(|_| R::SPECIALIZE)) {
             (Self::ErrorResult { label: None, .. }, Some(Term::ErrorResult { errors, result }))
                 if matches!(
                     result.as_ref(),
@@ -4600,51 +4626,58 @@ impl Pattern {
                 inner.rewrite_with_domain(rewriter, payload)?;
             }
             Self::ErrorResult { label, inner } => {
-                let inner_domain = label.clone().or_else(|| match domain {
-                    Some(Term::ErrorResult { result, .. }) => Some((**result).clone()),
-                    _ => None,
-                });
+                let inner_domain = if R::SPECIALIZE {
+                    label
+                        .as_ref()
+                        .or_else(|| match domain {
+                            Some(Term::ErrorResult { result, .. }) => Some(result.as_ref()),
+                            _ => None,
+                        })
+                        .cloned()
+                } else {
+                    None
+                };
                 if let Some(ty) = label {
-                    *ty = rewriter.ty(ty)?;
+                    rewriter.ty(ty)?;
                 }
                 inner.rewrite_with_domain(rewriter, inner_domain.as_ref())?;
             }
             Self::CodeEvidence { outputs } => {
                 for (_, ty) in outputs {
-                    *ty = rewriter.ty(ty)?;
+                    rewriter.ty(ty)?;
                 }
             }
 
             Self::Then { first, value, next } => {
                 first.rewrite_with_domain(rewriter, domain)?;
-                let computed_domain = value.ty.clone();
+                let computed_domain = R::SPECIALIZE.then(|| value.ty.clone());
                 value.rewrite_with(rewriter)?;
-                next.rewrite_with_domain(rewriter, Some(&computed_domain))?;
-                // An identity observation used to retain a generic error
-                // field's domain is no new value or ownership transfer. Once
-                // its success domain is concrete, keep matching the subject
-                // directly if the temporary alias is unused by the pattern.
-                if let Self::Observe { binding, inner } = first.as_ref() {
-                    if matches!(inner.as_ref(), Self::Wild)
-                        && matches!(&value.kind, ExprKind::Local(id) if id == binding)
-                        && matches!(&value.ty, Term::ErrorResult { result, .. }
-                            if !matches!(result.as_ref(), Term::Rigid { .. }
-                                | Term::Bound { .. } | Term::Hole { .. }
-                                | Term::AssociatedType { .. }))
-                        && crate::free_bindings::collect_pattern(next, &mut 4096)
-                            .is_ok_and(|free| !free.contains(binding))
-                    {
-                        *self = *std::mem::replace(next, Box::new(Self::Wild));
-                    }
+                next.rewrite_with_domain(rewriter, computed_domain.as_ref())?;
+            }
+            Self::Observe { binding, inner } => {
+                inner.rewrite_with_domain(rewriter, domain)?;
+                // The temporary subject is in scope for the complete computed
+                // pattern. Once its error domain is concrete, a direct match
+                // can replace the observation if no later read needs the alias.
+                if R::SPECIALIZE
+                    && let Self::Then { first, value, next } = inner.as_mut()
+                    && matches!(first.as_ref(), Self::Wild)
+                    && matches!(&value.kind, ExprKind::Local(id) if id == binding)
+                    && matches!(&value.ty, Term::ErrorResult { result, .. }
+                        if !matches!(result.as_ref(), Term::Rigid { .. }
+                            | Term::Bound { .. } | Term::Hole { .. }
+                            | Term::AssociatedType { .. }))
+                    && crate::free_bindings::collect_pattern(next, &mut 4096)
+                        .is_ok_and(|free| !free.contains(binding))
+                {
+                    *self = *std::mem::replace(next, Box::new(Self::Wild));
                 }
             }
             Self::Guard { pattern, condition } => {
                 pattern.rewrite_with_domain(rewriter, domain)?;
                 condition.rewrite_with(rewriter)?;
             }
-            Self::Observe { inner: pattern, .. }
-            | Self::Remap { pattern, .. }
-            | Self::Binding { inner: pattern, .. } => {
+            Self::Remap { pattern, .. } | Self::Binding { inner: pattern, .. } => {
                 pattern.rewrite_with_domain(rewriter, domain)?
             }
             Self::Or(alternatives) => {
@@ -4687,12 +4720,13 @@ impl Pattern {
             _ => {}
         }
         if let Some((errors, result)) = completion {
-            let payload = rewriter.ty(result)?;
+            let mut payload = (**result).clone();
+            rewriter.ty(&mut payload)?;
             if matches!(payload, Term::ErrorResult { .. }) {
-                let labels = errors
-                    .iter()
-                    .map(|ty| rewriter.ty(ty))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut labels = errors.clone();
+                for label in &mut labels {
+                    rewriter.ty(label)?;
+                }
                 crate::error_results::specialize::complete_ignored_success_pattern(
                     self, &labels, &payload,
                 );

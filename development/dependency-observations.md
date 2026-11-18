@@ -359,46 +359,32 @@ capability 形成递归的修复前错误见 `/tmp/luna-tools-0nmp1s3o/result.js
 同一最外层槽的不同 sort 在需要带 sort 的观察中会被拒绝。源码签名中仍有使用重写器
 的作用域与替换操作；这里的结构引用关系只回答依赖问题。[表达式观察](../compiler/nir/src/copy_budget.rs) · [CMTT 接口](../compiler/nir/src/code_interfaces.rs) · [别名声明接纳](../compiler/nir/src/type_aliases.rs)
 
-### 4.8 已接通：staged 实参保留 invocation 输入
+### 4.8 Required invocation 如何从源码作用域取得输入
 
-required invocation 和延迟 staged 实参都在 comptime 存储中计算。
-检查 staged 实参内的赋值或闭包构造，不代表已经写入或逃逸 enclosing runtime 存储。
-失效规则必须区分这两个存储边界，同时保留 invocation 内部 construction observation
-自身的失效规则；不能通过供应伪造的 abstract value 补救丢失的实参。
+设调用者依次有三个槽 `runtime r, comptime T: Type, comptime x: T`。如果已检查表达式只读取 `x`，
+捕获仍然需要 `T`，因为交付 `x` 时要检查它的域。生成的入口按原顺序接收 `[T, x]`。
+入口签名中的 `x` 引用槽 0；调用者提供 `x` 时，它的域仍引用源码槽 1。这个映射也用于
+把残余 invocation 送回调用者。空缺的域可以保留位置；一旦所需输入的域缺失，或需要读取
+runtime 槽，准备阶段就返回相应错误。[捕获与作用域映射](../compiler/nir/src/type_computations.rs)
 
-复现中，具体 `forward` 实例已收到 `flag = true`，进入主体时仍保存该输入。
-在准备内层调用的 staged 闭包实参时，旧 `invalidate_staged_storage` 只识别
-`in_required_comptime`，把 `in_staged_input` 中的闭包捕获当作 runtime 逃逸，
-删除 `specialization_inputs` 和 `value_input_bindings` 的对应项。
-随后的 `capture_sparse_entry` 正确拒绝了缺少输入的 invocation。
-修复在失效边界统一识别这两种 staged 上下文，保留外围输入；
-不改变捕获分析、阶段准入、抽象输入授权或 runtime 写入后的失效规则。
-临时跟踪代码已移除，正式 docs 未修改。
+捕获先读词法自由绑定与所有已存类型项，再沿选中参数的域取传递依赖。函数类型引入自己的
+binder，NF 的显式实参、闭包环境和闭包主体都可能携带外层引用。即使观察结果为空，也要检查
+已观察类型的作用域。预算耗尽与作用域错误均向上传递。若主体引用的槽号都保持原位，
+入口沿用原主体及共享闭包。需要移动槽位时，只重排引用；表达式阶段、模式分支和错误的物理
+标签次序均保留。实际提供值后才做特化。[结构观察](../compiler/nir/src/copy_budget.rs) · [槽位重排](../compiler/nir/src/types.rs)
 
-原 ignored 正例恢复为活动回归。真实 sysroot 用例覆盖直接调用、局部别名、
-嵌套闭包、闭包环境连续修改以及环境修改不影响源值；经过多层转发分别实例化
-bool/u8，reference 与 IIR 两条路径实际执行。负例检查 runtime 输入不能被捕获
-后提升为 comptime，以及 runtime 写入、取址和捕获后不能恢复已经失效的输入。
+泛型 tuple 的错误限定字段说明了这一区分。定义端可以用 `Observe` 在匹配字段期间借用当前
+subject，在其内部读取别名并继续匹配。别名在离开 `Observe` 时失效。给整个函数改局部名、
+压缩外层槽位，都要保留这个作用域。实例供应具体成功域后，特化才可以补全新暴露的错误分支；
+当后续模式无须再读该别名时，可以直接匹配原字段。[字段模式生成](../compiler/elaboration/src/program/error_handlers.rs) · [模式特化回归](../compiler/nir/tests/error_results.rs)
 
-验证工作目录为 `/home/fin/luna`，入口仍为
-`python3 -B development/check.py --timeout 900 -- test`：
+Checker 借用签名中可见的域，在选出输入之后才为准备好的入口取得所有权。冻结值和活的 VM
+值按同一组槽交付。staged 实参里的闭包在本次 invocation 中观察、修改自己的环境；
+外围 runtime 存储的写入和逃逸仍按其各自边界使输入失效。
+[入口准备](../compiler/elaboration/src/program/required/capture.rs) · [源码实参用例](../compiler/luna/tests/source_input_dependencies.rs)
 
-| 范围 | 实际结果与证据 |
-| --- | --- |
-| 修复前复现 | 显式运行原 ignored，退出 101；`/tmp/luna-tools-lk3c_fvc/result.json`。两个形态均缺少 `(local 3 1)`。临时输入跟踪见 `/tmp/luna-tools-wxsie14w/stderr.log`。 |
-| 真实 sysroot 输入与捕获 | `-p luna --test source_input_dependencies`，4 项通过、无 ignored，退出 0；`/tmp/luna-tools-nuyt7q3p/result.json`。 |
-| 开放函数、闭包、签名观察及聚合输入失效 | `-p luna --test open_functions --test closure_environment_parameters --test comptime_bytecode_closures --test signature_source_readiness --test inline_pattern_observation --test staged_aggregate_contracts --test nominal_staging --no-fail-fast`，471 项通过、退出 0；`/tmp/luna-tools-3it1en62/result.json`。 |
-
-已有闭包私有状态回归 `-p luna --test execution staged_closure_capture_mutation`
-4 项通过、退出 0，证据 `/tmp/luna-tools-o54kr4jw/result.json`；包括默认实参、
-嵌套／同级环境及真实 caller 写入拒绝。两个修改的 Rust 文件通过 rustfmt check，
-证据 `/tmp/luna-tools-4rztovm2/result.json`；`git diff --check` 通过。
-
-这只是 invocation 输入保留边界的修复，不代表完整的生命周期、资源规则或
-跨 world 查询失效协议已经迁移；未运行全 workspace、整个 CMTT 组、native 或性能基准。
-本阶段清单、精确命令、源码哈希与原有修改核对保存在
-`/tmp/luna-staged-closure-inputs-8gkf2piw`。
-
+这条路径的起点是已经检查过的表达式。源码仍待运行中的 Type 生产者供应结果时，
+需要能保存源码检查进度并由 VM 恢复的继续点。捕获入口只交付当前已有的代码和输入。
 
 ### 4.9 VM 输入域的观察与替换
 

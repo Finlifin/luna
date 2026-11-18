@@ -13935,9 +13935,6 @@ fn conditional_effect_memory_checks_instance_identity_and_routing() {
     struct BreakSlot;
     impl Rewriter for BreakSlot {
         type Error = String;
-        fn ty(&mut self, ty: &nir::Term) -> Result<nir::Term, String> {
-            Ok(ty.clone())
-        }
         fn expression(&mut self, expr: &mut nir::program::Expr) -> Result<bool, String> {
             if let K::EffectRequest { allowed_index, .. } = &mut expr.kind {
                 *allowed_index = 999;

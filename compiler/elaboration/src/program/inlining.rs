@@ -199,9 +199,6 @@ struct Pass<'a> {
 }
 impl n::Rewriter for Pass<'_> {
     type Error = String;
-    fn ty(&mut self, ty: &Term) -> Result<Term, String> {
-        Ok(ty.clone())
-    }
     fn expression(&mut self, expression: &mut n::Expr) -> Result<bool, String> {
         if *self.fuel == 0 {
             return Ok(false);
