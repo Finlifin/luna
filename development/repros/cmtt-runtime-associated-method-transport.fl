@@ -5,8 +5,8 @@
     Regression: reconstruct the inner method with its public associated return
     type, then expose the observed callable type to the receiving context.
     The cmtt_methods source test compiles and executes this file, and checks
-    the retained NIR signature. See development/comptime-value-admission.md,
-    section 33.
+    the retained NIR signature. See the callable identity discussion in
+    development/comptime-value-admission.md.
 
     A second acceptance case replaces make's body with:
         while true {} false

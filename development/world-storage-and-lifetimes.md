@@ -56,7 +56,7 @@ DeclarationSource::Snapshot 复用同一份已完成目录。调用前提、类�
 
 旧的第二份 runtime Copy/Drop 权限世界及其回调已删除。comptime 值引用不依赖它；
 runtime 资源权限仍由 runtime 入口独立检查，详见
-[执行角色边界](comptime-value-admission.md#执行角色与资源权限已分开)。
+[执行角色边界](comptime-value-admission.md#值引用与快照)。
 
 共享声明不缓存计算结果。每次 invocation 仍按自己的输入、预算与 live graph 执行；
 输入赋值失败不会污染其他派生调用。原准备结果释放后，未完成的派生调用继续保活
@@ -229,7 +229,7 @@ required 目录迁移阶段的检查工作目录 `/home/fin/luna`，统一使用
 前端失败在该迁移阶段未重跑：此前 `/tmp/luna-tools-p1o2diml/result.json` 退出 101，在
 `1465..1484` 报 `Type domain equality: UnvalidatedModel`，与独立基线
 `/tmp/luna-tools-uq7f8i42/result.json` 一致。后续已移除普通实参 trait 义务之前的
-重复前提门槛并通过原用例，见[前提与独立证据](comptime-value-admission.md#普通实参-trait-义务不能以前提匹配作为门槛)；
+重复前提门槛并通过原用例，见[前提与独立证据](comptime-value-admission.md#接收世界中的值域)；
 该修复不归入源码所有权迁移的成绩。
 
 ### 1.3 Driver 资源协议的源码所有权

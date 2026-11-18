@@ -915,7 +915,7 @@ Flurry 的语言限制。更深的有限程序仍可能触发现有分析额度�
   outward_request_cannot_retire_the_storage_a_callback_will_read`：
   `/tmp/luna-tools-8u6n660u/result.json` 退出 0，1,002 项通过，2 项已知基线问题
   显式过滤。前者是准备成功与拒绝预期不符，后者是拒绝诊断断言不符，均未修复；
-  [原对照证据](comptime-value-admission.md)保留。未执行全 workspace 回归。
+  原对照证据可从提交 `3c6e61c3` 的 `development/comptime-value-admission.md` 取得。未执行全 workspace 回归。
 
 ### 8.2 程序契约分析的操作栈帧
 

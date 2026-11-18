@@ -30,7 +30,7 @@ comptime value-reference 用 VM 的 slot/lens 表示可更新位置。读取和�
 
 生产 comptime 入口已移除 runtime Copy/Drop 权限准备与指针转移回调；值引用、
 源 Eq/Hash 和 Type 结果缓存按各自契约工作，runtime 指针权限只用于 runtime
-执行。详见[执行角色边界](comptime-value-admission.md#执行角色与资源权限已分开)。
+执行。详见[执行角色边界](comptime-value-admission.md#值引用与快照)。
 
 ## 2. Freeze / restore 协议
 
@@ -77,10 +77,10 @@ ContextualExpr {
 迁移应从普通调用和用户定义 NF 的同一依赖参数例开始，同时覆盖 Tuple/List。
 仅把 NormalFormArgument 改名而保留第二套遍历器，不算消除。
 
-当前普通子句已先分离[检查顺序与源码求值位置](comptime-value-admission.md#13-域检查顺序与源码求值顺序分离)：
+当前普通子句已先分离[检查顺序与源码求值位置](comptime-value-admission.md#源码次序与完成槽位)：
 静态 Type 尚未取得时保留 HIR 输入，在其域就绪后交回普通 expr 检查。它不增加新的
 表达式解释器，也不提前执行 Type 生产者。NF 表达式现已采用
-[统一输入准备与普通集合组装](comptime-value-admission.md#17-nf-输入统一准备检查顺序与求值位置分离)，
+[统一输入准备与普通集合组装](comptime-value-admission.md#源码次序与完成槽位)，
 删除独立 positional 收集入口；NF 类型标注也消费同一计划，不再拥有纯 Type 与混合
 输入的独立绑定循环。静态域使用同一普通列表表达式，连续尾部与交错产生器分别保留
 各自的源码位置。函数类型的局部依赖参数名接入普通表达式检查；Type 值构造函数类型时的
@@ -99,7 +99,7 @@ binder 提升由静态检查、观察与两种 VM 共用。动态 contextual 参
 不代表标注已经执行或实际类型已经取得；具体化仍消费原 suspended source。实际
 依赖未知域的结构保留尚未迁移，完整 ContextualExpr 仍须携带待定域、词法依赖和
 证明义务，不能把这项有限接线称为开放定义的整体行为检查已完成。证据与边界见
-[已知输入域的标注区域](comptime-value-admission.md#已知输入域的签名标注保留完整行为)。
+[已知输入域的标注区域](comptime-value-admission.md#源码次序与完成槽位)。
 
 ### 已接通：纯 Type 与混合子句共用准备路径
 
@@ -810,7 +810,7 @@ trait 的分支，没有把 trait 方法伪装成已选中的 impl 方法。
 剩余 `transported_runtime_methods_preserve_clause_domains_and_nested_storage` 仍在
 `550..578` 报 `required comptime evaluation failed: interpretation Type`，与上一阶段
 `/tmp/luna-tools-stgm4rkr` 相同；本阶段没有宣称其 runtime 方法存储链路已修复。
-后续已修复这一跨 VM 存储路径，见[callable 输入的主动准入](comptime-value-admission.md#跨-vm-callable-输入的主动准入)。
+后续已修复这一跨 VM 存储路径，见[callable 输入的主动准入](comptime-value-admission.md#函数身份与源码契约)。
 
 
 ### 待定闭包需要保留可调用证据与主体，不能伪造完整函数类型
@@ -850,7 +850,7 @@ comptime 值引用与 runtime 资源约束；描述器不执行主体。每次�
 `describable_open_type` 在描述器中仍存在。签名分类及推断调用的 readiness 已移除
 该白名单，输入发现和供应改用共同源码依赖观察；其他消费者只有在共同机制覆盖其
 输入及失败路径后才可删除。已知域的局部闭包标注，以及不引用自身参数的具名动态函数类型已接通；待定域
-闭包和真正依赖自身 binder 的动态 callable telescope 仍未完成。具体边界见[签名依赖接线](comptime-value-admission.md#签名分类与调用供应共享输入依赖观察)。
+闭包和真正依赖自身 binder 的动态 callable telescope 仍未完成。具体边界见[签名依赖接线](comptime-value-admission.md#源码次序与完成槽位)。
 
 交付验收须包括：待定 Type 的直接／嵌套捕获、已知域闭包、别名和重新赋值、分支
 汇合、参数及结果标注、未调用定义中的错误主体、阶段错误、提前返回，以及暂停后
@@ -1092,9 +1092,8 @@ Rust 控制流下的主动放弃与 Drop，不宣称进程崩溃或任意 panic 
   --test library_protocols --no-fail-fast`：`/tmp/luna-tools-xr0efrj7/result.json`，
   退出 101，751 项通过、2 项失败。VM 的 487 项与 luna 的 84 项单元检查通过；
   完整命令不能记为全通过。
-- enum builder 的失败仍在 HIR lowering：共享 fixture 缺少 `Symbol` 绑定；与
-  [先前源码对照](comptime-value-admission.md#12-required-与-invocation-共享-callable-参数包)
-  记录一致。另一失败是 `deferred_normal_inputs_run_bytecode_before_their_domains_arrive`
+- enum builder 的失败仍在 HIR lowering：共享 fixture 缺少 `Symbol` 绑定。
+  基线对照记录可从提交 `3c6e61c3` 的准入文档第 12 节取得。另一失败是 `deferred_normal_inputs_run_bytecode_before_their_domains_arrive`
   要求上下文输入总计数为 2、实际为 3；已用本次修改前的四份 VM 生产文件单独对照，
   同样在第 551 行失败，`/tmp/luna-tools-0z_8e64c/result.json`，退出 101。对照后本次
   修改逐字节恢复。两项 fixture／计数预期本次均未修改。
@@ -1638,8 +1637,7 @@ cmtt_methods 的 indexed-code-signature 用例在修改前即于 139..143 报未
 [required residual 作用域修复](dependency-observations.md#57-required-residual-保留声明值的词法作用域)
 恢复：失败实际发生于声明签名形成时丢掉抽象值权限，并非调用推断结果错误。
 indexed-code-signature 已由后续[统一父声明输入](#已接通contextual-签名与普通值检查共用父声明输入)
-修复。此前机制、证据与发现的 runtime 方法传递问题见[代码实例的签名观察](comptime-value-admission.md#签名观察与发布补充验证)；
-该传递问题已通过[恢复公共方法签名](comptime-value-admission.md#公共方法身份的重建)修复。
+修复。runtime 方法传递时保留公共关联返回类型的处理见[函数身份与源码契约](comptime-value-admission.md#函数身份与源码契约)。
 
 新增源码回归逐预算寻找 expr／pattern／data 分类的资源边界，随后在同一 HIR 上以
 新预算完成 elaboration 和执行；深嵌套 quote 检查必须报告分类深度失败。真实 sysroot
@@ -2081,7 +2079,7 @@ snapshot 的既有 session 尝试非法 snapshot，都不能获得成功索引�
 命令 `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
 --test instance_budget --test runtime_function_identities --no-fail-fast`，退出 0；
 `/tmp/luna-tools-wlh0bw22/result.json`。本次修正的是过期断言及覆盖范围，生产实现
-没有放宽。此前失败证据保留在[字段与代码准入](comptime-value-admission.md#34-iir-callable-查询与代码复制视图)。
+没有放宽。此前失败证据可从提交 `3c6e61c3` 的 `development/comptime-value-admission.md` 第 34 节取得。
 
 这一步首先迁移普通显式 invocation；当时保留的 `memoization::staging` Type 输入
 IIR 专门化现已在下述后续迁移中删除。运行时 IIR、后端交付以及引用执行器继续使用
@@ -2341,7 +2339,7 @@ Snapshot 的 owner 仍属于唯一 Protocol，两个 Protocol 即使来自同一
   退出 0；`git diff --check` 通过。
 
 后续普通实参 trait 义务清理已修复 nested Type forwarding，原用例已直接通过，见
-[前提与独立证据](comptime-value-admission.md#普通实参-trait-义务不能以前提匹配作为门槛)。
+[前提与独立证据](comptime-value-admission.md#接收世界中的值域)。
 两项反射失败不在该修复范围内；上述日志仍只代表各自执行时的结果。
 
 以下保留先前键协议迁移中影响成本判据的对照，避免把预热差异误作值复制成本变化。
@@ -2374,7 +2372,7 @@ VM 的失败与已执行工作的计费，不改变 Context::spend 的实现。
 
 后续已完成这项责任核对：复制成本只检查表示，未知身份应由世界准入拒绝。
 过期成本断言及新增正反例见
-[函数身份的成本、准入与执行权限](comptime-value-admission.md#20-函数身份的成本准入与执行权限)。
+[函数身份的成本与准入用例](../compiler/luna/tests/execution.rs)。
 
 Rust 格式检查 `/tmp/luna-tools-k8e_6o4o` 退出 0，提交范围 diff 检查通过。
 正式 docs、已有资源分析修改及 library README 均保持原样。

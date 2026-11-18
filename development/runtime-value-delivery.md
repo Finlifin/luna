@@ -792,7 +792,7 @@ comptime 值引用仍通过自己的存储与准入规则处理，不借用 runt
 runtime 解释器的指针权限检查不变；Type 值描述 runtime 指针、函数签名以及
 quote 内的 runtime 指针代码仍合法。实际源码世界的目录、成员查询和存储准入
 继续保留。CLI invocation、key 与 memoization 的同类清理已在后续接通，见
-[执行角色与资源权限](comptime-value-admission.md#执行角色与资源权限已分开)。
+[执行角色与资源权限](comptime-value-admission.md#值引用与快照)。
 这没有完成通用声明世界共享，也没有完成 staged 参数的 runtime 交付。
 
 删除 runtime 权限世界后、目录尚未惰性化时，八步字节构造仍失败：在 `/home/fin/luna` 执行

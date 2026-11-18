@@ -540,8 +540,8 @@ DepthExhausted 或 Type 分类，并携带消费位置；失败不变成空依�
 | VM 域观察、输入计划与失败恢复 | `-p comptime_interpretor --lib --no-fail-fast`，显式跳过既有 `normal_input_data_tests::clause_list_inputs_share_domain_scope_and_budget_validation` 后 446 项通过、退出 0；`/tmp/luna-tools-lg0x9nzf/result.json`。新增检查嵌套 binder／opaque 身份、预算／深度／sort 失败的源码位置和恢复、未选深层实参不被读取及真实代换结果。 |
 | 真实源码与 sysroot | NF 输入计划、开放 NF 输入、名义 staging／参数、NF 域、comptime 子句、普通收集器、模板局部定义、动态 trait 子句九组共 444 项通过、2 项既有 ignored，退出 0；`/tmp/luna-tools-ifv9ebuq/result.json` 含完整命令。既有 `memoized_value_indexed_keys_keep_declaration_and_value_arguments` 显式跳过。 |
 
-上述两个 skip 仅描述当时的检查：list 域诊断后来在输入值准入 §21 修正，memoized
-value-indexed key 在 §19 修复；[输入值准入 §18](comptime-value-admission.md#18-invocation-已完成输入共用槽位存储)
+这两个 skip 是当时的记录。list 域诊断和含普通值实参的缓存键后来均已修复。
+[源码次序与完成槽位](comptime-value-admission.md#源码次序与完成槽位)
 维护当前共享输入调度与检查状态。动态 Type producer 与默认值证明环境的两个
 ignored 未因依赖观察迁移而解除。当时四个修改的 Rust 文件格式检查退出 0，证据
 `/tmp/luna-tools-e0qr31bc/result.json`；本次范围的 `git diff --check` 通过。
@@ -723,7 +723,7 @@ stdout.log 保留逐项实参和原因。中间 `/tmp/luna-tools-px3e7mk_` 是�
 ApplicationError 会混合部分工作量限制与 InputType，不能仅凭剩余 fuel 非零就把它
 包装成“已证明的值域拒绝”。本次保留该分支原分类，不新增这样的断言；后续统一普通
 值准入时须替换带 Option/bool 回调的失败协议，明确 Budget/Unknown/Invalid 后一起
-迁移消费者，不能只改错误文本。该适配分支后来已由[共同值域检查](comptime-value-admission.md#10-已接通的共同值域检查)接管，
+迁移消费者，不能只改错误文本。该适配分支后来已由[共同值域检查](comptime-value-admission.md#接收世界中的值域)接管，
 VM callable 签名查询的资源失败也已单独分类；Tuple/List 的旧 Role 检查仍未整体退役。
 
 `0d6ba379` 的这项接线解决信息丢失，当时尚未实现 §4 的依赖选择；默认 helper 正例

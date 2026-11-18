@@ -69,7 +69,7 @@ Budget 与 Invalid 不获得此标记。成功形成 atom 只有增加新的前�
 rustfmt check，`/tmp/luna-tools-k40wbfcs/result.json` 退出 0；git diff --check 通过。
 后续已定位并移除 runtime 闭包存储检查反复构建整包域表的成本，上述 16 项中
 15 项恢复，剩余一项推进到实际执行阶段，见
-[域表复用与成本测量](comptime-value-admission.md#runtime-闭包存储检查复用声明域)。
+[阶段检查的域表复用](comptime-value-admission.md#预算与复用)。
 不得将该后续修复计入本节签名前提形成的验证结果。
 
 ## 2. WorldRevision、可见范围与 coherence 分开
