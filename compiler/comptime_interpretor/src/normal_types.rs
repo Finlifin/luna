@@ -4,14 +4,14 @@ use super::*;
 use input_bindings::Bindings;
 
 impl Interpreter<'_> {
-    pub(super) fn prepare_normal_type(
+    pub(super) fn normal_input_bindings(
         &mut self,
         head: DeclarationId,
         ty: &Term,
         count: usize,
         diverges: bool,
         source: SourceRange,
-    ) -> Result<(), Error> {
+    ) -> Result<Bindings, Error> {
         let metadata = self
             .normal_forms
             .get(&head)
@@ -24,7 +24,10 @@ impl Interpreter<'_> {
         if *ty != Term::Primitive(expected) || count != metadata.parameters.len() {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
-        self.integer_operation(Some(source), |budget| budget.consume(count))
+        self.integer_operation(Some(source), |budget| budget.consume(count))?;
+        Ok(Bindings::structural(
+            metadata.parameters.iter().map(|p| p.declaration),
+        ))
     }
     pub(super) fn normal_list_domain<'a>(
         &mut self,

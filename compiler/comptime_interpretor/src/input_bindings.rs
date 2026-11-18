@@ -20,7 +20,9 @@ impl fmt::Display for SortChange {
 /// Substitutions follow completion order; final arguments follow declaration order.
 /// Slots store indices rather than cloning potentially large comptime terms.
 pub(super) struct Bindings {
+    positions: BTreeMap<DeclarationId, usize>,
     slots: Vec<Option<usize>>,
+    changed_sort: bool,
     parameters: Vec<nir::DeclarationParameter>,
     arguments: Vec<Term>,
     sort_change: SortChange,
@@ -30,20 +32,28 @@ pub(super) struct Bindings {
 impl Bindings {
     /// NF heads admit the complete application separately; substitution does
     /// not confer declaration-domain evidence on the stored values.
-    pub fn structural(count: usize) -> Self {
-        Self::new(count, SortChange::Substitute)
+    pub fn structural(ids: impl IntoIterator<Item = DeclarationId>) -> Self {
+        Self::new(ids, SortChange::Substitute)
     }
 
     /// Nominal/alias inputs require current-world evidence when an input changes
     /// a declaration binder's sort. Neither transport nor shared storage grants it.
-    pub fn admitted(count: usize) -> Self {
-        Self::new(count, SortChange::Admit)
+    pub fn admitted(ids: impl IntoIterator<Item = DeclarationId>) -> Self {
+        Self::new(ids, SortChange::Admit)
     }
 
-    fn new(count: usize, sort_change: SortChange) -> Self {
+    fn new(ids: impl IntoIterator<Item = DeclarationId>, sort_change: SortChange) -> Self {
+        // Head and nominal contract validation establish unique binder identities.
+        let positions: BTreeMap<_, _> = ids
+            .into_iter()
+            .enumerate()
+            .map(|(slot, id)| (id, slot))
+            .collect();
         Self {
             sort_change,
-            slots: vec![None; count],
+            slots: vec![None; positions.len()],
+            positions,
+            changed_sort: false,
             parameters: vec![],
             arguments: vec![],
             domains: vec![],
@@ -62,7 +72,7 @@ impl Bindings {
         value: Value,
         source: SourceRange,
     ) -> Result<(), Error> {
-        if slot >= self.slots.len() || self.contains(slot) {
+        if self.positions.get(&parameter.declaration) != Some(&slot) || self.contains(slot) {
             return Err(vm.failure(ErrorKind::Type, Some(source)));
         }
         let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
@@ -91,6 +101,7 @@ impl Bindings {
         } else {
             vm.residual_input_term(value, source)?
         };
+        self.changed_sort |= parameter.sort != term.sort();
         self.slots[slot] = Some(self.arguments.len());
         self.parameters.push(parameter);
         self.domains.push(domain);
@@ -121,28 +132,32 @@ impl Bindings {
         ty: &Term,
         source: SourceRange,
     ) -> Result<Term, Error> {
-        if !self.descriptions.is_empty() {
-            let deps = vm.observe_input_dependencies(ty, source)?;
+        if !self.changed_sort || !self.descriptions.is_empty() {
+            let inputs = vm.observe_input_dependencies(ty, source)?;
             vm.integer_operation(Some(source), |budget| {
-                budget.consume(self.descriptions.len())
+                budget.consume(inputs.declarations.len())
             })?;
-            if self
-                .descriptions
-                .values()
-                .any(|(id, _)| deps.declarations.contains_key(id))
+            let demanded = inputs
+                .declarations
+                .keys()
+                .filter_map(|id| self.positions.get(id));
+            if !self.descriptions.is_empty()
+                && demanded
+                    .clone()
+                    .any(|slot| self.descriptions.contains_key(slot))
             {
                 return Err(vm.failure(ErrorKind::AbstractValueUnresolved, Some(source)));
             }
+            if !self.changed_sort {
+                let selected = demanded
+                    .filter_map(|&slot| self.slots[slot])
+                    .map(|index| (&self.parameters[index], &self.arguments[index]));
+                return vm.instantiate_selected_domain(ty, selected, source);
+            }
         }
+        // A changed sort needs the declaration domains as evidence, including
+        // completed inputs that are absent from the term being rewritten.
         vm.integer_operation(Some(source), |budget| budget.consume(self.parameters.len()))?;
-        if self
-            .parameters
-            .iter()
-            .zip(&self.arguments)
-            .all(|(p, a)| p.sort == a.sort())
-        {
-            return vm.instantiate_contextual_domain(ty, &self.parameters, &self.arguments, source);
-        }
         let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = before;
         let result = match self.sort_change {
@@ -221,17 +236,17 @@ impl Bindings {
         &self,
         vm: &mut Interpreter<'_>,
         domain: &Term,
-        parameters: impl ExactSizeIterator<Item = DeclarationId>,
         source: SourceRange,
     ) -> Result<BTreeSet<usize>, Error> {
         let dependencies = vm.observe_input_dependencies(domain, source)?;
-        vm.integer_operation(Some(source), |budget| budget.consume(parameters.len()))?;
-        Ok(parameters
-            .enumerate()
-            .filter_map(|(slot, parameter)| {
-                (!self.contains(slot) && dependencies.declarations.contains_key(&parameter))
-                    .then_some(slot)
-            })
+        vm.integer_operation(Some(source), |budget| {
+            budget.consume(dependencies.declarations.len())
+        })?;
+        Ok(dependencies
+            .declarations
+            .keys()
+            .filter_map(|id| self.positions.get(id).copied())
+            .filter(|&slot| !self.contains(slot))
             .collect())
     }
 
@@ -354,11 +369,10 @@ mod tests {
         let package = Package::default();
         for make in [Bindings::structural, Bindings::admitted] {
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-            let mut bindings = make(2);
+            let mut bindings = make([id(1), id(2)]);
             let domain = rigid(2, nir::Sort::ComptimeValue);
             let observe = |bindings: &Bindings, vm: &mut Interpreter<'_>| {
-                let awaiting =
-                    bindings.pending_inputs(vm, &domain, [id(1), id(2)].into_iter(), SOURCE)?;
+                let awaiting = bindings.pending_inputs(vm, &domain, SOURCE)?;
                 let expected = bindings.instantiate(vm, &domain, SOURCE)?;
                 Ok::<_, Error>((expected, awaiting))
             };
@@ -430,6 +444,46 @@ mod tests {
     }
 
     #[test]
+    fn sparse_domain_queries_do_not_scan_unrelated_slots_or_completions() {
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let ty = Term::Primitive(Primitive::Type);
+        let value = Term::Primitive(Primitive::Char);
+        let domain = Term::Tuple(vec![rigid(0, nir::Sort::Type), rigid(1, nir::Sort::Type)]);
+        let run = |vm: &mut Interpreter<'_>, width: u32| {
+            let mut bindings = Bindings::structural((0..width).map(id));
+            for slot in (0..width).rev().filter(|slot| *slot != 1) {
+                bindings
+                    .bind(
+                        vm,
+                        slot as usize,
+                        nir::DeclarationParameter {
+                            declaration: id(slot),
+                            sort: nir::Sort::Type,
+                        },
+                        &ty,
+                        Value::Type(value.clone()),
+                        SOURCE,
+                    )
+                    .unwrap();
+            }
+            // Charge the queries separately from building the invocation.
+            let before = vm.budget.steps;
+            assert_eq!(
+                bindings.pending_inputs(vm, &domain, SOURCE).unwrap(),
+                BTreeSet::from([1])
+            );
+            assert_eq!(
+                bindings.instantiate(vm, &domain, SOURCE).unwrap(),
+                Term::Tuple(vec![value.clone(), rigid(1, nir::Sort::Type)])
+            );
+            before - vm.budget.steps
+        };
+        let narrow = run(&mut vm, 2);
+        assert_eq!(run(&mut vm, 512), narrow);
+    }
+
+    #[test]
     fn sort_change_admission_uses_the_receiving_world_without_retaining_authority() {
         let package = Package::default();
         let ty = Term::Primitive(Primitive::Type);
@@ -438,7 +492,7 @@ mod tests {
         sender
             .authorize_abstract_value_parameters(&[(id(4), boolean.clone())])
             .unwrap();
-        let mut bindings = Bindings::admitted(3);
+        let mut bindings = Bindings::admitted([id(1), id(2), id(3)]);
         // Completion order differs from declaration order. The abstract value
         // was authorized for transport by the sender, not by future receivers.
         bindings
@@ -521,7 +575,7 @@ mod tests {
         let mut failures = 0;
         let mut successes = 0;
         for steps in 0..32 {
-            let mut bindings = Bindings::structural(1);
+            let mut bindings = Bindings::structural([id(1)]);
             vm.budget.steps = steps;
             match bindings.bind(
                 &mut vm,
@@ -566,7 +620,7 @@ mod tests {
         let package = Package::default();
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let domain = Term::Primitive(Primitive::Type);
-        let mut bindings = Bindings::structural(2);
+        let mut bindings = Bindings::structural([id(2), id(1)]);
         bindings
             .bind(
                 &mut vm,
@@ -583,7 +637,10 @@ mod tests {
                 .bind(
                     &mut vm,
                     0,
-                    parameter(),
+                    nir::DeclarationParameter {
+                        declaration: id(2),
+                        ..parameter()
+                    },
                     &domain,
                     Value::TypeParameter(parameter().declaration),
                     SOURCE

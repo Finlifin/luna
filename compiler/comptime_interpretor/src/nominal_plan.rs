@@ -130,19 +130,28 @@ impl<'a, 'e> Frame<'a, 'e> {
         vm.integer_operation(Some(expr.source), |budget| {
             budget.consume(arguments.len().saturating_add(1))
         })?;
-        let specialize = bindings.is_some()
-            || domains.iter().any(|domain| {
-                parameters
-                    .iter()
-                    .any(|parameter| domain.mentions_rigid(parameter.declaration))
-            });
         let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = before;
-        let charged = domains
-            .iter()
-            .try_for_each(|domain| nir::type_computations::charge_term(domain, &mut remaining));
+        let mut referenced = BTreeSet::new();
+        let charged = domains.iter().try_for_each(|domain| {
+            if bindings.is_some() {
+                nir::type_computations::charge_term(domain, &mut remaining)
+            } else {
+                // The copy preflight also observes rigid inputs. A domain can
+                // contain them beneath an opaque head or in a closure snapshot.
+                nir::type_computations::rigid_declarations_bounded(
+                    domain,
+                    &mut remaining,
+                    &mut referenced,
+                )
+            }
+        });
         vm.budget.steps -= (before - remaining) as u64;
         charged.map_err(|_| vm.failure(ErrorKind::StepsExhausted, Some(expr.source)))?;
+        let specialize = bindings.is_some()
+            || parameters
+                .iter()
+                .any(|p| referenced.contains(&p.declaration));
         let inputs = nominal_inputs::Frame::new(
             expression.clone(),
             parameters,

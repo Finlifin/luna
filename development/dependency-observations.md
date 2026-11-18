@@ -508,46 +508,21 @@ bool/u8，reference 与 IIR 两条路径实际执行。负例检查 runtime 输�
 `/tmp/luna-staged-closure-inputs-8gkf2piw`。
 
 
-### 4.9 已接通：VM 输入域复用有界只读观察
+### 4.9 VM 输入域的观察与替换
 
-NF 与名义类型／alias 的输入计划在实际 invocation 中也需要判断域依赖。
-`instantiate_contextual_domain` 原先先给 Term 计费，再调用会重写并复制整棵类型的
-`rigid_parameters()`；现在改用同一 `nir::copy_budget::term_inputs`，只选择域确实
-引用的已完成输入。随后真正的代换仍使用有界 substitution，不把观察结果当作作用域、
-值域或形成证明。未选中的输入不因这次域观察被复制或提前检查；它们各自的接纳责任
-仍由原输入计划承担。
+一次 NF、名义类型或别名调用为其声明参数建立从声明身份到槽位的索引。
+检查某个实参时，VM 在**原始声明域**中收集自由声明引用，从索引找出尚未完成的槽。
+例如域只引用 A、B 时，等待集合只需查询这两个声明。替换得到的调用方绑定即使与本次
+形参同名同号，也不能据此增加等待边。[输入帧与恢复](comptime-value-admission.md#源码次序与完成槽位)
 
-NF 和名义输入的待定域判断分别保留原有参数集合和完成状态规则，但不再对每个参数
-调用 `mentions_rigid` 扫描整个域。每次先有界观察一次已代换的接收域，再对声明集合
-做查找；参数遍历也消耗 invocation 预算。结构遍历从按参数重复扫描，变为一次扫描
-加集合查询，不承诺整条类型构造或编译流程的复杂度与耗时。
+普通同 sort 替换只读取所引用且已经完成的值。局部 binder 仍由嵌套作用域管理，
+NF 头与 closure factory 保留身份，closure snapshot 的实参参与观察。对包含描述的
+输入，实际使用该描述的域需要 concrete value 时会得到未决诊断。观察和替换分别
+消耗本次 invocation 的预算，失败携带消费位置。[VM 输入绑定](../compiler/comptime_interpretor/src/input_bindings.rs)
 
-VM 错误适配与域替换收在 `input_dependencies`。观察失败保留 StepsExhausted、
-DepthExhausted 或 Type 分类，并携带消费位置；失败不变成空依赖集合，也不会交付
-部分结果。嵌套 callable 的本地 binder 不成为外层输入，closure snapshot 的实际
-参数仍被观察，NF 头与 factory 身份不被当成待供应参数，更不会因此执行它们。
-
-这一步没有新增跨 invocation 缓存，没有替换名义类型的证据接纳，也未消除 pending
-输入恢复中的所有重复观察。完整 ContextualExpr／ArgumentPlan 和动态 Type producer
-子句仍待接通；结构依赖观察本身不保存生产者进度或负责重新执行。
-
-
-
-验证在 `/home/fin/luna` 经 `development/check.py --timeout 900 -- test` 执行：
-
-| 范围 | 本轮证据 |
-| --- | --- |
-| VM 域观察、输入计划与失败恢复 | `-p comptime_interpretor --lib --no-fail-fast`，显式跳过既有 `normal_input_data_tests::clause_list_inputs_share_domain_scope_and_budget_validation` 后 446 项通过、退出 0；`/tmp/luna-tools-lg0x9nzf/result.json`。新增检查嵌套 binder／opaque 身份、预算／深度／sort 失败的源码位置和恢复、未选深层实参不被读取及真实代换结果。 |
-| 真实源码与 sysroot | NF 输入计划、开放 NF 输入、名义 staging／参数、NF 域、comptime 子句、普通收集器、模板局部定义、动态 trait 子句九组共 444 项通过、2 项既有 ignored，退出 0；`/tmp/luna-tools-ifv9ebuq/result.json` 含完整命令。既有 `memoized_value_indexed_keys_keep_declaration_and_value_arguments` 显式跳过。 |
-
-这两个 skip 是当时的记录。list 域诊断和含普通值实参的缓存键后来均已修复。
-[源码次序与完成槽位](comptime-value-admission.md#源码次序与完成槽位)
-维护当前共享输入调度与检查状态。动态 Type producer 与默认值证明环境的两个
-ignored 未因依赖观察迁移而解除。当时四个修改的 Rust 文件格式检查退出 0，证据
-`/tmp/luna-tools-e0qr31bc/result.json`；本次范围的 `git diff --check` 通过。
-清单、源码快照和受保护工作区哈希在 `/tmp/luna-vm-input-observation-04cuefwz`。
-正式 docs 与原有修改未动。未运行全 workspace、native 或性能基准。
-
+参数域可以随先前输入变成 Type。此时结构替换需要完整绑定的 sort 依据，名义准入
+还要按声明顺序在接收方 world 检查域与值的证据。该路径继续使用完整已交付输入。
+槽位索引、等待者及已完成值均归本次调用所有。[输入依赖回归](../compiler/comptime_interpretor/src/input_dependencies.rs)
 
 ## 5. 四个判断精确性是否正确的例子
 

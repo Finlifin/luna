@@ -57,7 +57,7 @@ impl<'e> Source<'e> {
             locals,
             specialize,
             alias: matches!(expression.kind, K::CheckTypeAlias { .. }),
-            completed: input_bindings::Bindings::admitted(parameters.len()),
+            completed: input_bindings::Bindings::admitted(parameters.iter().map(|p| p.declaration)),
             expression,
             parameters,
             domains,
@@ -82,12 +82,8 @@ impl input_collection::Source for Source<'_> {
         vm: &mut Interpreter<'_>,
         slot: usize,
     ) -> Result<BTreeSet<usize>, Error> {
-        self.completed.pending_inputs(
-            vm,
-            self.domain(slot),
-            self.parameters.iter().map(|p| p.declaration),
-            self.input(slot).source(),
-        )
+        self.completed
+            .pending_inputs(vm, self.domain(slot), self.input(slot).source())
     }
     fn expected(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Term, Error> {
         self.completed

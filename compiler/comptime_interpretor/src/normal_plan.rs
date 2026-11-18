@@ -42,7 +42,7 @@ impl<'a> Frame<'a> {
                 .iter()
                 .flat_map(|plan| &plan.preparations)
                 .any(|p| p.expression.ty == Term::Primitive(Primitive::Never));
-        vm.prepare_normal_type(
+        let bindings = vm.normal_input_bindings(
             *head,
             &expression.ty,
             arguments.len(),
@@ -52,7 +52,7 @@ impl<'a> Frame<'a> {
         Ok(Self::from_source(Source {
             head: *head,
             locals,
-            bindings: input_bindings::Bindings::structural(arguments.len()),
+            bindings,
             expression,
         }))
     }
@@ -84,12 +84,8 @@ impl input_collection::Source for Source<'_> {
             .normal_forms
             .get(&self.head)
             .expect("admitted normal head");
-        self.bindings.pending_inputs(
-            vm,
-            &metadata.parameters[slot].ty,
-            metadata.parameters.iter().map(|p| p.declaration),
-            self.expression.source,
-        )
+        self.bindings
+            .pending_inputs(vm, &metadata.parameters[slot].ty, self.expression.source)
     }
 
     fn expected(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Term, Error> {
@@ -108,7 +104,7 @@ impl input_collection::Source for Source<'_> {
 
     fn complete(&mut self, vm: &mut Interpreter<'_>) -> Result<Progress, Error> {
         let bindings =
-            std::mem::replace(&mut self.bindings, input_bindings::Bindings::structural(0));
+            std::mem::replace(&mut self.bindings, input_bindings::Bindings::structural([]));
         let arguments = bindings
             .finish_normal()
             .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.expression.source)))?;

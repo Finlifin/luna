@@ -23,36 +23,21 @@ impl Interpreter<'_> {
         })
     }
 
-    pub(super) fn instantiate_contextual_domain(
+    pub(super) fn instantiate_selected_domain<'a>(
         &mut self,
         ty: &Term,
-        parameters: &[nir::DeclarationParameter],
-        types: &[Term],
+        selected: impl Iterator<Item = (&'a nir::DeclarationParameter, &'a Term)>,
         source: SourceRange,
     ) -> Result<Term, Error> {
-        let inputs = self.observe_input_dependencies(ty, source)?;
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = before;
         let result = (|| {
-            if parameters.len() != types.len() {
-                return Err(nir::type_computations::Error::Scope(
-                    nir::TypeError::ArgumentCount {
-                        expected: parameters.len(),
-                        actual: types.len(),
-                    },
-                ));
-            }
-            remaining = remaining
-                .checked_sub(parameters.len())
-                .ok_or(nir::type_computations::Error::Budget)?;
             let mut selected_parameters = Vec::new();
             let mut selected_types = Vec::new();
-            for (parameter, value) in parameters.iter().zip(types) {
-                if inputs.declarations.contains_key(&parameter.declaration) {
-                    nir::type_computations::charge_term(value, &mut remaining)?;
-                    selected_parameters.push(parameter.clone());
-                    selected_types.push(value.clone());
-                }
+            for (parameter, value) in selected {
+                nir::type_computations::charge_term(value, &mut remaining)?;
+                selected_parameters.push(parameter.clone());
+                selected_types.push(value.clone());
             }
             nir::type_computations::instantiate_parameters_bounded(
                 ty,
@@ -191,26 +176,31 @@ mod tests {
                 })),
             ],
         };
+        let mut bindings = input_bindings::Bindings::structural([id(1), id(2)]);
         let mut unselected = boolean.clone();
-        for _ in 0..nir::copy_budget::MAX_COPY_DEPTH + 8 {
+        for _ in 0..24 {
             unselected = Term::Optional(Box::new(unselected));
         }
-        let parameters = [
-            nir::DeclarationParameter {
-                declaration: id(1),
-                sort: Sort::Type,
-            },
-            nir::DeclarationParameter {
-                declaration: id(2),
-                sort: Sort::Type,
-            },
-        ];
-        let values = [boolean, unselected];
+        for (local, value) in [(2, unselected), (1, boolean)] {
+            bindings
+                .bind(
+                    &mut vm,
+                    (local - 1) as usize,
+                    nir::DeclarationParameter {
+                        declaration: id(local),
+                        sort: Sort::Type,
+                    },
+                    &Term::Primitive(Primitive::Type),
+                    Value::Type(value),
+                    SOURCE,
+                )
+                .unwrap();
+        }
         let mut failed = false;
         let mut succeeded = false;
         for steps in [0, 4, 16, 64, 256, 10_000] {
             vm.budget.steps = steps;
-            match vm.instantiate_contextual_domain(&ty, &parameters, &values, SOURCE) {
+            match bindings.instantiate(&mut vm, &ty, SOURCE) {
                 Ok(result) => {
                     assert_eq!(result, expected);
                     succeeded = true;
@@ -221,8 +211,7 @@ mod tests {
                     failed = true;
                     vm.budget = Budget::default();
                     assert_eq!(
-                        vm.instantiate_contextual_domain(&ty, &parameters, &values, SOURCE)
-                            .unwrap(),
+                        bindings.instantiate(&mut vm, &ty, SOURCE).unwrap(),
                         expected
                     );
                 }
