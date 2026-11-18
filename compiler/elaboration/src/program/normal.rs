@@ -1385,23 +1385,8 @@ impl Checker<'_, '_> {
                 source: source(input.span),
             });
         }
-        if let H::List(items) = &input.kind {
-            return Ok(n::NormalFormArgument::List {
-                source: source(input.span),
-                items: items
-                    .iter()
-                    .map(|value| self.dependent_normal_argument(value, depth + 1))
-                    .collect::<Result<_, _>>()?,
-            });
-        }
-        if let H::Tuple(items) = &input.kind {
-            return Ok(n::NormalFormArgument::Tuple {
-                source: source(input.span),
-                items: items
-                    .iter()
-                    .map(|value| self.dependent_normal_argument(value, depth + 1))
-                    .collect::<Result<_, _>>()?,
-            });
+        if matches!(input.kind, H::List(_) | H::Tuple(_)) {
+            return self.check_contextual_aggregate(input, depth);
         }
         if matches!(input.kind, H::Match(..)) {
             return self.check_contextual_match_region(input, depth);

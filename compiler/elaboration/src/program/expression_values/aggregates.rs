@@ -33,30 +33,7 @@ impl Checker<'_, '_> {
                 };
                 (ty, K::Object { names, fields })
             }
-            H::Tuple(items) => {
-                // A proven type equation can expose a tuple's element contexts
-                // without unfolding an opaque normal-form head. Keep the final
-                // equality check against the original expected type below.
-                let expected_shape = expected
-                    .map(|ty| self.structural_type(ty, expr.span))
-                    .transpose()?;
-                let expected_items = if let Some(Term::Tuple(items)) = expected_shape.as_ref() {
-                    Some(items)
-                } else {
-                    None
-                };
-                let values = items
-                    .iter()
-                    .enumerate()
-                    .map(|(i, x)| self.expr(x, expected_items.and_then(|xs| xs.get(i))))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let ty = if values.iter().any(|x| is_never(&x.ty)) {
-                    p(P::Never)
-                } else {
-                    self.tuple_value_type(values.iter().map(|x| x.ty.clone()).collect(), expr.span)?
-                };
-                (ty, K::Tuple(values))
-            }
+            H::Tuple(items) => return self.check_tuple_fields(expr, items, expected),
             H::InlineControl(value)
                 if matches!(value.kind, H::If(..) | H::When(..) | H::Match(..))
                     && self.closed_comptime_control_body() =>

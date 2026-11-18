@@ -72,6 +72,7 @@ impl<'b, 'h> Region<'b, 'h> {
                 RegionFrame::Block(frame) => {
                     frame.step(checker, returned.take(), &Destination::statement())?
                 }
+                RegionFrame::Aggregate(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::Conditional(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::When(frame) => frame.step(checker, returned.take())?,
                 RegionFrame::Match(frame) => frame.step(checker, returned.take())?,
@@ -109,6 +110,32 @@ impl<'b, 'h> Region<'b, 'h> {
             let (block, destination, boundary) = match request {
                 Request::Block(block, destination) => (block, destination, None),
                 Request::Expression(expr, destination) => {
+                    if matches!(expr.kind, H::Tuple(_) | H::List(_))
+                        && let Some(depth) = destination.contextual_depth()
+                    {
+                        self.frames
+                            .push(RegionFrame::Aggregate(aggregates::Frame::contextual(
+                                expr, depth,
+                            )?));
+                        return Ok(Poll::Continue);
+                    }
+                    if let H::Tuple(items) = expr.kind
+                        && matches!(
+                            destination.structural_input(),
+                            Some(
+                                crate::calls::InputContext::Tuple(_)
+                                    | crate::calls::InputContext::NormalTuple { .. }
+                            )
+                        )
+                    {
+                        self.frames
+                            .push(RegionFrame::Aggregate(aggregates::Frame::partial_tuple(
+                                expr,
+                                items,
+                                destination,
+                            )?));
+                        return Ok(Poll::Continue);
+                    }
                     if let H::NFApplication(head, inputs) = expr.kind
                         && let H::ResolvedDef { def_id, .. } = head.kind
                         && checker.data_consumer_call(expr)?.is_none()

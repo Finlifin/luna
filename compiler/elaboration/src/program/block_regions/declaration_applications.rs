@@ -37,25 +37,8 @@ impl<'h, C: Completion<Output = n::Expr>> Frame<'h, C> {
                 use declaration_inputs::request::Demand;
                 let (input, demand) = request.into_parts();
                 let destination = match demand {
-                    Demand::Ordinary(expected) => Destination::ordinary(
-                        checker,
-                        OrdinaryTail {
-                            expected: expected.as_ref(),
-                            partial: None,
-                            input: None,
-                        },
-                        input.span,
-                    )?,
-                    Demand::Input(context) => Destination::ordinary(
-                        checker,
-                        OrdinaryTail {
-                            expected: None,
-                            partial: None,
-                            input: Some(&context),
-                        },
-                        input.span,
-                    )?,
-                    // The old request enters dependent_normal_argument at depth 0.
+                    Demand::Ordinary(expected) => Destination::from_expected(expected),
+                    Demand::Input(context) => Destination::from_input(context),
                     Demand::Contextual => Destination::ContextualInput,
                 };
                 Ok(Step::Child(Request::Expression(input, destination)))

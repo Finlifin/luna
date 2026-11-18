@@ -142,6 +142,7 @@ impl std::fmt::Display for Step<'_, '_> {
 }
 
 enum RegionFrame<'b, 'h> {
+    Aggregate(aggregates::Frame<'b, 'h>),
     Block(BlockFrame<'b, 'h>),
     Conditional(conditionals::Frame<'b, 'h>),
     When(when::Frame<'b, 'h>),
@@ -163,7 +164,7 @@ impl RegionFrame<'_, '_> {
             Self::Conditional(frame) => frame.unwind(checker),
             Self::When(frame) => frame.unwind(checker),
             Self::Match(frame) => frame.unwind(checker),
-            Self::Comparison(_) | Self::Arithmetic(_) | Self::Unary(_) => {}
+            Self::Comparison(_) | Self::Arithmetic(_) | Self::Unary(_) | Self::Aggregate(_) => {}
             Self::Logical(frame) => frame.unwind(checker),
             Self::NormalApplication(frame) => frame.unwind(checker),
             Self::CallableApplication(frame) => frame.unwind(checker),
@@ -175,6 +176,7 @@ impl std::fmt::Display for RegionFrame<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Block(frame) => frame.fmt(f),
+            Self::Aggregate(frame) => frame.fmt(f),
             Self::Conditional(frame) => frame.fmt(f),
             Self::When(frame) => frame.fmt(f),
             Self::Match(frame) => frame.fmt(f),
@@ -305,6 +307,59 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         )?;
         let frame = comparisons::Frame::new(self, expr, destination, false)?;
         self.drive_check_region(RegionFrame::Comparison(frame))?
+            .ordinary(expr.span)
+    }
+
+    pub(in crate::program) fn check_contextual_aggregate(
+        &mut self,
+        expr: &Expr<'_>,
+        depth: usize,
+    ) -> Result<n::NormalFormArgument, Error> {
+        let frame = aggregates::Frame::contextual(expr, depth)?;
+        self.drive_check_region(RegionFrame::Aggregate(frame))?
+            .contextual(expr.span)
+    }
+
+    pub(in crate::program) fn check_partial_tuple(
+        &mut self,
+        expr: &Expr<'_>,
+        items: &[Expr<'_>],
+        context: &crate::calls::InputContext,
+    ) -> Result<n::Expr, Error> {
+        let destination = Destination::ordinary(
+            self,
+            OrdinaryTail {
+                expected: None,
+                partial: None,
+                input: Some(context),
+            },
+            expr.span,
+        )?;
+        let frame = aggregates::Frame::partial_tuple(expr, items, destination)?;
+        self.drive_check_region(RegionFrame::Aggregate(frame))?
+            .ordinary(expr.span)
+    }
+
+    pub(in crate::program) fn check_tuple_fields(
+        &mut self,
+        expr: &Expr<'_>,
+        items: &[Expr<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let frame = aggregates::Frame::tuple(self, expr, items, expected)?;
+        self.drive_check_region(RegionFrame::Aggregate(frame))?
+            .ordinary(expr.span)
+    }
+
+    pub(in crate::program) fn check_list_fields(
+        &mut self,
+        expr: &Expr<'_>,
+        items: &[Expr<'_>],
+        expected: &Term,
+        element: &Term,
+    ) -> Result<n::Expr, Error> {
+        let frame = aggregates::Frame::list(self, expr, items, expected, element)?;
+        self.drive_check_region(RegionFrame::Aggregate(frame))?
             .ordinary(expr.span)
     }
 

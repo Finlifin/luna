@@ -4986,28 +4986,8 @@ impl Checker<'_, '_> {
                     kind: K::Tuple(Vec::new()),
                 })
             }
-            (C::Tuple(fields) | C::NormalTuple { fields, .. }, H::Tuple(items)) => {
-                if fields.len() != items.len() {
-                    return Err(error(input.span, "tuple argument arity mismatch"));
-                }
-                let values = items
-                    .iter()
-                    .zip(fields)
-                    .map(|(item, context)| self.input_context_expression(item, context))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let ty = if values.iter().any(|value| is_never(&value.ty)) {
-                    p(P::Never)
-                } else {
-                    self.tuple_value_type(
-                        values.iter().map(|value| value.ty.clone()).collect(),
-                        input.span,
-                    )?
-                };
-                Ok(n::Expr {
-                    ty,
-                    source: source(input.span),
-                    kind: K::Tuple(values),
-                })
+            (C::Tuple(_) | C::NormalTuple { .. }, H::Tuple(items)) => {
+                self.check_partial_tuple(input, items, context)
             }
             (C::ErrorResult { errors, .. }, H::ErrorNew(_)) => self.expr(
                 input,

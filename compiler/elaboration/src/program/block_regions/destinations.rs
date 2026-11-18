@@ -110,12 +110,26 @@ impl Destination {
         Ok(Self::Ordinary(std::sync::Arc::new(retained)))
     }
 
-    pub(super) fn statement() -> Self {
+    // Declaration requests and projected tuple fields already own these
+    // terms. Moving them into the region preserves their original copy charge.
+    pub(super) fn from_expected(expected: Option<Term>) -> Self {
         Self::Ordinary(std::sync::Arc::new(OrdinaryDestination {
-            expected: None,
+            expected,
             partial: None,
             input: None,
         }))
+    }
+
+    pub(super) fn from_input(input: crate::calls::InputContext) -> Self {
+        Self::Ordinary(std::sync::Arc::new(OrdinaryDestination {
+            expected: None,
+            partial: None,
+            input: Some(input),
+        }))
+    }
+
+    pub(super) fn statement() -> Self {
+        Self::from_expected(None)
     }
 
     pub(super) fn ordinary_view(&self) -> Option<OrdinaryTail<'_>> {

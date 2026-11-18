@@ -1162,3 +1162,36 @@ fn supplied_generic_domains_do_not_authorize_unrelated_payloads() {
         );
     }
 }
+
+#[test]
+fn contextual_aggregate_fields_keep_source_order_across_a_later_type() {
+    let package = sysroot::compile(
+        "
+        pure comptime fn Packet<T, ...values: meta.List<T>> -> Type { bool }
+        comptime fn Pair() -> Type { Tuple<u8, bool> }
+        comptime fn byte() -> u8 { 7 }
+        comptime fn yes() -> bool { true }
+        comptime fn Expected() -> Type { Packet<Tuple<u8, bool>, (7, true), (255, false)> }
+        comptime fn Nested() -> Type {
+            Packet<.values = [(byte(), yes()), (255, false)], Pair()>
+        }
+        comptime fn Exit() -> Type {
+            Packet<.values = [(byte(), do { return bool; false }), (255, yes())], Pair()>
+        }
+        ",
+    )
+    .unwrap();
+    let expected = invoke_both(&package, "Expected");
+    trace_both(
+        &package,
+        "Nested",
+        &expected,
+        &["Nested", "byte", "yes", "Pair"],
+    );
+    trace_both(
+        &package,
+        "Exit",
+        &Value::Type(nir::Term::Primitive(nir::Primitive::Bool)),
+        &["Exit", "byte"],
+    );
+}

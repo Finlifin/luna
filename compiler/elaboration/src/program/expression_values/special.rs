@@ -747,24 +747,9 @@ impl Checker<'_, '_> {
         }
         if let (H::List(items), Some(expected)) = (&expr.kind, expected) {
             if let Some(element) = self.list_element_type(expected).cloned() {
-                self.required_steps = self
-                    .required_steps
-                    .checked_sub(items.len() as u64)
-                    .ok_or_else(|| error(expr.span, "type-list construction budget exhausted"))?;
-                let fields = items
-                    .iter()
-                    .map(|item| self.expr(item, Some(&element)))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let ty = if fields.iter().any(|field| is_never(&field.ty)) {
-                    p(P::Never)
-                } else {
-                    expected.clone()
-                };
-                return Ok(Some(n::Expr {
-                    source: source(expr.span),
-                    ty,
-                    kind: K::TypeList(fields),
-                }));
+                return self
+                    .check_list_fields(expr, items, expected, &element)
+                    .map(Some);
             }
         }
         if expected.is_none() && matches!(expr.kind, H::List(_)) {
