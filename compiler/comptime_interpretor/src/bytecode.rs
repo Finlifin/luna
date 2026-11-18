@@ -21,7 +21,7 @@ pub(super) struct Frame {
     newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
     error_conversions: BTreeMap<usize, comptime_compiler::ErrorConversion>,
     list_operations: BTreeMap<usize, (Term, Option<Term>)>,
-    instance_origins: BTreeMap<usize, Option<(DeclarationId, usize)>>,
+    instance_origins: BTreeMap<usize, InstanceOrigin>,
     instance_methods: BTreeMap<usize, comptime_compiler::methods::Method>,
     closures: BTreeMap<usize, PendingClosure>,
     bit_updates: BTreeMap<usize, (Arc<comptime_compiler::bit_updates::Plan>, usize, usize)>,
@@ -213,6 +213,11 @@ pub(super) enum Progress {
     Complete(Flow),
 }
 
+enum InstanceOrigin {
+    Function(dynamic_instances::FunctionTarget),
+    Method(DeclarationId, usize),
+}
+
 impl fmt::Display for Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -295,8 +300,16 @@ impl fmt::Display for Frame {
         write!(f, " (instance-origins")?;
         for (slot, origin) in &self.instance_origins {
             write!(f, " (%{slot}")?;
-            if let Some((interface, count)) = origin {
-                write!(f, " (interface {interface} {count})")?;
+            match origin {
+                InstanceOrigin::Function(dynamic_instances::FunctionTarget::Declaration(id)) => {
+                    write!(f, " (declaration {id})")?
+                }
+                InstanceOrigin::Function(dynamic_instances::FunctionTarget::Concrete(handle)) => {
+                    write!(f, " {}", handle.key())?
+                }
+                InstanceOrigin::Method(interface, count) => {
+                    write!(f, " (interface {interface} {count})")?
+                }
             }
             write!(f, ")")?;
         }
@@ -1102,14 +1115,16 @@ impl<'a> Interpreter<'a> {
                         &constructor.output,
                         source,
                     )?;
-                    if origin.is_none() {
-                        self.admit_dynamic_function_instance(
+                    let origin = match origin {
+                        Some((interface, count)) => InstanceOrigin::Method(interface, count),
+                        None => InstanceOrigin::Function(self.admit_dynamic_function_instance(
                             constructor.declaration,
                             constructor.operands.len(),
+                            constructor.link.clone(),
                             &constructor.output,
                             source,
-                        )?;
-                    }
+                        )?),
+                    };
                     frame.instance_origins.insert(*destination, origin);
                 }
                 Op::FinishInstance {
@@ -1126,14 +1141,18 @@ impl<'a> Interpreter<'a> {
                         let value = frame.slots[*register].take().ok_or_else(missing)?;
                         arguments.push(self.freeze_instance_argument(value, domain, source)?);
                     }
-                    let Some(origin) = origin else {
-                        frame.slots[*destination] = Some(self.function_instance_value(
-                            constructor.declaration,
-                            &arguments,
-                            &constructor.output,
-                            source,
-                        )?);
-                        continue;
+                    let origin = match origin {
+                        InstanceOrigin::Method(interface, count) => (interface, count),
+                        InstanceOrigin::Function(target) => {
+                            frame.slots[*destination] =
+                                Some(self.finish_dynamic_function_instance(
+                                    target,
+                                    &arguments,
+                                    &constructor.output,
+                                    source,
+                                )?);
+                            continue;
+                        }
                     };
                     let instance = self.dynamic_trait_method(
                         constructor.declaration,

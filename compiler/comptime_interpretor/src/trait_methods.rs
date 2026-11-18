@@ -60,6 +60,11 @@ impl Interpreter<'_> {
                     &identity.method_arguments,
                 )?
                 .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
+            if !contract.program.preconditions.is_empty()
+                && self.iir_template_method_type(identity).is_none()
+            {
+                return Err(self.failure(ErrorKind::Unsupported, Some(source)));
+            }
             for requirement in &contract.requirements {
                 self.check_type_contract(requirement, source)?;
             }

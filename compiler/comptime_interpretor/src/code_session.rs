@@ -106,7 +106,7 @@ impl CodeSession {
             graph_indexes: None,
             indexes: Default::default(),
             resolving_indexes: Default::default(),
-            compilation: Default::default(),
+            compilation: comptime_compiler::CompilationSession::for_concrete_graph(),
             bytecode: Default::default(),
             inputs: Default::default(),
             defaults: Default::default(),

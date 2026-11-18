@@ -21,6 +21,27 @@ pub struct InstanceKey {
     /// hashing remain structural; pointer identity is not semantic evidence.
     pub arguments: std::sync::Arc<[Term]>,
 }
+impl InstanceKey {
+    fn parts(&self) -> (DeclarationId, &[Term]) {
+        (self.declaration, &self.arguments)
+    }
+}
+
+/// Dependency of a concrete clause operation, conditional on its operands
+/// returning. The executable packet still owns all lexical computations.
+pub fn observed_clause_arguments(
+    declaration: DeclarationId,
+    inputs: &nir::program::ClauseOperands,
+    fuel: &mut usize,
+) -> Result<Vec<Term>, String> {
+    inputs
+        .copy_observed_arguments(fuel)
+        .map_err(|e| format!("IIR clause dependency budget: {e:?}"))?
+        .ok_or_else(|| {
+            format!("IIR clause dependency for {declaration} still requires invocation-time input")
+        })
+}
+
 impl fmt::Display for InstanceKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -200,7 +221,7 @@ impl Package {
     /// Validate completed annotations and closure of every named callable
     /// reference, including references embedded in defaults and patterns.
     pub fn validate(&self, fuel: &mut usize) -> Result<(), String> {
-        self.validate_index_with_budget(fuel)?;
+        let callables = self.checked_callables(fuel)?;
         let links = TypeLinks::new(self, fuel)?;
         for identity in &self.callable_identities {
             let signature = identity.closed_signature()?;
@@ -264,6 +285,11 @@ impl Package {
                 let program = nir::contracts::CallableProgram::method(method)
                     .map_err(|error| error.to_string())?;
                 visit::program_expressions(program, fuel, |expr, fuel| {
+                    callables.validate_clause(
+                        expr,
+                        method.signature.is_comptime_callable(),
+                        fuel,
+                    )?;
                     self.validate_expression_types_in(&links, expr, fuel)
                 })?;
             }
@@ -386,18 +412,17 @@ impl Package {
                 if let Some(message) = nir::program::pointer_operation_error_in(expr, self.target) {
                     return Err(message.into());
                 }
-                let target = match &expr.kind {
-                    K::Function(id) => Some(InstanceKey {
-                        declaration: *id,
-                        arguments: vec![].into(),
-                    }),
+                callables.validate_clause(
+                    expr,
+                    instance.function.phase == nir::program::FunctionPhase::Comptime,
+                    fuel,
+                )?;
+                let target: Option<(DeclarationId, &[Term])> = match &expr.kind {
+                    K::Function(id) => Some((*id, &[])),
                     K::FunctionInstance {
                         declaration,
                         arguments,
-                    } => Some(InstanceKey {
-                        declaration: *declaration,
-                        arguments: arguments.clone().into(),
-                    }),
+                    } => Some((*declaration, arguments)),
                     K::TraitMethod {
                         method_arguments,
                         interface,
@@ -435,10 +460,7 @@ impl Package {
                                 m.member == *member && m.method_arguments == *method_arguments
                             })
                             .ok_or("IIR trait reference has no selected method")?;
-                        Some(InstanceKey {
-                            declaration: method.body,
-                            arguments: method.arguments.clone().into(),
-                        })
+                        Some((method.body, &method.arguments))
                     }
 
                     K::StagedValue(_) => {
@@ -458,20 +480,22 @@ impl Package {
                     _ => None,
                 };
                 if let Some(target) = target {
-                    if let Some(ty) = self.template_type(&target) {
+                    index::terms(target.1, fuel)?;
+                    if let Some(&ty) = callables.templates.get(&target) {
                         if ty != &expr.ty {
                             return Err("IIR template reference changed logical type".into());
                         }
                         return Ok(());
                     }
-                    let target = self
-                        .function(&target)
+                    let target = callables
+                        .functions
+                        .get(&target)
                         .ok_or("IIR callable reference is dangling")?;
-                    let comptime = target.function.phase == nir::program::FunctionPhase::Comptime;
+                    let comptime = target.phase == nir::program::FunctionPhase::Comptime;
                     if comptime != expr.ty.is_comptime_callable() {
                         return Err("IIR callable reference changed execution phase".into());
                     }
-                    if target.function.is_unsafe != expr.ty.is_unsafe_callable() {
+                    if target.is_unsafe != expr.ty.is_unsafe_callable() {
                         return Err("IIR callable reference changed unsafe responsibility".into());
                     }
                 }

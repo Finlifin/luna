@@ -2,6 +2,45 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
 
+/// The validation walk borrows the same executable and template declarations
+/// that established uniqueness and dispatch closure.
+pub(super) struct CallableLinks<'a> {
+    pub(super) functions: HashMap<(DeclarationId, &'a [Term]), &'a Function>,
+    pub(super) templates: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
+}
+
+impl CallableLinks<'_> {
+    pub(super) fn validate_clause(
+        &self,
+        expr: &nir::program::Expr,
+        comptime: bool,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        let nir::program::ExprKind::ComptimeFunctionInstance {
+            declaration,
+            inputs,
+        } = &expr.kind
+        else {
+            return Ok(());
+        };
+        if !comptime || !expr.ty.is_comptime_callable() {
+            return Err("IIR clause computation requires comptime invocation".into());
+        }
+        let arguments = observed_clause_arguments(*declaration, inputs, fuel)?;
+        let key = (*declaration, arguments.as_slice());
+        let target = self
+            .functions
+            .get(&key)
+            .ok_or("IIR clause dependency has no executable instance")?;
+        if target.phase != nir::program::FunctionPhase::Comptime
+            || target.is_unsafe != expr.ty.is_unsafe_callable()
+            || target.signature.callable_signature() != expr.ty.callable_signature()
+        {
+            return Err("IIR clause dependency changed callable signature or phase".into());
+        }
+        Ok(())
+    }
+}
 impl Package {
     pub fn validate_index(&self) -> Result<(), String> {
         self.validate_index_with_budget(&mut 100_000)
@@ -9,6 +48,10 @@ impl Package {
 
     /// Guard structural keys before recursive hashing, comparison or cloning.
     pub fn validate_index_with_budget(&self, fuel: &mut usize) -> Result<(), String> {
+        self.checked_callables(fuel).map(|_| ())
+    }
+
+    pub(super) fn checked_callables(&self, fuel: &mut usize) -> Result<CallableLinks<'_>, String> {
         spend(fuel, 1)?;
         let mut callable_keys = HashSet::new();
         for identity in &self.callable_identities {
@@ -23,7 +66,7 @@ impl Package {
             for target in table.targets() {
                 key(target, fuel)?;
                 if template_targets
-                    .insert(target, table.logical_type())
+                    .insert(target.parts(), table.logical_type())
                     .is_some()
                 {
                     return Err("duplicate IIR template identity".into());
@@ -35,11 +78,11 @@ impl Package {
             key(&instance.key, fuel)?;
             term(&instance.function.signature, fuel)?;
             spend(fuel, instance.function.parameters.len())?;
-            if template_targets.contains_key(&instance.key) {
+            if template_targets.contains_key(&instance.key.parts()) {
                 return Err("IIR identity is both a template and executable instance".into());
             }
             if functions
-                .insert(&instance.key, &instance.function)
+                .insert(instance.key.parts(), &instance.function)
                 .is_some()
             {
                 return Err("duplicate IIR function instance".into());
@@ -70,7 +113,7 @@ impl Package {
         }
         for root in &self.roots {
             key(root, fuel)?;
-            if !functions.contains_key(root) {
+            if !functions.contains_key(&root.parts()) {
                 return Err(format!("missing IIR root {root}"));
             }
         }
@@ -184,10 +227,7 @@ impl Package {
                             && m.type_arguments == method.method_arguments
                     })
                     .ok_or("IIR dispatch member is absent from its interface")?;
-                let key = InstanceKey {
-                    declaration: method.body,
-                    arguments: method.arguments.clone().into(),
-                };
+                let key = (method.body, method.arguments.as_slice());
                 if let Some(&ty) = template_targets.get(&key) {
                     if declared.signature.ordinary().map_err(|e| e.to_string())? != ty
                         || declared.signature.is_comptime_callable()
@@ -219,7 +259,10 @@ impl Package {
                 return Err("IIR interface has no dispatch selection".into());
             }
         }
-        Ok(())
+        Ok(CallableLinks {
+            functions,
+            templates: template_targets,
+        })
     }
 }
 
@@ -231,7 +274,7 @@ fn term(value: &Term, fuel: &mut usize) -> Result<(), String> {
     nir::type_computations::charge_term(value, fuel)
         .map_err(|e| format!("IIR index key budget: {e}"))
 }
-fn terms(values: &[Term], fuel: &mut usize) -> Result<(), String> {
+pub(super) fn terms(values: &[Term], fuel: &mut usize) -> Result<(), String> {
     for value in values {
         term(value, fuel)?;
     }

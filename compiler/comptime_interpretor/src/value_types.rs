@@ -284,6 +284,21 @@ impl Interpreter<'_> {
         }
         if self.graph.is_some() {
             match value {
+                Value::RuntimeTraitMethod(identity) if self.comptime_only => {
+                    return checks
+                        .admit(|fuel| {
+                            self.admitted_callable_signature(
+                                nir::CallableValueRef::Method(identity),
+                                &[],
+                                fuel,
+                            )
+                        })
+                        .flatten()
+                        .is_some_and(|signature| {
+                            checks.record_method(identity)
+                                && checks.callable_matches(&signature, ty, &self.associated_values)
+                        });
+                }
                 Value::RuntimeTraitMethod(identity) => {
                     return self
                         .iir_template_method_type(identity)

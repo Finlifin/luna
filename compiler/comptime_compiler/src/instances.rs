@@ -4,6 +4,9 @@ use std::fmt;
 
 #[derive(Debug)]
 pub struct Constructor {
+    /// Only concrete graph code carries this link. Source calls can compute
+    /// previously unseen instances in their declaration world.
+    pub link: Option<std::sync::Arc<[Term]>>,
     pub declaration: DeclarationId,
     pub operands: Vec<(crate::Register, Term)>,
     pub output: Term,
@@ -14,7 +17,15 @@ impl fmt::Display for Constructor {
         for (register, domain) in &self.operands {
             write!(f, " (%{register} {domain})")?;
         }
-        write!(f, ") (output {}))", self.output)
+        write!(f, ")")?;
+        if let Some(inputs) = &self.link {
+            write!(f, " (graph-link")?;
+            for term in inputs.iter() {
+                write!(f, " {term}")?;
+            }
+            write!(f, ")")?;
+        }
+        write!(f, " (output {}))", self.output)
     }
 }
 

@@ -153,7 +153,7 @@ impl<'a> Interpreter<'a> {
             bytecode_input_preparations: 0,
             bytecode_compilations: 0,
             bytecode_compilation_steps: 0,
-            compilation_session: Default::default(),
+            compilation_session: comptime_compiler::CompilationSession::for_concrete_graph(),
             bytecode_cache: Default::default(),
             borrowed_code_cache: Default::default(),
             input_body_cache: Default::default(),
@@ -287,6 +287,13 @@ impl<'a> Interpreter<'a> {
     }
 
     fn iir_callable(&mut self, key: &iir::InstanceKey) -> Result<Value, Error> {
+        self.iir_callable_handle(key).map(Value::IirCallable)
+    }
+
+    pub(super) fn iir_callable_handle(
+        &mut self,
+        key: &iir::InstanceKey,
+    ) -> Result<Arc<IirCallable>, Error> {
         // External keys and warm cache queries must be bounded before any
         // structural hash, including the graph's definition lookup.
         self.charge_copy_work(None, |fuel| {
@@ -302,7 +309,7 @@ impl<'a> Interpreter<'a> {
             .iir_function_position(key.declaration, &key.arguments)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
         if let Some(handle) = self.iir_callables.get(&position) {
-            return Ok(Value::IirCallable(handle.clone()));
+            return Ok(handle.clone());
         }
         let instance = &self.graph.expect("indexed graph").functions[position];
         let declaration = &instance.function.interface;
@@ -315,7 +322,7 @@ impl<'a> Interpreter<'a> {
             ty: declaration.callable_type(),
         });
         self.iir_callables.insert(position, handle.clone());
-        Ok(Value::IirCallable(handle))
+        Ok(handle)
     }
 
     pub(super) fn iir_target(
@@ -427,9 +434,14 @@ impl<'a> Interpreter<'a> {
         output: &Term,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        let value = if self
-            .iir_template_type(key.declaration, &key.arguments)
-            .is_some()
+        // A runtime interface member transported through comptime keeps the
+        // public member identity even when its selected body is executable.
+        let transport_method =
+            method.is_some() && self.comptime_only && !output.is_comptime_callable();
+        let value = if transport_method
+            || self
+                .iir_template_type(key.declaration, &key.arguments)
+                .is_some()
         {
             if let Some(method) = method {
                 Value::RuntimeTraitMethod(Box::new(TraitMethodIdentity {
@@ -450,9 +462,7 @@ impl<'a> Interpreter<'a> {
         } else {
             self.iir_callable(&key)?
         };
-        if !self.has_type(&value, output) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        self.check_value_type(&value, output, Some(source))?;
         Ok(value)
     }
 }

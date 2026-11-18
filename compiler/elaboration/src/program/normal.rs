@@ -802,6 +802,36 @@ impl Checker<'_, '_> {
         bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
     ) -> Result<Term, Failure> {
         match &expr.kind {
+            // A checked named operand denotes its declaration if formation
+            // succeeds. Observing the key does not perform formation or call it.
+            K::Function(declaration) => Ok(Term::FunctionValue {
+                declaration: *declaration,
+                arguments: vec![],
+            }),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => Ok(Term::FunctionValue {
+                declaration: *declaration,
+                arguments: copy_observed_terms(arguments, budget)?,
+            }),
+            K::TraitMethod {
+                interface,
+                interface_arguments,
+                member,
+                subject,
+                method_arguments,
+            } if !expr.ty.is_comptime_callable() => {
+                Ok(Term::MethodValue(Box::new(nir::TraitMethodIdentity {
+                    interface: n::InterfaceInstance {
+                        declaration: *interface,
+                        arguments: copy_observed_terms(interface_arguments, budget)?,
+                    },
+                    subject: copy_observed_term(subject, budget)?,
+                    member: *member,
+                    method_arguments: copy_observed_terms(method_arguments, budget)?,
+                })))
+            }
             K::TypeValue(ty) | K::ComptimeValue(ty) | K::StagedValue(ty) => {
                 copy_observed_term(ty, budget)
             }
@@ -1656,6 +1686,17 @@ fn known_type_equality(
 
 fn copy_observed_term(term: &Term, budget: &mut comptime_runtime::Budget) -> Result<Term, Failure> {
     nir::copy_budget::clone_term(term, &mut budget.steps).map_err(Failure::from)
+}
+
+fn copy_observed_terms(
+    terms: &[Term],
+    budget: &mut comptime_runtime::Budget,
+) -> Result<Vec<Term>, Failure> {
+    budget.consume(terms.len())?;
+    terms
+        .iter()
+        .map(|term| copy_observed_term(term, budget))
+        .collect()
 }
 
 pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budget) -> Option<Term> {

@@ -1293,10 +1293,18 @@ enum Work<'a> {
 #[derive(Default)]
 pub struct CompilationSession {
     constants: constants::Pool,
+    concrete_instances: bool,
 }
 impl CompilationSession {
+    pub fn for_concrete_graph() -> Self {
+        Self {
+            concrete_instances: true,
+            ..Self::default()
+        }
+    }
+
     pub fn compile(&mut self, body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
-        compile_root(Root::Expression(body), fuel, &mut self.constants).map(|(program, _)| program)
+        compile_root(Root::Expression(body), fuel, self).map(|(program, _)| program)
     }
     /// A checked input expression executes in its source activation's lexical context.
     pub fn compile_lexical_expression(
@@ -1304,15 +1312,14 @@ impl CompilationSession {
         body: &Expr,
         fuel: &mut usize,
     ) -> Result<Program, Error> {
-        compile_root(Root::LexicalExpression(body), fuel, &mut self.constants)
-            .map(|(program, _)| program)
+        compile_root(Root::LexicalExpression(body), fuel, self).map(|(program, _)| program)
     }
     pub fn compile_staged_input(
         &mut self,
         input: &nir::program::NormalFormArgument,
         fuel: &mut usize,
     ) -> Result<(Program, normal_types::Shape), Error> {
-        compile_root(Root::Staged(input), fuel, &mut self.constants)
+        compile_root(Root::Staged(input), fuel, self)
             .map(|(program, shape)| (program, shape.unwrap()))
     }
     pub fn compile_contextual_input(
@@ -1321,8 +1328,7 @@ impl CompilationSession {
         expected: &Term,
         fuel: &mut usize,
     ) -> Result<Program, Error> {
-        compile_root(Root::Contextual(input, expected), fuel, &mut self.constants)
-            .map(|(program, _)| program)
+        compile_root(Root::Contextual(input, expected), fuel, self).map(|(program, _)| program)
     }
 }
 
@@ -1360,7 +1366,7 @@ enum Root<'a> {
 fn compile_root<'a>(
     root: Root<'a>,
     fuel: &mut usize,
-    constants: &mut constants::Pool,
+    session: &mut CompilationSession,
 ) -> Result<(Program, Option<normal_types::Shape>), Error> {
     let lexical_input = !matches!(root, Root::Expression(_));
     let source = match root {
@@ -1566,7 +1572,19 @@ fn compile_root<'a>(
                             .iter()
                             .map(|arg| Ok((fresh(), copy_term(&arg.ty, fuel, source)?)))
                             .collect::<Result<Vec<_>, Error>>()?;
+                        let link = if session.concrete_instances {
+                            Some(
+                                inputs
+                                    .copy_observed_arguments(fuel)
+                                    .map_err(|e| copy_error(e, source))?
+                                    .ok_or(Error::InvalidControl(source))?
+                                    .into(),
+                            )
+                        } else {
+                            None
+                        };
                         let constructor = Arc::new(instances::Constructor {
+                            link,
                             declaration: *declaration,
                             operands,
                             output: copy_term(&expr.ty, fuel, source)?,
@@ -2279,7 +2297,7 @@ fn compile_root<'a>(
                                 ),
                                 _ => {
                                     let constant =
-                                        constant_table.insert(constants.get(index, fuel)?);
+                                        constant_table.insert(session.constants.get(index, fuel)?);
                                     leaf_inputs::Selector::Literal(constant, index.source)
                                 }
                             };
@@ -2511,8 +2529,8 @@ fn compile_root<'a>(
                                         field.source,
                                     )),
                                     K::Literal(_) => {
-                                        let constant =
-                                            constant_table.insert(constants.get(field, fuel)?);
+                                        let constant = constant_table
+                                            .insert(session.constants.get(field, fuel)?);
                                         Ok(leaf_inputs::Selector::Literal(constant, field.source))
                                     }
                                     _ => unreachable!(),
@@ -2725,7 +2743,7 @@ fn compile_root<'a>(
                     }
                     K::Unit => emit(&mut work, Op::Unit(dst)),
                     K::Literal(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::Function(_) => {
-                        let constant = constant_table.insert(constants.get(expr, fuel)?);
+                        let constant = constant_table.insert(session.constants.get(expr, fuel)?);
                         emit(
                             &mut work,
                             Op::Constant {

@@ -276,6 +276,25 @@ impl ClauseOperands {
         }
     }
 
+    /// Dependency key conditional on producing all arguments. This never
+    /// evaluates a producer or supplies an operand for execution.
+    pub fn copy_observed_arguments(
+        &self,
+        fuel: &mut usize,
+    ) -> Result<Option<Vec<Term>>, crate::copy_budget::CopyBudgetExhausted> {
+        *fuel = fuel
+            .checked_sub(self.arguments.len())
+            .ok_or(crate::copy_budget::CopyBudgetExhausted::Steps)?;
+        let mut observed = Vec::with_capacity(self.arguments.len());
+        for slot in 0..self.arguments.len() {
+            let Some(term) = self.observed_argument(slot) else {
+                return Ok(None);
+            };
+            observed.push(crate::copy_budget::clone_term(term, fuel)?);
+        }
+        Ok(Some(observed))
+    }
+
     pub fn expressions(&self) -> impl DoubleEndedIterator<Item = &Expr> {
         self.statements.iter().chain(&self.arguments)
     }

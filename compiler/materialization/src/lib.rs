@@ -3170,6 +3170,12 @@ impl Builder<'_> {
                         .find(|member| member.declaration == *declaration)
                         .map(|member| (interface, member))
                 }) else {
+                    if self.instances.is_some() {
+                        let arguments =
+                            iir::observed_clause_arguments(*declaration, inputs, &mut self.fuel)?;
+                        self.queue
+                            .push_back(Task::Function(*declaration, arguments));
+                    }
                     return Ok(());
                 };
                 if self.instances.is_some() {

@@ -7,11 +7,14 @@ use nir::program::{Expr, ExprKind as K, Literal, SourceRange};
 use nir::{Primitive, Term};
 
 fn graph(source: &str, entry: &str) -> iir::Package {
-    let package = support::compile(source);
+    graph_from_package(&support::compile(source), entry)
+}
+
+fn graph_from_package(package: &nir::program::Package, entry: &str) -> iir::Package {
     elaboration::materialization::instantiate(
-        &package,
+        package,
         &[iir::InstanceKey {
-            declaration: support::id(&package, entry),
+            declaration: support::id(package, entry),
             arguments: vec![].into(),
         }],
         Default::default(),
@@ -546,5 +549,101 @@ fn concrete_comptime_storage_uses_instantiated_nominal_layouts() {
                 Value::Bool(value)
             );
         }
+    }
+}
+
+#[test]
+fn observed_clause_links_preserve_execution_and_reject_stale_evidence() {
+    let source = "
+        comptime fn pick() -> bool where flag: bool { flag }
+        comptime fn run(allowed: bool) -> bool {
+            var touched = false;
+            let result = pick<do { assumes allowed; assumes not touched; touched = true; true }>();
+            result and touched and not pick<false>()
+        }";
+    let original = graph(source, "run");
+    let run = original.roots[0].clone();
+    for corrupt in [false, true] {
+        let mut graph = original.clone();
+        if corrupt {
+            // Change what the operand delivers after its original prefix. Keep
+            // the linked target and its evidence intact, as in a stale artifact.
+            let function = graph.functions.iter_mut().find(|f| f.key == run).unwrap();
+            let mut changed = 0;
+            nir::visit::expression_mut(&mut function.function.body, &mut 10000, |expr, _| {
+                if let K::ComptimeFunctionInstance { inputs, .. } = &mut expr.kind
+                    && inputs.observed_argument(0) == Some(&Term::Bool(true))
+                {
+                    inputs.arguments[0].kind = K::Literal(Literal::Bool(false));
+                    changed += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(changed, 1);
+        }
+        for compiled in [false, true] {
+            let mut vm = if compiled {
+                Interpreter::from_iir_for_comptime(&graph, Budget::default())
+            } else {
+                Interpreter::from_iir_for_comptime_tree(&graph, Budget::default())
+            }
+            .unwrap();
+            for allowed in [true, false, true] {
+                let result = vm.invoke_instance(&run, vec![Value::Bool(allowed)]);
+                if !allowed {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+                } else if corrupt {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::InvalidCallPlan);
+                } else {
+                    assert_eq!(result.unwrap(), Value::Bool(true));
+                }
+            }
+        }
+    }
+    let mut dangling = original;
+    dangling
+        .functions
+        .retain(|function| function.key.arguments.as_ref() != [Term::Bool(true)]);
+    assert!(
+        dangling
+            .validate(&mut 10000)
+            .unwrap_err()
+            .contains("clause dependency")
+    );
+}
+
+#[test]
+fn runtime_method_in_an_opaque_head_retains_its_interface_identity_in_both_worlds() {
+    let source = "
+        typealias Type = .Type'builtin;
+        trait Flag { fn read(self) -> bool; }
+        impl Flag for bool { fn read(self) -> bool { self } }
+        pure comptime fn Carrier<action: fn(bool) -> bool> -> Type { bool }
+        comptime fn selected() -> Type where T { T }
+        comptime fn run() -> Type { selected<Carrier<bool.as(Flag).read>>() }
+    ";
+    let package = support::compile(source);
+    let root = support::id(&package, "run");
+    let expected = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .invoke(root, vec![])
+        .unwrap();
+    assert!(
+        matches!(&expected, Value::Type(Term::NormalForm { arguments, .. })
+        if matches!(arguments.as_slice(), [Term::MethodValue(_)]))
+    );
+    let graph = graph_from_package(&package, "run");
+    for compiled in [false, true] {
+        let mut vm = if compiled {
+            Interpreter::from_iir_for_comptime(&graph, Budget::default())
+        } else {
+            Interpreter::from_iir_for_comptime_tree(&graph, Budget::default())
+        }
+        .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+            expected
+        );
     }
 }

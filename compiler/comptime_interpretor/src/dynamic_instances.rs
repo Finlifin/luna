@@ -2,6 +2,12 @@
 use super::*;
 use std::ops::ControlFlow;
 
+/// A source declaration can form an instance only after its operands finish.
+pub(super) enum FunctionTarget {
+    Declaration(DeclarationId),
+    Concrete(Arc<IirCallable>),
+}
+
 pub(super) enum PreparedTraitInstance {
     Unrelated,
     Ready(Expr),
@@ -284,28 +290,65 @@ impl Interpreter<'_> {
     }
 
     pub(super) fn admit_dynamic_function_instance(
-        &self,
+        &mut self,
         declaration: DeclarationId,
         arity: usize,
+        link: Option<Arc<[Term]>>,
         output: &Term,
         source: SourceRange,
-    ) -> Result<(), Error> {
-        if !self.comptime_only {
+    ) -> Result<FunctionTarget, Error> {
+        if !self.comptime_only || !output.is_comptime_callable() {
             return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+        }
+        if self.graph.is_some() {
+            let arguments =
+                link.ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+            let handle = self.iir_callable_handle(&iir::InstanceKey {
+                declaration,
+                arguments,
+            })?;
+            if handle.ty() != output {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            }
+            return Ok(FunctionTarget::Concrete(handle));
         }
         let definition = self
             .functions
             .declaration(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        if definition.phase != nir::program::FunctionPhase::Comptime
-            || !output.is_comptime_callable()
-        {
+        if definition.phase != nir::program::FunctionPhase::Comptime {
             return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
         }
         if arity != definition.type_parameters.len() {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
-        Ok(())
+        Ok(FunctionTarget::Declaration(declaration))
+    }
+
+    pub(super) fn finish_dynamic_function_instance(
+        &mut self,
+        target: FunctionTarget,
+        arguments: &[Term],
+        output: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        match target {
+            FunctionTarget::Declaration(id) => {
+                self.function_instance_value(id, arguments, output, source)
+            }
+            FunctionTarget::Concrete(handle) => {
+                self.charge_copy_work(Some(source), |fuel| {
+                    for term in arguments {
+                        nir::copy_budget::charge_term_copy(term, fuel, 128)?;
+                    }
+                    Ok(())
+                })?;
+                if handle.key().arguments.as_ref() != arguments {
+                    return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                }
+                Ok(Value::IirCallable(handle))
+            }
+        }
     }
 
     pub(super) fn freeze_instance_argument(
@@ -447,9 +490,17 @@ impl Interpreter<'_> {
         else {
             unreachable!()
         };
-        self.admit_dynamic_function_instance(
+        let mut link = None;
+        if self.graph.is_some() {
+            self.charge_copy_work(Some(expr.source), |fuel| {
+                link = inputs.copy_observed_arguments(fuel)?.map(Arc::from);
+                Ok(())
+            })?;
+        }
+        let target = self.admit_dynamic_function_instance(
             *declaration,
             inputs.arguments.len(),
+            link,
             &expr.ty,
             expr.source,
         )?;
@@ -457,8 +508,8 @@ impl Interpreter<'_> {
             ControlFlow::Continue(arguments) => arguments,
             ControlFlow::Break(flow) => return Ok(flow),
         };
-        // Revalidate declaration domains and requirements, including cache hits.
-        self.function_instance_value(*declaration, &arguments, &expr.ty, expr.source)
+        // Source formation checks the declaration. Graph formation checks the actual key.
+        self.finish_dynamic_function_instance(target, &arguments, &expr.ty, expr.source)
             .map(Flow::Value)
     }
 }
