@@ -481,7 +481,11 @@ impl Checker<'_, '_> {
             }));
         }
         match &expr.kind {
-            H::TraitBound(..) if self.executable_refinement_owner == Some(expr.hir_id.owner) => {
+            H::TraitBound(..)
+                if self.in_required_comptime
+                    || self.in_staged_input
+                    || self.executable_refinement_owner == Some(expr.hir_id.owner) =>
+            {
                 let value = self.refinement_trait_value(expr)?;
                 let ty = p(P::Bool);
                 if let Some(expected) = expected {

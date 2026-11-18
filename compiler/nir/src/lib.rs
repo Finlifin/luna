@@ -55,6 +55,7 @@ pub mod inline_return;
 
 pub mod newtypes;
 
+pub mod described_applications;
 pub mod refinements;
 pub mod type_aliases;
 

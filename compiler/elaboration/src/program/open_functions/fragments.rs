@@ -222,6 +222,7 @@ impl Checker<'_, '_> {
                     .subjects
                     .values()
                     .map(|b| b.declaration)
+                    .chain(self.definition_refinements.tuple_elements.iter().copied())
                     .collect(),
                 preconditions: vec![],
                 postconditions: vec![],

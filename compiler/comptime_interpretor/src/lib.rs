@@ -3278,6 +3278,96 @@ impl<'a> Interpreter<'a> {
         };
         Ok(Flow::Value(result))
     }
+    fn freeze_normal_argument(
+        &mut self,
+        value: &Value,
+        source: SourceRange,
+    ) -> Result<nir::described_applications::DataArgument, Error> {
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut budget = comptime_runtime::Budget {
+            steps: before,
+            max_limbs: 4096,
+        };
+        let mut fields = Vec::new();
+        let template = value.freeze_input_template(
+            &mut budget,
+            &self.abstract_type_parameters,
+            &self.abstract_value_parameters,
+            true,
+            Some(&mut fields),
+        );
+        self.budget.steps -= (before - budget.steps) as u64;
+        let template = template.map_err(|kind| self.failure(kind, Some(source)))?;
+        Ok(nir::described_applications::DataArgument::new(
+            template, fields,
+        ))
+    }
+
+    fn complete_normal_data(
+        &mut self,
+        head: DeclarationId,
+        inputs: Vec<nir::described_applications::DataArgument>,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        if inputs.iter().all(|input| input.is_concrete()) {
+            return self.complete_normal_type(
+                head,
+                inputs
+                    .into_iter()
+                    .map(|input| input.into_concrete().expect("concrete input"))
+                    .collect(),
+                source,
+            );
+        }
+        let world = self
+            .declaration_world
+            .filter(|_| self.comptime_only)
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let mut parameters = Vec::new();
+        let validation = inputs
+            .iter()
+            .map(|input| input.in_telescope(&mut parameters, &mut fuel))
+            .collect::<Result<Vec<_>, _>>();
+        self.budget.steps -= (before - fuel) as u64;
+        let arguments = validation.map_err(|_| {
+            self.failure(
+                if fuel == 0 {
+                    ErrorKind::StepsExhausted
+                } else {
+                    ErrorKind::Type
+                },
+                Some(source),
+            )
+        })?;
+        // Validate the original head and all argument domains in one binder
+        // frame. This temporary type never escapes as a result or PTC fact.
+        let schema = Term::Function {
+            parameters,
+            result: Box::new(Term::NormalForm {
+                head,
+                sort: nir::Sort::Type,
+                arguments,
+            }),
+        };
+        self.check_type_description(&schema, Some(source))?;
+        self.admit_type(&schema, 0)?;
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let data = world.refinements.application(head, inputs, &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        data.map(Value::Description).map_err(|_| {
+            self.failure(
+                if fuel == 0 {
+                    ErrorKind::StepsExhausted
+                } else {
+                    ErrorKind::Type
+                },
+                Some(source),
+            )
+        })
+    }
     fn complete_normal_type(
         &mut self,
         head: DeclarationId,
@@ -5249,7 +5339,7 @@ impl<'a> Interpreter<'a> {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
             }
             self.integer_operation(Some(expr.source), |budget| budget.consume(arguments.len()))?;
-            let mut inputs = vec![None; arguments.len()];
+            let mut inputs: Vec<_> = (0..arguments.len()).map(|_| None).collect();
             for argument in arguments {
                 if argument.parameter >= inputs.len()
                     || inputs[argument.parameter].is_some()
@@ -5260,13 +5350,13 @@ impl<'a> Interpreter<'a> {
                 }
                 let value = value!(self.eval(&argument.value, environment));
                 inputs[argument.parameter] =
-                    Some(self.residual_input_term(value, argument.value.source)?);
+                    Some(self.freeze_normal_argument(&value, argument.value.source)?);
             }
             let inputs = inputs
                 .into_iter()
                 .collect::<Option<Vec<_>>>()
                 .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
-            return Ok(Flow::Value(self.complete_normal_type(
+            return Ok(Flow::Value(self.complete_normal_data(
                 head,
                 inputs,
                 expr.source,

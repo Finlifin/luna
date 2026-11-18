@@ -21,7 +21,7 @@ pub mod fs { pub use file.{File, remove_file}; }
 pub mod mem { pub use layout.Layout; }
 pub mod fmt {
     pub use builtin.fmt.Display;
-    pub use parse.{FormatPlan, FormatPiece, FormatError};
+    pub use parse.{Parse, FormatPlan, FormatPiece, FormatError};
     pub use arguments.{print, println, eprint, eprintln, print_value, println_value};
 }
 pub mod prelude {

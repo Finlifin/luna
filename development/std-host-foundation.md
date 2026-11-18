@@ -5,8 +5,7 @@
 
 作者要求的 println 是
 `fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format))`。
-本记录中的文本输出 demo 只验证宿主底座，不满足该格式化变参要求。完整交付
-仍待类型描述计算和变参实例化接通；当前进度见
+下方保留早期宿主底座的验收记录。当前演示已接通格式化变参、Display 和换行，详见
 [格式化变参边界](runtime-value-delivery.md#格式化变参边界不能把静态文本输出当作-println-交付)。
 
 ## 历史宿主输出演示

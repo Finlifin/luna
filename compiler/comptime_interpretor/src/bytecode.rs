@@ -154,7 +154,7 @@ struct PendingCall {
 
 enum PreparedArgument {
     Value(Value),
-    Normal(Term),
+    Normal(nir::described_applications::DataArgument),
 }
 
 struct PendingClosure {
@@ -1767,9 +1767,9 @@ impl<'a> Interpreter<'a> {
                         .remove(destination)
                         .and_then(|input| input.normal)
                         .ok_or_else(missing)?;
-                    frame.slots[*destination] = Some(self.complete_normal_type(
+                    frame.slots[*destination] = Some(self.complete_normal_data(
                         input.head,
-                        input.bindings.finish().ok_or_else(missing)?,
+                        input.bindings.finish_normal().ok_or_else(missing)?,
                         source,
                     )?);
                 }
@@ -2357,7 +2357,7 @@ impl<'a> Interpreter<'a> {
                     let slot = pending.arguments.get_mut(*parameter).ok_or_else(missing)?;
                     if pending.normal_head.is_some() {
                         *slot = Some(PreparedArgument::Normal(
-                            self.residual_input_term(value, source)?,
+                            self.freeze_normal_argument(&value, source)?,
                         ));
                         continue;
                     }
@@ -2387,7 +2387,7 @@ impl<'a> Interpreter<'a> {
                             })
                             .collect::<Result<Vec<_>, _>>()?;
                         frame.slots[*destination] =
-                            Some(self.complete_normal_type(head, inputs, source)?);
+                            Some(self.complete_normal_data(head, inputs, source)?);
                         continue;
                     }
                     let arguments = arguments

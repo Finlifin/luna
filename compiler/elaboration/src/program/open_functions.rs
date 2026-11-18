@@ -12,6 +12,7 @@ use annotations::annotation_source;
 
 mod annotations;
 mod fragments;
+mod inline_evidence;
 mod inputs;
 mod observations;
 mod scalar_descriptions;
@@ -152,9 +153,13 @@ pub(super) struct Definition {
     result: Annotation,
     default_types: BTreeMap<usize, Term>,
     default_dependencies: BTreeMap<usize, BTreeSet<usize>>,
+    checked_tuple_loops: BTreeSet<n::LocalId>,
     checked: bool,
 }
 impl Definition {
+    pub(super) fn checked_empty_iteration(&self, site: hir::HirId) -> bool {
+        self.checked && self.checked_tuple_loops.contains(&local(site))
+    }
     pub(super) fn input_domain_refs(&self) -> impl Iterator<Item = (Sort, Option<&Term>)> {
         self.parameters.iter().map(|(sort, annotation)| {
             (
@@ -1786,6 +1791,7 @@ impl Checker<'_, '_> {
                 result,
                 default_types: BTreeMap::new(),
                 default_dependencies: BTreeMap::new(),
+                checked_tuple_loops: BTreeSet::new(),
                 checked: false,
             },
         );
@@ -2052,7 +2058,7 @@ impl Checker<'_, '_> {
                 // A signature template has no executable body. Its annotation,
                 // default and contract checks above still apply; each instance
                 // independently checks its supplied body in the inherited domain.
-                return Ok((default_types, default_dependencies));
+                return Ok((default_types, default_dependencies, BTreeSet::new()));
             };
             let body = this
                 .package
@@ -2161,13 +2167,18 @@ impl Checker<'_, '_> {
             } else {
                 check_body(this)?;
             }
-            Ok((default_types, default_dependencies))
+            Ok((
+                default_types,
+                default_dependencies,
+                std::mem::take(&mut this.definition_refinements.checked_tuple_loops),
+            ))
         });
         self.active_open_definitions.remove(&owner);
-        let (default_types, default_dependencies) = checked?;
+        let (default_types, default_dependencies, checked_tuple_loops) = checked?;
         let definition = self.open_functions.get_mut(&owner).unwrap();
         definition.default_types = default_types;
         definition.default_dependencies = default_dependencies;
+        definition.checked_tuple_loops = checked_tuple_loops;
         definition.checked = true;
         Ok(())
     }
@@ -2343,6 +2354,14 @@ impl Checker<'_, '_> {
                 "ordinary deferred body checking budget exhausted",
             )
         })?;
+        if let H::InlineControl(inner) = expr.kind
+            && let H::If(condition, yes, no) = inner.kind
+            && matches!(condition.kind, H::TraitBound(..))
+        {
+            return self.describe_inline_trait_guard(
+                expr, condition, yes, no, locals, returns, expected, depth,
+            );
+        }
         if super::intrinsics::is_application(expr) {
             return self.describe_known_region(expr, expected);
         }
@@ -4098,14 +4117,27 @@ impl Checker<'_, '_> {
             unreachable!()
         };
         let (index_source, element_source) = self.tuple_iteration_patterns(pat)?;
-        let (input, elements) = self.tuple_enumeration_input(input)?;
-        self.check_open_fragment(&input, expr.span, false)?;
-        if elements.is_empty() {
-            return Err(error(
-                expr.span,
-                "empty tuple_enumerate body checking is not yet implemented",
-            ));
-        }
+        let computed = self.computed_tuple_input(input)?;
+        let elements = if computed {
+            let binder = self.fresh_type_binder(expr.hir_id.owner, expr.span)?;
+            self.definition_refinements
+                .tuple_elements
+                .push(binder.declaration);
+            vec![Term::Rigid {
+                declaration: binder.declaration,
+                sort: Sort::Type,
+            }]
+        } else {
+            let (checked, elements) = self.tuple_enumeration_input(input)?;
+            self.check_open_fragment(&checked, expr.span, false)?;
+            if elements.is_empty() {
+                return Err(error(
+                    expr.span,
+                    "empty tuple_enumerate body checking is not yet implemented",
+                ));
+            }
+            elements
+        };
         let saved = self.locals.clone();
         let staged = self.open_staged_locals.clone();
         let staged_members = self.open_member_locals.clone();
@@ -4173,7 +4205,8 @@ impl Checker<'_, '_> {
             // element body diverges and none can break/continue this loop.
             // Transfers to enclosing loops remain visible to their own probe.
             let result = D::Known(p(
-                if patterns_irrefutable
+                if !computed
+                    && patterns_irrefutable
                     && guard.is_none()
                     && bodies_diverge
                     && !self.open_loop_transfers[&identity].any()
@@ -4186,6 +4219,14 @@ impl Checker<'_, '_> {
             self.require_description(&result, expected, expr.span)?;
             Ok(result)
         })();
+        if computed {
+            self.definition_refinements.tuple_elements.pop();
+            if checked.is_ok() {
+                self.definition_refinements
+                    .checked_tuple_loops
+                    .insert(local(expr.hir_id));
+            }
+        }
         self.control.loops.pop();
         self.open_loop_transfers.remove(&identity);
         if let Some(previous) = saved_transfer {

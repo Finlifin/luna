@@ -25,6 +25,7 @@ pub(super) struct Bindings {
     arguments: Vec<Term>,
     sort_change: SortChange,
     domains: Vec<Term>,
+    descriptions: BTreeMap<usize, (DeclarationId, nir::described_applications::DataArgument)>,
 }
 impl Bindings {
     /// NF heads admit the complete application separately; substitution does
@@ -46,6 +47,7 @@ impl Bindings {
             parameters: vec![],
             arguments: vec![],
             domains: vec![],
+            descriptions: BTreeMap::new(),
         }
     }
 
@@ -76,7 +78,19 @@ impl Bindings {
                 Some(source),
             )
         })?;
-        let term = vm.residual_input_term(value, source)?;
+        let term = if matches!(self.sort_change, SortChange::Substitute) {
+            let data = vm.freeze_normal_argument(&value, source)?;
+            if !data.is_concrete() {
+                let expected = self.instantiate(vm, &domain, source)?;
+                vm.check_value_type(&value, &expected, Some(source))?;
+                self.descriptions
+                    .insert(slot, (parameter.declaration, data));
+                return Ok(());
+            }
+            data.into_concrete().expect("concrete argument")
+        } else {
+            vm.residual_input_term(value, source)?
+        };
         self.slots[slot] = Some(self.arguments.len());
         self.parameters.push(parameter);
         self.domains.push(domain);
@@ -85,7 +99,7 @@ impl Bindings {
     }
 
     pub fn len(&self) -> usize {
-        self.arguments.len()
+        self.arguments.len() + self.descriptions.len()
     }
 
     fn completed(&self) -> impl Iterator<Item = (&nir::DeclarationParameter, &Term, &Term)> {
@@ -107,6 +121,19 @@ impl Bindings {
         ty: &Term,
         source: SourceRange,
     ) -> Result<Term, Error> {
+        if !self.descriptions.is_empty() {
+            let deps = vm.observe_input_dependencies(ty, source)?;
+            vm.integer_operation(Some(source), |budget| {
+                budget.consume(self.descriptions.len())
+            })?;
+            if self
+                .descriptions
+                .values()
+                .any(|(id, _)| deps.declarations.contains_key(id))
+            {
+                return Err(vm.failure(ErrorKind::AbstractValueUnresolved, Some(source)));
+            }
+        }
         vm.integer_operation(Some(source), |budget| budget.consume(self.parameters.len()))?;
         if self
             .parameters
@@ -227,7 +254,27 @@ impl Bindings {
         Ok(())
     }
     pub fn contains(&self, slot: usize) -> bool {
-        self.slots.get(slot).is_some_and(Option::is_some)
+        self.slots.get(slot).is_some_and(Option::is_some) || self.descriptions.contains_key(&slot)
+    }
+    pub fn finish_normal(mut self) -> Option<Vec<nir::described_applications::DataArgument>> {
+        use nir::described_applications::DataArgument;
+        if self.descriptions.is_empty() {
+            return self
+                .finish()
+                .map(|args| args.into_iter().map(DataArgument::concrete).collect());
+        }
+        let mut terms = self.arguments.into_iter().map(Some).collect::<Vec<_>>();
+        self.slots
+            .into_iter()
+            .enumerate()
+            .map(|(slot, index)| {
+                if let Some((_, data)) = self.descriptions.remove(&slot) {
+                    Some(data)
+                } else {
+                    terms.get_mut(index?)?.take().map(DataArgument::concrete)
+                }
+            })
+            .collect()
     }
     pub fn finish(self) -> Option<Vec<Term>> {
         if self
@@ -251,7 +298,9 @@ impl fmt::Display for Bindings {
         write!(f, "(input-bindings (sort-change {})", self.sort_change)?;
         for (slot, index) in self.slots.iter().enumerate() {
             write!(f, " (slot {slot}")?;
-            if let Some(index) = index {
+            if let Some((id, data)) = self.descriptions.get(&slot) {
+                write!(f, " (declaration {id}) {data}")?;
+            } else if let Some(index) = index {
                 write!(
                     f,
                     " (declaration {}) (value {})",

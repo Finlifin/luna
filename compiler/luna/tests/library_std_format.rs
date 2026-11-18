@@ -95,3 +95,104 @@ fn format_plan_remains_a_comptime_operation() {
     .expect("a runtime string cannot supply the comptime format scanner");
     assert!(error.contains("comptime"), "{error}");
 }
+
+#[test]
+fn format_domains_preserve_the_field_count_and_each_display_requirement() {
+    let source = r#"
+        comptime fn Fields() -> meta.List<Type> {
+            std.fmt.FormatPlan.parse("{{}}{}:{}") match {
+                plan! => plan.argument_domains(),
+                error _ => [],
+            }
+        }
+        const fields = Fields();
+        fn pairs(first: defer fields[0], second: defer fields[1]) -> bool { true }
+        fn empty(...values: defer std.fmt.Parse("{{}}")) -> bool { true }
+        fn run() -> bool {
+            let byte: u8 = 42;
+            empty() and pairs(true, byte) and pairs(byte, false)
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    let invalid = source.replace("pairs(byte, false)", "pairs(byte, Missing {})");
+    let invalid = format!("struct Missing {{}} {invalid}");
+    let error = support::compile(&invalid).unwrap_err();
+    assert!(
+        error.contains("refinement requirement is not established"),
+        "{error}"
+    );
+    let error = support::compile(&source.replace("empty()", "empty(true)")).unwrap_err();
+    assert!(
+        error.contains("expected (normal-form")
+            || error.contains("count")
+            || error.contains("arity"),
+        "{error}"
+    );
+}
+
+#[test]
+fn invalid_format_cannot_supply_a_variadic_domain() {
+    let error =
+        support::compile("typealias Invalid = std.fmt.Parse(\"{} }\"); fn run() {}").unwrap_err();
+    assert!(error.contains("ProgramContractRejected"), "{error}");
+}
+
+#[test]
+fn deferred_format_parameters_accept_complete_packs_and_check_each_field() {
+    let source = r#"
+        fn accept(comptime format: str, ...varargs: defer std.fmt.Parse(format)) -> bool { true }
+        fn run() -> bool {
+            let byte: u8 = 42;
+            accept("{}", byte) and accept("{}:{}", true, byte)
+                and accept("{}:{}", .varargs = (byte, true))
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    for (call, diagnostic) in [
+        (r#"std.fmt.println("{}:{}", true)"#, "shape mismatch"),
+        (r#"std.fmt.println("{}", byte, false)"#, "shape mismatch"),
+        (
+            r#"std.fmt.println("{}", Unknown {})"#,
+            "refinement requirement is not established",
+        ),
+        (
+            r#"std.fmt.println("unclosed {")"#,
+            "ProgramContractRejected",
+        ),
+    ] {
+        let invalid = format!(
+            "struct Unknown {{}} fn run() -> !std.io.Error void {{ let byte:u8 = 42; {call} }}"
+        );
+        let error = support::compile(&invalid).unwrap_err();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}
+
+#[test]
+fn tuple_iteration_requires_evidence_from_all_producer_returns() {
+    let template = r#"
+        pure comptime fn Shape(flag: bool) -> Type {
+            if flag { return OTHER; };
+            Tuple<bool, bool>
+        }
+        fn consume(comptime flag: bool, ...values: defer Shape(flag)) {
+            inline for (_, value) in values'tuple_enumerate { };
+        }
+    "#;
+    // The early return can deliver a scalar while the tail constructs a tuple.
+    assert!(support::compile(&template.replace("OTHER", "bool")).is_err());
+    support::compile(&template.replace("OTHER", "Tuple<u8>")).unwrap();
+}
+
+#[test]
+fn a_tuple_head_guarantee_does_not_supply_a_field_trait() {
+    let source = r#"
+        trait Mark { fn mark(self) -> bool; }
+        impl Mark for bool { fn mark(self) -> bool { self } }
+        pure comptime fn Shape(flag: bool) -> Type { Tuple<Any> }
+        fn consume(comptime flag: bool, ...values: defer Shape(flag)) {
+            inline for (_, value) in values'tuple_enumerate { value.mark(); };
+        }
+    "#;
+    assert!(support::compile(source).is_err());
+}

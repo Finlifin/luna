@@ -139,6 +139,21 @@ impl PreparedRequired {
         self.world.package().definition_identity_cursor
     }
 
+    /// Inspect normal return paths in the checked computation. A call whose
+    /// result has sort Type alone grants no structural evidence.
+    pub(in crate::program) fn returns_head(
+        &self,
+        expected: DeclarationId,
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<bool, Error> {
+        let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let answer = result_head::guarantees(self.world.package(), self.entry, expected, &mut fuel);
+        *steps -= (before - fuel) as u64;
+        answer.map_err(|reason| error(span, reason))
+    }
+
     /// Observe the carried invocation inputs and code without consulting a
     /// current Checker, copying the snapshot, or running its computations.
     /// Ambient abstract binders authorize transport; they are not input uses.
@@ -2022,3 +2037,5 @@ mod tests {
         assert!(!quoted && !escaped);
     }
 }
+
+mod result_head;

@@ -163,12 +163,14 @@ impl fmt::Display for ExpansionSource {
 pub enum DescriptionLiteral {
     Any,
     Refined(crate::refinements::Refinement),
+    Application(crate::described_applications::DescribedApplication),
 }
 impl fmt::Display for DescriptionLiteral {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Any => f.write_str("(type-value (description any))"),
             Self::Refined(reference) => write!(f, "(type-value (description {reference}))"),
+            Self::Application(app) => write!(f, "(type-value {app})"),
         }
     }
 }

@@ -369,9 +369,7 @@ impl Checker<'_, '_> {
             || matches!(&self.package.item(owner).unwrap().kind,
                     ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)
         {
-            return self
-                .normal_type_annotation(expr, owner, args)
-                .map(CompletedType::Identity);
+            return self.normal_type_annotation(expr, owner, args);
         }
         if let Some(ItemKind::TypeAlias(target, ..)) =
             self.package.item(owner).map(|item| &item.kind)

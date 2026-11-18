@@ -74,4 +74,25 @@ impl FormatPlan {
         }
         Self { pieces: pieces, argument_count: arguments }
     }
+
+    {- Each field admits its own concrete runtime type at the call site. -}
+    pub pure comptime fn argument_domains(self) -> meta.List<Type> {
+        let field = refines { Itself :- Display } Any;
+        var domains: meta.List<Type> = [];
+        var index: Integer = 0;
+        while index < self.argument_count {
+            domains = domains.concat([field]);
+            index = index + 1;
+        }
+        domains
+    }
+}
+
+pub pure comptime fn Parse(format: str) -> Type {
+    let parsed = FormatPlan.parse(format);
+    let domains: meta.List<Type> = parsed match {
+        plan! => plan.argument_domains(),
+        error _ => { assumes false; [] },
+    };
+    Tuple<.Es = domains>
 }

@@ -331,3 +331,37 @@ fn a_parameter_refinement_supplies_body_evidence_without_proving_the_caller() {
         "{error}"
     );
 }
+
+#[test]
+fn constructed_descriptions_keep_the_head_formation_requirements() {
+    let source = r#"
+        pure comptime fn Checked<T, Gate> -> Type where requires Gate == bool { bool }
+        comptime fn Make(gate: Type) -> Type { Checked<Any, gate> }
+    "#;
+    let package = support::compile(source).unwrap();
+    let entry = package
+        .functions
+        .iter()
+        .find(|f| f.name == "Make")
+        .unwrap()
+        .declaration;
+    for tree in [false, true] {
+        support::with_comptime(&package, support::COMPTIME_BUDGET, tree, |vm| {
+            assert!(
+                vm.invoke(
+                    entry,
+                    vec![Value::Type(nir::Term::Primitive(nir::Primitive::U8))]
+                )
+                .is_err()
+            );
+            assert!(matches!(
+                vm.invoke(
+                    entry,
+                    vec![Value::Type(nir::Term::Primitive(nir::Primitive::Bool))]
+                )
+                .unwrap(),
+                Value::Description(_)
+            ));
+        });
+    }
+}

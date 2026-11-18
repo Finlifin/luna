@@ -86,6 +86,17 @@ impl Value {
         value_parameters: &BTreeMap<DeclarationId, Term>,
         invocation: bool,
     ) -> Result<Term, ErrorKind> {
+        self.freeze_input_template(budget, parameters, value_parameters, invocation, None)
+    }
+
+    pub(super) fn freeze_input_template(
+        &self,
+        budget: &mut comptime_runtime::Budget,
+        parameters: &BTreeSet<DeclarationId>,
+        value_parameters: &BTreeMap<DeclarationId, Term>,
+        invocation: bool,
+        mut holes: Option<&mut Vec<nir::program::DescriptionLiteral>>,
+    ) -> Result<Term, ErrorKind> {
         fn charge(budget: &mut comptime_runtime::Budget, work: usize) -> Result<(), ErrorKind> {
             budget.consume(work).map_err(|_| ErrorKind::StepsExhausted)
         }
@@ -111,9 +122,21 @@ impl Value {
             parameters: &BTreeSet<DeclarationId>,
             value_parameters: &BTreeMap<DeclarationId, Term>,
             invocation: bool,
+            holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             if depth > 128 {
                 return Err(ErrorKind::DepthExhausted);
+            }
+            if let Value::Description(data) = value {
+                charge(budget, 1)?;
+                let holes = holes.as_deref_mut().ok_or(ErrorKind::Unsupported)?;
+                let index = holes.len();
+                holes.push(data.clone());
+                return Ok(Term::Bound {
+                    depth: 0,
+                    index,
+                    sort: nir::Sort::Type,
+                });
             }
             match value {
                 Value::Object(_) => freeze_object(
@@ -123,6 +146,7 @@ impl Value {
                     parameters,
                     value_parameters,
                     invocation,
+                    holes,
                 ),
                 Value::List { .. } => freeze_list(
                     value,
@@ -131,6 +155,7 @@ impl Value {
                     parameters,
                     value_parameters,
                     invocation,
+                    holes,
                 ),
                 Value::Optional { .. } => freeze_optional(
                     value,
@@ -139,6 +164,7 @@ impl Value {
                     parameters,
                     value_parameters,
                     invocation,
+                    holes,
                 ),
                 Value::ErrorResult { .. } => freeze_error(
                     value,
@@ -147,6 +173,7 @@ impl Value {
                     parameters,
                     value_parameters,
                     invocation,
+                    holes,
                 ),
                 Value::Newtype { .. } => freeze_newtype(
                     value,
@@ -155,6 +182,7 @@ impl Value {
                     parameters,
                     value_parameters,
                     invocation,
+                    holes,
                 ),
                 Value::Record { .. } | Value::Variant { .. } => freeze_nominal(
                     value,
@@ -163,6 +191,7 @@ impl Value {
                     parameters,
                     value_parameters,
                     invocation,
+                    holes,
                 ),
                 Value::AnonymousRecord(_) => freeze_record(
                     value,
@@ -171,6 +200,7 @@ impl Value {
                     parameters,
                     value_parameters,
                     invocation,
+                    holes,
                 ),
                 Value::Tuple(_) => freeze_tuple(
                     value,
@@ -179,6 +209,7 @@ impl Value {
                     parameters,
                     value_parameters,
                     invocation,
+                    holes,
                 ),
                 _ => visit_scalar(
                     value,
@@ -198,6 +229,7 @@ impl Value {
             parameters: &BTreeSet<DeclarationId>,
             value_parameters: &BTreeMap<DeclarationId, Term>,
             invocation: bool,
+            holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
             Ok(match value {
@@ -230,6 +262,7 @@ impl Value {
                             parameters,
                             value_parameters,
                             invocation,
+                            holes,
                         )?;
                         entries.push(nir::objects::entry(entry.key(), domain, value));
                     }
@@ -247,6 +280,7 @@ impl Value {
             parameters: &BTreeSet<DeclarationId>,
             value_parameters: &BTreeMap<DeclarationId, Term>,
             invocation: bool,
+            holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
             Ok(match value {
@@ -289,6 +323,7 @@ impl Value {
                                 parameters,
                                 value_parameters,
                                 invocation,
+                                holes,
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
@@ -310,6 +345,7 @@ impl Value {
             parameters: &BTreeSet<DeclarationId>,
             value_parameters: &BTreeMap<DeclarationId, Term>,
             invocation: bool,
+            holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
             Ok(match value {
@@ -338,6 +374,7 @@ impl Value {
                                     parameters,
                                     value_parameters,
                                     invocation,
+                                    holes,
                                 )
                                 .map(Box::new)
                             })
@@ -356,6 +393,7 @@ impl Value {
             parameters: &BTreeSet<DeclarationId>,
             value_parameters: &BTreeMap<DeclarationId, Term>,
             invocation: bool,
+            holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
             Ok(match value {
@@ -399,6 +437,7 @@ impl Value {
                             parameters,
                             value_parameters,
                             invocation,
+                            holes,
                         )?),
                     };
                     let work = scoped_term_value_work_with_evidence(
@@ -424,6 +463,7 @@ impl Value {
             parameters: &BTreeSet<DeclarationId>,
             value_parameters: &BTreeMap<DeclarationId, Term>,
             invocation: bool,
+            holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
             Ok(match value {
@@ -454,6 +494,7 @@ impl Value {
                             parameters,
                             value_parameters,
                             invocation,
+                            holes,
                         )?],
                     }
                 }
@@ -469,6 +510,7 @@ impl Value {
             parameters: &BTreeSet<DeclarationId>,
             value_parameters: &BTreeMap<DeclarationId, Term>,
             invocation: bool,
+            holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
             Ok(match value {
@@ -527,6 +569,7 @@ impl Value {
                                     parameters,
                                     value_parameters,
                                     invocation,
+                                    holes,
                                 )
                             })
                             .collect::<Result<_, _>>()?,
@@ -544,6 +587,7 @@ impl Value {
             parameters: &BTreeSet<DeclarationId>,
             value_parameters: &BTreeMap<DeclarationId, Term>,
             invocation: bool,
+            holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
             Ok(match value {
@@ -566,6 +610,7 @@ impl Value {
                                         parameters,
                                         value_parameters,
                                         invocation,
+                                        holes,
                                     )?,
                                 ))
                             })
@@ -584,6 +629,7 @@ impl Value {
             parameters: &BTreeSet<DeclarationId>,
             value_parameters: &BTreeMap<DeclarationId, Term>,
             invocation: bool,
+            holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
             Ok(match value {
@@ -598,6 +644,7 @@ impl Value {
                                 parameters,
                                 value_parameters,
                                 invocation,
+                                holes,
                             )
                         })
                         .collect::<Result<_, _>>()?,
@@ -768,7 +815,15 @@ impl Value {
                 _ => return Err(ErrorKind::Unsupported),
             })
         }
-        visit(self, 0, budget, parameters, value_parameters, invocation)
+        visit(
+            self,
+            0,
+            budget,
+            parameters,
+            value_parameters,
+            invocation,
+            &mut holes,
+        )
     }
 }
 

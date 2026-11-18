@@ -514,7 +514,9 @@ fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format))
 普通 Type 返回和别名现在能传递显式 Any。调用点可以用实参的类型具体化单个
 Any 参数；有目标类型时也能检查 Any 结果的交付。定义端仍只拥有声明提供的
 操作证据。闭合的类型 refinement 可以随 Type 数据返回，调用点可用实际类型检查其要求。
-格式化仍需带描述实参的构造应用与逐字段准入。具体函数类型和 runtime IR 的发布仍要求
+闭合构造实参中的描述现保留在 NF 应用中，`std.fmt.Parse` 已能交付逐项准入的变参域。
+开放定义能观察直接构造与直接调用转发的共同结果头，字段在有 trait 证据的分支中使用。
+真实 std.println 已按此规则实例化输出。具体函数类型和 runtime IR 的发布仍要求
 所需布局与义务完整。
 
 完整的状态和数据分工见[可计算类型描述与调用准入](type-descriptions-and-admission.md)。
@@ -522,15 +524,14 @@ Any 参数；有目标类型时也能检查 Any 结果的交付。定义端仍�
 Type 也不自动授予消费者 tuple 结构或 Display 证据，定义检查仍需可靠结果观察。
 
 `development/repros/refined-any-type-producer.fl` 隔离最小合法输入：普通 Type
-生产函数返回带 Display 约束的 Any，经 defer 用于两个 tuple 元素。单字段描述的返回与调用准入已接通。此例在形成 Tuple 的普通 NF 输入时
-报告 `normal-form input freezing failed: Unsupported`。复现命令：
+生产函数返回带 Display 约束的 Any，经 defer 用于两个 tuple 元素。单字段描述的返回与调用准入已接通。此例已通过检查。复现命令：
 
 ```sh
 python3 -B development/check.py --timeout 900 -- run -p luna -- check development/repros/refined-any-type-producer.fl --sysroot library --build-target x86_64 linux 64
 ```
 
-报告 `/tmp/luna-tools-497v89zc/result.json`，退出 1。这是待实现的合法程序，
-不是应当永久拒绝的测试；不能把这个失败改成 language rule。
+原报告 `/tmp/luna-tools-497v89zc/result.json` 记录了旧输入冻结失败。现有真实 sysroot 用例
+见 `compiler/luna/tests/library_std_format.rs`。
 
 最终验收须同时覆盖：零／多个字段、不同机器类型与用户 Display、花括号转义、
 UTF-8 与 NUL、参数数量不匹配、无 Display 类型、错误格式与 runtime 格式输入；

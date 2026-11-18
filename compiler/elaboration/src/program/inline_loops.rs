@@ -380,7 +380,12 @@ impl Checker<'_, '_> {
         let (index_source, element_source) = self.tuple_iteration_patterns(pat)?;
         let (input, elements) = self.tuple_enumeration_input(input)?;
         let observed_elements = self.observed_tuple_elements(&input, elements.len(), expr.span)?;
-        if elements.is_empty() {
+        if elements.is_empty()
+            && !self
+                .open_functions
+                .get(&expr.hir_id.owner)
+                .is_some_and(|d| d.checked_empty_iteration(expr.hir_id))
+        {
             return Err(error(
                 expr.span,
                 "empty tuple_enumerate body checking is not yet implemented",

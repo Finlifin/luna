@@ -66,7 +66,7 @@
 | 稳定世界与执行 | DeclarationSnapshot 保活声明与索引；source invocation 借用原包并隔离已选实例，保留 CodeSession；关联选择、方法选择及具体定义准备可交接宿主请求；required Type 与普通值共用返回通道，旧推断输出队列已退出生产模块 | 普通前端检查请求、通用 Region/Candidate 所有权及任意定义发布尚未全线接通；共享声明世界不等于共享活动 VM；测试用 Type 队列不代表源码恢复能力 |
 | 源码主体与调用入口 | VM 准入、签名与契约查询只接收声明接口及来源，主体有独立查询；源码命名实例只携带身份和声明实参，入口契约成功后才替换泛型主体并按普通输入重绑定 | 注册表仍要求完整受检 NIR 主体；源码模板独立发布、待决主体请求及原 activation 的 Type 响应尚未接通 |
 | TypeRef 与 IIR | core/substitution 已有实现，闭合 callable/template 有消费者 | 普通函数仍以 NIR Function 为实例载体；runtime_bindings 不能替代带域的 EnvironmentPlan |
-| 六包与资源 | 已有真实 sysroot 的 builder、列表、反射及两阶段方法；Linux 文件/字节 I/O、Layout、文本与单值输出已接通；Display/ByteWriter 位于 builtin；FormatPlan 已能扫描格式串 | `println(comptime format: str, ...varargs: defer std.fmt.Parse(format))` 尚未实现；runtime 文本来源、阶段输入重建、allocator、抽象 Copy 仍须贯通 |
+| 六包与资源 | 已有真实 sysroot 的 builder、列表、反射及两阶段方法；Linux 文件/字节 I/O、Layout、文本与单值输出已接通；Display/ByteWriter 位于 builtin；格式化 println 已接通 {}、转义花括号与异构 Display 实参 | runtime 文本来源、阶段输入重建、allocator、抽象 Copy 仍须贯通 |
 
 具体接线及语义边界见[共同输入计划](values-staging-and-publication.md#已接通nf名义类型与透明别名共用输入规划)、
 [父声明输入](values-staging-and-publication.md#已接通contextual-签名与普通值检查共用父声明输入)、

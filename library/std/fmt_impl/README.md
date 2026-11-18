@@ -1,10 +1,12 @@
 # 格式分析、文本与值输出
 
-目标入口是作者指定的
-`fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format))`。
-格式串确定变参数量与每项约束，实参保留各自的具体类型，并按普通调用规则
-求值一次。下面的文本输出与 `println_value` 是已有底层能力，不能当作该
-格式化接口的完成版本。
+从 `std.prelude` 显式导入或通过 `std.fmt.println` 调用：
+
+```flurry
+fn show(value: u32) -> !std.io.Error void {
+    std.fmt.println("value = {}, ready = {}", value, true)
+}
+```
 
 `std.fmt.FormatPlan.parse(format)` 是已接通的 comptime 扫描入口，返回
 `!FormatError FormatPlan`。计划中的 `pieces` 按输出顺序记录原文的半开 UTF-8
@@ -18,11 +20,15 @@
 编号、命名、宽度和精度规则尚未实现，不将这些内容静默当作普通 `{}`。
 计划不检查实参、不赋予 Display 能力，也不创建 runtime 字符串。
 
-`Parse` 的类型描述结果、描述的 VM 传递与调用实例化尚未接通；不得用固定
-整数 tuple、统一装箱或识别 println 名称代替。具体接线见
-`development/runtime-value-delivery.md` 的格式化变参边界。
+`std.fmt.Parse(format)` 调用扫描器，按字段数构造普通的 `meta.List<Type>`，
+每项携带 `refines { Itself :- Display } Any`，再把列表具名交给 Tuple。
+经 `defer` 使用时，调用方逐项检查实际类型；完整具名参数也遵循相同约束。
+无效格式在 comptime 拒绝，扫描器本身可以提供错误种类和字节位置。
+开放定义从待算结果的共同返回头取得元组遍历依据。字段上的 `inline if`
+在 Display 成立的分支中检查方法调用，实例按实际字段类型展开。
 
-`print`/`println` 输出 comptime 文本；`eprint`/`eprintln` 输出到 stderr。
+`println` 按格式写出文本和字段，再写一个换行。当前实例在 runtime 顺序读取格式串字节；
+写入失败立即返回，并保留已经输出的前缀。`print` 输出原文，`eprint`/`eprintln` 输出到 stderr。
 `print_value`/`println_value` 调用builtin 的 runtime `Display.write(self, output)`，output 为泛型 writer 的借用。
 标准输出入口返回 `!std.io.Error`，使用后缀 `!` 传播；Display 本身保留实际 writer 的关联错误类型。
 协议与标量实现在 builtin/protocols/formatting，std.fmt 只再导出同一 Display。
@@ -31,5 +37,4 @@
 最大值。负数先在自己的有符号域取得安全幅值，再转到无符号域，避免窄整数
 零扩展造成负数输出错误。没有借用开发用 S-expression 结果打印器。
 
-尚不支持格式串参数替换、宽度/精度、浮点、运行时 str 或 String。它们需要继续
-接通 comptime 展开和文本来源契约，不由编译器识别 println 名称来实现。
+尚未实现宽度、精度、浮点以及运行时 str 或 String 的 Display。

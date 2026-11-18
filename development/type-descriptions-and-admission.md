@@ -20,8 +20,8 @@ Any 与 bool、u8 分别相容，不产生 bool == u8，也不产生二者间的
 | 当前载体或入口 | 已有职责 | 尚缺的能力 |
 | --- | --- | --- |
 | `open_functions::observations::TypeObservation::{Known, Unknown}` | 定义侧的有限域观察；待定注解观察为 Unknown | 不持有生产状态，也不是已经求值的 Type 数据 |
-| `open_functions::Annotation` | 分别保存具体身份、已完成的显式 Any、待执行计算、前置 Type 输入和待恢复源码。调用者可用自己的实参域具体化 Any | 含描述实参的构造尚缺传送表示 |
-| `Value::Type`、`TypeParameter`、`Description` | 传递完整或受作用域授权的身份，以及显式 Any 与受闭合类型命题约束的描述 | 复合构造和 NF 参数传送尚待接通 |
+| `open_functions::Annotation` | 分别保存具体身份、已完成的显式 Any、待执行计算、前置 Type 输入和待恢复源码。调用者可用自己的实参域具体化 Any | 已检查代码支持有限的外层头观察；更一般的返回值传送仍待接通 |
+| `Value::Type`、`TypeParameter`、`Description` | 传递完整或受作用域授权的身份，以及显式 Any 与受闭合类型命题约束的描述 | 闭合 NF 输入可传送，外层捕获还需要重定位 |
 | `PreparedRequired::invoke_in_world` / `restore_required_packet` | 普通 VM 调用可交付具体身份或显式 Any，回到调用方 scope 后继续使用 | 复合描述和未完成源码区域的恢复仍待接通 |
 | `Checker::completed_type` / `type_expr` | 前者完成 Type 值；后者在具体类型使用点索取身份。闭合别名可以发布两种结果 | 有描述实参的别名目前只接通必选 Type 槽位；默认值和混合值域仍走 Term 路径 |
 | `type_expr` 的 `RefinedType` | 具体 base 检查要求；描述 base 保留 subject binder，在调用方分别证明闭合类型命题 | 外层捕获与可执行谓词还缺传送机制 |
@@ -68,8 +68,8 @@ typealias Forward = Second<...packet()>;
 检查路径，目前还不能作为稳定项写入 NF 或 metadata。
 
 [带 Display 的最小复现](repros/refined-any-type-producer.fl)现在可以解析 Any。
-`refines { Itself :- Display } Any` 可以作为 Type 返回，实参在自己的调用点证明 Display。普通 VM 数据传送尚不能把含描述的参数发布为 NF 应用或 Term metadata。
-`std.fmt.Parse` 和格式化变参输出仍待接通。
+`refines { Itself :- Display } Any` 可以作为 Type 返回，实参在自己的调用点证明 Display。含描述的闭合 NF 实参在独立的描述数据中保留头与值模板，模板槽位逐项绑定实际输入。
+`std.fmt.Parse` 已接通变参准入，定义端从受检 Type 生产者的返回路径观察共同 NF 头，并在字段 guard 内取得方法证据。
 
 ### 已接通的调用点准入
 
@@ -446,7 +446,8 @@ NF 输入依旧按函数签名接收普通值。具体身份中的稳定参数�
 已实现的子集是只引用自身 subject 和已解析声明的类型命题。定义端为每个参数
 单独引入刚性 subject，调用端在自己的上下文中实例化并证明要求。VM 以共享
 快照中登记的不可变引用检查来源，另一个编译世界即使槽号相同也不能接收。
-外层自由输入的重定位、可执行 predicate 的捕获和含描述的 NF 构造仍待实现。
+含描述的闭合 NF 构造保留原头及每个普通实参的值模板。模板的私有槽位只在准入时匹配，
+不会进入具体类型身份。外层自由输入的重定位与可执行 predicate 的捕获仍待实现。
 
 描述的替换必须走共同的有作用域遍历，并同时处理节点域、构造实参及要求代码。
 原 TypeTerm 的 binder 算法可以服务身份叶子，但不能只替换叶子而漏掉外围数据图。

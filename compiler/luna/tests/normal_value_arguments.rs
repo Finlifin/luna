@@ -2,7 +2,7 @@
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
-use comptime_interpretor::{Budget, Interpreter, Value};
+use comptime_interpretor::Value;
 
 fn check_comptime_and_runtime(source: &str) {
     let package = sysroot::compile(source).unwrap();
@@ -13,17 +13,13 @@ fn check_comptime_and_runtime(source: &str) {
         .unwrap()
         .declaration;
     for tree in [false, true] {
-        let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime(&package, Budget::default())
-        }
-        .unwrap();
-        assert_eq!(
-            vm.invoke(entry, vec![]).unwrap(),
-            Value::Bool(true),
-            "tree={tree}"
-        );
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            assert_eq!(
+                vm.invoke(entry, vec![]).unwrap(),
+                Value::Bool(true),
+                "tree={tree}"
+            );
+        });
     }
     let runtime = source.replace("comptime fn check()", "fn run()");
     assert_eq!(sysroot::run(&runtime), Value::Bool(true));

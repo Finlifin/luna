@@ -82,6 +82,12 @@ fn println_and_display_preserve_bytes_and_external_effects() {
                 self.value.write(output)
             }
         }
+        fn mark(counter: *u8) -> u8 {
+            let previous = counter.*;
+            assumes previous < 255;
+            counter.* = previous + 1;
+            previous
+        }
         fn output() -> !std.io.Error void {
             println("Hello, Flurry! 世界")!;
             print("embedded\0NUL")!;
@@ -93,7 +99,10 @@ fn println_and_display_preserve_bytes_and_external_effects() {
             println_value(large)!;
             println_value(least)!;
             println_value(true)!;
-            println_value(Label { value: 42 })!;
+            println("界{{{}}}\0{}", Label { value: 42 }, false)!;
+            var calls: u8 = 0;
+            println("{}{}", mark(calls.ref), mark(calls.ref))!;
+            assumes calls == 2;
             eprintln("stderr")
         }
         fn run() -> bool { output() match { _! => true, error _ => false } }
@@ -103,7 +112,7 @@ fn println_and_display_preserve_bytes_and_external_effects() {
         success(&case.build(level));
         let output = case.run();
         success(&output);
-        assert_eq!(output.stdout, "Hello, Flurry! 世界\nembedded\0NUL\n-128\n340282366920938463463374607431768211455\n-170141183460469231731687303715884105728\ntrue\ncustom=42\n(bool true)\n".as_bytes());
+        assert_eq!(output.stdout, "Hello, Flurry! 世界\nembedded\0NUL\n-128\n340282366920938463463374607431768211455\n-170141183460469231731687303715884105728\ntrue\n界{custom=42}\0false\n01\n(bool true)\n".as_bytes());
         assert_eq!(output.stderr, b"stderr\n");
     }
 }

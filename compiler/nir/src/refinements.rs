@@ -60,18 +60,20 @@ impl BoundRequirement<'_> {
 /// Immutable snapshots share the published prefix. An independent compilation
 /// or a sibling snapshot cannot claim a requirement by reproducing its index.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Refinements(Arc<Vec<Refinement>>);
+pub struct Refinements(Arc<Vec<Refinement>>, Arc<()>);
 
 impl Refinements {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+    pub(crate) fn contains_refinement(&self, r: &Refinement) -> bool {
+        self.0.get(r.0.slot) == Some(r)
+    }
     pub fn contains(&self, description: &DescriptionLiteral) -> bool {
         match description {
+            DescriptionLiteral::Application(a) => a.belongs_to(&self.1, self),
             DescriptionLiteral::Any => true,
-            DescriptionLiteral::Refined(reference) => {
-                self.0.get(reference.0.slot) == Some(reference)
-            }
+            DescriptionLiteral::Refined(reference) => self.contains_refinement(reference),
         }
     }
 
@@ -83,6 +85,7 @@ impl Refinements {
             return None;
         }
         let first = match description {
+            DescriptionLiteral::Application(_) => return None,
             DescriptionLiteral::Any => None,
             DescriptionLiteral::Refined(reference) => self.0.get(reference.0.slot),
         };
@@ -90,6 +93,22 @@ impl Refinements {
             std::iter::successors(first, |item| item.0.base.and_then(|slot| self.0.get(slot)))
                 .map(|handle| BoundRequirement(&handle.0)),
         )
+    }
+    pub fn application(
+        &self,
+        head: crate::DeclarationId,
+        inputs: Vec<crate::described_applications::DataArgument>,
+        fuel: &mut usize,
+    ) -> Result<DescriptionLiteral, &'static str> {
+        crate::described_applications::DescribedApplication::new(
+            &self.1,
+            head,
+            inputs,
+            self,
+            self.0.last().cloned(),
+            fuel,
+        )
+        .map(DescriptionLiteral::Application)
     }
     pub fn publish(
         &mut self,
@@ -118,6 +137,9 @@ impl Refinements {
             .checked_sub(cost)
             .ok_or("refinement publication budget exhausted")?;
         let base = match base {
+            DescriptionLiteral::Application(_) => {
+                return Err("refining a constructed description needs a structural subject".into());
+            }
             DescriptionLiteral::Any => None,
             DescriptionLiteral::Refined(parent) => Some(parent.0.slot),
         };

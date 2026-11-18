@@ -236,9 +236,9 @@ impl input_collection::Source for Source<'_> {
         let bindings =
             std::mem::replace(&mut self.bindings, input_bindings::Bindings::structural(0));
         let arguments = bindings
-            .finish()
+            .finish_normal()
             .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.source)))?;
-        Ok(Progress::Complete(Flow::Value(vm.complete_normal_type(
+        Ok(Progress::Complete(Flow::Value(vm.complete_normal_data(
             self.head,
             arguments,
             self.source,

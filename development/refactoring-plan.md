@@ -248,9 +248,8 @@ Byte、统一提前执行所有 Type 生产者，或给 List/Tuple 增加语法�
 但它们也不是所有前端工作共同等待的全局门禁。默认 allocator 的不可恢复失败策略
 及高级 verification 库不阻止上述声明输入迁移；涉及它们的库交付仍须解决真实语义
 问题，不能临时替作者选择。格式化签名已由作者明确为
-`fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format))`；其剩余
-工作是[描述计算与参数准入](type-descriptions-and-admission.md)的实际接线，不再是
-等待公开签名决定，也不能用静态文本输出替代这项库验收。
+`fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format))`。带 Display 的字段、转义与换行已经通过真实 sysroot 的宿主演示，
+对应的类型数据与准入边界见[描述计算与参数准入](type-descriptions-and-admission.md)。
 
 ## 5. 测试如何支持架构，而不是牵着语义走
 

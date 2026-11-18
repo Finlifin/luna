@@ -539,7 +539,7 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         owner: OwnerId,
         inputs: &[Arg<'_>],
-    ) -> Result<Term, Error> {
+    ) -> Result<CompletedType, Error> {
         // Input producers belong to comptime here. Runtime Splice must not
         // intercept packet formation while checking a type annotation.
         let checked = self.with_staged_input(true, |this| {
@@ -548,24 +548,30 @@ impl Checker<'_, '_> {
         let known = self.checked_normal_input_in(&checked, &BTreeMap::new(), expr.span)?;
         let known = match known {
             Some(known) => Some(known),
-            None => self.required_normal_type_plan(expr, &checked)?,
+            None if nir::copy_budget::expression_has_contextual_types(
+                &checked,
+                &mut self.required_steps,
+            )
+            .map_err(|e| {
+                error(
+                    expr.span,
+                    format!("normal input scope inspection failed: {e:?}"),
+                )
+            })? =>
+            {
+                self.required_normal_type_plan(expr, &checked)?
+            }
+            None => None,
         };
         if let Some(ty @ Term::NormalForm { .. }) = known {
             let Term::NormalForm { arguments, .. } = &ty else {
                 unreachable!()
             };
             self.check_type_application(owner, arguments, expr.span)?;
-            return Ok(ty);
+            return Ok(CompletedType::Identity(ty));
         }
-        let (comptime_interpretor::Value::Type(ty), _) =
-            self.required_normal_input(expr, checked, Vec::new())?
-        else {
-            return Err(error(
-                expr.span,
-                "normal-form application did not produce Type",
-            ));
-        };
-        Ok(ty)
+        let (value, _) = self.required_normal_input(expr, checked, Vec::new())?;
+        CompletedType::from_value(value, expr.span)
     }
 
     pub(super) fn normal_type_expression(

@@ -7,6 +7,8 @@ use super::*;
 pub(super) struct DefinitionRefinements {
     pub(super) subjects: BTreeMap<n::LocalId, nir::DeclarationParameter>,
     pub(super) requirements: Vec<n::TypePredicate>,
+    pub(super) checked_tuple_loops: BTreeSet<n::LocalId>,
+    pub(super) tuple_elements: Vec<DeclarationId>,
 }
 
 impl Checker<'_, '_> {
@@ -65,14 +67,40 @@ impl Checker<'_, '_> {
             return data.identity(span);
         };
         let actual = actual(self)?;
+        self.check_description(&description, &actual, span)?;
+        Ok(actual)
+    }
+
+    fn check_description(
+        &mut self,
+        description: &n::DescriptionLiteral,
+        actual: &Term,
+        span: Span,
+    ) -> Result<(), Error> {
+        if !self.refinements.contains(description) {
+            return Err(error(
+                span,
+                "description belongs to a different declaration world",
+            ));
+        }
+        if let n::DescriptionLiteral::Application(application) = description {
+            let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let checked = application.fields_for(actual, &mut fuel);
+            self.required_steps -= (before - fuel) as u64;
+            for (field, value) in checked.map_err(|message| error(span, message))? {
+                self.check_description(field, value, span)?;
+            }
+            return Ok(());
+        }
         if matches!(description, n::DescriptionLiteral::Any) {
-            return Ok(actual);
+            return Ok(());
         }
         let assumptions = self.capability_assumptions();
-        self.for_each_refinement(&description, &actual, span, |this, predicate| {
+        self.for_each_refinement(description, actual, span, |this, predicate| {
             this.prove_source_refinement(&predicate, &this.context, &assumptions, span)
         })?;
-        Ok(actual)
+        Ok(())
     }
 
     pub(super) fn assume_parameter_refinement(
