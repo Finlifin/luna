@@ -5,6 +5,7 @@ use crate::{Primitive, Sort, Term, contracts::CallableProgram};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod comptime_storage;
+pub(crate) mod contextual;
 mod declarations;
 mod inspection;
 pub use inspection::{Inspection, PhaseCheckedPackage};
@@ -47,6 +48,18 @@ impl Error {
             kind: ErrorKind::Budget,
             source,
             message,
+        }
+    }
+
+    fn call_safety(source: SourceRange, failure: crate::call_safety::Error) -> Self {
+        match failure {
+            crate::call_safety::Error::Budget(_) => {
+                Self::budget(source, "call safety validation budget exhausted")
+            }
+            crate::call_safety::Error::Invalid {
+                source: at,
+                message,
+            } => Self::invalid(at.unwrap_or(source), message),
         }
     }
 
@@ -135,28 +148,50 @@ impl<'a> PhaseContext<'a> {
         let mut machine_owners = BTreeSet::new();
         // Method contracts remain borrowed; inspection grants no specialization
         // or execution authority and never persists a body-validation receipt.
-        let programs = self
+        for function in self
             .package
             .functions
             .iter()
             .chain(&self.package.quote_templates)
-            .map(|function| Ok(CallableProgram::function(function)))
-            .chain(
-                self.package
-                    .traits
-                    .iter()
-                    .flat_map(|t| &t.methods)
-                    .map(|method| {
-                        CallableProgram::method(method).map_err(|_| {
-                            Error::invalid(
-                                SourceRange { start: 0, end: 0 },
-                                "invalid trait program contract signature",
-                            )
-                        })
-                    }),
-            );
-        for function in programs {
-            self.inspect(function?, fuel, &mut machine_owners)?;
+        {
+            self.inspect(
+                CallableProgram::function(function),
+                fuel,
+                &mut machine_owners,
+            )?;
+        }
+        for method in self
+            .package
+            .traits
+            .iter()
+            .flat_map(|interface| &interface.methods)
+        {
+            use crate::code_interfaces::MethodSignature::*;
+            match &method.signature {
+                Callable(ty) => {
+                    self.inspect(
+                        CallableProgram::ordinary_method(method, ty),
+                        fuel,
+                        &mut machine_owners,
+                    )?;
+                    continue;
+                }
+                Generator(sig) => {
+                    contextual::inspect_contract(&mut self.storage_queries, method, sig, fuel)
+                }
+                PatternGenerator(sig) => {
+                    contextual::inspect_contract(&mut self.storage_queries, method, sig, fuel)
+                }
+                DataConsumer(sig) => {
+                    contextual::inspect_contract(&mut self.storage_queries, method, sig, fuel)
+                }
+            }?;
+            let parts = crate::contracts::ProgramParts::method(method);
+            let frame = parameters::InspectionFrame::for_parts(parts, None, fuel)
+                .map_err(parameters::Failure::into_diagnostic)?;
+            self.inspect_parts(parts, frame, fuel, &mut machine_owners)?;
+            crate::call_safety::validate_parts(parts, fuel)
+                .map_err(|failure| Error::call_safety(parts.source, failure))?;
         }
         Ok(machine_owners)
     }
@@ -181,6 +216,25 @@ impl<'a> PhaseContext<'a> {
         inspection_fuel: &mut usize,
         machine_owners: &mut BTreeSet<crate::DeclarationId>,
     ) -> Result<(), Error> {
+        if function.parts.phase == Phase::Runtime {
+            self.storage_queries
+                .check_runtime(function.signature, &[], inspection_fuel)
+                .map_err(|failure| Error::storage(function.parts.source, failure))?;
+        }
+        let inspection = parameters::InspectionFrame::new(function, inspection_fuel)
+            .map_err(parameters::Failure::into_diagnostic)?;
+        self.inspect_parts(function.parts, inspection, inspection_fuel, machine_owners)?;
+        crate::call_safety::validate_program(function, inspection_fuel)
+            .map_err(|failure| Error::call_safety(function.parts.source, failure))
+    }
+
+    fn inspect_parts(
+        &mut self,
+        function: crate::contracts::ProgramParts<'_>,
+        inspection: parameters::InspectionFrame<'_>,
+        inspection_fuel: &mut usize,
+        machine_owners: &mut BTreeSet<crate::DeclarationId>,
+    ) -> Result<(), Error> {
         let Self {
             package,
             declarations,
@@ -193,13 +247,6 @@ impl<'a> PhaseContext<'a> {
             ..
         } = *declarations;
         let ct = function.phase != Phase::Runtime;
-        if !ct {
-            storage_queries
-                .check_runtime(function.signature, &[], inspection_fuel)
-                .map_err(|failure| Error::storage(function.source, failure))?;
-        }
-        let inspection = parameters::InspectionFrame::new(function, inspection_fuel)
-            .map_err(parameters::Failure::into_diagnostic)?;
         let caller_frames = &inspection.frames;
         let frozen = &inspection.frozen;
         let fail = Error::invalid;
@@ -236,7 +283,7 @@ impl<'a> PhaseContext<'a> {
         work.extend(
             function.defaults.iter().map(|(index, value)| {
                 let staged = matches!(inspection.signature,
-                        crate::Term::Function {parameters,..}
+                        Some(crate::Term::Function {parameters,..})
                         if parameters.get(*index).is_some_and(|p|p.sort!=crate::Sort::Runtime));
                 Work::Expr(value, false, ct || staged)
             }),
@@ -1195,8 +1242,11 @@ impl<'a> PhaseContext<'a> {
                                 .retained_method(package, *declaration, inspection_fuel)
                                 .map_err(|failure| Error::member(expr.source, failure))?;
                             let target = if let Some(member) = member {
+                                let signature = member.signature.ordinary().map_err(|_| {
+                                    error("contextual method cannot supply an ordinary function instance")
+                                })?;
                                 (
-                                    if member.signature.is_comptime_callable() {
+                                    if signature.is_comptime_callable() {
                                         Phase::Comptime
                                     } else {
                                         Phase::Runtime
@@ -1589,7 +1639,8 @@ impl<'a> PhaseContext<'a> {
                             work.push(Work::Expr(selector, false, ct), inspection_fuel)?;
                         }
                         K::StagedValue(value) => {
-                            let Term::Function { parameters, .. } = inspection.signature else {
+                            let Some(Term::Function { parameters, .. }) = inspection.signature
+                            else {
                                 return Err(fail(
                                     expr.source,
                                     "staged value has no invocation frame",
@@ -1624,7 +1675,7 @@ impl<'a> PhaseContext<'a> {
                 }
             }
         }
-        if let Term::Function { parameters, result } = inspection.signature {
+        if let Some(Term::Function { parameters, result }) = inspection.signature {
             for domain in parameters
                 .iter()
                 .filter(|parameter| ct || parameter.sort != Sort::Runtime)
@@ -1636,20 +1687,6 @@ impl<'a> PhaseContext<'a> {
                     .map_err(|error| Error::storage(function.source, error))?;
             }
         }
-        crate::call_safety::validate_program(function, inspection_fuel).map_err(
-            |error| match error {
-                crate::call_safety::Error::Budget(_) => Error {
-                    kind: ErrorKind::Budget,
-                    source: function.source,
-                    message: "call safety validation budget exhausted",
-                },
-                crate::call_safety::Error::Invalid { source, message } => Error {
-                    kind: ErrorKind::Invalid,
-                    source: source.unwrap_or(function.source),
-                    message,
-                },
-            },
-        )?;
         Ok(())
     }
 }

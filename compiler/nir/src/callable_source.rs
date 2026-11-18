@@ -112,9 +112,20 @@ impl Positions {
             .iter()
             .flat_map(|interface| &interface.methods)
         {
-            let view = crate::contracts::CallableProgram::method(method)
-                .map_err(|_| Error::invalid(source, "invalid trait program contract signature"))?;
-            validate_frame(view, false, fuel)?;
+            use crate::code_interfaces::MethodSignature::*;
+            use crate::phases::contextual::validate_method_frame;
+            match &method.signature {
+                Callable(ty) => {
+                    validate_frame(
+                        crate::contracts::CallableProgram::ordinary_method(method, ty),
+                        false,
+                        fuel,
+                    )?;
+                }
+                Generator(sig) => validate_method_frame(method, sig, fuel)?,
+                PatternGenerator(sig) => validate_method_frame(method, sig, fuel)?,
+                DataConsumer(sig) => validate_method_frame(method, sig, fuel)?,
+            }
         }
         Ok(Arc::new(Self(entries)))
     }

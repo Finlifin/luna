@@ -11,10 +11,17 @@ use std::fmt;
 
 #[derive(Clone, Copy)]
 pub struct CallableProgram<'a> {
+    pub(crate) signature: &'a Term,
+    pub(crate) parts: ProgramParts<'a>,
+}
+
+/// Executable roots and their lexical owner, independently of the input ABI.
+/// Contextual method specifications have these parts without a callable Term.
+#[derive(Clone, Copy)]
+pub(crate) struct ProgramParts<'a> {
     pub(crate) declaration: Option<DeclarationId>,
     pub(crate) phase: FunctionPhase,
     pub(crate) is_unsafe: bool,
-    pub(crate) signature: &'a Term,
     pub(crate) type_parameters: &'a [DeclarationId],
     pub(crate) parameters: &'a [LocalId],
     pub(crate) body: Option<&'a Expr>,
@@ -28,73 +35,64 @@ pub struct CallableProgram<'a> {
 
 impl<'a> CallableProgram<'a> {
     pub fn function(function: &'a Function) -> Self {
-        Self {
-            body: Some(&function.body),
-            ..Self::declaration(&function.interface, function.body.source)
-        }
+        let mut program = Self::declaration(&function.interface, function.body.source);
+        program.parts.body = Some(&function.body);
+        program
     }
 
     /// Inspect a specialized declaration without inventing executable code.
     pub fn declaration(function: &'a FunctionDeclaration, source: SourceRange) -> Self {
         Self {
-            declaration: Some(function.declaration),
-            phase: function.phase,
-            is_unsafe: function.is_unsafe,
             signature: &function.signature,
-            type_parameters: &function.type_parameters,
-            parameters: &function.parameters,
-            body: None,
-            source,
-            defaults: &function.defaults,
-            preconditions: &function.preconditions,
-            postconditions: &function.postconditions,
-            result_binding: function.result_binding,
-            entry_snapshots: &function.entry_snapshots,
+            parts: ProgramParts {
+                declaration: Some(function.declaration),
+                phase: function.phase,
+                is_unsafe: function.is_unsafe,
+                type_parameters: &function.type_parameters,
+                parameters: &function.parameters,
+                body: None,
+                source,
+                defaults: &function.defaults,
+                preconditions: &function.preconditions,
+                postconditions: &function.postconditions,
+                result_binding: function.result_binding,
+                entry_snapshots: &function.entry_snapshots,
+            },
         }
     }
 
     /// Contextual code is not an ordinary callable. Its code interfaces are
     /// checked separately; this adapter cannot erase their category or ports.
     pub fn method(method: &'a MethodContract) -> Result<Self, TypeError> {
-        let signature = method.signature.ordinary()?;
-        Ok(Self {
-            declaration: Some(method.declaration),
-            phase: if signature.is_comptime_callable() {
-                FunctionPhase::Comptime
-            } else {
-                FunctionPhase::Runtime
-            },
-            is_unsafe: method.is_unsafe,
+        Ok(Self::ordinary_method(method, method.signature.ordinary()?))
+    }
+
+    pub(crate) fn ordinary_method(method: &'a MethodContract, signature: &'a Term) -> Self {
+        Self {
             signature: signature.callable_signature(),
-            type_parameters: &method.type_parameters,
-            parameters: &method.parameter_bindings,
-            body: None,
-            source: SourceRange { start: 0, end: 0 },
-            defaults: &[],
-            preconditions: &method.program.preconditions,
-            postconditions: &method.program.postconditions,
-            result_binding: method.program.result_binding,
-            entry_snapshots: &method.program.entry_snapshots,
-        })
+            parts: ProgramParts::method(method),
+        }
     }
 
     /// A detached, closed comptime body has no global declaration identity.
     /// Its caller supplies a zero-argument signature for ordinary result checks.
     pub(crate) fn comptime_body(body: &'a Expr, signature: &'a Term) -> Self {
         Self {
-            declaration: None,
-            phase: FunctionPhase::Comptime,
-            is_unsafe: false,
             signature,
-            type_parameters: &[],
-            parameters: &[],
-            body: Some(body),
-            source: body.source,
-            defaults: &[],
-            preconditions: &[],
-            postconditions: &[],
-            result_binding: None,
-            entry_snapshots: &[],
+            parts: ProgramParts {
+                declaration: None,
+                phase: FunctionPhase::Comptime,
+                is_unsafe: false,
+                type_parameters: &[],
+                parameters: &[],
+                body: Some(body),
+                source: body.source,
+                defaults: &[],
+                preconditions: &[],
+                postconditions: &[],
+                result_binding: None,
+                entry_snapshots: &[],
+            },
         }
     }
 
@@ -107,10 +105,10 @@ impl<'a> CallableProgram<'a> {
         fuel: &mut usize,
     ) -> Result<super::ProgramContract, crate::type_computations::Error> {
         super::instantiate_program_parts(
-            self.preconditions,
-            self.postconditions,
-            self.result_binding,
-            self.entry_snapshots,
+            self.parts.preconditions,
+            self.parts.postconditions,
+            self.parts.result_binding,
+            self.parts.entry_snapshots,
             substitution,
             fuel,
         )
@@ -119,6 +117,33 @@ impl<'a> CallableProgram<'a> {
     /// Same root order as a Function traversal; consumers can reverse it to
     /// retain the existing work-stack order without collecting every root.
     pub fn roots(self) -> impl DoubleEndedIterator<Item = &'a Expr> {
+        self.parts.roots()
+    }
+}
+
+impl<'a> ProgramParts<'a> {
+    pub(crate) fn method(method: &'a MethodContract) -> Self {
+        Self {
+            declaration: Some(method.declaration),
+            phase: if method.signature.is_comptime_callable() {
+                FunctionPhase::Comptime
+            } else {
+                FunctionPhase::Runtime
+            },
+            is_unsafe: method.is_unsafe,
+            type_parameters: &method.type_parameters,
+            parameters: &method.parameter_bindings,
+            body: None,
+            source: SourceRange { start: 0, end: 0 },
+            defaults: &[],
+            preconditions: &method.program.preconditions,
+            postconditions: &method.program.postconditions,
+            result_binding: method.program.result_binding,
+            entry_snapshots: &method.program.entry_snapshots,
+        }
+    }
+
+    pub(crate) fn roots(self) -> impl DoubleEndedIterator<Item = &'a Expr> {
         self.body
             .into_iter()
             .chain(self.preconditions)
@@ -130,45 +155,45 @@ impl<'a> CallableProgram<'a> {
 impl fmt::Display for CallableProgram<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(callable-program ")?;
-        match self.declaration {
+        match self.parts.declaration {
             Some(declaration) => write!(f, "{declaration}")?,
             None => f.write_str("(anonymous)")?,
         }
         write!(
             f,
             " (phase {}) (unsafe {}) (signature {})",
-            self.phase, self.is_unsafe, self.signature
+            self.parts.phase, self.parts.is_unsafe, self.signature
         )?;
         f.write_str(" (type-parameters")?;
-        for parameter in self.type_parameters {
+        for parameter in self.parts.type_parameters {
             write!(f, " {parameter}")?;
         }
         f.write_str(") (parameters")?;
-        for parameter in self.parameters {
+        for parameter in self.parts.parameters {
             write!(f, " {parameter}")?;
         }
         f.write_str(") (requires")?;
-        for condition in self.preconditions {
+        for condition in self.parts.preconditions {
             write!(f, " {condition}")?;
         }
         f.write_str(") (ensures")?;
-        for condition in self.postconditions {
+        for condition in self.parts.postconditions {
             write!(f, " {condition}")?;
         }
         f.write_str(") (result-binding")?;
-        if let Some(binding) = self.result_binding {
+        if let Some(binding) = self.parts.result_binding {
             write!(f, " {binding}")?;
         }
         f.write_str(") (entry-snapshots")?;
-        for snapshot in self.entry_snapshots {
+        for snapshot in self.parts.entry_snapshots {
             write!(f, " {snapshot}")?;
         }
         f.write_str(") (defaults")?;
-        for (index, value) in self.defaults {
+        for (index, value) in self.parts.defaults {
             write!(f, " ({index} {value})")?;
         }
         f.write_str(") (body")?;
-        if let Some(body) = self.body {
+        if let Some(body) = self.parts.body {
             write!(f, " {body}")?;
         }
         f.write_str("))")
@@ -243,24 +268,24 @@ mod tests {
             method.signature.ordinary().unwrap()
         ));
         assert!(std::ptr::eq(
-            view.parameters,
+            view.parts.parameters,
             method.parameter_bindings.as_slice()
         ));
         assert!(std::ptr::eq(
-            view.type_parameters,
+            view.parts.type_parameters,
             method.type_parameters.as_slice()
         ));
         assert!(std::ptr::eq(
-            view.entry_snapshots,
+            view.parts.entry_snapshots,
             method.program.entry_snapshots.as_slice()
         ));
         let roots: Vec<_> = view.roots().collect();
         assert_eq!(roots.len(), 2);
         assert!(std::ptr::eq(roots[0], &method.program.preconditions[0]));
         assert!(std::ptr::eq(roots[1], &method.program.postconditions[0]));
-        assert!(view.body.is_none());
-        assert!(view.defaults.is_empty());
-        assert_eq!(view.result_binding, method.program.result_binding);
+        assert!(view.parts.body.is_none());
+        assert!(view.parts.defaults.is_empty());
+        assert_eq!(view.parts.result_binding, method.program.result_binding);
         let mut visited = vec![];
         crate::visit::program_expressions(view, &mut 2, |expr, _| {
             visited.push(expr);
@@ -282,7 +307,7 @@ mod tests {
             .program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000)
             .unwrap();
         let view = CallableProgram::declaration(&declaration, flag(90).source);
-        assert!(view.body.is_none());
+        assert!(view.parts.body.is_none());
         let roots: Vec<_> = view.roots().collect();
         assert_eq!(roots.len(), 2);
         assert!(std::ptr::eq(roots[0], &declaration.preconditions[0]));
@@ -303,9 +328,9 @@ mod tests {
             result: Box::new(body.ty.clone()),
         };
         let view = CallableProgram::comptime_body(&body, &signature);
-        assert_eq!(view.declaration, None);
-        assert_eq!(view.phase, FunctionPhase::Comptime);
-        assert!(!view.is_unsafe);
+        assert_eq!(view.parts.declaration, None);
+        assert_eq!(view.parts.phase, FunctionPhase::Comptime);
+        assert!(!view.parts.is_unsafe);
         assert!(std::ptr::eq(view.signature, &signature));
         let roots: Vec<_> = view.roots().collect();
         assert_eq!(roots.len(), 1);
@@ -371,7 +396,7 @@ mod tests {
         };
         function.defaults = vec![(0, flag(40))];
         let view = CallableProgram::function(&function);
-        assert!(std::ptr::eq(view.body.unwrap(), &function.body));
+        assert!(std::ptr::eq(view.parts.body.unwrap(), &function.body));
         let mut visited = vec![];
         crate::visit::program_expressions(view, &mut 4, |expr, _| {
             visited.push(expr.source.start);
@@ -436,7 +461,7 @@ mod tests {
             ..flag(72)
         }];
         let view = CallableProgram::method(&method).unwrap();
-        assert_eq!(view.phase, FunctionPhase::Comptime);
+        assert_eq!(view.parts.phase, FunctionPhase::Comptime);
         crate::call_safety::validate_program(view, &mut 100).unwrap();
         // A scope in the postcondition cannot authorize a sibling precondition.
         method.program.preconditions = vec![call];

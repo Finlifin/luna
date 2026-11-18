@@ -2581,17 +2581,22 @@ identity，移除重复项后恢复。索引测试还覆盖宽名称预留失败
 
 ### Trait 契约只读视图与 summary 构造边界
 
-phase validation 与 IIR validation 不再为了遍历方法的程序契约而调用空实参
-summary 实例化。两者使用借用原始签名、参数绑定、requires、ensures 和 entry
-snapshots 的 `CallableProgram`；method 视图没有 body，普通函数视图保留原 body
-与 defaults。phase 不再收集所有 owned summaries，也不复制名称、capabilities、
-requirements 和整棵契约表达式。这里是只读检查适配器，不是新的可执行 IR，不能
-作为 invocation 入口或实现选择证据；其 Display 采用 S-expression。
+源码世界可同时包含普通方法、表达式生成器、模式生成器和接收 quoted code 的数据函数。
+检查方法前先区分 `MethodSignature` 的类别。普通方法从 `CallableProgram` 取得借用的
+参数望远镜。三类 contextual 方法从 `CodeFunctionSignature` 取得各自的子句域、数据或
+代码输入以及结果。建立声明目录时核对子句数、输入绑定顺序和唯一性，并按已有规则
+检查依赖绑定只能出现在后续输入域或结果中。完成目录检查只允许查询声明。
 
-方法 phase 仍从原 callable signature 取得，普通 telescope 视图与 unsafe 责任
-分别保留。Generator、PatternGenerator 和 DataConsumer 不经此入口转成普通
-callable。参数／结果绑定冲突、snapshot 约束、契约形状、表达式阶段和 lexical
-unsafe 检查继续运行；程序契约仍不进入 PTC。没有把移除复制理解为移除检查。
+整包阶段检查按存储阶段读取每个域。数据输入和数据结果使用 comptime 存储规则，
+代码中的表达式结果、上下文、模式主体和成功输出使用 runtime 规则。例如，
+表达式生成器可以描述返回指针的 runtime 代码，直接把指针作为数据实参则会被拒绝。
+contextual 规格中的入口快照只能引用数据参数，读取代码参数或其 runtime 上下文绑定的普通局部值也会被拒绝。
+
+两类方法都借用 `ProgramParts` 中的前置条件、后置条件和快照，执行相同的谓词形状、
+快照绑定、阶段和 lexical unsafe 检查。contextual 规格没有普通函数的 de Bruijn
+实参帧。对方法建立普通函数值或契约摘要时，消费者仍须取得 ordinary 签名。
+elaboration 完成代码应用后，执行包只交付剩余的普通接口与实现方法，IIR 的
+程序规格检查因此可以直接借用普通签名。程序规格由程序验证层处理。
 
 共享不可变 visitor 与 call-safety visitor 按原来的后进先出顺序惰性取得根节点，
 不先分配与 requires／ensures／defaults 数量相等的根引用数组；子树仍复用原有

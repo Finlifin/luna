@@ -283,9 +283,8 @@ fn method_signature_preserves_category_through_specialization() {
     assert_eq!(original.to_string(), signature().to_string());
 }
 
-#[test]
-fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
-    let mut method = nir::program::MethodContract {
+fn code_method() -> nir::program::MethodContract {
+    nir::program::MethodContract {
         phase: Default::default(),
         is_quote: false,
         pure: true,
@@ -305,7 +304,12 @@ fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
         signature: nir::code_interfaces::MethodSignature::Generator(signature()),
         requirements: vec![],
         default: None,
-    };
+    }
+}
+
+#[test]
+fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
+    let mut method = code_method();
     assert!(matches!(
         nir::contracts::CallableProgram::method(&method),
         Err(nir::TypeError::ContextualCodeNotCallable)
@@ -386,6 +390,166 @@ fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
             .to_string()
             .contains("(signature (data-consumer-signature")
     );
+}
+
+fn code_method_package() -> nir::program::Package {
+    let id = |local| DeclarationId { package: 1, local };
+    nir::program::Package {
+        traits: vec![nir::program::Trait {
+            declaration: id(7),
+            self_parameter: id(3),
+            name: "Build".into(),
+            methods: vec![code_method()],
+            comptime_only: false,
+            parents: vec![],
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            associated: vec![],
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn contextual_declaration_frames_preserve_slots_and_cannot_be_invoked_as_functions() {
+    use nir::phases::{ErrorKind, Inspection};
+    use nir::program::{Expr, ExprKind, SourceRange};
+    let mut package = code_method_package();
+    let member = &package.traits[0].methods[0];
+    let callable = Term::ComptimeFunction(Box::new(Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Primitive(Primitive::Bool)),
+    }));
+    let source = SourceRange { start: 7, end: 11 };
+    let subject = Expr {
+        kind: ExprKind::TypeValue(Term::Primitive(Primitive::Bool)),
+        ty: Term::Primitive(Primitive::Type),
+        source,
+    };
+    let value = Expr {
+        kind: ExprKind::ComptimeFunctionInstance {
+            declaration: member.declaration,
+            subject: Box::new(subject),
+        },
+        ty: callable,
+        source,
+    };
+    let inspection = Inspection::new(&package);
+    assert_eq!(
+        inspection.check(&value, &mut 0).unwrap_err().kind,
+        ErrorKind::Budget
+    );
+    let failure = inspection.check(&value, &mut 10_000).unwrap_err();
+    assert_eq!(
+        failure.message,
+        "contextual method cannot supply an ordinary function instance"
+    );
+    inspection.check_package(&mut 10_000).unwrap();
+    package.traits[0].methods[0].parameter_bindings.swap(0, 1);
+    let failure = nir::callable_source::Callables::new(&package, &mut 10_000)
+        .err()
+        .unwrap();
+    assert_eq!(failure.message, "contextual method input identity mismatch");
+}
+
+#[test]
+fn contextual_specifications_read_data_and_keep_code_ports_in_runtime_storage() {
+    use nir::code_interfaces::{CodeInput, MethodSignature};
+    use nir::program::{EntrySnapshot, Expr, ExprKind, SourceRange};
+    let mut package = code_method_package();
+    let member = &mut package.traits[0].methods[0];
+    let (data, code) = (member.parameter_bindings[0], member.parameter_bindings[1]);
+    let MethodSignature::Generator(signature) = &mut member.signature else {
+        unreachable!()
+    };
+    signature.inputs[0].1 = CodeInput::Data(Term::Primitive(Primitive::Bool));
+    signature.output.result = Term::Pointer(Box::new(Term::Primitive(Primitive::Bool)));
+    let source = SourceRange { start: 20, end: 40 };
+    member.program.preconditions.push(Expr {
+        kind: ExprKind::Local(data),
+        ty: Term::Primitive(Primitive::Bool),
+        source,
+    });
+    nir::phases::validate(&package).unwrap();
+
+    // An expression-code input and the runtime identity in its open context
+    // are both unavailable to a construction-time predicate.
+    for unavailable in [code, LocalId { owner: 2, index: 1 }] {
+        let mut invalid = package.clone();
+        invalid.traits[0].methods[0].program.preconditions[0].kind = ExprKind::Local(unavailable);
+        let failure = nir::phases::validate(&invalid).unwrap_err();
+        assert_eq!(failure.source, source);
+        assert_eq!(
+            failure.message,
+            "contextual contract reads code or its runtime context as ordinary data"
+        );
+    }
+
+    let mut invalid = package.clone();
+    invalid.traits[0].methods[0]
+        .program
+        .entry_snapshots
+        .push(EntrySnapshot {
+            parameter: code,
+            binding: LocalId { owner: 9, index: 7 },
+        });
+    assert_eq!(
+        nir::phases::validate(&invalid).unwrap_err().message,
+        "contextual method entry snapshot requires a data parameter"
+    );
+
+    let MethodSignature::Generator(sig) = &mut package.traits[0].methods[0].signature else {
+        unreachable!()
+    };
+    sig.inputs[0].1 = CodeInput::Data(sig.output.result.clone());
+    assert_eq!(
+        nir::phases::validate(&package).unwrap_err().message,
+        "runtime pointer values cannot inhabit comptime storage"
+    );
+}
+
+#[test]
+fn pattern_outputs_and_ordinary_consumer_results_have_distinct_storage_phases() {
+    use nir::code_interfaces::{CodeFunctionSignature, MethodSignature, PatternCodeInterface};
+    let mut package = code_method_package();
+    let member = &mut package.traits[0].methods[0];
+    let inputs = signature().inputs;
+    let integer = Term::Primitive(Primitive::Integer);
+    member.signature = MethodSignature::DataConsumer(CodeFunctionSignature {
+        clause_domains: vec![],
+        input_binders: BTreeMap::new(),
+        inputs: inputs.clone(),
+        output: integer.clone(),
+    });
+    member.program.result_binding = Some(LocalId { owner: 9, index: 7 });
+    nir::phases::validate(&package).unwrap();
+
+    let member = &mut package.traits[0].methods[0];
+    member.signature = MethodSignature::PatternGenerator(CodeFunctionSignature {
+        clause_domains: vec![],
+        input_binders: BTreeMap::new(),
+        inputs,
+        output: PatternCodeInterface {
+            subject: Term::Primitive(Primitive::Bool),
+            outputs: BTreeMap::from([("matched".into(), integer)]),
+        },
+    });
+    assert_eq!(
+        nir::phases::validate(&package).unwrap_err().message,
+        "quoted result cannot supply a data result binding"
+    );
+    package.traits[0].methods[0].program.result_binding = None;
+    let error = nir::phases::validate(&package).unwrap_err();
+    assert_eq!(error.kind, nir::phases::ErrorKind::Invalid);
+    let MethodSignature::PatternGenerator(sig) = &mut package.traits[0].methods[0].signature else {
+        unreachable!()
+    };
+    sig.output
+        .outputs
+        .insert("matched".into(), Term::Primitive(Primitive::Bool));
+    nir::phases::validate(&package).unwrap();
 }
 
 #[test]

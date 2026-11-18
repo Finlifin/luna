@@ -58,13 +58,21 @@ pub(super) fn domains(
 /// Per-callable inspection data. It borrows the original telescope and owns
 /// only the sort frame and immutable snapshot-binding membership evidence.
 pub(super) struct InspectionFrame<'a> {
-    pub(super) signature: &'a Term,
+    pub(super) signature: Option<&'a Term>,
     pub(super) frames: Vec<Vec<crate::Sort>>,
     pub(super) frozen: BTreeSet<crate::program::LocalId>,
 }
 impl<'a> InspectionFrame<'a> {
     pub(super) fn new(
         function: crate::contracts::CallableProgram<'a>,
+        fuel: &mut usize,
+    ) -> Result<Self, Failure> {
+        Self::for_parts(function.parts, Some(function.signature), fuel)
+    }
+
+    pub(super) fn for_parts(
+        function: crate::contracts::ProgramParts<'a>,
+        ordinary: Option<&'a Term>,
         fuel: &mut usize,
     ) -> Result<Self, Failure> {
         let budget = || {
@@ -83,10 +91,10 @@ impl<'a> InspectionFrame<'a> {
         };
         // Follow only callable wrappers. This view does not clone or unfold
         // any type payload, captured environment or normal-form definition.
-        let mut signature = function.signature;
-        loop {
+        let mut signature = ordinary;
+        while let Some(current) = signature {
             *fuel = fuel.checked_sub(1).ok_or_else(budget)?;
-            match signature {
+            match current {
                 Term::ComptimeFunction(inner)
                 | Term::NormalFormFunction(inner, _)
                 | Term::UnsafeFunction(inner)
@@ -95,11 +103,11 @@ impl<'a> InspectionFrame<'a> {
                 }
                 | Term::ContextualClosure {
                     signature: inner, ..
-                } => signature = inner,
+                } => signature = Some(inner),
                 _ => break,
             }
         }
-        let frames = if let Term::Function { parameters, .. } = signature {
+        let frames = if let Some(Term::Function { parameters, .. }) = signature {
             *fuel = fuel
                 .checked_sub(parameters.len().saturating_add(1))
                 .ok_or_else(budget)?;
@@ -216,7 +224,7 @@ mod tests {
         let program = crate::contracts::CallableProgram::function(&value);
         let frame = InspectionFrame::new(program, &mut 100).unwrap();
         assert!(std::ptr::eq(
-            frame.signature,
+            frame.signature.unwrap(),
             value.signature.callable_signature()
         ));
         assert_eq!(

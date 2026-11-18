@@ -77,38 +77,39 @@ impl<'a> CallableProgram<'a> {
     ) -> Result<&'a [Parameter], InputFrameError> {
         use InputFrameErrorKind as K;
         let failure = |kind| InputFrameError {
-            source: self.source,
+            source: self.parts.source,
             kind,
         };
         *fuel = fuel
-            .checked_sub(self.parameters.len().saturating_add(1))
+            .checked_sub(self.parts.parameters.len().saturating_add(1))
             .ok_or_else(|| failure(K::Budget))?;
         *fuel = fuel
-            .checked_sub(self.defaults.len())
+            .checked_sub(self.parts.defaults.len())
             .ok_or_else(|| failure(K::Budget))?;
         crate::type_computations::charge_term(self.signature, fuel)
             .map_err(|_| failure(K::Budget))?;
         let Term::Function { parameters, .. } = self.signature.callable_signature() else {
             return Err(failure(K::Signature));
         };
-        if parameters.len() != self.parameters.len() {
+        if parameters.len() != self.parts.parameters.len() {
             return Err(failure(K::Arity));
         }
         let mut positions = BTreeMap::new();
-        for (slot, binding) in self.parameters.iter().enumerate() {
+        for (slot, binding) in self.parts.parameters.iter().enumerate() {
             if positions.insert(*binding, slot).is_some() {
                 return Err(failure(K::DuplicateBinding));
             }
         }
         let mut defaults = BTreeSet::new();
         if self
+            .parts
             .defaults
             .iter()
             .any(|(slot, _)| *slot >= parameters.len() || !defaults.insert(*slot))
         {
             return Err(failure(K::DefaultSlot));
         }
-        for (slot, value) in self.defaults {
+        for (slot, value) in self.parts.defaults {
             let free =
                 crate::free_bindings::collect(value, fuel).map_err(|reason| InputFrameError {
                     source: value.source,

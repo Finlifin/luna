@@ -9,6 +9,7 @@ use crate::{DeclarationId, Term, TypeError};
 pub use alignment::BindingAlignment;
 pub use input_frame::{InputFrameError, InputFrameErrorKind};
 pub use program_view::CallableProgram;
+pub(crate) use program_view::ProgramParts;
 use std::{collections::BTreeMap, fmt};
 
 #[derive(Clone, Debug, Default, PartialEq)]

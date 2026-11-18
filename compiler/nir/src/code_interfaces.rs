@@ -142,6 +142,34 @@ pub enum CodeInput {
     Pattern(PatternCodeInterface),
 }
 
+/// Borrow the domain of a contextual input or output without erasing code ports.
+#[derive(Clone, Copy)]
+pub enum CodeDomain<'a> {
+    Data(&'a Term),
+    Expression(&'a ExpressionCodeInterface),
+    Pattern(&'a PatternCodeInterface),
+}
+
+impl<'a> CodeDomain<'a> {
+    pub fn type_terms(self) -> impl Iterator<Item = &'a Term> {
+        let (data, code, pattern) = match self {
+            Self::Data(ty) => (Some(ty), None, None),
+            Self::Expression(interface) => (None, Some(interface), None),
+            Self::Pattern(interface) => (None, None, Some(interface)),
+        };
+        data.into_iter()
+            .chain(code.into_iter().flat_map(|interface| {
+                interface
+                    .context
+                    .values()
+                    .chain(std::iter::once(&interface.result))
+            }))
+            .chain(pattern.into_iter().flat_map(|interface| {
+                std::iter::once(&interface.subject).chain(interface.outputs.values())
+            }))
+    }
+}
+
 /// A contextual call preserves each input category independently of its result.
 /// The default output is expression code for compatibility with its producers;
 /// pattern producers and data consumers use the same argument telescope.
@@ -159,13 +187,19 @@ pub struct CodeFunctionSignature<O = ExpressionCodeInterface> {
     pub output: O,
 }
 
-impl fmt::Display for CodeInput {
+impl fmt::Display for CodeDomain<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Data(ty) => write!(f, "(data {ty})"),
-            Self::Code(interface) => write!(f, "(code {interface})"),
+            Self::Expression(interface) => write!(f, "(code {interface})"),
             Self::Pattern(interface) => write!(f, "(pattern {interface})"),
         }
+    }
+}
+
+impl fmt::Display for CodeInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.domain().fmt(f)
     }
 }
 
@@ -173,14 +207,20 @@ impl fmt::Display for CodeInput {
 /// output category; changing a signature result requires an explicit new type.
 pub trait SignatureOutput: Sized + fmt::Display {
     const DUMP_KIND: &'static str;
+    fn domain(&self) -> CodeDomain<'_>;
     fn charge_output(&self, fuel: &mut usize) -> Result<(), type_computations::Error>;
     fn try_map_output<E>(&self, transform: impl FnMut(&Term) -> Result<Term, E>)
     -> Result<Self, E>;
-    fn output_terms(&self) -> impl Iterator<Item = &Term>;
+    fn output_terms(&self) -> impl Iterator<Item = &Term> {
+        self.domain().type_terms()
+    }
 }
 
 impl SignatureOutput for ExpressionCodeInterface {
     const DUMP_KIND: &'static str = "code-function-signature";
+    fn domain(&self) -> CodeDomain<'_> {
+        CodeDomain::Expression(self)
+    }
     fn charge_output(&self, fuel: &mut usize) -> Result<(), type_computations::Error> {
         self.charge(fuel)
     }
@@ -189,14 +229,14 @@ impl SignatureOutput for ExpressionCodeInterface {
         transform: impl FnMut(&Term) -> Result<Term, E>,
     ) -> Result<Self, E> {
         self.try_map_types(transform)
-    }
-    fn output_terms(&self) -> impl Iterator<Item = &Term> {
-        self.context.values().chain(std::iter::once(&self.result))
     }
 }
 
 impl SignatureOutput for PatternCodeInterface {
     const DUMP_KIND: &'static str = "pattern-function-signature";
+    fn domain(&self) -> CodeDomain<'_> {
+        CodeDomain::Pattern(self)
+    }
     fn charge_output(&self, fuel: &mut usize) -> Result<(), type_computations::Error> {
         self.charge(fuel)
     }
@@ -206,13 +246,13 @@ impl SignatureOutput for PatternCodeInterface {
     ) -> Result<Self, E> {
         self.try_map_types(transform)
     }
-    fn output_terms(&self) -> impl Iterator<Item = &Term> {
-        std::iter::once(&self.subject).chain(self.outputs.values())
-    }
 }
 
 impl SignatureOutput for Term {
     const DUMP_KIND: &'static str = "data-consumer-signature";
+    fn domain(&self) -> CodeDomain<'_> {
+        CodeDomain::Data(self)
+    }
     fn charge_output(&self, fuel: &mut usize) -> Result<(), type_computations::Error> {
         type_computations::charge_term(self, fuel)
     }
@@ -221,9 +261,6 @@ impl SignatureOutput for Term {
         mut transform: impl FnMut(&Term) -> Result<Term, E>,
     ) -> Result<Self, E> {
         transform(self)
-    }
-    fn output_terms(&self) -> impl Iterator<Item = &Term> {
-        std::iter::once(self)
     }
 }
 
@@ -591,24 +628,19 @@ impl MethodSignature {
 }
 
 impl CodeInput {
+    pub fn domain(&self) -> CodeDomain<'_> {
+        match self {
+            Self::Data(ty) => CodeDomain::Data(ty),
+            Self::Code(code) => CodeDomain::Expression(code),
+            Self::Pattern(pattern) => CodeDomain::Pattern(pattern),
+        }
+    }
+
     pub fn type_terms(&self) -> impl Iterator<Item = &Term> {
-        let (data, code, pattern) = match self {
-            Self::Data(ty) => (Some(ty), None, None),
-            Self::Code(interface) => (None, Some(interface), None),
-            Self::Pattern(interface) => (None, None, Some(interface)),
-        };
-        data.into_iter()
-            .chain(code.into_iter().flat_map(|interface| {
-                interface
-                    .context
-                    .values()
-                    .chain(std::iter::once(&interface.result))
-            }))
-            .chain(pattern.into_iter().flat_map(|interface| {
-                std::iter::once(&interface.subject).chain(interface.outputs.values())
-            }))
+        self.domain().type_terms()
     }
 }
+
 impl MethodSignature {
     /// Visit semantic type dependencies without erasing signature categories.
     pub fn type_terms(&self) -> impl Iterator<Item = &Term> {

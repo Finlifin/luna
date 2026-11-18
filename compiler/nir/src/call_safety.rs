@@ -59,6 +59,13 @@ pub fn validate_program(
             message: "function declaration requires an unqualified parameter/result telescope",
         });
     }
+    validate_parts(function.parts, fuel)
+}
+
+pub(crate) fn validate_parts(
+    function: crate::contracts::ProgramParts<'_>,
+    fuel: &mut usize,
+) -> Result<(), Error> {
     let mut roots = function.roots().rev();
     let mut pending = Vec::new();
     while let Some((root, permitted)) = pending
