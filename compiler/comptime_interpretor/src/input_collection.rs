@@ -1,8 +1,9 @@
 //! One invocation-local scheduler for ordered input execution and domain wakeup.
 //! Providers retain their own admission and final construction semantics.
 use super::*;
+use comptime_compiler::declaration_inputs::PreparationSite;
 pub(super) use comptime_compiler::declaration_inputs::{PlanView, Target};
-use nir::program::{NormalFormArgument as Argument, NormalFormPreparation};
+use nir::program::NormalFormArgument as Argument;
 use normal_inputs::StagedNormalInput;
 
 #[derive(Clone)]
@@ -22,6 +23,13 @@ impl<'e> Plan<'e> {
         match self {
             Self::Borrowed(view) => *view,
             Self::Compiled { plan, .. } => plan.view(),
+        }
+    }
+
+    fn preparation(&self, index: usize) -> PreparationSite<'_> {
+        match self {
+            Self::Borrowed(view) => PreparationSite::borrowed(&view.schedule.preparations[index]),
+            Self::Compiled { plan, .. } => plan.preparation(index),
         }
     }
 
@@ -67,12 +75,12 @@ impl<'e> Plan<'e> {
 }
 
 pub(super) trait Source: fmt::Display {
-    fn view(&self) -> PlanView<'_>;
+    fn plan(&self) -> &Plan<'_>;
     fn source(&self) -> SourceRange {
-        self.view().source
+        self.plan().view().source
     }
     fn inputs(&self) -> (&[Argument], nir::program::InputSchedule<'_>) {
-        let view = self.view();
+        let view = self.plan().view();
         (view.arguments, view.schedule)
     }
     fn input(&self, slot: usize) -> &Argument {
@@ -136,7 +144,7 @@ enum Waiting {
 
 pub(super) enum Request<'a> {
     DomainDelivered,
-    Preparation(&'a NormalFormPreparation),
+    Preparation(PreparationSite<'a>),
     Ready(std::borrow::Cow<'a, Argument>, Term),
     Stage(std::borrow::Cow<'a, Argument>),
     Complete,
@@ -359,7 +367,7 @@ impl<S: Source> Frame<S> {
             && preparation.before == self.position
         {
             self.state = State::Waiting(Waiting::Preparation(self.preparation));
-            Request::Preparation(preparation)
+            Request::Preparation(self.source.plan().preparation(self.preparation))
         } else if self.position < arguments.len() {
             let slot = schedule
                 .order
@@ -419,7 +427,7 @@ impl<S: Source> Frame<S> {
                     if let Some(frame) = vm.start_input_preparation(preparation, env)? {
                         return Ok(Progress::Input(frame));
                     }
-                    match vm.eval(&preparation.expression, env)? {
+                    match vm.eval(preparation.expression(), env)? {
                         Flow::Value(_) => Completion::Prepared,
                         flow => return Ok(Progress::Complete(flow)),
                     }

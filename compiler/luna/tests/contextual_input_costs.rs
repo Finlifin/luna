@@ -84,3 +84,60 @@ fn spread_producer_preparation_and_execution_scale_with_input_size() {
         }
     }
 }
+
+#[test]
+fn repeated_fixed_spreads_compile_once_but_read_the_current_iteration() {
+    let package = sysroot::compile(
+        r#"
+        pure comptime fn Mark<n: Integer> -> Type { bool }
+        comptime fn packet(n: Integer) -> Tuple<Integer> { (n,) }
+        comptime fn Build(count: Integer) -> Type {
+            var i: Integer = 0;
+            var result: Type = bool;
+            while i < count {
+                i = i + 1;
+                result = Mark<...packet(i)>;
+            }
+            result
+        }
+    "#,
+    )
+    .unwrap();
+    let function = |name| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    let packet = function("packet");
+    let build = function("Build");
+    let mut costs = Vec::new();
+    for n in [1, 8] {
+        let n_value = comptime_runtime::Integer::from_u128(n);
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, false, |vm| {
+            let result = vm
+                .invoke(build, vec![Value::Integer(n_value.clone())])
+                .unwrap();
+            let Value::Type(nir::Term::NormalForm { arguments, .. }) = result else {
+                panic!("expected Mark applied to the last input")
+            };
+            assert_eq!(arguments, [nir::Term::Integer(n_value)]);
+            assert_eq!(
+                vm.events()
+                    .iter()
+                    .filter(|event| matches!(event, Event::EnterFunction(id) if *id == packet))
+                    .count(),
+                n as usize
+            );
+            assert_eq!(vm.bytecode_input_preparations(), n as usize);
+            costs.push(vm.bytecode_compilation_steps());
+        });
+    }
+    assert!(costs[0] > 0);
+    assert_eq!(
+        costs[0], costs[1],
+        "extra activations recompiled lexical code"
+    );
+}

@@ -303,10 +303,18 @@ Commit、Probe、RetainCode 分别遵守各自对构造副作用的交付规则�
 自由 LocalId 在 initializer substitution 后观察一次，仅在后续结构不变的本根中
 复用；不是跨根缓存，也不允许先捕获所有外围值。
 
-帧的 `Exports` 在创建请求与实际开始时检查名字冲突；解析到该 Program 的寄存器，
-预算与全部检查通过后才移动入口环境。Frame 自己持有绑定交接，正常值出口要求已
-终结、无 pending 请求、内部模式作用域闭合、所有输出有值且无环境冲突。先整体验证，
-再移动任何新输出。错误或非局部控制不发布新绑定，但归还实际已变更的原输入。
+以 `Mark<...packet(i)>` 为例，每一轮都要用当轮的 `i` 执行一次 `packet`。
+VM 首次走到该展开位置时，编译生产者的词法表达式，同时确定它正常结束时要交回的
+LocalId 及其寄存器。后续迭代从同一编译会话按声明输入计划的身份与展开位置取得
+这份代码。缓存按权重限额保留成功产物，预算耗尽后仍可重试；相同的源码范围可以
+出现在不同实例中，不能据此共享代码。别名体若要把已准入的参数代入类型后才能执行，
+其代码身份还依赖这组替换，仅凭声明计划与位置不足以选中它。
+[片段编译](../compiler/comptime_compiler/src/preparation.rs) · [别名体的实例化](../compiler/comptime_interpretor/src/nominal_plan.rs)
+
+每次执行都先对照当前环境检查导出名冲突，再创建新帧、取得入口值。正常结束时，
+帧检查控制状态、内部模式作用域及所有导出槽位，随后一起移交绑定。提前返回或
+执行失败时，调用者取回已经发生的写入，未完成的绑定留在片段内。
+[绑定交接](../compiler/comptime_interpretor/src/bytecode/bindings.rs) · [源码循环用例](../compiler/luna/tests/contextual_input_costs.rs)
 
 这些是生产输入准备计划已有能力，仍缺源 scope、域准入和执行 receipt。Program
 寄存器编号是片段私有的，不能直接把 slots／PatternScope 搬到另一 Program。

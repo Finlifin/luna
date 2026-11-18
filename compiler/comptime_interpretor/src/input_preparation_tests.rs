@@ -257,7 +257,28 @@ fn normal_plan_cleans_exported_bindings_and_executes_trailing_empty_packets() {
         let result = if compiled {
             let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
             assert!(code.to_string().contains("(type-input-plan %"));
-            vm.execute_code(&code, &mut env)
+            let result = vm.execute_code(&code, &mut env);
+            let plan = code
+                .instructions()
+                .iter()
+                .find_map(|instruction| match &instruction.op {
+                    Op::TypeInputPlan { plan, .. } => Some(plan),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(
+                plan.preparation(0)
+                    .compiled(&vm.compilation_session)
+                    .is_some()
+            );
+            // Failure in the intervening operand must not compile the trailing packet.
+            assert_eq!(
+                plan.preparation(1)
+                    .compiled(&vm.compilation_session)
+                    .is_some(),
+                !invalid
+            );
+            result
         } else {
             vm.eval(&body, &mut env)
         };
@@ -286,39 +307,118 @@ fn normal_plan_cleans_exported_bindings_and_executes_trailing_empty_packets() {
 }
 
 #[test]
-fn fragment_exports_reject_invalid_names_before_taking_the_environment() {
+fn fragment_exports_reject_invalid_patterns_before_taking_the_environment() {
     let package = Package::default();
-    let prep = preparation(tuple(vec![boolean(true), boolean(false)]));
-    let code = Arc::new(comptime_compiler::compile(&prep.expression, &mut 10000).unwrap());
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    let original = Environment::from([(local(0), Value::Bool(false))]);
-    for names in [vec![local(1), local(1)], vec![local(0)], vec![local(99)]] {
+    for pattern in [
+        Pattern::Tuple(vec![Pattern::Wild]),
+        Pattern::Tuple(vec![
+            Pattern::Binding {
+                binding: local(1),
+                inner: Box::new(Pattern::Wild)
+            };
+            2
+        ]),
+    ] {
+        let mut prep = preparation(tuple(vec![boolean(true), boolean(false)]));
+        let K::LetPattern {
+            pattern: output, ..
+        } = &mut prep.expression.kind
+        else {
+            unreachable!()
+        };
+        *output = pattern;
+        let original = Environment::from([(local(0), Value::Bool(false))]);
         let mut environment = original.clone();
-        let request = bindings::Exports::new(&mut vm, names, &environment, SOURCE);
-        let result = request
-            .and_then(|request| vm.start_frame_with_exports(&code, &mut environment, request));
-        assert!(result.is_err());
+        let error = vm
+            .start_input_preparation(PreparationSite::borrowed(&prep), &mut environment)
+            .err()
+            .unwrap();
+        assert_eq!(error.kind, ErrorKind::Type);
         assert_eq!(environment, original);
     }
-    let mut environment = original;
-    let request = bindings::Exports::new(&mut vm, vec![local(1)], &environment, SOURCE).unwrap();
-    assert!(
-        request
-            .to_string()
-            .starts_with("(requested-exports (source 1 2)")
-    );
-    // Request preparation does not reserve a caller binding. Recheck the
-    // actual environment before moving it, even if the code is already cached.
-    environment.insert(local(1), Value::Bool(false));
-    let original = environment.clone();
-    assert_eq!(
-        vm.start_frame_with_exports(&code, &mut environment, request)
-            .err()
+}
+
+#[test]
+fn a_packet_site_reuses_code_across_activations_and_publishes_only_after_compilation() {
+    use nir::program::NormalFormInputPlan;
+    let package = Package::default();
+    let make_plan = |value| {
+        let body = expr(
+            Primitive::Type,
+            K::NormalFormType {
+                head: DeclarationId {
+                    package: 74,
+                    local: 1,
+                },
+                arguments: vec![],
+                plan: Some(NormalFormInputPlan {
+                    order: vec![],
+                    bindings: vec![],
+                    preparations: vec![preparation(tuple(vec![
+                        boolean(value),
+                        expr(Primitive::Bool, K::Local(local(0))),
+                    ]))],
+                }),
+            },
+        );
+        let code = comptime_compiler::compile(&body, &mut 10000).unwrap();
+        code.instructions()
+            .iter()
+            .find_map(|instruction| match &instruction.op {
+                Op::TypeInputPlan { plan, .. } => Some(plan.clone()),
+                _ => None,
+            })
             .unwrap()
-            .kind,
-        ErrorKind::Type
+    };
+    let first = make_plan(true);
+    let second = make_plan(false);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut env = Environment::from([(local(0), Value::Bool(false))]);
+    vm.budget.steps = 2;
+    let error = vm
+        .start_input_preparation(first.preparation(0), &mut env)
+        .err()
+        .unwrap();
+    assert_eq!(error.kind, ErrorKind::StepsExhausted);
+    assert!(
+        first
+            .preparation(0)
+            .compiled(&vm.compilation_session)
+            .is_none()
     );
-    assert_eq!(environment, original);
+    assert_eq!(env.len(), 1);
+    vm.budget = Budget::default();
+    for (plan, field, input, cold) in [
+        (&first, true, false, true),
+        (&first, true, true, false),
+        (&second, false, false, true),
+    ] {
+        let mut env = Environment::from([(local(0), Value::Bool(input))]);
+        let count = vm.bytecode_compilations();
+        let frame = vm
+            .start_input_preparation(plan.preparation(0), &mut env)
+            .unwrap()
+            .unwrap();
+        let result = frame.run(&mut vm);
+        assert!(matches!(result.flow, Ok(Flow::Value(Value::Unit))));
+        assert_eq!(vm.bytecode_compilations() - count, usize::from(cold));
+        assert_eq!(result.environment.get(&local(1)), Some(&Value::Bool(field)));
+        assert_eq!(
+            result.environment.get(&local(2)),
+            Some(&Value::Bool(!input))
+        );
+    }
+    let mut colliding = Environment::from([(local(1), Value::Bool(false))]);
+    let count = vm.bytecode_compilations();
+    let error = vm
+        .start_input_preparation(first.preparation(0), &mut colliding)
+        .err()
+        .unwrap();
+    assert_eq!(error.kind, ErrorKind::Type);
+    assert_eq!(vm.bytecode_compilations(), count);
+    assert_eq!(colliding.len(), 1);
+    assert_eq!(vm.bytecode_input_preparations(), 3);
 }
 
 #[test]
@@ -329,7 +429,7 @@ fn fragment_exports_publish_atomically_only_at_closed_completion() {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let mut environment = Environment::from([(local(0), Value::Bool(false))]);
         let InputFrame { mut code, finish } = vm
-            .start_input_preparation(&prep, &mut environment)
+            .start_input_preparation(PreparationSite::borrowed(&prep), &mut environment)
             .unwrap()
             .unwrap();
         assert!(environment.is_empty());
@@ -384,7 +484,7 @@ fn fragment_handoff_moves_storage_without_replacing_its_identity() {
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let mut environment = Environment::from([(local(0), Value::Bool(false))]);
     let InputFrame { mut code, finish } = vm
-        .start_input_preparation(&prep, &mut environment)
+        .start_input_preparation(PreparationSite::borrowed(&prep), &mut environment)
         .unwrap()
         .unwrap();
     let flow = vm.run_fragment(&mut code);

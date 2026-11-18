@@ -65,8 +65,8 @@ impl<'e> Source<'e> {
 }
 
 impl input_collection::Source for Source<'_> {
-    fn view(&self) -> input_collection::PlanView<'_> {
-        self.plan.view()
+    fn plan(&self) -> &input_collection::Plan<'_> {
+        &self.plan
     }
     fn substitutions(&self) -> Option<&input_bindings::Bindings> {
         self.specialize.then_some(&self.completed)

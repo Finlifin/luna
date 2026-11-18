@@ -1,6 +1,6 @@
 //! NF input contracts use the shared invocation input scheduler.
 use super::*;
-use input_collection::{Plan, PlanView, Progress, Target};
+use input_collection::{Plan, Progress, Target};
 use nir::program::NormalFormArgument as Argument;
 
 pub(super) struct Source<'a> {
@@ -159,8 +159,8 @@ impl<'a> Frame<'a> {
 }
 
 impl input_collection::Source for Source<'_> {
-    fn view(&self) -> PlanView<'_> {
-        self.plan.view()
+    fn plan(&self) -> &input_collection::Plan<'_> {
+        &self.plan
     }
     fn substitutions(&self) -> Option<&input_bindings::Bindings> {
         Some(&self.bindings)

@@ -1,7 +1,10 @@
 //! Invocation-only execution of linear code. Runtime cleanup and mixed-stage
 //! interpretation keep their existing paths. No opcode recursively evaluates NIR.
 use super::*;
-use comptime_compiler::{Op, Program};
+use comptime_compiler::{
+    Op, Program,
+    declaration_inputs::{BoundExports, PreparationSite},
+};
 mod bindings;
 #[path = "bytecode_interface.rs"]
 mod interface;
@@ -12,7 +15,7 @@ pub(super) struct Frame {
     code: Arc<Program>,
     environment: Environment,
     imported: Vec<(LocalId, usize)>,
-    exports: Option<bindings::BoundExports>,
+    exports: Option<Arc<BoundExports>>,
     terminal: bool,
     interface: Option<Box<interface::InterfaceCall>>,
     waiting: Option<Waiting>,
@@ -786,6 +789,9 @@ impl<'a> Interpreter<'a> {
             Err(comptime_compiler::Error::Unsupported(source)) => {
                 Err(self.failure(ErrorKind::Unsupported, Some(source)))
             }
+            Err(comptime_compiler::Error::InvalidPreparation(source)) => {
+                Err(self.failure(ErrorKind::Type, Some(source)))
+            }
             Err(comptime_compiler::Error::UnresolvedTypeEvidence(source)) => {
                 Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)))
             }
@@ -947,22 +953,25 @@ impl<'a> Interpreter<'a> {
 
     pub(super) fn start_input_preparation(
         &mut self,
-        preparation: &nir::program::NormalFormPreparation,
+        site: PreparationSite<'_>,
         environment: &mut Environment,
     ) -> Result<Option<InputFrame>, Error> {
-        let source = preparation.expression.source;
-        let mut bindings = Vec::new();
-        if !preparation.visit_bindings(
-            |count| self.effect_charge(count, Some(source)),
-            |binding| bindings.push(binding),
-        )? {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
-        let exports = bindings::Exports::new(self, bindings, environment, source)?;
-        let Some(code) = self.lexical_expression_code(&preparation.expression)? else {
+        if !self.bytecode_invocation_available() {
             return Ok(None);
+        }
+        let fragment = match site.compiled(&self.compilation_session) {
+            Some(fragment) => fragment,
+            None => self.compile_bytecode(|session, fuel| site.compile(session, fuel))?,
         };
-        let code = self.start_frame_with_exports(&code, environment, exports)?;
+        let source = Some(fragment.exports.source());
+        for (binding, _) in fragment.exports.bindings() {
+            self.tick(source)?;
+            if environment.contains_key(binding) {
+                return Err(self.failure(ErrorKind::Type, source));
+            }
+        }
+        let mut code = self.start_frame(&fragment.program, environment)?;
+        code.exports = Some(fragment.exports);
         self.bytecode_input_preparations += 1;
         Ok(Some(InputFrame {
             code,

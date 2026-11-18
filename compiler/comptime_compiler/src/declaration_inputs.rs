@@ -1,4 +1,5 @@
 //! Data needed by a declaration input activation after evaluating its callee.
+pub use crate::preparation::{BoundExports, PreparationProgram, PreparationSite};
 use crate::{Error, copy_error};
 use nir::program::{
     Expr, ExprKind as K, InputSchedule, LocalId, NormalFormArgument, NormalFormPreparation,
@@ -138,6 +139,10 @@ impl DeclarationInputPlan {
             locals: bindings.locals.into(),
         };
         Ok((plan, bindings.imports))
+    }
+
+    pub fn preparation(self: &Arc<Self>, index: usize) -> PreparationSite<'_> {
+        PreparationSite::owned(&self.preparations[index], self, index)
     }
 
     pub fn view(&self) -> PlanView<'_> {

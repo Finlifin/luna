@@ -64,7 +64,11 @@ impl Interpreter<'_> {
         preparation: &nir::program::NormalFormPreparation,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        let Some(frame) = self.start_input_preparation(preparation, environment)? else {
+        let Some(frame) = self.start_input_preparation(
+            comptime_compiler::declaration_inputs::PreparationSite::borrowed(preparation),
+            environment,
+        )?
+        else {
             return self.eval(&preparation.expression, environment);
         };
         let result = frame.run(self);

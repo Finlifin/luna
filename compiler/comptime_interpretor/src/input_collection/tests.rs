@@ -31,8 +31,8 @@ impl<S: Source> fmt::Display for Observed<S> {
     }
 }
 impl<S: Source> Source for Observed<S> {
-    fn view(&self) -> PlanView<'_> {
-        self.inner.view()
+    fn plan(&self) -> &input_collection::Plan<'_> {
+        self.inner.plan()
     }
     fn substitutions(&self) -> Option<&input_bindings::Bindings> {
         self.inner.substitutions()

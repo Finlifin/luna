@@ -18,6 +18,7 @@ pub mod normal_types;
 pub mod objects;
 pub mod observations;
 mod patterns;
+mod preparation;
 pub mod scalar;
 pub mod staged_inputs;
 pub mod type_constructors;
@@ -565,6 +566,7 @@ pub enum Error {
     Budget(SourceRange),
     Depth(SourceRange),
     InvalidControl(SourceRange),
+    InvalidPreparation(SourceRange),
     /// Definition-checking evidence reached executable pattern lowering.
     UnresolvedTypeEvidence(SourceRange),
 }
@@ -1296,11 +1298,12 @@ enum Work<'a> {
     EndScope(SourceRange),
 }
 
-/// Compilation state for one immutable code world. Only bounded weak constant
-/// identities are retained; invocation values and source bodies are not cached.
+/// Compilation state for one immutable code world. Retains bounded constant
+/// identities and lexical code. Invocation values belong to each activation.
 #[derive(Default)]
 pub struct CompilationSession {
     constants: constants::Pool,
+    preparations: preparation::Cache,
     concrete_instances: bool,
 }
 impl CompilationSession {
