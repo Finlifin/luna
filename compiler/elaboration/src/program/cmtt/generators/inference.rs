@@ -1239,7 +1239,13 @@ impl Checker<'_, '_> {
         match &argument.kind {
             H::List(items) => {
                 let inputs: Vec<_> = items.iter().map(|item| (item, false)).collect();
-                return self.generator_static_collection_hint(&inputs, domain, depth, bindings);
+                return self.generator_static_collection_hint(
+                    &inputs,
+                    domain,
+                    depth,
+                    bindings,
+                    argument.span,
+                );
             }
             H::Block(block) if block.stmts.is_empty() => {
                 return match block.expr {
@@ -1262,36 +1268,41 @@ impl Checker<'_, '_> {
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id)
                 if self.immutable.contains(&local(*id)) =>
             {
-                let mut budget = comptime_runtime::Budget {
-                    steps: self.required_steps as usize,
-                    max_limbs: 4096,
-                };
-                let value = self
-                    .observed_generator_input(local(*id), &mut budget)
-                    .filter(|(actual, _)| actual == domain)
-                    .map(|(_, value)| value)
-                    .or_else(|| {
-                        self.generator_data
-                            .get(&local(*id))
-                            .and_then(Option::as_ref)
-                            .filter(|value| &value.ty == domain)
-                            .and_then(|value| self.known_normal_input(value, 0, &mut budget))
-                    });
-                self.required_steps = budget.steps as u64;
-                return Ok(value);
+                let binding = local(*id);
+                return self.with_observation_budget(argument.span, |this, budget| {
+                    if let Some((_, value)) = this
+                        .observed_generator_input(binding)
+                        .filter(|(actual, _)| *actual == domain)
+                    {
+                        return Ok(Some(nir::copy_budget::clone_term(
+                            value,
+                            &mut budget.steps,
+                        )?));
+                    }
+                    match this
+                        .generator_data
+                        .get(&binding)
+                        .and_then(Option::as_ref)
+                        .filter(|value| &value.ty == domain)
+                    {
+                        Some(value) => this.normal_input_hint(value, budget),
+                        None => Ok(None),
+                    }
+                });
             }
             H::ResolvedDef { def_id, .. } => {
-                let mut budget = comptime_runtime::Budget {
-                    steps: self.required_steps as usize,
-                    max_limbs: 4096,
-                };
-                let value = self
-                    .package
-                    .definition_owner(*def_id)
-                    .and_then(|owner| self.constants.get(&owner))
-                    .filter(|value| &value.ty == domain)
-                    .and_then(|value| self.known_normal_input(value, 0, &mut budget));
-                self.required_steps = budget.steps as u64;
+                let value =
+                    self.with_observation_budget(argument.span, |this, budget| {
+                        match this
+                            .package
+                            .definition_owner(*def_id)
+                            .and_then(|owner| this.constants.get(&owner))
+                            .filter(|value| &value.ty == domain)
+                        {
+                            Some(value) => this.normal_input_hint(value, budget),
+                            None => Ok(None),
+                        }
+                    })?;
                 if value.is_some() {
                     return Ok(value);
                 }
@@ -1317,15 +1328,12 @@ impl Checker<'_, '_> {
             self.checking_attempt(argument.span, false, CheckingDisposition::Probe, |this| {
                 this.expr(argument, Some(domain))
             })?;
-        let mut budget = comptime_runtime::Budget {
-            steps: self.required_steps as usize,
-            max_limbs: 4096,
-        };
-        let value = checked
-            .as_ref()
-            .and_then(|checked| self.known_normal_input(checked, 0, &mut budget));
-        self.required_steps = budget.steps as u64;
-        Ok(value)
+        match checked {
+            Some(checked) => self.with_observation_budget(argument.span, |this, budget| {
+                this.normal_input_hint(&checked, budget)
+            }),
+            None => Ok(None),
+        }
     }
 
     fn generator_static_collection_hint(
@@ -1334,29 +1342,35 @@ impl Checker<'_, '_> {
         domain: &Term,
         depth: usize,
         bindings: Option<(&[DeclarationId], &[Term])>,
+        span: Span,
     ) -> Result<Option<Term>, Error> {
-        let Some(element) = self.list_element_type(domain).cloned() else {
+        let element = self.with_observation_budget(span, |this, budget| {
+            this.list_element_type(domain)
+                .map(|ty| nir::copy_budget::clone_term(ty, &mut budget.steps))
+                .transpose()
+                .map_err(Into::into)
+        })?;
+        let Some(element) = element else {
             return Ok(None);
         };
-        let mut items = Vec::with_capacity(inputs.len());
+        let mut values = Vec::new();
         for &(input, spread) in inputs {
             let ty = if spread { domain } else { &element };
             let Some(value) = self.generator_static_value_hint(input, ty, depth + 1, bindings)?
             else {
                 return Ok(None);
             };
-            let value = n::Expr {
-                ty: self.copy_alias_type(ty, input.span)?,
-                source: source(input.span),
-                kind: K::ComptimeValue(value),
-            };
-            items.push(if spread {
-                n::NormalFormArgument::ListSpread(value)
-            } else {
-                n::NormalFormArgument::Value(value)
-            });
+            values.push((value, spread));
         }
-        Ok(self.known_collected_list_in(&items, domain, &BTreeMap::new()))
+        self.with_observation_budget(span, |_, budget| {
+            normal::observation::optional(normal::collect_list_inputs(
+                domain,
+                &element,
+                values.into_iter(),
+                budget,
+                |part, _| Ok(part),
+            ))
+        })
     }
 
     pub(super) fn generator_static_type_hint(
@@ -1667,6 +1681,7 @@ impl Checker<'_, '_> {
                     &domain,
                     depth + 1,
                     outer_bindings,
+                    span,
                 )?
                 else {
                     return Ok(None);

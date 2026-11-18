@@ -301,12 +301,10 @@ impl Checker<'_, '_> {
                             true,
                             |this, expression, domain| {
                                 let checked = this.expr(expression, Some(domain))?;
-                                let mut budget = comptime_runtime::Budget {
-                                    steps: this.required_steps as usize,
-                                    max_limbs: 4096,
-                                };
-                                let known = this.known_normal_input(&checked, 0, &mut budget);
-                                this.required_steps = budget.steps as u64;
+                                let known = this
+                                    .with_observation_budget(expression.span, |this, budget| {
+                                        this.normal_input_hint(&checked, budget)
+                                    })?;
                                 // Structural Type aliases preserve their relationship
                                 // to earlier inputs without invoking a Type producer.
                                 if let Some(value) = known {

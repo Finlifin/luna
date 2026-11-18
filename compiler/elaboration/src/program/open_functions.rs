@@ -3483,7 +3483,7 @@ impl Checker<'_, '_> {
             Ok(value)
         })?;
         self.immutable.extend(pattern_binding_ids(&decl.pattern));
-        let observed = self.known_pattern_type_value(&value);
+        let observed = self.known_pattern_type_value(&value, init.span)?;
         let pattern = self.with_staged_input(true, |this| {
             this.pattern_observed(&decl.pattern, &value.ty, observed.as_ref())
         })?;

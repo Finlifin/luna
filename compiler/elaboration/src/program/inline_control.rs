@@ -205,6 +205,9 @@ impl Checker<'_, '_> {
                         "inline pattern selection structure budget exhausted".into()
                     }
                     Failure::Proof => "inline pattern selection proof budget exhausted".into(),
+                    Failure::Evaluation(message) => {
+                        format!("inline pattern evaluation failed: {message}")
+                    }
                     Failure::Invalid(message) => {
                         format!("invalid inline pattern evidence: {message}")
                     }

@@ -9,6 +9,7 @@ pub(in crate::program) enum Failure {
     Size,
     Structure,
     Proof,
+    Evaluation(String),
     Invalid(String),
 }
 impl fmt::Display for Failure {
@@ -20,6 +21,7 @@ impl fmt::Display for Failure {
             Self::Size => f.write_str("(observation-limit size)"),
             Self::Structure => f.write_str("(observation-limit structure)"),
             Self::Proof => f.write_str("(observation-limit proof)"),
+            Self::Evaluation(message) => write!(f, "(observation-evaluation {message:?})"),
             Self::Invalid(message) => write!(f, "(observation-invalid {message:?})"),
         }
     }
@@ -30,7 +32,8 @@ impl From<comptime_runtime::Error> for Failure {
         match error {
             E::BudgetExhausted => Self::Steps,
             E::SizeLimit => Self::Size,
-            error => Self::Invalid(error.to_string()),
+            E::DivisionByZero | E::OutOfRange => Self::Evaluation(error.to_string()),
+            E::InvalidLiteral => Self::Invalid(error.to_string()),
         }
     }
 }
@@ -78,6 +81,16 @@ impl From<nir::comptime_values::Error> for Failure {
     }
 }
 
+/// A hint reads checked code ahead of execution. A value-dependent trap
+/// supplies no identity on that path. Resource and representation errors still
+/// belong to the observation, even when its caller can use partial evidence.
+pub(in crate::program) fn hint<T>(result: Result<T, Failure>) -> Result<Option<T>, Failure> {
+    match result {
+        Err(Failure::Evaluation(_)) => Ok(None),
+        other => optional(other),
+    }
+}
+
 /// Checking may defer an unavailable value, but a failed observation is not
 /// permission to retry with invocation or to publish a weaker obligation.
 pub(in crate::program) fn optional<T>(result: Result<T, Failure>) -> Result<Option<T>, Failure> {
@@ -91,6 +104,26 @@ pub(in crate::program) fn optional<T>(result: Result<T, Failure>) -> Result<Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_faults_can_wait_for_invocation_while_limits_stop_observation() {
+        for error in [
+            comptime_runtime::Error::DivisionByZero,
+            comptime_runtime::Error::OutOfRange,
+        ] {
+            let failure = Failure::from(error);
+            assert_eq!(hint::<u8>(Err(failure.clone())), Ok(None));
+            assert_eq!(optional::<u8>(Err(failure.clone())), Err(failure));
+        }
+        for error in [
+            comptime_runtime::Error::BudgetExhausted,
+            comptime_runtime::Error::SizeLimit,
+            comptime_runtime::Error::InvalidLiteral,
+        ] {
+            let failure = Failure::from(error);
+            assert_eq!(hint::<u8>(Err(failure.clone())), Err(failure));
+        }
+    }
 
     #[test]
     fn only_unavailable_observation_allows_deferred_checking() {

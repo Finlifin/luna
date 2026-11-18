@@ -459,7 +459,7 @@ impl Checker<'_, '_> {
                     value.span,
                     |checker| {
                         let value = checker.expr(value, None)?;
-                        let observed = checker.known_pattern_type_value(&value);
+                        let observed = checker.known_pattern_type_value(&value, next.span)?;
                         let next = checker.pattern_observed(next, &value.ty, observed.as_ref())?;
                         Ok((value, next))
                     },

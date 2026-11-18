@@ -26,7 +26,7 @@ impl Checker<'_, '_> {
         arm: &hir::pattern::PatternArm<'_>,
         value: &n::Expr,
     ) -> Result<n::Pattern, Error> {
-        let observed = self.known_pattern_type_value(value);
+        let observed = self.known_pattern_type_value(value, arm.pat.span)?;
         let domain = arguments::inference_type(value).unwrap_or(&value.ty);
         let pattern = self.pattern_observed(&arm.pat, domain, observed.as_ref())?;
         let guard = arm

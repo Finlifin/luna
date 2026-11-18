@@ -1032,22 +1032,25 @@ impl Checker<'_, '_> {
                 && !self.generator_data.is_empty()
                 && !self.input_facts.partial.is_empty()
             {
-                let mut budget = comptime_runtime::Budget {
-                    steps: self.required_steps as usize,
-                    max_limbs: 4096,
-                };
                 for binding in free.iter().copied() {
                     if supplied.contains(&binding) {
                         continue;
                     }
-                    if let Some((domain, value)) =
-                        self.observed_generator_input(binding, &mut budget)
-                    {
+                    let captured = self.with_observation_budget(expr.span, |this, budget| {
+                        this.observed_generator_input(binding)
+                            .map(|(domain, value)| {
+                                Ok((
+                                    nir::copy_budget::clone_term(domain, &mut budget.steps)?,
+                                    nir::copy_budget::clone_term(value, &mut budget.steps)?,
+                                ))
+                            })
+                            .transpose()
+                    })?;
+                    if let Some((domain, value)) = captured {
                         supplied.insert(binding);
                         inputs.push((binding, domain, value));
                     }
                 }
-                self.required_steps = budget.steps as u64;
             }
             // Retain only referenced outer inputs, including dependencies in
             // type annotations. This transports existing evidence; it does not

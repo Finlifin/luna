@@ -1381,7 +1381,7 @@ impl Checker<'_, '_> {
             .checked_sub(1)
             .ok_or("partial pattern evidence budget exhausted")?;
         if depth >= 128 {
-            return Ok(PartialStagedValue::unknown());
+            return Err("partial pattern evidence depth exhausted".into());
         }
         if let K::Local(binding) = value.kind {
             if let Some(value) = scope.values.get(&binding) {
@@ -1552,9 +1552,14 @@ impl Checker<'_, '_> {
             steps: *fuel,
             max_limbs: 4096,
         };
-        let symbol = self.known_normal_input_in(value, 0, &mut budget, &scope.known);
+        let symbol = normal::observation::hint(self.observe_normal_input_in(
+            value,
+            0,
+            &mut budget,
+            &scope.known,
+        ));
         *fuel = budget.steps;
-        if let Some(symbol) = symbol {
+        if let Some(symbol) = symbol.map_err(|failure| failure.to_string())? {
             return Ok(PartialStagedValue::known(symbol));
         }
         match &value.kind {
@@ -2027,11 +2032,7 @@ impl Checker<'_, '_> {
 
     /// Completed construction data may supply a nested required invocation,
     /// without replacing the enclosing expression's ordinary local reads.
-    pub(super) fn observed_generator_input(
-        &self,
-        binding: n::LocalId,
-        budget: &mut comptime_runtime::Budget,
-    ) -> Option<(Term, Term)> {
+    pub(super) fn observed_generator_input(&self, binding: n::LocalId) -> Option<(&Term, &Term)> {
         if !self.generator_data.contains_key(&binding) || !self.immutable.contains(&binding) {
             return None;
         }
@@ -2039,9 +2040,7 @@ impl Checker<'_, '_> {
         let PartialStagedData::Known(value) = &self.input_facts.partial.get(&binding)?.data else {
             return None;
         };
-        nir::type_computations::charge_term(domain, &mut budget.steps).ok()?;
-        nir::type_computations::charge_term(value, &mut budget.steps).ok()?;
-        Some((domain.clone(), value.clone()))
+        Some((domain, value))
     }
 
     pub(super) fn observed_local_type(

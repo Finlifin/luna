@@ -620,10 +620,10 @@ Steps、Depth、Size、Structure、Proof 与 Invalid 直接形成带源码位置
 
 这一边界不把静态观察升级为一般求值。库 callable 等需要执行的表达式仍可以
 Unavailable，并保留实际 invocation 的错误、短路和执行次数。观察到静态身份也
-不删除原实参生产者。`known_normal_input`／`known_normal_input_in` 仍供其他可选
-证据消费者使用，CMTT 的 `known_collected_list_in` 仍是明确保留的 Option 适配器，
-其底层组装已经复用带类型结果；这些消费者还需按自身需求迁移。NF contextual
-参数树和动态 Type 生产者问题仍未整体退役。
+保留原实参生产者。模式、投影与 CMTT 在执行前读取提示时，除零或越界只表示
+当前路径无法给出静态值，由实际执行决定是否触发。资源耗尽和无效表示则立即报告。
+必需输入的观察仍保留值错误。CMTT 将已观察的元素和列表展开值直接送入与 NF
+共用的列表组装过程。NF contextual 参数树和动态 Type 生产者仍待迁移。
 
 本节在 `/home/fin/luna` 用 `development/check.py --timeout 900 -- check -p elaboration`
 检查通过，证据 `/tmp/luna-tools-d_vlbx7n/result.json`。最终 `test -p elaboration

@@ -106,7 +106,7 @@ impl Checker<'_, '_> {
                 if !decl.mutable {
                     self.immutable.extend(pattern_binding_ids(&decl.pattern));
                 }
-                let observed = self.known_pattern_type_value(&value);
+                let observed = self.known_pattern_type_value(&value, decl.span)?;
                 let pattern = self.pattern_observed(&decl.pattern, &binding_type, observed.as_ref())?;
                 if !decl.mutable {
                     if in_comptime_body {

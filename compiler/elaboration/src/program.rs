@@ -6534,18 +6534,17 @@ impl Checker<'_, '_> {
         })
     }
 
-    fn known_pattern_type_value(&mut self, value: &n::Expr) -> Option<Term> {
+    fn known_pattern_type_value(
+        &mut self,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
         if value.ty != p(P::Type) {
-            return None;
+            return Ok(None);
         }
-        let mut budget = comptime_runtime::Budget {
-            steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-            max_limbs: 4096,
-        };
-        let before = budget.steps;
-        let value = self.known_normal_input(value, 0, &mut budget);
-        self.required_steps -= (before - budget.steps) as u64;
-        value.filter(|value| value.sort() == Sort::Type)
+        let observed = self
+            .with_observation_budget(span, |this, budget| this.normal_input_hint(value, budget))?;
+        Ok(observed.filter(|value| value.sort() == Sort::Type))
     }
 
     /// Elaborate once, then choose execution phase from dependencies, never by
@@ -6607,14 +6606,7 @@ impl Checker<'_, '_> {
                     | n::Literal::UnsignedInteger(_)
             )
         ) {
-            let mut budget = comptime_runtime::Budget {
-                steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-                max_limbs: 4096,
-            };
-            let before = budget.steps;
-            let value = self.known_normal_input(&checked, 0, &mut budget);
-            self.required_steps -= (before - budget.steps) as u64;
-            match value {
+            match self.checked_normal_input_in(&checked, &BTreeMap::new(), index.span)? {
                 Some(Term::Integer(value)) => Some(value),
                 _ => None,
             }

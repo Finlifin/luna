@@ -105,17 +105,6 @@ impl Checker<'_, '_> {
         value.map_err(|failure| error(span, failure.to_string()))
     }
 
-    // Legacy optional hint consumer. Required NF planning uses the typed
-    // boundary below; CMTT hint migration remains a separate consumer change.
-    pub(super) fn known_collected_list_in(
-        &mut self,
-        items: &[n::NormalFormArgument],
-        ty: &Term,
-        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-    ) -> Option<Term> {
-        self.observe_collected_list_in(items, ty, bindings).ok()
-    }
-
     pub(super) fn checked_collected_list_in(
         &mut self,
         items: &[n::NormalFormArgument],
@@ -123,64 +112,28 @@ impl Checker<'_, '_> {
         bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
         span: Span,
     ) -> Result<Option<Term>, Error> {
-        observation::optional(self.observe_collected_list_in(items, ty, bindings))
-            .map_err(|failure| error(span, format!("static value observation failed: {failure}")))
-    }
-
-    fn observe_collected_list_in(
-        &mut self,
-        items: &[n::NormalFormArgument],
-        ty: &Term,
-        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-    ) -> Result<Term, Failure> {
-        let element = self.list_element_type(ty).ok_or(Failure::Unavailable)?;
-        let mut budget = comptime_runtime::Budget {
-            steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-            max_limbs: 4096,
-        };
-        let before = budget.steps;
-        let result = (|| {
-            budget.consume(items.len())?;
-            let domain = copy_observed_term(ty, &mut budget)?;
-            let mut parts = Vec::new();
-            let mut fields = Vec::new();
-            for item in items {
-                match item {
-                    n::NormalFormArgument::Value(value) if value.ty == *element => {
-                        let value =
-                            self.observe_normal_input_in(value, 0, &mut budget, bindings)?;
-                        fields.push(value);
-                    }
-                    n::NormalFormArgument::ListSpread(value) if value.ty == *ty => {
-                        if !fields.is_empty() {
-                            parts.push(freeze_known_list(
-                                ty,
-                                element,
-                                std::mem::take(&mut fields),
-                                &mut budget,
-                            )?);
-                        }
-                        parts.push(self.observe_normal_input_in(
-                            value,
-                            0,
-                            &mut budget,
-                            bindings,
-                        )?);
-                    }
-                    _ => return Err(Failure::Unavailable),
-                }
-            }
-            if !fields.is_empty() {
-                parts.push(freeze_known_list(ty, element, fields, &mut budget)?);
-            }
-            // Pay for inspecting/merging retained operands before normalization.
-            for part in &parts {
-                nir::type_computations::charge_term(part, &mut budget.steps)?;
-            }
-            Term::list_concat(domain, parts).map_err(|reason| Failure::Invalid(reason.to_string()))
-        })();
-        self.required_steps -= (before - budget.steps) as u64;
-        result
+        self.with_observation_budget(span, |this, budget| {
+            let Some(element) = this.list_element_type(ty) else {
+                return Ok(None);
+            };
+            observation::optional(collect_list_inputs(
+                ty,
+                element,
+                items.iter(),
+                budget,
+                |item, budget| {
+                    let (expr, spread) = match item {
+                        n::NormalFormArgument::Value(expr) if expr.ty == *element => (expr, false),
+                        n::NormalFormArgument::ListSpread(expr) if expr.ty == *ty => (expr, true),
+                        _ => return Err(Failure::Unavailable),
+                    };
+                    Ok((
+                        this.observe_normal_input_in(expr, 0, budget, bindings)?,
+                        spread,
+                    ))
+                },
+            ))
+        })
     }
 
     pub(super) fn is_type_list_type(&self, ty: &Term) -> bool {
@@ -612,14 +565,9 @@ impl Checker<'_, '_> {
                     ty: ty.clone(),
                     kind: K::Literal(literal.clone()),
                 };
-                let mut budget = comptime_runtime::Budget {
-                    steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-                    max_limbs: 4096,
-                };
-                let before = budget.steps;
-                let value = self.known_normal_input(&expr, 0, &mut budget);
-                self.required_steps -= (before - budget.steps) as u64;
-                Ok(value)
+                self.with_observation_budget(span, |this, budget| {
+                    this.normal_input_hint(&expr, budget)
+                })
             }
             n::Pattern::Binding { inner, .. } | n::Pattern::Remap { pattern: inner, .. } => {
                 self.matched_value_pattern_input(inner, ty, span, depth + 1)
@@ -745,8 +693,9 @@ impl Checker<'_, '_> {
                     steps: before,
                     max_limbs: 4096,
                 };
-                let value = self.known_normal_input(value, 0, &mut budget);
+                let value = self.normal_input_hint(value, &mut budget);
                 *fuel -= (before - budget.steps) as u64;
+                let value = value.map_err(|failure| error(span, failure.to_string()))?;
                 if let (Some(Term::Integer(value)), Term::Primitive(primitive)) = (&value, ty)
                     && let Some((signed, width)) = primitive.fixed_integer_layout()
                     && (if signed {
@@ -775,38 +724,32 @@ impl Checker<'_, '_> {
         bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
         span: Span,
     ) -> Result<Option<Term>, Error> {
+        self.with_observation_budget(span, |this, budget| {
+            observation::optional(this.observe_normal_input_in(expr, 0, budget, bindings))
+        })
+    }
+
+    pub(super) fn with_observation_budget<T>(
+        &mut self,
+        span: Span,
+        inspect: impl FnOnce(&Self, &mut comptime_runtime::Budget) -> Result<T, Failure>,
+    ) -> Result<T, Error> {
         let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut budget = comptime_runtime::Budget {
             steps: before,
             max_limbs: 4096,
         };
-        let observed = self.observe_normal_input_in(expr, 0, &mut budget, bindings);
+        let result = inspect(self, &mut budget);
         self.required_steps -= (before - budget.steps) as u64;
-        observation::optional(observed)
-            .map_err(|failure| error(span, format!("static value observation failed: {failure}")))
+        result.map_err(|failure| error(span, format!("static value observation failed: {failure}")))
     }
 
-    // Recover an identity from already elaborated structure, never by running a
-    // function or reducing a normal-form body. Keep the original expression so
-    // its execution order and invocation-time validation remain unchanged.
-    pub(super) fn known_normal_input(
+    pub(super) fn normal_input_hint(
         &self,
         expr: &n::Expr,
-        depth: usize,
         budget: &mut comptime_runtime::Budget,
-    ) -> Option<Term> {
-        self.known_normal_input_in(expr, depth, budget, &BTreeMap::new())
-    }
-
-    pub(in crate::program) fn known_normal_input_in(
-        &self,
-        expr: &n::Expr,
-        depth: usize,
-        budget: &mut comptime_runtime::Budget,
-        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-    ) -> Option<Term> {
-        self.observe_normal_input_in(expr, depth, budget, bindings)
-            .ok()
+    ) -> Result<Option<Term>, Failure> {
+        observation::hint(self.observe_normal_input_in(expr, 0, budget, &BTreeMap::new()))
     }
 
     /// Inspect an immutable binding with the ordinary static value and pattern
@@ -897,9 +840,9 @@ impl Checker<'_, '_> {
                 };
                 budget.consume(index.bit_len().div_ceil(32).saturating_add(1))?;
                 let index = usize::try_from(index.to_u128()?)
-                    .map_err(|_| Failure::Invalid("list index overflow".into()))?;
+                    .map_err(|_| Failure::Evaluation("list index overflow".into()))?;
                 if index >= values.len() {
-                    return Err(Failure::Invalid("list index out of bounds".into()));
+                    return Err(Failure::Evaluation("list index out of bounds".into()));
                 }
                 Ok(values.swap_remove(index))
             }
@@ -966,7 +909,7 @@ impl Checker<'_, '_> {
                 };
                 budget.consume(width.bit_len().div_ceil(32).saturating_add(1))?;
                 let width = usize::try_from(width.to_u128()?)
-                    .map_err(|_| Failure::Invalid("bit-vector width overflow".into()))?;
+                    .map_err(|_| Failure::Evaluation("bit-vector width overflow".into()))?;
                 Ok(p(P::BitVec(width)))
             }
             K::FunctionType {
@@ -1624,6 +1567,45 @@ fn take_known_list_elements(
         .all(|field| field.sort() == sort)
         .then_some(fields)
         .ok_or_else(|| Failure::Invalid("list element sort mismatch".into()))
+}
+
+/// Assemble already admitted elements and complete-list spreads in source
+/// order. The reader owns operand inspection. A frozen caller moves its terms
+/// here directly, without making expressions that would need checking again.
+pub(super) fn collect_list_inputs<I>(
+    ty: &Term,
+    element: &Term,
+    inputs: impl ExactSizeIterator<Item = I>,
+    budget: &mut comptime_runtime::Budget,
+    mut read: impl FnMut(I, &mut comptime_runtime::Budget) -> Result<(Term, bool), Failure>,
+) -> Result<Term, Failure> {
+    budget.consume(inputs.len())?;
+    let domain = copy_observed_term(ty, budget)?;
+    let mut parts = Vec::new();
+    let mut fields = Vec::new();
+    for item in inputs {
+        let (value, spread) = read(item, budget)?;
+        if spread {
+            if !fields.is_empty() {
+                parts.push(freeze_known_list(
+                    ty,
+                    element,
+                    std::mem::take(&mut fields),
+                    budget,
+                )?);
+            }
+            parts.push(value);
+        } else {
+            fields.push(value);
+        }
+    }
+    if !fields.is_empty() {
+        parts.push(freeze_known_list(ty, element, fields, budget)?);
+    }
+    for part in &parts {
+        nir::type_computations::charge_term(part, &mut budget.steps)?;
+    }
+    Term::list_concat(domain, parts).map_err(|reason| Failure::Invalid(reason.to_string()))
 }
 
 // Keep one canonical writer until all frozen-list consumers migrate together.

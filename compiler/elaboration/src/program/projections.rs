@@ -232,12 +232,9 @@ impl Checker<'_, '_> {
             match &base.kind {
                 K::Field { value, .. } | K::AnonymousField { value, .. } => base = value,
                 K::TypeListIndex(value, index) => {
-                    let mut budget = comptime_runtime::Budget {
-                        steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-                        max_limbs: 4096,
-                    };
-                    let known = self.known_normal_input(index, 0, &mut budget);
-                    self.required_steps = budget.steps as u64;
+                    let known = self.with_observation_budget(expr.span, |this, budget| {
+                        this.normal_input_hint(index, budget)
+                    })?;
                     if !matches!(known, Some(Term::Integer(_))) {
                         return Ok(None);
                     }

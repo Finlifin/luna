@@ -1885,7 +1885,7 @@ impl Checker<'_, '_> {
         let (data, ty) = self.required_typed_expression(init, annotation.as_ref())?;
         let value = self.materialize_local_constant(data, ty.clone(), init.span)?;
         self.immutable.extend(pattern_binding_ids(&decl.pattern));
-        let observed = self.known_pattern_type_value(&value);
+        let observed = self.known_pattern_type_value(&value, init.span)?;
         let pattern = self.with_staged_input(true, |this| {
             this.pattern_observed(&decl.pattern, &ty, observed.as_ref())
         })?;
@@ -2607,7 +2607,7 @@ impl Checker<'_, '_> {
                 let Some(projected) = projected else { break };
                 value = projected;
             }
-            if let Some(ty) = self.known_pattern_type_value(value) {
+            if let Some(ty) = self.known_pattern_type_value(value, span)? {
                 known_types.extend(self.known_type_pattern_outputs(pattern, &ty, span)?);
                 continue;
             }
@@ -2782,18 +2782,13 @@ impl Checker<'_, '_> {
         value: &n::Expr,
         span: Span,
     ) -> Result<Option<n::Expr>, Error> {
-        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let mut budget = comptime_runtime::Budget {
-            steps: before,
-            max_limbs: 4096,
-        };
-        let known = self.known_normal_input(value, 0, &mut budget);
-        self.required_steps -= (before - budget.steps) as u64;
+        let known = self
+            .with_observation_budget(span, |this, budget| this.normal_input_hint(value, budget))?;
         let kind = match known {
             Some(ty) if value.ty == p(P::Type) && ty.sort() == Sort::Type => K::TypeValue(ty),
             // An immutable schema may retain its checked structural value so
             // later field projections and aliases can recover contained Types.
-            // known_normal_input never calls a factory or unfolds a head;
+            // Static observation never calls a factory or unfolds a head;
             // the original initializer still executes during invocation.
             Some(
                 known @ (Term::RecordValue(_) | Term::TupleValue(_) | Term::NominalValue { .. }),

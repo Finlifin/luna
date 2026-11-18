@@ -62,8 +62,9 @@ impl Checker<'_, '_> {
                             max_limbs: 4096,
                         };
                         let before = budget.steps;
-                        let known = self.known_normal_input(value, 0, &mut budget);
+                        let known = self.normal_input_hint(value, &mut budget);
                         *fuel -= (before - budget.steps) as u64;
+                        let known = known.map_err(|failure| error(span, failure.to_string()))?;
                         let Some(ty) = known.filter(|ty| ty.sort() == Sort::Type) else {
                             return Ok(None);
                         };
