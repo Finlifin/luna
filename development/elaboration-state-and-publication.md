@@ -178,7 +178,7 @@ Waiting 与 Unresolved 不混用。没有就绪任务时，先区分外部请求
 | --- | --- | --- |
 | `elaboration/src/program/block_regions/driver.rs` 与 `driver/region.rs` | 普通、contextual、部分结构输入共用 Region；帧栈保留子请求；根消费者交付表达式、声明输入或普通调用的依赖证据 | 仍使用原活动 Checker，没有可移交的外部等待权限；模式／guard 子检查仍同步 |
 | `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；if／when／match 帧持有搜索位置与当前事务 | 不提供执行前缀恢复或外部 Type 等待 |
-| `elaboration/src/program/dependent_inputs/tasks.rs` | 依赖帧持有准备结果、活动路径、默认后继与待检查槽，poll/accept 交接源码子检查 | 所需参数的子检查已进入共同 Region。完整普通调用及原 VM 交付 Type 仍待接通 |
+| `block_regions/ordinary_calls.rs` 与 `dependent_inputs/tasks.rs` | 签名已确定的普通调用在同一输入区域完成依赖观察、形成义务检查、显式实参和默认供应 | callee 选择仍由外层检查器完成。等待原 VM 交付 Type 的源码子检查尚未接通 |
 | `elaboration/src/program/declaration_inputs/progress.rs` | producer、身份、检查次序与源码 schedule 分开 | Typed 路径仍要求普通完整 Expr，Contextual 仍保留 NormalFormArgument |
 | `elaboration/src/program/dynamic_instances.rs` | callable packet 保留实际 producer、静态身份与 pending 集合 | 签名仍提及 pending 参数时直接拒绝发布 |
 | `elaboration/src/program/function_bodies.rs` | 最终函数与 required 依赖共用主体检查 | 必须检查出完整 body 才能构造 NIR Function |
@@ -272,6 +272,7 @@ Commit、Probe、RetainCode 分别遵守各自对构造副作用的交付规则�
 | 源码输入路由 | 将具名、位置、展开和完整参数包分配到目标接口的槽位，保留源码位置。空展开也可能产生副作用。 | 包的表达式通过检查后，保存各字段及其绑定。路由失败保留对应诊断。 |
 | 声明实参准备帧 | 持有路由、域依赖、收集进度、调用者环境和最终结果的消费者。声明 NF、名义类型、别名、函数实例和动态 NF 的位置参数共用这条路径。 | 在同一检查区域内把普通期望域、部分结构上下文或待定上下文交给子帧。退出当前观察、默认供应环境和调用者作用域之后，消费者才取得结果。 |
 | 普通调用的依赖帧 | 持有所需参数及其默认值、活动依赖路径和已观察的输入。按目标槽位取得原始 HIR，收集和 tactic 参数保留各自在本次调用中的语法视图。 | 在同一个区域协议中检查所需实参。只有该子检查进入 staged 上下文；交付或失败都先恢复父上下文。全部依赖完成后一次交还原调用准备结果。 |
+| 签名已确定的普通调用 | 接管依赖帧，保留调用源位置、已供应的接收者、下一条源码路由以及返回值应进入的声明槽。 | 依赖观察完成后用同一组身份检查能力与类型要求。显式实参按源码路由组装，已检查的生产者直接移动到对应位置，最后按声明顺序补齐默认实参。子检查交付和失败都恢复调用者的 staged 状态。[普通调用输入区域](../compiler/elaboration/src/program/block_regions/ordinary_calls.rs) |
 | VM 的原调用 | 持有已执行的前缀、值、局部存储、控制出口及本次执行的预算。 | 目前已检查的声明实参可以在域就绪时继续。普通函数的源码实参等待执行产生的 Type 时，还缺原 VM 与源码检查区域之间的交接。 |
 
 声明准备持有临时望远镜、准备语句与最终的执行计划。显式实参引用调用者绑定，默认供应引用选定声明和父项的绑定。处理依赖时先在原始 callee 域中找待定槽，再用已有实参一次代入，保留调用者合法的开放参数。递归调用中，实参带有和被调声明同号的参数仍可成立。域检查与复制共用预算，越界或预算耗尽会终止准备。[槽位检查](../compiler/elaboration/src/program/declaration_inputs/slots.rs) · [身份观察](../compiler/elaboration/src/program/declaration_inputs/observations.rs)
@@ -279,6 +280,8 @@ Commit、Probe、RetainCode 分别遵守各自对构造副作用的交付规则�
 收集器保留各元素的源码位置、已检查字段和非连续元素的准备语句。缺上下文的探测由发起探测的帧恢复；已知类型冲突、形成失败和预算耗尽须继续报告。失败从最内层词法帧退出，恢复默认值或 staged 输入的环境，不回滚已消费的预算，也不撤销其他已提交的存储事实。[收集规则](../compiler/elaboration/src/program/declaration_inputs/collections.rs) · [子帧分派](../compiler/elaboration/src/program/block_regions/driver/children.rs) · [恢复与交付](../compiler/elaboration/src/program/block_regions/driver/region.rs)
 
 普通参数的默认值可引用较早完成的输入。检查器保留原 Local 读取，只有再次进入本次活动路径才报告依赖环。对于 `do { mark(); U }`，即使最后的 U 能提供类型信息，也必须在调用时执行前面的 `mark()`。如果依赖检查不能静态观察其身份，普通 comptime callable 的准备仍缺执行许可；另开 required invocation 会改变副作用次序。runtime 函数局部常量的必需计算有其独立入口。[普通调用域依赖](../compiler/elaboration/src/program/dependent_inputs/tasks.rs) · [默认值用例](../compiler/luna/tests/ordinary_input_identity.rs)
+
+已确定签名的调用在绑定输入时借用所选签名，参数域和结果域按同一组绑定检查作用域。普通源码准备持有受检表达式、观察到的身份和待供应的默认值。开放签名求值单独持有执行产生的值，用它继续形成参数或结果类型。[输入绑定](../compiler/elaboration/src/program/dependent_inputs.rs) · [开放签名的输入](../compiler/elaboration/src/program/open_functions/inputs.rs)
 
 公开参数名与默认供应跟随目标调用接口。固定参数包的宽度由已检查布局确定，位置路由保留完整具名供应与逐项收集的区别。高阶调用的公开名字及默认供应的传送边界见[可调用输入接口](callable-input-interfaces.md)。
 

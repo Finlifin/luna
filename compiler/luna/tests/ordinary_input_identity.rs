@@ -182,6 +182,30 @@ fn nested_dependent_defaults_keep_checked_inputs_and_source_order() {
 }
 
 #[test]
+fn receiver_and_named_type_inputs_keep_their_positions_across_early_return() {
+    check_events(
+        "
+        struct Gate { enabled: bool }
+        comptime fn fallback() -> bool { true }
+        impl Gate {
+            comptime fn accept(self, comptime .T: Type = bool, value: T,
+                .last: bool = fallback()) -> bool { self.enabled and last }
+        }
+        comptime fn exercise(exit: bool) -> bool {
+            var trace: Integer = 0;
+            let result = (do { trace = trace * 10 + 1; Gate { enabled: true } }).accept(
+                do { if exit { return trace == 1; }; trace = trace * 10 + 2; true },
+                .T = do { trace = trace * 10 + 3; bool }
+            );
+            result and trace == 123
+        }
+        comptime fn check() -> bool { exercise(false) and exercise(true) }
+        ",
+        &[("exercise", 2), ("fallback", 1)],
+    );
+}
+
+#[test]
 fn new_facts_after_effects_support_both_type_and_value_inputs() {
     check_both(
         &format!(

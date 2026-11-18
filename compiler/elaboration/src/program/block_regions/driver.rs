@@ -607,6 +607,17 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         self.drive_region(region::Region::with_consumer(preparation))
     }
 
+    pub(super) fn drive_input_consumer<'b, R: Root<'b, 'b>>(
+        &mut self,
+        root: R,
+    ) -> Result<R::Output, Error>
+    where
+        'a: 'b,
+        'arena: 'b,
+    {
+        self.drive_region(region::Region::with_consumer(root))
+    }
+
     pub(in crate::program) fn check_call_dependencies_region<'b>(
         &mut self,
         frame: dependent_inputs::tasks::Frame<'b, '_>,

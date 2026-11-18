@@ -1,9 +1,9 @@
 //! Source definitions whose explicit deferred annotations need invocation inputs.
 //! Ordinary descriptions never enter Term or typed NIR. Only checked concrete
 //! instances are published to the runtime package.
-use super::dependent_inputs::PreparedInputs;
 use super::required::prepared::PreparedRequired;
 use super::*;
+use inputs::StagedInputs;
 use observations::TypeObservation as D;
 use std::sync::Arc;
 
@@ -143,7 +143,7 @@ fn subject_pattern_bindings(
 
 // A pending ordinary description is not a frozen inference candidate or IR.
 enum OpenClauseInference {
-    Ready(Vec<Term>, PreparedInputs, BTreeMap<usize, CompletedType>),
+    Ready(Vec<Term>, StagedInputs, BTreeMap<usize, CompletedType>),
     Pending(D),
 }
 
@@ -5862,7 +5862,7 @@ impl Checker<'_, '_> {
         let all = self.type_parameters[&owner].clone();
         let lexical = self.lexical_function_arguments(owner, expr.span)?;
         let (generic, template, pending) = self.function_type_plan(owner, &lexical, expr.span)?;
-        let mut checked = PreparedInputs::new(sig.params.len());
+        let mut checked = StagedInputs::new(sig.params.len());
         let mut formed = BTreeMap::new();
         // Prepare staged inputs demanded by formed annotations.
         // Preserve both their value and symbol for the final invocation, so
@@ -6701,7 +6701,7 @@ impl Checker<'_, '_> {
             owner,
             args,
             expected,
-            PreparedInputs::new(self.open_functions[&owner].parameters.len()),
+            StagedInputs::new(self.open_functions[&owner].parameters.len()),
             BTreeMap::new(),
         )
     }
@@ -6799,7 +6799,7 @@ impl Checker<'_, '_> {
                 owner,
                 args,
                 expected,
-                PreparedInputs::new(self.open_functions[&owner].parameters.len()),
+                StagedInputs::new(self.open_functions[&owner].parameters.len()),
                 BTreeMap::new(),
             );
         }
@@ -6822,13 +6822,13 @@ impl Checker<'_, '_> {
         result
     }
 
-    pub(super) fn open_function_call(
+    fn open_function_call(
         &mut self,
         expr: &Expr<'_>,
         owner: OwnerId,
         args: &[Arg<'_>],
         expected: Option<&Term>,
-        checked: PreparedInputs,
+        checked: StagedInputs,
         formed: BTreeMap<usize, CompletedType>,
     ) -> Result<n::Expr, Error> {
         self.check_open_definition(owner)?;

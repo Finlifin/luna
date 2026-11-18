@@ -3,11 +3,33 @@
 use super::*;
 pub(super) mod tasks;
 
+/// Borrow the selected function telescope, including its result under the
+/// same binders. Callable wrappers remain the responsibility of call delivery.
+#[derive(Clone, Copy)]
+pub(super) struct CallSignature<'a> {
+    pub(super) term: &'a Term,
+    pub(super) parameters: &'a [Parameter],
+    pub(super) result: &'a Term,
+}
+
+impl<'a> CallSignature<'a> {
+    pub(super) fn of(callable: &'a Term) -> Option<Self> {
+        let term = callable.callable_signature();
+        let Term::Function { parameters, result } = term else {
+            return None;
+        };
+        Some(Self {
+            term,
+            parameters,
+            result,
+        })
+    }
+}
+
 #[derive(Default)]
 pub(super) struct PreparedInputs {
     pub values: Vec<Option<n::Expr>>,
     pub symbols: Vec<Option<Term>>,
-    pub live: Vec<Option<comptime_interpretor::Value>>,
     pub defaults: Vec<Option<n::Expr>>,
 }
 
@@ -16,7 +38,6 @@ impl PreparedInputs {
         Self {
             values: vec![None; count],
             symbols: vec![None; count],
-            live: vec![None; count],
             defaults: vec![None; count],
         }
     }
@@ -319,16 +340,11 @@ impl Checker<'_, '_> {
 
     pub(super) fn prepare_call_binding(
         &self,
-        parameters: &[Parameter],
+        signature: &Term,
         inputs: &[Option<Term>],
         span: Span,
     ) -> Result<nir::FunctionCallBinding, Error> {
-        let frames = self.call_input_frames();
-        let signature = Term::Function {
-            parameters: parameters.to_vec(),
-            result: Box::new(Term::Primitive(P::Void)),
-        };
-        nir::FunctionCallBinding::new(&signature, inputs, &frames, |ty| {
+        nir::FunctionCallBinding::new(signature, inputs, &self.call_input_frames(), |ty| {
             self.callable_input_view(ty, span)
         })
         .map_err(|e| match e {
@@ -395,8 +411,7 @@ impl Checker<'_, '_> {
 
     pub(super) fn prepare_call_types(
         &mut self,
-        parameters: &[Parameter],
-        result: &Term,
+        signature: CallSignature<'_>,
         callee: &n::Expr,
         direct: Option<OwnerId>,
         routes: &[arguments::RoutedArgument<'_>],
@@ -406,18 +421,48 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         seed: Vec<Option<n::Expr>>,
     ) -> Result<PreparedInputs, Error> {
-        let mut prepared = PreparedInputs::new(parameters.len());
+        let mut prepared = PreparedInputs::new(signature.parameters.len());
         if !seed.is_empty() {
             prepared.values = seed;
         }
         for (index, value) in prefix.iter().enumerate() {
             prepared.values[index] = Some(value.clone());
         }
+        let demanded = self.call_input_demands(
+            signature,
+            callee,
+            direct,
+            assigned,
+            offset,
+            expr,
+            &mut prepared.defaults,
+        )?;
+        if demanded.is_empty() {
+            return Ok(prepared);
+        }
+        let sources = tasks::Sources::new(routes, offset, expr, &mut self.required_steps)?;
+        let frame = tasks::Frame::new(
+            self, demanded, signature, callee, direct, &sources, expr, prepared,
+        )?;
+        self.check_call_dependencies_region(frame)
+    }
+
+    pub(super) fn call_input_demands(
+        &mut self,
+        signature: CallSignature<'_>,
+        callee: &n::Expr,
+        direct: Option<OwnerId>,
+        assigned: &[bool],
+        offset: usize,
+        expr: &Expr<'_>,
+        defaults: &mut [Option<n::Expr>],
+    ) -> Result<BTreeSet<usize>, Error> {
         let mut demanded = BTreeSet::new();
-        for ty in parameters
+        for ty in signature
+            .parameters
             .iter()
             .map(|parameter| &parameter.ty)
-            .chain(std::iter::once(result))
+            .chain(std::iter::once(signature.result))
         {
             demanded.extend(self.term_substitution_inputs(ty, expr.span)?.into_keys());
         }
@@ -468,16 +513,9 @@ impl Checker<'_, '_> {
                 self.checked_substitution_inputs(&value, expr.span)?
                     .into_keys(),
             );
-            prepared.defaults[parameter] = Some(value);
+            defaults[parameter] = Some(value);
         }
-        if demanded.is_empty() {
-            return Ok(prepared);
-        }
-        let sources = tasks::Sources::new(routes, offset, expr, &mut self.required_steps)?;
-        let frame = tasks::Frame::new(
-            self, demanded, parameters, callee, direct, &sources, expr, prepared,
-        )?;
-        self.check_call_dependencies_region(frame)
+        Ok(demanded)
     }
 
     pub(super) fn call_default(
@@ -613,7 +651,7 @@ impl Checker<'_, '_> {
         let Term::Function { parameters, .. } = signature.callable_signature() else {
             return Err(error(span, "expected a function signature"));
         };
-        let binding = self.prepare_call_binding(parameters, inputs, span)?;
+        let binding = self.prepare_call_binding(&signature, inputs, span)?;
         frames.push(parameters.iter().map(|p| p.sort).collect());
 
         let arguments = arguments

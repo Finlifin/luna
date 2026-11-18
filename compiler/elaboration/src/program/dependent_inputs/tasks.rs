@@ -122,35 +122,33 @@ fn copy_evidence(value: &Term, steps: &mut u64, span: Span) -> Result<Term, Erro
 /// Borrow ordinary HIR directly. A collected tuple or tactic argument owns
 /// only its routing wrapper; its children still borrow the call's source.
 /// Key by declaration slot so a chain of demands does not rescan every route.
-struct InputSource<'a> {
-    route: &'a arguments::RoutedArgument<'a>,
-    expression: std::borrow::Cow<'a, Expr<'a>>,
+pub(in crate::program) struct InputSource<'a> {
+    pub(in crate::program) route: &'a arguments::RoutedArgument<'a>,
+    pub(in crate::program) expression: std::borrow::Cow<'a, Expr<'a>>,
 }
 
-pub(super) struct Sources<'a>(BTreeMap<usize, InputSource<'a>>);
+#[derive(Default)]
+pub(in crate::program) struct Sources<'a> {
+    pub(in crate::program) ordered: Vec<InputSource<'a>>,
+    offset: usize,
+}
 
 impl<'a> Sources<'a> {
-    pub(super) fn new(
+    pub(in crate::program) fn new(
         routes: &'a [arguments::RoutedArgument<'a>],
         offset: usize,
         call: &Expr<'_>,
         fuel: &mut u64,
     ) -> Result<Self, Error> {
         spend(fuel, routes.len(), call.span)?;
-        Ok(Self(
-            routes
-                .iter()
-                .map(|route| {
-                    (
-                        route.parameter + offset,
-                        InputSource {
-                            route,
-                            expression: route.expression_view(call),
-                        },
-                    )
-                })
-                .collect(),
-        ))
+        let ordered = routes
+            .iter()
+            .map(|route| InputSource {
+                route,
+                expression: route.expression_view(call),
+            })
+            .collect();
+        Ok(Self { ordered, offset })
     }
 }
 
@@ -158,12 +156,13 @@ impl<'a> Sources<'a> {
 /// Source borrows still belong to the enclosing checking region, not a VM task.
 #[must_use = "drive the input frame to completion or discard its uncommitted results"]
 pub(in crate::program) struct Frame<'b, 'h> {
-    parameters: &'b [Parameter],
+    signature: CallSignature<'b>,
     callee: &'b n::Expr,
     owner: Option<OwnerId>,
     sources: &'b Sources<'h>,
     source: &'b Expr<'h>,
     prepared: PreparedInputs,
+    by_slot: BTreeMap<usize, usize>,
     progress: Progress,
     phase: Phase,
 }
@@ -202,10 +201,10 @@ impl std::fmt::Display for Request<'_> {
 }
 
 impl<'b, 'h: 'b> Frame<'b, 'h> {
-    pub(super) fn new(
+    pub(in crate::program) fn new(
         checker: &mut Checker<'_, '_>,
         demanded: BTreeSet<usize>,
-        parameters: &'b [Parameter],
+        signature: CallSignature<'b>,
         callee: &'b n::Expr,
         owner: Option<OwnerId>,
         sources: &'b Sources<'h>,
@@ -213,8 +212,19 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         prepared: PreparedInputs,
     ) -> Result<Self, Error> {
         spend(&mut checker.required_steps, demanded.len(), source.span)?;
+        let by_slot = if demanded.is_empty() {
+            BTreeMap::new()
+        } else {
+            sources
+                .ordered
+                .iter()
+                .enumerate()
+                .map(|(index, input)| (sources.offset + input.route.parameter, index))
+                .collect()
+        };
         Ok(Self {
-            parameters,
+            by_slot,
+            signature,
             callee,
             owner,
             sources,
@@ -256,7 +266,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
     }
 
     fn step(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b>, Error> {
-        let parameters = self.parameters;
+        let parameters = self.signature.parameters;
         let callee = self.callee;
         let owner = self.owner;
         let sources = self.sources;
@@ -291,13 +301,19 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 )?;
             }
             Task::Check(slot) => {
-                let binding =
-                    checker.prepare_call_binding(parameters, &prepared.symbols, source.span)?;
+                let binding = checker.prepare_call_binding(
+                    self.signature.term,
+                    &prepared.symbols,
+                    source.span,
+                )?;
                 let expected = binding
                     .substitute(&parameters[slot].ty)
                     .map_err(|e| error(source.span, e.to_string()))?;
                 let expected = checker.callable_input_view(&expected, source.span)?;
-                let route = sources.0.get(&slot);
+                let route = self
+                    .by_slot
+                    .get(&slot)
+                    .map(|&index| &sources.ordered[index]);
                 // Completion returns the producer to its declaration slot.
                 // A failed observation terminates this preparation.
                 let value = if let Some(value) = prepared.values[slot].take() {
@@ -386,8 +402,11 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 mut value,
                 references,
             } => {
-                let binding =
-                    checker.prepare_call_binding(parameters, &prepared.symbols, source.span)?;
+                let binding = checker.prepare_call_binding(
+                    self.signature.term,
+                    &prepared.symbols,
+                    source.span,
+                )?;
                 value
                     .rewrite_types(&mut |ty| binding.substitute(ty))
                     .map_err(|e| error(source.span, e.to_string()))?;
@@ -483,7 +502,7 @@ impl std::fmt::Display for PreparedInputs {
             if let Some(value) = &self.symbols[slot] {
                 write!(f, " {value}")?;
             }
-            write!(f, ") (live {}) (default", self.live[slot].is_some())?;
+            f.write_str(") (default")?;
             if let Some(value) = &self.defaults[slot] {
                 write!(f, " {value}")?;
             }
@@ -680,11 +699,16 @@ mod tests {
         prepared.values[0] = Some(value.clone());
         prepared.symbols[0] = Some(Term::String("retained\"\n".into()));
         prepared.defaults[1] = Some(value.clone());
+        let signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(p(P::Void)),
+        };
         let mut frame = Frame {
-            parameters: &[],
+            signature: CallSignature::of(&signature).unwrap(),
             callee: &value,
             owner: None,
-            sources: &Sources(BTreeMap::new()),
+            sources: &Sources::default(),
+            by_slot: BTreeMap::new(),
             source: &source_expr,
             prepared,
             progress: Progress::new(1),

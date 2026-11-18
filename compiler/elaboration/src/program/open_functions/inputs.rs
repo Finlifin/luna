@@ -1,6 +1,24 @@
 //! Source-ordered staged suppliers and declaration-scoped defaults for open calls.
 use super::*;
 
+/// Open signature formation can receive an executed value in addition to a
+/// producer and its static identity. Ordinary source checking owns no VM values.
+pub(super) struct StagedInputs {
+    pub(super) values: Vec<Option<n::Expr>>,
+    pub(super) symbols: Vec<Option<Term>>,
+    pub(super) live: Vec<Option<comptime_interpretor::Value>>,
+}
+
+impl StagedInputs {
+    pub(super) fn new(count: usize) -> Self {
+        Self {
+            values: vec![None; count],
+            symbols: vec![None; count],
+            live: vec![None; count],
+        }
+    }
+}
+
 struct StagedCollection {
     domain: Term,
     fields: Vec<n::Expr>,

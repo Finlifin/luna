@@ -13,6 +13,7 @@ mod input_roots;
 mod logical;
 mod matches;
 mod normal_applications;
+mod ordinary_calls;
 mod tails;
 mod unary;
 mod when;

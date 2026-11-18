@@ -5157,16 +5157,10 @@ impl Checker<'_, '_> {
                 arguments: preview_arguments,
             },
         };
-        let Term::Function {
-            parameters: prepared_parameters,
-            result: prepared_result,
-        } = &prepared_signature
-        else {
-            unreachable!()
-        };
+        let prepared_signature = dependent_inputs::CallSignature::of(&prepared_signature)
+            .expect("instantiated generic function signature");
         let mut prepared = self.prepare_call_types(
-            prepared_parameters,
-            prepared_result,
+            prepared_signature,
             &preview,
             Some(owner),
             &routes,
@@ -5177,7 +5171,7 @@ impl Checker<'_, '_> {
             seed,
         )?;
         let call_binding =
-            self.prepare_call_binding(prepared_parameters, &prepared.symbols, expr.span)?;
+            self.prepare_call_binding(prepared_signature.term, &prepared.symbols, expr.span)?;
         // Ordinary Type inputs are values in the function frame, whereas the
         // clause parameters below become inference variables in an outer frame.
         let inference_signature = Term::Function {
@@ -5922,12 +5916,7 @@ impl Checker<'_, '_> {
         }
         let retained_callable = self.structural_type(&callee.ty, expr.span)?;
         let callable = self.callable_input_view(&retained_callable, expr.span)?;
-        let signature = if let Term::Closure { signature, .. } = &callable {
-            signature.as_ref()
-        } else {
-            &callable
-        };
-        let Term::Function { parameters, result } = signature.callable_signature() else {
+        let Some(signature) = dependent_inputs::CallSignature::of(&callable) else {
             return Err(error(
                 expr.span,
                 if is_never(&callee.ty) {
@@ -5946,13 +5935,13 @@ impl Checker<'_, '_> {
                 _ => None,
             });
         let offset = prefix.len();
-        if offset > parameters.len() {
+        if offset > signature.parameters.len() {
             return Err(error(expr.span, "method receiver count mismatch"));
         }
         let (routes, assigned) = route_arguments(
             args,
             declarations.map(|p| &p[offset..]),
-            parameters.len() - offset,
+            signature.parameters.len() - offset,
             expr.span,
         )
         .map_err(|mut failure| {
@@ -5961,97 +5950,16 @@ impl Checker<'_, '_> {
             }
             failure
         })?;
-        let mut prepared = self.prepare_call_types(
-            parameters,
-            result,
-            &callee,
-            direct,
-            &routes,
-            offset,
-            &assigned,
-            &prefix,
-            expr,
-            vec![],
+        let (mut arguments, call_binding) = self.check_ordinary_call_inputs(
+            signature, &callee, direct, &routes, &assigned, prefix, expr,
         )?;
-        let mut arguments: Vec<_> = prefix
-            .into_iter()
-            .enumerate()
-            .map(|(parameter, value)| n::CallArgument {
-                passing: Default::default(),
-                parameter,
-                value,
-                is_default: false,
-            })
-            .collect();
-        let type_inputs = prepared.symbols;
-        let call_binding = self.prepare_call_binding(&parameters, &type_inputs, expr.span)?;
-        if let Some(owner) = direct {
-            // Trait entries carry Self, interface arguments and method arguments
-            // separately. Contract checking needs their complete declaration substitution.
-            let type_arguments = self
-                .method_instantiation_inputs(&callee, expr.span)?
-                .map(|(_, arguments)| arguments)
-                .unwrap_or_default();
-            self.check_ordinary_capabilities(owner, &type_arguments, &type_inputs, expr.span)?;
-            self.check_ordinary_type_requirements(owner, &type_arguments, &type_inputs, expr.span)?;
-        }
-        for route in &routes {
-            let parameter = route.parameter + offset;
-            let input_type = call_binding
-                .substitute(&parameters[parameter].ty)
-                .map_err(|e| {
-                    error(
-                        expr.span,
-                        format!("dependent call input is not available: {e}"),
-                    )
-                })?;
-            let input_type = self.callable_input_view(&input_type, expr.span)?;
-            route.require_collection_type(self, &input_type, expr.span)?;
-            let value = route.expression(expr);
-            let checked = if let Some(value) = prepared.values[parameter].take() {
-                value
-            } else {
-                self.with_staged_input(parameters[parameter].sort != Sort::Runtime, |this| {
-                    this.expr(&value, Some(&input_type))
-                })?
-            };
-            arguments.push(n::CallArgument {
-                passing: Default::default(),
-                parameter,
-                value: checked,
-                is_default: false,
-            });
-        }
-        for (parameter, assigned) in assigned.iter().enumerate() {
-            let parameter = parameter + offset;
-            if !assigned {
-                let value = if let Some(value) = prepared.values[parameter].take() {
-                    value
-                } else {
-                    let mut value = prepared.defaults[parameter].take().unwrap();
-                    // Value bindings name the callee; annotations name the caller.
-                    value
-                        .rewrite_types(&mut |ty| call_binding.substitute(ty))
-                        .map_err(|e| error(expr.span, e.to_string()))?;
-                    value
-                        .rewrite_types(&mut |ty| self.callable_argument_term_view(ty, expr.span))?;
-                    value
-                };
-                arguments.push(n::CallArgument {
-                    passing: Default::default(),
-                    parameter,
-                    value,
-                    is_default: true,
-                });
-            }
-        }
         let ty = if arguments
             .iter()
             .any(|argument| is_never(&argument.value.ty))
         {
             p(P::Never)
         } else {
-            let result = call_binding.substitute(&result).map_err(|e| {
+            let result = call_binding.substitute(signature.result).map_err(|e| {
                 error(
                     expr.span,
                     format!("dependent call result is not available: {e}"),

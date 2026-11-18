@@ -2049,14 +2049,7 @@ impl Checker<'_, '_> {
             &frames,
             span,
         )?;
-        let Term::Function {
-            parameters: specialized_parameters,
-            ..
-        } = specialized.callable_signature()
-        else {
-            unreachable!()
-        };
-        let binding = self.prepare_call_binding(specialized_parameters, inputs, span)?;
+        let binding = self.prepare_call_binding(&specialized, inputs, span)?;
         frames.push(ordinary.iter().map(|p| p.sort).collect());
         let arguments = type_arguments
             .iter()
