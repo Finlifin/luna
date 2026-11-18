@@ -586,6 +586,10 @@ mod tests {
         );
         assert!(matches!(
             frame.advance(&mut vm, &mut env).unwrap(),
+            Request::DomainDelivered
+        ));
+        assert!(matches!(
+            frame.advance(&mut vm, &mut env).unwrap(),
             Request::Complete
         ));
         assert_eq!(

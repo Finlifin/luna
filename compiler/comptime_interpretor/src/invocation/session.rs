@@ -703,6 +703,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         }
         if let Some(StackEntry::Plan(active)) = stack.last_mut() {
             match active.frame.next_input(vm, &mut active.environment) {
+                Ok(input_collection::Progress::DomainDelivered) => {}
                 Ok(input_collection::Progress::Input(bytecode::InputFrame { code, finish })) => {
                     stack.push(StackEntry::Code(StackContext::Input(finish), code));
                 }
@@ -722,6 +723,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         if stack.is_empty() {
             if let Some((frame, environment)) = root.plan() {
                 match frame.next_input(vm, environment)? {
+                    input_collection::Progress::DomainDelivered => {}
                     input_collection::Progress::Input(bytecode::InputFrame { code, finish }) => {
                         stack.push(StackEntry::Code(StackContext::Input(finish), code));
                     }

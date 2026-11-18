@@ -328,7 +328,7 @@ impl InputPlan for Frame<'_, '_> {
         environment: &mut Environment,
     ) -> Result<Progress, Error> {
         let result = self.next(vm, environment);
-        if !matches!(&result, Ok(Progress::Input(_))) {
+        if !matches!(&result, Ok(Progress::Input(_) | Progress::DomainDelivered)) {
             self.terminal = true;
         }
         result

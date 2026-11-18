@@ -219,10 +219,13 @@ impl<'a> Interpreter<'a> {
             // inputs. Do not retain the large bytecode driver frame at each
             // recursively constructed type. Dynamically disabled bytecode still
             // uses the resumable driver below.
-            return match frame.next_input(self, environment)? {
-                input_collection::Progress::Complete(flow) => Ok(flow),
-                _ => Err(self.failure(ErrorKind::InvalidControlFlow, None)),
-            };
+            loop {
+                match frame.next_input(self, environment)? {
+                    input_collection::Progress::DomainDelivered => continue,
+                    input_collection::Progress::Complete(flow) => return Ok(flow),
+                    _ => return Err(self.failure(ErrorKind::InvalidControlFlow, None)),
+                }
+            }
         }
         Session::plan(self, frame, environment)
             .run()?

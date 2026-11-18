@@ -85,6 +85,7 @@ fn run<S: Source>(
 ) -> Result<Progress, Error> {
     loop {
         match frame.next_input(vm, env)? {
+            Progress::DomainDelivered => continue,
             Progress::Input(bytecode::InputFrame { mut code, finish }) => {
                 let flow = vm.run_fragment(&mut code);
                 let result = finish.complete(vm, code, flow);
@@ -461,6 +462,10 @@ fn waking_a_staged_block_is_independent_of_its_executed_prefix() {
             let before = vm.budget.steps;
             assert!(matches!(
                 frame.advance(&mut vm, &mut env).unwrap(),
+                Request::DomainDelivered
+            ));
+            assert!(matches!(
+                frame.advance(&mut vm, &mut env).unwrap(),
                 Request::Complete
             ));
             assert_eq!(env.get(&local(1)), Some(&Value::UnsignedInteger(7)));
@@ -468,6 +473,68 @@ fn waking_a_staged_block_is_independent_of_its_executed_prefix() {
             before - vm.budget.steps
         };
         assert_eq!(wake_cost(1), wake_cost(129));
+    }
+}
+
+#[test]
+fn one_domain_delivery_can_be_cancelled_before_a_later_field_fails() {
+    let (mut package, mut input, _, _) = fixture(3);
+    let head = &mut package.normal_forms[0];
+    head.parameters[2].kind = Kind::Value;
+    head.parameters[2].ty = head.parameters[1].ty.clone();
+    let invalid_source = SourceRange { start: 21, end: 24 };
+    let K::NormalFormType { arguments, .. } = &mut input.kind else {
+        unreachable!()
+    };
+    arguments[2] = Argument::Integer {
+        source: invalid_source,
+        spelling: "256".into(),
+        negative: false,
+    };
+
+    for tree in [false, true] {
+        let mut vm = if tree {
+            Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+        } else {
+            Interpreter::for_comptime(&package, Budget::default()).unwrap()
+        };
+        // Re-enter the same VM after cancellation and again after failure.
+        for cancel in [true, false, true] {
+            let mut env = Environment::from([(local(999), Value::Bool(false))]);
+            let mut frame =
+                normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &env).unwrap();
+            loop {
+                match frame.next_input(&mut vm, &mut env).unwrap() {
+                    Progress::DomainDelivered => break,
+                    Progress::Input(bytecode::InputFrame { mut code, finish }) => {
+                        let flow = vm.run_fragment(&mut code);
+                        let result = finish.complete(&mut vm, code, flow);
+                        assert!(
+                            frame
+                                .accept_input(&mut vm, &mut env, result)
+                                .unwrap()
+                                .is_none()
+                        );
+                    }
+                    _ => panic!("completed before delivering the first field"),
+                }
+            }
+            assert_eq!(env.get(&local(1)), Some(&Value::UnsignedInteger(7)));
+            assert!(!env.contains_key(&local(2)));
+            if cancel {
+                frame.cancel(&mut env);
+            } else {
+                let failure = frame.next_input(&mut vm, &mut env).err().unwrap();
+                assert_eq!(failure.kind, ErrorKind::Type);
+                assert_eq!(failure.source, Some(invalid_source));
+                frame.cleanup(&mut env);
+            }
+            assert_eq!(env, Environment::from([(local(999), Value::Bool(true))]));
+            assert_eq!(
+                frame.next_input(&mut vm, &mut env).err().unwrap().kind,
+                ErrorKind::InvalidControlFlow
+            );
+        }
     }
 }
 
