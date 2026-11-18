@@ -3,12 +3,28 @@
 //! Domain checking owns its draft; execution receives only a complete result.
 use super::*;
 use comptime_compiler::normal_types::{Input as Scalar, Shape, ShapeKind};
+use input_bindings::Bindings;
 use nir::program::NormalFormArgument as A;
 use normal_types::Prepared;
+use std::borrow::Cow;
+
+/// Source annotations belong to the original declaration template. Substitute
+/// each observed annotation once with the current activation's complete prefix.
+pub(super) fn annotation<'a>(
+    vm: &mut Interpreter<'_>,
+    bindings: Option<&Bindings>,
+    ty: &'a Term,
+    source: SourceRange,
+) -> Result<Cow<'a, Term>, Error> {
+    match bindings {
+        Some(bindings) => bindings.instantiate(vm, ty, source).map(Cow::Owned),
+        None => Ok(Cow::Borrowed(ty)),
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Node<'a> {
-    Source(&'a A),
+    Source(&'a A, Option<&'a Bindings>),
     Compiled(&'a Shape),
 }
 
@@ -31,6 +47,16 @@ pub(super) struct Preparation {
 }
 
 impl Preparation {
+    pub(super) fn deliver_literals(self, literals: &mut BTreeMap<InputKey, PreparedNormalInput>) {
+        for (key, value) in self.entries {
+            let value = match value {
+                Prepared::Literal(value) => PreparedNormalInput::Value(value),
+                Prepared::List { ty, .. } => PreparedNormalInput::ListType(ty),
+                Prepared::Tuple { .. } => continue,
+            };
+            literals.insert(key, value);
+        }
+    }
     pub(super) fn into_entries(self) -> impl Iterator<Item = (InputKey, Prepared)> {
         self.entries.into_iter()
     }
@@ -49,19 +75,43 @@ impl fmt::Display for Preparation {
 impl<'a> Node<'a> {
     fn source(self) -> SourceRange {
         match self {
-            Self::Source(input) => input.source(),
+            Self::Source(input, _) => input.source(),
             Self::Compiled(shape) => shape.source,
         }
     }
-    fn diverges(self) -> bool {
+    fn bindings(self) -> Option<&'a Bindings> {
         match self {
-            Self::Source(input) => input.is_diverging(),
-            Self::Compiled(shape) => shape.diverges,
+            Self::Source(_, bindings) => bindings,
+            Self::Compiled(_) => None,
+        }
+    }
+    fn empty_block_diverges(self, vm: &mut Interpreter<'_>) -> Result<bool, Error> {
+        match self {
+            Self::Compiled(shape) => Ok(shape.diverges),
+            Self::Source(
+                A::Block {
+                    statements,
+                    result: None,
+                    ..
+                },
+                bindings,
+            ) => {
+                for statement in statements {
+                    vm.tick(Some(statement.source))?;
+                    if *annotation(vm, bindings, &statement.ty, statement.source)?
+                        == Term::Primitive(Primitive::Never)
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            _ => unreachable!("block without a result"),
         }
     }
     fn kind(self) -> Kind<'a> {
         match self {
-            Self::Source(input) => match input {
+            Self::Source(input, _) => match input {
                 A::Value(value) | A::ListSpread(value) => Kind::Value(&value.ty),
                 A::Null { .. } => Kind::Null,
                 A::Unit { .. } => Kind::Unit,
@@ -95,23 +145,26 @@ impl<'a> Node<'a> {
     }
     fn child(self, index: usize) -> Self {
         match self {
-            Self::Source(input) => Self::Source(match input {
-                A::List { items, .. } | A::Tuple { items, .. } => &items[index],
-                A::Match { arms, .. } => &arms[index].body,
-                A::If {
-                    then_input,
-                    else_input,
-                    ..
-                } => {
-                    if index == 0 {
-                        then_input
-                    } else {
-                        else_input
+            Self::Source(input, bindings) => Self::Source(
+                match input {
+                    A::List { items, .. } | A::Tuple { items, .. } => &items[index],
+                    A::Match { arms, .. } => &arms[index].body,
+                    A::If {
+                        then_input,
+                        else_input,
+                        ..
+                    } => {
+                        if index == 0 {
+                            then_input
+                        } else {
+                            else_input
+                        }
                     }
-                }
-                A::Block { result, .. } => result.as_ref().unwrap(),
-                _ => unreachable!("contextual container child"),
-            }),
+                    A::Block { result, .. } => result.as_ref().unwrap(),
+                    _ => unreachable!("contextual container child"),
+                },
+                bindings,
+            ),
             Self::Compiled(shape) => Self::Compiled(match &shape.kind {
                 ShapeKind::List(items) => &items[index].1,
                 ShapeKind::Tuple { items, .. } => &items[index],
@@ -134,7 +187,7 @@ impl<'a> Node<'a> {
     }
     fn spread(self, index: usize) -> bool {
         match self {
-            Self::Source(A::List { items, .. }) => matches!(items[index], A::ListSpread(_)),
+            Self::Source(A::List { items, .. }, _) => matches!(items[index], A::ListSpread(_)),
             Self::Compiled(Shape {
                 kind: ShapeKind::List(items),
                 ..
@@ -144,7 +197,7 @@ impl<'a> Node<'a> {
     }
     fn guard(self, index: usize) -> Option<(&'a Term, SourceRange)> {
         match self {
-            Self::Source(A::Match { arms, .. }) => arms[index]
+            Self::Source(A::Match { arms, .. }, _) => arms[index]
                 .guard
                 .as_ref()
                 .map(|guard| (&guard.ty, guard.source)),
@@ -158,7 +211,7 @@ impl<'a> Node<'a> {
     fn child_key(self, index: usize, parent: &InputKey) -> InputKey {
         match self.child(index) {
             Self::Compiled(shape) => InputKey::Register(shape.slot),
-            Self::Source(_) => parent.child(index),
+            Self::Source(..) => parent.child(index),
         }
     }
 }
@@ -191,7 +244,8 @@ impl Interpreter<'_> {
         self.tick(Some(source))?;
         let value = match node.kind() {
             Kind::Value(ty) => {
-                self.prepare_normal_value_type(ty, expected, source)?;
+                let ty = annotation(self, node.bindings(), ty, source)?;
+                self.prepare_normal_value_type(&ty, expected, source)?;
                 return Ok(());
             }
             Kind::Null => {
@@ -203,8 +257,9 @@ impl Interpreter<'_> {
                 Prepared::Literal(self.normal_integer_value(expected, spelling, negative, source)?)
             }
             Kind::Choice(condition, condition_source) => {
+                let condition = annotation(self, node.bindings(), condition, condition_source)?;
                 if !matches!(
-                    condition,
+                    *condition,
                     Term::Primitive(Primitive::Bool | Primitive::Never)
                 ) {
                     return Err(self.failure(ErrorKind::Type, Some(condition_source)));
@@ -229,7 +284,7 @@ impl Interpreter<'_> {
                         depth + 1,
                         entries,
                     )?;
-                } else if !node.diverges() {
+                } else if !node.empty_block_diverges(self)? {
                     self.check_type_contract(
                         &nir::program::TypePredicate::Equal(
                             Term::Primitive(Primitive::Void),
@@ -243,7 +298,8 @@ impl Interpreter<'_> {
             Kind::Match(count) => {
                 for index in 0..count {
                     if let Some((ty, source)) = node.guard(index) {
-                        if !matches!(ty, Term::Primitive(Primitive::Bool | Primitive::Never)) {
+                        let ty = annotation(self, node.bindings(), ty, source)?;
+                        if !matches!(*ty, Term::Primitive(Primitive::Bool | Primitive::Never)) {
                             return Err(self.failure(ErrorKind::Type, Some(source)));
                         }
                     }
@@ -319,7 +375,7 @@ mod tests {
         };
         let complete = vm
             .prepare_input_domain(
-                Node::Source(&input),
+                Node::Source(&input, None),
                 &Term::Tuple(vec![Term::Primitive(Primitive::U8)]),
                 InputKey::root(),
                 0,

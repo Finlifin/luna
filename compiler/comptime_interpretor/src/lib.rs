@@ -3592,19 +3592,12 @@ impl<'a> Interpreter<'a> {
         depth: usize,
     ) -> Result<(), Error> {
         let prepared = self.prepare_input_domain(
-            input_domains::Node::Source(input),
+            input_domains::Node::Source(input, None),
             expected,
             InputKey::root(),
             depth,
         )?;
-        for (key, value) in prepared.into_entries() {
-            let value = match value {
-                normal_types::Prepared::Literal(value) => PreparedNormalInput::Value(value),
-                normal_types::Prepared::List { ty, .. } => PreparedNormalInput::ListType(ty),
-                normal_types::Prepared::Tuple { .. } => continue,
-            };
-            literals.insert(key, value);
-        }
+        prepared.deliver_literals(literals);
         Ok(())
     }
 

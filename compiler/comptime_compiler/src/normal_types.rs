@@ -144,16 +144,38 @@ pub(super) fn compile_input<'a>(
 ) -> Result<(Shape, Vec<Work<'a>>), Error> {
     use nir::program::NormalFormArgument as A;
     enum Task<'a> {
-        Enter(&'a A, usize),
+        Enter(&'a A, usize, usize),
         Code(Work<'a>),
         Transfer(Register, bool, SourceRange),
         Choice(&'a A, Register, usize),
         Match(&'a A, Register, usize),
         Block(&'a A, Register, bool),
-        Exit(&'a A, Register, usize),
+        Exit(&'a A, Register, usize, usize),
         Append(Register, bool, SourceRange),
     }
-    let mut pending = vec![Task::Enter(root, 0)];
+    let mut path = Vec::new();
+    let retained_path = |indices: &[usize], fuel: &mut usize, source| {
+        *fuel = fuel
+            .checked_sub(indices.len())
+            .ok_or(Error::Budget(source))?;
+        Ok::<_, Error>(nir::program::InputPath::from_indices(indices))
+    };
+    let transfer = |destination, value, diverges| {
+        if staged {
+            Op::Stage(staged_inputs::Instruction::Transfer {
+                destination,
+                value,
+                diverges,
+            })
+        } else {
+            Op::NormalResult {
+                destination,
+                value,
+                diverges,
+            }
+        }
+    };
+    let mut pending = vec![Task::Enter(root, 0, 0)];
     let mut shapes = Vec::new();
     let mut code = Vec::new();
     while let Some(task) = pending.pop() {
@@ -164,11 +186,7 @@ pub(super) fn compile_input<'a>(
                 let child: &Shape = shapes.last().unwrap();
                 code.push(Work::Emit(
                     source,
-                    Op::NormalResult {
-                        destination,
-                        value: child.slot,
-                        diverges: forced || child.diverges,
-                    },
+                    transfer(destination, child.slot, forced || child.diverges),
                 ));
             }
             Task::Match(argument, slot, start) => {
@@ -234,22 +252,19 @@ pub(super) fn compile_input<'a>(
                 if let Some(result) = &result {
                     code.push(Work::Emit(
                         argument.source(),
-                        Op::NormalResult {
-                            destination: slot,
-                            value: result.slot,
-                            diverges,
-                        },
+                        transfer(slot, result.slot, diverges),
                     ));
                 } else {
-                    code.push(Work::Emit(argument.source(), Op::Unit(slot)));
+                    let unit = if staged {
+                        Op::Stage(staged_inputs::Instruction::Unit(slot))
+                    } else {
+                        Op::Unit(slot)
+                    };
+                    code.push(Work::Emit(argument.source(), unit));
                     if diverges {
                         code.push(Work::Emit(
                             argument.source(),
-                            Op::NormalResult {
-                                destination: slot,
-                                value: slot,
-                                diverges,
-                            },
+                            transfer(slot, slot, diverges),
                         ));
                     }
                 }
@@ -265,16 +280,25 @@ pub(super) fn compile_input<'a>(
                 let child: &Shape = shapes.last().unwrap();
                 code.push(Work::Emit(
                     source,
-                    Op::AppendNormalContainer {
-                        constructor,
-                        parent,
-                        value: child.slot,
-                        spread,
-                        diverges: child.diverges,
+                    if staged {
+                        Op::Stage(staged_inputs::Instruction::Append {
+                            parent,
+                            value: child.slot,
+                            spread,
+                            diverges: child.diverges,
+                        })
+                    } else {
+                        Op::AppendNormalContainer {
+                            constructor,
+                            parent,
+                            value: child.slot,
+                            spread,
+                            diverges: child.diverges,
+                        }
                     },
                 ));
             }
-            Task::Exit(argument, slot, start) => {
+            Task::Exit(argument, slot, start, depth) => {
                 let items: Vec<Shape> = shapes.split_off(start);
                 let diverges = items.iter().any(|item| item.diverges);
                 let kind = match argument {
@@ -292,10 +316,19 @@ pub(super) fn compile_input<'a>(
                 };
                 code.push(Work::Emit(
                     argument.source(),
-                    Op::FinishNormalContainer {
-                        constructor,
-                        value: slot,
-                        diverges,
+                    if staged {
+                        Op::Stage(staged_inputs::Instruction::Container {
+                            path: retained_path(&path[..depth], fuel, argument.source())?,
+                            value: slot,
+                            list: matches!(kind, ShapeKind::List(_)),
+                            diverges,
+                        })
+                    } else {
+                        Op::FinishNormalContainer {
+                            constructor,
+                            value: slot,
+                            diverges,
+                        }
                     },
                 ));
                 shapes.push(Shape {
@@ -305,11 +338,15 @@ pub(super) fn compile_input<'a>(
                     kind,
                 });
             }
-            Task::Enter(argument, depth) => {
+            Task::Enter(argument, depth, index) => {
                 if depth >= 128 {
                     return Err(Error::Depth(argument.source()));
                 }
                 if staged {
+                    if depth > 0 {
+                        path.truncate(depth - 1);
+                        path.push(index);
+                    }
                     code.push(Work::Emit(
                         argument.source(),
                         Op::Stage(staged_inputs::Instruction::Enter),
@@ -352,7 +389,7 @@ pub(super) fn compile_input<'a>(
                         pending.push(Task::Match(argument, slot, shapes.len()));
                         pending.push(Task::Code(Work::Label(done)));
                         pending.push(Task::Code(Work::Emit(*source, Op::NonExhaustiveMatch)));
-                        for arm in arms.iter().rev() {
+                        for (index, arm) in arms.iter().enumerate().rev() {
                             let next = labels.len();
                             labels.push(None);
                             pending.push(Task::Code(Work::EndScope(*source)));
@@ -364,7 +401,7 @@ pub(super) fn compile_input<'a>(
                                 value.ty == Term::Primitive(Primitive::Never),
                                 arm.body.source(),
                             ));
-                            pending.push(Task::Enter(&arm.body, depth + 1));
+                            pending.push(Task::Enter(&arm.body, depth + 1, index));
                             for guard in arm.guard.iter().rev() {
                                 pending.push(Task::Code(Work::Emit(
                                     guard.source,
@@ -420,11 +457,11 @@ pub(super) fn compile_input<'a>(
                         pending.push(Task::Choice(argument, slot, shapes.len()));
                         pending.push(Task::Code(Work::Label(done)));
                         pending.push(Task::Transfer(slot, diverges, else_input.source()));
-                        pending.push(Task::Enter(else_input, depth + 1));
+                        pending.push(Task::Enter(else_input, depth + 1, 1));
                         pending.push(Task::Code(Work::Label(otherwise)));
                         pending.push(Task::Code(Work::Emit(argument.source(), Op::Jump(done))));
                         pending.push(Task::Transfer(slot, diverges, then_input.source()));
-                        pending.push(Task::Enter(then_input, depth + 1));
+                        pending.push(Task::Enter(then_input, depth + 1, 0));
                         None
                     }
                     A::Block {
@@ -446,7 +483,7 @@ pub(super) fn compile_input<'a>(
                                 .any(|statement| statement.ty == Term::Primitive(Primitive::Never)),
                         ));
                         if let Some(result) = result {
-                            pending.push(Task::Enter(result, depth + 1));
+                            pending.push(Task::Enter(result, depth + 1, 0));
                         }
                         None
                     }
@@ -454,14 +491,14 @@ pub(super) fn compile_input<'a>(
                         *fuel = fuel
                             .checked_sub(items.len())
                             .ok_or(Error::Budget(argument.source()))?;
-                        pending.push(Task::Exit(argument, slot, shapes.len()));
-                        for item in items.iter().rev() {
+                        pending.push(Task::Exit(argument, slot, shapes.len(), depth));
+                        for (index, item) in items.iter().enumerate().rev() {
                             pending.push(Task::Append(
                                 slot,
                                 matches!(item, A::ListSpread(_)),
                                 item.source(),
                             ));
-                            pending.push(Task::Enter(item, depth + 1));
+                            pending.push(Task::Enter(item, depth + 1, index));
                         }
                         None
                     }
@@ -470,9 +507,16 @@ pub(super) fn compile_input<'a>(
                     if argument.expression().is_none() {
                         code.push(Work::Emit(
                             argument.source(),
-                            Op::NormalLiteral {
-                                constructor,
-                                destination: slot,
+                            if staged {
+                                Op::Stage(staged_inputs::Instruction::Literal {
+                                    value: slot,
+                                    path: retained_path(&path, fuel, argument.source())?,
+                                })
+                            } else {
+                                Op::NormalLiteral {
+                                    constructor,
+                                    destination: slot,
+                                }
                             },
                         ));
                     }

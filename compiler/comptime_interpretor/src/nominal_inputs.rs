@@ -167,26 +167,27 @@ impl input_collection::Source for Source<'_> {
     }
     fn check_input(
         &self,
-        vm: &Interpreter<'_>,
+        vm: &mut Interpreter<'_>,
         slot: usize,
         operand: &A,
+        bindings: Option<&input_bindings::Bindings>,
         expected: Option<&Term>,
     ) -> Result<(), Error> {
-        if self.parameters[slot].sort == nir::Sort::Type
-            && let A::Value(value) = operand
-            && !matches!(
-                value.ty,
-                Term::Primitive(Primitive::Type | Primitive::Never)
-            )
+        let type_slot = self.parameters[slot].sort == nir::Sort::Type;
+        if let A::Value(value) = operand
+            && (type_slot || self.alias && expected.is_some())
         {
-            return Err(vm.failure(ErrorKind::Type, Some(value.source)));
-        }
-        if self.alias
-            && let (Some(expected), A::Value(value)) = (expected, operand)
-            && value.ty != *expected
-            && value.ty != Term::Primitive(Primitive::Never)
-        {
-            return Err(vm.failure(ErrorKind::Type, Some(value.source)));
+            let ty = input_domains::annotation(vm, bindings, &value.ty, value.source)?;
+            if type_slot && !matches!(*ty, Term::Primitive(Primitive::Type | Primitive::Never)) {
+                return Err(vm.failure(ErrorKind::Type, Some(value.source)));
+            }
+            if self.alias
+                && let Some(expected) = expected
+                && *ty != *expected
+                && *ty != Term::Primitive(Primitive::Never)
+            {
+                return Err(vm.failure(ErrorKind::Type, Some(value.source)));
+            }
         }
         Ok(())
     }

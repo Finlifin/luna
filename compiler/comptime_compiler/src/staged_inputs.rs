@@ -1,12 +1,15 @@
 //! Code for evaluating contextual operands before their domain is available.
-//! Literals and containers retain register keys; no invocation addresses are cached.
+//! Literal and container instructions carry their source operand path.
 use super::*;
 
 #[derive(Debug)]
 pub enum Instruction {
     Enter,
     Leave,
-    Literal(Register),
+    Literal {
+        value: Register,
+        path: nir::program::InputPath,
+    },
     Unit(Register),
     Append {
         parent: Register,
@@ -15,6 +18,7 @@ pub enum Instruction {
         diverges: bool,
     },
     Container {
+        path: nir::program::InputPath,
         value: Register,
         list: bool,
         diverges: bool,
@@ -35,7 +39,7 @@ impl fmt::Display for Instruction {
             Self::Enter => write!(f, "(stage-enter)"),
             Self::Leave => write!(f, "(stage-leave)"),
             Self::Unit(slot) => write!(f, "(stage-unit %{slot})"),
-            Self::Literal(slot) => write!(f, "(stage-literal %{slot})"),
+            Self::Literal { value, path } => write!(f, "(stage-literal %{value} {path})"),
             Self::Append {
                 parent,
                 value,
@@ -46,12 +50,13 @@ impl fmt::Display for Instruction {
                 "(stage-append %{parent} %{value} (spread {spread}) (diverges {diverges}))"
             ),
             Self::Container {
+                path,
                 value,
                 list,
                 diverges,
             } => write!(
                 f,
-                "(stage-container %{value} (list {list}) (diverges {diverges}))"
+                "(stage-container %{value} {path} (list {list}) (diverges {diverges}))"
             ),
             Self::Transfer {
                 destination,
@@ -66,83 +71,6 @@ impl fmt::Display for Instruction {
             }
         }
     }
-}
-
-pub(super) fn lower<'a>(
-    code: Vec<Work<'a>>,
-    shape: &normal_types::Shape,
-    fuel: &mut usize,
-) -> Result<Vec<Work<'a>>, Error> {
-    use normal_types::ShapeKind as K;
-    let mut pending = vec![shape];
-    let mut lists = std::collections::BTreeSet::new();
-    while let Some(shape) = pending.pop() {
-        *fuel = fuel.checked_sub(1).ok_or(Error::Budget(shape.source))?;
-        match &shape.kind {
-            K::Scalar(_) => {}
-            K::Block { result } => pending.extend(result.iter().map(Box::as_ref)),
-            K::Choice {
-                then_input,
-                else_input,
-                ..
-            } => {
-                pending.push(else_input);
-                pending.push(then_input);
-            }
-            K::Match(arms) => pending.extend(arms.iter().map(|arm| &arm.body)),
-            K::List(items) => {
-                lists.insert(shape.slot);
-                pending.extend(items.iter().map(|(_, child)| child));
-            }
-            K::Tuple { items, .. } => pending.extend(items),
-        }
-    }
-    code.into_iter()
-        .map(|work| {
-            *fuel = fuel.checked_sub(1).ok_or(Error::Budget(shape.source))?;
-            Ok(match work {
-                Work::Emit(source, op) => Work::Emit(
-                    source,
-                    match op {
-                        Op::Unit(slot) => Op::Stage(Instruction::Unit(slot)),
-                        Op::NormalLiteral { destination, .. } => {
-                            Op::Stage(Instruction::Literal(destination))
-                        }
-                        Op::NormalResult {
-                            destination,
-                            value,
-                            diverges,
-                        } => Op::Stage(Instruction::Transfer {
-                            destination,
-                            value,
-                            diverges,
-                        }),
-                        Op::AppendNormalContainer {
-                            parent,
-                            value,
-                            spread,
-                            diverges,
-                            ..
-                        } => Op::Stage(Instruction::Append {
-                            parent,
-                            value,
-                            spread,
-                            diverges,
-                        }),
-                        Op::FinishNormalContainer {
-                            value, diverges, ..
-                        } => Op::Stage(Instruction::Container {
-                            value,
-                            list: lists.contains(&value),
-                            diverges,
-                        }),
-                        op => op,
-                    },
-                ),
-                work => work,
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]

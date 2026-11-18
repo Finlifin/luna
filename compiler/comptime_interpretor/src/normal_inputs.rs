@@ -1,6 +1,5 @@
 //! Invocation-local evaluation of contextual inputs before their Type arrives.
-//! Structural input paths survive cloning; bytecode registers are rekeyed
-//! explicitly before completed operands meet prepared domains.
+//! Tree and bytecode producers retain the same structural path at execution.
 //! Explicit continuations retain logical depth while avoiding host recursion
 //! through contextual containers. Expression and guard evaluation stay shared.
 use super::*;
@@ -11,33 +10,25 @@ use std::ops::ControlFlow;
 /// Child indices follow source order (then/else, fields, arms, block result).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum InputKey {
-    Node(Vec<usize>),
+    Node(nir::program::InputPath),
     Register(usize),
 }
 impl InputKey {
     pub(super) fn root() -> Self {
-        Self::Node(vec![])
+        Self::Node(nir::program::InputPath::default())
     }
     pub(super) fn child(&self, index: usize) -> Self {
         let Self::Node(path) = self else {
             unreachable!("child of input node")
         };
-        let mut path = path.clone();
-        path.push(index);
-        Self::Node(path)
+        Self::Node(path.child(index))
     }
 }
 impl fmt::Display for InputKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Register(slot) => write!(f, "(register {slot})"),
-            Self::Node(path) => {
-                write!(f, "(input-path")?;
-                for index in path {
-                    write!(f, " {index}")?;
-                }
-                write!(f, ")")
-            }
+            Self::Node(path) => path.fmt(f),
         }
     }
 }

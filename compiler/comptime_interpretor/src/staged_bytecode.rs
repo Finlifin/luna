@@ -95,9 +95,9 @@ impl State {
             Op::Unit(slot) => {
                 self.values.insert(*slot, Input::Value(Value::Unit));
             }
-            Op::Literal(slot) => {
+            Op::Literal { value: slot, path } => {
                 self.values
-                    .insert(*slot, Input::Literal(InputKey::Register(*slot)));
+                    .insert(*slot, Input::Literal(InputKey::Node(path.clone())));
             }
             Op::Transfer {
                 destination, value, ..
@@ -117,16 +117,18 @@ impl State {
                     .or_default()
                     .push((*spread, input));
             }
-            Op::Container { value, list, .. } => {
+            Op::Container {
+                value, list, path, ..
+            } => {
                 let items = self.containers.remove(value).unwrap_or_default();
                 let input = if *list {
                     Input::List {
-                        key: InputKey::Register(*value),
+                        key: InputKey::Node(path.clone()),
                         items,
                     }
                 } else {
                     Input::Tuple {
-                        key: InputKey::Register(*value),
+                        key: InputKey::Node(path.clone()),
                         items: items.into_iter().map(|(_, item)| item).collect(),
                     }
                 };
@@ -138,195 +140,5 @@ impl State {
             }
         }
         Ok(None)
-    }
-}
-
-impl Interpreter<'_> {
-    /// Resolve bytecode slots from compiled shape metadata, without retaining
-    /// the source input tree. Validation precedes mutation so failure leaves
-    /// the completed operands usable for diagnosis or a fresh-budget retry.
-    pub(super) fn rekey_staged_input(
-        &mut self,
-        shape: &comptime_compiler::normal_types::Shape,
-        staged: &mut Input,
-    ) -> Result<(), Error> {
-        use comptime_compiler::normal_types::ShapeKind as K;
-        let source = shape.source;
-        let mut pairs = vec![(shape, InputKey::root(), 0)];
-        let mut keys = BTreeMap::new();
-        while let Some((shape, key, depth)) = pairs.pop() {
-            self.tick(Some(shape.source))?;
-            if depth >= 128 {
-                return Err(self.failure(ErrorKind::DepthExhausted, Some(shape.source)));
-            }
-            if keys.insert(shape.slot, key.clone()).is_some() {
-                return Err(self.failure(ErrorKind::InvalidControlFlow, Some(shape.source)));
-            }
-            match &shape.kind {
-                K::Scalar(_) => {}
-                K::List(items) => pairs.extend(
-                    items
-                        .iter()
-                        .enumerate()
-                        .map(|(index, (_, child))| (child, key.child(index), depth + 1)),
-                ),
-                K::Tuple { items, .. } => pairs.extend(
-                    items
-                        .iter()
-                        .enumerate()
-                        .map(|(index, child)| (child, key.child(index), depth + 1)),
-                ),
-                K::Choice {
-                    then_input,
-                    else_input,
-                    ..
-                } => {
-                    pairs.push((then_input, key.child(0), depth + 1));
-                    pairs.push((else_input, key.child(1), depth + 1));
-                }
-                K::Block { result } => {
-                    if let Some(child) = result {
-                        pairs.push((child, key.child(0), depth + 1));
-                    }
-                }
-                K::Match(arms) => pairs.extend(
-                    arms.iter()
-                        .enumerate()
-                        .map(|(index, arm)| (&arm.body, key.child(index), depth + 1)),
-                ),
-            }
-        }
-        // Validate and reserve the complete rewrite before touching any key.
-        let mut replacements = Vec::new();
-        let mut pending = vec![&*staged];
-        while let Some(input) = pending.pop() {
-            self.tick(Some(source))?;
-            let key = match input {
-                Input::Value(_) => continue,
-                Input::Literal(key) => key,
-                Input::List { key, items } => {
-                    pending.extend(items.iter().map(|(_, child)| child));
-                    key
-                }
-                Input::Tuple { key, items } => {
-                    pending.extend(items.iter());
-                    key
-                }
-            };
-            let InputKey::Register(slot) = key else {
-                return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
-            };
-            let replacement = keys
-                .get(slot)
-                .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-            replacements.push(replacement.clone());
-        }
-        let mut replacements = replacements.into_iter();
-        let mut pending = vec![staged];
-        while let Some(input) = pending.pop() {
-            let key = match input {
-                Input::Value(_) => continue,
-                Input::Literal(key) => key,
-                Input::List { key, items } => {
-                    pending.extend(items.iter_mut().map(|(_, child)| child));
-                    key
-                }
-                Input::Tuple { key, items } => {
-                    pending.extend(items.iter_mut());
-                    key
-                }
-            };
-            *key = replacements.next().expect("validated staged key");
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use comptime_compiler::normal_types::{Input as Scalar, Shape, ShapeKind};
-
-    const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
-
-    fn shape() -> Shape {
-        Shape {
-            slot: 0,
-            source: SOURCE,
-            diverges: false,
-            kind: ShapeKind::Tuple {
-                items: [1, 2]
-                    .map(|slot| Shape {
-                        slot,
-                        source: SOURCE,
-                        diverges: false,
-                        kind: ShapeKind::Scalar(Scalar::Integer {
-                            spelling: slot.to_string(),
-                            negative: false,
-                        }),
-                    })
-                    .into(),
-            },
-        }
-    }
-
-    fn operands(last: usize) -> Input {
-        Input::Tuple {
-            key: InputKey::Register(0),
-            items: vec![
-                Input::Literal(InputKey::Register(1)),
-                Input::Literal(InputKey::Register(last)),
-            ],
-        }
-    }
-
-    #[test]
-    fn compiled_shapes_rekey_without_source_trees_and_fail_atomically() {
-        let package = Package::default();
-        let shape = shape();
-        for steps in 0..=6 {
-            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-            let mut staged = operands(2);
-            let before = staged.to_string();
-            vm.budget.steps = steps;
-            let result = vm.rekey_staged_input(&shape, &mut staged);
-            if steps < 6 {
-                assert_eq!(result.unwrap_err().kind, ErrorKind::StepsExhausted);
-                assert_eq!(staged.to_string(), before);
-                vm.budget = Budget::default();
-                vm.rekey_staged_input(&shape, &mut staged).unwrap();
-            } else {
-                result.unwrap();
-            }
-            assert_eq!(
-                staged.to_string(),
-                "(staged-tuple (input-path) (staged-literal (input-path 0)) (staged-literal (input-path 1)))"
-            );
-        }
-    }
-
-    #[test]
-    fn invalid_registers_and_duplicate_shape_slots_do_not_rewrite_operands() {
-        let package = Package::default();
-        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-        let mut shape = shape();
-        let mut staged = operands(99);
-        let before = staged.to_string();
-        assert_eq!(
-            vm.rekey_staged_input(&shape, &mut staged).unwrap_err().kind,
-            ErrorKind::Type
-        );
-        assert_eq!(staged.to_string(), before);
-        let ShapeKind::Tuple { items, .. } = &mut shape.kind else {
-            unreachable!()
-        };
-        items[1].slot = 1;
-        let mut staged = operands(2);
-        let before = staged.to_string();
-        assert_eq!(
-            vm.rekey_staged_input(&shape, &mut staged).unwrap_err().kind,
-            ErrorKind::InvalidControlFlow
-        );
-        assert_eq!(staged.to_string(), before);
     }
 }

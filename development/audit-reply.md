@@ -27,6 +27,8 @@ let size = count<
 
 列表与元组的字段检查也使用源码区域。帧按书写顺序保留已经检查的字段；已知列表元素域可复用于各字段，元组按位置取得各自的期望类型或调用候选给出的部分上下文。上下文仍待确定时，接受这种输入的消费者保留原文字与嵌套结构。普通 callable 的动态实例持有已经检查的准备语句和声明槽位。尚待后续 Type 的列表无法交付其中的已检查操作数，仍需要下述跨源码与 VM 的恢复机制。[字段检查](../compiler/elaboration/src/program/block_regions/aggregates.rs) · [源码调用用例](../compiler/luna/tests/normal_input_plans.rs)
 
+对于已经进入 VM 的声明实参，字节码在文字和容器指令中直接记录字段、分支或 match arm 的位置。执行先前实参时，原调用保留选中路径的值。后续绑定交付类型时，原调用用当前绑定检查原始输入模板的域标注，检查覆盖未选分支；已经执行的语句无需再次特化。普通 callable 中尚未通过源码检查的列表仍受上表中的交接限制。[输入指令](../compiler/comptime_compiler/src/staged_inputs.rs) · [输入恢复](../compiler/comptime_interpretor/src/input_collection.rs)
+
 ### 一次调用内的恢复
 
 1. **建立输入位置。** 调用准备记录书写顺序、公开槽位、源码位置和接收域的依赖。每个尚待上下文的表达式保留其原词法环境与目标位置。域已知且冲突时直接报告，即使另一个槽位仍未决。

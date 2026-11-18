@@ -38,8 +38,7 @@ impl Interpreter<'_> {
         *environment = result.environment;
         Ok(match result.flow? {
             Flow::Value(_) => {
-                let (shape, mut staged) = result.staged.expect("completed staged fragment");
-                self.rekey_staged_input(&shape, &mut staged)?;
+                let staged = result.staged.expect("completed staged fragment");
                 std::ops::ControlFlow::Continue(staged)
             }
             flow => std::ops::ControlFlow::Break(flow),

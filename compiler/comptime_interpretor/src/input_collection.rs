@@ -34,8 +34,8 @@ pub(super) trait Source: fmt::Display {
     fn input(&self, slot: usize) -> &Argument;
     fn substitutions(&self) -> Option<&input_bindings::Bindings>;
 
-    // Rebuild from the template at both staging and admission. A completed
-    // caller value is never an input to another round of substitution.
+    // Specialize executable code for its source position. Waking the input
+    // later only observes domain annotations from the original template.
     fn operand(
         &self,
         vm: &mut Interpreter<'_>,
@@ -57,9 +57,10 @@ pub(super) trait Source: fmt::Display {
     fn expected(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Term, Error>;
     fn check_input(
         &self,
-        vm: &Interpreter<'_>,
+        vm: &mut Interpreter<'_>,
         slot: usize,
         operand: &Argument,
+        bindings: Option<&input_bindings::Bindings>,
         expected: Option<&Term>,
     ) -> Result<(), Error>;
     fn bind(
@@ -227,11 +228,18 @@ impl<S: Source> Frame<S> {
                 let pending = self.pending.remove(&slot).expect("awakened input");
                 vm.tick(Some(self.source.source()))?;
                 let expected = self.source.expected(vm, slot)?;
-                let argument = self.source.operand(vm, slot)?;
+                let argument = self.source.input(slot);
+                let bindings = self.source.substitutions();
                 self.source
-                    .check_input(vm, slot, &argument, Some(&expected))?;
+                    .check_input(vm, slot, argument, bindings, Some(&expected))?;
+                let prepared = vm.prepare_input_domain(
+                    input_domains::Node::Source(argument, bindings),
+                    &expected,
+                    InputKey::root(),
+                    0,
+                )?;
                 let mut literals = BTreeMap::new();
-                vm.prepare_normal_argument(&argument, &expected, &mut literals, 0)?;
+                prepared.deliver_literals(&mut literals);
                 let value = vm.finish_staged_normal_argument(
                     pending.staged,
                     &mut literals,
@@ -266,12 +274,12 @@ impl<S: Source> Frame<S> {
             Request::Preparation(preparation)
         } else if let Some(slot) = self.source.slot(self.position) {
             let operand = self.source.operand(vm, slot)?;
-            self.source.check_input(vm, slot, &operand, None)?;
+            self.source.check_input(vm, slot, &operand, None, None)?;
             let awaiting = self.source.pending_inputs(vm, slot)?;
             if awaiting.is_empty() {
                 let expected = self.source.expected(vm, slot)?;
                 self.source
-                    .check_input(vm, slot, &operand, Some(&expected))?;
+                    .check_input(vm, slot, &operand, None, Some(&expected))?;
                 self.waiting = Some(Waiting::Ready(slot));
                 Request::Ready(operand, expected)
             } else {
@@ -395,10 +403,9 @@ impl<S: Source> InputPlan for Frame<S> {
                 Some(Waiting::Preparation(_)) => Completion::Prepared,
                 Some(Waiting::Ready(_)) => Completion::Value(value),
                 Some(Waiting::Stage { .. }) => {
-                    let (shape, mut staged) = result.staged.ok_or_else(|| {
+                    let staged = result.staged.ok_or_else(|| {
                         vm.failure(ErrorKind::InvalidControlFlow, Some(self.source.source()))
                     })?;
-                    vm.rekey_staged_input(&shape, &mut staged)?;
                     Completion::Staged(staged)
                 }
                 None => unreachable!("waiting request checked above"),

@@ -1,18 +1,13 @@
 //! Bounded compiled-input reuse. Entries contain immutable descriptions and
 //! code, never input values, proof outcomes, or partially executed frames.
 use super::*;
-use comptime_compiler::{Program, normal_types::Shape};
+use comptime_compiler::Program;
 use nir::program::NormalFormArgument;
 
-#[derive(Clone)]
-pub(super) struct Code {
-    pub program: Arc<Program>,
-    pub shape: Option<Arc<Shape>>,
-}
 struct Entry {
     input: NormalFormArgument,
     expected: Option<Term>,
-    code: Code,
+    code: Arc<Program>,
     key_work: u64,
     weight: u64,
 }
@@ -27,7 +22,7 @@ impl Cache {
         input: &NormalFormArgument,
         expected: Option<&Term>,
         fuel: &mut u64,
-    ) -> Result<Option<Code>, ()> {
+    ) -> Result<Option<Arc<Program>>, ()> {
         for entry in self.entries.iter().rev() {
             *fuel = fuel.checked_sub(1).ok_or(())?;
             if entry.input.source() != input.source()
@@ -59,7 +54,7 @@ impl Interpreter<'_> {
         &mut self,
         input: &NormalFormArgument,
         expected: Option<&Term>,
-    ) -> Result<Code, Error> {
+    ) -> Result<Arc<Program>, Error> {
         let source = input.source();
         // Bound recursive comparison and copying before looking at owned keys.
         let before = self.budget.steps;
@@ -88,22 +83,14 @@ impl Interpreter<'_> {
             return Ok(code);
         }
         let before = self.budget.steps;
-        let code = if let Some(expected) = expected {
-            let program = self.compile_bytecode(|session, fuel| {
-                session.compile_contextual_input(input, expected, fuel)
-            })?;
-            Code {
-                program: Arc::new(program),
-                shape: None,
+        let code = Arc::new(self.compile_bytecode(|session, fuel| {
+            match expected {
+                Some(expected) => session.compile_contextual_input(input, expected, fuel),
+                None => session
+                    .compile_staged_input(input, fuel)
+                    .map(|(program, _)| program),
             }
-        } else {
-            let (program, shape) =
-                self.compile_bytecode(|session, fuel| session.compile_staged_input(input, fuel))?;
-            Code {
-                program: Arc::new(program),
-                shape: Some(Arc::new(shape)),
-            }
-        };
+        })?);
         let weight = (before - self.budget.steps)
             .saturating_add(key_work)
             .saturating_add(1);
@@ -145,21 +132,17 @@ mod tests {
         let first = vm.contextual_input_code(&input, Some(&u8)).unwrap();
         let count = vm.bytecode_compilations();
         let copy = vm.contextual_input_code(&input.clone(), Some(&u8)).unwrap();
-        assert!(Arc::ptr_eq(&first.program, &copy.program));
+        assert!(Arc::ptr_eq(&first, &copy));
         assert_eq!(vm.bytecode_compilations(), count);
         let other = vm
             .contextual_input_code(&input, Some(&Term::Primitive(Primitive::U16)))
             .unwrap();
-        assert!(!Arc::ptr_eq(&first.program, &other.program));
+        assert!(!Arc::ptr_eq(&first, &other));
         let changed = vm.contextual_input_code(&literal("18"), Some(&u8)).unwrap();
-        assert!(!Arc::ptr_eq(&first.program, &changed.program));
+        assert!(!Arc::ptr_eq(&first, &changed));
         let staged = vm.contextual_input_code(&input, None).unwrap();
         let repeated = vm.contextual_input_code(&input, None).unwrap();
-        assert!(Arc::ptr_eq(&staged.program, &repeated.program));
-        assert!(Arc::ptr_eq(
-            staged.shape.as_ref().unwrap(),
-            repeated.shape.as_ref().unwrap()
-        ));
+        assert!(Arc::ptr_eq(&staged, &repeated));
         assert_eq!(vm.bytecode_compilations(), count + 3);
     }
     #[test]

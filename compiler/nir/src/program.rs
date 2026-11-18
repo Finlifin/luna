@@ -6,7 +6,7 @@ use crate::{DeclarationId, Term};
 use std::fmt;
 use std::sync::Arc;
 mod input_schedule;
-pub use input_schedule::{CheckedInputSchedule, InputSchedule, InputStep};
+pub use input_schedule::{CheckedInputSchedule, InputPath, InputSchedule, InputStep};
 mod function;
 pub use function::{DefinitionRegion, Function, FunctionDeclaration};
 mod predicate_shape;

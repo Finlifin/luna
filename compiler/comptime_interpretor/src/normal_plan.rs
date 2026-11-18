@@ -160,9 +160,10 @@ impl input_collection::Source for Source<'_> {
     }
     fn check_input(
         &self,
-        _vm: &Interpreter<'_>,
+        _vm: &mut Interpreter<'_>,
         _slot: usize,
         _operand: &Argument,
+        _bindings: Option<&input_bindings::Bindings>,
         _expected: Option<&Term>,
     ) -> Result<(), Error> {
         Ok(())

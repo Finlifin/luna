@@ -239,6 +239,13 @@ fn staged_inputs_survive_cloning_with_selected_shapes_and_delayed_preflight() {
             let ControlFlow::Continue(staged) = staged else {
                 panic!("unexpected transfer")
             };
+            assert_eq!(
+                staged.to_string(),
+                concat!(
+                    "(staged-tuple (input-path) (staged-literal (input-path 0 0)) ",
+                    "(staged-literal (input-path 1 1)) (staged-literal (input-path 2 1)))"
+                )
+            );
             assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
             let mut prepared = BTreeMap::new();
             // All nodes deliberately share SOURCE. A cloned tree has different

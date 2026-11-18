@@ -59,12 +59,14 @@ impl<S: Source> Source for Observed<S> {
     }
     fn check_input(
         &self,
-        vm: &Interpreter<'_>,
+        vm: &mut Interpreter<'_>,
         slot: usize,
         operand: &Argument,
+        substitutions: Option<&input_bindings::Bindings>,
         expected: Option<&Term>,
     ) -> Result<(), Error> {
-        self.inner.check_input(vm, slot, operand, expected)
+        self.inner
+            .check_input(vm, slot, operand, substitutions, expected)
     }
     fn bind(
         &mut self,
@@ -421,6 +423,62 @@ fn dependency_registration_and_wakeup_fail_terminally_without_replaying_inputs()
             .unwrap()
             .source;
         check_unrelated(source, &mut vm, 2);
+    }
+}
+
+#[test]
+fn waking_a_staged_block_is_independent_of_its_executed_prefix() {
+    for compiled in [false, true] {
+        let wake_cost = |statement_count| {
+            let (package, mut input, _, _) = fixture(2);
+            let K::NormalFormType { arguments, .. } = &mut input.kind else {
+                unreachable!()
+            };
+            let Argument::Block { statements, .. } = &mut arguments[1] else {
+                unreachable!()
+            };
+            statements.resize(statement_count, statements[0].clone());
+            let mut vm = if compiled {
+                Interpreter::for_comptime(&package, Budget::default()).unwrap()
+            } else {
+                Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+            };
+            let mut env = Environment::from([(local(999), Value::Bool(false))]);
+            let mut frame = normal_plan::Frame::borrowed(&mut vm, &input, &env).unwrap();
+            let Request::Stage(argument) = frame.advance(&mut vm, &mut env).unwrap() else {
+                panic!("expected input before its domain")
+            };
+            let std::ops::ControlFlow::Continue(staged) =
+                vm.stage_normal_argument(&argument, &mut env, 0).unwrap()
+            else {
+                panic!("unexpected transfer from staged block")
+            };
+            frame
+                .receive(&mut vm, &mut env, Completion::Staged(staged))
+                .unwrap();
+            let Request::Ready(argument, expected) = frame.advance(&mut vm, &mut env).unwrap()
+            else {
+                panic!("expected the later Type input")
+            };
+            let Flow::Value(value) = vm
+                .evaluate_contextual_argument(&argument, &expected, &mut env)
+                .unwrap()
+            else {
+                panic!("unexpected transfer from Type input")
+            };
+            frame
+                .receive(&mut vm, &mut env, Completion::Value(value))
+                .unwrap();
+            let before = vm.budget.steps;
+            assert!(matches!(
+                frame.advance(&mut vm, &mut env).unwrap(),
+                Request::Complete
+            ));
+            assert_eq!(env.get(&local(1)), Some(&Value::UnsignedInteger(7)));
+            assert_eq!(env.get(&local(999)), Some(&Value::Bool(true)));
+            before - vm.budget.steps
+        };
+        assert_eq!(wake_cost(1), wake_cost(129));
     }
 }
 

@@ -359,31 +359,20 @@ pub(super) struct InputFrame {
 }
 pub(super) enum InputFinish {
     Ready,
-    Staged {
-        shape: Arc<comptime_compiler::normal_types::Shape>,
-        depth: usize,
-        source: SourceRange,
-    },
+    Staged { depth: usize, source: SourceRange },
 }
 pub(super) struct InputResult {
     pub flow: Result<Flow, Error>,
     pub environment: Environment,
-    pub staged: Option<(
-        Arc<comptime_compiler::normal_types::Shape>,
-        normal_inputs::StagedNormalInput,
-    )>,
+    pub staged: Option<normal_inputs::StagedNormalInput>,
 }
 impl fmt::Display for InputFinish {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ready => write!(f, "(input-finish ready)"),
-            Self::Staged {
-                shape,
-                depth,
-                source,
-            } => write!(
+            Self::Staged { depth, source } => write!(
                 f,
-                "(input-finish staged (depth {depth}) (source {} {}) {shape})",
+                "(input-finish staged (depth {depth}) (source {} {}))",
                 source.start, source.end
             ),
         }
@@ -404,11 +393,7 @@ impl InputFinish {
         let mut staged = None;
         match self {
             Self::Ready => {}
-            Self::Staged {
-                shape,
-                depth,
-                source,
-            } => {
+            Self::Staged { depth, source } => {
                 vm.depth = depth;
                 if matches!(&flow, Ok(Flow::Value(_))) {
                     match code
@@ -416,7 +401,7 @@ impl InputFinish {
                         .as_mut()
                         .and_then(|state| state.completed.take())
                     {
-                        Some(value) => staged = Some((shape, value)),
+                        Some(value) => staged = Some(value),
                         None => flow = Err(vm.failure(ErrorKind::InvalidControlFlow, Some(source))),
                     }
                 }
@@ -882,13 +867,11 @@ impl<'a> Interpreter<'a> {
             return Ok(None);
         }
         let compiled = self.contextual_input_code(input, None)?;
-        let code = self.start_frame(&compiled.program, environment)?;
-        let shape = compiled.shape.expect("staged input shape");
+        let code = self.start_frame(&compiled, environment)?;
         self.bytecode_staged_inputs += 1;
         Ok(Some(InputFrame {
             code,
             finish: InputFinish::Staged {
-                shape,
                 depth: self.depth,
                 source: input.source(),
             },
@@ -920,7 +903,7 @@ impl<'a> Interpreter<'a> {
             return Ok(None);
         }
         let compiled = self.contextual_input_code(input, Some(expected))?;
-        let code = self.start_frame(&compiled.program, environment)?;
+        let code = self.start_frame(&compiled, environment)?;
         self.bytecode_contextual_inputs += 1;
         Ok(Some(InputFrame {
             code,

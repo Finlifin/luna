@@ -1497,7 +1497,6 @@ fn compile_root<'a>(
                 &mut locals,
                 true,
             )?;
-            let code = staged_inputs::lower(code, &shape, fuel)?;
             let mut work = vec![Work::Emit(
                 source,
                 Op::Stage(staged_inputs::Instruction::Finish {

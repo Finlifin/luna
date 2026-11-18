@@ -7,6 +7,37 @@ use super::{
 use std::collections::BTreeSet;
 use std::fmt;
 
+/// A position in a contextual operand. Branches, match arms, and container
+/// fields use their source index. A block result is its only contextual child.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct InputPath(std::sync::Arc<[usize]>);
+
+impl InputPath {
+    pub fn from_indices(indices: &[usize]) -> Self {
+        Self(indices.into())
+    }
+
+    pub fn child(&self, index: usize) -> Self {
+        Self(
+            self.0
+                .iter()
+                .copied()
+                .chain(std::iter::once(index))
+                .collect(),
+        )
+    }
+}
+
+impl fmt::Display for InputPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(input-path")?;
+        for index in self.0.iter() {
+            write!(f, " {index}")?;
+        }
+        f.write_str(")")
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct InputSchedule<'a> {
     pub order: Option<&'a [usize]>,
