@@ -1,23 +1,6 @@
 //! Opaque normal-form construction metadata; no definition body is executed.
 use super::*;
 
-#[derive(Debug)]
-pub struct Constructor {
-    pub head: nir::DeclarationId,
-    pub ty: Term,
-    pub count: usize,
-    pub diverges: bool,
-}
-impl fmt::Display for Constructor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "(normal-type (head {}) (type {}) (inputs {}) (diverges {}))",
-            self.head, self.ty, self.count, self.diverges
-        )
-    }
-}
-
 /// Contextual scalar inputs keep their spelling until the preceding inputs
 /// determine the domain. Expression code remains outside this metadata.
 #[derive(Debug)]
@@ -135,7 +118,6 @@ impl fmt::Display for Shape {
 /// Container append tasks immediately follow their corresponding child code.
 pub(super) fn compile_input<'a>(
     root: &'a nir::program::NormalFormArgument,
-    constructor: Register,
     fresh: &mut impl FnMut() -> Register,
     fuel: &mut usize,
     labels: &mut Vec<Option<usize>>,
@@ -289,7 +271,6 @@ pub(super) fn compile_input<'a>(
                         })
                     } else {
                         Op::AppendNormalContainer {
-                            constructor,
                             parent,
                             value: child.slot,
                             spread,
@@ -325,7 +306,6 @@ pub(super) fn compile_input<'a>(
                         })
                     } else {
                         Op::FinishNormalContainer {
-                            constructor,
                             value: slot,
                             diverges,
                         }
@@ -508,10 +488,7 @@ pub(super) fn compile_input<'a>(
                                     path: retained_path(&path, fuel, argument.source())?,
                                 })
                             } else {
-                                Op::NormalLiteral {
-                                    constructor,
-                                    destination: slot,
-                                }
+                                Op::NormalLiteral { destination: slot }
                             },
                         ));
                     }
@@ -546,7 +523,6 @@ mod tests {
         assert!(matches!(
             compile_input(
                 &input,
-                0,
                 &mut fresh,
                 &mut 0,
                 &mut vec![],
@@ -563,7 +539,6 @@ mod tests {
         }
         let (shape, code) = compile_input(
             &input,
-            0,
             &mut fresh,
             &mut 10000,
             &mut vec![],
@@ -580,7 +555,6 @@ mod tests {
         assert!(matches!(
             compile_input(
                 &input,
-                0,
                 &mut fresh,
                 &mut 10000,
                 &mut vec![],
@@ -596,7 +570,6 @@ mod tests {
         assert!(matches!(
             compile_input(
                 &wide,
-                0,
                 &mut fresh,
                 &mut 10,
                 &mut vec![],
@@ -650,6 +623,11 @@ mod contextual_fragment_tests {
         let dump = program.to_string();
         assert!(dump.contains(&format!("(expected {})", Term::Primitive(Primitive::U8))));
         assert!(dump.contains("(normal-literal "));
-        assert!(!dump.contains("(begin-normal-type "));
+        assert!(
+            !program
+                .instructions()
+                .iter()
+                .any(|instruction| matches!(instruction.op, Op::TypeInputPlan { .. }))
+        );
     }
 }

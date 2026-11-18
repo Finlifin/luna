@@ -1479,8 +1479,12 @@ mod tests {
                     break;
                 }
                 let mut environment = Environment::from([(local(1), Value::Bool(false))]);
-                let mut plan =
-                    normal_plan::Frame::borrowed(&mut vm, &expression, &environment).unwrap();
+                let mut plan = normal_plan::Frame::new(
+                    &mut vm,
+                    input_collection::Expression::Borrowed(&expression),
+                    &environment,
+                )
+                .unwrap();
                 let mut frame = if borrowed_plan {
                     None
                 } else {

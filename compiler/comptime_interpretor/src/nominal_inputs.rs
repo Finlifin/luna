@@ -1,15 +1,14 @@
 //! Nominal/alias input policies over the shared invocation scheduler.
 use super::*;
-use nir::program::{NormalFormArgument as A, NormalFormPreparation};
+use nir::program::NormalFormArgument as A;
 
 pub(super) struct Source<'e> {
-    expression: nominal_plan::Expression<'e>,
+    expression: input_collection::Expression<'e>,
     specialize: bool,
     parameters: Vec<nir::DeclarationParameter>,
     domains: Vec<Term>,
     alias: bool,
     locals: Arc<[LocalId]>,
-    source: SourceRange,
     completed: input_bindings::Bindings,
 }
 
@@ -27,7 +26,7 @@ impl fmt::Display for Source<'_> {
 
 impl<'e> Frame<'e> {
     pub fn new(
-        expression: nominal_plan::Expression<'e>,
+        expression: input_collection::Expression<'e>,
         parameters: Vec<nir::DeclarationParameter>,
         domains: Vec<Term>,
         specialize: bool,
@@ -48,7 +47,7 @@ impl<'e> Frame<'e> {
 
 impl<'e> Source<'e> {
     pub fn new(
-        expression: nominal_plan::Expression<'e>,
+        expression: input_collection::Expression<'e>,
         parameters: Vec<nir::DeclarationParameter>,
         domains: Vec<Term>,
         specialize: bool,
@@ -58,42 +57,10 @@ impl<'e> Source<'e> {
             locals,
             specialize,
             alias: matches!(expression.kind, K::CheckTypeAlias { .. }),
-            source: expression.source,
             completed: input_bindings::Bindings::admitted(parameters.len()),
             expression,
             parameters,
             domains,
-        }
-    }
-    fn arguments_of(expression: &Expr) -> &[A] {
-        match &expression.kind {
-            K::NominalType { arguments, .. } | K::CheckTypeAlias { arguments, .. } => arguments,
-            _ => unreachable!(),
-        }
-    }
-    fn arguments(&self) -> &[A] {
-        Self::arguments_of(&self.expression)
-    }
-    fn bindings(&self) -> Option<&[LocalId]> {
-        match &self.expression.kind {
-            K::NominalType { bindings, .. } | K::CheckTypeAlias { bindings, .. } => {
-                bindings.as_deref()
-            }
-            _ => unreachable!(),
-        }
-    }
-    fn order(&self) -> Option<&[usize]> {
-        match &self.expression.kind {
-            K::NominalType { order, .. } | K::CheckTypeAlias { order, .. } => order.as_deref(),
-            _ => unreachable!(),
-        }
-    }
-    fn preparations(&self) -> &[NormalFormPreparation] {
-        match &self.expression.kind {
-            K::NominalType { preparations, .. } | K::CheckTypeAlias { preparations, .. } => {
-                preparations
-            }
-            _ => unreachable!(),
         }
     }
     fn domain(&self, slot: usize) -> &Term {
@@ -101,50 +68,11 @@ impl<'e> Source<'e> {
             .get(slot)
             .unwrap_or(&Term::Primitive(Primitive::Type))
     }
-    fn bind(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-        slot: usize,
-        value: Value,
-    ) -> Result<(), Error> {
-        let source = self.arguments()[slot].source();
-        let copy = self
-            .bindings()
-            .map(|_| vm.checkpoint_representation(&value, source))
-            .transpose()?;
-        let domain = self
-            .domains
-            .get(slot)
-            .unwrap_or(&Term::Primitive(Primitive::Type));
-        self.completed.bind(
-            vm,
-            slot,
-            self.parameters[slot].clone(),
-            domain,
-            value,
-            source,
-        )?;
-        if let Some(copy) = copy {
-            environment.insert(self.bindings().unwrap()[slot], copy);
-        }
-        Ok(())
-    }
 }
 
 impl input_collection::Source for Source<'_> {
-    fn source(&self) -> SourceRange {
-        self.source
-    }
-    fn preparation(&self, index: usize) -> Option<&NormalFormPreparation> {
-        self.preparations().get(index)
-    }
-    fn slot(&self, position: usize) -> Option<usize> {
-        (position < self.arguments().len())
-            .then(|| self.order().map_or(position, |order| order[position]))
-    }
-    fn input(&self, slot: usize) -> &A {
-        &self.arguments()[slot]
+    fn expression(&self) -> &Expr {
+        &self.expression
     }
     fn substitutions(&self) -> Option<&input_bindings::Bindings> {
         self.specialize.then_some(&self.completed)
@@ -158,12 +86,12 @@ impl input_collection::Source for Source<'_> {
             vm,
             self.domain(slot),
             self.parameters.iter().map(|p| p.declaration),
-            self.arguments()[slot].source(),
+            self.input(slot).source(),
         )
     }
     fn expected(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Term, Error> {
         self.completed
-            .instantiate(vm, self.domain(slot), self.arguments()[slot].source())
+            .instantiate(vm, self.domain(slot), self.input(slot).source())
     }
     fn check_input(
         &self,
@@ -191,18 +119,24 @@ impl input_collection::Source for Source<'_> {
         }
         Ok(())
     }
-    fn bind(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-        slot: usize,
-        value: Value,
-    ) -> Result<(), Error> {
-        Source::bind(self, vm, environment, slot, value)
+    fn bind(&mut self, vm: &mut Interpreter<'_>, slot: usize, value: Value) -> Result<(), Error> {
+        let source = self.input(slot).source();
+        let domain = self
+            .domains
+            .get(slot)
+            .unwrap_or(&Term::Primitive(Primitive::Type));
+        self.completed.bind(
+            vm,
+            slot,
+            self.parameters[slot].clone(),
+            domain,
+            value,
+            source,
+        )
     }
     fn complete(&mut self, vm: &mut Interpreter<'_>) -> Result<input_collection::Progress, Error> {
-        if self.completed.len() != self.arguments().len() {
-            return Err(vm.failure(ErrorKind::Type, Some(self.source)));
+        if self.completed.len() != self.inputs().0.len() {
+            return Err(vm.failure(ErrorKind::Type, Some(self.expression.source)));
         }
         Ok(input_collection::Progress::InputsComplete)
     }
@@ -286,7 +220,7 @@ mod tests {
                 let locals =
                     input_collection::admit_scope(&mut vm, &expression, &environment).unwrap();
                 let mut frame = Frame::new(
-                    nominal_plan::Expression::Owned(expression),
+                    input_collection::Expression::Owned(expression),
                     parameters.clone(),
                     domains.clone(),
                     true,
@@ -381,7 +315,7 @@ mod tests {
         let mut environment = Environment::new();
         let locals = input_collection::admit_scope(&mut vm, &expression, &environment).unwrap();
         let mut frame = Frame::new(
-            nominal_plan::Expression::Owned(Arc::new(expression)),
+            input_collection::Expression::Owned(Arc::new(expression)),
             parameters,
             domains,
             true,
@@ -484,10 +418,10 @@ mod tests {
         vm.authorize_abstract_value_parameters(&[(id(4), boolean.clone())])
             .unwrap();
         for valid in [false, true] {
-            let mut environment = Environment::new();
+            let environment = Environment::new();
             let locals = input_collection::admit_scope(&mut vm, &expression, &environment).unwrap();
             let mut frame = Frame::new(
-                nominal_plan::Expression::Owned(expression.clone()),
+                input_collection::Expression::Owned(expression.clone()),
                 parameters.clone(),
                 domains.clone(),
                 false,
@@ -502,10 +436,7 @@ mod tests {
             } else {
                 Value::UnsignedInteger(7)
             };
-            frame
-                .source
-                .bind(&mut vm, &mut environment, 2, value)
-                .unwrap();
+            frame.source.bind(&mut vm, 2, value).unwrap();
             use input_collection::Source as _;
             assert_eq!(
                 frame.source.expected(&mut vm, 1).unwrap(),
@@ -517,16 +448,11 @@ mod tests {
             );
             frame
                 .source
-                .bind(&mut vm, &mut environment, 0, Value::Type(ty.clone()))
+                .bind(&mut vm, 0, Value::Type(ty.clone()))
                 .unwrap();
             frame
                 .source
-                .bind(
-                    &mut vm,
-                    &mut environment,
-                    1,
-                    Value::Type(Term::Primitive(Primitive::U8)),
-                )
+                .bind(&mut vm, 1, Value::Type(Term::Primitive(Primitive::U8)))
                 .unwrap();
             let result = frame.source.completed.instantiate(
                 &mut vm,

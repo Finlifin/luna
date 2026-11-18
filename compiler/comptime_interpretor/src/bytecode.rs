@@ -25,7 +25,7 @@ pub(super) struct Frame {
     instance_methods: BTreeMap<usize, comptime_compiler::methods::Method>,
     closures: BTreeMap<usize, PendingClosure>,
     bit_updates: BTreeMap<usize, (Arc<comptime_compiler::bit_updates::Plan>, usize, usize)>,
-    normal_types: BTreeMap<usize, super::normal_types::Inputs>,
+    prepared_inputs: BTreeMap<usize, super::normal_types::Prepared>,
     staged: Option<Box<staged_bytecode::State>>,
     pc: usize,
     slots: Vec<Option<Value>>,
@@ -303,8 +303,8 @@ impl fmt::Display for Frame {
         for (slot, method) in &self.instance_methods {
             write!(f, " (%{slot} {method})")?;
         }
-        write!(f, ") (normal-types")?;
-        for (slot, inputs) in &self.normal_types {
+        write!(f, ") (prepared-inputs")?;
+        for (slot, inputs) in &self.prepared_inputs {
             write!(f, " (%{slot} {inputs})")?;
         }
         write!(f, ") (calls")?;
@@ -1029,7 +1029,7 @@ impl<'a> Interpreter<'a> {
             list_operations: BTreeMap::new(),
             instance_origins: BTreeMap::new(),
             instance_methods: BTreeMap::new(),
-            normal_types: BTreeMap::new(),
+            prepared_inputs: BTreeMap::new(),
             closures: BTreeMap::new(),
             bit_updates: BTreeMap::new(),
             staged: None,
@@ -1689,44 +1689,10 @@ impl<'a> Interpreter<'a> {
                     };
                     frame.slots[*destination] = Some(value);
                 }
-                Op::BeginContextualInput {
-                    destination,
-                    expected,
-                    input,
-                } => {
-                    let mut state = super::normal_types::Inputs::contextual();
-                    self.prepare_normal_shape(input, expected, &mut state.prepared, 0)?;
-                    frame.normal_types.insert(*destination, state);
-                }
-                Op::BeginNormalType {
-                    destination,
-                    constructor,
-                } => {
-                    self.prepare_normal_type(
-                        constructor.head,
-                        &constructor.ty,
-                        constructor.count,
-                        constructor.diverges,
-                        source,
-                    )?;
-                    frame.normal_types.insert(
-                        *destination,
-                        super::normal_types::Inputs::new(constructor.head, constructor.count),
-                    );
-                }
-                Op::PrepareNormalInput {
-                    destination,
-                    index,
-                    input,
-                } => {
-                    let state = frame
-                        .normal_types
-                        .get_mut(destination)
-                        .ok_or_else(missing)?;
-                    self.prepare_compiled_normal_input(state, *index, input, source)?;
+                Op::BeginContextualInput { expected, input } => {
+                    self.prepare_normal_shape(input, expected, &mut frame.prepared_inputs, 0)?;
                 }
                 Op::AppendNormalContainer {
-                    constructor,
                     parent,
                     value,
                     spread,
@@ -1736,26 +1702,14 @@ impl<'a> Interpreter<'a> {
                         return Err(self.failure(ErrorKind::Type, Some(source)));
                     }
                     let value = frame.slots[*value].take().ok_or_else(missing)?;
-                    let input = frame
-                        .normal_types
-                        .get_mut(constructor)
-                        .ok_or_else(missing)?;
-                    let parent = input.prepared.get_mut(parent).ok_or_else(missing)?;
+                    let parent = frame.prepared_inputs.get_mut(parent).ok_or_else(missing)?;
                     self.append_compiled_normal_container(parent, value, *spread, source)?;
                 }
-                Op::FinishNormalContainer {
-                    constructor,
-                    value,
-                    diverges,
-                } => {
+                Op::FinishNormalContainer { value, diverges } => {
                     if *diverges {
                         return Err(self.failure(ErrorKind::Type, Some(source)));
                     }
-                    let input = frame
-                        .normal_types
-                        .get_mut(constructor)
-                        .ok_or_else(missing)?;
-                    let container = input.prepared.remove(value).ok_or_else(missing)?;
+                    let container = frame.prepared_inputs.remove(value).ok_or_else(missing)?;
                     frame.slots[*value] =
                         Some(self.finish_compiled_normal_container(container, source)?);
                 }
@@ -1770,47 +1724,13 @@ impl<'a> Interpreter<'a> {
                     let value = frame.slots[*value].take().ok_or_else(missing)?;
                     frame.slots[*destination] = Some(value);
                 }
-                Op::NormalLiteral {
-                    constructor,
-                    destination,
-                } => {
-                    let input = frame
-                        .normal_types
-                        .get_mut(constructor)
-                        .ok_or_else(missing)?;
+                Op::NormalLiteral { destination } => {
                     let Some(super::normal_types::Prepared::Literal(value)) =
-                        input.prepared.remove(destination)
+                        frame.prepared_inputs.remove(destination)
                     else {
                         return Err(missing());
                     };
                     frame.slots[*destination] = Some(value);
-                }
-                Op::BindNormalInput {
-                    destination,
-                    value,
-                    diverges,
-                } => {
-                    if *diverges {
-                        return Err(self.failure(ErrorKind::Type, Some(source)));
-                    }
-                    let value = frame.slots[*value].take().ok_or_else(missing)?;
-                    let input = frame
-                        .normal_types
-                        .get_mut(destination)
-                        .ok_or_else(missing)?;
-                    self.bind_compiled_normal_input(input, value, source)?;
-                }
-                Op::FinishNormalType { destination } => {
-                    let input = frame
-                        .normal_types
-                        .remove(destination)
-                        .and_then(|input| input.normal)
-                        .ok_or_else(missing)?;
-                    frame.slots[*destination] = Some(self.complete_normal_data(
-                        input.head,
-                        input.bindings.finish_normal().ok_or_else(missing)?,
-                        source,
-                    )?);
                 }
                 Op::AssociatedValue {
                     destination,

@@ -234,15 +234,15 @@ impl<'a> Interpreter<'a> {
         environment: &Environment,
     ) -> Result<Box<dyn input_collection::InputPlan + 'a>, Error> {
         match &expression.kind {
-            K::NormalFormType { .. } => Ok(Box::new(normal_plan::Frame::owned(
+            K::NormalFormType { .. } => Ok(Box::new(normal_plan::Frame::new(
                 self,
-                expression,
+                input_collection::Expression::Owned(expression),
                 environment,
             )?)),
             K::NominalType { .. } | K::CheckTypeAlias { .. } => {
                 Ok(Box::new(nominal_plan::Frame::new(
                     self,
-                    nominal_plan::Expression::Owned(expression),
+                    input_collection::Expression::Owned(expression),
                     environment,
                 )?))
             }

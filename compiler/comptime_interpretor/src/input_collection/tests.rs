@@ -31,17 +31,8 @@ impl<S: Source> fmt::Display for Observed<S> {
     }
 }
 impl<S: Source> Source for Observed<S> {
-    fn source(&self) -> SourceRange {
-        self.inner.source()
-    }
-    fn preparation(&self, index: usize) -> Option<&NormalFormPreparation> {
-        self.inner.preparation(index)
-    }
-    fn slot(&self, position: usize) -> Option<usize> {
-        self.inner.slot(position)
-    }
-    fn input(&self, slot: usize) -> &Argument {
-        self.inner.input(slot)
+    fn expression(&self) -> &Expr {
+        self.inner.expression()
     }
     fn substitutions(&self) -> Option<&input_bindings::Bindings> {
         self.inner.substitutions()
@@ -68,14 +59,8 @@ impl<S: Source> Source for Observed<S> {
         self.inner
             .check_input(vm, slot, operand, substitutions, expected)
     }
-    fn bind(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        env: &mut Environment,
-        slot: usize,
-        value: Value,
-    ) -> Result<(), Error> {
-        self.inner.bind(vm, env, slot, value)?;
+    fn bind(&mut self, vm: &mut Interpreter<'_>, slot: usize, value: Value) -> Result<(), Error> {
+        self.inner.bind(vm, slot, value)?;
         self.bindings.push(slot);
         Ok(())
     }
@@ -241,9 +226,10 @@ fn only_observed_completions_recheck_nominal_and_normal_domains() {
             } else {
                 Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
             };
-            let source = normal_plan::Frame::borrowed(&mut vm, &input, &Environment::new())
-                .unwrap()
-                .source;
+            let source =
+                normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &Environment::new())
+                    .unwrap()
+                    .source;
             check_unrelated(source, &mut vm, count);
             let K::NormalFormType {
                 arguments,
@@ -265,7 +251,7 @@ fn only_observed_completions_recheck_nominal_and_normal_domains() {
             );
             let locals = admit_scope(&mut vm, &nominal, &Environment::new()).unwrap();
             let source = nominal_inputs::Source::new(
-                nominal_plan::Expression::Borrowed(&nominal),
+                input_collection::Expression::Borrowed(&nominal),
                 parameters.clone(),
                 domains.clone(),
                 true,
@@ -337,7 +323,7 @@ fn transitive_completions_wake_dependents_and_cycles_remain_unresolved() {
             );
             let locals = admit_scope(&mut vm, &input, &Environment::new()).unwrap();
             let source = nominal_inputs::Source::new(
-                nominal_plan::Expression::Borrowed(&input),
+                input_collection::Expression::Borrowed(&input),
                 parameters.clone(),
                 domains,
                 true,
@@ -371,9 +357,10 @@ fn dependency_registration_and_wakeup_fail_terminally_without_replaying_inputs()
     let (package, input, _, _) = fixture(2);
     for fail_at_registration in [true, false] {
         let mut vm = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
-        let source = normal_plan::Frame::borrowed(&mut vm, &input, &Environment::new())
-            .unwrap()
-            .source;
+        let source =
+            normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &Environment::new())
+                .unwrap()
+                .source;
         let mut frame = observed(source);
         let mut env = Environment::from([(local(999), Value::Bool(false))]);
         let Request::Stage(argument) = frame.advance(&mut vm, &mut env).unwrap() else {
@@ -419,9 +406,10 @@ fn dependency_registration_and_wakeup_fail_terminally_without_replaying_inputs()
         );
         frame.cancel(&mut env);
         assert_eq!(env, Environment::from([(local(999), Value::Bool(true))]));
-        let source = normal_plan::Frame::borrowed(&mut vm, &input, &Environment::new())
-            .unwrap()
-            .source;
+        let source =
+            normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &Environment::new())
+                .unwrap()
+                .source;
         check_unrelated(source, &mut vm, 2);
     }
 }
@@ -444,7 +432,8 @@ fn waking_a_staged_block_is_independent_of_its_executed_prefix() {
                 Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
             };
             let mut env = Environment::from([(local(999), Value::Bool(false))]);
-            let mut frame = normal_plan::Frame::borrowed(&mut vm, &input, &env).unwrap();
+            let mut frame =
+                normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &env).unwrap();
             let Request::Stage(argument) = frame.advance(&mut vm, &mut env).unwrap() else {
                 panic!("expected input before its domain")
             };
@@ -541,9 +530,10 @@ fn shared_and_partial_dependencies_keep_each_pending_value_until_its_domain_is_r
             } else {
                 Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
             };
-            let source = normal_plan::Frame::borrowed(&mut vm, &input, &Environment::new())
-                .unwrap()
-                .source;
+            let source =
+                normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &Environment::new())
+                    .unwrap()
+                    .source;
             let mut frame = observed(source);
             let mut env = Environment::from([(local(999), Value::Bool(false))]);
             assert!(matches!(
@@ -608,7 +598,7 @@ fn supplied_abstract_identity_is_complete_even_when_its_declaration_is_unchanged
         vm.authorize_abstract_value_parameters(&[(id(2000), abstract_type.clone())])
             .unwrap();
         let mut env = Environment::from([(local(998), abstract_value.clone())]);
-        let source = normal_plan::Frame::borrowed(&mut vm, &input, &env)
+        let source = normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &env)
             .unwrap()
             .source;
         let mut frame = observed(source);

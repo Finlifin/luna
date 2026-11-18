@@ -4,6 +4,21 @@ use super::*;
 use nir::program::{NormalFormArgument as Argument, NormalFormPreparation};
 use normal_inputs::StagedNormalInput;
 
+#[derive(Clone)]
+pub(super) enum Expression<'e> {
+    Borrowed(&'e Expr),
+    Owned(Arc<Expr>),
+}
+impl std::ops::Deref for Expression<'_> {
+    type Target = Expr;
+    fn deref(&self) -> &Expr {
+        match self {
+            Self::Borrowed(expr) => expr,
+            Self::Owned(expr) => expr,
+        }
+    }
+}
+
 /// Acquire only locals that are absent from the caller. Keep this list until
 /// normal completion or cancellation, including while an alias body executes.
 pub(super) fn admit_scope(
@@ -28,10 +43,19 @@ pub(super) fn admit_scope(
 }
 
 pub(super) trait Source: fmt::Display {
-    fn source(&self) -> SourceRange;
-    fn preparation(&self, index: usize) -> Option<&NormalFormPreparation>;
-    fn slot(&self, position: usize) -> Option<usize>;
-    fn input(&self, slot: usize) -> &Argument;
+    fn expression(&self) -> &Expr;
+    fn source(&self) -> SourceRange {
+        self.expression().source
+    }
+    fn inputs(&self) -> (&[Argument], nir::program::InputSchedule<'_>) {
+        self.expression()
+            .kind
+            .declaration_inputs()
+            .expect("admitted declaration operands")
+    }
+    fn input(&self, slot: usize) -> &Argument {
+        &self.inputs().0[slot]
+    }
     fn substitutions(&self) -> Option<&input_bindings::Bindings>;
 
     // Specialize executable code for its source position. Waking the input
@@ -63,13 +87,7 @@ pub(super) trait Source: fmt::Display {
         bindings: Option<&input_bindings::Bindings>,
         expected: Option<&Term>,
     ) -> Result<(), Error>;
-    fn bind(
-        &mut self,
-        vm: &mut Interpreter<'_>,
-        environment: &mut Environment,
-        slot: usize,
-        value: Value,
-    ) -> Result<(), Error>;
+    fn bind(&mut self, vm: &mut Interpreter<'_>, slot: usize, value: Value) -> Result<(), Error>;
     fn complete(&mut self, vm: &mut Interpreter<'_>) -> Result<Progress, Error>;
     fn cleanup(&self, environment: &mut Environment);
 }
@@ -199,6 +217,29 @@ impl<S: Source> Frame<S> {
         Ok(())
     }
 
+    // The declaration policy admits the actual operand. Only after admission
+    // can a later producer read its lexical snapshot through the slot binder.
+    fn bind(
+        &mut self,
+        vm: &mut Interpreter<'_>,
+        env: &mut Environment,
+        slot: usize,
+        value: Value,
+    ) -> Result<(), Error> {
+        let exported = match self.source.inputs().1.bindings {
+            Some(ids) => Some((
+                ids[slot],
+                vm.checkpoint_representation(&value, self.source.input(slot).source())?,
+            )),
+            None => None,
+        };
+        self.source.bind(vm, slot, value)?;
+        if let Some((id, snapshot)) = exported {
+            env.insert(id, snapshot);
+        }
+        self.completed(vm, slot)
+    }
+
     fn completed(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error> {
         if let Some(dependents) = self.dependents.remove(&slot) {
             vm.integer_operation(Some(self.source.source()), |budget| {
@@ -245,8 +286,7 @@ impl<S: Source> Frame<S> {
                     argument.source(),
                     0,
                 )?;
-                self.source.bind(vm, env, slot, value)?;
-                self.completed(vm, slot)?;
+                self.bind(vm, env, slot, value)?;
                 // Newly affected later slots belong to this ordered round;
                 // earlier slots are revisited in the next one.
                 round.append(&mut self.ready.split_off(&slot.saturating_add(1)));
@@ -266,12 +306,16 @@ impl<S: Source> Frame<S> {
         // A semantic failure ends this frame. It must never replay a producer.
         self.terminal = true;
         self.drain(vm, env)?;
-        let request = if let Some(preparation) = self.source.preparation(self.preparation)
+        let (arguments, schedule) = self.source.inputs();
+        let request = if let Some(preparation) = schedule.preparations.get(self.preparation)
             && preparation.before == self.position
         {
             self.waiting = Some(Waiting::Preparation(self.preparation));
             Request::Preparation(preparation)
-        } else if let Some(slot) = self.source.slot(self.position) {
+        } else if self.position < arguments.len() {
+            let slot = schedule
+                .order
+                .map_or(self.position, |order| order[self.position]);
             let operand = self.source.operand(vm, slot)?;
             self.source.check_input(vm, slot, &operand, None, None)?;
             let awaiting = self.source.pending_inputs(vm, slot)?;
@@ -310,8 +354,7 @@ impl<S: Source> Frame<S> {
         match (self.waiting.take().expect("completed request"), completion) {
             (Waiting::Preparation(_), Completion::Prepared) => self.preparation += 1,
             (Waiting::Ready(slot), Completion::Value(value)) => {
-                self.source.bind(vm, env, slot, value)?;
-                self.completed(vm, slot)?;
+                self.bind(vm, env, slot, value)?;
                 self.position += 1;
             }
             (Waiting::Stage { slot, awaiting }, Completion::Staged(staged)) => {

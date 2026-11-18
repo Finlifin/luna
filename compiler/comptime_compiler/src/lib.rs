@@ -172,28 +172,16 @@ pub enum Op {
     },
     Stage(staged_inputs::Instruction),
     BeginContextualInput {
-        destination: Register,
         expected: Arc<Term>,
         input: Arc<normal_types::Shape>,
     },
-    BeginNormalType {
-        destination: Register,
-        constructor: Arc<normal_types::Constructor>,
-    },
-    PrepareNormalInput {
-        destination: Register,
-        index: usize,
-        input: Arc<normal_types::Shape>,
-    },
     AppendNormalContainer {
-        constructor: Register,
         parent: Register,
         value: Register,
         spread: bool,
         diverges: bool,
     },
     FinishNormalContainer {
-        constructor: Register,
         value: Register,
         diverges: bool,
     },
@@ -203,15 +191,6 @@ pub enum Op {
         diverges: bool,
     },
     NormalLiteral {
-        constructor: Register,
-        destination: Register,
-    },
-    BindNormalInput {
-        destination: Register,
-        value: Register,
-        diverges: bool,
-    },
-    FinishNormalType {
         destination: Register,
     },
     CheckListAppend {
@@ -889,40 +868,21 @@ impl fmt::Display for Program {
                     write!(f, "))")?;
                 }
                 Op::Stage(operation) => write!(f, "{operation}")?,
-                Op::BeginContextualInput {
-                    destination,
-                    expected,
-                    input,
-                } => write!(
-                    f,
-                    "(begin-contextual-input %{destination} (expected {expected}) {input})"
-                )?,
-                Op::BeginNormalType {
-                    destination,
-                    constructor,
-                } => write!(f, "(begin-normal-type %{destination} {constructor})")?,
-                Op::PrepareNormalInput {
-                    destination,
-                    index,
-                    input,
-                } => write!(f, "(prepare-normal-input %{destination} {index} {input})")?,
+                Op::BeginContextualInput { expected, input } => {
+                    write!(f, "(begin-contextual-input (expected {expected}) {input})")?
+                }
                 Op::AppendNormalContainer {
-                    constructor,
                     parent,
                     value,
                     spread,
                     diverges,
                 } => write!(
                     f,
-                    "(append-normal-container %{constructor} %{parent} %{value} (spread {spread}) (diverges {diverges}))"
+                    "(append-normal-container %{parent} %{value} (spread {spread}) (diverges {diverges}))"
                 )?,
-                Op::FinishNormalContainer {
-                    constructor,
-                    value,
-                    diverges,
-                } => write!(
+                Op::FinishNormalContainer { value, diverges } => write!(
                     f,
-                    "(finish-normal-container %{constructor} %{value} (diverges {diverges}))"
+                    "(finish-normal-container %{value} (diverges {diverges}))"
                 )?,
                 Op::NormalResult {
                     destination,
@@ -932,21 +892,7 @@ impl fmt::Display for Program {
                     f,
                     "(normal-result %{destination} %{value} (diverges {diverges}))"
                 )?,
-                Op::NormalLiteral {
-                    constructor,
-                    destination,
-                } => write!(f, "(normal-literal %{destination} %{constructor})")?,
-                Op::BindNormalInput {
-                    destination,
-                    value,
-                    diverges,
-                } => write!(
-                    f,
-                    "(bind-normal-input %{destination} %{value} (diverges {diverges}))"
-                )?,
-                Op::FinishNormalType { destination } => {
-                    write!(f, "(finish-normal-type %{destination})")?
-                }
+                Op::NormalLiteral { destination } => write!(f, "(normal-literal %{destination})")?,
                 Op::AssociatedValue {
                     destination,
                     access,
@@ -1447,7 +1393,6 @@ fn compile_root<'a>(
             };
             let (shape, code) = normal_types::compile_input(
                 input,
-                0,
                 &mut fresh,
                 fuel,
                 &mut labels,
@@ -1475,7 +1420,6 @@ fn compile_root<'a>(
             work.push(Work::Emit(
                 source,
                 Op::BeginContextualInput {
-                    destination: 0,
                     expected: Arc::new(copy_term(expected, fuel, source)?),
                     input: Arc::new(shape),
                 },
@@ -1490,7 +1434,6 @@ fn compile_root<'a>(
             };
             let (shape, code) = normal_types::compile_input(
                 input,
-                0,
                 &mut fresh,
                 fuel,
                 &mut labels,
@@ -2171,9 +2114,7 @@ fn compile_root<'a>(
                             work.push(Work::Expression(field, slot));
                         }
                     }
-                    K::NormalFormType { plan: Some(_), .. }
-                    | K::NominalType { .. }
-                    | K::CheckTypeAlias { .. } => {
+                    K::NormalFormType { .. } | K::NominalType { .. } | K::CheckTypeAlias { .. } => {
                         // The template shares closure bodies. Type rewriting is
                         // charged only when the admitted plan specializes them.
                         let mut copy_steps = *fuel as u64;
@@ -2203,60 +2144,6 @@ fn compile_root<'a>(
                                 destination: dst,
                                 expression: Arc::new(expr.clone()),
                                 environment,
-                            },
-                        );
-                    }
-                    K::NormalFormType {
-                        head,
-                        arguments,
-                        plan: None,
-                    } => {
-                        *fuel = fuel
-                            .checked_sub(arguments.len())
-                            .ok_or(Error::Budget(source))?;
-                        let mut inputs = Vec::with_capacity(arguments.len());
-                        for argument in arguments {
-                            inputs.push(normal_types::compile_input(
-                                argument,
-                                dst,
-                                &mut fresh,
-                                fuel,
-                                &mut labels,
-                                &mut locals,
-                                false,
-                            )?);
-                        }
-                        let constructor = Arc::new(normal_types::Constructor {
-                            head: *head,
-                            ty: copy_term(&expr.ty, fuel, source)?,
-                            count: inputs.len(),
-                            diverges: inputs.iter().any(|(shape, _)| shape.diverges),
-                        });
-                        emit(&mut work, Op::FinishNormalType { destination: dst });
-                        for (index, (input, code)) in inputs.into_iter().enumerate().rev() {
-                            work.push(Work::Emit(
-                                input.source,
-                                Op::BindNormalInput {
-                                    destination: dst,
-                                    value: input.slot,
-                                    diverges: input.diverges,
-                                },
-                            ));
-                            work.extend(code.into_iter().rev());
-                            work.push(Work::Emit(
-                                input.source,
-                                Op::PrepareNormalInput {
-                                    destination: dst,
-                                    index,
-                                    input: Arc::new(input),
-                                },
-                            ));
-                        }
-                        emit(
-                            &mut work,
-                            Op::BeginNormalType {
-                                destination: dst,
-                                constructor,
                             },
                         );
                     }

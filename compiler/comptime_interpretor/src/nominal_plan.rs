@@ -1,21 +1,6 @@
 //! Owned nominal/alias plans separate input collection, admission and body execution.
 use super::*;
-use input_collection::{InputPlan, Progress};
-
-#[derive(Clone)]
-pub(super) enum Expression<'e> {
-    Borrowed(&'e Expr),
-    Owned(Arc<Expr>),
-}
-impl std::ops::Deref for Expression<'_> {
-    type Target = Expr;
-    fn deref(&self) -> &Expr {
-        match self {
-            Self::Borrowed(expr) => expr,
-            Self::Owned(expr) => expr,
-        }
-    }
-}
+use input_collection::{Expression, InputPlan, Progress};
 
 enum Contract<'a> {
     Alias(&'a nir::type_aliases::Contract),

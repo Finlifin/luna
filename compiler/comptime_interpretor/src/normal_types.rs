@@ -3,44 +3,6 @@ use super::*;
 
 use input_bindings::Bindings;
 
-pub(super) struct Normal {
-    pub head: DeclarationId,
-    pub bindings: Bindings,
-}
-pub(super) struct Inputs {
-    pub normal: Option<Normal>,
-    pub prepared: BTreeMap<usize, Prepared>,
-}
-impl Inputs {
-    pub fn new(head: DeclarationId, count: usize) -> Self {
-        Self {
-            normal: Some(Normal {
-                head,
-                bindings: Bindings::structural(count),
-            }),
-            prepared: BTreeMap::new(),
-        }
-    }
-    pub fn contextual() -> Self {
-        Self {
-            normal: None,
-            prepared: BTreeMap::new(),
-        }
-    }
-}
-impl fmt::Display for Inputs {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(contextual-inputs")?;
-        if let Some(normal) = &self.normal {
-            write!(f, " (normal (head {}) {})", normal.head, normal.bindings)?;
-        }
-        write!(f, " (prepared")?;
-        for (slot, value) in &self.prepared {
-            write!(f, " (%{slot} {value})")?;
-        }
-        write!(f, "))")
-    }
-}
 impl Interpreter<'_> {
     pub(super) fn prepare_normal_type(
         &mut self,
@@ -63,32 +25,6 @@ impl Interpreter<'_> {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         self.integer_operation(Some(source), |budget| budget.consume(count))
-    }
-    pub(super) fn prepare_compiled_normal_input(
-        &mut self,
-        inputs: &mut Inputs,
-        index: usize,
-        input: &comptime_compiler::normal_types::Shape,
-        source: SourceRange,
-    ) -> Result<(), Error> {
-        let normal = inputs
-            .normal
-            .as_ref()
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        let metadata = self
-            .normal_forms
-            .get(&normal.head)
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        if index != normal.bindings.len() || index >= metadata.parameters.len() {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
-        let expected = normal
-            .bindings
-            .instantiate(self, &metadata.parameters[index].ty, source)?;
-        let mut prepared = BTreeMap::new();
-        self.prepare_normal_shape(input, &expected, &mut prepared, 0)?;
-        inputs.prepared = prepared;
-        Ok(())
     }
     pub(super) fn normal_list_domain<'a>(
         &mut self,
@@ -230,19 +166,6 @@ impl Interpreter<'_> {
             )?;
         }
         Ok(())
-    }
-    pub(super) fn bind_compiled_normal_input(
-        &mut self,
-        inputs: &mut Inputs,
-        value: Value,
-        source: SourceRange,
-    ) -> Result<(), Error> {
-        let normal = inputs
-            .normal
-            .as_mut()
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        let slot = normal.bindings.len();
-        self.bind_normal_input(normal.head, &mut normal.bindings, slot, value, source)
     }
     pub(super) fn bind_normal_input(
         &mut self,

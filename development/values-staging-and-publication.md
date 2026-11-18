@@ -89,6 +89,16 @@ comptime fn check() -> bool {
 
 ### 接收域到达前后的执行
 
+在 NIR 中，省略 NF 的输入计划表示按声明顺序求值，且没有额外的参数包准备或局部导出绑定。
+例如第一个槽绑定 `T = bool`，第二个槽的表达式带有类型标注 `T`，执行第二个表达式前必须先用
+本次绑定特化该标注。显式列出相同顺序时也遵守这条规则。两种编码最终产生同一个 NF 头和相同的实参。
+[两种编码的执行对照](../compiler/comptime_interpretor/src/normal_types/tests.rs)
+
+字节码通过 `TypeInputPlan` 把声明实参交给当前 invocation。NF、名义类型和透明别名共用
+准备位置、供应位置和等待中的域依赖。调用方可见的局部快照在对应槽通过准入后才安装。
+NF 由自己的声明检查并构造保留头身份的结果；透明别名在自己的契约检查后执行主体。
+编译好的单个操作数片段仅维护本次执行的域转换和容器值。[输入调度器](../compiler/comptime_interpretor/src/input_collection.rs)
+
 对于已经交付给 VM 的声明实参，下面的时序同时适用于条件、match、块、列表和元组。编译后的代码用寄存器标识域准备结果；跨越等待的文字和集合保留输入内的结构位置。源码范围用于诊断，同一范围可以对应多个不同的字段。[字节码输入](../compiler/comptime_compiler/src/normal_types.rs) · [源码输入执行](../compiler/comptime_interpretor/src/normal_inputs/execution.rs)
 
 | 时刻 | 原调用交付的行为 |

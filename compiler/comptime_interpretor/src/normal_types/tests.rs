@@ -11,92 +11,6 @@ fn expr(ty: Primitive, kind: K) -> Expr {
 }
 
 #[test]
-fn normal_input_preparation_replaces_the_previous_slot_only_after_success() {
-    let head = DeclarationId {
-        package: 91,
-        local: 0,
-    };
-    let package = Package {
-        normal_forms: vec![Head {
-            declaration: head,
-            collector: None,
-            role: Role::Opaque,
-            requirements: vec![],
-            parameters: vec![Parameter {
-                declaration: DeclarationId {
-                    package: 91,
-                    local: 1,
-                },
-                binding: LocalId { owner: 0, index: 0 },
-                kind: Kind::Value,
-                ty: Term::Tuple(vec![Term::Primitive(Primitive::U8); 2]),
-            }],
-        }],
-        ..Default::default()
-    };
-    let shape = |last: &str| {
-        let input = A::Tuple {
-            source: SOURCE,
-            items: ["7", last]
-                .into_iter()
-                .map(|spelling| A::Integer {
-                    source: SOURCE,
-                    spelling: spelling.into(),
-                    negative: false,
-                })
-                .collect(),
-        };
-        comptime_compiler::compile_staged_input(&input, &mut 100_000)
-            .unwrap()
-            .1
-    };
-    let invalid = shape("256");
-    let valid = shape("13");
-    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    let mut inputs = normal_types::Inputs::new(head, 1);
-    inputs.prepared.insert(
-        usize::MAX,
-        normal_types::Prepared::Literal(Value::Bool(true)),
-    );
-    let saved = inputs.to_string();
-    assert_eq!(
-        vm.prepare_compiled_normal_input(&mut inputs, 0, &invalid, SOURCE)
-            .unwrap_err()
-            .kind,
-        ErrorKind::Type
-    );
-    assert_eq!(inputs.to_string(), saved);
-    let mut exhausted = 0;
-    let mut complete = false;
-    for steps in 0..256 {
-        vm.budget.steps = steps;
-        match vm.prepare_compiled_normal_input(&mut inputs, 0, &valid, SOURCE) {
-            Err(error) => {
-                assert_eq!(error.kind, ErrorKind::StepsExhausted);
-                assert_eq!(inputs.to_string(), saved);
-                exhausted += 1;
-            }
-            Ok(()) => {
-                complete = true;
-                break;
-            }
-        }
-    }
-    assert!(exhausted > 2 && complete);
-    assert!(!inputs.prepared.contains_key(&usize::MAX));
-    assert_eq!(inputs.prepared.len(), 3);
-    assert_eq!(inputs.normal.as_ref().unwrap().bindings.len(), 0);
-    vm.budget = Budget::default();
-    vm.bind_compiled_normal_input(
-        &mut inputs,
-        Value::Tuple(vec![Value::UnsignedInteger(7), Value::UnsignedInteger(13)]),
-        SOURCE,
-    )
-    .unwrap();
-    assert_eq!(inputs.normal.as_ref().unwrap().bindings.len(), 1);
-}
-
-#[test]
 fn sequential_normal_inputs_preserve_identity_order_and_recovery() {
     let head = DeclarationId {
         package: 3,
@@ -181,7 +95,6 @@ fn sequential_normal_inputs_preserve_identity_order_and_recovery() {
             let mut env = Environment::from([(trace, Value::Bool(false))]);
             let result = if compiled {
                 let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
-                assert!(code.to_string().contains("(begin-normal-type "));
                 vm.execute_code(&code, &mut env)
             } else {
                 vm.eval(&body, &mut env)
@@ -447,7 +360,10 @@ fn contextual_scalars_use_the_preceding_type_input() {
             },
         );
         let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
-        assert!(code.to_string().contains("(normal-literal "));
+        assert!(code.instructions().iter().any(|instruction| matches!(
+            instruction.op,
+            comptime_compiler::Op::TypeInputPlan { .. }
+        )));
         let mut tree = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let expected = tree.eval(&body, &mut Environment::new());
@@ -598,6 +514,63 @@ fn container_body(domain: Term, input: A) -> Expr {
 }
 
 #[test]
+fn completed_head_inputs_specialize_operand_annotations_with_or_without_a_plan() {
+    let package = container_package();
+    let binder = package.normal_forms[0].parameters[0].declaration;
+    for explicit in [false, true] {
+        let dependent = A::Value(Expr {
+            source: SOURCE,
+            ty: Term::Rigid {
+                declaration: binder,
+                sort: nir::Sort::Type,
+            },
+            kind: K::Literal(Literal::Bool(true)),
+        });
+        let mut body = container_body(Term::Primitive(Primitive::Bool), dependent);
+        if explicit {
+            let K::NormalFormType { plan, .. } = &mut body.kind else {
+                unreachable!()
+            };
+            *plan = Some(nir::program::NormalFormInputPlan {
+                order: vec![0, 1],
+                bindings: vec![
+                    LocalId {
+                        owner: 72,
+                        index: 1,
+                    },
+                    LocalId {
+                        owner: 72,
+                        index: 2,
+                    },
+                ],
+                preparations: vec![],
+            });
+        }
+        let expected = Value::Type(Term::NormalForm {
+            head: package.normal_forms[0].declaration,
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Bool), Term::Bool(true)],
+        });
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+        for compiled in [false, true] {
+            let mut env = Environment::new();
+            let result = if compiled {
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                vm.execute_code(&code, &mut env)
+            } else {
+                let mut vm = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
+                vm.eval(&body, &mut env)
+            };
+            assert!(
+                matches!(result, Ok(Flow::Value(ref v)) if v == &expected),
+                "compiled={compiled}, explicit={explicit}: {result:?}"
+            );
+            assert!(env.is_empty());
+        }
+    }
+}
+
+#[test]
 fn nested_contextual_containers_preserve_domains_and_tuple_heads() {
     let package = container_package();
     let integer = || A::Integer {
@@ -647,9 +620,6 @@ fn nested_contextual_containers_preserve_domains_and_tuple_heads() {
     ] {
         let body = container_body(domain.clone(), input);
         let code = Arc::new(comptime_compiler::compile(&body, &mut 100000).unwrap());
-        if domain != Term::Primitive(Primitive::Type) {
-            assert!(code.to_string().contains("(finish-normal-container "));
-        }
         let mut tree = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let Flow::Value(expected) = tree.eval(&body, &mut Environment::new()).unwrap() else {
@@ -1586,30 +1556,57 @@ fn known_contextual_domains_precheck_all_branches_before_effects() {
 #[test]
 fn contextual_fragment_does_not_replace_nested_normal_form_identity() {
     let package = container_package();
-    let input = A::Value(container_body(
+    let body = container_body(
         Term::Primitive(Primitive::Bool),
         A::Value(expr(Primitive::Bool, K::Literal(Literal::Bool(true)))),
-    ));
-    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    let result = vm
-        .evaluate_contextual_argument(
-            &input,
-            &Term::Primitive(Primitive::Type),
-            &mut Environment::new(),
-        )
-        .unwrap();
-    let Flow::Value(value) = result else {
-        panic!("transfer")
-    };
-    assert_eq!(
-        value,
-        Value::Type(Term::NormalForm {
-            head: package.normal_forms[0].declaration,
-            sort: nir::Sort::Type,
-            arguments: vec![Term::Primitive(Primitive::Bool), Term::Bool(true)],
-        })
     );
-    assert_eq!(vm.bytecode_contextual_inputs(), 1);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for explicit in [false, true] {
+        let mut nested = body.clone();
+        if explicit {
+            let K::NormalFormType { plan, .. } = &mut nested.kind else {
+                unreachable!()
+            };
+            *plan = Some(nir::program::NormalFormInputPlan {
+                order: vec![0, 1],
+                bindings: vec![
+                    LocalId {
+                        owner: 91,
+                        index: 0,
+                    },
+                    LocalId {
+                        owner: 91,
+                        index: 1,
+                    },
+                ],
+                preparations: vec![],
+            });
+        }
+        let before = vm.bytecode_contextual_inputs();
+        let mut environment = Environment::new();
+        let Flow::Value(value) = vm
+            .evaluate_contextual_argument(
+                &A::Value(nested),
+                &Term::Primitive(Primitive::Type),
+                &mut environment,
+            )
+            .unwrap()
+        else {
+            panic!("expected type value")
+        };
+        assert_eq!(
+            value,
+            Value::Type(Term::NormalForm {
+                head: package.normal_forms[0].declaration,
+                sort: nir::Sort::Type,
+                arguments: vec![Term::Primitive(Primitive::Bool), Term::Bool(true)],
+            })
+        );
+        // The enclosing operand and the two constructor operands start in
+        // the same invocation for both encodings of declaration order.
+        assert_eq!(vm.bytecode_contextual_inputs() - before, 3);
+        assert!(environment.is_empty());
+    }
 }
 
 #[test]

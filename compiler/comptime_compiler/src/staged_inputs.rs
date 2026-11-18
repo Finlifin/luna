@@ -110,7 +110,12 @@ mod tests {
         assert!(dump.contains("(stage-append "));
         assert!(dump.contains("(stage-container "));
         assert!(dump.contains("(stage-finish "));
-        assert!(!dump.contains("(prepare-normal-input "));
+        assert!(
+            !code
+                .instructions()
+                .iter()
+                .any(|instruction| matches!(instruction.op, Op::BeginContextualInput { .. }))
+        );
         assert_eq!(
             dump,
             compile_staged_input(&input, &mut 10000)
