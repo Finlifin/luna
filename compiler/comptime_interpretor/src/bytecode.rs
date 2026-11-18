@@ -198,7 +198,8 @@ pub(super) enum Progress {
     },
     TypeInputPlan {
         selected: Option<Value>,
-        expression: Arc<Expr>,
+        plan: Arc<comptime_compiler::DeclarationInputPlan>,
+        register_collision: bool,
         environment: Environment,
     },
     Default {
@@ -1454,14 +1455,20 @@ impl<'a> Interpreter<'a> {
                 }
                 Op::TypeInputPlan {
                     destination,
-                    expression,
+                    plan,
+                    collisions,
                     environment: imports,
                     selected,
                 } => {
                     let selected = selected
                         .map(|slot| frame.slots[slot].take().ok_or_else(missing))
                         .transpose()?;
-                    self.effect_charge(imports.len(), Some(source))?;
+                    self.effect_charge(
+                        imports.len().saturating_add(collisions.len()),
+                        Some(source),
+                    )?;
+                    let register_collision =
+                        collisions.iter().any(|&slot| frame.slots[slot].is_some());
                     let mut environment = std::mem::take(&mut frame.environment);
                     let mut borrowed = Vec::new();
                     for &(binding, slot) in imports {
@@ -1476,7 +1483,8 @@ impl<'a> Interpreter<'a> {
                     });
                     return Ok(Progress::TypeInputPlan {
                         selected,
-                        expression: expression.clone(),
+                        plan: plan.clone(),
+                        register_collision,
                         environment,
                     });
                 }

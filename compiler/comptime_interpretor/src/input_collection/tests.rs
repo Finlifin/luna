@@ -250,13 +250,15 @@ fn only_observed_completions_recheck_nominal_and_normal_domains() {
                     preparations: vec![],
                 },
             );
-            let locals = admit_scope(&mut vm, &nominal, &Environment::new()).unwrap();
+            let locals = Expression::Borrowed(&nominal)
+                .admit_scope(&mut vm, &Environment::new())
+                .unwrap();
             let source = nominal_inputs::Source::new(
                 input_collection::Expression::Borrowed(&nominal),
                 parameters.clone(),
                 domains.clone(),
                 true,
-                locals.into(),
+                locals,
             );
             check_unrelated(source, &mut vm, count);
         }
@@ -322,13 +324,15 @@ fn transitive_completions_wake_dependents_and_cycles_remain_unresolved() {
                     ],
                 },
             );
-            let locals = admit_scope(&mut vm, &input, &Environment::new()).unwrap();
+            let locals = Expression::Borrowed(&input)
+                .admit_scope(&mut vm, &Environment::new())
+                .unwrap();
             let source = nominal_inputs::Source::new(
                 input_collection::Expression::Borrowed(&input),
                 parameters.clone(),
                 domains,
                 true,
-                locals.into(),
+                locals,
             );
             let mut frame = observed(source);
             let mut env = Environment::from([(local(999), Value::Bool(false))]);

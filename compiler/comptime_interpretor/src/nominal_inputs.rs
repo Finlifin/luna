@@ -209,14 +209,15 @@ mod tests {
                     },
                 });
                 let mut environment = Environment::from([(local(99), Value::Bool(true))]);
-                let locals =
-                    input_collection::admit_scope(&mut vm, &expression, &environment).unwrap();
+                let locals = input_collection::Expression::Borrowed(&expression)
+                    .admit_scope(&mut vm, &environment)
+                    .unwrap();
                 let mut frame = Frame::new(
-                    input_collection::Expression::Owned(expression),
+                    input_collection::Expression::Borrowed(&expression),
                     parameters.clone(),
                     domains.clone(),
                     true,
-                    locals.into(),
+                    locals,
                 );
                 let result = vm.run_nominal_inputs(&mut frame, &mut environment);
                 if spelling == "256" {
@@ -305,13 +306,15 @@ mod tests {
         let package = Package::default();
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let mut environment = Environment::new();
-        let locals = input_collection::admit_scope(&mut vm, &expression, &environment).unwrap();
+        let locals = input_collection::Expression::Borrowed(&expression)
+            .admit_scope(&mut vm, &environment)
+            .unwrap();
         let mut frame = Frame::new(
-            input_collection::Expression::Owned(Arc::new(expression)),
+            input_collection::Expression::Borrowed(&expression),
             parameters,
             domains,
             true,
-            locals.into(),
+            locals,
         );
         let input_collection::Progress::Input(bytecode::InputFrame { mut code, finish }) =
             frame.next_input(&mut vm, &mut environment).unwrap()
@@ -411,13 +414,15 @@ mod tests {
             .unwrap();
         for valid in [false, true] {
             let environment = Environment::new();
-            let locals = input_collection::admit_scope(&mut vm, &expression, &environment).unwrap();
+            let locals = input_collection::Expression::Borrowed(&expression)
+                .admit_scope(&mut vm, &environment)
+                .unwrap();
             let mut frame = Frame::new(
-                input_collection::Expression::Owned(expression.clone()),
+                input_collection::Expression::Borrowed(&expression),
                 parameters.clone(),
                 domains.clone(),
                 false,
-                locals.into(),
+                locals,
             );
             // Source completion order differs from the declaration telescope.
             let value = if valid {

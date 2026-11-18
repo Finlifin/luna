@@ -6,7 +6,7 @@ use nir::program::NormalFormArgument as Argument;
 pub(super) struct Source<'a> {
     head: DeclarationId,
     domains: Domains<'a>,
-    locals: Vec<LocalId>,
+    locals: Arc<[LocalId]>,
     expression: Expression<'a>,
     bindings: input_bindings::Bindings,
 }
@@ -128,7 +128,7 @@ impl<'a> Frame<'a> {
             }
             _ => return Err(vm.failure(ErrorKind::Type, Some(source))),
         };
-        let locals = input_collection::admit_scope(vm, &expression, environment)?;
+        let locals = expression.admit_scope(vm, environment)?;
         let diverges = arguments.iter().any(Argument::is_diverging)
             || plan
                 .iter()
@@ -222,7 +222,7 @@ impl input_collection::Source for Source<'_> {
         )?)))
     }
     fn cleanup(&self, environment: &mut Environment) {
-        for binding in &self.locals {
+        for binding in self.locals.iter() {
             environment.remove(binding);
         }
     }
@@ -303,8 +303,8 @@ mod tests {
     #[test]
     fn unplanned_inputs_preserve_caller_bindings_and_recover_across_entries() {
         let package = package();
-        for entry in ["borrowed", "owned", "bytecode"] {
-            let mut vm = if entry == "borrowed" {
+        for entry in ["tree", "direct-frame", "bytecode"] {
+            let mut vm = if entry == "tree" {
                 Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
             } else {
                 Interpreter::for_comptime(&package, Budget::default()).unwrap()
@@ -343,11 +343,10 @@ mod tests {
                 );
                 let mut environment = original.clone();
                 let result = match entry {
-                    "borrowed" => vm.eval(&body, &mut environment),
-                    "owned" => {
+                    "tree" => vm.eval(&body, &mut environment),
+                    "direct-frame" => {
                         let mut frame =
-                            Frame::new(&mut vm, Expression::Owned(Arc::new(body)), &environment)
-                                .unwrap();
+                            Frame::new(&mut vm, Expression::Borrowed(&body), &environment).unwrap();
                         let result = vm.run_type_plan(&mut frame, &mut environment);
                         frame.cleanup(&mut environment);
                         result
@@ -380,6 +379,66 @@ mod tests {
                 }
                 assert_eq!(environment, original, "{entry}: {spelling}");
             }
+        }
+    }
+
+    #[test]
+    fn a_reusable_plan_checks_both_caller_registers_and_lexical_bindings_at_entry() {
+        let package = package();
+        let plan = expr(
+            Primitive::Type,
+            K::NormalFormType {
+                head: id(0),
+                arguments: vec![
+                    Argument::Value(expr(Primitive::Type, K::Local(local(7)))),
+                    Argument::Integer {
+                        source: SOURCE,
+                        spelling: "7".into(),
+                        negative: false,
+                    },
+                ],
+                plan: Some(NormalFormInputPlan {
+                    order: vec![0, 1],
+                    bindings: vec![local(10), local(11)],
+                    preparations: vec![],
+                }),
+            },
+        );
+        // The later let reserves a caller register for 10. Local 11 has no register.
+        let body = expr(
+            Primitive::Void,
+            K::Block {
+                statements: vec![
+                    plan,
+                    expr(
+                        Primitive::Void,
+                        K::Let {
+                            binding: local(10),
+                            value: Box::new(expr(Primitive::Void, K::Unit)),
+                        },
+                    ),
+                ],
+                result: None,
+            },
+        );
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        for collision in [Some(local(10)), None, Some(local(11)), None] {
+            let mut environment =
+                Environment::from([(local(7), Value::Type(Term::Primitive(Primitive::U8)))]);
+            if let Some(binding) = collision {
+                environment.insert(binding, Value::Bool(false));
+            }
+            let before = environment.clone();
+            let result = vm.execute_code(&code, &mut environment);
+            if collision.is_some() {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind, ErrorKind::Type);
+                assert_eq!(error.source, Some(SOURCE));
+            } else {
+                assert!(matches!(result.unwrap(), Flow::Value(Value::Unit)));
+            }
+            assert_eq!(environment, before);
         }
     }
 

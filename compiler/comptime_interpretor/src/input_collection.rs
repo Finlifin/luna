@@ -7,39 +7,58 @@ use normal_inputs::StagedNormalInput;
 #[derive(Clone)]
 pub(super) enum Expression<'e> {
     Borrowed(&'e Expr),
-    Owned(Arc<Expr>),
+    Compiled {
+        plan: Arc<comptime_compiler::DeclarationInputPlan>,
+        register_collision: bool,
+    },
 }
 impl std::ops::Deref for Expression<'_> {
     type Target = Expr;
     fn deref(&self) -> &Expr {
         match self {
             Self::Borrowed(expr) => expr,
-            Self::Owned(expr) => expr,
+            Self::Compiled { plan, .. } => plan.expression(),
         }
     }
 }
 
 /// Acquire only locals that are absent from the caller. Keep this list until
 /// normal completion or cancellation, including while an alias body executes.
-pub(super) fn admit_scope(
-    vm: &mut Interpreter<'_>,
-    expression: &Expr,
-    environment: &Environment,
-) -> Result<Vec<LocalId>, Error> {
-    let (arguments, schedule) = expression
-        .kind
-        .declaration_inputs()
-        .expect("declaration inputs");
-    let source = Some(expression.source);
-    let checked = schedule
-        .check(arguments.len(), |n| {
-            vm.integer_operation(source, |b| b.consume(n))
-        })?
-        .ok_or_else(|| vm.failure(ErrorKind::Type, source))?;
-    if checked.locals.iter().any(|id| environment.contains_key(id)) {
-        return Err(vm.failure(ErrorKind::Type, source));
+impl Expression<'_> {
+    pub(super) fn admit_scope(
+        &self,
+        vm: &mut Interpreter<'_>,
+        environment: &Environment,
+    ) -> Result<Arc<[LocalId]>, Error> {
+        let source = Some(self.source);
+        let locals: Arc<[LocalId]> = match self {
+            Self::Compiled {
+                plan,
+                register_collision,
+            } => {
+                if *register_collision {
+                    return Err(vm.failure(ErrorKind::Type, source));
+                }
+                plan.locals().clone()
+            }
+            Self::Borrowed(expr) => {
+                let (arguments, schedule) =
+                    expr.kind.declaration_inputs().expect("declaration inputs");
+                schedule
+                    .check(arguments.len(), |n| {
+                        vm.integer_operation(source, |b| b.consume(n))
+                    })?
+                    .ok_or_else(|| vm.failure(ErrorKind::Type, source))?
+                    .locals
+                    .into()
+            }
+        };
+        vm.integer_operation(source, |b| b.consume(locals.len()))?;
+        if locals.iter().any(|id| environment.contains_key(id)) {
+            return Err(vm.failure(ErrorKind::Type, source));
+        }
+        Ok(locals)
     }
-    Ok(checked.locals)
 }
 
 pub(super) trait Source: fmt::Display {

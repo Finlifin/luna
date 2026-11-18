@@ -458,10 +458,18 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 *pending = Some(Pending::Bytecode(preparation));
             }
             Ok(bytecode::Progress::TypeInputPlan {
-                expression,
+                plan,
+                register_collision,
                 environment,
                 selected,
-            }) => match vm.start_type_plan(expression, &environment, selected) {
+            }) => match vm.start_type_plan(
+                input_collection::Expression::Compiled {
+                    plan,
+                    register_collision,
+                },
+                &environment,
+                selected,
+            ) {
                 Ok(frame) => stack.push(StackEntry::Plan(Box::new(PlanActivation {
                     frame,
                     environment,

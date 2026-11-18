@@ -232,26 +232,17 @@ impl<'a> Interpreter<'a> {
     }
     fn start_type_plan(
         &mut self,
-        expression: Arc<Expr>,
+        expression: input_collection::Expression<'a>,
         environment: &Environment,
         selected: Option<Value>,
     ) -> Result<Box<dyn input_collection::InputPlan + 'a>, Error> {
         match &expression.kind {
-            K::NormalFormType { .. } | K::ApplyNormalForm { .. } => {
-                Ok(Box::new(normal_plan::Frame::application(
-                    self,
-                    input_collection::Expression::Owned(expression),
-                    environment,
-                    selected,
-                )?))
-            }
-            K::NominalType { .. } | K::CheckTypeAlias { .. } => {
-                Ok(Box::new(nominal_plan::Frame::new(
-                    self,
-                    input_collection::Expression::Owned(expression),
-                    environment,
-                )?))
-            }
+            K::NormalFormType { .. } | K::ApplyNormalForm { .. } => Ok(Box::new(
+                normal_plan::Frame::application(self, expression, environment, selected)?,
+            )),
+            K::NominalType { .. } | K::CheckTypeAlias { .. } => Ok(Box::new(
+                nominal_plan::Frame::new(self, expression, environment)?,
+            )),
             _ => Err(self.failure(ErrorKind::Type, Some(expression.source))),
         }
     }

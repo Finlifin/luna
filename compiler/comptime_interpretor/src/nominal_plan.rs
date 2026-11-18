@@ -86,7 +86,7 @@ impl<'a, 'e> Frame<'a, 'e> {
         else {
             unreachable!()
         };
-        let locals: Arc<[LocalId]> = input_collection::admit_scope(vm, expr, environment)?.into();
+        let locals = expression.admit_scope(vm, environment)?;
         let contract = if matches!(expr.kind, K::CheckTypeAlias { .. }) {
             Contract::Alias(
                 vm.alias_contracts

@@ -74,10 +74,15 @@ fn read(
 pub fn collect(expr: &Expr, fuel: &mut usize) -> Result<Scope, Error> {
     collect_with_dependencies(expr, &Dependencies::new(), fuel)
 }
-/// Environment needed after the callee has been evaluated into its own register.
-pub fn collect_input_plan(expr: &Expr, fuel: &mut usize) -> Result<Scope, Error> {
+/// Bindings of the operand schedule after the callee has been selected.
+pub struct InputPlanBindings {
+    pub imports: BTreeSet<LocalId>,
+    pub locals: Vec<LocalId>,
+}
+
+pub fn input_plan_bindings(expr: &Expr, fuel: &mut usize) -> Result<InputPlanBindings, Error> {
     let mut free = Scope::new();
-    scan_inputs(
+    let locals = scan_inputs(
         expr,
         &Scope::new(),
         &mut free,
@@ -85,7 +90,10 @@ pub fn collect_input_plan(expr: &Expr, fuel: &mut usize) -> Result<Scope, Error>
         0,
         &Dependencies::new(),
     )?;
-    Ok(free)
+    Ok(InputPlanBindings {
+        imports: free,
+        locals,
+    })
 }
 
 fn scan_inputs(
@@ -95,7 +103,7 @@ fn scan_inputs(
     fuel: &mut usize,
     depth: usize,
     dependencies: &Dependencies,
-) -> Result<(), Error> {
+) -> Result<Vec<LocalId>, Error> {
     let (arguments, schedule) = node
         .kind
         .declaration_inputs()
@@ -129,7 +137,7 @@ fn scan_inputs(
     {
         scan(body, &inner, free, fuel, depth + 1, dependencies)?;
     }
-    Ok(())
+    Ok(schedule.locals)
 }
 
 /// Runtime dependencies of pattern observations, excluding lexical binders.

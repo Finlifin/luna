@@ -44,6 +44,30 @@ impl fmt::Display for ErrorConversion {
     }
 }
 
+/// Immutable operand template and the binding identities owned by its checked schedule.
+#[derive(Debug)]
+pub struct DeclarationInputPlan {
+    expression: Expr,
+    locals: Arc<[LocalId]>,
+}
+impl DeclarationInputPlan {
+    pub fn expression(&self) -> &Expr {
+        &self.expression
+    }
+    pub fn locals(&self) -> &Arc<[LocalId]> {
+        &self.locals
+    }
+}
+impl fmt::Display for DeclarationInputPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(declaration-input-plan (locals")?;
+        for binding in self.locals.iter() {
+            write!(f, " {binding}")?;
+        }
+        write!(f, ") {})", self.expression)
+    }
+}
+
 #[derive(Debug)]
 pub enum Op {
     AssociatedValue {
@@ -168,7 +192,8 @@ pub enum Op {
     TypeInputPlan {
         destination: Register,
         selected: Option<Register>,
-        expression: Arc<Expr>,
+        plan: Arc<DeclarationInputPlan>,
+        collisions: Vec<Register>,
         environment: Vec<(LocalId, Register)>,
     },
     Stage(staged_inputs::Instruction),
@@ -765,7 +790,8 @@ impl fmt::Display for Program {
                 } => write!(f, "(closure %{destination} (prepared %{closure}))")?,
                 Op::TypeInputPlan {
                     destination,
-                    expression,
+                    plan,
+                    collisions,
                     environment,
                     selected,
                 } => {
@@ -777,7 +803,11 @@ impl fmt::Display for Program {
                     for (binding, slot) in environment {
                         write!(f, " ({binding} %{slot})")?;
                     }
-                    write!(f, ") {expression})")?;
+                    f.write_str(") (collision-registers")?;
+                    for slot in collisions {
+                        write!(f, " %{slot}")?;
+                    }
+                    write!(f, ") {plan})")?;
                 }
                 Op::CheckListAppend { local, ty } => {
                     write!(f, "(check-list-append %{local} {ty})")?
@@ -2148,17 +2178,19 @@ fn compile_root<'a>(
                         let copied = nir::copy_budget::charge_expression(expr, &mut copy_steps);
                         *fuel = copy_steps as usize;
                         copied.map_err(|error| copy_error(error, source))?;
-                        let bindings = nir::free_bindings::collect_input_plan(expr, fuel).map_err(
-                            |reason| match reason {
+                        let bindings = nir::free_bindings::input_plan_bindings(expr, fuel)
+                            .map_err(|reason| match reason {
                                 nir::free_bindings::Error::Budget(_) => Error::Budget(source),
                                 nir::free_bindings::Error::Depth(_) => Error::Depth(source),
                                 nir::free_bindings::Error::Invalid(_) => Error::Unsupported(source),
-                            },
-                        )?;
+                            })?;
                         *fuel = fuel
-                            .checked_sub(bindings.len())
+                            .checked_sub(
+                                bindings.imports.len().saturating_add(bindings.locals.len()),
+                            )
                             .ok_or(Error::Budget(source))?;
                         let environment = bindings
+                            .imports
                             .into_iter()
                             .map(|binding| {
                                 let slot = *locals.entry(binding).or_insert_with(&mut fresh);
@@ -2174,7 +2206,11 @@ fn compile_root<'a>(
                             Op::TypeInputPlan {
                                 selected: selection.map(|(_, register)| register),
                                 destination: dst,
-                                expression: Arc::new(expr.clone()),
+                                plan: Arc::new(DeclarationInputPlan {
+                                    expression: expr.clone(),
+                                    locals: bindings.locals.into(),
+                                }),
+                                collisions: Vec::new(),
                                 environment,
                             },
                         );
@@ -3236,36 +3272,14 @@ fn compile_root<'a>(
             }
         }
         if let Op::TypeInputPlan {
-            expression,
-            environment,
-            ..
+            plan, collisions, ..
         } = &mut instruction.op
         {
-            // Retain the previous collision checks without allocating registers
-            // for plan-owned binders. A caller slot with the same identity must
-            // still be visible to plan admission, even if it is not a free read.
-            let (arguments, schedule) = expression
-                .kind
-                .declaration_inputs()
-                .expect("type input plan expression");
-            let checked = schedule
-                .check(arguments.len(), |n| {
-                    *fuel = fuel
-                        .checked_sub(n)
-                        .ok_or(Error::Budget(instruction.source))?;
-                    Ok::<_, Error>(())
-                })?
-                .ok_or(Error::Unsupported(instruction.source))?;
-            for binding in checked.locals {
-                *fuel = fuel
-                    .checked_sub(environment.len().saturating_add(1))
-                    .ok_or(Error::Budget(instruction.source))?;
-                if let Some(&slot) = locals.get(&binding) {
-                    if !environment.iter().any(|(id, _)| *id == binding) {
-                        environment.push((binding, slot));
-                    }
-                }
-            }
+            // Only now are registers for locals first seen later in the body known.
+            *fuel = fuel
+                .checked_sub(plan.locals.len())
+                .ok_or(Error::Budget(instruction.source))?;
+            collisions.extend(plan.locals.iter().filter_map(|id| locals.get(id).copied()));
         }
         let target = match &mut instruction.op {
             Op::Jump(target) | Op::Branch { target, .. } => target,

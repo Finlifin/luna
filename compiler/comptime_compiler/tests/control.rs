@@ -760,9 +760,16 @@ fn normal_plan_templates_own_inputs_and_capture_only_free_bindings() {
             result: Some(Box::new(body.clone())),
         });
         let collision_code = compile(&collision, &mut 100_000).unwrap();
+        let slot = collision_code
+            .locals()
+            .iter()
+            .find(|(id, _)| *id == first)
+            .unwrap()
+            .1;
         assert!(collision_code.instructions().iter().any(|instruction| {
-            matches!(&instruction.op, comptime_compiler::Op::TypeInputPlan { environment, .. }
-                if environment.iter().any(|(id, _)| *id == first))
+            matches!(&instruction.op, comptime_compiler::Op::TypeInputPlan { environment, collisions, plan, .. }
+                if collisions == &[slot] && plan.locals().as_ref() == [first, second]
+                    && environment.iter().map(|(id, _)| *id).eq([external]))
         }));
         let K::NormalFormType {
             plan: Some(plan), ..
@@ -781,6 +788,41 @@ fn normal_plan_templates_own_inputs_and_capture_only_free_bindings() {
     assert!(dump.contains("(type-input-plan %"));
     assert!(dump.contains("(order 0 1)"));
     assert_eq!(dump, code.to_string());
+}
+
+#[test]
+fn wide_plan_linking_does_not_cross_product_imports_and_owned_bindings() {
+    use nir::program::{NormalFormArgument, NormalFormInputPlan};
+    fn compile_work(count: u32) -> usize {
+        let body = Expr {
+            source: SourceRange { start: 4, end: 7 },
+            ty: Term::Primitive(Primitive::Type),
+            kind: K::NormalFormType {
+                head: nir::DeclarationId {
+                    package: 80,
+                    local: 0,
+                },
+                arguments: (0..count)
+                    .map(|index| {
+                        NormalFormArgument::Value(Expr {
+                            kind: K::Local(LocalId { owner: 1, index }),
+                            ty: Term::Primitive(Primitive::Bool),
+                            source: SourceRange { start: 5, end: 6 },
+                        })
+                    })
+                    .collect(),
+                plan: Some(NormalFormInputPlan {
+                    bindings: (0..count)
+                        .map(|index| LocalId { owner: 2, index })
+                        .collect(),
+                    order: (0..count as usize).collect(),
+                    preparations: vec![],
+                }),
+            },
+        };
+        compile(&body, &mut 1_000_000).unwrap().storage_work()
+    }
+    assert!(compile_work(256) <= 3 * compile_work(128));
 }
 
 #[test]
