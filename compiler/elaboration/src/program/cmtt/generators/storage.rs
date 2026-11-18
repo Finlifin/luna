@@ -59,51 +59,11 @@ impl Checker<'_, '_> {
     // Runtime type payloads in callable signatures are descriptions, not stored
     // generator data, so constructing this frame must not clone those payloads.
     fn generator_storage_frame(&self, fuel: &mut usize) -> Result<Vec<Sort>, StorageError> {
-        if let Some(prefix) = self
-            .signature_owner
-            .and_then(|owner| self.signature_prefixes.get(&owner))
-        {
-            return collect_frame(prefix.iter().map(|p| p.sort), fuel);
-        }
-        if let Some(scope) = &self.default_input_scope {
-            return collect_frame(
-                scope
-                    .iter()
-                    .map_while(|(sort, ty)| ty.as_ref().map(|_| *sort)),
-                fuel,
-            );
-        }
-        if let Some(mut signature) = self.signature_owner.and_then(|owner| {
-            self.signatures
-                .get(&owner)
-                .or_else(|| self.interface_signatures.get(&owner))
-        }) {
-            loop {
-                *fuel = fuel.checked_sub(1).ok_or(StorageError::Budget)?;
-                match signature {
-                    Term::ComptimeFunction(inner)
-                    | Term::NormalFormFunction(inner, _)
-                    | Term::UnsafeFunction(inner)
-                    | Term::Closure {
-                        signature: inner, ..
-                    }
-                    | Term::ContextualClosure {
-                        signature: inner, ..
-                    } => signature = inner,
-                    Term::Function { parameters, .. } => {
-                        return collect_frame(parameters.iter().map(|p| p.sort), fuel);
-                    }
-                    _ => break,
-                }
-            }
-        }
-        if let Some(definition) = self
-            .signature_owner
-            .and_then(|owner| self.open_functions.get(&owner))
-        {
-            return collect_frame(definition.known_prefix_sorts(), fuel);
-        }
-        Ok(vec![])
+        collect_frame(
+            self.lexical_input_domains()
+                .map_while(|(sort, ty)| ty.map(|_| sort)),
+            fuel,
+        )
     }
 }
 

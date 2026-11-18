@@ -160,19 +160,8 @@ impl Definition {
     pub(super) fn checked_empty_iteration(&self, site: hir::HirId) -> bool {
         self.checked && self.checked_tuple_loops.contains(&local(site))
     }
-    pub(super) fn input_domain_refs(&self) -> impl Iterator<Item = (Sort, Option<&Term>)> {
-        self.parameters.iter().map(|(sort, annotation)| {
-            (
-                *sort,
-                match annotation {
-                    Annotation::Known(ty) => Some(ty),
-                    Annotation::Description(_)
-                    | Annotation::Pending(_)
-                    | Annotation::InputType { .. }
-                    | Annotation::Suspended { .. } => None,
-                },
-            )
-        })
+    pub(super) fn input_domain_refs(&self) -> lexical_domains::InputDomains<'_> {
+        lexical_domains::InputDomains::Open(self.parameters.iter())
     }
 
     pub(super) fn input_domains(&self) -> Vec<(Sort, Option<Term>)> {
@@ -182,27 +171,6 @@ impl Definition {
     }
     pub(super) fn input_sorts(&self) -> Vec<Sort> {
         self.parameters.iter().map(|(sort, _)| *sort).collect()
-    }
-    pub(super) fn known_prefix_sorts(&self) -> impl Iterator<Item = Sort> + '_ {
-        self.parameters.iter().map_while(|(sort, annotation)| {
-            matches!(annotation, Annotation::Known(_)).then_some(*sort)
-        })
-    }
-
-    pub(super) fn known_prefix(&self) -> Vec<Parameter> {
-        self.parameters
-            .iter()
-            .map_while(|(sort, annotation)| match annotation {
-                Annotation::Known(ty) => Some(Parameter {
-                    sort: *sort,
-                    ty: ty.clone(),
-                }),
-                Annotation::Description(_)
-                | Annotation::Pending(_)
-                | Annotation::InputType { .. }
-                | Annotation::Suspended { .. } => None,
-            })
-            .collect()
     }
 }
 impl std::fmt::Display for Definition {
@@ -232,6 +200,15 @@ impl std::fmt::Display for Definition {
 }
 
 impl Checker<'_, '_> {
+    /// The outer definition check still owns validation when a recursive edge
+    /// forms an interface. This does not make pending comptime code executable.
+    fn check_open_interface_dependency(&mut self, owner: OwnerId) -> Result<(), Error> {
+        if self.active_open_definitions.contains(&owner) {
+            return Ok(());
+        }
+        self.check_open_definition(owner)
+    }
+
     /// Describe explicit callable formation without executing a signature that
     /// still inspects an abstract caller value. No callable NIR is published.
     fn describe_pending_function_value(
@@ -257,12 +234,10 @@ impl Checker<'_, '_> {
             return Ok(None);
         }
         self.ensure_signature(owner, expr.span)?;
-        if !self.open_functions.contains_key(&owner)
-            || self.known_callable_signature(owner).is_some()
-        {
+        if !self.open_functions.contains_key(&owner) || self.declared_signature(owner).is_some() {
             return Ok(None);
         }
-        self.check_open_definition(owner)?;
+        self.check_open_interface_dependency(owner)?;
         self.ensure_contract(owner, expr.span)?;
         let ItemKind::Fn(sig, _) = &self.package.item(owner).unwrap().kind else {
             unreachable!()
@@ -441,7 +416,7 @@ impl Checker<'_, '_> {
     /// is already known. Staged contexts may still transport a pending identity.
     pub(super) fn open_value_needs_instance(&self, owner: OwnerId) -> bool {
         self.open_functions.get(&owner).is_some_and(|definition| {
-            self.known_callable_signature(owner).is_none()
+            self.declared_signature(owner).is_none()
                 || (self.runtime_value_context()
                     && definition
                         .parameters
@@ -459,7 +434,7 @@ impl Checker<'_, '_> {
         arguments: &[Term],
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
-        self.check_open_definition(owner)?;
+        self.check_open_interface_dependency(owner)?;
         self.check_type_application(owner, arguments, expr.span)?;
         let binders = self.declaration_binders(owner);
         if binders.len() != arguments.len() {
@@ -544,27 +519,7 @@ impl Checker<'_, '_> {
                 parameters,
                 result: result.unwrap(),
             };
-            let ty = self.callable_type(owner, signature.clone());
-            let captures = self.open_instance_captures(owner, &symbols, &signature, expr.span)?;
-            let id = self.instantiate_open_function(owner, &symbols, signature, expr.span)?;
-            Ok(n::Expr {
-                ty,
-                source: source(expr.span),
-                kind: if captures.is_empty() {
-                    K::Function(id)
-                } else {
-                    K::FunctionInstance {
-                        declaration: id,
-                        arguments: captures
-                            .into_iter()
-                            .map(|(parameter, _)| Term::Rigid {
-                                declaration: parameter.declaration,
-                                sort: parameter.sort,
-                            })
-                            .collect(),
-                    }
-                },
-            })
+            self.open_instance_value(owner, &symbols, signature, expr.span)
         })();
         self.alias_substitution = saved;
         result
@@ -572,13 +527,13 @@ impl Checker<'_, '_> {
 
     /// A known callable telescope can be named before its staged body exists.
     /// This exposes identity and signature, never an executable residual body.
-    pub(super) fn known_callable_signature(&self, owner: OwnerId) -> Option<Term> {
+    pub(super) fn declared_signature(&self, owner: OwnerId) -> Option<std::borrow::Cow<'_, Term>> {
         if let Some(signature) = self
             .signatures
             .get(&owner)
             .or_else(|| self.interface_signatures.get(&owner))
         {
-            return Some(signature.clone());
+            return Some(std::borrow::Cow::Borrowed(signature));
         }
         let definition = self.open_functions.get(&owner)?;
         let Annotation::Known(result) = &definition.result else {
@@ -597,10 +552,10 @@ impl Checker<'_, '_> {
                 })
             })
             .collect::<Option<Vec<_>>>()?;
-        Some(Term::Function {
+        Some(std::borrow::Cow::Owned(Term::Function {
             parameters,
             result: Box::new(result.clone()),
-        })
+        }))
     }
 
     pub(super) fn has_staged_body_work(&mut self, owner: OwnerId) -> Result<bool, Error> {
@@ -1803,6 +1758,7 @@ impl Checker<'_, '_> {
     fn in_open_function<T>(
         &mut self,
         owner: OwnerId,
+        instance: Option<Arc<generated_functions::InstanceKey>>,
         check: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let saved_refinements = std::mem::take(&mut self.definition_refinements);
@@ -1811,6 +1767,7 @@ impl Checker<'_, '_> {
         let saved_call = std::mem::replace(&mut self.describing_open_call, false);
         let saved_spread = std::mem::replace(&mut self.describing_open_spread, false);
         let saved_owner = self.signature_owner.replace(owner);
+        let saved_instance = std::mem::replace(&mut self.open_instance, instance);
         let saved_inline = self.inline_selection.take();
         let saved_match_input = self.inline_match_input.take();
         let saved_unselected = std::mem::replace(&mut self.in_unselected_inline, false);
@@ -1833,7 +1790,11 @@ impl Checker<'_, '_> {
         let saved_default_owner = self.default_input_owner.take();
         let saved_effects = self.effect_environment.take();
         let saved_resume = self.effect_resume_result.take();
-        self.context = self.definition_context(owner);
+        self.context = if self.open_instance.is_some() {
+            self.definition_context_in_scope(owner, self.call_input_frames())
+        } else {
+            self.definition_context(owner)
+        };
         let result = check(self);
         self.definition_refinements = saved_refinements;
         self.ordinary_behavior_inputs = saved_behavior_inputs;
@@ -1841,6 +1802,7 @@ impl Checker<'_, '_> {
         self.describing_open_call = saved_call;
         self.describing_open_spread = saved_spread;
         self.signature_owner = saved_owner;
+        self.open_instance = saved_instance;
         self.inline_selection = saved_inline;
         self.inline_match_input = saved_match_input;
         self.in_unselected_inline = saved_unselected;
@@ -1882,7 +1844,7 @@ impl Checker<'_, '_> {
                 "cyclic or excessively deep ordinary open-definition dependency",
             ));
         }
-        let checked = self.in_open_function(owner, |this| {
+        let checked = self.in_open_function(owner, None, |this| {
             let item = this.package.item(owner).unwrap();
             let (sig, body) = match &item.kind {
                 ItemKind::Fn(sig, body) => (sig, Some(*body)),
@@ -5725,7 +5687,7 @@ impl Checker<'_, '_> {
             symbols[slot] = Some(self.normal_value_argument(&route.expression(call), &domain)?);
             return Ok(());
         }
-        let term = self.in_open_function(owner, |this| {
+        let term = self.in_open_function(owner, None, |this| {
             let ItemKind::Fn(sig, _) = &this.package.item(owner).unwrap().kind else {
                 unreachable!()
             };
@@ -5964,9 +5926,7 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         mut description: Option<(&mut BTreeMap<n::LocalId, D>, Option<&D>, usize)>,
     ) -> Result<OpenClauseInference, Error> {
-        if !self.active_open_definitions.contains(&owner) {
-            self.check_open_definition(owner)?;
-        }
+        self.check_open_interface_dependency(owner)?;
         let mut definition = self.open_functions[&owner].clone();
         let ItemKind::Fn(sig, _) = &self.package.item(owner).unwrap().kind else {
             unreachable!()
@@ -6844,21 +6804,9 @@ impl Checker<'_, '_> {
         {
             return Ok(None);
         }
-        let definition = &self.open_functions[&owner];
-        let Annotation::Known(result) = &definition.result else {
+        let Some(signature) = self.declared_signature(owner).map(|sig| sig.into_owned()) else {
             return Ok(None);
         };
-        let mut parameters = Vec::new();
-        for (sort, annotation) in &definition.parameters {
-            let Annotation::Known(ty) = annotation else {
-                return Ok(None);
-            };
-            parameters.push(Parameter {
-                sort: *sort,
-                ty: ty.clone(),
-            });
-        }
-        let result = result.clone();
         if self.checking_default_behavior
             && !matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime)
         {
@@ -6872,38 +6820,31 @@ impl Checker<'_, '_> {
         // every inline alternative.
         // Keep the declared stages; ordinary input checking can retain symbolic
         // comptime inputs without recursively demanding the callee definition.
-        let signature = Term::Function {
-            parameters,
-            result: Box::new(result),
+        let result = if self.type_parameters[&owner].is_empty() && clauses.is_none() {
+            let callee = n::Expr {
+                source: source(expr.span),
+                ty: self.callable_type(owner, signature),
+                kind: K::Function(declaration(self.package, &self.package_identities, owner)),
+            };
+            self.finish_prepared_call(
+                expr,
+                callee,
+                args,
+                vec![],
+                expected,
+                None,
+                CallUse::DefinitionBehavior,
+            )
+        } else {
+            let known = match fixed {
+                Some(arguments) => arguments,
+                None => match clauses {
+                    Some(clauses) => self.function_clause_arguments(expr, owner, clauses)?,
+                    None => self.lexical_function_arguments(owner, expr.span)?,
+                },
+            };
+            self.generic_call_with_receiver(expr, owner, args, expected, None, vec![], known)
         };
-        let callee = n::Expr {
-            source: source(expr.span),
-            ty: self.callable_type(owner, signature.clone()),
-            kind: K::Function(declaration(self.package, &self.package_identities, owner)),
-        };
-        let saved = self.signatures.insert(owner, signature);
-        let result = (|| {
-            if self.type_parameters[&owner].is_empty() && clauses.is_none() {
-                self.finish_call(expr, callee, args, vec![], expected, None)
-            } else {
-                let known = match fixed {
-                    Some(arguments) => arguments,
-                    None => match clauses {
-                        Some(clauses) => self.function_clause_arguments(expr, owner, clauses)?,
-                        None => self.lexical_function_arguments(owner, expr.span)?,
-                    },
-                };
-                self.generic_call_with_receiver(expr, owner, args, expected, None, vec![], known)
-            }
-        })();
-        match saved {
-            Some(signature) => {
-                self.signatures.insert(owner, signature);
-            }
-            None => {
-                self.signatures.remove(&owner);
-            }
-        }
         result.map(Some)
     }
 
@@ -7321,32 +7262,12 @@ impl Checker<'_, '_> {
         if let Some(expected) = expected {
             self.require_expression(&result, expected, expr.span)?;
         }
-        let captures = self.open_instance_captures(owner, &symbols, &signature, expr.span)?;
-        let id = self.instantiate_open_function(owner, &symbols, signature.clone(), expr.span)?;
+        let callee = self.open_instance_value(owner, &symbols, signature, expr.span)?;
         let call = n::Expr {
             source: source(expr.span),
             ty: result,
             kind: K::Call {
-                callee: Box::new(n::Expr {
-                    source: source(expr.span),
-                    ty: signature
-                        .with_comptime_phase(sig.modifiers.is_comptime)
-                        .with_unsafe_call_requirement(sig.modifiers.is_unsafe),
-                    kind: if captures.is_empty() {
-                        K::Function(id)
-                    } else {
-                        K::FunctionInstance {
-                            declaration: id,
-                            arguments: captures
-                                .iter()
-                                .map(|(parameter, _)| Term::Rigid {
-                                    declaration: parameter.declaration,
-                                    sort: parameter.sort,
-                                })
-                                .collect(),
-                        }
-                    },
-                }),
+                callee: Box::new(callee),
                 arguments,
                 parameter_bindings: sig
                     .params
@@ -7448,14 +7369,45 @@ impl Checker<'_, '_> {
         result
     }
 
-    fn instantiate_open_function(
+    fn open_instance_value(
         &mut self,
         owner: OwnerId,
         symbols: &[Option<Term>],
         signature: Term,
         span: Span,
-    ) -> Result<DeclarationId, Error> {
+    ) -> Result<n::Expr, Error> {
         let captures = self.open_instance_captures(owner, symbols, &signature, span)?;
+        let ty = self.callable_type(owner, signature.clone());
+        let id = self.instantiate_open_function(owner, symbols, signature, &captures, span)?;
+        let kind = if captures.is_empty() {
+            K::Function(id)
+        } else {
+            K::FunctionInstance {
+                declaration: id,
+                arguments: captures
+                    .into_iter()
+                    .map(|(binder, _)| Term::Rigid {
+                        declaration: binder.declaration,
+                        sort: binder.sort,
+                    })
+                    .collect(),
+            }
+        };
+        Ok(n::Expr {
+            source: source(span),
+            ty,
+            kind,
+        })
+    }
+
+    fn instantiate_open_function(
+        &mut self,
+        owner: OwnerId,
+        symbols: &[Option<Term>],
+        signature: Term,
+        captures: &[(nir::DeclarationParameter, Term)],
+        span: Span,
+    ) -> Result<DeclarationId, Error> {
         let mut identity = Vec::new();
         for binder in self.declaration_binders(owner) {
             identity.push(
@@ -7470,7 +7422,7 @@ impl Checker<'_, '_> {
             owner,
             declaration_inputs: identity,
             ordinary_inputs: symbols.to_vec(),
-            signature: signature.clone(),
+            signature,
         };
         if let Some(id) = self.generated_functions.instance(&key) {
             return Ok(id);
@@ -7480,7 +7432,7 @@ impl Checker<'_, '_> {
         }
         let checkpoint = self.generated_functions.checkpoint();
         let id = self.generated_functions.fresh_identity(span)?;
-        self.generated_functions.reserve(
+        let instance = self.generated_functions.reserve(
             key,
             nir::function_parameters::Declaration {
                 declaration: id,
@@ -7492,13 +7444,13 @@ impl Checker<'_, '_> {
             },
         );
         self.open_instantiation_depth += 1;
-        let saved_signature = self.signatures.insert(owner, signature.clone());
-        let function = self.in_open_function(owner, |this| {
+        let body = self.in_open_function(owner, Some(Arc::clone(&instance)), |this| {
+            let signature = &instance.signature;
             let item = this.package.item(owner).unwrap();
             let ItemKind::Fn(sig, body) = &item.kind else {
                 unreachable!()
             };
-            let Term::Function { parameters, result } = &signature else {
+            let Term::Function { parameters, result } = signature else {
                 unreachable!()
             };
             for (slot, parameter) in sig.params.iter().enumerate() {
@@ -7534,57 +7486,47 @@ impl Checker<'_, '_> {
             let result_binding = sig.return_binding.map(local);
             let (postconditions, entry_snapshots) =
                 this.program_postconditions(owner, result_binding, result)?;
+            let interface = n::FunctionDeclaration {
+                source: source(item.span),
+                declaration: id,
+                name: item.ident.name.as_str().into(),
+                phase: if sig.modifiers.is_comptime {
+                    n::FunctionPhase::Comptime
+                } else {
+                    n::FunctionPhase::Runtime
+                },
+                inline: sig.modifiers.is_inline,
+                pure: sig.modifiers.is_pure,
+                is_unsafe: sig.modifiers.is_unsafe,
+                signature: signature.clone(),
+                parameters: sig
+                    .params
+                    .iter()
+                    .map(|parameter| local(parameter.hir_id))
+                    .collect(),
+                preconditions,
+                postconditions,
+                entry_snapshots,
+                result_binding,
+                type_parameters: captures
+                    .iter()
+                    .map(|(parameter, _)| parameter.declaration)
+                    .collect(),
+                requirements: this.specialized_open_requirements(owner, symbols, span)?,
+                capabilities: this.specialized_open_capabilities(owner, symbols, span)?,
+                defaults: vec![],
+            };
+            this.generated_functions.begin_body(interface);
             let body = this
                 .package
                 .body(*body)
                 .ok_or_else(|| error(span, "missing open function body"))?;
-            let value = this.function_body(owner, body.value, result)?;
-            Ok(n::Function {
-                interface: nir::program::FunctionDeclaration {
-                    source: source(item.span),
-                    declaration: id,
-                    name: item.ident.name.as_str().into(),
-                    phase: if sig.modifiers.is_comptime {
-                        n::FunctionPhase::Comptime
-                    } else {
-                        n::FunctionPhase::Runtime
-                    },
-                    inline: sig.modifiers.is_inline,
-                    pure: sig.modifiers.is_pure,
-                    is_unsafe: sig.modifiers.is_unsafe,
-                    signature: signature.clone(),
-                    parameters: sig
-                        .params
-                        .iter()
-                        .map(|parameter| local(parameter.hir_id))
-                        .collect(),
-                    preconditions,
-                    postconditions,
-                    entry_snapshots,
-                    result_binding,
-                    type_parameters: captures
-                        .iter()
-                        .map(|(parameter, _)| parameter.declaration)
-                        .collect(),
-                    requirements: this.specialized_open_requirements(owner, symbols, span)?,
-                    capabilities: this.specialized_open_capabilities(owner, symbols, span)?,
-                    defaults: vec![],
-                },
-                body: value,
-            })
+            this.function_body(owner, body.value, result)
         });
-        match saved_signature {
-            Some(signature) => {
-                self.signatures.insert(owner, signature);
-            }
-            None => {
-                self.signatures.remove(&owner);
-            }
-        }
         self.open_instantiation_depth -= 1;
-        match function {
-            Ok(function) => {
-                self.generated_functions.publish(function);
+        match body {
+            Ok(body) => {
+                self.generated_functions.finish_body(id, body);
                 Ok(id)
             }
             Err(failure) => {

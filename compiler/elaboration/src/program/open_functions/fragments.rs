@@ -288,15 +288,24 @@ impl Checker<'_, '_> {
             }
             let function = if let Some(function) = self.generated_functions.body(id) {
                 // A completed body already carries its signature and program contracts.
-                let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let mut fuel = before;
-                let charged =
-                    nir::copy_budget::charge_function_substitution(function, &[], &[], &mut fuel);
-                self.required_steps -= (before - fuel) as u64;
-                charged.map_err(|_| {
-                    error(span, "ordinary region function snapshot budget exhausted")
-                })?;
-                function.clone()
+                nir::copy_budget::clone_function(function, &mut self.required_steps).map_err(
+                    |_| error(span, "ordinary region function snapshot budget exhausted"),
+                )?
+            } else if let Some(interface) = self.generated_functions.declaration(id) {
+                if interface.phase != n::FunctionPhase::Runtime
+                    || !interface.preconditions.is_empty()
+                {
+                    return Err(error(
+                        span,
+                        "ordinary region requires callable code or program contracts still being checked",
+                    ));
+                }
+                identities.push(function_bodies::retain_runtime_identity(
+                    interface,
+                    &mut self.required_steps,
+                    span,
+                )?);
+                continue;
             } else {
                 let Some(owner) = self.source_declarations.owner(id) else {
                     continue;
@@ -310,7 +319,9 @@ impl Checker<'_, '_> {
                     Some(ItemKind::Fn(sig, _)) if !sig.modifiers.is_normal_form_head => {
                         self.ensure_signature(owner, span)?;
                         self.ensure_contract(owner, span)?;
-                        if let Some(signature) = self.known_callable_signature(owner) {
+                        if let Some(signature) =
+                            self.declared_signature(owner).map(|sig| sig.into_owned())
+                        {
                             identities.push(self.runtime_function_identity(owner, signature));
                         }
                         continue;

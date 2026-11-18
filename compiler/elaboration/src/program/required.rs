@@ -1512,12 +1512,15 @@ impl Checker<'_, '_> {
         }
         self.ensure_signature(owner, span)?;
         self.ensure_contract(owner, span)?;
-        let signature = self.known_callable_signature(owner).ok_or_else(|| {
-            error(
-                span,
-                "required comptime function signature still needs invocation inputs",
-            )
-        })?;
+        let signature = self
+            .declared_signature(owner)
+            .map(|sig| sig.into_owned())
+            .ok_or_else(|| {
+                error(
+                    span,
+                    "required comptime function signature still needs invocation inputs",
+                )
+            })?;
         let saved_owner = self.signature_owner.replace(owner);
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_captures = std::mem::take(&mut self.captures);

@@ -2027,9 +2027,7 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         let signature = self
-            .signatures
-            .get(&owner)
-            .or_else(|| self.interface_signatures.get(&owner))
+            .declared_signature(owner)
             .ok_or_else(|| error(span, "ordinary capability requires function signature"))?;
         let Term::Function {
             parameters: ordinary,
@@ -2045,7 +2043,7 @@ impl Checker<'_, '_> {
             .map(|parameter| parameter.declaration)
             .collect::<Vec<_>>();
         let specialized = self.instantiate_input_types_in_scope(
-            signature,
+            &signature,
             &parameters,
             type_arguments,
             &frames,

@@ -7,6 +7,28 @@ use comptime_interpretor::{ErrorKind, Value};
 use nir::{Primitive, Term, program::DescriptionLiteral};
 
 #[test]
+fn recursive_runtime_identity_keeps_its_own_admitted_signature() {
+    let source = r#"
+        comptime fn keep(action: fn(bool, bool) -> bool) -> fn(bool, bool) -> bool { action }
+        fn convert(value: Any, inspect: bool) -> Any {
+            const callback = keep(convert);
+            if inspect { let observed = callback(true, false); assumes observed; };
+            value
+        }
+        fn run() -> bool {
+            let byte: fn(u8, bool) -> u8 = convert;
+            let flag: fn(bool, bool) -> bool = convert;
+            byte(42, true) == 42 and flag(true, true)
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+
+    let guarded = source.replace("-> Any {", "-> Any where requires inspect {");
+    let error = support::compile(&guarded).unwrap_err();
+    assert!(error.contains("erase program preconditions"), "{error}");
+}
+
+#[test]
 fn descriptions_survive_calls_and_containers_without_supplying_identity() {
     let package = support::compile(
         r#"

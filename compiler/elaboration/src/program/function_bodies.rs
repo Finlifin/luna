@@ -10,6 +10,26 @@ pub(super) enum Defaults {
     CallPlan,
 }
 
+/// Retain the fields needed to form a runtime function value in a source
+/// snapshot. Program contract admission remains the consumer's responsibility.
+pub(super) fn retain_runtime_identity(
+    interface: &n::FunctionDeclaration,
+    steps: &mut u64,
+    span: Span,
+) -> Result<n::RuntimeFunctionIdentity, Error> {
+    debug_assert_eq!(interface.phase, n::FunctionPhase::Runtime);
+    nir::copy_budget::charge_callable_formation(interface.into(), steps)
+        .map_err(|_| error(span, "runtime function identity snapshot budget exhausted"))?;
+    Ok(n::RuntimeFunctionIdentity {
+        source: interface.source,
+        declaration: interface.declaration,
+        type_parameters: interface.type_parameters.clone(),
+        requirements: interface.requirements.clone(),
+        capabilities: interface.capabilities.clone(),
+        signature: interface.callable_type(),
+    })
+}
+
 impl Checker<'_, '_> {
     pub(super) fn runtime_function_identity(
         &self,

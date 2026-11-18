@@ -19,7 +19,7 @@ pub fn retained_callable_inputs(
         .chain(
             identities
                 .iter()
-                .map(|f| (Node::RuntimeIdentity(f), f.type_parameters.as_slice())),
+                .map(|f| (Node::Formation(f.into()), f.type_parameters.as_slice())),
         )
     {
         *steps = steps

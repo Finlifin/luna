@@ -30,7 +30,7 @@ impl Scope {
                 span,
             )?;
             let caller_scope =
-                environment::copy_domains(checker.call_inference_domain_refs(), &mut fuel, span)?;
+                environment::copy_domains(checker.lexical_input_domains(), &mut fuel, span)?;
             Ok::<_, Error>((environment, caller_scope))
         })();
         checker.required_steps = fuel;

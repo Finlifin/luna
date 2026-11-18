@@ -1,4 +1,4 @@
-//! Generated bodies and the recursive instance reservations that name them.
+//! Recursive instance reservations, checked interfaces and completed bodies.
 use super::*;
 use std::{collections::HashMap, sync::Arc};
 
@@ -21,6 +21,7 @@ pub(super) struct GeneratedFunctions {
     next: u32,
     instances: HashMap<Arc<InstanceKey>, usize>,
     reservations: Vec<(Arc<InstanceKey>, nir::function_parameters::Declaration)>,
+    checking: BTreeMap<DeclarationId, n::FunctionDeclaration>,
     bodies: Vec<n::Function>,
     positions: BTreeMap<DeclarationId, usize>,
 }
@@ -53,17 +54,39 @@ impl GeneratedFunctions {
         &mut self,
         key: InstanceKey,
         inputs: nir::function_parameters::Declaration,
-    ) {
+    ) -> Arc<InstanceKey> {
         let key = Arc::new(key);
         let previous = self.instances.insert(key.clone(), self.reservations.len());
         debug_assert!(previous.is_none());
-        self.reservations.push((key, inputs));
+        self.reservations.push((key.clone(), inputs));
+        key
     }
 
     pub(super) fn parameter_declarations(
         &self,
     ) -> impl Iterator<Item = &nir::function_parameters::Declaration> {
         self.reservations.iter().map(|(_, inputs)| inputs)
+    }
+
+    /// Make the checked interface visible while its owner elaborates the body.
+    /// It belongs to the same transaction as the instance reservation.
+    pub(super) fn begin_body(&mut self, interface: n::FunctionDeclaration) {
+        let previous = self.checking.insert(interface.declaration, interface);
+        debug_assert!(previous.is_none());
+    }
+
+    pub(super) fn finish_body(&mut self, id: DeclarationId, body: n::Expr) {
+        let interface = self
+            .checking
+            .remove(&id)
+            .expect("active instance interface");
+        self.publish(n::Function { interface, body });
+    }
+
+    pub(super) fn declaration(&self, id: DeclarationId) -> Option<&n::FunctionDeclaration> {
+        self.checking
+            .get(&id)
+            .or_else(|| self.body(id).map(|f| &f.interface))
     }
 
     pub(super) fn publish(&mut self, function: n::Function) {
@@ -84,7 +107,8 @@ impl GeneratedFunctions {
         for function in self.bodies.drain(checkpoint.bodies..) {
             self.positions.remove(&function.declaration);
         }
-        for (key, _) in self.reservations.drain(checkpoint.reservations..) {
+        for (key, inputs) in self.reservations.drain(checkpoint.reservations..) {
+            self.checking.remove(&inputs.declaration);
             self.instances.remove(&key);
         }
     }
@@ -110,6 +134,28 @@ mod tests {
         }
     }
 
+    fn declaration(id: DeclarationId) -> n::FunctionDeclaration {
+        n::FunctionDeclaration {
+            declaration: id,
+            source: n::SourceRange::generated(id.local),
+            signature: key(0).signature,
+            phase: n::FunctionPhase::Runtime,
+            name: "example".into(),
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            type_parameters: vec![],
+            parameters: vec![],
+            defaults: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+        }
+    }
+
     #[test]
     fn enclosing_failure_retires_nested_reservations_without_reusing_identities() {
         let mut generated = GeneratedFunctions::default();
@@ -128,14 +174,40 @@ mod tests {
         let committed = reserve(&mut generated, 1);
         let outer = generated.checkpoint();
         let recursive = reserve(&mut generated, 2);
+        assert!(generated.declaration(recursive).is_none());
+        generated.begin_body(declaration(recursive));
+        assert_eq!(
+            generated.declaration(recursive),
+            Some(&declaration(recursive))
+        );
+        assert!(generated.body(recursive).is_none());
         let inner = generated.checkpoint();
         let failed = reserve(&mut generated, 3);
+        generated.begin_body(declaration(failed));
         generated.rollback(inner);
+        assert!(generated.declaration(failed).is_none());
+        assert!(generated.declaration(recursive).is_some());
         assert_eq!(generated.instance(&key(2)), Some(recursive));
         assert_eq!(generated.instance(&key(3)), None);
         let retried = reserve(&mut generated, 3);
         assert_ne!(failed, retried);
+        generated.begin_body(declaration(retried));
+        generated.finish_body(
+            retried,
+            n::Expr {
+                ty: p(P::Bool),
+                source: n::SourceRange::generated(retried.local),
+                kind: K::Literal(n::Literal::Bool(true)),
+            },
+        );
+        assert_eq!(
+            generated.declaration(retried),
+            Some(&generated.body(retried).unwrap().interface)
+        );
         generated.rollback(outer);
+        assert!(generated.declaration(recursive).is_none());
+        assert!(generated.declaration(retried).is_none());
+        assert!(generated.body(retried).is_none());
         assert_eq!(generated.instance(&key(1)), Some(committed));
         assert_eq!(generated.instance(&key(2)), None);
         assert_eq!(generated.instance(&key(3)), None);

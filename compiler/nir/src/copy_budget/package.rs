@@ -173,7 +173,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         meter.contracts(requirements, capabilities)?;
     }
     for identity in runtime_function_identities {
-        meter.node(Node::RuntimeIdentity(identity))?;
+        meter.node(Node::Formation(identity.into()))?;
     }
     for head in normal_forms {
         meter.head(head)?;

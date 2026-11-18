@@ -19,6 +19,25 @@ fn run(source: &str, expected: Value, order: &[&str]) {
 }
 
 #[test]
+fn definition_behavior_edge_uses_the_open_callees_declared_default() {
+    let package = compile(
+        r#"
+        pure fn select(comptime flag: bool, .value: bool = true) -> bool {
+            inline if flag { value } else { false }
+        }
+        pure fn wrapper(comptime flag: bool) -> bool {
+            inline if flag { select(flag) } else { false }
+        }
+        fn run() -> bool { wrapper(true) and not wrapper(false) }
+    "#,
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
 fn inline_control_in_runtime_defaults_keeps_selector_dependencies_and_all_branches() {
     for expression in [
         "inline if mode {not value} else {value}",

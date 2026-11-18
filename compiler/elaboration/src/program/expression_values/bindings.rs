@@ -283,7 +283,8 @@ impl Checker<'_, '_> {
                     }
                 }
                 let ty = self
-                    .known_callable_signature(owner)
+                    .declared_signature(owner)
+                    .map(|sig| sig.into_owned())
                     .ok_or_else(|| error(expr.span, "declaration is not a supported callable"))?;
                 let ty = self.callable_type(owner, ty);
                 self.check_type_application(owner, &[], expr.span)?;

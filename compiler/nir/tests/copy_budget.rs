@@ -829,6 +829,18 @@ fn callable_bindings_bound_owned_metadata_independently_of_body_code() {
 }
 
 #[test]
+fn retaining_formation_and_copying_code_charge_their_own_payloads() {
+    use nir::copy_budget::{charge_callable_formation, clone_function};
+    let mut value = function();
+    value.body = large();
+    charge_callable_formation((&value.interface).into(), &mut 128).unwrap();
+    assert!(clone_function(&value, &mut 128).is_err());
+    assert_eq!(clone_function(&value, &mut 10000).unwrap(), value);
+    value.interface.requirements = vec![nir::program::TypePredicate::Bool(true); 512];
+    assert!(charge_callable_formation((&value.interface).into(), &mut 128).is_err());
+}
+
+#[test]
 fn declaration_copy_bounds_metadata_without_visiting_executable_code() {
     let mut value = function();
     value.body = large();

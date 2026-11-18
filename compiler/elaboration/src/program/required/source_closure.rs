@@ -107,29 +107,31 @@ impl Checker<'_, '_> {
                 }
                 Dependency::Definition(id) => id,
             };
-            if let Some(function) = self.generated_functions.body(id) {
-                if function.phase == n::FunctionPhase::Runtime {
-                    if !function.preconditions.is_empty() && !has_staged_inputs(&function.signature)
+            if let Some(interface) = self.generated_functions.declaration(id) {
+                if interface.phase == n::FunctionPhase::Runtime {
+                    if !interface.preconditions.is_empty()
+                        && !has_staged_inputs(&interface.signature)
                     {
                         return Err(error(span, ERASED_PRECONDITIONS));
                     }
-                    runtime_function_identities.push(n::RuntimeFunctionIdentity {
-                        source: function.source,
-                        requirements: function.requirements.clone(),
-                        capabilities: function.capabilities.clone(),
-                        declaration: id,
-                        type_parameters: function.interface.type_parameters.clone(),
-                        signature: function
-                            .interface
-                            .signature
-                            .clone()
-                            .with_unsafe_call_requirement(function.interface.is_unsafe),
-                    });
+                    runtime_function_identities.push(function_bodies::retain_runtime_identity(
+                        interface,
+                        &mut self.required_steps,
+                        span,
+                    )?);
                 } else {
+                    let function = self.generated_functions.body(id).ok_or_else(|| {
+                        error(span, "required comptime code is still being checked")
+                    })?;
                     let found = function_references(function, &mut self.required_steps)
                         .map_err(|failure| error(span, failure.to_string()))?;
                     work.extend(found, &mut self.required_steps, span)?;
-                    functions.push(function.clone());
+                    functions.push(
+                        nir::copy_budget::clone_function(function, &mut self.required_steps)
+                            .map_err(|_| {
+                                error(span, "required function snapshot budget exhausted")
+                            })?,
+                    );
                 }
                 continue;
             }
@@ -144,9 +146,12 @@ impl Checker<'_, '_> {
             if modifiers.is_some_and(|flags| !flags.is_comptime && !flags.is_normal_form_head) {
                 self.ensure_signature(owner, span)?;
                 self.ensure_contract(owner, span)?;
-                let signature = self.known_callable_signature(owner).ok_or_else(|| {
-                    error(span, "runtime function identity requires a known signature")
-                })?;
+                let signature = self
+                    .declared_signature(owner)
+                    .map(|sig| sig.into_owned())
+                    .ok_or_else(|| {
+                        error(span, "runtime function identity requires a known signature")
+                    })?;
                 let preconditions = self
                     .program_requirements
                     .get(&owner)

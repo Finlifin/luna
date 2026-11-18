@@ -89,6 +89,23 @@ pub fn charge_callable_bindings(
     charge_node(Node::CallableBindings(function), steps, false, None)
 }
 
+/// Bound the callable fields retained when publishing an identity without code.
+pub fn charge_callable_formation(
+    value: crate::callable_source::Formation<'_>,
+    steps: &mut u64,
+) -> Result<(), CopyBudgetExhausted> {
+    charge_node(Node::Formation(value), steps, false, None)
+}
+
+/// Clone complete code only when its consumer actually needs the body.
+pub fn clone_function(
+    value: &n::Function,
+    steps: &mut u64,
+) -> Result<n::Function, CopyBudgetExhausted> {
+    charge_node(Node::Function(value), steps, false, None)?;
+    Ok(value.clone())
+}
+
 pub fn charge_pattern_rewrite(
     value: &n::Pattern,
     steps: &mut u64,
@@ -219,7 +236,7 @@ pub(crate) enum Node<'a> {
     Region(&'a n::DefinitionRegion),
     Function(&'a n::Function),
     FunctionDeclaration(&'a n::FunctionDeclaration),
-    RuntimeIdentity(&'a n::RuntimeFunctionIdentity),
+    Formation(crate::callable_source::Formation<'a>),
     CallableBindings(&'a n::FunctionDeclaration),
     Predicate(&'a n::TypePredicate),
     Requirement(&'a n::TraitRequirement),
@@ -551,21 +568,23 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                 );
                 0
             }
-            Node::RuntimeIdentity(identity) => {
-                let n::RuntimeFunctionIdentity {
-                    source: _,
-                    declaration: _,
-                    type_parameters,
-                    signature,
-                    requirements,
-                    capabilities,
-                } = identity;
-                charge_width(steps, type_parameters.len())?;
-                charge_width(steps, requirements.len())?;
-                charge_width(steps, capabilities.len())?;
-                work.push((Node::Type(signature), depth));
-                work.extend(requirements.iter().map(|p| (Node::Predicate(p), depth)));
-                work.extend(capabilities.iter().map(|r| (Node::Requirement(r), depth)));
+            Node::Formation(formation) => {
+                charge_width(steps, formation.parameters.len())?;
+                charge_width(steps, formation.requirements.len())?;
+                charge_width(steps, formation.capabilities.len())?;
+                work.push((Node::Type(formation.signature), depth));
+                work.extend(
+                    formation
+                        .requirements
+                        .iter()
+                        .map(|p| (Node::Predicate(p), depth)),
+                );
+                work.extend(
+                    formation
+                        .capabilities
+                        .iter()
+                        .map(|r| (Node::Requirement(r), depth)),
+                );
                 0
             }
             Node::Function(function) => {

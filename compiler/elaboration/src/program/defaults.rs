@@ -63,14 +63,17 @@ impl Checker<'_, '_> {
                     "default preparation needs a function declaration",
                 ));
             };
-            let Term::Function { parameters, .. } = self
-                .signatures
-                .get(&owner)
-                .or_else(|| self.interface_signatures.get(&owner))
-                .unwrap()
-                .clone()
-            else {
-                unreachable!()
+            let signature = self
+                .declared_signature(owner)
+                .ok_or_else(|| {
+                    error(
+                        span,
+                        "ordinary default requires a formed declaration signature",
+                    )
+                })?
+                .into_owned();
+            let Term::Function { parameters, .. } = signature else {
+                unreachable!("declaration has a function telescope")
             };
             let parameter = sig
                 .params
@@ -179,16 +182,7 @@ impl Checker<'_, '_> {
                     scope.parameters = self.input_binders(parameters);
                 }
                 scope.requirements = self.definition_requirements(owner);
-                if let Some(signature) = self
-                    .signatures
-                    .get(&owner)
-                    .or_else(|| self.interface_signatures.get(&owner))
-                {
-                    if let Term::Function { parameters, .. } = signature.callable_signature() {
-                        scope.input_scope =
-                            parameters.iter().map(|parameter| parameter.sort).collect();
-                    }
-                }
+                scope.input_scope = self.lexical_input_domains().map(|(sort, _)| sort).collect();
                 if let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
                     self.package.item(owner).map(|item| &item.kind)
                 {

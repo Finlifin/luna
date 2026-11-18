@@ -274,7 +274,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             return Ok(None);
         }
         let domains = self.trait_domains(owner)?;
-        let Some(signature) = self.known_callable_signature(owner) else {
+        let Some(signature) = self.declared_signature(owner).map(|sig| sig.into_owned()) else {
             return Ok(None);
         };
         let (captured, local_domains) = declaration_inputs::KnownInputs::partition(

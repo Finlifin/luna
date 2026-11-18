@@ -21,10 +21,10 @@ mod generated_functions;
 mod inline_control;
 mod inline_loops;
 pub mod inlining;
-mod input_domains;
 mod input_observation;
 mod input_routing;
 mod intrinsics;
+mod lexical_domains;
 mod nominal_fields;
 mod spreads;
 mod tactics;
@@ -46,6 +46,7 @@ mod dependent_inputs;
 mod derivation;
 mod dynamic_instances;
 mod enum_groups;
+mod input_domains;
 mod input_facts;
 mod interfaces;
 mod iteration;
@@ -443,6 +444,7 @@ fn elaborate_with_attributes(
         open_functions: BTreeMap::new(),
         active_open_definitions: BTreeSet::new(),
         open_instantiation_depth: 0,
+        open_instance: None,
         generated_functions: Default::default(),
         ordinary_behavior_functions: Vec::new(),
         checking_open_behavior: false,
@@ -500,7 +502,6 @@ fn elaborate_with_attributes(
         callable_value_inputs: BTreeMap::new(),
         open_staged_locals: BTreeSet::new(),
         open_member_locals: BTreeSet::new(),
-        signature_prefixes: BTreeMap::new(),
         signature_domains: BTreeMap::new(),
         default_input_scope: None,
         default_input_owner: None,
@@ -1357,7 +1358,10 @@ fn elaborate_candidate<'a, 'h>(
         {
             continue;
         }
-        if let Some(signature) = checker.known_callable_signature(owner) {
+        if let Some(signature) = checker
+            .declared_signature(owner)
+            .map(|sig| sig.into_owned())
+        {
             output
                 .runtime_function_identities
                 .push(checker.runtime_function_identity(owner, signature));
@@ -1517,6 +1521,12 @@ impl GeneratorCell {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CallUse {
+    Invocation,
+    DefinitionBehavior,
+}
+
 struct Checker<'a, 'h> {
     source_declarations: source_declarations::SourceDeclarations<'a, 'h>,
     next_definition_identity: u32,
@@ -1535,6 +1545,7 @@ struct Checker<'a, 'h> {
     open_functions: BTreeMap<OwnerId, open_functions::Definition>,
     active_open_definitions: BTreeSet<OwnerId>,
     open_instantiation_depth: usize,
+    open_instance: Option<std::sync::Arc<generated_functions::InstanceKey>>,
     generated_functions: generated_functions::GeneratedFunctions,
     ordinary_behavior_functions: Vec<n::Function>,
     checking_open_behavior: bool,
@@ -1594,7 +1605,6 @@ struct Checker<'a, 'h> {
     open_staged_locals: BTreeSet<n::LocalId>,
     // Pending member results, not Type identities or permission evidence.
     open_member_locals: BTreeSet<n::LocalId>,
-    signature_prefixes: BTreeMap<OwnerId, Vec<Parameter>>,
     signature_domains: BTreeMap<OwnerId, Vec<(Sort, Option<Term>)>>,
     default_input_scope: Option<Vec<(Sort, Option<Term>)>>,
     default_input_owner: Option<OwnerId>,
@@ -2163,20 +2173,12 @@ impl Checker<'_, '_> {
                     .entry(owner)
                     .or_default()
                     .push((parameter_type.sort, Some(parameter_type.ty.clone())));
-                let pending = annotations
-                    .iter()
-                    .any(|(_, annotation)| annotation.needs_instance());
-                let index = if pending {
-                    parameter_index
-                } else {
-                    parameters.len()
-                };
                 if parameter_type.sort == Sort::Type {
                     self.input_facts.types.insert(
                         local(parameter.hir_id),
                         Term::Bound {
                             depth: 0,
-                            index,
+                            index: parameter_index,
                             sort: Sort::Type,
                         },
                     );
@@ -2187,19 +2189,15 @@ impl Checker<'_, '_> {
                         (
                             Term::Bound {
                                 depth: 0,
-                                index,
+                                index: parameter_index,
                                 sort: Sort::ComptimeValue,
                             },
                             parameter_type.ty.clone(),
                         ),
                     );
                 }
-                if !pending {
+                if parameters.len() == parameter_index {
                     parameters.push(parameter_type);
-                    self.signature_prefixes
-                        .entry(owner)
-                        .or_default()
-                        .push(parameters.last().unwrap().clone());
                 }
             }
             self.ready_signature_capabilities(owner, &mut pending_capabilities, true)?;
@@ -2267,7 +2265,6 @@ impl Checker<'_, '_> {
         self.numeric_defaults = saved_defaults;
         self.active_signatures.remove(&owner);
         self.normal_input_prefixes.remove(&owner);
-        self.signature_prefixes.remove(&owner);
         self.signature_domains.remove(&owner);
         if checked.is_err() {
             self.lexical_input_plans.remove(&owner);
@@ -3909,7 +3906,6 @@ impl Checker<'_, '_> {
         context
     }
     fn definition_context(&self, owner: OwnerId) -> crate::ptc::Context {
-        let base = self.binder_context(owner);
         let scope = self
             .signatures
             .get(&owner)
@@ -3926,6 +3922,15 @@ impl Checker<'_, '_> {
                     .map(|definition| vec![definition.input_sorts()])
             })
             .unwrap_or_default();
+        self.definition_context_in_scope(owner, scope)
+    }
+
+    fn definition_context_in_scope(
+        &self,
+        owner: OwnerId,
+        scope: Vec<Vec<Sort>>,
+    ) -> crate::ptc::Context {
+        let base = self.binder_context(owner);
         let mut context = base.theory_in_scope(scope);
         for assumption in base.assumptions() {
             context.assume(assumption.clone());
@@ -4513,8 +4518,8 @@ impl Checker<'_, '_> {
             vec![scope.iter().map(|p| p.0).collect()]
         };
         let template = self
-            .known_callable_signature(owner)
-            .or_else(|| self.interface_signatures.get(&owner).cloned())
+            .declared_signature(owner)
+            .map(|sig| sig.into_owned())
             .ok_or_else(|| error(expr.span, "declaration is not a supported callable"))?;
         let parameters = self
             .declaration_binders(owner)
@@ -4666,18 +4671,17 @@ impl Checker<'_, '_> {
             let value = self.function_instance(expr, owner, template, expected, !pending_open)?;
             return self.callable_value_view(value, expected, expr.span);
         }
-        let (original, known_parameters, known_result) = match self
-            .known_callable_signature(owner)
-            .or_else(|| self.interface_signatures.get(&owner).cloned())
-        {
-            Some(signature) => (signature, None, true),
-            None => {
-                let (signature, known, result) = self
-                    .open_callable_inference_shape(owner)
-                    .ok_or_else(|| error(expr.span, "declaration is not a supported callable"))?;
-                (signature, Some(known), result)
-            }
-        };
+        let (original, known_parameters, known_result) =
+            match self.declared_signature(owner).map(|sig| sig.into_owned()) {
+                Some(signature) => (signature, None, true),
+                None => {
+                    let (signature, known, result) =
+                        self.open_callable_inference_shape(owner).ok_or_else(|| {
+                            error(expr.span, "declaration is not a supported callable")
+                        })?;
+                    (signature, Some(known), result)
+                }
+            };
         let expected_shape = expected
             .map(|ty| self.structural_type(ty, expr.span))
             .transpose()?;
@@ -5078,10 +5082,9 @@ impl Checker<'_, '_> {
         let (parameters, template, pending_defaults) =
             self.function_type_plan(owner, &known, expr.span)?;
         let signature = self.instantiate_input_types(
-            self.signatures
-                .get(&owner)
-                .or_else(|| self.interface_signatures.get(&owner))
-                .ok_or_else(|| error(expr.span, "declaration is not a supported callable"))?,
+            self.declared_signature(owner)
+                .ok_or_else(|| error(expr.span, "declaration is not a supported callable"))?
+                .as_ref(),
             &all_parameters,
             &template,
             expr.span,
@@ -5778,7 +5781,15 @@ impl Checker<'_, '_> {
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
         if prefix.is_empty() || !matches!(callee.kind, K::ComptimeFunctionInstance { .. }) {
-            return self.finish_prepared_call(expr, callee, args, prefix, expected, partial);
+            return self.finish_prepared_call(
+                expr,
+                callee,
+                args,
+                prefix,
+                expected,
+                partial,
+                CallUse::Invocation,
+            );
         }
         // The receiver is the leftmost source computation. Bind it outside
         // clause preparation, also when a spread later wraps the inner call.
@@ -5789,8 +5800,15 @@ impl Checker<'_, '_> {
             for value in prefix {
                 prepared.push(self.bind_type_input(value, &mut statements, expr.span)?);
             }
-            let call =
-                self.finish_prepared_call(expr, callee, args, prepared, expected, partial)?;
+            let call = self.finish_prepared_call(
+                expr,
+                callee,
+                args,
+                prepared,
+                expected,
+                partial,
+                CallUse::Invocation,
+            )?;
             Ok(n::Expr {
                 source: source(expr.span),
                 ty: call.ty.clone(),
@@ -5812,6 +5830,7 @@ impl Checker<'_, '_> {
         prefix: Vec<n::Expr>,
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
+        call_use: CallUse,
     ) -> Result<n::Expr, Error> {
         if callee.ty.is_normal_form_callable() && !matches!(expr.kind, H::NFApplication(..)) {
             return Err(error(
@@ -5826,7 +5845,7 @@ impl Checker<'_, '_> {
             && self.runtime_value_context()
         {
             let value = self.with_staged_input(true, |this| {
-                this.finish_call(expr, callee, args, prefix, None, None)
+                this.finish_prepared_call(expr, callee, args, prefix, None, None, call_use)
             })?;
             return self.deliver_comptime_result(expr, value, expected);
         }
@@ -5862,11 +5881,10 @@ impl Checker<'_, '_> {
             }
         }
         // Preserve selected clause arguments when a constant/function value
-        // denotes an open declaration. Analysis-only signatures suppress this
-        // route while constructing ordinary behavior call edges.
+        // denotes an open declaration. Definition-side edges keep the template.
         if let Some(owner) = direct
             && self.open_functions.contains_key(&owner)
-            && !self.signatures.contains_key(&owner)
+            && call_use == CallUse::Invocation
             && prefix.is_empty()
         {
             let clauses = match &callee.kind {

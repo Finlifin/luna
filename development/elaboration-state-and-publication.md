@@ -91,7 +91,7 @@ WorldRevision 描述物理数据版本；visibility_frontier 描述当前语义�
 | package、package_identities、target、protocols | WorldSnapshot / SemanticView | 稳定只读输入，不能随候选覆写 |
 | signatures、requirements、defaults、checked_traits、checked_implementations | 定义生产者及其完成结果 | 已完成部分进入稳定世界，活动前缀不与其共表伪装完成 |
 | active_signatures、active_constants、active_required | 请求 owner 的求值/观察栈 | 记录具体正在生产的 facet，退出后移除；不能只以 owner 相同判循环 |
-| normal_input_prefixes、signature_prefixes、signature_domains | SignatureTask | 前缀可供合法观察，不能当完整签名导出 |
+| normal_input_prefixes、signature_domains | SignatureTask | 前缀可供合法观察，不能当完整签名导出 |
 | locals、captures、loops、result、return_observations、effect_environment | BodyRegion / ControlFrame | 嵌套进入显式帧；退出交付结果和证据，不把临时上下文留在共享 Checker |
 | context、pending_type_uses、pending_refinements、候选替换 | CandidateTrial / Region obligations | 前提、赋值、term result 与诊断决定一起提交 |
 | code_values、pattern_codes、generator_cells、code_method_captures | 当前代码构造/执行 owner | 声明模板可共享，实例捕获、可变 cell 和实际 CodeValue 不能共享误用 |
@@ -712,6 +712,27 @@ VM 在形成具名 runtime 函数值和接收冻结值时，用当前声明环�
 泛型代码才需读取主体。runtime 函数身份可以穿过 comptime 并作为 IIR 类型中的数据，
 仅凭身份无法将函数列为可执行根。当前可执行源码仍由完整包或已有的已检查片段供应；
 在同一轮 elaboration 中按需向尚未完成的源码模板请求主体，仍属后续工作。
+
+#### 开放实例的声明与主体
+
+同一个 `fn convert(value: Any, inspect: bool) -> Any` 可以按调用方的目标接口
+形成不同实例。例如 `fn(u8, bool) -> u8` 实例的主体可以把 `convert` 交给
+接收 `fn(bool, bool) -> bool` 的 comptime 函数。结果携带后一个实例的身份，
+待运行时才调用。若两者共享源码签名表中的一个可变条目，内层查询就可能读到
+外层实例的 `u8`。这一用法和程序前置条件的拒绝例见[源码回归](../compiler/luna/tests/gradual_type_data.rs)。
+
+源码声明表保留定义端的签名。进入实例时，词法帧持有实例键，其中包括子句输入、
+普通静态输入和已准入的签名；检查实际主体的调用、PTC 上下文和代码生成器均从该帧
+观察普通参数。检查签名时尚待确定的参数仍占原槽。只需要已知前缀的消费者在首个
+待决槽停止。定义端行为分析的调用边显式指向源声明。省略实参时，分析使用被调声明
+提供的默认表达式；嵌套调用可以独立请求实例。
+
+`GeneratedFunctions` 先预留身份以闭合递归边。形成签名、类型要求和程序契约后，
+当前事务可按实例身份读取声明。此时 required invocation 可以携带合法的 runtime
+函数值；需要执行 comptime 代码的请求仍须取得已完成主体。定义片段做算术验证时，
+具有程序前置条件的调用仍需要载有这些条件的函数。主体成功时同一份声明进入
+最终函数。实例失败时撤销本次预留、活动声明，以及本次启动并已完成的嵌套主体，
+已发出的身份不再复用。通用源码 VM 在入口检查之后挂起等待未完成主体的协议仍待接入。
 
 #### 完整包检查凭证也是迁移边界
 

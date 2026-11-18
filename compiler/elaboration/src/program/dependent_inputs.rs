@@ -317,90 +317,6 @@ impl Checker<'_, '_> {
         Ok((known, arguments, values, collected))
     }
 
-    /// Borrow before choosing a retention policy. Pending descriptions keep
-    /// their positions; they are not a truncated known signature prefix.
-    pub(super) fn call_inference_domain_refs(&self) -> impl Iterator<Item = (Sort, Option<&Term>)> {
-        let declared = self
-            .signature_owner
-            .and_then(|owner| self.signature_domains.get(&owner))
-            .or(self.default_input_scope.as_ref());
-        let open = self
-            .signature_owner
-            .and_then(|owner| self.open_functions.get(&owner))
-            .filter(|_| declared.is_none());
-        let parameters = if declared.is_none() && open.is_none() {
-            self.signature_owner.and_then(|owner| {
-                self.signature_prefixes
-                    .get(&owner)
-                    .map(Vec::as_slice)
-                    .or_else(|| {
-                        self.signatures
-                            .get(&owner)
-                            .or_else(|| self.interface_signatures.get(&owner))
-                            .and_then(|signature| match signature.callable_signature() {
-                                Term::Function { parameters, .. } => Some(parameters.as_slice()),
-                                _ => None,
-                            })
-                    })
-            })
-        } else {
-            None
-        };
-        declared
-            .into_iter()
-            .flat_map(|domains| domains.iter().map(|(sort, ty)| (*sort, ty.as_ref())))
-            .chain(
-                open.into_iter()
-                    .flat_map(|definition| definition.input_domain_refs()),
-            )
-            .chain(
-                parameters
-                    .into_iter()
-                    .flatten()
-                    .map(|parameter| (parameter.sort, Some(&parameter.ty))),
-            )
-    }
-
-    pub(super) fn call_inference_domains(&self) -> Vec<(Sort, Option<Term>)> {
-        self.call_inference_domain_refs()
-            .map(|(sort, ty)| (sort, ty.cloned()))
-            .collect()
-    }
-
-    pub(super) fn call_inference_scope(&self) -> Vec<Parameter> {
-        if let Some(prefix) = self
-            .signature_owner
-            .and_then(|owner| self.signature_prefixes.get(&owner))
-        {
-            return prefix.clone();
-        }
-        if let Some(scope) = &self.default_input_scope {
-            return scope
-                .iter()
-                .map_while(|(sort, ty)| ty.clone().map(|ty| Parameter { sort: *sort, ty }))
-                .collect();
-        }
-        self.signature_owner
-            .and_then(|owner| {
-                self.signatures
-                    .get(&owner)
-                    .or_else(|| self.interface_signatures.get(&owner))
-            })
-            .and_then(|signature| {
-                if let Term::Function { parameters, .. } = signature.callable_signature() {
-                    Some(parameters.clone())
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                self.signature_owner
-                    .and_then(|owner| self.open_functions.get(&owner))
-                    .map(|definition| definition.known_prefix())
-            })
-            .unwrap_or_default()
-    }
-
     pub(super) fn prepare_call_binding(
         &self,
         parameters: &[Parameter],
@@ -419,54 +335,6 @@ impl Checker<'_, '_> {
             nir::CallError::Contract { error, .. } => error,
             other => error(span, other.to_string()),
         })
-    }
-
-    pub(super) fn call_input_frames(&self) -> Vec<Vec<Sort>> {
-        if let Some(domains) = self
-            .signature_owner
-            .and_then(|owner| self.signature_domains.get(&owner))
-        {
-            return if domains.is_empty() {
-                vec![]
-            } else {
-                vec![domains.iter().map(|entry| entry.0).collect()]
-            };
-        }
-        // Scope inspection only needs sorts, not copies of dependent types.
-        if let Some(scope) = &self.default_input_scope {
-            return if scope.is_empty() {
-                vec![]
-            } else {
-                vec![scope.iter().map(|entry| entry.0).collect()]
-            };
-        }
-        let scope = self
-            .signature_owner
-            .and_then(|owner| self.signature_prefixes.get(&owner))
-            .map(Vec::as_slice)
-            .or_else(|| {
-                self.signature_owner
-                    .and_then(|owner| {
-                        self.signatures
-                            .get(&owner)
-                            .or_else(|| self.interface_signatures.get(&owner))
-                    })
-                    .and_then(|signature| {
-                        if let Term::Function { parameters, .. } = signature.callable_signature() {
-                            Some(parameters.as_slice())
-                        } else {
-                            None
-                        }
-                    })
-            });
-        match scope {
-            Some(scope) if !scope.is_empty() => vec![scope.iter().map(|p| p.sort).collect()],
-            _ => self
-                .signature_owner
-                .and_then(|owner| self.open_functions.get(&owner))
-                .map(|definition| vec![definition.input_sorts()])
-                .unwrap_or_default(),
-        }
     }
 
     pub(super) fn instantiate_input_types(
@@ -727,9 +595,7 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         let signature = self
-            .signatures
-            .get(&owner)
-            .or_else(|| self.interface_signatures.get(&owner))
+            .declared_signature(owner)
             .ok_or_else(|| error(span, "ordinary type requirement needs a function signature"))?;
         let mut frames = self.call_input_frames();
         let declarations = self
@@ -738,7 +604,7 @@ impl Checker<'_, '_> {
             .map(|parameter| parameter.declaration)
             .collect::<Vec<_>>();
         let signature = self.instantiate_input_types_in_scope(
-            signature,
+            &signature,
             &declarations,
             arguments,
             &frames,
