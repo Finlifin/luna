@@ -3,6 +3,8 @@
 use super::*;
 use crate::ptc::{Budget, Formula, Outcome};
 mod associated;
+mod contracts;
+pub(super) use contracts::CheckedTraits;
 mod declarations;
 mod discovery;
 mod early_inherent;
@@ -246,9 +248,7 @@ impl Checker<'_, '_> {
         })
     }
 
-    pub(super) fn check_interfaces(
-        &mut self,
-    ) -> Result<(Vec<n::Trait>, Vec<n::Implementation>), Error> {
+    pub(super) fn check_interfaces(&mut self) -> Result<Vec<n::Implementation>, Error> {
         let mut traits = BTreeMap::new();
         let mut required_members = BTreeSet::new();
         for (owner, info) in self.package.owners() {
@@ -357,7 +357,8 @@ impl Checker<'_, '_> {
         let mut method_signature_checks = Vec::new();
         // Declaration guarantees are available when checking implementation
         // binders, but the implementation being checked is never an assumption.
-        self.checked_traits = traits.values().cloned().collect();
+        let traits = std::sync::Arc::new(CheckedTraits::new(traits, &mut self.required_steps)?);
+        self.checked_traits = traits.clone();
         let mut index = crate::implementation::Index::for_builtin_packages(
             self.target,
             self.protocols
@@ -1233,12 +1234,11 @@ impl Checker<'_, '_> {
             self.enums.values(),
             self.newtypes.values(),
         );
-        let trait_values: Vec<_> = traits.values().cloned().collect();
         for (requirements, assumptions, context, span, name) in method_capability_checks {
             let world = crate::capabilities::World {
                 index: &index,
                 implementations: &implementations,
-                traits: &trait_values,
+                traits: &traits,
                 assumptions: &assumptions,
                 context: &context,
             };
@@ -1299,7 +1299,7 @@ impl Checker<'_, '_> {
                 let world = crate::capabilities::World {
                     index: &index,
                     implementations: &implementations,
-                    traits: &trait_values,
+                    traits: &traits,
                     assumptions: &implementation.capabilities,
                     context: &context,
                 };
@@ -1373,7 +1373,7 @@ impl Checker<'_, '_> {
             let world = crate::capabilities::World {
                 index: &index,
                 implementations: &implementations,
-                traits: &trait_values,
+                traits: &traits,
                 assumptions: &pending.assumptions,
                 context: &pending.context,
             };
@@ -1439,7 +1439,7 @@ impl Checker<'_, '_> {
                 let world = crate::capabilities::World {
                     index: &index,
                     implementations: &type_world,
-                    traits: &trait_values,
+                    traits: &traits,
                     assumptions: &assumptions,
                     context: &context,
                 };
@@ -1478,7 +1478,7 @@ impl Checker<'_, '_> {
         }
         self.implementation_index = index;
         self.inherent_index = inherent_index;
-        Ok((traits.into_values().collect(), implementations))
+        Ok(implementations)
     }
 }
 
@@ -1761,8 +1761,7 @@ impl Checker<'_, '_> {
             {
                 let contract = self
                     .checked_traits
-                    .iter()
-                    .find(|t| t.declaration == interface.declaration)
+                    .by_id(interface.declaration)
                     .unwrap()
                     .methods
                     .iter()
@@ -1841,8 +1840,7 @@ impl Checker<'_, '_> {
         if let Some(interface) = interface.as_ref() {
             if let Some(contract) = self
                 .checked_traits
-                .iter()
-                .find(|t| t.declaration == interface.declaration)
+                .by_id(interface.declaration)
                 .and_then(|t| t.methods.iter().find(|method| method.name == name))
             {
                 if !implementation.phases.contains(contract.phase) {
@@ -1865,8 +1863,7 @@ impl Checker<'_, '_> {
         if let Some(interface) = interface.as_ref() {
             let contract = self
                 .checked_traits
-                .iter()
-                .find(|t| t.declaration == interface.declaration)
+                .by_id(interface.declaration)
                 .unwrap()
                 .methods
                 .iter()
@@ -1877,8 +1874,7 @@ impl Checker<'_, '_> {
         if let Some(interface) = interface.as_ref() {
             let contract = self
                 .checked_traits
-                .iter()
-                .find(|t| t.declaration == interface.declaration)
+                .by_id(interface.declaration)
                 .unwrap()
                 .methods
                 .iter()
@@ -2467,8 +2463,7 @@ impl Checker<'_, '_> {
             } => {
                 let contract = self
                     .checked_traits
-                    .iter()
-                    .find(|t| t.declaration == *interface)
+                    .by_id(*interface)
                     .unwrap()
                     .methods
                     .iter()

@@ -10,7 +10,8 @@ pub(super) mod prepared;
 mod publication;
 mod restore;
 mod scope;
-pub(super) use dependencies::{function_references, references};
+mod source_closure;
+pub(super) use dependencies::{Dependency, frozen_references, function_references, references};
 use prepared::PreparedRequired;
 
 /// Required expression evaluation can prepare a distinct clause packet at the
@@ -1666,274 +1667,21 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            let mut functions = Vec::new();
-            let mut runtime_function_identities = Vec::new();
-            let mut live_methods = Vec::new();
-            let mut members = BTreeSet::new();
-            let mut expanded_members = BTreeSet::new();
-            let mut associated = BTreeSet::new();
-            let mut expanded_associated = BTreeSet::new();
-            let mut queue = VecDeque::from_iter(
-                references(
-                    &root,
-                    &mut members,
-                    &mut associated,
-                    &mut self.required_steps,
-                )
-                .map_err(|failure| error(expr.span, failure.to_string()))?,
-            );
-            // A frozen callable input is an execution dependency even when the
-            // source computation refers to it through a local parameter.
-            queue.extend(frozen_references(
+            let source_closure::SourceClosure {
+                mut functions,
+                runtime_function_identities,
+                retained,
+            } = self.required_source_closure(
+                &root,
                 inputs
                     .iter()
                     .filter(|(binding, _, _)| free.contains(binding))
                     .map(|(_, _, value)| value),
-                &mut live_methods,
-                &mut self.required_steps,
+                live.iter()
+                    .filter(|(binding, _, _)| free.contains(binding))
+                    .map(|(_, _, value)| value),
                 expr.span,
-            )?);
-            members.extend(live_methods.iter().map(|method| method.member));
-            for (binding, _, value) in live {
-                if !free.contains(binding) {
-                    continue;
-                }
-                let dependencies = live_references(
-                    value,
-                    &mut members,
-                    &mut associated,
-                    &mut live_methods,
-                    &mut self.required_steps,
-                    expr.span,
-                )?;
-                queue.extend(dependencies);
-            }
-            let mut seen = BTreeSet::new();
-            loop {
-                // Abstract associated values can carry runtime code identities.
-                // Retain their declaration metadata without checking or executing
-                // unrelated runtime function bodies in this comptime snapshot.
-                let pending: Vec<_> = associated
-                    .difference(&expanded_associated)
-                    .copied()
-                    .collect();
-                for member in pending {
-                    self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
-                        error(
-                            expr.span,
-                            "required comptime associated dependency budget exhausted",
-                        )
-                    })?;
-                    expanded_associated.insert(member);
-                    // A generic comptime body may discover a member dependency
-                    // that the enclosing initializer has not demanded yet.
-                    let implementations: Vec<_> = self
-                        .associated_initializers
-                        .keys()
-                        .filter(|(_, id)| *id == member)
-                        .map(|(implementation, _)| *implementation)
-                        .collect();
-                    for implementation in implementations {
-                        self.selected_associated_value(implementation, member, expr.span)?;
-                    }
-                    for implementation in &self.checked_implementations {
-                        for (_, value) in implementation
-                            .associated
-                            .iter()
-                            .filter(|(id, _)| *id == member)
-                        {
-                            queue.extend(
-                                references(
-                                    value,
-                                    &mut members,
-                                    &mut associated,
-                                    &mut self.required_steps,
-                                )
-                                .map_err(|failure| error(expr.span, failure.to_string()))?,
-                            );
-                        }
-                        for (_, initializer) in implementation
-                            .associated_initializers
-                            .iter()
-                            .filter(|(id, _)| *id == member)
-                        {
-                            queue.extend(
-                                references(
-                                    initializer.expression(),
-                                    &mut members,
-                                    &mut associated,
-                                    &mut self.required_steps,
-                                )
-                                .map_err(|failure| error(expr.span, failure.to_string()))?,
-                            );
-                        }
-                    }
-                }
-                for member in members.difference(&expanded_members) {
-                    if !self.interfaces_ready {
-                        return Err(error(
-                            expr.span,
-                            "required comptime evaluation is waiting for the trait implementation world",
-                        ));
-                    }
-                    let (interface, contract) = self
-                        .checked_traits
-                        .iter()
-                        .find_map(|interface| {
-                            interface
-                                .methods
-                                .iter()
-                                .find(|method| method.declaration == *member)
-                                .map(|method| (interface.declaration, method))
-                        })
-                        .ok_or_else(|| {
-                            error(expr.span, "required comptime method contract is missing")
-                        })?;
-                    if !contract.signature.is_comptime_callable()
-                        && !contract.program.preconditions.is_empty()
-                        && !matches!(contract.signature.callable_signature(), Ok(Term::Function { parameters, .. })
-                            if parameters.iter().any(|p| p.sort != Sort::Runtime))
-                    {
-                        return Err(error(
-                            expr.span,
-                            "trait method value would erase program preconditions; callable program contracts are not implemented",
-                        ));
-                    }
-                    // Checked implementation tables already contain the default
-                    // body when it is inherited. An overridden default is not an
-                    // execution dependency and may depend on this very query.
-                    for implementation in &self.checked_implementations {
-                        if implementation.interface == Some(interface) {
-                            queue.extend(
-                                implementation
-                                    .methods
-                                    .iter()
-                                    .filter(|(name, _)| *name == contract.name)
-                                    .map(|(_, body)| *body),
-                            );
-                        }
-                    }
-                }
-                expanded_members.extend(members.iter().copied());
-                let Some(id) = queue.pop_front() else {
-                    // An initializer can refer to another associated value
-                    // without introducing a function edge in this iteration.
-                    // Close both dependency sets before finishing the snapshot.
-                    if !associated.is_subset(&expanded_associated) {
-                        continue;
-                    }
-                    break;
-                };
-                if let Some(member) = self.checked_traits.iter().find_map(|interface| {
-                    interface
-                        .methods
-                        .iter()
-                        .find(|member| member.declaration == id)
-                }) {
-                    // Repeated packet references still name a contract, not a
-                    // function body. Only an inherited default can reuse that
-                    // identity as an executable dependency after expansion.
-                    if !expanded_members.contains(&id) || member.default != Some(id) {
-                        members.insert(id);
-                        continue;
-                    }
-                }
-                if !seen.insert(id) {
-                    continue;
-                }
-                if seen.len() > 256 {
-                    return Err(error(
-                        expr.span,
-                        "required comptime dependency budget exhausted",
-                    ));
-                }
-                if let Some(function) = self
-                    .generated_functions
-                    .iter()
-                    .find(|function| function.declaration == id)
-                {
-                    if function.phase == n::FunctionPhase::Runtime {
-                        if !function.preconditions.is_empty()
-                            && !matches!(&function.interface.signature, Term::Function { parameters, .. }
-                                if parameters.iter().any(|p| p.sort != Sort::Runtime))
-                        {
-                            return Err(error(
-                                expr.span,
-                                "function value would erase program preconditions; callable program contracts are not implemented",
-                            ));
-                        }
-                        runtime_function_identities.push(n::RuntimeFunctionIdentity {
-                            declaration: id,
-                            type_parameters: function.interface.type_parameters.clone(),
-                            signature: function
-                                .interface
-                                .signature
-                                .clone()
-                                .with_unsafe_call_requirement(function.interface.is_unsafe),
-                        });
-                    } else {
-                        queue.extend(
-                            function_references(
-                                &function,
-                                &mut members,
-                                &mut associated,
-                                &mut self.required_steps,
-                            )
-                            .map_err(|failure| error(expr.span, failure.to_string()))?,
-                        );
-                        functions.push(function.clone());
-                    }
-                    continue;
-                }
-                let owner = self.source_declarations.owner(id).ok_or_else(|| {
-                    error(
-                        expr.span,
-                        "required comptime function declaration is missing",
-                    )
-                })?;
-                if self.package.item(owner).is_some_and(|item| matches!(&item.kind,
-                    ItemKind::Fn(sig, _) if !sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head)) {
-                    self.ensure_signature(owner, expr.span)?;
-                    self.ensure_contract(owner, expr.span)?;
-                    let signature = self.known_callable_signature(owner)
-                        .ok_or_else(|| error(expr.span, "runtime function identity requires a known signature"))?;
-                    if self.program_requirements.get(&owner).is_some_and(|requirements| !requirements.is_empty())
-                        && !matches!(&signature, Term::Function { parameters, .. }
-                            if parameters.iter().any(|p| p.sort != Sort::Runtime)) {
-                        return Err(error(expr.span, "function value would erase program preconditions; callable program contracts are not implemented"));
-                    }
-                    runtime_function_identities.push(n::RuntimeFunctionIdentity {
-                        declaration: id,
-                        type_parameters: self.type_parameters[&owner].clone(),
-                        signature: self.callable_type(owner, signature),
-                    });
-                    continue;
-                }
-                if self
-                    .builtin_normal_form_constant(owner, expr.span)?
-                    .is_some()
-                    || self.package.item(owner).is_some_and(|item| {
-                        matches!(&item.kind,
-                    ItemKind::Fn(signature, _) if signature.modifiers.is_normal_form_head)
-                    })
-                {
-                    // Carry the declaration contract, never an executable body.
-                    self.ensure_signature(owner, expr.span)?;
-                    self.ensure_contract(owner, expr.span)?;
-                    continue;
-                }
-                let function = self.required_function(owner, expr.span)?;
-                queue.extend(
-                    function_references(
-                        &function,
-                        &mut members,
-                        &mut associated,
-                        &mut self.required_steps,
-                    )
-                    .map_err(|failure| error(expr.span, failure.to_string()))?,
-                );
-                functions.push(function);
-            }
+            )?;
             // Signature formation may have produced obligations independently of
             // this expression's speculative queue. Settle both before execution.
             let uses: Vec<_> = self
@@ -2024,7 +1772,8 @@ impl Checker<'_, '_> {
             if !self.interfaces_ready
                 && self.pending_refinements.iter().any(|pending| {
                     let id = declaration(self.package, &self.package_identities, pending.owner);
-                    seen.contains(&id) || members.contains(&id)
+                    retained.contains(&Dependency::Definition(id))
+                        || retained.contains(&Dependency::Method(id))
                 })
             {
                 return Err(error(
@@ -2160,13 +1909,16 @@ impl Checker<'_, '_> {
             // Preserve the checked implementation world, projecting only its
             // method tables to the members this invocation can reference. This
             // avoids requiring unrelated runtime bodies in a comptime snapshot.
-            let mut traits = self.checked_traits.clone();
+            let mut traits = self.checked_traits.to_vec();
             for interface in &mut traits {
                 interface
                     .methods
-                    .retain(|method| members.contains(&method.declaration));
+                    .retain(|method| retained.contains(&Dependency::Method(method.declaration)));
                 for method in &mut interface.methods {
-                    if method.default.is_some_and(|body| !seen.contains(&body)) {
+                    if method
+                        .default
+                        .is_some_and(|body| !retained.contains(&Dependency::Definition(body)))
+                    {
                         // Project the unused fallback out of this execution
                         // snapshot only. The final package still checks and
                         // retains the original default declaration.
@@ -2456,126 +2208,6 @@ impl Checker<'_, '_> {
         self.numeric_defaults = saved_defaults;
         result
     }
-}
-
-// Callable identities are execution dependencies wherever they occur in a
-// completed aggregate. Data types are not unfolded and no factory is invoked.
-pub(super) fn frozen_references<'a>(
-    values: impl IntoIterator<Item = &'a Term>,
-    methods: &mut Vec<comptime_interpretor::TraitMethodIdentity>,
-    steps: &mut u64,
-    span: Span,
-) -> Result<BTreeSet<DeclarationId>, Error> {
-    let mut declarations = BTreeSet::new();
-    for value in values {
-        let before = usize::try_from(*steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let bounded = nir::type_computations::charge_term(value, &mut fuel);
-        *steps -= (before - fuel) as u64;
-        bounded.map_err(|failure| error(span, failure.to_string()))?;
-        let mut pending = vec![value];
-        while let Some(value) = pending.pop() {
-            match value {
-                Term::MethodValue(method) => {
-                    methods.push((**method).clone());
-                    pending.extend(method.terms());
-                }
-                Term::FunctionValue {
-                    declaration,
-                    arguments,
-                } => {
-                    declarations.insert(*declaration);
-                    pending.extend(arguments);
-                }
-                Term::ClosureSnapshot { factory, arguments } => {
-                    declarations.insert(*factory);
-                    pending.extend(arguments);
-                }
-                Term::TupleValue(fields) => pending.extend(fields),
-                Term::RecordValue(fields) => pending.extend(fields.iter().map(|(_, value)| value)),
-                Term::OptionalValue { ty, value } => {
-                    pending.push(ty);
-                    if let Some(value) = value {
-                        pending.push(value);
-                    }
-                }
-                Term::ErrorValue { ty, label, value } => {
-                    pending.push(ty);
-                    if let Some(label) = label {
-                        pending.push(label);
-                    }
-                    pending.push(value);
-                }
-                Term::NominalValue { fields, .. } => pending.extend(fields),
-                _ => {}
-            }
-        }
-    }
-    Ok(declarations)
-}
-
-// The traversal includes guards and pattern computations; a function hidden in
-// one of those positions must not escape phase/dependency checks.
-fn live_references(
-    value: &Value,
-    members: &mut BTreeSet<DeclarationId>,
-    associated: &mut BTreeSet<DeclarationId>,
-    live_methods: &mut Vec<comptime_interpretor::TraitMethodIdentity>,
-    steps: &mut u64,
-    span: Span,
-) -> Result<BTreeSet<DeclarationId>, Error> {
-    let mut found = BTreeSet::new();
-    value
-        .visit_owned_graph(steps, &mut |value, fuel| {
-            match value {
-                Value::Function(id)
-                | Value::FunctionInstance {
-                    declaration: id, ..
-                } => {
-                    found.insert(*id);
-                }
-                Value::RuntimeTraitMethod(method) => {
-                    members.insert(method.member);
-                    for term in std::iter::once(&method.subject)
-                        .chain(&method.interface.arguments)
-                        .chain(&method.method_arguments)
-                    {
-                        let before = usize::try_from(*fuel).unwrap_or(usize::MAX);
-                        let mut remaining = before;
-                        let checked = nir::type_computations::charge_term(term, &mut remaining);
-                        *fuel -= (before - remaining) as u64;
-                        checked.map_err(|_| comptime_interpretor::ErrorKind::StepsExhausted)?;
-                    }
-                    live_methods.push((**method).clone());
-                }
-                Value::Closure(closure) => {
-                    if let Some((declaration, _)) = closure.declaration_instance() {
-                        found.insert(declaration);
-                    }
-                    found.extend(
-                        references(closure.body(), members, associated, fuel).map_err(
-                            |failure| match failure {
-                                nir::visit::Error::Budget(_) => {
-                                    comptime_interpretor::ErrorKind::StepsExhausted
-                                }
-                                nir::visit::Error::Invalid(_) => {
-                                    comptime_interpretor::ErrorKind::Type
-                                }
-                            },
-                        )?,
-                    );
-                }
-                _ => {}
-            }
-            Ok(())
-        })
-        .map_err(|failure| {
-            error(
-                span,
-                format!("required comptime graph dependency inspection failed: {failure:?}"),
-            )
-        })?;
-    Ok(found)
 }
 
 // Classification follows resolved value binders, never a failed PTC attempt.

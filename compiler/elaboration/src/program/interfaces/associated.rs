@@ -121,8 +121,7 @@ impl Checker<'_, '_> {
         };
         let Some(contract) = self
             .checked_traits
-            .iter()
-            .find(|t| t.declaration == interface.declaration)
+            .by_id(interface.declaration)
             .and_then(|t| t.associated.iter().find(|a| a.name == name))
         else {
             return Ok(None);
@@ -314,10 +313,9 @@ impl Checker<'_, '_> {
             .find(|item| item.declaration == implementation)
             .ok_or_else(|| error(span, "unknown associated implementation"))?;
         if !selected.phases.comptime
-            && self
-                .checked_traits
-                .iter()
-                .find(|interface| Some(interface.declaration) == selected.interface)
+            && selected
+                .interface
+                .and_then(|id| self.checked_traits.by_id(id))
                 .and_then(|interface| {
                     interface
                         .associated
@@ -331,14 +329,9 @@ impl Checker<'_, '_> {
                 "selected implementation lacks comptime trait phase",
             ));
         }
-        if let Some(value) = self
-            .checked_implementations
-            .iter()
-            .find(|i| i.declaration == implementation)
-            .and_then(|i| i.associated.iter().find(|(id, _)| *id == member))
-        {
-            constants::charge_copy(&value.1, &mut self.required_steps, span)?;
-            return Ok(value.1.clone());
+        if let Some((_, value)) = selected.associated.iter().find(|(id, _)| *id == member) {
+            constants::charge_copy(value, &mut self.required_steps, span)?;
+            return Ok(value.clone());
         }
         if let Some(value) = self.associated_initializer_reference(implementation, member, span) {
             return Ok(value);
@@ -554,8 +547,7 @@ impl Checker<'_, '_> {
                 let mut dependent = false;
                 let binders = self
                     .checked_traits
-                    .iter()
-                    .find(|t| t.declaration == interface)
+                    .by_id(interface)
                     .unwrap()
                     .parameters_with_self();
                 template
@@ -577,25 +569,13 @@ impl Checker<'_, '_> {
                     self.associated_contract(owner, true)?.default
                 };
             }
-            *self
-                .checked_traits
-                .iter_mut()
-                .find(|t| t.declaration == interface)
-                .unwrap()
-                .associated
-                .iter_mut()
-                .find(|a| a.declaration == member)
-                .unwrap() = contract;
+            std::sync::Arc::make_mut(&mut self.checked_traits)
+                .complete_associated(interface, contract);
         }
         // Demand order is not declaration order: normalize the published table.
         for implementation in &mut self.checked_implementations {
             if let Some(interface) = implementation.interface {
-                let members = &self
-                    .checked_traits
-                    .iter()
-                    .find(|t| t.declaration == interface)
-                    .unwrap()
-                    .associated;
+                let members = &self.checked_traits.by_id(interface).unwrap().associated;
                 implementation.associated.sort_by_key(|(member, _)| {
                     members
                         .iter()
@@ -640,14 +620,11 @@ impl Checker<'_, '_> {
             return false;
         };
         let name = self.package.item(owner).unwrap().ident.name.as_str();
-        self.checked_traits
-            .iter()
-            .find(|t| t.declaration == interface)
-            .is_some_and(|t| {
-                t.associated
-                    .iter()
-                    .any(|a| a.name == name && a.ty == p(P::Type))
-            })
+        self.checked_traits.by_id(interface).is_some_and(|t| {
+            t.associated
+                .iter()
+                .any(|a| a.name == name && a.ty == p(P::Type))
+        })
     }
 
     pub(in crate::program) fn associated_reference_owner(
@@ -771,8 +748,7 @@ impl Checker<'_, '_> {
         let name = self.package.item(owner).unwrap().ident.name.as_str();
         let member = self
             .checked_traits
-            .iter()
-            .find(|t| t.declaration == interface)
+            .by_id(interface)
             .and_then(|t| t.associated.iter().find(|a| a.name == name))
             .map(|a| a.declaration)
             .ok_or_else(|| error(span, "associated value has no originating interface member"))?;
@@ -1085,10 +1061,7 @@ impl Checker<'_, '_> {
             .checked_implementations
             .iter()
             .find(|i| i.declaration == selected)?;
-        let interface = self
-            .checked_traits
-            .iter()
-            .find(|t| Some(t.declaration) == implementation.interface)?;
+        let interface = self.checked_traits.by_id(implementation.interface?)?;
         interface
             .associated
             .iter()

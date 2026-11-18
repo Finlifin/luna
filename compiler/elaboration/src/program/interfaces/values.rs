@@ -13,28 +13,14 @@ impl Checker<'_, '_> {
         use nir::type_computations::Error as QueryError;
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let result = (|| {
-            let mut contract = None;
-            for candidate in &self.checked_traits {
-                fuel = fuel.checked_sub(1).ok_or(QueryError::Budget)?;
-                if candidate.declaration == identity.interface.declaration {
-                    contract = Some(candidate);
-                    break;
-                }
-            }
-            let contract = contract.ok_or_else(|| {
-                QueryError::Structure("unknown materialized trait identity".into())
-            })?;
-            let mut method = None;
-            for candidate in &contract.methods {
-                fuel = fuel.checked_sub(1).ok_or(QueryError::Budget)?;
-                if candidate.declaration == identity.member {
-                    method = Some(candidate);
-                    break;
-                }
-            }
-            let method = method.ok_or_else(|| {
-                QueryError::Structure("unknown materialized method identity".into())
-            })?;
+            fuel = fuel.checked_sub(1).ok_or(QueryError::Budget)?;
+            let (contract, method) = self
+                .checked_traits
+                .method(identity.member)
+                .filter(|(interface, _)| interface.declaration == identity.interface.declaration)
+                .ok_or_else(|| {
+                    QueryError::Structure("unknown materialized trait method identity".into())
+                })?;
             nir::member_types::method(
                 contract,
                 method,

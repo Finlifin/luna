@@ -214,11 +214,7 @@ impl Checker<'_, '_> {
         interface: &n::InterfaceInstance,
         subject: &Term,
     ) -> (Vec<DeclarationId>, Vec<Term>) {
-        let def = self
-            .checked_traits
-            .iter()
-            .find(|t| t.declaration == interface.declaration)
-            .unwrap();
+        let def = self.checked_traits.by_id(interface.declaration).unwrap();
         (
             def.parameters_with_self(),
             std::iter::once(subject.clone())
@@ -283,8 +279,7 @@ impl Checker<'_, '_> {
             }
             let interface = self
                 .checked_traits
-                .iter()
-                .find(|t| t.declaration == instance.declaration)
+                .by_id(instance.declaration)
                 .ok_or_else(|| error(span, "unknown interface in member lookup"))?;
             if interface.methods.iter().any(|m| m.name == name)
                 || interface.associated.iter().any(|a| a.name == name)

@@ -463,7 +463,7 @@ fn elaborate_with_attributes(
         active_early_inherent: BTreeSet::new(),
         checking_method_contract: false,
         pending_contract_projections: Vec::new(),
-        checked_traits: Vec::new(),
+        checked_traits: Default::default(),
         checked_implementations: Vec::new(),
         associated_initializers: BTreeMap::new(),
         implementation_relationships: BTreeMap::new(),
@@ -883,9 +883,7 @@ fn elaborate_candidate<'a, 'h>(
             prepared_attributes,
         ));
     }
-    let (traits, implementations) = checker.check_interfaces()?;
-    checker.checked_traits = traits.clone();
-    checker.checked_implementations = implementations.clone();
+    checker.checked_implementations = checker.check_interfaces()?;
     for (&member, &parent) in &checker.self_containers {
         let inherited = checker.requirements[&parent].clone();
         checker
@@ -905,7 +903,7 @@ fn elaborate_candidate<'a, 'h>(
             }
         }
     }
-    for interface in &checker.checked_traits {
+    for interface in checker.checked_traits.iter() {
         for method in &interface.methods {
             if let Some(member) = checker.source_declarations.owner(method.declaration) {
                 checker
@@ -975,7 +973,6 @@ fn elaborate_candidate<'a, 'h>(
             checker.check_type_defaults(owner)?;
         }
     }
-    let traits = checker.checked_traits.clone();
     let implementations = checker.checked_implementations.clone();
     let mut functions = Vec::new();
     for (owner, info) in package.owners() {
@@ -1234,7 +1231,7 @@ fn elaborate_candidate<'a, 'h>(
             });
         }
     }
-    output.traits = traits;
+    output.traits = checker.checked_traits.to_vec();
     output.implementations = implementations;
     // Code methods belong to the elaboration world. Ordinary execution keeps
     // the same trait/implementation identities but no code-only member slots.
@@ -1561,7 +1558,7 @@ struct Checker<'a, 'h> {
     active_early_inherent: BTreeSet<String>,
     checking_method_contract: bool,
     pending_contract_projections: Vec<interfaces::PendingProjection>,
-    checked_traits: Vec<n::Trait>,
+    checked_traits: std::sync::Arc<interfaces::CheckedTraits>,
     checked_implementations: Vec<n::Implementation>,
     associated_initializers:
         BTreeMap<(DeclarationId, DeclarationId), (OwnerId, Vec<DeclarationId>, Vec<Term>)>,

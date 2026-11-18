@@ -87,8 +87,7 @@ impl Checker<'_, '_> {
             })?;
         let contract = self
             .checked_traits
-            .iter()
-            .find(|item| item.declaration == interface.declaration)
+            .by_id(interface.declaration)
             .and_then(|item| {
                 item.methods
                     .iter()

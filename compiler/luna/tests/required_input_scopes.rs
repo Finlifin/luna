@@ -192,3 +192,37 @@ fn required_and_published_bodies_keep_entry_and_result_contracts() {
     assert!(sysroot::compile(&source.replace("keep(9)", "keep(11)")).is_err());
     assert!(sysroot::compile(&source.replace("original\n", "0\n")).is_err());
 }
+
+#[test]
+fn wide_required_type_computation_retains_every_referenced_definition() {
+    use std::fmt::Write;
+    let mut source = String::new();
+    for index in 0..260 {
+        writeln!(source, "pure comptime fn flag{index}() -> bool {{ true }}").unwrap();
+    }
+    source.push_str("pure comptime fn Output() -> Type {\n");
+    for index in 0..260 {
+        writeln!(source, "if not flag{index}() {{ return u8; }}").unwrap();
+    }
+    source.push_str("bool } fn run() -> Output() { true }");
+    assert_eq!(sysroot::run(&source), Value::Bool(true));
+}
+
+#[test]
+fn deferred_type_calls_keep_callable_inputs_of_named_instances() {
+    assert_eq!(
+        sysroot::run(
+            r#"
+        comptime fn Flag() -> Type { bool }
+        comptime fn Byte() -> Type { u8 }
+        comptime fn Forward() -> Type where choose: comptime fn() -> Type { choose() }
+        fn accept(comptime choose: comptime fn() -> Type, value: defer choose()) -> defer choose() { value }
+        fn run() -> bool {
+            let byte: u8 = 7;
+            accept(Forward<Flag>, true) and accept(Forward<Byte>, byte) == 7
+        }
+    "#
+        ),
+        Value::Bool(true)
+    );
+}

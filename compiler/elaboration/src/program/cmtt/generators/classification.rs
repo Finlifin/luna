@@ -277,16 +277,12 @@ impl Checker<'_, '_> {
                 if !seen.insert(id) {
                     continue;
                 }
-                let interface = self
-                    .checked_traits
-                    .iter()
-                    .find(|item| item.declaration == id)
-                    .ok_or_else(|| {
-                        error(
-                            head.span,
-                            "contextual method source lacks its trait contract",
-                        )
-                    })?;
+                let interface = self.checked_traits.by_id(id).ok_or_else(|| {
+                    error(
+                        head.span,
+                        "contextual method source lacks its trait contract",
+                    )
+                })?;
                 if let Some(member) = interface
                     .methods
                     .iter()
@@ -388,8 +384,7 @@ impl Checker<'_, '_> {
         if let Some(interface) = self.context_member_interface(subject, name, span)? {
             let contract = self
                 .checked_traits
-                .iter()
-                .find(|item| item.declaration == interface.declaration)
+                .by_id(interface.declaration)
                 .ok_or_else(|| error(span, "contextual method source lacks its trait contract"))?;
             let Some(method) = contract.methods.iter().find(|method| method.name == name) else {
                 // Associated values use ordinary value/call elaboration.

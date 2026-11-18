@@ -50,7 +50,7 @@ fn capabilities(
 pub(super) fn merge(
     contributions: Vec<n::Implementation>,
     relationships: &BTreeMap<DeclarationId, DeclarationId>,
-    traits: &BTreeMap<DeclarationId, n::Trait>,
+    traits: &CheckedTraits,
     fuel: &mut u64,
 ) -> Result<Vec<n::Implementation>, (DeclarationId, String)> {
     let mut output: Vec<n::Implementation> = Vec::new();
@@ -80,7 +80,7 @@ pub(super) fn merge(
             }
             let interface = target
                 .interface
-                .and_then(|id| traits.get(&id))
+                .and_then(|id| traits.by_id(id))
                 .ok_or("phase contribution has no trait contract")?;
             spend(
                 fuel,

@@ -23,8 +23,7 @@ impl Checker<'_, '_> {
             }
             let contract = self
                 .checked_traits
-                .iter()
-                .find(|t| t.declaration == id)
+                .by_id(id)
                 .ok_or_else(|| error(span, "unknown interface in member lookup"))?;
             if contract.methods.iter().any(|m| m.name == name)
                 || contract.associated.iter().any(|a| a.name == name)
@@ -130,13 +129,9 @@ impl Checker<'_, '_> {
                             error(span, "ambiguous trait has no definition owner")
                         })?;
                         let interface = declaration(self.package, &self.package_identities, owner);
-                        let contract = self
-                            .checked_traits
-                            .iter()
-                            .find(|t| t.declaration == interface)
-                            .ok_or_else(|| {
-                                error(span, "ambiguous trait has no checked contract")
-                            })?;
+                        let contract = self.checked_traits.by_id(interface).ok_or_else(|| {
+                            error(span, "ambiguous trait has no checked contract")
+                        })?;
                         if !comptime && contract.comptime_only {
                             continue;
                         }
@@ -171,11 +166,7 @@ impl Checker<'_, '_> {
                     let Some(interface) = head.interface.filter(|id| visible.contains(id)) else {
                         continue;
                     };
-                    let Some(contract) = self
-                        .checked_traits
-                        .iter()
-                        .find(|t| t.declaration == interface)
-                    else {
+                    let Some(contract) = self.checked_traits.by_id(interface) else {
                         return Err(error(span, "visible trait has no checked contract"));
                     };
                     if (!comptime && contract.comptime_only)

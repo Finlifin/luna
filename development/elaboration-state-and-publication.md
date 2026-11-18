@@ -1257,7 +1257,7 @@ adapter 的成功当作部分包拥有完整 phase 凭证。完整包和代码�
 
 | 位置 | 当前所需产物 | 迁移要求 |
 | --- | --- | --- |
-| `required.rs::prepare_required_root_with_live_inputs` | 完整根，递归 `required_function` 和 `function_references` 收集的完整函数 | 区分声明可见性与本次代码需求；合法延迟模板保留定义端检查，不把源码引用一律当作立即取得完整主体的要求 |
+| `prepare_required_root_with_live_inputs` 与 `required_source_closure` | 完整根；按声明、方法、关联值和定义身份建立本次调用的源码闭包 | 区分声明可见性与本次代码需求；合法延迟模板保留定义端检查，不把源码引用一律当作立即取得完整主体的要求 |
 | `required.rs::required_function` | known callable signature，然后同步 `check_source_function` | 签名待决由父检查区域保存；尚未准入的 callee 不能建立 activation 来计算自己的参数域 |
 | `required.rs` 的 `check_package_with_evidence` 与 `validate_machine_operations_checked` | 整包 phase 完成证据及独立的算术安全检查 | 完整根保留现有快路径；源码片段交付须带与实际片段、binder 和世界匹配的检查证据 |
 | `RequiredWorld::with_phase`／`CodeSession::with_phase_checked_source` | 对同一个不可变 Package 的整包凭证 | 不把部分目录升级为 PhaseCheckedPackage；源码服务和活动任务使用独立 owner，不伪造完整包 |
@@ -2063,7 +2063,31 @@ universe 复用、stale receipt 触发用户回调、整实例失败后仍交付
 
 ### 所需类型计算的执行入口
 
-`PreparedRequired` 在参数齐备后经 `start_prepared_invocation` 交付它们。源码
-VM 与 CLI 使用相同的 invocation 驱动处理关联项、方法选择和定义构造请求。
-每个响应交回原 activation；作用域恢复在取得完成值之后执行。返回类型计算仍要求
-源根已经完成，`refines { Itself :- Display } Any` 的值表示与逐实参准入尚待实现。
+`PreparedRequired` 的调用分两步。准备阶段的 `required_source_closure`
+从已检查的根表达式、引用到的冻结数据和活动输入收集依赖。输入齐备后，
+`start_prepared_invocation` 在这个世界中启动，与 CLI 共用同一个 VM 驱动。关联项、方法选择与定义
+构造的响应交回原 activation。取得完成值之后，调用方恢复源作用域。
+
+**方法声明和默认实现可能共享一个声明 ID。** 源码中保存方法值时，应保留方法契约；
+实现表确实引用默认体时，才加入该定义。工作队列按“用途与 ID”去重。关联项的
+初始化器可以继续引入其他关联项，即便中间没有普通函数引用也要走到闭包完成。
+已访问的依赖不必在每次迭代后重新扫描。队列使用当前 required invocation 的
+准备预算，库中可达声明的个数没有额外的 256 项门槛。
+
+例如，一个已实例化的 comptime 函数可以在子句参数中携带另一个函数。无论入口
+取得的是 NIR 函数实例、冻结的函数值还是 VM 中的活动值，准备端都应保留里面的
+可调用声明。作为参数传递的 normal-form Type 只携带身份，发现依赖不会展开它的头。
+
+Checker 在检查实现之前建立按身份查询的 trait 契约目录。同一个目录供方法值恢复、
+实现检查和 required 源码闭包使用。方法位置在该世界内固定，关联项的默认值可在
+一致性检查后的阶段完成。开放签名的验证片段仍有自己的 phase 与算术检查。
+
+当前仍须在 VM 启动前完成根表达式和所需的 comptime 主体。涉及方法分派时，
+准备端按接口保留候选实现的定义，VM 根据实际输入选择。未完成源码的按需交付、
+`refines { Itself :- Display } Any` 的值传送及逐实参准入仍待接通。
+
+真实 sysroot 的回归用例见 `compiler/luna/tests/required_input_scopes.rs`。
+其中一个 Type 计算依次调用 260 个小函数。另一个把 `Forward<Flag>` 和
+`Forward<Byte>` 交给同一个 `value: defer choose()`，两个调用分别得到
+`bool` 和 `u8`。格式化演示尚未通过，`host-println.fl` 的双字段调用在
+现有单参数库签名处报 `too many positional inputs`。

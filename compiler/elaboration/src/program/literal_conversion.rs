@@ -115,8 +115,7 @@ impl Checker<'_, '_> {
         }
         let contract = self
             .checked_traits
-            .iter()
-            .find(|t| t.declaration == protocol)
+            .by_id(protocol)
             .ok_or_else(|| error(span, "LiteralInto declaration is unavailable"))?;
         let [_, result_parameter] = contract.type_parameters.as_slice() else {
             return Err(error(

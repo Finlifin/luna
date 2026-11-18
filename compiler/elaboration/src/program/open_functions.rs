@@ -2551,17 +2551,11 @@ impl Checker<'_, '_> {
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let mut members = BTreeSet::new();
-        let mut associated = BTreeSet::new();
-        let mut pending = required::references(
-            &value,
-            &mut members,
-            &mut associated,
-            &mut self.required_steps,
-        )
-        .map_err(|failure| error(span, failure.to_string()))?
-        .into_iter()
-        .collect::<Vec<_>>();
+        let mut pending = required::references(&value, &mut self.required_steps)
+            .map_err(|failure| error(span, failure.to_string()))?
+            .into_iter()
+            .filter_map(required::Dependency::callable)
+            .collect::<Vec<_>>();
         let mut seen = BTreeSet::new();
         let mut functions = Vec::new();
         while let Some(id) = pending.pop() {
@@ -2585,13 +2579,10 @@ impl Checker<'_, '_> {
                     error(span, "ordinary region function snapshot budget exhausted")
                 })?;
                 pending.extend(
-                    required::function_references(
-                        function,
-                        &mut members,
-                        &mut associated,
-                        &mut self.required_steps,
-                    )
-                    .map_err(|failure| error(span, failure.to_string()))?,
+                    required::function_references(function, &mut self.required_steps)
+                        .map_err(|failure| error(span, failure.to_string()))?
+                        .into_iter()
+                        .filter_map(required::Dependency::callable),
                 );
                 functions.push(function.clone());
                 continue;
@@ -2603,13 +2594,10 @@ impl Checker<'_, '_> {
             {
                 let function = self.required_function(owner, span)?;
                 pending.extend(
-                    required::function_references(
-                        &function,
-                        &mut members,
-                        &mut associated,
-                        &mut self.required_steps,
-                    )
-                    .map_err(|failure| error(span, failure.to_string()))?,
+                    required::function_references(&function, &mut self.required_steps)
+                        .map_err(|failure| error(span, failure.to_string()))?
+                        .into_iter()
+                        .filter_map(required::Dependency::callable),
                 );
                 functions.push(function);
             } else {
@@ -2725,7 +2713,7 @@ impl Checker<'_, '_> {
             newtypes: self.newtypes.values().cloned().collect(),
             alias_contracts: self.alias_contracts.values().cloned().collect(),
             enums: self.enums.values().cloned().collect(),
-            traits: self.checked_traits.clone(),
+            traits: self.checked_traits.to_vec(),
             ..Default::default()
         };
         if arithmetic {
@@ -6482,16 +6470,13 @@ impl Checker<'_, '_> {
         // A definition-side snapshot cannot contain a callable declaration
         // supplied only at this call site. Rebuild its dependency closure with
         // the completed inputs, just as for an active closure environment.
-        let mut method_inputs = Vec::new();
         let callable_input = annotation.is_pending()
             && !required::frozen_references(
                 symbols.iter().flatten(),
-                &mut method_inputs,
                 &mut self.required_steps,
                 span,
             )?
             .is_empty();
-        let callable_input = callable_input || !method_inputs.is_empty();
         // A generated Type supplied by this caller may postdate the frozen
         // declaration snapshot. Reprepare completed source with these inputs;
         // never graft current inference state into a saved computation.

@@ -622,8 +622,7 @@ impl Checker<'_, '_> {
         }
         let interface = self
             .checked_traits
-            .iter()
-            .find(|item| item.declaration == protocol)
+            .by_id(protocol)
             .ok_or_else(|| error(span, "operator protocol declaration is unavailable"))?;
         let [rhs] = interface.type_parameters.as_slice() else {
             return Err(error(
