@@ -100,10 +100,16 @@ comptime fn check() -> bool {
 本次绑定特化该标注。显式列出相同顺序时也遵守这条规则。两种编码最终产生同一个 NF 头和相同的实参。
 [两种编码的执行对照](../compiler/comptime_interpretor/src/normal_types/tests.rs)
 
-字节码通过 `TypeInputPlan` 把声明实参交给当前 invocation。NF、名义类型和透明别名共用
-准备位置、供应位置和等待中的域依赖。调用方可见的局部快照在对应槽通过准入后才安装。
-NF 由自己的声明检查并构造保留头身份的结果；透明别名在自己的契约检查后执行主体。
-编译好的单个操作数片段仅维护本次执行的域转换和容器值。[输入调度器](../compiler/comptime_interpretor/src/input_collection.rs)
+字节码的 `TypeInputPlan` 持有声明目标、结果标注、实参模板和执行顺序。动态 NF 的
+callee 先在调用者的代码中求值。计划保存公开签名、打开该签名所用的槽位身份及
+callee 的源码范围。进入计划时用该范围检查选中的函数值，再按公开域接收实参。
+已编译的计划可以随代码复用，callee 的值和调用者写入的存储归当前 invocation。
+[字节码计划](../compiler/comptime_compiler/src/declaration_inputs.rs)
+
+NF、名义类型和透明别名共用准备位置、供应位置和等待中的域依赖。操作数或准备语句
+是否会使整体发散，由编译器从已检查模板计算一次。各槽实际完成的值、分支与控制出口
+仍由本次执行决定。透明别名在契约检查后特化并执行主体；NF 成功时保留原头身份。
+[输入调度器](../compiler/comptime_interpretor/src/input_collection.rs)
 
 对于已经交付给 VM 的声明实参，下面的时序同时适用于条件、match、块、列表和元组。编译后的代码用寄存器标识域准备结果；跨越等待的文字和集合保留输入内的结构位置。源码范围用于诊断，同一范围可以对应多个不同的字段。[字节码输入](../compiler/comptime_compiler/src/normal_types.rs) · [源码输入执行](../compiler/comptime_interpretor/src/normal_inputs/execution.rs)
 
@@ -144,23 +150,11 @@ NF 由自己的声明检查并构造保留头身份的结果；透明别名在�
 
 借用资格没有扩大：只有原先允许的局部值／字面量选择器走该路径；计算型选择器
 仍先取得快照。可变别名、锁冲突、实际域、目标数值形成与值引用检查保持在执行时。
-本阶段没有把默认模板、闭包主体或 TypeInputPlan 移出源码载体，也没有取消整个
-invocation 的 tree fallback；不能以这个常量表接线宣称完成独立执行 IR。
+默认参数、闭包主体、声明计划中的操作数和透明别名体仍携带受检代码模板。
+清理和效应环境仍限制了 invocation 进入字节码的条件。
 
-工作目录 `/home/fin/luna`，基线 `72932b66` 加本阶段改动。
-`python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --test control -- --test-threads=1`
-退出 0（编译器单元 7、控制流 30、解释器单元 599）；证据
-`/tmp/luna-tools-cau1e2eg/result.json`。新增回归覆盖共享载荷保留不同来源、预算失败
-后重试、错误字面量域与失败后恢复；已有借用锁、别名和求值顺序用例保持通过。
-源码集成检查 `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects --test comptime_bytecode_lists --test comptime_list_operations -- --test-threads=1`
-退出 0，三个组分别 34、6、66 项通过，见 `/tmp/luna-tools-u68gxans/result.json`。
-其中既有普通包公开 List 入口会从实际 library 载入依赖；其余拼接库源码的隔离用例
-不单独用来证明完整 sysroot 交付。
-真实 sysroot 补充检查 `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes -- --test-threads=1 shipped_meta_object shipped_object_fallible`
-退出 0，3 项通过；`/tmp/luna-tools-xwheicba/result.json`。本阶段未运行全 workspace
-或计时性能基准，不从载荷复用推断整体复杂度改善。
-
-
+共享常量的源码位置、预算耗尽与重试由字节码控制流和真实包入口分别覆盖。
+[字节码用例](../compiler/comptime_compiler/tests/control.rs) · [sysroot 用例](../compiler/luna/tests/sysroot_preludes.rs)
 
 ### 已清理：BitVec 固定元数操作的临时堆参数
 

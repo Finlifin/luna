@@ -1,36 +1,44 @@
 //! One invocation-local scheduler for ordered input execution and domain wakeup.
 //! Providers retain their own admission and final construction semantics.
 use super::*;
+pub(super) use comptime_compiler::declaration_inputs::{PlanView, Target};
 use nir::program::{NormalFormArgument as Argument, NormalFormPreparation};
 use normal_inputs::StagedNormalInput;
 
 #[derive(Clone)]
-pub(super) enum Expression<'e> {
-    Borrowed(&'e Expr),
+pub(super) enum Plan<'e> {
+    Borrowed(PlanView<'e>),
     Compiled {
         plan: Arc<comptime_compiler::DeclarationInputPlan>,
         register_collision: bool,
     },
 }
-impl std::ops::Deref for Expression<'_> {
-    type Target = Expr;
-    fn deref(&self) -> &Expr {
+impl<'e> Plan<'e> {
+    pub(super) fn borrowed(expr: &'e Expr) -> Self {
+        Self::Borrowed(PlanView::from_expression(expr).expect("declaration inputs"))
+    }
+
+    pub(super) fn view(&self) -> PlanView<'_> {
         match self {
-            Self::Borrowed(expr) => expr,
-            Self::Compiled { plan, .. } => plan.expression(),
+            Self::Borrowed(view) => *view,
+            Self::Compiled { plan, .. } => plan.view(),
         }
     }
-}
 
-/// Acquire only locals that are absent from the caller. Keep this list until
-/// normal completion or cancellation, including while an alias body executes.
-impl Expression<'_> {
+    pub(super) fn inputs_diverge(&self) -> bool {
+        match self {
+            Self::Borrowed(view) => view.inputs_diverge(),
+            Self::Compiled { plan, .. } => plan.inputs_diverge(),
+        }
+    }
+
+    /// Acquire only locals absent from the caller, through alias body completion.
     pub(super) fn admit_scope(
         &self,
         vm: &mut Interpreter<'_>,
         environment: &Environment,
     ) -> Result<Arc<[LocalId]>, Error> {
-        let source = Some(self.source);
+        let source = Some(self.view().source);
         let locals: Arc<[LocalId]> = match self {
             Self::Compiled {
                 plan,
@@ -41,17 +49,14 @@ impl Expression<'_> {
                 }
                 plan.locals().clone()
             }
-            Self::Borrowed(expr) => {
-                let (arguments, schedule) =
-                    expr.kind.declaration_inputs().expect("declaration inputs");
-                schedule
-                    .check(arguments.len(), |n| {
-                        vm.integer_operation(source, |b| b.consume(n))
-                    })?
-                    .ok_or_else(|| vm.failure(ErrorKind::Type, source))?
-                    .locals
-                    .into()
-            }
+            Self::Borrowed(view) => view
+                .schedule
+                .check(view.arguments.len(), |n| {
+                    vm.integer_operation(source, |b| b.consume(n))
+                })?
+                .ok_or_else(|| vm.failure(ErrorKind::Type, source))?
+                .locals
+                .into(),
         };
         vm.integer_operation(source, |b| b.consume(locals.len()))?;
         if locals.iter().any(|id| environment.contains_key(id)) {
@@ -62,15 +67,13 @@ impl Expression<'_> {
 }
 
 pub(super) trait Source: fmt::Display {
-    fn expression(&self) -> &Expr;
+    fn view(&self) -> PlanView<'_>;
     fn source(&self) -> SourceRange {
-        self.expression().source
+        self.view().source
     }
     fn inputs(&self) -> (&[Argument], nir::program::InputSchedule<'_>) {
-        self.expression()
-            .kind
-            .declaration_inputs()
-            .expect("admitted declaration operands")
+        let view = self.view();
+        (view.arguments, view.schedule)
     }
     fn input(&self, slot: usize) -> &Argument {
         &self.inputs().0[slot]

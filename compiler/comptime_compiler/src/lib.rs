@@ -5,6 +5,8 @@ pub mod bit_updates;
 pub mod bits;
 pub mod closures;
 pub mod constants;
+pub mod declaration_inputs;
+pub use declaration_inputs::DeclarationInputPlan;
 pub mod definitions;
 pub mod instances;
 pub mod leaf_inputs;
@@ -41,30 +43,6 @@ impl fmt::Display for ErrorConversion {
             "(error-conversion {} (input {}) (output {}))",
             self.conversion, self.input, self.output
         )
-    }
-}
-
-/// Immutable operand template and the binding identities owned by its checked schedule.
-#[derive(Debug)]
-pub struct DeclarationInputPlan {
-    expression: Expr,
-    locals: Arc<[LocalId]>,
-}
-impl DeclarationInputPlan {
-    pub fn expression(&self) -> &Expr {
-        &self.expression
-    }
-    pub fn locals(&self) -> &Arc<[LocalId]> {
-        &self.locals
-    }
-}
-impl fmt::Display for DeclarationInputPlan {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("(declaration-input-plan (locals")?;
-        for binding in self.locals.iter() {
-            write!(f, " {binding}")?;
-        }
-        write!(f, ") {})", self.expression)
     }
 }
 
@@ -2172,25 +2150,11 @@ fn compile_root<'a>(
                     | K::ApplyNormalForm { .. }
                     | K::NominalType { .. }
                     | K::CheckTypeAlias { .. } => {
-                        // The template shares closure bodies. Type rewriting is
-                        // charged only when the admitted plan specializes them.
-                        let mut copy_steps = *fuel as u64;
-                        let copied = nir::copy_budget::charge_expression(expr, &mut copy_steps);
-                        *fuel = copy_steps as usize;
-                        copied.map_err(|error| copy_error(error, source))?;
-                        let bindings = nir::free_bindings::input_plan_bindings(expr, fuel)
-                            .map_err(|reason| match reason {
-                                nir::free_bindings::Error::Budget(_) => Error::Budget(source),
-                                nir::free_bindings::Error::Depth(_) => Error::Depth(source),
-                                nir::free_bindings::Error::Invalid(_) => Error::Unsupported(source),
-                            })?;
+                        let (plan, imports) = DeclarationInputPlan::compile(expr, fuel)?;
                         *fuel = fuel
-                            .checked_sub(
-                                bindings.imports.len().saturating_add(bindings.locals.len()),
-                            )
+                            .checked_sub(imports.len())
                             .ok_or(Error::Budget(source))?;
-                        let environment = bindings
-                            .imports
+                        let environment = imports
                             .into_iter()
                             .map(|binding| {
                                 let slot = *locals.entry(binding).or_insert_with(&mut fresh);
@@ -2206,10 +2170,7 @@ fn compile_root<'a>(
                             Op::TypeInputPlan {
                                 selected: selection.map(|(_, register)| register),
                                 destination: dst,
-                                plan: Arc::new(DeclarationInputPlan {
-                                    expression: expr.clone(),
-                                    locals: bindings.locals.into(),
-                                }),
+                                plan: Arc::new(plan),
                                 collisions: Vec::new(),
                                 environment,
                             },
@@ -3277,9 +3238,13 @@ fn compile_root<'a>(
         {
             // Only now are registers for locals first seen later in the body known.
             *fuel = fuel
-                .checked_sub(plan.locals.len())
+                .checked_sub(plan.locals().len())
                 .ok_or(Error::Budget(instruction.source))?;
-            collisions.extend(plan.locals.iter().filter_map(|id| locals.get(id).copied()));
+            collisions.extend(
+                plan.locals()
+                    .iter()
+                    .filter_map(|id| locals.get(id).copied()),
+            );
         }
         let target = match &mut instruction.op {
             Op::Jump(target) | Op::Branch { target, .. } => target,

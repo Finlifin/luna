@@ -31,8 +31,8 @@ impl<S: Source> fmt::Display for Observed<S> {
     }
 }
 impl<S: Source> Source for Observed<S> {
-    fn expression(&self) -> &Expr {
-        self.inner.expression()
+    fn view(&self) -> PlanView<'_> {
+        self.inner.view()
     }
     fn substitutions(&self) -> Option<&input_bindings::Bindings> {
         self.inner.substitutions()
@@ -228,7 +228,7 @@ fn only_observed_completions_recheck_nominal_and_normal_domains() {
                 Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
             };
             let source =
-                normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &Environment::new())
+                normal_plan::Frame::new(&mut vm, Plan::borrowed(&input), &Environment::new())
                     .unwrap()
                     .source;
             check_unrelated(source, &mut vm, count);
@@ -250,11 +250,11 @@ fn only_observed_completions_recheck_nominal_and_normal_domains() {
                     preparations: vec![],
                 },
             );
-            let locals = Expression::Borrowed(&nominal)
+            let locals = Plan::borrowed(&nominal)
                 .admit_scope(&mut vm, &Environment::new())
                 .unwrap();
             let source = nominal_inputs::Source::new(
-                input_collection::Expression::Borrowed(&nominal),
+                input_collection::Plan::borrowed(&nominal),
                 parameters.clone(),
                 domains.clone(),
                 true,
@@ -324,11 +324,11 @@ fn transitive_completions_wake_dependents_and_cycles_remain_unresolved() {
                     ],
                 },
             );
-            let locals = Expression::Borrowed(&input)
+            let locals = Plan::borrowed(&input)
                 .admit_scope(&mut vm, &Environment::new())
                 .unwrap();
             let source = nominal_inputs::Source::new(
-                input_collection::Expression::Borrowed(&input),
+                input_collection::Plan::borrowed(&input),
                 parameters.clone(),
                 domains,
                 true,
@@ -362,10 +362,9 @@ fn dependency_registration_and_wakeup_fail_terminally_without_replaying_inputs()
     let (package, input, _, _) = fixture(2);
     for fail_at_registration in [true, false] {
         let mut vm = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
-        let source =
-            normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &Environment::new())
-                .unwrap()
-                .source;
+        let source = normal_plan::Frame::new(&mut vm, Plan::borrowed(&input), &Environment::new())
+            .unwrap()
+            .source;
         let mut frame = observed(source);
         let mut env = Environment::from([(local(999), Value::Bool(false))]);
         let Request::Stage(argument) = frame.advance(&mut vm, &mut env).unwrap() else {
@@ -411,10 +410,9 @@ fn dependency_registration_and_wakeup_fail_terminally_without_replaying_inputs()
         );
         frame.cancel(&mut env);
         assert_eq!(env, Environment::from([(local(999), Value::Bool(true))]));
-        let source =
-            normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &Environment::new())
-                .unwrap()
-                .source;
+        let source = normal_plan::Frame::new(&mut vm, Plan::borrowed(&input), &Environment::new())
+            .unwrap()
+            .source;
         check_unrelated(source, &mut vm, 2);
     }
 }
@@ -437,8 +435,7 @@ fn waking_a_staged_block_is_independent_of_its_executed_prefix() {
                 Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
             };
             let mut env = Environment::from([(local(999), Value::Bool(false))]);
-            let mut frame =
-                normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &env).unwrap();
+            let mut frame = normal_plan::Frame::new(&mut vm, Plan::borrowed(&input), &env).unwrap();
             let Request::Stage(argument) = frame.advance(&mut vm, &mut env).unwrap() else {
                 panic!("expected input before its domain")
             };
@@ -505,8 +502,7 @@ fn one_domain_delivery_can_be_cancelled_before_a_later_field_fails() {
         // Re-enter the same VM after cancellation and again after failure.
         for cancel in [true, false, true] {
             let mut env = Environment::from([(local(999), Value::Bool(false))]);
-            let mut frame =
-                normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &env).unwrap();
+            let mut frame = normal_plan::Frame::new(&mut vm, Plan::borrowed(&input), &env).unwrap();
             loop {
                 match frame.next_input(&mut vm, &mut env).unwrap() {
                     Progress::DomainDelivered => break,
@@ -602,7 +598,7 @@ fn shared_and_partial_dependencies_keep_each_pending_value_until_its_domain_is_r
                 Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
             };
             let source =
-                normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &Environment::new())
+                normal_plan::Frame::new(&mut vm, Plan::borrowed(&input), &Environment::new())
                     .unwrap()
                     .source;
             let mut frame = observed(source);
@@ -669,7 +665,7 @@ fn supplied_abstract_identity_is_complete_even_when_its_declaration_is_unchanged
         vm.authorize_abstract_value_parameters(&[(id(2000), abstract_type.clone())])
             .unwrap();
         let mut env = Environment::from([(local(998), abstract_value.clone())]);
-        let source = normal_plan::Frame::new(&mut vm, Expression::Borrowed(&input), &env)
+        let source = normal_plan::Frame::new(&mut vm, Plan::borrowed(&input), &env)
             .unwrap()
             .source;
         let mut frame = observed(source);

@@ -232,18 +232,18 @@ impl<'a> Interpreter<'a> {
     }
     fn start_type_plan(
         &mut self,
-        expression: input_collection::Expression<'a>,
+        plan: input_collection::Plan<'a>,
         environment: &Environment,
         selected: Option<Value>,
     ) -> Result<Box<dyn input_collection::InputPlan + 'a>, Error> {
-        match &expression.kind {
-            K::NormalFormType { .. } | K::ApplyNormalForm { .. } => Ok(Box::new(
-                normal_plan::Frame::application(self, expression, environment, selected)?,
+        use input_collection::Target;
+        match plan.view().target {
+            Target::Normal(_) | Target::Selected { .. } => Ok(Box::new(
+                normal_plan::Frame::application(self, plan, environment, selected)?,
             )),
-            K::NominalType { .. } | K::CheckTypeAlias { .. } => Ok(Box::new(
-                nominal_plan::Frame::new(self, expression, environment)?,
-            )),
-            _ => Err(self.failure(ErrorKind::Type, Some(expression.source))),
+            Target::Nominal(_) | Target::Alias { .. } => {
+                Ok(Box::new(nominal_plan::Frame::new(self, plan, environment)?))
+            }
         }
     }
 

@@ -524,9 +524,9 @@ fn contextual_nominal_input_waits_for_capture_without_replaying_effects() {
 }
 
 #[test]
-fn nominal_input_order_rejects_malformed_permutations_before_effects_and_recovers() {
+fn nominal_input_order_is_checked_before_the_world_can_execute_producers() {
     for order in [vec![], vec![1], vec![0, 0], vec![usize::MAX]] {
-        let package = Package {
+        let mut package = Package {
             structs: vec![record(vec![])],
             functions: vec![
                 function(
@@ -547,14 +547,27 @@ fn nominal_input_order_rejects_malformed_permutations_before_effects_and_recover
             ],
             ..Default::default()
         };
+        let failure = Interpreter::for_comptime(&package, Budget::default())
+            .err()
+            .expect("invalid schedule must prevent VM admission");
+        assert!(matches!(failure.kind, ErrorKind::InvalidPhase(reason)
+            if reason.source == package.functions[0].body.source && reason.message == "invalid declaration input plan"));
+        let K::NominalType { order, .. } = &mut package.functions[0].body.kind else {
+            unreachable!()
+        };
+        *order = Some(vec![0]);
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-        assert_eq!(vm.invoke(id(0), vec![]).unwrap_err().kind, ErrorKind::Type);
-        assert!(
-            !vm.events()
-                .iter()
-                .any(|event| matches!(event, Event::EnterFunction(callee) if *callee == id(2)))
+        assert_eq!(
+            vm.invoke(id(0), vec![]).unwrap(),
+            vm.invoke(id(1), vec![]).unwrap()
         );
-        assert!(matches!(vm.invoke(id(1), vec![]).unwrap(), Value::Type(_)));
+        assert_eq!(
+            vm.events()
+                .iter()
+                .filter(|event| matches!(event, Event::EnterFunction(callee) if *callee == id(2)))
+                .count(),
+            1
+        );
     }
 }
 

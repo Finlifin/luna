@@ -3698,11 +3698,8 @@ impl<'a> Interpreter<'a> {
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        let mut frame = nominal_plan::Frame::new(
-            self,
-            input_collection::Expression::Borrowed(expr),
-            environment,
-        )?;
+        let mut frame =
+            nominal_plan::Frame::new(self, input_collection::Plan::borrowed(expr), environment)?;
         let result = self.run_type_plan(&mut frame, environment);
         input_collection::InputPlan::cleanup(&frame, environment);
         result

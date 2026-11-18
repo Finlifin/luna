@@ -337,7 +337,8 @@ fn type_list_constant_nodes_validate_elements_domain_and_substitution() {
     // execution; the retired compact node delayed this check until invocation.
     assert!(matches!(
         Interpreter::for_comptime(&package, Budget::default()),
-        Err(failure) if failure.kind == comptime_interpretor::ErrorKind::PhaseMismatch
+        Err(comptime_interpretor::Error { kind: comptime_interpretor::ErrorKind::InvalidPhase(reason), .. })
+            if reason.source == source && reason.message == "captured comptime value requires a non-Type value domain"
     ));
     package.functions[0].body.ty = list_type();
     package.normal_forms.clear();
@@ -929,14 +930,9 @@ fn list_operations_reject_forged_output_domains_and_honor_vm_budget() {
             ty: list,
             values: vec![Value::Bool(true); 32].into(),
         };
-        let mut vm = Interpreter::for_comptime(
-            &package,
-            Budget {
-                steps: 32,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        vm.charge_preparation(vm.remaining_steps() as usize - 32)
+            .unwrap();
         assert_eq!(
             vm.invoke(id(3), vec![argument.clone()]).unwrap_err().kind,
             ErrorKind::StepsExhausted

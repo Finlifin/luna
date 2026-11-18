@@ -628,7 +628,7 @@ fn immutable_function_references_check_the_current_declaration_world() {
 }
 
 #[test]
-fn immutable_prepared_functions_keep_session_body_authority() {
+fn a_nested_named_callable_freezes_by_identity_and_keeps_its_live_handle_local() {
     let world = world();
     let key = |local| iir::InstanceKey {
         declaration: id(local),
@@ -655,15 +655,34 @@ fn immutable_prepared_functions_keep_session_body_authority() {
         }
         .unwrap();
         let value = vm.invoke_instance(&key(1), vec![]).unwrap();
-        assert!(matches!(&value, Value::Closure(_)));
         let value = Value::Tuple(vec![value]);
+        let frozen = value
+            .clone()
+            .into_scoped_invocation_term(
+                &mut comptime_runtime::Budget::default(),
+                &Default::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            frozen,
+            Term::TupleValue(vec![Term::FunctionValue {
+                declaration: id(3),
+                arguments: vec![],
+            }])
+        );
         let ty = Term::Tuple(vec![callable()]);
         vm.validate_immutable_input(&value, &ty).unwrap();
         let mut foreign = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
         // Preparing the same declaration and signature does not transfer body
         // authority. Explicit normal-term transport remains a separate API.
         let own = Value::Tuple(vec![foreign.invoke_instance(&key(1), vec![]).unwrap()]);
-        assert!(foreign.validate_immutable_input(&value, &ty).is_err());
+        assert_eq!(
+            foreign
+                .validate_immutable_input(&value, &ty)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
         foreign.validate_immutable_input(&own, &ty).unwrap();
         vm.charge_preparation(vm.remaining_steps() as usize)
             .unwrap();

@@ -1,13 +1,13 @@
 //! NF input contracts use the shared invocation input scheduler.
 use super::*;
-use input_collection::{Expression, Progress};
+use input_collection::{Plan, PlanView, Progress, Target};
 use nir::program::NormalFormArgument as Argument;
 
 pub(super) struct Source<'a> {
     head: DeclarationId,
     domains: Domains<'a>,
     locals: Arc<[LocalId]>,
-    expression: Expression<'a>,
+    plan: Plan<'a>,
     bindings: input_bindings::Bindings,
 }
 
@@ -76,44 +76,37 @@ impl<'a> Frame<'a> {
     #[cfg(test)]
     pub(super) fn new<'world: 'a>(
         vm: &mut Interpreter<'world>,
-        expression: Expression<'a>,
+        plan: Plan<'a>,
         environment: &Environment,
     ) -> Result<Self, Error> {
-        Self::application(vm, expression, environment, None)
+        Self::application(vm, plan, environment, None)
     }
 
     pub(super) fn application<'world: 'a>(
         vm: &mut Interpreter<'world>,
-        expression: Expression<'a>,
+        plan: Plan<'a>,
         environment: &Environment,
         selected: Option<Value>,
     ) -> Result<Self, Error> {
-        let source = expression.source;
-        let (head, public_inputs, arguments, plan) = match (&expression.kind, selected) {
+        let view = plan.view();
+        let source = view.source;
+        let (head, public_inputs) = match (view.target, selected) {
+            (Target::Normal(head), None) => (head, None),
             (
-                K::NormalFormType {
-                    head,
-                    arguments,
-                    plan,
-                },
-                None,
-            ) => (*head, None, arguments, plan),
-            (
-                K::ApplyNormalForm {
-                    callee,
+                Target::Selected {
+                    signature,
+                    source: callee_source,
                     input_ids,
-                    arguments,
-                    plan,
                 },
                 Some(value),
             ) => {
-                vm.check_value_type(&value, &callee.ty, Some(callee.source))?;
+                vm.check_value_type(&value, signature, Some(callee_source))?;
                 let Value::Function(head) = value else {
-                    return Err(vm.failure(ErrorKind::Type, Some(callee.source)));
+                    return Err(vm.failure(ErrorKind::Type, Some(callee_source)));
                 };
                 let mut fuel = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
                 let before = fuel;
-                let opened = nir::normal_forms::open_inputs(&callee.ty, input_ids, &mut fuel);
+                let opened = nir::normal_forms::open_inputs(signature, input_ids, &mut fuel);
                 vm.budget.steps -= (before - fuel) as u64;
                 let opened = opened.map_err(|reason| {
                     vm.failure(
@@ -124,27 +117,22 @@ impl<'a> Frame<'a> {
                         Some(source),
                     )
                 })?;
-                (head, Some(opened), arguments, plan)
+                (head, Some(opened))
             }
             _ => return Err(vm.failure(ErrorKind::Type, Some(source))),
         };
-        let locals = expression.admit_scope(vm, environment)?;
-        let diverges = arguments.iter().any(Argument::is_diverging)
-            || plan
-                .iter()
-                .flat_map(|plan| &plan.preparations)
-                .any(|p| p.expression.ty == Term::Primitive(Primitive::Never));
+        let locals = plan.admit_scope(vm, environment)?;
         let metadata = vm
             .normal_forms
             .get(&head)
             .ok_or_else(|| vm.failure(ErrorKind::Type, Some(source)))?;
-        let count = arguments.len();
-        let result = if diverges {
+        let count = view.arguments.len();
+        let result = if plan.inputs_diverge() {
             Primitive::Never
         } else {
             Primitive::Type
         };
-        if expression.ty != Term::Primitive(result)
+        if *view.ty != Term::Primitive(result)
             || metadata.parameters.len() != count
             || public_inputs
                 .as_ref()
@@ -165,14 +153,14 @@ impl<'a> Frame<'a> {
             domains,
             locals,
             bindings,
-            expression,
+            plan,
         }))
     }
 }
 
 impl input_collection::Source for Source<'_> {
-    fn expression(&self) -> &Expr {
-        &self.expression
+    fn view(&self) -> PlanView<'_> {
+        self.plan.view()
     }
     fn substitutions(&self) -> Option<&input_bindings::Bindings> {
         Some(&self.bindings)
@@ -194,13 +182,13 @@ impl input_collection::Source for Source<'_> {
     ) -> Result<BTreeSet<usize>, Error> {
         let (_, domain) = self.domains.parameter(slot).expect("admitted parameter");
         self.bindings
-            .pending_inputs(vm, domain, self.expression.source)
+            .pending_inputs(vm, domain, self.plan.view().source)
     }
 
     fn expected(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Term, Error> {
         let (_, domain) = self.domains.parameter(slot).expect("admitted parameter");
         self.bindings
-            .instantiate(vm, domain, self.expression.source)
+            .instantiate(vm, domain, self.plan.view().source)
     }
 
     fn bind(&mut self, vm: &mut Interpreter<'_>, slot: usize, value: Value) -> Result<(), Error> {
@@ -214,11 +202,11 @@ impl input_collection::Source for Source<'_> {
             std::mem::replace(&mut self.bindings, input_bindings::Bindings::structural([]));
         let arguments = bindings
             .finish_normal()
-            .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.expression.source)))?;
+            .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.plan.view().source)))?;
         Ok(Progress::Complete(Flow::Value(vm.complete_normal_data(
             self.head,
             arguments,
-            self.expression.source,
+            self.plan.view().source,
         )?)))
     }
     fn cleanup(&self, environment: &mut Environment) {
@@ -242,8 +230,7 @@ impl Interpreter<'_> {
         } else {
             None
         };
-        let mut frame =
-            Frame::application(self, Expression::Borrowed(expr), environment, selected)?;
+        let mut frame = Frame::application(self, Plan::borrowed(expr), environment, selected)?;
         let result = self.run_normal_plan(&mut frame, environment);
         input_collection::InputPlan::cleanup(&frame, environment);
         result
@@ -346,7 +333,7 @@ mod tests {
                     "tree" => vm.eval(&body, &mut environment),
                     "direct-frame" => {
                         let mut frame =
-                            Frame::new(&mut vm, Expression::Borrowed(&body), &environment).unwrap();
+                            Frame::new(&mut vm, Plan::borrowed(&body), &environment).unwrap();
                         let result = vm.run_type_plan(&mut frame, &mut environment);
                         frame.cleanup(&mut environment);
                         result
@@ -548,7 +535,7 @@ mod tests {
         };
         let ordered = constructor(ordered);
         let reversed = constructor(plan);
-        let mut failed = Frame::new(&mut vm, Expression::Borrowed(&ordered), &env).unwrap();
+        let mut failed = Frame::new(&mut vm, Plan::borrowed(&ordered), &env).unwrap();
         assert!(matches!(
             failed.advance(&mut vm, &mut env).unwrap(),
             Request::Ready(..)
@@ -572,7 +559,7 @@ mod tests {
             ErrorKind::InvalidControlFlow
         );
         vm.budget = Budget::default();
-        let mut failed = Frame::new(&mut vm, Expression::Borrowed(&ordered), &env).unwrap();
+        let mut failed = Frame::new(&mut vm, Plan::borrowed(&ordered), &env).unwrap();
         env.insert(local(90), Value::Bool(true));
         let Progress::Input(bytecode::InputFrame { mut code, finish }) =
             failed.next_input(&mut vm, &mut env).unwrap()
@@ -596,7 +583,7 @@ mod tests {
             ErrorKind::InvalidControlFlow
         );
         vm.budget = Budget::default();
-        let mut frame = Frame::new(&mut vm, Expression::Borrowed(&reversed), &env).unwrap();
+        let mut frame = Frame::new(&mut vm, Plan::borrowed(&reversed), &env).unwrap();
         let Request::Stage(argument) = frame.advance(&mut vm, &mut env).unwrap() else {
             panic!("expected deferred input");
         };

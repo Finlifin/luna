@@ -143,6 +143,91 @@ fn invocation_code_distinguishes_normal_form_application() {
 }
 
 #[test]
+fn compiled_dynamic_plan_releases_the_callee_and_keeps_its_public_interface() {
+    use comptime_compiler::{Op, declaration_inputs::Target};
+    use nir::{DeclarationId, Parameter, Sort};
+    use std::sync::Arc;
+    let source = SourceRange { start: 12, end: 18 };
+    let input = DeclarationId {
+        package: 5,
+        local: 7,
+    };
+    let parameter = LocalId { owner: 5, index: 2 };
+    let signature = Term::NormalFormFunction(
+        Box::new(Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            result: Box::new(Term::Primitive(Primitive::Type)),
+        }),
+        None,
+    );
+    let callee = Arc::new(Expr {
+        source,
+        ty: signature.clone(),
+        kind: K::Local(parameter),
+    });
+    let original = Arc::downgrade(&callee);
+    let code = {
+        let body = Expr {
+            source: SourceRange { start: 12, end: 24 },
+            ty: Term::Primitive(Primitive::Type),
+            kind: K::ApplyNormalForm {
+                callee,
+                input_ids: vec![input],
+                arguments: vec![nir::program::NormalFormArgument::Value(Expr {
+                    source: SourceRange { start: 19, end: 23 },
+                    ty: Term::Primitive(Primitive::Type),
+                    kind: K::TypeValue(Term::Primitive(Primitive::Bool)),
+                })],
+                plan: None,
+            },
+        };
+        compile(&body, &mut 10_000).unwrap()
+    };
+    assert!(original.upgrade().is_none());
+    let (plan, environment) = code
+        .instructions()
+        .iter()
+        .find_map(|instruction| match &instruction.op {
+            Op::TypeInputPlan {
+                plan,
+                environment,
+                selected: Some(_),
+                ..
+            } => Some((plan, environment)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(environment.is_empty());
+    assert!(
+        code.locals()
+            .iter()
+            .any(|&(binding, _)| binding == parameter)
+    );
+    let view = plan.view();
+    let Target::Selected {
+        signature: actual,
+        source: location,
+        input_ids,
+    } = view.target
+    else {
+        panic!("missing selected interface");
+    };
+    assert_eq!(actual, &signature);
+    assert_eq!(location, source);
+    assert_eq!(input_ids, &[input]);
+    assert_eq!(view.arguments.len(), 1);
+    assert_ne!(view.source, location);
+    assert_eq!(plan.inputs_diverge(), view.inputs_diverge());
+    assert!(
+        plan.to_string()
+            .contains("(selected-interface (source 12 18)")
+    );
+}
+
+#[test]
 fn default_templates_are_owned_and_copy_work_is_bounded() {
     let code = {
         let source = SourceRange { start: 1, end: 2 };

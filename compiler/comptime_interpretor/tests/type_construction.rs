@@ -179,14 +179,10 @@ fn normal_form_construction_is_budgeted_and_specialization_visits_inputs() {
     assert_ne!(body, specialized);
     assert!(body.to_string().contains("normal-form-type"));
     let package = world(vec![function(0, specialized)], 16);
-    let mut interpreter = Interpreter::for_comptime(
-        &package,
-        Budget {
-            steps: 8,
-            depth: 128,
-        },
-    )
-    .unwrap();
+    let mut interpreter = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    interpreter
+        .charge_preparation(interpreter.remaining_steps() as usize - 8)
+        .unwrap();
     assert_eq!(
         interpreter.invoke(id(0), vec![]).unwrap_err().kind,
         ErrorKind::StepsExhausted

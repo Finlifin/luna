@@ -463,7 +463,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 environment,
                 selected,
             }) => match vm.start_type_plan(
-                input_collection::Expression::Compiled {
+                input_collection::Plan::Compiled {
                     plan,
                     register_collision,
                 },
@@ -1206,7 +1206,7 @@ mod tests {
                 let mut environment = Environment::from([(local(1), Value::Bool(false))]);
                 let mut plan = normal_plan::Frame::new(
                     &mut vm,
-                    input_collection::Expression::Borrowed(&expression),
+                    input_collection::Plan::borrowed(&expression),
                     &environment,
                 )
                 .unwrap();

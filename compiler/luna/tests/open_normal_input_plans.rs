@@ -91,11 +91,11 @@ fn suspended_collection_routes_reject_conflicts_and_known_wrong_domains() {
         ("Packet<T, ...value>", "type"),
         (
             "Packet<T, value, .values = items>",
-            "cannot combine a complete",
+            "cannot append to a directly supplied collection",
         ),
         (
             "Packet<.values = items, T, value>",
-            "cannot combine a complete",
+            "cannot append to a directly supplied collection",
         ),
         (
             "Packet<T, .values = items, .values = items>",

@@ -3,7 +3,7 @@ use super::*;
 use nir::program::NormalFormArgument as A;
 
 pub(super) struct Source<'e> {
-    expression: input_collection::Expression<'e>,
+    plan: input_collection::Plan<'e>,
     specialize: bool,
     parameters: Vec<nir::DeclarationParameter>,
     domains: Vec<Term>,
@@ -26,15 +26,13 @@ impl fmt::Display for Source<'_> {
 
 impl<'e> Frame<'e> {
     pub fn new(
-        expression: input_collection::Expression<'e>,
+        plan: input_collection::Plan<'e>,
         parameters: Vec<nir::DeclarationParameter>,
         domains: Vec<Term>,
         specialize: bool,
         locals: Arc<[LocalId]>,
     ) -> Self {
-        Self::from_source(Source::new(
-            expression, parameters, domains, specialize, locals,
-        ))
+        Self::from_source(Source::new(plan, parameters, domains, specialize, locals))
     }
     pub fn finish(self) -> Option<Vec<Term>> {
         self.source.completed.finish()
@@ -43,7 +41,7 @@ impl<'e> Frame<'e> {
 
 impl<'e> Source<'e> {
     pub fn new(
-        expression: input_collection::Expression<'e>,
+        plan: input_collection::Plan<'e>,
         parameters: Vec<nir::DeclarationParameter>,
         domains: Vec<Term>,
         specialize: bool,
@@ -52,9 +50,9 @@ impl<'e> Source<'e> {
         Self {
             locals,
             specialize,
-            alias: matches!(expression.kind, K::CheckTypeAlias { .. }),
+            alias: matches!(plan.view().target, input_collection::Target::Alias { .. }),
             completed: input_bindings::Bindings::admitted(parameters.iter().map(|p| p.declaration)),
-            expression,
+            plan,
             parameters,
             domains,
         }
@@ -67,8 +65,8 @@ impl<'e> Source<'e> {
 }
 
 impl input_collection::Source for Source<'_> {
-    fn expression(&self) -> &Expr {
-        &self.expression
+    fn view(&self) -> input_collection::PlanView<'_> {
+        self.plan.view()
     }
     fn substitutions(&self) -> Option<&input_bindings::Bindings> {
         self.specialize.then_some(&self.completed)
@@ -128,7 +126,7 @@ impl input_collection::Source for Source<'_> {
     }
     fn complete(&mut self, vm: &mut Interpreter<'_>) -> Result<input_collection::Progress, Error> {
         if self.completed.len() != self.inputs().0.len() {
-            return Err(vm.failure(ErrorKind::Type, Some(self.expression.source)));
+            return Err(vm.failure(ErrorKind::Type, Some(self.plan.view().source)));
         }
         Ok(input_collection::Progress::InputsComplete)
     }
@@ -209,11 +207,11 @@ mod tests {
                     },
                 });
                 let mut environment = Environment::from([(local(99), Value::Bool(true))]);
-                let locals = input_collection::Expression::Borrowed(&expression)
+                let locals = input_collection::Plan::borrowed(&expression)
                     .admit_scope(&mut vm, &environment)
                     .unwrap();
                 let mut frame = Frame::new(
-                    input_collection::Expression::Borrowed(&expression),
+                    input_collection::Plan::borrowed(&expression),
                     parameters.clone(),
                     domains.clone(),
                     true,
@@ -306,11 +304,11 @@ mod tests {
         let package = Package::default();
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let mut environment = Environment::new();
-        let locals = input_collection::Expression::Borrowed(&expression)
+        let locals = input_collection::Plan::borrowed(&expression)
             .admit_scope(&mut vm, &environment)
             .unwrap();
         let mut frame = Frame::new(
-            input_collection::Expression::Borrowed(&expression),
+            input_collection::Plan::borrowed(&expression),
             parameters,
             domains,
             true,
@@ -414,11 +412,11 @@ mod tests {
             .unwrap();
         for valid in [false, true] {
             let environment = Environment::new();
-            let locals = input_collection::Expression::Borrowed(&expression)
+            let locals = input_collection::Plan::borrowed(&expression)
                 .admit_scope(&mut vm, &environment)
                 .unwrap();
             let mut frame = Frame::new(
-                input_collection::Expression::Borrowed(&expression),
+                input_collection::Plan::borrowed(&expression),
                 parameters.clone(),
                 domains.clone(),
                 false,
