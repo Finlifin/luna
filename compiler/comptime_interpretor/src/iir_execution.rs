@@ -263,23 +263,6 @@ impl<'a> Interpreter<'a> {
         })
     }
 
-    pub(super) fn invocation_declaration(
-        &self,
-        id: DeclarationId,
-        value: &Value,
-    ) -> Option<&'a nir::program::FunctionDeclaration> {
-        if self.graph.is_some() {
-            let arguments = match value {
-                Value::Closure(c) => c.instance_arguments.as_deref().unwrap_or_default(),
-                _ => &[],
-            };
-            self.iir_function_definition(id, arguments)
-                .map(|function| &function.interface)
-        } else {
-            self.functions.declaration(&id)
-        }
-    }
-
     pub(super) fn iir_method(
         &self,
         interface: DeclarationId,
@@ -306,7 +289,6 @@ impl<'a> Interpreter<'a> {
     fn iir_callable(&mut self, key: &iir::InstanceKey) -> Result<Value, Error> {
         // External keys and warm cache queries must be bounded before any
         // structural hash, including the graph's definition lookup.
-        let before_key = self.budget.steps;
         self.charge_copy_work(None, |fuel| {
             *fuel = fuel
                 .checked_sub(1)
@@ -316,66 +298,38 @@ impl<'a> Interpreter<'a> {
             }
             Ok(())
         })?;
-        let key_work = before_key - self.budget.steps;
-        let definition = self
-            .iir_function_definition(key.declaration, &key.arguments)
+        let position = self
+            .iir_function_position(key.declaration, &key.arguments)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
-        let cache_key = (key.declaration, key.arguments.clone());
-        if let Some(callable) = self.iir_callables.lookup(key.declaration, &key.arguments) {
-            return Ok(Value::Closure(callable.clone()));
+        if let Some(handle) = self.iir_callables.get(&position) {
+            return Ok(Value::IirCallable(handle.clone()));
         }
-        let cached = self
-            .prepared_instance_cache
-            .lookup(
-                key.declaration,
-                &key.arguments,
-                key_work,
-                &mut self.budget.steps,
-            )
-            .map_err(|()| self.failure(ErrorKind::StepsExhausted, Some(definition.body.source)))?;
-        // Even a warm body needs a fresh VM-local callable. Copy only its
-        // parameter bindings and signature; contracts remain in the graph.
-        self.charge_copy_work(Some(definition.body.source), |fuel| {
-            let mut steps = *fuel as u64;
-            let result =
-                nir::copy_budget::charge_callable_bindings(&definition.interface, &mut steps);
-            *fuel = steps as usize;
-            result
+        let instance = &self.graph.expect("indexed graph").functions[position];
+        let declaration = &instance.function.interface;
+        self.charge_copy_work(Some(declaration.source), |fuel| {
+            nir::copy_budget::charge_type_substitution(&declaration.signature, &[], &[], fuel)
         })?;
-        let before_preparation = self.budget.steps;
-        let is_new = cached.is_none();
-        let body = if let Some((_, body)) = cached {
-            body
-        } else {
-            self.charge_copy_work(Some(definition.body.source), |fuel| {
-                let mut steps = *fuel as u64;
-                let result = nir::copy_budget::charge_expression(&definition.body, &mut steps);
-                *fuel = steps as usize;
-                result
-            })?;
-            Arc::new(definition.body.clone())
-        };
-        let callable = Arc::new(Closure {
-            definition_source: None,
-            origin: Some(key.declaration),
-            instance_arguments: Some(key.arguments.clone()),
-            parameters: definition.parameters.clone(),
-            environment: Environment::new(),
-            capture_order: vec![],
-            body: body.clone(),
-            ty: definition.callable_type(),
+        let handle = Arc::new(IirCallable {
+            position,
+            key: instance.key.clone(),
+            ty: declaration.callable_type(),
         });
-        if is_new && self.budget.steps >= key_work {
-            self.budget.steps -= key_work;
-            self.prepared_instance_cache.insert(
-                cache_key.clone(),
-                body,
-                key_work,
-                before_preparation - self.budget.steps,
-            );
+        self.iir_callables.insert(position, handle.clone());
+        Ok(Value::IirCallable(handle))
+    }
+
+    pub(super) fn iir_target(
+        &self,
+        handle: &Arc<IirCallable>,
+    ) -> Result<&'a nir::program::Function, Error> {
+        if !self
+            .iir_callables
+            .get(&handle.position)
+            .is_some_and(|local| Arc::ptr_eq(local, handle))
+        {
+            return Err(self.failure(ErrorKind::Type, None));
         }
-        self.iir_callables.insert(cache_key, callable.clone());
-        Ok(Value::Closure(callable))
+        Ok(&self.graph.expect("local graph callable").functions[handle.position].function)
     }
 
     pub(super) fn eval_iir_callable(&mut self, expr: &Expr) -> Result<Flow, Error> {
@@ -557,8 +511,8 @@ mod callable_budget_tests {
         let graph = graph("run".into());
         let key = &graph.functions[0].key;
         let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
-        let Value::Closure(first) = vm.iir_callable(key).unwrap() else {
-            panic!("missing closure")
+        let Value::IirCallable(first) = vm.iir_callable(key).unwrap() else {
+            panic!("missing graph callable")
         };
         vm.budget.steps = 0;
         assert_eq!(
@@ -566,8 +520,8 @@ mod callable_budget_tests {
             ErrorKind::StepsExhausted
         );
         vm.budget.steps = 1000;
-        let Value::Closure(second) = vm.iir_callable(key).unwrap() else {
-            panic!("missing cached closure")
+        let Value::IirCallable(second) = vm.iir_callable(key).unwrap() else {
+            panic!("missing cached graph callable")
         };
         assert!(Arc::ptr_eq(&first, &second));
         assert!(vm.budget.steps < 1000);
@@ -603,7 +557,10 @@ mod callable_budget_tests {
             ErrorKind::DepthExhausted
         );
         assert_eq!(vm.iir_callables.len(), 1);
-        assert!(matches!(vm.iir_callable(key).unwrap(), Value::Closure(_)));
+        assert!(matches!(
+            vm.iir_callable(key).unwrap(),
+            Value::IirCallable(_)
+        ));
     }
 
     #[test]
@@ -640,20 +597,38 @@ mod callable_budget_tests {
                 .kind,
             ErrorKind::Type
         );
-        let (Value::Closure(foreign), Value::Closure(local)) = (&foreign, &local) else {
+        let (Value::IirCallable(foreign), Value::IirCallable(local)) = (&foreign, &local) else {
             panic!("concrete IIR calls must retain their local callable")
         };
         assert!(!Arc::ptr_eq(foreign, local));
-        assert!(Arc::ptr_eq(&foreign.body, &local.body));
+        let frozen = Value::IirCallable(foreign.clone())
+            .into_scoped_invocation_term(&mut comptime_runtime::Budget::default(), &BTreeSet::new())
+            .unwrap();
+        let Value::IirCallable(restored) = second.normal_pattern_value(&frozen, &domain).unwrap()
+        else {
+            panic!("frozen instance must resolve in the receiving graph")
+        };
+        assert!(Arc::ptr_eq(local, &restored));
+        assert!(std::ptr::eq(
+            first.iir_target(foreign).unwrap(),
+            second.iir_target(local).unwrap()
+        ));
         assert_eq!(
             second
-                .invoke_value(Value::Closure(local.clone()), vec![Value::Bool(false)])
+                .invoke_value(Value::IirCallable(foreign.clone()), vec![Value::Bool(true)])
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+        assert_eq!(
+            second
+                .invoke_value(Value::IirCallable(local.clone()), vec![Value::Bool(false)])
                 .unwrap(),
             Value::Bool(false)
         );
         assert_eq!(
             first
-                .invoke_value(Value::Closure(foreign.clone()), vec![Value::Bool(true)])
+                .invoke_value(Value::IirCallable(foreign.clone()), vec![Value::Bool(true)])
                 .unwrap(),
             Value::Bool(true)
         );
@@ -678,7 +653,7 @@ mod callable_budget_tests {
         };
         for copy in [copied, checkpoint, nested[0].clone()] {
             vm.validate_immutable_input(&copy, &domain).unwrap();
-            let (Value::Closure(original), Value::Closure(copied)) = (&local, &copy) else {
+            let (Value::IirCallable(original), Value::IirCallable(copied)) = (&local, &copy) else {
                 panic!("expected concrete callable")
             };
             assert!(Arc::ptr_eq(original, copied));
@@ -706,7 +681,7 @@ mod callable_budget_tests {
     }
 
     #[test]
-    fn warm_body_cache_still_charges_local_callable_bindings() {
+    fn forming_graph_handles_charges_the_signature_in_each_vm() {
         let mut source = graph("wide".into());
         let definition = &mut source.functions[0].function;
         definition.parameters = (0..256).map(|index| LocalId { owner: 1, index }).collect();
@@ -721,7 +696,7 @@ mod callable_budget_tests {
         let key = &graph.functions[0].key;
         let mut cache = CodeSession::for_iir(graph.clone());
         let mut first = Interpreter::from_iir(&graph, Budget::default()).unwrap();
-        let Value::Closure(initial) = first
+        let Value::IirCallable(initial) = first
             .with_code_session(&mut cache, |vm| vm.iir_callable(key))
             .unwrap()
         else {
@@ -738,24 +713,76 @@ mod callable_budget_tests {
         );
         assert!(second.iir_callables.is_empty());
         second.budget.steps = 100_000;
-        let Value::Closure(recovered) = second
+        let Value::IirCallable(recovered) = second
             .with_code_session(&mut cache, |vm| vm.iir_callable(key))
             .unwrap()
         else {
             panic!("missing recovered callable")
         };
         assert!(!Arc::ptr_eq(&initial, &recovered));
-        assert!(Arc::ptr_eq(&initial.body, &recovered.body));
+        assert_eq!(initial.key(), recovered.key());
         assert_eq!(second.iir_callables.len(), 1);
     }
 
     #[test]
-    fn iir_closures_copy_code_without_unused_declaration_names() {
+    fn rejected_graph_entry_is_independent_of_body_width() {
+        let mut costs = Vec::new();
+        for width in [0, 2048] {
+            let mut graph = graph("guarded".into());
+            let function = &mut graph.functions[0].function;
+            function.phase = nir::program::FunctionPhase::Comptime;
+            let mut condition = function.body.clone();
+            condition.kind = K::Literal(Literal::Bool(false));
+            function.preconditions.push(condition.clone());
+            function.body.kind = K::Block {
+                statements: vec![condition.clone(); width],
+                result: Some(Box::new(condition)),
+            };
+            for tree in [false, true] {
+                let mut vm = if tree {
+                    Interpreter::from_iir_for_comptime_tree(&graph, Budget::default())
+                } else {
+                    Interpreter::from_iir_for_comptime(&graph, Budget::default())
+                }
+                .unwrap();
+                vm.budget.steps = 500;
+                let key = &graph.functions[0].key;
+                let handle = vm.iir_callable(key).unwrap();
+                let after_formation = vm.budget.steps;
+                assert_eq!(
+                    handle
+                        .clone()
+                        .into_scoped_invocation_term(
+                            &mut comptime_runtime::Budget::default(),
+                            &BTreeSet::new()
+                        )
+                        .unwrap(),
+                    Term::FunctionValue {
+                        declaration: key.declaration,
+                        arguments: key.arguments.to_vec()
+                    }
+                );
+                assert_eq!(
+                    vm.invoke_value(handle, vec![]).unwrap_err().kind,
+                    ErrorKind::ProgramContractRejected
+                );
+                assert!(!vm.events().contains(&Event::EnterFunction(key.declaration)));
+                costs.push((after_formation, vm.budget.steps));
+            }
+        }
+        assert_eq!(costs[..2], costs[2..]);
+    }
+
+    #[test]
+    fn graph_callable_formation_ignores_declaration_names() {
         let graph = graph("unused".repeat(1000));
         let key = &graph.functions[0].key;
         let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
         vm.budget.steps = 500;
-        assert!(matches!(vm.iir_callable(key).unwrap(), Value::Closure(_)));
+        assert!(matches!(
+            vm.iir_callable(key).unwrap(),
+            Value::IirCallable(_)
+        ));
         assert_eq!(vm.invoke_instance(key, vec![]).unwrap(), Value::Bool(true));
     }
 }

@@ -31,8 +31,6 @@ fn fixture(repeat: bool) -> (Arc<Program>, Environment) {
     }));
     let closure = Value::Closure(Arc::new(Closure {
         definition_source: None,
-        origin: None,
-        instance_arguments: None,
         parameters: vec![],
         environment: Environment::new(),
         capture_order: vec![],

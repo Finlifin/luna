@@ -16274,17 +16274,13 @@ fn owned_function_instances_preserve_declaration_arguments_without_exporting_clo
             vec![Value::Integer(comptime_runtime::Integer::from_u128(7))],
         )
         .unwrap();
-    let Value::Closure(instance) = &value else {
-        panic!("expected function instance")
-    };
-    assert!(value.to_string().contains("(instance (declaration"));
-    assert!(
-        value
-            .to_string()
-            .contains("(arguments (primitive Integer))")
+    assert!(matches!(value, Value::FunctionInstance { .. }));
+    assert_eq!(
+        value.to_string(),
+        format!("(function-instance {origin} (arguments (primitive Integer)))")
     );
     assert_eq!(
-        instance.declaration_instance(),
+        value.declaration_instance(),
         Some((origin, [Term::Primitive(Primitive::Integer)].as_slice()))
     );
     assert_eq!(
@@ -24566,8 +24562,8 @@ fn runtime_function_constants_keep_declaration_identity_without_invoking_bodies(
     let value = vm.invoke(id(&package, "obtain"), vec![]).unwrap();
     match value {
         Value::Function(declaration) => assert_eq!(declaration, id(&package, "invert")),
-        Value::Closure(closure) => assert_eq!(
-            closure.declaration_instance(),
+        Value::FunctionInstance { .. } => assert_eq!(
+            value.declaration_instance(),
             Some((id(&package, "invert"), [].as_slice()))
         ),
         other => panic!("expected a function identity, got {other:?}"),

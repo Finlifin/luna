@@ -44,7 +44,7 @@ struct InvocationFrame<'a> {
 impl InvocationFrame<'_> {
     /// Only the active contract or the admitted body can supply execution code.
     /// Entry and exit states do not retain a fallback body expression.
-    fn parts(&mut self) -> (&Expr, Option<DeclarationId>, &mut Environment) {
+    fn parts(&mut self) -> (&Expr, Option<CodeOrigin>, &mut Environment) {
         let (expression, identity) = match self.condition.as_deref() {
             Some(condition) => (condition, None),
             None => {
@@ -95,7 +95,7 @@ enum Execution<'a> {
 }
 
 impl Execution<'_> {
-    fn parts(&mut self) -> (&Expr, Option<DeclarationId>, &mut Environment) {
+    fn parts(&mut self) -> (&Expr, Option<CodeOrigin>, &mut Environment) {
         match self {
             Self::Associated {
                 activation,
@@ -322,10 +322,14 @@ impl<'a> Interpreter<'a> {
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<Box<Activation<'a>>, Error> {
         let function = self.resolve_invocation_identity(function)?;
-        let origin = self.admit_invocation(&function, context.as_ref())?;
+        let declaration = self.admit_invocation(&function, context.as_ref())?;
+        let origin = match &function {
+            Value::Function(id) => Some(*id),
+            _ => function.declaration_instance().map(|(id, _)| id),
+        };
         let saved = self.enter_invocation(&function, origin, context)?;
         let prepared = self
-            .prepare_invocation(function, arguments, origin)
+            .prepare_invocation(function, arguments, declaration)
             .and_then(|mut frame| {
                 self.prepare_invocation_step(&mut frame)?;
                 Ok(frame)
@@ -380,36 +384,27 @@ impl<'a> Interpreter<'a> {
         &mut self,
         function: &Value,
         context: Option<&(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
-    ) -> Result<Option<DeclarationId>, Error> {
-        if matches!(function, Value::RuntimeTraitMethod(_)) {
-            return Err(self.failure(ErrorKind::PhaseMismatch, None));
-        }
-        let origin = match &function {
+    ) -> Result<Option<&'a nir::program::FunctionDeclaration>, Error> {
+        let declaration = match function {
+            Value::RuntimeTraitMethod(_) => {
+                return Err(self.failure(ErrorKind::PhaseMismatch, None));
+            }
+            Value::IirCallable(handle) => Some(&self.iir_target(handle)?.interface),
             Value::Function(id)
             | Value::FunctionInstance {
                 declaration: id, ..
-            } => Some(*id),
-            Value::Closure(closure) => closure.origin,
+            } => {
+                if self.normal_forms.contains_key(id) {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, None));
+                }
+                self.functions.declaration(id)
+            }
             _ => None,
         };
-        if origin.is_some_and(|id| self.normal_forms.contains_key(&id)) {
-            return Err(self.failure(ErrorKind::PhaseMismatch, None));
-        }
         if self.comptime_only {
-            let declared_comptime = |id| {
-                self.invocation_declaration(id, &function)
-                    .is_some_and(|f| f.phase == nir::program::FunctionPhase::Comptime)
-            };
-            let authorized = match &function {
-                Value::Function(id)
-                | Value::FunctionInstance {
-                    declaration: id, ..
-                } => declared_comptime(*id),
-                Value::Closure(closure) => {
-                    closure.ty.is_comptime_callable()
-                        && closure.origin.is_none_or(declared_comptime)
-                }
-                _ => false,
+            let authorized = match function {
+                Value::Closure(closure) => closure.ty.is_comptime_callable(),
+                _ => declaration.is_some_and(|d| d.phase == nir::program::FunctionPhase::Comptime),
             };
             if !authorized {
                 return Err(self.failure(ErrorKind::PhaseMismatch, None));
@@ -418,17 +413,7 @@ impl<'a> Interpreter<'a> {
         if self.cleanup_schedule.is_some() && context.is_none() {
             let named_instance = match &function {
                 Value::Function(declaration) => Some((*declaration, &[][..])),
-                Value::FunctionInstance {
-                    declaration,
-                    arguments,
-                } => Some((*declaration, arguments.as_slice())),
-                Value::Closure(closure) => closure.origin.map(|declaration| {
-                    (
-                        declaration,
-                        closure.instance_arguments.as_deref().unwrap_or(&[]),
-                    )
-                }),
-                _ => None,
+                _ => function.declaration_instance(),
             };
             if let Some((declaration, arguments)) = named_instance {
                 for key in &self.cleanup_schedule.unwrap().borrowed_callable_functions {
@@ -438,17 +423,16 @@ impl<'a> Interpreter<'a> {
                     }
                 }
             }
-            if let Some(declaration) = origin {
-                let definition = self
-                    .invocation_declaration(declaration, &function)
-                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
+            if named_instance.is_some() {
+                let definition =
+                    declaration.ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
                 if matches!(definition.signature.callable_signature(), Term::Function {parameters,..} if parameters.iter().any(|p|matches!(p.ty.callable_signature(),Term::Function {..})))
                 {
                     return Err(self.failure(ErrorKind::InvalidCallPlan, None));
                 }
             }
         }
-        Ok(origin)
+        Ok(declaration)
     }
 
     fn enter_invocation(
@@ -487,9 +471,7 @@ impl<'a> Interpreter<'a> {
             origin.map(|declaration| iir::InstanceKey {
                 declaration,
                 arguments: (match &function {
-                    Value::Closure(closure) => {
-                        closure.instance_arguments.clone().unwrap_or_default()
-                    }
+                    Value::IirCallable(handle) => handle.key.arguments.clone(),
                     Value::FunctionInstance { arguments, .. } => Arc::from(arguments.as_slice()),
                     _ => Arc::from([]),
                 })
@@ -535,18 +517,20 @@ impl<'a> Interpreter<'a> {
     fn prepare_invocation_body(
         &mut self,
         frame: &InvocationFrame<'a>,
-    ) -> Result<(Body<'a>, Option<DeclarationId>), Error> {
-        let mut body = match &frame.function {
-            Value::Function(id) => Body::Package(
-                self.functions
+    ) -> Result<(Body<'a>, Option<CodeOrigin>), Error> {
+        let (body, origin) = match &frame.function {
+            Value::Function(id) => {
+                let body = self
+                    .functions
                     .body(id)
-                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(frame.source)))?,
-            ),
+                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(frame.source)))?;
+                (Body::Package(body), Some(CodeOrigin::Declaration(*id)))
+            }
             Value::FunctionInstance {
                 declaration,
                 arguments,
-            } => Body::Owned(
-                self.prepare_function_instance_body(
+            } => {
+                let body = self.prepare_function_instance_body(
                     *declaration,
                     arguments,
                     frame
@@ -554,48 +538,40 @@ impl<'a> Interpreter<'a> {
                         .as_ref()
                         .expect("source instance admission"),
                     frame.source,
-                )?,
+                )?;
+                (Body::Owned(body), None)
+            }
+            Value::IirCallable(handle) => (
+                Body::Package(&self.iir_target(handle)?.body),
+                Some(CodeOrigin::GraphInstance(handle.position)),
             ),
-            Value::Closure(closure) => Body::Owned(closure.body.clone()),
+            Value::Closure(closure) => (Body::Owned(closure.body.clone()), None),
             _ => return Err(self.failure(ErrorKind::Type, Some(frame.source))),
         };
-        let independent = if let Some(scope) = &frame.type_scope {
-            let (prepared, independent) = match &body {
-                Body::Package(body) => {
-                    let declaration = match &frame.function {
-                        Value::Function(id) => Some(*id),
-                        _ => None,
-                    };
-                    self.prepare_input_body(body, scope, declaration)?
-                }
-                Body::Owned(body) => self.prepare_owned_input_body(body, scope)?,
-            };
-            body = Body::Owned(prepared);
-            independent
-        } else {
-            true
+        let Some(scope) = &frame.type_scope else {
+            return Ok((body, origin));
         };
-        let stable_code = match &frame.function {
-            Value::Function(id) if independent => Some(*id),
-            _ => None,
+        let (prepared, independent) = match &body {
+            Body::Package(body) => {
+                self.prepare_input_body(body, scope, origin.expect("named body origin"))?
+            }
+            Body::Owned(body) => self.prepare_owned_input_body(body, scope)?,
         };
-        Ok((body, stable_code))
+        Ok((Body::Owned(prepared), origin.filter(|_| independent)))
     }
 
     fn prepare_invocation(
         &mut self,
         function: Value,
         arguments: Vec<Value>,
-        origin: Option<DeclarationId>,
+        declaration: Option<&'a nir::program::FunctionDeclaration>,
     ) -> Result<InvocationFrame<'a>, Error> {
         let frames;
         let mut instance_inputs = None;
         let (parameters, mut environment, source, signature) = match &function {
             Value::Function(id) => {
-                let definition = self
-                    .functions
-                    .declaration(id)
-                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
+                let definition =
+                    declaration.ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
                 if !definition.type_parameters.is_empty() {
                     return Err(self.failure(ErrorKind::Type, None));
                 }
@@ -614,14 +590,9 @@ impl<'a> Interpreter<'a> {
                     std::borrow::Cow::Borrowed(&definition.signature),
                 )
             }
-            Value::FunctionInstance {
-                declaration,
-                arguments,
-            } => {
-                let definition = self
-                    .functions
-                    .declaration(declaration)
-                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
+            Value::FunctionInstance { arguments, .. } => {
+                let definition =
+                    declaration.ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
                 let source = definition.source;
                 frames = [self.ordinary_input_frame(&definition.signature, source)?];
                 let inputs = self.admit_function_inputs(
@@ -638,6 +609,15 @@ impl<'a> Interpreter<'a> {
                     Environment::with_capacity(definition.parameters.len()),
                     source,
                     std::borrow::Cow::Owned(signature),
+                )
+            }
+            Value::IirCallable(handle) => {
+                let target = self.iir_target(handle)?;
+                (
+                    target.parameters.as_slice(),
+                    Environment::with_capacity(target.parameters.len()),
+                    target.body.source,
+                    std::borrow::Cow::Borrowed(&handle.ty),
                 )
             }
             Value::Closure(closure) => {
@@ -668,12 +648,6 @@ impl<'a> Interpreter<'a> {
             &mut environment,
             source,
         )?;
-        let declaration = origin
-            .map(|id| {
-                self.invocation_declaration(id, &function)
-                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))
-            })
-            .transpose()?;
         let mut substitution = None;
         if let Some(definition) = declaration {
             let check_contracts = (self.comptime_only
@@ -690,9 +664,6 @@ impl<'a> Interpreter<'a> {
                     _ => {
                         let arguments = match &function {
                             _ if self.graph.is_some() => &[][..],
-                            Value::Closure(closure) => {
-                                closure.instance_arguments.as_deref().unwrap_or_default()
-                            }
                             Value::FunctionInstance { arguments, .. } => arguments.as_slice(),
                             _ => &[],
                         };
@@ -790,8 +761,6 @@ mod tests {
                 .unwrap_or_default();
             Value::Closure(Arc::new(Closure {
                 definition_source: None,
-                origin: None,
-                instance_arguments: None,
                 parameters: vec![],
                 environment: captured
                     .map(|value| Environment::from([(local(0), value)]))
@@ -955,8 +924,6 @@ mod tests {
             environment.insert(captured, Value::Bool(true));
             Value::Closure(Arc::new(Closure {
                 definition_source: None,
-                origin: None,
-                instance_arguments: None,
                 parameters: vec![],
                 environment,
                 capture_order: vec![captured],

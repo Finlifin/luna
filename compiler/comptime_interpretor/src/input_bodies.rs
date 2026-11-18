@@ -12,12 +12,12 @@ struct BoundBody {
 }
 #[derive(Default)]
 pub(super) struct Cache {
-    entries: BTreeMap<DeclarationId, (Entry, u64)>,
+    entries: BTreeMap<CodeOrigin, (Entry, u64)>,
     owned: BTreeMap<usize, (std::sync::Weak<Expr>, Entry, u64)>,
     weight: u64,
 }
 impl Cache {
-    fn insert(&mut self, id: DeclarationId, entry: Entry, weight: u64) {
+    fn insert(&mut self, id: CodeOrigin, entry: Entry, weight: u64) {
         const LIMIT: u64 = 100_000;
         if weight > LIMIT {
             return;
@@ -65,14 +65,19 @@ impl Cache {
             .insert(key, (Arc::downgrade(body), entry, weight));
     }
 }
+enum SourceKey<'a> {
+    Named(CodeOrigin),
+    Owned(&'a Arc<Expr>),
+}
+
 impl Interpreter<'_> {
     pub(super) fn prepare_input_body(
         &mut self,
         body: &Expr,
         scope: &nir::FunctionInputBinding,
-        declaration: Option<DeclarationId>,
+        origin: CodeOrigin,
     ) -> Result<(Arc<Expr>, bool), Error> {
-        self.prepare_input_body_key(body, scope, declaration, None)
+        self.prepare_input_body_key(body, scope, SourceKey::Named(origin))
     }
 
     pub(super) fn prepare_owned_input_body(
@@ -80,24 +85,23 @@ impl Interpreter<'_> {
         body: &Arc<Expr>,
         scope: &nir::FunctionInputBinding,
     ) -> Result<(Arc<Expr>, bool), Error> {
-        self.prepare_input_body_key(body, scope, None, Some(body))
+        self.prepare_input_body_key(body, scope, SourceKey::Owned(body))
     }
 
     fn prepare_input_body_key(
         &mut self,
         body: &Expr,
         scope: &nir::FunctionInputBinding,
-        declaration: Option<DeclarationId>,
-        owned: Option<&Arc<Expr>>,
+        key: SourceKey<'_>,
     ) -> Result<(Arc<Expr>, bool), Error> {
-        let cached = declaration
-            .and_then(|id| {
-                self.input_body_cache
-                    .entries
-                    .get(&id)
-                    .map(|(entry, _)| entry.clone())
-            })
-            .or_else(|| owned.and_then(|body| self.input_body_cache.owned(body)));
+        let cached = match key {
+            SourceKey::Named(origin) => self
+                .input_body_cache
+                .entries
+                .get(&origin)
+                .map(|(entry, _)| entry.clone()),
+            SourceKey::Owned(body) => self.input_body_cache.owned(body),
+        };
         if let Some(Entry::Prepared(body)) = cached {
             return Ok((body, true));
         }
@@ -132,32 +136,24 @@ impl Interpreter<'_> {
         // completion, before publishing an independent body for later calls.
         self.specialize_input_types(&mut prepared, scope)?;
         let prepared = Arc::new(prepared);
-        if declaration.is_some() || owned.is_some() {
-            let entry = if !dependent || persistent {
-                let before = self.budget.steps;
-                nir::copy_budget::charge_type_rewrite(&prepared, &mut self.budget.steps)
-                    .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(body.source)))?;
-                let weight = (before - self.budget.steps)
-                    .saturating_add(binding_work)
-                    .saturating_add(1);
-                let entry = if dependent {
-                    Entry::Dependent(Arc::new(BoundBody {
-                        binding: scope.clone(),
-                        body: prepared.clone(),
-                    }))
-                } else {
-                    Entry::Prepared(prepared.clone())
-                };
-                Some((entry, weight))
+        if !dependent || persistent {
+            let before = self.budget.steps;
+            nir::copy_budget::charge_type_rewrite(&prepared, &mut self.budget.steps)
+                .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(body.source)))?;
+            let weight = (before - self.budget.steps)
+                .saturating_add(binding_work)
+                .saturating_add(1);
+            let entry = if dependent {
+                Entry::Dependent(Arc::new(BoundBody {
+                    binding: scope.clone(),
+                    body: prepared.clone(),
+                }))
             } else {
-                None
+                Entry::Prepared(prepared.clone())
             };
-            if let Some((entry, weight)) = entry {
-                if let Some(id) = declaration {
-                    self.input_body_cache.insert(id, entry, weight);
-                } else if let Some(body) = owned {
-                    self.input_body_cache.insert_owned(body, entry, weight);
-                }
+            match key {
+                SourceKey::Named(origin) => self.input_body_cache.insert(origin, entry, weight),
+                SourceKey::Owned(body) => self.input_body_cache.insert_owned(body, entry, weight),
             }
         }
         Ok((prepared, !dependent))
@@ -190,6 +186,10 @@ mod tests {
             kind: K::TypeValue(term),
         }
     }
+    fn named(local: u32) -> CodeOrigin {
+        CodeOrigin::Declaration(id(local))
+    }
+
     fn scope(input: Primitive) -> nir::FunctionInputBinding {
         Term::Function {
             parameters: vec![nir::Parameter {
@@ -271,19 +271,12 @@ mod tests {
     fn rejected_entry_does_not_spend_or_publish_dependent_body_preparation() {
         for width in [0, 4096] {
             let package = guarded_type_body(width);
-            for (tree, owned) in [(false, false), (true, false), (false, true), (true, true)] {
-                let callable = if owned {
-                    let function = &package.functions[0];
-                    Value::Closure(Arc::new(Closure {
-                        definition_source: None,
-                        origin: Some(function.declaration),
-                        instance_arguments: None,
-                        parameters: function.parameters.clone(),
-                        capture_order: vec![],
-                        environment: Environment::default(),
-                        body: Arc::new(function.body.clone()),
-                        ty: Term::ComptimeFunction(Box::new(function.signature.clone())),
-                    }))
+            for (tree, instance) in [(false, false), (true, false), (false, true), (true, true)] {
+                let callable = if instance {
+                    Value::FunctionInstance {
+                        declaration: id(1),
+                        arguments: vec![],
+                    }
                 } else {
                     Value::Function(id(1))
                 };
@@ -507,12 +500,12 @@ mod tests {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let constant = body(Term::Primitive(Primitive::Bool));
         let (first, independent) = vm
-            .prepare_input_body(&constant, &scope(Primitive::Bool), Some(id(1)))
+            .prepare_input_body(&constant, &scope(Primitive::Bool), named(1))
             .unwrap();
         assert!(independent);
         let before = vm.budget.steps;
         let (next, independent) = vm
-            .prepare_input_body(&constant, &scope(Primitive::Char), Some(id(1)))
+            .prepare_input_body(&constant, &scope(Primitive::Char), named(1))
             .unwrap();
         assert!(independent && Arc::ptr_eq(&first, &next));
         assert_eq!(before, vm.budget.steps);
@@ -523,13 +516,13 @@ mod tests {
         });
         for input in [Primitive::Bool, Primitive::Char, Primitive::Bool] {
             let (prepared, independent) = vm
-                .prepare_input_body(&dependent, &scope(input), Some(id(2)))
+                .prepare_input_body(&dependent, &scope(input), named(2))
                 .unwrap();
             assert!(!independent);
             assert!(matches!(&prepared.kind, K::TypeValue(ty) if *ty == Term::Primitive(input)));
         }
         assert!(matches!(
-            vm.input_body_cache.entries.get(&id(2)),
+            vm.input_body_cache.entries.get(&named(2)),
             Some((Entry::Dependent(_), _))
         ));
     }
@@ -543,14 +536,14 @@ mod tests {
             sort: nir::Sort::Type,
         });
         assert!(
-            vm.prepare_input_body(&invalid, &scope(Primitive::Bool), Some(id(1)))
+            vm.prepare_input_body(&invalid, &scope(Primitive::Bool), named(1))
                 .is_err()
         );
         assert!(vm.input_body_cache.entries.is_empty());
         let valid = body(Term::Primitive(Primitive::Bool));
         vm.budget.steps = 0;
         assert_eq!(
-            vm.prepare_input_body(&valid, &scope(Primitive::Bool), Some(id(1)))
+            vm.prepare_input_body(&valid, &scope(Primitive::Bool), named(1))
                 .unwrap_err()
                 .kind,
             ErrorKind::StepsExhausted
@@ -558,14 +551,14 @@ mod tests {
         assert!(vm.input_body_cache.entries.is_empty());
         vm.budget = Budget::default();
         let (held, _) = vm
-            .prepare_input_body(&valid, &scope(Primitive::Bool), Some(id(1)))
+            .prepare_input_body(&valid, &scope(Primitive::Bool), named(1))
             .unwrap();
         vm.input_body_cache
-            .insert(id(2), Entry::Prepared(held.clone()), 100_000);
-        assert!(!vm.input_body_cache.entries.contains_key(&id(1)));
+            .insert(named(2), Entry::Prepared(held.clone()), 100_000);
+        assert!(!vm.input_body_cache.entries.contains_key(&named(1)));
         assert_eq!(held.to_string(), valid.to_string());
         let (again, _) = vm
-            .prepare_input_body(&valid, &scope(Primitive::Bool), Some(id(1)))
+            .prepare_input_body(&valid, &scope(Primitive::Bool), named(1))
             .unwrap();
         assert!(!Arc::ptr_eq(&held, &again));
         assert_eq!(held.to_string(), again.to_string());
@@ -622,29 +615,29 @@ mod tests {
         let other_scope = scope(Primitive::Char);
         assert_eq!(first_scope.signature(), other_scope.signature());
         let (first, _) = vm
-            .prepare_input_body(&source, &first_scope, Some(id(1)))
+            .prepare_input_body(&source, &first_scope, named(1))
             .unwrap();
         let before = vm.remaining_steps();
         let (warm, independent) = vm
-            .prepare_input_body(&source, &first_scope, Some(id(1)))
+            .prepare_input_body(&source, &first_scope, named(1))
             .unwrap();
         assert!(!independent && Arc::ptr_eq(&first, &warm));
         let work = before - vm.remaining_steps();
         assert!(work > 0);
         vm.budget.steps = work - 1;
         let error = vm
-            .prepare_input_body(&source, &other_scope, Some(id(1)))
+            .prepare_input_body(&source, &other_scope, named(1))
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::StepsExhausted);
         assert_eq!(error.source, Some(source.source));
         vm.budget = Budget::default();
         let (recovered, _) = vm
-            .prepare_input_body(&source, &first_scope, Some(id(1)))
+            .prepare_input_body(&source, &first_scope, named(1))
             .unwrap();
         assert!(Arc::ptr_eq(&first, &recovered));
         let previous_weight = vm.input_body_cache.weight;
         let (changed, _) = vm
-            .prepare_input_body(&source, &other_scope, Some(id(1)))
+            .prepare_input_body(&source, &other_scope, named(1))
             .unwrap();
         assert!(!Arc::ptr_eq(&first, &changed));
         assert!(matches!(
@@ -700,19 +693,19 @@ mod tests {
         });
         vm.abstract_type_parameters.insert(id(10));
         let (first, _) = vm
-            .prepare_input_body(&source, &scope(Primitive::Bool), Some(id(1)))
+            .prepare_input_body(&source, &scope(Primitive::Bool), named(1))
             .unwrap();
         let (next, _) = vm
-            .prepare_input_body(&source, &scope(Primitive::Bool), Some(id(1)))
+            .prepare_input_body(&source, &scope(Primitive::Bool), named(1))
             .unwrap();
         assert!(!Arc::ptr_eq(&first, &next));
         assert!(vm.input_body_cache.entries.is_empty());
         vm.abstract_type_parameters.clear();
         let (concrete, _) = vm
-            .prepare_input_body(&source, &scope(Primitive::Bool), Some(id(1)))
+            .prepare_input_body(&source, &scope(Primitive::Bool), named(1))
             .unwrap();
         let (warm, _) = vm
-            .prepare_input_body(&source, &scope(Primitive::Bool), Some(id(1)))
+            .prepare_input_body(&source, &scope(Primitive::Bool), named(1))
             .unwrap();
         assert!(Arc::ptr_eq(&concrete, &warm));
     }

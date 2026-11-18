@@ -97,6 +97,14 @@ impl Interpreter<'_> {
                 Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
             ) =>
             {
+                if self.graph.is_some() {
+                    return self.iir_function_value(
+                        *declaration,
+                        arguments,
+                        ty,
+                        SourceRange { start: 0, end: 0 },
+                    );
+                }
                 let source = if let Some(identity) = self.functions.runtime_identity(declaration) {
                     if ty.is_comptime_callable() || identity.signature.is_comptime_callable() {
                         return Err(self.failure(ErrorKind::Type, None));

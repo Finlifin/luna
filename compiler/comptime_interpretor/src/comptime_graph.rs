@@ -48,6 +48,10 @@ impl Interpreter<'_> {
                     seen,
                 )?;
             }
+            Value::IirCallable(handle) => {
+                self.iir_target(handle)?;
+                self.check_comptime_domain(&handle.ty, source)?;
+            }
             Value::Closure(closure) => {
                 if !seen.insert((1, Arc::as_ptr(closure) as usize)) {
                     return Ok(());

@@ -2,8 +2,8 @@
 use super::*;
 
 // Separate declaration lookup allows borrowed slice queries without constructing
-// an owned tuple key. Each VM owns its admitted bodies and callable handles;
-// only immutable body code may also enter the persistent cache below.
+// an owned tuple key. A source VM retains its specialized expression bodies;
+// only immutable code may also enter the persistent cache below.
 pub(super) struct Instances<T> {
     entries: HashMap<DeclarationId, HashMap<Arc<[Term]>, Arc<T>>>,
 }

@@ -23,6 +23,21 @@ pub struct CodeSession {
     // Specialized bodies only; callable identity belongs to each VM.
     instances: function_instances::Cache,
 }
+/// Scoped to the exact immutable world retained by CodeSession.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CodeOrigin {
+    Declaration(DeclarationId),
+    GraphInstance(usize),
+}
+impl fmt::Display for CodeOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Declaration(id) => write!(f, "(declaration {id})"),
+            Self::GraphInstance(position) => write!(f, "(graph-instance {position})"),
+        }
+    }
+}
+
 enum CodeWorld {
     Source(Arc<Package>),
     Graph(Arc<iir::Package>),

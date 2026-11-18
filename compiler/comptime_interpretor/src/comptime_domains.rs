@@ -258,8 +258,6 @@ mod tests {
         };
         let closure = Value::Closure(Arc::new(Closure {
             definition_source: None,
-            origin: None,
-            instance_arguments: None,
             parameters: vec![],
             environment: std::iter::once((binding, Value::Storage(cell.clone()))).collect(),
             capture_order: vec![binding],

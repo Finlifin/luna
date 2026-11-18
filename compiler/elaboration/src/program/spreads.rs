@@ -318,9 +318,7 @@ impl Checker<'_, '_> {
         // Delivery remains attached to the original packet. Only the selected
         // dependency obtains a symbol; a closure's checked snapshot factory is
         // used by annotation computations, not to split the delivery graph.
-        if matches!(&selected, comptime_interpretor::Value::Closure(closure)
-            if closure.declaration_instance().is_none())
-        {
+        if matches!(&selected, comptime_interpretor::Value::Closure(_)) {
             return self
                 .freeze_completed_dependency(selected, ty.clone(), source.span)
                 .map(|(_, symbol)| Some(symbol));

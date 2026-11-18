@@ -178,12 +178,6 @@ impl Restore<'_> {
     #[inline(never)]
     fn closure(&mut self, closure: &Arc<Closure>, depth: usize) -> Result<Value, ErrorKind> {
         Ok({
-            if let Some((declaration, inputs)) = closure.declaration_instance() {
-                return Ok(Value::FunctionInstance {
-                    declaration,
-                    arguments: self.types(inputs)?,
-                });
-            }
             let key = Arc::as_ptr(closure) as usize;
             if let Some(saved) = self.closures.get(&key) {
                 return saved
@@ -203,12 +197,6 @@ impl Restore<'_> {
                 .collect::<Result<_, ErrorKind>>()?;
             let restored = Arc::new(Closure {
                 definition_source: closure.definition_source,
-                origin: closure.origin,
-                instance_arguments: closure
-                    .instance_arguments
-                    .as_ref()
-                    .map(|args| self.types(args).map(Into::into))
-                    .transpose()?,
                 parameters: closure.parameters.clone(),
                 capture_order: closure.capture_order.clone(),
                 environment,
@@ -299,6 +287,10 @@ impl Restore<'_> {
 
             Value::Storage(cell) => self.cell(cell, depth)?,
 
+            Value::IirCallable(handle) => Value::FunctionInstance {
+                declaration: handle.key.declaration,
+                arguments: self.types(&handle.key.arguments)?,
+            },
             Value::Closure(closure) => self.closure(closure, depth)?,
 
             Value::Code(code) => self.code(code)?,
@@ -390,8 +382,6 @@ mod tests {
         let cell = Storage::new(Value::TypeParameter(parameters[0].declaration));
         let closure = Arc::new(Closure {
             definition_source: None,
-            origin: None,
-            instance_arguments: None,
             parameters: vec![LocalId { owner: 1, index: 1 }],
             capture_order: vec![slot],
             environment: [(slot, Value::Storage(cell.clone()))].into_iter().collect(),

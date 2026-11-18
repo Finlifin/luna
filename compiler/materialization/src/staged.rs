@@ -186,10 +186,15 @@ impl Builder<'_> {
         crate::associated::charge_projection_copy(ty, &mut self.fuel)
             .map_err(|_| "staged value type copy budget exhausted")?;
         let kind = match value {
-            Value::FunctionInstance {
-                declaration,
-                arguments,
-            } if matches!(ty.callable_signature(), Term::Function { .. }) => {
+            Value::IirCallable(_) | Value::FunctionInstance { .. }
+                if matches!(ty.callable_signature(), Term::Function { .. }) =>
+            {
+                if let Value::IirCallable(handle) = value
+                    && ty.is_comptime_callable() != handle.ty().is_comptime_callable()
+                {
+                    return Err("staged callable phase mismatch".into());
+                }
+                let (declaration, arguments) = value.declaration_instance().unwrap();
                 // The source VM has checked this result against `ty`. Named
                 // identities can belong to either phase; freezing preserves
                 // the original signature rather than granting runtime entry.
@@ -199,8 +204,8 @@ impl Builder<'_> {
                     iir::completed_type(argument, &BTreeSet::new(), &mut self.fuel)?;
                 }
                 K::FunctionInstance {
-                    declaration: *declaration,
-                    arguments: arguments.clone(),
+                    declaration,
+                    arguments: arguments.to_vec(),
                 }
             }
             Value::RuntimeTraitMethod(identity)
@@ -233,23 +238,6 @@ impl Builder<'_> {
                 if matches!(ty.callable_signature(), Term::Function { .. }) =>
             {
                 K::Function(*declaration)
-            }
-            Value::Closure(closure)
-                if matches!(ty.callable_signature(), Term::Function { .. })
-                    && ty.is_comptime_callable() == closure.ty().is_comptime_callable()
-                    && closure.captured_values().len() == 0
-                    && closure.declaration_instance().is_some() =>
-            {
-                let (declaration, arguments) = closure.declaration_instance().unwrap();
-                for argument in arguments {
-                    nir::type_computations::charge_term(argument, &mut self.fuel)
-                        .map_err(|error| error.to_string())?;
-                    iir::completed_type(argument, &BTreeSet::new(), &mut self.fuel)?;
-                }
-                K::FunctionInstance {
-                    declaration,
-                    arguments: arguments.to_vec(),
-                }
             }
             Value::Closure(closure)
                 if matches!(ty.callable_signature(), Term::Function { .. })

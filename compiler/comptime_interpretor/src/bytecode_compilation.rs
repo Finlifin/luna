@@ -102,10 +102,10 @@ fn stable_code_cache_hits_do_not_repeat_compilation_charges() {
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let body = body();
     let code = Arc::new(vm.compile_body(&body).unwrap());
-    let declaration = DeclarationId {
+    let declaration = CodeOrigin::Declaration(DeclarationId {
         package: 1,
         local: 1,
-    };
+    });
     vm.bytecode_cache.insert(declaration, code.clone());
     let before = vm.budget.steps;
     for _ in 0..3 {
@@ -178,10 +178,10 @@ fn owned_and_declaration_code_share_a_bounded_cache() {
         ..body()
     });
     let code = Arc::new(vm.compile_body(&source).unwrap());
-    let declaration = DeclarationId {
+    let declaration = CodeOrigin::Declaration(DeclarationId {
         package: 91,
         local: 1,
-    };
+    });
     vm.bytecode_cache.insert(declaration, code.clone());
     vm.bytecode_cache.insert_owned(&source, code.clone());
     let weight = vm.bytecode_cache.weight;
@@ -388,10 +388,10 @@ fn rejected_input_lowering_never_starts_execution_or_publishes_code() {
     assert_eq!(failure.kind, ErrorKind::Unsupported);
     assert_eq!(failure.source, Some(unsupported_source));
     assert_eq!(environment.get(&trace), Some(&Value::Bool(true)));
-    let declaration = DeclarationId {
+    let declaration = CodeOrigin::Declaration(DeclarationId {
         package: 1,
         local: 1,
-    };
+    });
     for _ in 0..2 {
         assert_eq!(
             vm.invocation_code(&expression, Some(declaration))

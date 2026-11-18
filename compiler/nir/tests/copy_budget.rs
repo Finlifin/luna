@@ -794,41 +794,6 @@ fn function_specialization_separates_closed_signature_and_ordinary_input_frames(
 }
 
 #[test]
-fn callable_bindings_bound_owned_metadata_independently_of_body_code() {
-    use nir::copy_budget::charge_callable_bindings;
-    let charge = |definition: &nir::program::Function, fuel: &mut u64| {
-        charge_callable_bindings(&definition.interface, fuel)
-    };
-    let mut definition = function();
-    definition.name = "unused".repeat(1000);
-    definition.defaults.push((0, large()));
-    definition.preconditions.push(large());
-    definition.body = large();
-    charge(&definition, &mut 128).unwrap();
-    assert_eq!(charge(&definition, &mut 0), Err(CopyBudgetExhausted::Steps));
-    definition.signature = Term::Function {
-        parameters: vec![],
-        result: Box::new(Term::Record(
-            (0..256)
-                .map(|i| (format!("field{i}"), Term::Primitive(P::Bool)))
-                .collect(),
-        )),
-    };
-    assert_eq!(
-        charge(&definition, &mut 128),
-        Err(CopyBudgetExhausted::Steps)
-    );
-    definition.signature = function().interface.signature;
-    definition.parameters = (0..256)
-        .map(|index| nir::program::LocalId { owner: 1, index })
-        .collect();
-    assert_eq!(
-        charge(&definition, &mut 128),
-        Err(CopyBudgetExhausted::Steps)
-    );
-}
-
-#[test]
 fn retaining_formation_and_copying_code_charge_their_own_payloads() {
     use nir::copy_budget::{charge_callable_formation, clone_function};
     let mut value = function();

@@ -211,8 +211,7 @@ impl Checker<'_, '_> {
                 } else {
                     self.required_normal_input(input, value, vec![])?.0
                 };
-                if matches!(&completed, comptime_interpretor::Value::Closure(closure) if closure.declaration_instance().is_none())
-                {
+                if matches!(&completed, comptime_interpretor::Value::Closure(_)) {
                     values[slot] = Some(if let Some(value) = packet_expression {
                         value
                     } else {

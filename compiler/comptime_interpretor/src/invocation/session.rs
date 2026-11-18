@@ -720,8 +720,6 @@ mod tests {
         let closure = |body, child: Option<Value>| {
             Value::Closure(Arc::new(Closure {
                 definition_source: None,
-                origin: None,
-                instance_arguments: None,
                 parameters: vec![],
                 capture_order: child.as_ref().map(|_| vec![local(0)]).unwrap_or_default(),
                 environment: child

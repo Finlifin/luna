@@ -49,8 +49,6 @@ impl Interpreter<'_> {
         let result_type = body.ty.clone();
         let function = Value::Closure(Arc::new(Closure {
             definition_source: Some(body.source),
-            origin: None,
-            instance_arguments: None,
             parameters: vec![],
             environment: Environment::new(),
             capture_order: vec![],

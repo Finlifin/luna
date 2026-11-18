@@ -172,6 +172,7 @@ fn charge_clone(value: &Value, fuel: &mut u64, depth: usize) -> Result<(), Error
         Value::BitVec(value) => charge(fuel, value.words().len())?,
         Value::Code(_)
         | Value::Storage(_)
+        | Value::IirCallable(_)
         | Value::Closure(_)
         | Value::String(_)
         | Value::Symbol(_)

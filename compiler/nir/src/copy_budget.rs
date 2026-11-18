@@ -79,16 +79,6 @@ pub fn charge_expression(value: &n::Expr, steps: &mut u64) -> Result<(), CopyBud
     charge_tree(value, steps, false)
 }
 
-/// Bound the signature and parameter identities copied into a local callable.
-/// Body ownership and its copy budget are separate; a warm code cache does not
-/// remove this cost. No declaration names, defaults or contracts are copied.
-pub fn charge_callable_bindings(
-    function: &n::FunctionDeclaration,
-    steps: &mut u64,
-) -> Result<(), CopyBudgetExhausted> {
-    charge_node(Node::CallableBindings(function), steps, false, None)
-}
-
 /// Bound the callable fields retained when publishing an identity without code.
 pub fn charge_callable_formation(
     value: crate::callable_source::Formation<'_>,
@@ -237,7 +227,6 @@ pub(crate) enum Node<'a> {
     Function(&'a n::Function),
     FunctionDeclaration(&'a n::FunctionDeclaration),
     Formation(crate::callable_source::Formation<'a>),
-    CallableBindings(&'a n::FunctionDeclaration),
     Predicate(&'a n::TypePredicate),
     Requirement(&'a n::TraitRequirement),
     Expr(&'a n::Expr),
@@ -538,11 +527,6 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
         }
         *steps -= 1;
         let size = match node {
-            Node::CallableBindings(function) => {
-                charge_width(steps, function.parameters.len())?;
-                work.push((Node::Type(&function.signature), depth));
-                0
-            }
             Node::Region(region) => {
                 for width in [
                     region.parameters.len(),

@@ -682,7 +682,9 @@ impl Checker<'_, '_> {
         if matches!(&ty, Term::Function { .. })
             && matches!(
                 value,
-                Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_)
+                Value::IirCallable(_)
+                    | Value::FunctionInstance { .. }
+                    | Value::RuntimeTraitMethod(_)
             )
         {
             let scope = self.local_constant_type_scope(span)?;
@@ -692,7 +694,7 @@ impl Checker<'_, '_> {
         // capture graph. Anonymous bodies and generic instances reuse constant
         // reconstruction as local callable constants.
         let captureless_callable = match &value {
-            Value::Function(_) | Value::FunctionInstance { .. } => true,
+            Value::Function(_) | Value::IirCallable(_) | Value::FunctionInstance { .. } => true,
             Value::Closure(closure) => closure.captured_values().len() == 0,
             _ => false,
         };
@@ -781,9 +783,7 @@ impl Checker<'_, '_> {
                 symbol,
             ));
         }
-        if let Value::Closure(closure) = &value
-            && closure.declaration_instance().is_none()
-        {
+        if let Value::Closure(_) = &value {
             let type_scope = self.local_constant_type_scope(span)?;
             self.validate_closure_snapshot(
                 &value,
@@ -1046,25 +1046,6 @@ impl Checker<'_, '_> {
                     ));
                 }
                 let result = (|| {
-                    if closure.declaration_instance().is_some() {
-                        let mut budget = comptime_runtime::Budget {
-                            steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-                            max_limbs: 4096,
-                        };
-                        let before = budget.steps;
-                        let frozen = value
-                            .clone()
-                            .into_scoped_invocation_term(&mut budget, type_scope);
-                        self.required_steps -= (before - budget.steps) as u64;
-                        frozen.map_err(|cause| {
-                            error(
-                                span,
-                                format!(
-                                    "closure snapshot requires completed instance inputs: {cause:?}"
-                                ),
-                            )
-                        })?;
-                    }
                     let width = closure.captured_values().len();
                     self.required_steps = self
                         .required_steps
@@ -1158,7 +1139,9 @@ impl Checker<'_, '_> {
                     )
                 })
             }
-            Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_) => {
+            Value::IirCallable(_)
+            | Value::FunctionInstance { .. }
+            | Value::RuntimeTraitMethod(_) => {
                 let mut budget = comptime_runtime::Budget {
                     steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
                     max_limbs: 4096,
@@ -3804,126 +3787,117 @@ impl Checker<'_, '_> {
                 }
             }
             Value::Function(declaration) => K::Function(*declaration),
-            Value::FunctionInstance {
-                declaration,
-                arguments,
-            } => {
+            Value::IirCallable(_) | Value::FunctionInstance { .. } => {
+                let (declaration, arguments) = value.declaration_instance().unwrap();
                 for argument in arguments {
                     self.charge_constant_type_copy(argument, span)?;
                 }
                 K::FunctionInstance {
-                    declaration: *declaration,
-                    arguments: arguments.clone(),
+                    declaration,
+                    arguments: arguments.to_vec(),
                 }
             }
             Value::RuntimeTraitMethod(identity) => {
                 return self.materialized_trait_method(identity, &ty, span);
             }
             Value::Closure(closure) => {
-                if let Some((declaration, arguments)) = closure.declaration_instance() {
-                    K::FunctionInstance {
-                        declaration,
-                        arguments: arguments.to_vec(),
+                let identity = ClosureIdentity::new(closure);
+                if let Some((binding, previous_type)) = snapshot.closures.get(&identity) {
+                    if previous_type != &ty {
+                        return Err(error(span, "shared constant closure type mismatch"));
                     }
-                } else {
-                    let identity = ClosureIdentity::new(closure);
-                    if let Some((binding, previous_type)) = snapshot.closures.get(&identity) {
-                        if previous_type != &ty {
-                            return Err(error(span, "shared constant closure type mismatch"));
-                        }
-                        return Ok(n::Expr {
-                            source: source(span),
-                            ty,
-                            kind: K::Local(*binding),
-                        });
-                    }
-                    if !snapshot.active.insert(identity.clone()) {
+                    return Ok(n::Expr {
+                        source: source(span),
+                        ty,
+                        kind: K::Local(*binding),
+                    });
+                }
+                if !snapshot.active.insert(identity.clone()) {
+                    return Err(error(
+                        span,
+                        "cyclic closure environment cannot be materialized as a constant",
+                    ));
+                }
+                let types: &[Term] = match &ty {
+                    Term::Closure { environment, .. } => environment,
+                    Term::ComptimeFunction(_) => &[],
+                    _ => {
                         return Err(error(
                             span,
-                            "cyclic closure environment cannot be materialized as a constant",
+                            "constant closure has no comptime callable type",
                         ));
                     }
-                    let types: &[Term] = match &ty {
-                        Term::Closure { environment, .. } => environment,
-                        Term::ComptimeFunction(_) => &[],
-                        _ => {
-                            return Err(error(
-                                span,
-                                "constant closure has no comptime callable type",
-                            ));
-                        }
-                    };
-                    if types.len() != closure.captured_values().len() {
-                        return Err(error(span, "constant closure environment shape mismatch"));
-                    }
-                    let mut captures = Vec::new();
-                    for ((binding, value), capture_type) in closure.captured_values().zip(types) {
-                        // Only owned capture cells can be snapshotted. Pointers
-                        // and free runtime storage remain invalid constants.
-                        self.charge_constant_type_copy(capture_type, span)?;
-                        let expression = if let Value::Storage(cell) = value {
-                            let mut steps = self.required_steps;
-                            let checked = cell.inspect_owned(&mut steps, 128, |value, steps| {
-                                self.required_steps = *steps;
-                                let result = self.constant_expression_ref(
-                                    value,
-                                    capture_type.clone(),
-                                    span,
-                                    depth + 1,
-                                    snapshot,
-                                );
-                                *steps = self.required_steps;
-                                result
-                            });
-                            self.required_steps = steps;
-                            checked.map_err(|e| {
-                                error(span, format!("constant capture snapshot failed: {e:?}"))
-                            })??
-                        } else {
-                            self.constant_expression_ref(
+                };
+                if types.len() != closure.captured_values().len() {
+                    return Err(error(span, "constant closure environment shape mismatch"));
+                }
+                let mut captures = Vec::new();
+                for ((binding, value), capture_type) in closure.captured_values().zip(types) {
+                    // Only owned capture cells can be snapshotted. Pointers
+                    // and free runtime storage remain invalid constants.
+                    self.charge_constant_type_copy(capture_type, span)?;
+                    let expression = if let Value::Storage(cell) = value {
+                        let mut steps = self.required_steps;
+                        let checked = cell.inspect_owned(&mut steps, 128, |value, steps| {
+                            self.required_steps = *steps;
+                            let result = self.constant_expression_ref(
                                 value,
                                 capture_type.clone(),
                                 span,
                                 depth + 1,
                                 snapshot,
-                            )?
-                        };
-                        captures.push(n::Capture {
-                            binding,
-                            ty: capture_type.clone(),
-                            value: Some(Box::new(expression)),
+                            );
+                            *steps = self.required_steps;
+                            result
                         });
-                    }
-                    let index = self.next_temporary_binding;
-                    self.next_temporary_binding = index
-                        .checked_add(1)
-                        .ok_or_else(|| error(span, "constant closure binding space exhausted"))?;
-                    let binding = n::LocalId {
-                        owner: u32::MAX,
-                        index,
+                        self.required_steps = steps;
+                        checked.map_err(|e| {
+                            error(span, format!("constant capture snapshot failed: {e:?}"))
+                        })??
+                    } else {
+                        self.constant_expression_ref(
+                            value,
+                            capture_type.clone(),
+                            span,
+                            depth + 1,
+                            snapshot,
+                        )?
                     };
-                    let value = n::Expr {
-                        source: source(span),
-                        ty: ty.clone(),
-                        kind: K::Closure {
-                            parameters: closure.parameters().to_vec(),
-                            captures,
-                            // The body is immutable, already elaborated and specialized.
-                            body: closure.body().clone(),
-                        },
-                    };
-                    snapshot.bindings.push(n::Expr {
-                        source: source(span),
-                        ty: p(P::Void),
-                        kind: K::Let {
-                            binding,
-                            value: Box::new(value),
-                        },
+                    captures.push(n::Capture {
+                        binding,
+                        ty: capture_type.clone(),
+                        value: Some(Box::new(expression)),
                     });
-                    snapshot.active.remove(&identity);
-                    snapshot.closures.insert(identity, (binding, ty.clone()));
-                    K::Local(binding)
                 }
+                let index = self.next_temporary_binding;
+                self.next_temporary_binding = index
+                    .checked_add(1)
+                    .ok_or_else(|| error(span, "constant closure binding space exhausted"))?;
+                let binding = n::LocalId {
+                    owner: u32::MAX,
+                    index,
+                };
+                let value = n::Expr {
+                    source: source(span),
+                    ty: ty.clone(),
+                    kind: K::Closure {
+                        parameters: closure.parameters().to_vec(),
+                        captures,
+                        // The body is immutable, already elaborated and specialized.
+                        body: closure.body().clone(),
+                    },
+                };
+                snapshot.bindings.push(n::Expr {
+                    source: source(span),
+                    ty: p(P::Void),
+                    kind: K::Let {
+                        binding,
+                        value: Box::new(value),
+                    },
+                });
+                snapshot.active.remove(&identity);
+                snapshot.closures.insert(identity, (binding, ty.clone()));
+                K::Local(binding)
             }
         };
         Ok(n::Expr {

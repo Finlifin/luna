@@ -234,6 +234,8 @@ pub enum Value {
         declaration: DeclarationId,
         arguments: Vec<Term>,
     },
+    /// Executable instance admitted by one VM over an immutable graph.
+    IirCallable(Arc<IirCallable>),
     RuntimeTraitMethod(Box<TraitMethodIdentity>),
     Closure(Arc<Closure>),
 }
@@ -266,13 +268,13 @@ impl Value {
 
     /// Named identity carried by data or a retained concrete callable. This
     /// observation grants no phase, formation or executable-body authority.
-    fn declaration_instance(&self) -> Option<(DeclarationId, &[Term])> {
+    pub fn declaration_instance(&self) -> Option<(DeclarationId, &[Term])> {
         match self {
             Self::FunctionInstance {
                 declaration,
                 arguments,
             } => Some((*declaration, arguments)),
-            Self::Closure(closure) => closure.declaration_instance(),
+            Self::IirCallable(handle) => Some((handle.key.declaration, &handle.key.arguments)),
             _ => None,
         }
     }
@@ -514,16 +516,16 @@ impl Value {
                 // Its signature and phase are checked against the current VM;
                 // it must never qualify for uniform-scalar type admission.
                 Value::Function(_) => 0,
-                Value::Closure(closure) => {
-                    let (_, arguments) = closure.declaration_instance()?;
+                Value::Closure(_) => return None,
+                Value::IirCallable(handle) => {
                     let mut total = scoped_type_value_work_with_evidence(
-                        &closure.ty,
+                        &handle.ty,
                         &BTreeMap::new(),
                         parameters,
                         value_parameters,
                         |_, _, _| None,
                     )?;
-                    for argument in arguments {
+                    for argument in handle.key.arguments.iter() {
                         total = total.checked_add(scoped_term_value_work_with_evidence(
                             argument,
                             &BTreeMap::new(),
@@ -693,7 +695,8 @@ impl Value {
         parameters: &BTreeSet<DeclarationId>,
     ) -> Result<(), ErrorKind> {
         let terms: Vec<&Term> = match self {
-            Self::FunctionInstance { arguments, .. } => {
+            Self::IirCallable(_) | Self::FunctionInstance { .. } => {
+                let (_, arguments) = self.declaration_instance().unwrap();
                 budget
                     .consume(arguments.len().saturating_add(1))
                     .map_err(|_| ErrorKind::StepsExhausted)?;
@@ -743,11 +746,26 @@ impl Value {
         self.into_scoped_term(budget, type_parameters, value_parameters, true)
     }
 }
+/// A graph position is meaningful only in the admitting VM. Frozen data
+/// carries the declaration and arguments, never the position or local handle.
+#[derive(Debug, PartialEq)]
+pub struct IirCallable {
+    position: usize,
+    key: iir::InstanceKey,
+    ty: Term,
+}
+impl IirCallable {
+    pub fn key(&self) -> &iir::InstanceKey {
+        &self.key
+    }
+    pub fn ty(&self) -> &Term {
+        &self.ty
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Closure {
     definition_source: Option<SourceRange>,
-    origin: Option<DeclarationId>,
-    instance_arguments: Option<Arc<[Term]>>,
     parameters: Vec<LocalId>,
     environment: Environment,
     capture_order: Vec<LocalId>,
@@ -772,14 +790,6 @@ impl Closure {
         self.capture_order
             .iter()
             .map(|id| (*id, &self.environment[id]))
-    }
-    /// A declaration instance can be restored without serializing an execution
-    /// environment or treating an arbitrary lambda as a named function.
-    pub fn declaration_instance(&self) -> Option<(DeclarationId, &[Term])> {
-        if !self.environment.is_empty() || !self.capture_order.is_empty() {
-            return None;
-        }
-        Some((self.origin?, self.instance_arguments.as_deref()?))
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -932,6 +942,7 @@ macro_rules! value {
 mod associated_catalog;
 mod associated_execution;
 mod code_session;
+use code_session::CodeOrigin;
 mod contextual_code;
 mod declaration_index;
 mod layout_catalog;
@@ -1065,7 +1076,7 @@ pub struct Interpreter<'a> {
     active_associated_initializers: HashSet<(InterfaceInstance, Term, DeclarationId)>,
     // Source specializations retain code, while IIR handles carry VM-local identity.
     instances: function_instances::Instances<Expr>,
-    iir_callables: function_instances::Instances<Closure>,
+    iir_callables: HashMap<usize, Arc<IirCallable>>,
     functions: nir::callable_source::Callables<'a>,
 
     graph_indexes: Option<Arc<iir_execution::GraphIndexes>>,
@@ -3968,8 +3979,6 @@ impl<'a> Interpreter<'a> {
                     });
                     Value::Closure(Arc::new(Closure {
                         definition_source: Some(expr.source),
-                        origin: None,
-                        instance_arguments: None,
                         parameters: parameters.clone(),
                         environment: captured,
                         capture_order: captures.iter().map(|capture| capture.binding).collect(),
@@ -4817,6 +4826,7 @@ impl<'a> Interpreter<'a> {
                 .declaration(id)
                 .map(|f| f.parameters.clone())
                 .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source))),
+            Value::IirCallable(handle) => Ok(self.iir_target(handle)?.parameters.clone()),
             Value::Closure(closure) => Ok(closure.parameters.clone()),
             _ => Err(self.failure(ErrorKind::Type, Some(source))),
         }
@@ -5323,15 +5333,11 @@ impl fmt::Display for Value {
                 }
                 f.write_str(")")
             }
+            Self::IirCallable(handle) => {
+                write!(f, "(iir-callable {} (type {}))", handle.key, handle.ty)
+            }
             Self::Closure(closure) => {
                 write!(f, "(closure (type {})", closure.ty)?;
-                if let Some((declaration, arguments)) = closure.declaration_instance() {
-                    write!(f, " (instance (declaration {declaration}) (arguments")?;
-                    for argument in arguments {
-                        write!(f, " {argument}")?;
-                    }
-                    f.write_str("))")?;
-                }
                 f.write_str(" (environment")?;
                 for id in &closure.capture_order {
                     write!(f, " (binding {id} {})", closure.environment[id])?;
@@ -6616,8 +6622,6 @@ mod normal_input_data_tests {
         .with_comptime_phase(true);
         let closure = Closure {
             definition_source: None,
-            origin: Some(declaration),
-            instance_arguments: Some(vec![].into()),
             parameters: vec![],
             environment: Environment::new(),
             capture_order: vec![],
@@ -6641,28 +6645,21 @@ mod normal_input_data_tests {
                 arguments: vec![]
             }
         );
-        assert_eq!(
-            freeze(Value::Closure(Arc::new(closure.clone()))).unwrap(),
-            Term::FunctionValue {
-                declaration,
-                arguments: vec![]
-            }
-        );
+        let named = |arguments: Vec<Term>| Value::FunctionInstance {
+            declaration,
+            arguments,
+        };
         let mut captured = closure.clone();
         let binding = LocalId { owner: 1, index: 0 };
         captured.environment.insert(binding, Value::Bool(true));
         captured.capture_order.push(binding);
-        let mut specialized = closure.clone();
-        specialized.instance_arguments = Some(vec![Term::Primitive(Primitive::Bool)].into());
         for argument in [
             Term::Bool(true),
             Term::TupleValue(vec![Term::Bool(false), Term::Primitive(Primitive::Bool)]),
             Term::TupleValue(vec![Term::Primitive(Primitive::Bool)]),
         ] {
-            let mut instance = closure.clone();
-            instance.instance_arguments = Some(vec![argument.clone()].into());
             assert_eq!(
-                freeze(Value::Closure(Arc::new(instance))).unwrap(),
+                freeze(named(vec![argument.clone()])).unwrap(),
                 Term::FunctionValue {
                     declaration,
                     arguments: vec![argument]
@@ -6690,28 +6687,22 @@ mod normal_input_data_tests {
                 parts: vec![Term::TupleValue(vec![])],
             },
         ] {
-            let mut instance = closure.clone();
-            instance.instance_arguments = Some(vec![argument].into());
             assert_eq!(
-                Value::Closure(Arc::new(instance)).into_scoped_invocation_term(
+                named(vec![argument]).into_scoped_invocation_term(
                     &mut comptime_runtime::Budget::default(),
                     &BTreeSet::from([declaration]),
                 ),
                 Err(ErrorKind::Type)
             );
         }
-        let mut scoped = closure.clone();
         let parameter = Term::Rigid {
             declaration,
             sort: nir::Sort::Type,
         };
-        scoped.instance_arguments = Some(vec![parameter.clone()].into());
+        let scoped = named(vec![parameter.clone()]);
+        assert_eq!(freeze(scoped.clone()), Err(ErrorKind::Type));
         assert_eq!(
-            freeze(Value::Closure(Arc::new(scoped.clone()))),
-            Err(ErrorKind::Type)
-        );
-        assert_eq!(
-            Value::Closure(Arc::new(scoped))
+            scoped
                 .into_scoped_invocation_term(
                     &mut comptime_runtime::Budget::default(),
                     &BTreeSet::from([declaration]),
@@ -6722,25 +6713,7 @@ mod normal_input_data_tests {
                 arguments: vec![parameter]
             }
         );
-        let mut anonymous = closure.clone();
-        anonymous.origin = None;
-        let mut runtime = closure;
-        runtime.ty = runtime.ty.callable_signature().clone();
-        assert_eq!(
-            freeze(Value::Closure(Arc::new(specialized))).unwrap(),
-            Term::FunctionValue {
-                declaration,
-                arguments: vec![Term::Primitive(Primitive::Bool)]
-            }
-        );
-        assert_eq!(
-            freeze(Value::Closure(Arc::new(runtime))).unwrap(),
-            Term::FunctionValue {
-                declaration,
-                arguments: vec![]
-            }
-        );
-        for unsupported in [captured, anonymous] {
+        for unsupported in [captured, closure] {
             assert_eq!(
                 freeze(Value::Tuple(vec![Value::Closure(Arc::new(
                     unsupported.clone()
@@ -7204,8 +7177,6 @@ mod invocation_environment_tests {
         let binding = LocalId { owner: 1, index: 0 };
         let closure = Value::Closure(Arc::new(Closure {
             definition_source: None,
-            origin: None,
-            instance_arguments: None,
             parameters: vec![],
             capture_order: vec![binding],
             environment: Environment::from([(binding, Value::Tuple(vec![Value::Bool(false); 64]))]),

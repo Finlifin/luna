@@ -231,19 +231,11 @@ impl Interpreter<'_> {
                     self.admit_type(argument, depth + 1)?;
                 }
             }
-            Value::Closure(closure) => {
-                let (declaration, arguments) = closure
-                    .declaration_instance()
-                    .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                // IIR callables are VM-owned handles. Shared body code, a
-                // matching type or a declaration ID cannot authorize another
-                // VM's callable. Normal-term transport reconstructs identities.
-                let current = self.iir_callables.lookup(declaration, arguments);
-                if !current.is_some_and(|current| Arc::ptr_eq(current, closure)) {
-                    return Err(self.failure(ErrorKind::Type, None));
-                }
-                self.admit_type(&closure.ty, depth + 1)?;
+            Value::IirCallable(handle) => {
+                self.iir_target(handle)?;
+                self.admit_type(&handle.ty, depth + 1)?;
             }
+            Value::Closure(_) => return Err(self.failure(ErrorKind::Type, None)),
             Value::List { ty, values } => {
                 self.admit_type(ty, depth + 1)?;
                 // Uniform primitive leaves contain no embedded type descriptions.

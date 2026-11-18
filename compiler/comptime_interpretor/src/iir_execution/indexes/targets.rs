@@ -36,18 +36,17 @@ impl<'a> Interpreter<'a> {
         Some(self.graph?.templates[*index].logical_type())
     }
 
-    pub(crate) fn iir_function_definition(
+    pub(in crate::iir_execution) fn iir_function_position(
         &self,
         declaration: DeclarationId,
         arguments: &[Term],
-    ) -> Option<&'a nir::program::Function> {
-        let index = self
-            .graph_indexes
+    ) -> Option<usize> {
+        self.graph_indexes
             .as_ref()?
             .functions
             .get(&declaration)?
-            .get(arguments)?;
-        Some(&self.graph?.functions[*index].function)
+            .get(arguments)
+            .copied()
     }
 
     pub(crate) fn iir_template_method_type(
@@ -154,7 +153,7 @@ mod tests {
                 assert!(vm.has_type(&handle, &signature));
                 assert!(!vm.has_type(&handle, &Term::Primitive(Primitive::Bool)));
                 assert!(
-                    vm.iir_function_definition(key.declaration, &key.arguments)
+                    vm.iir_function_position(key.declaration, &key.arguments)
                         .is_none()
                 );
             }

@@ -757,6 +757,10 @@ impl Interpreter<'_> {
                                 })
                         })
             }
+            (Value::IirCallable(handle), ty) => {
+                self.iir_target(handle).is_ok()
+                    && checks.callable_matches(&handle.ty, ty, &self.associated_values)
+            }
             (Value::Closure(closure), ty) => {
                 checks.callable_matches(&closure.ty, ty, &self.associated_values)
             }

@@ -147,9 +147,9 @@ impl Checker<'_, '_> {
                 // Declaration identities carry no runtime capture storage.
                 // Validate their instance inputs alongside owned callbacks;
                 // actual invocation remains subject to the phase checker.
-                Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_) => {
-                    callbacks.push(value)
-                }
+                Value::IirCallable(_)
+                | Value::FunctionInstance { .. }
+                | Value::RuntimeTraitMethod(_) => callbacks.push(value),
                 Value::Closure(_) => runtime_callback = true,
                 _ => {}
             }

@@ -324,6 +324,45 @@ fn graph_sessions_reuse_code_only_for_the_exact_immutable_graph() {
 }
 
 #[test]
+fn a_graph_session_keeps_specializations_of_one_declaration_distinct() {
+    use comptime_interpretor::CodeSession;
+    use std::sync::Arc;
+    let package = support::compile("comptime fn selected() -> bool where flag: bool { flag }");
+    let declaration = support::id(&package, "selected");
+    let roots = [false, true].map(|flag| iir::InstanceKey {
+        declaration,
+        arguments: vec![Term::Bool(flag)].into(),
+    });
+    let graph = Arc::new(
+        elaboration::materialization::instantiate(
+            &package,
+            &roots,
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap(),
+    );
+    let mut session = CodeSession::for_iir(graph.clone());
+    for warm in [false, true] {
+        let mut vm = Interpreter::from_iir_for_comptime_in_session(
+            &graph,
+            &mut session,
+            &mut Budget::default(),
+        )
+        .unwrap();
+        vm.with_code_session(&mut session, |vm| {
+            for index in [1, 0, 1] {
+                assert_eq!(
+                    vm.invoke_instance(&roots[index], vec![]).unwrap(),
+                    Value::Bool(index == 1)
+                );
+            }
+        });
+        assert_eq!(vm.bytecode_compilations(), if warm { 0 } else { 2 });
+    }
+}
+
+#[test]
 fn graph_validation_reuse_is_metered_and_cannot_authorize_another_snapshot() {
     use comptime_interpretor::CodeSession;
     use std::sync::Arc;

@@ -706,6 +706,7 @@ impl<'a> Interpreter<'a> {
                 self.copy_work(reference.metadata_work(), source)?;
                 value.clone()
             }
+            Value::IirCallable(handle) => Value::IirCallable(handle.clone()),
             Value::Storage(_) | Value::Closure(_) if preserve_identity => {
                 if self.comptime_only {
                     self.check_comptime_graph(value, source, depth)?;
@@ -728,24 +729,10 @@ impl<'a> Interpreter<'a> {
                 )?))
             }
             Value::Closure(closure) => {
-                if closure.declaration_instance().is_some() {
-                    // Named callables have no captured storage to duplicate.
-                    // Keep their VM-local handle identity through both copy
-                    // and checkpoint; sharing code never imports a new handle.
-                    return Ok(Value::Closure(closure.clone()));
-                }
                 self.copy_work(closure.environment.len(), source)?;
                 self.copy_work(closure.parameters.len(), source)?;
                 self.copy_work(closure.capture_order.len(), source)?;
                 self.copy_type_work(&closure.ty, source)?;
-                let arguments = closure
-                    .instance_arguments
-                    .as_ref()
-                    .map(|arguments| {
-                        self.check_instance_arguments(arguments, source)?;
-                        Ok::<_, Error>(arguments.clone())
-                    })
-                    .transpose()?;
                 let mut environment = Environment::new();
                 for (binding, value) in &closure.environment {
                     environment.insert(
@@ -755,8 +742,6 @@ impl<'a> Interpreter<'a> {
                 }
                 Value::Closure(std::sync::Arc::new(Closure {
                     definition_source: closure.definition_source,
-                    origin: closure.origin,
-                    instance_arguments: arguments,
                     parameters: closure.parameters.clone(),
                     environment,
                     capture_order: closure.capture_order.clone(),
@@ -1010,10 +995,7 @@ impl<'a> Interpreter<'a> {
                 declaration: *declaration,
                 arguments: vec![].into(),
             }),
-            Value::Closure(closure) => closure.origin.map(|declaration| iir::InstanceKey {
-                declaration,
-                arguments: (closure.instance_arguments.clone().unwrap_or_default()).into(),
-            }),
+            Value::IirCallable(handle) => Some(handle.key.clone()),
             _ => None,
         };
         if let Some(callee) = named {
@@ -1945,25 +1927,6 @@ mod representation_copy_tests {
         ] {
             assert_eq!(vm.copy_representation(&value, source, 0).unwrap(), value);
         }
-        let mut value = closure(vec![Value::Bool(true)]);
-        let Value::Closure(original) = &mut value else {
-            unreachable!()
-        };
-        Arc::make_mut(original).instance_arguments = Some(arguments.clone().into());
-        let Value::Closure(copied) = vm.copy_representation(&value, source, 0).unwrap() else {
-            panic!("closure")
-        };
-        assert_eq!(
-            copied.instance_arguments.as_deref(),
-            Some(arguments.as_slice())
-        );
-        let Value::Closure(original) = &value else {
-            unreachable!()
-        };
-        assert!(Arc::ptr_eq(
-            original.instance_arguments.as_ref().unwrap(),
-            copied.instance_arguments.as_ref().unwrap(),
-        ));
         assert!(
             vm.copy_representation(&crate::test_type_list(vec![Term::Bool(true)]), source, 0)
                 .is_err()
@@ -1983,8 +1946,6 @@ mod representation_copy_tests {
             .collect::<Vec<_>>();
         Value::Closure(Arc::new(Closure {
             definition_source: Some(SourceRange { start: 0, end: 1 }),
-            origin: None,
-            instance_arguments: None,
             parameters: vec![],
             environment: ids.iter().copied().zip(captures).collect(),
             capture_order: ids,

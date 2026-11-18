@@ -240,11 +240,12 @@ impl ObservedInputs {
                 Value::Function(id) => {
                     self.code.insert(Dependency::Callable(*id));
                 }
-                Value::FunctionInstance {
-                    declaration,
-                    arguments,
-                } => {
-                    self.code.insert(Dependency::Callable(*declaration));
+                Value::IirCallable(_) | Value::FunctionInstance { .. } => {
+                    let (declaration, arguments) = value.declaration_instance().unwrap();
+                    if let Value::IirCallable(handle) = value {
+                        self.term(handle.ty(), fuel)?;
+                    }
+                    self.code.insert(Dependency::Callable(declaration));
                     collect_frozen(arguments, &mut self.code, fuel).map_err(visit_failure)?;
                     for term in arguments {
                         self.term(term, fuel)?;
@@ -259,13 +260,6 @@ impl ObservedInputs {
                 }
                 Value::Closure(closure) => {
                     self.term(closure.ty(), fuel)?;
-                    if let Some((declaration, arguments)) = closure.declaration_instance() {
-                        self.code.insert(Dependency::Callable(declaration));
-                        collect_frozen(arguments, &mut self.code, fuel).map_err(visit_failure)?;
-                        for term in arguments {
-                            self.term(term, fuel)?;
-                        }
-                    }
                     self.code
                         .extend(references(closure.body(), fuel).map_err(visit_failure)?);
                 }

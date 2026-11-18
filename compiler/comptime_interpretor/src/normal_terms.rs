@@ -666,16 +666,7 @@ impl Value {
             }
             let instance = match value {
                 Value::Function(declaration) => Some((*declaration, &[][..])),
-                Value::FunctionInstance {
-                    declaration,
-                    arguments,
-                } => Some((*declaration, arguments.as_slice())),
-                Value::Closure(closure)
-                    if closure.environment.is_empty() && closure.capture_order.is_empty() =>
-                {
-                    closure.declaration_instance()
-                }
-                _ => None,
+                _ => value.declaration_instance(),
             };
             {
                 if let Value::RuntimeTraitMethod(method) = value {

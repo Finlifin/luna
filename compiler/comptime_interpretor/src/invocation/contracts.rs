@@ -7,7 +7,7 @@ pub(super) enum Progress<'a> {
     NeedBody,
     Body {
         code: Body<'a>,
-        cache_key: Option<DeclarationId>,
+        cache_key: Option<CodeOrigin>,
     },
     Exit {
         next: usize,
@@ -17,7 +17,7 @@ pub(super) enum Progress<'a> {
 }
 
 impl Progress<'_> {
-    pub(super) fn body(&self) -> Option<(&Body<'_>, Option<DeclarationId>)> {
+    pub(super) fn body(&self) -> Option<(&Body<'_>, Option<CodeOrigin>)> {
         match self {
             Self::Body { code, cache_key } => Some((code, *cache_key)),
             Self::Entry(_) | Self::NeedBody | Self::Exit { .. } => None,

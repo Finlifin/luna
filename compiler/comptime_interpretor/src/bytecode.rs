@@ -542,7 +542,7 @@ impl Frame {
 /// A cache entry always owns executable code; absence only means a cache miss.
 #[derive(Default)]
 pub(super) struct CodeCache {
-    entries: BTreeMap<DeclarationId, Arc<Program>>,
+    entries: BTreeMap<CodeOrigin, Arc<Program>>,
     owned: BTreeMap<usize, OwnedCode>,
     recency: BTreeMap<CodeKey, u64>,
     order: BTreeMap<u64, CodeKey>,
@@ -552,7 +552,7 @@ pub(super) struct CodeCache {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum CodeKey {
-    Named(DeclarationId),
+    Named(CodeOrigin),
     Owned(usize),
 }
 
@@ -628,13 +628,13 @@ impl CodeCache {
         self.clock += 1;
     }
 
-    fn named(&mut self, id: DeclarationId) -> Option<Arc<Program>> {
+    fn named(&mut self, id: CodeOrigin) -> Option<Arc<Program>> {
         let program = self.entries.get(&id)?.clone();
         self.touch(CodeKey::Named(id));
         Some(program)
     }
 
-    fn insert(&mut self, id: DeclarationId, program: Arc<Program>) {
+    fn insert(&mut self, id: CodeOrigin, program: Arc<Program>) {
         self.forget(CodeKey::Named(id));
         if let Some(previous) = self.entries.remove(&id) {
             self.weight -= Self::program_weight(&previous);
@@ -797,7 +797,7 @@ impl<'a> Interpreter<'a> {
     pub(super) fn invocation_code(
         &mut self,
         body: &Expr,
-        stable_code: Option<DeclarationId>,
+        stable_code: Option<CodeOrigin>,
     ) -> Result<Option<Arc<Program>>, Error> {
         if !self.bytecode_invocation_available() {
             return Ok(None);
@@ -1426,8 +1426,6 @@ impl<'a> Interpreter<'a> {
                     });
                     frame.slots[*destination] = Some(Value::Closure(Arc::new(Closure {
                         definition_source: Some(source),
-                        origin: None,
-                        instance_arguments: None,
                         parameters: constructor.parameters.clone(),
                         environment: pending.environment,
                         capture_order: constructor.captures.iter().map(|(id, _)| *id).collect(),
@@ -3376,8 +3374,6 @@ mod tests {
         };
         let closure = Value::Closure(Arc::new(Closure {
             definition_source: None,
-            origin: None,
-            instance_arguments: None,
             parameters,
             environment: Environment::new(),
             capture_order: vec![],
@@ -3493,8 +3489,6 @@ mod tests {
         };
         let closure = Value::Closure(Arc::new(Closure {
             definition_source: None,
-            origin: None,
-            instance_arguments: None,
             parameters: parameters.clone(),
             environment: Environment::new(),
             capture_order: vec![],
@@ -3565,8 +3559,6 @@ mod tests {
         }));
         let closure = Value::Closure(Arc::new(Closure {
             definition_source: None,
-            origin: None,
-            instance_arguments: None,
             parameters: vec![],
             environment: Environment::new(),
             capture_order: vec![],
@@ -3677,10 +3669,10 @@ mod tests {
             };
             let code = Arc::new(comptime_compiler::compile(&body, &mut 100).unwrap());
             vm.bytecode_cache.insert(
-                DeclarationId {
+                CodeOrigin::Declaration(DeclarationId {
                     package: 1,
                     local: 0,
-                },
+                }),
                 code.clone(),
             );
             let mut frame = vm.start_frame(&code, &mut environment).unwrap();
@@ -3850,14 +3842,17 @@ mod tests {
         let weight = CodeCache::program_weight(&code);
         let capacity = 100_000 / weight;
         for local in 0..=capacity as u32 {
-            cache.insert(DeclarationId { package: 1, local }, code.clone());
+            cache.insert(
+                CodeOrigin::Declaration(DeclarationId { package: 1, local }),
+                code.clone(),
+            );
         }
         assert_eq!(cache.entries.len(), capacity);
         assert_eq!(cache.weight, capacity * weight);
-        let first = DeclarationId {
+        let first = CodeOrigin::Declaration(DeclarationId {
             package: 1,
             local: 0,
-        };
+        });
         assert!(!cache.entries.contains_key(&first));
         cache.insert(first, code);
         assert!(cache.entries.contains_key(&first));
@@ -3870,7 +3865,7 @@ mod tests {
         let (body, code) = cached_unit();
         let weight = CodeCache::program_weight(&code);
         let capacity = 100_000 / weight;
-        let id = |local| DeclarationId { package: 1, local };
+        let id = |local| CodeOrigin::Declaration(DeclarationId { package: 1, local });
         cache.insert(id(0), code.clone());
         cache.insert_owned(&body, code.clone());
         // Replacement must remove both old weight and its recency node.
@@ -3922,17 +3917,20 @@ mod tests {
         drop(expired);
         let named_count = capacity as u32 - 2;
         for local in 0..named_count {
-            cache.insert(DeclarationId { package: 1, local }, code.clone());
+            cache.insert(
+                CodeOrigin::Declaration(DeclarationId { package: 1, local }),
+                code.clone(),
+            );
         }
         assert_eq!(cache.weight, capacity * weight);
-        let first = DeclarationId {
+        let first = CodeOrigin::Declaration(DeclarationId {
             package: 1,
             local: 0,
-        };
-        let added = DeclarationId {
+        });
+        let added = CodeOrigin::Declaration(DeclarationId {
             package: 1,
             local: named_count,
-        };
+        });
         cache.insert(added, code.clone());
         assert!(cache.entries.contains_key(&first));
         assert!(cache.entries.contains_key(&added));
@@ -3941,10 +3939,10 @@ mod tests {
         assert_eq!(cache.weight, capacity * weight);
         // With no dead entries left, the established bounded eviction policy applies.
         cache.insert(
-            DeclarationId {
+            CodeOrigin::Declaration(DeclarationId {
                 package: 1,
                 local: named_count + 1,
-            },
+            }),
             code.clone(),
         );
         assert_eq!(cache.weight, capacity * weight);
