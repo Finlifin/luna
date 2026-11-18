@@ -2,27 +2,23 @@
 use super::*;
 
 impl Checker<'_, '_> {
-    pub(in crate::program) fn generator_required_type(
+    pub(in crate::program) fn generator_type_data(
         &mut self,
         value: &Expr<'_>,
-    ) -> Result<Term, Error> {
+    ) -> Result<CompletedType, Error> {
         if !self.checking_code_generator
             && (self.generator_data.is_empty() || self.data_consumer_call(value)?.is_some())
         {
             let (completed, _) = self.generator_data_expression(value, Some(&p(P::Type)))?;
-            let comptime_interpretor::Value::Type(ty) = completed else {
-                return Err(error(
-                    value.span,
-                    "contextual input did not produce a Type value",
-                ));
-            };
-            return Ok(ty);
+            return CompletedType::from_value(completed, value.span);
         }
         let mut evidence = None;
         let completed = self.generator_data_frame_with(value, |this| {
             let checked = this.expr(value, Some(&p(P::Type)))?;
             if this.checking_code_generator {
-                evidence = this.generator_type_result_evidence(&checked, value.span)?;
+                evidence = this
+                    .generator_type_result_evidence(&checked, value.span)?
+                    .map(CompletedType::Identity);
                 if evidence.is_none() {
                     let mut fuel = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
                     let free = nir::free_bindings::collect(&checked, &mut fuel);
@@ -33,18 +29,16 @@ impl Checker<'_, '_> {
                     if free.is_empty() {
                         this.validate_generator_data(&checked, value.span)?;
                         constants::charge_copy(&checked, &mut this.required_steps, value.span)?;
-                        if let (comptime_interpretor::Value::Type(ty), _) =
-                            this.required_normal_input(value, checked.clone(), Vec::new())?
-                        {
-                            evidence = Some(ty);
-                        }
+                        let (result, _) =
+                            this.required_normal_input(value, checked.clone(), Vec::new())?;
+                        evidence = Some(CompletedType::from_value(result, value.span)?);
                     }
                 }
             }
             Ok(checked)
         })?;
-        if let Some((comptime_interpretor::Value::Type(ty), _)) = completed {
-            return Ok(ty);
+        if let Some((result, _)) = completed {
+            return CompletedType::from_value(result, value.span);
         }
         evidence.ok_or_else(|| error(value.span,
             "contextual Type computation requires a result identity known during definition checking"))

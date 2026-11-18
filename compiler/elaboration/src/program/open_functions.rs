@@ -1904,12 +1904,7 @@ impl Checker<'_, '_> {
                 expr.hir_id.owner,
                 expr.span,
             )?;
-            let comptime_interpretor::Value::Type(ty) = value else {
-                return Err(error(
-                    expr.span,
-                    "deferred annotation did not produce a Type",
-                ));
-            };
+            let ty = CompletedType::from_value(value, expr.span)?.identity(expr.span)?;
             Ok(Annotation::Known(ty))
         }
     }
@@ -6265,10 +6260,7 @@ impl Checker<'_, '_> {
                     .ok_or_else(|| error(span, "deferred annotation has no source owner"))?;
                 let (value, _) =
                     self.invoke_required_publishing(invocation, Vec::new(), owner, span)?;
-                let comptime_interpretor::Value::Type(ty) = value else {
-                    return Err(error(span, "deferred annotation did not produce a Type"));
-                };
-                ty
+                CompletedType::from_value(value, span)?.identity(span)?
             }
         };
         let ty = ty

@@ -454,31 +454,11 @@ impl Checker<'_, '_> {
                             kind,
                         }));
                     }
-                    if let ItemKind::TypeAlias(value, ..) = &self.package.item(owner).unwrap().kind
+                    if let ItemKind::TypeAlias(target, ..) = self.package.item(owner).unwrap().kind
                     {
-                        let parameters = self.type_parameters[&owner].clone();
-                        if parameters.is_empty() || parameters.len() != arguments.len() {
-                            return Err(error(
-                                expr.span,
-                                "generic type alias argument count mismatch",
-                            ));
-                        }
-                        let mut values = Vec::new();
-                        for argument in *arguments {
-                            let Arg::Positional(value) = argument else {
-                                return Err(error(
-                                    expr.span,
-                                    "type alias arguments must be positional",
-                                ));
-                            };
-                            values.push(self.expr(value, Some(&p(P::Type)))?);
-                        }
-                        let result =
-                            self.alias_value_expression(owner, value, values, expr.span)?;
-                        if let Some(expected) = expected {
-                            self.require(&result.ty, expected, expr.span)?;
-                        }
-                        return Ok(Some(result));
+                        return self
+                            .applied_alias_expression(owner, target, arguments, expr.span, expected)
+                            .map(Some);
                     }
                     if matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)
                     {
@@ -800,48 +780,20 @@ impl Checker<'_, '_> {
                 "a parenthesized tuple is a value, not a type; use Tuple<...> to construct a tuple type",
             ));
         }
-        if matches!(&expr.kind, H::Builtin(symbol) if symbol.as_str() == "Any") {
+        if self.is_type_head(expr) {
             let ty = p(P::Type);
             if let Some(expected) = expected {
                 self.require_expression(&ty, expected, expr.span)?;
             }
-            return Ok(Some(n::Expr {
-                source: source(expr.span),
-                ty,
-                kind: K::Literal(n::Literal::Description(n::DescriptionLiteral::Any)),
-            }));
-        }
-        let type_value = self.is_type_head(expr)
-            || matches!(
-                expr.kind,
-                H::TypeOf(_)
-                    | H::Builtin(_)
-                    | H::TyType
-                    | H::TyVoid
-                    | H::TyNoReturn
-                    | H::TyPtr(_)
-                    | H::TyOptional(_)
-                    | H::TyClosure(..)
-                    | H::TyFn(_)
-                    | H::TyComptimeFn(_)
-                    | H::TyFnArrow(..)
-            );
-        if type_value {
-            let ty = p(P::Type);
-            if let Some(expected) = expected {
-                self.require_expression(&ty, expected, expr.span)?;
+            let data = self.completed_type(expr)?;
+            if self.in_required_comptime
+                && let CompletedType::Identity(ty) = &data
+            {
+                // Early invocations can reflect nominal identities before the
+                // declaration pass has built the corresponding descriptor.
+                self.ensure_invocation_type(ty, expr.span)?;
             }
-            let value = self.type_expr(expr)?;
-            if self.in_required_comptime {
-                // Early invocations can transport and reflect a nominal Type
-                // before the ordinary declaration pass has built its descriptor.
-                self.ensure_invocation_type(&value, expr.span)?;
-            }
-            return Ok(Some(n::Expr {
-                ty,
-                source: source(expr.span),
-                kind: K::TypeValue(value),
-            }));
+            return Ok(Some(data.into_expression(expr.span)));
         }
         Ok(None)
     }

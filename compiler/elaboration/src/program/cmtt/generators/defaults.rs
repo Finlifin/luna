@@ -52,7 +52,9 @@ impl Checker<'_, '_> {
                     };
                     defaults.insert(slot);
                     if binder.is_some() {
-                        let ty = this.generator_required_type(expression)?;
+                        let ty = this
+                            .generator_type_data(expression)?
+                            .identity(expression.span)?;
                         Argument::Data(Some(n::Expr {
                             source: source(expression.span),
                             ty: p(P::Type),

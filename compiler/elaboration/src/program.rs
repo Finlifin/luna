@@ -3,6 +3,7 @@
 //! the boundary between comptime producers and runtime conversion instances.
 //! Resource/effect verification remains a separate obligation;
 //! this is a type-elaboration output, not permission to generate executable code.
+mod aliases;
 mod arguments;
 pub mod attributes;
 mod computed_patterns;
@@ -68,6 +69,7 @@ mod source_declarations;
 mod splicing;
 mod text_queries;
 mod trait_inputs;
+mod type_data;
 mod type_defaults;
 use crate::verification::purity::{copy_scalar, stable_default};
 pub(crate) use cmtt::{expand_bound_quote, expand_materialized_quotes};
@@ -77,6 +79,7 @@ use nir::program::{self as n, ExprKind as K};
 use nir::{DeclarationId, Parameter, Primitive as P, Sort, Term};
 use rustc_span::Span;
 use std::collections::{BTreeMap, BTreeSet};
+use type_data::CompletedType;
 
 #[derive(Debug)]
 pub struct DiagnosticNote {
@@ -1027,7 +1030,7 @@ fn elaborate_candidate<'a, 'h>(
             ItemKind::TypeAlias(value, ..) => {
                 checker.check_type_defaults(owner)?;
                 if checker.type_parameters[&owner].is_empty() {
-                    checker.alias_type(owner, value, &[], item.span)?;
+                    checker.completed_alias(owner, value, &[], item.span)?;
                 } else {
                     checker.check_alias_definition(owner, value, item.span)?;
                 }
@@ -1634,14 +1637,8 @@ struct Checker<'a, 'h> {
     code_construction_depth: usize,
     expansion_sources: Vec<n::ExpansionSource>,
     aliases: BTreeSet<OwnerId>,
-    completed_aliases: std::collections::HashMap<
-        (
-            OwnerId,
-            Vec<Term>,
-            Vec<(DeclarationId, std::sync::Arc<Term>)>,
-        ),
-        std::sync::Arc<Term>,
-    >,
+    completed_aliases:
+        std::collections::HashMap<aliases::Application, std::sync::Arc<CompletedType>>,
     checked_alias_definitions: BTreeSet<OwnerId>,
     alias_scopes: BTreeMap<OwnerId, Option<OwnerId>>,
     alias_substitution: BTreeMap<DeclarationId, std::sync::Arc<Term>>,
@@ -3361,91 +3358,7 @@ impl Checker<'_, '_> {
             _ => false,
         }
     }
-    fn require_type_identity(
-        value: comptime_interpretor::Value,
-        span: Span,
-    ) -> Result<Term, Error> {
-        match value {
-            comptime_interpretor::Value::Type(ty) => Ok(ty),
-            comptime_interpretor::Value::Description(_) => Err(error(
-                span,
-                "this use requires a type identity; the completed Type value is a gradual description",
-            )),
-            _ => Err(error(span, "expected a completed Type value")),
-        }
-    }
-    fn type_expr(&mut self, expr: &Expr<'_>) -> Result<Term, Error> {
-        if let H::DeliveredType(ty) = &expr.kind {
-            return self.delivered_type(expr.hir_id, ty, expr.span);
-        }
-        if let H::ResolvedLocal(_, id) = expr.kind
-            && !self.callable_type_inputs.contains_key(&local(id))
-            && !self.generator_data.contains_key(&local(id))
-            && let Some(ty) = self.observed_local_type(local(id), expr.span)?
-        {
-            return Ok(ty);
-        }
-        if let H::Projection(value, field) = &expr.kind {
-            if field.name.as_str() == "Closure"
-                && let H::Projection(base, namespace) = &value.kind
-                && namespace.name.as_str() == "vars"
-                && self.metatype_namespace_receiver(base)?
-            {
-                return Ok(Term::ClosureContextType);
-            }
-        }
-        // This is a type position: computed member receivers are required
-        // inputs, not runtime values to deliver through Splice. Ordinary
-        // expression projections retain the caller's phase in their probe.
-        let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
-        let projected = self.projected_member_type(expr);
-        self.in_required_comptime = saved_mode;
-        if let Some(ty) = projected? {
-            return Ok(ty);
-        }
-        if let Some(ty) = self.observed_projection_type(expr)? {
-            return Ok(ty);
-        }
-        if self.projected_constant_owner(expr)?.is_some() {
-            return Self::require_type_identity(
-                self.required_expression(expr, Some(&p(P::Type)))?,
-                expr.span,
-            );
-        }
-        if let H::RefinementSubject = &expr.kind {
-            return self
-                .refinement_subjects
-                .last()
-                .cloned()
-                .ok_or_else(|| error(expr.span, "Itself has no active refinement subject"));
-        }
-        if let H::RefinedType { requirement, base } = &expr.kind {
-            let base = self.type_expr(base)?;
-            self.refinement_subjects.push(base.clone());
-            let requirement_result = self.check_refinement_expression(requirement);
-            self.refinement_subjects.pop();
-            requirement_result?;
-            return Ok(base);
-        }
-        if let H::Defer(value) = &expr.kind {
-            // Signature annotations prepare open computations separately. Other
-            // type positions still demand a completed computation here; never
-            // manufacture an opaque normal-form head for unavailable inputs.
-            return self.type_expr(value);
-        }
-        if let H::Projection(value, field) = &expr.kind {
-            if let Some(value) =
-                self.associated_projection(value, field.name.as_str(), expr.span, expr.hir_id)?
-            {
-                let K::TypeValue(ty) = value.kind else {
-                    return Err(error(
-                        expr.span,
-                        "associated value used as a type does not contain a completed Type",
-                    ));
-                };
-                return Ok(ty);
-            }
-        }
+    fn form_type_identity(&mut self, expr: &Expr<'_>) -> Result<Term, Error> {
         match &expr.kind {
             H::ResolvedLocal(_, id) if self.callable_type_inputs.contains_key(&local(*id)) => {
                 let value = self
@@ -3458,21 +3371,6 @@ impl Checker<'_, '_> {
                     ));
                 };
                 Ok(ty)
-            }
-            H::ResolvedLocal(_, id) if self.generator_data.contains_key(&local(*id)) => {
-                match self.generator_data.get(&local(*id)) {
-                    Some(Some(value)) if matches!(value.kind, K::TypeValue(_)) => {
-                        constants::charge_copy(value, &mut self.required_steps, expr.span)?;
-                        let K::TypeValue(ty) = &value.kind else {
-                            unreachable!()
-                        };
-                        Ok(ty.clone())
-                    }
-                    _ => Err(error(
-                        expr.span,
-                        "local constant used as a type must contain a completed Type value",
-                    )),
-                }
             }
             H::ResolvedLocal(_, id)
                 if self.input_facts.derived.contains(&local(*id))
@@ -3524,27 +3422,6 @@ impl Checker<'_, '_> {
                 let operations = self.effect_row(effects, 0)?;
                 Ok(Term::computation(operations, self.type_expr(result)?))
             }
-            H::Application(..)
-            | H::ExtendedApplication(..)
-            | H::Projection(..)
-            | H::Index(..)
-            | H::If(..)
-            | H::When(_)
-            | H::Match(..)
-            | H::Block(_) => {
-                // After member/associated-type and observed-field selection,
-                // remaining projections are ordinary computations. Evaluate
-                // the complete receiver and projection at the required stage;
-                // a Type field's declared domain alone is not its identity.
-                if !self.generator_data.is_empty() && self.data_consumer_call(expr)?.is_none() {
-                    return self.generator_required_type(expr);
-                }
-                let value = self.required_value(expr, P::Type)?;
-                let comptime_interpretor::Value::Type(ty) = value else {
-                    unreachable!()
-                };
-                Ok(ty)
-            }
             H::TySelf => {
                 let ty = self.self_type(expr.hir_id.owner, expr.span)?;
                 let identity = match &ty {
@@ -3579,152 +3456,6 @@ impl Checker<'_, '_> {
                 }
                 Ok(ty)
             }
-            H::NFApplication(head, args) => {
-                if let H::Builtin(name) = &head.kind {
-                    if name.as_str() == "BitVec" {
-                        let [Arg::Positional(width)] = *args else {
-                            return Err(error(
-                                expr.span,
-                                "builtin BitVec requires exactly one positional comptime width",
-                            ));
-                        };
-                        if matches!(
-                            &width.kind,
-                            H::Lit(hir::Lit {
-                                kind: hir::LitKind::Float(_),
-                                ..
-                            })
-                        ) {
-                            return Err(error(
-                                width.span,
-                                "BitVec width requires a nonnegative comptime integer",
-                            ));
-                        }
-                        let exact = if let H::Lit(hir::Lit {
-                            kind: hir::LitKind::Integer(spelling),
-                            ..
-                        }) = &width.kind
-                        {
-                            comptime_runtime::Integer::parse_literal(
-                                spelling,
-                                &mut comptime_runtime::Budget::default(),
-                            )
-                            .map_err(|e| error(width.span, e.to_string()))?
-                        } else {
-                            let comptime_interpretor::Value::Integer(value) =
-                                self.required_value(width, P::Integer)?
-                            else {
-                                return Err(error(
-                                    width.span,
-                                    "BitVec width is still an abstract comptime value; symbolic widths are not supported at this type formation boundary",
-                                ));
-                            };
-                            value
-                        };
-                        if exact.is_negative() {
-                            return Err(error(
-                                width.span,
-                                "BitVec width must be a nonnegative comptime integer",
-                            ));
-                        }
-                        let width = exact
-                            .to_u128()
-                            .ok()
-                            .and_then(|width| usize::try_from(width).ok())
-                            .ok_or_else(|| {
-                                error(
-                                    width.span,
-                                    "BitVec width exceeds the implementation size limit",
-                                )
-                            })?;
-                        return Ok(p(P::BitVec(width)));
-                    }
-                }
-                if let Some(owner) = self.normal_form_constant_target(head)?
-                    && !matches!(head.kind, H::ResolvedDef { def_id, .. } if self.package.definition_owner(def_id) == Some(owner))
-                {
-                    let definition = self.package.owner_definition(owner).ok_or_else(|| {
-                        error(
-                            expr.span,
-                            "normal-form callable has no declaration identity",
-                        )
-                    })?;
-                    let target = Expr {
-                        kind: H::ResolvedDef {
-                            name: self.package.item(owner).unwrap().ident.name,
-                            has_clause_param: true,
-                            def_id: definition,
-                        },
-                        ..(*head).clone()
-                    };
-                    let application = Expr {
-                        kind: H::NFApplication(&target, args),
-                        ..expr.clone()
-                    };
-                    return self.type_expr(&application);
-                }
-                let H::ResolvedDef { def_id, .. } = head.kind else {
-                    return Self::require_type_identity(
-                        self.required_value(expr, P::Type)?,
-                        expr.span,
-                    );
-                };
-                let owner = self
-                    .package
-                    .definition_owner(def_id)
-                    .ok_or_else(|| error(expr.span, "type definition has no HIR owner"))?;
-                if self.normal_parameters.contains_key(&owner)
-                    || matches!(&self.package.item(owner).unwrap().kind,
-                    ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)
-                {
-                    return self.normal_type_annotation(expr, owner, args);
-                }
-                if let Some(ItemKind::TypeAlias(value, ..)) =
-                    self.package.item(owner).map(|item| &item.kind)
-                {
-                    let count = self.type_parameters[&owner].len();
-                    if count == 0 {
-                        return Err(error(
-                            expr.span,
-                            "generic type alias argument count mismatch",
-                        ));
-                    }
-                    let arguments = self
-                        .type_clause_arguments(owner, args, None, expr.span)
-                        .map_err(|mut failure| {
-                            if failure.message == "type argument count mismatch" {
-                                failure.message =
-                                    "generic type alias argument count mismatch".into();
-                            }
-                            failure
-                        })?;
-                    self.check_type_application(owner, &arguments, expr.span)?;
-                    return self.alias_type(owner, value, &arguments, expr.span);
-                }
-                if !matches!(
-                    self.package.item(owner).map(|item| &item.kind),
-                    Some(ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(..))
-                ) {
-                    return Err(error(
-                        expr.span,
-                        "this type application requires comptime elaboration not yet implemented",
-                    ));
-                }
-                if self.type_parameters[&owner].is_empty() {
-                    return Err(error(
-                        expr.span,
-                        "generic type type argument count mismatch",
-                    ));
-                }
-                let mut arguments = self.type_clause_arguments(owner, args, None, expr.span)?;
-                self.check_type_application(owner, &arguments, expr.span)?;
-                arguments.extend(self.nominal_capture_arguments(owner, expr.span)?);
-                Ok(Term::Nominal {
-                    declaration: declaration(self.package, &self.package_identities, owner),
-                    arguments,
-                })
-            }
-
             H::TypeOf(value) => {
                 if matches!(
                     &value.kind,
@@ -3991,87 +3722,6 @@ impl Checker<'_, '_> {
                     _ => return Err(error(expr.span, format!("unsupported builtin type {name}"))),
                 };
                 Ok(p(primitive))
-            }
-            H::ResolvedDef { def_id, .. } => {
-                let owner = self.package.definition_owner(*def_id).ok_or_else(|| {
-                    error(expr.span, "resolved type declaration has no HIR owner")
-                })?;
-                if matches!(
-                    self.package.item(owner).map(|i| &i.kind),
-                    Some(ItemKind::Associated(_))
-                ) {
-                    let value = self.lexical_associated_value(owner, expr.span)?;
-                    return match value.kind {
-                        K::TypeValue(ty) => Ok(ty),
-                        _ => Err(error(
-                            expr.span,
-                            "associated value used as a type does not contain a completed Type",
-                        )),
-                    };
-                }
-                if matches!(
-                    self.package.item(owner).map(|i| &i.kind),
-                    Some(ItemKind::Const(..))
-                ) {
-                    let value = self.constant_value(owner, expr.span)?;
-                    return match value.kind {
-                        K::TypeValue(ty) => Ok(ty),
-                        _ => Self::require_type_identity(
-                            self.required_normal_input(expr, value, Vec::new())?.0,
-                            expr.span,
-                        ),
-                    };
-                }
-                if let Some(ItemKind::TypeAlias(value, ..)) =
-                    self.package.item(owner).map(|i| &i.kind)
-                {
-                    let arguments = self
-                        .type_clause_arguments(owner, &[], None, expr.span)
-                        .map_err(|mut failure| {
-                            if failure.message == "type argument count mismatch" {
-                                failure.message =
-                                    "generic type alias requires explicit type arguments".into();
-                            }
-                            failure
-                        })?;
-                    self.check_type_application(owner, &arguments, expr.span)?;
-                    return self.alias_type(owner, value, &arguments, expr.span);
-                }
-                if !self.aliases.insert(owner) {
-                    return Err(error(expr.span, "cyclic type alias"));
-                }
-                let result = match self.package.item(owner).map(|i| &i.kind) {
-                    Some(ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(..)) => {
-                        (|| {
-                            let arguments = self
-                                .type_clause_arguments(owner, &[], None, expr.span)
-                                .map_err(|mut failure| {
-                                    if failure.message.contains("argument count mismatch") {
-                                        failure.message =
-                                            "generic type requires explicit type arguments".into();
-                                    }
-                                    failure
-                                })?;
-                            self.check_type_application(owner, &arguments, expr.span)?;
-                            let mut arguments = arguments;
-                            arguments.extend(self.nominal_capture_arguments(owner, expr.span)?);
-                            Ok(Term::Nominal {
-                                declaration: declaration(
-                                    self.package,
-                                    &self.package_identities,
-                                    owner,
-                                ),
-                                arguments,
-                            })
-                        })()
-                    }
-                    _ => Err(error(
-                        expr.span,
-                        "declaration does not produce a supported type",
-                    )),
-                };
-                self.aliases.remove(&owner);
-                result
             }
             _ => Err(error(
                 expr.span,

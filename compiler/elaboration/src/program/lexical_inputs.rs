@@ -356,6 +356,14 @@ impl Checker<'_, '_> {
         ) {
             return Ok(Vec::new());
         }
+        self.lexical_arguments(owner, span)
+    }
+
+    pub(super) fn lexical_arguments(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<Vec<Term>, Error> {
         let plan = self.lexical_input_plan(owner, span)?;
         let mut arguments = Vec::with_capacity(plan.inputs.len());
         for input in plan.inputs {

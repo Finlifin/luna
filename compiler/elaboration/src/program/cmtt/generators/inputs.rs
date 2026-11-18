@@ -497,7 +497,9 @@ impl Checker<'_, '_> {
                             argument.span,
                         )?
                     } else if template.input_binders.contains_key(&route.parameter) {
-                        let value = self.generator_required_type(argument)?;
+                        let value = self
+                            .generator_type_data(argument)?
+                            .identity(argument.span)?;
                         (
                             Argument::Data(Some(n::Expr {
                                 source: source(argument.span),

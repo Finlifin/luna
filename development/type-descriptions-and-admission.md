@@ -22,7 +22,8 @@ Any 与 bool、u8 分别相容，不产生 bool == u8，也不产生二者间的
 | `open_functions::observations::TypeObservation::{Known, Unknown}` | 定义侧的有限域观察；待定注解观察为 Unknown | 不持有生产状态，也不是已经求值的 Type 数据 |
 | `open_functions::Annotation` | 已知域、待执行计算、前置 Type 输入、待恢复源码 | 没有已完成但仍含 Any/refinement 的参数描述状态 |
 | `Value::Type`、`TypeParameter`、`Description` | 传递完整或受作用域授权的身份，以及显式 Any 描述叶 | 复合描述、带 binder 的要求、NF 参数传送尚待接通 |
-| `PreparedRequired::invoke_in_world` / `restore_required_packet` | Type 与其他结果共用普通 VM 调用及调用方 scope 恢复，不分配临时推断输出 | Type 载荷仍为身份 Term；尚不能传送完整描述或恢复未完成源码区域 |
+| `PreparedRequired::invoke_in_world` / `restore_required_packet` | 普通 VM 调用可交付具体身份或显式 Any，回到调用方 scope 后继续使用 | 复合描述和未完成源码区域的恢复仍待接通 |
+| `Checker::completed_type` / `type_expr` | 前者完成 Type 值；后者在具体类型使用点索取身份。闭合别名可以发布两种结果 | 有描述实参的别名目前只接通必选 Type 槽位；默认值和混合值域仍走 Term 路径 |
 | `type_expr` 的 `RefinedType` | 取得 base，证明要求，返回 base | 不能先保留针对未知描述的要求，再于实例准入时检查 |
 | `comptime_values::encode_admitted_list` | 已准入列表的普通稳定编码 | 元素仍为 Term，描述数据不能靠 Type 列表专用旁路接入 |
 | `normal_types`、值准入与 nominal formation | 按接收世界检查身份和普通实参 | 描述应用不能直接借旧身份/布局接口伪造完成 |
@@ -47,6 +48,24 @@ comptime fn First() -> Type {
 相等判定、布局或结构观察的使用点另行要求身份。描述中的 Any 不会为 PTC 引入等式。
 上述行为及失败后同一 VM 的后续调用见
 [源码回归](../compiler/luna/tests/gradual_type_data.rs)。
+
+同样的区别也适用于类型别名。下面的 `Forward` 经一次元组展开得到 Any；把
+`Forward` 放进 `meta.List<Type>` 可以传递这份数据。若将它用作结构体字段的
+存储类型，诊断出现在需要具体类型身份的字段上。
+
+```flurry
+typealias Field = Any;
+typealias Second<A, B> = B;
+comptime fn packet() -> Tuple<Type, Type> { (bool, Field) }
+typealias Forward = Second<...packet()>;
+```
+
+具有稳定实参的别名按声明、槽位实参和声明实际捕获的输入保存结果。例如
+`typealias Declared = Make();` 只产生一次类型，通过 `Through<bool>` 与
+`Through<u8>` 引用它仍得到同一身份。另写一条调用生成式工厂的别名声明会得到
+独立结果。成员别名引用所在类型的参数时，该参数也参与区分。静态类型构造沿用
+原有的形成检查，包括位宽、实参域和约束。含描述的实参走别名的参数绑定和约束
+检查路径，目前还不能作为稳定项写入 NF 或 metadata。
 
 [带 Display 的最小复现](repros/refined-any-type-producer.fl)现在可以解析 Any。
 检查 `refines { Itself :- Display } Any` 时，现有 refinement 入口仍尝试取得
@@ -280,7 +299,7 @@ dump 应显示生产状态及各消费边，例如下面的结构示意，而不
 
 | 当前入口 | 当前边界 | 目标职责与退役条件 |
 | --- | --- | --- |
-| [`Interpreter::type_description_term`](../compiler/comptime_interpretor/src/lib.rs) | 从 Type/授权 TypeParameter 取得 Term | 消费者明确请求 Type 数据或具体身份；数据转发不强制形成身份 |
+| [`Interpreter::type_data` / `type_identity_term`](../compiler/comptime_interpretor/src/lib.rs) | 分别读取 Type 数据和具体身份；数据转发可保留显式 Any | 复合描述须保持相同的消费边界 |
 | [`value_types::has_type_at`](../compiler/comptime_interpretor/src/value_types.rs) | Type 域的值走 `inspect_type_description` | 检查合法 TypeValue 成员资格；不将数据检查等同于实际参数准入 |
 | [`admission::admit_value_types`](../compiler/comptime_interpretor/src/admission.rs) | Type 载荷走接收世界的 `admit_type` | 遍历描述中的身份、要求和绑定；身份引用仍须在接收世界有效，实际输入的 trait 选择另行进行 |
 | [`normal_terms`](../compiler/comptime_interpretor/src/normal_terms.rs) | Type 值冻结为身份 Term | 共同冻结载体保留描述载荷及依赖；容器、Object 与捕获递归走同一规则 |

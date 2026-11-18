@@ -47,6 +47,16 @@ impl<'h> Checker<'_, 'h> {
         count: usize,
         span: Span,
     ) -> Result<Vec<(Option<hir::common::Ident>, Term)>, Error> {
+        self.expand_type_inputs_with(args, count, span, CompletedType::identity)
+    }
+
+    pub(super) fn expand_type_inputs_with<T>(
+        &mut self,
+        args: &[Arg<'_>],
+        count: usize,
+        span: Span,
+        consume: impl Fn(CompletedType, Span) -> Result<T, Error>,
+    ) -> Result<Vec<(Option<hir::common::Ident>, T)>, Error> {
         let mut inputs = Vec::new();
         let contexts = self
             .clause_packet_layout(args, &vec![p(P::Type); count], span)?
@@ -59,15 +69,20 @@ impl<'h> Checker<'_, 'h> {
             .collect::<Result<Vec<_>, _>>()?;
         for (index, arg) in args.iter().enumerate() {
             match arg {
-                Arg::Positional(value) => inputs.push((None, self.type_expr(value)?)),
-                Arg::Named(name, value) => inputs.push((Some(*name), self.type_expr(value)?)),
+                Arg::Positional(value) => {
+                    inputs.push((None, consume(self.completed_type(value)?, value.span)?))
+                }
+                Arg::Named(name, value) => inputs.push((
+                    Some(*name),
+                    consume(self.completed_type(value)?, value.span)?,
+                )),
                 Arg::Expand(value) => {
                     if matches!(value.kind, H::Unit) {
                         continue;
                     }
                     if let H::Tuple(fields) = value.kind {
                         for field in fields {
-                            inputs.push((None, self.type_expr(field)?));
+                            inputs.push((None, consume(self.completed_type(field)?, field.span)?));
                         }
                     } else {
                         let (packet, ty) =
@@ -89,11 +104,14 @@ impl<'h> Checker<'_, 'h> {
                         };
                         for value in values {
                             let ty = match value {
-                                Value::Type(ty) => ty,
-                                Value::TypeParameter(declaration) => Term::Rigid {
-                                    declaration,
-                                    sort: Sort::Type,
-                                },
+                                Value::Type(ty) => CompletedType::Identity(ty),
+                                Value::Description(leaf) => CompletedType::Description(leaf),
+                                Value::TypeParameter(declaration) => {
+                                    CompletedType::Identity(Term::Rigid {
+                                        declaration,
+                                        sort: Sort::Type,
+                                    })
+                                }
                                 _ => {
                                     return Err(error(
                                         span,
@@ -101,7 +119,7 @@ impl<'h> Checker<'_, 'h> {
                                     ));
                                 }
                             };
-                            inputs.push((None, ty));
+                            inputs.push((None, consume(ty, span)?));
                         }
                     }
                 }
@@ -692,15 +710,11 @@ impl<'h> Checker<'_, 'h> {
         self.type_clause_values(owner, values, subject, span, prefix)
     }
 
-    pub(super) fn type_clause_values(
-        &mut self,
-        owner: OwnerId,
-        values: Vec<(Option<hir::common::Ident>, Term)>,
-        subject: Option<&Term>,
+    pub(super) fn route_type_slots<T>(
+        clauses: &[hir::clause::ClauseParam<'_>],
+        values: Vec<(Option<hir::common::Ident>, T)>,
         span: Span,
-        prefix: Vec<Term>,
-    ) -> Result<Vec<Term>, Error> {
-        let clauses = self.type_clause_params(owner);
+    ) -> Result<Vec<Option<T>>, Error> {
         let inputs = values
             .iter()
             .map(|(name, _)| {
@@ -710,9 +724,9 @@ impl<'h> Checker<'_, 'h> {
             })
             .collect::<Vec<_>>();
         let mut routing =
-            input_routing::Cursor::new(clause_inputs::entries(&clauses), &inputs, None)
+            input_routing::Cursor::new(clause_inputs::entries(clauses), &inputs, None)
                 .map_err(|failure| Self::type_input_routing_error(failure.kind, span))?;
-        let mut supplied = vec![None; clauses.len()];
+        let mut supplied = (0..clauses.len()).map(|_| None).collect::<Vec<_>>();
         for ((_, value), input) in values.into_iter().zip(&inputs) {
             let slot = routing
                 .select(input)
@@ -724,6 +738,19 @@ impl<'h> Checker<'_, 'h> {
                 return Err(error(span, "duplicate type argument"));
             }
         }
+        Ok(supplied)
+    }
+
+    pub(super) fn type_clause_values(
+        &mut self,
+        owner: OwnerId,
+        values: Vec<(Option<hir::common::Ident>, Term)>,
+        subject: Option<&Term>,
+        span: Span,
+        prefix: Vec<Term>,
+    ) -> Result<Vec<Term>, Error> {
+        let clauses = self.type_clause_params(owner);
+        let supplied = Self::route_type_slots(&clauses, values, span)?;
         let mut arguments = prefix;
         for (slot, supplied) in supplied.into_iter().enumerate() {
             arguments.push(match supplied {

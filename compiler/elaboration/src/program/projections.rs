@@ -54,7 +54,10 @@ impl Checker<'_, '_> {
             H::Projection(..) | H::NFApplication(..) => {
                 // Resolve each intermediate type member with its own use-site
                 // permissions. A value member cannot become a Type receiver.
-                *completed = self.projected_member_type(base)?;
+                *completed = self
+                    .projected_member_data(base)?
+                    .map(|data| data.identity(base.span))
+                    .transpose()?;
                 if completed.is_none() && matches!(base.kind, H::Projection(..)) {
                     *completed = self.observed_projection_type(base)?;
                     if completed.is_none() && self.local_field_domain(base)? == Some(p(P::Type)) {
@@ -476,23 +479,26 @@ impl Checker<'_, '_> {
             .map_err(|e| error(span, e.to_string()))
     }
 
-    pub(super) fn projected_member_type(&mut self, expr: &Expr<'_>) -> Result<Option<Term>, Error> {
+    pub(super) fn projected_member_data(
+        &mut self,
+        expr: &Expr<'_>,
+    ) -> Result<Option<CompletedType>, Error> {
         self.with_projected_type_member(expr, |checker, owner, mut arguments| {
             checker.check_type_application(owner, &arguments, expr.span)?;
             match &checker.package.item(owner).unwrap().kind {
                 ItemKind::TypeAlias(value, ..) => {
-                    checker.alias_type(owner, value, &arguments, expr.span)
+                    checker.completed_alias(owner, value, &arguments, expr.span)
                 }
                 ItemKind::Newtype(..) | ItemKind::Struct(_) | ItemKind::Enum(_) => {
                     arguments.extend(checker.nominal_capture_arguments(owner, expr.span)?);
-                    Ok(Term::Nominal {
+                    Ok(CompletedType::Identity(Term::Nominal {
                         declaration: declaration(
                             checker.package,
                             &checker.package_identities,
                             owner,
                         ),
                         arguments,
-                    })
+                    }))
                 }
                 _ => unreachable!(),
             }
