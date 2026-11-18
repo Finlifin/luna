@@ -1521,26 +1521,13 @@ impl Checker<'_, '_> {
                     "required comptime function signature still needs invocation inputs",
                 )
             })?;
-        let saved_owner = self.signature_owner.replace(owner);
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_captures = std::mem::take(&mut self.captures);
-        let saved_control = std::mem::take(&mut self.control);
-        let saved_immutable = std::mem::take(&mut self.immutable);
-        let saved_context = self.context.clone();
-        let saved_contract = std::mem::replace(&mut self.checking_contract, false);
-        let saved_defaults = std::mem::replace(&mut self.numeric_defaults, true);
-        self.context = self.definition_context(owner);
-        let result =
-            self.check_source_function(owner, signature, function_bodies::Defaults::CallPlan, span);
-        self.signature_owner = saved_owner;
-        self.locals = saved_locals;
-        self.captures = saved_captures;
-        self.control = saved_control;
-        self.immutable = saved_immutable;
-        self.context = saved_context;
-        self.checking_contract = saved_contract;
-        self.numeric_defaults = saved_defaults;
-        result
+        // The demand is mandatory, but its caller's open-instance refinements,
+        // locals and projected parameter slots do not belong to this definition.
+        let required = self.in_required_comptime;
+        self.in_function_scope(owner, None, |this| {
+            this.in_required_comptime = required;
+            this.check_source_function(owner, signature, function_bodies::Defaults::CallPlan, span)
+        })
     }
 }
 

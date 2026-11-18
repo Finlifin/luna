@@ -2093,21 +2093,8 @@ impl Package {
         declaration: DeclarationId,
         arguments: &'b [Term],
     ) -> Result<(&'a Function, &'b [Term]), &'static str> {
-        let mut matches = self.runtime_instances.iter().filter(|instance| {
-            instance.declaration == declaration && instance.arguments == arguments
-        });
-        if let Some(instance) = matches.next() {
-            if matches.next().is_some()
-                || instance.function.declaration != declaration
-                || !instance.function.type_parameters.is_empty()
-                || instance.function.phase != FunctionPhase::Runtime
-                || !matches!(&instance.function.signature, Term::Function { parameters, .. }
-                    if parameters.len() == instance.function.parameters.len()
-                        && parameters.iter().all(|p| p.sort == crate::Sort::Runtime))
-            {
-                return Err("runtime function instance is ambiguous or malformed");
-            }
-            return Ok((&instance.function, &[]));
+        if let Some(instance) = self.runtime_instance_body_checked(declaration, arguments)? {
+            return Ok((instance, &[]));
         }
         let mut declarations = self
             .functions
@@ -2122,6 +2109,32 @@ impl Package {
             return Err("function type arguments have incorrect arity");
         }
         Ok((function, arguments))
+    }
+
+    /// Select only an exact residual. An absent residual permits consulting
+    /// the source interface. An invalid or ambiguous residual never does.
+    pub fn runtime_instance_body_checked(
+        &self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+    ) -> Result<Option<&Function>, &'static str> {
+        let mut matches = self.runtime_instances.iter().filter(|instance| {
+            instance.declaration == declaration && instance.arguments == arguments
+        });
+        if let Some(instance) = matches.next() {
+            if matches.next().is_some()
+                || instance.function.declaration != declaration
+                || !instance.function.type_parameters.is_empty()
+                || instance.function.phase != FunctionPhase::Runtime
+                || !matches!(&instance.function.signature, Term::Function { parameters, .. }
+                    if parameters.len() == instance.function.parameters.len()
+                        && parameters.iter().all(|p| p.sort == crate::Sort::Runtime))
+            {
+                return Err("runtime function instance is ambiguous or malformed");
+            }
+            return Ok(Some(&instance.function));
+        }
+        Ok(None)
     }
 }
 

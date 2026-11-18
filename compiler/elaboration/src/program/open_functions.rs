@@ -1753,80 +1753,6 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    // Isolate definition/instance checking from the caller's locals, return and
-    // control-flow context. Global demanded declarations and budgets survive.
-    fn in_open_function<T>(
-        &mut self,
-        owner: OwnerId,
-        instance: Option<Arc<generated_functions::InstanceKey>>,
-        check: impl FnOnce(&mut Self) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        let saved_refinements = std::mem::take(&mut self.definition_refinements);
-        let saved_behavior_inputs = std::mem::take(&mut self.ordinary_behavior_inputs);
-        let saved_behavior = std::mem::replace(&mut self.checking_open_behavior, false);
-        let saved_call = std::mem::replace(&mut self.describing_open_call, false);
-        let saved_spread = std::mem::replace(&mut self.describing_open_spread, false);
-        let saved_owner = self.signature_owner.replace(owner);
-        let saved_instance = std::mem::replace(&mut self.open_instance, instance);
-        let saved_inline = self.inline_selection.take();
-        let saved_match_input = self.inline_match_input.take();
-        let saved_unselected = std::mem::replace(&mut self.in_unselected_inline, false);
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_code = self.code_values.clone();
-        let saved_patterns = self.pattern_codes.clone();
-        let saved_staged_locals = std::mem::take(&mut self.open_staged_locals);
-        let saved_staged_locals_members = std::mem::take(&mut self.open_member_locals);
-        let saved_captures = std::mem::take(&mut self.captures);
-        let saved_control = std::mem::take(&mut self.control);
-        let saved_immutable = std::mem::take(&mut self.immutable);
-        let saved_context = self.context.clone();
-        let saved_contract = std::mem::replace(&mut self.checking_contract, false);
-        let saved_numeric = std::mem::replace(&mut self.numeric_defaults, true);
-        let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
-        let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
-        let inputs = self.input_facts.for_open_body();
-        let saved_inputs = std::mem::replace(&mut self.input_facts, inputs);
-        let saved_default_scope = self.default_input_scope.take();
-        let saved_default_owner = self.default_input_owner.take();
-        let saved_effects = self.effect_environment.take();
-        let saved_resume = self.effect_resume_result.take();
-        self.context = if self.open_instance.is_some() {
-            self.definition_context_in_scope(owner, self.call_input_frames())
-        } else {
-            self.definition_context(owner)
-        };
-        let result = check(self);
-        self.definition_refinements = saved_refinements;
-        self.ordinary_behavior_inputs = saved_behavior_inputs;
-        self.checking_open_behavior = saved_behavior;
-        self.describing_open_call = saved_call;
-        self.describing_open_spread = saved_spread;
-        self.signature_owner = saved_owner;
-        self.open_instance = saved_instance;
-        self.inline_selection = saved_inline;
-        self.inline_match_input = saved_match_input;
-        self.in_unselected_inline = saved_unselected;
-        self.locals = saved_locals;
-        self.code_values = saved_code;
-        self.pattern_codes = saved_patterns;
-        self.open_staged_locals = saved_staged_locals;
-        self.open_member_locals = saved_staged_locals_members;
-        self.captures = saved_captures;
-        self.control = saved_control;
-        self.immutable = saved_immutable;
-        self.context = saved_context;
-        self.checking_contract = saved_contract;
-        self.numeric_defaults = saved_numeric;
-        self.in_staged_input = saved_staged;
-        self.in_required_comptime = saved_required;
-        self.input_facts = saved_inputs;
-        self.default_input_scope = saved_default_scope;
-        self.default_input_owner = saved_default_owner;
-        self.effect_environment = saved_effects;
-        self.effect_resume_result = saved_resume;
-        result
-    }
-
     pub(super) fn check_open_definition(&mut self, owner: OwnerId) -> Result<(), Error> {
         let definition = self.open_functions[&owner].clone();
         let needs_default_behavior = self.default_behavior_functions.contains(&owner)
@@ -1844,7 +1770,7 @@ impl Checker<'_, '_> {
                 "cyclic or excessively deep ordinary open-definition dependency",
             ));
         }
-        let checked = self.in_open_function(owner, None, |this| {
+        let checked = self.in_function_scope(owner, None, |this| {
             let item = this.package.item(owner).unwrap();
             let (sig, body) = match &item.kind {
                 ItemKind::Fn(sig, body) => (sig, Some(*body)),
@@ -5687,7 +5613,7 @@ impl Checker<'_, '_> {
             symbols[slot] = Some(self.normal_value_argument(&route.expression(call), &domain)?);
             return Ok(());
         }
-        let term = self.in_open_function(owner, None, |this| {
+        let term = self.in_function_scope(owner, None, |this| {
             let ItemKind::Fn(sig, _) = &this.package.item(owner).unwrap().kind else {
                 unreachable!()
             };
@@ -7444,7 +7370,7 @@ impl Checker<'_, '_> {
             },
         );
         self.open_instantiation_depth += 1;
-        let body = self.in_open_function(owner, Some(Arc::clone(&instance)), |this| {
+        let body = self.in_function_scope(owner, Some(Arc::clone(&instance)), |this| {
             let signature = &instance.signature;
             let item = this.package.item(owner).unwrap();
             let ItemKind::Fn(sig, body) = &item.kind else {

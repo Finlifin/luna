@@ -121,14 +121,36 @@ pub fn inspect_definition_region(
     package: &Package,
     region: &crate::program::DefinitionRegion,
 ) -> Result<(BTreeSet<crate::DeclarationId>, bool), Error> {
+    inspect_definition_region_with_declarations(package, &BTreeMap::new(), region)
+}
+
+/// Inspect imported interfaces and their references without registering a
+/// callable body. Only the lexical region and complete package functions can
+/// contribute executable obligations.
+pub fn inspect_definition_region_with_declarations(
+    package: &Package,
+    imports: &crate::callable_source::RegionDeclarations,
+    region: &crate::program::DefinitionRegion,
+) -> Result<(BTreeSet<crate::DeclarationId>, bool), Error> {
     let mut declaration_fuel = 1_000_000;
     let mut inspection_fuel = 1_000_000;
     let declarations = declarations::Declarations::new(package, &mut declaration_fuel)?;
     let program = CallableProgram::definition_region(region);
     crate::callable_source::validate_frame(program, false, &mut declaration_fuel)?;
     let mut context = PhaseContext::new(package, &declarations);
+    context
+        .callables
+        .import_declarations(imports, &mut declaration_fuel)?;
     let owners = context.check_package(&mut inspection_fuel)?;
     let arithmetic = context.inspect(program, &mut inspection_fuel)?;
+    // Check the use in its own phase first. For a legal reference, also
+    // inspect everything exported by the supplying declaration.
+    for declaration in imports.values() {
+        context.inspect(
+            CallableProgram::declaration(declaration),
+            &mut inspection_fuel,
+        )?;
+    }
     Ok((owners, arithmetic))
 }
 
@@ -146,7 +168,7 @@ pub fn validate_comptime_expression(
 struct PhaseContext<'a> {
     package: &'a Package,
     declarations: &'a declarations::Declarations,
-    callables: crate::callable_source::Callables<'a>,
+    callables: declarations::Interfaces<'a>,
     storage_queries: storage_cache::StorageQueries<'a>,
 }
 impl<'a> PhaseContext<'a> {
@@ -154,7 +176,7 @@ impl<'a> PhaseContext<'a> {
         Self {
             package,
             declarations,
-            callables: declarations.callables.bind(package),
+            callables: declarations::Interfaces::new(declarations.callables.bind(package)),
             storage_queries: storage_cache::StorageQueries::with_declarations(
                 package,
                 declarations,
@@ -584,15 +606,15 @@ impl<'a> PhaseContext<'a> {
                         | K::FunctionInstance {
                             declaration: id, ..
                         } => {
-                            if callables.quote(id).is_some() {
+                            if callables.source.quote(id).is_some() {
                                 if !_callee {
                                     return Err(error(
                                         "quote template cannot escape as a runtime function value",
                                     ));
                                 }
                                 if !function.declaration.is_some_and(|declaration| {
-                                    callables.quote(&declaration).is_some()
-                                }) && !callables.staged_quote(id)
+                                    callables.source.quote(&declaration).is_some()
+                                }) && !callables.source.staged_quote(id)
                                 {
                                     return Err(error(
                                         "quote application requires deterministic expansion before runtime execution",

@@ -66,3 +66,63 @@ impl Declarations {
         })
     }
 }
+
+/// A phase check may inspect an active declaration. The executable source
+/// directory and the package evidence it belongs to remain unchanged.
+pub(super) struct Interfaces<'a> {
+    pub(super) source: crate::callable_source::Callables<'a>,
+    imports: Option<&'a crate::callable_source::RegionDeclarations>,
+}
+
+impl<'a> Interfaces<'a> {
+    pub(super) fn new(source: crate::callable_source::Callables<'a>) -> Self {
+        Self {
+            source,
+            imports: None,
+        }
+    }
+
+    pub(super) fn import_declarations(
+        &mut self,
+        declarations: &'a crate::callable_source::RegionDeclarations,
+        fuel: &mut usize,
+    ) -> Result<(), Error> {
+        for (id, declaration) in declarations {
+            *fuel = fuel.checked_sub(1).ok_or_else(|| {
+                Error::budget(declaration.source, "region declaration budget exhausted")
+            })?;
+            if *id != declaration.declaration || self.phase(id).is_some() {
+                return Err(Error::invalid(
+                    declaration.source,
+                    "invalid or duplicate region declaration identity",
+                ));
+            }
+            crate::callable_source::validate_frame(
+                crate::contracts::CallableProgram::declaration(declaration),
+                false,
+                fuel,
+            )?;
+        }
+        self.imports = Some(declarations);
+        Ok(())
+    }
+
+    pub(super) fn method_definition(
+        &self,
+        id: &crate::DeclarationId,
+    ) -> Option<&'a crate::program::FunctionDeclaration> {
+        self.source
+            .method_definition(id)
+            .or_else(|| self.imports?.get(id))
+    }
+
+    pub(super) fn phase(&self, id: &crate::DeclarationId) -> Option<(Phase, bool, bool)> {
+        if let Some(f) = self.method_definition(id) {
+            Some((f.phase, !f.preconditions.is_empty(), f.is_unsafe))
+        } else {
+            self.source
+                .runtime_identity(id)
+                .map(|f| (Phase::Runtime, false, f.signature.is_unsafe_callable()))
+        }
+    }
+}

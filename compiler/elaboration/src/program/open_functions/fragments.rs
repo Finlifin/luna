@@ -198,7 +198,7 @@ impl Checker<'_, '_> {
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let (functions, runtime_function_identities) = self.fragment_callables(&value, span)?;
+        let imports = self.fragment_declarations(&value, span)?;
         let region = n::DefinitionRegion {
             owner: declaration(self.package, &self.package_identities, owner),
             phase: if self.in_staged_input || sig.modifiers.is_comptime {
@@ -224,8 +224,6 @@ impl Checker<'_, '_> {
         };
         let package = n::Package {
             target: self.target,
-            functions,
-            runtime_function_identities,
             normal_forms: self.normal_form_metadata(),
             function_parameters: self.function_parameter_metadata(),
             structs: self.structs.values().cloned().collect(),
@@ -236,29 +234,29 @@ impl Checker<'_, '_> {
             ..Default::default()
         };
         if arithmetic {
-            crate::verification::flow::validate_definition_region(&package, &region).map_err(
-                |mut failure| {
-                    failure.source = failure
-                        .source
-                        .original(&self.expansion_sources)
-                        .unwrap_or(failure.source);
-                    error(span, failure.to_string())
-                },
+            crate::verification::flow::validate_definition_region_with_declarations(
+                &package, &imports, &region,
             )
+            .map_err(|mut failure| {
+                failure.source = failure
+                    .source
+                    .original(&self.expansion_sources)
+                    .unwrap_or(failure.source);
+                error(span, failure.to_string())
+            })
         } else {
-            nir::phases::inspect_definition_region(&package, &region)
+            nir::phases::inspect_definition_region_with_declarations(&package, &imports, &region)
                 .map(|_| ())
                 .map_err(|failure| error(span, failure.message))
         }
     }
 
-    fn fragment_callables(
+    fn fragment_declarations(
         &mut self,
         root: &n::Expr,
         span: Span,
-    ) -> Result<(Vec<n::Function>, Vec<n::RuntimeFunctionIdentity>), Error> {
-        let mut functions = Vec::new();
-        let mut identities = Vec::new();
+    ) -> Result<nir::callable_source::RegionDeclarations, Error> {
+        let mut imports = nir::callable_source::RegionDeclarations::new();
         // The phase pass inspects these method contracts as well as the fragment.
         // Their references are roots even if the fragment never calls that method.
         let contracts = self
@@ -286,60 +284,54 @@ impl Checker<'_, '_> {
             if !seen.insert(id) {
                 continue;
             }
-            let function = if let Some(function) = self.generated_functions.body(id) {
-                // A completed body already carries its signature and program contracts.
-                nir::copy_budget::clone_function(function, &mut self.required_steps).map_err(
-                    |_| error(span, "ordinary region function snapshot budget exhausted"),
-                )?
-            } else if let Some(interface) = self.generated_functions.declaration(id) {
-                if interface.phase != n::FunctionPhase::Runtime
-                    || !interface.preconditions.is_empty()
-                {
-                    return Err(error(
-                        span,
-                        "ordinary region requires callable code or program contracts still being checked",
-                    ));
-                }
-                identities.push(function_bodies::retain_runtime_identity(
-                    interface,
-                    &mut self.required_steps,
-                    span,
-                )?);
-                continue;
+            let declaration = if let Some(declaration) = self.generated_functions.declaration(id) {
+                let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let copy = nir::copy_budget::clone_function_declaration(declaration, &mut fuel);
+                self.required_steps -= (before - fuel) as u64;
+                copy.map_err(|_| error(span, "region declaration snapshot budget exhausted"))?
             } else {
                 let Some(owner) = self.source_declarations.owner(id) else {
                     continue;
                 };
-                match self.package.item(owner).map(|item| &item.kind) {
-                    Some(ItemKind::Fn(sig, _))
-                        if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head =>
-                    {
-                        self.required_function(owner, span)?
-                    }
-                    Some(ItemKind::Fn(sig, _)) if !sig.modifiers.is_normal_form_head => {
-                        self.ensure_signature(owner, span)?;
-                        self.ensure_contract(owner, span)?;
-                        if let Some(signature) =
-                            self.declared_signature(owner).map(|sig| sig.into_owned())
-                        {
-                            identities.push(self.runtime_function_identity(owner, signature));
-                        }
-                        continue;
-                    }
-                    _ => {
-                        self.ensure_signature(owner, span)?;
-                        continue;
-                    }
+                self.ensure_signature(owner, span)?;
+                let Some(ItemKind::Fn(sig, _)) = self.package.item(owner).map(|item| &item.kind)
+                else {
+                    continue;
+                };
+                if sig.modifiers.is_normal_form_head {
+                    continue;
                 }
+                self.ensure_contract(owner, span)?;
+                let Some(signature) = self.declared_signature(owner).map(|sig| sig.into_owned())
+                else {
+                    continue;
+                };
+                self.in_function_scope(owner, None, |this| {
+                    this.with_source_declaration(
+                        owner,
+                        signature,
+                        function_bodies::Defaults::CallPlan,
+                        span,
+                        |_, declaration| Ok(declaration),
+                    )
+                })?
             };
-            pending.extend(
-                required::function_references(&function, &mut self.required_steps)
-                    .map_err(|failure| error(span, failure.to_string()))?
-                    .into_iter()
-                    .filter_map(required::Dependency::callable),
-            );
-            functions.push(function);
+            for contract in declaration
+                .preconditions
+                .iter()
+                .chain(&declaration.postconditions)
+                .chain(declaration.defaults.iter().map(|(_, expr)| expr))
+            {
+                pending.extend(
+                    required::references(contract, &mut self.required_steps)
+                        .map_err(|failure| error(span, failure.to_string()))?
+                        .into_iter()
+                        .filter_map(required::Dependency::callable),
+                );
+            }
+            imports.insert(id, declaration);
         }
-        Ok((functions, identities))
+        Ok(imports)
     }
 }

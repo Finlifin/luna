@@ -362,10 +362,27 @@ fn a_definition_region_borrows_its_frame_without_publishing_the_owner() {
     };
     let failure = inspect_definition_region(&Package::default(), &region).unwrap_err();
     assert_eq!(failure.message, "function phase declaration is missing");
+    let imports = BTreeMap::from([(owner.declaration, owner.interface.clone())]);
+    let source = Package::default();
+    let (owners, _) =
+        inspect_definition_region_with_declarations(&source, &imports, &region).unwrap();
+    assert!(owners.is_empty());
+    assert!(
+        crate::callable_source::Callables::new(&source, &mut 1000)
+            .unwrap()
+            .formation(&owner.declaration)
+            .is_none()
+    );
     let package = Package {
         functions: vec![owner],
         ..Default::default()
     };
+    let duplicate =
+        inspect_definition_region_with_declarations(&package, &imports, &region).unwrap_err();
+    assert_eq!(
+        duplicate.message,
+        "invalid or duplicate region declaration identity"
+    );
     inspect_definition_region(&package, &region).unwrap();
     region
         .parameters

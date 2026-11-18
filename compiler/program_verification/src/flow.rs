@@ -685,10 +685,13 @@ fn bind_place(
     Ok(())
 }
 
+use nir::callable_source::RegionDeclarations;
+
 pub fn analyze(function: &Function, limits: &mut Limits) -> Result<Report, Error> {
     analyze_impl(
         CallableProgram::function(function),
         &function.requirements,
+        None,
         None,
         limits,
         true,
@@ -703,6 +706,7 @@ pub fn analyze_in_package(
         CallableProgram::function(function),
         &function.requirements,
         Some(package),
+        None,
         limits,
         true,
     )
@@ -770,6 +774,7 @@ pub fn validate_residual_contracts(
             CallableProgram::function(function),
             &function.requirements,
             Some(package),
+            None,
             limits,
             false,
         )?;
@@ -797,6 +802,7 @@ pub fn prove_implication(
         CallableProgram::declaration(declaration),
         &declaration.requirements,
         package,
+        None,
         limits,
         true,
     )
@@ -806,6 +812,7 @@ fn analyze_impl(
     program: CallableProgram<'_>,
     requirements: &[nir::program::TypePredicate],
     package: Option<&nir::program::Package>,
+    imports: Option<&RegionDeclarations>,
     limits: &mut Limits,
     collect_points: bool,
 ) -> Result<Report, Error> {
@@ -935,6 +942,7 @@ fn analyze_impl(
         next_frame: 1,
         limits,
         package,
+        imports,
         declarations: crate::declarations::Metadata::new(package),
         points: vec![],
         collect_points,
@@ -1050,6 +1058,7 @@ struct Walker<'a> {
     )>,
     limits: &'a mut Limits,
     package: Option<&'a nir::program::Package>,
+    imports: Option<&'a RegionDeclarations>,
     declarations: crate::declarations::Metadata<'a>,
     points: Vec<Point>,
     // Final validation consumes only success/failure, not report snapshots.
@@ -3472,54 +3481,64 @@ impl Walker<'_> {
             } => Some((*declaration, arguments.as_slice())),
             _ => None,
         };
-        let selected_target = match (direct, self.package) {
-            (Some((declaration, arguments)), Some(package)) => {
-                self.limits.step(
-                    package
-                        .runtime_instances
-                        .len()
-                        .saturating_add(package.functions.len())
-                        .saturating_add(package.quote_templates.len()),
-                )?;
-                Some(
-                    package
-                        .runtime_body(declaration, arguments)
-                        .ok_or(Reason::InvalidSignature)?,
-                )
+        let (program, target_arguments) = match (direct, self.package) {
+            (Some((id, arguments)), Some(package)) => {
+                let selected =
+                    if let Some(declaration) = self.imports.and_then(|imports| imports.get(&id)) {
+                        self.limits
+                            .step(package.runtime_instances.len().saturating_add(1))?;
+                        match package
+                            .runtime_instance_body_checked(id, arguments)
+                            .map_err(|_| Reason::InvalidSignature)?
+                        {
+                            Some(code) => (CallableProgram::function(code), &[][..]),
+                            None if declaration.type_parameters.len() == arguments.len() => {
+                                (CallableProgram::declaration(declaration), arguments)
+                            }
+                            None => return Err(Reason::InvalidSignature),
+                        }
+                    } else {
+                        self.limits.step(
+                            package
+                                .runtime_instances
+                                .len()
+                                .saturating_add(package.functions.len())
+                                .saturating_add(package.quote_templates.len()),
+                        )?;
+                        let (code, arguments) = package
+                            .runtime_body_checked(id, arguments)
+                            .map_err(|_| Reason::InvalidSignature)?;
+                        (CallableProgram::function(code), arguments)
+                    };
+                (Some(selected.0), selected.1)
             }
-            _ => None,
+            _ => (
+                method_summary.as_ref().map(CallableProgram::declaration),
+                &[][..],
+            ),
         };
-        let target = selected_target
-            .map(|(function, _)| &function.interface)
-            .or(method_summary.as_ref());
-        // A residual instance already substituted both clause and ordinary
-        // staged inputs. Its key identifies it, but must not substitute again.
-        let target_arguments = selected_target
-            .map(|(_, arguments)| arguments)
-            .unwrap_or(&[]);
+        let target = program.as_ref().map(CallableProgram::parts);
         let mut preconditions = Vec::new();
         let mut postconditions = Vec::new();
         let result_binding = target.and_then(|f| f.result_binding);
-        let snapshots = target
-            .map(|f| f.entry_snapshots.as_slice())
-            .unwrap_or_default();
+        let snapshots = target.map(|f| f.entry_snapshots).unwrap_or_default();
         let needs_arguments =
             target.is_some_and(|f| !f.preconditions.is_empty() || !f.entry_snapshots.is_empty());
         if let Some(target) = target {
-            if needs_arguments && parameter_bindings != &target.parameters {
+            if needs_arguments && parameter_bindings != target.parameters {
                 return Err(Reason::InvalidSignature);
             }
             if !target.preconditions.is_empty() || !target.postconditions.is_empty() {
                 let domains = self
                     .declarations
-                    .parameter_domains(&target.type_parameters, &mut self.limits.arithmetic.steps)
+                    .parameter_domains(target.type_parameters, &mut self.limits.arithmetic.steps)
                     .map_err(declaration_failure)?;
                 // The completed declaration domain, not the argument's shape,
                 // permits a value binder to become Type. All inputs belong to
                 // this caller's explicit scope; failed scope checking is never
                 // a request to retry under a more permissive environment.
                 let substitution = nir::DeclarationSubstitution::bounded(
-                    &target.type_parameters,
+                    target.type_parameters,
                     &domains,
                     target_arguments,
                     &self.input_frames,
@@ -3539,8 +3558,8 @@ impl Walker<'_> {
                         })
                         .collect::<Result<Vec<_>, Reason>>()
                 };
-                preconditions = prepare(&target.preconditions)?;
-                postconditions = prepare(&target.postconditions)?;
+                preconditions = prepare(target.preconditions)?;
+                postconditions = prepare(target.postconditions)?;
             }
         }
         // Reserve immutable contract observations in the caller before making
@@ -3571,28 +3590,24 @@ impl Walker<'_> {
         }
         let mut stable_postcondition_parameters = pointer_postconditions;
         if stable_postcondition_parameters {
-            if let Some((target, _)) = selected_target {
-                iir::visit::expression(
-                    &target.body,
-                    &mut self.limits.arithmetic.steps,
-                    |expr, fuel| {
-                        *fuel = fuel
-                            .checked_sub(target.parameters.len())
-                            .ok_or("parameter stability budget exhausted")?;
-                        match &expr.kind {
-                            K::Assign { place, .. }
-                            | K::BitAssign { place, .. }
-                            | K::BitUpdate { place, .. }
-                                if target.parameters.contains(&place.root) =>
-                            {
-                                stable_postcondition_parameters = false
-                            }
-                            K::AddressOf(_) => stable_postcondition_parameters = false,
-                            _ => {}
+            if let Some((target, body)) = target.and_then(|parts| Some((parts, parts.body?))) {
+                iir::visit::expression(body, &mut self.limits.arithmetic.steps, |expr, fuel| {
+                    *fuel = fuel
+                        .checked_sub(target.parameters.len())
+                        .ok_or("parameter stability budget exhausted")?;
+                    match &expr.kind {
+                        K::Assign { place, .. }
+                        | K::BitAssign { place, .. }
+                        | K::BitUpdate { place, .. }
+                            if target.parameters.contains(&place.root) =>
+                        {
+                            stable_postcondition_parameters = false
                         }
-                        Ok(())
-                    },
-                )
+                        K::AddressOf(_) => stable_postcondition_parameters = false,
+                        _ => {}
+                    }
+                    Ok(())
+                })
                 .map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
             } else {
                 // Public interface inputs belong to this invocation frame,
@@ -5611,7 +5626,7 @@ pub fn validate_machine_operations(package: &nir::program::Package) -> Result<()
         source: e.source,
         reason: Reason::Phase(e.message),
     })?;
-    validate_machine_owners(package, &owners)
+    validate_machine_owners(package, &owners, None)
 }
 
 /// Check a projected definition expression without installing it as a callable.
@@ -5619,14 +5634,23 @@ pub fn validate_definition_region(
     package: &nir::program::Package,
     region: &nir::program::DefinitionRegion,
 ) -> Result<(), Error> {
+    validate_definition_region_with_declarations(package, &RegionDeclarations::new(), region)
+}
+
+pub fn validate_definition_region_with_declarations(
+    package: &nir::program::Package,
+    imports: &RegionDeclarations,
+    region: &nir::program::DefinitionRegion,
+) -> Result<(), Error> {
     let (owners, arithmetic) =
-        nir::phases::inspect_definition_region(package, region).map_err(|e| Error {
-            source: e.source,
-            reason: Reason::Phase(e.message),
-        })?;
-    validate_machine_owners(package, &owners)?;
+        nir::phases::inspect_definition_region_with_declarations(package, imports, region)
+            .map_err(|e| Error {
+                source: e.source,
+                reason: Reason::Phase(e.message),
+            })?;
+    validate_machine_owners(package, &owners, Some(imports))?;
     if arithmetic {
-        validate_machine_instances(package, region)?;
+        validate_machine_instances(package, region, Some(imports))?;
     }
     Ok(())
 }
@@ -5637,7 +5661,7 @@ pub fn validate_definition_region(
 pub fn validate_machine_operations_checked(
     phase: &nir::phases::PhaseCheckedPackage<'_>,
 ) -> Result<(), Error> {
-    validate_machine_owners(phase.package(), phase.machine_arithmetic_functions())
+    validate_machine_owners(phase.package(), phase.machine_arithmetic_functions(), None)
 }
 
 #[cfg(test)]
@@ -5648,12 +5672,13 @@ mod scalar_observation_tests;
 fn validate_machine_owners(
     package: &nir::program::Package,
     owners: &std::collections::BTreeSet<nir::DeclarationId>,
+    imports: Option<&RegionDeclarations>,
 ) -> Result<(), Error> {
     for function in package.functions.iter().chain(&package.quote_templates) {
         if !owners.contains(&function.declaration) {
             continue;
         }
-        validate_machine_instances(package, function)?;
+        validate_machine_instances(package, function, imports)?;
     }
     Ok(())
 }
@@ -5661,10 +5686,11 @@ fn validate_machine_owners(
 fn validate_machine_instances<B: finite_domains::MachineBody>(
     package: &nir::program::Package,
     body: &B,
+    imports: Option<&RegionDeclarations>,
 ) -> Result<(), Error> {
     let mut limits = Limits::default();
     let Some(instances) = finite_domains::integer_instances(body, &mut limits)? else {
-        return validate_machine_body(package, body);
+        return validate_machine_body(package, body, imports);
     };
     for mut instance in instances {
         // An unspecified target is not the compiler host. A generic
@@ -5695,11 +5721,11 @@ fn validate_machine_instances<B: finite_domains::MachineBody>(
                 proof_package.target = Some(nir::target::TargetData::new(width).unwrap());
                 let mut proof = instance.clone();
                 finite_domains::complete_literals(&mut proof, proof_package.target, &mut limits)?;
-                validate_machine_body(&proof_package, &proof)?;
+                validate_machine_body(&proof_package, &proof, imports)?;
             }
         } else {
             finite_domains::complete_literals(&mut instance, package.target, &mut limits)?;
-            validate_machine_body(package, &instance)?;
+            validate_machine_body(package, &instance, imports)?;
         }
     }
     Ok(())
@@ -5710,6 +5736,7 @@ fn validate_machine_instances<B: finite_domains::MachineBody>(
 fn validate_machine_body(
     package: &nir::program::Package,
     body: &impl finite_domains::MachineBody,
+    imports: Option<&RegionDeclarations>,
 ) -> Result<(), Error> {
     let program = body.program();
     for execution in std::iter::once(program).chain(program.default_bodies()) {
@@ -5717,6 +5744,7 @@ fn validate_machine_body(
             execution,
             body.requirements(),
             Some(package),
+            imports,
             &mut Limits::default(),
             false,
         )?;
@@ -6618,6 +6646,7 @@ mod memory_summary_cache_tests {
             type_context: crate::ptc::Context::with_scope(vec![]),
             input_frames: vec![],
             next_frame: 1,
+            imports: None,
             memory_summaries: Default::default(),
             exit_contract: None,
             assuming_postcondition: false,
@@ -6733,6 +6762,7 @@ mod conditional_origin_tests {
             type_context: crate::ptc::Context::with_scope(vec![]),
             input_frames: vec![],
             next_frame: 1,
+            imports: None,
             memory_summaries: Default::default(),
             exit_contract: None,
             assuming_postcondition: false,
@@ -7210,6 +7240,7 @@ mod tuple_storage_tests {
                 type_context: crate::ptc::Context::with_scope(vec![]),
                 input_frames: vec![],
                 next_frame: 1,
+                imports: None,
                 memory_summaries: Default::default(),
                 exit_contract: None,
                 assuming_postcondition: false,

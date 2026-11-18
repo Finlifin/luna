@@ -484,8 +484,7 @@ NIR Function 继续代表已检查产物；不能给 body 塞占位表达式或�
 `check_source_function` 在检查主体之前组装受检声明，主体成功后才交付完整 Function；
 失败仍恢复 Type 输入事实与 quote 检查状态，不把声明塞入执行函数表。VM 的
 `invocation_declaration` 以及程序／类型契约的替换、能力检查只接收 FunctionDeclaration，
-主体仍沿独立的
-Entry → Body 路径取得。required 收集生成的 runtime 函数身份时只复制所需声明字段，
+主体在执行器推进 NeedBody 时取得。required 收集生成的 runtime 函数身份时只复制所需声明字段，
 需要执行的依赖仍保留完整代码。独立声明和完整函数的 S-expression dump 都包含声明
 来源；完整函数还显示主体和表达式各自的来源。
 
@@ -664,23 +663,13 @@ RefCell／Mutex 后从回调重入，或增加 unsafe Send／延长 HIR 生命�
 入口快照和模板／效应感知主体检查。最终声明携带已检查默认值；required 依赖由实际
 call plan 提供用到的默认值，不能强制准备未使用项。
 
-VM 已把普通输入的 body 重绑定放在 Entry → Body 转换：入口程序契约通过后才准备
-这份执行代码，等待／取消不重新 begin_invocation。源码命名实例的声明参数主体替换
-也已移入这一阶段；域、签名与形成条件检查仍在调用准备时完成。该接线不是定义端
-源码延迟检查。新主体服务必须沿同一 activation 取得代码，不能
-为了允许缺失 body 而删掉定义检查或阶段准入。
+VM 的入口契约通过后，原帧进入 NeedBody，保留输入存储和本次准入的声明替换。
+执行器从当前包或闭包取得代码，按声明参数特化并按普通输入重绑定。准备成功后，
+Body 持有这份代码和缓存键；Exit 持有实际结果和原来源，负责后置条件与清理。
+树执行与字节码共用这些状态。dump 显示 package-body 或 owned-body 及相应缓存键。
 
-VM 的 `contracts::Progress::Body` 现直接持有已准备的 Body 与其代码缓存键，
-不再由 InvocationFrame 在 Entry／Body／Exit 之外保留一个始终可回退执行的 body。
-Entry → Body 先取得并按普通输入准备代码，成功后一次交付这个阶段状态；Exit
-保留结果和原 source，用于结果交付、后置条件及清理。树执行与字节码执行共用
-InvocationFrame 的当前代码选择，不在入口或出口缺少 condition 时回退到主体。
-dump 区分 package-body／owned-body 及相应缓存键。
-
-此处只拆开了活动调用的执行状态。被调用的 Function／Closure 仍可保留完整的
-已检查源码；签名准入现通过下面的声明视图取得来源，完整包适配器仍从 body 提取
-该位置。声明参数特化、函数收集和
-RequiredWorld 尚未因此接受缺少主体的源码模板，也没有新增源码主体的外部请求。
+源码可见性和可执行代码的边界在下文分别说明。RequiredWorld 仍要求完整执行根，
+未完成源码主体与原 invocation 的交接仍需实现。
 
 接线要共同改变函数收集、required 根和 VM 主体取得。当前 RequiredWorld 只有完成
 的 NIR 声明；只给 InvocationProgress 增加请求变体无法让未完成源码抵达它。
@@ -729,10 +718,29 @@ VM 在形成具名 runtime 函数值和接收冻结值时，用当前声明环�
 
 `GeneratedFunctions` 先预留身份以闭合递归边。形成签名、类型要求和程序契约后，
 当前事务可按实例身份读取声明。此时 required invocation 可以携带合法的 runtime
-函数值；需要执行 comptime 代码的请求仍须取得已完成主体。定义片段做算术验证时，
-具有程序前置条件的调用仍需要载有这些条件的函数。主体成功时同一份声明进入
+函数值；需要执行 comptime 代码的请求仍须取得已完成主体。主体成功时同一份声明进入
 最终函数。实例失败时撤销本次预留、活动声明，以及本次启动并已完成的嵌套主体，
 已发出的身份不再复用。通用源码 VM 在入口检查之后挂起等待未完成主体的协议仍待接入。
+
+开放定义的片段检查现在按调用声明收集依赖。例如：
+
+```flurry
+pure fn gate(ok: bool) -> result: bool where requires ok, ensures result { ok }
+fn choose(value: Any, .ok: bool = gate(true)) -> bool { ok }
+```
+
+检查默认值时，`gate` 的声明提供实参槽和谓词 `requires ok`。定义检查当场证明
+`gate(true)` 满足前提；换成 `gate(false)` 即使 `choose` 从未实例化也会报错。
+生成实例从已发布的实例声明取得契约；普通源码函数则在自己的定义作用域里形成声明。
+片段沿声明的契约与保留的默认表达式继续查找引用，到这里无需遍历 `gate` 的主体。
+即使调用处合法，包检查仍须证明 `gate` 的每个返回都满足 `ensures result`。
+[源码回归](../compiler/luna/tests/declaration_contracts.rs)
+
+这些声明只对本次片段检查可见。阶段检查核对实参槽、调用阶段和 unsafe 要求。
+程序验证使用同一组声明，并在有精确 runtime residual 时优先采用该实例的契约；
+选择到损坏或歧义的实例会失败。若要跨调用保留指针读写事实，验证器还需要内存效果
+证据；只有签名与前后置条件时，它无法从被调者的实现推知参数和内存保持稳定。
+[程序验证](../compiler/program_verification/src/flow.rs)
 
 #### 完整包检查凭证也是迁移边界
 
@@ -952,7 +960,7 @@ prepare；子依赖的预算耗尽、失败、未知外部行为分别报告。�
 之前尝试同步解析，后置条件则在主体完成的交付栈上同步执行。接口调用的
 `Execution::Contract` 已能使用字节码，不能把这两条路径混为一谈。
 
-普通声明现由同一 activation 持有 `Entry(index) → Body → Exit(index,result,returned)`。
+普通声明现由同一 activation 持有 `Entry(index) → NeedBody → Body → Exit(index,result,returned)`。
 每次只准备一个条件的普通 CheckPredicate 表达式，交给已有执行驱动；完成后保存
 环境并推进原 activation。主体仅在所有前置条件成功后进入一次，后置条件保留已检查
 的实际返回值，显式 return 不绕过后置条件。类型／capability 准入仍在各自原边界完成。

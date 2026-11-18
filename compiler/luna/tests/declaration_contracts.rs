@@ -4,6 +4,25 @@ mod sysroot;
 use comptime_interpretor::Value;
 
 #[test]
+fn an_open_default_observes_the_callees_program_contract_before_instantiation() {
+    let source = r#"
+        pure fn gate(ok: bool) -> result: bool where requires ok, ensures result { ok }
+        fn choose(value: Any, .ok: bool = gate(true)) -> bool { ok }
+        fn run() -> bool { choose(true) }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let uncalled = source.replace("choose(true)", "true");
+    let error = sysroot::compile(&uncalled.replace("gate(true)", "gate(false)")).unwrap_err();
+    assert!(
+        error.contains("program precondition is not proven"),
+        "{error}"
+    );
+    let invalid_body = uncalled.replace("ensures result { ok }", "ensures result { false }");
+    let error = sysroot::compile(&invalid_body).unwrap_err();
+    assert!(error.contains("postcondition"), "{error}");
+}
+
+#[test]
 fn dependent_declaration_domains_can_be_type_in_program_contracts() {
     let source = r#"
         fn admits(ok: bool) -> result: bool

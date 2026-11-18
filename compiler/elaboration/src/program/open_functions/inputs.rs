@@ -336,7 +336,7 @@ impl Checker<'_, '_> {
         unresolved: &[DeclarationId],
     ) -> Result<Option<(comptime_interpretor::Value, Term)>, Error> {
         let assumptions = self.context.assumptions().to_vec();
-        self.in_open_function(owner, None, |this| {
+        self.in_function_scope(owner, None, |this| {
             for assumption in assumptions {
                 this.context.assume(assumption);
             }
@@ -438,7 +438,7 @@ impl Checker<'_, '_> {
             .get(slot)
             .and_then(|(_, ty)| ty.as_ref())
             .ok_or_else(|| error(span, "default input domain has not formed"))?;
-        self.in_open_function(owner, None, |this| {
+        self.in_function_scope(owner, None, |this| {
             let ItemKind::Fn(sig, _) = &this.package.item(owner).unwrap().kind else {
                 unreachable!()
             };

@@ -58,6 +58,10 @@ impl Formation<'_> {
     }
 }
 
+/// Callable interfaces available to a lexical region during definition checking.
+/// These declarations grant no executable bodies or complete-package evidence.
+pub type RegionDeclarations = BTreeMap<DeclarationId, FunctionDeclaration>;
+
 #[derive(Clone, Default)]
 pub struct Callables<'a> {
     functions: &'a [Function],
@@ -223,20 +227,6 @@ impl<'a> Callables<'a> {
             return None;
         };
         Some(&self.runtime[i])
-    }
-
-    pub(crate) fn phase(&self, id: &DeclarationId) -> Option<(FunctionPhase, bool, bool)> {
-        if let Some(f) = self.method_definition(id) {
-            Some((f.phase, !f.preconditions.is_empty(), f.is_unsafe))
-        } else {
-            self.runtime_identity(id).map(|f| {
-                (
-                    FunctionPhase::Runtime,
-                    false,
-                    f.signature.is_unsafe_callable(),
-                )
-            })
-        }
     }
 }
 

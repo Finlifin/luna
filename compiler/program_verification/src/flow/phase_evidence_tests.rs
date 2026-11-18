@@ -113,6 +113,61 @@ fn region_and_dependency_with_one_lexical_owner_require_separate_proofs() {
 }
 
 #[test]
+fn region_calls_use_the_selected_residual_contract_or_the_imported_declaration() {
+    let mut callee = package(0, false).functions.pop().unwrap();
+    let id = callee.declaration;
+    callee.phase = FunctionPhase::Runtime;
+    let condition = |value| Expr {
+        source: callee.source,
+        ty: Term::Primitive(Primitive::Bool),
+        kind: ExprKind::Literal(Literal::Bool(value)),
+    };
+    let denied = condition(false);
+    let allowed = condition(true);
+    callee.preconditions = vec![allowed];
+    let imports = RegionDeclarations::from([(id, callee.interface.clone())]);
+    let region = DefinitionRegion {
+        owner: id,
+        phase: FunctionPhase::Runtime,
+        parameters: vec![],
+        signature: callee.signature.clone(),
+        type_parameters: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        body: Expr {
+            kind: ExprKind::Call {
+                callee: Box::new(Expr {
+                    source: callee.source,
+                    ty: callee.callable_type(),
+                    kind: ExprKind::Function(id),
+                }),
+                arguments: vec![],
+                parameter_bindings: vec![],
+            },
+            ..integer(0)
+        },
+    };
+    let mut world = Package::default();
+    validate_definition_region_with_declarations(&world, &imports, &region).unwrap();
+    callee.preconditions = vec![denied];
+    world.runtime_instances.push(RuntimeInstance {
+        declaration: id,
+        arguments: vec![],
+        function: callee,
+        cleanup_accesses: vec![],
+    });
+    let failure =
+        validate_definition_region_with_declarations(&world, &imports, &region).unwrap_err();
+    assert_eq!(failure.reason, Reason::MissingPreconditionProof);
+    world
+        .runtime_instances
+        .push(world.runtime_instances[0].clone());
+    let failure =
+        validate_definition_region_with_declarations(&world, &imports, &region).unwrap_err();
+    assert_eq!(failure.reason, Reason::InvalidSignature);
+}
+
+#[test]
 fn projected_integer_domains_prove_every_admitted_width_before_execution() {
     let package = Package::default();
     let binder = DeclarationId {
