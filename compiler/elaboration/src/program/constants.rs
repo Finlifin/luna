@@ -3297,11 +3297,13 @@ impl Checker<'_, '_> {
                     arguments, plan, ..
                 } => {
                     if let Some(plan) = plan {
-                        if !plan.valid(arguments.len()) {
+                        let Some(schedule) =
+                            self.checked_input_schedule(plan, arguments.len(), span)?
+                        else {
                             structural = false;
                             break;
-                        }
-                        block_bindings.extend(plan.local_bindings().unwrap());
+                        };
+                        block_bindings.extend(schedule.locals);
                         pending.extend(plan.preparations.iter().map(|p| &p.expression));
                     }
                     for argument in arguments {

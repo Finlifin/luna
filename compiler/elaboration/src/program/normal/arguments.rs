@@ -2,80 +2,17 @@
 //! opaque heads and nominal constructors. Executable producers remain intact.
 use super::*;
 
-#[derive(Clone, Copy, Default)]
-pub(super) struct Plan<'a> {
-    pub preparations: &'a [n::NormalFormPreparation],
-    pub bindings: Option<&'a [n::LocalId]>,
-    pub order: Option<&'a [usize]>,
-}
-impl<'a> Plan<'a> {
-    pub(super) fn normal(plan: Option<&'a n::NormalFormInputPlan>) -> Self {
-        plan.map_or_else(Self::default, |plan| Self {
-            preparations: &plan.preparations,
-            bindings: Some(&plan.bindings),
-            order: Some(&plan.order),
-        })
-    }
-    fn valid(
-        self,
-        count: usize,
-        outer: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-        budget: &mut comptime_runtime::Budget,
-    ) -> Result<bool, Failure> {
-        budget.consume(
-            self.order
-                .map_or(0, <[_]>::len)
-                .saturating_add(self.bindings.map_or(0, <[_]>::len)),
-        )?;
-        if let Some(order) = self.order {
-            let mut seen = BTreeSet::new();
-            if order.len() != count
-                || order
-                    .iter()
-                    .any(|slot| *slot >= count || !seen.insert(*slot))
-            {
-                return Ok(false);
-            }
-        }
-        if let Some(bindings) = self.bindings {
-            let mut seen = BTreeSet::new();
-            if bindings.len() != count
-                || bindings
-                    .iter()
-                    .any(|id| outer.contains_key(id) || !seen.insert(*id))
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-}
-impl std::fmt::Display for Plan<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("(observed-input-plan (order")?;
-        if let Some(order) = self.order {
-            for slot in order {
-                write!(f, " {slot}")?;
-            }
-        } else {
-            f.write_str(" declaration")?;
-        }
-        f.write_str(") (bindings")?;
-        if let Some(bindings) = self.bindings {
-            for binding in bindings {
-                write!(f, " {binding}")?;
-            }
-        }
-        f.write_str(") (preparations")?;
-        for preparation in self.preparations {
-            write!(
-                f,
-                " (before {} {})",
-                preparation.before, preparation.expression
-            )?;
-        }
-        f.write_str("))")
-    }
+use nir::program::InputSchedule as Plan;
+
+fn observable(
+    plan: Plan<'_>,
+    count: usize,
+    outer: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+    budget: &mut comptime_runtime::Budget,
+) -> Result<bool, Failure> {
+    Ok(plan
+        .check(count, |n| budget.consume(n))?
+        .is_some_and(|schedule| schedule.locals.iter().all(|id| !outer.contains_key(id))))
 }
 
 impl Checker<'_, '_> {
@@ -139,7 +76,7 @@ impl Checker<'_, '_> {
         bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
     ) -> Result<Vec<Term>, Failure> {
         budget.consume(arguments.len().saturating_add(bindings.len()))?;
-        if !plan.preparations.is_empty() || !plan.valid(arguments.len(), bindings, budget)? {
+        if !plan.preparations.is_empty() || !observable(plan, arguments.len(), bindings, budget)? {
             return Err(Failure::Unavailable);
         }
         // Contextual operands obtain their domain from the declaration. This
@@ -257,41 +194,49 @@ mod tests {
             order: Some(&[1, 0]),
             ..Plan::default()
         };
-        assert!(plan.valid(2, &outer, &mut budget).unwrap());
+        assert!(observable(plan, 2, &outer, &mut budget).unwrap());
         for order in [&[0, 0][..], &[0, 2], &[0]] {
             assert!(
-                !Plan {
-                    order: Some(order),
-                    ..plan
-                }
-                .valid(2, &outer, &mut budget)
+                !observable(
+                    Plan {
+                        order: Some(order),
+                        ..plan
+                    },
+                    2,
+                    &outer,
+                    &mut budget
+                )
                 .unwrap()
             );
         }
         for bindings in [&[a, a][..], &[a]] {
             assert!(
-                !Plan {
-                    bindings: Some(bindings),
-                    ..plan
-                }
-                .valid(2, &outer, &mut budget)
+                !observable(
+                    Plan {
+                        bindings: Some(bindings),
+                        ..plan
+                    },
+                    2,
+                    &outer,
+                    &mut budget
+                )
                 .unwrap()
             );
         }
         let outer = BTreeMap::from([(a, std::sync::Arc::new(Term::Primitive(P::Bool)))]);
-        assert!(!plan.valid(2, &outer, &mut budget).unwrap());
+        assert!(!observable(plan, 2, &outer, &mut budget).unwrap());
         let mut short = comptime_runtime::Budget {
             steps: 3,
             ..Default::default()
         };
         assert_eq!(
-            plan.valid(2, &BTreeMap::new(), &mut short),
+            observable(plan, 2, &BTreeMap::new(), &mut short),
             Err(Failure::Steps)
         );
-        assert!(plan.valid(2, &BTreeMap::new(), &mut budget).unwrap());
+        assert!(observable(plan, 2, &BTreeMap::new(), &mut budget).unwrap());
         let dump = format!("{plan}");
         assert!(
-            dump.starts_with("(observed-input-plan (order 1 0) (bindings "),
+            dump.starts_with("(input-plan (order 1 0) (bindings "),
             "{dump}"
         );
         assert!(dump.ends_with(") (preparations))"), "{dump}");

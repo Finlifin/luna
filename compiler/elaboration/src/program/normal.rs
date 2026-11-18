@@ -854,7 +854,7 @@ impl Checker<'_, '_> {
                 let arguments = self.observe_declaration_arguments(
                     *head,
                     arguments,
-                    arguments::Plan::normal(plan.as_ref()),
+                    n::InputSchedule::normal(plan.as_ref()),
                     depth,
                     budget,
                     bindings,
@@ -875,7 +875,7 @@ impl Checker<'_, '_> {
                 let arguments = self.observe_declaration_arguments(
                     *declaration,
                     arguments,
-                    arguments::Plan {
+                    n::InputSchedule {
                         preparations,
                         bindings: input_bindings.as_deref(),
                         order: order.as_deref(),
@@ -2457,7 +2457,11 @@ impl Checker<'_, '_> {
         else {
             return Ok(None);
         };
-        if !plan.valid(arguments.len()) || arguments.iter().any(|a| a.expression().is_none()) {
+        if self
+            .checked_input_schedule(plan, arguments.len(), source.span)?
+            .is_none()
+            || arguments.iter().any(|a| a.expression().is_none())
+        {
             return Ok(None);
         }
         let mut scoped: BTreeMap<n::LocalId, std::sync::Arc<Term>> = BTreeMap::new();

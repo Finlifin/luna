@@ -4,6 +4,29 @@ use super::*;
 use nir::program::{NormalFormArgument as Argument, NormalFormPreparation};
 use normal_inputs::StagedNormalInput;
 
+/// Acquire only locals that are absent from the caller. Keep this list until
+/// normal completion or cancellation, including while an alias body executes.
+pub(super) fn admit_scope(
+    vm: &mut Interpreter<'_>,
+    expression: &Expr,
+    environment: &Environment,
+) -> Result<Vec<LocalId>, Error> {
+    let (arguments, schedule) = expression
+        .kind
+        .declaration_inputs()
+        .expect("declaration inputs");
+    let source = Some(expression.source);
+    let checked = schedule
+        .check(arguments.len(), |n| {
+            vm.integer_operation(source, |b| b.consume(n))
+        })?
+        .ok_or_else(|| vm.failure(ErrorKind::Type, source))?;
+    if checked.locals.iter().any(|id| environment.contains_key(id)) {
+        return Err(vm.failure(ErrorKind::Type, source));
+    }
+    Ok(checked.locals)
+}
+
 pub(super) trait Source: fmt::Display {
     fn source(&self) -> SourceRange;
     fn preparation(&self, index: usize) -> Option<&NormalFormPreparation>;

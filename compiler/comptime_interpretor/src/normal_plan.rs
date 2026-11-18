@@ -24,6 +24,7 @@ impl Inputs<'_> {
 pub(super) struct Source<'a> {
     head: DeclarationId,
     source: SourceRange,
+    locals: Vec<LocalId>,
     inputs: Inputs<'a>,
     specialized: BTreeMap<usize, Box<Argument>>,
     bindings: input_bindings::Bindings,
@@ -47,10 +48,12 @@ impl<'a> Frame<'a> {
         source: SourceRange,
         arguments: &'a [Argument],
         plan: Option<&'a NormalFormInputPlan>,
+        locals: Vec<LocalId>,
     ) -> Self {
         Self::from_source(Source {
             head,
             source,
+            locals,
             inputs: Inputs::Borrowed(arguments, plan),
             specialized: BTreeMap::new(),
             bindings: input_bindings::Bindings::structural(arguments.len()),
@@ -62,7 +65,7 @@ impl<'a> Frame<'a> {
         expression: &'a Expr,
         environment: &Environment,
     ) -> Result<Self, Error> {
-        admit_inputs(vm, expression, environment)?;
+        let locals = admit_inputs(vm, expression, environment)?;
         let K::NormalFormType {
             head,
             arguments,
@@ -76,6 +79,7 @@ impl<'a> Frame<'a> {
             expression.source,
             arguments,
             plan.as_ref(),
+            locals,
         ))
     }
 
@@ -84,7 +88,7 @@ impl<'a> Frame<'a> {
         expression: Arc<Expr>,
         environment: &Environment,
     ) -> Result<Frame<'static>, Error> {
-        admit_inputs(vm, &expression, environment)?;
+        let locals = admit_inputs(vm, &expression, environment)?;
         let K::NormalFormType {
             head, arguments, ..
         } = &expression.kind
@@ -95,6 +99,7 @@ impl<'a> Frame<'a> {
             head: *head,
             source: expression.source,
             bindings: input_bindings::Bindings::structural(arguments.len()),
+            locals,
             inputs: Inputs::Owned(expression),
             specialized: BTreeMap::new(),
         }))
@@ -108,7 +113,7 @@ fn admit_inputs(
     vm: &mut Interpreter<'_>,
     expression: &Expr,
     environment: &Environment,
-) -> Result<(), Error> {
+) -> Result<Vec<LocalId>, Error> {
     let K::NormalFormType {
         head,
         arguments,
@@ -117,17 +122,7 @@ fn admit_inputs(
     else {
         return Err(vm.failure(ErrorKind::Type, Some(expression.source)));
     };
-    if let Some(plan) = plan {
-        if !plan.valid(arguments.len())
-            || plan
-                .local_bindings()
-                .expect("validated plan")
-                .iter()
-                .any(|id| environment.contains_key(id))
-        {
-            return Err(vm.failure(ErrorKind::Type, Some(expression.source)));
-        }
-    }
+    let locals = input_collection::admit_scope(vm, expression, environment)?;
     let diverges = arguments.iter().any(Argument::is_diverging)
         || plan
             .iter()
@@ -148,7 +143,8 @@ fn admit_inputs(
             },
             Some(expression.source),
         )
-    })
+    })?;
+    Ok(locals)
 }
 
 impl input_collection::Source for Source<'_> {
@@ -245,10 +241,8 @@ impl input_collection::Source for Source<'_> {
         )?)))
     }
     fn cleanup(&self, environment: &mut Environment) {
-        if let Some(plan) = self.inputs.parts().1 {
-            for binding in plan.local_bindings().expect("validated plan") {
-                environment.remove(&binding);
-            }
+        for binding in &self.locals {
+            environment.remove(binding);
         }
     }
 }
@@ -491,7 +485,13 @@ mod tests {
             order: vec![0, 1],
             ..plan.clone()
         };
-        let mut failed = Frame::new(id(0), SOURCE, &arguments, Some(&ordered));
+        let mut failed = Frame::new(
+            id(0),
+            SOURCE,
+            &arguments,
+            Some(&ordered),
+            ordered.bindings.clone(),
+        );
         assert!(matches!(
             failed.advance(&mut vm, &mut env).unwrap(),
             Request::Ready(..)
@@ -515,7 +515,13 @@ mod tests {
             ErrorKind::InvalidControlFlow
         );
         vm.budget = Budget::default();
-        let mut failed = Frame::new(id(0), SOURCE, &arguments, Some(&ordered));
+        let mut failed = Frame::new(
+            id(0),
+            SOURCE,
+            &arguments,
+            Some(&ordered),
+            ordered.bindings.clone(),
+        );
         env.insert(local(90), Value::Bool(true));
         let Progress::Input(bytecode::InputFrame { mut code, finish }) =
             failed.next_input(&mut vm, &mut env).unwrap()
@@ -539,7 +545,13 @@ mod tests {
             ErrorKind::InvalidControlFlow
         );
         vm.budget = Budget::default();
-        let mut frame = Frame::new(id(0), SOURCE, &arguments, Some(&plan));
+        let mut frame = Frame::new(
+            id(0),
+            SOURCE,
+            &arguments,
+            Some(&plan),
+            plan.bindings.clone(),
+        );
         let Request::Stage(argument) = frame.advance(&mut vm, &mut env).unwrap() else {
             panic!("expected deferred input");
         };

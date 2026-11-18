@@ -5,6 +5,8 @@ use crate::display::string;
 use crate::{DeclarationId, Term};
 use std::fmt;
 use std::sync::Arc;
+mod input_schedule;
+pub use input_schedule::{CheckedInputSchedule, InputSchedule, InputStep};
 mod function;
 pub use function::{DefinitionRegion, Function, FunctionDeclaration};
 mod predicate_shape;
@@ -278,83 +280,33 @@ pub struct NormalFormPreparation {
 impl NormalFormPreparation {
     /// The only bindings exported by a packet producer belong to its outer
     /// tuple pattern. Producer-local temporaries never enter the input plan.
-    pub fn local_bindings(&self) -> Option<Vec<LocalId>> {
-        let ExprKind::LetPattern {
-            pattern: Pattern::Tuple(fields),
-            guard: None,
-            otherwise: None,
-            ..
-        } = &self.expression.kind
-        else {
+    fn binding_fields(&self) -> Option<&[Pattern]> {
+        match &self.expression.kind {
+            ExprKind::LetPattern {
+                pattern: Pattern::Tuple(fields),
+                guard: None,
+                otherwise: None,
+                ..
+            } => Some(fields),
+            _ => None,
+        }
+    }
+    fn field_binding(field: &Pattern) -> Option<LocalId> {
+        let Pattern::Binding { binding, inner } = field else {
             return None;
         };
-        fields
-            .iter()
-            .map(|field| {
-                let Pattern::Binding { binding, inner } = field else {
-                    return None;
-                };
-                matches!(inner.as_ref(), Pattern::Wild).then_some(*binding)
-            })
-            .collect()
+        matches!(inner.as_ref(), Pattern::Wild).then_some(*binding)
     }
-}
-impl NormalFormInputPlan {
     pub fn local_bindings(&self) -> Option<Vec<LocalId>> {
-        let mut bindings = self.bindings.clone();
-        for preparation in &self.preparations {
-            bindings.extend(preparation.local_bindings()?);
-        }
-        Some(bindings)
-    }
-    pub fn valid(&self, count: usize) -> bool {
-        self.order.len() == count
-            && self.bindings.len() == count
-            && self
-                .order
-                .iter()
-                .copied()
-                .collect::<std::collections::BTreeSet<_>>()
-                == (0..count).collect()
-            && self
-                .bindings
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                == count
-            && self.preparations.iter().all(|p| p.before <= count)
-            && self
-                .preparations
-                .windows(2)
-                .all(|p| p[0].before <= p[1].before)
-            && self.local_bindings().is_some_and(|bindings| {
-                bindings
-                    .iter()
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len()
-                    == bindings.len()
-            })
+        self.binding_fields()?
+            .iter()
+            .map(Self::field_binding)
+            .collect()
     }
 }
 impl fmt::Display for NormalFormInputPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("(input-plan (order")?;
-        for slot in &self.order {
-            write!(f, " {slot}")?;
-        }
-        f.write_str(") (bindings")?;
-        for binding in &self.bindings {
-            write!(f, " {binding}")?;
-        }
-        f.write_str(") (preparations")?;
-        for preparation in &self.preparations {
-            write!(
-                f,
-                " (before {} {})",
-                preparation.before, preparation.expression
-            )?;
-        }
-        f.write_str("))")
+        InputSchedule::normal(Some(self)).fmt(f)
     }
 }
 /// A head input may need its earlier Type inputs before literal conversion.
@@ -5070,46 +5022,4 @@ pub fn bit_update_layout_error_in<'a>(
         return None;
     }
     bit_writeback_error_in(storage, 0, width, value, result, target)
-}
-
-impl ExprKind {
-    /// Validate constructor-local binding ownership, including packet producers.
-    pub fn nominal_local_bindings(&self) -> Option<Vec<LocalId>> {
-        let (Self::NominalType {
-            arguments,
-            bindings,
-            preparations,
-            ..
-        }
-        | Self::CheckTypeAlias {
-            arguments,
-            bindings,
-            preparations,
-            ..
-        }) = self
-        else {
-            return None;
-        };
-        if bindings
-            .as_ref()
-            .is_some_and(|bindings| bindings.len() != arguments.len())
-            || preparations.iter().any(|p| p.before > arguments.len())
-            || preparations.windows(2).any(|p| p[0].before > p[1].before)
-        {
-            return None;
-        }
-        let mut locals = bindings.clone().unwrap_or_default();
-        for preparation in preparations {
-            locals.extend(preparation.local_bindings()?);
-        }
-        if locals
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            != locals.len()
-        {
-            return None;
-        }
-        Some(locals)
-    }
 }

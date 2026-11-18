@@ -67,18 +67,23 @@ impl PreparedDeclarationInputs {
         } = self.plan;
         let mut sources = self.arguments.into_iter().map(Some).collect::<Vec<_>>();
         let mut outputs = vec![None; sources.len()];
-        let mut preparations = preparations.into_iter().peekable();
         let mut statements = Vec::new();
-        for (position, slot) in order.into_iter().enumerate() {
-            while preparations
-                .peek()
-                .is_some_and(|preparation| preparation.before <= position)
-            {
-                statements.push(preparations.next().unwrap().expression);
-            }
+        let steps = n::InputStep::in_order(
+            order.into_iter(),
+            preparations.into_iter().map(|p| (p.before, p.expression)),
+        );
+        for step in steps {
+            let slot = match step {
+                n::InputStep::Prepare(expr) => {
+                    statements.push(expr);
+                    continue;
+                }
+                n::InputStep::Supply(slot) => slot,
+            };
             let Some(n::NormalFormArgument::Value(value)) = sources[slot].take() else {
                 return Err(error(span, "typed declaration input was not checked"));
             };
+            let binding = bindings[slot];
             let ty = value.ty.clone();
             let output = if matches!(value.kind, K::TypeValue(_)) {
                 value
@@ -92,7 +97,7 @@ impl PreparedDeclarationInputs {
                         p(P::Void)
                     },
                     kind: K::Let {
-                        binding: bindings[slot],
+                        binding,
                         value: Box::new(value),
                     },
                 });
@@ -103,14 +108,13 @@ impl PreparedDeclarationInputs {
                     {
                         K::TypeValue(identity.clone())
                     } else {
-                        K::Local(bindings[slot])
+                        K::Local(binding)
                     },
                     ty,
                 }
             };
             outputs[slot] = Some(output);
         }
-        statements.extend(preparations.map(|preparation| preparation.expression));
         Ok(CheckedDeclarationInputs {
             arguments: outputs.into_iter().map(Option::unwrap).collect(),
             statements,
@@ -197,6 +201,23 @@ impl std::fmt::Display for DeclarationInputDomain {
             write!(f, " {input}")?;
         }
         write!(f, ") (type {}))", self.ty)
+    }
+}
+
+impl Checker<'_, '_> {
+    pub(super) fn checked_input_schedule<'p>(
+        &mut self,
+        plan: &'p n::NormalFormInputPlan,
+        count: usize,
+        span: Span,
+    ) -> Result<Option<n::CheckedInputSchedule<'p>>, Error> {
+        n::InputSchedule::normal(Some(plan)).check(count, |n| {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(n as u64)
+                .ok_or_else(|| error(span, "declaration input schedule budget exhausted"))?;
+            Ok(())
+        })
     }
 }
 

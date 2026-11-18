@@ -56,6 +56,7 @@ pub(super) struct Frame<'a, 'e> {
     expression: Expression<'e>,
     contract: Contract<'a>,
     inputs: Option<nominal_inputs::Frame<'e>>,
+    locals: Arc<[LocalId]>,
     body: Option<Arc<Expr>>,
     waiting_body: bool,
     terminal: bool,
@@ -86,14 +87,13 @@ impl<'a, 'e> Frame<'a, 'e> {
         let (K::NominalType {
             preparations,
             bindings,
-            order,
             declaration,
             arguments,
+            ..
         }
         | K::CheckTypeAlias {
             preparations,
             bindings,
-            order,
             declaration,
             arguments,
             ..
@@ -101,25 +101,7 @@ impl<'a, 'e> Frame<'a, 'e> {
         else {
             unreachable!()
         };
-        vm.integer_operation(Some(expr.source), |budget| {
-            budget.consume(arguments.len().saturating_add(preparations.len()))
-        })?;
-        for preparation in preparations {
-            if let K::LetPattern {
-                pattern: nir::program::Pattern::Tuple(fields),
-                ..
-            } = &preparation.expression.kind
-            {
-                vm.integer_operation(Some(expr.source), |budget| budget.consume(fields.len()))?;
-            }
-        }
-        let locals = expr
-            .kind
-            .nominal_local_bindings()
-            .ok_or_else(|| vm.failure(ErrorKind::Type, Some(expr.source)))?;
-        if locals.iter().any(|id| environment.contains_key(id)) {
-            return Err(vm.failure(ErrorKind::Type, Some(expr.source)));
-        }
+        let locals: Arc<[LocalId]> = input_collection::admit_scope(vm, expr, environment)?.into();
         let contract = if matches!(expr.kind, K::CheckTypeAlias { .. }) {
             Contract::Alias(
                 vm.alias_contracts
@@ -163,19 +145,6 @@ impl<'a, 'e> Frame<'a, 'e> {
         vm.integer_operation(Some(expr.source), |budget| {
             budget.consume(arguments.len().saturating_add(1))
         })?;
-        if let Some(order) = order {
-            vm.integer_operation(Some(expr.source), |budget| budget.consume(order.len()))?;
-            if order.len() != arguments.len() {
-                return Err(vm.failure(ErrorKind::Type, Some(expr.source)));
-            }
-            let mut seen = vec![false; arguments.len()];
-            for &slot in order {
-                if slot >= seen.len() || seen[slot] {
-                    return Err(vm.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                seen[slot] = true;
-            }
-        }
         let specialize = bindings.is_some()
             || domains.iter().any(|domain| {
                 parameters
@@ -212,11 +181,13 @@ impl<'a, 'e> Frame<'a, 'e> {
             parameters,
             domains.to_vec(),
             specialize,
+            locals.clone(),
         );
         Ok(Self {
             expression,
             contract,
             inputs: Some(inputs),
+            locals,
             body: None,
             waiting_body: false,
             terminal: false,
@@ -411,13 +382,8 @@ impl InputPlan for Frame<'_, '_> {
         result
     }
     fn cleanup(&self, environment: &mut Environment) {
-        for binding in self
-            .expression
-            .kind
-            .nominal_local_bindings()
-            .expect("validated nominal plan")
-        {
-            environment.remove(&binding);
+        for binding in self.locals.iter() {
+            environment.remove(binding);
         }
     }
 }

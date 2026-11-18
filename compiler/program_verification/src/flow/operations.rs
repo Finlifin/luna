@@ -387,117 +387,47 @@ impl Walker<'_> {
     ) -> Result<Value, Reason> {
         let result = Value::default();
         match &expr.kind {
-            K::NormalFormType {
-                head,
-                arguments,
-                plan,
-            } => {
-                let metadata = self.package.and_then(|package| {
-                    package
-                        .normal_forms
-                        .iter()
-                        .find(|item| item.declaration == *head)
-                });
-                if let Some(plan) = plan {
-                    self.limits
-                        .step(arguments.len().saturating_add(plan.preparations.len()))?;
-                    if !plan.valid(arguments.len()) {
-                        return Err(Reason::Unsupported);
-                    }
-                    let mut preparations = plan.preparations.iter().peekable();
-                    for (position, slot) in plan.order.iter().copied().enumerate() {
-                        while preparations.peek().is_some_and(|p| p.before == position) {
-                            self.child(&preparations.next().unwrap().expression, state, depth)?;
-                        }
-                        if !state.facts.is_reachable() {
-                            break;
-                        }
-                        let domain = metadata
-                            .and_then(|head| head.parameters.get(slot))
-                            .map(|parameter| &parameter.ty);
-                        let (value, ty) =
-                            self.normal_input_value(&arguments[slot], domain, state, depth)?;
-                        if state.facts.is_reachable() {
-                            self.bind_related_value(state, plan.bindings[slot], &ty, value)?;
-                        }
-                    }
-                    for preparation in preparations {
-                        self.child(&preparation.expression, state, depth)?;
-                    }
-                } else {
-                    for (slot, argument) in arguments.iter().enumerate() {
-                        if !state.facts.is_reachable() {
-                            break;
-                        }
-                        let domain = metadata
-                            .and_then(|head| head.parameters.get(slot))
-                            .map(|parameter| &parameter.ty);
-                        self.normal_input_value(argument, domain, state, depth)?;
-                    }
-                }
-            }
-            K::NominalType {
-                preparations,
-                arguments,
-                order,
-                bindings,
-                ..
-            }
-            | K::CheckTypeAlias {
-                preparations,
-                arguments,
-                order,
-                bindings,
-                ..
-            } => {
-                self.limits
-                    .step(arguments.len().saturating_add(preparations.len()))?;
-                if expr.kind.nominal_local_bindings().is_none() {
-                    return Err(Reason::Unsupported);
-                }
-                if bindings
-                    .as_ref()
-                    .is_some_and(|bindings| bindings.len() != arguments.len())
-                {
-                    return Err(Reason::Unsupported);
-                }
-                let mut seen = vec![false; arguments.len()];
-                if order
-                    .as_ref()
-                    .is_some_and(|order| order.len() != arguments.len())
-                {
-                    return Err(Reason::Unsupported);
-                }
-                for position in 0..arguments.len() {
-                    let slot = order.as_ref().map_or(position, |order| order[position]);
-                    if slot >= arguments.len() || seen[slot] {
-                        return Err(Reason::Unsupported);
-                    }
-                    seen[slot] = true;
-                }
-                let mut preparations = preparations.iter().peekable();
-                for position in 0..arguments.len() {
-                    while preparations.peek().is_some_and(|p| p.before == position) {
-                        self.child(&preparations.next().unwrap().expression, state, depth)?;
-                    }
+            K::NormalFormType { .. } | K::NominalType { .. } | K::CheckTypeAlias { .. } => {
+                let (arguments, schedule) = expr.kind.declaration_inputs().unwrap();
+                self.limits.step(arguments.len())?;
+                let schedule = schedule
+                    .check(arguments.len(), |n| self.limits.step(n))?
+                    .ok_or(Reason::Unsupported)?;
+                let metadata = match &expr.kind {
+                    K::NormalFormType { head, .. } => self.package.and_then(|package| {
+                        package
+                            .normal_forms
+                            .iter()
+                            .find(|item| item.declaration == *head)
+                    }),
+                    _ => None,
+                };
+                for step in schedule.steps() {
                     if !state.facts.is_reachable() {
                         break;
                     }
-                    let slot = order.as_ref().map_or(position, |order| order[position]);
-                    let (value, ty) =
-                        self.normal_input_value(&arguments[slot], None, state, depth)?;
-                    if state.facts.is_reachable() {
-                        if let Some(bindings) = bindings {
-                            self.bind_related_value(state, bindings[slot], &ty, value)?;
+                    match step {
+                        nir::program::InputStep::Prepare(expr) => {
+                            self.child(expr, state, depth)?;
+                        }
+                        nir::program::InputStep::Supply(slot) => {
+                            let domain = metadata
+                                .and_then(|head| head.parameters.get(slot))
+                                .map(|p| &p.ty);
+                            let (value, ty) =
+                                self.normal_input_value(&arguments[slot], domain, state, depth)?;
+                            if let Some(binding) = schedule.binding(slot)
+                                && state.facts.is_reachable()
+                            {
+                                self.bind_related_value(state, binding, &ty, value)?;
+                            }
                         }
                     }
-                }
-                for preparation in preparations {
-                    self.child(&preparation.expression, state, depth)?;
                 }
                 if let K::CheckTypeAlias {
                     body: Some(body), ..
                 } = &expr.kind
+                    && state.facts.is_reachable()
                 {
                     self.child(body, state, depth)?;
                 }

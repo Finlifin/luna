@@ -8,6 +8,7 @@ pub(super) struct Source<'e> {
     parameters: Vec<nir::DeclarationParameter>,
     domains: Vec<Term>,
     alias: bool,
+    locals: Arc<[LocalId]>,
     source: SourceRange,
     completed: input_bindings::Bindings,
 }
@@ -30,8 +31,11 @@ impl<'e> Frame<'e> {
         parameters: Vec<nir::DeclarationParameter>,
         domains: Vec<Term>,
         specialize: bool,
+        locals: Arc<[LocalId]>,
     ) -> Self {
-        Self::from_source(Source::new(expression, parameters, domains, specialize))
+        Self::from_source(Source::new(
+            expression, parameters, domains, specialize, locals,
+        ))
     }
     pub fn finish_parts(self) -> Option<(Vec<nir::DeclarationParameter>, Vec<Term>)> {
         Some((self.source.parameters, self.source.completed.finish()?))
@@ -48,9 +52,11 @@ impl<'e> Source<'e> {
         parameters: Vec<nir::DeclarationParameter>,
         domains: Vec<Term>,
         specialize: bool,
+        locals: Arc<[LocalId]>,
     ) -> Self {
         let arguments = Self::arguments_of(&expression);
         Self {
+            locals,
             specialized: specialize.then(|| arguments.to_vec()),
             alias: matches!(expression.kind, K::CheckTypeAlias { .. }),
             source: expression.source,
@@ -230,13 +236,8 @@ impl input_collection::Source for Source<'_> {
         Ok(input_collection::Progress::InputsComplete)
     }
     fn cleanup(&self, environment: &mut Environment) {
-        for binding in self
-            .expression
-            .kind
-            .nominal_local_bindings()
-            .expect("validated input plan")
-        {
-            environment.remove(&binding);
+        for binding in self.locals.iter() {
+            environment.remove(binding);
         }
     }
 }
@@ -310,13 +311,16 @@ mod tests {
                         ],
                     },
                 });
+                let mut environment = Environment::from([(local(99), Value::Bool(true))]);
+                let locals =
+                    input_collection::admit_scope(&mut vm, &expression, &environment).unwrap();
                 let mut frame = Frame::new(
                     nominal_plan::Expression::Owned(expression),
                     parameters.clone(),
                     domains.clone(),
                     true,
+                    locals.into(),
                 );
-                let mut environment = Environment::from([(local(99), Value::Bool(true))]);
                 let result = vm.run_nominal_inputs(&mut frame, &mut environment);
                 if spelling == "256" {
                     assert!(
@@ -403,13 +407,15 @@ mod tests {
         };
         let package = Package::default();
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut environment = Environment::new();
+        let locals = input_collection::admit_scope(&mut vm, &expression, &environment).unwrap();
         let mut frame = Frame::new(
             nominal_plan::Expression::Owned(Arc::new(expression)),
             parameters,
             domains,
             true,
+            locals.into(),
         );
-        let mut environment = Environment::new();
         let input_collection::Progress::Input(bytecode::InputFrame { mut code, finish }) =
             frame.next_input(&mut vm, &mut environment).unwrap()
         else {
@@ -507,13 +513,15 @@ mod tests {
         vm.authorize_abstract_value_parameters(&[(id(4), boolean.clone())])
             .unwrap();
         for valid in [false, true] {
+            let mut environment = Environment::new();
+            let locals = input_collection::admit_scope(&mut vm, &expression, &environment).unwrap();
             let mut frame = Frame::new(
                 nominal_plan::Expression::Owned(expression.clone()),
                 parameters.clone(),
                 domains.clone(),
                 false,
+                locals.into(),
             );
-            let mut environment = Environment::new();
             // Source completion order differs from the declaration telescope.
             let value = if valid {
                 Value::AbstractValue {

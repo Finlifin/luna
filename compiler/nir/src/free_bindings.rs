@@ -213,128 +213,36 @@ fn scan(
                 }
                 return Ok(false);
             }
-            K::NominalType {
-                preparations,
-                arguments,
-                order,
-                bindings,
-                ..
-            }
-            | K::CheckTypeAlias {
-                preparations,
-                arguments,
-                order,
-                bindings,
-                ..
-            } => {
+            K::NominalType { .. } | K::CheckTypeAlias { .. } | K::NormalFormType { .. } => {
+                let (arguments, schedule) = node.kind.declaration_inputs().unwrap();
                 charge(fuel, arguments.len())?;
-                if order
-                    .as_ref()
-                    .is_some_and(|order| order.len() != arguments.len())
-                    || bindings.as_ref().is_some_and(|bindings| {
-                        bindings.len() != arguments.len()
-                            || bindings.iter().collect::<BTreeSet<_>>().len() != bindings.len()
-                    })
-                {
-                    return Err(Error::Invalid("invalid nominal input plan"));
-                }
-                if node.kind.nominal_local_bindings().is_none() {
-                    return Err(Error::Invalid("invalid nominal input bindings"));
-                }
-                let mut preparations = preparations.iter().peekable();
+                let schedule = schedule
+                    .check(arguments.len(), |n| charge(fuel, n))?
+                    .ok_or(Error::Invalid("invalid declaration input plan"))?;
                 let mut inner = fork(scope, fuel)?;
-                let mut seen = BTreeSet::new();
-                for position in 0..arguments.len() {
-                    while preparations.peek().is_some_and(|p| p.before == position) {
-                        statement(
-                            &preparations.next().unwrap().expression,
-                            &mut inner,
-                            free,
-                            fuel,
-                            depth + 1,
-                            dependencies,
-                        )?;
+                for step in schedule.steps() {
+                    match step {
+                        crate::program::InputStep::Prepare(expr) => {
+                            statement(expr, &mut inner, free, fuel, depth + 1, dependencies)?;
+                        }
+                        crate::program::InputStep::Supply(slot) => {
+                            normal(
+                                &arguments[slot],
+                                &inner,
+                                free,
+                                fuel,
+                                depth + 1,
+                                dependencies,
+                            )?;
+                            inner.extend(schedule.binding(slot));
+                        }
                     }
-                    let slot = order.as_ref().map_or(position, |order| order[position]);
-                    if slot >= arguments.len() || !seen.insert(slot) {
-                        return Err(Error::Invalid("invalid nominal input order"));
-                    }
-                    normal(
-                        &arguments[slot],
-                        &inner,
-                        free,
-                        fuel,
-                        depth + 1,
-                        dependencies,
-                    )?;
-                    if let Some(bindings) = bindings {
-                        inner.insert(bindings[slot]);
-                    }
-                }
-                for preparation in preparations {
-                    statement(
-                        &preparation.expression,
-                        &mut inner,
-                        free,
-                        fuel,
-                        depth + 1,
-                        dependencies,
-                    )?;
                 }
                 if let K::CheckTypeAlias {
                     body: Some(body), ..
                 } = &node.kind
                 {
                     scan(body, &inner, free, fuel, depth + 1, dependencies)?;
-                }
-                return Ok(false);
-            }
-            K::NormalFormType {
-                arguments, plan, ..
-            } => {
-                charge(fuel, arguments.len())?;
-                let mut inner = fork(scope, fuel)?;
-                if let Some(plan) = plan {
-                    if !plan.valid(arguments.len()) {
-                        return Err(Error::Invalid("invalid normal-form input plan"));
-                    }
-                    let mut preparations = plan.preparations.iter().peekable();
-                    for (position, slot) in plan.order.iter().enumerate() {
-                        while preparations.peek().is_some_and(|p| p.before == position) {
-                            let preparation = preparations.next().unwrap();
-                            statement(
-                                &preparation.expression,
-                                &mut inner,
-                                free,
-                                fuel,
-                                depth + 1,
-                                dependencies,
-                            )?;
-                        }
-                        normal(
-                            &arguments[*slot],
-                            &inner,
-                            free,
-                            fuel,
-                            depth + 1,
-                            dependencies,
-                        )?;
-                        inner.insert(plan.bindings[*slot]);
-                    }
-                    for preparation in preparations {
-                        statement(
-                            &preparation.expression,
-                            &mut inner,
-                            free,
-                            fuel,
-                            depth + 1,
-                            dependencies,
-                        )?;
-                    }
-                } else {
-                    for argument in arguments {
-                        normal(argument, scope, free, fuel, depth + 1, dependencies)?;
-                    }
                 }
                 return Ok(false);
             }

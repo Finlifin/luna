@@ -2201,3 +2201,43 @@ fn borrowed_method_contracts_keep_predicate_and_snapshot_admission() {
         nir::phases::validate(&package).unwrap();
     }
 }
+
+#[test]
+fn constructor_schedules_cannot_repeat_or_omit_a_source_operand() {
+    use nir::program::NormalFormArgument as A;
+    let package = Package::default();
+    let inspection = nir::phases::Inspection::new(&package);
+    let inputs = [true, false].map(|b| A::Value(flag(K::Literal(Literal::Bool(b)))));
+    for (order, valid) in [
+        (vec![1, 1], false),
+        (vec![0], false),
+        (vec![2, 0], false),
+        (vec![1, 0], true),
+    ] {
+        let expr = Expr {
+            ty: Term::Primitive(Primitive::Type),
+            source: SourceRange { start: 12, end: 18 },
+            kind: K::NominalType {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 81,
+                },
+                bindings: None,
+                order: Some(order),
+                preparations: vec![],
+                arguments: inputs.to_vec(),
+            },
+        };
+        let phase = inspection.check(&expr, &mut 10_000);
+        let captures = nir::free_bindings::collect(&expr, &mut 10_000);
+        if valid {
+            phase.unwrap();
+            assert!(captures.unwrap().is_empty());
+        } else {
+            let error = phase.unwrap_err();
+            assert_eq!(error.source, expr.source);
+            assert_eq!(error.kind, nir::phases::ErrorKind::Invalid);
+            assert!(captures.is_err());
+        }
+    }
+}

@@ -3308,14 +3308,19 @@ fn compile_root<'a>(
             // Retain the previous collision checks without allocating registers
             // for plan-owned binders. A caller slot with the same identity must
             // still be visible to plan admission, even if it is not a free read.
-            let owned = match &expression.kind {
-                K::NormalFormType {
-                    plan: Some(plan), ..
-                } => plan.local_bindings(),
-                _ => expression.kind.nominal_local_bindings(),
-            }
-            .ok_or(Error::Unsupported(instruction.source))?;
-            for binding in owned {
+            let (arguments, schedule) = expression
+                .kind
+                .declaration_inputs()
+                .expect("type input plan expression");
+            let checked = schedule
+                .check(arguments.len(), |n| {
+                    *fuel = fuel
+                        .checked_sub(n)
+                        .ok_or(Error::Budget(instruction.source))?;
+                    Ok::<_, Error>(())
+                })?
+                .ok_or(Error::Unsupported(instruction.source))?;
+            for binding in checked.locals {
                 *fuel = fuel
                     .checked_sub(environment.len().saturating_add(1))
                     .ok_or(Error::Budget(instruction.source))?;

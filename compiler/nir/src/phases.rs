@@ -491,6 +491,20 @@ impl<'a> PhaseContext<'a> {
                             return Err(error("entry snapshots are immutable"));
                         }
                     }
+                    if let Some((arguments, schedule)) = expr.kind.declaration_inputs() {
+                        let checked = schedule.check(arguments.len(), |n| {
+                            *inspection_fuel = inspection_fuel.checked_sub(n).ok_or_else(|| {
+                                Error::budget(
+                                    expr.source,
+                                    "input schedule inspection budget exhausted",
+                                )
+                            })?;
+                            Ok::<_, Error>(())
+                        })?;
+                        if checked.is_none() {
+                            return Err(error("invalid declaration input plan"));
+                        }
+                    }
                     match &expr.kind {
                         K::Intrinsic {
                             tag,
@@ -1001,12 +1015,6 @@ impl<'a> PhaseContext<'a> {
                                 .ok_or_else(|| {
                                     error("normal-form constructor metadata is missing")
                                 })?;
-                            if plan
-                                .as_ref()
-                                .is_some_and(|plan| !plan.valid(arguments.len()))
-                            {
-                                return Err(error("invalid normal-form input plan"));
-                            }
                             if arguments.len() != metadata.parameters.len() {
                                 return Err(error(
                                     "normal-form constructor argument count mismatch",
@@ -1062,7 +1070,6 @@ impl<'a> PhaseContext<'a> {
                                     })
                             };
                             if arguments.len() != contract.parameters.len()
-                                || expr.kind.nominal_local_bindings().is_none()
                                 || body.as_ref().is_some_and(|body| {
                                     !matches!(
                                         body.ty,
