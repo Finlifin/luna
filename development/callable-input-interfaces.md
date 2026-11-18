@@ -342,8 +342,7 @@ comptime fn Apply(factory: Factory, items: meta.List<Type>) -> Type {
 工作区保留 formatter 集成与原有资源分析等改动，不宣称为纯 HEAD 或 LLVM 验收。
 
 本次只交付接口设计和复现，没有增加新的编译器接口类型或改变准入判断。
-原有[单层动态 NF 复现及供应游标迁移](audit-reply.md#动态-nf-的具名入口已复现先补参数协议载体)
-继续作为基础证据，不能据它们或本文宣称参数协议传送已经完成。
+后续位置实参已接入共享输入计划，目标公开槽名的传送仍待实现。[当前接口边界](audit-reply.md#公开接口与值传送)
 
 在 `9e3509d7` 工作区重新核验入口身份与具名调用，仍使用真实 sysroot。
 工作目录 `/home/fin/luna`，命令前缀为

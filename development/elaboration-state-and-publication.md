@@ -1527,7 +1527,7 @@ python3 -B development/check.py --timeout 900 -- test -p luna \
 
 另有 32 项 luna elaboration 集成失败在 Attempt 迁移时与 `53696cc6` 基线逐例对照
 一致，报告 `/tmp/luna-tools-o47vegep/result.json`；本轮未复测，仍待处理。不能把其中
-诊断断言失败都认作测试过时；九项名义动态输入缺口另见[晚报回复](audit-reply.md)。
+诊断断言失败都认作测试过时。当前源码域与调用恢复的边界见[生产复核](audit-reply.md#源码检查与原调用的交接)。
 这些历史验证包含当时工作区原有资源分析修改，不宣称为纯提交验收。
 
 此前在 `/home/fin/luna`、`6a564ae5` 加保留的已有修改上执行：

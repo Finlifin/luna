@@ -220,7 +220,7 @@ NF、名义类型和透明别名的输入帧现在通过 `input_bindings::Bindin
 单元检查在树解释和字节码路径覆盖恒等转发、两种具体分支、未授权／外来声明拒绝、
 错误值域拒绝，以及非恒等转换未决后用具体值重试。原失败源码保持预期不变，并增加
 真实 sysroot 的编译及 IIR 执行；测试沿用 `error_surface` 中的 trait 值参数案例。
-详细命令与回归结果见 [报告回复](audit-reply.md#错误结果值参数的恒等传送修复)。
+这条路径可用[源码错误结果用例](../compiler/luna/tests/error_surface.rs)复核。
 
 真实 sysroot 的 `ordinary_clause_collectors`、`ordinary_callable_types`、
 `nominal_value_parameters`、`normal_form_methods`、`library_protocols` 共 384 项通过，

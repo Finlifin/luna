@@ -6,7 +6,7 @@
 本文件保留初始审计；随后已实施的源码退役与检查见[模块边界](module-boundaries-and-retirement.md)。
 完整架构迁移尚未完成。
 
-11-11／11-12 晚报的纠正及截至 `3fd323ca` 的局部复核见[审查回复](audit-reply.md)。
+11 月 18 日晚报与截至 `296ff6b2` 的生产边界见[审查回复](audit-reply.md)。
 其中区分 CodeSession 与活动 VM、阶段／理论／布局职责，以及仍需实际迁移的
 输入恢复、值传送、runtime TypeRef 和文本来源链路；本文件的初始基线不随之改写。
 
