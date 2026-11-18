@@ -8,14 +8,14 @@
 python3 -B development/demo_println.py
 ```
 
-源码见 [host-println.fl](host-println.fl)。脚本使用实际 sysroot，生成并运行
-`/tmp/flurry-println`；演示时也可以直接运行该文件。输出包含中文问候、
-`answer = 42`、当前进程 PID、`i128` 最小值和 `done`。
+[host-println.fl](host-println.fl) 直接调用
+`println("answer = {}, ready = {}", answer, true)`。演示要求通过真实 sysroot、
+资源检查和 LLVM 构建，并在 stdout 输出 `answer = 42, ready = true`。
+当前 sysroot 的同名入口只接收一个文本参数，构建在变参调用处失败。
+脚本在构建失败时退出。
 
-当前目标为 x86_64 Linux。`println` 接收 comptime 文本；运行时整数、bool
-和自定义 `Display` 使用 `println_value`，尚不支持 `{}` 参数替换。
-`std.fs`、`std.io`、`std.mem` 和平台接口的范围见
-[std 说明](../../library/std/README.md)。
+[host-stdout.fl](host-stdout.fl) 保留单段文本与单值 Display 的宿主输出示例。
+文件、内存与平台接口的可用范围见 [std 说明](../../library/std/README.md)。
 
 其他 host 示例：
 
@@ -45,5 +45,4 @@ python3 -B development/host_examples.py arithmetic number-theory library-tuple l
 
 其他 host 示例中的 S-expression 返回值由开发驱动打印；上面的 `println`
 演示则由标准库写入 stdout。运行和证据入口见[工具说明](../working-guide.md)，
-实现边界见[架构审计](../architecture-audit.md)。本轮重新运行了 `println`
-演示，未重新运行这里列出的其他 host 示例。
+实现边界见[架构审计](../architecture-audit.md)。

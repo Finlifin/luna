@@ -9,7 +9,11 @@
 仍待类型描述计算和变参实例化接通；当前进度见
 [格式化变参边界](runtime-value-delivery.md#格式化变参边界不能把静态文本输出当作-println-交付)。
 
-## 演示
+## 历史宿主输出演示
+
+以下命令与输出记录当时的文本和单值实现。原程序现保存在
+[host-stdout.fl](examples/host-stdout.fl)。当前 demo 脚本使用
+[host-println.fl](examples/host-println.fl) 验收格式化变参。
 
 在仓库根目录执行：
 
@@ -97,7 +101,7 @@ EINTR、零写入和部分写入后的 EIO，验证错误传播与已经输出�
 构建日志 `/tmp/luna-tools-kzljx98k/result.json`。产物 `/tmp/flurry-println`
 输出中文、42、实际 Linux pid、i128 最小值和 done，没有 `(unit)` 尾行。
 
-## 当前演示复验
+## 当时的演示复验
 
 `python3 -B development/demo_println.py` 已在当前 dev 上重新构建并运行，
 退出 0；构建报告为 `/tmp/luna-tools-0fwuk41k/result.json`。可直接运行

@@ -50,5 +50,5 @@ std.io.Writer 与 File 都实现 ByteWriter；`value.write(file.ref)` 借用文�
 模块与同名自动目录模块冲突。
 
 演示入口：在仓库根目录执行 `python3 -B development/demo_println.py`。
-构建后可直接运行 `/tmp/flurry-println`。源码见
+此入口检查异构格式化变参，当前在调用检查时失败。源码见
 [`host-println.fl`](../../development/examples/host-println.fl)。
