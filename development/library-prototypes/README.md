@@ -10,14 +10,11 @@ even when the user only needed builtin iteration or arithmetic.
 | builtin/option_unwrap.fl, builtin/result_unwrap.fl | Define and implement panic/control-transfer behavior, including resource cleanup. Total optional/error-result operations remain in builtin. |
 | std/collections.fl | Real allocation/storage and resource contracts, language optional/error semantics, and source Iterator integration. The legacy intrinsic names and Some/None forms are not implementations. |
 
-The unused formatting, I/O and export stubs have been removed. Their invented
-`__builtin_format`/`__builtin_println` calls and String-returning Display contract
-must not guide implementation. The actual source protocols and Linux output
-foundation live in builtin and std; see the
-[host foundation status](../std-host-foundation.md). The requested formatted
-println still requires ordinary `std.fmt.Parse(format)` Type production and
-argument admission, as described in the
-[type-description design](../type-descriptions-and-admission.md).
+The public `println` uses a comptime format string. At each call,
+`std.fmt.Parse(format)` supplies the variadic domain and every field must
+implement Display. The [native demo](../std-host-foundation.md) exercises
+this interface through the real sysroot. The earlier formatting and I/O
+stubs have been removed.
 
 Allocation, containers, complete formatting, I/O and owned strings remain
 required work in the [library delivery design](../libraries-and-delivery.md).
