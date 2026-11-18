@@ -855,6 +855,7 @@ impl Builder<'_> {
                 &mut self.fuel,
             )
             .map_err(|e| e.to_string())?;
+            self.callable_formation(identity.into(), &substitution)?;
             let signature = substitution
                 .instantiate_bounded(&identity.signature, &mut self.fuel)
                 .map_err(|e| e.to_string())?;
@@ -1368,6 +1369,22 @@ impl Builder<'_> {
             world.check_predicate_metered(requirement, budget)
         })
     }
+    fn callable_formation(
+        &mut self,
+        formation: nir::callable_source::Formation<'_>,
+        substitution: &nir::DeclarationSubstitution<'_>,
+    ) -> Result<(), String> {
+        self.formation_requirements(formation.requirements, substitution)?;
+        for capability in formation.capabilities {
+            let bound = substitution
+                .instantiate_requirement_bounded(capability, &mut self.fuel)
+                .map_err(|error| error.to_string())?;
+            self.queue
+                .push_back(Task::Interface(bound.interface_instance(), bound.subject));
+        }
+        Ok(())
+    }
+
     fn formation_requirements(
         &mut self,
         requirements: &[n::TypePredicate],
@@ -2462,6 +2479,20 @@ impl Builder<'_> {
                 nir::type_computations::charge_term(&signature, &mut self.fuel)
                     .map_err(|e| e.to_string())?;
                 children.push(signature.clone());
+                if let Some(function) = self.world.function_formation(*declaration) {
+                    let domains = self
+                        .world
+                        .input_domains(function.parameters, &mut self.fuel)?;
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        function.parameters,
+                        &domains,
+                        arguments,
+                        &[],
+                        &mut self.fuel,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    self.callable_formation(function, &substitution)?;
+                }
                 // Only concrete IIR publishes immutable callable evidence.
                 // Annotation and dispatch exploration may still contain binders.
                 if self.instances.is_some() {
@@ -2474,27 +2505,6 @@ impl Builder<'_> {
                         &mut self.type_cores,
                         &mut self.fuel,
                     )?);
-                }
-                if let Some(function) = self.world.function_declaration(*declaration) {
-                    let domains = self
-                        .world
-                        .input_domains(&function.type_parameters, &mut self.fuel)?;
-                    let substitution = nir::DeclarationSubstitution::bounded(
-                        &function.type_parameters,
-                        &domains,
-                        arguments,
-                        &[],
-                        &mut self.fuel,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    self.formation_requirements(&function.requirements, &substitution)?;
-                    for capability in &function.capabilities {
-                        let bound = substitution
-                            .instantiate_requirement_bounded(capability, &mut self.fuel)
-                            .map_err(|e| e.to_string())?;
-                        self.queue
-                            .push_back(Task::Interface(bound.interface_instance(), bound.subject));
-                    }
                 }
                 children.extend(arguments.iter().cloned());
             }

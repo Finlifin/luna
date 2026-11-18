@@ -419,6 +419,8 @@ fn frozen_callable_type_inputs_check_contracts_phase_and_safety() {
             package
                 .runtime_function_identities
                 .push(nir::program::RuntimeFunctionIdentity {
+                    requirements: vec![],
+                    capabilities: vec![],
                     declaration: runtime.declaration,
                     type_parameters: runtime.interface.type_parameters,
                     signature: runtime.interface.signature,

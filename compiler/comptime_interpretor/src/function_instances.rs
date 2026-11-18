@@ -111,34 +111,11 @@ impl Interpreter<'_> {
             .map(|argument| self.selected_type_view(argument, Some(source)))
             .collect::<Result<Vec<_>, _>>()?;
         let arguments = observed_arguments.as_slice();
-        if let Some(identity) = self.functions.runtime_identity(&declaration) {
-            let signature = self.signature_from_inputs(
-                &identity.type_parameters,
-                arguments,
-                &identity.signature,
-                source,
-            )?;
-            if !self.observe_same_type(&signature, output, source)? {
-                return Err(self.failure(ErrorKind::Type, Some(source)));
-            }
-            return Ok(Value::FunctionInstance {
-                declaration,
-                arguments: observed_arguments,
-            });
-        }
-        let definition = self
+        let formation = self
             .functions
-            .interface(&declaration)
+            .formation(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        let frames = [self.ordinary_input_frame(&definition.signature, source)?];
-        let inputs = self.admit_function_inputs(
-            &definition.type_parameters,
-            arguments,
-            nir::DeclarationInputScope::ClosedInBody(&frames),
-            source,
-        )?;
-        let signature = self.signature_from_admission(definition, &inputs, source)?;
-        self.check_callable_requirements(definition, &inputs, source)?;
+        let signature = self.formed_function_signature(formation, arguments, source)?;
         if !self.observe_same_type(&signature, output, source)? {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
@@ -148,6 +125,24 @@ impl Interpreter<'_> {
             declaration,
             arguments: observed_arguments,
         })
+    }
+
+    pub(super) fn formed_function_signature(
+        &mut self,
+        formation: nir::callable_source::Formation<'_>,
+        arguments: &[Term],
+        source: SourceRange,
+    ) -> Result<Term, Error> {
+        let frames = [self.ordinary_input_frame(formation.signature, source)?];
+        let inputs = self.admit_function_inputs(
+            formation.parameters,
+            arguments,
+            nir::DeclarationInputScope::ClosedInBody(&frames),
+            source,
+        )?;
+        let signature = self.signature_from_admission(formation, &inputs, source)?;
+        self.check_callable_requirements(formation, &inputs, source)?;
+        Ok(signature)
     }
 
     pub(super) fn specialize_function_signature(
@@ -162,21 +157,19 @@ impl Interpreter<'_> {
             nir::DeclarationInputScope::Caller(&[]),
             source,
         )?;
-        self.signature_from_admission(declaration, &inputs, source)
+        self.signature_from_admission(declaration.into(), &inputs, source)
     }
 
     pub(super) fn signature_from_admission(
         &mut self,
-        declaration: &nir::program::FunctionDeclaration,
+        formation: nir::callable_source::Formation<'_>,
         inputs: &nir::AdmittedArguments<'_>,
         source: SourceRange,
     ) -> Result<Term, Error> {
         let signature = self.query_admission(Some(source), |_, fuel| {
-            Ok(inputs.instantiate_in_input_scope(&declaration.signature, fuel)?)
+            Ok(inputs.instantiate_in_input_scope(formation.signature, fuel)?)
         })?;
-        Ok(signature
-            .with_comptime_phase(declaration.phase == nir::program::FunctionPhase::Comptime)
-            .with_unsafe_call_requirement(declaration.is_unsafe))
+        Ok(formation.qualify(signature))
     }
 
     /// Acquire immutable declaration-specialized code only after this

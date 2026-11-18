@@ -550,6 +550,8 @@ fn runtime_identity_observes_associated_output_without_an_executable_body() {
     };
     let package = Package {
         runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+            requirements: vec![],
+            capabilities: vec![],
             declaration: id(9),
             type_parameters: vec![],
             signature: signature(Term::AssociatedType {

@@ -3236,10 +3236,7 @@ impl<'a> Interpreter<'a> {
             K::Unit => Value::Unit,
             K::Local(id) => self.local_value(environment, *id, Some(expr.source))?,
             K::Function(id) if self.functions.runtime_identity(id).is_some() => {
-                Value::FunctionInstance {
-                    declaration: *id,
-                    arguments: vec![],
-                }
+                self.function_instance_value(*id, &[], &expr.ty, expr.source)?
             }
             K::Function(id) => Value::Function(*id),
             K::Break(identity) => {

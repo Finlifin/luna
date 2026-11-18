@@ -2429,10 +2429,7 @@ impl<'a> Interpreter<'a> {
                             self.iir_function_value(*id, &[], &value.ty, source)?
                         }
                         Kind::Function(id) if self.functions.runtime_identity(id).is_some() => {
-                            Value::FunctionInstance {
-                                declaration: *id,
-                                arguments: vec![],
-                            }
+                            self.function_instance_value(*id, &[], &value.ty, source)?
                         }
                         Kind::Function(id) => Value::Function(*id),
                     };

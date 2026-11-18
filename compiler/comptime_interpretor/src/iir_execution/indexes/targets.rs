@@ -124,6 +124,8 @@ mod tests {
         for local in 0..128 {
             let source = nir::program::Package {
                 runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+                    requirements: vec![],
+                    capabilities: vec![],
                     declaration: key(local, true).declaration,
                     type_parameters: vec![DeclarationId { package: 95, local }],
                     signature: signature.clone(),

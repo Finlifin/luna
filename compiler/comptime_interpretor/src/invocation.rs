@@ -632,7 +632,8 @@ impl<'a> Interpreter<'a> {
                     nir::DeclarationInputScope::ClosedInBody(&frames),
                     source,
                 )?;
-                let signature = self.signature_from_admission(definition, &inputs, source)?;
+                let signature =
+                    self.signature_from_admission(definition.into(), &inputs, source)?;
                 instance_inputs = Some(inputs);
                 (
                     definition.parameters.as_slice(),

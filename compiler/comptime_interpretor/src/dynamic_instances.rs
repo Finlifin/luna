@@ -46,39 +46,27 @@ impl Interpreter<'_> {
             };
         }
 
-        if let Some(identity) = self.functions.runtime_identity(&declaration) {
-            // Transport-only metadata is published after producer-side
-            // formation checks. It cannot authorize a runtime invocation.
-            return self
-                .admit_function_inputs(
-                    &identity.type_parameters,
-                    arguments,
-                    nir::DeclarationInputScope::Caller(&[]),
-                    source,
-                )
-                .map(|_| ());
-        }
-        let definition = self
+        let formation = self
             .functions
-            .interface(&declaration)
+            .formation(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        let frames = [self.ordinary_input_frame(&definition.signature, source)?];
+        let frames = [self.ordinary_input_frame(formation.signature, source)?];
         let inputs = self.admit_function_inputs(
-            &definition.type_parameters,
+            formation.parameters,
             arguments,
             nir::DeclarationInputScope::ClosedInBody(&frames),
             source,
         )?;
-        self.check_callable_requirements(definition, &inputs, source)
+        self.check_callable_requirements(formation, &inputs, source)
     }
 
     pub(super) fn check_callable_requirements(
         &mut self,
-        definition: &nir::program::FunctionDeclaration,
+        formation: nir::callable_source::Formation<'_>,
         inputs: &nir::AdmittedArguments<'_>,
         source: SourceRange,
     ) -> Result<(), Error> {
-        for requirement in &definition.requirements {
+        for requirement in formation.requirements {
             let requirement = self.query_admission(Some(source), |_, fuel| {
                 Ok(inputs.instantiate_predicate(requirement, fuel)?)
             })?;
@@ -88,7 +76,7 @@ impl Interpreter<'_> {
                 self.check_type_contract(&requirement, source)?;
             }
         }
-        for capability in &definition.capabilities {
+        for capability in formation.capabilities {
             let bound = self.query_admission(Some(source), |_, fuel| {
                 Ok(inputs.instantiate_requirement(capability, fuel)?)
             })?;

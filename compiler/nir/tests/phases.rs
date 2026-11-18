@@ -1069,6 +1069,8 @@ fn retained_quote_templates_reject_identity_collisions_and_wrong_phase() {
     package
         .runtime_function_identities
         .push(nir::program::RuntimeFunctionIdentity {
+            requirements: vec![],
+            capabilities: vec![],
             declaration: template.declaration,
             type_parameters: vec![],
             signature: template.interface.signature,

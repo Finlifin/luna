@@ -611,6 +611,8 @@ mod tests {
         };
         let source = Arc::new(Package {
             runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+                requirements: vec![],
+                capabilities: vec![],
                 declaration: identity,
                 type_parameters: vec![parameter],
                 signature: signature.clone(),

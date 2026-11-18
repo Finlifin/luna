@@ -50,6 +50,8 @@ fn main() {
                 .collect(),
             runtime_function_identities: (0..count)
                 .map(|i| RuntimeFunctionIdentity {
+                    requirements: vec![],
+                    capabilities: vec![],
                     declaration: id(count + i),
                     type_parameters: vec![],
                     signature: signature.clone(),

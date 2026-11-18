@@ -126,6 +126,8 @@ mod tests {
         };
         let package = n::Package {
             runtime_function_identities: vec![n::RuntimeFunctionIdentity {
+                requirements: vec![],
+                capabilities: vec![],
                 declaration: id(1),
                 type_parameters: vec![id(2)],
                 signature: signature.clone(),

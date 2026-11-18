@@ -297,46 +297,30 @@ impl Interpreter<'_> {
         } = method;
         let (body, mut arguments) = binding.clone();
         arguments.extend(method_arguments.iter().cloned());
-        if let Some(identity) = self.functions.runtime_identity(&body) {
-            let signature = self.signature_from_inputs(
-                &identity.type_parameters,
-                &arguments,
-                &identity.signature,
-                source,
-            )?;
-            if !self.observe_same_type(&signature, output, source)?
-                || (has_preconditions && !retained_template)
-            {
-                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-            }
-            if pending {
-                self.resolved_method_bodies
-                    .insert(key.clone(), binding.clone());
-            }
-            return Ok(Selection::Value(Value::RuntimeTraitMethod(Box::new(
-                TraitMethodIdentity {
-                    interface: InterfaceInstance {
-                        declaration: interface,
-                        arguments: interface_arguments.to_vec(),
-                    },
-                    subject: subject.clone(),
-                    member: member,
-                    method_arguments: method_arguments.to_vec(),
-                },
-            ))));
-        }
-        let definition = self
+        let formation = self
             .functions
-            .interface(&body)
+            .formation(&body)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        if pending && definition.phase == nir::program::FunctionPhase::NormalForm {
+        if pending && formation.phase == nir::program::FunctionPhase::NormalForm {
             return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
         }
-        let ty = self.specialize_function_signature(definition, &arguments, source)?;
+        let transport = self.functions.runtime_identity(&body).is_some()
+            || (self.comptime_only && formation.phase == nir::program::FunctionPhase::Runtime);
+        let ty = if transport {
+            self.formed_function_signature(formation, &arguments, source)?
+        } else {
+            let inputs = self.admit_function_inputs(
+                formation.parameters,
+                &arguments,
+                nir::DeclarationInputScope::Caller(&[]),
+                source,
+            )?;
+            self.signature_from_admission(formation, &inputs, source)?
+        };
         if !self.observe_same_type(&ty, output, source)? {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
-        if self.comptime_only && definition.phase == nir::program::FunctionPhase::Runtime {
+        if transport {
             if has_preconditions && !retained_template {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
             }
@@ -363,7 +347,9 @@ impl Interpreter<'_> {
         }
         Ok(Selection::Function {
             declaration: body,
-            instantiate: !arguments.is_empty() || !definition.requirements.is_empty(),
+            instantiate: !arguments.is_empty()
+                || !formation.requirements.is_empty()
+                || !formation.capabilities.is_empty(),
             arguments,
             ty,
         })

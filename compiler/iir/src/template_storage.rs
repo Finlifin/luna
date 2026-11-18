@@ -49,7 +49,7 @@ impl TemplateStorage {
                 .functions
                 .iter()
                 .filter(|function| function.declaration == key.declaration);
-            let (type_parameters, declared_signature) =
+            let formation: nir::callable_source::Formation =
                 if let Some(declaration) = declarations.next() {
                     if declarations.next().is_some() {
                         return Err("template storage target declaration is ambiguous".into());
@@ -57,7 +57,7 @@ impl TemplateStorage {
                     if declaration.phase != nir::program::FunctionPhase::Runtime {
                         return Err("template storage target is not a runtime declaration".into());
                     }
-                    (&declaration.type_parameters, &declaration.signature)
+                    (&declaration.interface).into()
                 } else {
                     // Open runtime declarations expose identity before any staged
                     // invocation has produced a body. Tags store that identity;
@@ -75,10 +75,10 @@ impl TemplateStorage {
                     if identities.next().is_some() {
                         return Err("template storage target identity is ambiguous".into());
                     }
-                    (&identity.type_parameters, &identity.signature)
+                    identity.into()
                 };
             let mut input_domains = Vec::new();
-            for id in type_parameters {
+            for id in formation.parameters {
                 let default_domain = Term::Primitive(nir::Primitive::Type);
                 let domain = domains.get(id).unwrap_or(&default_domain);
                 nir::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
@@ -86,13 +86,13 @@ impl TemplateStorage {
             }
             nir::function_parameters::validate_arguments(
                 package,
-                type_parameters,
+                formation.parameters,
                 &input_domains,
                 &key.arguments,
                 fuel,
             )?;
             let substitution = nir::DeclarationSubstitution::bounded(
-                type_parameters,
+                formation.parameters,
                 &input_domains,
                 &key.arguments,
                 &[],
@@ -100,9 +100,9 @@ impl TemplateStorage {
             )
             .map_err(|e| e.to_string())?;
             let signature = substitution
-                .instantiate_bounded(declared_signature, fuel)
+                .instantiate_bounded(formation.signature, fuel)
                 .map_err(|e| e.to_string())?;
-            selected.push((key, signature));
+            selected.push((key, formation.qualify(signature)));
         }
         Self::new_in(logical_type, selected, interner, fuel)
     }
@@ -336,6 +336,8 @@ mod tests {
                 ],
             }],
             runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+                requirements: vec![],
+                capabilities: vec![],
                 declaration: target,
                 type_parameters: vec![first, second],
                 signature: signature(),
@@ -417,6 +419,8 @@ mod tests {
                 domains: vec![domain.clone()],
             }],
             runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+                requirements: vec![],
+                capabilities: vec![],
                 declaration: target,
                 type_parameters: vec![input],
                 signature: signature(),

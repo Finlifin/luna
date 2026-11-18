@@ -28,6 +28,52 @@ impl std::fmt::Display for Declaration<'_> {
     }
 }
 
+/// The inputs, signature and type obligations observable when a named function
+/// forms a value. Execution, defaults and program contracts require a declaration.
+#[derive(Clone, Copy)]
+pub struct Formation<'a> {
+    pub parameters: &'a [DeclarationId],
+    pub signature: &'a Term,
+    pub requirements: &'a [TypePredicate],
+    pub capabilities: &'a [TraitRequirement],
+    pub phase: FunctionPhase,
+    unsafe_qualifier: bool,
+}
+
+impl<'a> From<&'a FunctionDeclaration> for Formation<'a> {
+    fn from(f: &'a FunctionDeclaration) -> Self {
+        Self {
+            parameters: &f.type_parameters,
+            signature: &f.signature,
+            requirements: &f.requirements,
+            capabilities: &f.capabilities,
+            phase: f.phase,
+            unsafe_qualifier: f.is_unsafe,
+        }
+    }
+}
+
+impl<'a> From<&'a RuntimeFunctionIdentity> for Formation<'a> {
+    fn from(f: &'a RuntimeFunctionIdentity) -> Self {
+        Self {
+            parameters: &f.type_parameters,
+            signature: &f.signature,
+            requirements: &f.requirements,
+            capabilities: &f.capabilities,
+            phase: FunctionPhase::Runtime,
+            unsafe_qualifier: false,
+        }
+    }
+}
+
+impl Formation<'_> {
+    pub fn qualify(&self, signature: Term) -> Term {
+        signature
+            .with_comptime_phase(self.phase == FunctionPhase::Comptime)
+            .with_unsafe_call_requirement(self.unsafe_qualifier)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Callables<'a> {
     functions: &'a [Function],
@@ -161,6 +207,12 @@ impl<'a> Callables<'a> {
             interface: &f.interface,
             source: f.body.source,
         })
+    }
+
+    pub fn formation(&self, id: &DeclarationId) -> Option<Formation<'a>> {
+        self.interface(id)
+            .map(Formation::from)
+            .or_else(|| self.runtime_identity(id).map(Formation::from))
     }
 
     pub fn body(&self, id: &DeclarationId) -> Option<&'a Expr> {

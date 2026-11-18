@@ -18,6 +18,8 @@ fn template_identity_metadata_admits_tags_but_not_execution() {
         result: Box::new(Term::Primitive(Primitive::Bool)),
     };
     let identity = nir::program::RuntimeFunctionIdentity {
+        requirements: vec![],
+        capabilities: vec![],
         declaration: id,
         type_parameters: vec![],
         signature: logical.clone(),
@@ -60,6 +62,7 @@ fn template_storage_checks_source_declarations_and_recovers_after_rejection() {
          fn keep(comptime T:Type,value:T)->T {value}
          fn generic(comptime T:Type,value:T)->T where X {value}
          fn tagged(comptime T:Type,value:T)->T where tag:bool {value}
+         unsafe fn raw(comptime T:Type,value:T)->T {value}
          fn wrong(comptime T:Type,value:bool)->bool {value}
          comptime fn staged(comptime T:Type,value:T)->T {value}",
     );
@@ -88,7 +91,17 @@ fn template_storage_checks_source_declarations_and_recovers_after_rejection() {
         assert_eq!(storage.encode(target, &mut 1000).unwrap(), index as u64);
         assert_eq!(storage.decode(index as u64).unwrap(), target);
     }
+    let raw = key("raw", vec![]);
+    let unsafe_storage = TemplateStorage::from_package(
+        logical.clone().with_unsafe_call_requirement(true),
+        vec![raw.clone()],
+        &package,
+        &mut 100_000,
+    )
+    .unwrap();
+    assert_eq!(unsafe_storage.decode(0).unwrap(), &raw);
     for (invalid, diagnostic) in [
+        (vec![raw], "signature differs"),
         (vec![key("wrong", vec![])], "signature differs"),
         (vec![key("staged", vec![])], "not a runtime declaration"),
         (vec![keep.clone(), keep.clone()], "duplicate target"),

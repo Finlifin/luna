@@ -11,6 +11,20 @@ pub(super) enum Defaults {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn runtime_function_identity(
+        &self,
+        owner: OwnerId,
+        signature: Term,
+    ) -> n::RuntimeFunctionIdentity {
+        n::RuntimeFunctionIdentity {
+            declaration: declaration(self.package, &self.package_identities, owner),
+            signature: self.callable_type(owner, signature),
+            type_parameters: self.type_parameters[&owner].clone(),
+            requirements: self.definition_requirements(owner),
+            capabilities: self.capabilities.get(&owner).cloned().unwrap_or_default(),
+        }
+    }
+
     pub(super) fn check_source_function(
         &mut self,
         owner: OwnerId,

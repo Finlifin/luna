@@ -82,6 +82,18 @@ impl<'a> DeclarationWorld<'a> {
             .get(&declaration)
             .map(|slot| &self.package.runtime_function_identities[*slot])
     }
+    pub fn function_formation(
+        &self,
+        declaration: Id,
+    ) -> Option<nir::callable_source::Formation<'a>> {
+        self.runtime_function_identity(declaration)
+            .map(Into::into)
+            .or_else(|| {
+                self.function_declaration(declaration)
+                    .map(|f| (&f.interface).into())
+            })
+    }
+
     fn normal_head(&self, declaration: Id) -> Option<&'a nir::normal_forms::Head> {
         self.metadata
             .normal_heads
@@ -151,31 +163,17 @@ impl<'a> DeclarationWorld<'a> {
                 .map(Some)
                 .map_err(AdmissionError::from);
         }
-        let (parameters, signature, qualifiers) =
-            if let Some(identity) = self.runtime_function_identity(declaration) {
-                (&identity.type_parameters, &identity.signature, None)
-            } else if let Some(function) = self.function_declaration(declaration) {
-                (
-                    &function.type_parameters,
-                    &function.signature,
-                    Some((
-                        function.phase == n::FunctionPhase::Comptime,
-                        function.is_unsafe,
-                    )),
-                )
-            } else {
-                return Ok(None);
-            };
-        self.specialized_callable_signature(
-            declaration,
-            parameters,
-            signature,
-            qualifiers,
+        let Some(formation) = self.function_formation(declaration) else {
+            return Ok(None);
+        };
+        let signature = self.specialized_callable_signature(
+            formation.parameters,
+            formation.signature,
             arguments,
             frames,
             fuel,
-        )
-        .map(Some)
+        )?;
+        Ok(Some(formation.qualify(signature)))
     }
 
     pub fn callable_value_signature(
@@ -217,9 +215,6 @@ impl<'a> DeclarationWorld<'a> {
                 {
                     return Err("method identity has incompatible inputs or callable phase".into());
                 }
-                for term in method.terms() {
-                    nir::type_computations::charge_term(term, fuel)?;
-                }
                 *fuel = fuel
                     .checked_sub(
                         interface
@@ -231,15 +226,13 @@ impl<'a> DeclarationWorld<'a> {
                     .ok_or(AdmissionError::Budget)?;
                 let mut parameters = interface.parameters_with_self();
                 parameters.extend(&contract.type_parameters);
-                let inputs: Vec<_> = method.terms().cloned().collect();
+                let inputs: Vec<_> = method.terms().collect();
                 self.specialized_callable_signature(
-                    method.member,
                     &parameters,
                     contract
                         .signature
                         .ordinary()
                         .map_err(|e| AdmissionError::Invalid(e.to_string()))?,
-                    None,
                     &inputs,
                     frames,
                     fuel,
@@ -249,59 +242,36 @@ impl<'a> DeclarationWorld<'a> {
         }
     }
 
-    fn specialized_callable_signature(
+    fn specialized_callable_signature<T: std::borrow::Borrow<Term>>(
         &self,
-        declaration: Id,
         parameters: &[Id],
         signature: &Term,
-        qualifiers: Option<(bool, bool)>,
-        arguments: &[Term],
+        arguments: &[T],
         frames: &[Vec<nir::Sort>],
         fuel: &mut usize,
     ) -> Result<Term, AdmissionError> {
-        let domains = self.input_domains(parameters, fuel)?;
-        let descriptor = nir::normal_forms::Head {
-            declaration,
-            collector: None,
-            role: nir::normal_forms::Role::Opaque,
-            requirements: vec![],
-            parameters: parameters
-                .iter()
-                .zip(&domains)
-                .enumerate()
-                .map(|(index, (id, domain))| nir::normal_forms::Parameter {
-                    declaration: *id,
-                    binding: n::LocalId {
-                        owner: declaration.local,
-                        index: index as u32,
-                    },
-                    kind: if *domain == Term::Primitive(nir::Primitive::Type) {
-                        nir::normal_forms::Kind::Type
-                    } else {
-                        nir::normal_forms::Kind::Value
-                    },
-                    ty: domain.clone(),
-                })
-                .collect(),
-        };
+        construction::spend(fuel, parameters.len())?;
+        let domains: Vec<_> = parameters
+            .iter()
+            .map(|id| {
+                self.index()
+                    .parameter_domains()
+                    .get(id)
+                    .unwrap_or(&Term::Primitive(nir::Primitive::Type))
+            })
+            .collect();
         self.with_admission_queries(|queries| {
-            descriptor.check_arguments(arguments, frames, fuel, queries)
-        })
-        .map_err(|error| match error {
-            nir::normal_forms::ApplicationError::Budget { .. } => AdmissionError::Budget,
-            nir::normal_forms::ApplicationError::Unresolved { reason, .. } => {
-                AdmissionError::Unresolved(reason)
-            }
-            error => AdmissionError::Invalid(error.to_string()),
-        })?;
-        let signature =
-            nir::DeclarationSubstitution::bounded(parameters, &domains, arguments, frames, fuel)?
-                .instantiate_bounded(signature, fuel)?;
-        Ok(match qualifiers {
-            Some((comptime, is_unsafe)) => signature
-                .with_comptime_phase(comptime)
-                .with_unsafe_call_requirement(is_unsafe),
-            None => signature,
+            let admitted = nir::admit_declaration_inputs(
+                parameters,
+                &domains,
+                arguments,
+                nir::DeclarationInputScope::Caller(frames),
+                0,
+                fuel,
+                queries,
+            )
+            .map_err(|failure| failure.reason)?;
+            Ok(admitted.instantiate(signature, fuel)?)
         })
     }
 

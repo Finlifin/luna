@@ -1360,11 +1360,7 @@ fn elaborate_candidate<'a, 'h>(
         if let Some(signature) = checker.known_callable_signature(owner) {
             output
                 .runtime_function_identities
-                .push(n::RuntimeFunctionIdentity {
-                    declaration: declaration(package, package_identities, owner),
-                    type_parameters: checker.type_parameters[&owner].clone(),
-                    signature: checker.callable_type(owner, signature),
-                });
+                .push(checker.runtime_function_identity(owner, signature));
         }
     }
     output.function_parameters = checker.function_parameter_metadata();

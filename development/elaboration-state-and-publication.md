@@ -814,48 +814,26 @@ CodeSession 的包指针后复用旧准入。活动任务、receipt 和 VM cell 
 代码缓存或 Type 结果缓存。相同源码的两次 invocation 只共享稳定模板、接口与合法
 代码，不共享执行状态。NF 头始终不展开，实际 Type 响应也不改变它的身份规则。
 
-#### VM 声明消费者与主体查询分开
+#### 函数值的形成、调用与主体取得
 
-当前源码函数目录提供 `FunctionDeclarationView`：借用的 `FunctionDeclaration`
-和独立交付的诊断位置，不带函数主体、Closure 或执行环境；默认值和程序契约代码
-仍是声明接口的一部分。命名函数准入、普通／泛型
-调用入口、参数绑定、签名特化、trait 方法选择、默认代码的接口选择、值域检查及
-冻结函数值恢复都通过声明查询取得元数据；程序契约沿 `invocation_declaration`
-取得同一接口。消费者不再为访问接口字段而接收完整 Function。
+检查具名函数值需要其声明身份、子句参数、签名、阶段和类型形成条件。完整函数声明与
+只保留身份的 runtime 函数通过同一个借用视图提供这些字段。elaboration 在为
+required computation 或开放函数构造局部源码环境时，须一并投影声明的类型命题和
+trait 要求。否则接收方会把一个有条件的函数值当作无条件的函数值使用。
 
-命名函数的主体取得有独立 `body` 查询，仍发生在已存在的 Entry → Body 转换中；
-泛型主体特化也先读取声明，再在主体阶段单独取得代码。恢复 ClosureSnapshot 时
-仍需按原规则实际调用 factory，声明观察本身不会代替这次执行。闭包继续拥有其
-捕获环境和代码，本次没有把匿名闭包强改为命名声明。
+普通函数及 trait 成员的签名特化按声明参数建立输入依赖关系。某个值实参的域若依赖
+位置靠后的类型参数，先取得该参数的类型证据，仍按公开槽位绑定实参。检查后的同一组
+输入负责替换签名里的参数。这个过程适用于普通声明，NF 头保留自己的应用与身份规则。
 
-该视图保留原包借用期限，查询不复制接口或建立新的声明目录，也不授予阶段、
-形成条件或契约许可。Display 输出 `(source-declaration (source start end) ...)`
-及声明元数据，转义名称且不输出主体。名称／域／默认值仍来自原声明，未新增
-normal-form 展开规则或依赖缓存。
+VM 在形成具名 runtime 函数值和接收冻结值时，用当前声明环境检查实参、特化签名和
+已闭合的形成条件。IIR 在函数值作为类型实参出现时也需要这些证据。比如某声明要求
+`T :- Allowed`，保存声明身份和 `T = bool` 可以重建查询，接收方仍须建立
+`bool :- Allowed`。无法判定与已被拒绝是不同结果。
 
-**物理目录仍以完整 Package 为来源。** 当前适配器从完整 Function 借用 interface，
-从其 body 取得原诊断范围；尚不能注册缺少代码的源码模板。因此这是消费接口的
-拆分，不是懒检查服务，也不能证明两个待定 Type 正例已可执行。后续源码服务须
-直接提供声明位置及 owning snapshot，再以受控响应满足主体需求，不能把当前
-adapter 的成功当作部分包拥有完整 phase 凭证。完整包和代码缓存规则继续保留。
-
-本阶段验证目录 `/home/fin/luna`，统一使用 `development/check.py --timeout 900 --`：
-
-- `check -p comptime_interpretor`：退出 0，`/tmp/luna-tools-eofeqvab/result.json`。
-- `test -p comptime_interpretor --lib --test runtime_function_identities
-  --test instance_budget -p luna --test ordinary_callable_types --test default_calls
-  --test staged_callable_freezing --test library_protocols --test library_std_format
-  --no-fail-fast -- --test-threads=1`：退出 0，
-  `/tmp/luna-tools-7m994kvp/result.json`。其中原有的待定签名正例仍标记 ignored；
-  新声明视图测试检查借用来源、未知身份与稳定转义 dump，不声称验证缺少主体的目录。
-- 单独执行两个 ignored Type 正例，命令使用 `test -p luna
-  --test ordinary_callable_types --test ordinary_clause_collectors --no-fail-fast
-  -- --ignored --test-threads=1 pending_clause_domains_can_wait_for_a_type_producer
-  computed_type_inputs_can_complete_a_dependent_callable_signature`：退出 101，
-  `/tmp/luna-tools-9tua589f/result.json`。仍分别失败于 `159..181` 的待定 callable
-  签名和 `193..201` 的缺少列表元素域，与此前取证相同；没有更改预期或隐藏失败。
-- 修改的 Rust 文件格式检查退出 0，`/tmp/luna-tools-7exef8xd/result.json`。
-  没有执行全 workspace、native 或性能基准。
+调用还有独立的需求。默认值、前后置条件和诊断位置取自调用声明，进入函数体或特化
+泛型代码才需读取主体。runtime 函数身份可以穿过 comptime 并作为 IIR 类型中的数据，
+仅凭身份无法将函数列为可执行根。当前可执行源码仍由完整包或已有的已检查片段供应；
+在同一轮 elaboration 中按需向尚未完成的源码模板请求主体，仍属后续工作。
 
 #### 完整包检查凭证也是迁移边界
 

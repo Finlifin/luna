@@ -114,6 +114,8 @@ impl Checker<'_, '_> {
                         return Err(error(span, ERASED_PRECONDITIONS));
                     }
                     runtime_function_identities.push(n::RuntimeFunctionIdentity {
+                        requirements: function.requirements.clone(),
+                        capabilities: function.capabilities.clone(),
                         declaration: id,
                         type_parameters: function.interface.type_parameters.clone(),
                         signature: function
@@ -151,11 +153,7 @@ impl Checker<'_, '_> {
                 if preconditions && !has_staged_inputs(&signature) {
                     return Err(error(span, ERASED_PRECONDITIONS));
                 }
-                runtime_function_identities.push(n::RuntimeFunctionIdentity {
-                    declaration: id,
-                    type_parameters: self.type_parameters[&owner].clone(),
-                    signature: self.callable_type(owner, signature),
-                });
+                runtime_function_identities.push(self.runtime_function_identity(owner, signature));
                 continue;
             }
             if modifiers.is_some_and(|flags| flags.is_normal_form_head)

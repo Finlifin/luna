@@ -331,6 +331,8 @@ fn packages() -> Vec<(&'static str, n::Package)> {
     package
         .runtime_function_identities
         .push(n::RuntimeFunctionIdentity {
+            requirements: vec![],
+            capabilities: vec![],
             declaration: id(1),
             type_parameters: vec![],
             signature: Term::Tuple(vec![boolean(); 2048]),

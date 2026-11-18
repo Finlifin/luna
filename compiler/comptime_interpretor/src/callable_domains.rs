@@ -176,37 +176,19 @@ impl Interpreter<'_> {
                 .ok_or(AdmissionError::Budget)?;
             return Ok(Some(Cow::Owned(head.callable_type_in(fuel)?)));
         }
-        let (parameters, signature, qualifiers) =
-            if let Some(identity) = self.functions.runtime_identity(&declaration) {
-                (&identity.type_parameters, &identity.signature, None)
-            } else {
-                let Some(function) = self.functions.interface(&declaration) else {
-                    return Ok(None);
-                };
-                (
-                    &function.type_parameters,
-                    &function.signature,
-                    Some((
-                        function.phase == nir::program::FunctionPhase::Comptime,
-                        function.is_unsafe,
-                    )),
-                )
-            };
+        let Some(formation) = self.functions.formation(&declaration) else {
+            return Ok(None);
+        };
         let signature = self
             .admitted_function_inputs(
-                parameters,
+                formation.parameters,
                 arguments,
                 nir::DeclarationInputScope::Caller(frames),
                 fuel,
             )
             .map_err(input_failure)?
-            .instantiate(signature, fuel)?;
-        Ok(Some(Cow::Owned(match qualifiers {
-            Some((comptime, is_unsafe)) => signature
-                .with_comptime_phase(comptime)
-                .with_unsafe_call_requirement(is_unsafe),
-            None => signature,
-        })))
+            .instantiate(formation.signature, fuel)?;
+        Ok(Some(Cow::Owned(formation.qualify(signature))))
     }
 }
 

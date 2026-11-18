@@ -17,6 +17,8 @@ fn package() -> Package {
     let callable = signature(Term::Primitive(Primitive::Bool));
     Package {
         runtime_function_identities: vec![RuntimeFunctionIdentity {
+            requirements: vec![],
+            capabilities: vec![],
             declaration: id(2),
             type_parameters: vec![id(3)],
             signature: signature(Term::Rigid {
@@ -73,6 +75,75 @@ fn runtime_identity_is_typed_transport_without_a_body() {
     assert_eq!(
         vm.invoke(id(2), vec![]).unwrap_err().kind,
         ErrorKind::PhaseMismatch
+    );
+}
+
+#[test]
+fn receiving_world_rechecks_projected_function_obligations() {
+    use comptime_interpretor::ContractOutcome;
+    use nir::program::{TraitRequirement, TypePredicate};
+    use std::cell::Cell;
+
+    let mut package = package();
+    let parameter = Term::Rigid {
+        declaration: id(3),
+        sort: Sort::Type,
+    };
+    let boolean = Term::Primitive(Primitive::Bool);
+    let identity = &mut package.runtime_function_identities[0];
+    identity
+        .requirements
+        .push(TypePredicate::Equal(parameter.clone(), boolean.clone()));
+    identity.capabilities.push(TraitRequirement {
+        subject: parameter,
+        interface: id(9),
+        interface_arguments: vec![],
+    });
+    let answer = Cell::new(ContractOutcome::Satisfied);
+    let solver = |predicate: &TypePredicate, _: &mut u64| match predicate {
+        TypePredicate::Equal(left, right) => {
+            assert_eq!(right, &boolean);
+            Ok(if left == right {
+                ContractOutcome::Satisfied
+            } else {
+                ContractOutcome::Rejected
+            })
+        }
+        TypePredicate::Trait(requirement) => {
+            assert_eq!(requirement.subject, boolean);
+            assert_eq!(requirement.interface, id(9));
+            Ok(answer.get())
+        }
+        unexpected => panic!("unexpected formation obligation {unexpected}"),
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_budgeted_type_solver(&solver);
+    let value = vm.invoke(id(1), vec![]).unwrap();
+    for (outcome, expected) in [
+        (ContractOutcome::Unknown, ErrorKind::TypeContractUnresolved),
+        (ContractOutcome::Rejected, ErrorKind::TypeContractRejected),
+    ] {
+        answer.set(outcome);
+        assert_eq!(vm.invoke(id(1), vec![]).unwrap_err().kind, expected);
+        assert_eq!(
+            vm.validate_immutable_input(&value, &signature(boolean.clone()))
+                .unwrap_err()
+                .kind,
+            expected
+        );
+    }
+    answer.set(ContractOutcome::Satisfied);
+    vm.validate_immutable_input(&value, &signature(boolean.clone()))
+        .unwrap();
+    let byte = Term::Primitive(Primitive::U8);
+    let wrong = Value::FunctionInstance {
+        declaration: id(2),
+        arguments: vec![byte.clone()],
+    };
+    assert!(
+        vm.validate_immutable_input(&wrong, &signature(byte))
+            .is_err()
     );
 }
 

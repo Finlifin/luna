@@ -309,12 +309,9 @@ impl Checker<'_, '_> {
                     }
                     Some(ItemKind::Fn(sig, _)) if !sig.modifiers.is_normal_form_head => {
                         self.ensure_signature(owner, span)?;
+                        self.ensure_contract(owner, span)?;
                         if let Some(signature) = self.known_callable_signature(owner) {
-                            identities.push(n::RuntimeFunctionIdentity {
-                                declaration: id,
-                                signature: self.callable_type(owner, signature),
-                                type_parameters: self.type_parameters[&owner].clone(),
-                            });
+                            identities.push(self.runtime_function_identity(owner, signature));
                         }
                         continue;
                     }

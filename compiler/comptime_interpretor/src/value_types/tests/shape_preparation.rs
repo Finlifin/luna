@@ -150,6 +150,8 @@ fn callable_shape_preparation_preserves_budget_and_input_rejection() {
     };
     let package = Package {
         runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+            requirements: vec![],
+            capabilities: vec![],
             declaration: id(1),
             type_parameters: vec![id(2)],
             signature: Term::Function {

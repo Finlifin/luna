@@ -65,6 +65,8 @@ fn package(noise: u32) -> Package {
     Package {
         functions,
         runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+            requirements: vec![],
+            capabilities: vec![],
             declaration: id(2),
             type_parameters: vec![],
             signature: callable(boolean()),
@@ -140,6 +142,37 @@ fn evidence_lookup_work_does_not_scale_with_unrelated_declarations() {
                 .is_some()
         );
     }
+}
+
+#[test]
+fn ordinary_callable_inputs_wait_for_the_declared_domain_producer() {
+    let mut package = package(0);
+    let value = id(11);
+    let domain = id(10);
+    package.functions[0].type_parameters = vec![value, domain];
+    package
+        .function_parameters
+        .push(nir::function_parameters::Declaration {
+            declaration: id(1),
+            parameters: vec![value, domain],
+            domains: vec![
+                Term::Rigid {
+                    declaration: domain,
+                    sort: Sort::Type,
+                },
+                Term::Primitive(Primitive::Type),
+            ],
+        });
+    let (world, _) = DeclarationWorld::new(&package, Budget::default(), None).unwrap();
+    let query = |value| world.callable_signature(id(1), &[value, boolean()], &[], &mut 1000);
+    assert!(matches!(
+        query(Term::Char('x')),
+        Err(AdmissionError::Invalid(_))
+    ));
+    assert_eq!(
+        query(Term::Bool(true)).unwrap(),
+        Some(callable(boolean()).with_comptime_phase(true))
+    );
 }
 
 #[test]

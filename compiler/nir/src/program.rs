@@ -2127,11 +2127,10 @@ impl Package {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeFunctionIdentity {
-    /// The producer checks formation obligations for each use before invoking
-    /// the interpreter. Staged runtime templates may carry program contracts:
-    /// the identity is transport-only and calls recover the source declaration
-    /// and its contracts during specialization. Ordinary contracted callable
-    /// values must not be erased into this signature-only representation.
+    /// Type obligations for forming this identity in the receiving world.
+    /// Calling a staged template still requires its source program contracts.
+    pub requirements: Vec<TypePredicate>,
+    pub capabilities: Vec<TraitRequirement>,
     pub declaration: DeclarationId,
     pub type_parameters: Vec<DeclarationId>,
     pub signature: Term,
@@ -2146,7 +2145,15 @@ impl fmt::Display for RuntimeFunctionIdentity {
         for parameter in &self.type_parameters {
             write!(f, " {parameter}")?;
         }
-        write!(f, ") (signature {}))", self.signature)
+        write!(f, ") (signature {}) (requires", self.signature)?;
+        for requirement in &self.requirements {
+            write!(f, " {requirement}")?;
+        }
+        f.write_str(") (capabilities")?;
+        for capability in &self.capabilities {
+            write!(f, " {capability}")?;
+        }
+        f.write_str("))")
     }
 }
 
