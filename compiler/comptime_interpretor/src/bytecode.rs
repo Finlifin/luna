@@ -1836,8 +1836,11 @@ impl<'a> Interpreter<'a> {
                 }
                 Op::TypeDescription(slot) => {
                     let value = frame.slots[*slot].take().ok_or_else(missing)?;
-                    frame.slots[*slot] =
-                        Some(Value::Type(self.type_description_term(value, source)?));
+                    frame.slots[*slot] = Some(self.type_data(value, source)?);
+                }
+                Op::TypeIdentity(slot) => {
+                    let value = frame.slots[*slot].take().ok_or_else(missing)?;
+                    frame.slots[*slot] = Some(Value::Type(self.type_identity_term(value, source)?));
                 }
                 Op::TypeEqual {
                     destination,
@@ -2014,10 +2017,7 @@ impl<'a> Interpreter<'a> {
                         if matches!(subject, Value::AbstractValue { .. }) {
                             return Err(self.failure(ErrorKind::AbstractValueUnresolved, None));
                         }
-                        if matches!(
-                            subject,
-                            Value::TypeParameter(_) | Value::Type(Term::Rigid { .. })
-                        ) {
+                        if subject.lacks_pattern_shape() {
                             return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
                         }
                     }
@@ -2042,10 +2042,7 @@ impl<'a> Interpreter<'a> {
                         if frame.slots[*local].is_some() {
                             return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
                         }
-                        if matches!(
-                            value,
-                            Value::TypeParameter(_) | Value::Type(Term::Rigid { .. })
-                        ) {
+                        if value.lacks_pattern_shape() {
                             return Err(
                                 self.failure(ErrorKind::TypeContractUnresolved, Some(source))
                             );

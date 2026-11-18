@@ -1108,6 +1108,7 @@ impl Checker<'_, '_> {
                 }
                 result
             }
+            Value::Description(n::DescriptionLiteral::Any) => Ok(()),
             Value::TypeParameter(_)
             | Value::Type(_)
             | Value::Unit
@@ -3651,6 +3652,12 @@ impl Checker<'_, '_> {
             Value::Type(value) => {
                 self.charge_constant_type_copy(value, span)?;
                 K::TypeValue(value.clone())
+            }
+            Value::Description(description) => {
+                if ty != p(P::Type) {
+                    return Err(error(span, "type description requires the Type domain"));
+                }
+                K::Literal(n::Literal::Description(*description))
             }
             Value::Unit => K::Unit,
             scalar @ (Value::Bool(_)

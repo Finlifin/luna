@@ -53,6 +53,7 @@ pub(in crate::program) fn literal(
 ) -> Result<Term, Failure> {
     use n::Literal as L;
     Ok(match literal {
+        L::Description(_) => return Err(Failure::Unavailable),
         L::Bool(value) => Term::Bool(*value),
         L::Char(value) => Term::Char(*value),
         L::Float32(value) => Term::Float32(*value),

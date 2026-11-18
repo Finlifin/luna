@@ -3,6 +3,7 @@
 
 pub typealias bool = .bool'builtin;
 pub typealias Type = .Type'builtin;
+pub const Any: Type = .Any'builtin;
 pub typealias Integer = .Integer'builtin;
 pub typealias Float = .Float'builtin;
 pub typealias BitVec<n: Integer> = .BitVec'builtin<n>;

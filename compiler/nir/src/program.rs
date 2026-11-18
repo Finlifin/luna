@@ -158,8 +158,21 @@ impl fmt::Display for ExpansionSource {
         )
     }
 }
+/// A closed description leaf is data of domain Type. It has no identity Term.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DescriptionLiteral {
+    Any,
+}
+impl fmt::Display for DescriptionLiteral {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Any => f.write_str("(type-value (description any))"),
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Literal {
+    Description(DescriptionLiteral),
     PendingInteger {
         spelling: String,
         negative: bool,
@@ -210,6 +223,7 @@ impl Literal {
         };
         match self {
             Self::PendingFloat { .. } | Self::PendingInteger { .. } => false,
+            Self::Description(_) => *domain == P::Type,
             Self::Bool(_) => *domain == P::Bool,
             Self::Char(_) => *domain == P::Char,
             Self::String(_) => *domain == P::Str,
@@ -2753,6 +2767,7 @@ impl fmt::Display for SourceRange {
 impl fmt::Display for Literal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Description(description) => description.fmt(f),
             Self::BitVec { width, words } => {
                 write!(f, "(bitvec (width {width}) (words")?;
                 for word in words {

@@ -74,7 +74,7 @@ impl Interpreter<'_> {
                 self.integer_operation(Some(source), |budget| budget.consume(values.len()))?;
                 values
                     .into_iter()
-                    .map(|value| self.type_description_term(value, source))
+                    .map(|value| self.type_identity_term(value, source))
                     .collect()
             }
             _ => Err(self.failure(ErrorKind::Type, Some(source))),
@@ -108,7 +108,7 @@ impl Interpreter<'_> {
             let value = value!(self.eval(field, environment));
             values.push(
                 if !diverging && element == Some(Term::Primitive(Primitive::Type)) {
-                    Value::Type(self.type_description_term(value, field.source)?)
+                    self.type_data(value, field.source)?
                 } else {
                     value
                 },

@@ -3361,6 +3361,19 @@ impl Checker<'_, '_> {
             _ => false,
         }
     }
+    fn require_type_identity(
+        value: comptime_interpretor::Value,
+        span: Span,
+    ) -> Result<Term, Error> {
+        match value {
+            comptime_interpretor::Value::Type(ty) => Ok(ty),
+            comptime_interpretor::Value::Description(_) => Err(error(
+                span,
+                "this use requires a type identity; the completed Type value is a gradual description",
+            )),
+            _ => Err(error(span, "expected a completed Type value")),
+        }
+    }
     fn type_expr(&mut self, expr: &Expr<'_>) -> Result<Term, Error> {
         if let H::DeliveredType(ty) = &expr.kind {
             return self.delivered_type(expr.hir_id, ty, expr.span);
@@ -3394,13 +3407,10 @@ impl Checker<'_, '_> {
             return Ok(ty);
         }
         if self.projected_constant_owner(expr)?.is_some() {
-            return match self.required_expression(expr, Some(&p(P::Type)))? {
-                comptime_interpretor::Value::Type(ty) => Ok(ty),
-                _ => Err(error(
-                    expr.span,
-                    "constant used as a type does not contain a Type value",
-                )),
-            };
+            return Self::require_type_identity(
+                self.required_expression(expr, Some(&p(P::Type)))?,
+                expr.span,
+            );
         }
         if let H::RefinementSubject = &expr.kind {
             return self
@@ -3654,13 +3664,10 @@ impl Checker<'_, '_> {
                     return self.type_expr(&application);
                 }
                 let H::ResolvedDef { def_id, .. } = head.kind else {
-                    return match self.required_value(expr, P::Type)? {
-                        comptime_interpretor::Value::Type(ty) => Ok(ty),
-                        _ => Err(error(
-                            expr.span,
-                            "type application did not produce a completed Type",
-                        )),
-                    };
+                    return Self::require_type_identity(
+                        self.required_value(expr, P::Type)?,
+                        expr.span,
+                    );
                 };
                 let owner = self
                     .package
@@ -4009,13 +4016,10 @@ impl Checker<'_, '_> {
                     let value = self.constant_value(owner, expr.span)?;
                     return match value.kind {
                         K::TypeValue(ty) => Ok(ty),
-                        _ => match self.required_normal_input(expr, value, Vec::new())?.0 {
-                            comptime_interpretor::Value::Type(ty) => Ok(ty),
-                            _ => Err(error(
-                                expr.span,
-                                "constant used as a type does not contain a Type value",
-                            )),
-                        },
+                        _ => Self::require_type_identity(
+                            self.required_normal_input(expr, value, Vec::new())?.0,
+                            expr.span,
+                        ),
                     };
                 }
                 if let Some(ItemKind::TypeAlias(value, ..)) =

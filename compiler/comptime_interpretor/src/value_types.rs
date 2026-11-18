@@ -585,6 +585,7 @@ impl Interpreter<'_> {
                             }
                         })
             }
+            (Value::Description(_), Term::Primitive(Primitive::Type)) => self.comptime_only,
             (Value::TypeParameter(id), Term::Primitive(Primitive::Type)) => {
                 self.abstract_type_parameters.contains(id)
             }

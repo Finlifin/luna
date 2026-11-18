@@ -175,6 +175,7 @@ fn charge_clone(value: &Value, fuel: &mut u64, depth: usize) -> Result<(), Error
         | Value::Closure(_)
         | Value::String(_)
         | Value::Symbol(_)
+        | Value::Description(_)
         | Value::TypeParameter(_)
         | Value::Float16(_)
         | Value::BFloat16(_)

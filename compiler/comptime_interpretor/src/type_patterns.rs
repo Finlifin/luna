@@ -71,10 +71,7 @@ impl<'a> Interpreter<'a> {
         if matches!(input, Value::AbstractValue { .. }) {
             return Err(self.failure(ErrorKind::AbstractValueUnresolved, None));
         }
-        if matches!(
-            input,
-            Value::TypeParameter(_) | Value::Type(Term::Rigid { .. })
-        ) {
+        if input.lacks_pattern_shape() {
             return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
         }
         let binders = match shape {

@@ -103,7 +103,7 @@ impl Interpreter<'_> {
         value: Value,
         source: SourceRange,
     ) -> Result<Term, Error> {
-        let ty = self.type_description_term(value, source)?;
+        let ty = self.type_identity_term(value, source)?;
         let valid = match kind {
             Kind::Result if index == 0 => matches!(ty.callable_signature(), Term::Function { .. }),
             Kind::Closure if count > 1 && index + 1 == count => matches!(

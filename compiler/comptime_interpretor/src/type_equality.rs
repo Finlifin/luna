@@ -66,9 +66,9 @@ impl Interpreter<'_> {
         };
         self.prepare_type_equal(&expr.ty, &left.ty, &right.ty, expr.source)?;
         let left = value!(self.eval(left, environment));
-        let left = self.type_description_term(left, expr.source)?;
+        let left = self.type_identity_term(left, expr.source)?;
         let right = value!(self.eval(right, environment));
-        let right = self.type_description_term(right, expr.source)?;
+        let right = self.type_identity_term(right, expr.source)?;
         self.complete_type_equal(left, right, expr.source)
             .map(Flow::Value)
     }

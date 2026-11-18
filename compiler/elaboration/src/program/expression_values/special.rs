@@ -800,6 +800,17 @@ impl Checker<'_, '_> {
                 "a parenthesized tuple is a value, not a type; use Tuple<...> to construct a tuple type",
             ));
         }
+        if matches!(&expr.kind, H::Builtin(symbol) if symbol.as_str() == "Any") {
+            let ty = p(P::Type);
+            if let Some(expected) = expected {
+                self.require_expression(&ty, expected, expr.span)?;
+            }
+            return Ok(Some(n::Expr {
+                source: source(expr.span),
+                ty,
+                kind: K::Literal(n::Literal::Description(n::DescriptionLiteral::Any)),
+            }));
+        }
         let type_value = self.is_type_head(expr)
             || matches!(
                 expr.kind,

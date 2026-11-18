@@ -386,7 +386,7 @@ fn type_comparison_validates_each_operand_before_the_next() {
         .filter_map(|instruction| match instruction.op {
             Op::PrepareTypeEqual { .. } => Some("prepare"),
             Op::Constant { .. } => Some("operand"),
-            Op::TypeDescription(_) => Some("description"),
+            Op::TypeIdentity(_) => Some("identity"),
             Op::TypeEqual { .. } => Some("compare"),
             _ => None,
         })
@@ -394,12 +394,7 @@ fn type_comparison_validates_each_operand_before_the_next() {
     assert_eq!(
         operations,
         [
-            "prepare",
-            "operand",
-            "description",
-            "operand",
-            "description",
-            "compare"
+            "prepare", "operand", "identity", "operand", "identity", "compare"
         ]
     );
     let dump = code.to_string();

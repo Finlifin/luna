@@ -176,8 +176,10 @@ pub enum Value {
     Storage(Storage),
     /// Invocation-only comptime alias, including a checked structural field path.
     ComptimeReference(ValueReference),
-    /// Type description; abstract constituents require an authorized comptime scope.
+    /// Concrete or scoped type identity.
     Type(Term),
+    /// Completed gradual Type data without a concrete type identity.
+    Description(nir::program::DescriptionLiteral),
     /// Opaque declaration Type input, admitted only by a comptime scope.
     TypeParameter(DeclarationId),
     /// Invocation-scoped opaque data, never a completed runtime value.
@@ -253,6 +255,15 @@ impl fmt::Display for ObjectValue {
 }
 pub use nir::TraitMethodIdentity;
 impl Value {
+    /// An ordinary binding can carry this Type, but a structural pattern
+    /// cannot select a branch from its representation.
+    fn lacks_pattern_shape(&self) -> bool {
+        matches!(
+            self,
+            Self::Description(_) | Self::TypeParameter(_) | Self::Type(Term::Rigid { .. })
+        )
+    }
+
     /// Named identity carried by data or a retained concrete callable. This
     /// observation grants no phase, formation or executable-body authority.
     fn declaration_instance(&self) -> Option<(DeclarationId, &[Term])> {
@@ -2361,18 +2372,25 @@ impl<'a> Interpreter<'a> {
             )
         }
     }
-    fn type_description_term(&self, value: Value, source: SourceRange) -> Result<Term, Error> {
+    fn type_data(&self, value: Value, source: SourceRange) -> Result<Value, Error> {
         match value {
-            Value::Type(ty) => Ok(ty),
+            Value::Type(_) => Ok(value),
+            Value::Description(_) if self.comptime_only => Ok(value),
             Value::TypeParameter(declaration)
                 if self.abstract_type_parameters.contains(&declaration) =>
             {
-                Ok(Term::Rigid {
+                Ok(Value::Type(Term::Rigid {
                     declaration,
                     sort: nir::Sort::Type,
-                })
+                }))
             }
             _ => Err(self.failure(ErrorKind::Type, Some(source))),
+        }
+    }
+    fn type_identity_term(&self, value: Value, source: SourceRange) -> Result<Term, Error> {
+        match self.type_data(value, source)? {
+            Value::Type(ty) => Ok(ty),
+            _ => Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source))),
         }
     }
     pub fn events(&self) -> &[Event] {
@@ -3443,7 +3461,7 @@ impl<'a> Interpreter<'a> {
         } else {
             // Normalize authorized opaque Type inputs before later operands run.
             let value = if self.list_element(ty) == Some(&Term::Primitive(Primitive::Type)) {
-                Value::Type(self.type_description_term(value, source)?)
+                self.type_data(value, source)?
             } else {
                 value
             };
@@ -3814,6 +3832,12 @@ impl<'a> Interpreter<'a> {
             Literal::UnsignedInteger(v) => {
                 let value = Value::UnsignedInteger(*v);
                 value
+            }
+            Literal::Description(description) => {
+                if !self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+                }
+                Value::Description(*description)
             }
             Literal::Bool(v) => Value::Bool(*v),
             Literal::Char(v) => Value::Char(*v),
@@ -5312,6 +5336,7 @@ impl fmt::Display for Value {
             Self::Storage(_) => f.write_str("(internal-storage)"),
             Self::ComptimeReference(reference) => reference.fmt(f),
             Self::Type(ty) => write!(f, "(type-value {ty})"),
+            Self::Description(description) => description.fmt(f),
             Self::TypeParameter(id) => write!(f, "(abstract-type-input {id})"),
             Self::AbstractValue { declaration, ty } => {
                 write!(f, "(abstract-value-input {declaration} (domain {ty}))")
@@ -5478,9 +5503,7 @@ impl Interpreter<'_> {
         {
             return Err(self.failure(ErrorKind::AbstractValueUnresolved, None));
         }
-        let abstract_input = matches!(input, Value::TypeParameter(_))
-            || matches!(input, Value::Type(Term::Rigid { .. }));
-        if abstract_input
+        if input.lacks_pattern_shape()
             && !matches!(
                 pattern,
                 Pattern::Wild
@@ -5545,6 +5568,9 @@ impl Interpreter<'_> {
     #[inline(never)]
     fn match_literal_value(&mut self, literal: &Literal, input: &Value) -> Result<bool, Error> {
         let matched = match literal {
+            Literal::Description(_) => {
+                return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
+            }
             Literal::PendingInteger { .. } | Literal::PendingFloat { .. } => {
                 return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
             }

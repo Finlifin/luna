@@ -1,7 +1,7 @@
 # 可计算类型描述与调用准入
 
 状态：重构设计；初始源码核对基线 `e1c57dc9`，第 9 节按 `627ab804` 复核值载体
-和输入绑定。这里不声明新语言规则，也不声称 Any 已进入 VM。目标是支撑作者指定的
+和输入绑定。显式 Any 的源码和 VM 传递现状见第 1 节。目标是支撑作者指定的
 `fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format))`，
 同时适用于用户类型工厂、别名、容器和普通函数。正式 docs 保持不动。
 
@@ -21,17 +21,38 @@ Any 与 bool、u8 分别相容，不产生 bool == u8，也不产生二者间的
 | --- | --- | --- |
 | `open_functions::observations::TypeObservation::{Known, Unknown}` | 定义侧的有限域观察；待定注解观察为 Unknown | 不持有生产状态，也不是已经求值的 Type 数据 |
 | `open_functions::Annotation` | 已知域、待执行计算、前置 Type 输入、待恢复源码 | 没有已完成但仍含 Any/refinement 的参数描述状态 |
-| `Value::Type(Term)` / `TypeParameter` | 完整或受作用域授权的抽象类型身份 | 不能保存未知描述节点、复合描述与待准入要求 |
+| `Value::Type`、`TypeParameter`、`Description` | 传递完整或受作用域授权的身份，以及显式 Any 描述叶 | 复合描述、带 binder 的要求、NF 参数传送尚待接通 |
 | `PreparedRequired::invoke_in_world` / `restore_required_packet` | Type 与其他结果共用普通 VM 调用及调用方 scope 恢复，不分配临时推断输出 | Type 载荷仍为身份 Term；尚不能传送完整描述或恢复未完成源码区域 |
 | `type_expr` 的 `RefinedType` | 取得 base，证明要求，返回 base | 不能先保留针对未知描述的要求，再于实例准入时检查 |
 | `comptime_values::encode_admitted_list` | 已准入列表的普通稳定编码 | 元素仍为 Term，描述数据不能靠 Type 列表专用旁路接入 |
 | `normal_types`、值准入与 nominal formation | 按接收世界检查身份和普通实参 | 描述应用不能直接借旧身份/布局接口伪造完成 |
-| `hir::ExprKind::TyAny` | 一个现存 HIR 枚举项 | 源绑定、alias、检查和执行没有因枚举存在而接通 |
+| `builtin.Any` | 集中绑定的 Type 常量；可通过 prelude 或重命名导入 | 用于具体类型注解时仍需实例准入 |
 
-[最小复现](repros/refined-any-type-producer.fl)目前在名字解析失败。不能据此判定
-只缺一个 builtin 名称；即使补名称，返回、容器、构造应用和调用准入仍各有断点。
-`488303ff` 的准备阶段修复、`e1c57dc9` 的 scanner 和现有 println_value 都不能
-证明完整格式化接口完成。
+### 源码中的显式 Any
+
+```flurry
+use builtin.Any as Field;
+const Fields: meta.List<Type> = [Field, u8];
+
+struct Slot { domain: Type }
+comptime fn Forward(value: Type) -> Type { value }
+comptime fn First() -> Type {
+    let slot = Slot { domain: Forward(Fields[0]) };
+    slot.domain
+}
+```
+
+`First()` 返回 `(type-value (description any))`。源码使用普通名字解析。常量重建、
+两套 VM 的函数入参与返回、列表取值以及结构体字段都保留 Type 数据。需要类型
+相等判定、布局或结构观察的使用点另行要求身份。描述中的 Any 不会为 PTC 引入等式。
+上述行为及失败后同一 VM 的后续调用见
+[源码回归](../compiler/luna/tests/gradual_type_data.rs)。
+
+[带 Display 的最小复现](repros/refined-any-type-producer.fl)现在可以解析 Any。
+检查 `refines { Itself :- Display } Any` 时，现有 refinement 入口仍尝试取得
+base 的具体身份。下一步需要保留受当前 subject binder 约束的谓词，在调用方取得实际类型
+时分别检查。普通 VM 数据传送尚不能把含描述的参数发布为 NF 应用或 Term metadata。
+`std.fmt.Parse` 和格式化变参输出仍待接通。
 
 ### 已接通的函数类型值传送
 

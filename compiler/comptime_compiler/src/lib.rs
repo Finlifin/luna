@@ -311,6 +311,7 @@ pub enum Op {
         inputs: [Arc<Term>; 2],
     },
     TypeDescription(Register),
+    TypeIdentity(Register),
     TypeEqual {
         destination: Register,
         left: Register,
@@ -960,6 +961,7 @@ impl fmt::Display for Program {
                     "(prepare-type-equal (type {ty}) (left {}) (right {}))",
                     inputs[0], inputs[1]
                 )?,
+                Op::TypeIdentity(value) => write!(f, "(type-identity %{value})")?,
                 Op::TypeDescription(value) => write!(f, "(type-description %{value})")?,
                 Op::TypeEqual {
                     destination,
@@ -2463,9 +2465,9 @@ fn compile_root<'a>(
                                 right: right_slot,
                             },
                         );
-                        emit(&mut work, Op::TypeDescription(right_slot));
+                        emit(&mut work, Op::TypeIdentity(right_slot));
                         work.push(Work::Expression(right, right_slot));
-                        emit(&mut work, Op::TypeDescription(left_slot));
+                        emit(&mut work, Op::TypeIdentity(left_slot));
                         work.push(Work::Expression(left, left_slot));
                         emit(
                             &mut work,
