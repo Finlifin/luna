@@ -9,28 +9,15 @@ pub(super) struct SourceClosure {
 }
 
 impl Checker<'_, '_> {
-    pub(super) fn required_source_closure<'v>(
+    pub(super) fn required_source_closure(
         &mut self,
-        root: &n::Expr,
-        frozen: impl Iterator<Item = &'v Term>,
-        live: impl Iterator<Item = &'v Value>,
+        roots: BTreeSet<Dependency>,
         span: Span,
     ) -> Result<SourceClosure, Error> {
         let mut functions = Vec::new();
         let mut runtime_function_identities = Vec::new();
         let mut work = dependencies::Worklist::default();
-        let roots = references(root, &mut self.required_steps)
-            .map_err(|failure| error(span, failure.to_string()))?;
         work.extend(roots, &mut self.required_steps, span)?;
-        work.extend(
-            frozen_references(frozen, &mut self.required_steps, span)?,
-            &mut self.required_steps,
-            span,
-        )?;
-        for value in live {
-            let found = dependencies::live_references(value, &mut self.required_steps, span)?;
-            work.extend(found, &mut self.required_steps, span)?;
-        }
         while let Some(need) = work.next() {
             let id = match need {
                 Dependency::Associated(member) => {

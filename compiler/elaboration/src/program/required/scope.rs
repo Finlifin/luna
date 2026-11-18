@@ -6,6 +6,7 @@ pub(super) fn retain_abstract_values(
     authority: &mut Vec<(DeclarationId, Term)>,
     entry: &n::Function,
     inputs: &[(n::LocalId, Term, Option<Term>)],
+    live: &BTreeSet<DeclarationId>,
     steps: &mut u64,
     span: Span,
 ) -> Result<(), Error> {
@@ -27,7 +28,7 @@ pub(super) fn retain_abstract_values(
         .checked_sub(authority.len() as u64)
         .ok_or_else(|| error(span, "required value scope selection budget exhausted"))?;
     // Commit selection only after every carrier has been observed successfully.
-    authority.retain(|(id, _)| used.contains(id));
+    authority.retain(|(id, _)| used.contains(id) || live.contains(id));
     Ok(())
 }
 
@@ -90,8 +91,15 @@ mod tests {
             Term::Tuple(vec![p(P::Bool), p(P::Bool)]),
             Some(Term::TupleValue(vec![value(3), value(99)])),
         )];
-        retain_abstract_values(&mut authority, &entry, &inputs, &mut 1000, Span::default())
-            .unwrap();
+        retain_abstract_values(
+            &mut authority,
+            &entry,
+            &inputs,
+            &BTreeSet::new(),
+            &mut 1000,
+            Span::default(),
+        )
+        .unwrap();
         assert_eq!(authority, vec![(id(2), p(P::Bool)), (id(3), p(P::Bool))]);
         // The residual constant itself has no local capture, yet still needs
         // its known lexical binder to cross the VM admission boundary.
@@ -113,6 +121,48 @@ mod tests {
     }
 
     #[test]
+    fn live_carriers_select_existing_value_binders_without_granting_new_ones() {
+        let rigid = |n| Term::Rigid {
+            declaration: id(n),
+            sort: Sort::Type,
+        };
+        let packet = Value::Record {
+            declaration: id(50),
+            arguments: vec![rigid(51)],
+            fields: vec![
+                Value::FunctionInstance {
+                    declaration: id(52),
+                    arguments: vec![rigid(53), value(4)],
+                },
+                Value::AbstractValue {
+                    declaration: id(99),
+                    ty: p(P::Bool),
+                },
+            ],
+        };
+        let mut observed = dependencies::ObservedInputs::default();
+        observed.live(&packet, &mut 1000, Span::default()).unwrap();
+        assert_eq!(observed.types, BTreeSet::from([id(51), id(53)]));
+        assert_eq!(observed.values, BTreeSet::from([id(4), id(99)]));
+        assert_eq!(
+            observed.code,
+            BTreeSet::from([Dependency::Callable(id(52))])
+        );
+
+        let mut authority = vec![(id(3), p(P::Bool)), (id(4), p(P::Bool))];
+        retain_abstract_values(
+            &mut authority,
+            &entry(),
+            &[],
+            &observed.values,
+            &mut 1000,
+            Span::default(),
+        )
+        .unwrap();
+        assert_eq!(authority, [(id(4), p(P::Bool))]);
+    }
+
+    #[test]
     fn failed_scope_selection_keeps_authority_and_can_retry() {
         let entry = entry();
         let original = vec![(id(2), p(P::Bool)), (id(4), p(P::Bool))];
@@ -124,8 +174,15 @@ mod tests {
         )];
         let mut steps = 1000;
         assert!(
-            retain_abstract_values(&mut authority, &entry, &inputs, &mut steps, Span::default())
-                .is_err()
+            retain_abstract_values(
+                &mut authority,
+                &entry,
+                &inputs,
+                &BTreeSet::new(),
+                &mut steps,
+                Span::default()
+            )
+            .is_err()
         );
         assert!(steps < 1000);
         assert_eq!(authority, original);
@@ -133,6 +190,7 @@ mod tests {
             &mut authority,
             &entry,
             &inputs,
+            &BTreeSet::new(),
             &mut 100_000,
             Span::default(),
         )

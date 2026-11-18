@@ -195,38 +195,95 @@ fn collect_values<'a>(
     Ok(())
 }
 
-// The traversal includes guards and pattern computations; a function hidden in
-// one of those positions must not escape phase/dependency checks.
-pub(super) fn live_references(
-    value: &Value,
-    steps: &mut u64,
-    span: Span,
-) -> Result<BTreeSet<Dependency>, Error> {
-    let mut found = BTreeSet::new();
-    value
-        .visit_owned_graph(steps, &mut |value, fuel| {
+/// Observations from the selected packet. A carried value binder can select
+/// existing lexical authority; its ID alone never supplies a domain proof.
+#[derive(Default)]
+pub(super) struct ObservedInputs {
+    pub(super) code: BTreeSet<Dependency>,
+    pub(super) types: BTreeSet<DeclarationId>,
+    pub(super) values: BTreeSet<DeclarationId>,
+}
+
+impl ObservedInputs {
+    fn term(&mut self, ty: &Term, fuel: &mut u64) -> Result<(), comptime_interpretor::ErrorKind> {
+        use comptime_interpretor::ErrorKind;
+        use nir::copy_budget::{CopyBudgetExhausted as Limit, InputObservationError};
+        let inputs = nir::copy_budget::term_inputs(ty, fuel).map_err(|failure| match failure {
+            InputObservationError::Limit(Limit::Steps) => ErrorKind::StepsExhausted,
+            InputObservationError::Limit(Limit::Depth) => ErrorKind::DepthExhausted,
+            InputObservationError::Scope(_) => ErrorKind::Type,
+        })?;
+        for (id, sort) in inputs.declarations {
+            match sort {
+                Sort::Type => {
+                    self.types.insert(id);
+                }
+                Sort::ComptimeValue => {
+                    self.values.insert(id);
+                }
+                Sort::Runtime => {}
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn live(&mut self, root: &Value, steps: &mut u64, span: Span) -> Result<(), Error> {
+        root.visit_owned_graph(steps, &mut |value, fuel| {
             match value {
+                Value::TypeParameter(id) => {
+                    self.types.insert(*id);
+                }
+                Value::AbstractValue { declaration, ty } => {
+                    self.values.insert(*declaration);
+                    self.term(ty, fuel)?;
+                }
                 Value::Function(id) => {
-                    found.insert(Dependency::Callable(*id));
+                    self.code.insert(Dependency::Callable(*id));
                 }
                 Value::FunctionInstance {
                     declaration,
                     arguments,
                 } => {
-                    found.insert(Dependency::Callable(*declaration));
-                    collect_frozen(arguments, &mut found, fuel).map_err(visit_failure)?;
+                    self.code.insert(Dependency::Callable(*declaration));
+                    collect_frozen(arguments, &mut self.code, fuel).map_err(visit_failure)?;
+                    for term in arguments {
+                        self.term(term, fuel)?;
+                    }
                 }
                 Value::RuntimeTraitMethod(method) => {
-                    found.insert(Dependency::Method(method.member));
-                    collect_frozen(method.terms(), &mut found, fuel).map_err(visit_failure)?;
+                    self.code.insert(Dependency::Method(method.member));
+                    collect_frozen(method.terms(), &mut self.code, fuel).map_err(visit_failure)?;
+                    for term in method.terms() {
+                        self.term(term, fuel)?;
+                    }
                 }
                 Value::Closure(closure) => {
+                    self.term(closure.ty(), fuel)?;
                     if let Some((declaration, arguments)) = closure.declaration_instance() {
-                        found.insert(Dependency::Callable(declaration));
-                        collect_frozen(arguments, &mut found, fuel).map_err(visit_failure)?;
+                        self.code.insert(Dependency::Callable(declaration));
+                        collect_frozen(arguments, &mut self.code, fuel).map_err(visit_failure)?;
+                        for term in arguments {
+                            self.term(term, fuel)?;
+                        }
                     }
-                    found.extend(references(closure.body(), fuel).map_err(visit_failure)?);
+                    self.code
+                        .extend(references(closure.body(), fuel).map_err(visit_failure)?);
                 }
+                Value::Record { arguments, .. } | Value::Variant { arguments, .. } => {
+                    for term in arguments {
+                        self.term(term, fuel)?;
+                    }
+                }
+                Value::Object(object) => {
+                    for entry in object.entries() {
+                        self.term(&entry.value().ty, fuel)?;
+                    }
+                }
+                Value::Type(ty)
+                | Value::List { ty, .. }
+                | Value::Newtype { ty, .. }
+                | Value::Optional { ty, .. }
+                | Value::ErrorResult { ty, .. } => self.term(ty, fuel)?,
                 _ => {}
             }
             Ok(())
@@ -234,10 +291,10 @@ pub(super) fn live_references(
         .map_err(|failure| {
             error(
                 span,
-                format!("required comptime graph dependency inspection failed: {failure:?}"),
+                format!("required comptime graph inspection failed: {failure:?}"),
             )
-        })?;
-    Ok(found)
+        })
+    }
 }
 
 fn visit_failure(error: nir::visit::Error) -> comptime_interpretor::ErrorKind {
@@ -377,10 +434,9 @@ mod tests {
             frozen_references([&frozen], &mut 100, Span::default()).unwrap(),
             expected
         );
-        assert_eq!(
-            live_references(&live, &mut 100, Span::default()).unwrap(),
-            expected
-        );
+        let mut observation = ObservedInputs::default();
+        observation.live(&live, &mut 100, Span::default()).unwrap();
+        assert_eq!(observation.code, expected);
     }
 
     #[test]

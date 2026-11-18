@@ -4,6 +4,7 @@
 use super::*;
 use comptime_interpretor::{Budget, Interpreter, Value};
 use std::collections::VecDeque;
+mod capture;
 mod dependencies;
 pub(super) mod inputs;
 pub(super) mod prepared;
@@ -962,6 +963,7 @@ impl Checker<'_, '_> {
                     &mut self.required_steps,
                     expr.span,
                 )?;
+                supplied.insert(binding);
                 inputs.push((binding, domain, value));
             }
             let mut root = build(self).map_err(|mut e| {
@@ -1014,15 +1016,15 @@ impl Checker<'_, '_> {
             let result_type = root.ty.clone();
             // The root is structurally stable after initializer substitution.
             // Later Type-slot rebinding changes Bound terms to rigid identities,
-            // not lexical LocalIds. Capture selection and dependency discovery
-            // share this one scoped observation, never a cross-root cache.
+            // not lexical LocalIds. These reads locate outer bindings. The entry
+            // telescope below additionally closes over their dependent domains.
             let mut capture_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
             let before = capture_fuel;
             let free = nir::free_bindings::collect(&root, &mut capture_fuel);
             self.required_steps -= (before - capture_fuel) as u64;
             let free = free.map_err(|message| error(expr.span, message))?;
             for input in &self.input_facts.specialized {
-                if !inputs.iter().any(|(id, _, _)| *id == input.0) {
+                if supplied.insert(input.0) {
                     inputs.push(input.clone());
                 }
             }
@@ -1035,14 +1037,13 @@ impl Checker<'_, '_> {
                     max_limbs: 4096,
                 };
                 for binding in free.iter().copied() {
-                    if inputs.iter().any(|(id, _, _)| *id == binding)
-                        || live.iter().any(|(id, _, _)| *id == binding)
-                    {
+                    if supplied.contains(&binding) {
                         continue;
                     }
                     if let Some((domain, value)) =
                         self.observed_generator_input(binding, &mut budget)
                     {
+                        supplied.insert(binding);
                         inputs.push((binding, domain, value));
                     }
                 }
@@ -1053,8 +1054,7 @@ impl Checker<'_, '_> {
             // evaluate a producer to fill a missing capture.
             if !self.input_facts.supplied.is_empty() {
                 for binding in free.iter().copied() {
-                    if inputs.iter().any(|(id, _, _)| *id == binding)
-                        || live.iter().any(|(id, _, _)| *id == binding)
+                    if supplied.contains(&binding)
                         || !self.locals.contains_key(&binding)
                         || !self.immutable.contains(&binding)
                     {
@@ -1067,6 +1067,7 @@ impl Checker<'_, '_> {
                     )? {
                         let domain = inputs::copy(domain, &mut self.required_steps, expr.span)?;
                         let value = inputs::copy(value, &mut self.required_steps, expr.span)?;
+                        supplied.insert(binding);
                         inputs.push((binding, domain, value));
                     }
                 }
@@ -1136,7 +1137,7 @@ impl Checker<'_, '_> {
                         });
                         scoped_arguments.push(symbol.clone());
                     }
-                    if free.contains(binding) && !inputs.iter().any(|(id, _, _)| id == binding) {
+                    if free.contains(binding) && supplied.insert(*binding) {
                         inputs.push((*binding, p(P::Type), mapping[*index].clone()));
                     }
                 }
@@ -1160,21 +1161,17 @@ impl Checker<'_, '_> {
                     }
                 }
             }
+            let capture = self.capture_required_entry(root, inputs, live, expr.span)?;
+            let observed = capture.observe(&mut self.required_steps, expr.span)?;
             let source_closure::SourceClosure {
                 mut functions,
                 runtime_function_identities,
                 retained,
-            } = self.required_source_closure(
-                &root,
-                inputs
-                    .iter()
-                    .filter(|(binding, _, _)| free.contains(binding))
-                    .map(|(_, _, value)| value),
-                live.iter()
-                    .filter(|(binding, _, _)| free.contains(binding))
-                    .map(|(_, _, value)| value),
-                expr.span,
-            )?;
+            } = self.required_source_closure(observed.code, expr.span)?;
+            let capture::Entry {
+                function, inputs, ..
+            } = capture;
+            let entry = function.declaration;
             // Signature formation may have produced obligations independently of
             // this expression's speculative queue. Settle both before execution.
             let uses: Vec<_> = self
@@ -1274,131 +1271,15 @@ impl Checker<'_, '_> {
                     "required comptime evaluation is waiting for a signature type refinement",
                 ));
             }
-            let entry = DeclarationId {
-                package: u64::MAX,
-                local: u32::MAX,
-            };
-            let mut entry_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-            let before = entry_fuel;
-            // Retain the source telescope, including unused runtime slots:
-            // type annotations refer to these original positions. Capture
-            // compaction will reject a runtime read and prune unused inputs.
-            // Completed caller values and pending staged inputs are distinct.
-            let mut available = Vec::new();
-            if let Some(owner) = self
-                .signature_owner
-                .filter(|owner| self.active_signatures.contains(owner))
-            {
-                if let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-                    self.package.item(owner).map(|item| &item.kind)
-                {
-                    for (parameter, domain) in signature
-                        .params
-                        .iter()
-                        .zip(self.signature_domains.get(&owner).into_iter().flatten())
-                    {
-                        let binding = local(parameter.hir_id);
-                        let supplied = inputs
-                            .iter()
-                            .position(|(id, _, _)| *id == binding)
-                            .map(|index| inputs.remove(index));
-                        let (ty, value) = match supplied {
-                            Some((_, ty, value)) => (Some(ty), Some(value)),
-                            None => (domain.1.clone(), None),
-                        };
-                        let sort = if signature.modifiers.is_comptime && domain.0 == Sort::Runtime {
-                            if ty.as_ref() == Some(&p(P::Type)) {
-                                Sort::Type
-                            } else {
-                                Sort::ComptimeValue
-                            }
-                        } else {
-                            domain.0
-                        };
-                        available.push((binding, (sort, ty), value));
-                    }
-                }
-            }
-            for (binding, ty, value) in inputs {
-                available.push((
-                    binding,
-                    (
-                        if ty == p(P::Type) {
-                            Sort::Type
-                        } else {
-                            Sort::ComptimeValue
-                        },
-                        Some(ty),
-                    ),
-                    Some(value),
-                ));
-            }
-            for (binding, ty, _) in live {
-                if let Some((_, (_, domain), value)) =
-                    available.iter_mut().find(|(id, _, _)| id == binding)
-                {
-                    if value.is_some() {
-                        return Err(error(expr.span, "duplicate required comptime input"));
-                    }
-                    if let Some(expected) = domain.as_ref() {
-                        self.require_expression(ty, expected, expr.span)?;
-                    }
-                    *domain = Some(ty.clone());
-                } else {
-                    available.push((
-                        *binding,
-                        (
-                            if *ty == p(P::Type) {
-                                Sort::Type
-                            } else {
-                                Sort::ComptimeValue
-                            },
-                            Some(ty.clone()),
-                        ),
-                        None,
-                    ));
-                }
-            }
-            let captured = nir::type_computations::capture_sparse_entry(
-                entry,
-                "<required-comptime>".into(),
-                root,
-                &available
-                    .iter()
-                    .map(|(binding, parameter, _)| (*binding, parameter.0, parameter.1.clone()))
-                    .collect::<Vec<_>>(),
-                &mut entry_fuel,
-            );
-            self.required_steps -= (before - entry_fuel) as u64;
-            let captured=captured.map_err(|failure| error(expr.span, match failure {
-                nir::type_computations::Error::MissingCapture(binding) if self.required_runtime_parameter(binding) =>
-                    "required comptime computation cannot read a runtime parameter; defer does not change the parameter's phase".into(),
-                nir::type_computations::Error::MissingCapture(binding) =>
-                    format!("required comptime input {binding} is not available in this invocation"),
-                other => other.to_string(),
-            }))?;
-            let selected = captured.slots.iter().copied().collect::<BTreeSet<_>>();
-            let inputs: Vec<(n::LocalId, Term, Option<Term>)> = available
-                .into_iter()
-                .enumerate()
-                .filter_map(|(slot, (binding, parameter, value))| {
-                    selected.contains(&slot).then(|| {
-                        (
-                            binding,
-                            parameter.1.expect("captured domain checked"),
-                            value,
-                        )
-                    })
-                })
-                .collect();
             scope::retain_abstract_values(
                 &mut abstract_value_parameters,
-                &captured.function,
+                &function,
                 &inputs,
+                &observed.values,
                 &mut self.required_steps,
                 expr.span,
             )?;
-            functions.push(captured.function);
+            functions.push(function);
             // Preserve the checked implementation world, projecting only its
             // method tables to the members this invocation can reference. This
             // avoids requiring unrelated runtime bodies in a comptime snapshot.
@@ -1511,15 +1392,9 @@ impl Checker<'_, '_> {
                         .flat_map(|(_, ty, value)| std::iter::once(ty).chain(value.iter())),
                 )
             {
-                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let before = fuel;
-                let bounded = nir::type_computations::charge_term(argument, &mut fuel);
-                self.required_steps -= (before - fuel) as u64;
-                bounded.map_err(|failure| error(expr.span, failure.to_string()))?;
-                for (id, sort) in argument
-                    .rigid_parameters()
-                    .map_err(|failure| error(expr.span, failure.to_string()))?
-                {
+                let observed =
+                    input_observation::term_inputs(argument, &mut self.required_steps, expr.span)?;
+                for (id, sort) in observed.declarations {
                     if sort == Sort::Type && !abstract_parameters.contains(&id) {
                         abstract_parameters.push(id);
                     } else if sort == Sort::ComptimeValue
@@ -1541,56 +1416,8 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            for (binding, _, value) in live {
-                if !free.contains(binding) {
-                    continue;
-                }
-                value
-                    .visit_owned_graph(&mut self.required_steps, &mut |value, fuel| {
-                        if let Value::TypeParameter(id) = value {
-                            if !abstract_parameters.contains(id) {
-                                abstract_parameters.push(*id);
-                            }
-                        }
-                        let mut types: Vec<&Term> = match value {
-                            Value::Type(ty)
-                            | Value::List { ty, .. }
-                            | Value::Newtype { ty, .. }
-                            | Value::Optional { ty, .. }
-                            | Value::ErrorResult { ty, .. } => vec![ty],
-                            Value::Closure(closure) => {
-                                let mut types = vec![closure.ty()];
-                                if let Some((_, arguments)) = closure.declaration_instance() {
-                                    types.extend(arguments);
-                                }
-                                types
-                            }
-                            _ => vec![],
-                        };
-                        for ty in types.drain(..) {
-                            let mut remaining = usize::try_from(*fuel).unwrap_or(usize::MAX);
-                            let before = remaining;
-                            let bounded = nir::type_computations::charge_term(ty, &mut remaining);
-                            *fuel -= (before - remaining) as u64;
-                            bounded.map_err(|_| comptime_interpretor::ErrorKind::StepsExhausted)?;
-                            for (id, sort) in ty
-                                .rigid_parameters()
-                                .map_err(|_| comptime_interpretor::ErrorKind::Type)?
-                            {
-                                if sort == Sort::Type && !abstract_parameters.contains(&id) {
-                                    abstract_parameters.push(id);
-                                }
-                            }
-                        }
-                        Ok(())
-                    })
-                    .map_err(|failure| {
-                        error(
-                            expr.span,
-                            format!("live input Type scope failed: {failure:?}"),
-                        )
-                    })?;
-            }
+            let existing: BTreeSet<_> = abstract_parameters.iter().copied().collect();
+            abstract_parameters.extend(observed.types.difference(&existing).copied());
             // This is checked source for an invocation, not a concrete dispatch
             // closure. The private VM resolves demanded members in RequiredWorld;
             // unrelated concrete implementations must not be selected here.
