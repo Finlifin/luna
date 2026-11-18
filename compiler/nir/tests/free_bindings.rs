@@ -593,3 +593,26 @@ fn typed_traversal_preserves_callback_errors_and_structural_failures() {
         Err(Error::Invalid("anonymous record pattern arity mismatch"))
     );
 }
+
+#[test]
+fn clause_operands_read_preparation_locals_without_exporting_them() {
+    let instance = expr(K::ComptimeFunctionInstance {
+        declaration: nir::DeclarationId {
+            package: 1,
+            local: 9,
+        },
+        inputs: nir::program::ClauseOperands {
+            statements: vec![expr(K::Let {
+                binding: id(2),
+                value: Box::new(local(1)),
+            })],
+            arguments: vec![local(2), local(3)],
+        },
+    });
+    assert_eq!(result(&instance), vec![id(1), id(3)]);
+    let caller = expr(K::Block {
+        statements: vec![instance],
+        result: Some(Box::new(local(2))),
+    });
+    assert_eq!(result(&caller), vec![id(1), id(2), id(3)]);
+}

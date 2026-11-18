@@ -2827,13 +2827,13 @@ impl Checker<'_, '_> {
     ) -> Option<(OwnerId, Vec<Term>)> {
         if let K::ComptimeFunctionInstance {
             declaration: id,
-            subject,
+            inputs,
         } = &value.kind
         {
             let owner = self.source_declarations.owner(*id)?;
             return Some((
                 owner,
-                self.comptime_instance_clause_evidence(owner, subject)?,
+                self.comptime_instance_clause_evidence(owner, inputs)?,
             ));
         }
         let (id, arguments) = match &value.kind {

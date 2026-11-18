@@ -354,9 +354,9 @@ mod tests {
         assert_eq!(prepared.observations.identity(2), Some(&identity));
         // Static observation retains the original source producer. A typed
         // consumer must still execute it in its source position exactly once.
-        let checked = prepared.into_typed(span).unwrap();
-        assert_eq!(checked.statements.len(), 3);
-        for (statement, index) in checked.statements.iter().zip([2, 0, 1]) {
+        let checked = prepared.into_typed(&mut 1000, span).unwrap();
+        assert_eq!(checked.operands.statements.len(), 3);
+        for (statement, index) in checked.operands.statements.iter().zip([2, 0, 1]) {
             let K::Let { binding, value } = &statement.kind else {
                 panic!()
             };

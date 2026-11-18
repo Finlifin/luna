@@ -3065,7 +3065,9 @@ impl Checker<'_, '_> {
                 // callable phases may be data inputs; the Call arm above
                 // independently rejects execution of runtime code.
                 K::Function(_) => {}
-                K::ComptimeFunctionInstance { subject, .. } => pending.push(subject),
+                K::ComptimeFunctionInstance { inputs, .. } => {
+                    pending.extend(inputs.expressions().rev())
+                }
                 K::Closure { captures, .. } if value.ty.is_comptime_callable() => {
                     // The body is separately phase-checked. Its parameters
                     // belong to invocation; only environment construction

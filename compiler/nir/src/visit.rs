@@ -680,7 +680,6 @@ fn walk_mut(
                     | K::EnumStructure { subject: value, .. }
                     | K::ObjectQuery { subject: value, .. }
                     | K::ObjectEdit { subject: value, .. }
-                    | K::ComptimeFunctionInstance { subject: value, .. }
                     | K::StructFieldNames(value)
                     | K::BitVecType(value)
                     | K::IntegerNegate(value)
@@ -745,6 +744,9 @@ fn walk_mut(
                             extend!(work, fuel, arm.guard.iter_mut().map(Node::Expr));
                             push!(work, fuel, Node::Expr(&mut arm.body));
                         }
+                    }
+                    K::ComptimeFunctionInstance { inputs, .. } => {
+                        extend!(work, fuel, inputs.expressions_mut().map(Node::Expr));
                     }
                     K::Block { statements, result } | K::CallPreparation { statements, result } => {
                         extend!(work, fuel, statements.iter_mut().map(Node::Expr));

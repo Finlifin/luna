@@ -637,9 +637,9 @@ impl Checker<'_, '_> {
             })?
             .clone();
         let (parameters, arguments) = match &callee.kind {
-            K::ComptimeFunctionInstance { subject, .. } => (
+            K::ComptimeFunctionInstance { inputs, .. } => (
                 self.type_parameters[&owner].clone(),
-                self.comptime_instance_clause_evidence(owner, subject)
+                self.comptime_instance_clause_evidence(owner, inputs)
                     .ok_or_else(|| error(span, "invalid comptime clause input packet"))?,
             ),
             K::FunctionInstance { arguments, .. } => {

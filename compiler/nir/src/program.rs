@@ -257,6 +257,38 @@ impl Literal {
         }
     }
 }
+/// A lexical preparation in source evaluation order followed by the checked
+/// operand for each declaration slot. Temporaries are private to this scope.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClauseOperands {
+    pub statements: Vec<Expr>,
+    pub arguments: Vec<Expr>,
+}
+
+impl ClauseOperands {
+    pub fn expressions(&self) -> impl DoubleEndedIterator<Item = &Expr> {
+        self.statements.iter().chain(&self.arguments)
+    }
+
+    pub(crate) fn expressions_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut Expr> {
+        self.statements.iter_mut().chain(&mut self.arguments)
+    }
+}
+
+impl fmt::Display for ClauseOperands {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(clause-operands (statements")?;
+        for statement in &self.statements {
+            write!(f, " {statement}")?;
+        }
+        f.write_str(") (arguments")?;
+        for argument in &self.arguments {
+            write!(f, " {argument}")?;
+        }
+        f.write_str("))")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Expr {
     pub ty: Term,
@@ -1117,7 +1149,7 @@ pub enum ExprKind {
     /// interface inputs, then member inputs, and dispatch uses the trait contract.
     ComptimeFunctionInstance {
         declaration: DeclarationId,
-        subject: Box<Expr>,
+        inputs: ClauseOperands,
     },
     ObjectEdit {
         subject: Box<Expr>,
@@ -3252,11 +3284,11 @@ impl fmt::Display for ExprKind {
             }
             Self::ComptimeFunctionInstance {
                 declaration,
-                subject,
+                inputs,
             } => {
                 write!(
                     f,
-                    "(comptime-function-instance (declaration {declaration}) (inputs {subject}))"
+                    "(comptime-function-instance (declaration {declaration}) {inputs})"
                 )
             }
             Self::ObjectEdit { subject, operation } => {
@@ -3669,6 +3701,9 @@ impl Expr {
                     }
                     work.push(Work::Expr(selector));
                 }
+                ExprKind::ComptimeFunctionInstance { inputs, .. } => {
+                    work.extend(inputs.expressions_mut().rev().map(Work::Expr));
+                }
                 ExprKind::Block { statements, result }
                 | ExprKind::CallPreparation { statements, result } => {
                     if let Some(result) = result {
@@ -3702,7 +3737,6 @@ impl Expr {
                 | ExprKind::EnumStructure { subject: value, .. }
                 | ExprKind::ObjectQuery { subject: value, .. }
                 | ExprKind::ObjectEdit { subject: value, .. }
-                | ExprKind::ComptimeFunctionInstance { subject: value, .. }
                 | ExprKind::StructFieldNames(value)
                 | ExprKind::BitVecType(value)
                 | ExprKind::IntegerNegate(value)
@@ -4075,6 +4109,11 @@ impl Expr {
                     body.rewrite_with(rewriter)?;
                 }
             }
+            ExprKind::ComptimeFunctionInstance { inputs, .. } => {
+                for operand in inputs.expressions_mut() {
+                    operand.rewrite_with(rewriter)?;
+                }
+            }
             ExprKind::FunctionType {
                 parameters: fields, ..
             }
@@ -4115,7 +4154,6 @@ impl Expr {
             | ExprKind::EnumStructure { subject: value, .. }
             | ExprKind::ObjectQuery { subject: value, .. }
             | ExprKind::ObjectEdit { subject: value, .. }
-            | ExprKind::ComptimeFunctionInstance { subject: value, .. }
             | ExprKind::StructFieldNames(value)
             | ExprKind::BitVecType(value)
             | ExprKind::IntegerNegate(value)

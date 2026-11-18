@@ -214,7 +214,6 @@ pub(super) fn expand<'a>(
             | K::EnumStructure { subject: value, .. }
             | K::ObjectQuery { subject: value, .. }
             | K::ObjectEdit { subject: value, .. }
-            | K::ComptimeFunctionInstance { subject: value, .. }
             | K::StructFieldNames(value)
             | K::BitVecType(value)
             | K::IntegerNegate(value)
@@ -279,6 +278,9 @@ pub(super) fn expand<'a>(
                     extend!(work, fuel, arm.guard.iter().map(Node::Expr));
                     push!(work, fuel, Node::Expr(&arm.body));
                 }
+            }
+            K::ComptimeFunctionInstance { inputs, .. } => {
+                extend!(work, fuel, inputs.expressions().map(Node::Expr));
             }
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
                 extend!(work, fuel, statements.iter().map(Node::Expr));

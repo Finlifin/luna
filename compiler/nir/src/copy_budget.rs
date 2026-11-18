@@ -638,6 +638,16 @@ fn charge_node_observed(
                         );
                         parameter_bindings.len()
                     }
+                    K::ComptimeFunctionInstance { inputs, .. } => {
+                        charge_width(steps, inputs.statements.len())?;
+                        charge_width(steps, inputs.arguments.len())?;
+                        work.extend(
+                            inputs
+                                .expressions()
+                                .map(|expr| (Node::Expr(expr), depth + 1)),
+                        );
+                        0
+                    }
                     K::Block { statements, result } | K::CallPreparation { statements, result } => {
                         charge_width(steps, statements.len())?;
                         work.extend(statements.iter().map(|expr| (Node::Expr(expr), depth + 1)));
@@ -829,7 +839,6 @@ fn charge_node_observed(
                     | K::EnumStructure { subject: value, .. }
                     | K::ObjectQuery { subject: value, .. }
                     | K::ObjectEdit { subject: value, .. }
-                    | K::ComptimeFunctionInstance { subject: value, .. }
                     | K::StructFieldNames(value)
                     | K::BitVecType(value)
                     | K::FloatNegate(value)

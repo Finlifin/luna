@@ -65,14 +65,13 @@ fn dynamic_clause_packets_check_formation_before_freezing_values() {
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
         .with_budgeted_type_solver(&solver);
-    let domains = Term::Tuple(vec![nominal.clone()]);
     for (result, expected) in [
         (ContractOutcome::Unknown, ErrorKind::TypeContractUnresolved),
         (ContractOutcome::Rejected, ErrorKind::TypeContractRejected),
     ] {
         outcome.set(result);
         assert_eq!(
-            vm.dynamic_instance_arguments(&domains, Value::Tuple(vec![packet.clone()]), SOURCE)
+            vm.freeze_instance_argument(packet.clone(), &nominal, SOURCE)
                 .unwrap_err()
                 .kind,
             expected
@@ -81,13 +80,13 @@ fn dynamic_clause_packets_check_formation_before_freezing_values() {
     }
     outcome.set(ContractOutcome::Satisfied);
     assert_eq!(
-        vm.dynamic_instance_arguments(&domains, Value::Tuple(vec![packet]), SOURCE)
+        vm.freeze_instance_argument(packet, &nominal, SOURCE)
             .unwrap(),
-        vec![Term::NominalValue {
+        Term::NominalValue {
             ty: Box::new(nominal),
             variant: None,
             fields: vec![Term::Bool(true)]
-        }]
+        }
     );
     assert!(vm.assumed_interfaces.is_empty());
 }

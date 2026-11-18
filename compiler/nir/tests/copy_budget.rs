@@ -490,7 +490,10 @@ fn dynamic_instance_copy_accounts_for_clause_operands() {
             package: 1,
             local: 1,
         },
-        subject: Box::new(large()),
+        inputs: nir::program::ClauseOperands {
+            statements: vec![],
+            arguments: vec![large()],
+        },
     }));
 }
 

@@ -92,7 +92,6 @@ pub enum Op {
     },
     FinishInstance {
         destination: Register,
-        packet: Register,
         constructor: Arc<instances::Constructor>,
         direct: bool,
     },
@@ -692,12 +691,11 @@ impl fmt::Display for Program {
                 } => write!(f, "(begin-instance %{destination} {constructor})")?,
                 Op::FinishInstance {
                     destination,
-                    packet,
                     constructor,
                     direct,
                 } => write!(
                     f,
-                    "(finish-instance %{destination} (packet %{packet}) (direct {direct}) {constructor})"
+                    "(finish-instance %{destination} (direct {direct}) {constructor})"
                 )?,
                 Op::PreparePredicate { valid } => write!(f, "(prepare-predicate {valid})")?,
                 Op::CheckPredicate {
@@ -1609,24 +1607,41 @@ fn compile_root<'a>(
                     }
                     K::ComptimeFunctionInstance {
                         declaration,
-                        subject,
+                        inputs,
                     } => {
+                        *fuel = fuel
+                            .checked_sub(inputs.statements.len())
+                            .and_then(|remaining| remaining.checked_sub(inputs.arguments.len()))
+                            .ok_or(Error::Budget(source))?;
+                        let operands = inputs
+                            .arguments
+                            .iter()
+                            .map(|arg| Ok((fresh(), copy_term(&arg.ty, fuel, source)?)))
+                            .collect::<Result<Vec<_>, Error>>()?;
                         let constructor = Arc::new(instances::Constructor {
                             declaration: *declaration,
-                            input: copy_term(&subject.ty, fuel, source)?,
+                            operands,
                             output: copy_term(&expr.ty, fuel, source)?,
                         });
-                        let packet = fresh();
                         emit(
                             &mut work,
                             Op::FinishInstance {
                                 destination: dst,
-                                packet,
                                 constructor: constructor.clone(),
                                 direct: direct_callee,
                             },
                         );
-                        work.push(Work::Expression(subject, packet));
+                        work.push(Work::EndScope(source));
+                        for (operand, (register, _)) in
+                            inputs.arguments.iter().zip(&constructor.operands).rev()
+                        {
+                            work.push(Work::Expression(operand, *register));
+                        }
+                        let scratch = fresh();
+                        for statement in inputs.statements.iter().rev() {
+                            work.push(Work::Expression(statement, scratch));
+                        }
+                        work.push(Work::BeginScope(source));
                         emit(
                             &mut work,
                             Op::BeginInstance {

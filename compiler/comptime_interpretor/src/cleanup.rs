@@ -1294,11 +1294,11 @@ impl<'a> Interpreter<'a> {
         }
         result.map(|_| ())
     }
-    pub(super) fn with_prepared_frame(
+    pub(super) fn with_prepared_frame<T>(
         &mut self,
         source: SourceRange,
-        run: impl FnOnce(&mut Self) -> Result<Flow, Error>,
-    ) -> Result<Flow, Error> {
+        run: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         if self.cleanup_schedule.is_none() {
             return run(self);
         }

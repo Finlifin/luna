@@ -39,12 +39,12 @@ impl Completion for Typed {
 
     fn finish(
         self,
-        _: &mut Checker<'_, '_>,
+        checker: &mut Checker<'_, '_>,
         _: &[(DeclarationId, Sort, Term)],
         inputs: PreparedDeclarationInputs,
         span: Span,
     ) -> Result<Self::Output, Error> {
-        inputs.into_typed(span)
+        inputs.into_typed(&mut checker.required_steps, span)
     }
 }
 

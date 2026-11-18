@@ -1,5 +1,6 @@
 //! Clause computations use the ordinary function-instance cache and contracts.
 use super::*;
+use std::ops::ControlFlow;
 
 pub(super) enum PreparedTraitInstance {
     Unrelated,
@@ -328,7 +329,7 @@ impl Interpreter<'_> {
     pub(super) fn admit_dynamic_trait_instance(
         &mut self,
         declaration: DeclarationId,
-        input: &Term,
+        arity: usize,
         output: &Term,
         source: SourceRange,
     ) -> Result<Option<(DeclarationId, usize)>, Error> {
@@ -352,10 +353,7 @@ impl Interpreter<'_> {
         let interface_count = count
             .checked_sub(1 + contract.type_parameters.len())
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
-        let Term::Tuple(domains) = input else {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        };
-        if domains.len() != count || count < 1 + interface_count {
+        if arity != count {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         Ok(Some((interface, interface_count)))
@@ -364,7 +362,7 @@ impl Interpreter<'_> {
     pub(super) fn admit_dynamic_function_instance(
         &self,
         declaration: DeclarationId,
-        input: &Term,
+        arity: usize,
         output: &Term,
         source: SourceRange,
     ) -> Result<(), Error> {
@@ -380,94 +378,89 @@ impl Interpreter<'_> {
         {
             return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
         }
-        let Term::Tuple(domains) = input else {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        };
-        if domains.len() != definition.type_parameters.len() {
+        if arity != definition.type_parameters.len() {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         Ok(())
     }
 
-    // The tuple here is the NIR clause packet, not a language tuple-type rule.
-    // Current values are checked even when the resulting instance is cached.
-    pub(super) fn dynamic_instance_arguments(
+    pub(super) fn freeze_instance_argument(
         &mut self,
-        input: &Term,
-        packet: Value,
+        value: Value,
+        domain: &Term,
         source: SourceRange,
-    ) -> Result<Vec<Term>, Error> {
-        let (Term::Tuple(domains), Value::Tuple(values)) = (input, packet) else {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
+    ) -> Result<Term, Error> {
+        self.tick(Some(source))?;
+        self.check_value_type(&value, domain, Some(source))?;
+        self.residual_input_term(value, source)
+    }
+
+    fn eval_clause_operands(
+        &mut self,
+        inputs: &nir::program::ClauseOperands,
+        environment: &mut Environment,
+        source: SourceRange,
+    ) -> Result<ControlFlow<Flow, Vec<Term>>, Error> {
+        self.integer_operation(Some(source), |budget| budget.consume(environment.len()))?;
+        let existing = environment.snapshot();
+        let result: Result<_, Error> = (|| {
+            for statement in &inputs.statements {
+                match self.eval(statement, environment)? {
+                    Flow::Value(_) => {}
+                    flow => return Ok(ControlFlow::Break(flow)),
+                }
+            }
+            let result = self.with_prepared_frame(source, |vm| {
+                let mut values = Vec::new();
+                for (slot, operand) in inputs.arguments.iter().enumerate() {
+                    match vm.eval(operand, environment)? {
+                        Flow::Value(value) => {
+                            vm.retain_prepared(slot, operand.source, &value)?;
+                            values.push(value);
+                        }
+                        flow => return Ok(ControlFlow::Break(flow)),
+                    }
+                }
+                Ok(ControlFlow::Continue(values))
+            })?;
+            if result.is_continue() {
+                self.cleanup_block(source, environment)?;
+            }
+            Ok(result)
+        })();
+        environment.retain(|id, _| existing.contains(id));
+        let values = match result? {
+            ControlFlow::Continue(values) => values,
+            ControlFlow::Break(flow) => return Ok(ControlFlow::Break(flow)),
         };
-        if values.len() != domains.len() {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
-        self.integer_operation(Some(source), |budget| budget.consume(values.len()))?;
-        let mut arguments = Vec::with_capacity(values.len());
-        for (value, domain) in values.into_iter().zip(domains) {
-            self.check_value_type(&value, domain, Some(source))?;
-            arguments.push(self.residual_input_term(value, source)?);
-        }
-        Ok(arguments)
+        let arguments = values
+            .into_iter()
+            .zip(&inputs.arguments)
+            .map(|(value, operand)| self.freeze_instance_argument(value, &operand.ty, source))
+            .collect::<Result<_, _>>()?;
+        Ok(ControlFlow::Continue(arguments))
     }
 
     pub(super) fn dynamic_trait_method(
-        &mut self,
+        &self,
         member: DeclarationId,
-        input: &Term,
         output: &Term,
-        origin: (DeclarationId, usize),
-        packet: Value,
+        (interface, count): (DeclarationId, usize),
+        arguments: Vec<Term>,
         source: SourceRange,
     ) -> Result<comptime_compiler::methods::Method, Error> {
-        let arguments = self.dynamic_instance_arguments(input, packet, source)?;
-        let (interface, count) = origin;
-        if arguments.len() < 1 + count {
-            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-        }
+        let mut arguments = arguments.into_iter();
+        let subject = arguments
+            .next()
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
         Ok(comptime_compiler::methods::Method {
             interface,
             member,
-            subject: arguments[0].clone(),
-            interface_arguments: arguments[1..1 + count].to_vec(),
-            method_arguments: arguments[1 + count..].to_vec(),
+            subject,
+            interface_arguments: arguments.by_ref().take(count).collect(),
+            method_arguments: arguments.collect(),
             output: output.clone(),
             source,
-        })
-    }
-
-    pub(super) fn dynamic_instance_expression(
-        &mut self,
-        declaration: DeclarationId,
-        input: &Term,
-        output: &Term,
-        origin: Option<(DeclarationId, usize)>,
-        packet: Value,
-        source: SourceRange,
-    ) -> Result<Expr, Error> {
-        let arguments = self.dynamic_instance_arguments(input, packet, source)?;
-        let kind = if let Some((interface, count)) = origin {
-            if arguments.len() < 1 + count {
-                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-            }
-            K::TraitMethod {
-                interface,
-                member: declaration,
-                subject: arguments[0].clone(),
-                interface_arguments: arguments[1..1 + count].to_vec(),
-                method_arguments: arguments[1 + count..].to_vec(),
-            }
-        } else {
-            K::FunctionInstance {
-                declaration,
-                arguments,
-            }
-        };
-        Ok(Expr {
-            source,
-            ty: output.clone(),
-            kind,
         })
     }
 
@@ -478,30 +471,37 @@ impl Interpreter<'_> {
     ) -> Result<PreparedTraitInstance, Error> {
         let K::ComptimeFunctionInstance {
             declaration,
-            subject,
+            inputs,
         } = &expr.kind
         else {
             return Ok(PreparedTraitInstance::Unrelated);
         };
-        let Some(origin) =
-            self.admit_dynamic_trait_instance(*declaration, &subject.ty, &expr.ty, expr.source)?
+        let Some(origin) = self.admit_dynamic_trait_instance(
+            *declaration,
+            inputs.arguments.len(),
+            &expr.ty,
+            expr.source,
+        )?
         else {
             return Ok(PreparedTraitInstance::Unrelated);
         };
-        let packet = match self.eval(subject, environment)? {
-            Flow::Value(value) => value,
-            flow => return Ok(PreparedTraitInstance::Control(flow)),
+        let arguments = match self.eval_clause_operands(inputs, environment, expr.source)? {
+            ControlFlow::Continue(arguments) => arguments,
+            ControlFlow::Break(flow) => return Ok(PreparedTraitInstance::Control(flow)),
         };
-        Ok(PreparedTraitInstance::Ready(
-            self.dynamic_instance_expression(
-                *declaration,
-                &subject.ty,
-                &expr.ty,
-                Some(origin),
-                packet,
-                expr.source,
-            )?,
-        ))
+        let method =
+            self.dynamic_trait_method(*declaration, &expr.ty, origin, arguments, expr.source)?;
+        Ok(PreparedTraitInstance::Ready(Expr {
+            source: method.source,
+            ty: method.output,
+            kind: K::TraitMethod {
+                interface: method.interface,
+                member: method.member,
+                subject: method.subject,
+                interface_arguments: method.interface_arguments,
+                method_arguments: method.method_arguments,
+            },
+        }))
     }
 
     pub(super) fn eval_comptime_function_instance(
@@ -518,17 +518,21 @@ impl Interpreter<'_> {
         }
         let K::ComptimeFunctionInstance {
             declaration,
-            subject,
+            inputs,
         } = &expr.kind
         else {
             unreachable!()
         };
-        self.admit_dynamic_function_instance(*declaration, &subject.ty, &expr.ty, expr.source)?;
-        let packet = match self.eval(subject, environment)? {
-            Flow::Value(value) => value,
-            flow => return Ok(flow),
+        self.admit_dynamic_function_instance(
+            *declaration,
+            inputs.arguments.len(),
+            &expr.ty,
+            expr.source,
+        )?;
+        let arguments = match self.eval_clause_operands(inputs, environment, expr.source)? {
+            ControlFlow::Continue(arguments) => arguments,
+            ControlFlow::Break(flow) => return Ok(flow),
         };
-        let arguments = self.dynamic_instance_arguments(&subject.ty, packet, expr.source)?;
         // Revalidate declaration domains and requirements, including cache hits.
         self.function_instance_value(*declaration, &arguments, &expr.ty, expr.source)
             .map(Flow::Value)
@@ -599,11 +603,10 @@ mod tests {
             ty: package.functions[0].callable_type(),
             kind: K::ComptimeFunctionInstance {
                 declaration: package.functions[0].declaration,
-                subject: Box::new(Expr {
-                    source,
-                    ty: Term::Tuple(vec![field.ty.clone()]),
-                    kind: K::Tuple(vec![field]),
-                }),
+                inputs: nir::program::ClauseOperands {
+                    statements: vec![],
+                    arguments: vec![field],
+                },
             },
         }
     }
@@ -616,30 +619,26 @@ mod tests {
             for valid in [false, true, false, true] {
                 let mut body = expression(&package);
                 let source = body.source;
-                let K::ComptimeFunctionInstance { subject, .. } = &mut body.kind else {
+                let K::ComptimeFunctionInstance { inputs, .. } = &mut body.kind else {
                     unreachable!()
                 };
-                let packet = subject.as_ref().clone();
-                subject.kind = K::Block {
-                    statements: vec![Expr {
-                        source,
-                        ty: Term::Primitive(Primitive::Void),
-                        kind: K::Assign {
-                            place: nir::program::Place {
-                                root: trace,
-                                fields: vec![],
-                            },
-                            value: Box::new(Expr {
-                                source,
-                                ty: Term::Primitive(Primitive::Bool),
-                                kind: K::Literal(Literal::Bool(true)),
-                            }),
+                inputs.statements.push(Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root: trace,
+                            fields: vec![],
                         },
-                    }],
-                    result: Some(Box::new(packet)),
-                };
+                        value: Box::new(Expr {
+                            source,
+                            ty: Term::Primitive(Primitive::Bool),
+                            kind: K::Literal(Literal::Bool(true)),
+                        }),
+                    },
+                });
                 if !valid {
-                    subject.ty = Term::Primitive(Primitive::Bool);
+                    inputs.arguments.clear();
                 }
                 let mut env = Environment::from([
                     (LocalId { owner: 2, index: 0 }, Value::Bool(true)),

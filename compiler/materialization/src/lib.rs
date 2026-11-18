@@ -3146,9 +3146,11 @@ impl Builder<'_> {
                 .push_back(Task::Function(*declaration, arguments.clone())),
             K::ComptimeFunctionInstance {
                 declaration,
-                subject: packet,
+                inputs,
             } => {
-                self.expr(packet, depth + 1)?;
+                for operand in inputs.expressions() {
+                    self.expr(operand, depth + 1)?;
+                }
                 let Some((interface, member)) = self.package.traits.iter().find_map(|interface| {
                     interface
                         .methods
@@ -3161,16 +3163,7 @@ impl Builder<'_> {
                 if self.instances.is_some() {
                     return Err("dynamic trait clauses require comptime invocation before IIR instantiation".into());
                 }
-                let values = match &packet.kind {
-                    K::Block {
-                        result: Some(result),
-                        ..
-                    } => result.as_ref(),
-                    _ => packet.as_ref(),
-                };
-                let K::Tuple(values) = &values.kind else {
-                    return Err("dynamic trait clause packet has no input tuple".into());
-                };
+                let values = &inputs.arguments;
                 let prefix_count = 1 + interface.type_parameters.len();
                 if values.len() != prefix_count + member.type_parameters.len() {
                     return Err("dynamic trait clause packet arity mismatch".into());

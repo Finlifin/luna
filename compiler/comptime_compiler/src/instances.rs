@@ -5,16 +5,16 @@ use std::fmt;
 #[derive(Debug)]
 pub struct Constructor {
     pub declaration: DeclarationId,
-    pub input: Term,
+    pub operands: Vec<(crate::Register, Term)>,
     pub output: Term,
 }
 impl fmt::Display for Constructor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "(instance-constructor {} (input {}) (output {}))",
-            self.declaration, self.input, self.output
-        )
+        write!(f, "(instance-constructor {} (operands", self.declaration)?;
+        for (register, domain) in &self.operands {
+            write!(f, " (%{register} {domain})")?;
+        }
+        write!(f, ") (output {}))", self.output)
     }
 }
 

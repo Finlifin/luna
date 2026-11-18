@@ -1121,14 +1121,14 @@ impl<'a> Interpreter<'a> {
                 } => {
                     let origin = self.admit_dynamic_trait_instance(
                         constructor.declaration,
-                        &constructor.input,
+                        constructor.operands.len(),
                         &constructor.output,
                         source,
                     )?;
                     if origin.is_none() {
                         self.admit_dynamic_function_instance(
                             constructor.declaration,
-                            &constructor.input,
+                            constructor.operands.len(),
                             &constructor.output,
                             source,
                         )?;
@@ -1137,7 +1137,6 @@ impl<'a> Interpreter<'a> {
                 }
                 Op::FinishInstance {
                     destination,
-                    packet,
                     constructor,
                     direct,
                 } => {
@@ -1145,10 +1144,12 @@ impl<'a> Interpreter<'a> {
                         .instance_origins
                         .remove(destination)
                         .ok_or_else(missing)?;
-                    let packet = frame.slots[*packet].take().ok_or_else(missing)?;
-                    if origin.is_none() {
-                        let arguments =
-                            self.dynamic_instance_arguments(&constructor.input, packet, source)?;
+                    let mut arguments = Vec::new();
+                    for (register, domain) in &constructor.operands {
+                        let value = frame.slots[*register].take().ok_or_else(missing)?;
+                        arguments.push(self.freeze_instance_argument(value, domain, source)?);
+                    }
+                    let Some(origin) = origin else {
                         frame.slots[*destination] = Some(self.function_instance_value(
                             constructor.declaration,
                             &arguments,
@@ -1156,13 +1157,12 @@ impl<'a> Interpreter<'a> {
                             source,
                         )?);
                         continue;
-                    }
+                    };
                     let instance = self.dynamic_trait_method(
                         constructor.declaration,
-                        &constructor.input,
                         &constructor.output,
-                        origin.ok_or_else(missing)?,
-                        packet,
+                        origin,
+                        arguments,
                         source,
                     )?;
                     if *direct {

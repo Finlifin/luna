@@ -39,32 +39,35 @@ pub(super) struct PreparedDeclarationInputs {
 /// Typed consumers receive ordinary NIR only, with execution statements separate
 /// from the declaration-order result slots and their formation evidence.
 pub(super) struct CheckedDeclarationInputs {
-    pub arguments: Vec<n::Expr>,
-    pub statements: Vec<n::Expr>,
+    pub operands: n::ClauseOperands,
     pub observations: Observations,
 }
 
 impl std::fmt::Display for CheckedDeclarationInputs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("(checked-declaration-inputs (statements")?;
-        for statement in &self.statements {
-            write!(f, " {statement}")?;
-        }
-        f.write_str(") (arguments")?;
-        for argument in &self.arguments {
-            write!(f, " {argument}")?;
-        }
-        write!(f, ") {})", self.observations)
+        write!(
+            f,
+            "(checked-declaration-inputs {} {})",
+            self.operands, self.observations
+        )
     }
 }
 
 impl PreparedDeclarationInputs {
-    pub(super) fn into_typed(self, span: Span) -> Result<CheckedDeclarationInputs, Error> {
+    pub(super) fn into_typed(
+        self,
+        fuel: &mut u64,
+        span: Span,
+    ) -> Result<CheckedDeclarationInputs, Error> {
         let n::NormalFormInputPlan {
             order,
             preparations,
             bindings,
         } = self.plan;
+        let width = order.len().saturating_add(preparations.len());
+        *fuel = fuel
+            .checked_sub(width as u64)
+            .ok_or_else(|| error(span, "declaration operand preparation budget exhausted"))?;
         let mut sources = self.arguments.into_iter().map(Some).collect::<Vec<_>>();
         let mut outputs = vec![None; sources.len()];
         let mut statements = Vec::new();
@@ -84,10 +87,10 @@ impl PreparedDeclarationInputs {
                 return Err(error(span, "typed declaration input was not checked"));
             };
             let binding = bindings[slot];
-            let ty = value.ty.clone();
             let output = if matches!(value.kind, K::TypeValue(_)) {
                 value
             } else {
+                let ty = copy_input_domain(&value.ty, fuel, span)?;
                 let location = value.source;
                 statements.push(n::Expr {
                     source: location,
@@ -106,7 +109,7 @@ impl PreparedDeclarationInputs {
                     kind: if ty == p(P::Type)
                         && let Some(identity) = self.observations.identity(slot)
                     {
-                        K::TypeValue(identity.clone())
+                        K::TypeValue(copy_input_domain(identity, fuel, span)?)
                     } else {
                         K::Local(binding)
                     },
@@ -116,8 +119,10 @@ impl PreparedDeclarationInputs {
             outputs[slot] = Some(output);
         }
         Ok(CheckedDeclarationInputs {
-            arguments: outputs.into_iter().map(Option::unwrap).collect(),
-            statements,
+            operands: n::ClauseOperands {
+                arguments: outputs.into_iter().map(Option::unwrap).collect(),
+                statements,
+            },
             observations: self.observations,
         })
     }
@@ -471,10 +476,10 @@ mod tests {
         assert!(dump.contains("(pending)"), "{dump}");
         assert!(dump.contains(&id.to_string()), "{dump}");
         assert!(!dump.contains('\n'), "unescaped newline: {dump}");
-        let checked = inputs.into_typed(Span::default()).unwrap();
+        let checked = inputs.into_typed(&mut 1000, Span::default()).unwrap();
         let dump = checked.to_string();
         assert!(
-            dump.starts_with("(checked-declaration-inputs (statements "),
+            dump.starts_with("(checked-declaration-inputs (clause-operands (statements "),
             "{dump}"
         );
         assert!(dump.contains("quote\\\"\\n"), "{dump}");

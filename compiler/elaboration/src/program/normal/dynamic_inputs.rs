@@ -45,9 +45,10 @@ impl Checker<'_, '_> {
             ));
         }
         let parameters = self.open_normal_input_telescope(parameters, expr.span)?;
-        let prepared = self.planned_positional_inputs(inputs, expr.span, parameters, *collector)?;
-        let diverges = prepared.statements.iter().any(|value| is_never(&value.ty))
-            || prepared.arguments.iter().any(|value| is_never(&value.ty));
+        let operands = self
+            .planned_positional_inputs(inputs, expr.span, parameters, *collector)?
+            .operands;
+        let diverges = operands.expressions().any(|value| is_never(&value.ty));
         let ty = if diverges { p(P::Never) } else { p(P::Type) };
         if let Some(expected) = expected {
             self.require_expression(&ty, expected, expr.span)?;
@@ -60,7 +61,7 @@ impl Checker<'_, '_> {
             start: expr.span.lo().0,
             end: expr.span.lo().0,
         };
-        let mut statements = Vec::with_capacity(prepared.statements.len() + 1);
+        let mut statements = Vec::with_capacity(operands.statements.len() + 1);
         statements.push(n::Expr {
             source: anchor,
             ty: p(P::Void),
@@ -69,7 +70,7 @@ impl Checker<'_, '_> {
                 value: Box::new(callee),
             },
         });
-        statements.extend(prepared.statements);
+        statements.extend(operands.statements);
         let call = n::Expr {
             source: source(expr.span),
             ty: p(P::Type),
@@ -79,7 +80,7 @@ impl Checker<'_, '_> {
                     ty: callee_type,
                     kind: K::Local(binding),
                 }),
-                arguments: prepared
+                arguments: operands
                     .arguments
                     .into_iter()
                     .enumerate()

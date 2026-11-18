@@ -1171,9 +1171,8 @@ RefCell／Mutex 后从回调重入，或增加 unsafe Send／延长 HIR 生命�
    不额外启动同一片段。
 3. 正常结果经接收世界与域准入后形成观察响应。非局部 return、失败和取消走原
    控制路径，不被包装成一个 Type 响应；入口／退出契约也不因切片重复运行。
-4. 原检查任务只恢复对应待观察规则。`CallableClausePacket.pending` 中的实际
-   Type 完成签名后，callable 才可交付；producer 的 receipt 保留在本次输入计划，
-   不能同时留下一个会再次执行的 `ComptimeFunctionInstance.subject`。
+4. 原检查任务只恢复对应待观察规则。实际 Type 完成签名后，才能交付 callable。
+   本次输入计划持有已执行的准备位置和实际值，后续槽位直接读取已有绑定。
 5. 后续受检片段引用已取得的绑定，按通用域和资源规则使用它们。返回可变值引用
    的读取与只读 Type 观察不同：描述响应不允许克隆可变环境，也不延长已退出 scope。
 

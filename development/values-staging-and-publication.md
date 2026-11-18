@@ -300,7 +300,10 @@ fn run() -> bool {
 描述端按声明 binder 保留 Type sort；普通值继续使用其原来的 sort。这个描述不是
 实际结果，也不是完成的 Type 猜测。
 默认 Type 引用先前输入时使用同一个值绑定；不再为了取得类型身份提前调用 producer。
-包的 S-expression dump 显示表达式、身份、有序的待决输入及形成检查是否仍被推迟。
+动态实例的 NIR 以 `ClauseOperands` 保存一个词法作用域。准备语句按源码顺序执行，
+随后按声明顺序读取各槽。elaboration 和 materialization 均可直接检查槽位的域与
+静态证据。字节码为每个槽保留寄存器和受检域，先检查声明与元数，再执行准备语句，
+离开作用域后冻结各槽的值。任何实参提前返回都会越过实例形成。
 
 静态调用签名先代入已经取得的身份，再检查是否仍提及待确定身份的输入。只有签名已经
 完成，才生成既有 `ComptimeFunctionInstance`；仅 Type 子句与混合子句现在共用
@@ -321,8 +324,8 @@ normal-form 头由原来的 head 分支处理，未合并成普通函数求值�
 提前 return 保留调用方控制流，不继续执行后续输入，也不发布 callable。已经形成
 的 callable 再次调用不重跑子句 producer；这依靠保存的真实输入，不是结果缓存。
 
-runtime callable 的 required 参数准备消费同一参数包：只执行子句，取得实际身份
-后才走 runtime 实例形成，不把 runtime 函数体交给 comptime 执行。所有源码验收
+runtime callable 的 required 参数准备也消费这组操作数。required 入口目前只交付
+单个值，在此边界才把完成的各槽包成元组返回宿主。取得实际身份后形成 runtime 实例。所有源码验收
 使用真实 sysroot、公开 Type 与 meta 接口，没有拼装简化的内置包替代生产入口。
 
 **剩余边界。** 本次没有增加 ContextualExpr、前端 region 或外部 HostRequest。

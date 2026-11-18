@@ -312,8 +312,10 @@ impl<'h> Checker<'_, 'h> {
             self.alias_value_bindings = saved_bindings.clone();
             self.normal_default_bindings = saved_normal_bindings.clone();
             self.context = saved_context.clone();
-            let mut statements = prepared.statements;
-            let arguments = prepared.arguments;
+            let n::ClauseOperands {
+                mut statements,
+                arguments,
+            } = prepared.operands;
             for argument in &arguments {
                 if let K::Local(binding) = &argument.kind {
                     self.locals.insert(*binding, argument.ty.clone());

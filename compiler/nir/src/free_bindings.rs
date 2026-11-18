@@ -129,6 +129,16 @@ fn scan(
             K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. } => {
                 read(place.root, scope, free, dependencies, fuel, depth)?
             }
+            K::ComptimeFunctionInstance { inputs, .. } => {
+                let mut inner = fork(scope, fuel)?;
+                for value in &inputs.statements {
+                    statement(value, &mut inner, free, fuel, depth + 1, dependencies)?;
+                }
+                for value in &inputs.arguments {
+                    scan(value, &inner, free, fuel, depth + 1, dependencies)?;
+                }
+                return Ok(false);
+            }
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
                 let mut inner = fork(scope, fuel)?;
                 for value in statements {

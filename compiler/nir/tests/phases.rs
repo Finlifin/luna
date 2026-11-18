@@ -1636,11 +1636,7 @@ fn dynamic_comptime_instances_preserve_phase_and_responsibility() {
     };
     callee.kind = K::ComptimeFunctionInstance {
         declaration: target.declaration,
-        subject: Box::new(Expr {
-            source: callee.source,
-            ty: Term::Tuple(vec![]),
-            kind: K::Tuple(vec![]),
-        }),
+        inputs: nir::program::ClauseOperands::default(),
     };
     caller.body = expression;
     let mut package = Package {

@@ -1256,7 +1256,7 @@ impl<'a> PhaseContext<'a> {
                         }
                         K::ComptimeFunctionInstance {
                             declaration,
-                            subject,
+                            inputs,
                         } => {
                             let member = trait_index
                                 .retained_method(package, *declaration, inspection_fuel)
@@ -1298,7 +1298,9 @@ impl<'a> PhaseContext<'a> {
                                     ));
                                 }
                             }
-                            work.push(Work::Expr(subject, false, true), inspection_fuel)?;
+                            for input in inputs.expressions().rev() {
+                                work.push(Work::Expr(input, false, true), inspection_fuel)?;
+                            }
                         }
                         K::BuildStruct(value)
                         | K::BuildNewtype(value)

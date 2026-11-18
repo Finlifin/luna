@@ -431,7 +431,10 @@ fn contextual_declaration_frames_preserve_slots_and_cannot_be_invoked_as_functio
     let value = Expr {
         kind: ExprKind::ComptimeFunctionInstance {
             declaration: member.declaration,
-            subject: Box::new(subject),
+            inputs: nir::program::ClauseOperands {
+                statements: vec![],
+                arguments: vec![subject],
+            },
         },
         ty: callable,
         source,

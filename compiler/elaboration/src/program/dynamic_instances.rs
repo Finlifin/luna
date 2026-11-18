@@ -7,7 +7,7 @@ mod domain_checks;
 /// Pending inputs can be supplied during invocation only when the consumer does
 /// not publish a callable signature that still depends on those identities.
 pub(super) struct CallableClausePacket {
-    expression: n::Expr,
+    inputs: n::ClauseOperands,
     bindings: declaration_inputs::CallableBindings,
     formation_deferred: bool,
 }
@@ -16,8 +16,8 @@ impl std::fmt::Display for CallableClausePacket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(callable-clause-packet (expression {}) {} (formation-deferred {}))",
-            self.expression, self.bindings, self.formation_deferred
+            "(callable-clause-packet {} {} (formation-deferred {}))",
+            self.inputs, self.bindings, self.formation_deferred
         )
     }
 }
@@ -78,7 +78,7 @@ impl declaration_inputs::Completion for CallableCompletion {
         let prefix = std::mem::take(&mut self.prefix);
         let parameters = &self.parameters;
         let domains = &self.domains;
-        let prepared = inputs.into_typed(span)?;
+        let prepared = inputs.into_typed(&mut checker.required_steps, span)?;
         let prefix_count = prefix.len();
         let prefix_binders = checker.input_binders(&parameters[..prefix_count]);
         let observations = prepared
@@ -87,11 +87,11 @@ impl declaration_inputs::Completion for CallableCompletion {
         let frames = checker.call_input_frames();
         let (bindings, mut formation) =
             observations.bind(domains, frames, &mut checker.required_steps, span)?;
-        let mut operands = Vec::new();
+        let mut prefix_operands = Vec::with_capacity(prefix_count);
         for (domain, value) in domains[..prefix_count].iter().zip(&formation.terms) {
             let ty = bindings.instantiate(domain, &mut checker.required_steps, span)?;
             let value = checker.copy_alias_type(value, span)?;
-            operands.push(n::Expr {
+            prefix_operands.push(n::Expr {
                 source: source(span),
                 kind: if ty == p(P::Type) {
                     K::TypeValue(value)
@@ -101,11 +101,17 @@ impl declaration_inputs::Completion for CallableCompletion {
                 ty,
             });
         }
-        let statements = prepared.statements;
-        operands.extend(prepared.arguments);
+        let mut inputs = prepared.operands;
+        inputs.arguments.splice(..0, prefix_operands);
         let mut steps = checker.required_steps;
-        let checked =
-            self.check_domains(checker, &bindings, &formation, &operands, &mut steps, span);
+        let checked = self.check_domains(
+            checker,
+            &bindings,
+            &formation,
+            &inputs.arguments,
+            &mut steps,
+            span,
+        );
         checker.required_steps = steps;
         checked?;
         formation.deferred.extend(
@@ -116,25 +122,8 @@ impl declaration_inputs::Completion for CallableCompletion {
         );
         let formation_deferred = !formation.deferred.is_empty();
         checker.check_formation_application(self.owner, formation, span)?;
-        let ty = Term::Tuple(
-            operands
-                .iter()
-                .map(|value| checker.copy_alias_type(&value.ty, span))
-                .collect::<Result<_, _>>()?,
-        );
         Ok(CallableClausePacket {
-            expression: n::Expr {
-                source: source(span),
-                ty: checker.copy_alias_type(&ty, span)?,
-                kind: K::Block {
-                    statements,
-                    result: Some(Box::new(n::Expr {
-                        source: source(span),
-                        ty,
-                        kind: K::Tuple(operands),
-                    })),
-                },
-            },
+            inputs,
             bindings,
             formation_deferred,
         })
@@ -235,18 +224,9 @@ impl<'a, 'arena> Checker<'a, 'arena> {
     pub(super) fn comptime_instance_clause_evidence(
         &self,
         owner: OwnerId,
-        subject: &n::Expr,
+        inputs: &n::ClauseOperands,
     ) -> Option<Vec<Term>> {
-        let packet = match &subject.kind {
-            K::Block {
-                result: Some(result),
-                ..
-            } => result.as_ref(),
-            _ => subject,
-        };
-        let K::Tuple(inputs) = &packet.kind else {
-            return None;
-        };
+        let inputs = &inputs.arguments;
         let parameters = self.type_parameters.get(&owner)?;
         if inputs.len() != parameters.len() {
             return None;
@@ -424,9 +404,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
                 "comptime callable signature still depends on an invocation-time clause input",
             ));
         }
-        if !packet.formation_deferred
-            && matches!(&packet.expression.kind, K::Block { statements, .. } if statements.is_empty())
-        {
+        if !packet.formation_deferred && packet.inputs.statements.is_empty() {
             // Only an already checked static application can use the direct
             // instance and declaration-side default substitution. An observed
             // identity cannot erase producers or complete deferred contracts.
@@ -454,7 +432,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             ty,
             kind: K::ComptimeFunctionInstance {
                 declaration: declaration(self.package, &self.package_identities, owner),
-                subject: Box::new(packet.expression),
+                inputs: packet.inputs,
             },
         })
     }
@@ -578,16 +556,37 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             false,
             &[],
             |checker| {
-                checker
-                    .prepare_callable_clause_packet(
-                        expr,
-                        owner,
-                        args,
-                        prefix,
-                        &parameters,
-                        &domains,
-                    )
-                    .map(|packet| packet.expression)
+                let packet = checker.prepare_callable_clause_packet(
+                    expr,
+                    owner,
+                    args,
+                    prefix,
+                    &parameters,
+                    &domains,
+                )?;
+                // A required invocation returns one value to the host.
+                let n::ClauseOperands {
+                    statements,
+                    arguments,
+                } = packet.inputs;
+                let ty = Term::Tuple(
+                    arguments
+                        .iter()
+                        .map(|arg| checker.copy_alias_type(&arg.ty, expr.span))
+                        .collect::<Result<_, _>>()?,
+                );
+                Ok(n::Expr {
+                    source: source(expr.span),
+                    ty: checker.copy_alias_type(&ty, expr.span)?,
+                    kind: K::Block {
+                        statements,
+                        result: Some(Box::new(n::Expr {
+                            source: source(expr.span),
+                            ty,
+                            kind: K::Tuple(arguments),
+                        })),
+                    },
+                })
             },
         )?;
         let (value, packet_type) =
@@ -705,7 +704,10 @@ mod packet_tests {
         };
         let producer = expression.to_string();
         let packet = CallableClausePacket {
-            expression,
+            inputs: n::ClauseOperands {
+                statements: vec![],
+                arguments: vec![expression],
+            },
             bindings: declaration_inputs::Observations::new(
                 vec![last, first]
                     .into_iter()

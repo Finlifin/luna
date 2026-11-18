@@ -1192,10 +1192,9 @@ fn dynamic_trait_package() -> Package {
         result: Box::new(boolean.clone()),
     };
     package.functions[0].parameters = vec![binding];
-    let packet = Expr {
-        source,
-        ty: Term::Tuple(vec![Term::Primitive(Primitive::Type); 2]),
-        kind: K::Tuple(vec![
+    let inputs = nir::program::ClauseOperands {
+        statements: vec![],
+        arguments: vec![
             Expr {
                 source,
                 ty: Term::Primitive(Primitive::Type),
@@ -1206,7 +1205,7 @@ fn dynamic_trait_package() -> Package {
                 ty: Term::Primitive(Primitive::Type),
                 kind: K::Local(binding),
             },
-        ]),
+        ],
     };
     package.functions[0].body = Expr {
         source,
@@ -1217,7 +1216,7 @@ fn dynamic_trait_package() -> Package {
                 ty: callable,
                 kind: K::ComptimeFunctionInstance {
                     declaration: id(5),
-                    subject: Box::new(packet),
+                    inputs,
                 },
             }),
             arguments: vec![],
@@ -1367,17 +1366,10 @@ fn dynamic_trait_clause_packet_requires_every_declared_input() {
     let K::Call { callee, .. } = &mut package.functions[0].body.kind else {
         unreachable!()
     };
-    let K::ComptimeFunctionInstance { subject, .. } = &mut callee.kind else {
+    let K::ComptimeFunctionInstance { inputs, .. } = &mut callee.kind else {
         unreachable!()
     };
-    let Term::Tuple(domains) = &mut subject.ty else {
-        unreachable!()
-    };
-    domains.pop();
-    let K::Tuple(values) = &mut subject.kind else {
-        unreachable!()
-    };
-    values.pop();
+    inputs.arguments.pop();
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         vm.invoke(id(1), vec![Value::Type(Term::Primitive(Primitive::Bool))])
@@ -1567,14 +1559,10 @@ fn dynamic_trait_defaults_specialize_comptime_value_inputs_per_invocation() {
         unreachable!()
     };
     callee.ty = method_signature.with_comptime_phase(true);
-    let K::ComptimeFunctionInstance { subject, .. } = &mut callee.kind else {
+    let K::ComptimeFunctionInstance { inputs, .. } = &mut callee.kind else {
         unreachable!()
     };
-    subject.ty = Term::Tuple(vec![Term::Primitive(Primitive::Type), boolean.clone()]);
-    let K::Tuple(fields) = &mut subject.kind else {
-        unreachable!()
-    };
-    fields[1].ty = boolean.clone();
+    inputs.arguments[1].ty = boolean.clone();
     for argument in arguments.iter_mut() {
         argument.value.ty = boolean.clone();
     }

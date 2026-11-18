@@ -76,6 +76,12 @@ impl Walker<'_> {
                 self.child(index, state, depth)?;
                 result = self.unknown_value(&expr.ty)?;
             }
+            K::ComptimeFunctionInstance { inputs, .. } => {
+                for input in inputs.expressions() {
+                    self.child(input, state, depth)?;
+                }
+                result = self.unknown_value(&expr.ty)?;
+            }
             K::NewtypeRepresentation(subject)
             | K::StructFieldTypes(subject)
             | K::StructFieldNames(subject)
@@ -84,7 +90,6 @@ impl Walker<'_> {
             | K::BuildEnum(subject)
             | K::ObjectQuery { subject, .. }
             | K::ObjectEdit { subject, .. }
-            | K::ComptimeFunctionInstance { subject, .. }
             | K::EnumStructure { subject, .. } => {
                 self.child(subject, state, depth)?;
                 result = self.unknown_value(&expr.ty)?;

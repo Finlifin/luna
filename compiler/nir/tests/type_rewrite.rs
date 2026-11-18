@@ -606,7 +606,10 @@ fn dynamic_instance_operands_participate_in_type_rewriting() {
             package: 1,
             local: 1,
         },
-        subject: Box::new(expr(K::TypeValue(rigid()))),
+        inputs: nir::program::ClauseOperands {
+            statements: vec![expr(K::TypeValue(rigid()))],
+            arguments: vec![expr(K::TypeValue(rigid()))],
+        },
     });
     let mut visits = 0;
     value
@@ -615,7 +618,7 @@ fn dynamic_instance_operands_participate_in_type_rewriting() {
             Ok::<_, ()>(Term::Primitive(Primitive::Bool))
         })
         .unwrap();
-    assert_eq!(visits, 3);
+    assert_eq!(visits, 5);
     assert!(value.to_string().contains("(comptime-function-instance"));
     assert!(!value.to_string().contains("(rigid"));
 }
