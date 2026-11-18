@@ -179,6 +179,7 @@ impl Interpreter<'_> {
         &mut self,
         declaration: DeclarationId,
         arguments: &[Term],
+        substitution: &nir::DeclarationSubstitution<'_>,
         source: SourceRange,
     ) -> Result<Arc<Expr>, Error> {
         let before_key = self.budget.steps;
@@ -207,27 +208,11 @@ impl Interpreter<'_> {
             return Ok(body);
         }
         let before_preparation = self.budget.steps;
-        let definition = self
-            .functions
-            .declaration(&declaration)
-            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        // Input admission and entry contracts have completed. Body scope needs
-        // the declaration's binder sorts; substituting their types cannot change them.
-        let Term::Function { parameters, .. } = definition.signature.callable_signature() else {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        };
-        self.integer_operation(Some(source), |budget| budget.consume(parameters.len()))?;
-        let frames = vec![parameters.iter().map(|parameter| parameter.sort).collect()];
         let code = self
             .functions
             .body(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        let body = Arc::new(self.specialize_function_expression(
-            code,
-            &definition.type_parameters,
-            arguments,
-            &frames,
-        )?);
+        let body = Arc::new(self.instantiate_activation_code(code, substitution)?);
         let key = (declaration, Arc::from(arguments));
         if persistent && self.budget.steps >= key_work {
             self.budget.steps -= key_work;

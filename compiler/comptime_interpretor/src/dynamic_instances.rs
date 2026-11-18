@@ -8,6 +8,24 @@ pub(super) enum PreparedTraitInstance {
     Control(Flow),
 }
 
+pub(super) fn instantiate_code(
+    substitution: &nir::DeclarationSubstitution<'_>,
+    expression: &Expr,
+    fuel: &mut usize,
+) -> Result<Expr, ErrorKind> {
+    substitution
+        .instantiate_expression_bounded(expression, fuel)
+        .map_err(|failure| match failure {
+            nir::ExpressionInstantiationError::Copy(
+                nir::copy_budget::CopyBudgetExhausted::Steps,
+            ) => ErrorKind::StepsExhausted,
+            nir::ExpressionInstantiationError::Copy(
+                nir::copy_budget::CopyBudgetExhausted::Depth,
+            ) => ErrorKind::DepthExhausted,
+            nir::ExpressionInstantiationError::Scope(_) => ErrorKind::Type,
+        })
+}
+
 impl Interpreter<'_> {
     pub(super) fn admit_callable_identity(
         &mut self,
@@ -125,19 +143,7 @@ impl Interpreter<'_> {
                 nir::type_computations::Error::Budget => ErrorKind::StepsExhausted,
                 _ => ErrorKind::Type,
             })
-            .and_then(|substitution| {
-                substitution
-                    .instantiate_expression_bounded(expression, &mut fuel)
-                    .map_err(|failure| match failure {
-                        nir::ExpressionInstantiationError::Copy(
-                            nir::copy_budget::CopyBudgetExhausted::Steps,
-                        ) => ErrorKind::StepsExhausted,
-                        nir::ExpressionInstantiationError::Copy(
-                            nir::copy_budget::CopyBudgetExhausted::Depth,
-                        ) => ErrorKind::DepthExhausted,
-                        nir::ExpressionInstantiationError::Scope(_) => ErrorKind::Type,
-                    })
-            });
+            .and_then(|substitution| instantiate_code(&substitution, expression, &mut fuel));
         self.budget.steps -= (before - fuel) as u64;
         result.map_err(|kind| self.failure(kind, Some(expression.source)))
     }

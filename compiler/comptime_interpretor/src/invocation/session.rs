@@ -295,6 +295,12 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 }
             }
         }
+        if let Some(Execution::Invocation(active)) = execution.as_mut()
+            && matches!(active.frame.progress, contracts::Progress::NeedBody)
+            && let Err(error) = vm.install_invocation_body(&mut active.frame)
+        {
+            *result = Some(vm.complete_execution(execution.take().unwrap(), Err(error)));
+        }
         if let Some(mut active) = execution.take() {
             let owned = match &active {
                 Execution::Invocation(activation) if activation.frame.condition.is_some() => {

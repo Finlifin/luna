@@ -4,6 +4,7 @@ use super::*;
 
 pub(super) enum Progress<'a> {
     Entry(usize),
+    NeedBody,
     Body {
         code: Body<'a>,
         cache_key: Option<DeclarationId>,
@@ -19,7 +20,7 @@ impl Progress<'_> {
     pub(super) fn body(&self) -> Option<(&Body<'_>, Option<DeclarationId>)> {
         match self {
             Self::Body { code, cache_key } => Some((code, *cache_key)),
-            Self::Entry(_) | Self::Exit { .. } => None,
+            Self::Entry(_) | Self::NeedBody | Self::Exit { .. } => None,
         }
     }
 }
@@ -28,6 +29,7 @@ impl fmt::Display for Progress<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Entry(next) => write!(f, "(entry (next {next}))"),
+            Self::NeedBody => f.write_str("(need-body)"),
             Self::Body { code, cache_key } => {
                 f.write_str("(body (cache-key")?;
                 if let Some(identity) = cache_key {
@@ -59,16 +61,13 @@ impl<'a> Interpreter<'a> {
         frame.condition = None;
         let condition = match &frame.progress {
             Progress::Entry(index) => Some((true, *index)),
-            Progress::Body { .. } => None,
+            Progress::Body { .. } | Progress::NeedBody => None,
             Progress::Exit { next, .. } if self.cleanup_schedule.is_none() => Some((false, *next)),
             Progress::Exit { .. } => None,
         };
         if let Some((entry, index)) = condition
-            && let Some(origin) = frame.origin
+            && let Some(definition) = frame.declaration
         {
-            let definition = self
-                .invocation_declaration(origin, &frame.function)
-                .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
             let conditions = if entry {
                 &definition.preconditions
             } else {
@@ -76,7 +75,7 @@ impl<'a> Interpreter<'a> {
             };
             if let Some(condition) = conditions.get(index) {
                 let mut condition =
-                    self.copy_invocation_condition(condition, definition, &frame.function)?;
+                    self.copy_invocation_condition(condition, frame.substitution.as_ref())?;
                 if let Some(scope) = &frame.type_scope {
                     self.specialize_input_types(&mut condition, scope)?;
                 }
@@ -90,14 +89,10 @@ impl<'a> Interpreter<'a> {
         }
         match &mut frame.progress {
             Progress::Entry(_) => {
-                let (code, cache_key) = self.prepare_invocation_body(frame)?;
-                frame.progress = Progress::Body { code, cache_key };
-                if let Some(origin) = frame.origin {
-                    self.events.push(Event::EnterFunction(origin));
-                }
+                frame.progress = Progress::NeedBody;
                 Ok(None)
             }
-            Progress::Body { .. } => Ok(None),
+            Progress::Body { .. } | Progress::NeedBody => Ok(None),
             Progress::Exit {
                 value, returned, ..
             } => {
@@ -111,6 +106,19 @@ impl<'a> Interpreter<'a> {
                 Ok(Some(std::mem::replace(value, Value::Unit)))
             }
         }
+    }
+
+    pub(super) fn install_invocation_body(
+        &mut self,
+        frame: &mut InvocationFrame<'a>,
+    ) -> Result<(), Error> {
+        let (code, cache_key) = self.prepare_invocation_body(frame)?;
+        frame.progress = Progress::Body { code, cache_key };
+        if let Some(definition) = frame.declaration {
+            self.events
+                .push(Event::EnterFunction(definition.declaration));
+        }
+        Ok(())
     }
 
     pub(super) fn accept_invocation_step(
@@ -129,6 +137,7 @@ impl<'a> Interpreter<'a> {
                 }
                 *index += 1;
             }
+            Progress::NeedBody => unreachable!("awaiting code has no evaluated expression"),
             Progress::Body { .. } => {
                 let (value, returned) = match flow {
                     Flow::Value(value) => (value, false),
@@ -145,10 +154,7 @@ impl<'a> Interpreter<'a> {
                     if !returned {
                         self.check_scheduled_result(&value, source, &mut frame.environment)?;
                     }
-                } else if let Some(origin) = frame.origin {
-                    let definition = self
-                        .invocation_declaration(origin, &frame.function)
-                        .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
+                } else if let Some(definition) = frame.declaration {
                     if !definition.postconditions.is_empty()
                         && let Some(binding) = definition.result_binding
                     {

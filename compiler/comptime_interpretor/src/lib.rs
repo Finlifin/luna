@@ -2432,23 +2432,25 @@ impl<'a> Interpreter<'a> {
             )
         })
     }
+    fn instantiate_activation_code(
+        &mut self,
+        expression: &Expr,
+        substitution: &nir::DeclarationSubstitution<'_>,
+    ) -> Result<Expr, Error> {
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = dynamic_instances::instantiate_code(substitution, expression, &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        result.map_err(|kind| self.failure(kind, Some(expression.source)))
+    }
+
     fn copy_invocation_condition(
         &mut self,
         condition: &Expr,
-        definition: &nir::program::FunctionDeclaration,
-        function: &Value,
+        substitution: Option<&nir::DeclarationSubstitution<'_>>,
     ) -> Result<Expr, Error> {
-        let arguments = match function {
-            value if self.graph.is_none() => value.declaration_instance().map(|(_, inputs)| inputs),
-            _ => None,
-        };
-        match arguments {
-            Some(arguments) => self.specialize_function_expression(
-                condition,
-                &definition.type_parameters,
-                arguments,
-                &[],
-            ),
+        match substitution {
+            Some(inputs) => self.instantiate_activation_code(condition, inputs),
             None => {
                 self.charge_copy_work(Some(condition.source), |fuel| {
                     let mut steps = *fuel as u64;

@@ -35,7 +35,8 @@ struct InvocationFrame<'a> {
     source: SourceRange,
     result_type: Term,
     type_scope: Option<nir::FunctionInputBinding>,
-    origin: Option<DeclarationId>,
+    declaration: Option<&'a nir::program::FunctionDeclaration>,
+    substitution: Option<nir::DeclarationSubstitution<'static>>,
     progress: contracts::Progress<'a>,
     condition: Option<Arc<Expr>>,
 }
@@ -179,14 +180,12 @@ impl<'a> Interpreter<'a> {
         arguments: Vec<Value>,
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<Value, Error> {
-        let mut activation = self.begin_invocation(function, arguments, context)?;
+        let activation = self.begin_invocation(function, arguments, context)?;
         if !self.bytecode_invocation_available() {
             // Tree execution must not retain the large linear VM dispatcher
             // frame at every native recursive call. Admission, completion and
             // restoration still use the shared invocation boundaries.
-            let (expression, _, environment) = activation.frame.parts();
-            let result = self.eval(expression, environment);
-            return self.complete_invocation(activation, result);
+            return self.run_tree_invocation(activation);
         }
         match Session::invocation(self, activation).run()? {
             Some(Flow::Value(value)) => Ok(value),
@@ -362,21 +361,17 @@ impl<'a> Interpreter<'a> {
         Ok(function)
     }
 
-    fn complete_invocation(
-        &mut self,
-        mut activation: Box<Activation<'a>>,
-        result: Result<Flow, Error>,
-    ) -> Result<Value, Error> {
-        let mut result = result;
-        let completed = loop {
-            match result.and_then(|flow| self.accept_invocation_step(&mut activation.frame, flow)) {
-                Ok(None) => {
-                    let (expression, _, environment) = activation.frame.parts();
-                    result = self.eval(expression, environment);
-                }
-                outcome => break outcome.map(|value| value.expect("completed invocation")),
+    fn run_tree_invocation(&mut self, mut activation: Box<Activation<'a>>) -> Result<Value, Error> {
+        let completed = (|| loop {
+            if matches!(activation.frame.progress, contracts::Progress::NeedBody) {
+                self.install_invocation_body(&mut activation.frame)?;
             }
-        };
+            let (expression, _, environment) = activation.frame.parts();
+            let flow = self.eval(expression, environment)?;
+            if let Some(value) = self.accept_invocation_step(&mut activation.frame, flow)? {
+                return Ok(value);
+            }
+        })();
         self.leave_invocation(activation.saved);
         completed
     }
@@ -550,11 +545,17 @@ impl<'a> Interpreter<'a> {
             Value::FunctionInstance {
                 declaration,
                 arguments,
-            } => Body::Owned(self.prepare_function_instance_body(
-                *declaration,
-                arguments,
-                frame.source,
-            )?),
+            } => Body::Owned(
+                self.prepare_function_instance_body(
+                    *declaration,
+                    arguments,
+                    frame
+                        .substitution
+                        .as_ref()
+                        .expect("source instance admission"),
+                    frame.source,
+                )?,
+            ),
             Value::Closure(closure) => Body::Owned(closure.body.clone()),
             _ => return Err(self.failure(ErrorKind::Type, Some(frame.source))),
         };
@@ -667,38 +668,57 @@ impl<'a> Interpreter<'a> {
             &mut environment,
             source,
         )?;
-        if let Some(id) = origin
-            && (self.comptime_only
+        let declaration = origin
+            .map(|id| {
+                self.invocation_declaration(id, &function)
+                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))
+            })
+            .transpose()?;
+        let mut substitution = None;
+        if let Some(definition) = declaration {
+            let check_contracts = (self.comptime_only
                 || matches!(
                     function,
                     Value::Function(_) | Value::FunctionInstance { .. }
                 ))
-        {
-            let definition = self
-                .invocation_declaration(id, &function)
-                .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
-            if !definition.requirements.is_empty() || !definition.capabilities.is_empty() {
-                let generic_arguments = match &function {
-                    _ if self.graph.is_some() => &[][..],
-                    Value::Closure(closure) => closure.instance_arguments.as_deref().unwrap_or(&[]),
-                    Value::FunctionInstance { arguments, .. } => arguments.as_slice(),
-                    _ => &[],
-                };
+                && (!definition.requirements.is_empty() || !definition.capabilities.is_empty());
+            let source_instance = self.graph.is_none() && function.declaration_instance().is_some();
+            if check_contracts || source_instance {
                 let contract_frames;
                 let inputs = match instance_inputs {
                     Some(inputs) if self.graph.is_none() => inputs,
                     _ => {
+                        let arguments = match &function {
+                            _ if self.graph.is_some() => &[][..],
+                            Value::Closure(closure) => {
+                                closure.instance_arguments.as_deref().unwrap_or_default()
+                            }
+                            Value::FunctionInstance { arguments, .. } => arguments.as_slice(),
+                            _ => &[],
+                        };
                         contract_frames =
                             [self.ordinary_input_frame(&definition.signature, source)?];
                         self.admit_function_inputs(
                             &definition.type_parameters,
-                            generic_arguments,
+                            arguments,
                             nir::DeclarationInputScope::ClosedInBody(&contract_frames),
                             source,
                         )?
                     }
                 };
-                self.check_invocation_contracts(definition, &inputs, type_scope.as_ref(), source)?;
+                if check_contracts {
+                    self.check_invocation_contracts(
+                        definition,
+                        &inputs,
+                        type_scope.as_ref(),
+                        source,
+                    )?;
+                }
+                if source_instance {
+                    substitution = Some(self.query_admission(Some(source), |_, fuel| {
+                        Ok(inputs.into_substitution().into_owned(fuel)?)
+                    })?);
+                }
             }
         }
         let result_type = match &type_scope {
@@ -716,18 +736,7 @@ impl<'a> Interpreter<'a> {
         } else {
             self.effect_state.environment.clear();
         }
-        let origin = match &function {
-            Value::Function(id)
-            | Value::FunctionInstance {
-                declaration: id, ..
-            } => Some(*id),
-            Value::Closure(closure) => closure.origin,
-            _ => None,
-        };
-        if let Some(id) = origin {
-            let definition = self
-                .invocation_declaration(id, &function)
-                .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
+        if let Some(definition) = declaration {
             for snapshot in &definition.entry_snapshots {
                 let value = self.local_value(&environment, snapshot.parameter, None)?;
                 environment.insert(snapshot.binding, value);
@@ -741,7 +750,8 @@ impl<'a> Interpreter<'a> {
             source,
             result_type,
             type_scope,
-            origin,
+            declaration,
+            substitution,
             progress: contracts::Progress::Entry(0),
             condition: None,
         })
@@ -971,9 +981,7 @@ mod tests {
         // A delivery type error must unwind the child activation while leaving
         // the suspended parent's owned closure and captured environment usable.
         assert_eq!(
-            vm.complete_invocation(child, Ok(Flow::Value(Value::Unit)))
-                .unwrap_err()
-                .kind,
+            vm.run_tree_invocation(child).unwrap_err().kind,
             ErrorKind::Type
         );
         assert_eq!(vm.depth, 1);

@@ -327,6 +327,139 @@ mod tests {
     }
 
     #[test]
+    fn instance_contracts_share_declaration_and_ordinary_type_bindings() {
+        use nir::program::{Literal, MatchArm, Pattern};
+        let mut package = guarded_type_body(0);
+        let interface = &mut package.functions[0].interface;
+        interface.type_parameters.push(id(2));
+        let marker = Term::Rigid {
+            declaration: id(2),
+            sort: nir::Sort::Type,
+        };
+        let ordinary = Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: nir::Sort::Type,
+        };
+        let Term::Function { parameters, .. } = &mut interface.signature else {
+            unreachable!()
+        };
+        parameters.truncate(1);
+        interface.parameters.truncate(1);
+        let mut predicates = Vec::new();
+        for (index, ty) in [(1, marker), (2, ordinary)] {
+            let ty = Term::Optional(Box::new(ty));
+            let local = LocalId { owner: 1, index };
+            parameters.push(nir::Parameter {
+                ty: ty.clone(),
+                sort: nir::Sort::Runtime,
+            });
+            interface.parameters.push(local);
+            let source = SourceRange {
+                start: index,
+                end: index + 1,
+            };
+            let arm = |pattern, value| MatchArm {
+                pattern,
+                guard: None,
+                body: Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Bool),
+                    kind: K::Literal(Literal::Bool(value)),
+                },
+            };
+            predicates.push(Expr {
+                source,
+                ty: Term::Primitive(Primitive::Bool),
+                kind: K::Match {
+                    value: Box::new(Expr {
+                        source,
+                        ty,
+                        kind: K::Local(local),
+                    }),
+                    arms: vec![
+                        arm(Pattern::OptionalAbsent, true),
+                        arm(Pattern::Wild, false),
+                    ],
+                },
+            });
+        }
+        // The ordinary input occurs before and after execution. The declaration
+        // input independently controls the first exit predicate.
+        interface.preconditions = vec![predicates[1].clone()];
+        interface.postconditions = predicates;
+        for tree in [false, true] {
+            let mut vm = if tree {
+                Interpreter::for_comptime_tree(&package, Budget::default())
+            } else {
+                Interpreter::for_comptime(&package, Budget::default())
+            }
+            .unwrap();
+            let optional = |ty, value: Option<Value>| Value::Optional {
+                ty: Term::Optional(Box::new(Term::Primitive(ty))),
+                value: value.map(Box::new),
+            };
+            for (ty, marker, ordinary, rejection) in [
+                (Primitive::U8, None, None, None),
+                (
+                    Primitive::U8,
+                    None,
+                    Some(Value::UnsignedInteger(3)),
+                    Some(2),
+                ),
+                (Primitive::Bool, Some(Value::Char('x')), None, Some(1)),
+                (Primitive::Bool, None, None, None),
+            ] {
+                let term = Term::Primitive(ty);
+                let result = vm.invoke_instantiated(
+                    id(1),
+                    vec![Term::Primitive(Primitive::Char)],
+                    vec![
+                        Value::Type(term.clone()),
+                        optional(Primitive::Char, marker),
+                        optional(ty, ordinary),
+                    ],
+                );
+                if let Some(start) = rejection {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.kind, ErrorKind::ProgramContractRejected);
+                    assert_eq!(
+                        error.source,
+                        Some(SourceRange {
+                            start,
+                            end: start + 1
+                        })
+                    );
+                } else {
+                    assert_eq!(result.unwrap(), Value::Type(term));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unpolled_call_without_preconditions_does_not_prepare_its_body() {
+        let mut package = guarded_type_body(4096);
+        package.functions[0].interface.preconditions.clear();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        vm.budget.steps = 500;
+        let active = vm
+            .start_invocation(
+                Value::Function(id(1)),
+                vec![
+                    Value::Type(Term::Primitive(Primitive::Bool)),
+                    Value::Bool(true),
+                ],
+            )
+            .unwrap();
+        assert!(active.to_string().contains("(need-body)"));
+        drop(active);
+        assert!(vm.input_body_cache.entries.is_empty());
+        assert!(!vm.events().contains(&Event::EnterFunction(id(1))));
+        assert_eq!(vm.invocation_depth, 0);
+    }
+
+    #[test]
     fn cancelled_entry_and_failed_body_preparation_restore_the_same_caller() {
         let package = guarded_type_body(4096);
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();

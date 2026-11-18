@@ -599,6 +599,18 @@ impl<T: Borrow<Term>> std::fmt::Display for AdmittedArguments<'_, T> {
         f.write_str(")")
     }
 }
+impl<'a> AdmittedArguments<'a> {
+    /// Keep the checked binder index and the template's ordinary telescope for
+    /// code in this activation. Rewriting code does not grant admission again.
+    pub fn into_substitution(self) -> DeclarationSubstitution<'a> {
+        DeclarationSubstitution {
+            parameters: self.parameters,
+            arguments: Cow::Borrowed(self.arguments),
+            frames: Cow::Borrowed(self.scope.template()),
+        }
+    }
+}
+
 impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
     pub fn instantiate(
         &self,

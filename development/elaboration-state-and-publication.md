@@ -746,7 +746,13 @@ VM 在形成具名 runtime 函数值和接收冻结值时，用当前声明环�
 | `RequiredWorld::with_phase`／`CodeSession::with_phase_checked_source` | 对同一个不可变 Package 的整包凭证 | 不把部分目录升级为 PhaseCheckedPackage；源码服务和活动任务使用独立 owner，不伪造完整包 |
 | `nir::callable_source::Callables` | 与源包绑定的不可变身份目录 | 声明观察与代码取得分别查询；待完成源码的独立发布仍需接线 |
 | `prepare_invocation` | 直接借用 FunctionDeclaration 取得接口和声明来源 | 独立发布源码接口，并在 Entry 成功后按需交付主体；源包注册仍依赖完整 Function |
-| `prepare_invocation_step` 的 Entry → Body | 同步取得、特化和重绑定完整主体 | 入口契约成功后在原 activation 等待代码，响应不得再次 bind inputs、运行入口契约或建立新调用 |
+| VM 的 Entry → NeedBody → Body | 入口通过后，原调用帧保留参数、声明和本次替换。执行器下一步从当前包取得主体并安装代码 | 接入未完成源码的供应端后，响应须恢复同一帧，保留已求值实参、已经通过的入口契约以及执行预算 |
+
+此处有两类输入。以带声明参数 `Marker`、普通参数 `comptime T: Type` 的函数为例，
+按声明输入特化契约时，`Marker` 已有值，契约里的 `T` 仍指向普通参数槽。
+因此声明替换须保留普通参数的 binder，随后才能使用本次调用中 `T` 的值重绑定。
+从入口谓词、函数体到出口谓词都使用这同一份声明替换。没有前置条件的调用也先进入
+`NeedBody`；此时取消调用不会特化函数体或发出函数体入口事件。
 
 `nir::phases::Inspection` 与 `PhaseCheckedPackage` 也必须区别：前者拥有相同
 世界的声明目录并可检查表达式，后者只在全部函数、quote 模板、默认值与契约的
