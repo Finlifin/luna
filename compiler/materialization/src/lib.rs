@@ -231,8 +231,8 @@ pub fn resolve_method_identity_in_context(
 /// Normalize annotations on a private expansion candidate without invoking
 /// code, selecting bodies or publishing an executable instance. Unresolved
 /// definition-side projections remain views; opaque heads retain identity.
-struct InlineAnnotationRewriter<F>(F);
-impl<F: FnMut(&Term) -> Result<Term, String>> n::Rewriter for InlineAnnotationRewriter<F> {
+struct StagingAnnotationRewriter<F>(F);
+impl<F: FnMut(&Term) -> Result<Term, String>> n::Rewriter for StagingAnnotationRewriter<F> {
     type Error = String;
     fn ty(&mut self, ty: &Term) -> Result<Term, String> {
         (self.0)(ty)
@@ -671,7 +671,7 @@ fn build(
             .chain(&mut function.interface.preconditions)
             .chain(&mut function.interface.postconditions)
         {
-            expression.rewrite_with(&mut InlineAnnotationRewriter(|ty: &Term| {
+            expression.rewrite_with(&mut StagingAnnotationRewriter(|ty: &Term| {
                 builder.staging_type_view(ty)
             }))?;
         }
@@ -1554,7 +1554,9 @@ impl Builder<'_> {
         });
         self.fuel = fuel.min(self.fuel);
         result?;
-        expression.rewrite_types(&mut |ty| self.staging_type_view(ty))?;
+        expression.rewrite_with(&mut StagingAnnotationRewriter(|ty: &Term| {
+            self.staging_type_view(ty)
+        }))?;
         nir::float_formation::complete(expression, &mut self.fuel)?;
         nir::integer_formation::complete(expression, self.package.target, &mut self.fuel)?;
         if self.instances.is_some() {
@@ -2005,6 +2007,9 @@ impl Builder<'_> {
                         }
                         *parameter_bindings = template.parameters.clone();
                     }
+                    // The interface entry has been selected. Its callable view
+                    // can now use the associated types of this implementation.
+                    callee.ty = self.staging_type_view(&callee.ty)?;
                     callee.kind = K::FunctionInstance {
                         declaration: method.body,
                         arguments: method.arguments,
