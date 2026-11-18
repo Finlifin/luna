@@ -55,7 +55,7 @@ impl fmt::Display for InstanceKey {
         f.write_str("))")
     }
 }
-/// Declaration evidence for a callable retained only inside immutable types.
+/// Declaration evidence for a callable carried as comptime data.
 /// This records its completed signature, not an executable instance or a tag.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallableIdentity {
@@ -285,7 +285,7 @@ impl Package {
                 let program = nir::contracts::CallableProgram::method(method)
                     .map_err(|error| error.to_string())?;
                 visit::program_expressions(program, fuel, |expr, fuel| {
-                    callables.validate_clause(
+                    callables.validate_reference(
                         expr,
                         method.signature.is_comptime_callable(),
                         fuel,
@@ -412,57 +412,12 @@ impl Package {
                 if let Some(message) = nir::program::pointer_operation_error_in(expr, self.target) {
                     return Err(message.into());
                 }
-                callables.validate_clause(
+                callables.validate_reference(
                     expr,
                     instance.function.phase == nir::program::FunctionPhase::Comptime,
                     fuel,
                 )?;
-                let target: Option<(DeclarationId, &[Term])> = match &expr.kind {
-                    K::Function(id) => Some((*id, &[])),
-                    K::FunctionInstance {
-                        declaration,
-                        arguments,
-                    } => Some((*declaration, arguments)),
-                    K::TraitMethod {
-                        method_arguments,
-                        interface,
-                        interface_arguments,
-                        member,
-                        subject,
-                    } => {
-                        if self.interfaces.iter().any(|contract| {
-                            contract.interface.declaration == *interface
-                                && contract.interface.arguments == *interface_arguments
-                                && contract.subject == *subject
-                                && contract
-                                    .methods
-                                    .iter()
-                                    .any(|method| method.declaration == *member && method.is_quote)
-                        }) {
-                            return Err(
-                                "IIR quote method requires completed deterministic expansion"
-                                    .into(),
-                            );
-                        }
-                        let selected = self
-                            .dispatch
-                            .iter()
-                            .find(|d| {
-                                d.interface == *interface
-                                    && d.interface_arguments == *interface_arguments
-                                    && d.subject == *subject
-                            })
-                            .ok_or("IIR trait reference has no selected implementation")?;
-                        let method = selected
-                            .methods
-                            .iter()
-                            .find(|m| {
-                                m.member == *member && m.method_arguments == *method_arguments
-                            })
-                            .ok_or("IIR trait reference has no selected method")?;
-                        Some((method.body, &method.arguments))
-                    }
-
+                match &expr.kind {
                     K::StagedValue(_) => {
                         return Err("IIR retains an unbound staged value".into());
                     }
@@ -477,27 +432,7 @@ impl Package {
                     K::AssociatedValue { .. } => {
                         return Err("IIR requires associated value selection".into());
                     }
-                    _ => None,
-                };
-                if let Some(target) = target {
-                    index::terms(target.1, fuel)?;
-                    if let Some(&ty) = callables.templates.get(&target) {
-                        if ty != &expr.ty {
-                            return Err("IIR template reference changed logical type".into());
-                        }
-                        return Ok(());
-                    }
-                    let target = callables
-                        .functions
-                        .get(&target)
-                        .ok_or("IIR callable reference is dangling")?;
-                    let comptime = target.phase == nir::program::FunctionPhase::Comptime;
-                    if comptime != expr.ty.is_comptime_callable() {
-                        return Err("IIR callable reference changed execution phase".into());
-                    }
-                    if target.is_unsafe != expr.ty.is_unsafe_callable() {
-                        return Err("IIR callable reference changed unsafe responsibility".into());
-                    }
+                    _ => {}
                 }
                 Ok(())
             })?;

@@ -107,6 +107,13 @@ fn graph_phase_authority_is_checked_before_nested_execution() {
     let package = support::compile("fn leaf()->bool {true} fn run()->bool {leaf()}");
     let mut graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let root = graph.roots[0].clone();
+    let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&root, vec![]).unwrap_err().kind,
+        ErrorKind::PhaseMismatch
+    );
+    assert_eq!(vm.bytecode_invocations(), 0);
+
     graph
         .functions
         .iter_mut()
@@ -114,12 +121,13 @@ fn graph_phase_authority_is_checked_before_nested_execution() {
         .unwrap()
         .function
         .phase = nir::program::FunctionPhase::Comptime;
-    let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
-    assert_eq!(
-        vm.invoke_instance(&root, vec![]).unwrap_err().kind,
-        ErrorKind::PhaseMismatch
+    assert!(
+        graph
+            .validate(&mut 100_000)
+            .unwrap_err()
+            .contains("execution phase")
     );
-    assert_eq!(vm.bytecode_invocations(), 1);
+    assert!(Interpreter::from_iir_for_comptime(&graph, Budget::default()).is_err());
 }
 
 #[test]
@@ -613,17 +621,42 @@ fn observed_clause_links_preserve_execution_and_reject_stale_evidence() {
     );
 }
 
+fn retain_runtime_declaration(
+    package: &mut nir::program::Package,
+    declaration: nir::DeclarationId,
+) {
+    let position = package
+        .functions
+        .iter()
+        .position(|f| f.declaration == declaration)
+        .unwrap();
+    let f = package.functions.remove(position).interface;
+    assert_eq!(f.phase, nir::program::FunctionPhase::Runtime);
+    let signature = f.callable_type();
+    package
+        .runtime_function_identities
+        .push(nir::program::RuntimeFunctionIdentity {
+            source: f.source,
+            requirements: f.requirements,
+            capabilities: f.capabilities,
+            declaration,
+            type_parameters: f.type_parameters,
+            signature,
+        });
+}
+
 #[test]
 fn runtime_method_in_an_opaque_head_retains_its_interface_identity_in_both_worlds() {
     let source = "
         typealias Type = .Type'builtin;
         trait Flag { fn read(self) -> bool; }
         impl Flag for bool { fn read(self) -> bool { self } }
+        fn execute(value: bool) -> bool { value.as(Flag).read() }
         pure comptime fn Carrier<action: fn(bool) -> bool> -> Type { bool }
         comptime fn selected() -> Type where T { T }
         comptime fn run() -> Type { selected<Carrier<bool.as(Flag).read>>() }
     ";
-    let package = support::compile(source);
+    let mut package = support::compile(source);
     let root = support::id(&package, "run");
     let expected = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
@@ -633,7 +666,37 @@ fn runtime_method_in_an_opaque_head_retains_its_interface_identity_in_both_world
         matches!(&expected, Value::Type(Term::NormalForm { arguments, .. })
         if matches!(arguments.as_slice(), [Term::MethodValue(_)]))
     );
+    let executable = luna::instantiation::instantiate(&package, "execute", 100_000).unwrap();
+    let selected = executable
+        .dispatch
+        .iter()
+        .flat_map(|interface| &interface.methods)
+        .next()
+        .unwrap()
+        .body;
+    let mut vm = Interpreter::from_iir(&executable, Budget::default()).unwrap();
+    for value in [true, false] {
+        assert_eq!(
+            vm.invoke_instance(&executable.roots[0], vec![Value::Bool(value)])
+                .unwrap(),
+            Value::Bool(value)
+        );
+    }
+    retain_runtime_declaration(&mut package, selected);
     let graph = graph_from_package(&package, "run");
+    assert!(
+        graph
+            .callable_identities
+            .iter()
+            .any(|id| id.key.declaration == selected)
+    );
+    assert!(
+        graph
+            .functions
+            .iter()
+            .all(|f| f.key.declaration != selected)
+    );
+    assert!(luna::instantiation::instantiate(&package, "execute", 100_000).is_err());
     for compiled in [false, true] {
         let mut vm = if compiled {
             Interpreter::from_iir_for_comptime(&graph, Budget::default())
@@ -645,5 +708,123 @@ fn runtime_method_in_an_opaque_head_retains_its_interface_identity_in_both_world
             vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
             expected
         );
+    }
+}
+
+#[test]
+fn transporting_runtime_functions_needs_their_declarations_and_calling_needs_their_bodies() {
+    let mut package = support::compile(
+        "
+        typealias Type = .Type'builtin;
+        trait Source { assoc Item: Type; }
+        impl Source for bool { assoc Item: Type = bool; }
+        fn keep(value: T.as(Source).Item) -> T.as(Source).Item
+        where T :- Source
+        {
+            value
+        }
+        fn flip(value: bool) -> bool { not value }
+        comptime fn select(first: bool) -> fn(bool) -> bool {
+            if first { keep<bool> } else { flip }
+        }
+        fn run(value: bool) -> bool { keep<bool>(value) }
+    ",
+    );
+    let root = |name: &str| iir::InstanceKey {
+        declaration: support::id(&package, name),
+        arguments: vec![].into(),
+    };
+    let select = root("select");
+    let run = root("run");
+    let keep = root("keep").declaration;
+    let flip = root("flip").declaration;
+    let instantiate = |package: &nir::program::Package, roots: &[iir::InstanceKey]| {
+        elaboration::materialization::instantiate(
+            package,
+            roots,
+            Default::default(),
+            Default::default(),
+        )
+    };
+    let cases = [
+        (true, keep, vec![Term::Primitive(Primitive::Bool)]),
+        (false, flip, vec![]),
+    ];
+    for declarations_only in [false, true] {
+        if declarations_only {
+            for (_, declaration, _) in &cases {
+                retain_runtime_declaration(&mut package, *declaration);
+            }
+        }
+        let graph = instantiate(&package, std::slice::from_ref(&select)).unwrap();
+        assert_eq!(graph.functions.len(), 1);
+        assert_eq!(graph.callable_identities.len(), cases.len());
+        for reference in [false, true] {
+            let mut vm = if reference {
+                Interpreter::from_iir_for_comptime_tree(&graph, Budget::default())
+            } else {
+                Interpreter::from_iir_for_comptime(&graph, Budget::default())
+            }
+            .unwrap();
+            for (first, declaration, arguments) in &cases {
+                assert_eq!(
+                    vm.invoke_instance(&select, vec![Value::Bool(*first)])
+                        .unwrap(),
+                    Value::FunctionInstance {
+                        declaration: *declaration,
+                        arguments: arguments.clone()
+                    }
+                );
+            }
+        }
+        let executable = instantiate(&package, &[select.clone(), run.clone()]);
+        if declarations_only {
+            assert!(executable.unwrap_err().contains("no executable definition"));
+        } else {
+            let mut both = executable.unwrap();
+            let mut vm = Interpreter::from_iir(&both, Budget::default()).unwrap();
+            assert_eq!(
+                vm.invoke_instance(&run, vec![Value::Bool(true)]).unwrap(),
+                Value::Bool(true)
+            );
+            let mut ct = Interpreter::from_iir_for_comptime(&both, Budget::default()).unwrap();
+            assert_eq!(
+                ct.invoke_instance(&select, vec![Value::Bool(true)])
+                    .unwrap(),
+                Value::FunctionInstance {
+                    declaration: keep,
+                    arguments: cases[0].2.clone()
+                }
+            );
+            let mut inconsistent = both.clone();
+            let identity = inconsistent
+                .callable_identities
+                .iter_mut()
+                .find(|i| i.key.declaration == keep)
+                .unwrap();
+            *identity = iir::CallableIdentity::intern(
+                identity.key.clone(),
+                identity
+                    .closed_signature()
+                    .unwrap()
+                    .clone()
+                    .with_unsafe_call_requirement(true),
+                &mut nir::TypeInterner::default(),
+                &mut 100_000,
+            )
+            .unwrap();
+            assert!(
+                inconsistent
+                    .validate(&mut 100_000)
+                    .unwrap_err()
+                    .contains("disagree on signature")
+            );
+            both.functions.retain(|f| f.key.declaration != keep);
+            assert!(
+                both.validate(&mut 100_000)
+                    .unwrap_err()
+                    .contains("callable reference is dangling")
+            );
+        }
     }
 }

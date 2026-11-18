@@ -497,6 +497,7 @@ impl<'a> InstantiationSession<'a> {
         publication::retain_demanded_methods(
             &functions,
             &templates,
+            &callable_identities,
             &mut dispatch,
             &mut publication_fuel,
         )?;
@@ -1030,7 +1031,8 @@ impl Builder<'_> {
                 )?;
             }
         }
-        self.expr(&function.body, 0)?;
+        let comptime = function.phase == n::FunctionPhase::Comptime;
+        self.expr(&function.body, 0, comptime)?;
         for expression in function
             .interface
             .preconditions
@@ -1038,7 +1040,7 @@ impl Builder<'_> {
             .chain(&function.interface.postconditions)
             .chain(function.interface.defaults.iter().map(|(_, e)| e))
         {
-            self.expr(expression, 0)?;
+            self.expr(expression, 0, comptime)?;
         }
         if let Some(instances) = &mut self.instances {
             instances.push(iir::FunctionInstance {
@@ -1207,7 +1209,7 @@ impl Builder<'_> {
                     .iter()
                     .chain(&method.program.postconditions)
                 {
-                    self.expr(expression, 0)?;
+                    self.expr(expression, 0, method.signature.is_comptime_callable())?;
                 }
                 methods.push(method);
             }
@@ -1318,7 +1320,7 @@ impl Builder<'_> {
             .iter()
             .chain(&specialized.program.postconditions)
         {
-            self.expr(expression, 0)?;
+            self.expr(expression, 0, specialized.signature.is_comptime_callable())?;
         }
         Ok(method)
     }
@@ -2436,15 +2438,14 @@ impl Builder<'_> {
                             })
                         })
                         .ok_or("frozen method has no retained contract")?;
-                    let signature = contract
-                        .signature
-                        .callable_signature()
-                        .map_err(|e| e.to_string())?;
+                    let signature = contract.signature.ordinary().map_err(|e| e.to_string())?;
                     nir::type_computations::charge_term(signature, &mut self.fuel)
                         .map_err(|e| e.to_string())?;
                     let signature = signature.clone();
-                    if !signature.is_comptime_callable()
-                        && matches!(signature.callable_signature(), Term::Function { parameters, .. }
+                    if signature.is_comptime_callable() {
+                        return Err("frozen runtime method has a comptime signature".into());
+                    }
+                    if matches!(signature.callable_signature(), Term::Function { parameters, .. }
                         if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))
                     {
                         self.frozen_methods.push(n::Expr {
@@ -2458,10 +2459,11 @@ impl Builder<'_> {
                                 method_arguments: method.method_arguments.clone(),
                             },
                         });
-                    } else {
-                        self.queue
-                            .push_back(Task::Function(selected.body, selected.arguments));
                     }
+                    self.queue.push_back(Task::Type(Term::FunctionValue {
+                        declaration: selected.body,
+                        arguments: selected.arguments,
+                    }));
                 }
                 children.extend(method.terms().cloned());
             }
@@ -2476,9 +2478,6 @@ impl Builder<'_> {
                     .callable_signature(*declaration, arguments, &[], &mut self.fuel)
                     .map_err(|error| format!("IIR callable identity: {error}"))?
                     .ok_or("IIR callable identity has no declaration evidence")?;
-                nir::type_computations::charge_term(&signature, &mut self.fuel)
-                    .map_err(|e| e.to_string())?;
-                children.push(signature.clone());
                 if let Some(function) = self.world.function_formation(*declaration) {
                     let domains = self
                         .world
@@ -2496,6 +2495,10 @@ impl Builder<'_> {
                 // Only concrete IIR publishes immutable callable evidence.
                 // Annotation and dispatch exploration may still contain binders.
                 if self.instances.is_some() {
+                    let signature = self.normalized_type(&signature)?;
+                    nir::type_computations::charge_term(&signature, &mut self.fuel)
+                        .map_err(|e| e.to_string())?;
+                    children.push(signature.clone());
                     self.callable_identities.push(iir::CallableIdentity::intern(
                         iir::InstanceKey {
                             declaration: *declaration,
@@ -2505,6 +2508,8 @@ impl Builder<'_> {
                         &mut self.type_cores,
                         &mut self.fuel,
                     )?);
+                } else {
+                    children.push(signature);
                 }
                 children.extend(arguments.iter().cloned());
             }
@@ -2817,7 +2822,7 @@ impl Builder<'_> {
                     self.output[slot]
                         .associated
                         .push((origin.member, selected.value.clone()));
-                    self.expr(&selected.value, 0)?;
+                    self.expr(&selected.value, 0, true)?;
                 }
                 children.push(normalized);
                 children.extend(arguments.iter().cloned());
@@ -2869,29 +2874,29 @@ impl Builder<'_> {
         self.queue.extend(children.into_iter().map(Task::Type));
         Ok(())
     }
-    fn pattern(&mut self, pattern: &P, depth: usize) -> Result<(), String> {
+    fn pattern(&mut self, pattern: &P, depth: usize, comptime: bool) -> Result<(), String> {
         self.tick(depth)?;
         match pattern {
             P::ErrorResult { label, inner } => {
                 if let Some(label) = label {
                     self.queue.push_back(Task::Type(label.clone()));
                 }
-                self.pattern(inner, depth + 1)?;
+                self.pattern(inner, depth + 1, comptime)?;
             }
             P::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
             P::Then { first, value, next } => {
-                self.pattern(first, depth + 1)?;
-                self.expr(value, depth + 1)?;
-                self.pattern(next, depth + 1)?;
+                self.pattern(first, depth + 1, comptime)?;
+                self.expr(value, depth + 1, comptime)?;
+                self.pattern(next, depth + 1, comptime)?;
             }
             P::Guard { pattern, condition } => {
-                self.pattern(pattern, depth + 1)?;
-                self.expr(condition, depth + 1)?;
+                self.pattern(pattern, depth + 1, comptime)?;
+                self.expr(condition, depth + 1, comptime)?;
             }
             P::OptionalPresent(pattern)
             | P::Observe { inner: pattern, .. }
             | P::Remap { pattern, .. }
-            | P::Binding { inner: pattern, .. } => self.pattern(pattern, depth + 1)?,
+            | P::Binding { inner: pattern, .. } => self.pattern(pattern, depth + 1, comptime)?,
             P::NominalType { fields, .. }
             | P::Record { fields, .. }
             | P::AnonymousRecord { fields, .. }
@@ -2903,14 +2908,14 @@ impl Builder<'_> {
             | P::Tuple(fields)
             | P::Or(fields) => {
                 for p in fields {
-                    self.pattern(p, depth + 1)?;
+                    self.pattern(p, depth + 1, comptime)?;
                 }
             }
             P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => {}
         }
         Ok(())
     }
-    fn expr(&mut self, expr: &n::Expr, depth: usize) -> Result<(), String> {
+    fn expr(&mut self, expr: &n::Expr, depth: usize, comptime: bool) -> Result<(), String> {
         // Ordinary operation children use a heap frontier. Preserve preorder,
         // type dependencies and semantic depth, without retaining the large
         // expr_node frame once per unary/binary operand. Lexical preparation
@@ -2998,7 +3003,7 @@ impl Builder<'_> {
                     pending.push((a, depth + 1));
                 }
                 _ => {
-                    self.expr_node(expr, depth)?;
+                    self.expr_node(expr, depth, comptime)?;
                     continue;
                 }
             }
@@ -3012,12 +3017,27 @@ impl Builder<'_> {
     }
 
     #[inline(never)]
-    fn expr_node(&mut self, expr: &n::Expr, depth: usize) -> Result<(), String> {
+    fn expr_node(&mut self, expr: &n::Expr, depth: usize, comptime: bool) -> Result<(), String> {
         self.tick(depth)?;
         if self.instances.is_some() {
             iir::completed_type(&expr.ty, &self.runtime_bindings, &mut self.fuel)?;
         }
         self.queue.push_back(Task::Type(expr.ty.clone()));
+        if self.instances.is_some()
+            && comptime
+            && !expr.ty.is_comptime_callable()
+            && let Some((declaration, arguments)) = expr.named_function()
+        {
+            for argument in arguments {
+                nir::type_computations::charge_term(argument, &mut self.fuel)
+                    .map_err(|e| e.to_string())?;
+            }
+            self.queue.push_back(Task::Type(Term::FunctionValue {
+                declaration,
+                arguments: arguments.to_vec(),
+            }));
+            return Ok(());
+        }
         match &expr.kind {
             K::Intrinsic { tag, inputs, .. } => {
                 nir::intrinsics::checked(expr).map_err(str::to_owned)?;
@@ -3026,7 +3046,7 @@ impl Builder<'_> {
                     arguments: vec![],
                 }));
                 for input in inputs {
-                    self.expr(input, depth + 1)?;
+                    self.expr(input, depth + 1, comptime)?;
                 }
             }
             K::EffectHandle {
@@ -3034,7 +3054,7 @@ impl Builder<'_> {
                 handlers,
                 outer,
             } => {
-                self.expr(computation, depth + 1)?;
+                self.expr(computation, depth + 1, comptime)?;
                 for operation in outer {
                     for argument in &operation.arguments {
                         self.queue.push_back(Task::Type(argument.clone()));
@@ -3046,16 +3066,16 @@ impl Builder<'_> {
                         self.queue.push_back(Task::Type(argument.clone()));
                     }
                     for arm in &handler.arms {
-                        self.pattern(&arm.pattern, depth + 1)?;
+                        self.pattern(&arm.pattern, depth + 1, comptime)?;
                         if let Some(g) = &arm.guard {
-                            self.expr(g, depth + 1)?;
+                            self.expr(g, depth + 1, comptime)?;
                         }
-                        self.expr(&arm.body, depth + 1)?;
+                        self.expr(&arm.body, depth + 1, comptime)?;
                     }
                 }
             }
             K::EffectResume(computation) | K::EffectRun { computation, .. } => {
-                self.expr(computation, depth + 1)?;
+                self.expr(computation, depth + 1, comptime)?;
             }
             K::EffectComputation { effects, body } => {
                 for operation in effects {
@@ -3063,7 +3083,7 @@ impl Builder<'_> {
                         self.queue.push_back(Task::Type(argument.clone()));
                     }
                 }
-                self.expr(body, depth + 1)?;
+                self.expr(body, depth + 1, comptime)?;
             }
             K::EffectRequest {
                 operation,
@@ -3076,7 +3096,7 @@ impl Builder<'_> {
                     self.queue.push_back(Task::Type(argument.clone()));
                 }
                 for argument in arguments {
-                    self.expr(argument, depth + 1)?;
+                    self.expr(argument, depth + 1, comptime)?;
                 }
             }
             K::AssociatedValue {
@@ -3115,9 +3135,9 @@ impl Builder<'_> {
                         self.output[slot]
                             .associated_initializers
                             .push((*member, template));
-                        self.expr(&selected.value, depth + 1)?;
+                        self.expr(&selected.value, depth + 1, comptime)?;
                     } else {
-                        self.expr(&selected.value, depth + 1)?;
+                        self.expr(&selected.value, depth + 1, comptime)?;
                         self.output[slot].associated.push((*member, selected.value));
                     }
                 }
@@ -3161,7 +3181,7 @@ impl Builder<'_> {
                 inputs,
             } => {
                 for operand in inputs.expressions() {
-                    self.expr(operand, depth + 1)?;
+                    self.expr(operand, depth + 1, comptime)?;
                 }
                 let Some((interface, member)) = self.package.traits.iter().find_map(|interface| {
                     interface
@@ -3264,6 +3284,13 @@ impl Builder<'_> {
                 let subject = self.output[slot].subject.clone();
                 let method =
                     self.specialize_method(slot, &instance, &subject, *member, method_arguments)?;
+                if self.instances.is_some() && comptime && !expr.ty.is_comptime_callable() {
+                    self.queue.push_back(Task::Type(Term::FunctionValue {
+                        declaration: method.body,
+                        arguments: method.arguments,
+                    }));
+                    return Ok(());
+                }
                 if !expr.ty.is_comptime_callable()
                     && matches!(expr.ty.callable_signature(), Term::Function { parameters, .. }
                         if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))
@@ -3285,10 +3312,10 @@ impl Builder<'_> {
                 for c in captures {
                     self.queue.push_back(Task::Type(c.ty.clone()));
                     if let Some(value) = &c.value {
-                        self.expr(value, depth + 1)?;
+                        self.expr(value, depth + 1, comptime)?;
                     }
                 }
-                self.expr(body, depth + 1)?;
+                self.expr(body, depth + 1, comptime)?;
             }
             K::NormalFormType {
                 arguments, plan, ..
@@ -3297,16 +3324,16 @@ impl Builder<'_> {
                 arguments, plan, ..
             } => {
                 if let K::ApplyNormalForm { callee, .. } = &expr.kind {
-                    self.expr(callee, depth + 1)?;
+                    self.expr(callee, depth + 1, comptime)?;
                 }
                 for p in plan.iter().flat_map(|p| &p.preparations) {
-                    self.expr(&p.expression, depth + 1)?;
+                    self.expr(&p.expression, depth + 1, comptime)?;
                 }
                 for pattern in arguments.iter().flat_map(|a| a.patterns()) {
-                    self.pattern(pattern, depth + 1)?;
+                    self.pattern(pattern, depth + 1, comptime)?;
                 }
                 for e in arguments.iter().flat_map(|a| a.expressions()) {
-                    self.expr(e, depth + 1)?;
+                    self.expr(e, depth + 1, comptime)?;
                 }
             }
             K::NominalType {
@@ -3315,13 +3342,13 @@ impl Builder<'_> {
                 ..
             } => {
                 for preparation in preparations {
-                    self.expr(&preparation.expression, depth + 1)?;
+                    self.expr(&preparation.expression, depth + 1, comptime)?;
                 }
                 for pattern in arguments.iter().flat_map(|a| a.patterns()) {
-                    self.pattern(pattern, depth + 1)?;
+                    self.pattern(pattern, depth + 1, comptime)?;
                 }
                 for value in arguments.iter().flat_map(|a| a.expressions()) {
-                    self.expr(value, depth + 1)?;
+                    self.expr(value, depth + 1, comptime)?;
                 }
             }
             K::ClosureType {
@@ -3329,9 +3356,9 @@ impl Builder<'_> {
                 signature,
             } => {
                 for field in environment {
-                    self.expr(field, depth + 1)?;
+                    self.expr(field, depth + 1, comptime)?;
                 }
-                self.expr(signature, depth + 1)?;
+                self.expr(signature, depth + 1, comptime)?;
             }
             K::CheckTypeAlias {
                 arguments,
@@ -3340,18 +3367,18 @@ impl Builder<'_> {
                 ..
             } => {
                 for preparation in preparations {
-                    self.expr(&preparation.expression, depth + 1)?;
+                    self.expr(&preparation.expression, depth + 1, comptime)?;
                 }
                 for argument in arguments {
                     for pattern in argument.patterns() {
-                        self.pattern(pattern, depth + 1)?;
+                        self.pattern(pattern, depth + 1, comptime)?;
                     }
                     for expression in argument.expressions() {
-                        self.expr(expression, depth + 1)?;
+                        self.expr(expression, depth + 1, comptime)?;
                     }
                 }
                 if let Some(body) = body {
-                    self.expr(body, depth + 1)?;
+                    self.expr(body, depth + 1, comptime)?;
                 }
             }
             K::Variant { fields, .. }
@@ -3364,7 +3391,7 @@ impl Builder<'_> {
             | K::TypeList(fields)
             | K::Tuple(fields) => {
                 for e in fields {
-                    self.expr(e, depth + 1)?;
+                    self.expr(e, depth + 1, comptime)?;
                 }
             }
             K::BitWritePointer {
@@ -3372,14 +3399,14 @@ impl Builder<'_> {
                 selections,
                 value,
             } => {
-                self.expr(pointer, depth + 1)?;
+                self.expr(pointer, depth + 1, comptime)?;
                 for input in selections
                     .iter()
                     .flat_map(nir::program::BitSelection::expressions)
                 {
-                    self.expr(input, depth + 1)?;
+                    self.expr(input, depth + 1, comptime)?;
                 }
-                self.expr(value, depth + 1)?;
+                self.expr(value, depth + 1, comptime)?;
             }
             K::BitUpdate {
                 storage_type,
@@ -3392,9 +3419,9 @@ impl Builder<'_> {
                     .iter()
                     .flat_map(nir::program::BitSelection::expressions)
                 {
-                    self.expr(input, depth + 1)?;
+                    self.expr(input, depth + 1, comptime)?;
                 }
-                self.expr(value, depth + 1)?;
+                self.expr(value, depth + 1, comptime)?;
             }
             K::BitAssign {
                 storage_type,
@@ -3402,7 +3429,7 @@ impl Builder<'_> {
                 ..
             } => {
                 self.queue.push_back(Task::Type(storage_type.clone()));
-                self.expr(value, depth + 1)?;
+                self.expr(value, depth + 1, comptime)?;
             }
             K::AnonymousField { value, .. }
             | K::Field { value, .. }
@@ -3445,28 +3472,28 @@ impl Builder<'_> {
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::Not(value)
-            | K::Loop { body: value, .. } => self.expr(value, depth + 1)?,
+            | K::Loop { body: value, .. } => self.expr(value, depth + 1, comptime)?,
             K::BitWindow { value, start, end } => {
-                self.expr(value, depth + 1)?;
-                self.expr(start, depth + 1)?;
-                self.expr(end, depth + 1)?;
+                self.expr(value, depth + 1, comptime)?;
+                self.expr(start, depth + 1, comptime)?;
+                self.expr(end, depth + 1, comptime)?;
             }
             K::Match { value, arms } => {
-                self.expr(value, depth + 1)?;
+                self.expr(value, depth + 1, comptime)?;
                 for arm in arms {
-                    self.pattern(&arm.pattern, depth + 1)?;
+                    self.pattern(&arm.pattern, depth + 1, comptime)?;
                     if let Some(g) = &arm.guard {
-                        self.expr(g, depth + 1)?;
+                        self.expr(g, depth + 1, comptime)?;
                     }
-                    self.expr(&arm.body, depth + 1)?;
+                    self.expr(&arm.body, depth + 1, comptime)?;
                 }
             }
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
                 for e in statements {
-                    self.expr(e, depth + 1)?;
+                    self.expr(e, depth + 1, comptime)?;
                 }
                 if let Some(e) = result {
-                    self.expr(e, depth + 1)?;
+                    self.expr(e, depth + 1, comptime)?;
                 }
             }
             K::LetPattern {
@@ -3475,13 +3502,13 @@ impl Builder<'_> {
                 guard,
                 otherwise,
             } => {
-                self.pattern(pattern, depth + 1)?;
-                self.expr(value, depth + 1)?;
+                self.pattern(pattern, depth + 1, comptime)?;
+                self.expr(value, depth + 1, comptime)?;
                 if let Some(e) = guard {
-                    self.expr(e, depth + 1)?;
+                    self.expr(e, depth + 1, comptime)?;
                 }
                 if let Some(e) = otherwise {
-                    self.expr(e, depth + 1)?;
+                    self.expr(e, depth + 1, comptime)?;
                 }
             }
             K::If {
@@ -3489,15 +3516,15 @@ impl Builder<'_> {
                 then_branch,
                 else_branch,
             } => {
-                self.expr(condition, depth + 1)?;
-                self.expr(then_branch, depth + 1)?;
+                self.expr(condition, depth + 1, comptime)?;
+                self.expr(then_branch, depth + 1, comptime)?;
                 if let Some(e) = else_branch {
-                    self.expr(e, depth + 1)?;
+                    self.expr(e, depth + 1, comptime)?;
                 }
             }
             K::Return(value) => {
                 if let Some(e) = value {
-                    self.expr(e, depth + 1)?;
+                    self.expr(e, depth + 1, comptime)?;
                 }
             }
             K::Call {
@@ -3518,9 +3545,9 @@ impl Builder<'_> {
                         _ => {}
                     }
                 }
-                self.expr(callee, depth + 1)?;
+                self.expr(callee, depth + 1, comptime)?;
                 for a in arguments {
-                    self.expr(&a.value, depth + 1)?;
+                    self.expr(&a.value, depth + 1, comptime)?;
                 }
             }
             K::WritePointer {
@@ -3551,13 +3578,13 @@ impl Builder<'_> {
             | K::BitIndex(a, b)
             | K::And(a, b)
             | K::Or(a, b) => {
-                self.expr(a, depth + 1)?;
-                self.expr(b, depth + 1)?;
+                self.expr(a, depth + 1, comptime)?;
+                self.expr(b, depth + 1, comptime)?;
             }
             K::BuildMetadata {
                 selector, entries, ..
             } => {
-                self.expr(selector, depth + 1)?;
+                self.expr(selector, depth + 1, comptime)?;
                 for (_, _, value) in entries {
                     if let Some(value) = value {
                         // Retain completed immutable snapshots for comptime

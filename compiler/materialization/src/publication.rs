@@ -22,13 +22,18 @@ fn charge_key(arguments: &[Term], fuel: &mut usize) -> Result<(), String> {
 pub(super) fn retain_demanded_methods(
     functions: &[iir::FunctionInstance],
     templates: &[iir::template_storage::TemplateStorage],
+    identities: &[iir::CallableIdentity],
     dispatch: &mut [n::DispatchInstance],
     fuel: &mut usize,
 ) -> Result<(), String> {
     let mut demanded = HashSet::new();
-    for function in functions {
-        charge_key(&function.key.arguments, fuel)?;
-        demanded.insert((function.key.declaration, function.key.arguments.as_ref()));
+    for key in functions
+        .iter()
+        .map(|f| &f.key)
+        .chain(identities.iter().map(|identity| &identity.key))
+    {
+        charge_key(&key.arguments, fuel)?;
+        demanded.insert((key.declaration, key.arguments.as_ref()));
     }
     for table in templates {
         spend(fuel, 1)?;
@@ -173,19 +178,20 @@ mod tests {
         let tables = [table];
         let mut result = original.clone();
         let mut fuel = 1000;
-        retain_demanded_methods(&[], &tables, &mut result, &mut fuel).unwrap();
+        retain_demanded_methods(&[], &tables, &[], &mut result, &mut fuel).unwrap();
         assert_eq!(result[0].methods, vec![method(id(1), true)]);
         let cost = 1000 - fuel;
         for allowance in 0..cost {
             let mut result = original.clone();
             assert!(
-                retain_demanded_methods(&[], &tables, &mut result, &mut allowance.clone()).is_err()
+                retain_demanded_methods(&[], &tables, &[], &mut result, &mut allowance.clone())
+                    .is_err()
             );
             assert_eq!(result, original);
         }
         let mut exact = cost;
         let mut recovered = original;
-        retain_demanded_methods(&[], &tables, &mut recovered, &mut exact).unwrap();
+        retain_demanded_methods(&[], &tables, &[], &mut recovered, &mut exact).unwrap();
         assert_eq!(exact, 0);
         assert_eq!(recovered, result);
     }

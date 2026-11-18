@@ -1,5 +1,7 @@
 //! Shared immutable keys for executable and body-free callable identities.
 use super::*;
+use nir::value_admission::Error as AdmissionError;
+use std::borrow::Cow;
 
 pub(super) fn instance_positions<'a>(
     entries: impl Iterator<Item = (usize, &'a iir::InstanceKey)>,
@@ -22,6 +24,42 @@ pub(super) fn instance_positions<'a>(
 }
 
 impl<'a> Interpreter<'a> {
+    /// Read the declaration that authorizes transport in this concrete world.
+    /// An executable instance can supply its interface without lending its body.
+    pub(crate) fn iir_callable_signature(
+        &self,
+        graph: &'a iir::Package,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<Option<Cow<'a, Term>>, AdmissionError> {
+        use nir::type_computations::charge_term;
+        for argument in arguments {
+            charge_term(argument, fuel)?;
+        }
+        let indexes = self
+            .graph_indexes
+            .as_ref()
+            .expect("validated graph indexes");
+        let signature = if let Some(position) = indexes
+            .callables
+            .get(&declaration)
+            .and_then(|keys| keys.get(arguments))
+        {
+            graph.callable_identities[*position].closed_signature()?
+        } else if let Some(signature) = self.iir_template_type(declaration, arguments) {
+            signature
+        } else if let Some(position) = self.iir_function_position(declaration, arguments) {
+            let function = &graph.functions[position].function.interface;
+            charge_term(&function.signature, fuel)?;
+            return Ok(Some(function.callable_type_view()));
+        } else {
+            return Ok(None);
+        };
+        charge_term(signature, fuel)?;
+        Ok(Some(Cow::Borrowed(signature)))
+    }
+
     pub(crate) fn iir_template_type(
         &self,
         declaration: DeclarationId,

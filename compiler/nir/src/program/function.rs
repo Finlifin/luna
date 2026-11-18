@@ -33,10 +33,17 @@ impl FunctionDeclaration {
     /// Value interface of this declaration; the stored signature remains its
     /// parameter/result telescope for instantiation and ABI consumers.
     pub fn callable_type(&self) -> Term {
-        self.signature
-            .clone()
-            .with_comptime_phase(self.phase == FunctionPhase::Comptime)
-            .with_unsafe_call_requirement(self.is_unsafe)
+        self.callable_type_view().into_owned()
+    }
+
+    pub fn callable_type_view(&self) -> std::borrow::Cow<'_, Term> {
+        if self.phase == FunctionPhase::Comptime || self.is_unsafe {
+            std::borrow::Cow::Owned(
+                crate::callable_source::Formation::from(self).qualify(self.signature.clone()),
+            )
+        } else {
+            std::borrow::Cow::Borrowed(&self.signature)
+        }
     }
     /// Substitute checked declaration fields without acquiring or copying a
     /// body. Binder identities and local input slots are preserved.

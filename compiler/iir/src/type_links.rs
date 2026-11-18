@@ -2,7 +2,7 @@
 use crate::{NominalDefinition, Package, Term};
 use nir::{DeclarationId, value_admission::Error};
 mod applications;
-type MethodKey<'a> = (
+pub(super) type MethodKey<'a> = (
     DeclarationId,
     &'a [Term],
     &'a Term,
@@ -12,13 +12,7 @@ type MethodKey<'a> = (
 use std::collections::{HashMap, HashSet};
 
 pub(super) struct TypeLinks<'a> {
-    methods: HashSet<(
-        DeclarationId,
-        &'a [Term],
-        &'a Term,
-        DeclarationId,
-        &'a [Term],
-    )>,
+    methods: HashSet<MethodKey<'a>>,
     callables: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
     signatures: HashMap<MethodKey<'a>, &'a Term>,
     target: Option<nir::target::TargetData>,
@@ -166,14 +160,22 @@ impl<'a> TypeLinks<'a> {
                     for argument in method.terms() {
                         charge(argument, fuel)?;
                     }
-                    if !self.methods.contains(&(
+                    let key: MethodKey<'_> = (
                         method.interface.declaration,
                         method.interface.arguments.as_slice(),
                         &method.subject,
                         method.member,
                         method.method_arguments.as_slice(),
-                    )) {
+                    );
+                    if !self.methods.contains(&key) {
                         return Err("IIR frozen method has no dispatch evidence".into());
+                    }
+                    let signature = self
+                        .signatures
+                        .get(&key)
+                        .ok_or("IIR frozen method has no ordinary signature")?;
+                    if signature.is_comptime_callable() {
+                        return Err("IIR frozen runtime method has a comptime signature".into());
                     }
                 }
                 Term::FunctionValue {

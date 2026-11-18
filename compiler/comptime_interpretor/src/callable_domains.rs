@@ -141,7 +141,7 @@ impl Interpreter<'_> {
         Ok(Some(Cow::Owned(signature)))
     }
 
-    fn admitted_function_signature(
+    pub(super) fn admitted_function_signature(
         &self,
         declaration: DeclarationId,
         arguments: &[Term],
@@ -150,22 +150,7 @@ impl Interpreter<'_> {
     ) -> Result<Option<Cow<'_, Term>>, AdmissionError> {
         *fuel = fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
         if let Some(graph) = self.graph {
-            for argument in arguments {
-                nir::type_computations::charge_term(argument, fuel)?;
-            }
-            let Some(index) = self.graph_indexes.as_ref().and_then(|indexes| {
-                indexes
-                    .callables
-                    .get(&declaration)
-                    .and_then(|instances| instances.get(arguments))
-            }) else {
-                return Ok(None);
-            };
-            let signature = graph.callable_identities[*index]
-                .closed_signature()
-                .map_err(|e| e.to_string())?;
-            nir::type_computations::charge_term(signature, fuel)?;
-            return Ok(Some(Cow::Borrowed(signature)));
+            return self.iir_callable_signature(graph, declaration, arguments, fuel);
         }
         if let Some(head) = self.normal_forms.get(&declaration) {
             if !arguments.is_empty() {

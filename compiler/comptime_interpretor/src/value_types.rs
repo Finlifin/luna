@@ -307,6 +307,20 @@ impl Interpreter<'_> {
                 Value::FunctionInstance {
                     declaration,
                     arguments,
+                } if self.comptime_only => {
+                    return !ty.is_comptime_callable()
+                        && checks
+                            .admit(|fuel| {
+                                self.admitted_function_signature(*declaration, arguments, &[], fuel)
+                            })
+                            .flatten()
+                            .is_some_and(|signature| {
+                                checks.callable_matches(&signature, ty, &self.associated_values)
+                            });
+                }
+                Value::FunctionInstance {
+                    declaration,
+                    arguments,
                 } => {
                     return self
                         .iir_template_type(*declaration, arguments)

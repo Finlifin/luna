@@ -47,22 +47,11 @@ impl Interpreter<'_> {
             };
         }
         if self.graph.is_some() {
-            // Concrete artifacts retain checked identity/signature evidence
-            // independently of executable bodies. Requiring a source function
-            // here would reject ordinary callable values inside frozen types.
-            self.tick(Some(source))?;
-            self.charge_copy_work(Some(source), |fuel| {
-                for argument in arguments {
-                    nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;
-                }
-                Ok(())
+            let admitted = self.query_admission(Some(source), |vm, fuel| {
+                Ok(vm
+                    .admitted_function_signature(declaration, arguments, &[], fuel)?
+                    .is_some())
             })?;
-            let admitted = self.graph_indexes.as_ref().is_some_and(|indexes| {
-                indexes
-                    .callables
-                    .get(&declaration)
-                    .is_some_and(|instances| instances.contains_key(arguments))
-            });
             return if admitted {
                 Ok(())
             } else {

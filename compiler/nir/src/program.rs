@@ -3580,6 +3580,19 @@ impl fmt::Display for Package {
 }
 
 impl Expr {
+    /// A statically named function and its declaration inputs, before deciding
+    /// whether the consumer needs its identity, template or executable code.
+    pub fn named_function(&self) -> Option<(DeclarationId, &[Term])> {
+        match &self.kind {
+            ExprKind::Function(declaration) => Some((*declaration, &[])),
+            ExprKind::FunctionInstance {
+                declaration,
+                arguments,
+            } => Some((*declaration, arguments)),
+            _ => None,
+        }
+    }
+
     /// A discarded void expression has no separate value to retire. Lowering
     /// commonly gives the statement wrapper and its child the same range; the
     /// child's full-expression hook owns that boundary exactly once.

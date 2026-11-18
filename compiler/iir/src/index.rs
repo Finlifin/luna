@@ -5,12 +5,103 @@ use std::collections::{HashMap, HashSet};
 /// The validation walk borrows the same executable and template declarations
 /// that established uniqueness and dispatch closure.
 pub(super) struct CallableLinks<'a> {
-    pub(super) functions: HashMap<(DeclarationId, &'a [Term]), &'a Function>,
-    pub(super) templates: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
+    functions: HashMap<(DeclarationId, &'a [Term]), &'a Function>,
+    templates: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
+    identities: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
+    methods: HashMap<
+        crate::type_links::MethodKey<'a>,
+        (
+            &'a nir::program::MethodContract,
+            &'a nir::program::MethodInstance,
+        ),
+    >,
 }
 
 impl CallableLinks<'_> {
-    pub(super) fn validate_clause(
+    pub(super) fn validate_reference(
+        &self,
+        expr: &nir::program::Expr,
+        comptime: bool,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        use nir::program::ExprKind as K;
+        if let K::Call { callee, .. } = &expr.kind
+            && comptime != callee.ty.is_comptime_callable()
+        {
+            return Err("IIR call target belongs to a different execution phase".into());
+        }
+        let transport = comptime && !expr.ty.is_comptime_callable();
+        let key = if let Some(key) = expr.named_function() {
+            key
+        } else if let K::TraitMethod {
+            interface,
+            interface_arguments,
+            subject,
+            member,
+            method_arguments,
+        } = &expr.kind
+        {
+            terms(interface_arguments, fuel)?;
+            term(subject, fuel)?;
+            terms(method_arguments, fuel)?;
+            let (contract, target) = self
+                .methods
+                .get(&(
+                    *interface,
+                    interface_arguments.as_slice(),
+                    subject,
+                    *member,
+                    method_arguments.as_slice(),
+                ))
+                .ok_or("IIR trait reference has no selected method")?;
+            if contract.is_quote {
+                return Err("IIR quote method requires completed deterministic expansion".into());
+            }
+            if transport {
+                term(&expr.ty, fuel)?;
+                if contract.signature.ordinary().map_err(|e| e.to_string())? != &expr.ty {
+                    return Err("IIR transported method changed interface signature".into());
+                }
+            }
+            (target.body, target.arguments.as_slice())
+        } else {
+            return self.validate_clause(expr, comptime, fuel);
+        };
+        terms(key.1, fuel)?;
+        if transport && let Some(&signature) = self.identities.get(&key) {
+            term(&expr.ty, fuel)?;
+            if signature != &expr.ty {
+                return Err("IIR transported function changed signature".into());
+            }
+            return Ok(());
+        }
+        if let Some(&ty) = self.templates.get(&key) {
+            if ty != &expr.ty {
+                return Err("IIR template reference changed logical type".into());
+            }
+            return Ok(());
+        }
+        let function = self
+            .functions
+            .get(&key)
+            .ok_or("IIR callable reference is dangling")?;
+        if (function.phase == nir::program::FunctionPhase::Comptime)
+            != expr.ty.is_comptime_callable()
+        {
+            return Err("IIR callable reference changed execution phase".into());
+        }
+        if function.is_unsafe != expr.ty.is_unsafe_callable() {
+            return Err("IIR callable reference changed unsafe responsibility".into());
+        }
+        if transport {
+            term(&function.signature, fuel)?;
+            if function.callable_type_view().as_ref() != &expr.ty {
+                return Err("IIR transported function changed signature".into());
+            }
+        }
+        Ok(())
+    }
+    fn validate_clause(
         &self,
         expr: &nir::program::Expr,
         comptime: bool,
@@ -53,10 +144,13 @@ impl Package {
 
     pub(super) fn checked_callables(&self, fuel: &mut usize) -> Result<CallableLinks<'_>, String> {
         spend(fuel, 1)?;
-        let mut callable_keys = HashSet::new();
+        let mut identities = HashMap::new();
         for identity in &self.callable_identities {
             key(&identity.key, fuel)?;
-            if !callable_keys.insert(&identity.key) {
+            if identities
+                .insert(identity.key.parts(), identity.closed_signature()?)
+                .is_some()
+            {
                 return Err("duplicate IIR callable signature evidence".into());
             }
         }
@@ -65,6 +159,12 @@ impl Package {
             term(table.logical_type(), fuel)?;
             for target in table.targets() {
                 key(target, fuel)?;
+                if identities
+                    .get(&target.parts())
+                    .is_some_and(|ty| *ty != table.logical_type())
+                {
+                    return Err("IIR template and retained identity disagree on signature".into());
+                }
                 if template_targets
                     .insert(target.parts(), table.logical_type())
                     .is_some()
@@ -80,6 +180,11 @@ impl Package {
             spend(fuel, instance.function.parameters.len())?;
             if template_targets.contains_key(&instance.key.parts()) {
                 return Err("IIR identity is both a template and executable instance".into());
+            }
+            if let Some(signature) = identities.get(&instance.key.parts())
+                && instance.function.callable_type_view().as_ref() != *signature
+            {
+                return Err("IIR executable and retained identity disagree on signature".into());
             }
             if functions
                 .insert(instance.key.parts(), &instance.function)
@@ -151,13 +256,12 @@ impl Package {
             spend(fuel, 1)?;
             terms(&contract.interface.arguments, fuel)?;
             term(&contract.subject, fuel)?;
-            if contracts
-                .insert((&contract.interface, &contract.subject), contract)
-                .is_some()
-            {
-                return Err("duplicate IIR interface contract".into());
-            }
-            let mut members = HashSet::new();
+            let world = (
+                contract.interface.declaration,
+                contract.interface.arguments.as_slice(),
+                &contract.subject,
+            );
+            let mut members = HashMap::new();
             for method in &contract.methods {
                 spend(fuel, 1)?;
                 terms(&method.type_arguments, fuel)?;
@@ -166,7 +270,13 @@ impl Package {
                     fuel,
                 )?;
                 spend(fuel, method.parameter_bindings.len())?;
-                if !members.insert((method.declaration, &method.type_arguments)) {
+                if members
+                    .insert(
+                        (method.declaration, method.type_arguments.as_slice()),
+                        method,
+                    )
+                    .is_some()
+                {
                     return Err("duplicate IIR interface member".into());
                 }
                 let Ok(Term::Function { parameters, .. }) = method.signature.callable_signature()
@@ -192,41 +302,50 @@ impl Package {
                     return Err("IIR interface retains an unselected default body".into());
                 }
             }
+            if contracts.insert(world, (members, false)).is_some() {
+                return Err("duplicate IIR interface contract".into());
+            }
         }
-        let mut worlds = HashSet::new();
+        let mut methods = HashMap::new();
         for dispatch in &self.dispatch {
             spend(fuel, 1)?;
             terms(&dispatch.interface_arguments, fuel)?;
             term(&dispatch.subject, fuel)?;
-            let interface = dispatch.interface_instance();
-            if !worlds.insert((interface.clone(), &dispatch.subject)) {
+            let world = (
+                dispatch.interface,
+                dispatch.interface_arguments.as_slice(),
+                &dispatch.subject,
+            );
+            let (members, selected) = contracts
+                .get_mut(&world)
+                .ok_or("IIR dispatch has no interface contract")?;
+            if std::mem::replace(selected, true) {
                 return Err("duplicate IIR dispatch selection".into());
             }
-            let contract = contracts
-                .get(&(&interface, &dispatch.subject))
-                .ok_or("IIR dispatch has no interface contract")?;
-            let mut members = HashSet::new();
             for method in &dispatch.methods {
                 spend(fuel, 1)?;
                 terms(&method.method_arguments, fuel)?;
                 terms(&method.arguments, fuel)?;
-                if !members.insert((method.member, &method.method_arguments)) {
+                let declared = *members
+                    .get(&(method.member, method.method_arguments.as_slice()))
+                    .ok_or("IIR dispatch member is absent from its interface")?;
+                terms(&dispatch.interface_arguments, fuel)?;
+                term(&dispatch.subject, fuel)?;
+                if methods
+                    .insert(
+                        (
+                            dispatch.interface,
+                            dispatch.interface_arguments.as_slice(),
+                            &dispatch.subject,
+                            method.member,
+                            method.method_arguments.as_slice(),
+                        ),
+                        (declared, method),
+                    )
+                    .is_some()
+                {
                     return Err("duplicate IIR dispatch member".into());
                 }
-                // Bound the complete candidate scan, including argument equality.
-                for candidate in &contract.methods {
-                    spend(fuel, 1)?;
-                    terms(&candidate.type_arguments, fuel)?;
-                    terms(&method.method_arguments, fuel)?;
-                }
-                let declared = contract
-                    .methods
-                    .iter()
-                    .find(|m| {
-                        m.declaration == method.member
-                            && m.type_arguments == method.method_arguments
-                    })
-                    .ok_or("IIR dispatch member is absent from its interface")?;
                 let key = (method.body, method.arguments.as_slice());
                 if let Some(&ty) = template_targets.get(&key) {
                     if declared.signature.ordinary().map_err(|e| e.to_string())? != ty
@@ -237,6 +356,16 @@ impl Package {
                         );
                     }
                     continue;
+                }
+                if let Some(&signature) = identities.get(&key) {
+                    if declared.signature.ordinary().map_err(|e| e.to_string())? != signature {
+                        return Err(
+                            "IIR transported method disagrees with its interface signature".into(),
+                        );
+                    }
+                    if !functions.contains_key(&key) && !signature.is_comptime_callable() {
+                        continue;
+                    }
                 }
                 let function = functions
                     .get(&key)
@@ -251,17 +380,15 @@ impl Package {
                 }
             }
         }
-        for contract in &self.interfaces {
-            spend(fuel, 1)?;
-            terms(&contract.interface.arguments, fuel)?;
-            term(&contract.subject, fuel)?;
-            if !worlds.contains(&(contract.interface.clone(), &contract.subject)) {
-                return Err("IIR interface has no dispatch selection".into());
-            }
+        spend(fuel, contracts.len())?;
+        if contracts.values().any(|(_, selected)| !selected) {
+            return Err("IIR interface has no dispatch selection".into());
         }
         Ok(CallableLinks {
             functions,
             templates: template_targets,
+            identities,
+            methods,
         })
     }
 }

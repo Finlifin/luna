@@ -217,8 +217,8 @@ impl Interpreter<'_> {
                 declaration,
                 arguments,
             } => {
-                // Concrete IIR template targets were checked by has_type in
-                // this immutable graph. Source identities additionally need
+                // Concrete handles use the signature checked by has_type in
+                // the receiving graph. Source identities additionally need
                 // the current declaration's input and formation contracts.
                 if self.graph.is_none() {
                     self.admit_callable_identity(

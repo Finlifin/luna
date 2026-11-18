@@ -436,9 +436,8 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, Error> {
         // A runtime interface member transported through comptime keeps the
         // public member identity even when its selected body is executable.
-        let transport_method =
-            method.is_some() && self.comptime_only && !output.is_comptime_callable();
-        let value = if transport_method
+        let transport = self.comptime_only && !output.is_comptime_callable();
+        let value = if transport
             || self
                 .iir_template_type(key.declaration, &key.arguments)
                 .is_some()
