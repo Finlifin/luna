@@ -455,3 +455,66 @@ fn exit_during_callee_selection_skips_variadic_fields() {
         &["check", "stop"],
     );
 }
+
+#[test]
+fn member_alias_spreads_run_in_order_with_only_contract_captures() {
+    check_twice(
+        r#"
+        newtype Flags<tag: bool, first: bool, last: bool> = bool;
+        struct Group where tag: bool {
+            pub typealias Pair<first: bool, last: bool> = Flags<tag, first, last>;
+        }
+        comptime fn packet(bit: bool) -> Tuple<bool> { (bit,) }
+        comptime fn check() -> bool {
+            var bit = false;
+            let result = Group<true>.Pair<
+                ...packet(do { bit = not bit; bit }),
+                ...packet(do { bit = not bit; bit })
+            >;
+            result == Flags<true, true, false> and not bit
+        }
+        "#,
+        &["check", "packet", "packet"],
+    );
+}
+
+#[test]
+fn projected_newtype_uses_its_own_dependent_domain_after_the_parent() {
+    check_twice(
+        r#"
+        struct Group where tag: bool {
+            pub newtype Entry<.T: Type = bool, value: T> = bool;
+        }
+        comptime fn Byte() -> Type { u8 }
+        comptime fn parent() -> bool { true }
+        comptime fn check() -> bool {
+            var trace: Integer = 0;
+            let result = Group<parent()>.Entry<
+                do { trace = trace * 10 + 1; 255 },
+                .T = do { trace = trace * 10 + 2; Byte() }
+            >;
+            result == Group<true>.Entry<255, .T = u8> and trace == 12
+        }
+        "#,
+        &["check", "parent", "Byte"],
+    );
+}
+
+#[test]
+fn member_alias_keeps_a_domain_capture_while_omitting_an_unrelated_parent_slot() {
+    check_twice(
+        r#"
+        newtype Indexed<T, value: T, flag: bool> = bool;
+        struct Group where spare: bool, Outer {
+            pub typealias Entry<value: Outer, flag: bool> = Indexed<Outer, value, flag>;
+        }
+        comptime fn packet(value: u8) -> Tuple<u8, bool> { (value, true) }
+        comptime fn check() -> bool {
+            let byte: u8 = 17;
+            let result = Group<false, u8>.Entry<...packet(byte)>;
+            result == Indexed<u8, byte, true>
+        }
+        "#,
+        &["check", "packet"],
+    );
+}

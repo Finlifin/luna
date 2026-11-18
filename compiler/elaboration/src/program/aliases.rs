@@ -288,14 +288,17 @@ impl Checker<'_, '_> {
         })
     }
 
-    pub(super) fn ensure_alias_formation_contract(
+    /// Publish the declaration contract and return its lexical input prefix.
+    /// The alias's own clause parameters always follow that prefix.
+    pub(super) fn alias_formation_captures(
         &mut self,
         owner: OwnerId,
         span: Span,
     ) -> Result<Vec<DeclarationId>, Error> {
         let declaration = declaration(self.package, &self.package_identities, owner);
         if let Some(contract) = self.alias_contracts.get(&declaration) {
-            return Ok(contract.parameters.clone());
+            let own_count = self.type_parameters[&owner].len();
+            return Ok(contract.parameters[..contract.parameters.len() - own_count].to_vec());
         }
         self.ensure_contract(owner, span)?;
         let mut requirements = self.requirements[&owner].clone();
@@ -332,84 +335,104 @@ impl Checker<'_, '_> {
             && capabilities.is_empty()
             && domains.iter().all(|ty| *ty == p(P::Type))
         {
-            return Ok(parameters);
+            return Ok(Vec::new());
         }
-        // Captures precede the alias's own telescope, so an own value domain
-        // can refer to a parent Type input. Close over dependencies of captured
-        // domains as well as references in predicates.
-        let mut pending = domains.clone();
-        let predicates: Vec<_> = requirements
-            .iter()
-            .cloned()
-            .chain(capabilities.iter().cloned().map(n::TypePredicate::Trait))
-            .collect();
-        for predicate in &predicates {
-            for term in requirement_terms(predicate, span)? {
-                pending.push(self.copy_alias_type(term, span)?);
-            }
-        }
-        let mut captures = BTreeMap::new();
-        while let Some(term) = pending.pop() {
-            let term = self.copy_alias_type(&term, span)?;
-            for (id, sort) in term
-                .rigid_parameters()
-                .map_err(|e| error(span, e.to_string()))?
-            {
-                if parameters.contains(&id) || captures.contains_key(&id) {
-                    continue;
-                }
-                let domain = self.trait_input_domain(id).unwrap_or_else(|| p(P::Type));
-                let expected_sort = if domain == p(P::Type) {
-                    Sort::Type
-                } else {
-                    Sort::ComptimeValue
-                };
-                if sort != expected_sort {
-                    return Err(error(span, "alias capture domain has incompatible sort"));
-                }
-                pending.push(self.copy_alias_type(&domain, span)?);
-                captures.insert(id, domain);
-            }
-        }
-        let mut captured_parameters = Vec::new();
-        let mut captured_domains = Vec::new();
-        while !captures.is_empty() {
-            self.required_steps = self
-                .required_steps
-                .checked_sub(captures.len() as u64)
-                .ok_or_else(|| error(span, "alias capture ordering budget exhausted"))?;
-            let next = captures
-                .iter()
-                .find_map(|(id, domain)| {
-                    domain
-                        .rigid_parameters()
-                        .ok()
-                        .filter(|dependencies| {
-                            dependencies
-                                .iter()
-                                .all(|(dependency, _)| captured_parameters.contains(dependency))
-                        })
-                        .map(|_| *id)
-                })
-                .ok_or_else(|| error(span, "cyclic or unavailable alias capture domain"))?;
-            captured_parameters.push(next);
-            captured_domains.push(captures.remove(&next).unwrap());
-        }
-        captured_parameters.append(&mut parameters);
-        captured_domains.append(&mut domains);
-        parameters = captured_parameters;
-        domains = captured_domains;
+        let captures =
+            self.ordered_alias_captures(&parameters, &domains, &requirements, &capabilities, span)?;
+        let (mut ids, mut types): (Vec<_>, Vec<_>) = captures.into_iter().unzip();
+        let capture_ids = ids.clone();
+        ids.append(&mut parameters);
+        types.append(&mut domains);
         self.alias_contracts.insert(
             declaration,
             nir::type_aliases::Contract {
                 declaration,
-                parameters: parameters.clone(),
-                parameter_types: domains,
+                parameters: ids,
+                parameter_types: types,
                 requirements,
                 capabilities,
             },
         );
-        Ok(parameters)
+        Ok(capture_ids)
+    }
+
+    /// Close the contract over free declaration inputs, then order its prefix
+    /// by domain dependencies. Ready inputs retain declaration-ID tie order.
+    fn ordered_alias_captures(
+        &mut self,
+        parameters: &[DeclarationId],
+        domains: &[Term],
+        requirements: &[n::TypePredicate],
+        capabilities: &[n::TraitRequirement],
+        span: Span,
+    ) -> Result<Vec<(DeclarationId, Term)>, Error> {
+        let own: BTreeSet<_> = parameters.iter().copied().collect();
+        let mut references = Vec::new();
+        let mut observe = |term| -> Result<(), Error> {
+            references.extend(
+                input_observation::term_inputs(term, &mut self.required_steps, span)?.declarations,
+            );
+            Ok(())
+        };
+        for domain in domains {
+            observe(domain)?;
+        }
+        for predicate in requirements {
+            for term in requirement_terms(predicate, span)? {
+                observe(term)?;
+            }
+        }
+        for capability in capabilities {
+            observe(&capability.subject)?;
+            for argument in &capability.interface_arguments {
+                observe(argument)?;
+            }
+        }
+
+        let mut captures: BTreeMap<DeclarationId, (Term, usize)> = BTreeMap::new();
+        let mut consumers = BTreeMap::<DeclarationId, Vec<DeclarationId>>::new();
+        let mut ready = BTreeSet::new();
+        while let Some((id, sort)) = references.pop() {
+            if own.contains(&id) {
+                continue;
+            }
+            let domain = match captures.get(&id) {
+                Some((domain, _)) if Sort::of_comptime_domain(domain) == sort => continue,
+                Some(_) => return Err(error(span, "alias capture domain has incompatible sort")),
+                None => self.trait_input_domain(id).unwrap_or_else(|| p(P::Type)),
+            };
+            if Sort::of_comptime_domain(&domain) != sort {
+                return Err(error(span, "alias capture domain has incompatible sort"));
+            }
+            let dependencies =
+                input_observation::term_inputs(&domain, &mut self.required_steps, span)?
+                    .declarations;
+            if dependencies.is_empty() {
+                ready.insert(id);
+            }
+            captures.insert(id, (domain, dependencies.len()));
+            for (dependency, sort) in dependencies {
+                consumers.entry(dependency).or_default().push(id);
+                references.push((dependency, sort));
+            }
+        }
+
+        let mut ordered = Vec::with_capacity(captures.len());
+        while let Some(id) = ready.pop_first() {
+            let (domain, _) = captures.remove(&id).unwrap();
+            ordered.push((id, domain));
+            for dependent in consumers.remove(&id).into_iter().flatten() {
+                let (_, waiting) = captures.get_mut(&dependent).unwrap();
+                *waiting -= 1;
+                if *waiting == 0 {
+                    ready.insert(dependent);
+                }
+            }
+        }
+        if !captures.is_empty() {
+            return Err(error(span, "cyclic or unavailable alias capture domain"));
+        }
+        Ok(ordered)
     }
 
     pub(super) fn alias_value_expression(
@@ -419,21 +442,7 @@ impl Checker<'_, '_> {
         arguments: Vec<n::Expr>,
         span: Span,
     ) -> Result<n::Expr, Error> {
-        self.alias_value_expression_with_guard(owner, value, arguments, span, true)
-    }
-
-    pub(super) fn alias_value_expression_with_guard(
-        &mut self,
-        owner: OwnerId,
-        value: &Expr<'_>,
-        arguments: Vec<n::Expr>,
-        span: Span,
-        guarded: bool,
-    ) -> Result<n::Expr, Error> {
-        self.alias_expression_budget = self
-            .alias_expression_budget
-            .checked_sub(1)
-            .ok_or_else(|| error(span, "type alias expression expansion budget exhausted"))?;
+        self.charge_alias_expression(span)?;
         let parameters = self.type_parameters[&owner].clone();
         let mut terms = Vec::new();
         for (argument, parameter) in arguments.iter().zip(&parameters) {
@@ -453,7 +462,7 @@ impl Checker<'_, '_> {
             self.check_type_application(owner, &terms, span)?;
             return self.alias_expression(owner, value, &terms, span);
         }
-        let contract_parameters = self.ensure_alias_formation_contract(owner, span)?;
+        let captures = self.alias_formation_captures(owner, span)?;
         let mut deferred: BTreeSet<_> = parameters
             .iter()
             .zip(&arguments)
@@ -461,8 +470,9 @@ impl Checker<'_, '_> {
             .map(|(id, _)| *id)
             .collect();
         deferred.extend(
-            contract_parameters
+            captures
                 .iter()
+                .chain(&parameters)
                 .filter(|id| {
                     self.alias_value_bindings.contains_key(id)
                         || self.normal_default_bindings.contains_key(id)
@@ -479,24 +489,22 @@ impl Checker<'_, '_> {
             span,
         )?;
         let diverges = arguments.iter().any(|argument| is_never(&argument.ty));
-        let saved_bindings = self.alias_value_bindings.clone();
-        let saved_normal_bindings = self.normal_default_bindings.clone();
-        let result = self.with_alias_arguments(owner, &parameters, &terms, span, |checker| {
+        self.with_alias_arguments(owner, &parameters, &terms, span, |checker| {
             let mut statements = Vec::new();
-            let mut guard_inputs = BTreeMap::new();
+            let guard = checker.alias_contracts.contains_key(&declaration(
+                checker.package,
+                &checker.package_identities,
+                owner,
+            ));
+            let mut guard_inputs = Vec::new();
             for (argument, parameter) in arguments.into_iter().zip(&parameters) {
                 if matches!(argument.kind, K::TypeValue(_)) {
-                    guard_inputs.insert(*parameter, argument);
+                    if guard {
+                        guard_inputs.push(argument);
+                    }
                     continue;
                 }
-                let index = checker.next_temporary_binding;
-                checker.next_temporary_binding = index
-                    .checked_add(1)
-                    .ok_or_else(|| error(span, "type alias binding budget exhausted"))?;
-                let binding = n::LocalId {
-                    owner: u32::MAX,
-                    index,
-                };
+                let binding = checker.spread_binding(span)?;
                 // A diverging input never initializes this local. Preserve the
                 // declared domain for the unreachable alias body and guard.
                 let binding_ty = if is_never(&argument.ty) {
@@ -506,22 +514,14 @@ impl Checker<'_, '_> {
                 } else {
                     argument.ty.clone()
                 };
-                if binding_ty == p(P::Type) {
-                    checker.alias_value_bindings.insert(*parameter, binding);
-                } else {
-                    checker
-                        .normal_default_bindings
-                        .insert(*parameter, (binding, binding_ty.clone()));
-                }
-                checker.locals.insert(binding, binding_ty.clone());
-                guard_inputs.insert(
-                    *parameter,
-                    n::Expr {
+                checker.install_alias_local(*parameter, binding, binding_ty.clone());
+                if guard {
+                    guard_inputs.push(n::Expr {
                         source: argument.source,
                         ty: binding_ty,
                         kind: K::Local(binding),
-                    },
-                );
+                    });
+                }
                 statements.push(n::Expr {
                     source: argument.source,
                     ty: if is_never(&argument.ty) {
@@ -535,25 +535,13 @@ impl Checker<'_, '_> {
                     },
                 });
             }
-            let mut guard_arguments = Vec::new();
-            for parameter in &contract_parameters {
-                let input = if let Some(input) = guard_inputs.remove(parameter) {
-                    input
-                } else {
-                    checker.captured_input_expression(*parameter, span)?
-                };
-                guard_arguments.push(input);
-            }
-            let saved_mode = std::mem::replace(&mut checker.in_required_comptime, true);
-            let body = checker.expr(value, Some(&p(P::Type)));
-            checker.in_required_comptime = saved_mode;
-            let body = body?;
-            let body = if guarded
-                && checker.alias_contracts.contains_key(&declaration(
-                    checker.package,
-                    &checker.package_identities,
-                    owner,
-                )) {
+            let body = checker.check_alias_value_body(value)?;
+            let body = if guard {
+                let mut guard_arguments = Vec::with_capacity(captures.len() + guard_inputs.len());
+                for id in captures {
+                    guard_arguments.push(checker.captured_input_expression(id, span)?);
+                }
+                guard_arguments.extend(guard_inputs);
                 n::Expr {
                     source: source(span),
                     ty: body.ty.clone(),
@@ -588,10 +576,63 @@ impl Checker<'_, '_> {
                     result: Some(Box::new(body)),
                 },
             })
-        });
-        self.alias_value_bindings = saved_bindings;
-        self.normal_default_bindings = saved_normal_bindings;
-        result
+        })
+    }
+
+    /// The declaration-input frame evaluates and admits the whole telescope
+    /// before it enters this body. Reads refer to that frame's original slots.
+    pub(super) fn planned_alias_body(
+        &mut self,
+        owner: OwnerId,
+        value: &Expr<'_>,
+        bindings: &[n::LocalId],
+        domains: &[Term],
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        self.charge_alias_expression(span)?;
+        let parameters = self.type_parameters[&owner].clone();
+        let terms = self
+            .input_binders(&parameters)
+            .into_iter()
+            .map(|binder| Term::Rigid {
+                declaration: binder.declaration,
+                sort: binder.sort,
+            })
+            .collect::<Vec<_>>();
+        self.with_alias_arguments(owner, &parameters, &terms, span, |checker| {
+            for ((&id, &binding), domain) in parameters.iter().zip(bindings).zip(domains) {
+                let ty = checker.copy_alias_type(domain, span)?;
+                checker.install_alias_local(id, binding, ty);
+            }
+            checker.check_alias_value_body(value)
+        })
+    }
+
+    fn charge_alias_expression(&mut self, span: Span) -> Result<(), Error> {
+        self.alias_expression_budget = self
+            .alias_expression_budget
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "type alias expression expansion budget exhausted"))?;
+        Ok(())
+    }
+
+    fn install_alias_local(&mut self, parameter: DeclarationId, binding: n::LocalId, ty: Term) {
+        if ty == p(P::Type) {
+            self.alias_value_bindings.insert(parameter, binding);
+            self.normal_default_bindings.remove(&parameter);
+        } else {
+            self.normal_default_bindings
+                .insert(parameter, (binding, ty.clone()));
+            self.alias_value_bindings.remove(&parameter);
+        }
+        self.locals.insert(binding, ty);
+    }
+
+    fn check_alias_value_body(&mut self, value: &Expr<'_>) -> Result<n::Expr, Error> {
+        let mode = std::mem::replace(&mut self.in_required_comptime, true);
+        let body = self.expr(value, Some(&p(P::Type)));
+        self.in_required_comptime = mode;
+        body
     }
 
     fn with_alias_arguments<R>(
@@ -623,6 +664,8 @@ impl Checker<'_, '_> {
         };
         let saved_context = self.context.clone();
         let saved_locals = std::mem::take(&mut self.locals);
+        let saved_bindings = self.alias_value_bindings.clone();
+        let saved_normal_bindings = self.normal_default_bindings.clone();
         let saved_substitution = self.alias_substitution.clone();
         self.alias_substitution.extend(
             parameters
@@ -637,6 +680,8 @@ impl Checker<'_, '_> {
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.locals = saved_locals;
+        self.alias_value_bindings = saved_bindings;
+        self.normal_default_bindings = saved_normal_bindings;
         self.alias_substitution = saved_substitution;
         if generic {
             if let Some(scope) = previous_scope {

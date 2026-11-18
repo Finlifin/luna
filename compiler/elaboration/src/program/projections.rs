@@ -713,18 +713,6 @@ impl Checker<'_, '_> {
                     format!("parent input observation failed: {failure}"),
                 )
             })?;
-            let member_captures = self.nominal_captures(owner, expr.span)?;
-            let contextual_alias = matches!(
-                self.package.item(owner).map(|item| &item.kind),
-                Some(ItemKind::TypeAlias(..))
-            ) && self
-                .trait_domains(owner)?
-                .iter()
-                .any(|domain| *domain != p(P::Type))
-                || self
-                    .trait_domains(owner)?
-                    .iter()
-                    .any(|domain| member_captures.iter().any(|id| domain.mentions_rigid(*id)));
             let (mut statements, instance_body) = match instance.kind {
                 K::Block {
                     statements,
@@ -811,21 +799,6 @@ impl Checker<'_, '_> {
                         ..expr.clone()
                     };
                     this.expr(&definition, expected)
-                } else if contextual_alias {
-                    let caller = nominal::InputEnvironment {
-                        substitution: &saved_substitution,
-                        bindings: &saved_bindings,
-                        normal_bindings: &saved_normal_bindings,
-                        context: &saved_context,
-                    };
-                    this.contextual_nominal_expression_in(
-                        owner,
-                        supplied,
-                        expr.span,
-                        Some(&p(P::Type)),
-                        Some(&caller),
-                    )?
-                    .ok_or_else(|| error(expr.span, "missing contextual alias input domain"))
                 } else {
                     let caller = nominal::InputEnvironment {
                         substitution: &saved_substitution,
@@ -833,12 +806,12 @@ impl Checker<'_, '_> {
                         normal_bindings: &saved_normal_bindings,
                         context: &saved_context,
                     };
-                    this.prepared_type_member_expression(
+                    this.defaulted_type_expression_in(
                         owner,
                         supplied,
                         expr.span,
                         Some(&p(P::Type)),
-                        &caller,
+                        Some(&caller),
                     )
                 }
             })?;

@@ -311,6 +311,15 @@ LocalId 及其寄存器。后续迭代从同一编译会话按声明输入计划
 其代码身份还依赖这组替换，仅凭声明计划与位置不足以选中它。
 [片段编译](../compiler/comptime_compiler/src/preparation.rs) · [别名体的实例化](../compiler/comptime_interpretor/src/nominal_plan.rs)
 
+在 `Group<parent()>.Entry<255, .T = Byte()>` 中，若成员声明为
+`newtype Entry<.T: Type = bool, value: T>`，先取得父实例，再按源码顺序处理
+`255` 和 `Byte()`。等到 `T` 确定为 `u8`，才能按 `value: T` 检查字面量。
+名义类型把外围捕获存放在显式参数之后；成员别名则只把形成契约所需的外围绑定
+放在契约槽位前缀里。仅在别名体内使用的绑定仍从词法环境取得。
+例如 `Pair<...packet(a), ...packet(b)>` 的两个展开位置按实际捕获数计算，
+两次调用各执行一次，按书写顺序向别名提供字段。
+[成员输入计划](../compiler/elaboration/src/program/nominal.rs) · [执行顺序用例](../compiler/luna/tests/type_input_execution_order.rs)
+
 每次执行都先对照当前环境检查导出名冲突，再创建新帧、取得入口值。正常结束时，
 帧检查控制状态、内部模式作用域及所有导出槽位，随后一起移交绑定。提前返回或
 执行失败时，调用者取回已经发生的写入，未完成的绑定留在片段内。

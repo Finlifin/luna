@@ -313,45 +313,57 @@ impl Checker<'_, '_> {
             self.signature_owner = saved_owner;
             self.context = saved_context.clone();
             self.in_required_comptime = saved_mode;
-            if alias.is_some() {
-                self.ensure_alias_formation_contract(owner, span)?;
-            }
+            // The alias contract stores captures before its own parameters.
+            // Nominal identities store captures after them. In both cases
+            // capture reads precede every source operand, including spreads.
+            let capture_ids = if alias.is_some() {
+                let required = self.alias_formation_captures(owner, span)?;
+                let available: BTreeSet<_> = captures.into_iter().collect();
+                if required.iter().any(|id| !available.contains(id)) {
+                    return Err(error(span, "alias input capture is unavailable"));
+                }
+                required
+            } else {
+                captures
+            };
             self.check_formation_application(owner, prepared.observations.into_formation(), span)?;
-            let mut arguments = prepared.arguments;
-            arguments.extend(
-                self.nominal_capture_expressions(owner, span)?
-                    .into_iter()
-                    .map(n::NormalFormArgument::Value),
-            );
-            for _ in parameters.len()..arguments.len() {
-                bindings.push(self.spread_binding(span)?);
-            }
-            // Captures have already been evaluated by the enclosing instance.
-            // Bind them before checking defaults whose domains mention them;
-            // stored argument order still keeps own inputs before captures.
-            let capture_count = arguments.len() - parameters.len();
-            for preparation in &mut preparations {
-                preparation.before += capture_count;
-            }
-            slots = (parameters.len()..arguments.len()).chain(slots).collect();
-            let mut alias_body = None;
-            if let Some(alias) = alias {
-                let own_inputs = parameters
-                    .iter()
-                    .enumerate()
-                    .map(|(index, _)| {
-                        Ok(n::Expr {
-                            source: source(span),
-                            ty: self.substituted_trait_domain(&domains[index], span)?,
-                            kind: K::Local(bindings[index]),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?;
-                alias_body = Some(Box::new(self.alias_value_expression_with_guard(
-                    owner, alias, own_inputs, span, false,
-                )?));
+            let alias_body = if let Some(alias) = alias {
+                Some(Box::new(self.planned_alias_body(
+                    owner, alias, &bindings, &domains, span,
+                )?))
             } else {
                 self.ensure_nominal_expression(owner, span)?;
+                None
+            };
+
+            let mut arguments = prepared.arguments;
+            if !capture_ids.is_empty() {
+                let count = capture_ids.len();
+                let mut capture_arguments = Vec::with_capacity(count);
+                let mut capture_bindings = Vec::with_capacity(count);
+                for id in capture_ids {
+                    capture_arguments.push(n::NormalFormArgument::Value(
+                        self.captured_input_expression(id, span)?,
+                    ));
+                    capture_bindings.push(self.spread_binding(span)?);
+                }
+                let capture_slots = if alias_body.is_some() {
+                    arguments.splice(..0, capture_arguments);
+                    bindings.splice(..0, capture_bindings);
+                    for slot in &mut slots {
+                        *slot += count;
+                    }
+                    0..count
+                } else {
+                    let start = arguments.len();
+                    arguments.extend(capture_arguments);
+                    bindings.extend(capture_bindings);
+                    start..arguments.len()
+                };
+                slots.splice(..0, capture_slots);
+                for preparation in &mut preparations {
+                    preparation.before += count;
+                }
             }
             let ty = if arguments.iter().any(n::NormalFormArgument::is_diverging)
                 || preparations.iter().any(|p| is_never(&p.expression.ty))
@@ -365,37 +377,11 @@ impl Checker<'_, '_> {
                 self.require_expression(&ty, expected, span)?;
             }
             let kind = if let Some(body) = alias_body {
-                let contract_parameters = self.ensure_alias_formation_contract(owner, span)?;
-                let mut all_parameters = parameters.clone();
-                all_parameters.extend(self.nominal_captures(owner, span)?);
-                let source_indices = contract_parameters
-                    .iter()
-                    .map(|id| {
-                        all_parameters
-                            .iter()
-                            .position(|source| source == id)
-                            .ok_or_else(|| error(span, "alias input capture is unavailable"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let order = slots
-                    .into_iter()
-                    .filter_map(|source| source_indices.iter().position(|index| *index == source))
-                    .collect();
-                let original_bindings = bindings;
-                let bindings = source_indices
-                    .iter()
-                    .map(|index| original_bindings[*index])
-                    .collect();
-                let mut original = arguments.into_iter().map(Some).collect::<Vec<_>>();
-                let arguments = source_indices
-                    .into_iter()
-                    .map(|index| original[index].take().unwrap())
-                    .collect();
                 K::CheckTypeAlias {
                     declaration: declaration(self.package, &self.package_identities, owner),
                     preparations,
                     bindings: Some(bindings),
-                    order: Some(order),
+                    order: Some(slots),
                     arguments,
                     body: Some(body),
                 }

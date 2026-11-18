@@ -190,10 +190,23 @@ impl<'h> Checker<'_, 'h> {
         span: Span,
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
-        if let Some(value) = self.contextual_nominal_expression(owner, args, span, expected)? {
+        self.defaulted_type_expression_in(owner, args, span, expected, None)
+    }
+
+    pub(super) fn defaulted_type_expression_in(
+        &mut self,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        span: Span,
+        expected: Option<&Term>,
+        caller: Option<&nominal::InputEnvironment<'_>>,
+    ) -> Result<n::Expr, Error> {
+        if let Some(value) =
+            self.contextual_nominal_expression_in(owner, args, span, expected, caller)?
+        {
             return Ok(value);
         }
-        self.prepared_type_instance(owner, args, span, expected)
+        self.build_type_instance(owner, args, span, expected, caller)
             .map(|(value, _)| value)
     }
 
@@ -207,18 +220,6 @@ impl<'h> Checker<'_, 'h> {
         expected: Option<&Term>,
     ) -> Result<(n::Expr, Vec<n::Expr>), Error> {
         self.build_type_instance(owner, args, span, expected, None)
-    }
-
-    pub(super) fn prepared_type_member_expression(
-        &mut self,
-        owner: OwnerId,
-        args: &[Arg<'_>],
-        span: Span,
-        expected: Option<&Term>,
-        caller: &nominal::InputEnvironment<'_>,
-    ) -> Result<n::Expr, Error> {
-        self.build_type_instance(owner, args, span, expected, Some(caller))
-            .map(|(value, _)| value)
     }
 
     fn build_type_instance(
