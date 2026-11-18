@@ -11,10 +11,10 @@ pub(super) enum Poll<'h> {
 
 pub(super) struct Frame<'h> {
     span: Span,
-    parameters: Parameters,
+    telescope: domain::Telescope,
     prefix: KnownInputs,
     inputs: Vec<Arg<'h>>,
-    packet_contexts: Vec<Option<Vec<Term>>>,
+    packet_slots: Vec<Option<Vec<usize>>>,
     list_spreads: BTreeSet<usize>,
     collector: Option<usize>,
     routing: clause_inputs::ClauseInputRouting,
@@ -44,12 +44,13 @@ impl<'h> Frame<'h> {
         // Layout hints establish only positions. Actual packet checking
         // still validates the tuple and its element types. Do not expose
         // a head's unresolved Type binders as caller-side expectations.
-        let positional_types = parameters
+        let positional_slots: Vec<_> = entries
             .iter()
-            .zip(&entries)
+            .enumerate()
             .filter(|(_, entry)| !entry.optional && !entry.variadic)
-            .map(|((_, _, ty), _)| ty.clone())
-            .collect::<Vec<_>>();
+            .map(|(slot, _)| slot)
+            .collect();
+        let telescope = domain::Telescope::new(parameters, &mut checker.required_steps, span)?;
         let collector = entries.iter().position(|entry| entry.variadic);
         loop {
             let whole_collector = collector.is_some_and(|slot| {
@@ -58,7 +59,7 @@ impl<'h> Frame<'h> {
             });
             let mut excluded = BTreeSet::new();
             let mut list_spreads = BTreeSet::new();
-            let mut remaining = Some(positional_types.len());
+            let mut remaining = Some(positional_slots.len());
             let mut layout_fuel = 10_000;
             if collector.is_some() && !whole_collector {
                 for (index, input) in inputs.iter().enumerate() {
@@ -106,10 +107,10 @@ impl<'h> Frame<'h> {
                 inputs = expanded;
                 continue;
             }
-            let packet_contexts = if inputs.iter().any(|input| matches!(input, Arg::Expand(_))) {
+            let packet_slots = if inputs.iter().any(|input| matches!(input, Arg::Expand(_))) {
                 checker.spread_packet_layout_excluding(
                     &inputs,
-                    &positional_types,
+                    &positional_slots,
                     span,
                     &excluded,
                 )?
@@ -119,13 +120,13 @@ impl<'h> Frame<'h> {
 
             let routing = clause_inputs::ClauseInputRouting::from_entries(entries, &inputs, span)?;
             let preparations = vec![Vec::new(); inputs.len()];
-            let routed = (0..parameters.len()).map(|_| None).collect();
+            let routed = (0..telescope.parameters.len()).map(|_| None).collect();
             return Ok(Self {
                 span,
-                parameters,
+                telescope,
                 prefix,
                 inputs,
-                packet_contexts,
+                packet_slots,
                 list_spreads,
                 collector,
                 routing,
@@ -163,34 +164,21 @@ impl<'h> Frame<'h> {
                 self.next += 1;
                 return Ok(Poll::Continue);
             }
-            let context = if let Some(fields) = &mut self.packet_contexts[input_index] {
+            let context = if let Some(slots) = &self.packet_slots[input_index] {
                 use crate::calls::InputContext as C;
-                let pending = fields
+                let fields = self.packet_domains(checker, slots, span)?;
+                if slots
                     .iter()
-                    .map(|ty| {
-                        input_observation::pending_domain_inputs(
-                            ty,
-                            self.parameters.iter().map(|(id, _, _)| (*id, false)),
-                            &mut checker.required_steps,
-                            span,
-                        )
-                        .map(|pending| !pending.is_empty())
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                if !self.prefix.values.is_empty() {
-                    for domain in fields.iter_mut() {
-                        *domain = self.prefix.instantiate(checker, domain, span)?;
-                    }
-                }
-                if pending.iter().any(|pending| *pending) {
-                    let fields = fields
+                    .any(|&slot| !self.telescope.direct(slot).is_empty())
+                {
+                    let fields = slots
                         .iter()
-                        .zip(pending)
-                        .map(|(ty, pending)| {
-                            if pending {
-                                C::Unknown
+                        .zip(fields)
+                        .map(|(&slot, ty)| {
+                            if self.telescope.direct(slot).is_empty() {
+                                C::Known(ty)
                             } else {
-                                C::Known(ty.clone())
+                                C::Unknown
                             }
                         })
                         .collect();
@@ -203,9 +191,7 @@ impl<'h> Frame<'h> {
                         None => C::Tuple(fields),
                     })
                 } else {
-                    Some(C::Known(
-                        checker.tuple_value_type(fields.clone(), packet.span)?,
-                    ))
+                    Some(C::Known(checker.tuple_value_type(fields, packet.span)?))
                 }
             } else {
                 None
@@ -254,6 +240,60 @@ impl<'h> Frame<'h> {
         Ok(Poll::Continue)
     }
 
+    fn packet_domains(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        slots: &[usize],
+        span: Span,
+    ) -> Result<Vec<Term>, Error> {
+        let domains = slots.iter().map(|&slot| &self.telescope.parameters[slot].2);
+        if self.prefix.values().is_empty() {
+            domains
+                .map(|ty| environment::copy_term(ty, &mut checker.required_steps, span))
+                .collect()
+        } else {
+            self.prefix
+                .with_substitution(checker, span, |substitution, fuel| {
+                    domains
+                        .map(|ty| substitution.instantiate_bounded(ty, fuel))
+                        .collect()
+                })
+        }
+    }
+
+    fn packet_fields(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        packet: &n::Expr,
+        input_index: usize,
+        span: Span,
+    ) -> Result<Vec<Term>, Error> {
+        // Early exit does not erase the checked type of an unreachable tail.
+        let mut shape = packet;
+        while is_never(&shape.ty) {
+            match &shape.kind {
+                K::Block {
+                    result: Some(result),
+                    ..
+                } => shape = result,
+                _ => break,
+            }
+        }
+        if let Term::Tuple(fields) = checker.structural_type(&shape.ty, span)? {
+            Ok(fields)
+        } else if is_never(&shape.ty) {
+            let slots = self.packet_slots[input_index].as_deref().ok_or_else(|| {
+                error(
+                    span,
+                    "diverging type input spread has ambiguous packet width",
+                )
+            })?;
+            self.packet_domains(checker, slots, span)
+        } else {
+            Err(error(span, "type input spread requires a tuple"))
+        }
+    }
+
     pub(super) fn accept(
         &mut self,
         checker: &mut Checker<'_, '_>,
@@ -273,11 +313,7 @@ impl<'h> Frame<'h> {
             ));
         };
         let span = self.span;
-        let fields = checker.prepared_packet_fields(
-            &value,
-            self.packet_contexts[input_index].as_deref(),
-            packet.span,
-        )?;
+        let fields = self.packet_fields(checker, &value, input_index, packet.span)?;
         let observed = checker.preserved_input_identity(
             &value,
             self.prepared_bindings
@@ -362,11 +398,11 @@ impl<'h> Frame<'h> {
             self.order
                 .push(self.collector.expect("collected inputs have a collector"));
         }
-        let bindings = (0..self.parameters.len())
+        let bindings = (0..self.telescope.parameters.len())
             .map(|_| checker.spread_binding(self.span))
             .collect::<Result<Vec<_>, _>>()?;
         let progress = progress::Progress::new(
-            self.parameters.clone(),
+            self.telescope,
             bindings,
             self.order,
             self.prefix,
@@ -383,7 +419,6 @@ impl<'h> Frame<'h> {
         );
         Ok(slots::Frame::new(
             self.span,
-            self.parameters,
             interface,
             defaults,
             checking,
@@ -409,6 +444,13 @@ impl std::fmt::Display for Frame<'_> {
             write!(f, " (source-index {index})")?;
             if let Arg::Expand(input) = self.inputs[index] {
                 write!(f, " (child {} {})", input.hir_id, source(input.span))?;
+            }
+            if let Some(slots) = &self.packet_slots[index] {
+                f.write_str(" (declaration-slots")?;
+                for slot in slots {
+                    write!(f, " {slot}")?;
+                }
+                f.write_str(")")?;
             }
         }
         f.write_str(") (order")?;
@@ -459,9 +501,9 @@ mod tests {
         let frame = Frame {
             prefix: KnownInputs::default(),
             span,
-            parameters: Vec::new().into(),
+            telescope: domain::Telescope::new(Vec::new().into(), &mut 100, span).unwrap(),
             inputs: vec![Arg::Expand(&input), Arg::Expand(&input)],
-            packet_contexts: vec![],
+            packet_slots: vec![None, Some(vec![])],
             list_spreads: BTreeSet::new(),
             collector: None,
             routing: clause_inputs::ClauseInputRouting::new(&[], &[], span).unwrap(),
@@ -485,6 +527,7 @@ mod tests {
         for fragment in [
             "(next 1) (complete false)",
             "(pending (source-index 1) (child ",
+            "(declaration-slots)",
             "(preparations (source-index 0 (before 0)",
             "packet\\\"\\n",
         ] {

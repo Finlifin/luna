@@ -19,7 +19,6 @@ pub(super) enum Poll<'b, 'h> {
 
 pub(super) struct Frame<'b, 'h> {
     span: Span,
-    parameters: Parameters,
     interface: interface::Interface<'h>,
     defaults: Option<environment::Environment>,
     checking: InputChecking,
@@ -39,7 +38,6 @@ pub(super) struct Frame<'b, 'h> {
 impl<'b, 'h: 'b> Frame<'b, 'h> {
     pub(super) fn new(
         span: Span,
-        parameters: Parameters,
         interface: interface::Interface<'h>,
         defaults: Option<environment::Environment>,
         checking: InputChecking,
@@ -50,7 +48,6 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
     ) -> Self {
         Self {
             span,
-            parameters,
             interface,
             defaults,
             checking,
@@ -80,7 +77,11 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         }
         if let Some(collection) = &self.collection {
             if let Some(slot) = collection.domain_slot() {
-                self.dependencies = Some(self.domain_frame(checker, slot)?);
+                self.dependencies = Some(domain::Frame::new(
+                    slot,
+                    self.progress.declaration_prefix(),
+                    self.span,
+                ));
                 return self.poll_dependencies(checker);
             }
             return self.poll_collection(checker);
@@ -89,41 +90,24 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             self.complete = true;
             return Ok(Poll::Complete);
         };
-        let pending = self
-            .progress
-            .pending_inputs(slot, &mut checker.required_steps, self.span)?;
-        if self.routed[slot].is_some() && !pending.is_empty() {
-            self.dependencies = Some(self.domain_frame(checker, slot)?);
+        if self.routed[slot].is_some() && self.progress.may_need_preparation(slot) {
+            self.dependencies = Some(domain::Frame::new(
+                slot,
+                self.progress.declaration_prefix(),
+                self.span,
+            ));
             return self.poll_dependencies(checker);
         }
-        let domain = DeclarationInputDomain {
-            ty: self
-                .progress
-                .instantiate(checker, &self.parameters[slot].2, self.span)?,
-            pending,
-        };
+        let domain = self.progress.domain(checker, slot, self.span)?;
         self.check_slot(checker, slot, domain)
-    }
-
-    fn domain_frame(
-        &self,
-        checker: &mut Checker<'_, '_>,
-        slot: usize,
-    ) -> Result<domain::Frame, Error> {
-        domain::Frame::new(
-            slot,
-            &self.progress.dependencies,
-            |previous| {
-                self.routed[previous].is_none() && self.interface.default(previous).is_some()
-            },
-            &mut checker.required_steps,
-            self.span,
-        )
     }
 
     fn poll_dependencies(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b, 'h>, Error> {
         let dependencies = self.dependencies.as_mut().expect("active domain check");
-        match dependencies.poll(checker, &self.parameters, &self.progress)? {
+        match dependencies.poll(checker, &self.progress, |slot| {
+            self.routed[slot].is_none() && self.interface.default(slot).is_some()
+        })? {
+            domain::Poll::Continue => Ok(Poll::Continue),
             domain::Poll::Input { slot, domain } => self.check_slot(checker, slot, domain),
             domain::Poll::Complete(domain) => {
                 let slot = self.dependencies.take().unwrap().slot();
@@ -164,9 +148,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         domain: DeclarationInputDomain,
     ) -> Result<Poll<'b, 'h>, Error> {
         if self.routed[slot].is_none() && self.interface.is_collector(slot) {
-            let ty = self
-                .progress
-                .instantiate(checker, &self.parameters[slot].2, self.span)?;
+            let ty = domain.ty;
             if checker.list_element_type(&ty).is_none() {
                 return Err(error(
                     self.span,
@@ -315,27 +297,23 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         slot: usize,
         provider: interface::DefaultSource<'h>,
     ) -> Result<&'h Expr<'h>, Error> {
+        self.progress.require_default_prefix(slot, self.span)?;
         if let Some(defaults) = &self.defaults {
             defaults.install(checker, self.span)?;
         }
         // Only preceding declaration inputs enter a default. Their observations
         // never replace the executable producers retained in source order.
         for previous in 0..slot {
-            let parameter = self.parameters[previous].0;
+            let parameter = self.progress.telescope.parameters[previous].0;
             checker.alias_substitution.remove(&parameter);
             checker.alias_value_bindings.remove(&parameter);
             checker.normal_default_bindings.remove(&parameter);
-            if !self.progress.is_prepared(previous) {
-                return Err(error(
-                    self.span,
-                    "normal-form default awaits preceding input",
-                ));
-            }
             if checker.locals[&self.progress.binding(previous)] == p(P::Type) {
                 if let Some(ty) = self.progress.identity(previous) {
+                    let ty = checker.copy_alias_type(ty, self.span)?;
                     checker
                         .alias_substitution
-                        .insert(parameter, std::sync::Arc::new(ty.clone()));
+                        .insert(parameter, std::sync::Arc::new(ty));
                 } else {
                     checker
                         .alias_value_bindings
@@ -376,7 +354,9 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         self.unwind(checker);
         let slot = pending.slot;
         let value = result.map_err(|mut failure| {
-            if self.parameters[slot].2 != p(P::Type) && failure.message.contains("type mismatch") {
+            if self.progress.telescope.parameters[slot].2 != p(P::Type)
+                && failure.message.contains("type mismatch")
+            {
                 failure.message = format!(
                     "normal-form value argument type mismatch: {}",
                     failure.message
@@ -548,7 +528,7 @@ mod tests {
         let domain = p(P::Str);
         let parameters = [(declaration, Sort::ComptimeValue, domain.clone())];
         let progress = progress::Progress::new(
-            parameters.to_vec().into(),
+            domain::Telescope::new(parameters.into(), &mut 100, span).unwrap(),
             vec![binding],
             vec![0],
             KnownInputs::default(),
@@ -558,7 +538,6 @@ mod tests {
         .unwrap();
         let mut frame = Frame::new(
             span,
-            parameters.into(),
             interface::Interface::positional(1, None, span).unwrap(),
             None,
             InputChecking::Typed,

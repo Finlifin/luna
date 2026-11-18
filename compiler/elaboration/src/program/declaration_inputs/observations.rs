@@ -36,12 +36,17 @@ impl KnownInputs {
         &self.values
     }
 
-    pub(in crate::program) fn instantiate(
+    /// Check the observed prefix in the current caller frame once per consumer.
+    /// A packet or a default body may use it in many separate annotations.
+    pub(in crate::program) fn with_substitution<R>(
         &self,
         checker: &mut Checker<'_, '_>,
-        term: &Term,
         span: Span,
-    ) -> Result<Term, Error> {
+        apply: impl FnOnce(
+            &nir::DeclarationSubstitution<'_>,
+            &mut usize,
+        ) -> Result<R, nir::type_computations::Error>,
+    ) -> Result<R, Error> {
         let frames = checker.call_input_frames();
         let before = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);
         let mut fuel = before;
@@ -52,7 +57,7 @@ impl KnownInputs {
             &frames,
             &mut fuel,
         )
-        .and_then(|s| s.instantiate_bounded(term, &mut fuel));
+        .and_then(|substitution| apply(&substitution, &mut fuel));
         checker.required_steps -= (before - fuel) as u64;
         result.map_err(|failure| error(span, failure.to_string()))
     }

@@ -129,37 +129,6 @@ impl<'h> Checker<'_, 'h> {
         Ok(inputs)
     }
 
-    pub(super) fn prepared_packet_fields(
-        &mut self,
-        packet: &n::Expr,
-        context: Option<&[Term]>,
-        span: Span,
-    ) -> Result<Vec<Term>, Error> {
-        // Early exit does not erase the checked type of an unreachable tail.
-        let mut shape = packet;
-        while is_never(&shape.ty) {
-            match &shape.kind {
-                K::Block {
-                    result: Some(result),
-                    ..
-                } => shape = result,
-                _ => break,
-            }
-        }
-        if let Term::Tuple(fields) = self.structural_type(&shape.ty, span)? {
-            Ok(fields)
-        } else if is_never(&shape.ty) {
-            context.map(<[Term]>::to_vec).ok_or_else(|| {
-                error(
-                    span,
-                    "diverging type input spread has ambiguous packet width",
-                )
-            })
-        } else {
-            Err(error(span, "type input spread requires a tuple"))
-        }
-    }
-
     pub(super) fn type_clause_params(&self, owner: OwnerId) -> Vec<hir::clause::ClauseParam<'h>> {
         match &self.package.item(owner).unwrap().kind {
             ItemKind::Trait(def) => def.clause_params.to_vec(),

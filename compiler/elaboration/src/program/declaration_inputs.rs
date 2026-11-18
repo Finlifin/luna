@@ -335,11 +335,16 @@ impl Checker<'_, '_> {
         progress: &progress::Progress,
         span: Span,
     ) -> Result<n::Expr, Error> {
-        if (0..slot).any(|previous| !progress.is_prepared(previous)) {
-            return Err(error(span, "normal-form default awaits preceding input"));
-        }
+        progress.require_default_prefix(slot, span)?;
         let mut value = self.checked_normal_default(owner, slot)?;
-        constants::charge_copy(&value, &mut self.required_steps, span)?;
+        nir::copy_budget::charge_type_rewrite(&value, &mut self.required_steps).map_err(
+            |reason| {
+                error(
+                    span,
+                    format!("default expression rewrite limit: {reason:?}"),
+                )
+            },
+        )?;
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = fuel;
         let free = nir::free_bindings::collect(&value, &mut fuel);
@@ -360,7 +365,11 @@ impl Checker<'_, '_> {
             &mut self.expansion_sources,
             span,
         )?;
-        value.rewrite_types(&mut |ty| progress.instantiate(self, ty, span))?;
+        progress
+            .known
+            .with_substitution(self, span, |substitution, fuel| {
+                value.rewrite_types(&mut |ty| substitution.instantiate_bounded(ty, fuel))
+            })?;
         Ok(value)
     }
 

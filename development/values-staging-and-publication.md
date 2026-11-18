@@ -87,6 +87,12 @@ comptime fn check() -> bool {
 - 块、分支、模式和普通调用的依赖准备共用源码检查区域。分支内的类型事实参与该分支的检查，退出后恢复调用者的状态。参数包的宽度、各字段域和实际值分别取得；完整具名供应直接占据对应槽。NF 保留头身份，名义类型保留声明与捕获，透明别名另行检查形成条件和主体。[准备与恢复](elaboration-state-and-publication.md) · [公开参数接口](callable-input-interfaces.md)
 - Type 参数和其他 comptime 值共用输入传送。当前世界重新检查带有抽象身份的值；例如已授权的错误限定值可以原样转交到同一域。若转换必须重映射标签，就需要实际观察分支。签名、普通表达式与生成器按源声明关系取得同一父 telescope，具体替换归所选实例。[值准入](comptime-value-admission.md)
 
+以上面的 `count` 为例，检查器先遇到占据声明槽 1 的 `values`，可以转去检查槽 0 的 `Byte()`。返回类型 `Type` 只说明这个表达式会产生一个类型。此时槽 0 已经有受检生产者，槽 1 的元素域仍然等待槽 0 的实际值。调用计划继续保留 `values` 在先的执行顺序。若槽 0 的生产者原本就是可静态观察的 `u8`，同一个接口可以立即用它检查槽 1。[检查进度](../compiler/elaboration/src/program/declaration_inputs/progress.rs)
+
+声明域的检查帧保留消费者、正在读取的依赖边和待检查的槽位。它沿原声明域向前找依赖，按声明顺序交付子检查。一个省略的默认参数还需要它之前的词法绑定；已准备好的连续声明前缀可直接跳过，其余部分用区间表示。显式覆盖默认值时，只沿参数域自身的边查找。连接默认表达式时，整段代码共享当前调用方帧中已检查的替换，按各处标注实际使用的参数实例化。[依赖游标](../compiler/elaboration/src/program/declaration_inputs/domain.rs) · [默认表达式连接](../compiler/elaboration/src/program/declaration_inputs.rs)
+
+例如声明参数依次为 `.extra: bool = false, T, .small: u8 = 7, value: T, tail: u8`，展开包 `...(bool, mark(), 255)` 供应槽 1、3、4。路由时槽 3 的域引用本次调用的 `T`，槽 4 已能为整数文字提供 `u8` 的上下文。因此将 255 改成 256 会在检查包时被拒绝。路由持有槽号，检查包内字段和检查最终绑定使用同一张声明依赖表。[展开包路由](../compiler/elaboration/src/program/declaration_inputs/routing.rs) · [完整用例](../compiler/luna/tests/declaration_input_plans.rs)
+
 ### 接收域到达前后的执行
 
 在 NIR 中，省略 NF 的输入计划表示按声明顺序求值，且没有额外的参数包准备或局部导出绑定。

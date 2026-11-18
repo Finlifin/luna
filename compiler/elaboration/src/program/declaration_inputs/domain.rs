@@ -3,6 +3,7 @@
 use super::*;
 
 pub(super) enum Poll {
+    Continue,
     Input {
         slot: usize,
         domain: DeclarationInputDomain,
@@ -12,14 +13,13 @@ pub(super) enum Poll {
 
 /// Edges refer to callee slots, never to names in the caller's replacement
 /// terms. External declaration inputs remain in their enclosing telescope.
-pub(super) struct Dependencies(Vec<Vec<usize>>);
+pub(super) struct Telescope {
+    pub(super) parameters: Parameters,
+    edges: Vec<Vec<usize>>,
+}
 
-impl Dependencies {
-    pub(super) fn new(
-        parameters: &[(DeclarationId, Sort, Term)],
-        fuel: &mut u64,
-        span: Span,
-    ) -> Result<Self, Error> {
+impl Telescope {
+    pub(super) fn new(parameters: Parameters, fuel: &mut u64, span: Span) -> Result<Self, Error> {
         environment::charge(fuel, parameters.len(), span)?;
         let positions: BTreeMap<_, _> = parameters
             .iter()
@@ -27,7 +27,7 @@ impl Dependencies {
             .map(|(index, (id, _, _))| (*id, index))
             .collect();
         let mut edges = Vec::with_capacity(parameters.len());
-        for (_, _, domain) in parameters {
+        for (_, _, domain) in parameters.iter() {
             let refs = input_observation::term_inputs(domain, fuel, span)?.declarations;
             edges.push(
                 refs.keys()
@@ -35,101 +35,140 @@ impl Dependencies {
                     .collect(),
             );
         }
-        Ok(Self(edges))
+        Ok(Self { parameters, edges })
     }
 
     pub(super) fn direct(&self, slot: usize) -> &[usize] {
-        &self.0[slot]
+        &self.edges[slot]
     }
+}
+
+/// Visit the telescope backwards to collect the required slots, then check
+/// them in declaration order. An omitted default needs its lexical prefix;
+/// keep that interval as a cursor instead of inserting every slot into a set.
+enum Phase {
+    Select,
+    Edges { slot: usize, next: usize },
+    Check,
+    Complete,
 }
 
 pub(super) struct Frame {
     slot: usize,
     span: Span,
-    dependencies: Vec<usize>,
-    next: usize,
-    complete: bool,
+    phase: Phase,
+    frontier: BTreeSet<usize>,
+    default_prefix: std::ops::Range<usize>,
+    checks: Vec<usize>,
+}
+
+enum Step {
+    Continue,
+    Check(usize),
+    Consumer,
 }
 
 impl Frame {
-    pub(super) fn new(
-        slot: usize,
-        edges: &Dependencies,
-        uses_default: impl Fn(usize) -> bool,
-        fuel: &mut u64,
-        span: Span,
-    ) -> Result<Self, Error> {
-        let mut work = BTreeSet::new();
-        // Process from the consumer back toward its declaration prefix. A
-        // selected default additionally needs every earlier binding in scope.
-        let mut dependencies = Vec::new();
-        let mut current = slot;
-        let mut default_prefix = 0;
-        loop {
-            let direct = edges.direct(current);
-            environment::charge(fuel, direct.len(), span)?;
-            work.extend(direct.iter().copied().filter(|&input| input < current));
-            if current != slot && uses_default(current) && default_prefix < current {
-                environment::charge(fuel, current - default_prefix, span)?;
-                work.extend(default_prefix..current);
-                default_prefix = current;
-            }
-            let Some(previous) = work.pop_last() else {
-                break;
-            };
-            environment::charge(fuel, 1, span)?;
-            dependencies.push(previous);
-            current = previous;
-        }
-        dependencies.reverse();
-        Ok(Self {
+    pub(super) fn new(slot: usize, prepared_prefix: usize, span: Span) -> Self {
+        Self {
             slot,
             span,
-            dependencies,
-            next: 0,
-            complete: false,
-        })
+            phase: Phase::Edges { slot, next: 0 },
+            frontier: BTreeSet::new(),
+            default_prefix: prepared_prefix..prepared_prefix,
+            checks: Vec::new(),
+        }
     }
 
     pub(super) fn slot(&self) -> usize {
         self.slot
     }
 
+    fn predecessor(&mut self) -> Option<usize> {
+        if !self.default_prefix.is_empty()
+            && self
+                .frontier
+                .last()
+                .is_none_or(|&slot| slot < self.default_prefix.end)
+        {
+            self.default_prefix.end -= 1;
+            self.frontier.remove(&self.default_prefix.end);
+            Some(self.default_prefix.end)
+        } else {
+            self.frontier.pop_last()
+        }
+    }
+
+    fn advance(
+        &mut self,
+        edges: &[Vec<usize>],
+        prepared: impl Fn(usize) -> bool,
+        uses_default: impl Fn(usize) -> bool,
+        fuel: &mut u64,
+    ) -> Result<Step, Error> {
+        environment::charge(fuel, 1, self.span)?;
+        match self.phase {
+            Phase::Edges { slot, ref mut next } => {
+                if let Some(&input) = edges[slot].get(*next) {
+                    *next += 1;
+                    if input < slot && input >= self.default_prefix.end {
+                        self.frontier.insert(input);
+                    }
+                } else {
+                    self.phase = Phase::Select;
+                }
+            }
+            Phase::Select => {
+                if let Some(slot) = self.predecessor() {
+                    // Its producer may still lack an identity. Rechecking its
+                    // dependencies cannot supply that value; the original
+                    // invocation owns it.
+                    if !prepared(slot) {
+                        self.checks.push(slot);
+                        if uses_default(slot) {
+                            self.default_prefix.end = slot;
+                        }
+                        self.phase = Phase::Edges { slot, next: 0 };
+                    }
+                } else {
+                    self.phase = Phase::Check;
+                }
+            }
+            Phase::Check => {
+                if let Some(slot) = self.checks.pop() {
+                    return Ok(Step::Check(slot));
+                }
+                self.phase = Phase::Complete;
+                return Ok(Step::Consumer);
+            }
+            Phase::Complete => {
+                return Err(error(self.span, "declaration domain check is complete"));
+            }
+        }
+        Ok(Step::Continue)
+    }
+
     pub(super) fn poll(
         &mut self,
         checker: &mut Checker<'_, '_>,
-        parameters: &[(DeclarationId, Sort, Term)],
         progress: &progress::Progress,
+        uses_default: impl Fn(usize) -> bool,
     ) -> Result<Poll, Error> {
-        if self.complete {
-            return Err(error(self.span, "declaration domain check is complete"));
+        match self.advance(
+            &progress.telescope.edges,
+            |slot| progress.is_prepared(slot),
+            uses_default,
+            &mut checker.required_steps,
+        )? {
+            Step::Continue => Ok(Poll::Continue),
+            Step::Check(slot) => Ok(Poll::Input {
+                slot,
+                domain: progress.domain(checker, slot, self.span)?,
+            }),
+            Step::Consumer => Ok(Poll::Complete(
+                progress.domain(checker, self.slot, self.span)?,
+            )),
         }
-        while let Some(&previous) = self.dependencies.get(self.next) {
-            self.next += 1;
-            if progress.is_prepared(previous) {
-                continue;
-            }
-            return Ok(Poll::Input {
-                slot: previous,
-                domain: Self::domain(checker, parameters, progress, previous, self.span)?,
-            });
-        }
-        let domain = Self::domain(checker, parameters, progress, self.slot, self.span)?;
-        self.complete = true;
-        Ok(Poll::Complete(domain))
-    }
-
-    fn domain(
-        checker: &mut Checker<'_, '_>,
-        parameters: &[(DeclarationId, Sort, Term)],
-        progress: &progress::Progress,
-        slot: usize,
-        span: Span,
-    ) -> Result<DeclarationInputDomain, Error> {
-        let domain = &parameters[slot].2;
-        let pending = progress.pending_inputs(slot, &mut checker.required_steps, span)?;
-        let ty = progress.instantiate(checker, domain, span)?;
-        Ok(DeclarationInputDomain { ty, pending })
     }
 }
 
@@ -137,14 +176,27 @@ impl std::fmt::Display for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(declaration-domain-frame (consumer {}) (source {}) (next {}) (complete {}) (dependencies",
+            "(declaration-domain-frame (consumer {}) (source {}) (phase ",
             self.slot,
             source(self.span),
-            self.next,
-            self.complete
         )?;
-        for dependency in &self.dependencies {
-            write!(f, " {dependency}")?;
+        match self.phase {
+            Phase::Select => f.write_str("select")?,
+            Phase::Edges { slot, next } => write!(f, "(edges {slot} {next})")?,
+            Phase::Check => f.write_str("check")?,
+            Phase::Complete => f.write_str("complete")?,
+        }
+        write!(
+            f,
+            ") (default-prefix {} {}) (frontier",
+            self.default_prefix.start, self.default_prefix.end
+        )?;
+        for slot in &self.frontier {
+            write!(f, " {slot}")?;
+        }
+        f.write_str(") (checks")?;
+        for slot in self.checks.iter().rev() {
+            write!(f, " {slot}")?;
         }
         f.write_str("))")
     }
@@ -165,45 +217,118 @@ mod tests {
         }
     }
 
-    #[test]
-    fn domain_dependencies_are_transitive_bounded_and_keep_the_consumer() {
-        let parameters = [
-            (id(0), Sort::Type, p(P::Type)),
-            (id(1), Sort::ComptimeValue, p(P::Bool)),
-            (id(2), Sort::ComptimeValue, dependency(0)),
-            (id(3), Sort::ComptimeValue, dependency(2)),
-        ];
-        let span = Span::default();
-        let edges = Dependencies::new(&parameters, &mut 100, span).unwrap();
-        let mut short = 1;
-        assert!(Frame::new(3, &edges, |_| false, &mut short, span).is_err());
-        assert_eq!(short, 0);
-        let mut fuel = 100;
-        let mut frame = Frame::new(3, &edges, |_| false, &mut fuel, span).unwrap();
-        assert!(fuel < 100);
-        assert_eq!(frame.dependencies, [0, 2]);
-        assert_eq!(frame.slot(), 3);
-        frame.next = 1;
-        let dump = frame.to_string();
-        assert!(dump.contains("(consumer 3)"), "{dump}");
-        assert!(dump.contains("(dependencies 0 2)"), "{dump}");
-        assert!(dump.contains("(next 1)"), "{dump}");
+    fn check_order(
+        frame: &mut Frame,
+        edges: &[Vec<usize>],
+        prepared: impl Fn(usize) -> bool,
+        uses_default: impl Fn(usize) -> bool,
+    ) -> Vec<usize> {
+        let mut order = Vec::new();
+        let mut fuel = 200;
+        loop {
+            match frame
+                .advance(edges, &prepared, &uses_default, &mut fuel)
+                .unwrap()
+            {
+                Step::Continue => {}
+                Step::Check(slot) => order.push(slot),
+                Step::Consumer => return order,
+            }
+        }
     }
 
     #[test]
-    fn default_dependencies_prepare_prefixes_without_adding_unrelated_suffixes() {
-        let parameters = [
-            (id(0), Sort::Type, p(P::Type)),
-            (id(1), Sort::ComptimeValue, p(P::Bool)),
-            (id(2), Sort::Type, p(P::Type)),
-            (id(3), Sort::ComptimeValue, p(P::Bool)),
-            (id(4), Sort::ComptimeValue, dependency(2)),
+    fn overlapping_defaults_and_explicit_edges_preserve_declaration_order() {
+        // 7 depends on 6 and 3; both also need 2. Slot 4 is unrelated
+        // unless a default at 6 captures its declaration prefix.
+        let edges = vec![
+            vec![],
+            vec![],
+            vec![],
+            vec![2],
+            vec![],
+            vec![],
+            vec![2],
+            vec![3, 6],
         ];
-        let edges = Dependencies::new(&parameters, &mut 100, Span::default()).unwrap();
-        let frame = Frame::new(4, &edges, |slot| slot == 2, &mut 100, Span::default()).unwrap();
-        assert_eq!(frame.dependencies, [0, 1, 2]);
-        let overridden = Frame::new(4, &edges, |_| false, &mut 100, Span::default()).unwrap();
-        assert_eq!(overridden.dependencies, [2]);
+        let order = |defaults: &[usize]| {
+            check_order(
+                &mut Frame::new(7, 0, Span::default()),
+                &edges,
+                |_| false,
+                |slot| defaults.contains(&slot),
+            )
+        };
+        assert_eq!(order(&[]), [2, 3, 6]);
+        assert_eq!(order(&[3]), [0, 1, 2, 3, 6]);
+        assert_eq!(order(&[3, 6]), [0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn prepared_inputs_cut_off_domain_and_default_dependencies() {
+        let edges = vec![vec![], vec![], vec![], vec![0], vec![3, 1]];
+        let order = check_order(
+            &mut Frame::new(4, 0, Span::default()),
+            &edges,
+            |slot| slot == 3,
+            |slot| {
+                assert_ne!(
+                    slot, 3,
+                    "the prepared producer already owns its chosen supply"
+                );
+                false
+            },
+        );
+        assert_eq!(order, [1]);
+    }
+
+    #[test]
+    fn large_telescope_resumes_at_the_saved_edge_and_default_prefix() {
+        let mut edges = vec![vec![]; 1026];
+        edges[1025] = vec![600, 1024];
+        let mut frame = Frame::new(1025, 0, Span::default());
+        let advance = |frame: &mut Frame, fuel: &mut u64| {
+            frame.advance(&edges, |_| false, |slot| slot == 1024, fuel)
+        };
+        assert!(matches!(
+            advance(&mut frame, &mut 1).unwrap(),
+            Step::Continue
+        ));
+        let saved = frame.to_string();
+        assert!(saved.contains("(phase (edges 1025 1))"), "{saved}");
+        assert!(advance(&mut frame, &mut 0).is_err());
+        assert_eq!(frame.to_string(), saved);
+        let mut fuel = 10_000;
+        let mut next = 0;
+        loop {
+            match advance(&mut frame, &mut fuel).unwrap() {
+                Step::Continue => {
+                    assert!(frame.frontier.len() <= 2);
+                }
+                Step::Check(slot) => {
+                    assert_eq!(slot, next);
+                    next += 1;
+                }
+                Step::Consumer => break,
+            }
+        }
+        assert_eq!(next, 1025);
+    }
+
+    #[test]
+    fn an_omitted_default_only_visits_the_missing_declaration_suffix() {
+        let mut edges = vec![vec![]; 1026];
+        edges[1025] = vec![3, 1024];
+        let order = check_order(
+            &mut Frame::new(1025, 1020, Span::default()),
+            &edges,
+            |slot| {
+                assert!(slot >= 1020, "checked prefix was traversed at slot {slot}");
+                slot == 1022
+            },
+            |slot| slot == 1024,
+        );
+        assert_eq!(order, [1020, 1021, 1023, 1024]);
     }
 
     #[test]
@@ -216,6 +341,6 @@ mod tests {
             },
         ]);
         let parameters = [(id(0), Sort::Type, p(P::Type)), (id(1), Sort::Type, domain)];
-        assert!(Dependencies::new(&parameters, &mut 100, Span::default()).is_err());
+        assert!(Telescope::new(parameters.into(), &mut 100, Span::default()).is_err());
     }
 }

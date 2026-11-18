@@ -348,12 +348,27 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             &mut self.required_steps,
             expr.span,
         )?;
-        for (id, domain) in parameters.iter().zip(&domains).skip(prefix.len()) {
-            if declared_inputs.contains(id)
-                && *domain != p(P::Type)
-                && (prefix.is_empty()
-                    || captured.instantiate(self, domain, expr.span)? != p(P::Type))
-            {
+        let mut dependent = parameters
+            .iter()
+            .zip(&domains)
+            .skip(prefix.len())
+            .filter(|(id, domain)| declared_inputs.contains(id) && **domain != p(P::Type))
+            .map(|(_, domain)| domain)
+            .peekable();
+        if dependent.peek().is_some() {
+            if prefix.is_empty() {
+                return Ok(None);
+            }
+            let type_domains =
+                captured.with_substitution(self, expr.span, |substitution, fuel| {
+                    for domain in dependent {
+                        if substitution.instantiate_bounded(domain, fuel)? != p(P::Type) {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                })?;
+            if !type_domains {
                 return Ok(None);
             }
         }

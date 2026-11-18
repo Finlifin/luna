@@ -77,6 +77,25 @@ fn nominal_packet_producers_receive_their_known_result_context() {
     );
 }
 
+#[test]
+fn spread_field_domains_follow_declaration_slots_across_named_defaults() {
+    let source = "
+        pure comptime fn Packet<.extra: bool = false, T, .small: u8 = 7, value: T, tail: u8> -> Type { T }
+        comptime fn mark() -> bool { true }
+        comptime fn check() -> bool {
+            let packet = Packet<...(bool, mark(), 255)>;
+            packet == Packet<bool, true, 255>
+        }
+    ";
+    check_both(source, &["check", "mark"]);
+    let invalid = source.replace("mark(), 255", "mark(), 256");
+    let failure = sysroot::compile(&invalid).unwrap_err();
+    assert!(
+        failure.contains("does not fit the requested fixed-width representation"),
+        "{failure}"
+    );
+}
+
 const CONSTRUCTORS: &[&str] = &[
     "pure comptime fn Packet<T, .values: meta.List<T> = []> -> Type { bool }",
     "struct Packet where T, .values: meta.List<T> = [] {}",

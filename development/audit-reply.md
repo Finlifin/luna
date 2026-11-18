@@ -19,6 +19,7 @@ let size = count<
 | --- | --- | --- |
 | [检查区域](../compiler/elaboration/src/program/block_regions/driver/region.rs) | 区域持有检查帧、结果消费者与 HIR 借用，每次 poll 单独借用 Checker。声明实参和普通调用的依赖准备都可作为根消费者取得已检查的结果。[驱动](../compiler/elaboration/src/program/block_regions/driver.rs)在一次同步调用中推进到完成。 | 一次源域观察需要保存尚未完成的检查以及交付目的地，允许原调用稍后送回一个值。 |
 | [实参依赖任务](../compiler/elaboration/src/program/dependent_inputs/tasks.rs) | 按槽位调度普通参数域与默认值的依赖，所需源码实参通过共同区域接受 staged 检查。 | 此队列只知道依赖哪个槽，缺少原实参的执行位置、活动绑定和控制出口。 |
+| [声明参数域](../compiler/elaboration/src/program/declaration_inputs/domain.rs) | 展开包与后续槽位检查共用原声明的依赖索引。帧保留当前边、尚待检查的前驱和默认值需要的声明前缀。检查完成的生产者仍可持有未知身份。 | 列表需要的元素域来自一次普通调用时，检查帧还要能接收那次调用交付的值。 |
 | [required 入口](../compiler/elaboration/src/program/required.rs) | 为已有受检根准备运行所需的声明和可用输入。 | 尚待元素域的源码表达式无法作为受检根交付。重新准备一个根也无法恢复原调用栈。 |
 | [调用会话](../compiler/comptime_interpretor/src/invocation/session.rs)与[宿主接口](../compiler/comptime_interpretor/src/invocation/host.rs) | VM 可以在原调用中运行已检查的实参片段、传递循环控制，请求选择或定义。 | 收到 Type 后仍缺将它送到原源码检查位置，并以检查结果继续该调用的路径。 |
 | [定义端片段检查](../compiler/elaboration/src/program/open_functions/fragments.rs) | 将可见输入投影到紧凑参数帧，重绑定片段中的引用，NIR 的 `DefinitionRegion` 在真实依赖目录旁独立接受阶段和算术检查。 | 投影参数只有定义端的域与前提，实际存储、已执行前缀和外层控制目标仍归原调用持有。 |
@@ -45,6 +46,8 @@ NF 的隐式声明顺序与显式计划现由同一输入帧执行。旧字节�
 ```sh
 python3 -B development/check.py --timeout 900 -- test -p luna --test type_input_execution_order -- --include-ignored
 ```
+
+动态 NF 有一个相关的对照。对于 `factory<...prefix(), 1, 255>`，`prefix()` 在原调用中产生装有 `u8` 的包。路由能确定各字段的位置；函数值的当前位置入口接下来要把所有实参转为受检操作数。显式运行该用例时，整数文字取得 `Integer`，而收集器仍要求尚未取得的刚性类型，检查在执行 `prefix()` 前失败。这个消费者与普通函数的列表文字在不同位置丢失所需的交接。[函数值入口](../compiler/elaboration/src/program/normal/dynamic_inputs.rs) · [动态 NF 用例](../compiler/luna/tests/normal_input_plans.rs)
 
 另一个对照是[名义值参数组](../compiler/luna/tests/nominal_value_parameters.rs)。在独立的 `3b4b54d9` 源码快照中运行整组，297 项通过、11 项失败。失败涉及开放父参数的成员域、别名文字的整数域要求、required 输入可用性及旧用例缺少 Splice 协议。复核输入恢复时，应按用例和诊断与这个基线比较。
 
