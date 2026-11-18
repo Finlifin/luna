@@ -32,14 +32,34 @@ pub(super) trait Source: fmt::Display {
     fn preparation(&self, index: usize) -> Option<&NormalFormPreparation>;
     fn slot(&self, position: usize) -> Option<usize>;
     fn input(&self, slot: usize) -> &Argument;
-    fn specialize(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error>;
-    // A domain observes only this source's completed input identities. Changes
-    // to those identities, not unrelated producer effects, trigger rechecking.
-    fn domain(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Domain, Error>;
+    fn substitutions(&self) -> Option<&input_bindings::Bindings>;
+
+    // Rebuild from the template at both staging and admission. A completed
+    // caller value is never an input to another round of substitution.
+    fn operand(
+        &self,
+        vm: &mut Interpreter<'_>,
+        slot: usize,
+    ) -> Result<std::borrow::Cow<'_, Argument>, Error> {
+        let template = self.input(slot);
+        match self.substitutions() {
+            Some(bindings) => bindings
+                .specialized(vm, template)
+                .map(std::borrow::Cow::Owned),
+            None => Ok(std::borrow::Cow::Borrowed(template)),
+        }
+    }
+    fn pending_inputs(
+        &self,
+        vm: &mut Interpreter<'_>,
+        slot: usize,
+    ) -> Result<BTreeSet<usize>, Error>;
+    fn expected(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Term, Error>;
     fn check_input(
         &self,
         vm: &Interpreter<'_>,
         slot: usize,
+        operand: &Argument,
         expected: Option<&Term>,
     ) -> Result<(), Error>;
     fn bind(
@@ -53,14 +73,6 @@ pub(super) trait Source: fmt::Display {
     fn cleanup(&self, environment: &mut Environment);
 }
 
-/// A partially instantiated domain and the unfinished input slots it observes.
-/// Dependencies belong to this invocation, not to expression execution order.
-/// Re-observation after a completion can reveal further dependencies.
-pub(super) struct Domain {
-    pub expected: Term,
-    pub awaiting: BTreeSet<usize>,
-}
-
 struct Pending {
     staged: StagedNormalInput,
     awaiting: BTreeSet<usize>,
@@ -68,10 +80,7 @@ struct Pending {
 
 enum Waiting {
     Preparation(usize),
-    Ready {
-        slot: usize,
-        expected: Term,
-    },
+    Ready(usize),
     Stage {
         slot: usize,
         awaiting: BTreeSet<usize>,
@@ -80,8 +89,8 @@ enum Waiting {
 
 pub(super) enum Request<'a> {
     Preparation(&'a NormalFormPreparation),
-    Ready(&'a Argument, &'a Term),
-    Stage(&'a Argument),
+    Ready(std::borrow::Cow<'a, Argument>, Term),
+    Stage(std::borrow::Cow<'a, Argument>),
     Complete,
 }
 
@@ -133,7 +142,7 @@ impl<S: Source> fmt::Display for Frame<S> {
         )?;
         match &self.waiting {
             Some(Waiting::Preparation(index)) => write!(f, " (preparation {index})")?,
-            Some(Waiting::Ready { slot, expected }) => write!(f, " (ready {slot} {expected})")?,
+            Some(Waiting::Ready(slot)) => write!(f, " (ready {slot})")?,
             Some(Waiting::Stage { slot, awaiting }) => {
                 write!(f, " (stage {slot} (awaiting")?;
                 for dependency in awaiting {
@@ -194,7 +203,16 @@ impl<S: Source> Frame<S> {
             vm.integer_operation(Some(self.source.source()), |budget| {
                 budget.consume(dependents.len())
             })?;
-            self.ready.extend(dependents);
+            for dependent in dependents {
+                let pending = self
+                    .pending
+                    .get_mut(&dependent)
+                    .expect("registered dependent");
+                pending.awaiting.remove(&slot);
+                if pending.awaiting.is_empty() {
+                    self.ready.insert(dependent);
+                }
+            }
         }
         Ok(())
     }
@@ -206,36 +224,14 @@ impl<S: Source> Frame<S> {
             // producers or changing the source-order execution cursor.
             let mut round = std::mem::take(&mut self.ready);
             while let Some(slot) = round.pop_first() {
-                self.ready.remove(&slot);
                 let pending = self.pending.remove(&slot).expect("awakened input");
-                vm.integer_operation(Some(self.source.source()), |budget| {
-                    budget.consume(pending.awaiting.len().saturating_add(1))
-                })?;
-                for dependency in &pending.awaiting {
-                    if let Some(dependents) = self.dependents.get_mut(dependency) {
-                        dependents.remove(&slot);
-                        if dependents.is_empty() {
-                            self.dependents.remove(dependency);
-                        }
-                    }
-                }
-                let Domain { expected, awaiting } = self.source.domain(vm, slot)?;
-                if !awaiting.is_empty() {
-                    self.watch(
-                        vm,
-                        slot,
-                        Pending {
-                            staged: pending.staged,
-                            awaiting,
-                        },
-                    )?;
-                    continue;
-                }
-                self.source.specialize(vm, slot)?;
-                self.source.check_input(vm, slot, Some(&expected))?;
-                let argument = self.source.input(slot);
+                vm.tick(Some(self.source.source()))?;
+                let expected = self.source.expected(vm, slot)?;
+                let argument = self.source.operand(vm, slot)?;
+                self.source
+                    .check_input(vm, slot, &argument, Some(&expected))?;
                 let mut literals = BTreeMap::new();
-                vm.prepare_normal_argument(argument, &expected, &mut literals, 0)?;
+                vm.prepare_normal_argument(&argument, &expected, &mut literals, 0)?;
                 let value = vm.finish_staged_normal_argument(
                     pending.staged,
                     &mut literals,
@@ -263,33 +259,30 @@ impl<S: Source> Frame<S> {
         // A semantic failure ends this frame. It must never replay a producer.
         self.terminal = true;
         self.drain(vm, env)?;
-        if let Some(preparation) = self.source.preparation(self.preparation)
+        let request = if let Some(preparation) = self.source.preparation(self.preparation)
             && preparation.before == self.position
         {
             self.waiting = Some(Waiting::Preparation(self.preparation));
+            Request::Preparation(preparation)
         } else if let Some(slot) = self.source.slot(self.position) {
-            self.source.specialize(vm, slot)?;
-            self.source.check_input(vm, slot, None)?;
-            let Domain { expected, awaiting } = self.source.domain(vm, slot)?;
-            self.waiting = Some(if !awaiting.is_empty() {
-                Waiting::Stage { slot, awaiting }
+            let operand = self.source.operand(vm, slot)?;
+            self.source.check_input(vm, slot, &operand, None)?;
+            let awaiting = self.source.pending_inputs(vm, slot)?;
+            if awaiting.is_empty() {
+                let expected = self.source.expected(vm, slot)?;
+                self.source
+                    .check_input(vm, slot, &operand, Some(&expected))?;
+                self.waiting = Some(Waiting::Ready(slot));
+                Request::Ready(operand, expected)
             } else {
-                self.source.check_input(vm, slot, Some(&expected))?;
-                Waiting::Ready { slot, expected }
-            });
+                self.waiting = Some(Waiting::Stage { slot, awaiting });
+                Request::Stage(operand)
+            }
         } else {
             return Ok(Request::Complete);
-        }
+        };
         self.terminal = false;
-        Ok(match self.waiting.as_ref().expect("requested input") {
-            Waiting::Preparation(index) => Request::Preparation(
-                self.source
-                    .preparation(*index)
-                    .expect("requested preparation"),
-            ),
-            Waiting::Ready { slot, expected } => Request::Ready(self.source.input(*slot), expected),
-            Waiting::Stage { slot, .. } => Request::Stage(self.source.input(*slot)),
-        })
+        Ok(request)
     }
 
     pub(super) fn receive(
@@ -301,7 +294,7 @@ impl<S: Source> Frame<S> {
         if !matches!(
             (&self.waiting, &completion),
             (Some(Waiting::Preparation(_)), Completion::Prepared)
-                | (Some(Waiting::Ready { .. }), Completion::Value(_))
+                | (Some(Waiting::Ready(_)), Completion::Value(_))
                 | (Some(Waiting::Stage { .. }), Completion::Staged(_))
         ) {
             return Err(vm.failure(ErrorKind::InvalidControlFlow, Some(self.source.source())));
@@ -309,7 +302,7 @@ impl<S: Source> Frame<S> {
         self.terminal = true;
         match (self.waiting.take().expect("completed request"), completion) {
             (Waiting::Preparation(_), Completion::Prepared) => self.preparation += 1,
-            (Waiting::Ready { slot, .. }, Completion::Value(value)) => {
+            (Waiting::Ready(slot), Completion::Value(value)) => {
                 self.source.bind(vm, env, slot, value)?;
                 self.completed(vm, slot)?;
                 self.position += 1;
@@ -337,19 +330,19 @@ impl<S: Source> Frame<S> {
                     }
                 }
                 Request::Ready(argument, expected) => {
-                    if let Some(frame) = vm.start_contextual_input(argument, expected, env)? {
+                    if let Some(frame) = vm.start_contextual_input(&argument, &expected, env)? {
                         return Ok(Progress::Input(frame));
                     }
-                    match vm.interpret_contextual_input(argument, expected, env)? {
+                    match vm.interpret_contextual_input(&argument, &expected, env)? {
                         Flow::Value(value) => Completion::Value(value),
                         flow => return Ok(Progress::Complete(flow)),
                     }
                 }
                 Request::Stage(argument) => {
-                    if let Some(frame) = vm.start_staged_input(argument, env, 0)? {
+                    if let Some(frame) = vm.start_staged_input(&argument, env, 0)? {
                         return Ok(Progress::Input(frame));
                     }
-                    match vm.interpret_staged_argument(argument, env, 0)? {
+                    match vm.interpret_staged_argument(&argument, env, 0)? {
                         std::ops::ControlFlow::Continue(value) => Completion::Staged(value),
                         std::ops::ControlFlow::Break(flow) => return Ok(Progress::Complete(flow)),
                     }
@@ -400,7 +393,7 @@ impl<S: Source> InputPlan for Frame<S> {
         let completion = match result.flow? {
             Flow::Value(value) => match &self.waiting {
                 Some(Waiting::Preparation(_)) => Completion::Prepared,
-                Some(Waiting::Ready { .. }) => Completion::Value(value),
+                Some(Waiting::Ready(_)) => Completion::Value(value),
                 Some(Waiting::Stage { .. }) => {
                     let (shape, mut staged) = result.staged.ok_or_else(|| {
                         vm.failure(ErrorKind::InvalidControlFlow, Some(self.source.source()))

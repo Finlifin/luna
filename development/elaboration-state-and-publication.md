@@ -906,94 +906,15 @@ PTC／candidate 记录所属前提；generator cell 与 VM slot 的实际内容�
 
 #### 检查依赖与执行次序
 
-NeedDomain、NeedValue、NeedCheckedCode 表示信息依赖；AfterExecution、SelectedBy
-表示次序和控制许可。调度器可推进已满足检查依赖的任务，VM 只执行许可及前序均
-满足的片段。后实参的检查证据可帮助前 lambda，不代表后实参可先于 callee 求值。
+域检查可以利用后一个实参提供的类型信息。运行实参则受源码位置和控制流约束。声明中的参数引用确定依赖哪一个槽，调用者提供的值决定该槽完成后如何代入。递归调用中，同一个声明的外层绑定可以出现在内层实参里。等待关系、求值快照和完成槽位的例子见[源码次序与完成槽位](comptime-value-admission.md#源码次序与完成槽位)。
 
-```flurry
-comptime fn Byte() -> Type { u8 }
+普通 callable 的形成有三个检查点。
 
-comptime fn count() -> Integer
-where T, ...values: meta.List<T>
-{
-    values.length()
-}
+1. **定义检查。** 在本次证明内为待定输入分配符号。一个输入在不同位置共享同一个符号，多个符号与已有实参同时代入声明域。这样，即使主体从未执行，若已知 `A != B`，仍可拒绝向 `Pair<T, T>` 供应 `Pair<A, B>`。证明使用调用者的前提，查询结束后释放私有符号。预算耗尽或命题无效时，保留对应失败。[域检查](../compiler/elaboration/src/program/dynamic_instances/domain_checks.rs)
+2. **输入执行。** 原调用负责取得每个值。先读可变局部再执行会写该局部的 Type 生产者，须保留读到的旧值。已定型的子句参数包能做到这一点。普通 callable 中，需要等待计算域才能定型的源码子表达式仍缺少交接；[顺序、快照和早退用例](../compiler/luna/tests/type_input_execution_order.rs)保留了这条路径的成功预期。
+3. **实例形成。** 输入齐备后检查实际域与形成条件。comptime callable 在 VM 中形成函数值；runtime callable 的 required 路径取得已执行参数包的值和受检类型，再完成代入与比较。若 callee 签名本身依赖尚在执行的 Type，仍需要将结果交还原检查帧。例如 `identity<Byte()>(9)` 应在 `Byte()` 完成后以实际类型检查 9，并让同一次执行取得的实参形成 callable。[实例形成](../compiler/elaboration/src/program/dynamic_instances.rs)
 
-comptime fn check() -> bool {
-    var trace: Integer = 0;
-    let size = count<
-        .values = do { trace = trace * 10 + 1; [1, 255] },
-        do { trace = trace * 10 + 2; Byte() }
-    >();
-    size == 2 and trace == 12
-}
-```
-
-这是验收目标，尚未通过。共同检查规则先交付第一处写入，列表组装保留域依赖；
-原区域完成写入后，才允许第二处写入与 Byte。实际 Type 经准入恢复元素范围检查和
-组装，全部输入及形成条件完成后才进入 count。不是 List／Tuple 语法白名单允许跳过
-源序；列表元素若含需上下文选择的调用，须保留相应执行依赖，不能套用这一时序。
-
-已经接通的较窄路径是：前项自身可形成完整受检表达式，例如在同一 `do` 内声明
-`let packet: meta.List<u8> = [1, 255];` 并返回 packet，后项才执行 Byte。
-`CallableCompletion` 在路由完成时区分已知域和仍依赖本次生产者的域：已知域继续
-严格检查；待定域只提前拒绝已证明的类型冲突，不把尚未执行的 Type rigid 当作
-完整参数。未证明冲突不构成相等或准入证据；预算耗尽和无效命题仍报错。
-
-递归应用的槽位按调用区分。例如外层有 `T != U`，内层把 `computed(U)` 交给
-自己的 `T`，并给 `value: T` 传入外层的 `U` 值。域检查为内层每个待定输入
-建立本次证明内独立的符号，同一输入在多个位置共用一个符号。已观察的实参和这些
-符号同时代入原始域，外层的 `T != U` 仍约束外层。这样也能在主体从未执行时
-拒绝以 `Pair<A, B>` 供应 `Pair<T, T>` 且已知 `A != B` 的调用。
-这些证明符号只在只读查询期间存在，退出时释放。生成定义的身份游标、可执行
-packet 和类型身份均只接收各自实际拥有的数据。
-
-VM 请求检查类型契约时，先用本次恢复的 PTC 上下文尝试直接证明。若结论还取决于
-trait 事实，则从目标及前提收集 trait 查询，按需建立实现索引并在相同的剩余预算
-中继续证明。即使目标只包含类型等式，前提中出现的 trait 也可能决定等式的真值。
-不同调用或不同恢复上下文可以复用声明元数据，证明取得的前提只在该次检查中有效。
-源码查询和已建好声明世界的 CLI 入口共用类型契约的结果转换。查询成功时交付
-`Satisfied`、`Rejected` 或 `Unknown`；每次证明可以有比 invocation 更小的
-预算，达到查询上限会返回执行错误，即使外层还有剩余步数。非法命题携带 PTC 的
-诊断，VM 在消费处补上源码位置。恢复 binder 时的命题替换也在同一份剩余预算中
-先计费再执行。类型相等先证明正命题，必要时再证明其否定；任一次查询失败即结束
-本次比较。新的 invocation 可以使用同一声明目录重新取得证据。
-
-comptime callable 由原 VM 在所有实际参数齐备后替换声明望远镜并检查准入，成功后
-才形成函数值、进入主体。runtime callable 的 required 输入消费者在原 packet
-执行后，用完整实参替换声明域，与 packet 保留的受检类型比较，然后才交付实例形成。
-后一路径原来只检查形成条件；放开待定域的提前相等检查后，必须在此补齐最终域
-检查，否则会引入漏检。本次一并接通，不重跑生产者。
-这不是一般源码等待／恢复机制：需要 Type 上下文才能检查的列表字面量，以及依赖
-该 Type 才能形成的函数签名，仍未接通。
-
-源码回归集中在
-[`type_input_execution_order`](../compiler/luna/tests/type_input_execution_order.rs)：
-直接观察 Type 的对照、已受检 packet 的前置写入与旧值快照、错误输入在主体前拒绝、
-同一 VM 内失败后恢复，以及 required runtime callable 的正反例。comptime 路径
-在两种执行引擎中重复调用并检查函数进入次序。三个尚未实现的源码等待正例保留原
-成功断言并显式 ignored；不能把改写成显式类型 packet 后的成功当作它们已完成。
-
-验证基线为 `f0abe655` 加本次限定改动，工作目录 `/home/fin/luna`。
-`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna
---test type_input_execution_order --test ordinary_callable_types
---test ordinary_clause_collectors --test source_input_dependencies
---test prepared_input_dependencies --test staged_callable_freezing --test default_calls
---test library_std_format --no-fail-fast -- --test-threads=1` 退出 0；报告
-`/tmp/luna-tools-qggsb50x/result.json`，输出锚点为各测试组的 `test result: ok`。
-本次新增组 8 项通过、3 项明确未实现并 ignored；其他组也保留原有 ignored，未将其
-计作成功。修改的三个 Rust 文件经 rustfmt，报告
-`/tmp/luna-tools-86h0ck1m/result.json` 退出 0。工作区已有修改未纳入本次提交。
-
-较早输入中的读取、调用、失败检查、所有权交付和域相关转换均占有执行位置。
-读取可变字段后等待域，必须保留读取时依法取得的值；不能在后项写入后重读，也不能
-凭 pure 标记取消顺序边。没有合法读取／保留规则就继续等待，真实闭环与未实现规则
-分别诊断。
-
-对 identity，Byte 在父区域的 callee 位置执行一次；响应交给本次 T，producer 的
-执行 receipt 标记已消费。形成 `comptime fn(u8) -> u8` 后才以 u8 检查 9，不能再由
-`ComptimeFunctionInstance.subject` 重放该 packet。签名、输入或形成检查失败时不
-发布 callable，也不把错误推给一个已开始执行的 identity 来补救。
+类型契约证明从本次恢复的 PTC 上下文取得前提。目标或前提依赖 trait 时，查询在剩余额度内取得实现证据。结果区分成立、拒绝和未知；证据属于查询上下文，跨调用复用声明元数据时仍需检查实际前提。
 
 #### 片段边界、控制与取消
 
@@ -1002,10 +923,7 @@ guard 或子调用中等待时保留原 Frame，不调用 restore_environment。
 LocalId、域、访问／移动方式、输出绑定及其源 scope；先验证重复输出、错域、错 scope
 和过期位置，再移动。未初始化、已移走、活跃值引用保持不同状态。
 
-现有 compile_root 仅能将本段内部循环降为 Jump；外部 break／continue 不能凭原
-loop id 穿过 Program。目标协议显式声明外部控制目标与需退出的 scope，由原区域
-接收；未经声明的目标在片段准入处拒绝。return 保留 Flow::Return 并交给原函数，
-不能由合成包装吞成 Value。effect resume 也不因具有一个循环目标而获准。
+输入片段中，外层循环的 `break` 和 `continue` 已能按词法循环身份返回挂起输入的字节码位置。一个函数的目标只能由该函数内的片段恢复。`return` 走原函数的控制出口。这些规则也约束将来的源码交接；效应恢复另需检查 handler 和 continuation 的权限。[循环目标](../compiler/comptime_compiler/src/lib.rs) · [输入片段中的控制流](../compiler/luna/tests/type_input_execution_order.rs)
 
 请求沿 Authority／Ticket 校验区域、代次与执行位置。同一 HirId 的递归调用和循环
 迭代具有不同执行身份。重复、跨区域、旧代响应拒绝时保留当前 waiter；预算不足不

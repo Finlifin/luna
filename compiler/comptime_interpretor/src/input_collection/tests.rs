@@ -43,20 +43,28 @@ impl<S: Source> Source for Observed<S> {
     fn input(&self, slot: usize) -> &Argument {
         self.inner.input(slot)
     }
-    fn specialize(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error> {
-        self.inner.specialize(vm, slot)
+    fn substitutions(&self) -> Option<&input_bindings::Bindings> {
+        self.inner.substitutions()
     }
-    fn domain(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Domain, Error> {
+    fn pending_inputs(
+        &self,
+        vm: &mut Interpreter<'_>,
+        slot: usize,
+    ) -> Result<BTreeSet<usize>, Error> {
         self.queries.borrow_mut().push(slot);
-        self.inner.domain(vm, slot)
+        self.inner.pending_inputs(vm, slot)
+    }
+    fn expected(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Term, Error> {
+        self.inner.expected(vm, slot)
     }
     fn check_input(
         &self,
         vm: &Interpreter<'_>,
         slot: usize,
+        operand: &Argument,
         expected: Option<&Term>,
     ) -> Result<(), Error> {
-        self.inner.check_input(vm, slot, expected)
+        self.inner.check_input(vm, slot, operand, expected)
     }
     fn bind(
         &mut self,
@@ -208,7 +216,7 @@ fn check_unrelated<S: Source>(source: S, vm: &mut Interpreter<'_>, count: usize)
     ));
     assert_eq!(
         &*frame.source.queries.borrow(),
-        &(1..count).chain([0, 1]).collect::<Vec<_>>()
+        &(1..count).chain([0]).collect::<Vec<_>>()
     );
     assert_eq!(
         frame.source.bindings,
@@ -342,7 +350,7 @@ fn transitive_completions_wake_dependents_and_cycles_remain_unresolved() {
                 assert_eq!(frame.source.bindings, [2]);
             } else {
                 assert!(matches!(result, Ok(Progress::InputsComplete)));
-                assert_eq!(&*frame.source.queries.borrow(), &[0, 1, 2, 1, 0]);
+                assert_eq!(&*frame.source.queries.borrow(), &[0, 1, 2]);
                 assert_eq!(frame.source.bindings, [2, 1, 0]);
                 assert_eq!(env.get(&local(0)), Some(&Value::UnsignedInteger(7)));
             }
@@ -369,8 +377,9 @@ fn dependency_registration_and_wakeup_fail_terminally_without_replaying_inputs()
         let Request::Stage(argument) = frame.advance(&mut vm, &mut env).unwrap() else {
             panic!("pending domain")
         };
-        let std::ops::ControlFlow::Continue(staged) =
-            vm.interpret_staged_argument(argument, &mut env, 0).unwrap()
+        let std::ops::ControlFlow::Continue(staged) = vm
+            .interpret_staged_argument(&argument, &mut env, 0)
+            .unwrap()
         else {
             panic!("staged input")
         };
@@ -387,7 +396,7 @@ fn dependency_registration_and_wakeup_fail_terminally_without_replaying_inputs()
                 panic!("ready Type")
             };
             let Flow::Value(value) = vm
-                .interpret_contextual_input(argument, expected, &mut env)
+                .interpret_contextual_input(&argument, &expected, &mut env)
                 .unwrap()
             else {
                 panic!("Type value")
@@ -486,7 +495,7 @@ fn shared_and_partial_dependencies_keep_each_pending_value_until_its_domain_is_r
             if shared {
                 assert_eq!(
                     &*frame.source.queries.borrow(),
-                    &(1..count).chain([0]).chain(1..count).collect::<Vec<_>>()
+                    &(1..count).chain([0]).collect::<Vec<_>>()
                 );
                 for slot in 1..count {
                     assert_eq!(
@@ -495,7 +504,7 @@ fn shared_and_partial_dependencies_keep_each_pending_value_until_its_domain_is_r
                     );
                 }
             } else {
-                assert_eq!(&*frame.source.queries.borrow(), &[2, 0, 2, 1, 2]);
+                assert_eq!(&*frame.source.queries.borrow(), &[2, 0, 1]);
                 assert_eq!(
                     env.get(&local(2)),
                     Some(&Value::Tuple(vec![
@@ -564,12 +573,162 @@ fn supplied_abstract_identity_is_complete_even_when_its_declaration_is_unchanged
                 ],
             }
         );
-        assert_eq!(&*frame.source.queries.borrow(), &[1, 0, 1]);
+        assert_eq!(&*frame.source.queries.borrow(), &[1, 0]);
         assert_eq!(env.get(&local(1)), Some(&abstract_value));
         frame.cleanup(&mut env);
         assert_eq!(
             env,
             Environment::from([(local(998), abstract_value.clone())])
         );
+    }
+}
+
+#[test]
+fn recursive_application_keeps_caller_binders_in_ready_and_resumed_operands() {
+    let ty = Term::Primitive(Primitive::Type);
+    let boolean = Term::Primitive(Primitive::Bool);
+    let byte = Term::Primitive(Primitive::U8);
+    let rigid = |n| Term::Rigid {
+        declaration: id(n),
+        sort: nir::Sort::Type,
+    };
+    // Outer B and inner B have the same declaration. This application supplies
+    // A = outer B, B = bool, T = u8, and checks its last operand at (A, T).
+    let template = Term::Tuple(vec![rigid(0), rigid(2)]);
+    let domains = vec![ty.clone(), ty.clone(), ty.clone(), template];
+    let parameters = domains
+        .iter()
+        .enumerate()
+        .map(|(slot, domain)| Parameter {
+            declaration: id(slot as u32),
+            binding: local(slot as u32),
+            kind: if slot < 3 { Kind::Type } else { Kind::Value },
+            ty: domain.clone(),
+        })
+        .collect();
+    let package = Package {
+        normal_forms: vec![Head {
+            declaration: id(100),
+            collector: None,
+            role: Role::Opaque,
+            requirements: vec![],
+            parameters,
+        }],
+        alias_contracts: vec![nir::type_aliases::Contract {
+            declaration: id(101),
+            parameters: (0..4).map(id).collect(),
+            parameter_types: domains,
+            requirements: vec![],
+            capabilities: vec![],
+        }],
+        ..Default::default()
+    };
+    let outer = Value::AbstractValue {
+        declaration: id(42),
+        ty: rigid(1),
+    };
+    for tree in [true, false] {
+        let mut vm = if tree {
+            Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+        } else {
+            Interpreter::for_comptime(&package, Budget::default()).unwrap()
+        };
+        vm.authorize_abstract_type_parameters(&[id(1)]).unwrap();
+        vm.authorize_abstract_value_parameters(&[(id(42), rigid(1))])
+            .unwrap();
+        for staged in [false, true] {
+            let type_value = |value| expression(ty.clone(), K::TypeValue(value));
+            let mut inner_b = type_value(boolean.clone());
+            if !staged {
+                // T already arrived. Reading the exported operand before
+                // supplying inner B exposes any spurious wait on its identity.
+                inner_b = expression(
+                    ty.clone(),
+                    K::Block {
+                        statements: vec![expression(
+                            Term::Tuple(vec![rigid(0), byte.clone()]),
+                            K::Local(local(3)),
+                        )],
+                        result: Some(Box::new(inner_b)),
+                    },
+                );
+            }
+            let arguments = vec![
+                Argument::Value(type_value(rigid(1))),
+                Argument::Value(inner_b),
+                Argument::Value(type_value(byte.clone())),
+                Argument::Tuple {
+                    source: SOURCE,
+                    items: vec![
+                        Argument::Value(expression(rigid(0), K::Local(local(42)))),
+                        Argument::Integer {
+                            source: SOURCE,
+                            spelling: "7".into(),
+                            negative: false,
+                        },
+                    ],
+                },
+            ];
+            let plan = NormalFormInputPlan {
+                order: if staged {
+                    vec![0, 3, 1, 2]
+                } else {
+                    vec![0, 2, 3, 1]
+                },
+                bindings: (0..4).map(local).collect(),
+                preparations: vec![],
+            };
+            let normal = expression(
+                ty.clone(),
+                K::NormalFormType {
+                    head: id(100),
+                    arguments: arguments.clone(),
+                    plan: Some(plan.clone()),
+                },
+            );
+            let alias = expression(
+                ty.clone(),
+                K::CheckTypeAlias {
+                    declaration: id(101),
+                    body: Some(Box::new(type_value(rigid(0)))),
+                    arguments,
+                    order: Some(plan.order),
+                    bindings: Some(plan.bindings),
+                    preparations: vec![],
+                },
+            );
+            let mut env = Environment::from([(local(42), outer.clone())]);
+            for (input, expected) in [
+                (
+                    normal,
+                    Value::Type(Term::NormalForm {
+                        head: id(100),
+                        sort: nir::Sort::Type,
+                        arguments: vec![
+                            rigid(1),
+                            boolean.clone(),
+                            byte.clone(),
+                            Term::TupleValue(vec![
+                                Term::Rigid {
+                                    declaration: id(42),
+                                    sort: nir::Sort::ComptimeValue,
+                                },
+                                Term::Integer(comptime_runtime::Integer::from_u128(7)),
+                            ]),
+                        ],
+                    }),
+                ),
+                (alias, Value::TypeParameter(id(1))),
+            ] {
+                let flow = vm
+                    .eval(&input, &mut env)
+                    .unwrap_or_else(|err| panic!("tree={tree} staged={staged} {input}: {err:?}"));
+                let Flow::Value(actual) = flow else {
+                    panic!("unexpected transfer")
+                };
+                assert_eq!(actual, expected, "tree={tree} staged={staged}: {input}");
+                assert_eq!(env, Environment::from([(local(42), outer.clone())]));
+            }
+        }
     }
 }

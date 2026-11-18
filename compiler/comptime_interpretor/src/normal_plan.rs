@@ -26,7 +26,6 @@ pub(super) struct Source<'a> {
     source: SourceRange,
     locals: Vec<LocalId>,
     inputs: Inputs<'a>,
-    specialized: BTreeMap<usize, Box<Argument>>,
     bindings: input_bindings::Bindings,
 }
 
@@ -55,7 +54,6 @@ impl<'a> Frame<'a> {
             source,
             locals,
             inputs: Inputs::Borrowed(arguments, plan),
-            specialized: BTreeMap::new(),
             bindings: input_bindings::Bindings::structural(arguments.len()),
         })
     }
@@ -101,7 +99,6 @@ impl<'a> Frame<'a> {
             bindings: input_bindings::Bindings::structural(arguments.len()),
             locals,
             inputs: Inputs::Owned(expression),
-            specialized: BTreeMap::new(),
         }))
     }
 }
@@ -135,15 +132,6 @@ fn admit_inputs(
         diverges,
         expression.source,
     )?;
-    nir::copy_budget::charge_type_rewrite(expression, &mut vm.budget.steps).map_err(|error| {
-        vm.failure(
-            match error {
-                nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
-                nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
-            },
-            Some(expression.source),
-        )
-    })?;
     Ok(locals)
 }
 
@@ -165,47 +153,44 @@ impl input_collection::Source for Source<'_> {
         }
     }
     fn input(&self, slot: usize) -> &Argument {
-        self.specialized
-            .get(&slot)
-            .map_or(&self.inputs.parts().0[slot], |input| input)
+        &self.inputs.parts().0[slot]
     }
-    fn specialize(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error> {
-        // Entry admission has charged the input copies. Retain each specialized
-        // argument while suspended; completing its domain never copies producers.
-        let mut argument = self
-            .specialized
-            .remove(&slot)
-            .unwrap_or_else(|| Box::new(self.inputs.parts().0[slot].clone()));
-        let result = self.bindings.specialize(vm, &mut argument);
-        self.specialized.insert(slot, argument);
-        result
+    fn substitutions(&self) -> Option<&input_bindings::Bindings> {
+        Some(&self.bindings)
     }
     fn check_input(
         &self,
         _vm: &Interpreter<'_>,
         _slot: usize,
+        _operand: &Argument,
         _expected: Option<&Term>,
     ) -> Result<(), Error> {
         Ok(())
     }
-    fn domain(
+    fn pending_inputs(
         &self,
         vm: &mut Interpreter<'_>,
         slot: usize,
-    ) -> Result<input_collection::Domain, Error> {
+    ) -> Result<BTreeSet<usize>, Error> {
         let metadata = vm
             .normal_forms
             .get(&self.head)
             .expect("admitted normal head");
-        self.bindings.observe_domain(
+        self.bindings.pending_inputs(
             vm,
             &metadata.parameters[slot].ty,
-            metadata
-                .parameters
-                .iter()
-                .map(|parameter| parameter.declaration),
+            metadata.parameters.iter().map(|p| p.declaration),
             self.source,
         )
+    }
+
+    fn expected(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Term, Error> {
+        let metadata = vm
+            .normal_forms
+            .get(&self.head)
+            .expect("admitted normal head");
+        self.bindings
+            .instantiate(vm, &metadata.parameters[slot].ty, self.source)
     }
 
     fn bind(
@@ -224,7 +209,6 @@ impl input_collection::Source for Source<'_> {
         if let Some(binding) = binding {
             env.insert(binding, copy.expect("requested input snapshot"));
         }
-        self.specialized.remove(&slot);
         Ok(())
     }
 
@@ -556,7 +540,7 @@ mod tests {
             panic!("expected deferred input");
         };
         let std::ops::ControlFlow::Continue(staged) =
-            vm.stage_normal_argument(argument, &mut env, 0).unwrap()
+            vm.stage_normal_argument(&argument, &mut env, 0).unwrap()
         else {
             panic!("unexpected transfer");
         };
@@ -583,7 +567,7 @@ mod tests {
             panic!("expected Type input");
         };
         let Flow::Value(value) = vm
-            .evaluate_contextual_argument(argument, expected, &mut env)
+            .evaluate_contextual_argument(&argument, &expected, &mut env)
             .unwrap()
         else {
             panic!("unexpected transfer");

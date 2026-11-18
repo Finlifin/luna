@@ -55,6 +55,8 @@ comptime fn check() -> bool {
 
 执行计划里，`order[position]` 指向声明槽位，展开生产者的 `before` 指向源码求值位置。两个生产者可以位于同一位置；即使最后一次展开贡献零个值，它也可能产生副作用。普通 callable 的子句降码、NIR 捕获分析和程序验证按这个次序交替处理生产者和槽位。对外部 NIR 的检查还要确认每个槽恰好出现一次、局部绑定互异、展开位置单调且没有越界。在 VM 中，这批局部变量必须与调用者的活动变量分开。调用取得绑定清单后一直持有到完成或取消，执行别名主体时也保留它。字节码的环境捕获包括可能与计划绑定发生冲突的调用者位置。[输入顺序](../compiler/nir/src/program/input_schedule.rs) · [调用内的作用域](../compiler/comptime_interpretor/src/input_collection.rs) · [含空展开和默认值的调用用例](../compiler/luna/tests/clause_packet_preparation.rs)
 
+递归调用还要区分同一声明的两次绑定。设内层调用传入 `A = 外层 B`、`B = bool`、`T = u8`。一个域为 `Tuple<A, T>` 的槽只等本次调用的 A 和 T。若它们已经交付，该槽可以立即供后续实参读取，即使内层 B 尚未求值。若 T 较晚才到，VM 保存已读字段和所选分支；A、T 都就绪后，从原始标注同时代入，得到 `Tuple<外层 B, u8>`。在先前代入过的标注上再做一遍替换，会错误地把首字段改成 bool。NF 与名义构造、别名检查共用这套等待和恢复规则，各自执行声明的最终准入检查。[VM 输入帧](../compiler/comptime_interpretor/src/input_collection.rs) · [同编号绑定回归用例](../compiler/comptime_interpretor/src/input_collection/tests.rs)
+
 签名中的标注也需要区分两种工作。定义检查使用词法绑定身份判断标注依赖的输入，按已有参数域检查完整表达式及其分支前提。实例形成仍由原调用提供具体值。对 `u8` 参数计算 `n + 1` 时，定义检查必须看到保护加法的条件；调用时恰好得到小整数不能替定义证明算术安全。[词法依赖](../compiler/elaboration/src/program/lexical_inputs.rs) · [标注行为用例](../compiler/luna/tests/open_annotation_behavior.rs)
 
 ## 值引用与快照

@@ -108,6 +108,27 @@ impl Checker<'_, '_> {
             let before = pending.len();
             let mut deferred = Vec::new();
             for slot in pending {
+                if arguments[slot].expression().is_none()
+                    && let Some(parameters) = parameters.as_ref()
+                {
+                    // A caller rigid introduced by substitution cannot add a
+                    // dependency on this declaration's still-pending slots.
+                    let mut required = BTreeSet::new();
+                    nir::type_computations::rigid_declarations_bounded(
+                        parameters[slot].1,
+                        &mut budget.steps,
+                        &mut required,
+                    )?;
+                    budget.consume(parameters.len())?;
+                    if parameters
+                        .iter()
+                        .zip(&values)
+                        .any(|((id, _), value)| value.is_none() && required.contains(id))
+                    {
+                        deferred.push(slot);
+                        continue;
+                    }
+                }
                 let domain = if let Some(parameters) = parameters.as_ref() {
                     Some(
                         nir::DeclarationSubstitution::bounded(
@@ -124,28 +145,6 @@ impl Checker<'_, '_> {
                 } else {
                     None
                 };
-                if arguments[slot].expression().is_none() {
-                    if let (Some(parameters), Some(domain)) = (parameters.as_ref(), domain.as_ref())
-                    {
-                        budget.consume(
-                            parameters.len().saturating_mul(ids.len().saturating_add(1)),
-                        )?;
-                        let mut waiting = false;
-                        for (id, _) in parameters {
-                            if !ids.contains(id) {
-                                nir::type_computations::charge_term(domain, &mut budget.steps)?;
-                                if domain.mentions_rigid(*id) {
-                                    waiting = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if waiting {
-                            deferred.push(slot);
-                            continue;
-                        }
-                    }
-                }
                 let value = collect_known_normal_argument(
                     &arguments[slot],
                     domain.as_ref(),

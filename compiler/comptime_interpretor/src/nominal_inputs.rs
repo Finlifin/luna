@@ -4,7 +4,7 @@ use nir::program::{NormalFormArgument as A, NormalFormPreparation};
 
 pub(super) struct Source<'e> {
     expression: nominal_plan::Expression<'e>,
-    specialized: Option<Vec<A>>,
+    specialize: bool,
     parameters: Vec<nir::DeclarationParameter>,
     domains: Vec<Term>,
     alias: bool,
@@ -54,10 +54,9 @@ impl<'e> Source<'e> {
         specialize: bool,
         locals: Arc<[LocalId]>,
     ) -> Self {
-        let arguments = Self::arguments_of(&expression);
         Self {
             locals,
-            specialized: specialize.then(|| arguments.to_vec()),
+            specialize,
             alias: matches!(expression.kind, K::CheckTypeAlias { .. }),
             source: expression.source,
             completed: input_bindings::Bindings::admitted(parameters.len()),
@@ -97,53 +96,10 @@ impl<'e> Source<'e> {
             _ => unreachable!(),
         }
     }
-    fn input(&self, slot: usize) -> &A {
-        self.specialized
-            .as_ref()
-            .map_or(&self.arguments()[slot], |inputs| &inputs[slot])
-    }
-    fn specialize(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error> {
-        let Some(mut inputs) = self.specialized.take() else {
-            return Ok(());
-        };
-        // Staged keys use structural paths and remain valid when argument types
-        // are specialized after another input completes.
-        let result = self.completed.specialize(vm, &mut inputs[slot]);
-        self.specialized = Some(inputs);
-        result
-    }
-    fn domain(
-        &self,
-        vm: &mut Interpreter<'_>,
-        slot: usize,
-    ) -> Result<input_collection::Domain, Error> {
-        let domain = self
-            .domains
+    fn domain(&self, slot: usize) -> &Term {
+        self.domains
             .get(slot)
-            .unwrap_or(&Term::Primitive(Primitive::Type));
-        self.completed.observe_domain(
-            vm,
-            domain,
-            self.parameters
-                .iter()
-                .map(|parameter| parameter.declaration),
-            self.arguments()[slot].source(),
-        )
-    }
-    fn check_alias_input(
-        &self,
-        vm: &Interpreter<'_>,
-        slot: usize,
-        expected: &Term,
-    ) -> Result<(), Error> {
-        if self.alias
-            && let A::Value(value) = self.input(slot)
-            && value.ty != *expected
-            && value.ty != Term::Primitive(Primitive::Never)
-        {
-            return Err(vm.failure(ErrorKind::Type, Some(value.source)));
-        }
-        Ok(())
+            .unwrap_or(&Term::Primitive(Primitive::Type))
     }
     fn bind(
         &mut self,
@@ -188,26 +144,36 @@ impl input_collection::Source for Source<'_> {
             .then(|| self.order().map_or(position, |order| order[position]))
     }
     fn input(&self, slot: usize) -> &A {
-        Source::input(self, slot)
+        &self.arguments()[slot]
     }
-    fn specialize(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error> {
-        Source::specialize(self, vm, slot)
+    fn substitutions(&self) -> Option<&input_bindings::Bindings> {
+        self.specialize.then_some(&self.completed)
     }
-    fn domain(
+    fn pending_inputs(
         &self,
         vm: &mut Interpreter<'_>,
         slot: usize,
-    ) -> Result<input_collection::Domain, Error> {
-        Source::domain(self, vm, slot)
+    ) -> Result<BTreeSet<usize>, Error> {
+        self.completed.pending_inputs(
+            vm,
+            self.domain(slot),
+            self.parameters.iter().map(|p| p.declaration),
+            self.arguments()[slot].source(),
+        )
+    }
+    fn expected(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Term, Error> {
+        self.completed
+            .instantiate(vm, self.domain(slot), self.arguments()[slot].source())
     }
     fn check_input(
         &self,
         vm: &Interpreter<'_>,
         slot: usize,
+        operand: &A,
         expected: Option<&Term>,
     ) -> Result<(), Error> {
         if self.parameters[slot].sort == nir::Sort::Type
-            && let A::Value(value) = self.input(slot)
+            && let A::Value(value) = operand
             && !matches!(
                 value.ty,
                 Term::Primitive(Primitive::Type | Primitive::Never)
@@ -215,8 +181,12 @@ impl input_collection::Source for Source<'_> {
         {
             return Err(vm.failure(ErrorKind::Type, Some(value.source)));
         }
-        if let Some(expected) = expected {
-            self.check_alias_input(vm, slot, expected)?;
+        if self.alias
+            && let (Some(expected), A::Value(value)) = (expected, operand)
+            && value.ty != *expected
+            && value.ty != Term::Primitive(Primitive::Never)
+        {
+            return Err(vm.failure(ErrorKind::Type, Some(value.source)));
         }
         Ok(())
     }
@@ -535,12 +505,15 @@ mod tests {
                 .source
                 .bind(&mut vm, &mut environment, 2, value)
                 .unwrap();
-            let input_collection::Domain {
-                expected: domain,
-                awaiting,
-            } = frame.source.domain(&mut vm, 1).unwrap();
-            assert_eq!(domain, rigid(1, nir::Sort::Type));
-            assert!(!awaiting.is_empty());
+            use input_collection::Source as _;
+            assert_eq!(
+                frame.source.expected(&mut vm, 1).unwrap(),
+                rigid(1, nir::Sort::Type)
+            );
+            assert_eq!(
+                frame.source.pending_inputs(&mut vm, 1).unwrap(),
+                BTreeSet::from([0])
+            );
             frame
                 .source
                 .bind(&mut vm, &mut environment, 0, Value::Type(ty.clone()))

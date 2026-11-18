@@ -215,35 +215,44 @@ impl Bindings {
         })
     }
 
-    /// Observe dependencies only after substituting completed inputs. A source
-    /// slot is a wakeup dependency precisely while its declaration remains in
-    /// the resulting domain and the slot has not completed in this invocation.
-    pub fn observe_domain(
+    /// Waiting slots belong to the declaration telescope. Substitution may
+    /// introduce equally numbered caller binders into the expected domain.
+    pub fn pending_inputs(
         &self,
         vm: &mut Interpreter<'_>,
         domain: &Term,
         parameters: impl ExactSizeIterator<Item = DeclarationId>,
         source: SourceRange,
-    ) -> Result<input_collection::Domain, Error> {
-        let expected = self.instantiate(vm, domain, source)?;
-        let dependencies = vm.observe_input_dependencies(&expected, source)?;
+    ) -> Result<BTreeSet<usize>, Error> {
+        let dependencies = vm.observe_input_dependencies(domain, source)?;
         vm.integer_operation(Some(source), |budget| budget.consume(parameters.len()))?;
-        let awaiting = parameters
+        Ok(parameters
             .enumerate()
             .filter_map(|(slot, parameter)| {
                 (!self.contains(slot) && dependencies.declarations.contains_key(&parameter))
                     .then_some(slot)
             })
-            .collect();
-        Ok(input_collection::Domain { expected, awaiting })
+            .collect())
     }
 
-    pub fn specialize(
+    pub fn specialized(
         &self,
         vm: &mut Interpreter<'_>,
-        input: &mut nir::program::NormalFormArgument,
-    ) -> Result<(), Error> {
-        let source = input.source();
+        template: &nir::program::NormalFormArgument,
+    ) -> Result<nir::program::NormalFormArgument, Error> {
+        let source = template.source();
+        nir::copy_budget::charge_argument_type_rewrite(template, &mut vm.budget.steps).map_err(
+            |limit| {
+                vm.failure(
+                    match limit {
+                        nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
+                        nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
+                    },
+                    Some(source),
+                )
+            },
+        )?;
+        let mut input = template.clone();
         let mut rewrite = |ty: &Term| self.instantiate(vm, ty, source);
         for pattern in input.patterns_mut() {
             pattern.rewrite_types(&mut rewrite)?;
@@ -251,7 +260,7 @@ impl Bindings {
         for expression in input.expressions_mut() {
             expression.rewrite_types(&mut rewrite)?;
         }
-        Ok(())
+        Ok(input)
     }
     pub fn contains(&self, slot: usize) -> bool {
         self.slots.get(slot).is_some_and(Option::is_some) || self.descriptions.contains_key(&slot)
@@ -348,11 +357,14 @@ mod tests {
             let mut bindings = make(2);
             let domain = rigid(2, nir::Sort::ComptimeValue);
             let observe = |bindings: &Bindings, vm: &mut Interpreter<'_>| {
-                bindings.observe_domain(vm, &domain, [id(1), id(2)].into_iter(), SOURCE)
+                let awaiting =
+                    bindings.pending_inputs(vm, &domain, [id(1), id(2)].into_iter(), SOURCE)?;
+                let expected = bindings.instantiate(vm, &domain, SOURCE)?;
+                Ok::<_, Error>((expected, awaiting))
             };
             let pending = observe(&bindings, &mut vm).unwrap();
-            assert_eq!(pending.expected, domain);
-            assert_eq!(pending.awaiting, BTreeSet::from([1]));
+            assert_eq!(pending.0, domain);
+            assert_eq!(pending.1, BTreeSet::from([1]));
             // The value parameter becomes Type-sorted only through its actual
             // domain input. Recording that input alone does not finish slot 1.
             bindings
@@ -366,8 +378,8 @@ mod tests {
                 )
                 .unwrap();
             let pending = observe(&bindings, &mut vm).unwrap();
-            assert_eq!(pending.expected, domain);
-            assert_eq!(pending.awaiting, BTreeSet::from([1]));
+            assert_eq!(pending.0, domain);
+            assert_eq!(pending.1, BTreeSet::from([1]));
             bindings
                 .bind(
                     &mut vm,
@@ -388,8 +400,8 @@ mod tests {
                 vm.budget.steps = steps;
                 match observe(&bindings, &mut vm) {
                     Ok(domain) => {
-                        assert_eq!(domain.expected, Term::Primitive(Primitive::U8));
-                        assert!(domain.awaiting.is_empty());
+                        assert_eq!(domain.0, Term::Primitive(Primitive::U8));
+                        assert!(domain.1.is_empty());
                         completed += 1;
                     }
                     Err(failure) => {
@@ -400,8 +412,8 @@ mod tests {
                         // re-execution and no sticky failed domain observation.
                         vm.budget = Budget::default();
                         let domain = observe(&bindings, &mut vm).unwrap();
-                        assert_eq!(domain.expected, Term::Primitive(Primitive::U8));
-                        assert!(domain.awaiting.is_empty());
+                        assert_eq!(domain.0, Term::Primitive(Primitive::U8));
+                        assert!(domain.1.is_empty());
                     }
                 }
                 assert_eq!(bindings.to_string(), snapshot);
@@ -477,16 +489,10 @@ mod tests {
                     .authorize_abstract_value_parameters(&[(id(4), boolean.clone())])
                     .unwrap();
             }
-            let observed = bindings.observe_domain(
-                &mut receiver,
-                &domain,
-                [id(1), id(2), id(3)].into_iter(),
-                SOURCE,
-            );
+            let observed = bindings.instantiate(&mut receiver, &domain, SOURCE);
             if authorized {
                 let observed = observed.unwrap();
-                assert_eq!(observed.expected, Term::Primitive(Primitive::U8));
-                assert!(observed.awaiting.is_empty());
+                assert_eq!(observed, Term::Primitive(Primitive::U8));
             } else {
                 let failure = observed
                     .err()

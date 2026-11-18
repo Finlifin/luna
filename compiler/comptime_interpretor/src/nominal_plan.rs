@@ -151,24 +151,6 @@ impl<'a, 'e> Frame<'a, 'e> {
                     .iter()
                     .any(|parameter| domain.mentions_rigid(parameter.declaration))
             });
-        if specialize {
-            for argument in arguments {
-                nir::copy_budget::charge_argument_type_rewrite(argument, &mut vm.budget.steps)
-                    .map_err(|error| {
-                        vm.failure(
-                            match error {
-                                nir::copy_budget::CopyBudgetExhausted::Steps => {
-                                    ErrorKind::StepsExhausted
-                                }
-                                nir::copy_budget::CopyBudgetExhausted::Depth => {
-                                    ErrorKind::DepthExhausted
-                                }
-                            },
-                            Some(expr.source),
-                        )
-                    })?;
-            }
-        }
         let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = before;
         let charged = domains
