@@ -50,6 +50,8 @@ mod input_facts;
 mod interfaces;
 mod iteration;
 mod lexical_inputs;
+mod local_bindings;
+use local_bindings::LocalBindings;
 mod list_operations;
 mod list_patterns;
 mod literal_conversion;
@@ -515,10 +517,10 @@ fn elaborate_with_attributes(
         signature_owner: None,
         context: crate::ptc::Context::default(),
         defaults: BTreeMap::new(),
-        locals: BTreeMap::new(),
-        code_values: BTreeMap::new(),
+        locals: LocalBindings::default(),
+        code_values: LocalBindings::default(),
         template_code_values: BTreeMap::new(),
-        pattern_codes: BTreeMap::new(),
+        pattern_codes: LocalBindings::default(),
         pattern_quote_pending: None,
         pattern_generators: BTreeMap::new(),
         code_generators: BTreeMap::new(),
@@ -1615,10 +1617,10 @@ struct Checker<'a, 'h> {
     signature_owner: Option<OwnerId>,
     context: crate::ptc::Context,
     defaults: BTreeMap<OwnerId, Vec<Option<n::Expr>>>,
-    locals: BTreeMap<n::LocalId, Term>,
-    code_values: BTreeMap<n::LocalId, std::sync::Arc<cmtt::ExpressionCode>>,
+    locals: LocalBindings<Term>,
+    code_values: LocalBindings<cmtt::ExpressionCode>,
     template_code_values: BTreeMap<(u32, u32), std::sync::Arc<cmtt::ExpressionCode>>,
-    pattern_codes: BTreeMap<n::LocalId, std::sync::Arc<cmtt::patterns::PatternCode>>,
+    pattern_codes: LocalBindings<cmtt::patterns::PatternCode>,
     pattern_quote_pending: Option<bool>,
     pattern_generators: BTreeMap<OwnerId, cmtt::patterns::PatternGenerator>,
     code_generators: BTreeMap<OwnerId, cmtt::Generator>,

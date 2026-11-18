@@ -109,9 +109,9 @@ impl std::fmt::Display for StorageCheckpoint {
 /// Candidate-private lexical observations. This is not a persistent world or
 /// a VM checkpoint: shared declaration tables retain their existing owners.
 struct LexicalCheckpoint {
-    locals: BTreeMap<n::LocalId, Term>,
-    code: BTreeMap<n::LocalId, std::sync::Arc<cmtt::ExpressionCode>>,
-    patterns: BTreeMap<n::LocalId, std::sync::Arc<cmtt::patterns::PatternCode>>,
+    locals: LocalBindings<Term>,
+    code: LocalBindings<cmtt::ExpressionCode>,
+    patterns: LocalBindings<cmtt::patterns::PatternCode>,
     aliases: BTreeSet<OwnerId>,
     control: control::Context,
     captures: Vec<CaptureFrame>,
@@ -321,7 +321,7 @@ mod tests {
     fn owned_attempt_dump_separates_lexical_observations_and_storage() {
         let id = n::LocalId { owner: 2, index: 3 };
         let lexical = LexicalCheckpoint {
-            locals: BTreeMap::from([(
+            locals: LocalBindings::from([(
                 id,
                 Term::NormalForm {
                     head: DeclarationId {
@@ -332,8 +332,8 @@ mod tests {
                     arguments: vec![Term::String("parent\"\n".into())],
                 },
             )]),
-            code: BTreeMap::new(),
-            patterns: BTreeMap::new(),
+            code: LocalBindings::default(),
+            patterns: LocalBindings::default(),
             aliases: BTreeSet::new(),
             control: control::Context {
                 result: Some(p(P::Bool)),

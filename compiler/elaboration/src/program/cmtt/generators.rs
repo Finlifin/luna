@@ -1789,10 +1789,11 @@ impl Checker<'_, '_> {
         span: Span,
         action: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> Result<R, Error> {
+        // A successful exit reconciles outer code assignments. Generator
+        // storage and immutability still need their own checkpoints.
         let work = self
-            .locals
+            .code_values
             .len()
-            .saturating_add(self.code_values.len())
             .saturating_add(self.pattern_codes.len())
             .saturating_add(self.generator_data.len())
             .saturating_add(self.immutable.len());
@@ -1821,16 +1822,8 @@ impl Checker<'_, '_> {
         );
         let result = action(self);
         if result.is_ok() {
-            for (id, value) in &mut saved.1 {
-                if let Some(current) = self.code_values.get(id) {
-                    *value = current.clone();
-                }
-            }
-            for (id, value) in &mut saved.4 {
-                if let Some(current) = self.pattern_codes.get(id) {
-                    *value = current.clone();
-                }
-            }
+            saved.1.retain_assignments(&self.code_values);
+            saved.4.retain_assignments(&self.pattern_codes);
             for (id, value) in &mut saved.2 {
                 if let Some(current) = self.generator_data.get(id) {
                     *value = current.clone();
@@ -2090,7 +2083,7 @@ impl Checker<'_, '_> {
                 "cannot assign an immutable generator binding",
             ));
         }
-        if let Some(previous) = self.pattern_codes.get(&id).cloned() {
+        if let Some(previous) = self.pattern_codes.shared(&id).cloned() {
             let code = self.pattern_argument(value, &previous)?;
             // Abstract control may visit several possible writes. Preserve the
             // interface until invocation selects and executes the actual path.
@@ -2102,7 +2095,7 @@ impl Checker<'_, '_> {
             self.pattern_codes.insert(id, code);
             return Ok(());
         }
-        if let Some(previous) = self.code_values.get(&id).cloned() {
+        if let Some(previous) = self.code_values.shared(&id).cloned() {
             let expected = Interface {
                 infer_context: true,
                 context: BTreeMap::new(),

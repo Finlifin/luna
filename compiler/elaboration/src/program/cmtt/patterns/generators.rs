@@ -1201,7 +1201,7 @@ impl Checker<'_, '_> {
                     }
                     (PatternInput::Expression(_), PatternInput::Expression(expected)) => {
                         let code =
-                            self.code_values.get(binding).cloned().ok_or_else(|| {
+                            self.code_values.shared(binding).cloned().ok_or_else(|| {
                                 error(span, "missing trait expression code input")
                             })?;
                         PatternArgument::Code(CodeValue::Expression(self.ascribe_code(
@@ -1213,7 +1213,7 @@ impl Checker<'_, '_> {
                     (PatternInput::Code(_), PatternInput::Code(expected)) => {
                         let code = self
                             .pattern_codes
-                            .get(binding)
+                            .shared(binding)
                             .cloned()
                             .ok_or_else(|| error(span, "missing trait pattern code input"))?;
                         self.ascribe_pattern_input(
@@ -1758,7 +1758,7 @@ impl Checker<'_, '_> {
             }
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => self
                 .pattern_codes
-                .get(&local(*id))
+                .shared(&local(*id))
                 .cloned()
                 .ok_or_else(|| error(value.span, "expected a comptime pattern code value"))?,
             H::CodePatternQuote(..) => {

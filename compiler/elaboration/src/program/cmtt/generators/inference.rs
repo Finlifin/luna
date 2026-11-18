@@ -363,21 +363,12 @@ impl Checker<'_, '_> {
         };
         let mut common = None;
         for arm in arms {
-            let mut saved = Vec::new();
+            let saved = self.locals.clone();
             let result = (|| {
-                self.generator_pattern_type_hints(&arm.pat, &subject_type, depth + 1, &mut saved)?;
+                self.generator_pattern_type_hints(&arm.pat, &subject_type, depth + 1)?;
                 self.generator_expression_type_hint(arm.body, depth + 1)
             })();
-            for (binding, previous) in saved.into_iter().rev() {
-                match previous {
-                    Some(ty) => {
-                        self.locals.insert(binding, ty);
-                    }
-                    None => {
-                        self.locals.remove(&binding);
-                    }
-                }
-            }
+            self.locals = saved;
             let Some(ty) = result? else {
                 return Ok(None);
             };
@@ -397,7 +388,7 @@ impl Checker<'_, '_> {
         if depth >= 64 {
             return Ok(None);
         }
-        let mut saved = Vec::new();
+        let saved = self.locals.clone();
         let result = (|| {
             for statement in block.stmts {
                 self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
@@ -414,12 +405,7 @@ impl Checker<'_, '_> {
                     None
                 };
                 if let Some(ty) = ty {
-                    self.generator_pattern_type_hints(
-                        &declaration.pattern,
-                        &ty,
-                        depth + 1,
-                        &mut saved,
-                    )?;
+                    self.generator_pattern_type_hints(&declaration.pattern, &ty, depth + 1)?;
                 }
             }
             match block.expr {
@@ -427,16 +413,7 @@ impl Checker<'_, '_> {
                 None => Ok(None),
             }
         })();
-        for (binding, previous) in saved.into_iter().rev() {
-            match previous {
-                Some(ty) => {
-                    self.locals.insert(binding, ty);
-                }
-                None => {
-                    self.locals.remove(&binding);
-                }
-            }
-        }
+        self.locals = saved;
         result
     }
 
@@ -445,7 +422,6 @@ impl Checker<'_, '_> {
         pattern: &hir::pattern::Pattern<'_>,
         ty: &Term,
         depth: usize,
-        saved: &mut Vec<(n::LocalId, Option<Term>)>,
     ) -> Result<(), Error> {
         self.required_steps = self
             .required_steps
@@ -457,14 +433,14 @@ impl Checker<'_, '_> {
         match &pattern.kind {
             hir::pattern::PatternKind::Binding(hir::common::BindingMode::ByValue, _, inner) => {
                 if let Some(inner) = inner {
-                    self.generator_pattern_type_hints(inner, ty, depth + 1, saved)?;
+                    self.generator_pattern_type_hints(inner, ty, depth + 1)?;
                 }
                 let ty = self.copy_alias_type(ty, pattern.span)?;
                 let binding = local(pattern.hir_id);
-                saved.push((binding, self.locals.insert(binding, ty)));
+                self.locals.insert(binding, ty);
             }
             hir::pattern::PatternKind::Guard(inner, _) => {
-                self.generator_pattern_type_hints(inner, ty, depth + 1, saved)?;
+                self.generator_pattern_type_hints(inner, ty, depth + 1)?;
             }
             hir::pattern::PatternKind::Or(alternatives) => {
                 // Only export evidence agreed by every alternative. Each probe
@@ -472,34 +448,19 @@ impl Checker<'_, '_> {
                 // as in normal pattern elaboration.
                 let mut common: Option<BTreeMap<String, (n::LocalId, Term)>> = None;
                 for alternative in *alternatives {
-                    let mut temporary = Vec::new();
+                    let outer = self.locals.clone();
                     let result = (|| {
-                        self.generator_pattern_type_hints(
-                            alternative,
-                            ty,
-                            depth + 1,
-                            &mut temporary,
-                        )?;
+                        self.generator_pattern_type_hints(alternative, ty, depth + 1)?;
                         let mut evidence = BTreeMap::new();
                         for (name, binding) in pattern_bindings(alternative)? {
-                            if let Some(ty) = self.locals.remove(&binding) {
+                            if let Some(ty) = self.locals.shared(&binding).cloned() {
                                 let copied = self.copy_alias_type(&ty, alternative.span);
-                                self.locals.insert(binding, ty);
                                 evidence.insert(name, (binding, copied?));
                             }
                         }
                         Ok::<_, Error>(evidence)
                     })();
-                    for (binding, previous) in temporary.into_iter().rev() {
-                        match previous {
-                            Some(ty) => {
-                                self.locals.insert(binding, ty);
-                            }
-                            None => {
-                                self.locals.remove(&binding);
-                            }
-                        }
-                    }
+                    self.locals = outer;
                     let evidence = result?;
                     if let Some(common) = &mut common {
                         common.retain(|name, (_, ty)| {
@@ -510,14 +471,14 @@ impl Checker<'_, '_> {
                     }
                 }
                 for (_, (binding, ty)) in common.into_iter().flatten() {
-                    saved.push((binding, self.locals.insert(binding, ty)));
+                    self.locals.insert(binding, ty);
                 }
             }
             hir::pattern::PatternKind::Tuple(patterns) => {
                 if let Term::Tuple(fields) = self.structural_type(ty, pattern.span)? {
                     if patterns.len() == fields.len() {
                         for (pattern, ty) in patterns.iter().zip(&fields) {
-                            self.generator_pattern_type_hints(pattern, ty, depth + 1, saved)?;
+                            self.generator_pattern_type_hints(pattern, ty, depth + 1)?;
                         }
                     }
                 }
@@ -538,7 +499,7 @@ impl Checker<'_, '_> {
                         field.ident.name.as_str(),
                         field.span,
                     )? {
-                        self.generator_pattern_type_hints(&field.pat, &ty, depth + 1, saved)?;
+                        self.generator_pattern_type_hints(&field.pat, &ty, depth + 1)?;
                     }
                 }
             }
@@ -548,7 +509,7 @@ impl Checker<'_, '_> {
                 {
                     if patterns.len() == fields.len() {
                         for (pattern, ty) in patterns.iter().zip(&fields) {
-                            self.generator_pattern_type_hints(pattern, ty, depth + 1, saved)?;
+                            self.generator_pattern_type_hints(pattern, ty, depth + 1)?;
                         }
                     }
                 }
@@ -570,7 +531,6 @@ impl Checker<'_, '_> {
                                 &field.pat,
                                 &fields[index],
                                 depth + 1,
-                                saved,
                             )?;
                         }
                     }

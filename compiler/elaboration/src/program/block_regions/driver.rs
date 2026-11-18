@@ -657,7 +657,7 @@ mod tests {
             span: Span::default(),
         };
         let scope = LexicalScope {
-            locals: BTreeMap::from([(
+            locals: LocalBindings::from([(
                 n::LocalId { owner: 1, index: 7 },
                 Term::NormalForm {
                     head: DeclarationId {
@@ -668,8 +668,8 @@ mod tests {
                     arguments: vec![Term::String("scope\"\n".into())],
                 },
             )]),
-            code: BTreeMap::new(),
-            patterns: BTreeMap::new(),
+            code: LocalBindings::default(),
+            patterns: LocalBindings::default(),
             context: crate::ptc::Context::from_package(&n::Package::default()).unwrap(),
             inputs: input_facts::State::default().lexical_boundary(),
         };

@@ -36,24 +36,21 @@ pub(super) trait Tail: std::fmt::Display {
 /// The parent lexical environment, not a checking transaction. Leaving a
 /// block restores bindings and premises but keeps invalidated outer inputs.
 struct LexicalScope {
-    locals: BTreeMap<n::LocalId, Term>,
-    code: BTreeMap<n::LocalId, std::sync::Arc<cmtt::ExpressionCode>>,
-    patterns: BTreeMap<n::LocalId, std::sync::Arc<cmtt::patterns::PatternCode>>,
+    locals: LocalBindings<Term>,
+    code: LocalBindings<cmtt::ExpressionCode>,
+    patterns: LocalBindings<cmtt::patterns::PatternCode>,
     context: crate::ptc::Context,
     inputs: input_facts::LexicalBoundary,
 }
 
 impl LexicalScope {
     fn enter(checker: &mut Checker<'_, '_>, span: Span) -> Result<Self, Error> {
-        // Shared code/context payloads are retained, not recursively copied.
-        // Account for map entries and boundary sets before allocating them.
+        // Lexical bindings and the PTC context retain shared roots. The
+        // input boundary still materializes its membership sets.
         let facts = &checker.input_facts;
-        let entries = checker
-            .locals
+        let entries = facts
+            .specialized
             .len()
-            .saturating_add(checker.code_values.len())
-            .saturating_add(checker.pattern_codes.len())
-            .saturating_add(facts.specialized.len())
             .saturating_add(facts.types.len())
             .saturating_add(facts.partial.len())
             .saturating_add(facts.values.len())
@@ -62,22 +59,8 @@ impl LexicalScope {
             .required_steps
             .checked_sub(entries as u64)
             .ok_or_else(|| error(span, "lexical scope snapshot budget exhausted"))?;
-        let mut locals = BTreeMap::new();
-        for (binding, ty) in &checker.locals {
-            let before = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);
-            let mut fuel = before;
-            let copied = nir::copy_budget::clone_term(ty, &mut fuel);
-            checker.required_steps -= (before - fuel) as u64;
-            let ty = copied.map_err(|failure| {
-                error(
-                    span,
-                    format!("lexical scope type snapshot budget exhausted: {failure:?}"),
-                )
-            })?;
-            locals.insert(*binding, ty);
-        }
         Ok(Self {
-            locals,
+            locals: checker.locals.clone(),
             code: checker.code_values.clone(),
             patterns: checker.pattern_codes.clone(),
             context: checker.context.clone(),

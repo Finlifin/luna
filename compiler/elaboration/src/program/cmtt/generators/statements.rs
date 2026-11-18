@@ -1128,12 +1128,12 @@ impl Checker<'_, '_> {
                 .map(|id| {
                     (if pattern {
                         this.pattern_codes
-                            .get(&id)
+                            .shared(&id)
                             .cloned()
                             .map(CodeWitness::Pattern)
                     } else {
                         this.code_values
-                            .get(&id)
+                            .shared(&id)
                             .cloned()
                             .map(CodeWitness::Expression)
                     })

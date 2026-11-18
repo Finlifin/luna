@@ -1,8 +1,8 @@
 # Elaboration、VM 与发布的状态协议
 
 状态：目标协议设计，通用任务协议尚未落地；局部签名前提形成已有下述接线。
-初始源码核对基线为 `873af90f`；第 4 节已按 `6a564ae5` 收敛当前接线，
-其它节仍按各自注明的基线和范围阅读，不将历史报告当作本轮验证。
+初始源码核对基线为 `873af90f`。第 4 节区分源码检查、词法绑定版本与 invocation 的所有权。
+其余历史验证按各自注明的基线和范围阅读。
 本文件细化 [全链路架构](architecture.md) 中的所有权，不新增源语言操作或等待语法。
 依赖如何分类、稳定查询如何复用见 [依赖观察](dependency-observations.md)。
 
@@ -291,218 +291,37 @@ SchedulingBudget 保留等待和已交付输入，不将队列改为 Failed；�
 
 #### 检查帧与探测
 
-`block_regions::Progress` 保存受检语句前缀、语句／尾值后继、diverges 和分期模式
-证据。子结果只能交给等待它的父帧；后继事实只在相应语句完成后建立。控制退出后的
-源码仍按语言规则检查，但不据此增加可达路径的事实。OrdinaryTail／ContextualTail
-共用绑定收尾、引用计量、混合分期物化及别名清除，分别产生 Expr／NormalFormArgument。
-结果种类不能借 Any、假 Type 或未经准入的 rigid 混同。
+源码区域持有帧栈、受检前缀和当前子请求。父帧记录请求的源码位置、目标域和完成后要做的事；
+只有等待中的位置能接收一次结果。失败先经过内层的作用域出口，再交给拥有探测事务的帧。
+每次推进按实际规则计费。dump 以 S-expression 展示阶段、等待项、已检查的操作数和返回位置。
 
-`Destination` 按共享预算复制 Type、部分 callable 和结构输入上下文，嵌套帧共享
-不可变目标；未知 Type、未知值与依赖域未定的值保持区别。语句推进、空块和只有尾值
-的帧同样计费。复制深度与步数耗尽是资源错误，不变成上下文不足。
+**词法作用域。** 进入块时保留父局部类型、表达式代码、模式代码的三个绑定根，
+以及 PTC 前提和输入事实的边界。每棵绑定树按 LocalId 的 owner、index 排序；
+保存根只增加共享引用，写入只更新键路径上的分支。类型与引用的代码值保持原有身份。
+块退出时恢复父绑定与前提，同时保留块内写入对外层输入事实造成的失效。
+当前输入事实边界仍需遍历成员并计费。声明实参准备只保留自己会恢复的局部类型根，
+另行保留调用者的默认环境、参数域和签名 owner。
 
-`LexicalScope` 保存父局部域、expr／pattern code、PTC context 及输入事实边界。
-正常完成与失败退出恢复父绑定和前提，保留外层失效。复制局部域与边界前计费，共享
-代码仅保留引用；这仍有随可见局部数量增长的复制成本，不代表完整快照已经有界化。
+**候选与存储。** Attempt 独占一次提交或恢复权。子规则缺少上下文时，Probe 可在
+还原控制、捕获、默认值、输入事实及候选私有绑定后继续搜索。域错误、预算耗尽和恢复失败
+向外传播，已花的预算不退还。生成器存储检查点单独保留 cell 身份及所拥有的值图；
+词法绑定版本不授予访问另一 invocation 的权限。生成器的普通成功出口保留已有代码变量
+的新值，丢弃子作用域新增的名字。失败出口恢复进入时的词法版本与原存储。
+Commit、Probe、RetainCode 分别遵守各自对构造副作用的交付规则。
 
-`delivery.rs` 的可选包装和错误结果转换是显式后继，只消费受检子结果。NoReturn
-直接传递；已有 optional 保留存在性层次，错误结果保留 Embed／Success 区别。
-普通 if 复用整体交付准备；它与 contextual、部分结构输入共用控制交接，却保留各自
-结果检查。inline 选择、callee 位置、分支前提和 effect 交付按边界恢复。没有 else
-的语句分支仍走原 Void／Never 规则；不是所有 if 都可按同一个目标推导规则合并。
+| 检查位置 | 帧必须保留的语义 |
+| --- | --- |
+| 块与结果交付 | 语句完成后才建立后继事实。不可达源码仍要检查。OrdinaryTail 与 ContextualTail 共用引用计量、绑定物化及别名收尾，各自产出 Expr 或 NormalFormArgument。NoReturn 直接传递，可选与错误限定类型保留包装层次。 |
+| if、when | 保存真假前提、当前分支域、inline 选择、callee 位置与 effect 交付责任。后续条件继承先前条件为假的事实，汇合时退出分支前提。缺省分支及语句位置遵守各自的 Void／Never 规则。 |
+| match | selector 只检查一次。每个 arm 保留模式、guard、受检主体与独立词法出口，再按原顺序检查覆盖及清理。inline 只交付选中的主体，所有 arm 仍须通过检查。 |
+| 部分输入域探测 | 先找实际类型证据，再按规则允许数字默认值。Never 和只有错误出口的分支不能确定成功域。候选回退后仍要按所得上下文正式检查。 |
+| 比较、算术与一元操作 | 单独保存各操作数、peer 搜索、原生域与 trait 域的试探结果。关联 Output 可以不同于输入域。比较结果的 bool 不给操作数定型，负数字面量连同符号形成。 |
+| and／or | bool 右侧在短路前提下检查，成功与失败都退出此前提。BitVec 保留双侧求值。每个操作数仍使用原函数的控制出口。 |
 
-contextual when 的条件与主体也进入同一帧栈。`when::Frame` 保存已检查分支、当前
-条件／主体后继、整段词法边界和分支的正前提；主体退出后先恢复分支局部，再撤销
-正前提，随后给后续条件安装本条件为假的事实。完成与失败都退出所属作用域，不能
-把前支的绑定或正前提带入后支。生成的每个 NormalFormArgument 分支仍保留原有
-Block 作用域，源码未选中的分支仍检查；这不是提前执行条件或用运行结果替代检查。
-无 fallback 的 when 继续采用普通语句规则，不伪造一个 contextual 值。
-
-普通 `when` 的条件与 arm 主体现也进入同一个 `when::Frame`，原 program.rs 的
-同步分支循环已退役。帧显式保存完整目标、当前分支结果域、fallback、有序 inline
-选择、父 callee 位置及 effect 交付责任。普通与 contextual 路径共用条件检查、
-正／负类型前提、每个 arm 的词法边界和失败退出；没有用运行结果免除未选 arm 检查。
-
-有 fallback 时，完成分支沿已有目标检查，缺少目标时从首个非 Never 分支取得后续域；
-没有 fallback 时保留普通语句的结果丢弃和 void 尾部。连接分支前恢复原事实上下文，
-不把某个 arm 的正前提带到连接点之外。inline 选择保留原有条件可用性检查与未选
-分支抑制；最终选中主体的复制纳入已有预算。嵌套普通 when 经同一交付前置检查进入
-父 Region，callees 仍只把交付位置传给 arm 结果，不能把条件或普通实参变成 callee。
-
-深嵌套验收还暴露了检查后的另一条递归链：comptime 局部量的初始化信息观察会在
-`observe_normal_input_in` 中为每层分支和块保留完整值构造器的宿主帧。32 层 when
-已完成 Region 检查后，仍在这里栈溢出。现在 `normal/control_observations.rs` 迭代
-跟随已知条件、匹配 arm 和块结果，独立维护观察用的局部绑定；值构造器只在非控制
-节点进入。深度、步数、绑定复制和模式／guard 的预算保持原义，未知调用、赋值和
-控制转移仍不给出值观察。这是静态证据路径的修复，不执行初始化器，也不补造结果。
-模式、条件、局部初始化及值构造的子观察尚未全部帧化，不能据此声称全前端已消除
-递归。参考树解释器另有 64 层宿主递归保护，深层源码验收与双引擎对照分别标明范围。
-
-部分输入上下文的候选域搜索与最终检查现在共用 when 帧。搜索仍采用
-`branch_probes::Search` 的原有次序：先寻找有类型证据的分支，再按允许的数字
-默认策略重试。每个候选持有独立 Probe，在交出第一个条件前保存检查事务；其前序
-条件提供负前提，本候选条件提供正前提，条件和主体都通过 Region 交还结果。
-候选完成后回滚探测私有状态，只将取得的类型证据交给后续正式检查。缺少上下文
-允许继续搜索；域错误、预算错误与恢复失败向外传播。
-
-普通与 contextual match 的 selector 和主体现在都交给 `matches::Frame`；原
-`pattern_checking/matches.rs` 的普通同步循环已删除，仅保留共同模式／guard 与
-覆盖检查入口。帧保存受检 selector、当前模式、已完成 arms、交付目标，以及各 arm
-的词法／匹配事实退出责任。模式与 guard 仍调用共同的同步规则，最终 guard 嵌在
-Pattern 中，不能额外执行一次，也不能在覆盖性检查前将其丢弃。
-
-普通交付状态位于 `block_regions/matches/ordinary.rs`，保留 inline 主语、选中
-位置、待安装的物化绑定、分支结果域及父 callee/effect 交付责任。已有 inline 主语
-只复制已检查的数据，不重新检查或执行 selector；相关复制和 generator_data 快照
-纳入预算。每个 arm 在模式可能引入绑定前建立词法出口，在主体前保存 staged/member
-绑定和 callee 位置。主体返回后撤销匹配前提再汇合结果域，离开 arm 时恢复局部与
-staged 描述；对外层写入造成的输入事实失效仍按共同词法边界保留。
-
-完整目标、先前分支的已知结果域及部分输入规则继续决定下一个 arm 的交付。
-普通 match 的错误成功 payload 恢复、合成 arm 的独立清理来源、覆盖检查和行为
-模式抽象保持原顺序；inline 选择仍检查所有 arms，只有选中 arm 被交付执行。
-各路径在完成或失败时恢复父 inline 选择／抑制状态，不用局部成功免除覆盖或资源
-义务。S-expression dump 区分 selector、当前 pattern、已完成 arms、inline 绑定
-和待恢复的 scope。
-
-部分 match 在取得一次受检 selector 后进入帧内搜索，保留 selector、搜索位置、
-当前 Probe 与匹配前提。候选主体返回或失败时，先撤销匹配前提，再消费事务。
-`optional_branch_context` 同步闭包循环已删除，嵌套部分输入 when／match 直接进入
-同一 Region。即使候选证据补齐了 expected，帧仍保留原结构输入的错误结果交付
-边界，不能在搜索完成后丢失或重复注入错误行。
-模式、guard、inline 模式选择与绑定物化仍没有可移交的外部等待后继。
-把 selector/主体移入 Region 不等于打通普通源码与 VM 的交织挂起，两个待定 Type
-正例仍待其共同前置能力。匹配事实的进入／退出仍复用统一服务，没有另造帧专用的
-类型事实规则。
-
-普通比较的左右操作数也进入同一帧栈。`operators::peers::Progress` 保存两侧源码、
-已检查代码、上下文搜索位置及默认类型策略；比较帧持有当前 Attempt，子检查结束
-后消费一次，再决定是否借用另一侧类型继续检查。Never 不提供操作数域，比较结果
-的 bool 上下文也不作为操作数域。词法退出先于探测回退，域错误与预算错误仍向外
-传播。完成后复用原 Eq／Ord 协议选择、标量降码和 effect 交付规则。
-
-`and/or` 的操作数现由 `logical::Frame` 保留并进入同一 Region，原同步递归与左链
-单独展开循环已删除。帧先尝试左侧的既有上下文；缺少上下文才交给共同的
-`operators::peers::Progress`。Never 不提供域，右侧先在无结果上下文下探测；若
-右侧仍需上下文，再使用正常的 peer/default 规则，不能把整个表达式的结果域强加
-给已经具有类型的右操作数。
-
-bool 右侧在已检查左侧的相应真／假类型前提内检查，帧独占该前提的退出责任；
-子检查正常完成或失败时先退出前提，完成整个结果交付或外层探测回退。BitVec
-不安装 bool 前提，保留双侧求值。域选择只决定检查，不执行操作数、不改源码顺序，
-块内 return 仍指向原函数，短路跳过的右侧也须通过源码检查。
-
-普通算术现也进入同一 Region。帧持有左侧探测、右侧无上下文探测、原生域试探、
-trait RHS 上下文及最终 peer 搜索的后继，拥有已检查操作数、当前 Attempt 和原生域
-不相容诊断。只有原生 RHS 试探允许在事务恢复后用独立的 trait 域再检查；预算、
-语义错误与恢复失败不变成候选证据。已成功检查的操作数直接交付原有协议选择／
-标量构造；native 左侧不意味着 RHS 同型，关联 Output 也不等于输入域。原独立
-同步算术探测流程及 peer 驱动适配器已经删除。
-
-嵌套算术在普通 primitive 目标下直接压入共同帧栈；非 primitive 目标仍先走普通
-交付适配，再进入相同算术规则。每个帧提供稳定 S-expression，保留源码位置、
-阶段、等待项、已检查代码和失败诊断。检查先后仍不改变操作数执行顺序，左侧
-提前退出仍使用原函数出口；右侧源码依旧检查。此迁移没有放宽身份观察的未知
-效果边界，也没有修复未知前缀 Type 默认值的提前冻结问题。
-
-一元 `-`／`not` 也由同一 Region 持有操作数探测与完成后继，原同步
-`unary_expression` 检查流程已删除。帧保存协议选择、Attempt、已检查操作数、
-目标域和 effect 交付责任；只对缺少上下文的探测回退，恢复 numeric defaults 后
-才决定是否取得了重试依据。成功探测的操作数直接复用，关联 Output 由原协议规则
-检查，不假定它与输入同型。primitive 或无目标域的嵌套一元运算直接压入共同栈；
-其他目标继续先经普通交付适配，再进入同一规则。
-
-立即负数字面量仍连同符号形成，避免先要求正幅值装入有符号目标；嵌套负号仍分别
-检查，不能将 `- -1` 合并成一次字面量构造。操作数的 return 沿原函数退出，协议
-探测不执行用户代码。S-expression 显示阶段、等待项、协议、事务和保留的操作数。
-这一迁移不改变静态身份观察，也未补齐未知默认值所需的原 invocation continuation。
-
-一元迁移的本轮证据（工作目录 `/home/fin/luna`，入口
-`python3 -B development/check.py --timeout 900 --`）：
-
-- `test -p elaboration --lib -p luna --test contextual_input_regions
-  -- unary_ --test-threads=1`：退出 0，
-  `/tmp/luna-tools-v359vkwd/result.json`；帧的 dump／重复响应拒绝及三个源码用例通过。
-  源码用例在两种执行器中检查操作数次数、提前返回、探测恢复、字面量范围及嵌套分支。
-- `test -p elaboration --lib -p luna --test contextual_input_regions
-  --test arithmetic_contexts --test library_std_format --no-fail-fast
-  -- --test-threads=1`：退出 0，`/tmp/luna-tools-zs43cah4/result.json`；
-  elaboration／luna 单元、区域、算术上下文和真实 sysroot 格式扫描用例通过。
-- `test -p luna --test execution --test inline_control --test library_protocols
-  --no-fail-fast -- unary nested_negation --test-threads=1`：退出 0，
-  `/tmp/luna-tools-3u3mrxbm/result.json`；七项既有用例覆盖关联输出、effect 边界、
-  inline 求值次数、溢出／phase 检查和嵌套操作数的执行／物化限制。
-- 六个修改／新增 Rust 文件 scoped rustfmt `--check` 退出 0，
-  `/tmp/luna-tools-pxtjrxx8/result.json`。这些检查不证明源码—VM continuation 或
-  `defer std.fmt.Parse(format)` 已实现。
-
-这些规则仍在原活动 Checker 中同步驱动，尚未提供等待外部 Type 响应的入口，
-不解除待定 callable／列表域正例的 ignore。源码状态迁移和原 VM activation
-交接必须继续共同推进，不能把内部上下文试探当作已执行前缀的恢复。
-
-算术迁移的验证目录为 `/home/fin/luna`，执行入口均为
-`python3 -B development/check.py --timeout 900 --`：
-
-- `test -p elaboration --lib -p luna --test arithmetic_contexts
-  --test contextual_input_regions --no-fail-fast -- --test-threads=1`：退出 0，
-  `/tmp/luna-tools-oxnachfj/result.json`。elaboration／luna 单元与算术上下文、
-  共同 Region 用例通过；新增源码用例在两种执行器中检查生产者顺序、嵌套 peer
-  上下文及原函数提前返回。没有解除既有 Type 等待用例的 ignore。
-- `test -p luna --test execution --test library_std_format --no-fail-fast
-  -- --test-threads=1 arithmetic numeric_peer_context format_plan`：退出 0，
-  `/tmp/luna-tools-qku264vc/result.json`。22 项执行回归及 4 项格式扫描通过，
-  包含原生／异构 RHS、关联输出、上下文 lambda、effect 交付、数值精度及溢出拒绝。
-- 八个修改／新增 Rust 文件的 scoped rustfmt 检查退出 0，
-  `/tmp/luna-tools-x1cm_fiz/result.json`。没有运行全 workspace 或性能基准。
-
-检查驱动的帧栈与返回值已从局部循环移入 `driver::region::Region`。一次正常 poll
-完成一个帧转换，返回 Continue、子表达式请求或完整结果；尚未迁移的原子表达式
-仍由同步适配器调用同一 `Destination::check_expression`，然后把结果交回原 Region。
-父帧、目标域、已检查分支和退出责任在两次 poll 之间保持原所有权，不复制活动树。
-
-子请求发出后为 Waiting，保留原源码位置；只有该状态接受一个结果。重复结果、
-无请求交付与结束后交付均被拒绝，原已接收结果或错误保留。失败作为数据交回原父帧；
-下一步先退出内部词法帧，再由最近的既有 Attempt 决定能否恢复搜索。交接本身不重发
-已完成子请求；Probe 是否尝试另一上下文仍由原搜索规则决定。域错误或预算不足不能
-转成缺少上下文。最终完成或不可恢复失败都会终止 Region。
-Region 与推进结果提供 S-expression dump，保留嵌套帧、返回值和错误位置。
-
-这个私有协议当前仅由同一同步适配器消费，不是跨世界消息端口。HIR 和 Checker 的
-活动状态仍由原调用保活，尚无完整源区域 owner、取消接口或外部 Type 响应票据。
-因此不能把 Region 放入 CodeSession，也不能离开当前词法环境后给它灌入任意响应。
-后续须把子规则、活动 Checker 所有权、原 VM activation 和响应准入一并接通。
-
-本次 Region 拆分的检查（工作目录 `/home/fin/luna`）：
-
-- `python3 -B development/check.py --timeout 900 -- test -p luna --test contextual_input_regions --test control_boundaries --test comparison_resources --test contextual_spreads --test declaration_input_plans --test prepared_input_dependencies --no-fail-fast -- --test-threads=1`：
-  `/tmp/luna-tools-ak238bls/result.json` 退出 0，77 项通过。包含原有源码顺序与次数、
-  嵌套返回、match guard、分支事实、Probe 恢复、错误域拒绝与默认供应检查。
-  这组对应 Region 拆分后、为 Waiting 增补源码位置及新增 dump/交付单测之前的版本。
-- 增补后运行 `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -- block_regions --test-threads=1`：
-  `/tmp/luna-tools-_tnhf93p/result.json` 退出 0，10 项通过。覆盖嵌套帧与转义 dump、
-  重复交付保留原结果／错误，以及无请求或结束后交付拒绝。
-- 最终版本经同一入口运行 `test -p luna --test contextual_input_regions -- partial_probe_recovery_does_not_hide_errors_or_publish_branch_locals --exact --test-threads=1`：
-  `/tmp/luna-tools-d1hcienv/result.json` 退出 0，确认探测失败不隐藏错误或泄漏分支绑定。
-  已修改 Rust 的定向 rustfmt 检查退出 0（`/tmp/luna-tools-nxl043_c/result.json`）。
-  未执行全 workspace 检查。
-
-部分 optional／error 输入的 `Search` 先遍历实际类型证据，再允许数字默认类型；
-Never 和只有错误出口的结果不提供成功域证据。`Probe` 保留 Attempt 与父探测模式；
-条件帧保存搜索位置及当前 Probe，不在移动阶段状态时丢弃恢复责任。探测后仍正式
-检查所有应检查的分支，不能因为本次执行不会选中某支就免检。
-
-`checking_attempts::Attempt` 不可 Clone、不借用 Checker，必须由原 owner 完成一次。
-它恢复控制／捕获、局部与 code／pattern 绑定、alias、输入事实、字段默认值和待发布
-Type use；生成器存储与 quote 构造状态另有检查点。`OwnedGraphCheckpoint` 保留原
-cell 身份和 owned graph，使用既有预算，不调用源语言 Copy／Clone，不扩展阶段准入。
-
-子检查失败先退出内部词法帧，再交给最近的 Probe。只有 needs-context 允许继续搜索；
-域错误、预算耗尽和恢复失败继续向外传播，外层 Probe 也必须清理。已经消耗的预算不
-退款。Commit、Probe、RetainCode 三种完成策略继续保留，不能让成功的试探提交构造
-副作用，也不能把真正保留的 quote 构造当作失败试探丢掉。
-
-**当前帧不是外部等待接口。** 保存父环境不等于拥有当前 Checker；同步驱动中的 `?`
-仍可终止整次检查。需要恢复源执行时，不能把 needs-context 捕获后从根重试。
+静态身份观察可以迭代跟随已知分支与块结果，未知调用或写入不能凭观察取得值。
+模式、guard、inline 选择及其余同步规则仍依赖活动 Checker。保存词法根解决了保留检查位置时的绑定复制；
+将 VM 产生的 Type 交回尚未检查的 HIR，并允许原 invocation 在原处继续，仍需要源区域和执行现场共同持有交接点。
+端到端的次序、退出及失败条件见[待定域的普通调用](refactoring-plan.md#下一条纵向交付待定域的普通调用)。
 
 #### 输入路由与域依赖
 
@@ -784,8 +603,7 @@ unwind 恢复所有声明，绑定分配游标也只在整批成功后提交。
 Unknown，不能被包装成“实现加强了前置条件”。所有程序命题仍由程序验证层处理。
 
 memory 方法组合确实需要执行实现调用，因此只在真实 Call 构造完成后组合
-Function；不先建立 Unit 占位再替换。以上是声明消费者的迁移，并不表示源码
-检查已能挂起、恢复原 VM activation，或 `defer std.fmt.Parse(format)` 已接通。
+Function；不先建立 Unit 占位再替换。源码检查与原 VM activation 的交接由调用区域负责。
 
 本阶段验证（工作目录均为 `/home/fin/luna`）：
 
@@ -1209,8 +1027,8 @@ python3 -B development/check.py --timeout 900 -- test -p luna \
 原有回归的行为预期与成本额度未改。
 
 这只能处理已能在声明环境形成受检代码的默认值。依赖外部 Type 生产者才能继续
-检查的源码、普通调用的待定参数域、完整 `std.fmt.Parse` 描述准入仍需要源区域的
-挂起和恢复，不能从这条默认值路径推导出它们已完成。
+检查的源码、普通调用中等待执行结果的参数域，仍需要源区域的挂起和恢复。
+公开 println 在 format 已知时的描述准入见[宿主演示](std-host-foundation.md)。
 
 另有 32 项 luna elaboration 集成失败在 Attempt 迁移时与 `53696cc6` 基线逐例对照
 一致，报告 `/tmp/luna-tools-o47vegep/result.json`；本轮未复测，仍待处理。不能把其中

@@ -88,7 +88,7 @@ impl Checker<'_, '_> {
         match &value.kind {
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => self
                 .pattern_codes
-                .get(&local(*id))
+                .shared(&local(*id))
                 .cloned()
                 .ok_or_else(|| error(value.span, "expected a pattern code argument")),
             H::Application(callee, args) => self.invoke_pattern_generator(

@@ -80,7 +80,7 @@ impl Checker<'_, '_> {
                 let terms: Vec<&Term> = match &planned.inputs[route.parameter].1 {
                     Input::Code(_) => self
                         .code_values
-                        .get(&id)
+                        .shared(&id)
                         .map(|code| {
                             std::iter::once(&code.result)
                                 .chain(code.context.values())
@@ -89,7 +89,7 @@ impl Checker<'_, '_> {
                         .unwrap_or_default(),
                     Input::Pattern(_) => self
                         .pattern_codes
-                        .get(&id)
+                        .shared(&id)
                         .map(|code| {
                             std::iter::once(&code.subject)
                                 .chain(code.outputs.values().map(|(_, ty)| ty))

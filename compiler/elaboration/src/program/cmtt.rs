@@ -288,12 +288,16 @@ impl Checker<'_, '_> {
                 )
             }
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
-                let code = self.code_values.get(&local(*id)).cloned().ok_or_else(|| {
-                    error(
-                        value.span,
-                        "splice requires an actual comptime code value, not a runtime value",
-                    )
-                })?;
+                let code = self
+                    .code_values
+                    .shared(&local(*id))
+                    .cloned()
+                    .ok_or_else(|| {
+                        error(
+                            value.span,
+                            "splice requires an actual comptime code value, not a runtime value",
+                        )
+                    })?;
                 self.ascribe_code(code, interface, value.span)
             }
             H::Application(callee, arguments) => {

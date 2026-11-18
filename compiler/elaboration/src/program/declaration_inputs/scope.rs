@@ -5,7 +5,7 @@ use super::*;
 
 #[must_use = "leave the input scope in its original checker"]
 pub(super) struct Scope {
-    locals: BTreeMap<n::LocalId, Term>,
+    locals: LocalBindings<Term>,
     environment: environment::Environment,
     owner: Option<OwnerId>,
     mode: bool,
@@ -19,12 +19,6 @@ impl Scope {
         // Failure still consumes its work budget, as ordinary checking does.
         let mut fuel = checker.required_steps;
         let retained = (|| {
-            environment::charge(&mut fuel, checker.locals.len(), span)?;
-            let locals = checker
-                .locals
-                .iter()
-                .map(|(id, ty)| Ok((*id, environment::copy_term(ty, &mut fuel, span)?)))
-                .collect::<Result<_, Error>>()?;
             let environment = environment::Environment::retain(
                 &nominal::InputEnvironment {
                     substitution: &checker.alias_substitution,
@@ -37,15 +31,15 @@ impl Scope {
             )?;
             let caller_scope =
                 environment::copy_domains(checker.call_inference_domain_refs(), &mut fuel, span)?;
-            Ok::<_, Error>((locals, environment, caller_scope))
+            Ok::<_, Error>((environment, caller_scope))
         })();
         checker.required_steps = fuel;
-        let (locals, environment, caller_scope) = retained?;
+        let (environment, caller_scope) = retained?;
         let caller_owner = checker.default_input_owner.or(checker.signature_owner);
         let input_owner = std::mem::replace(&mut checker.default_input_owner, caller_owner);
         let input_scope = checker.default_input_scope.replace(caller_scope);
         Ok(Self {
-            locals,
+            locals: checker.locals.clone(),
             environment,
             owner: checker.signature_owner,
             mode: checker.in_required_comptime,
@@ -124,7 +118,7 @@ mod tests {
         )
         .unwrap();
         let scope = Scope {
-            locals: BTreeMap::from([(local, p(P::Str))]),
+            locals: LocalBindings::from([(local, p(P::Str))]),
             environment,
             owner: Some(owner),
             mode: true,

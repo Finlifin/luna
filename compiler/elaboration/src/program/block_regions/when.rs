@@ -621,9 +621,9 @@ mod tests {
                 })),
             )],
             scope: LexicalScope {
-                locals: BTreeMap::new(),
-                code: BTreeMap::new(),
-                patterns: BTreeMap::new(),
+                locals: LocalBindings::default(),
+                code: LocalBindings::default(),
+                patterns: LocalBindings::default(),
                 context: crate::ptc::Context::from_package(&n::Package::default()).unwrap(),
                 inputs: input_facts::State::default().lexical_boundary(),
             },
