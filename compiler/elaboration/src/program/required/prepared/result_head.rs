@@ -1,109 +1,120 @@
-//! Inspect the result of checked Type-producing code without running it.
+//! Inspect the normal returns of checked Type producers without invoking them.
 use super::*;
 
-struct Observer<'a> {
-    package: &'a n::Package,
-    head: DeclarationId,
-    active: BTreeSet<DeclarationId>,
-    results: BTreeMap<DeclarationId, bool>,
-    fuel: &'a mut usize,
+enum Work<'a> {
+    Enter(DeclarationId),
+    Result(&'a n::Expr),
+    Finish(DeclarationId),
 }
 
 pub(super) fn guarantees(
-    package: &n::Package,
+    world: &RequiredWorld,
     entry: DeclarationId,
     head: DeclarationId,
     fuel: &mut usize,
 ) -> Result<bool, String> {
-    Observer {
-        package,
-        head,
-        active: BTreeSet::new(),
-        results: BTreeMap::new(),
-        fuel,
-    }
-    .function(entry, 0)
-}
-
-impl Observer<'_> {
-    fn function(&mut self, id: DeclarationId, depth: usize) -> Result<bool, String> {
-        if depth >= 64 || self.active.contains(&id) {
-            return Ok(false);
+    let package = world.package();
+    let callables = match world
+        .phase
+        .as_ref()
+        .and_then(|phase| phase.inspection_for(package))
+        .and_then(|source| source.callables_for(package))
+    {
+        Some(callables) => callables,
+        None => {
+            nir::callable_source::Callables::new(package, fuel).map_err(|reason| reason.message)?
         }
-        if let Some(&answer) = self.results.get(&id) {
-            return Ok(answer);
-        }
-        *self.fuel = self
-            .fuel
-            .checked_sub(self.package.functions.len())
-            .ok_or("result head inspection budget exhausted")?;
-        let Some(function) = self
-            .package
-            .functions
-            .iter()
-            .find(|f| f.declaration == id && f.phase == n::FunctionPhase::Comptime)
-        else {
-            return Ok(false);
-        };
-        self.active.insert(id);
-        // A tail expression describes only fallthrough. An early return,
-        // including one inside a statement, must give the same guarantee.
-        let mut exits = Vec::new();
-        nir::visit::expression(&function.body, self.fuel, |expr, _| {
-            if let K::Return(value) = &expr.kind {
-                exits.push(value.as_deref());
-            }
-            Ok(())
-        })?;
-        let mut answer = self.terminal(&function.body, depth + 1)?;
-        for exit in exits {
-            if !answer {
-                break;
-            }
-            answer = match exit {
-                Some(value) => self.terminal(value, depth + 1)?,
-                None => false,
-            };
-        }
-        self.active.remove(&id);
-        self.results.insert(id, answer);
-        Ok(answer)
-    }
-
-    fn terminal(&mut self, value: &n::Expr, depth: usize) -> Result<bool, String> {
-        *self.fuel = self
-            .fuel
+    };
+    let mut work = vec![Work::Enter(entry)];
+    let mut active = BTreeSet::new();
+    let mut checked = BTreeSet::new();
+    let mut saw_head = false;
+    while let Some(task) = work.pop() {
+        *fuel = fuel
             .checked_sub(1)
             .ok_or("result head inspection budget exhausted")?;
-        if depth >= 96 {
-            return Ok(false);
-        }
-        match &value.kind {
-            K::Block {
-                result: Some(value),
-                ..
+        match task {
+            Work::Enter(id) => {
+                if checked.contains(&id) {
+                    continue;
+                }
+                if !active.insert(id) {
+                    return Ok(false);
+                }
+                if !callables
+                    .interface(&id)
+                    .is_some_and(|f| f.phase == n::FunctionPhase::Comptime)
+                {
+                    return Ok(false);
+                }
+                let body = callables
+                    .body(&id)
+                    .expect("body from the same source callable slot");
+                work.push(Work::Finish(id));
+                work.push(Work::Result(body));
+                // Capture initializers can return from this function. The
+                // body of a newly constructed closure has a separate exit.
+                nir::visit::expression_in_closure_environment(body, fuel, |expr, _| {
+                    if let K::Return(value) = &expr.kind {
+                        work.push(Work::Result(value.as_deref().unwrap_or(expr)));
+                    }
+                    Ok(())
+                })?;
             }
-            | K::CallPreparation {
-                result: Some(value),
-                ..
+            Work::Finish(id) => {
+                active.remove(&id);
+                checked.insert(id);
             }
-            | K::Return(Some(value)) => self.terminal(value, depth + 1),
-            K::If {
-                then_branch,
-                else_branch: Some(no),
-                ..
-            } => Ok(self.terminal(then_branch, depth + 1)? && self.terminal(no, depth + 1)?),
-            K::NormalFormType { head, .. } | K::TypeValue(Term::NormalForm { head, .. }) => {
-                Ok(self.head == *head)
-            }
-            K::Call { callee, .. } => match &callee.kind {
-                K::Function(id)
-                | K::FunctionInstance {
-                    declaration: id, ..
-                } => self.function(*id, depth + 1),
-                _ => Ok(false),
+            Work::Result(value) => match &value.kind {
+                K::Return(None) => return Ok(false),
+                // Its lexical return operand was scheduled by Enter. A
+                // diverging path has no additional fallthrough value.
+                K::Return(Some(_)) => (),
+                _ if is_never(&value.ty) => (),
+                K::Block {
+                    result: Some(value),
+                    ..
+                }
+                | K::CallPreparation {
+                    result: Some(value),
+                    ..
+                }
+                | K::UnsafeScope(value) => work.push(Work::Result(value)),
+                K::If {
+                    then_branch,
+                    else_branch: Some(no),
+                    ..
+                } => {
+                    work.push(Work::Result(no));
+                    work.push(Work::Result(then_branch));
+                }
+                K::Match { arms, .. } => {
+                    work.extend(arms.iter().rev().map(|arm| Work::Result(&arm.body)));
+                }
+                K::NormalFormType { head: found, .. }
+                | K::TypeValue(Term::NormalForm { head: found, .. })
+                    if *found == head =>
+                {
+                    saw_head = true
+                }
+                K::Literal(n::Literal::Description(description))
+                    if package
+                        .refinements
+                        .structure(description)?
+                        .is_some_and(|app| app.head() == head) =>
+                {
+                    saw_head = true
+                }
+                K::Call { callee, .. } => match &callee.kind {
+                    K::Function(id)
+                    | K::FunctionInstance {
+                        declaration: id, ..
+                    } => work.push(Work::Enter(*id)),
+                    _ => return Ok(false),
+                },
+                _ => return Ok(false),
             },
-            _ => Ok(false),
         }
     }
+    Ok(saw_head)
 }

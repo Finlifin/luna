@@ -197,6 +197,10 @@ impl DescribedApplication {
         })))
     }
 
+    pub fn head(&self) -> DeclarationId {
+        self.0.head
+    }
+
     pub(crate) fn belongs_to(
         &self,
         world: &Arc<()>,

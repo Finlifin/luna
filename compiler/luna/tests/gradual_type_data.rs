@@ -365,3 +365,63 @@ fn constructed_descriptions_keep_the_head_formation_requirements() {
         });
     }
 }
+
+#[test]
+fn refined_applications_bind_field_and_whole_value_subjects_separately() {
+    let source = r#"
+        trait Field {}
+        impl Field for u8 {}
+        trait Packet { fn valid(self) -> bool; }
+        impl Packet for Tuple<u8, bool> { fn valid(self) -> bool { true } }
+        comptime fn Slots() -> Type { Tuple<refines { Itself :- Field } Any, Any> }
+        comptime fn PacketDomain() -> Type { refines { Itself :- Packet } Slots() }
+        typealias Payload = PacketDomain();
+        fn accept(value: Payload) -> bool {
+            inline for (_, field) in value'tuple_enumerate { };
+            value.valid()
+        }
+        fn run() -> bool { let byte: u8 = 5; accept((byte, true)) }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    for (invalid, diagnostic) in [
+        (
+            source.replace("impl Field for u8 {}", ""),
+            "refinement requirement is not established",
+        ),
+        (
+            source.replace("accept((byte, true))", "accept((byte, byte))"),
+            "refinement requirement is not established",
+        ),
+        (
+            source.replace("accept((byte, true))", "accept(byte)"),
+            "expected the normal-form head",
+        ),
+    ] {
+        let error = support::compile(&invalid).unwrap_err();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}
+
+#[test]
+fn checked_result_heads_include_refined_literals_on_each_return_path() {
+    let source = r#"
+        comptime fn Slots() -> Type { Tuple<Any> }
+        typealias Packet = refines { Itself == Tuple<bool> } Slots();
+        pure comptime fn Select(flag: bool) -> Type {
+            let nested = || { return bool; };
+            flag match { true => Packet, false => Packet }
+        }
+        fn consume(comptime flag: bool, ...args: defer Select(flag)) -> bool {
+            inline for (_, field) in args'tuple_enumerate { };
+            true
+        }
+        fn run() -> bool { consume(true, true) and consume(false, false) }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    let invalid = source.replace("false => Packet", "false => bool");
+    let error = support::compile(&invalid).unwrap_err();
+    assert!(
+        error.contains("requires a tuple head on every normal return"),
+        "{error}"
+    );
+}

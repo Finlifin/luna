@@ -149,7 +149,7 @@ impl PreparedRequired {
     ) -> Result<bool, Error> {
         let before = usize::try_from(*steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let answer = result_head::guarantees(self.world.package(), self.entry, expected, &mut fuel);
+        let answer = result_head::guarantees(&self.world, self.entry, expected, &mut fuel);
         *steps -= (before - fuel) as u64;
         answer.map_err(|reason| error(span, reason))
     }
@@ -572,6 +572,64 @@ mod tests {
             context: crate::ptc::Context::default(),
             in_signature: false,
         }
+    }
+
+    #[test]
+    fn result_head_observation_follows_deep_forwarding_with_one_budget() {
+        let mut prepared = literal_preparation(true);
+        let entry = prepared.entry;
+        let head = DeclarationId {
+            package: entry.package,
+            local: 9999,
+        };
+        let call = |id, source| n::Expr {
+            source,
+            ty: p(P::Type),
+            kind: K::Call {
+                callee: Box::new(n::Expr {
+                    source,
+                    ty: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(p(P::Type)),
+                    },
+                    kind: K::Function(id),
+                }),
+                arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        };
+        prepared.edit_package(|package| {
+            let template = package.functions[0].clone();
+            for offset in 1..256 {
+                let id = DeclarationId {
+                    local: entry.local + offset,
+                    ..entry
+                };
+                let next = n::Function {
+                    interface: n::FunctionDeclaration {
+                        declaration: id,
+                        ..template.interface.clone()
+                    },
+                    body: template.body.clone(),
+                };
+                package.functions.last_mut().unwrap().body = call(id, template.body.source);
+                package.functions.push(next);
+            }
+            package.functions.last_mut().unwrap().body.kind = K::TypeValue(Term::NormalForm {
+                head,
+                sort: Sort::Type,
+                arguments: vec![],
+            });
+        });
+        let span = Span::default();
+        assert!(prepared.returns_head(head, &mut 10, span).is_err());
+        assert!(prepared.returns_head(head, &mut 100_000, span).unwrap());
+        assert!(!prepared.returns_head(entry, &mut 100_000, span).unwrap());
+        prepared.edit_package(|package| {
+            let tail = package.functions.last_mut().unwrap();
+            tail.body = call(entry, tail.body.source);
+        });
+        assert!(!prepared.returns_head(head, &mut 100_000, span).unwrap());
     }
 
     #[test]

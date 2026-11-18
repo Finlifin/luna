@@ -3315,10 +3315,32 @@ impl Checker<'_, '_> {
             }
             H::NFApplication(head, _) => {
                 self.is_type_head(head)
-                    || matches!(head.kind,
-                H::ResolvedDef { def_id, .. } if self.package.definition_owner(def_id)
-                    .and_then(|o| self.package.item(o)).is_some_and(|i| matches!(&i.kind,
-                        ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)))
+                    || match head.kind {
+                        H::ResolvedDef { def_id, .. } => {
+                            self.package.definition_owner(def_id).is_some_and(|owner| {
+                                self.constants
+                                    .get(&owner)
+                                    .is_some_and(|value| value.ty.is_normal_form_callable())
+                                    || self.package.item(owner).is_some_and(|item| {
+                                        match &item.kind {
+                                            ItemKind::Fn(sig, _) => {
+                                                sig.modifiers.is_normal_form_head
+                                            }
+                                            ItemKind::Const(annotation, _) => {
+                                                function_types::normal_form_inputs(annotation)
+                                                    .is_some()
+                                            }
+                                            _ => false,
+                                        }
+                                    })
+                            })
+                        }
+                        H::ResolvedFnParam(_, id) | H::ResolvedLocal(_, id) => self
+                            .locals
+                            .get(&local(id))
+                            .is_some_and(Term::is_normal_form_callable),
+                        _ => false,
+                    }
             }
             H::Projection(base, _) if self.is_type_head(base) => {
                 let is_type = |id| {

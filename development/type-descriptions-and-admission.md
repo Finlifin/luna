@@ -20,9 +20,9 @@ Any 与 bool、u8 分别相容，不产生 bool == u8，也不产生二者间的
 | 当前载体或入口 | 已有职责 | 尚缺的能力 |
 | --- | --- | --- |
 | `open_functions::observations::TypeObservation::{Known, Unknown}` | 定义侧的有限域观察；待定注解观察为 Unknown | 不持有生产状态，也不是已经求值的 Type 数据 |
-| `open_functions::Annotation` | 分别保存具体身份、已完成的显式 Any、待执行计算、前置 Type 输入和待恢复源码。调用者可用自己的实参域具体化 Any | 已检查代码支持有限的外层头观察；更一般的返回值传送仍待接通 |
+| `open_functions::Annotation` | 分别保存具体身份、已完成的描述、待执行计算、前置 Type 输入和待恢复源码。调用者可用自己的实参域具体化 Any | 已检查代码支持有限的外层头观察；更一般的返回值传送仍待接通 |
 | `Value::Type`、`TypeParameter`、`Description` | 传递完整或受作用域授权的身份，以及显式 Any 与受闭合类型命题约束的描述 | 闭合 NF 输入可传送，外层捕获还需要重定位 |
-| `PreparedRequired::invoke_in_world` / `restore_required_packet` | 普通 VM 调用可交付具体身份或显式 Any，回到调用方 scope 后继续使用 | 复合描述和未完成源码区域的恢复仍待接通 |
+| `PreparedRequired::invoke_in_world` / `restore_required_packet` | 普通 VM 调用交付具体身份或同一世界中的闭合描述，返回调用方后继续使用 | 捕获外层 binder 的描述传送及未完成源码区域的恢复仍待接通 |
 | `Checker::completed_type` / `type_expr` | 前者完成 Type 值；后者在具体类型使用点索取身份。闭合别名可以发布两种结果 | 有描述实参的别名目前只接通必选 Type 槽位；默认值和混合值域仍走 Term 路径 |
 | `type_expr` 的 `RefinedType` | 具体 base 检查要求；描述 base 保留 subject binder，在调用方分别证明闭合类型命题 | 外层捕获与可执行谓词还缺传送机制 |
 | `comptime_values::encode_admitted_list` | 已准入列表的普通稳定编码 | 元素仍为 Term，描述数据不能靠 Type 列表专用旁路接入 |
@@ -44,8 +44,8 @@ comptime fn First() -> Type {
 ```
 
 `First()` 返回 `(type-value (description any))`。源码使用普通名字解析。常量重建、
-两套 VM 的函数入参与返回、列表取值以及结构体字段都保留 Type 数据。需要类型
-相等判定、布局或结构观察的使用点另行要求身份。描述中的 Any 不会为 PTC 引入等式。
+两套 VM 的函数入参与返回、列表取值以及结构体字段都保留 Type 数据。类型
+相等判定和布局另行要求身份。描述中的 Any 不会为 PTC 引入等式。
 上述行为及失败后同一 VM 的后续调用见
 [源码回归](../compiler/luna/tests/gradual_type_data.rs)。
 
@@ -65,7 +65,7 @@ typealias Forward = Second<...packet()>;
 `Through<u8>` 引用它仍得到同一身份。另写一条调用生成式工厂的别名声明会得到
 独立结果。成员别名引用所在类型的参数时，该参数也参与区分。静态类型构造沿用
 原有的形成检查，包括位宽、实参域和约束。含描述的实参走别名的参数绑定和约束
-检查路径，目前还不能作为稳定项写入 NF 或 metadata。
+检查路径。闭合 NF 构造可以保留描述输入；持久 metadata 仍需专门的编码与准入。
 
 [带 Display 的最小复现](repros/refined-any-type-producer.fl)现在可以解析 Any。
 `refines { Itself :- Display } Any` 可以作为 Type 返回，实参在自己的调用点证明 Display。含描述的闭合 NF 实参在独立的描述数据中保留头与值模板，模板槽位逐项绑定实际输入。
@@ -98,11 +98,21 @@ comptime 调用提前完成后面槽位的注解，同一次调用会向后续�
 定义端对未知成员的访问、实际存储类型和具体参数的资源检查继续生效。
 源码、调用副作用顺序与拒绝例见[真实 sysroot 回归](../compiler/luna/tests/gradual_type_data.rs)。
 
-这里交付的是单个显式 Any。要使 `Select` 返回 `refines { Itself :- Display } Any`，
-需要在 Type 数据中保留要求的 subject binder 及其声明来源，在接收世界对实际域
-检查要求。当前形成 refinement 时就对 base 调用 `type_expr`，仍会索取身份。
-再往下，`std.fmt.Parse` 要把这种描述作为普通值装入保留头的构造应用中，交给
-变参槽位按字段取得实际域。这两步都超出了单个 Any 的准入能力。
+### 同一参数中的字段与整体要求
+
+```flurry
+comptime fn Slots() -> Type { Tuple<refines { Itself :- Field } Any, Any> }
+comptime fn PacketDomain() -> Type { refines { Itself :- Packet } Slots() }
+```
+
+设第一个实参字段为 `u8`，第二个为 `bool`。检查 `PacketDomain()` 时，字段要求中的
+`Itself` 绑定到 `u8`，外层要求中的 `Itself` 绑定到完整的 `Tuple<u8, bool>`。
+准入先核对构造头和普通输入，再检查字段，最后检查整体要求。即使整体已有
+`Packet` 实现，第一个字段仍要满足 `Field`。两个字段均通过也不能省略整体检查。
+
+描述注册表在发布外层要求时保存其基底的构造应用。开放函数可从该应用观察到头，
+按参数上的要求检查函数体；具体调用仍须在调用方的 trait 世界中证明这些要求。
+其中涉及外层变量捕获或可执行谓词的情形仍需接入相应的绑定传送和计算机制。
 
 ### 已接通的函数类型值传送
 
@@ -133,9 +143,8 @@ VM 在检查参数域后才把这个参数加入当前签名的可见前缀；�
 目前返回 `TypeContractUnresolved`。现有证明回调只能接收当前 invocation 的命题，
 传入一个属于内层签名的自由槽位会造成变量捕获。具体调用完成绑定后可以检查闭合要求。
 
-真实 sysroot 用例在 `compiler/luna/tests/staged_callable_freezing.rs`。
-这里传送的都是具有类型身份的值。`refines { Itself :- Display } Any` 的描述载体、
-按实际参数逐项准入和 `std.fmt.Parse` 仍待实现。
+函数类型的传送见[真实 sysroot 用例](../compiler/luna/tests/staged_callable_freezing.rs)。
+格式串生成字段描述、变参准入与非法格式的用例见[标准库格式测试](../compiler/luna/tests/library_std_format.rs)。
 
 ## 2. 三种未知与两个完成点
 
@@ -212,8 +221,7 @@ Any 塞进普通 Sort::Type 身份等式以省去改造。消费身份的地方�
 
 描述携带要求，不携带“所有将来实参已经通过”的证明。定义检查可在假设要求成立
 的子上下文中检查操作；调用准入必须在原调用方上下文证明实际类型满足要求。
-不能用定义端自己安装的假设自证。test_support 中 RefinementScope 的上下文分工
-保留为协议回归，但没有源码或 VM 生产消费者；未来接线须实际实现这一职责。
+源码检查在开放定义的局部上下文中引入参数前提，退出时恢复上下文。实际准入沿基底和各字段检查，并在调用方重新实例化每项要求。
 
 Itself 上可提取的类型命题交给 PTC；关于 runtime 值、内存与状态的谓词仍属于
 程序验证及规定的运行时检查。不可提取的谓词不提供静态事实。两类义务都保留
@@ -230,7 +238,9 @@ binder、来源和错误位置，不因同在 refinement 内而混用求解器�
 return，也不把某次调用结果推广到所有输入。等待、分析失败和预算耗尽不提供保证。
 
 例如所有正常返回都通过同一个有合法结构视图的构造形成，可保留共同头与参数域
-信息；具体长度仍依赖 format。字段 refinement 必须来自实际描述构造或已证明
+信息；具体长度仍依赖 format。当前由同一受检包的声明索引查找被调函数，
+以工作栈检查尾值、分支和本函数的提前返回。闭包捕获初始化属于外层，闭包主体
+拥有独立返回边界。遇到递归调用环或动态目标时，现阶段保留未知。字段 refinement 必须来自实际描述构造或已证明
 契约。经过容器及函数转发，观察仍绑定实际值来源，不能凭静态外壳扩大权限。
 
 inline 主体也可以显式进行有依据的 Type/trait 检查，只在对应分支内调用 Display，
@@ -273,8 +283,7 @@ IIR/runtime 只接收其阶段允许的类型与值。Any 没有自动 tagged un
 真实 `PreparedRequired` 将 Type 返回值与其他 comptime 数据共用普通 VM 调用和
 packet 恢复，不再新建空推断上下文及临时输出变量。具体接线见
 [状态与发布协议](elaboration-state-and-publication.md#type-生产者的-invocation-与发布边界)。
-该通道仍要求预先完成根 Expr；完整描述载体、多消费者准入和原源码区域恢复尚未
-实现。后续应在这一普通值通道保留生产结果，再让有身份需求的消费者持有赋值权限，
+该通道仍要求预先完成根 Expr。已完成的闭合描述可用于多个调用；挂起的源码区域与活动 VM 的联合恢复仍待实现。后续应在这一普通值通道保留生产结果，再让有身份需求的消费者持有赋值权限，
 不能为了复用旧测试模型而重新为每次 Type 生产分配 MetaId。
 
 迁移后的所有权分为三部分；以下为目标协议，不是现有 API：
@@ -330,10 +339,10 @@ dump 应显示生产状态及各消费边，例如下面的结构示意，而不
 
 | 当前入口 | 当前边界 | 目标职责与退役条件 |
 | --- | --- | --- |
-| [`Interpreter::type_data` / `type_identity_term`](../compiler/comptime_interpretor/src/lib.rs) | 分别读取 Type 数据和具体身份；数据转发可保留显式 Any | 复合描述须保持相同的消费边界 |
+| [`Interpreter::type_data` / `type_identity_term`](../compiler/comptime_interpretor/src/lib.rs) | 分别读取 Type 数据和具体身份；数据转发保留 Any、闭合构造描述及其 refinement | 开放描述须保持相同的消费边界 |
 | [`value_types::has_type_at`](../compiler/comptime_interpretor/src/value_types.rs) | Type 域的值走 `inspect_type_description` | 检查合法 TypeValue 成员资格；不将数据检查等同于实际参数准入 |
 | [`admission::admit_value_types`](../compiler/comptime_interpretor/src/admission.rs) | Type 载荷走接收世界的 `admit_type` | 遍历描述中的身份、要求和绑定；身份引用仍须在接收世界有效，实际输入的 trait 选择另行进行 |
-| [`normal_terms`](../compiler/comptime_interpretor/src/normal_terms.rs) | Type 值冻结为身份 Term | 共同冻结载体保留描述载荷及依赖；容器、Object 与捕获递归走同一规则 |
+| [`normal_terms`](../compiler/comptime_interpretor/src/normal_terms.rs) | 具体身份冻结为 Term；构造描述的普通实参另保存值模板与描述槽位 | 共同冻结载体保留描述载荷及依赖；容器、Object 与捕获递归走同一规则 |
 | [`normal_values`](../compiler/comptime_interpretor/src/normal_values/mod.rs) | Type 域将输入 Term 解码成 `Value::Type` | 解码后仍区分身份与描述，不根据接收域为 Type 就将任意载荷当作身份 |
 | [`nir::comptime_values`](../compiler/nir/src/comptime_values.rs) | 列表字段是 Term；Type 元素用 `Sort::Type`，普通值验证入口拒绝 Type 域 | 迁移共同冻结值与域检查；不得添加仅用于 List&lt;Type&gt; 的描述字段或宽松 sort 绕行 |
 | [`deferred_signatures`](../compiler/nir/src/deferred_signatures.rs) | 稳定注解为 Known(Term) 或 Computed 索引 | 保存稳定描述与计算计划；活动生产、准入事务与等待者仍留在 elaboration |
@@ -353,13 +362,13 @@ scope 检查、substitution、预算计费和 Display 都必须按同一载体�
 
 先验证不涉及格式器的普通 Type 返回、转发与容器往返，再以两项不同实际类型的
 延迟参数检查生产与准入分离；最后接通 std 的真实入口和 native 输出。各层应保留
-拒绝、取消与恢复证据。公开格式化接口未接通前，`FormatPlan.parse` 仍只是扫描器，
-现有 `println(comptime text: str)` 仍是待替换接口，不能通过改名报告目标已完成。
+拒绝、取消与恢复证据。公开 `println` 已消费 `std.fmt.Parse(format)` 的结果，
+[宿主演示](examples/host-println.fl)覆盖异构字段与转义。活动输入的等待与取消另行验收。
 
 ## 9. 共同冻结载体与 binder 的实施选择
 
 这一节是实现方案，不是已经存在的 Rust API。按 `627ab804` 核对，真正需要替换
-的不只是 `Value::Type(Term)`。当前三个边界共同把 Type 数据等同于身份项：
+的不只是 `Value::Type(Term)`。以下是当时核对的三个身份项接口；第 1 节列出现已接通的描述数据路径：
 
 - `nir::comptime_values::encode_admitted_list` 依据元素域是否为 Type，要求元素分别
   使用 `Sort::Type` 或 `Sort::ComptimeValue`；其 `validate_scoped` 则明确拒绝 Type 域。

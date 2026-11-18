@@ -1,4 +1,5 @@
 //! Checked, world-owned requirements carried by gradual Type values.
+use crate::described_applications::DescribedApplication;
 use crate::program::{DescriptionLiteral, SourceRange, TypePredicate};
 use crate::{DeclarationParameter, Sort};
 use std::{
@@ -11,7 +12,6 @@ use std::{
 #[derive(Debug)]
 struct Entry {
     slot: usize,
-    base: Option<usize>,
     binder: DeclarationParameter,
     requirement: TypePredicate,
     origin: SourceRange,
@@ -57,17 +57,40 @@ impl BoundRequirement<'_> {
     }
 }
 
+/// The registry owns the base edge. A literal handle never owns earlier
+/// registry entries, even when a field refers to another refined application.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Published {
+    requirement: Refinement,
+    parent: Option<usize>,
+    application: Option<DescribedApplication>,
+}
+
+pub struct Subject<'a> {
+    pub application: Option<&'a DescribedApplication>,
+    requirements: Vec<BoundRequirement<'a>>,
+}
+
+impl<'a> Subject<'a> {
+    /// The base must hold before predicates on the same subject apply.
+    pub fn requirements(self) -> impl DoubleEndedIterator<Item = BoundRequirement<'a>> {
+        self.requirements.into_iter().rev()
+    }
+}
+
 /// Immutable snapshots share the published prefix. An independent compilation
 /// or a sibling snapshot cannot claim a requirement by reproducing its index.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Refinements(Arc<Vec<Refinement>>, Arc<()>);
+pub struct Refinements(Arc<Vec<Published>>, Arc<()>);
 
 impl Refinements {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
     pub(crate) fn contains_refinement(&self, r: &Refinement) -> bool {
-        self.0.get(r.0.slot) == Some(r)
+        self.0
+            .get(r.0.slot)
+            .is_some_and(|entry| entry.requirement == *r)
     }
     pub fn contains(&self, description: &DescriptionLiteral) -> bool {
         match description {
@@ -77,22 +100,45 @@ impl Refinements {
         }
     }
 
-    pub fn requirements<'a>(
+    /// Observe the checked base head without opening its inputs or proving
+    /// predicates. Publication preserves this observation through refinements.
+    pub fn structure<'a>(
         &'a self,
-        description: &DescriptionLiteral,
-    ) -> Option<impl Iterator<Item = BoundRequirement<'a>>> {
+        description: &'a DescriptionLiteral,
+    ) -> Result<Option<&'a DescribedApplication>, &'static str> {
         if !self.contains(description) {
-            return None;
+            return Err("description belongs to a different declaration world");
         }
-        let first = match description {
-            DescriptionLiteral::Application(_) => return None,
+        Ok(match description {
             DescriptionLiteral::Any => None,
-            DescriptionLiteral::Refined(reference) => self.0.get(reference.0.slot),
-        };
-        Some(
-            std::iter::successors(first, |item| item.0.base.and_then(|slot| self.0.get(slot)))
-                .map(|handle| BoundRequirement(&handle.0)),
-        )
+            DescriptionLiteral::Application(application) => Some(application),
+            DescriptionLiteral::Refined(r) => self.0[r.0.slot].application.as_ref(),
+        })
+    }
+
+    /// Peel predicates on one subject. Each field introduces a new subject.
+    pub fn subject<'a>(
+        &'a self,
+        description: &'a DescriptionLiteral,
+        steps: &mut u64,
+    ) -> Result<Subject<'a>, &'static str> {
+        let application = self.structure(description)?;
+        let mut requirements = Vec::new();
+        if let DescriptionLiteral::Refined(r) = description {
+            let mut slot = Some(r.0.slot);
+            while let Some(index) = slot {
+                *steps = steps
+                    .checked_sub(1)
+                    .ok_or("refinement admission budget exhausted")?;
+                let published = &self.0[index];
+                requirements.push(BoundRequirement(&published.requirement.0));
+                slot = published.parent;
+            }
+        }
+        Ok(Subject {
+            application,
+            requirements,
+        })
     }
     pub fn application(
         &self,
@@ -105,7 +151,7 @@ impl Refinements {
             head,
             inputs,
             self,
-            self.0.last().cloned(),
+            self.0.last().map(|entry| entry.requirement.clone()),
             fuel,
         )
         .map(DescriptionLiteral::Application)
@@ -118,9 +164,11 @@ impl Refinements {
         origin: SourceRange,
         steps: &mut u64,
     ) -> Result<DescriptionLiteral, String> {
-        if !self.contains(&base) {
-            return Err("refinement base belongs to a different declaration world".into());
-        }
+        let application = self.structure(&base)?.cloned();
+        let parent = match base {
+            DescriptionLiteral::Refined(r) => Some(r.0.slot),
+            _ => None,
+        };
         if binder.sort != Sort::Type
             || !crate::copy_budget::closed_refinement(&requirement, binder, steps)
                 .map_err(|e| format!("refinement publication limit: {e:?}"))?
@@ -136,37 +184,34 @@ impl Refinements {
         *steps = steps
             .checked_sub(cost)
             .ok_or("refinement publication budget exhausted")?;
-        let base = match base {
-            DescriptionLiteral::Application(_) => {
-                return Err("refining a constructed description needs a structural subject".into());
-            }
-            DescriptionLiteral::Any => None,
-            DescriptionLiteral::Refined(parent) => Some(parent.0.slot),
-        };
         let handle = Refinement(Arc::new(Entry {
             slot: self.0.len(),
-            base,
             binder,
             requirement,
             origin,
         }));
-        Arc::make_mut(&mut self.0).push(handle.clone());
+        Arc::make_mut(&mut self.0).push(Published {
+            requirement: handle.clone(),
+            parent,
+            application,
+        });
         Ok(DescriptionLiteral::Refined(handle))
     }
 }
 impl fmt::Display for Refinements {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(refinements")?;
-        for reference in self.0.iter() {
-            let item = &reference.0;
+        for published in self.0.iter() {
+            let item = &published.requirement.0;
             write!(
                 f,
                 "\n (refinement-definition {} (origin {}) (base ",
                 item.slot, item.origin
             )?;
-            match item.base {
-                Some(slot) => write!(f, "(refinement {slot})")?,
-                None => f.write_str("any")?,
+            match (published.parent, &published.application) {
+                (Some(parent), _) => write!(f, "(refinement {parent})")?,
+                (None, Some(application)) => write!(f, "{application}")?,
+                (None, None) => f.write_str("any")?,
             }
             write!(
                 f,

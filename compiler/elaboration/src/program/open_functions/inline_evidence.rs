@@ -3,35 +3,37 @@ use super::*;
 
 impl Checker<'_, '_> {
     pub(super) fn computed_tuple_input(&mut self, input: &Expr<'_>) -> Result<bool, Error> {
-        Ok(match input.kind {
-            H::ResolvedFnParam(_, binding) | H::ResolvedLocal(_, binding)
-                if !self.locals.contains_key(&local(binding)) =>
-            {
-                let owner = binding.owner;
-                let ItemKind::Fn(sig, _) = &self.package.item(owner).unwrap().kind else {
-                    return Err(error(
+        let (H::ResolvedFnParam(_, binding) | H::ResolvedLocal(_, binding)) = input.kind else {
+            return Ok(false);
+        };
+        let Some(head) = self.protocols.tuple else {
+            return Ok(false);
+        };
+        let owner = binding.owner;
+        let Some(ItemKind::Fn(sig, _)) = self.package.item(owner).map(|item| &item.kind) else {
+            return Ok(false);
+        };
+        let slot = sig.params.iter().position(|p| p.hir_id == binding);
+        let annotation =
+            slot.and_then(|slot| self.open_functions.get(&owner)?.parameters.get(slot));
+        match annotation {
+            Some((_, Annotation::Description(description))) => Ok(self
+                .refinements
+                .structure(description)
+                .map_err(|message| error(input.span, message))?
+                .is_some_and(|app| app.head() == head)),
+            Some((_, Annotation::Pending(code))) if !self.locals.contains_key(&local(binding)) => {
+                if code.returns_head(head, &mut self.required_steps, input.span)? {
+                    Ok(true)
+                } else {
+                    Err(error(
                         input.span,
-                        "tuple iteration input has no function signature",
-                    ));
-                };
-                let slot = sig.params.iter().position(|p| p.hir_id == binding);
-                let annotation =
-                    slot.and_then(|slot| self.open_functions.get(&owner)?.parameters.get(slot));
-                match (annotation, self.protocols.tuple) {
-                    (Some((_, Annotation::Pending(code))), Some(head)) => {
-                        if !code.returns_head(head, &mut self.required_steps, input.span)? {
-                            return Err(error(
-                                input.span,
-                                "tuple_enumerate requires a tuple head on every normal return of the type producer",
-                            ));
-                        }
-                        true
-                    }
-                    _ => false,
+                        "tuple_enumerate requires a tuple head on every normal return of the type producer",
+                    ))
                 }
             }
-            _ => false,
-        })
+            _ => Ok(false),
+        }
     }
     pub(super) fn describe_inline_trait_guard(
         &mut self,

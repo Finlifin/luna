@@ -77,29 +77,52 @@ impl Checker<'_, '_> {
         actual: &Term,
         span: Span,
     ) -> Result<(), Error> {
-        if !self.refinements.contains(description) {
-            return Err(error(
-                span,
-                "description belongs to a different declaration world",
-            ));
+        enum Check<'a> {
+            Subject(&'a n::DescriptionLiteral, &'a Term),
+            Predicate(nir::refinements::BoundRequirement<'a>, &'a Term),
         }
-        if let n::DescriptionLiteral::Application(application) = description {
-            let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-            let mut fuel = before;
-            let checked = application.fields_for(actual, &mut fuel);
-            self.required_steps -= (before - fuel) as u64;
-            for (field, value) in checked.map_err(|message| error(span, message))? {
-                self.check_description(field, value, span)?;
+        let registry = self.refinements.clone();
+        let mut work = vec![Check::Subject(description, actual)];
+        let mut receiving_context = None;
+        while let Some(check) = work.pop() {
+            match check {
+                Check::Subject(description, actual) => {
+                    let subject = registry
+                        .subject(description, &mut self.required_steps)
+                        .map_err(|message| error(span, message))?;
+                    let application = subject.application;
+                    // LIFO order: check the structural base, then its inner
+                    // predicates, then the predicates on its refinements.
+                    work.extend(
+                        subject
+                            .requirements()
+                            .rev()
+                            .map(|r| Check::Predicate(r, actual)),
+                    );
+                    if let Some(application) = application {
+                        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                        let mut fuel = before;
+                        let fields = application.fields_for(actual, &mut fuel);
+                        self.required_steps -= (before - fuel) as u64;
+                        work.extend(
+                            fields
+                                .map_err(|message| error(span, message))?
+                                .into_iter()
+                                .rev()
+                                .map(|(field, value)| Check::Subject(field, value)),
+                        );
+                    }
+                }
+                Check::Predicate(requirement, actual) => {
+                    let (frames, assumptions) = receiving_context.get_or_insert_with(|| {
+                        (self.call_input_frames(), self.capability_assumptions())
+                    });
+                    let predicate =
+                        self.instantiate_refinement(requirement, actual, frames, span)?;
+                    self.prove_source_refinement(&predicate, &self.context, assumptions, span)?;
+                }
             }
-            return Ok(());
         }
-        if matches!(description, n::DescriptionLiteral::Any) {
-            return Ok(());
-        }
-        let assumptions = self.capability_assumptions();
-        self.for_each_refinement(description, actual, span, |this, predicate| {
-            this.prove_source_refinement(&predicate, &this.context, &assumptions, span)
-        })?;
         Ok(())
     }
 
@@ -114,51 +137,38 @@ impl Checker<'_, '_> {
             declaration: binder.declaration,
             sort: binder.sort,
         };
-        self.for_each_refinement(description, &subject, span, |this, predicate| {
+        let registry = self.refinements.clone();
+        let view = registry
+            .subject(description, &mut self.required_steps)
+            .map_err(|message| error(span, message))?;
+        let frames = self.call_input_frames();
+        for requirement in view.requirements() {
+            let predicate = self.instantiate_refinement(requirement, &subject, &frames, span)?;
             let fact = crate::ptc::Formula::from_predicate(&predicate);
-            this.context
+            self.context
                 .validate_formula(&fact, &mut crate::ptc::Budget::default())
                 .map_err(|e| error(span, e.to_string()))?;
-            this.context.assume(fact);
-            this.definition_refinements.requirements.push(predicate);
-            Ok(())
-        })?;
+            self.context.assume(fact);
+            self.definition_refinements.requirements.push(predicate);
+        }
         self.definition_refinements
             .subjects
             .insert(local(parameter), binder);
         Ok(subject)
     }
 
-    fn for_each_refinement(
+    fn instantiate_refinement(
         &mut self,
-        description: &n::DescriptionLiteral,
+        requirement: nir::refinements::BoundRequirement<'_>,
         actual: &Term,
+        frames: &[Vec<Sort>],
         span: Span,
-        mut consume: impl FnMut(&mut Self, n::TypePredicate) -> Result<(), Error>,
-    ) -> Result<(), Error> {
-        let registry = self.refinements.clone();
-        let requirements = registry
-            .requirements(description)
-            .ok_or_else(|| error(span, "refinement belongs to a different declaration world"))?;
-        let mut chain = Vec::new();
-        for requirement in requirements {
-            self.required_steps = self
-                .required_steps
-                .checked_sub(1)
-                .ok_or_else(|| error(span, "refinement admission budget exhausted"))?;
-            chain.push(requirement);
-        }
-        let frames = self.call_input_frames();
-        for requirement in chain.into_iter().rev() {
-            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-            let before = fuel;
-            let predicate = requirement.instantiate(actual, &frames, &mut fuel);
-            self.required_steps -= (before - fuel) as u64;
-            let predicate = predicate
-                .map_err(|e| error(span, format!("refinement substitution failed: {e:?}")))?;
-            consume(self, predicate)?;
-        }
-        Ok(())
+    ) -> Result<n::TypePredicate, Error> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let predicate = requirement.instantiate(actual, frames, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        predicate.map_err(|e| error(span, format!("refinement substitution failed: {e:?}")))
     }
 }
 
