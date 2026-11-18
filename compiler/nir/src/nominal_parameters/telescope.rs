@@ -1,0 +1,173 @@
+//! The declaration-side index used by both structural substitution and
+//! receiving-world admission. Only the latter consults value-domain evidence.
+use super::*;
+use crate::type_computations::Error as QueryError;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound::{Excluded, Unbounded};
+
+pub(super) struct Binders {
+    pub(super) ordered: Vec<DeclarationParameter>,
+    positions: BTreeMap<DeclarationId, (usize, Sort)>,
+}
+
+impl Binders {
+    pub(super) fn new<T: Borrow<Term>>(
+        ids: &[DeclarationId],
+        domains: &[T],
+    ) -> Result<Self, TypeError> {
+        if !domains.is_empty() && domains.len() != ids.len() {
+            return Err(TypeError::ArgumentCount {
+                expected: ids.len(),
+                actual: domains.len(),
+            });
+        }
+        let mut ordered = Vec::with_capacity(ids.len());
+        let mut positions = BTreeMap::new();
+        for (slot, &id) in ids.iter().enumerate() {
+            let domain = domains
+                .get(slot)
+                .map(Borrow::borrow)
+                .unwrap_or(&Term::Primitive(Primitive::Type));
+            let binder = DeclarationParameter::comptime(id, domain);
+            if positions.insert(id, (slot, binder.sort)).is_some() {
+                return Err(TypeError::DuplicateDeclarationParameter(id));
+            }
+            if domain.sort() != Sort::Type {
+                return Err(TypeError::WrongSort {
+                    expected: Sort::Type,
+                    actual: domain.sort(),
+                });
+            }
+            domain.check_scope(&[])?;
+            ordered.push(binder);
+        }
+        Ok(Self { ordered, positions })
+    }
+
+    // Callers have checked arity, argument scope and the original binder
+    // identities. Replacements are caller terms and are never substituted again.
+    pub(super) fn instantiate<T: Borrow<Term>>(
+        &self,
+        term: &Term,
+        arguments: &[T],
+        frames: &[Vec<Sort>],
+    ) -> Result<Term, TypeError> {
+        term.instantiate_domain_checked_indices(&self.positions, arguments, frames)
+    }
+
+    pub(super) fn replacement<'a, T: Borrow<Term>>(
+        &self,
+        id: DeclarationId,
+        arguments: &'a [T],
+    ) -> Option<&'a Term> {
+        self.positions
+            .get(&id)
+            .map(|&(index, _)| arguments[index].borrow())
+    }
+
+    pub(super) fn charge_expansion<T: Borrow<Term>>(
+        &self,
+        term: &Term,
+        arguments: &[T],
+        fuel: &mut usize,
+    ) -> Result<(), QueryError> {
+        crate::type_computations::visit_expansion(
+            term,
+            fuel,
+            128,
+            &|id| self.replacement(id, arguments),
+            &mut |_, _| {},
+        )
+        .map_err(Into::into)
+    }
+
+    pub(super) fn instantiate_bounded<T: Borrow<Term>>(
+        &self,
+        term: &Term,
+        arguments: &[T],
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Term, QueryError> {
+        self.charge_expansion(term, arguments, fuel)?;
+        self.instantiate(term, arguments, frames)
+            .map_err(QueryError::Scope)
+    }
+
+    /// Admit each value only after all local binders mentioned in its original
+    /// domain have passed. External rigids belong to the caller's world.
+    pub(super) fn admit<D: Borrow<Term>, T: Borrow<Term>>(
+        &self,
+        domains: &[D],
+        arguments: &[T],
+        frames: &[Vec<Sort>],
+        first: usize,
+        fuel: &mut usize,
+        queries: &mut crate::value_admission::DomainQueries<'_, '_>,
+    ) -> Result<(), AdmissionError> {
+        let count = self.ordered.len();
+        *fuel = fuel.checked_sub(count).ok_or(AdmissionError::Budget)?;
+        let mut dependents = vec![Vec::new(); count];
+        let mut pending = vec![0usize; count];
+        let mut ready = BTreeSet::new();
+        for (slot, missing) in pending.iter_mut().enumerate() {
+            if let Some(domain) = domains.get(slot) {
+                let mut steps = *fuel as u64;
+                let inputs = crate::copy_budget::term_inputs(domain.borrow(), &mut steps);
+                *fuel = steps as usize;
+                let inputs = inputs.map_err(|err| match err {
+                    crate::copy_budget::InputObservationError::Limit(_) => AdmissionError::Budget,
+                    crate::copy_budget::InputObservationError::Scope(e) => {
+                        AdmissionError::Invalid(e.to_string())
+                    }
+                })?;
+                for id in inputs.declarations.keys() {
+                    if let Some(&(source, _)) = self.positions.get(id) {
+                        dependents[source].push(slot);
+                        *missing += 1;
+                    }
+                }
+            }
+            if *missing == 0 {
+                ready.insert(slot);
+            }
+        }
+        let mut cursor = first.checked_sub(1);
+        let mut admitted = 0;
+        while !ready.is_empty() {
+            // Continue the declaration-order sweep. An earlier slot woken by
+            // this sweep runs after the remaining ready slots to its right.
+            let slot = cursor
+                .and_then(|last| ready.range((Excluded(last), Unbounded)).next().copied())
+                .unwrap_or_else(|| *ready.first().unwrap());
+            ready.remove(&slot);
+            cursor = Some(slot);
+            let template = domains
+                .get(slot)
+                .map(Borrow::borrow)
+                .unwrap_or(&Term::Primitive(Primitive::Type));
+            let domain = self.instantiate_bounded(template, arguments, frames, fuel)?;
+            let expected = Sort::of_comptime_domain(&domain);
+            let argument = arguments[slot].borrow();
+            if argument.sort() != expected {
+                return Err("nominal argument sort mismatch".into());
+            }
+            if expected != Sort::Type {
+                crate::value_admission::validate(argument, &domain, frames, fuel, queries)?;
+            }
+            admitted += 1;
+            *fuel = fuel
+                .checked_sub(dependents[slot].len())
+                .ok_or(AdmissionError::Budget)?;
+            for &consumer in &dependents[slot] {
+                pending[consumer] -= 1;
+                if pending[consumer] == 0 {
+                    ready.insert(consumer);
+                }
+            }
+        }
+        if admitted != count {
+            return Err("nominal input domains have a cyclic dependency".into());
+        }
+        Ok(())
+    }
+}

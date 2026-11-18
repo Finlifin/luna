@@ -1213,19 +1213,12 @@ impl Term {
 
     /// Structural callers establish the replacement sorts from parameter domains;
     /// completed-value callers additionally carry full domain-admission evidence.
-    pub(crate) fn instantiate_domain_checked_parameters_in_scope(
+    pub(crate) fn instantiate_domain_checked_indices<T: std::borrow::Borrow<Term>>(
         &self,
-        parameters: &[DeclarationParameter],
-        arguments: &[Term],
+        indices: &BTreeMap<DeclarationId, (usize, Sort)>,
+        arguments: &[T],
         frames: &[Vec<Sort>],
     ) -> Result<Term, TypeError> {
-        if parameters.len() != arguments.len() {
-            return Err(TypeError::ArgumentCount {
-                expected: parameters.len(),
-                actual: arguments.len(),
-            });
-        }
-        let indices = declaration_parameter_indices(parameters)?;
         let result = self.rewrite(0, &mut |term, depth| match term {
             Self::Rigid { declaration, sort } => match indices.get(declaration) {
                 Some(&(index, expected)) => {
@@ -1235,7 +1228,7 @@ impl Term {
                             actual: *sort,
                         });
                     }
-                    arguments[index].shift(depth, 0)
+                    arguments[index].borrow().shift(depth, 0)
                 }
                 None => Ok(term.clone()),
             },

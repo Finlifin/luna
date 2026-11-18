@@ -117,74 +117,55 @@ impl Newtype {
         &self,
         arguments: &[Term],
         fuel: &mut usize,
-        layout: impl FnMut(
+        mut layout: impl FnMut(
             &Term,
             Option<u32>,
             &mut usize,
         ) -> Result<Vec<Term>, crate::NominalAdmissionError>,
-        declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
-        collection: impl FnMut(&Term, &mut usize) -> Result<Option<Term>, crate::NominalAdmissionError>,
+        mut declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+        mut collection: impl FnMut(
+            &Term,
+            &mut usize,
+        ) -> Result<Option<Term>, crate::NominalAdmissionError>,
         target: Option<crate::target::TargetData>,
     ) -> Result<(), crate::NominalAdmissionError> {
-        let own = self
+        self.admit_arguments_in_scope(
+            arguments,
+            &[],
+            fuel,
+            &mut crate::value_admission::DomainQueries {
+                layout: &mut layout,
+                declared: &mut |value, domain, fuel| Ok(declared(value, domain, fuel)),
+                collection: &mut collection,
+                callable: &mut |_, _, _| Ok(None),
+                target,
+            },
+        )
+        .map(|_| ())
+    }
+
+    /// Captures occupy trailing slots in the type identity but begin the
+    /// declaration sweep. Return the checked inputs in their stored order.
+    pub fn admit_arguments_in_scope<'a>(
+        &self,
+        arguments: &'a [Term],
+        frames: &'a [Vec<Sort>],
+        fuel: &mut usize,
+        queries: &mut crate::value_admission::DomainQueries<'_, '_>,
+    ) -> Result<crate::AdmittedArguments<'a>, crate::NominalAdmissionError> {
+        let first = self
             .type_parameters
             .len()
             .checked_sub(self.capture_count)
             .ok_or("invalid newtype capture count")?;
-        if self.capture_count == 0 {
-            return crate::nominal_parameters::validate_with_collections_in(
-                &self.type_parameters,
-                &self.parameter_types,
-                arguments,
-                fuel,
-                layout,
-                declared,
-                collection,
-                target,
-            );
-        }
-        if arguments.len() != self.type_parameters.len()
-            || (!self.parameter_types.is_empty() && self.parameter_types.len() != arguments.len())
-        {
-            return Err("newtype argument/domain count mismatch".into());
-        }
-        *fuel = fuel
-            .checked_sub(arguments.len())
-            .ok_or(crate::nominal_parameters::AdmissionError::Budget)?;
-        for domain in &self.parameter_types {
-            crate::type_computations::charge_term(domain, fuel)
-                .map_err(crate::nominal_parameters::AdmissionError::from)?;
-        }
-        for argument in arguments {
-            crate::type_computations::charge_term(argument, fuel)
-                .map_err(crate::nominal_parameters::AdmissionError::from)?;
-        }
-        let order = (own..arguments.len()).chain(0..own).collect::<Vec<_>>();
-        let parameters = order
-            .iter()
-            .map(|&i| self.type_parameters[i])
-            .collect::<Vec<_>>();
-        let domains = if self.parameter_types.is_empty() {
-            vec![]
-        } else {
-            order
-                .iter()
-                .map(|&i| self.parameter_types[i].clone())
-                .collect()
-        };
-        let arguments = order
-            .iter()
-            .map(|&i| arguments[i].clone())
-            .collect::<Vec<_>>();
-        crate::nominal_parameters::validate_with_collections_in(
-            &parameters,
-            &domains,
-            &arguments,
+        crate::nominal_parameters::admit_in_order(
+            &self.type_parameters,
+            &self.parameter_types,
+            arguments,
+            frames,
+            first,
             fuel,
-            layout,
-            declared,
-            collection,
-            target,
+            queries,
         )
     }
 

@@ -185,13 +185,24 @@ fn charge_node_substitution(
             &mut |_| {},
         )?;
     }
-    let replacements = parameters
+    let replacements: std::collections::BTreeMap<_, _> = parameters
         .iter()
         .zip(arguments)
         .map(|(parameter, argument)| (parameter.declaration, argument))
         .collect();
+    charge_projected(root, fuel, &|id| replacements.get(&id).copied())
+}
+
+/// A previously checked declaration substitution already indexes its arguments.
+/// The same whole-node preflight accounts for metadata, shared bodies and
+/// repeated replacements before any tree is copied.
+pub(crate) fn charge_projected<'a>(
+    root: Node<'_>,
+    fuel: &mut usize,
+    replacement: &dyn Fn(crate::DeclarationId) -> Option<&'a Term>,
+) -> Result<(), CopyBudgetExhausted> {
     let mut steps = *fuel as u64;
-    let result = charge_node(root, &mut steps, true, Some(&replacements));
+    let result = charge_node(root, &mut steps, true, Some(replacement));
     *fuel = steps as usize;
     result
 }
@@ -202,7 +213,7 @@ pub fn charge_argument_type_rewrite(
 ) -> Result<(), CopyBudgetExhausted> {
     charge_node(Node::Argument(value), steps, true, None)
 }
-enum Node<'a> {
+pub(crate) enum Node<'a> {
     Region(&'a n::DefinitionRegion),
     Function(&'a n::Function),
     FunctionDeclaration(&'a n::FunctionDeclaration),
@@ -217,11 +228,11 @@ enum Node<'a> {
     Operation(&'a crate::effects::Operation),
 }
 
-fn charge_node(
+fn charge_node<'a>(
     root: Node<'_>,
     steps: &mut u64,
     rewrite: bool,
-    replacements: Option<&std::collections::BTreeMap<crate::DeclarationId, &Term>>,
+    replacements: Option<&dyn Fn(crate::DeclarationId) -> Option<&'a Term>>,
 ) -> Result<(), CopyBudgetExhausted> {
     charge_node_observed(root, steps, rewrite, replacements, &mut |_, _| {})
 }
@@ -409,20 +420,19 @@ pub(crate) fn closed_refinement(
     Ok(closed)
 }
 
-fn charge_node_observed(
+fn charge_node_observed<'a>(
     root: Node<'_>,
     steps: &mut u64,
     rewrite: bool,
-    replacements: Option<&std::collections::BTreeMap<crate::DeclarationId, &Term>>,
+    replacements: Option<&dyn Fn(crate::DeclarationId) -> Option<&'a Term>>,
     observe: &mut dyn FnMut(&Term, u32),
 ) -> Result<(), CopyBudgetExhausted> {
-    let empty = std::collections::BTreeMap::new();
     walk_node_terms(root, steps, rewrite, |ty, depth, fuel| {
-        crate::type_computations::visit_expanded_term_scoped_for_copy(
+        crate::type_computations::visit_expansion(
             ty,
             fuel,
             depth,
-            replacements.unwrap_or(&empty),
+            replacements.unwrap_or(&|_| None),
             observe,
         )
     })

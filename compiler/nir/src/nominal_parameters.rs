@@ -1,7 +1,10 @@
 //! Nominal declaration binders. Layout substitution preserves value-indexed
 //! identities; domain admission and trait/program obligations remain separate.
 use crate::{DeclarationId, DeclarationParameter, Primitive, Sort, Term, TypeError};
-use std::{borrow::Cow, collections::BTreeSet};
+use std::borrow::{Borrow, Cow};
+
+mod telescope;
+use telescope::Binders;
 
 #[cfg(test)]
 mod owned_substitution_tests {
@@ -104,33 +107,7 @@ pub fn binders(
     parameters: &[DeclarationId],
     domains: &[Term],
 ) -> Result<Vec<DeclarationParameter>, TypeError> {
-    if !domains.is_empty() && domains.len() != parameters.len() {
-        return Err(TypeError::ArgumentCount {
-            expected: parameters.len(),
-            actual: domains.len(),
-        });
-    }
-    let mut seen = BTreeSet::new();
-    parameters
-        .iter()
-        .enumerate()
-        .map(|(index, declaration)| {
-            if !seen.insert(*declaration) {
-                return Err(TypeError::DuplicateDeclarationParameter(*declaration));
-            }
-            let domain = domains
-                .get(index)
-                .unwrap_or(&Term::Primitive(Primitive::Type));
-            if domain.sort() != Sort::Type {
-                return Err(TypeError::WrongSort {
-                    expected: Sort::Type,
-                    actual: domain.sort(),
-                });
-            }
-            domain.check_scope(&[])?;
-            Ok(DeclarationParameter::comptime(*declaration, domain))
-        })
-        .collect()
+    Ok(Binders::new(parameters, domains)?.ordered)
 }
 
 /// Admission of completed value indices at the concrete layout boundary.
@@ -275,14 +252,14 @@ impl From<ExpressionInstantiationError> for crate::type_computations::Error {
 /// validate scalar ranges, aggregate payloads, requirements or capabilities;
 /// those remain formation/admission obligations at the owning boundary.
 pub struct DeclarationSubstitution<'a> {
-    parameters: Vec<DeclarationParameter>,
+    parameters: Binders,
     arguments: Cow<'a, [Term]>,
     frames: Cow<'a, [Vec<Sort>]>,
 }
 impl std::fmt::Display for DeclarationSubstitution<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(declaration-substitution (inputs")?;
-        for (parameter, argument) in self.parameters.iter().zip(self.arguments.iter()) {
+        for (parameter, argument) in self.parameters.ordered.iter().zip(self.arguments.iter()) {
             write!(f, " (input {parameter} {argument})")?;
         }
         f.write_str(") ")?;
@@ -309,32 +286,28 @@ impl<'a> DeclarationSubstitution<'a> {
         arguments: &'a [Term],
         frames: &'a [Vec<Sort>],
     ) -> Result<Self, TypeError> {
-        Self::from_parameters(binders(ids, domains)?, domains, arguments, frames)
+        Self::from_parameters(Binders::new(ids, domains)?, domains, arguments, frames)
     }
     fn from_parameters(
-        parameters: Vec<DeclarationParameter>,
+        parameters: Binders,
         domains: &[Term],
         arguments: &'a [Term],
         frames: &'a [Vec<Sort>],
     ) -> Result<Self, TypeError> {
-        if parameters.len() != arguments.len() {
+        if parameters.ordered.len() != arguments.len() {
             return Err(TypeError::ArgumentCount {
-                expected: parameters.len(),
+                expected: parameters.ordered.len(),
                 actual: arguments.len(),
             });
         }
         for argument in arguments {
             argument.check_scope(frames)?;
         }
-        for (index, (parameter, argument)) in parameters.iter().zip(arguments).enumerate() {
+        for (index, (parameter, argument)) in parameters.ordered.iter().zip(arguments).enumerate() {
             let expected = if parameter.sort == Sort::Type {
                 Sort::Type
             } else {
-                let domain = domains[index].instantiate_domain_checked_parameters_in_scope(
-                    &parameters,
-                    arguments,
-                    frames,
-                )?;
+                let domain = parameters.instantiate(&domains[index], arguments, frames)?;
                 Sort::of_comptime_domain(&domain)
             };
             if expected != argument.sort() {
@@ -357,7 +330,7 @@ impl<'a> DeclarationSubstitution<'a> {
         frames: &'a [Vec<Sort>],
         fuel: &mut usize,
     ) -> Result<Self, crate::type_computations::Error> {
-        use crate::type_computations::{Error, charge_parameter_substitution, charge_term};
+        use crate::type_computations::{Error, charge_term};
         // Scope checks borrow the caller's frames and look up referenced slots.
         // Retaining an owned copy is charged by into_owned.
         *fuel = fuel.checked_sub(ids.len()).ok_or(Error::Budget)?;
@@ -367,12 +340,16 @@ impl<'a> DeclarationSubstitution<'a> {
         for argument in arguments {
             charge_term(argument, fuel)?;
         }
-        let parameters = binders(ids, domains).map_err(Error::Scope)?;
-        for (index, parameter) in parameters.iter().enumerate() {
+        let parameters = Binders::new(ids, domains).map_err(Error::Scope)?;
+        if arguments.len() != ids.len() {
+            return Err(Error::Scope(TypeError::ArgumentCount {
+                expected: ids.len(),
+                actual: arguments.len(),
+            }));
+        }
+        for (parameter, domain) in parameters.ordered.iter().zip(domains) {
             if parameter.sort == Sort::ComptimeValue {
-                if let Some(domain) = domains.get(index) {
-                    charge_parameter_substitution(domain, &parameters, arguments, fuel)?;
-                }
+                parameters.charge_expansion(domain, arguments, fuel)?;
             }
         }
         Self::from_parameters(parameters, domains, arguments, frames).map_err(Error::Scope)
@@ -427,11 +404,8 @@ impl<'a> DeclarationSubstitution<'a> {
     }
 
     pub fn instantiate(&self, term: &Term) -> Result<Term, TypeError> {
-        term.instantiate_domain_checked_parameters_in_scope(
-            &self.parameters,
-            &self.arguments,
-            &self.frames,
-        )
+        self.parameters
+            .instantiate(term, &self.arguments, &self.frames)
     }
     pub fn instantiate_predicate(
         &self,
@@ -464,18 +438,23 @@ impl<'a> DeclarationSubstitution<'a> {
             }
         })
     }
+    fn charge_template(
+        &self,
+        root: crate::copy_budget::Node<'_>,
+        fuel: &mut usize,
+    ) -> Result<(), crate::copy_budget::CopyBudgetExhausted> {
+        crate::copy_budget::charge_projected(root, fuel, &|id| {
+            self.parameters.replacement(id, self.arguments.as_ref())
+        })
+    }
+
     pub(crate) fn charge_function_substitution(
         &self,
         function: &crate::program::Function,
         fuel: &mut usize,
     ) -> Result<(), crate::type_computations::Error> {
-        crate::copy_budget::charge_function_substitution(
-            function,
-            &self.parameters,
-            &self.arguments,
-            fuel,
-        )
-        .map_err(|_| crate::type_computations::Error::Budget)
+        self.charge_template(crate::copy_budget::Node::Function(function), fuel)
+            .map_err(|_| crate::type_computations::Error::Budget)
     }
 
     /// Copy and specialize a checked expression only after bounding the entire
@@ -487,13 +466,8 @@ impl<'a> DeclarationSubstitution<'a> {
         fuel: &mut usize,
     ) -> Result<crate::program::Expr, ExpressionInstantiationError> {
         use ExpressionInstantiationError as Error;
-        crate::copy_budget::charge_substitution(
-            expression,
-            &self.parameters,
-            &self.arguments,
-            fuel,
-        )
-        .map_err(Error::Copy)?;
+        self.charge_template(crate::copy_budget::Node::Expr(expression), fuel)
+            .map_err(Error::Copy)?;
         let mut value = expression.clone();
         value
             .rewrite_types(&mut |ty| self.instantiate(ty))
@@ -506,13 +480,8 @@ impl<'a> DeclarationSubstitution<'a> {
         predicate: &crate::program::TypePredicate,
         fuel: &mut usize,
     ) -> Result<crate::program::TypePredicate, crate::type_computations::Error> {
-        crate::copy_budget::charge_predicate_substitution(
-            predicate,
-            &self.parameters,
-            &self.arguments,
-            fuel,
-        )
-        .map_err(|_| crate::type_computations::Error::Budget)?;
+        self.charge_template(crate::copy_budget::Node::Predicate(predicate), fuel)
+            .map_err(|_| crate::type_computations::Error::Budget)?;
         self.instantiate_predicate(predicate)
             .map_err(crate::type_computations::Error::Scope)
     }
@@ -550,54 +519,38 @@ impl<'a> DeclarationSubstitution<'a> {
         term: &Term,
         fuel: &mut usize,
     ) -> Result<Term, crate::type_computations::Error> {
-        crate::type_computations::charge_parameter_substitution(
-            term,
-            &self.parameters,
-            &self.arguments,
-            fuel,
-        )?;
-        self.instantiate(term)
-            .map_err(crate::type_computations::Error::Scope)
+        self.parameters
+            .instantiate_bounded(term, &self.arguments, &self.frames, fuel)
     }
 }
 
 /// Completed declaration inputs with checked domains. Only this evidence permits
 /// a definition-side value binder to become Type when its actual domain is Type.
 /// Strict mixed-sort substitution remains available for fixed-sort frames.
-pub struct AdmittedArguments<'a> {
-    parameters: Vec<DeclarationParameter>,
-    arguments: &'a [Term],
+pub struct AdmittedArguments<'a, T = Term> {
+    parameters: Binders,
+    arguments: &'a [T],
     frames: &'a [Vec<Sort>],
 }
-impl std::fmt::Display for AdmittedArguments<'_> {
+impl<T: Borrow<Term>> std::fmt::Display for AdmittedArguments<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(admitted-arguments")?;
-        for (parameter, argument) in self.parameters.iter().zip(self.arguments) {
-            write!(f, " (input {parameter} {argument})")?;
+        for (parameter, argument) in self.parameters.ordered.iter().zip(self.arguments) {
+            write!(f, " (input {parameter} {})", argument.borrow())?;
         }
         f.write_str(" ")?;
         display_frames(f, self.frames)?;
         f.write_str(")")
     }
 }
-impl AdmittedArguments<'_> {
+impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
     pub fn instantiate(
         &self,
         term: &Term,
         fuel: &mut usize,
     ) -> Result<Term, crate::type_computations::Error> {
-        crate::type_computations::charge_parameter_substitution(
-            term,
-            &self.parameters,
-            self.arguments,
-            fuel,
-        )?;
-        term.instantiate_domain_checked_parameters_in_scope(
-            &self.parameters,
-            self.arguments,
-            self.frames,
-        )
-        .map_err(crate::type_computations::Error::Scope)
+        self.parameters
+            .instantiate_bounded(term, self.arguments, self.frames, fuel)
     }
     pub fn instantiate_requirement(
         &self,
@@ -724,74 +677,47 @@ pub fn admit_in_scope<'a>(
     fuel: &mut usize,
     queries: &mut crate::value_admission::DomainQueries<'_, '_>,
 ) -> Result<AdmittedArguments<'a>, AdmissionError> {
+    admit_in_order(parameters, domains, arguments, frames, 0, fuel, queries)
+}
+
+/// Admit a declaration-ordered projection of invocation storage. The
+/// receiving world checks every value; the projection borrows their storage.
+pub fn admit_projected_in_scope<'a, 'value>(
+    parameters: &[DeclarationId],
+    domains: &[&Term],
+    arguments: &'a [&'value Term],
+    frames: &'a [Vec<Sort>],
+    fuel: &mut usize,
+    queries: &mut crate::value_admission::DomainQueries<'_, '_>,
+) -> Result<AdmittedArguments<'a, &'value Term>, AdmissionError> {
+    admit_in_order(parameters, domains, arguments, frames, 0, fuel, queries)
+}
+
+pub(crate) fn admit_in_order<'a, D: Borrow<Term>, T: Borrow<Term>>(
+    parameters: &[DeclarationId],
+    domains: &[D],
+    arguments: &'a [T],
+    frames: &'a [Vec<Sort>],
+    first: usize,
+    fuel: &mut usize,
+    queries: &mut crate::value_admission::DomainQueries<'_, '_>,
+) -> Result<AdmittedArguments<'a, T>, AdmissionError> {
     *fuel = fuel
         .checked_sub(parameters.len())
         .ok_or(AdmissionError::Budget)?;
     for domain in domains {
-        crate::type_computations::charge_term(domain, fuel)?;
+        crate::type_computations::charge_term(domain.borrow(), fuel)?;
     }
-    let parameters = binders(parameters, domains).map_err(|e| e.to_string())?;
-    if parameters.len() != arguments.len() {
+    let parameters = Binders::new(parameters, domains).map_err(|e| e.to_string())?;
+    if parameters.ordered.len() != arguments.len() {
         return Err("nominal argument count mismatch".into());
     }
     for argument in arguments {
+        let argument = argument.borrow();
         crate::type_computations::charge_term(argument, fuel)?;
         argument.check_scope(frames).map_err(|e| e.to_string())?;
     }
-    let mut ready = BTreeSet::new();
-    let mut admitted_parameters = Vec::new();
-    let mut admitted_arguments = Vec::new();
-    while ready.len() != parameters.len() {
-        let before = ready.len();
-        for (index, parameter) in parameters.iter().enumerate() {
-            *fuel = fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
-            if ready.contains(&parameter.declaration) {
-                continue;
-            }
-            let domain = domains
-                .get(index)
-                .unwrap_or(&Term::Primitive(Primitive::Type));
-            crate::type_computations::charge_term(domain, fuel)?;
-            let references = domain.rigid_parameters().map_err(|e| e.to_string())?;
-            *fuel = fuel
-                .checked_sub(parameters.len())
-                .ok_or(AdmissionError::Budget)?;
-            if parameters
-                .iter()
-                .any(|p| references.contains_key(&p.declaration) && !ready.contains(&p.declaration))
-            {
-                continue;
-            }
-            crate::type_computations::charge_parameter_substitution(
-                domain,
-                &admitted_parameters,
-                &admitted_arguments,
-                fuel,
-            )?;
-            let domain = domain
-                .instantiate_domain_checked_parameters_in_scope(
-                    &admitted_parameters,
-                    &admitted_arguments,
-                    frames,
-                )
-                .map_err(|e| e.to_string())?;
-            let argument = &arguments[index];
-            let expected = Sort::of_comptime_domain(&domain);
-            if argument.sort() != expected {
-                return Err("nominal argument sort mismatch".into());
-            }
-            if expected != Sort::Type {
-                crate::value_admission::validate(argument, &domain, frames, fuel, queries)?;
-            }
-            crate::type_computations::charge_term(argument, fuel)?;
-            admitted_parameters.push(*parameter);
-            admitted_arguments.push(argument.clone());
-            ready.insert(parameter.declaration);
-        }
-        if ready.len() == before {
-            return Err("nominal input domains have a cyclic dependency".into());
-        }
-    }
+    parameters.admit(domains, arguments, frames, first, fuel, queries)?;
     Ok(AdmittedArguments {
         parameters,
         arguments,

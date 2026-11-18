@@ -65,6 +65,7 @@ pub mod code_values;
 pub use nominal_parameters::{
     AdmissionError as NominalAdmissionError, AdmittedArguments, DeclarationSubstitution,
     ExpressionInstantiationError, admit_in_scope as admit_declaration_arguments_in_scope,
+    admit_projected_in_scope as admit_projected_declaration_arguments_in_scope,
     admit_with_collections_in as admit_declaration_arguments_with_collections_in,
     admit_with_evidence_in as admit_declaration_arguments_with_evidence_in,
     admit_with_queries_in as admit_declaration_arguments_with_queries_in,

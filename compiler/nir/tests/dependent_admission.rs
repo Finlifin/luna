@@ -246,3 +246,147 @@ fn structural_substitution_checks_completed_sorts_and_preserves_caller_scope() {
         .is_err()
     );
 }
+
+#[test]
+fn sparse_forward_dependencies_admit_once_in_declaration_sweeps() {
+    // Even slots form a long chain of forward dependencies. The odd slots
+    // are independent and query their receiving world in declaration order.
+    let width = 1024u32;
+    let ids: Vec<_> = (0..width).map(id).collect();
+    let arguments: Vec<_> = (0..width)
+        .map(|slot| rigid(width + slot, Sort::ComptimeValue))
+        .collect();
+    let template = |input| Term::NormalForm {
+        head: id(4 * width),
+        sort: Sort::Type,
+        arguments: vec![input],
+    };
+    let domains: Vec<_> = (0..width)
+        .map(|slot| {
+            if slot % 2 == 0 && slot + 2 < width {
+                template(rigid(slot + 2, Sort::ComptimeValue))
+            } else {
+                p(Primitive::Bool)
+            }
+        })
+        .collect();
+    let mut queried = Vec::new();
+    let mut fuel = 100 * width as usize;
+    let admitted = nir::admit_declaration_arguments_with_evidence_in(
+        &ids,
+        &domains,
+        &arguments,
+        &mut fuel,
+        |_, _, _| panic!("symbolic inputs do not request a layout"),
+        |value, domain, _| {
+            let Term::Rigid { declaration, .. } = value else {
+                return false;
+            };
+            let slot = declaration.local - width;
+            queried.push(slot);
+            if slot % 2 == 0 && slot + 2 < width {
+                *domain == template(rigid(width + slot + 2, Sort::ComptimeValue))
+            } else {
+                *domain == p(Primitive::Bool)
+            }
+        },
+        None,
+    )
+    .unwrap();
+    let expected: Vec<_> = (0..width)
+        .filter(|slot| slot % 2 == 1 || *slot == width - 2)
+        .chain((0..width - 2).rev().filter(|slot| slot % 2 == 0))
+        .collect();
+    assert_eq!(queried, expected);
+    // Once admitted, projecting one field costs only its template and payload.
+    let body = template(rigid(0, Sort::ComptimeValue));
+    assert_eq!(
+        admitted.instantiate(&body, &mut 16).unwrap(),
+        template(arguments[0].clone())
+    );
+}
+
+#[test]
+fn checked_substitutions_charge_only_referenced_payloads_on_each_projection() {
+    use nir::program::{Expr, ExprKind, SourceRange, TypePredicate};
+    let ids = [id(1), id(2)];
+    let arguments = [Term::Tuple(vec![p(Primitive::Bool); 512]), p(Primitive::U8)];
+    let checked =
+        nir::DeclarationSubstitution::bounded(&ids, &[], &arguments, &[], &mut 2000).unwrap();
+    let expression = |ty| Expr {
+        source: SourceRange { start: 3, end: 6 },
+        ty: p(Primitive::Type),
+        kind: ExprKind::TypeValue(ty),
+    };
+    let large = expression(rigid(1, Sort::Type));
+    assert!(matches!(
+        checked.instantiate_expression_bounded(&large, &mut 32),
+        Err(nir::ExpressionInstantiationError::Copy(
+            nir::copy_budget::CopyBudgetExhausted::Steps
+        ))
+    ));
+    let small = expression(rigid(2, Sort::Type));
+    assert_eq!(
+        checked
+            .instantiate_expression_bounded(&small, &mut 32)
+            .unwrap(),
+        expression(p(Primitive::U8))
+    );
+    let repeated = TypePredicate::Equal(rigid(1, Sort::Type), rigid(1, Sort::Type));
+    assert!(matches!(
+        checked.instantiate_predicate_bounded(&repeated, &mut 800),
+        Err(nir::type_computations::Error::Budget)
+    ));
+    let projected = TypePredicate::Equal(rigid(2, Sort::Type), p(Primitive::U8));
+    assert_eq!(
+        checked
+            .instantiate_predicate_bounded(&projected, &mut 32)
+            .unwrap(),
+        TypePredicate::Equal(p(Primitive::U8), p(Primitive::U8))
+    );
+}
+
+#[test]
+fn newtype_captures_query_before_independent_own_slots_without_reordering_identity() {
+    let declaration = nir::newtypes::Newtype {
+        declaration: id(8),
+        name: "Captured".into(),
+        type_parameters: vec![id(0), id(1), id(2)],
+        parameter_types: vec![p(Primitive::Bool); 3],
+        capture_count: 1,
+        representation: p(Primitive::Bool),
+        requirements: vec![],
+        capabilities: vec![],
+    };
+    let arguments = [10, 11, 12].map(|index| rigid(index, Sort::ComptimeValue));
+    let mut seen = Vec::new();
+    let mut queries = nir::value_admission::DomainQueries {
+        declared: &mut |value, _, _| {
+            seen.push(value.clone());
+            Ok(true)
+        },
+        collection: &mut |_, _| Ok(None),
+        layout: &mut |_, _, _| unreachable!(),
+        callable: &mut |_, _, _| unreachable!(),
+        target: None,
+    };
+    let admitted = declaration
+        .admit_arguments_in_scope(&arguments, &[], &mut 1000, &mut queries)
+        .unwrap();
+    assert_eq!(
+        seen,
+        [
+            arguments[2].clone(),
+            arguments[0].clone(),
+            arguments[1].clone()
+        ]
+    );
+    for slot in 0..3 {
+        assert_eq!(
+            admitted
+                .instantiate(&rigid(slot, Sort::ComptimeValue), &mut 16)
+                .unwrap(),
+            arguments[slot as usize]
+        );
+    }
+}

@@ -203,25 +203,21 @@ impl Bindings {
             let mut domains = Vec::new();
             let mut arguments = Vec::new();
             for (parameter, domain, argument) in self.completed() {
-                nir::type_computations::charge_term(domain, remaining)?;
-                nir::type_computations::charge_term(argument, remaining)?;
                 ids.push(parameter.declaration);
-                domains.push(domain.clone());
-                arguments.push(argument.clone());
+                domains.push(domain);
+                arguments.push(argument);
             }
-            let admitted = nir::admit_declaration_arguments_with_evidence_in(
-                &ids,
-                &domains,
-                &arguments,
-                remaining,
-                |ty, variant, fuel| vm.query_normal_value_fields(ty, variant, fuel),
-                |value, domain, _| {
-                    matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue}
-                    if vm.abstract_value_parameters.get(declaration) == Some(domain))
-                },
-                vm.target,
-            )?;
-            admitted.instantiate(ty, remaining).map_err(Into::into)
+            vm.with_admission_queries(|queries| {
+                let admitted = nir::admit_projected_declaration_arguments_in_scope(
+                    &ids,
+                    &domains,
+                    &arguments,
+                    &[],
+                    remaining,
+                    queries,
+                )?;
+                admitted.instantiate(ty, remaining).map_err(Into::into)
+            })
         })();
         result.map_err(|error| match error {
             nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,

@@ -484,3 +484,20 @@ fn nominal_collectors_use_ordinary_values_in_dependent_and_type_domains() {
         &["check", "Byte"],
     );
 }
+
+#[test]
+fn dependent_nominal_domains_receive_collection_and_callable_evidence() {
+    check_both(
+        "
+        struct Entry where items: meta.List<u8>, callback: comptime fn(bool) -> bool,
+                           T, field: T, flag: bool {}
+        comptime fn items() -> meta.List<u8> { [1, 255] }
+        comptime fn keep(value: bool) -> bool { value }
+        comptime fn Domain() -> Type { Type }
+        comptime fn check() -> bool {
+            Entry<items(), keep, Domain(), bool, true> == Entry<[1, 255], keep, Type, bool, true>
+        }
+        ",
+        &["check", "items", "Domain"],
+    );
+}

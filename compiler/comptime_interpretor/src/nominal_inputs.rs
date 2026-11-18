@@ -36,10 +36,6 @@ impl<'e> Frame<'e> {
             expression, parameters, domains, specialize, locals,
         ))
     }
-    pub fn finish_parts(self) -> Option<(Vec<nir::DeclarationParameter>, Vec<Term>)> {
-        Some((self.source.parameters, self.source.completed.finish()?))
-    }
-    #[cfg(test)]
     pub fn finish(self) -> Option<Vec<Term>> {
         self.source.completed.finish()
     }

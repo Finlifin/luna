@@ -57,6 +57,10 @@ comptime fn check() -> bool {
 
 递归调用还要区分同一声明的两次绑定。设内层调用传入 `A = 外层 B`、`B = bool`、`T = u8`。一个域为 `Tuple<A, T>` 的槽只等本次调用的 A 和 T。若它们已经交付，该槽可以立即供后续实参读取，即使内层 B 尚未求值。若 T 较晚才到，VM 保存已读字段和所选分支；A、T 都就绪后，从原始标注同时代入，得到 `Tuple<外层 B, u8>`。在先前代入过的标注上再做一遍替换，会错误地把首字段改成 bool。NF 与名义构造、别名检查共用这套等待和恢复规则，各自执行声明的最终准入检查。[VM 输入帧](../compiler/comptime_interpretor/src/input_collection.rs) · [同编号绑定回归用例](../compiler/comptime_interpretor/src/input_collection/tests.rs)
 
+收到完整参数包后，NIR 用声明身份建立槽位索引。每个原始域只登记一次它引用的本次调用槽位。某个值通过接收检查后，只更新依赖这个槽位的消费者。就绪槽沿声明顺序检查，本轮已越过的位置留给下一轮。newtype 从尾部的第一个捕获槽开始，检查完成后仍按原声明顺序解释类型身份。若就绪槽耗尽而仍有未完成的依赖，才报告域依赖成环。[参数准入与调度](../compiler/nir/src/nominal_parameters/telescope.rs) · [前向依赖和捕获顺序](../compiler/nir/tests/dependent_admission.rs)
+
+例如一个名义类型的输入同时含有列表、函数和 `field: T`。若 `T` 返回 `Type`，后续域可以使用作为类型传入的 `field`。VM 按声明顺序借用先前取得的值，由当前世界提供集合元素域、函数签名、名义布局和词法绑定证据。接收方仍检查整个输入包，包括后续域未引用的实参。通过后，字段和契约复用本次替换的索引。复制预检计算模板自身及每次实际展开的载荷，同一实参出现两次就按两次展开计费。此证据的有效范围是当前接收世界和调用者作用域。[VM 接收查询](../compiler/comptime_interpretor/src/admission.rs) · [源码到两种 VM 的用例](../compiler/luna/tests/declaration_input_plans.rs)
+
 签名中的标注也需要区分两种工作。定义检查使用词法绑定身份判断标注依赖的输入，按已有参数域检查完整表达式及其分支前提。实例形成仍由原调用提供具体值。对 `u8` 参数计算 `n + 1` 时，定义检查必须看到保护加法的条件；调用时恰好得到小整数不能替定义证明算术安全。[词法依赖](../compiler/elaboration/src/program/lexical_inputs.rs) · [标注行为用例](../compiler/luna/tests/open_annotation_behavior.rs)
 
 ## 值引用与快照

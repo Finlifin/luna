@@ -128,15 +128,20 @@ impl Interpreter<'_> {
                                 &e.capabilities,
                             )
                         } else if let Some(n) = vm.newtypes.get(declaration) {
-                            if n.capture_count > n.type_parameters.len() {
-                                return Err("invalid newtype capture count".into());
-                            }
-                            (
-                                &n.type_parameters,
-                                &n.parameter_types,
-                                &n.requirements,
-                                &n.capabilities,
-                            )
+                            return vm.with_scoped_queries(&frames.parameters, |queries| {
+                                let inputs = n.admit_arguments_in_scope(
+                                    arguments,
+                                    &frames.sorts,
+                                    fuel,
+                                    queries,
+                                )?;
+                                FormationContracts::instantiate(
+                                    &inputs,
+                                    &n.requirements,
+                                    &n.capabilities,
+                                    fuel,
+                                )
+                            });
                         } else {
                             return Err("unknown nominal declaration".into());
                         };

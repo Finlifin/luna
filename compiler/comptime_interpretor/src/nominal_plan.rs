@@ -175,7 +175,6 @@ impl Contract<'_> {
         &self,
         vm: &mut Interpreter<'_>,
         expr: &Expr,
-        parameters: Vec<nir::DeclarationParameter>,
         types: Vec<Term>,
     ) -> Result<Admitted, Error> {
         let (K::NominalType { declaration, .. } | K::CheckTypeAlias { declaration, .. }) =
@@ -186,46 +185,20 @@ impl Contract<'_> {
         let domains = self.domains();
         let requirements = self.requirements();
         let capabilities = self.capabilities();
-        let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
-        let mut remaining = before;
-        let ids = parameters.iter().map(|p| p.declaration).collect::<Vec<_>>();
-        // Captured newtype binders follow their own capture-first admission
-        // order; do not replace it with the ordinary declaration telescope.
-        let valid = if let Contract::Newtype(def) = self {
-            def.validate_completed_arguments_with_collections_in(
-                &types,
-                &mut remaining,
-                |ty, variant, fuel| {
-                    vm.query_normal_value_fields(ty, variant, fuel)
-                },
-                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if vm.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| vm.admitted_collection_domain(domain, fuel), vm.target)
-        } else {
-            Ok(())
-        };
-        let valid = valid.and_then(|_| {
-            nir::admit_declaration_arguments_with_collections_in(
-                &ids,
-                domains,
-                &types,
-                &mut remaining,
-                |ty, variant, fuel| {
-                    vm.query_normal_value_fields(ty, variant, fuel)
-                },
-                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if vm.abstract_value_parameters.get(declaration)==Some(domain)),
-                |domain, fuel| vm.admitted_collection_domain(domain, fuel),
-                vm.target,
-            )
-        });
-        vm.budget.steps -= (before - remaining) as u64;
-        let admitted = valid.map_err(|error| {
-            vm.failure(
-                match error {
-                    nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
-                    nir::NominalAdmissionError::Unresolved(_) => ErrorKind::TypeContractUnresolved,
-                    nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
-                },
-                Some(expr.source),
-            )
+        let admitted = vm.query_admission(Some(expr.source), |vm, fuel| {
+            vm.with_admission_queries(|queries| {
+                let ids = match self {
+                    Contract::Alias(def) => &def.parameters,
+                    Contract::Struct(def) => &def.type_parameters,
+                    Contract::Enum(def) => &def.type_parameters,
+                    Contract::Newtype(def) => {
+                        return def.admit_arguments_in_scope(&types, &[], fuel, queries);
+                    }
+                };
+                nir::admit_declaration_arguments_with_queries_in(
+                    ids, domains, &types, fuel, queries,
+                )
+            })
         })?;
         for requirement in requirements {
             vm.tick(Some(expr.source))?;
@@ -292,16 +265,13 @@ impl Frame<'_, '_> {
                 Progress::InputsComplete => {}
                 progress => return Ok(progress),
             }
-            let (parameters, types) = self
+            let types = self
                 .inputs
                 .take()
                 .unwrap()
-                .finish_parts()
+                .finish()
                 .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.expression.source)))?;
-            match self
-                .contract
-                .finish(vm, &self.expression, parameters, types)?
-            {
+            match self.contract.finish(vm, &self.expression, types)? {
                 Admitted::Value(value) => return Ok(Progress::Complete(Flow::Value(value))),
                 Admitted::Body(body) => self.body = Some(body),
             }

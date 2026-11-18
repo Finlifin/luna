@@ -642,6 +642,24 @@ pub(crate) fn visit_expanded_term_scoped_for_copy(
     replacements: &BTreeMap<DeclarationId, &Term>,
     visit: &mut dyn FnMut(&Term, u32),
 ) -> Result<(), crate::copy_budget::CopyBudgetExhausted> {
+    visit_expansion(
+        root,
+        fuel,
+        max_depth,
+        &|id| replacements.get(&id).copied(),
+        visit,
+    )
+}
+
+/// The receiving telescope already indexes its checked arguments. Look up only
+/// replacements reached by the template, charging each actual occurrence.
+pub(crate) fn visit_expansion<'a>(
+    root: &Term,
+    fuel: &mut usize,
+    max_depth: usize,
+    replacement: &dyn Fn(DeclarationId) -> Option<&'a Term>,
+    visit: &mut dyn FnMut(&Term, u32),
+) -> Result<(), crate::copy_budget::CopyBudgetExhausted> {
     use crate::copy_budget::CopyBudgetExhausted as Limit;
     let mut work = vec![(root, 0usize, 0u32, true)];
     while let Some((term, depth, nesting, substitute)) = work.pop() {
@@ -651,7 +669,7 @@ pub(crate) fn visit_expanded_term_scoped_for_copy(
         }
         if substitute {
             if let Term::Rigid { declaration, .. } = term {
-                if let Some(replacement) = replacements.get(declaration) {
+                if let Some(replacement) = replacement(*declaration) {
                     work.push((replacement, depth, nesting, false));
                     continue;
                 }

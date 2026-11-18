@@ -164,22 +164,12 @@ impl Interpreter<'_> {
     ) -> bool {
         checks
             .admit(|fuel| {
-                nir::validate_declaration_arguments_with_collections_in(
-                    parameters,
-                    domains,
-                    arguments,
-                    fuel,
-                    |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                    |value, domain, _| {
-                        matches!(
-                            value,
-                            Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
-                                if self.abstract_value_parameters.get(declaration) == Some(domain)
-                        )
-                    },
-                    |domain, fuel| self.admitted_collection_domain(domain, fuel),
-                    self.target,
-                )
+                self.with_admission_queries(|queries| {
+                    nir::admit_declaration_arguments_with_queries_in(
+                        parameters, domains, arguments, fuel, queries,
+                    )
+                    .map(|_| ())
+                })
             })
             .is_some()
     }
@@ -382,20 +372,10 @@ impl Interpreter<'_> {
             return self.newtypes.get(declaration).is_some_and(|d| {
                 checks
                     .admit(|fuel| {
-                        d.validate_completed_arguments_with_collections_in(
-                            arguments,
-                            fuel,
-                            |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                            |value, domain, _| {
-                                matches!(
-                                    value,
-                                    Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
-                                        if self.abstract_value_parameters.get(declaration) == Some(domain)
-                                )
-                            },
-                            |domain, fuel| self.admitted_collection_domain(domain, fuel),
-                            self.target,
-                        )
+                        self.with_admission_queries(|queries| {
+                            d.admit_arguments_in_scope(arguments, &[], fuel, queries)
+                                .map(|_| ())
+                        })
                     })
                     .is_some()
                     && self.shape_nominal_capabilities(
