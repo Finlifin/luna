@@ -265,6 +265,55 @@ fn mixed_fixture() -> (n::Package, n::Expr, n::Expr, n::TypePredicate) {
 }
 
 #[test]
+fn direct_type_answers_leave_implementation_metadata_cold() {
+    use comptime_interpretor::ContractOutcome;
+    use n::TypePredicate as P;
+    let (package, _, _, _) = mixed_fixture();
+    let context = Context::from_package(&package).unwrap();
+    let queries = SourceInvocationQueries::new(&package, &context, &[]);
+    let different = P::Equal(ty(Primitive::Bool), ty(Primitive::U8));
+    let mut fuel = 100_000;
+    assert_eq!(
+        queries.check(&different, Budget::default(), &mut fuel),
+        ContractOutcome::Rejected
+    );
+    assert_eq!(
+        queries.check(&P::Not(Box::new(different)), Budget::default(), &mut fuel),
+        ContractOutcome::Satisfied
+    );
+    assert!(fuel < 100_000);
+    assert!(queries.world.borrow().is_none());
+}
+
+#[test]
+fn traits_in_restored_premises_can_decide_an_equality_goal() {
+    use comptime_interpretor::ContractOutcome;
+    let (package, _, _, implements) = mixed_fixture();
+    let context = Context::from_package(&package).unwrap();
+    let queries = SourceInvocationQueries::new(&package, &context, &[]);
+    let equality = n::TypePredicate::Equal(
+        Term::Rigid {
+            declaration: id(120),
+            sort: nir::Sort::Type,
+        },
+        ty(Primitive::Bool),
+    );
+    let mut restored = context.fork();
+    restored.assume(
+        ptc::Formula::from_predicate(&implements).implies(ptc::Formula::from_predicate(&equality)),
+    );
+    assert_eq!(
+        queries.check_in_context(&equality, &restored, Budget::default(), &mut 100_000),
+        ContractOutcome::Satisfied
+    );
+    assert!(queries.world.borrow().is_some());
+    assert_ne!(
+        queries.check(&equality, Budget::default(), &mut 100_000),
+        ContractOutcome::Satisfied
+    );
+}
+
+#[test]
 fn all_three_services_share_one_construction_regardless_of_first_demand() {
     use comptime_interpretor::ContractOutcome;
     let (package, method, access, predicate) = mixed_fixture();

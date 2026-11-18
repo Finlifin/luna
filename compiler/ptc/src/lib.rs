@@ -666,20 +666,38 @@ impl Context {
     /// Consume the supplied work allowance on every outcome, including failure.
     /// The remaining allowance can be shared with subsequent compiler work.
     pub fn prove_metered(&self, goal: Formula, budget: &mut Budget) -> Outcome {
-        let max_depth = budget.max_depth.min(256);
-        let mut steps = budget.steps;
-        let admitted = !self
-            .assumptions
-            .iter()
-            .chain(std::iter::once(&goal))
-            .any(|formula| !within_limits(formula, max_depth, &mut steps));
-        budget.steps = steps;
-        if !admitted {
+        if !self.check_input_budget(Input::Formula(&goal), budget) {
             return Outcome::Unknown {
                 reason: UnknownReason::BudgetExhausted,
                 residual: goal,
             };
         }
+        self.prove_checked_input(goal, budget)
+    }
+
+    /// Check the borrowed predicate before constructing an owned formula. If
+    /// preflight fails there is no owned residual to return or cache.
+    pub fn prove_predicate_metered(
+        &self,
+        goal: &nir::program::TypePredicate,
+        budget: &mut Budget,
+    ) -> Result<Outcome, InputBudgetExhausted> {
+        if !self.check_input_budget(Input::Predicate(goal), budget) {
+            return Err(InputBudgetExhausted);
+        }
+        Ok(self.prove_checked_input(Formula::from_predicate(goal), budget))
+    }
+
+    fn check_input_budget(&self, goal: Input<'_>, budget: &mut Budget) -> bool {
+        let limit = budget.max_depth.min(256);
+        self.assumptions
+            .iter()
+            .all(|formula| within_limits(formula, limit, &mut budget.steps))
+            && within_input_limits(goal, limit, &mut budget.steps)
+    }
+
+    fn prove_checked_input(&self, goal: Formula, budget: &mut Budget) -> Outcome {
+        let max_depth = budget.max_depth.min(256);
         let mut atoms = Vec::new();
         let mut terms = Terms::default();
         let mut formulas = (*self.assumptions).clone();
@@ -704,7 +722,7 @@ impl Context {
             formula: &residual,
             atoms: &atoms,
             terms: &terms,
-            steps,
+            steps: budget.steps,
             max_depth,
         };
         let mut assignment = vec![None; atoms.len()];
@@ -740,41 +758,33 @@ impl Context {
     }
 }
 
+/// Input exceeded the work or nesting allowance before an owned goal existed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputBudgetExhausted;
+
 // Bound input traversal before recursive validation, interning and proof search.
 enum Input<'a> {
     Formula(&'a Formula),
+    Predicate(&'a nir::program::TypePredicate),
     Term(&'a Term),
 }
 pub fn within_limits(formula: &Formula, limit: usize, fuel: &mut usize) -> bool {
     within_input_limits(Input::Formula(formula), limit, fuel)
 }
 fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool {
+    use nir::program::TypePredicate as P;
     let mut pending = vec![(input, 0usize)];
     while let Some((input, depth)) = pending.pop() {
         if depth >= limit || *fuel == 0 {
             return false;
         }
         *fuel -= 1;
-        // Hashing and copying completed value inputs must pay for their
-        // payload, not merely the one symbolic node that contains it.
-        if let Input::Term(term) = input {
-            let payload = match term {
-                Term::String(value) | Term::Symbol(value) => value.len(),
-                Term::Integer(value) => value.bit_len().div_ceil(32),
-                Term::BitVec(value) => value.words().len(),
-                _ => 0,
-            };
-            let Some(remaining) = fuel.checked_sub(payload) else {
-                return false;
-            };
-            *fuel = remaining;
-        }
         // Pending roots already require at least one step each. Check width
         // before pushing children so a tiny budget cannot allocate a huge work
         // list merely to discover exhaustion on the next iteration.
         let room = fuel.saturating_sub(pending.len());
         match input {
-            Input::Formula(Formula::Equal(Equality(a, b))) => {
+            Input::Formula(Formula::Equal(Equality(a, b))) | Input::Predicate(P::Equal(a, b)) => {
                 pending.push((Input::Term(a), depth + 1));
                 pending.push((Input::Term(b), depth + 1));
             }
@@ -796,145 +806,44 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                     pending.push((Input::Formula(item), depth + 1));
                 }
             }
-            Input::Term(term) => match term {
-                Term::ErrorResult { errors, result } => {
-                    if errors.len().saturating_add(1) > room {
-                        return false;
-                    }
-                    pending.push((Input::Term(result), depth + 1));
-                    pending.extend(errors.iter().map(|ty| (Input::Term(ty), depth + 1)));
+            Input::Predicate(P::Trait(requirement)) => {
+                if requirement.interface_arguments.len().saturating_add(1) > room {
+                    return false;
                 }
-                Term::Computation { effects, result } => {
-                    if effects.len() > *fuel {
-                        return false;
-                    }
-                    *fuel -= effects.len();
-                    let width = effects.iter().try_fold(1usize, |n, operation| {
-                        n.checked_add(operation.arguments.len())
-                    });
-                    if width.is_none_or(|n| n > fuel.saturating_sub(pending.len())) {
-                        return false;
-                    }
-                    pending.push((Input::Term(result), depth + 1));
-                    for operation in effects {
-                        pending.extend(
-                            operation
-                                .arguments
-                                .iter()
-                                .map(|t| (Input::Term(t), depth + 1)),
-                        );
-                    }
+                pending.push((Input::Term(&requirement.subject), depth + 1));
+                pending.extend(
+                    requirement
+                        .interface_arguments
+                        .iter()
+                        .map(|arg| (Input::Term(arg), depth + 1)),
+                );
+            }
+            Input::Predicate(P::Not(inner)) => pending.push((Input::Predicate(inner), depth + 1)),
+            Input::Predicate(P::And(items) | P::Or(items)) => {
+                if items.len() > room {
+                    return false;
                 }
-                Term::AssociatedType {
-                    arguments, subject, ..
-                } => {
-                    if arguments.len().saturating_add(1) > room {
-                        return false;
-                    }
-                    pending.push((Input::Term(subject), depth + 1));
-                    for argument in arguments {
-                        pending.push((Input::Term(argument), depth + 1));
-                    }
+                pending.extend(items.iter().map(|item| (Input::Predicate(item), depth + 1)));
+            }
+            Input::Term(term) => {
+                if nir::copy_budget::charge_term_payload(term, fuel).is_err() {
+                    return false;
                 }
-                Term::Optional(inner)
-                | Term::Pointer(inner)
-                | Term::ComptimeFunction(inner)
-                | Term::NormalFormFunction(inner, _)
-                | Term::UnsafeFunction(inner) => pending.push((Input::Term(inner), depth + 1)),
-                Term::OptionalValue { ty, value } => {
-                    pending.push((Input::Term(ty), depth + 1));
-                    if let Some(value) = value {
-                        pending.push((Input::Term(value), depth + 1));
-                    }
+                if term
+                    .visit_children(|child| {
+                        if pending.len() >= *fuel {
+                            return Err(());
+                        }
+                        pending.push((Input::Term(child), depth + 1));
+                        Ok(())
+                    })
+                    .is_err()
+                {
+                    return false;
                 }
-                Term::ErrorValue { ty, label, value } => {
-                    pending.push((Input::Term(ty), depth + 1));
-                    if let Some(label) = label {
-                        pending.push((Input::Term(label), depth + 1));
-                    }
-                    pending.push((Input::Term(value), depth + 1));
-                }
-                Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
-                    if fields.len().saturating_add(1) > room {
-                        return false;
-                    }
-                    pending.push((Input::Term(ty), depth + 1));
-                    pending.extend(fields.iter().map(|field| (Input::Term(field), depth + 1)));
-                }
-                Term::Record(fields) | Term::RecordValue(fields) => {
-                    if fields.len() > room {
-                        return false;
-                    }
-                    for (name, ty) in fields {
-                        let Some(remaining) = fuel.checked_sub(name.len()) else {
-                            return false;
-                        };
-                        *fuel = remaining;
-                        pending.push((Input::Term(ty), depth + 1));
-                    }
-                }
-                Term::Tuple(items)
-                | Term::ClosureContextValue(items)
-                | Term::TupleValue(items)
-                | Term::FunctionValue {
-                    arguments: items, ..
-                }
-                | Term::ClosureSnapshot {
-                    arguments: items, ..
-                }
-                | Term::Nominal {
-                    arguments: items, ..
-                }
-                | Term::NormalForm {
-                    arguments: items, ..
-                } => {
-                    if items.len() > room {
-                        return false;
-                    }
-                    for item in items {
-                        pending.push((Input::Term(item), depth + 1));
-                    }
-                }
-                Term::MethodValue(method) => {
-                    let count = 1usize
-                        .saturating_add(method.interface.arguments.len())
-                        .saturating_add(method.method_arguments.len());
-                    if count > room {
-                        return false;
-                    }
-                    pending.extend(method.terms().map(|term| (Input::Term(term), depth + 1)));
-                }
-                Term::Function { parameters, result } => {
-                    if parameters.len().saturating_add(1) > room {
-                        return false;
-                    }
-                    pending.push((Input::Term(result), depth + 1));
-                    for parameter in parameters {
-                        pending.push((Input::Term(&parameter.ty), depth + 1));
-                    }
-                }
-                Term::ContextualClosure { context, signature } => {
-                    if room < 2 {
-                        return false;
-                    }
-                    pending.push((Input::Term(context), depth + 1));
-                    pending.push((Input::Term(signature), depth + 1));
-                }
-                Term::Closure {
-                    environment,
-                    signature,
-                } => {
-                    if environment.len().saturating_add(1) > room {
-                        return false;
-                    }
-                    pending.push((Input::Term(signature), depth + 1));
-                    for item in environment {
-                        pending.push((Input::Term(item), depth + 1));
-                    }
-                }
-                _ => {}
-            },
-            _ => {}
+            }
+            Input::Predicate(P::Bool(_))
+            | Input::Formula(Formula::True | Formula::False | Formula::IntLe(_)) => {}
         }
     }
     true

@@ -629,31 +629,7 @@ pub(crate) fn visit_expanded_term_scoped_for_copy(
             }
         }
         visit(term, nesting);
-        // Scalar payloads and empty effect occurrences cost space even when
-        // they add no child term. Charge them before cloning or substitution.
-        let payload = match term {
-            Term::String(value) | Term::Symbol(value) => value.len(),
-            Term::Integer(value) => value.bit_len().div_ceil(32),
-            Term::Float(value) => value
-                .digits()
-                .len()
-                .saturating_add(value.exponent().bit_len().div_ceil(32)),
-            Term::BitVec(value) => value.words().len(),
-            Term::Record(fields) | Term::RecordValue(fields) => {
-                if fields.len() > *fuel {
-                    return Err(Limit::Steps);
-                }
-                fields
-                    .iter()
-                    .try_fold(0usize, |size, (name, _)| {
-                        size.checked_add(name.len()).filter(|size| *size <= *fuel)
-                    })
-                    .ok_or(Limit::Steps)?
-            }
-            Term::Computation { effects, .. } => effects.len(),
-            _ => 0,
-        };
-        *fuel = fuel.checked_sub(payload).ok_or(Limit::Steps)?;
+        crate::copy_budget::charge_term_payload(term, fuel)?;
         let child_nesting = nesting + u32::from(matches!(term, Term::Function { .. }));
         let mut push = |term| {
             if work.len() >= *fuel {

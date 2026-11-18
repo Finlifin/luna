@@ -17,7 +17,9 @@ mod given;
 mod propositions;
 mod qualification;
 pub use conditions::ConditionSupport;
-pub use propositions::{TraitDecision, TraitTruth, WorldProposition};
+pub use propositions::{
+    PredicateDemand, TraitDecision, TraitTruth, WorldProposition, check_predicate_with,
+};
 
 #[derive(Clone, Debug)]
 pub enum Qualification {

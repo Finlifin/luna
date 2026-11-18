@@ -115,10 +115,10 @@ impl<'a> SourceInvocationQueries<'a> {
     ) -> comptime_interpretor::ContractOutcome {
         use comptime_interpretor::ContractOutcome;
         let result = query_budget::invocation(remaining, limits, |budget| {
-            self.query(budget, |world, budget| {
-                let mut proof = world.capabilities();
-                proof.context = context;
-                proof.check_predicate_metered(predicate, budget)
+            capabilities::check_predicate_with(context, predicate, budget, |demand, budget| {
+                self.query(budget, |world, budget| {
+                    demand.resolve(&world.capabilities(), budget)
+                })
             })
         });
         match result {

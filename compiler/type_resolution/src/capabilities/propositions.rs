@@ -83,6 +83,100 @@ fn metered<T>(fuel: &mut usize, allowance: Budget, run: impl FnOnce(&mut Budget)
     result
 }
 
+/// A direct PTC answer needs an implementation world only when unresolved
+/// trait atoms in the goal or its assumptions can change that answer.
+pub fn check_predicate_with(
+    context: &Context,
+    predicate: &nir::program::TypePredicate,
+    budget: &mut Budget,
+    world: impl FnOnce(PredicateDemand<'_>, &mut Budget) -> Result<Outcome, QueryError>,
+) -> Result<Outcome, QueryError> {
+    let direct = context
+        .prove_predicate_metered(predicate, budget)
+        .map_err(|_| QueryError::Budget)?;
+    let goal = match &direct {
+        Outcome::NotEntailed(witness) => &witness.goal,
+        Outcome::Unknown {
+            reason: UnknownReason::BudgetExhausted,
+            ..
+        } => return Err(QueryError::Budget),
+        Outcome::Unknown { residual, .. } => residual,
+        Outcome::Entailed(_) | Outcome::IllFormed(_) => return Ok(direct),
+    };
+    let queries = trait_queries(context, goal, budget)?;
+    if queries.is_empty() {
+        return Ok(direct);
+    }
+    world(
+        PredicateDemand {
+            context,
+            goal,
+            queries,
+        },
+        budget,
+    )
+}
+
+/// Borrow exactly the restored context and trait queries of this proof.
+pub struct PredicateDemand<'a> {
+    context: &'a Context,
+    goal: &'a Formula,
+    queries: Vec<&'a TraitQuery>,
+}
+
+impl fmt::Display for PredicateDemand<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(predicate-demand (goal {}) (traits", self.goal)?;
+        for query in &self.queries {
+            write!(f, " {query}")?;
+        }
+        f.write_str("))")
+    }
+}
+
+impl PredicateDemand<'_> {
+    pub fn resolve(self, world: &World<'_>, budget: &mut Budget) -> Result<Outcome, QueryError> {
+        let scoped = World {
+            context: self.context,
+            ..*world
+        };
+        Ok(scoped
+            .prove_with_queries(self.goal, self.queries, budget)?
+            .outcome)
+    }
+}
+
+fn trait_queries<'a>(
+    context: &'a Context,
+    goal: &'a Formula,
+    budget: &mut Budget,
+) -> Result<Vec<&'a TraitQuery>, QueryError> {
+    let mut fuel = budget.steps;
+    for formula in context.assumptions().iter().chain(std::iter::once(goal)) {
+        if !crate::ptc::within_limits(formula, budget.max_depth.min(128), &mut fuel) {
+            budget.steps = fuel;
+            return Err(QueryError::Budget);
+        }
+    }
+    budget.steps = fuel;
+    let mut pending: Vec<_> = context
+        .assumptions()
+        .iter()
+        .chain(std::iter::once(goal))
+        .collect();
+    let mut queries = Vec::new();
+    let mut seen = HashSet::new();
+    while let Some(formula) = pending.pop() {
+        match formula {
+            Formula::Trait(query) if seen.insert(query) => queries.push(query),
+            Formula::Not(inner) => pending.push(inner),
+            Formula::And(items) | Formula::Or(items) => pending.extend(items),
+            _ => {}
+        }
+    }
+    Ok(queries)
+}
+
 impl<'w> World<'w> {
     /// Check a retained type contract without publishing world facts into the
     /// caller context. The scoped support is consumed by this check only.
@@ -101,15 +195,9 @@ impl<'w> World<'w> {
         predicate: &nir::program::TypePredicate,
         budget: &mut Budget,
     ) -> Result<Outcome, QueryError> {
-        let goal = Formula::from_predicate(predicate);
-        let direct = self.context.prove_metered(goal.clone(), budget);
-        if matches!(direct, Outcome::Entailed(_) | Outcome::IllFormed(_)) {
-            return Ok(direct);
-        }
-        Ok(self
-            .prove_proposition_metered(goal, budget)?
-            .outcome()
-            .clone())
+        check_predicate_with(self.context, predicate, budget, |demand, budget| {
+            demand.resolve(self, budget)
+        })
     }
     pub fn prove_proposition<'a>(
         &'a self,
@@ -123,35 +211,16 @@ impl<'w> World<'w> {
         goal: Formula,
         budget: &mut Budget,
     ) -> Result<WorldProposition<'a, 'w>, QueryError> {
-        let mut fuel = budget.steps;
-        for formula in self
-            .context
-            .assumptions()
-            .iter()
-            .chain(std::iter::once(&goal))
-        {
-            if !crate::ptc::within_limits(formula, budget.max_depth.min(128), &mut fuel) {
-                budget.steps = fuel;
-                return Err(QueryError::Budget);
-            }
-        }
-        budget.steps = fuel;
-        let mut pending: Vec<_> = self
-            .context
-            .assumptions()
-            .iter()
-            .chain(std::iter::once(&goal))
-            .collect();
-        let mut queries = Vec::new();
-        let mut seen = HashSet::new();
-        while let Some(formula) = pending.pop() {
-            match formula {
-                Formula::Trait(query) if seen.insert(query) => queries.push(query),
-                Formula::Not(inner) => pending.push(inner),
-                Formula::And(items) | Formula::Or(items) => pending.extend(items),
-                _ => {}
-            }
-        }
+        let queries = trait_queries(self.context, &goal, budget)?;
+        self.prove_with_queries(&goal, queries, budget)
+    }
+
+    fn prove_with_queries<'a>(
+        &'a self,
+        goal: &Formula,
+        queries: Vec<&TraitQuery>,
+        budget: &mut Budget,
+    ) -> Result<WorldProposition<'a, 'w>, QueryError> {
         // Metered queries share the remaining allowance. Fixed per-atom
         // slices stranded the unused work of cheap given assumptions while
         // the one implementation search returned Pending prematurely.
@@ -183,7 +252,7 @@ impl<'w> World<'w> {
             }
             decisions.push(decision);
         }
-        let outcome = context.prove_metered(goal, budget);
+        let outcome = context.prove_metered(goal.clone(), budget);
         // A partial implementation world cannot refute a candidate. Independent
         // positive evidence is still valid even if another query is incomplete.
         let outcome = retain_incomplete_queries(outcome, pending_reason);

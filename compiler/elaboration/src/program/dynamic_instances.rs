@@ -1,6 +1,8 @@
 //! Shared clause packets, required input invocation, and staged comptime callables.
 use super::*;
 
+mod domain_checks;
+
 /// A checked packet keeps executable producers separate from static identities.
 /// Pending inputs can be supplied during invocation only when the consumer does
 /// not publish a callable signature that still depends on those identities.
@@ -67,18 +69,15 @@ impl declaration_inputs::Completion for CallableCompletion {
     type Output = CallableClausePacket;
 
     fn finish(
-        self,
+        mut self,
         checker: &mut Checker<'_, '_>,
         _: &[(DeclarationId, Sort, Term)],
         inputs: declaration_inputs::PreparedDeclarationInputs,
         span: Span,
     ) -> Result<Self::Output, Error> {
-        let Self {
-            owner,
-            parameters,
-            domains,
-            prefix,
-        } = self;
+        let prefix = std::mem::take(&mut self.prefix);
+        let parameters = &self.parameters;
+        let domains = &self.domains;
         let prepared = inputs.into_typed(span)?;
         let prefix_count = prefix.len();
         let prefix_binders = checker.input_binders(&parameters[..prefix_count]);
@@ -87,7 +86,7 @@ impl declaration_inputs::Completion for CallableCompletion {
             .with_prefix(prefix_binders.into_iter().zip(prefix));
         let frames = checker.call_input_frames();
         let (bindings, mut formation) =
-            observations.bind(&domains, frames, &mut checker.required_steps, span)?;
+            observations.bind(domains, frames, &mut checker.required_steps, span)?;
         let mut operands = Vec::new();
         for (domain, value) in domains[..prefix_count].iter().zip(&formation.terms) {
             let ty = bindings.instantiate(domain, &mut checker.required_steps, span)?;
@@ -104,28 +103,19 @@ impl declaration_inputs::Completion for CallableCompletion {
         }
         let statements = prepared.statements;
         operands.extend(prepared.arguments);
+        let mut steps = checker.required_steps;
+        let checked =
+            self.check_domains(checker, &bindings, &formation, &operands, &mut steps, span);
+        checker.required_steps = steps;
+        checked?;
         formation.deferred.extend(
             parameters
                 .iter()
-                .zip(&domains)
+                .zip(domains)
                 .filter_map(|(id, domain)| (*domain != p(P::Type)).then_some(*id)),
         );
         let formation_deferred = !formation.deferred.is_empty();
-        checker.check_formation_application(owner, formation, span)?;
-        // Routing completion is not execution completion. Known domains are
-        // checked even in unused definitions; domains still depending on this
-        // packet's producers retain their declaration-side admission obligation.
-        // The VM, or the required-input consumer for a runtime callable, checks
-        // the completed telescope before forming a callable value.
-        for (operand, domain) in operands.iter().zip(&domains) {
-            let awaits_input = bindings.awaits_input(domain, &mut checker.required_steps, span)?;
-            let domain = bindings.instantiate(domain, &mut checker.required_steps, span)?;
-            if awaits_input {
-                checker.check_pending_callable_domain(&operand.ty, &domain, span)?;
-            } else {
-                checker.require(&operand.ty, &domain, span)?;
-            }
-        }
+        checker.check_formation_application(self.owner, formation, span)?;
         let ty = Term::Tuple(
             operands
                 .iter()
@@ -240,46 +230,6 @@ impl std::fmt::Display for InstanceCompletion<'_> {
 }
 
 impl<'a, 'arena> Checker<'a, 'arena> {
-    /// A negative proof rejects an already known conflict. Failure to prove a
-    /// conflict does not admit the value: the receiving invocation or required
-    /// input consumer must check the actual completed domain before publication.
-    fn check_pending_callable_domain(
-        &self,
-        actual: &Term,
-        expected: &Term,
-        span: Span,
-    ) -> Result<(), Error> {
-        if is_never(actual) {
-            return Ok(());
-        }
-        let (actual_view, expected_view) = self.scoped_equality_operands(actual, expected, span)?;
-        let outcome = self.context.prove(
-            crate::ptc::Formula::equal(actual_view, expected_view).negate(),
-            crate::ptc::Budget::default(),
-        );
-        match outcome {
-            crate::ptc::Outcome::Entailed(_) => Err(error(
-                span,
-                format!("type mismatch: expected {expected}, found {actual}"),
-            )),
-            crate::ptc::Outcome::NotEntailed(_)
-            | crate::ptc::Outcome::Unknown {
-                reason: crate::ptc::UnknownReason::UnvalidatedModel,
-                ..
-            } => Ok(()),
-            crate::ptc::Outcome::Unknown { reason, .. } => Err(error(
-                span,
-                format!(
-                    "pending input domain observation failed ({reason:?}): expected {expected}, found {actual}"
-                ),
-            )),
-            crate::ptc::Outcome::IllFormed(reason) => Err(error(
-                span,
-                format!("ill-formed pending input domain: {reason}"),
-            )),
-        }
-    }
-
     /// Definition-side evidence only: pending values retain declaration rigids.
     /// The invocation packet remains the authority for their actual snapshots.
     pub(super) fn comptime_instance_clause_evidence(

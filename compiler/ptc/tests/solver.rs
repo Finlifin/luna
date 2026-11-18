@@ -49,6 +49,39 @@ fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
 }
 
 #[test]
+fn borrowed_predicate_preflight_preserves_scope_and_the_owned_query_budget() {
+    use nir::program::TypePredicate as Predicate;
+    let context = Context::with_scope(vec![vec![Sort::Type]]);
+    let bound = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let predicate = Predicate::And(vec![
+        Predicate::Equal(bound.clone(), bound),
+        Predicate::Not(Box::new(Predicate::Equal(ty(P::Bool), ty(P::U8)))),
+    ]);
+    let mut owned = Budget::default();
+    let mut borrowed = owned;
+    let expected = context.prove_metered(F::from_predicate(&predicate), &mut owned);
+    let actual = context
+        .prove_predicate_metered(&predicate, &mut borrowed)
+        .unwrap();
+    assert_eq!(actual.to_string(), expected.to_string());
+    assert_eq!(owned.steps, borrowed.steps);
+    let Outcome::Entailed(proof) = actual else {
+        panic!("expected a scoped proof")
+    };
+    assert_eq!(context.verify_proof(&proof, Budget::default()), Ok(()));
+    let wide = Predicate::And(vec![predicate; 256]);
+    let mut short = Budget {
+        steps: 8,
+        ..Budget::default()
+    };
+    assert!(context.prove_predicate_metered(&wide, &mut short).is_err());
+}
+
+#[test]
 fn normal_form_callable_heads_preserve_mode_and_collector_identity() {
     let signature = |result| Term::Function {
         parameters: vec![Parameter {

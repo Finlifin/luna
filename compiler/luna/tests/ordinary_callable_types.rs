@@ -43,6 +43,79 @@ fn recursive_clause_calls_keep_caller_identities_out_of_callee_dependencies() {
 }
 
 #[test]
+fn recursive_domain_proofs_use_the_inner_invocations_pending_subjects() {
+    let source = "
+        comptime fn computed(t: Type) -> Type { t }
+        comptime fn swap(witness: U, again: bool) -> bool
+        where T, U, value: T, requires T != U
+        {
+            if again { swap<computed(U), T, witness>(value, false) } else { true }
+        }
+        comptime fn check() -> bool {
+            let byte: u8 = 3;
+            swap<bool, u8, true>(byte, true)
+        }
+    ";
+    check_both(source);
+    // The callee's computed T is u8 here. A negative proof that found no
+    // conflict during elaboration cannot admit an actual bool at invocation.
+    let invalid = source.replace("T, witness>", "T, value>");
+    let package = sysroot::compile(&invalid).unwrap();
+    let check = package
+        .functions
+        .iter()
+        .find(|f| f.name == "check")
+        .unwrap()
+        .declaration;
+    for reference in [false, true] {
+        sysroot::with_comptime(&package, Budget::default(), reference, |vm| {
+            let err = vm.invoke(check, vec![]).unwrap_err();
+            assert!(
+                matches!(
+                    err.kind,
+                    comptime_interpretor::ErrorKind::FunctionInputRejected(_)
+                ),
+                "{err:?}"
+            );
+        });
+    }
+}
+
+#[test]
+fn pending_value_indices_remain_local_in_recursive_nominal_domains() {
+    check_both(
+        "
+        struct Ticket where index: bool {}
+        comptime fn computed(value: bool) -> bool { value }
+        comptime fn swap(again: bool) -> bool
+        where a: bool, b: bool, first: Ticket<a>, second: Ticket<b>,
+              requires Ticket<a> != Ticket<b>
+        {
+            if again { swap<computed(b), a, second, first>(false) } else { true }
+        }
+        comptime fn check() -> bool {
+            swap<true, false, Ticket<true> {}, Ticket<false> {}>(true)
+        }
+    ",
+    );
+}
+
+#[test]
+fn pending_subjects_preserve_repeated_positions_and_caller_disequality() {
+    let source = "
+        struct Pair where A, B {}
+        comptime fn computed(t: Type) -> Type { t }
+        comptime fn same() -> bool where T, pair: Pair<T, T> { true }
+        comptime fn unused() -> bool where A, B, requires A != B {
+            let pair = Pair<A, B> {};
+            same<computed(A), pair>()
+        }
+    ";
+    let err = sysroot::compile(source).unwrap_err();
+    assert!(err.contains("type mismatch"), "{err}");
+}
+
+#[test]
 fn selected_parent_inputs_and_member_supplies_substitute_simultaneously() {
     let source = "
         struct Holder where Outer {
@@ -58,7 +131,10 @@ fn selected_parent_inputs_and_member_supplies_substitute_simultaneously() {
         }
     ";
     check_both(source);
-    let wrong = source.replace("recurse<bool, witness, false>", "recurse<bool, true, false>");
+    let wrong = source.replace(
+        "recurse<bool, witness, false>",
+        "recurse<bool, true, false>",
+    );
     assert!(sysroot::compile(&wrong).is_err());
 }
 

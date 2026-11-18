@@ -17,6 +17,36 @@ pub enum CopyBudgetExhausted {
     Depth,
 }
 
+/// Account for data carried by this node in addition to its structural children.
+pub fn charge_term_payload(term: &Term, fuel: &mut usize) -> Result<(), CopyBudgetExhausted> {
+    let payload = match term {
+        Term::String(value) | Term::Symbol(value) => value.len(),
+        Term::Integer(value) => value.bit_len().div_ceil(32),
+        Term::Float(value) => value
+            .digits()
+            .len()
+            .saturating_add(value.exponent().bit_len().div_ceil(32)),
+        Term::BitVec(value) => value.words().len(),
+        Term::Record(fields) | Term::RecordValue(fields) => {
+            if fields.len() > *fuel {
+                return Err(CopyBudgetExhausted::Steps);
+            }
+            fields
+                .iter()
+                .try_fold(0usize, |size, (name, _)| {
+                    size.checked_add(name.len()).filter(|size| *size <= *fuel)
+                })
+                .ok_or(CopyBudgetExhausted::Steps)?
+        }
+        Term::Computation { effects, .. } => effects.len(),
+        _ => 0,
+    };
+    *fuel = fuel
+        .checked_sub(payload)
+        .ok_or(CopyBudgetExhausted::Steps)?;
+    Ok(())
+}
+
 /// Copy an immutable term only after charging all structural edges and payloads.
 /// This does not establish scope, formation, value admission or type equality.
 /// Failure retains its reason even when some fuel remains; callers must not
