@@ -6,7 +6,7 @@ use super::*;
 mod children;
 mod region;
 mod root;
-pub(super) use root::Root;
+pub(super) use root::{Execution, Root};
 
 struct ExpressionBoundary {
     callee: Option<hir::HirId>,
@@ -113,16 +113,20 @@ impl<'h> Request<'h> {
     }
 }
 
-pub(super) enum Poll<Q, T> {
+pub(super) enum Poll<Q, T, E = std::convert::Infallible> {
+    Invoke(E),
     Continue,
     Child(Q),
     Complete(T),
 }
 
-impl<Q: std::fmt::Display, T: std::fmt::Display> std::fmt::Display for Poll<Q, T> {
+impl<Q: std::fmt::Display, T: std::fmt::Display, E: std::fmt::Display> std::fmt::Display
+    for Poll<Q, T, E>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Continue => f.write_str("(checking-progress continue)"),
+            Self::Invoke(work) => write!(f, "(checking-progress (invoke {work}))"),
             Self::Child(child) => write!(f, "(checking-progress {child})"),
             Self::Complete(value) => write!(f, "(checking-progress (completed {value}))"),
         }
@@ -643,6 +647,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         loop {
             match region.advance(self)? {
                 region::Handoff::Child(pending) => region = pending.check(self),
+                region::Handoff::Invoke(pending) => region = pending.execute(self),
                 region::Handoff::Complete(value) => return Ok(value),
             }
         }

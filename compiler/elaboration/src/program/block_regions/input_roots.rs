@@ -6,6 +6,14 @@ use driver::{Poll, Request, Root, Step};
 
 impl<'h, C: Completion> Root<'h> for preparation::Frame<'h, C> {
     type Output = C::Output;
+    type Invocation = std::convert::Infallible;
+    fn resume(
+        &mut self,
+        _: &mut Checker<'_, '_>,
+        reply: std::convert::Infallible,
+    ) -> Result<(), Error> {
+        match reply {}
+    }
 
     fn advance(
         &mut self,
@@ -61,20 +69,31 @@ impl<'h, C: Completion<Output = n::Expr>> preparation::Frame<'h, C> {
 
 impl<'b, 'h: 'b> Root<'b> for dependent_inputs::tasks::Frame<'b, 'h> {
     type Output = dependent_inputs::PreparedInputs;
+    type Invocation = required::Invocation;
+    fn resume(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        reply: required::CompletedInvocation,
+    ) -> Result<(), Error> {
+        self.accept_required(checker, reply)
+    }
 
     fn advance(
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Poll<Request<'b>, Self::Output>, Error> {
-        if let Some(returned) = returned {
+    ) -> Result<Poll<Request<'b>, Self::Output, Self::Invocation>, Error> {
+        let next = if let Some(returned) = returned {
             let CheckedBlock::Ordinary(value) = returned else {
                 unreachable!("dependent input requested an ordinary expression")
             };
-            self.accept(checker, value)?;
-        }
+            self.accept(checker, value)?
+        } else {
+            self.poll(checker)?
+        };
         use dependent_inputs::tasks::Poll as Input;
-        match self.poll(checker)? {
+        match next {
+            Input::Invoke(work) => Ok(Poll::Invoke(work)),
             Input::Continue => Ok(Poll::Continue),
             Input::Child(child) => Ok(Poll::Child(Request::Expression(
                 child.input,
@@ -86,5 +105,12 @@ impl<'b, 'h: 'b> Root<'b> for dependent_inputs::tasks::Frame<'b, 'h> {
 
     fn unwind(&mut self, checker: &mut Checker<'_, '_>) {
         self.unwind(checker)
+    }
+}
+
+impl driver::Execution for required::Invocation {
+    type Reply = required::CompletedInvocation;
+    fn execute(self, steps: &mut u64, next_identity: &mut u32) -> Result<Self::Reply, Error> {
+        self.execute(steps, next_identity)
     }
 }

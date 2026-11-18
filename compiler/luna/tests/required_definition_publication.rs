@@ -195,3 +195,23 @@ fn late_mixed_descriptions_preserve_prior_definitions_and_fresh_identities() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn required_default_publishes_the_enum_before_checking_the_next_input() {
+    assert_eq!(
+        sysroot::run(
+            "comptime fn EventType() -> Type {
+                 let draft = meta.EnumBuilder.new();
+                 draft.add_unit(.idle);
+                 draft.add_tuple(.data, [bool]);
+                 draft.Build()
+             }
+             fn select(comptime .T: Type = EventType(), value: T) -> T { value }
+             fn run() -> bool {
+                 let event = select(.data(true));
+                 event match { .idle => false, .data(flag) => flag }
+             }"
+        ),
+        Value::Bool(true)
+    );
+}

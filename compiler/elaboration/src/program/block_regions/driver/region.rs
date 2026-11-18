@@ -49,8 +49,36 @@ impl<R: std::fmt::Display> std::fmt::Display for PendingChild<'_, R> {
     }
 }
 
+/// The prepared operation leaves with its only consumer. Failure re-enters
+/// normal region recovery before any further source child can be requested.
+pub(super) struct PendingInvocation<'h, R: Root<'h>> {
+    parent: Region<'h, R>,
+    operation: R::Invocation,
+}
+
+impl<'h, R: Root<'h>> PendingInvocation<'h, R> {
+    pub(super) fn execute(mut self, checker: &mut Checker<'_, '_>) -> Region<'h, R> {
+        self.parent.returned = self
+            .operation
+            .execute(
+                &mut checker.required_steps,
+                &mut checker.next_definition_identity,
+            )
+            .and_then(|reply| self.parent.root.resume(checker, reply))
+            .map(|()| None);
+        self.parent
+    }
+}
+
+impl<'h, R: Root<'h>> std::fmt::Display for PendingInvocation<'h, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(pending-invocation {} {})", self.operation, self.parent)
+    }
+}
+
 pub(super) enum Handoff<'h, R: Root<'h>> {
     Child(PendingChild<'h, R>),
+    Invoke(PendingInvocation<'h, R>),
     Complete(R::Output),
 }
 
@@ -93,6 +121,12 @@ impl<'h, R: Root<'h>> Region<'h, R> {
                         child,
                     }));
                 }
+                Ok(Poll::Invoke(operation)) => {
+                    return Ok(Handoff::Invoke(PendingInvocation {
+                        parent: self,
+                        operation,
+                    }));
+                }
                 Ok(Poll::Complete(value)) => return Ok(Handoff::Complete(value)),
                 Err(failure) => {
                     let recovered = recover(&mut self.frames, checker, failure)
@@ -109,7 +143,7 @@ impl<'h, R: Root<'h>> Region<'h, R> {
     fn step<'a: 'h, 'arena: 'h>(
         &mut self,
         checker: &mut Checker<'a, 'arena>,
-    ) -> Result<Poll<Child<'h>, R::Output>, Error> {
+    ) -> Result<Poll<Child<'h>, R::Output, R::Invocation>, Error> {
         let returned = std::mem::replace(&mut self.returned, Ok(None))?;
         let request = if let Some(frame) = self.frames.last_mut() {
             let step = match frame {
@@ -148,6 +182,7 @@ impl<'h, R: Root<'h>> Region<'h, R> {
         } else {
             match self.root.advance(checker, returned)? {
                 Poll::Continue => return Ok(Poll::Continue),
+                Poll::Invoke(operation) => return Ok(Poll::Invoke(operation)),
                 Poll::Complete(value) => return Ok(Poll::Complete(value)),
                 Poll::Child(request) => request,
             }

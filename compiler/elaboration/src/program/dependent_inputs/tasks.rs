@@ -134,17 +134,23 @@ pub(in crate::program) struct Frame<'b, 'h> {
     phase: Phase,
 }
 
-#[derive(Clone, Copy)]
 enum Phase {
     Ready,
     Child { slot: usize, caller_staged: bool },
+    Invoking { slot: usize },
     Failed,
     Complete,
+}
+
+enum Resolution {
+    Known(n::Expr, Term),
+    Required(required::Invocation),
 }
 
 pub(in crate::program) enum Poll<'b> {
     Continue,
     Child(Request<'b>),
+    Invoke(required::Invocation),
     Complete(PreparedInputs),
 }
 
@@ -219,7 +225,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     "dependent input frame awaits its child",
                 ));
             }
-            Phase::Failed | Phase::Complete => {
+            Phase::Invoking { .. } | Phase::Failed | Phase::Complete => {
                 return Err(error(
                     self.source.span,
                     "dependent input frame is no longer active",
@@ -348,8 +354,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     )?;
                     return Ok(Poll::Continue);
                 };
-                checker.complete_type_dependency(
-                    slot,
+                let resolution = checker.resolve_type_dependency(
                     owner,
                     callee,
                     source,
@@ -358,7 +363,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     BTreeMap::new(),
                     prepared,
                 )?;
-                progress.complete(slot, source.span)?;
+                return self.resolved(slot, resolution);
             }
             Task::Default {
                 slot,
@@ -376,10 +381,10 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 value.rewrite_types(&mut |term| {
                     checker.callable_argument_term_view(term, source.span)
                 })?;
-                checker.complete_type_dependency(
-                    slot, owner, callee, source, false, value, references, prepared,
+                let resolution = checker.resolve_type_dependency(
+                    owner, callee, source, false, value, references, prepared,
                 )?;
-                progress.complete(slot, source.span)?;
+                return self.resolved(slot, resolution);
             }
         }
 
@@ -397,22 +402,56 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         value: n::Expr,
-    ) -> Result<(), Error> {
+    ) -> Result<Poll<'b>, Error> {
         let (slot, caller_staged) = self.take_child()?;
         checker.in_staged_input = caller_staged;
-        checker.complete_type_dependency(
-            slot,
+        let resolution = checker.resolve_type_dependency(
             self.owner,
             self.callee,
             self.source,
             true,
             value,
             BTreeMap::new(),
-            &mut self.prepared,
+            &self.prepared,
         )?;
+        self.resolved(slot, resolution)
+    }
+
+    fn resolved(&mut self, slot: usize, resolution: Resolution) -> Result<Poll<'b>, Error> {
+        match resolution {
+            Resolution::Known(value, identity) => {
+                self.deliver(slot, value, identity)?;
+                Ok(Poll::Continue)
+            }
+            Resolution::Required(invocation) => {
+                self.phase = Phase::Invoking { slot };
+                Ok(Poll::Invoke(invocation))
+            }
+        }
+    }
+
+    fn deliver(&mut self, slot: usize, value: n::Expr, identity: Term) -> Result<(), Error> {
         self.progress.complete(slot, self.source.span)?;
+        self.prepared.values[slot] = Some(value);
+        self.prepared.symbols[slot] = Some(identity);
         self.phase = Phase::Ready;
         Ok(())
+    }
+
+    pub(in crate::program) fn accept_required(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        reply: required::CompletedInvocation,
+    ) -> Result<(), Error> {
+        let Phase::Invoking { slot } = std::mem::replace(&mut self.phase, Phase::Failed) else {
+            return Err(error(
+                self.source.span,
+                "dependent input has no pending invocation",
+            ));
+        };
+        let (value, ty) = reply.publish(checker)?;
+        let (value, identity) = checker.freeze_completed_dependency(value, ty, self.source.span)?;
+        self.deliver(slot, value, identity)
     }
 
     /// The returned expression belongs to the active region child. Its slot
@@ -446,6 +485,7 @@ impl std::fmt::Display for Frame<'_, '_> {
                 slot,
                 caller_staged,
             } => write!(f, "(child {slot} (caller-staged {caller_staged}))")?,
+            Phase::Invoking { slot } => write!(f, "(invoking {slot})")?,
             Phase::Failed => f.write_str("failed")?,
             Phase::Complete => f.write_str("complete")?,
         }
@@ -476,21 +516,19 @@ impl std::fmt::Display for PreparedInputs {
 }
 
 impl Checker<'_, '_> {
-    fn complete_type_dependency(
+    fn resolve_type_dependency(
         &mut self,
-        slot: usize,
         owner: Option<OwnerId>,
         callee: &n::Expr,
         source: &Expr<'_>,
         has_source: bool,
         value: n::Expr,
         references: BTreeMap<n::LocalId, usize>,
-        prepared: &mut PreparedInputs,
-    ) -> Result<(), Error> {
-        let observed = if matches!(value.kind, K::TypeValue(_)) {
-            None
-        } else {
-            self.preserved_input_identity(
+        prepared: &PreparedInputs,
+    ) -> Result<Resolution, Error> {
+        let identity = match &value.kind {
+            K::TypeValue(ty) => Some(copy_evidence(ty, &mut self.required_steps, source.span)?),
+            _ => self.preserved_input_identity(
                 &value,
                 |id, fuel| {
                     let Some(slot) = references.get(&id) else {
@@ -506,106 +544,69 @@ impl Checker<'_, '_> {
                     )?)))
                 },
                 source.span,
-            )?
+            )?,
         };
-        if !matches!(value.kind, K::TypeValue(_) | K::Local(_)) {
-            let unresolved = owner
-                .and_then(|owner| self.type_parameters.get(&owner))
-                .cloned()
-                .unwrap_or_default();
-            let inputs = self.checked_declaration_inputs(&value, source.span)?;
-            if unresolved.iter().any(|id| inputs.contains(id)) {
-                // Opaque heads and other structural Type values can retain
-                // rigids without invoking a computation over unknown inputs.
-                if observed.is_none() {
-                    return Err(context_error(
-                        source.span,
-                        "dependent Type computation awaits inferred type arguments",
-                    ));
+        if let Some(identity) = identity {
+            // Observation leaves the producer and all its effects at its source position.
+            return Ok(Resolution::Known(value, identity));
+        }
+        if let K::Local(binding) = &value.kind {
+            if has_source {
+                let fact = self
+                    .input_facts
+                    .types
+                    .get(binding)
+                    .or_else(|| self.input_facts.values.get(binding).map(|(ty, _)| ty));
+                if let Some(fact) = fact {
+                    let identity = copy_evidence(fact, &mut self.required_steps, source.span)?;
+                    return Ok(Resolution::Known(value, identity));
                 }
+            }
+            // The enclosing invocation supplies the actual captured Type.
+            if let Some(declaration) = self
+                .alias_value_bindings
+                .iter()
+                .find_map(|(parameter, id)| (id == binding).then_some(*parameter))
+            {
+                return Ok(Resolution::Known(
+                    value,
+                    Term::Rigid {
+                        declaration,
+                        sort: Sort::Type,
+                    },
+                ));
+            }
+            if let Some(identity) = self.spread_input_symbol(*binding, &value.ty, source)? {
+                return Ok(Resolution::Known(value, identity));
+            }
+        } else if let Some(owner) = owner
+            && self
+                .type_parameters
+                .get(&owner)
+                .is_some_and(|ids| !ids.is_empty())
+        {
+            let inputs = self.checked_declaration_inputs(&value, source.span)?;
+            if self.type_parameters[&owner]
+                .iter()
+                .any(|id| inputs.contains(id))
+            {
+                return Err(context_error(
+                    source.span,
+                    "dependent Type computation awaits inferred type arguments",
+                ));
             }
         }
-        let (value, symbol) = if let Some(identity) = observed {
-            // Identity evidence does not complete the producer. Its writes,
-            // calls and control transfers remain at the source input slot.
-            (value, identity)
-        } else {
-            match &value.kind {
-                K::TypeValue(ty) => {
-                    let symbol = copy_evidence(ty, &mut self.required_steps, source.span)?;
-                    (value, symbol)
-                }
-                K::Local(binding) if has_source && self.input_facts.types.contains_key(binding) => {
-                    let symbol = copy_evidence(
-                        &self.input_facts.types[binding],
-                        &mut self.required_steps,
-                        source.span,
-                    )?;
-                    (value, symbol)
-                }
-                K::Local(binding)
-                    if has_source && self.input_facts.values.contains_key(binding) =>
-                {
-                    let symbol = copy_evidence(
-                        &self.input_facts.values[binding].0,
-                        &mut self.required_steps,
-                        source.span,
-                    )?;
-                    (value, symbol)
-                }
-                K::Local(binding) => {
-                    // A prepared container input is supplied by the enclosing
-                    // invocation. Its declaration identity is enough to check
-                    // the callee telescope and container premises now; retain
-                    // the Local expression so execution receives the actual
-                    // value rather than freezing this symbolic identity.
-                    let captured = self
-                        .alias_value_bindings
-                        .iter()
-                        .find_map(|(parameter, id)| (id == binding).then_some(*parameter));
-                    if let Some(declaration) = captured {
-                        (
-                            value,
-                            Term::Rigid {
-                                declaration,
-                                sort: Sort::Type,
-                            },
-                        )
-                    } else {
-                        match self.spread_input_symbol(*binding, &value.ty, source)? {
-                            Some(symbol) => (value, symbol),
-                            None => self.complete_unobserved_call_input(
-                                callee,
-                                source,
-                                value,
-                                &references,
-                                prepared,
-                            )?,
-                        }
-                    }
-                }
-                _ => self.complete_unobserved_call_input(
-                    callee,
-                    source,
-                    value,
-                    &references,
-                    prepared,
-                )?,
-            }
-        };
-        prepared.values[slot] = Some(value);
-        prepared.symbols[slot] = Some(symbol);
-        Ok(())
+        self.prepare_unobserved_call_input(callee, source, value, &references, prepared)
     }
 
-    fn complete_unobserved_call_input(
+    fn prepare_unobserved_call_input(
         &mut self,
         callee: &n::Expr,
         source: &Expr<'_>,
         value: n::Expr,
         references: &BTreeMap<n::LocalId, usize>,
         prepared: &PreparedInputs,
-    ) -> Result<(n::Expr, Term), Error> {
+    ) -> Result<Resolution, Error> {
         let callable = self.structural_type(&callee.ty, source.span)?;
         let callable = self.callable_input_view(&callable, source.span)?;
         if callable.is_comptime_callable() {
@@ -634,7 +635,14 @@ impl Checker<'_, '_> {
                 copy_evidence(symbol, &mut self.required_steps, source.span)?,
             ));
         }
-        self.freeze_dependency_input(source, value, bindings)
+        let prepared =
+            self.prepare_required_expression(source, None, Some(value), bindings, false)?;
+        Ok(Resolution::Required(self.required_invocation(
+            prepared,
+            Vec::new(),
+            source.hir_id.owner,
+            source.span,
+        )))
     }
 }
 

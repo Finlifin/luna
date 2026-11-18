@@ -471,3 +471,39 @@ fn prefix_obligations_are_checked_before_observing_the_tail() {
     .unwrap_err();
     assert!(failure.contains("not established"), "{failure}");
 }
+
+#[test]
+fn required_runtime_inputs_resume_their_own_call_and_default_slots() {
+    let declarations = "
+        comptime fn Select(flag: bool) -> Type {
+            if flag { bool } else { u8 }
+        }
+        fn choose(comptime .flag: bool = true, comptime .T: Type = Select(flag),
+                  value: T) -> T { value }
+    ";
+    let source = format!(
+        "{declarations}
+        fn run() -> bool {{
+            let a = choose(true);
+            let b = choose(255, .flag = false);
+            let c = choose(7, .T = Select(false));
+            a and b == 255 and c == 7
+        }}"
+    );
+    assert_eq!(sysroot::run(&source), Value::Bool(true));
+
+    let checked = declarations.replace("if flag", "assumes flag; if flag");
+    let failure = sysroot::compile(&format!(
+        "{checked}
+        fn run() -> u8 {{ choose(255, .flag = false) }}"
+    ))
+    .unwrap_err();
+    assert!(failure.contains("ProgramContractRejected"), "{failure}");
+
+    // Supplying T removes the failing default from this invocation.
+    let source = format!(
+        "{checked}
+        fn run() -> bool {{ choose(true, .flag = false, .T = bool) }}"
+    );
+    assert_eq!(sysroot::run(&source), Value::Bool(true));
+}

@@ -277,13 +277,17 @@ Commit、Probe、RetainCode 分别遵守各自对构造副作用的交付规则�
 
 块、分支、聚合和运算符的规则帧保存外层 HIR 节点，子表达式继续引用原有存储。
 收集参数的临时 tuple 节点可以随请求释放，路由中保存的字段须覆盖整个子检查。
-当前驱动同步执行子检查。跨 VM 等待还需要由原 invocation 保留存储、返回实际 Type，并恢复同一个检查环境。[区域交接](../compiler/elaboration/src/program/block_regions/driver/region.rs)
+驱动可以接手一个源码子检查，也可以接手一个已经准备好世界与输入的必需计算。交接对象同时持有请求和唯一能消费回复的父区域。[区域交接](../compiler/elaboration/src/program/block_regions/driver/region.rs)
 
 声明准备持有临时望远镜、准备语句与最终的执行计划。显式实参引用调用者绑定，默认供应引用选定声明和父项的绑定。处理依赖时先在原始 callee 域中找待定槽，再用已有实参一次代入，保留调用者合法的开放参数。递归调用中，实参带有和被调声明同号的参数仍可成立。域检查与复制共用预算，越界或预算耗尽会终止准备。[槽位检查](../compiler/elaboration/src/program/declaration_inputs/slots.rs) · [身份观察](../compiler/elaboration/src/program/declaration_inputs/observations.rs)
 
 收集器保留各元素的源码位置、已检查字段和非连续元素的准备语句。缺上下文的探测由发起探测的帧恢复；已知类型冲突、形成失败和预算耗尽须继续报告。失败从最内层词法帧退出，恢复默认值或 staged 输入的环境，不回滚已消费的预算，也不撤销其他已提交的存储事实。[收集规则](../compiler/elaboration/src/program/declaration_inputs/collections.rs) · [子帧分派](../compiler/elaboration/src/program/block_regions/driver/children.rs) · [恢复与交付](../compiler/elaboration/src/program/block_regions/driver/region.rs)
 
-普通参数的默认值可引用较早完成的输入。检查器保留原 Local 读取，只有再次进入本次活动路径才报告依赖环。对于 `do { mark(); U }`，即使最后的 U 能提供类型信息，也必须在调用时执行前面的 `mark()`。如果依赖检查不能静态观察其身份，普通 comptime callable 的准备仍缺执行许可；另开 required invocation 会改变副作用次序。runtime 函数局部常量的必需计算有其独立入口。[普通调用域依赖](../compiler/elaboration/src/program/dependent_inputs/tasks.rs) · [默认值用例](../compiler/luna/tests/ordinary_input_identity.rs)
+普通参数的默认值可引用较早完成的输入。检查器保留原 Local 读取，只有再次进入本次活动路径才报告依赖环。对于 `do { mark(); U }`，即使最后的 U 能提供类型信息，也必须在调用时执行前面的 `mark()`。如果依赖检查不能静态观察其身份，普通 comptime callable 仍需原调用授予执行许可。提前执行默认值会改变副作用次序。[普通调用域依赖](../compiler/elaboration/src/program/dependent_inputs/tasks.rs) · [默认值用例](../compiler/luna/tests/ordinary_input_identity.rs)
+
+对于 runtime 函数的 comptime 参数，依赖帧可以请求必需计算。例如 `fn choose(comptime .flag: bool = true, comptime .T: Type = Select(flag), value: T) -> T` 需要先知道 `T` 才能检查 `value`。检查器收集默认值实际读取的绑定，准备执行世界，然后在 `T` 槽位挂起。驱动将剩余预算和定义编号分配权交给 VM。VM 返回值、类型和新生成的定义，由原帧在调用者作用域登记这些定义，再冻结值并填入该槽位。这样当默认值用 builder 产生枚举类型时，下一个实参可以用 `.data(true)` 构造它。执行或冻结失败沿原区域退出，后继输入不会收到部分结果。显式供应 `.T` 时直接使用显式实参。[区域驱动](../compiler/elaboration/src/program/block_regions/driver/region.rs) · [必需计算与默认值](../compiler/luna/tests/ordinary_input_identity.rs)
+
+`count<.values = [byte], do { byte = 9; Byte() }>()` 还需要另一种交接。当前函数实例的子句消费者只接收已完成类型检查的表达式，检查 `[byte]` 时就失去了等待元素域的位置。这里须由原 invocation 保留读取到的 `byte`，执行后一项后交付实际 Type，再继续检查并准入先前的值。若结果签名也依赖该 Type，调用结果的消费者必须一同保留。独立的必需计算只拥有显式捕获，无法提供这个执行现场。[子句消费者](../compiler/elaboration/src/program/dynamic_instances.rs) · [原调用用例](../compiler/luna/tests/type_input_execution_order.rs)
 
 已确定签名的调用在绑定输入时借用所选签名，参数域和结果域按同一组绑定检查作用域。普通源码准备持有受检表达式、观察到的身份和待供应的默认值。开放签名求值单独持有执行产生的值，用它继续形成参数或结果类型。[输入绑定](../compiler/elaboration/src/program/dependent_inputs.rs) · [开放签名的输入](../compiler/elaboration/src/program/open_functions/inputs.rs)
 

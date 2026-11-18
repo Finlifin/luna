@@ -40,14 +40,27 @@ impl CallInputs<'_, '_> {
 
 impl<'b, 'h: 'b> Root<'b> for CallInputs<'b, 'h> {
     type Output = Inputs;
+    type Invocation = required::Invocation;
+
+    fn resume(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        reply: required::CompletedInvocation,
+    ) -> Result<(), Error> {
+        let Phase::Observe(dependencies) = &mut self.phase else {
+            unreachable!("only dependency observation requests invocation")
+        };
+        dependencies.accept_required(checker, reply)
+    }
 
     fn advance(
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Poll<Request<'b>, Inputs>, Error> {
+    ) -> Result<Poll<Request<'b>, Inputs, Self::Invocation>, Error> {
         if let Phase::Observe(dependencies) = &mut self.phase {
             let mut prepared = match dependencies.advance(checker, returned)? {
+                Poll::Invoke(work) => return Ok(Poll::Invoke(work)),
                 Poll::Continue => return Ok(Poll::Continue),
                 Poll::Child(request) => return Ok(Poll::Child(request)),
                 Poll::Complete(prepared) => prepared,

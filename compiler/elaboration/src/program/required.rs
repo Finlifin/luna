@@ -23,6 +23,73 @@ pub(super) enum RootKind {
     CallableInputs,
 }
 
+/// A prepared VM operation owns its world and live inputs. During execution
+/// it can consume fuel and fresh identities, but cannot edit the caller scope.
+pub(super) struct Invocation {
+    prepared: PreparedRequired,
+    values: Vec<(n::LocalId, Value)>,
+    package: u64,
+    span: Span,
+}
+
+pub(super) struct CompletedInvocation {
+    result: (Value, Term),
+    definitions: crate::definitions::PublishedDefinitions,
+    span: Span,
+}
+
+impl Invocation {
+    pub(super) fn execute(
+        self,
+        steps: &mut u64,
+        next_identity: &mut u32,
+    ) -> Result<CompletedInvocation, Error> {
+        let (result, definitions) = self.prepared.invoke_publishing(
+            self.values,
+            steps,
+            self.span,
+            self.package,
+            next_identity,
+        )?;
+        Ok(CompletedInvocation {
+            result,
+            definitions,
+            span: self.span,
+        })
+    }
+}
+
+impl std::fmt::Display for Invocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(required-invocation (package {}) (source {}) (live-inputs",
+            self.package,
+            source(self.span)
+        )?;
+        for (binding, _) in &self.values {
+            write!(f, " {binding}")?;
+        }
+        write!(f, ") {})", self.prepared)
+    }
+}
+
+impl CompletedInvocation {
+    /// Publish generated definitions in the receiving source world before the
+    /// returned value or type can refer to them.
+    pub(super) fn publish(self, checker: &mut Checker<'_, '_>) -> Result<(Value, Term), Error> {
+        publication::Receiver {
+            context: &mut checker.context,
+            structs: &mut checker.structs,
+            enums: &mut checker.enums,
+            newtypes: &mut checker.newtypes,
+            implementation_index: &mut checker.implementation_index,
+        }
+        .register(&self.definitions, &mut checker.required_steps, self.span)?;
+        Ok(self.result)
+    }
+}
+
 impl Checker<'_, '_> {
     // A comptime parameter may acquire a Type domain from an explicit type
     // equality in this declaration. Only already available type binders and
@@ -736,23 +803,24 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         span: Span,
     ) -> Result<(Value, Term), Error> {
-        let identity = declaration(self.package, &self.package_identities, owner).package;
-        let (result, definitions) = prepared.invoke_publishing(
+        self.required_invocation(prepared, values, owner, span)
+            .execute(&mut self.required_steps, &mut self.next_definition_identity)?
+            .publish(self)
+    }
+
+    pub(super) fn required_invocation(
+        &self,
+        prepared: PreparedRequired,
+        values: Vec<(n::LocalId, Value)>,
+        owner: OwnerId,
+        span: Span,
+    ) -> Invocation {
+        Invocation {
+            prepared,
             values,
-            &mut self.required_steps,
+            package: declaration(self.package, &self.package_identities, owner).package,
             span,
-            identity,
-            &mut self.next_definition_identity,
-        )?;
-        publication::Receiver {
-            context: &mut self.context,
-            structs: &mut self.structs,
-            enums: &mut self.enums,
-            newtypes: &mut self.newtypes,
-            implementation_index: &mut self.implementation_index,
         }
-        .register(&definitions, &mut self.required_steps, span)?;
-        Ok(result)
     }
 
     pub(super) fn prepare_required_expression(
