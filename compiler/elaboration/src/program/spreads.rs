@@ -356,9 +356,7 @@ impl Checker<'_, '_> {
                     if failure.source == source(expr.span)
                         && failure.message.ends_with("too many positional inputs")
                     {
-                        failure.message =
-                            "argument count mismatch: spread tuple widths exceed positional slots"
-                                .into();
+                        failure.message = input_routing::FailureKind::PacketTooWide.to_string();
                     }
                     failure
                 });

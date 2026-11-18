@@ -124,10 +124,9 @@ impl ClauseInputRouting {
             .map_err(|kind| Self::failure(kind, span))
     }
 
-    pub(super) fn packet_slot(&mut self, span: Span) -> Result<usize, Error> {
+    pub(super) fn packet_slots(&mut self, width: usize, span: Span) -> Result<Vec<usize>, Error> {
         self.cursor
-            .packet_slot()
-            .map(|selection| selection.parameter)
+            .packet_slots(width)
             .map_err(|kind| Self::failure(kind, span))
     }
 

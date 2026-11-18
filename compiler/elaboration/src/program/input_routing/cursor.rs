@@ -97,28 +97,37 @@ impl<Name: Clone + Eq + Hash> Cursor<Name> {
         self.anchored_suffix[self.positional]
     }
 
-    pub fn select(&mut self, input: &Input<Name>) -> Result<Selection, FailureKind> {
-        self.select_inner(input, false)
-    }
-
-    pub fn packet_slot(&mut self) -> Result<Selection, FailureKind> {
-        if let Some(slot) = self.positional_entries().next()
-            && self.entries[slot].variadic
-        {
-            return Err(if self.complete[slot] {
-                FailureKind::AppendToComplete
-            } else {
-                FailureKind::PacketTargetsCollection
-            });
+    /// A tuple supplies one packet of fixed positional fields. Check its
+    /// entire route before advancing the cursor or publishing any assignment.
+    pub fn packet_slots(&mut self, width: usize) -> Result<Vec<usize>, FailureKind> {
+        let mut slots = Vec::new();
+        for slot in self.positional_entries().take(width) {
+            if self.entries[slot].variadic {
+                return Err(if self.complete[slot] {
+                    FailureKind::AppendToComplete
+                } else {
+                    FailureKind::PacketTargetsCollection
+                });
+            }
+            if self.supplied[slot] {
+                return Err(FailureKind::Duplicate);
+            }
+            slots.push(slot);
         }
-        self.select_inner(&Input::Positional, true)
+        if slots.len() != width {
+            return Err(FailureKind::PacketTooWide);
+        }
+        if let Some(last) = slots.last() {
+            self.positional = last + 1;
+            self.remaining = self.remaining.map(|left| left.saturating_sub(width));
+            for &slot in &slots {
+                self.supplied[slot] = true;
+            }
+        }
+        Ok(slots)
     }
 
-    fn select_inner(
-        &mut self,
-        input: &Input<Name>,
-        fixed_packet: bool,
-    ) -> Result<Selection, FailureKind> {
+    pub fn select(&mut self, input: &Input<Name>) -> Result<Selection, FailureKind> {
         // Compute a candidate without advancing. A rejected field or supply
         // cannot consume the next slot of a retained packet-routing task.
         let mut next = self.positional;
@@ -161,9 +170,6 @@ impl<Name: Clone + Eq + Hash> Cursor<Name> {
                         },
                     );
                 };
-                if fixed_packet && entry.variadic {
-                    return Err(FailureKind::PacketTargetsCollection);
-                }
                 if entry.variadic && self.variadic_suffix[next + 1] != 0 {
                     return Err(FailureKind::MultipleCollections);
                 }
@@ -279,13 +285,18 @@ mod tests {
         )
         .unwrap();
         assert!(cursor.missing_required());
-        assert_eq!(cursor.packet_slot().unwrap().parameter, 0);
-        assert_eq!(cursor.packet_slot().unwrap().parameter, 1);
+        let before = cursor.to_string();
+        assert_eq!(
+            cursor.packet_slots(3),
+            Err(FailureKind::PacketTargetsCollection)
+        );
+        assert_eq!(cursor.to_string(), before);
+        assert_eq!(cursor.packet_slots(2).unwrap(), [0, 1]);
         assert!(!cursor.missing_required());
         assert!(cursor.at_collector());
         let before = cursor.to_string();
         assert_eq!(
-            cursor.packet_slot(),
+            cursor.packet_slots(1),
             Err(FailureKind::PacketTargetsCollection)
         );
         assert_eq!(cursor.to_string(), before);
@@ -386,7 +397,9 @@ mod tests {
         );
         assert_eq!(cursor.to_string(), before);
         assert_eq!(cursor.finish(), Err(FailureKind::MissingAnchored));
-        assert_eq!(cursor.packet_slot().unwrap().parameter, 1);
+        assert_eq!(cursor.packet_slots(2), Err(FailureKind::PacketTooWide));
+        assert_eq!(cursor.packet_slots(0).unwrap(), []);
+        assert_eq!(cursor.packet_slots(1).unwrap(), [1]);
         assert!(cursor.finish().is_ok());
     }
 

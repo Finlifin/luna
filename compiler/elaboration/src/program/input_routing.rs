@@ -71,6 +71,7 @@ pub(super) enum FailureKind {
     MissingAnchored,
     NeedPositionalArity,
     PacketTargetsCollection,
+    PacketTooWide,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,6 +189,7 @@ impl fmt::Display for FailureKind {
             Self::MissingImplicit => "implicit parameter requires explicit named supply; automatic supply protocol is not yet implemented",
             Self::MissingAnchored => "argument count mismatch: missing anchored parameter",
             Self::NeedPositionalArity => "input routing requires the remaining positional arity",
+            Self::PacketTooWide => "argument count mismatch: spread tuple widths exceed positional slots",
             Self::PacketTargetsCollection => "fixed input packet cannot supply collection elements",
         })
     }

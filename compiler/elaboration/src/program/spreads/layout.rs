@@ -117,7 +117,7 @@ impl Checker<'_, '_> {
         if known > types.len() {
             return Err(error(
                 span,
-                "argument count mismatch: spread tuple widths exceed positional slots",
+                input_routing::FailureKind::PacketTooWide.to_string(),
             ));
         }
         let unknown: Vec<_> = widths

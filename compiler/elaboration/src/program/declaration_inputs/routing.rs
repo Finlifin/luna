@@ -190,8 +190,8 @@ impl<'h> Frame<'h> {
                 }
                 clause_inputs::Spread::Fields(items) => {
                     environment::charge(&mut checker.required_steps, items.len(), packet.span)?;
-                    for item in items {
-                        let slot = self.routing.packet_slot(item.span)?;
+                    let slots = self.routing.packet_slots(items.len(), packet.span)?;
+                    for (item, slot) in items.iter().zip(slots) {
                         self.supply(slot, RoutedDeclarationInput::Source(item));
                     }
                     self.next += 1;
@@ -364,6 +364,8 @@ impl<'h> Frame<'h> {
         };
         let span = self.span;
         let fields = self.packet_fields(checker, &value, pending.slots.as_deref(), packet.span)?;
+        environment::charge(&mut checker.required_steps, fields.len(), packet.span)?;
+        let slots = self.routing.packet_slots(fields.len(), packet.span)?;
         let observed = checker.preserved_input_identity(
             &value,
             |id, _| Ok(self.prepared_bindings.get(&id).cloned()),
@@ -376,10 +378,8 @@ impl<'h> Frame<'h> {
             _ => None,
         };
         let before = self.order.len();
-        environment::charge(&mut checker.required_steps, fields.len(), packet.span)?;
         let mut pattern = Vec::with_capacity(fields.len());
-        for ty in fields {
-            let slot = self.routing.packet_slot(packet.span)?;
+        for (ty, slot) in fields.into_iter().zip(slots) {
             let binding = checker.spread_binding(packet.span)?;
             if let Some(known) = observed_fields.as_mut().and_then(Iterator::next) {
                 self.prepared_bindings

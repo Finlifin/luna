@@ -2524,8 +2524,8 @@ impl Checker<'_, '_> {
                                     continue;
                                 }
                                 clause_inputs::Spread::Fields(fields) => {
-                                    for field in fields {
-                                        let slot = routing.packet_slot(field.span)?;
+                                    let slots = routing.packet_slots(fields.len(), value.span)?;
+                                    for (field, slot) in fields.iter().zip(slots) {
                                         routed.push((slot, Some(field), None, field.span, false));
                                     }
                                     continue;
@@ -2551,8 +2551,8 @@ impl Checker<'_, '_> {
                                     "type argument spread requires a tuple",
                                 ));
                             };
-                            for domain in fields {
-                                let slot = routing.packet_slot(value.span)?;
+                            let slots = routing.packet_slots(fields.len(), value.span)?;
+                            for (domain, slot) in fields.into_iter().zip(slots) {
                                 routed.push((slot, None, Some(domain), value.span, false));
                             }
                         }
