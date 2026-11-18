@@ -412,7 +412,8 @@ impl PreparedRequired {
                 .with_newtype_builder(&build_newtype);
         }
         let value = interpreter.with_code_session(code.session(), |vm| {
-            vm.invoke_with_prepared_arguments(entry, inputs)
+            vm.start_prepared_invocation(entry, inputs)?
+                .run_to_completion()
         });
         *steps = interpreter.remaining_steps();
         let value=value.map_err(|e| {

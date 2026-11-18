@@ -20,8 +20,8 @@ pub(super) struct Prepared<'a> {
         Arc<HashMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>>,
     pub(super) associated_values: associated_catalog::Catalog<'a>,
     pub(super) associated_initializers: associated_catalog::Catalog<'a>,
-    pub(super) functions: declaration_index::Functions<'a>,
-    pub(super) runtime_function_identities: declaration_index::RuntimeIdentities<'a>,
+    pub(super) functions: nir::callable_source::Callables<'a>,
+
     pub(super) structs: layout_catalog::Catalog<generated_structs::StructDefinition<'a>>,
     pub(super) enums: layout_catalog::Catalog<generated_enums::EnumDefinition<'a>>,
 }
@@ -110,16 +110,10 @@ impl<'a> Interpreter<'a> {
                 package,
                 index.initializers.clone(),
             ),
-            functions: declaration_index::Functions::new(
-                &package.functions,
-                Some(index.functions.clone()),
-                |item| item.declaration,
-            )?,
-            runtime_function_identities: declaration_index::RuntimeIdentities::new(
-                &package.runtime_function_identities,
-                Some(index.runtime_identities.clone()),
-                |item| item.declaration,
-            )?,
+            functions: index.phase_inspection.callables_for(package).ok_or(Error {
+                kind: ErrorKind::InvalidCallPlan,
+                source: None,
+            })?,
             structs: layout_catalog::Catalog::from_base(index.structs.clone()),
             enums: layout_catalog::Catalog::from_base(index.enums.clone()),
         };
@@ -146,7 +140,7 @@ impl<'a> Interpreter<'a> {
             associated_values,
             associated_initializers,
             functions,
-            runtime_function_identities,
+
             structs,
             enums,
         } = prepared;
@@ -220,7 +214,6 @@ impl<'a> Interpreter<'a> {
             instances: Default::default(),
             iir_callables: Default::default(),
             functions,
-            runtime_function_identities,
             graph_indexes: None,
             normal_forms: declaration_index::NormalForms::new(
                 &package.normal_forms,

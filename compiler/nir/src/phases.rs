@@ -34,7 +34,7 @@ pub enum ErrorKind {
 }
 
 impl Error {
-    fn invalid(source: SourceRange, message: &'static str) -> Self {
+    pub(crate) fn invalid(source: SourceRange, message: &'static str) -> Self {
         Self {
             kind: ErrorKind::Invalid,
             source,
@@ -42,7 +42,7 @@ impl Error {
         }
     }
 
-    fn budget(source: SourceRange, message: &'static str) -> Self {
+    pub(crate) fn budget(source: SourceRange, message: &'static str) -> Self {
         Self {
             kind: ErrorKind::Budget,
             source,
@@ -115,6 +115,7 @@ pub fn validate_comptime_expression(
 struct PhaseContext<'a> {
     package: &'a Package,
     declarations: &'a declarations::Declarations,
+    callables: crate::callable_source::Callables<'a>,
     storage_queries: storage_cache::StorageQueries<'a>,
 }
 impl<'a> PhaseContext<'a> {
@@ -122,6 +123,7 @@ impl<'a> PhaseContext<'a> {
         Self {
             package,
             declarations,
+            callables: declarations.callables.bind(package),
             storage_queries: storage_cache::StorageQueries::with_declarations(
                 package,
                 declarations,
@@ -182,15 +184,13 @@ impl<'a> PhaseContext<'a> {
         let Self {
             package,
             declarations,
+            callables,
             storage_queries,
         } = self;
         let declarations::Declarations {
             parameter_domains,
             trait_index,
-            functions,
-            parameter_frames,
-            quote_ids,
-            staged_quote_ids,
+            ..
         } = *declarations;
         let ct = function.phase != Phase::Runtime;
         if !ct {
@@ -504,16 +504,15 @@ impl<'a> PhaseContext<'a> {
                         | K::FunctionInstance {
                             declaration: id, ..
                         } => {
-                            if quote_ids.contains(id) {
+                            if callables.quote(id).is_some() {
                                 if !_callee {
                                     return Err(error(
                                         "quote template cannot escape as a runtime function value",
                                     ));
                                 }
-                                if !function
-                                    .declaration
-                                    .is_some_and(|declaration| quote_ids.contains(&declaration))
-                                    && !staged_quote_ids.contains(id)
+                                if !function.declaration.is_some_and(|declaration| {
+                                    callables.quote(&declaration).is_some()
+                                }) && !callables.staged_quote(id)
                                 {
                                     return Err(error(
                                         "quote application requires deterministic expansion before runtime execution",
@@ -548,8 +547,8 @@ impl<'a> PhaseContext<'a> {
                                 }
                                 continue;
                             }
-                            let target = functions
-                                .get(id)
+                            let target = callables
+                                .phase(id)
                                 .ok_or_else(|| error("function phase declaration is missing"))?;
                             if expr.ty.is_unsafe_callable() != target.2 {
                                 return Err(error(
@@ -766,9 +765,9 @@ impl<'a> PhaseContext<'a> {
                                     | K::Function(id)
                                     | K::FunctionInstance {
                                         declaration: id, ..
-                                    } => parameter_frames
-                                        .get(id)
-                                        .map(|frame| frame.parameters(package)),
+                                    } => callables
+                                        .method_definition(id)
+                                        .map(|frame| frame.parameters.as_slice()),
                                     _ => None,
                                 };
                                 if target
@@ -1195,9 +1194,8 @@ impl<'a> PhaseContext<'a> {
                             let member = trait_index
                                 .retained_method(package, *declaration, inspection_fuel)
                                 .map_err(|failure| Error::member(expr.source, failure))?;
-                            let trait_target;
                             let target = if let Some(member) = member {
-                                trait_target = (
+                                (
                                     if member.signature.is_comptime_callable() {
                                         Phase::Comptime
                                     } else {
@@ -1205,11 +1203,10 @@ impl<'a> PhaseContext<'a> {
                                     },
                                     !member.program.preconditions.is_empty(),
                                     member.is_unsafe,
-                                );
-                                &trait_target
+                                )
                             } else {
-                                functions
-                                    .get(declaration)
+                                callables
+                                    .phase(declaration)
                                     .ok_or_else(|| error("function phase declaration is missing"))?
                             };
                             if !ct || target.0 != Phase::Comptime || !expr.ty.is_comptime_callable()

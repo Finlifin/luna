@@ -31,6 +31,7 @@ pub mod normal_forms;
 mod display;
 pub use display::QuotedDisplay;
 
+pub mod callable_source;
 pub mod contracts;
 
 pub mod associated_initializers;

@@ -172,7 +172,7 @@ impl Interpreter<'_> {
             return Ok(Some(Cow::Owned(head.callable_type_in(fuel)?)));
         }
         let (parameters, signature, qualifiers) =
-            if let Some(identity) = self.runtime_function_identities.get(&declaration) {
+            if let Some(identity) = self.functions.runtime_identity(&declaration) {
                 (&identity.type_parameters, &identity.signature, None)
             } else {
                 let Some(function) = self.functions.interface(&declaration) else {

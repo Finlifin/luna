@@ -107,27 +107,26 @@ impl Interpreter<'_> {
                 Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
             ) =>
             {
-                let source =
-                    if let Some(identity) = self.runtime_function_identities.get(declaration) {
-                        if ty.is_comptime_callable() || identity.signature.is_comptime_callable() {
-                            return Err(self.failure(ErrorKind::Type, None));
-                        }
-                        SourceRange { start: 0, end: 0 }
-                    } else {
-                        let view = self
-                            .functions
-                            .declaration(declaration)
-                            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                        let function = view.interface;
-                        if function.phase == nir::program::FunctionPhase::NormalForm
-                            || (function.phase == nir::program::FunctionPhase::Comptime)
-                                != ty.is_comptime_callable()
-                            || function.is_unsafe != ty.is_unsafe_callable()
-                        {
-                            return Err(self.failure(ErrorKind::Type, None));
-                        }
-                        view.source
-                    };
+                let source = if let Some(identity) = self.functions.runtime_identity(declaration) {
+                    if ty.is_comptime_callable() || identity.signature.is_comptime_callable() {
+                        return Err(self.failure(ErrorKind::Type, None));
+                    }
+                    SourceRange { start: 0, end: 0 }
+                } else {
+                    let view = self
+                        .functions
+                        .declaration(declaration)
+                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                    let function = view.interface;
+                    if function.phase == nir::program::FunctionPhase::NormalForm
+                        || (function.phase == nir::program::FunctionPhase::Comptime)
+                            != ty.is_comptime_callable()
+                        || function.is_unsafe != ty.is_unsafe_callable()
+                    {
+                        return Err(self.failure(ErrorKind::Type, None));
+                    }
+                    view.source
+                };
                 for argument in arguments {
                     let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
                     let before = fuel;

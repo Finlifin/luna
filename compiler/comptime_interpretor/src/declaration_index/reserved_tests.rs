@@ -107,18 +107,16 @@ fn source() -> Arc<Package> {
 #[test]
 fn source_declaration_views_preserve_provenance_without_dumping_code() {
     let mut package = (*source()).clone();
-    let function = &mut package.quote_templates[0];
+    package.functions = std::mem::take(&mut package.quote_templates);
+    let function = &mut package.functions[0];
     function.interface.name = "quoted\"name\n".into();
     function.body.source = SourceRange { start: 17, end: 29 };
     let id = function.declaration;
-    let functions = Functions::new(&package.quote_templates, None, |function| {
-        function.declaration
-    })
-    .unwrap();
+    let functions = nir::callable_source::Callables::new(&package, &mut 1000).unwrap();
     let view = functions.declaration(&id).unwrap();
     assert!(std::ptr::eq(
         view.interface,
-        &package.quote_templates[0].interface
+        &package.functions[0].interface
     ));
     assert_eq!(view.source, SourceRange { start: 17, end: 29 });
     assert!(std::ptr::eq(
@@ -127,7 +125,7 @@ fn source_declaration_views_preserve_provenance_without_dumping_code() {
     ));
     assert!(std::ptr::eq(
         functions.body(&id).unwrap(),
-        &package.quote_templates[0].body
+        &package.functions[0].body
     ));
     let dump = view.to_string();
     assert!(

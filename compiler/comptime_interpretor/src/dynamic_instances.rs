@@ -45,7 +45,7 @@ impl Interpreter<'_> {
             };
         }
 
-        if let Some(identity) = self.runtime_function_identities.get(&declaration) {
+        if let Some(identity) = self.functions.runtime_identity(&declaration) {
             // Transport-only metadata is published after producer-side
             // formation checks. It cannot authorize a runtime invocation.
             return self.admit_function_inputs(&identity.type_parameters, arguments, source);

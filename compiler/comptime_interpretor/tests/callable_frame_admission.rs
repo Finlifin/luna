@@ -69,7 +69,7 @@ fn reject(package: &Package) {
     let inspection = nir::phases::Inspection::new(package);
     assert!(inspection.check_package(&mut 100_000).is_err());
     assert!(
-        !inspection.admitted_callable_frames(package),
+        inspection.callables_for(package).is_none(),
         "failed input admission published a reusable directory fact"
     );
 }
@@ -209,4 +209,14 @@ fn frame_registration_budget_is_independent_of_body_size_and_retry_is_fresh() {
         cost,
         "input frame admission traversed an executable body"
     );
+}
+
+#[test]
+fn a_source_identity_cannot_denote_two_different_function_bodies() {
+    let mut package = package();
+    let mut other = function();
+    other.interface.name = "other".into();
+    other.body = local(0);
+    package.functions.push(other);
+    reject(&package);
 }

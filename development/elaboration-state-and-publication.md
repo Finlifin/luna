@@ -942,11 +942,11 @@ S-expression Display，完整函数的既有 dump 结构保持不变。
 
 phase 声明目录与 VM 冷构造共用此入口，覆盖普通函数、quote template 和没有主体
 的 trait 方法接口。VM 原独立的方法绑定计数／去重检查已删除；原先未经 phase
-凭据的直接 VM 构造没有统一检查普通函数帧，现在在发布 VM 前拒绝错误帧。只有
-同一不可变 source owner 已完成的 phase 目录或 SourceIndexes 可以省略重复准入；
-VM 通过 `Inspection::admitted_callable_frames` 单独查询该事实，不把参数域表本身
-当作准入凭据。查询不发起准备，错误帧／未完成目录不发布事实，别的 source 即使
-内容相同也不能复用；完整目录仍不能证明一个不合法主体可执行。
+凭据的直接 VM 构造没有统一检查普通函数帧，现在在发布 VM 前拒绝错误帧。
+`Inspection::callables_for` 将已完成的身份目录绑定到同一个不可变 Package。
+phase 检查、VM 和 CodeSession 通过它区分可执行函数、quote 模板和仅有身份的
+runtime 函数。声明观察读取接口和来源，执行另行取得主体。冻结世界的目录可以
+复用；原始 VM 构造从自己的 Package 建立目录，重复身份在发布前产生诊断。
 预算失败与无效绑定分别报告；默认表达式分析错误保留默认值自身的位置。
 
 这只证明输入帧的结构和默认绑定可见性。默认值的类型、result／entry snapshot
@@ -1261,7 +1261,7 @@ adapter 的成功当作部分包拥有完整 phase 凭证。完整包和代码�
 | `required.rs::required_function` | known callable signature，然后同步 `check_source_function` | 签名待决由父检查区域保存；尚未准入的 callee 不能建立 activation 来计算自己的参数域 |
 | `required.rs` 的 `check_package_with_evidence` 与 `validate_machine_operations_checked` | 整包 phase 完成证据及独立的算术安全检查 | 完整根保留现有快路径；源码片段交付须带与实际片段、binder 和世界匹配的检查证据 |
 | `RequiredWorld::with_phase`／`CodeSession::with_phase_checked_source` | 对同一个不可变 Package 的整包凭证 | 不把部分目录升级为 PhaseCheckedPackage；源码服务和活动任务使用独立 owner，不伪造完整包 |
-| `declaration_index::Functions` | `Declarations<Function>` | 声明观察与代码取得分别查询；未知身份、已知合法模板及可执行代码是不同状态 |
+| `nir::callable_source::Callables` | 与源包绑定的不可变身份目录 | 声明观察与代码取得分别查询；待完成源码的独立发布仍需接线 |
 | `prepare_invocation` | 通过 FunctionDeclarationView 读取接口及来源；底层适配器仍依赖完整 Function | 源码服务须直接发布声明来源；消费端已不接收主体，但尚未解除目录的完整代码要求 |
 | `prepare_invocation_step` 的 Entry → Body | 同步取得、特化和重绑定完整主体 | 入口契约成功后在原 activation 等待代码，响应不得再次 bind inputs、运行入口契约或建立新调用 |
 
@@ -2059,3 +2059,11 @@ A 处已有的合法执行与证据来源；任何缓存复用必须携带对应
 重点拒绝：旧 ticket 命中新 task、budget Unknown 自动重排队、candidate 的负查找跨
 universe 复用、stale receipt 触发用户回调、整实例失败后仍交付机器码。
 这些为后续验收要求，本轮没有运行这些测试，也未声称当前代码已经满足新协议。
+
+
+### 所需类型计算的执行入口
+
+`PreparedRequired` 在参数齐备后经 `start_prepared_invocation` 交付它们。源码
+VM 与 CLI 使用相同的 invocation 驱动处理关联项、方法选择和定义构造请求。
+每个响应交回原 activation；作用域恢复在取得完成值之后执行。返回类型计算仍要求
+源根已经完成，`refines { Itself :- Display } Any` 的值表示与逐实参准入尚待实现。

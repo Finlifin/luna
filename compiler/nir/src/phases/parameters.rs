@@ -55,29 +55,6 @@ pub(super) fn domains(
     Ok(domains)
 }
 
-pub(super) fn validate_frame<'a>(
-    function: crate::contracts::CallableProgram<'a>,
-    quote: bool,
-    fuel: &mut usize,
-) -> Result<&'a [crate::Parameter], Failure> {
-    function.validate_input_frame(fuel).map_err(|failure| {
-        let diagnostic = super::Error {
-            kind: if failure.is_budget() {
-                super::ErrorKind::Budget
-            } else {
-                super::ErrorKind::Invalid
-            },
-            source: failure.source,
-            message: failure.message(quote),
-        };
-        if failure.is_budget() {
-            Failure::Budget(diagnostic)
-        } else {
-            Failure::Invalid(diagnostic)
-        }
-    })
-}
-
 /// Per-callable inspection data. It borrows the original telescope and owns
 /// only the sort frame and immutable snapshot-binding membership evidence.
 pub(super) struct InspectionFrame<'a> {
@@ -357,6 +334,8 @@ mod tests {
 
     #[test]
     fn frame_indices_defaults_and_signatures_share_the_callers_budget() {
+        use crate::callable_source::validate_frame;
+        use crate::phases::{Error, ErrorKind};
         let value = function(10);
         let mut generous = 1000;
         validate_frame(
@@ -381,7 +360,10 @@ mod tests {
                 true,
                 &mut fuel
             ),
-            Err(Failure::Budget(_))
+            Err(Error {
+                kind: ErrorKind::Budget,
+                ..
+            })
         ));
         let mut fuel = cost - 1;
         let failure = validate_frame(
@@ -390,8 +372,8 @@ mod tests {
             &mut fuel,
         )
         .unwrap_err();
-        assert!(matches!(failure, Failure::Budget(_)));
-        assert_eq!(failure.into_diagnostic().source, value.defaults[0].1.source);
+        assert!(matches!(failure.kind, ErrorKind::Budget));
+        assert_eq!(failure.source, value.defaults[0].1.source);
         assert_eq!(fuel, 0);
         validate_frame(
             crate::contracts::CallableProgram::declaration(&value.interface, value.body.source),
@@ -419,7 +401,10 @@ mod tests {
                     quote,
                     &mut 1000
                 ),
-                Err(Failure::Invalid(_))
+                Err(Error {
+                    kind: ErrorKind::Invalid,
+                    ..
+                })
             ));
         }
     }

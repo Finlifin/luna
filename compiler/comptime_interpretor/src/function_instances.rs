@@ -111,7 +111,7 @@ impl Interpreter<'_> {
             .map(|argument| self.selected_type_view(argument, Some(source)))
             .collect::<Result<Vec<_>, _>>()?;
         let arguments = observed_arguments.as_slice();
-        if let Some(identity) = self.runtime_function_identities.get(&declaration) {
+        if let Some(identity) = self.functions.runtime_identity(&declaration) {
             self.admit_function_inputs(&identity.type_parameters, arguments, source)?;
             let binders = self.input_binders(&identity.type_parameters);
             self.charge_copy_work(Some(source), |fuel| {

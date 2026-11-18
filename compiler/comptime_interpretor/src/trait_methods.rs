@@ -327,7 +327,7 @@ impl Interpreter<'_> {
         } = method;
         let (body, mut arguments) = binding.clone();
         arguments.extend(method_arguments.iter().cloned());
-        if let Some(identity) = self.runtime_function_identities.get(&body) {
+        if let Some(identity) = self.functions.runtime_identity(&body) {
             self.admit_function_inputs(&identity.type_parameters, &arguments, source)?;
             let signature = identity
                 .signature
@@ -435,7 +435,7 @@ impl Interpreter<'_> {
                 self.with_native_depth(|vm| {
                     if instantiate {
                         vm.function_instance_value(declaration, &arguments, &ty, source)
-                    } else if vm.runtime_function_identities.contains_key(&declaration) {
+                    } else if vm.functions.runtime_identity(&declaration).is_some() {
                         Ok(Value::FunctionInstance {
                             declaration,
                             arguments: vec![],

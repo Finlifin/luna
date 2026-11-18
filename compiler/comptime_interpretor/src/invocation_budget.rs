@@ -136,46 +136,6 @@ pub(super) fn validate_opaque_metadata(
     })
 }
 
-/// Admit ordinary input frames using declarations only. A phase directory for
-/// this exact source already contains these facts; a raw VM constructor must
-/// establish them before publishing any callable or execution state.
-pub(super) fn validate_callable_frames(
-    package: &Package,
-    budget: &mut Budget,
-) -> Result<(), Error> {
-    use nir::contracts::CallableProgram;
-    let before = usize::try_from(budget.steps).unwrap_or(usize::MAX);
-    let mut fuel = before;
-    let result = (|| {
-        for function in package.functions.iter().chain(&package.quote_templates) {
-            CallableProgram::declaration(&function.interface, function.body.source)
-                .validate_input_frame(&mut fuel)?;
-        }
-        for method in package
-            .traits
-            .iter()
-            .flat_map(|interface| &interface.methods)
-        {
-            let view =
-                CallableProgram::method(method).map_err(|_| nir::contracts::InputFrameError {
-                    source: nir::program::SourceRange { start: 0, end: 0 },
-                    kind: nir::contracts::InputFrameErrorKind::Signature,
-                })?;
-            view.validate_input_frame(&mut fuel)?;
-        }
-        Ok::<_, nir::contracts::InputFrameError>(())
-    })();
-    budget.steps -= (before - fuel) as u64;
-    result.map_err(|failure| Error {
-        kind: if failure.is_budget() {
-            ErrorKind::StepsExhausted
-        } else {
-            ErrorKind::InvalidCallPlan
-        },
-        source: Some(failure.source),
-    })
-}
-
 struct Scope<'program, 'budget> {
     interpreter: Interpreter<'program>,
     budget: &'budget mut Budget,

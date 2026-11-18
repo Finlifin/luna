@@ -189,6 +189,34 @@ impl<'world> Interpreter<'world> {
 }
 
 impl<'world> InvocationSession<'_, 'world> {
+    /// Complete a fresh invocation using the semantic services of its source
+    /// world. Each request owns its allowance until the response is admitted.
+    pub fn run_to_completion(mut self) -> Result<Value, Error> {
+        loop {
+            match self.poll()? {
+                InvocationProgress::Complete(value) => return Ok(value),
+                InvocationProgress::Running => {}
+                InvocationProgress::Associated(request) => self
+                    .resume(request.prepare())
+                    .map_err(|rejected| rejected.error().clone())?,
+                InvocationProgress::Definition(request) => self
+                    .resume_definition(request.prepare())
+                    .map_err(|rejected| rejected.error().clone())?,
+                InvocationProgress::Method(request) => self
+                    .resume_method(request.prepare())
+                    .map_err(|rejected| rejected.error().clone())?,
+                // An outstanding request taken by an earlier external poll
+                // cannot be serviced here. Its owner must deliver it first.
+                InvocationProgress::Waiting => {
+                    return Err(Error {
+                        kind: ErrorKind::InvalidControlFlow,
+                        source: None,
+                    });
+                }
+            }
+        }
+    }
+
     /// Advance one driver transition. Waiting does not spend steps or call the
     /// host. Running may include synchronous services or tree execution; this
     /// boundary does not promise a wall-clock slice or preemption.

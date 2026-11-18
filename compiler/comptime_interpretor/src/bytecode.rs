@@ -2473,7 +2473,7 @@ impl<'a> Interpreter<'a> {
                         Kind::Function(id) if self.graph.is_some() => {
                             self.iir_function_value(*id, &[], &value.ty, source)?
                         }
-                        Kind::Function(id) if self.runtime_function_identities.contains_key(id) => {
+                        Kind::Function(id) if self.functions.runtime_identity(id).is_some() => {
                             Value::FunctionInstance {
                                 declaration: *id,
                                 arguments: vec![],

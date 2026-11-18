@@ -262,8 +262,6 @@ impl<'program> Interpreter<'program> {
                 method_origins: self.method_origins.clone(),
                 parameter_domains: self.declaration_parameter_domains.clone(),
                 parameter_sorts: self.declaration_parameter_sorts.clone(),
-                functions: self.functions.positions.clone(),
-                runtime_identities: self.runtime_function_identities.positions.clone(),
                 effects: self.effect_declarations.positions.clone(),
                 traits: self.trait_declarations.positions.clone(),
             }));
@@ -673,8 +671,7 @@ mod tests {
         let mut budget = Budget::default();
         let mut first =
             Interpreter::for_comptime_in_session(&source, &mut session, &mut budget).unwrap();
-        let index = first.functions.positions.clone();
-        let identities = first.runtime_function_identities.positions.clone();
+        let index = first.functions.clone();
         let effects = first.effect_declarations.positions.clone();
         let heads = first.normal_forms.positions.clone();
         let newtypes = first.newtypes.source.positions.clone();
@@ -688,11 +685,7 @@ mod tests {
         let mut next_budget = Budget::default();
         let next =
             Interpreter::for_comptime_in_session(&source, &mut session, &mut next_budget).unwrap();
-        assert!(Arc::ptr_eq(&index, &next.functions.positions));
-        assert!(Arc::ptr_eq(
-            &identities,
-            &next.runtime_function_identities.positions
-        ));
+        assert!(index.shares_directory(&next.functions));
         assert!(Arc::ptr_eq(&effects, &next.effect_declarations.positions));
         assert!(Arc::ptr_eq(&domains, &next.declaration_parameter_domains));
         assert!(Arc::ptr_eq(&sorts, &next.declaration_parameter_sorts));
@@ -718,7 +711,7 @@ mod tests {
         assert!(next.events().is_empty());
         assert!(next.effect_state.environment.is_empty());
         assert!(std::ptr::eq(
-            next.runtime_function_identities.get(&identity).unwrap(),
+            next.functions.runtime_identity(&identity).unwrap(),
             &source.runtime_function_identities[0]
         ));
         assert!(std::ptr::eq(
@@ -755,10 +748,17 @@ mod tests {
                 .kind,
             ErrorKind::StepsExhausted
         );
-        assert!(Arc::ptr_eq(
-            &index,
-            &session.indexes.get().unwrap().functions
-        ));
+        assert!(
+            index.shares_directory(
+                &session
+                    .indexes
+                    .get()
+                    .unwrap()
+                    .phase_inspection
+                    .callables_for(&source)
+                    .unwrap()
+            )
+        );
     }
     #[test]
     fn layout_catalog_publication_exhaustion_leaves_session_unpublished() {

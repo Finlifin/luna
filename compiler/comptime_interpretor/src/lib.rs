@@ -1050,8 +1050,8 @@ pub struct Interpreter<'a> {
     // Source specializations retain code, while IIR handles carry VM-local identity.
     instances: function_instances::Instances<Expr>,
     iir_callables: function_instances::Instances<Closure>,
-    functions: declaration_index::Functions<'a>,
-    runtime_function_identities: declaration_index::RuntimeIdentities<'a>,
+    functions: nir::callable_source::Callables<'a>,
+
     graph_indexes: Option<Arc<iir_execution::GraphIndexes>>,
     normal_forms: declaration_index::NormalForms<'a>,
     structs: layout_catalog::Catalog<generated_structs::StructDefinition<'a>>,
@@ -1135,50 +1135,26 @@ impl<'a> Interpreter<'a> {
         // or permission to skip body, scope or method admission.
         let admitted_domains =
             inspection.and_then(|inspection| inspection.admitted_parameter_domains(package));
-        let functions = declaration_index::Functions::new(
-            &package.functions,
-            positions.as_ref().map(|index| index.functions.clone()),
-            |definition| definition.declaration,
-        )?;
-        let runtime_function_identities = declaration_index::RuntimeIdentities::new(
-            &package.runtime_function_identities,
-            positions
-                .as_ref()
-                .map(|index| index.runtime_identities.clone()),
-            |identity| identity.declaration,
-        )?;
-        for identity in &package.runtime_function_identities {
-            if !matches!(
-                identity.signature.callable_signature(),
-                Term::Function { .. }
-            ) || identity.signature.is_comptime_callable()
-                || functions.contains_key(&identity.declaration)
-            {
-                return Err(Error {
-                    kind: ErrorKind::InvalidCallPlan,
-                    source: None,
-                });
+        let directory = inspection
+            .or_else(|| positions.as_ref().map(|index| &index.phase_inspection))
+            .and_then(|inspection| inspection.callables_for(package));
+        let functions = match directory {
+            Some(directory) => directory,
+            None => {
+                let before = usize::try_from(budget.steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let result = nir::callable_source::Callables::new(package, &mut fuel);
+                budget.steps -= (before - fuel) as u64;
+                result.map_err(|failure| Error {
+                    kind: if failure.kind == nir::phases::ErrorKind::Budget {
+                        ErrorKind::StepsExhausted
+                    } else {
+                        ErrorKind::InvalidCallPlan
+                    },
+                    source: Some(failure.source),
+                })?
             }
-        }
-        // Quote templates supply declaration contracts, never executable VM
-        // bodies. Keep this lookup private to source shape admission.
-        let quote_templates =
-            declaration_index::Declarations::new(&package.quote_templates, None, |template| {
-                template.declaration
-            })?;
-        for template in &package.quote_templates {
-            if template.phase != nir::program::FunctionPhase::Runtime
-                || functions.contains_key(&template.declaration)
-                || runtime_function_identities.contains_key(&template.declaration)
-            {
-                return Err(Error {
-                    kind: ErrorKind::InvalidCallPlan,
-                    source: None,
-                });
-            }
-        }
-        let method_definition =
-            |id: &DeclarationId| functions.get(id).or_else(|| quote_templates.get(id));
+        };
         let effect_declarations = declaration_index::Effects::new(
             &package.effects,
             positions.as_ref().map(|index| index.effects.clone()),
@@ -1246,11 +1222,6 @@ impl<'a> Interpreter<'a> {
         if positions.is_none() && admitted_domains.is_none() {
             invocation_budget::validate_opaque_metadata(package, &mut budget)?;
         }
-        if positions.is_none()
-            && !inspection.is_some_and(|inspection| inspection.admitted_callable_frames(package))
-        {
-            invocation_budget::validate_callable_frames(package, &mut budget)?;
-        }
         let completed_tuple_heads = package
             .normal_forms
             .iter()
@@ -1276,9 +1247,9 @@ impl<'a> Interpreter<'a> {
                     return Err(invalid());
                 }
                 if member.default.is_some_and(|body| {
-                    (method_definition(&body).is_none()
-                        && !runtime_function_identities.contains_key(&body))
-                        || member.is_quote != quote_templates.contains_key(&body)
+                    (functions.method_definition(&body).is_none()
+                        && functions.runtime_identity(&body).is_none())
+                        || member.is_quote != functions.quote(&body).is_some()
                 }) {
                     return Err(invalid());
                 }
@@ -1417,8 +1388,8 @@ impl<'a> Interpreter<'a> {
             let mut supplied = BTreeMap::new();
             for (name, body) in &implementation.methods {
                 if supplied.insert(name, body).is_some()
-                    || (method_definition(body).is_none()
-                        && !runtime_function_identities.contains_key(body))
+                    || (functions.method_definition(body).is_none()
+                        && functions.runtime_identity(body).is_none())
                 {
                     return Err(invalid());
                 }
@@ -1431,20 +1402,21 @@ impl<'a> Interpreter<'a> {
                     continue;
                 }
                 let body = **supplied.get(&member.name).ok_or_else(invalid)?;
-                if member.is_quote != quote_templates.contains_key(&body) {
+                if member.is_quote != functions.quote(&body).is_some() {
                     return Err(invalid());
                 }
-                let (phase, type_parameters) = if let Some(function) = method_definition(&body) {
-                    (function.phase, &function.type_parameters)
-                } else {
-                    (
-                        nir::program::FunctionPhase::Runtime,
-                        &runtime_function_identities
-                            .get(&body)
-                            .expect("checked runtime identity")
-                            .type_parameters,
-                    )
-                };
+                let (phase, type_parameters) =
+                    if let Some(function) = functions.method_definition(&body) {
+                        (function.phase, &function.type_parameters)
+                    } else {
+                        (
+                            nir::program::FunctionPhase::Runtime,
+                            &functions
+                                .runtime_identity(&body)
+                                .expect("checked runtime identity")
+                                .type_parameters,
+                        )
+                    };
                 if phase == nir::program::FunctionPhase::NormalForm
                     || (phase == nir::program::FunctionPhase::Comptime)
                         != member.signature.is_comptime_callable()
@@ -1785,10 +1757,10 @@ impl<'a> Interpreter<'a> {
                 {
                     return Err(invalid());
                 }
-                if member.is_quote || quote_templates.contains_key(&method.body) {
+                if member.is_quote || functions.quote(&method.body).is_some() {
                     return Err(invalid());
                 }
-                let ty = if let Some(function) = functions.get(&method.body) {
+                let ty = if let Some(function) = functions.interface(&method.body) {
                     function
                         .signature
                         .instantiate_parameters(
@@ -1800,7 +1772,7 @@ impl<'a> Interpreter<'a> {
                             function.phase == nir::program::FunctionPhase::Comptime,
                         )
                         .with_unsafe_call_requirement(function.is_unsafe)
-                } else if let Some(identity) = runtime_function_identities.get(&method.body) {
+                } else if let Some(identity) = functions.runtime_identity(&method.body) {
                     identity
                         .signature
                         .instantiate_parameters(
@@ -1993,7 +1965,6 @@ impl<'a> Interpreter<'a> {
                 associated_values,
                 associated_initializers,
                 functions,
-                runtime_function_identities,
                 structs,
                 enums,
             },
@@ -3263,7 +3234,7 @@ impl<'a> Interpreter<'a> {
         let result = match &expr.kind {
             K::Unit => Value::Unit,
             K::Local(id) => self.local_value(environment, *id, Some(expr.source))?,
-            K::Function(id) if self.runtime_function_identities.contains_key(id) => {
+            K::Function(id) if self.functions.runtime_identity(id).is_some() => {
                 Value::FunctionInstance {
                     declaration: *id,
                     arguments: vec![],

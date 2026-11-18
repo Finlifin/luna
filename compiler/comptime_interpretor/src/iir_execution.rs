@@ -167,7 +167,7 @@ impl<'a> Interpreter<'a> {
             effect_declarations: Default::default(),
             effect_state: super::effects::State::default(),
             effect_values: None,
-            runtime_function_identities: Default::default(),
+
             graph: Some(graph),
             target: graph.target,
             cleanup_schedule: None,
