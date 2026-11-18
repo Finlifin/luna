@@ -17,13 +17,9 @@ impl Checker<'_, '_> {
         let identity = declaration(self.package, &self.package_identities, canonical);
         self.required_steps = self
             .required_steps
-            .checked_sub(self.generated_functions.len() as u64 + 1)
+            .checked_sub(1)
             .ok_or_else(|| error(span, "compiler operation function budget exhausted"))?;
-        if !self
-            .generated_functions
-            .iter()
-            .any(|function| function.declaration == identity)
-        {
+        if self.generated_functions.body(identity).is_none() {
             let Term::Function { parameters, result } = ty.callable_signature() else {
                 unreachable!()
             };
@@ -53,7 +49,7 @@ impl Checker<'_, '_> {
             };
             nir::copy_budget::charge_expression(&body, &mut self.required_steps)
                 .map_err(|_| error(span, "compiler operation body budget exhausted"))?;
-            self.generated_functions.push(n::Function {
+            self.generated_functions.publish(n::Function {
                 interface: nir::program::FunctionDeclaration {
                     declaration: identity,
                     name: format!("<compiler-operation.{}>", name.as_str()),

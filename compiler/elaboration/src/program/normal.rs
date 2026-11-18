@@ -386,7 +386,7 @@ impl Checker<'_, '_> {
                     domains,
                 })
             })
-            .chain(self.generated_function_parameters.values().cloned())
+            .chain(self.generated_functions.parameter_declarations().cloned())
             .collect()
     }
 

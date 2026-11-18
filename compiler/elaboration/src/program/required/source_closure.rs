@@ -120,11 +120,7 @@ impl Checker<'_, '_> {
                 }
                 Dependency::Definition(id) => id,
             };
-            if let Some(function) = self
-                .generated_functions
-                .iter()
-                .find(|function| function.declaration == id)
-            {
+            if let Some(function) = self.generated_functions.body(id) {
                 if function.phase == n::FunctionPhase::Runtime {
                     if !function.preconditions.is_empty() && !has_staged_inputs(&function.signature)
                     {

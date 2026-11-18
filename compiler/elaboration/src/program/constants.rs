@@ -793,15 +793,8 @@ impl Checker<'_, '_> {
                 span,
                 type_scope.clone(),
             )?;
-            let serial = self.next_open_instance;
-            self.next_open_instance = serial
-                .checked_add(1)
-                .ok_or_else(|| error(span, "closure snapshot instance limit exceeded"))?;
-            let factory = DeclarationId {
-                package: u64::MAX - 1,
-                local: serial,
-            };
-            self.generated_functions.push(n::Function {
+            let factory = self.generated_functions.fresh_identity(span)?;
+            self.generated_functions.publish(n::Function {
                 interface: nir::program::FunctionDeclaration {
                     declaration: factory,
                     name: "<closure-snapshot>".into(),

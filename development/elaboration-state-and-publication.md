@@ -2091,3 +2091,23 @@ Checker 在检查实现之前建立按身份查询的 trait 契约目录。同�
 `Forward<Byte>` 交给同一个 `value: defer choose()`，两个调用分别得到
 `bool` 和 `u8`。格式化演示尚未通过，`host-println.fl` 的双字段调用在
 现有单参数库签名处报 `too many positional inputs`。
+
+### 开放签名片段的可调用声明
+
+检查带 `defer` 域的定义时，片段需要解析其中引用的函数。以
+`measure(comptime flag: bool, value: defer Pick(flag), comptime .length: fn(Symbol) -> u64 = size)`
+为例，若 `size` 绑定了一个编译器操作，检查器已为这个可调用值生成普通函数体。
+片段按实际引用纳入这份定义及它的依赖。若调用的是只有签名可用的 runtime
+源码函数，则纳入它的签名。保留的 trait 方法前置、后置条件也参与依赖收集。
+先前这两条收集路径独立遍历，会为 `size` 的同一身份同时发布函数体和签名，
+导致合法的调用在 phase 检查时报重复身份。
+
+开放函数实例在检查主体前预留身份，递归调用由同一个键取得该身份。
+主体和参数目录分别按发布与预留顺序保存，按身份查找主体。嵌套实例化失败时，
+检查器只撤销本次尝试创建的预留、参数目录和主体。外层失败也会撤销已成功的
+内层工作。已发出的数字身份不再分配给下次尝试。
+
+源码回归覆盖默认生成回调、显式替换回调和两种实际参数域，见
+`compiler/luna/tests/compiler_operation_bindings.rs`。片段仍需事先完成根表达式，
+并复制名义类型及 trait 元数据。格式串扫描后的 Type 描述和各字段的具体准入
+仍是 `std.fmt.Parse` 的独立依赖。

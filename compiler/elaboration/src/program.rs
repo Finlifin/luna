@@ -16,6 +16,7 @@ mod extended;
 mod function_bodies;
 mod function_templates;
 mod function_types;
+mod generated_functions;
 mod inline_control;
 mod inline_loops;
 pub mod inlining;
@@ -436,11 +437,8 @@ fn elaborate_with_attributes(
         signatures: BTreeMap::new(),
         open_functions: BTreeMap::new(),
         active_open_definitions: BTreeSet::new(),
-        open_instances: std::collections::HashMap::new(),
-        next_open_instance: 0,
         open_instantiation_depth: 0,
-        generated_functions: Vec::new(),
-        generated_function_parameters: BTreeMap::new(),
+        generated_functions: Default::default(),
         ordinary_behavior_functions: Vec::new(),
         checking_open_behavior: false,
         checking_default_behavior: false,
@@ -1363,7 +1361,9 @@ fn elaborate_candidate<'a, 'h>(
         }
     }
     output.function_parameters = checker.function_parameter_metadata();
-    output.functions.append(&mut checker.generated_functions);
+    output
+        .functions
+        .extend(std::mem::take(&mut checker.generated_functions).into_bodies());
     output.alias_contracts = checker.alias_contracts.values().cloned().collect();
     output.expansion_sources = std::mem::take(&mut checker.expansion_sources);
     crate::verification::contracts::inherit(&mut output, &mut checker.next_temporary_binding)
@@ -1530,12 +1530,8 @@ struct Checker<'a, 'h> {
     signatures: BTreeMap<OwnerId, Term>,
     open_functions: BTreeMap<OwnerId, open_functions::Definition>,
     active_open_definitions: BTreeSet<OwnerId>,
-    open_instances:
-        std::collections::HashMap<(OwnerId, Vec<Term>, Vec<Option<Term>>, Term), DeclarationId>,
-    next_open_instance: u32,
     open_instantiation_depth: usize,
-    generated_functions: Vec<n::Function>,
-    generated_function_parameters: BTreeMap<DeclarationId, nir::function_parameters::Declaration>,
+    generated_functions: generated_functions::GeneratedFunctions,
     ordinary_behavior_functions: Vec<n::Function>,
     checking_open_behavior: bool,
     checking_default_behavior: bool,

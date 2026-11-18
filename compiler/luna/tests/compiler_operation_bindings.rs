@@ -1020,3 +1020,29 @@ fn integer_conversion_signatures_retain_phase_domain_and_alias_identity() {
         );
     }
 }
+
+#[test]
+fn open_parameter_fragments_retain_generated_callbacks_once() {
+    let package = compile(
+        "typealias Symbol = .Symbol'builtin;
+        typealias u8 = .u8'builtin;
+        typealias u64 = .u64'builtin;
+        const size: fn(Symbol) -> u64 = .symbol_byte_length'builtin;
+        comptime fn Pick(flag: bool) -> Type { if flag { bool } else { u8 } }
+        fn measure(comptime flag: bool, value: defer Pick(flag),
+                   comptime .length: fn(Symbol) -> u64 = size) -> u64 {
+            length(.abc)
+        }
+        fn alternative(value: Symbol) -> u64 { 7 }
+        fn run() -> bool {
+            measure(true, true) == 3 and measure(false, 9, .length = alternative) == 7
+        }",
+    )
+    .unwrap();
+    let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}

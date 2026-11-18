@@ -243,17 +243,22 @@ impl Checker<'_, '_> {
             } if !matches!(&callee.kind, K::FunctionInstance { arguments, .. } if !arguments.is_empty()) =>
             {
                 *fuel = fuel
-                    .checked_sub(
-                        self.generated_functions.len() + self.ordinary_behavior_functions.len(),
-                    )
+                    .checked_sub(1)
                     .ok_or("partial callable lookup budget exhausted")?;
-                let Some(function) = self
-                    .generated_functions
-                    .iter()
-                    .chain(&self.ordinary_behavior_functions)
-                    .find(|function| function.declaration == *id)
-                else {
-                    return Ok(None);
+                let function = if let Some(function) = self.generated_functions.body(*id) {
+                    function
+                } else {
+                    *fuel = fuel
+                        .checked_sub(self.ordinary_behavior_functions.len())
+                        .ok_or("partial callable lookup budget exhausted")?;
+                    let Some(function) = self
+                        .ordinary_behavior_functions
+                        .iter()
+                        .find(|function| function.declaration == *id)
+                    else {
+                        return Ok(None);
+                    };
+                    function
                 };
                 if function.phase != n::FunctionPhase::Comptime
                     || !function.type_parameters.is_empty()
