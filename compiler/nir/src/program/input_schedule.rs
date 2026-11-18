@@ -167,6 +167,9 @@ impl ExprKind {
         match self {
             Self::NormalFormType {
                 arguments, plan, ..
+            }
+            | Self::ApplyNormalForm {
+                arguments, plan, ..
             } => Some((arguments, InputSchedule::normal(plan.as_ref()))),
             Self::NominalType {
                 arguments,

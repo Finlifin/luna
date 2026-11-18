@@ -69,7 +69,7 @@ typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
 | `nir/types.rs::Parameter` | 仅有 sort 与 ty | 不能把这份 telescope 当成完整调用接口 |
 | `nir/program/function.rs` | FunctionDeclaration 独立持有受检声明字段，Function 组合声明与 body；`callable_type` 仍只合成 telescope 及阶段／责任修饰 | 所有权已拆开；公开供应协议及源码模板发布仍须迁移，不能把受检声明结构当成协议传送完成 |
 | `elaboration/program/input_routing` | 入口描述、完整值预留、源码实参位置已共用 | 当前 Entry 是路由投影，不包含默认提供者、协议证据及世界依赖，不能直接当完整发布格式 |
-| `elaboration/program/normal/dynamic_inputs.rs` | 动态 NF 的位置输入已进入共同准备器；callee 先保存，固定包、收集和依赖域沿同一计划检查 | 接入实际公开接口，而非从所选主体补名字；待定域仍须交回原执行区域 |
+| `elaboration/program/normal/dynamic_inputs.rs` | 动态 NF 的位置输入已进入共同准备器；callee 先保存，固定包、收集和依赖域沿同一计划检查 | 接入具名槽位及默认供应的公开接口 |
 | `comptime_interpretor/callable_domains.rs` | 从接收世界取得声明／方法的签名，且不执行源码 | 返回的准入依据须包含相应公开接口；缺失与预算失败继续分开 |
 | `nir/value_admission.rs`、VM `value_types.rs` | callable 准入比较签名／关联类型视图 | 不能只证明 telescope 相容，就接受缺少供应协议的值 |
 | `luna/build_context/metadata/wire.rs` | tag 35 只传 NF 签名与可选 collector 索引 | 不能让新接口通过旧格式静默丢掉入口、默认值或协议依赖 |
@@ -124,18 +124,18 @@ typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
 键回查源码声明域并默认成 Type。普通源码、名义类型和动态调用共同使用这一域
 替换边界，默认代码连接也沿同一规则进行。
 
-结果使用既有 CallPreparation 与 Call：先保存 callee，再按原始计划取得显式
-输入，最后交付完整参数。选择函数和可变 callee 读取不会被推迟到实参之后；
-提前返回保留此前副作用并跳过后继。NF 头与形成契约仍交给既有调用／VM 路径，
-不执行头的函数体。没有为 Tuple、List 或特定实参拼写增加入口规则。
+动态位置调用保留为 NIR 的 `apply-normal-form`。callee 在原调用环境中先求值
+一次。其公开位置签名给出本次输入的域和依赖，实际选择的声明给出形成契约
+及最终 NF 头。两种执行器都按照源顺序推进输入计划。字节码先将 callee 存入
+寄存器，再将计划所需的自由绑定交给输入帧。
 
-**具名动态供应、完整公开接口传送与待定 Type 恢复仍未实现。** 若计算得到的
-固定包中含 Type，而后面的字面量需要该 Type 才能检查，Typed 消费者仍不能
-恢复等待；`dynamic_normal_inputs_wait_for_a_type_inside_a_computed_packet` 保存
-这个尚未实现的正例并明确 ignored，不将其拒绝写成语义要求。已形成域的计算包、
-可静态观察 Type 的包以及列表展开另有执行验证，不能据此宣称所有动态输入完成。
-接口身份的未决关系与已确认的按槽位适配继续分开，不能用本次迁移替作者决定
-Type 相等，也不能从所选函数主体补回已经丢失的公开名字。
+例如 `factory<...prefix(), 1, 255>` 的固定包可以到执行时才产生 `u8`。
+帧在这个域下检查两个文字并构造收集值。操作数中的提前退出仍回到原调用，
+选中声明的函数体不参与类型构造。
+
+具名动态供应和完整公开接口传送仍待实现。按槽位适配后，调用点的名字与
+默认供应由目标接口提供。普通函数列表实参等待后续 Type 的恢复进度另见
+[审查回复](audit-reply.md)。
 
 当前 NF 元数据和 VM 形成服务仍只交付 Type 结果；动态准备入口对非 Type 结果
 保留明确的未实现诊断。这是当前实现范围，不是语言要求所有范式头只能返回 Type；

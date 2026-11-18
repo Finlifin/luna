@@ -392,7 +392,29 @@ impl Walker<'_> {
     ) -> Result<Value, Reason> {
         let result = Value::default();
         match &expr.kind {
-            K::NormalFormType { .. } | K::NominalType { .. } | K::CheckTypeAlias { .. } => {
+            K::ApplyNormalForm { .. }
+            | K::NormalFormType { .. }
+            | K::NominalType { .. }
+            | K::CheckTypeAlias { .. } => {
+                let public = if let K::ApplyNormalForm {
+                    callee, input_ids, ..
+                } = &expr.kind
+                {
+                    self.child(callee, state, depth)?;
+                    if !state.facts.is_reachable() {
+                        return Ok(result);
+                    }
+                    Some(
+                        nir::normal_forms::open_inputs(
+                            &callee.ty,
+                            input_ids,
+                            &mut self.limits.arithmetic.steps,
+                        )
+                        .map_err(declaration_failure)?,
+                    )
+                } else {
+                    None
+                };
                 let (arguments, schedule) = expr.kind.declaration_inputs().unwrap();
                 self.limits.step(arguments.len())?;
                 let schedule = schedule
@@ -416,9 +438,15 @@ impl Walker<'_> {
                             self.child(expr, state, depth)?;
                         }
                         nir::program::InputStep::Supply(slot) => {
-                            let domain = metadata
-                                .and_then(|head| head.parameters.get(slot))
-                                .map(|p| &p.ty);
+                            let domain = public
+                                .as_ref()
+                                .and_then(|inputs| inputs.get(slot))
+                                .map(|(_, _, ty)| ty)
+                                .or_else(|| {
+                                    metadata
+                                        .and_then(|head| head.parameters.get(slot))
+                                        .map(|p| &p.ty)
+                                });
                             let (value, ty) =
                                 self.normal_input_value(&arguments[slot], domain, state, depth)?;
                             if let Some(binding) = schedule.binding(slot)

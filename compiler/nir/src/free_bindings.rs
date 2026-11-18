@@ -74,6 +74,64 @@ fn read(
 pub fn collect(expr: &Expr, fuel: &mut usize) -> Result<Scope, Error> {
     collect_with_dependencies(expr, &Dependencies::new(), fuel)
 }
+/// Environment needed after the callee has been evaluated into its own register.
+pub fn collect_input_plan(expr: &Expr, fuel: &mut usize) -> Result<Scope, Error> {
+    let mut free = Scope::new();
+    scan_inputs(
+        expr,
+        &Scope::new(),
+        &mut free,
+        fuel,
+        0,
+        &Dependencies::new(),
+    )?;
+    Ok(free)
+}
+
+fn scan_inputs(
+    node: &Expr,
+    scope: &Scope,
+    free: &mut Scope,
+    fuel: &mut usize,
+    depth: usize,
+    dependencies: &Dependencies,
+) -> Result<(), Error> {
+    let (arguments, schedule) = node
+        .kind
+        .declaration_inputs()
+        .ok_or(Error::Invalid("expected declaration input plan"))?;
+    charge(fuel, arguments.len())?;
+    let schedule = schedule
+        .check(arguments.len(), |n| charge(fuel, n))?
+        .ok_or(Error::Invalid("invalid declaration input plan"))?;
+    let mut inner = fork(scope, fuel)?;
+    for step in schedule.steps() {
+        match step {
+            crate::program::InputStep::Prepare(expr) => {
+                statement(expr, &mut inner, free, fuel, depth + 1, dependencies)?;
+            }
+            crate::program::InputStep::Supply(slot) => {
+                normal(
+                    &arguments[slot],
+                    &inner,
+                    free,
+                    fuel,
+                    depth + 1,
+                    dependencies,
+                )?;
+                inner.extend(schedule.binding(slot));
+            }
+        }
+    }
+    if let K::CheckTypeAlias {
+        body: Some(body), ..
+    } = &node.kind
+    {
+        scan(body, &inner, free, fuel, depth + 1, dependencies)?;
+    }
+    Ok(())
+}
+
 /// Runtime dependencies of pattern observations, excluding lexical binders.
 pub fn collect_pattern(pattern: &P, fuel: &mut usize) -> Result<Scope, Error> {
     let mut free = Scope::new();
@@ -223,37 +281,14 @@ fn scan(
                 }
                 return Ok(false);
             }
-            K::NominalType { .. } | K::CheckTypeAlias { .. } | K::NormalFormType { .. } => {
-                let (arguments, schedule) = node.kind.declaration_inputs().unwrap();
-                charge(fuel, arguments.len())?;
-                let schedule = schedule
-                    .check(arguments.len(), |n| charge(fuel, n))?
-                    .ok_or(Error::Invalid("invalid declaration input plan"))?;
-                let mut inner = fork(scope, fuel)?;
-                for step in schedule.steps() {
-                    match step {
-                        crate::program::InputStep::Prepare(expr) => {
-                            statement(expr, &mut inner, free, fuel, depth + 1, dependencies)?;
-                        }
-                        crate::program::InputStep::Supply(slot) => {
-                            normal(
-                                &arguments[slot],
-                                &inner,
-                                free,
-                                fuel,
-                                depth + 1,
-                                dependencies,
-                            )?;
-                            inner.extend(schedule.binding(slot));
-                        }
-                    }
+            K::NominalType { .. }
+            | K::CheckTypeAlias { .. }
+            | K::NormalFormType { .. }
+            | K::ApplyNormalForm { .. } => {
+                if let K::ApplyNormalForm { callee, .. } = &node.kind {
+                    scan(callee, scope, free, fuel, depth + 1, dependencies)?;
                 }
-                if let K::CheckTypeAlias {
-                    body: Some(body), ..
-                } = &node.kind
-                {
-                    scan(body, &inner, free, fuel, depth + 1, dependencies)?;
-                }
+                scan_inputs(node, scope, free, fuel, depth, dependencies)?;
                 return Ok(false);
             }
             K::EffectHandle {

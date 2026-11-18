@@ -3170,7 +3170,9 @@ impl<'a> Interpreter<'a> {
             }
             K::StagedValue(_) => Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source))),
             K::ComptimeValue(..) | K::TypeValue(..) => self.eval_type_value(expr, environment),
-            K::NormalFormType { .. } => self.eval_normal_form_type(expr, environment),
+            K::NormalFormType { .. } | K::ApplyNormalForm { .. } => {
+                self.eval_normal_form_type(expr, environment)
+            }
             K::FunctionType { .. } | K::FunctionResultType { .. } => {
                 self.eval_type_constructor(expr, environment)
             }

@@ -44,73 +44,35 @@ impl Checker<'_, '_> {
                 "non-Type normal-form results are not implemented",
             ));
         }
-        let parameters = self.open_normal_input_telescope(parameters, expr.span)?;
-        let operands = self
-            .planned_positional_inputs(inputs, expr.span, parameters, *collector)?
-            .operands;
-        let diverges = operands.expressions().any(|value| is_never(&value.ty));
-        let ty = if diverges { p(P::Never) } else { p(P::Type) };
+        let ids = self.normal_input_ids(parameters.len(), expr.span)?;
+        let parameters = nominal_fields::metered(&mut self.required_steps, |fuel| {
+            nir::normal_forms::open_inputs(&callee.ty, &ids, fuel)
+        })
+        .map_err(|failure| error(expr.span, failure.to_string()))?;
+        let inputs = self.planned_positional_inputs(inputs, expr.span, parameters, *collector)?;
+        let ty = if inputs.diverges() {
+            p(P::Never)
+        } else {
+            p(P::Type)
+        };
         if let Some(expected) = expected {
             self.require_expression(&ty, expected, expr.span)?;
         }
-        // Retain the callee before any input producer. Even a selected function
-        // value may come from an effectful invocation or a mutable storage read.
-        let binding = self.spread_binding(expr.span)?;
-        let callee_type = self.copy_alias_type(&callee.ty, expr.span)?;
-        let anchor = n::SourceRange {
-            start: expr.span.lo().0,
-            end: expr.span.lo().0,
-        };
-        let mut statements = Vec::with_capacity(operands.statements.len() + 1);
-        statements.push(n::Expr {
-            source: anchor,
-            ty: p(P::Void),
-            kind: K::Let {
-                binding,
-                value: Box::new(callee),
-            },
-        });
-        statements.extend(operands.statements);
-        let call = n::Expr {
-            source: source(expr.span),
-            ty: p(P::Type),
-            kind: K::Call {
-                callee: Box::new(n::Expr {
-                    source: anchor,
-                    ty: callee_type,
-                    kind: K::Local(binding),
-                }),
-                arguments: operands
-                    .arguments
-                    .into_iter()
-                    .enumerate()
-                    .map(|(parameter, value)| n::CallArgument {
-                        passing: Default::default(),
-                        parameter,
-                        value,
-                        is_default: false,
-                    })
-                    .collect(),
-                parameter_bindings: Vec::new(),
-            },
-        };
         Ok(n::Expr {
             source: source(expr.span),
             ty,
-            kind: K::CallPreparation {
-                statements,
-                result: Some(Box::new(call)),
+            kind: K::ApplyNormalForm {
+                callee: std::sync::Arc::new(callee),
+                input_ids: ids,
+                arguments: inputs.arguments,
+                plan: Some(inputs.plan),
             },
         })
     }
 
     /// Open only this invocation's binder frame. Fresh rigid slots are private
     /// dependency keys; completed argument expressions retain caller identities.
-    fn open_normal_input_telescope(
-        &mut self,
-        parameters: &[Parameter],
-        span: Span,
-    ) -> Result<Vec<(DeclarationId, Sort, Term)>, Error> {
+    fn normal_input_ids(&mut self, count: usize, span: Span) -> Result<Vec<DeclarationId>, Error> {
         if self
             .package_identities
             .values()
@@ -121,33 +83,13 @@ impl Checker<'_, '_> {
                 "package identity conflicts with callable input namespace",
             ));
         }
-        let mut opened = Vec::new();
-        let mut arguments = Vec::new();
-        for parameter in parameters {
-            let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-            let mut fuel = before;
-            let charge = nir::type_computations::charge_term(&parameter.ty, &mut fuel);
-            self.required_steps -= (before - fuel) as u64;
-            charge.map_err(|failure| {
-                error(
-                    span,
-                    format!("callable input telescope budget exhausted: {failure}"),
-                )
-            })?;
-            let domain = parameter
-                .ty
-                .substitute(&arguments)
-                .map_err(|failure| error(span, failure.to_string()))?;
-            let declaration = DeclarationId {
-                package: function_types::INPUT_NAMESPACE,
-                local: self.spread_binding(span)?.index,
-            };
-            arguments.push(Term::Rigid {
-                declaration,
-                sort: parameter.sort,
-            });
-            opened.push((declaration, parameter.sort, domain));
-        }
-        Ok(opened)
+        (0..count)
+            .map(|_| {
+                Ok(DeclarationId {
+                    package: function_types::INPUT_NAMESPACE,
+                    local: self.spread_binding(span)?.index,
+                })
+            })
+            .collect()
     }
 }

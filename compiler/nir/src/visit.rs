@@ -589,9 +589,19 @@ fn walk_mut(
                                 .map(Node::Expr),
                         );
                     }
-                    K::NormalFormType {
-                        arguments, plan, ..
-                    } => {
+                    kind @ (K::NormalFormType { .. } | K::ApplyNormalForm { .. }) => {
+                        let (callee, arguments, plan) = match kind {
+                            K::NormalFormType {
+                                arguments, plan, ..
+                            } => (None, arguments, plan),
+                            K::ApplyNormalForm {
+                                callee,
+                                arguments,
+                                plan,
+                                ..
+                            } => (Some(std::sync::Arc::make_mut(callee)), arguments, plan),
+                            _ => unreachable!(),
+                        };
                         extend!(
                             work,
                             fuel,
@@ -600,6 +610,9 @@ fn walk_mut(
                                 .map(|p| Node::Expr(&mut p.expression)),
                         );
                         extend!(work, fuel, arguments.iter_mut().map(Node::Argument));
+                        if let Some(callee) = callee {
+                            push!(work, fuel, Node::Expr(callee));
+                        }
                     }
                     K::NominalType {
                         arguments,

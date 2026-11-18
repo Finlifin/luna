@@ -745,7 +745,8 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             Ok(bytecode::Progress::TypeInputPlan {
                 expression,
                 environment,
-            }) => match vm.start_type_plan(expression, &environment) {
+                selected,
+            }) => match vm.start_type_plan(expression, &environment, selected) {
                 Ok(frame) => stack.push(StackEntry::Plan(Box::new(PlanActivation {
                     frame,
                     environment,

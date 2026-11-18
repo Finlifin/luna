@@ -232,13 +232,17 @@ impl<'a> Interpreter<'a> {
         &mut self,
         expression: Arc<Expr>,
         environment: &Environment,
+        selected: Option<Value>,
     ) -> Result<Box<dyn input_collection::InputPlan + 'a>, Error> {
         match &expression.kind {
-            K::NormalFormType { .. } => Ok(Box::new(normal_plan::Frame::new(
-                self,
-                input_collection::Expression::Owned(expression),
-                environment,
-            )?)),
+            K::NormalFormType { .. } | K::ApplyNormalForm { .. } => {
+                Ok(Box::new(normal_plan::Frame::application(
+                    self,
+                    input_collection::Expression::Owned(expression),
+                    environment,
+                    selected,
+                )?))
+            }
             K::NominalType { .. } | K::CheckTypeAlias { .. } => {
                 Ok(Box::new(nominal_plan::Frame::new(
                     self,

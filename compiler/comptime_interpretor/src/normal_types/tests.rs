@@ -1173,27 +1173,31 @@ fn normal_bindings_preserve_declaration_order_and_reject_duplicate_slots() {
             .iter()
             .map(|p| p.declaration),
     );
-    vm.bind_normal_input(head, &mut bindings, 1, Value::Bool(true), SOURCE)
+    let domains = normal_plan::Domains::Declaration(&package.normal_forms[0].parameters);
+    domains
+        .bind(&mut vm, &mut bindings, 1, Value::Bool(true), SOURCE)
         .unwrap();
     assert!(bindings.contains(1));
     assert!(!bindings.contains(0));
     assert!(bindings.to_string().contains("(slot 0 pending)"));
     for slot in [1, 2] {
         assert_eq!(
-            vm.bind_normal_input(head, &mut bindings, slot, Value::Bool(false), SOURCE)
+            domains
+                .bind(&mut vm, &mut bindings, slot, Value::Bool(false), SOURCE)
                 .unwrap_err()
                 .kind,
             ErrorKind::Type
         );
     }
-    vm.bind_normal_input(
-        head,
-        &mut bindings,
-        0,
-        Value::Type(Term::Primitive(Primitive::Bool)),
-        SOURCE,
-    )
-    .unwrap();
+    domains
+        .bind(
+            &mut vm,
+            &mut bindings,
+            0,
+            Value::Type(Term::Primitive(Primitive::Bool)),
+            SOURCE,
+        )
+        .unwrap();
     assert_eq!(
         bindings.finish().unwrap(),
         vec![Term::Primitive(Primitive::Bool), Term::Bool(true)]

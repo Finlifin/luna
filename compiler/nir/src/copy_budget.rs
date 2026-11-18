@@ -659,6 +659,9 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     }
                     K::NormalFormType {
                         arguments, plan, ..
+                    }
+                    | K::ApplyNormalForm {
+                        arguments, plan, ..
                     } => {
                         charge_width(steps, arguments.len())?;
                         work.extend(
@@ -679,6 +682,15 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                                     .iter()
                                     .map(|p| (Node::Expr(&p.expression), depth + 1)),
                             );
+                        }
+                        if let K::ApplyNormalForm {
+                            callee, input_ids, ..
+                        } = &expr.kind
+                        {
+                            charge_width(steps, input_ids.len())?;
+                            if rewrite {
+                                work.push((Node::Expr(callee), depth + 1));
+                            }
                         }
                         0
                     }

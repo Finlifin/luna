@@ -197,6 +197,7 @@ pub(super) enum Progress {
         environment: Environment,
     },
     TypeInputPlan {
+        selected: Option<Value>,
         expression: Arc<Expr>,
         environment: Environment,
     },
@@ -1445,7 +1446,11 @@ impl<'a> Interpreter<'a> {
                     destination,
                     expression,
                     environment: imports,
+                    selected,
                 } => {
+                    let selected = selected
+                        .map(|slot| frame.slots[slot].take().ok_or_else(missing))
+                        .transpose()?;
                     self.effect_charge(imports.len(), Some(source))?;
                     let mut environment = std::mem::take(&mut frame.environment);
                     let mut borrowed = Vec::new();
@@ -1460,6 +1465,7 @@ impl<'a> Interpreter<'a> {
                         borrowed,
                     });
                     return Ok(Progress::TypeInputPlan {
+                        selected,
                         expression: expression.clone(),
                         environment,
                     });

@@ -167,6 +167,7 @@ pub enum Op {
     },
     TypeInputPlan {
         destination: Register,
+        selected: Option<Register>,
         expression: Arc<Expr>,
         environment: Vec<(LocalId, Register)>,
     },
@@ -766,8 +767,13 @@ impl fmt::Display for Program {
                     destination,
                     expression,
                     environment,
+                    selected,
                 } => {
-                    write!(f, "(type-input-plan %{destination} (environment")?;
+                    write!(f, "(type-input-plan %{destination}")?;
+                    if let Some(slot) = selected {
+                        write!(f, " (selected %{slot})")?;
+                    }
+                    f.write_str(" (environment")?;
                     for (binding, slot) in environment {
                         write!(f, " ({binding} %{slot})")?;
                     }
@@ -2114,14 +2120,17 @@ fn compile_root<'a>(
                             work.push(Work::Expression(field, slot));
                         }
                     }
-                    K::NormalFormType { .. } | K::NominalType { .. } | K::CheckTypeAlias { .. } => {
+                    K::NormalFormType { .. }
+                    | K::ApplyNormalForm { .. }
+                    | K::NominalType { .. }
+                    | K::CheckTypeAlias { .. } => {
                         // The template shares closure bodies. Type rewriting is
                         // charged only when the admitted plan specializes them.
                         let mut copy_steps = *fuel as u64;
                         let copied = nir::copy_budget::charge_expression(expr, &mut copy_steps);
                         *fuel = copy_steps as usize;
                         copied.map_err(|error| copy_error(error, source))?;
-                        let bindings = nir::free_bindings::collect(expr, fuel).map_err(
+                        let bindings = nir::free_bindings::collect_input_plan(expr, fuel).map_err(
                             |reason| match reason {
                                 nir::free_bindings::Error::Budget(_) => Error::Budget(source),
                                 nir::free_bindings::Error::Depth(_) => Error::Depth(source),
@@ -2138,14 +2147,22 @@ fn compile_root<'a>(
                                 (binding, slot)
                             })
                             .collect();
+                        let selection = match &expr.kind {
+                            K::ApplyNormalForm { callee, .. } => Some((callee.as_ref(), fresh())),
+                            _ => None,
+                        };
                         emit(
                             &mut work,
                             Op::TypeInputPlan {
+                                selected: selection.map(|(_, register)| register),
                                 destination: dst,
                                 expression: Arc::new(expr.clone()),
                                 environment,
                             },
                         );
+                        if let Some((callee, register)) = selection {
+                            work.push(Work::Expression(callee, register));
+                        }
                     }
                     K::BitVecType(width) => {
                         let value = fresh();

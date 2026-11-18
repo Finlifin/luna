@@ -47,7 +47,7 @@ NF 的隐式声明顺序与显式计划现由同一输入帧执行。旧字节�
 python3 -B development/check.py --timeout 900 -- test -p luna --test type_input_execution_order -- --include-ignored
 ```
 
-动态 NF 有一个相关的对照。对于 `factory<...prefix(), 1, 255>`，`prefix()` 在原调用中产生装有 `u8` 的包。路由能确定各字段的位置；函数值的当前位置入口接下来要把所有实参转为受检操作数。显式运行该用例时，整数文字取得 `Integer`，而收集器仍要求尚未取得的刚性类型，检查在执行 `prefix()` 前失败。这个消费者与普通函数的列表文字在不同位置丢失所需的交接。[函数值入口](../compiler/elaboration/src/program/normal/dynamic_inputs.rs) · [动态 NF 用例](../compiler/luna/tests/normal_input_plans.rs)
+动态 NF 已能在原调用内交付这类 Type。对于 `factory<...prefix(), 1, 255>`，先求得 factory 的实际声明，再运行一次 `prefix()`。包中的 `u8` 决定收集元素的域。树解释与字节码均可得到与按声明直接构造相同的 NF。此处复用声明输入帧即可闭合依赖，而上面的普通调用还需要把结果交还给源码列表的检查位置。[函数值入口](../compiler/elaboration/src/program/normal/dynamic_inputs.rs) · [动态 NF 用例](../compiler/luna/tests/normal_input_plans.rs)
 
 另一个对照是[名义值参数组](../compiler/luna/tests/nominal_value_parameters.rs)。在独立的 `3b4b54d9` 源码快照中运行整组，297 项通过、11 项失败。失败涉及开放父参数的成员域、别名文字的整数域要求、required 输入可用性及旧用例缺少 Splice 协议。复核输入恢复时，应按用例和诊断与这个基线比较。
 

@@ -5,9 +5,59 @@ use nir::program::NormalFormArgument as Argument;
 
 pub(super) struct Source<'a> {
     head: DeclarationId,
+    domains: Domains<'a>,
     locals: Vec<LocalId>,
     expression: Expression<'a>,
     bindings: input_bindings::Bindings,
+}
+
+/// Public callable slots have invocation-local identities. The selected head
+/// retains its own declaration identities for final formation and contracts.
+pub(super) enum Domains<'a> {
+    Declaration(&'a [nir::normal_forms::Parameter]),
+    Callable(Vec<(DeclarationId, nir::Sort, Term)>),
+}
+
+impl Domains<'_> {
+    fn parameter(&self, slot: usize) -> Option<(nir::DeclarationParameter, &Term)> {
+        match self {
+            Self::Callable(inputs) => inputs.get(slot).map(|(id, sort, domain)| {
+                (
+                    nir::DeclarationParameter {
+                        declaration: *id,
+                        sort: *sort,
+                    },
+                    domain,
+                )
+            }),
+            Self::Declaration(inputs) => inputs.get(slot).map(|p| {
+                let sort = match p.kind {
+                    nir::normal_forms::Kind::Type => nir::Sort::Type,
+                    nir::normal_forms::Kind::Value => nir::Sort::ComptimeValue,
+                };
+                (
+                    nir::DeclarationParameter {
+                        declaration: p.declaration,
+                        sort,
+                    },
+                    &p.ty,
+                )
+            }),
+        }
+    }
+    pub(super) fn bind(
+        &self,
+        vm: &mut Interpreter<'_>,
+        bindings: &mut input_bindings::Bindings,
+        slot: usize,
+        value: Value,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let (parameter, domain) = self
+            .parameter(slot)
+            .ok_or_else(|| vm.failure(ErrorKind::Type, Some(source)))?;
+        bindings.bind(vm, slot, parameter, domain, value, source)
+    }
 }
 
 pub(super) type Frame<'a> = input_collection::Frame<Source<'a>>;
@@ -23,18 +73,60 @@ impl fmt::Display for Source<'_> {
 }
 
 impl<'a> Frame<'a> {
-    pub(super) fn new(
-        vm: &mut Interpreter<'_>,
+    #[cfg(test)]
+    pub(super) fn new<'world: 'a>(
+        vm: &mut Interpreter<'world>,
         expression: Expression<'a>,
         environment: &Environment,
     ) -> Result<Self, Error> {
-        let K::NormalFormType {
-            head,
-            arguments,
-            plan,
-        } = &expression.kind
-        else {
-            return Err(vm.failure(ErrorKind::Type, Some(expression.source)));
+        Self::application(vm, expression, environment, None)
+    }
+
+    pub(super) fn application<'world: 'a>(
+        vm: &mut Interpreter<'world>,
+        expression: Expression<'a>,
+        environment: &Environment,
+        selected: Option<Value>,
+    ) -> Result<Self, Error> {
+        let source = expression.source;
+        let (head, public_inputs, arguments, plan) = match (&expression.kind, selected) {
+            (
+                K::NormalFormType {
+                    head,
+                    arguments,
+                    plan,
+                },
+                None,
+            ) => (*head, None, arguments, plan),
+            (
+                K::ApplyNormalForm {
+                    callee,
+                    input_ids,
+                    arguments,
+                    plan,
+                },
+                Some(value),
+            ) => {
+                vm.check_value_type(&value, &callee.ty, Some(callee.source))?;
+                let Value::Function(head) = value else {
+                    return Err(vm.failure(ErrorKind::Type, Some(callee.source)));
+                };
+                let mut fuel = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let opened = nir::normal_forms::open_inputs(&callee.ty, input_ids, &mut fuel);
+                vm.budget.steps -= (before - fuel) as u64;
+                let opened = opened.map_err(|reason| {
+                    vm.failure(
+                        match reason {
+                            nir::type_computations::Error::Budget => ErrorKind::StepsExhausted,
+                            _ => ErrorKind::Type,
+                        },
+                        Some(source),
+                    )
+                })?;
+                (head, Some(opened), arguments, plan)
+            }
+            _ => return Err(vm.failure(ErrorKind::Type, Some(source))),
         };
         let locals = input_collection::admit_scope(vm, &expression, environment)?;
         let diverges = arguments.iter().any(Argument::is_diverging)
@@ -42,15 +134,35 @@ impl<'a> Frame<'a> {
                 .iter()
                 .flat_map(|plan| &plan.preparations)
                 .any(|p| p.expression.ty == Term::Primitive(Primitive::Never));
-        let bindings = vm.normal_input_bindings(
-            *head,
-            &expression.ty,
-            arguments.len(),
-            diverges,
-            expression.source,
-        )?;
+        let metadata = vm
+            .normal_forms
+            .get(&head)
+            .ok_or_else(|| vm.failure(ErrorKind::Type, Some(source)))?;
+        let count = arguments.len();
+        let result = if diverges {
+            Primitive::Never
+        } else {
+            Primitive::Type
+        };
+        if expression.ty != Term::Primitive(result)
+            || metadata.parameters.len() != count
+            || public_inputs
+                .as_ref()
+                .is_some_and(|inputs| inputs.len() != count)
+        {
+            return Err(vm.failure(ErrorKind::Type, Some(source)));
+        }
+        vm.integer_operation(Some(source), |budget| budget.consume(count))?;
+        let domains = match public_inputs {
+            Some(inputs) => Domains::Callable(inputs),
+            None => Domains::Declaration(&metadata.parameters),
+        };
+        let bindings = input_bindings::Bindings::structural(
+            (0..count).map(|i| domains.parameter(i).unwrap().0.declaration),
+        );
         Ok(Self::from_source(Source {
-            head: *head,
+            head,
+            domains,
             locals,
             bindings,
             expression,
@@ -80,26 +192,21 @@ impl input_collection::Source for Source<'_> {
         vm: &mut Interpreter<'_>,
         slot: usize,
     ) -> Result<BTreeSet<usize>, Error> {
-        let metadata = vm
-            .normal_forms
-            .get(&self.head)
-            .expect("admitted normal head");
+        let (_, domain) = self.domains.parameter(slot).expect("admitted parameter");
         self.bindings
-            .pending_inputs(vm, &metadata.parameters[slot].ty, self.expression.source)
+            .pending_inputs(vm, domain, self.expression.source)
     }
 
     fn expected(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Term, Error> {
-        let metadata = vm
-            .normal_forms
-            .get(&self.head)
-            .expect("admitted normal head");
+        let (_, domain) = self.domains.parameter(slot).expect("admitted parameter");
         self.bindings
-            .instantiate(vm, &metadata.parameters[slot].ty, self.expression.source)
+            .instantiate(vm, domain, self.expression.source)
     }
 
     fn bind(&mut self, vm: &mut Interpreter<'_>, slot: usize, value: Value) -> Result<(), Error> {
         let source = self.input(slot).source();
-        vm.bind_normal_input(self.head, &mut self.bindings, slot, value, source)
+        self.domains
+            .bind(vm, &mut self.bindings, slot, value, source)
     }
 
     fn complete(&mut self, vm: &mut Interpreter<'_>) -> Result<Progress, Error> {
@@ -127,7 +234,16 @@ impl Interpreter<'_> {
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        let mut frame = Frame::new(self, Expression::Borrowed(expr), environment)?;
+        let selected = if let K::ApplyNormalForm { callee, .. } = &expr.kind {
+            match self.eval(callee, environment)? {
+                Flow::Value(value) => Some(value),
+                exit => return Ok(exit),
+            }
+        } else {
+            None
+        };
+        let mut frame =
+            Frame::application(self, Expression::Borrowed(expr), environment, selected)?;
         let result = self.run_normal_plan(&mut frame, environment);
         input_collection::InputPlan::cleanup(&frame, environment);
         result

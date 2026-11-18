@@ -3277,7 +3277,13 @@ impl Builder<'_> {
             }
             K::NormalFormType {
                 arguments, plan, ..
+            }
+            | K::ApplyNormalForm {
+                arguments, plan, ..
             } => {
+                if let K::ApplyNormalForm { callee, .. } = &expr.kind {
+                    self.expr(callee, depth + 1)?;
+                }
                 for p in plan.iter().flat_map(|p| &p.preparations) {
                     self.expr(&p.expression, depth + 1)?;
                 }

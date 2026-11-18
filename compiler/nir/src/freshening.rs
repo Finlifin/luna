@@ -175,6 +175,9 @@ impl n::Rewriter for Renamer<'_> {
             }
             K::NormalFormType {
                 plan: Some(plan), ..
+            }
+            | K::ApplyNormalForm {
+                plan: Some(plan), ..
             } => {
                 for id in &mut plan.bindings {
                     self.rename(id)?;

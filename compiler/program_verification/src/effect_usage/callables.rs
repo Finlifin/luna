@@ -335,7 +335,7 @@ impl<'a> Aliases<'a> {
                 K::LetPattern { pattern, value, .. } => {
                     register_pattern(pattern, value, &mut definitions, &mut exposed, fuel)?;
                 }
-                K::NormalFormType { arguments, .. } => {
+                K::ApplyNormalForm { arguments, .. } | K::NormalFormType { arguments, .. } => {
                     argument_binds(arguments, &mut exposed, fuel)?
                 }
                 K::Match { value, arms } => {

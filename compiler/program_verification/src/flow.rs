@@ -5495,7 +5495,8 @@ impl Walker<'_> {
             K::Closure { .. } | K::UnsafeScope(_) | K::Discard(_) => {
                 self.transparent_expression(expr, state, depth)
             }
-            K::NormalFormType { .. }
+            K::ApplyNormalForm { .. }
+            | K::NormalFormType { .. }
             | K::NominalType { .. }
             | K::CheckTypeAlias { .. }
             | K::TypeList(_)

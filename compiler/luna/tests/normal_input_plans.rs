@@ -63,6 +63,12 @@ fn dynamic_normal_inputs_share_packets_collections_and_callee_order() {
         comptime fn last() -> u8 { 4 }
         comptime fn Direct() -> Type { Packet<u8, 7, 1, 2, 3, 4> }
         comptime fn Mixed() -> Type { select()<...(u8, 7), 1, ...tail(), last()> }
+        comptime fn EarlyCallee(stop: bool) -> Type {
+            (do { if stop { return bool; }; select() })<...(u8, 7), last()>
+        }
+        comptime fn ExitBeforeInputs() -> Type { EarlyCallee(true) }
+        comptime fn EnterInputs() -> Type { EarlyCallee(false) }
+        comptime fn EnterDirect() -> Type { Packet<u8, 7, 4> }
         comptime fn EmptyDirect() -> Type { Packet<u8, 7> }
         comptime fn Empty() -> Type { select()<...(u8, 7)> }
         comptime fn TypesDirect() -> Type { Packet<Type, 7, bool, u8> }
@@ -79,6 +85,18 @@ fn dynamic_normal_inputs_share_packets_collections_and_callee_order() {
         "Mixed",
         &expected,
         &["Mixed", "select", "tail", "last"],
+    );
+    trace_both(
+        &package,
+        "ExitBeforeInputs",
+        &Value::Type(nir::Term::Primitive(nir::Primitive::Bool)),
+        &["ExitBeforeInputs", "EarlyCallee"],
+    );
+    trace_both(
+        &package,
+        "EnterInputs",
+        &invoke_both(&package, "EnterDirect"),
+        &["EnterInputs", "EarlyCallee", "select", "last"],
     );
     trace_both(
         &package,
@@ -130,7 +148,6 @@ fn dynamic_normal_inputs_preserve_computed_packets_and_mutable_callee_reads() {
 }
 
 #[test]
-#[ignore = "dynamic NF input domains still need an invocation-time packet Type response"]
 fn dynamic_normal_inputs_wait_for_a_type_inside_a_computed_packet() {
     let package = sysroot::compile(
         "
@@ -151,6 +168,39 @@ fn dynamic_normal_inputs_wait_for_a_type_inside_a_computed_packet() {
         &invoke_both(&package, "Direct"),
         &["Build", "prefix"],
     );
+}
+
+#[test]
+fn selected_head_rechecks_the_computed_domain_on_each_invocation() {
+    let package = sysroot::compile(
+        "typealias Factory = pure comptime fn<T: Type, ...values: meta.List<T>> -> Type;
+        pure comptime fn Packet<T, ...values: meta.List<T>> -> Type { bool }
+        comptime fn prefix(wide: bool) -> Tuple<Type> {
+            if wide { (u16,) } else { (u8,) }
+        }
+        comptime fn Build(wide: bool) -> Type {
+            let factory: Factory = Packet;
+            factory<...prefix(wide), 256>
+        }
+        comptime fn Direct() -> Type { Packet<u16, 256> }",
+    )
+    .unwrap();
+    for tree in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            let direct = vm.invoke(id(&package, "Direct"), vec![]).unwrap();
+            for _ in 0..2 {
+                let narrow = vm
+                    .invoke(id(&package, "Build"), vec![Value::Bool(false)])
+                    .unwrap_err();
+                assert_eq!(narrow.kind, comptime_interpretor::ErrorKind::Type);
+                assert_eq!(
+                    vm.invoke(id(&package, "Build"), vec![Value::Bool(true)])
+                        .unwrap(),
+                    direct
+                );
+            }
+        });
+    }
 }
 
 #[test]

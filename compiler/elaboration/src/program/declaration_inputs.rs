@@ -233,14 +233,14 @@ impl Checker<'_, '_> {
         span: Span,
         parameters: Vec<(DeclarationId, Sort, Term)>,
         collector: Option<usize>,
-    ) -> Result<CheckedDeclarationInputs, Error> {
+    ) -> Result<PreparedDeclarationInputs, Error> {
         let preparation = preparation::Frame::positional(
             self,
             inputs,
             span,
             parameters,
             collector,
-            completion::Typed,
+            completion::Contextual,
         )?;
         self.check_declaration_inputs_region(preparation)
     }

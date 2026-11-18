@@ -1255,6 +1255,14 @@ pub enum ExprKind {
         arguments: Vec<NormalFormArgument>,
         plan: Option<NormalFormInputPlan>,
     },
+    /// The callee is evaluated before any input. The input IDs open the
+    /// public callable telescope for annotations inside the invocation plan.
+    ApplyNormalForm {
+        callee: Arc<Expr>,
+        input_ids: Vec<DeclarationId>,
+        arguments: Vec<NormalFormArgument>,
+        plan: Option<NormalFormInputPlan>,
+    },
     FloatNegate(Box<Expr>),
     FloatBinary {
         op: FloatOp,
@@ -3177,11 +3185,27 @@ impl fmt::Display for ExprKind {
                 f.write_str("))")
             }
             Self::NormalFormType {
-                head,
-                arguments,
-                plan,
+                arguments, plan, ..
+            }
+            | Self::ApplyNormalForm {
+                arguments, plan, ..
             } => {
-                write!(f, "(normal-form-type-value (head {head}) (arguments")?;
+                match self {
+                    Self::NormalFormType { head, .. } => {
+                        write!(f, "(normal-form-type-value (head {head})")?
+                    }
+                    Self::ApplyNormalForm {
+                        callee, input_ids, ..
+                    } => {
+                        write!(f, "(apply-normal-form (callee {callee}) (inputs")?;
+                        for id in input_ids {
+                            write!(f, " {id}")?;
+                        }
+                        f.write_str(")")?;
+                    }
+                    _ => unreachable!(),
+                }
+                f.write_str(" (arguments")?;
                 for argument in arguments {
                     write!(f, " {argument}")?;
                 }
@@ -4066,11 +4090,22 @@ impl Expr {
                 }
                 Arc::make_mut(body).rewrite_with(rewriter)?;
             }
-            ExprKind::NormalFormType {
-                arguments: inputs,
-                plan,
-                ..
-            } => {
+            kind @ (ExprKind::NormalFormType { .. } | ExprKind::ApplyNormalForm { .. }) => {
+                let (inputs, plan) = match kind {
+                    ExprKind::ApplyNormalForm {
+                        callee,
+                        arguments,
+                        plan,
+                        ..
+                    } => {
+                        Arc::make_mut(callee).rewrite_with(rewriter)?;
+                        (arguments, plan)
+                    }
+                    ExprKind::NormalFormType {
+                        arguments, plan, ..
+                    } => (arguments, plan),
+                    _ => unreachable!(),
+                };
                 for preparation in plan.iter_mut().flat_map(|p| &mut p.preparations) {
                     preparation.expression.rewrite_with(rewriter)?;
                 }

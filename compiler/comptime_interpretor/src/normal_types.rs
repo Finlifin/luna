@@ -1,34 +1,7 @@
 //! Invocation-local bindings and contextual normal-form construction.
 use super::*;
 
-use input_bindings::Bindings;
-
 impl Interpreter<'_> {
-    pub(super) fn normal_input_bindings(
-        &mut self,
-        head: DeclarationId,
-        ty: &Term,
-        count: usize,
-        diverges: bool,
-        source: SourceRange,
-    ) -> Result<Bindings, Error> {
-        let metadata = self
-            .normal_forms
-            .get(&head)
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        let expected = if diverges {
-            Primitive::Never
-        } else {
-            Primitive::Type
-        };
-        if *ty != Term::Primitive(expected) || count != metadata.parameters.len() {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
-        self.integer_operation(Some(source), |budget| budget.consume(count))?;
-        Ok(Bindings::structural(
-            metadata.parameters.iter().map(|p| p.declaration),
-        ))
-    }
     pub(super) fn normal_list_domain<'a>(
         &mut self,
         expected: &'a Term,
@@ -169,30 +142,6 @@ impl Interpreter<'_> {
             )?;
         }
         Ok(())
-    }
-    pub(super) fn bind_normal_input(
-        &mut self,
-        head: DeclarationId,
-        bindings: &mut Bindings,
-        slot: usize,
-        value: Value,
-        source: SourceRange,
-    ) -> Result<(), Error> {
-        let parameter = self
-            .normal_forms
-            .get(&head)
-            .and_then(|head| head.parameters.get(slot))
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        let domain = &parameter.ty;
-        let parameter = nir::DeclarationParameter {
-            declaration: parameter.declaration,
-            sort: if parameter.kind == nir::normal_forms::Kind::Type {
-                nir::Sort::Type
-            } else {
-                nir::Sort::ComptimeValue
-            },
-        };
-        bindings.bind(self, slot, parameter, domain, value, source)
     }
 }
 

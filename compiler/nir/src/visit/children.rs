@@ -129,6 +129,9 @@ pub(super) fn expand<'a>(
             }
             K::NormalFormType {
                 arguments, plan, ..
+            }
+            | K::ApplyNormalForm {
+                arguments, plan, ..
             } => {
                 extend!(
                     work,
@@ -138,6 +141,9 @@ pub(super) fn expand<'a>(
                         .map(|p| Node::Expr(&p.expression)),
                 );
                 extend!(work, fuel, arguments.iter().map(Node::Argument));
+                if let K::ApplyNormalForm { callee, .. } = &expr.kind {
+                    push!(work, fuel, Node::Expr(callee));
+                }
             }
             K::NominalType {
                 arguments,

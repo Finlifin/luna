@@ -9,6 +9,55 @@ use std::{
 mod validation;
 pub use validation::{ValidationError, validate, validate_in};
 
+/// Open a callable's positional binder frame in the private namespace of one
+/// application. Domains can mention earlier slots and keep their outer scope.
+pub fn open_inputs(
+    callable: &Term,
+    ids: &[DeclarationId],
+    fuel: &mut usize,
+) -> Result<Vec<(DeclarationId, Sort, Term)>, crate::type_computations::Error> {
+    use crate::{
+        TypeError,
+        type_computations::{Error, charge_term},
+    };
+    let invalid = || Error::Scope(TypeError::InvalidNormalFormFunctionSignature);
+    let Term::NormalFormFunction(signature, _) = callable else {
+        return Err(invalid());
+    };
+    let Term::Function { parameters, result } = signature.callable_signature() else {
+        return Err(invalid());
+    };
+    if **result != Term::Primitive(Primitive::Type) {
+        return Err(invalid());
+    }
+    if parameters.len() != ids.len() {
+        return Err(Error::Scope(TypeError::ArgumentCount {
+            expected: parameters.len(),
+            actual: ids.len(),
+        }));
+    }
+    *fuel = fuel.checked_sub(ids.len()).ok_or(Error::Budget)?;
+    let mut seen = BTreeSet::new();
+    let mut replacements = Vec::with_capacity(ids.len());
+    let mut opened = Vec::with_capacity(ids.len());
+    for (parameter, &id) in parameters.iter().zip(ids) {
+        if !seen.insert(id) {
+            return Err(Error::Scope(TypeError::DuplicateDeclarationParameter(id)));
+        }
+        charge_term(&parameter.ty, fuel)?;
+        let domain = parameter
+            .ty
+            .substitute(&replacements)
+            .map_err(Error::Scope)?;
+        opened.push((id, parameter.sort, domain));
+        replacements.push(Term::Rigid {
+            declaration: id,
+            sort: parameter.sort,
+        });
+    }
+    Ok(opened)
+}
+
 /// Compiler-provided callable identities and their ordinary signatures.
 /// This registry describes builtin exports; it does not change NF application,
 /// argument representation, or matching for any declaration.

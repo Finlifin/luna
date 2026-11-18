@@ -987,9 +987,10 @@ impl<'a> PhaseContext<'a> {
                             )?;
                         }
                         K::NormalFormType {
-                            head,
-                            arguments,
-                            plan,
+                            arguments, plan, ..
+                        }
+                        | K::ApplyNormalForm {
+                            arguments, plan, ..
                         } => {
                             work.extend(
                                 plan.iter()
@@ -1009,14 +1010,30 @@ impl<'a> PhaseContext<'a> {
                                     "normal-form type construction requires comptime",
                                 ));
                             }
-                            let metadata = package
-                                .normal_forms
-                                .iter()
-                                .find(|h| h.declaration == *head)
-                                .ok_or_else(|| {
-                                    error("normal-form constructor metadata is missing")
-                                })?;
-                            if arguments.len() != metadata.parameters.len() {
+                            let count = match &expr.kind {
+                                K::NormalFormType { head, .. } => package
+                                    .normal_forms
+                                    .iter()
+                                    .find(|h| h.declaration == *head)
+                                    .ok_or_else(|| {
+                                        error("normal-form constructor metadata is missing")
+                                    })?
+                                    .parameters
+                                    .len(),
+                                K::ApplyNormalForm {
+                                    callee, input_ids, ..
+                                } => {
+                                    crate::normal_forms::open_inputs(&callee.ty, input_ids, inspection_fuel)
+                                        .map_err(|failure| match failure {
+                                            crate::type_computations::Error::Budget => Error::budget(expr.source, "normal-form interface inspection exhausted its budget"),
+                                            _ => error("invalid normal-form application interface"),
+                                        })?;
+                                    work.push(Work::Expr(callee, false, ct), inspection_fuel)?;
+                                    input_ids.len()
+                                }
+                                _ => unreachable!(),
+                            };
+                            if arguments.len() != count {
                                 return Err(error(
                                     "normal-form constructor argument count mismatch",
                                 ));
