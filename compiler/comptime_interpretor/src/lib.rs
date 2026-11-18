@@ -1763,7 +1763,7 @@ impl<'a> Interpreter<'a> {
                 if member.is_quote || functions.quote(&method.body).is_some() {
                     return Err(invalid());
                 }
-                let ty = if let Some(function) = functions.interface(&method.body) {
+                let ty = if let Some(function) = functions.declaration(&method.body) {
                     function
                         .signature
                         .instantiate_parameters(
@@ -2516,17 +2516,17 @@ impl<'a> Interpreter<'a> {
                 .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, None))?;
         }
 
-        let view = self
+        let definition = self
             .functions
             .declaration(&function)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
-        let definition = view.interface;
         if definition.type_parameters.is_empty() && types.is_empty() {
             return self.invoke_value(Value::Function(function), arguments);
         }
-        let signature = self.specialize_function_signature(definition, &types, view.source)?;
+        let signature =
+            self.specialize_function_signature(definition, &types, definition.source)?;
         let expression = Expr {
-            source: view.source,
+            source: definition.source,
             ty: signature,
             kind: K::FunctionInstance {
                 declaration: function,
@@ -4812,7 +4812,7 @@ impl<'a> Interpreter<'a> {
                 declaration: id, ..
             } => self
                 .functions
-                .interface(id)
+                .declaration(id)
                 .map(|f| f.parameters.clone())
                 .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source))),
             Value::Closure(closure) => Ok(closure.parameters.clone()),

@@ -124,6 +124,7 @@ mod tests {
         for local in 0..128 {
             let source = nir::program::Package {
                 runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     requirements: vec![],
                     capabilities: vec![],
                     declaration: key(local, true).declaration,

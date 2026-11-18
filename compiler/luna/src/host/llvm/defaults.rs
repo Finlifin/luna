@@ -63,6 +63,7 @@ mod tests {
         let byte = Term::Primitive(P::U8);
         let destructor = Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 phase: FunctionPhase::Runtime,
                 inline: false,
                 pure: false,

@@ -121,6 +121,7 @@ fn cleanup_effect_index_preserves_typed_failures_and_publishes_only_a_complete_m
     };
     let function = nir::program::Function {
         interface: nir::program::FunctionDeclaration {
+            source: SOURCE,
             declaration: id(3),
             name: "inspect".into(),
             phase: nir::program::FunctionPhase::Runtime,

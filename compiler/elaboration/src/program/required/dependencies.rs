@@ -321,6 +321,7 @@ mod tests {
     fn function() -> n::Function {
         n::Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(90),
                 name: "dependencies".into(),
                 phase: n::FunctionPhase::Comptime,

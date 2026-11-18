@@ -225,6 +225,7 @@ mod tests {
         Package {
             functions: vec![nir::program::Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     declaration: id(1),
                     name: "Guarded".into(),
                     phase: nir::program::FunctionPhase::Comptime,

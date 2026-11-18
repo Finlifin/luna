@@ -44,7 +44,7 @@ impl MachineBody for Function {
         arguments: &[Term],
         fuel: &mut usize,
     ) -> Result<Self, Error> {
-        let source = self.body.source;
+        let source = self.source;
         nir::copy_budget::charge_function_substitution(self, binders, arguments, fuel)
             .map_err(|_| exhausted(source))?;
         let mut instance = self
@@ -326,6 +326,7 @@ mod tests {
             .collect();
         Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 phase: FunctionPhase::Runtime,
                 inline: false,
                 pure: true,

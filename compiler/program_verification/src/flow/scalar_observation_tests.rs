@@ -31,6 +31,7 @@ fn equality(value: char, frozen: bool) -> Expr {
 fn function(preconditions: Vec<Expr>, postconditions: Vec<Expr>) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: DeclarationId {
                 package: 5,
                 local: 1,

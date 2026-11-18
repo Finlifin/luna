@@ -134,6 +134,7 @@ impl Checker<'_, '_> {
             // code method's callable type. No quote or contextual port enters
             // it, and it is never published in an execution package.
             let obligation = n::FunctionDeclaration {
+                source: source(span),
                 declaration: actual.declaration,
                 name: format!("{} program-domain refinement", actual.name),
                 phase: n::FunctionPhase::Comptime,
@@ -163,12 +164,8 @@ impl Checker<'_, '_> {
             let mut limits = crate::verification::Limits::default();
             limits.arithmetic.steps = limits.arithmetic.steps.min(fuel);
             let available = limits.arithmetic.steps;
-            let checked = crate::verification::flow::prove_implication(
-                &obligation,
-                source(span),
-                None,
-                &mut limits,
-            );
+            let checked =
+                crate::verification::flow::prove_implication(&obligation, None, &mut limits);
             fuel -= available - limits.arithmetic.steps;
             checked
                 .map_err(|e| format!("method `{}` strengthens trait program preconditions or their definedness is not proven: {e}", actual.name))?;

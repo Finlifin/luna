@@ -17,6 +17,7 @@ fn main() {
         };
         let function = Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(0),
                 name: "entry".into(),
                 phase: FunctionPhase::Comptime,
@@ -50,6 +51,7 @@ fn main() {
                 .collect(),
             runtime_function_identities: (0..count)
                 .map(|i| RuntimeFunctionIdentity {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     requirements: vec![],
                     capabilities: vec![],
                     declaration: id(count + i),

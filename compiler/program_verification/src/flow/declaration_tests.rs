@@ -16,6 +16,7 @@ fn value(kind: K, primitive: P) -> Expr {
 fn function(local: u32, body: Expr) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: id(local),
             name: format!("function_{local}"),
             phase: nir::program::FunctionPhase::Runtime,
@@ -173,6 +174,7 @@ fn method_contract_domains_do_not_conflate_budget_with_invalid_inputs() {
         capabilities: vec![],
         parents: vec![],
         methods: vec![nir::program::MethodContract {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: id(63),
             name: "invoke".into(),
             phase: nir::program::TraitPhase::Runtime,

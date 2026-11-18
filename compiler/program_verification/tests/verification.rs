@@ -17,6 +17,7 @@ fn captured_integer_facts_check_domains_budgets_and_symbolic_inputs() {
         };
         Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: DeclarationId {
                     package: 1,
                     local: 1,
@@ -170,6 +171,7 @@ fn checked_nonzero_division_preserves_both_signs_and_machine_obligations() {
         }
         Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: DeclarationId {
                     package: 1,
                     local: 1,

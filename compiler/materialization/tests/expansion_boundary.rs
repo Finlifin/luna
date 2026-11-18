@@ -187,6 +187,7 @@ fn fixture() -> (n::Package, iir::InstanceKey) {
     let boolean = Term::Primitive(Primitive::Bool);
     let function = n::Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: id(1),
             name: "run".into(),
             phase: n::FunctionPhase::Runtime,

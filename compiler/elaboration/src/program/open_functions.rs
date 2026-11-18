@@ -2133,6 +2133,7 @@ impl Checker<'_, '_> {
                         .collect();
                     this.ordinary_behavior_functions.push(n::Function {
                         interface: nir::program::FunctionDeclaration {
+                            source: source(item.span),
                             declaration: declaration(this.package, &this.package_identities, owner),
                             name: format!("{} [ordinary]", item.ident.name),
                             phase: n::FunctionPhase::Runtime,
@@ -7540,6 +7541,7 @@ impl Checker<'_, '_> {
             let value = this.function_body(owner, body.value, result)?;
             Ok(n::Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: source(item.span),
                     declaration: id,
                     name: item.ident.name.as_str().into(),
                     phase: if sig.modifiers.is_comptime {

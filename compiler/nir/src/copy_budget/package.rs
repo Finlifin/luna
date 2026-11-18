@@ -463,6 +463,7 @@ impl Meter<'_> {
         self.width(methods.len())?;
         for method in methods {
             let n::MethodContract {
+                source: _,
                 phase: _,
                 is_quote: _,
                 pure: _,

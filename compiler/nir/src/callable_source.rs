@@ -12,22 +12,6 @@ enum Slot {
 #[derive(Default)]
 pub(crate) struct Positions(BTreeMap<DeclarationId, Slot>);
 
-#[derive(Clone, Copy)]
-pub struct Declaration<'a> {
-    pub interface: &'a FunctionDeclaration,
-    pub source: SourceRange,
-}
-
-impl std::fmt::Display for Declaration<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "(source-declaration (source {} {}) {})",
-            self.source.start, self.source.end, self.interface
-        )
-    }
-}
-
 /// The inputs, signature and type obligations observable when a named function
 /// forms a value. Execution, defaults and program contracts require a declaration.
 #[derive(Clone, Copy)]
@@ -104,7 +88,7 @@ impl Positions {
             insert(
                 f.declaration,
                 Slot::Function(i),
-                f.body.source,
+                f.source,
                 "duplicate function declaration identity",
             )?;
         }
@@ -113,26 +97,26 @@ impl Positions {
                 || f.signature.is_comptime_callable()
             {
                 return Err(Error::invalid(
-                    source,
+                    f.source,
                     "invalid or duplicate runtime function identity",
                 ));
             }
             insert(
                 f.declaration,
                 Slot::Runtime(i),
-                source,
+                f.source,
                 "invalid or duplicate runtime function identity",
             )?;
         }
         for (i, f) in package.quote_templates.iter().enumerate() {
             if f.phase != FunctionPhase::Runtime {
                 return Err(Error::invalid(
-                    f.body.source,
+                    f.source,
                     "invalid or duplicate quote template identity",
                 ));
             }
             let parameters = validate_frame(
-                crate::contracts::CallableProgram::declaration(&f.interface, f.body.source),
+                crate::contracts::CallableProgram::declaration(&f.interface),
                 true,
                 fuel,
             )?;
@@ -142,13 +126,13 @@ impl Positions {
             insert(
                 f.declaration,
                 Slot::Quote { index: i, staged },
-                f.body.source,
+                f.source,
                 "invalid or duplicate quote template identity",
             )?;
         }
         for f in &package.functions {
             validate_frame(
-                crate::contracts::CallableProgram::declaration(&f.interface, f.body.source),
+                crate::contracts::CallableProgram::declaration(&f.interface),
                 false,
                 fuel,
             )?;
@@ -202,15 +186,8 @@ impl<'a> Callables<'a> {
         Some(&self.functions[i])
     }
 
-    pub fn declaration(&self, id: &DeclarationId) -> Option<Declaration<'a>> {
-        self.function(id).map(|f| Declaration {
-            interface: &f.interface,
-            source: f.body.source,
-        })
-    }
-
     pub fn formation(&self, id: &DeclarationId) -> Option<Formation<'a>> {
-        self.interface(id)
+        self.declaration(id)
             .map(Formation::from)
             .or_else(|| self.runtime_identity(id).map(Formation::from))
     }
@@ -219,7 +196,7 @@ impl<'a> Callables<'a> {
         self.function(id).map(|f| &f.body)
     }
 
-    pub fn interface(&self, id: &DeclarationId) -> Option<&'a FunctionDeclaration> {
+    pub fn declaration(&self, id: &DeclarationId) -> Option<&'a FunctionDeclaration> {
         self.function(id).map(|f| &f.interface)
     }
 
@@ -238,7 +215,7 @@ impl<'a> Callables<'a> {
     }
 
     pub fn method_definition(&self, id: &DeclarationId) -> Option<&'a FunctionDeclaration> {
-        self.interface(id).or_else(|| self.quote(id))
+        self.declaration(id).or_else(|| self.quote(id))
     }
 
     pub fn runtime_identity(&self, id: &DeclarationId) -> Option<&'a RuntimeFunctionIdentity> {

@@ -251,7 +251,7 @@ impl<'world> Interpreter<'world> {
             || self.enums.contains_key(&id)
             || self.newtypes.contains_key(&id)
             || self.normal_forms.contains_key(&id)
-            || self.functions.interface(&id).is_some()
+            || self.functions.declaration(&id).is_some()
             || self.functions.runtime_identity(&id).is_some()
             || self.alias_contracts.contains_key(&id)
             || self.effect_declarations.contains_key(&id)

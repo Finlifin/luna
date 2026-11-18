@@ -209,7 +209,7 @@ impl Interpreter<'_> {
         let before_preparation = self.budget.steps;
         let definition = self
             .functions
-            .interface(&declaration)
+            .declaration(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
         // Input admission and entry contracts have completed. Body scope needs
         // the declaration's binder sorts; substituting their types cannot change them.
@@ -269,6 +269,7 @@ mod frame_tests {
         };
         let function = nir::program::Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration,
                 name: "guarded".into(),
                 phase: nir::program::FunctionPhase::Comptime,
@@ -444,6 +445,7 @@ mod frame_tests {
         let source = SourceRange { start: 2, end: 9 };
         let function = nir::program::Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 phase: nir::program::FunctionPhase::Runtime,
                 inline: false,
                 pure: false,
@@ -604,6 +606,7 @@ mod frame_tests {
             };
             let function = nir::program::Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     declaration,
                     name: "guarded-type".into(),
                     phase: nir::program::FunctionPhase::Comptime,

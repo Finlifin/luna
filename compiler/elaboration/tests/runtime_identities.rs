@@ -11,6 +11,7 @@ fn signature_only_runtime_identity_is_not_an_executable_iir_root() {
     };
     let package = Package {
         runtime_function_identities: vec![RuntimeFunctionIdentity {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             requirements: vec![],
             capabilities: vec![],
             declaration,
@@ -76,6 +77,7 @@ fn frozen_identity_needs_formation_evidence_before_iir_publication() {
             requirements: vec![],
         }],
         runtime_function_identities: vec![RuntimeFunctionIdentity {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration,
             type_parameters: vec![binder],
             signature,

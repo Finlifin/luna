@@ -171,7 +171,7 @@ impl Interpreter<'_> {
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(construction)))?;
         let definition = self
             .functions
-            .interface(&declaration)
+            .declaration(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(construction)))?;
         let frame = self.ordinary_input_frame(&definition.signature, construction)?;
         self.specialize_function_expression(
@@ -289,7 +289,7 @@ impl Interpreter<'_> {
         }
         let definition = self
             .functions
-            .interface(&declaration)
+            .declaration(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
         if definition.phase != nir::program::FunctionPhase::Comptime
             || !output.is_comptime_callable()
@@ -477,6 +477,7 @@ mod tests {
             }],
             functions: vec![nir::program::Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     declaration: id,
                     name: "select".into(),
                     phase: nir::program::FunctionPhase::Comptime,

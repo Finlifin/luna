@@ -49,6 +49,7 @@ mod tests {
     fn entry() -> n::Function {
         n::Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(1),
                 name: "scope".into(),
                 phase: n::FunctionPhase::Comptime,

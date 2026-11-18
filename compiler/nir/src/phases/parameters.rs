@@ -146,6 +146,7 @@ mod tests {
         let ty = Term::Primitive(Primitive::Bool);
         Function {
             interface: crate::program::FunctionDeclaration {
+                source: SourceRange { start: 5, end: 20 },
                 declaration: DeclarationId { package: 1, local },
                 name: "input".into(),
                 phase: FunctionPhase::Runtime,
@@ -257,7 +258,7 @@ mod tests {
             panic!("snapshot membership must consume the caller's budget");
         };
         assert!(short > 0);
-        assert_eq!(error.source, value.body.source);
+        assert_eq!(error.source, value.source);
         InspectionFrame::new(program, &mut cost.clone()).unwrap();
 
         // Invalid metadata cannot bypass the reservation or become a budget
@@ -309,7 +310,7 @@ mod tests {
             ) else {
                 panic!("invalid binding must be rejected");
             };
-            assert_eq!(error.source, value.body.source);
+            assert_eq!(error.source, value.source);
             assert_eq!(
                 error.message,
                 if case == 0 {
@@ -333,7 +334,7 @@ mod tests {
         let value = function(10);
         let mut generous = 1000;
         validate_frame(
-            crate::contracts::CallableProgram::declaration(&value.interface, value.body.source),
+            crate::contracts::CallableProgram::declaration(&value.interface),
             false,
             &mut generous,
         )
@@ -342,7 +343,7 @@ mod tests {
         assert!(cost > 0);
         let mut fuel = cost;
         validate_frame(
-            crate::contracts::CallableProgram::declaration(&value.interface, value.body.source),
+            crate::contracts::CallableProgram::declaration(&value.interface),
             false,
             &mut fuel,
         )
@@ -350,7 +351,7 @@ mod tests {
         assert_eq!(fuel, 0);
         assert!(matches!(
             validate_frame(
-                crate::contracts::CallableProgram::declaration(&value.interface, value.body.source),
+                crate::contracts::CallableProgram::declaration(&value.interface),
                 true,
                 &mut fuel
             ),
@@ -361,7 +362,7 @@ mod tests {
         ));
         let mut fuel = cost - 1;
         let failure = validate_frame(
-            crate::contracts::CallableProgram::declaration(&value.interface, value.body.source),
+            crate::contracts::CallableProgram::declaration(&value.interface),
             false,
             &mut fuel,
         )
@@ -370,7 +371,7 @@ mod tests {
         assert_eq!(failure.source, value.defaults[0].1.source);
         assert_eq!(fuel, 0);
         validate_frame(
-            crate::contracts::CallableProgram::declaration(&value.interface, value.body.source),
+            crate::contracts::CallableProgram::declaration(&value.interface),
             true,
             &mut 1000,
         )
@@ -388,10 +389,7 @@ mod tests {
         for quote in [false, true] {
             assert!(matches!(
                 validate_frame(
-                    crate::contracts::CallableProgram::declaration(
-                        &duplicate.interface,
-                        duplicate.body.source
-                    ),
+                    crate::contracts::CallableProgram::declaration(&duplicate.interface),
                     quote,
                     &mut 1000
                 ),

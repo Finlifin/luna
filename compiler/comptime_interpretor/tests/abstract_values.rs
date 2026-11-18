@@ -36,6 +36,7 @@ fn package(body: Expr) -> Package {
     Package {
         functions: vec![Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(0),
                 name: "run".into(),
                 phase: FunctionPhase::Comptime,

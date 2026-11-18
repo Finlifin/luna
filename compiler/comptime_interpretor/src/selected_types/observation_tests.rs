@@ -52,6 +52,7 @@ fn call(declaration: u32) -> Expr {
 fn function(local: u32, body: Expr) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
+            source: SOURCE,
             declaration: id(local),
             name: format!("Domain{local}"),
             phase: FunctionPhase::Comptime,

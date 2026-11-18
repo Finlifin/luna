@@ -146,6 +146,7 @@ fn instantiate_contract(
         nir::DeclarationSubstitution::bounded(&parameters, &domains, arguments, &frames, fuel)
             .map_err(|e| e.to_string())?;
     Ok(MethodContract {
+        source: member.source,
         declaration: member.declaration,
         name: member.name.clone(),
         phase: member.phase,

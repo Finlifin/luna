@@ -82,6 +82,7 @@ fn fixture(arity: usize, repeats: usize) -> Package {
     Package {
         functions: vec![Function {
             interface: nir::program::FunctionDeclaration {
+                source: SOURCE,
                 declaration: ID,
                 name: "bits".into(),
                 phase: FunctionPhase::Comptime,

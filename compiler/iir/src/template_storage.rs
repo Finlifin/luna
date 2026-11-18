@@ -336,6 +336,7 @@ mod tests {
                 ],
             }],
             runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 requirements: vec![],
                 capabilities: vec![],
                 declaration: target,
@@ -419,6 +420,7 @@ mod tests {
                 domains: vec![domain.clone()],
             }],
             runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 requirements: vec![],
                 capabilities: vec![],
                 declaration: target,

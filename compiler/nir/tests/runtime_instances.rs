@@ -8,6 +8,7 @@ fn function() -> Function {
     let ty = Term::Primitive(Primitive::Bool);
     Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: id(1),
             name: "identity".into(),
             phase: FunctionPhase::Runtime,

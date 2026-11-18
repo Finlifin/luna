@@ -486,8 +486,8 @@ NIR Function 继续代表已检查产物；不能给 body 塞占位表达式或�
 `invocation_declaration` 以及程序／类型契约的替换、能力检查只接收 FunctionDeclaration，
 主体仍沿独立的
 Entry → Body 路径取得。required 收集生成的 runtime 函数身份时只复制所需声明字段，
-不再先复制整个主体；需要执行的依赖仍保留完整代码。声明和完整函数分别具有
-S-expression Display，完整函数的既有 dump 结构保持不变。
+需要执行的依赖仍保留完整代码。独立声明和完整函数的 S-expression dump 都包含声明
+来源；完整函数还显示主体和表达式各自的来源。
 
 这是已有受检产物的所有权拆分，尚非完整公开供应接口。公开参数名／默认提供者的
 跨值传送、源码模板的独立发布、未完成主体请求及原区域 Type 响应仍待接通；
@@ -511,8 +511,9 @@ runtime 函数。声明观察读取接口和来源，执行另行取得主体。
 
 这只证明输入帧的结构和默认绑定可见性。默认值的类型、result／entry snapshot
 约束、程序契约、phase、资源及代码安全仍由各自检查负责；没有新增执行授权。
-现有 Package adapter 仍从已检查 body 取得诊断位置，源码声明独立发布和未完成
-主体取得尚未实现。VM 构造成本不随主体语句数增加的测试，只证明该准入不扫描
+普通函数、仅保留身份的 runtime 函数和 trait 方法各自携带声明来源。调用目录按声明
+报告输入帧错误，表达式和默认代码的错误保留各自的位置。源包仍要先完成主体检查。
+VM 构造成本不随主体语句数增加的测试，只证明该准入不扫描
 主体，不能推导完整编译成本或一般源码 continuation 已完成。
 
 #### 程序契约使用声明，不制造可执行主体
@@ -723,7 +724,7 @@ VM 在形成具名 runtime 函数值和接收冻结值时，用当前声明环�
 | `required.rs` 的 `check_package_with_evidence` 与 `validate_machine_operations_checked` | 整包 phase 完成证据及独立的算术安全检查 | 完整根保留现有快路径；源码片段交付须带与实际片段、binder 和世界匹配的检查证据 |
 | `RequiredWorld::with_phase`／`CodeSession::with_phase_checked_source` | 对同一个不可变 Package 的整包凭证 | 不把部分目录升级为 PhaseCheckedPackage；源码服务和活动任务使用独立 owner，不伪造完整包 |
 | `nir::callable_source::Callables` | 与源包绑定的不可变身份目录 | 声明观察与代码取得分别查询；待完成源码的独立发布仍需接线 |
-| `prepare_invocation` | 通过 FunctionDeclarationView 读取接口及来源；底层适配器仍依赖完整 Function | 源码服务须直接发布声明来源；消费端已不接收主体，但尚未解除目录的完整代码要求 |
+| `prepare_invocation` | 直接借用 FunctionDeclaration 取得接口和声明来源 | 独立发布源码接口，并在 Entry 成功后按需交付主体；源包注册仍依赖完整 Function |
 | `prepare_invocation_step` 的 Entry → Body | 同步取得、特化和重绑定完整主体 | 入口契约成功后在原 activation 等待代码，响应不得再次 bind inputs、运行入口契约或建立新调用 |
 
 `nir::phases::Inspection` 与 `PhaseCheckedPackage` 也必须区别：前者拥有相同

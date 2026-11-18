@@ -35,11 +35,10 @@ impl Interpreter<'_> {
             (Term::String(value), _) => Value::String(value.clone()),
             (Term::Symbol(value), _) => Value::Symbol(value.clone()),
             (Term::ClosureSnapshot { factory, arguments }, ty) if ty.is_comptime_callable() => {
-                let view = self
+                let function = self
                     .functions
                     .declaration(factory)
                     .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                let function = view.interface;
                 if function.phase != nir::program::FunctionPhase::Comptime {
                     return Err(self.failure(ErrorKind::Type, None));
                 }
@@ -50,7 +49,7 @@ impl Interpreter<'_> {
                     &function.type_parameters,
                     arguments,
                     &function.signature,
-                    view.source,
+                    function.source,
                 )?;
                 if !matches!(signature.callable_signature(), Term::Function { parameters, result }
                         if parameters.is_empty() && result.as_ref() == ty)
@@ -58,7 +57,7 @@ impl Interpreter<'_> {
                     return Err(self.failure(ErrorKind::Type, None));
                 }
                 let expression = Expr {
-                    source: view.source,
+                    source: function.source,
                     ty: signature.with_comptime_phase(true),
                     kind: K::FunctionInstance {
                         declaration: *factory,
@@ -102,13 +101,12 @@ impl Interpreter<'_> {
                     if ty.is_comptime_callable() || identity.signature.is_comptime_callable() {
                         return Err(self.failure(ErrorKind::Type, None));
                     }
-                    SourceRange { start: 0, end: 0 }
+                    identity.source
                 } else {
-                    let view = self
+                    let function = self
                         .functions
                         .declaration(declaration)
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                    let function = view.interface;
                     if function.phase == nir::program::FunctionPhase::NormalForm
                         || (function.phase == nir::program::FunctionPhase::Comptime)
                             != ty.is_comptime_callable()
@@ -116,7 +114,7 @@ impl Interpreter<'_> {
                     {
                         return Err(self.failure(ErrorKind::Type, None));
                     }
-                    view.source
+                    function.source
                 };
                 for argument in arguments {
                     let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);

@@ -802,6 +802,7 @@ impl Checker<'_, '_> {
             let factory = self.generated_functions.fresh_identity(span)?;
             self.generated_functions.publish(n::Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: source(span),
                     declaration: factory,
                     name: "<closure-snapshot>".into(),
                     phase: n::FunctionPhase::Comptime,

@@ -17,6 +17,7 @@ fn package() -> Package {
     let callable = signature(Term::Primitive(Primitive::Bool));
     Package {
         runtime_function_identities: vec![RuntimeFunctionIdentity {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             requirements: vec![],
             capabilities: vec![],
             declaration: id(2),
@@ -28,6 +29,7 @@ fn package() -> Package {
         }],
         functions: vec![Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(1),
                 name: "obtain".into(),
                 phase: FunctionPhase::Comptime,
@@ -265,6 +267,7 @@ fn trait_package() -> Package {
         self_parameter: id(4),
         name: "Factory".into(),
         methods: vec![nir::program::MethodContract {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             phase: Default::default(),
             is_quote: false,
             pure: false,
@@ -445,6 +448,7 @@ fn generator_method_contract_cannot_enter_ordinary_interpreter_dispatch() {
         self_parameter: id(40),
         name: "Generator".into(),
         methods: vec![nir::program::MethodContract {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             phase: Default::default(),
             is_quote: false,
             pure: false,

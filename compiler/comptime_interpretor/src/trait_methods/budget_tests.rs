@@ -25,6 +25,7 @@ fn method_host_unwind_and_refill_cannot_leave_budget_or_selection() {
             parents: vec![],
             associated: vec![],
             methods: vec![MethodContract {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(3),
                 name: "accept".into(),
                 phase: TraitPhase::Comptime,

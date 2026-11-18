@@ -108,6 +108,7 @@ fn package(length: usize, reads: usize, mode: &str) -> Package {
         }],
         functions: vec![Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(1),
                 name: "ReadType".into(),
                 phase: FunctionPhase::Comptime,

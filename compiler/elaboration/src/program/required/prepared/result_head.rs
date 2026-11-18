@@ -42,7 +42,7 @@ pub(super) fn guarantees(
                     return Ok(false);
                 }
                 if !callables
-                    .interface(&id)
+                    .declaration(&id)
                     .is_some_and(|f| f.phase == n::FunctionPhase::Comptime)
                 {
                     return Ok(false);

@@ -586,6 +586,7 @@ mod tests {
         let package = n::Package {
             functions: vec![n::Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     phase: n::FunctionPhase::Comptime,
                     inline: false,
                     pure: true,
@@ -1412,6 +1413,7 @@ mod tests {
             package
                 .runtime_function_identities
                 .push(n::RuntimeFunctionIdentity {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     declaration: id(20),
                     type_parameters: vec![id(21), id(26)],
                     signature: Term::Function {
@@ -1440,6 +1442,7 @@ mod tests {
             package
                 .runtime_function_identities
                 .push(n::RuntimeFunctionIdentity {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     declaration: id(32),
                     type_parameters: vec![id(30)],
                     signature: Term::Function {

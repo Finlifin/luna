@@ -114,6 +114,7 @@ impl Checker<'_, '_> {
                         return Err(error(span, ERASED_PRECONDITIONS));
                     }
                     runtime_function_identities.push(n::RuntimeFunctionIdentity {
+                        source: function.source,
                         requirements: function.requirements.clone(),
                         capabilities: function.capabilities.clone(),
                         declaration: id,

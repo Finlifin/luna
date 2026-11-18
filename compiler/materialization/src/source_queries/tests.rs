@@ -15,6 +15,7 @@ fn fixture() -> (n::Package, n::Expr, n::Expr) {
         result: Box::new(ty(Primitive::Bool)),
     };
     let method = |local, name: &str| n::MethodContract {
+        source: nir::program::SourceRange { start: 0, end: 0 },
         declaration: id(local),
         name: name.into(),
         phase: Default::default(),

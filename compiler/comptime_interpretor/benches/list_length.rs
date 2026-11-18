@@ -86,6 +86,7 @@ fn package(element: Primitive, reads: usize, mode: &str) -> Package {
         }],
         functions: vec![Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(1),
                 name: "length".into(),
                 phase: FunctionPhase::Comptime,

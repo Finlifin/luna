@@ -480,6 +480,7 @@ mod tests {
         let source = Arc::new(Package {
             functions: vec![nir::program::Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: SourceRange { start: 0, end: 2 },
                     declaration: DeclarationId {
                         package: 1,
                         local: 1,
@@ -523,7 +524,7 @@ mod tests {
                 ).err().unwrap().kind,
                 ErrorKind::InvalidPhase(nir::phases::Error {
                     kind: nir::phases::ErrorKind::Invalid,
-                    source: changed.functions[0].body.source,
+                    source: changed.functions[0].source,
                     message: "invalid function parameter default slot",
                 }),
             );
@@ -539,7 +540,7 @@ mod tests {
                 .kind,
                 ErrorKind::InvalidPhase(nir::phases::Error {
                     kind: nir::phases::ErrorKind::Invalid,
-                    source: changed.functions[0].body.source,
+                    source: changed.functions[0].source,
                     message: "invalid function parameter default slot",
                 }),
             );
@@ -557,7 +558,7 @@ mod tests {
                 .kind,
                 ErrorKind::InvalidPhase(nir::phases::Error {
                     kind: nir::phases::ErrorKind::Invalid,
-                    source: changed.functions[0].body.source,
+                    source: changed.functions[0].source,
                     message: "invalid function parameter default slot",
                 }),
             );
@@ -611,6 +612,7 @@ mod tests {
         };
         let source = Arc::new(Package {
             runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 requirements: vec![],
                 capabilities: vec![],
                 declaration: identity,

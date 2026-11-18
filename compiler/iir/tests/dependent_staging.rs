@@ -42,6 +42,7 @@ fn dependent_inputs_rebind_body_contracts_defaults_and_trait_arguments() {
     let template = Function {
         body: expr(K::Local(id(2)), t.clone()),
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: DeclarationId {
                 package: 1,
                 local: 1,
@@ -126,6 +127,7 @@ fn dependent_default_values_receive_concrete_types_before_evaluation_or_runtime_
         };
         let template = Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: DeclarationId {
                     package: 1,
                     local: 2,
@@ -295,6 +297,7 @@ fn dependent_defaults_do_not_recharge_unrelated_completed_payloads() {
         .collect();
     let template = Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: DeclarationId {
                 package: 1,
                 local: 3,
@@ -406,6 +409,7 @@ fn dependent_type_value_domains_rebind_body_and_contracts_compositionally() {
     let template = Function {
         body: expr(K::TypeValue(opaque.clone()), p(Primitive::Type)),
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: DeclarationId {
                 package: 1,
                 local: 4,

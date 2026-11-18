@@ -45,6 +45,7 @@ fn source() -> Arc<Package> {
         traits: vec![base, derived],
         functions: vec![Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(3),
                 name: "read".into(),
                 phase: FunctionPhase::Comptime,

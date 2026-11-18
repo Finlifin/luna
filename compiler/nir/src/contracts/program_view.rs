@@ -61,13 +61,13 @@ impl<'a> CallableProgram<'a> {
     }
 
     pub fn function(function: &'a Function) -> Self {
-        let mut program = Self::declaration(&function.interface, function.body.source);
+        let mut program = Self::declaration(&function.interface);
         program.parts.body = Some(&function.body);
         program
     }
 
     /// Inspect a specialized declaration without inventing executable code.
-    pub fn declaration(function: &'a FunctionDeclaration, source: SourceRange) -> Self {
+    pub fn declaration(function: &'a FunctionDeclaration) -> Self {
         Self {
             signature: &function.signature,
             parts: ProgramParts {
@@ -77,7 +77,7 @@ impl<'a> CallableProgram<'a> {
                 type_parameters: &function.type_parameters,
                 parameters: &function.parameters,
                 body: None,
-                source,
+                source: function.source,
                 defaults: &function.defaults,
                 preconditions: &function.preconditions,
                 postconditions: &function.postconditions,
@@ -180,7 +180,7 @@ impl<'a> ProgramParts<'a> {
             type_parameters: &method.type_parameters,
             parameters: &method.parameter_bindings,
             body: None,
-            source: SourceRange { start: 0, end: 0 },
+            source: method.source,
             defaults: &[],
             preconditions: &method.program.preconditions,
             postconditions: &method.program.postconditions,
@@ -265,6 +265,7 @@ mod tests {
 
     fn method() -> MethodContract {
         MethodContract {
+            source: flag(90).source,
             declaration: DeclarationId {
                 package: 1,
                 local: 2,
@@ -352,7 +353,7 @@ mod tests {
         let declaration = method()
             .program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000)
             .unwrap();
-        let view = CallableProgram::declaration(&declaration, flag(90).source);
+        let view = CallableProgram::declaration(&declaration);
         assert!(view.parts.body.is_none());
         let roots: Vec<_> = view.roots().collect();
         assert_eq!(roots.len(), 2);

@@ -25,6 +25,7 @@ fn graph() -> Package {
             key,
             function: Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     declaration: id(1),
                     name: "read".into(),
                     phase: FunctionPhase::Comptime,

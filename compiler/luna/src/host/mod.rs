@@ -5,7 +5,7 @@ pub mod intrinsic;
 mod llvm;
 pub use discard::llvm_ir_discarding_result;
 mod tools;
-use nir::program::{FunctionPhase, Package};
+use nir::program::Package;
 pub use tools::{OptimizationLevel, TargetLayout, Toolchain};
 
 pub fn llvm_ir(package: &Package, entry: &str, fuel: u64) -> Result<String, String> {
@@ -65,12 +65,8 @@ pub fn llvm_ir_in_package(
     } else {
         package
     };
-    let (package, declaration) = crate::invocation::prepare_entry_in_package(
-        package,
-        entry,
-        FunctionPhase::Runtime,
-        Some(identity),
-    )?;
+    let (package, declaration) =
+        crate::invocation::prepare_runtime_entry(package, entry, Some(identity), fuel)?;
     llvm_ir_declaration(&package, declaration, fuel, protocols)
 }
 
@@ -105,7 +101,7 @@ pub fn prepare_with_protocols(
     drop: nir::DeclarationId,
 ) -> Result<Prepared, String> {
     let (package, declaration) =
-        crate::invocation::prepare_entry_in_package(package, entry, FunctionPhase::Runtime, None)?;
+        crate::invocation::prepare_runtime_entry(package, entry, None, fuel)?;
     prepare_declaration_with_protocols(&package, declaration, fuel, copy, drop)
 }
 
@@ -185,7 +181,7 @@ fn llvm_ir_selected(
         return llvm_ir_prepared(&executable, fuel);
     }
     let (package, declaration) =
-        crate::invocation::prepare_entry_in_package(package, entry, FunctionPhase::Runtime, None)?;
+        crate::invocation::prepare_runtime_entry(package, entry, None, fuel)?;
     llvm_ir_declaration(&package, declaration, fuel, None)
 }
 

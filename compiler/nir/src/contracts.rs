@@ -223,6 +223,7 @@ impl MethodContract {
         crate::type_computations::charge_term(completed_signature.callable_signature(), fuel)?;
         let signature = completed_signature.callable_signature().clone();
         Ok(FunctionDeclaration {
+            source: self.source,
             declaration: self.declaration,
             name: self.name.clone(),
             phase,

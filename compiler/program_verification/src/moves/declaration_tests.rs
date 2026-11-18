@@ -24,6 +24,7 @@ fn expr(ty: Term, kind: K) -> Expr {
 fn function(local: u32, body: Expr) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: id(local),
             name: format!("f{local}"),
             phase: FunctionPhase::Runtime,

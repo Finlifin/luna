@@ -12,6 +12,7 @@ fn flag() -> Expr {
 fn function(local: u32, phase: Phase) -> Function {
     Function {
         interface: crate::program::FunctionDeclaration {
+            source: SourceRange { start: 1, end: 20 },
             declaration: crate::DeclarationId { package: 1, local },
             name: format!("function{local}"),
             phase,
@@ -180,7 +181,7 @@ fn callable_preparation_cannot_allocate_a_frame_without_inspection_fuel() {
     };
     let error = run(&package, &mut 1).unwrap_err();
     assert_eq!(error.message, "function inspection frame budget exhausted");
-    assert_eq!(error.source, package.functions[0].body.source);
+    assert_eq!(error.source, package.functions[0].source);
     run(&package, &mut 1000).unwrap();
 }
 
@@ -200,7 +201,7 @@ fn storage_and_call_safety_consume_the_same_inspection_allowance() {
         assert_eq!(exact, 0);
         let error = run(&package, &mut (cost - 1)).unwrap_err();
         assert_eq!(error.message, "call safety validation budget exhausted");
-        assert_eq!(error.source, package.functions[0].body.source);
+        assert_eq!(error.source, package.functions[0].source);
         let mut twice = package.clone();
         twice.functions.push(function(2, phase));
         assert!(

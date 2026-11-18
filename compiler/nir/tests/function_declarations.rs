@@ -31,6 +31,7 @@ fn declaration() -> FunctionDeclaration {
         ExprKind::TypeEqual(Box::new(type_value.clone()), Box::new(type_value)),
     );
     FunctionDeclaration {
+        source: nir::program::SourceRange { start: 0, end: 0 },
         declaration: id(1),
         name: "quoted\"name\nnext".into(),
         phase: FunctionPhase::Comptime,

@@ -11,6 +11,7 @@ fn fixture() -> (Package, Expr) {
         result: Box::new(ty(P::Bool)),
     };
     interface.methods.push(MethodContract {
+        source: nir::program::SourceRange { start: 0, end: 0 },
         declaration: id(20),
         name: "accept".into(),
         phase: Default::default(),

@@ -2,7 +2,7 @@
 //! evaluated during construction. Code inputs retain their runtime domains.
 use super::{Error, storage_cache::StorageQueries};
 use crate::code_interfaces::{CodeDomain, CodeFunctionSignature, CodeInput, SignatureOutput};
-use crate::program::{MethodContract, SourceRange};
+use crate::program::MethodContract;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn validate_method_frame<O: SignatureOutput>(
@@ -10,7 +10,7 @@ pub(crate) fn validate_method_frame<O: SignatureOutput>(
     signature: &CodeFunctionSignature<O>,
     fuel: &mut usize,
 ) -> Result<(), Error> {
-    let source = SourceRange { start: 0, end: 0 };
+    let source = method.source;
     let budget = || Error::budget(source, "contextual method frame budget exhausted");
     signature.charge(fuel).map_err(|failure| match failure {
         crate::type_computations::Error::Budget => budget(),
@@ -64,7 +64,7 @@ pub(super) fn inspect_contract<O: SignatureOutput>(
     signature: &CodeFunctionSignature<O>,
     fuel: &mut usize,
 ) -> Result<(), Error> {
-    let source = SourceRange { start: 0, end: 0 };
+    let source = method.source;
     let storage_error = |failure| Error::storage(source, failure);
     let mut code_bindings = BTreeSet::new();
     let domains = signature

@@ -408,6 +408,7 @@ mod tests {
                 interface: method.interface.clone(),
                 subject: method.subject.clone(),
                 methods: vec![nir::program::MethodContract {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     phase: Default::default(),
                     is_quote: false,
                     pure: false,

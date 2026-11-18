@@ -2127,6 +2127,7 @@ impl Package {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeFunctionIdentity {
+    pub source: SourceRange,
     /// Type obligations for forming this identity in the receiving world.
     /// Calling a staged template still requires its source program contracts.
     pub requirements: Vec<TypePredicate>,
@@ -2139,8 +2140,8 @@ impl fmt::Display for RuntimeFunctionIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(runtime-function-identity {} (type-parameters",
-            self.declaration
+            "(runtime-function-identity {} {} (type-parameters",
+            self.declaration, self.source
         )?;
         for parameter in &self.type_parameters {
             write!(f, " {parameter}")?;
@@ -2343,6 +2344,7 @@ pub struct Trait {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct MethodContract {
+    pub source: SourceRange,
     pub phase: TraitPhase,
     /// Deterministic code application required by the interface; independent
     /// of execution phase and purity. Never authorizes a runtime call fallback.
@@ -2438,9 +2440,10 @@ impl fmt::Display for MethodContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(method {} (name {:?}) (phase {}) (quote {}) (pure {}) (unsafe {}) (by-value-receiver {}) (by-reference-receiver {}) (signature {}) (requires",
+            "(method {} (name {:?}) {} (phase {}) (quote {}) (pure {}) (unsafe {}) (by-value-receiver {}) (by-reference-receiver {}) (signature {}) (requires",
             self.declaration,
             self.name,
+            self.source,
             self.phase,
             self.is_quote,
             self.pure,

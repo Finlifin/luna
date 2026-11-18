@@ -51,6 +51,7 @@ impl Checker<'_, '_> {
                 .map_err(|_| error(span, "compiler operation body budget exhausted"))?;
             self.generated_functions.publish(n::Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: origin,
                     declaration: identity,
                     name: format!("<compiler-operation.{}>", name.as_str()),
                     phase: if matches!(ty, Term::ComptimeFunction(_)) {

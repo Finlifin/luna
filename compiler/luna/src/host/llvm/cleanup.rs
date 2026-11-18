@@ -2140,6 +2140,7 @@ mod tests {
         };
         let function = Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 phase: nir::program::FunctionPhase::Runtime,
                 inline: false,
                 pure: false,

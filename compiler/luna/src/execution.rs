@@ -1,7 +1,7 @@
 //! Bounded reference execution through the concrete instance graph.
 use comptime_interpretor::{Budget, Interpreter, Value};
 use elaboration::materialization::{ClosedDeclarations, DeclarationSnapshot, DeclarationSource};
-use nir::program::{FunctionPhase, Package};
+use nir::program::Package;
 
 /// Fuel is a per-stage bound, like the existing instantiation CLI budget.
 /// Resource verification and native code generation remain separate passes.
@@ -38,7 +38,7 @@ pub fn interpret_effects_with_protocols(
         ..Default::default()
     };
     let (package, declaration) =
-        crate::invocation::prepare_entry_in_package(package, entry, FunctionPhase::Runtime, None)?;
+        crate::invocation::prepare_runtime_entry(package, entry, None, fuel)?;
     let protocols = crate::resources::ProtocolContext::selected_in_source(
         elaboration::materialization::DeclarationSnapshot::new(std::sync::Arc::new(
             package.into_owned(),
@@ -113,12 +113,8 @@ fn interpret_selected(
     if fuel == 0 {
         return Err("execution fuel must be positive".into());
     }
-    let (package, declaration) = crate::invocation::prepare_entry_in_package(
-        package,
-        entry,
-        FunctionPhase::Runtime,
-        identity,
-    )?;
+    let (package, declaration) =
+        crate::invocation::prepare_runtime_entry(package, entry, identity, fuel)?;
     ReferenceSession::new(package, fuel)?.invoke(declaration, entry)
 }
 
@@ -261,12 +257,8 @@ pub(crate) fn interpret_protocols_selected(
     if fuel == 0 {
         return Err("execution fuel must be positive".into());
     }
-    let (package, declaration) = crate::invocation::prepare_entry_in_package(
-        package,
-        entry,
-        FunctionPhase::Runtime,
-        identity,
-    )?;
+    let (package, declaration) =
+        crate::invocation::prepare_runtime_entry(package, entry, identity, fuel)?;
     CheckedSession::new(
         package,
         copy_protocol,

@@ -30,6 +30,7 @@ fn present(value: Expr) -> Expr {
 fn function(local: u32, body: Expr) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: id(local),
             name: format!("optional{local}"),
             phase: FunctionPhase::Comptime,

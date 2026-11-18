@@ -18,6 +18,7 @@ fn template_identity_metadata_admits_tags_but_not_execution() {
         result: Box::new(Term::Primitive(Primitive::Bool)),
     };
     let identity = nir::program::RuntimeFunctionIdentity {
+        source: nir::program::SourceRange { start: 0, end: 0 },
         requirements: vec![],
         capabilities: vec![],
         declaration: id,

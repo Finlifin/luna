@@ -20,6 +20,7 @@ fn contract() -> Trait {
         capabilities: vec![],
         associated: vec![],
         methods: vec![MethodContract {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: id(4),
             name: "make".into(),
             phase: Default::default(),

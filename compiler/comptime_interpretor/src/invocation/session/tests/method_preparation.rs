@@ -114,6 +114,7 @@ fn tree_and_staged_input_scopes_restore_depth_after_method_host_unwind() {
 fn function(declaration: u32, result: Term, body: Expr) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: id(declaration),
             name: format!("method_test_{declaration}"),
             phase: FunctionPhase::Comptime,
@@ -183,6 +184,7 @@ fn fixture(direct: bool) -> (Package, Expr) {
             parents: vec![],
             associated: vec![],
             methods: vec![MethodContract {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(3),
                 name: "read".into(),
                 phase: TraitPhase::Comptime,

@@ -285,6 +285,7 @@ fn method_signature_preserves_category_through_specialization() {
 
 fn code_method() -> nir::program::MethodContract {
     nir::program::MethodContract {
+        source: nir::program::SourceRange { start: 32, end: 46 },
         phase: Default::default(),
         is_quote: false,
         pure: true,

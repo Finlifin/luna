@@ -1,65 +1,26 @@
 //! Host entry selection and bounded ordinary default-call preparation.
 use super::*;
+use nir::program::{CallArgument, Expr, ExprKind};
 use std::sync::Arc;
 
 pub(super) struct Entry {
     pub(super) declaration: DeclarationId,
-    defaults: bool,
-    call: Option<Arc<nir::program::Expr>>,
-}
-impl Entry {
-    pub(super) fn new(function: &nir::program::Function) -> Self {
-        Self {
-            declaration: function.declaration,
-            defaults: !function.parameters.is_empty(),
-            call: None,
-        }
-    }
-
-    pub(super) fn call(
-        &mut self,
-        package: &Package,
-        fuel: &mut u64,
-    ) -> Result<Option<Arc<nir::program::Expr>>, String> {
-        if !self.defaults {
-            return Ok(None);
-        }
-        *fuel = fuel
-            .checked_sub(1)
-            .ok_or("entry call preparation budget exhausted")?;
-        if let Some(call) = &self.call {
-            return Ok(Some(call.clone()));
-        }
-        let call = Arc::new(prepare_call(package, self.declaration, fuel)?);
-        self.call = Some(call.clone());
-        Ok(Some(call))
-    }
+    /// Index in the immutable package from which selection was made.
+    function_index: usize,
+    /// Declaration default indices, ordered by receiving parameter slot.
+    default_order: Vec<usize>,
+    call: Option<Arc<Expr>>,
 }
 
-pub(super) fn select<'a>(
-    package: &'a Package,
-    entry: &str,
-    phase: FunctionPhase,
-    identity: Option<u64>,
-) -> Result<&'a nir::program::Function, String> {
-    select_in(
-        package,
-        entry,
-        phase,
-        identity,
-        &mut Budget::default().steps,
-    )
-}
-
-pub(super) fn select_in<'a>(
-    package: &'a Package,
+pub(super) fn select_in(
+    package: &Package,
     entry: &str,
     phase: FunctionPhase,
     identity: Option<u64>,
     fuel: &mut u64,
-) -> Result<&'a nir::program::Function, String> {
+) -> Result<Entry, String> {
     let mut selected = None;
-    for function in &package.functions {
+    for (index, function) in package.functions.iter().enumerate() {
         spend(fuel, 1)?;
         if identity.is_some_and(|id| function.declaration.package != id)
             || function.name.len() != entry.len()
@@ -68,14 +29,15 @@ pub(super) fn select_in<'a>(
         }
         spend(fuel, entry.len())?;
         if function.name == entry {
-            if selected.replace(function).is_some() {
+            if selected.replace(index).is_some() {
                 return Err(format!(
                     "function name '{entry}' is ambiguous; use a uniquely named wrapper"
                 ));
             }
         }
     }
-    let function = selected.ok_or_else(|| format!("no function named '{entry}'"))?;
+    let function_index = selected.ok_or_else(|| format!("no function named '{entry}'"))?;
+    let function = &package.functions[function_index].interface;
     if function.phase != phase {
         return Err(format!(
             "'{entry}' is not a {} function",
@@ -93,21 +55,25 @@ pub(super) fn select_in<'a>(
     }
     spend(fuel, function.parameters.len().saturating_mul(2))?;
     spend(fuel, function.defaults.len())?;
-    let mut supplied = vec![false; function.parameters.len()];
-    for (slot, _) in &function.defaults {
+    let mut supplied = vec![None; function.parameters.len()];
+    for (index, (slot, _)) in function.defaults.iter().enumerate() {
         let slot = supplied
             .get_mut(*slot)
             .ok_or("invalid entry default parameter")?;
-        if std::mem::replace(slot, true) {
+        if slot.replace(index).is_some() {
             return Err("duplicate entry default parameter".into());
         }
     }
-    if supplied.contains(&false) {
-        return Err(format!(
-            "'{entry}' requires arguments; use a zero-argument wrapper"
-        ));
-    }
-    Ok(function)
+    let default_order = supplied
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| format!("'{entry}' requires arguments; use a zero-argument wrapper"))?;
+    Ok(Entry {
+        declaration: function.declaration,
+        function_index,
+        default_order,
+        call: None,
+    })
 }
 
 fn spend(fuel: &mut u64, amount: usize) -> Result<(), String> {
@@ -117,85 +83,84 @@ fn spend(fuel: &mut u64, amount: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn prepare_call(
-    package: &Package,
-    declaration: DeclarationId,
-    fuel: &mut u64,
-) -> Result<nir::program::Expr, String> {
-    use nir::program::{CallArgument, Expr, ExprKind};
-    *fuel = fuel
-        .checked_sub(package.functions.len() as u64)
-        .ok_or("entry declaration lookup budget exhausted")?;
-    let function = package
-        .functions
-        .iter()
-        .find(|function| function.declaration == declaration)
-        .ok_or("entry declaration disappeared")?;
-    if function.phase != FunctionPhase::Comptime || !function.type_parameters.is_empty() {
-        return Err("entry call requires a concrete comptime declaration".into());
-    }
-    let Term::Function { result, .. } = &function.signature else {
-        return Err("invalid invocation signature".into());
-    };
-    let mut steps =
-        usize::try_from(*fuel).map_err(|_| "entry fuel does not fit the host counter")?;
-    let before = steps;
-    let copied = (|| {
-        use nir::copy_budget::{CopyBudgetExhausted as E, charge_type_substitution};
-        steps = steps
-            .checked_sub(
-                function
-                    .parameters
-                    .len()
-                    .saturating_mul(2)
-                    .saturating_add(function.defaults.len()),
-            )
-            .ok_or(E::Steps)?;
-        charge_type_substitution(&function.signature, &[], &[], &mut steps)?;
-        charge_type_substitution(result, &[], &[], &mut steps)?;
-        for (_, value) in &function.defaults {
-            let mut work = steps as u64;
-            let result = nir::copy_budget::charge_expression(value, &mut work);
-            steps = work as usize;
-            result?;
+impl Entry {
+    pub(super) fn call(
+        &mut self,
+        package: &Package,
+        fuel: &mut u64,
+    ) -> Result<Option<Arc<Expr>>, String> {
+        if !self.has_defaults() {
+            return Ok(None);
         }
-        Ok::<_, E>(())
-    })();
-    *fuel -= (before - steps) as u64;
-    copied.map_err(|error| format!("entry call copy budget exhausted: {error:?}"))?;
-    let mut defaults = vec![None; function.parameters.len()];
-    for (slot, value) in &function.defaults {
-        let target = defaults
-            .get_mut(*slot)
-            .ok_or("invalid entry default parameter")?;
-        if target.replace(value).is_some() {
-            return Err("duplicate entry default parameter".into());
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("entry call preparation budget exhausted")?;
+        if let Some(call) = &self.call {
+            return Ok(Some(call.clone()));
         }
+        let call = Arc::new(self.default_call(package, fuel)?);
+        self.call = Some(call.clone());
+        Ok(Some(call))
     }
-    if defaults.iter().any(Option::is_none) {
-        return Err("entry requires an explicit argument".into());
+
+    pub(super) fn has_defaults(&self) -> bool {
+        !self.default_order.is_empty()
     }
-    let source = function.body.source;
-    Ok(Expr {
-        source,
-        ty: (**result).clone(),
-        kind: ExprKind::Call {
-            callee: Box::new(Expr {
-                source,
-                ty: function.callable_type(),
-                kind: ExprKind::Function(declaration),
-            }),
-            parameter_bindings: function.parameters.clone(),
-            arguments: defaults
-                .into_iter()
-                .enumerate()
-                .map(|(parameter, value)| CallArgument {
-                    passing: Default::default(),
-                    parameter,
-                    is_default: true,
-                    value: value.unwrap().clone(),
-                })
-                .collect(),
-        },
-    })
+
+    pub(super) fn default_call(&self, package: &Package, fuel: &mut u64) -> Result<Expr, String> {
+        let function = &package.functions[self.function_index].interface;
+        let Term::Function { result, .. } = &function.signature else {
+            return Err("invalid invocation signature".into());
+        };
+        let mut steps =
+            usize::try_from(*fuel).map_err(|_| "entry fuel does not fit the host counter")?;
+        let before = steps;
+        let copied = (|| {
+            use nir::copy_budget::{CopyBudgetExhausted as E, charge_type_substitution};
+            steps = steps
+                .checked_sub(
+                    function
+                        .parameters
+                        .len()
+                        .saturating_mul(2)
+                        .saturating_add(function.defaults.len()),
+                )
+                .ok_or(E::Steps)?;
+            charge_type_substitution(&function.signature, &[], &[], &mut steps)?;
+            charge_type_substitution(result, &[], &[], &mut steps)?;
+            for (_, value) in &function.defaults {
+                let mut work = steps as u64;
+                let result = nir::copy_budget::charge_expression(value, &mut work);
+                steps = work as usize;
+                result?;
+            }
+            Ok::<_, E>(())
+        })();
+        *fuel -= (before - steps) as u64;
+        copied.map_err(|error| format!("entry call copy budget exhausted: {error:?}"))?;
+        let source = function.source;
+        Ok(Expr {
+            source,
+            ty: (**result).clone(),
+            kind: ExprKind::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: function.callable_type(),
+                    kind: ExprKind::Function(self.declaration),
+                }),
+                parameter_bindings: function.parameters.clone(),
+                arguments: self
+                    .default_order
+                    .iter()
+                    .enumerate()
+                    .map(|(parameter, index)| CallArgument {
+                        passing: Default::default(),
+                        parameter,
+                        is_default: true,
+                        value: function.defaults[*index].1.clone(),
+                    })
+                    .collect(),
+            },
+        })
+    }
 }

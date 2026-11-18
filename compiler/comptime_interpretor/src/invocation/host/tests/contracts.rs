@@ -31,6 +31,7 @@ fn package(returned: bool) -> Package {
         }],
         functions: vec![nir::program::Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 phase: nir::program::FunctionPhase::Comptime,
                 inline: false,
                 pure: false,

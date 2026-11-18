@@ -553,6 +553,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
             }
             Node::RuntimeIdentity(identity) => {
                 let n::RuntimeFunctionIdentity {
+                    source: _,
                     declaration: _,
                     type_parameters,
                     signature,

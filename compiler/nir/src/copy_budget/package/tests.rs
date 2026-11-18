@@ -25,6 +25,7 @@ fn text() -> n::Expr {
 fn function() -> n::Function {
     n::Function {
         interface: crate::program::FunctionDeclaration {
+            source: crate::program::SourceRange { start: 0, end: 0 },
             phase: n::FunctionPhase::Comptime,
             inline: false,
             pure: true,
@@ -65,6 +66,7 @@ fn interface() -> n::Trait {
 }
 fn method() -> n::MethodContract {
     n::MethodContract {
+        source: n::SourceRange { start: 0, end: 0 },
         phase: n::TraitPhase::Runtime,
         is_quote: false,
         pure: false,
@@ -331,6 +333,7 @@ fn packages() -> Vec<(&'static str, n::Package)> {
     package
         .runtime_function_identities
         .push(n::RuntimeFunctionIdentity {
+            source: crate::program::SourceRange { start: 0, end: 0 },
             requirements: vec![],
             capabilities: vec![],
             declaration: id(1),

@@ -108,6 +108,7 @@ fn nonterminating_private_loop_is_p4_but_not_a_stable_default() {
     let package = Package {
         functions: vec![Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 phase: FunctionPhase::Runtime,
                 inline: false,
                 pure: true,

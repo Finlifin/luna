@@ -124,7 +124,7 @@ impl Interpreter<'_> {
         } else if dynamic && let Some((declaration, arguments)) = callee.declaration_instance() {
             let definition = self
                 .functions
-                .interface(&declaration)
+                .declaration(&declaration)
                 .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(construction)))?;
             function_frame = self.ordinary_input_frame(&definition.signature, construction)?;
             (

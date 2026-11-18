@@ -135,6 +135,7 @@ fn entry_with_bound_locals(
     let (parameters, types): (Vec<_>, Vec<_>) = inputs.into_iter().unzip();
     Ok(crate::program::Function {
         interface: crate::program::FunctionDeclaration {
+            source: body.source,
             declaration,
             name,
             phase: crate::program::FunctionPhase::Comptime,
@@ -160,25 +161,25 @@ fn entry_with_bound_locals(
 }
 impl std::error::Error for Error {}
 impl Invocation {
-    /// Retain the complete checked comptime body through its package identity.
+    /// Prepare the input frame from the declaration of a Type computation.
     /// This is an invocation input frame: ordinary parameters execute inside
     /// comptime and require concrete comptime values, not future runtime reads.
     /// The owning package retains statements, control flow and contracts.
-    pub fn from_function(
-        function: &crate::program::Function,
+    pub fn from_declaration(
+        function: &crate::program::FunctionDeclaration,
         fuel: &mut usize,
     ) -> Result<Self, Error> {
         bounded(&function.signature, fuel)?;
         function.signature.check_scope(&[]).map_err(Error::Scope)?;
         let Term::Function { parameters, result } = function.signature.callable_signature() else {
-            return Err(Error::InvalidCall(function.body.source));
+            return Err(Error::InvalidCall(function.source));
         };
         if function.phase != crate::program::FunctionPhase::Comptime
             || !function.type_parameters.is_empty()
             || **result != Term::Primitive(crate::Primitive::Type)
             || function.parameters.len() != parameters.len()
         {
-            return Err(Error::InvalidCall(function.body.source));
+            return Err(Error::InvalidCall(function.source));
         }
         *fuel = fuel.checked_sub(parameters.len()).ok_or(Error::Budget)?;
         let mut ids = BTreeSet::new();
@@ -731,9 +732,9 @@ impl CapturedEntry {
         *fuel = fuel
             .checked_sub(self.source_scope.len())
             .ok_or(Error::Budget)?;
-        let compact = Invocation::from_function(&self.function, fuel)?;
+        let compact = Invocation::from_declaration(&self.function.interface, fuel)?;
         if compact.scope().len() != self.slots.len() {
-            return Err(Error::InvalidCall(self.function.body.source));
+            return Err(Error::InvalidCall(self.function.source));
         }
         let mut seen = BTreeSet::new();
         let mut mapping = Vec::with_capacity(self.slots.len());
@@ -743,7 +744,7 @@ impl CapturedEntry {
                 .get(slot)
                 .ok_or(Error::Scope(TypeError::MissingArgument(slot)))?;
             if !seen.insert(slot) {
-                return Err(Error::InvalidCall(self.function.body.source));
+                return Err(Error::InvalidCall(self.function.source));
             }
             if sort != compact.scope()[index] {
                 return Err(Error::Scope(TypeError::WrongSort {

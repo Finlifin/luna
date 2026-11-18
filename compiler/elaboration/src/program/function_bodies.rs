@@ -17,6 +17,7 @@ impl Checker<'_, '_> {
         signature: Term,
     ) -> n::RuntimeFunctionIdentity {
         n::RuntimeFunctionIdentity {
+            source: source(self.package.item(owner).unwrap().span),
             declaration: declaration(self.package, &self.package_identities, owner),
             signature: self.callable_type(owner, signature),
             type_parameters: self.type_parameters[&owner].clone(),
@@ -76,6 +77,7 @@ impl Checker<'_, '_> {
             let (postconditions, entry_snapshots) =
                 self.program_postconditions(owner, result_binding, result)?;
             let interface = n::FunctionDeclaration {
+                source: source(item.span),
                 declaration: declaration(self.package, &self.package_identities, owner),
                 name: item.ident.name.as_str().into(),
                 phase: if sig.modifiers.is_normal_form_head {

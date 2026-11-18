@@ -1262,8 +1262,8 @@ OpenDefinition/WorldView 已经落地。冻结入口、实际执行入口及 IIR
 不先构造执行闭包，也不混用表中选择和按需选择。代码 session 复用代码，调用值、局部
 存储、契约状态与 builder 服务仍在每次 invocation 中建立。
 
-默认参数入口已从合成声明迁移为独立调用表达式：准备入口保存原函数身份，在首次
-执行额度内构造普通 `ExprKind::Call`，按参数顺序装入默认表达式和原参数绑定，
+带默认参数的 comptime 入口保存所选声明在不可变包中的位置、身份和默认供应顺序。
+第一次执行时，入口按本次额度构造普通 `ExprKind::Call`，按参数顺序装入默认表达式和原参数绑定，
 交给已有默认参数调用计划处理。查找、容器宽度、类型与表达式复制在分配前预检；
 完整代码才保留为 Arc，不给它编造 DeclarationId，也不为它修改 Package。
 无默认参数的零参数入口仍直接调用原声明。PreparedInvocation 连带默认参数的
@@ -1291,28 +1291,16 @@ VM 执行消费同一 invocation 额度。完整边界与验证见
 100,000 步构造上限。构造额度与之后每次 invoke 的额度分开，不能重复收取已完成
 的入口选择成本；同样也不能拿保留的入口身份冒充新的执行许可。
 
-此清理不覆盖 runtime／native 默认入口包装；其共享选择器已受默认构造上限约束，
-但尚未与 runtime 构图的累计额度接通。结果缓存与 Eq／Hash 的准备接线见下节；
-其他 driver 的外围准备仍有分阶段额度，不能据此声称所有宿主准备已统一。独立调用表达式不是新的语言
-声明种类。共享来源、独立证明和缓存准备的预算边界见
-[声明目录与捕获](world-storage-and-lifetimes.md#12-保活源码的共享声明目录)。
+runtime 解释和 native 构建使用同一个声明选择器、默认槽位顺序和 Call 构造函数。
+选名和构造 Call 共用调用方提供的阶段额度。构造器从声明取得位置、参数绑定和带
+阶段／unsafe 限定的 callable 类型。默认表达式各自保留源码位置，每次执行依次求值；
+默认供应在声明中的存储顺序不影响参数的词法依赖。选定入口只对其不可变源码包有效。
 
-默认入口迁移的检查工作目录 `/home/fin/luna`，通过 `development/check.py` 执行：
-
-- `test -p comptime_interpretor -p luna --lib --test prepared_invocations
-  --test comptime_bytecode_defaults --test builder_invocations --test library_protocols
-  --test subcommands --no-fail-fast`，`/tmp/luna-tools-7ljl1_bu/result.json` 退出 101：
-  742 项通过；新增失败重试 fixture 使用尚未实现舍入协议的 Integer `/`，在 elaboration
-  阶段被拒绝，未进入目标执行路径。此前无空格的相同 fixture 还触发了解析拒绝。
-- 将新增 fixture 改为真实 sysroot 的 `Integer.div_trunc`，补齐资源协议入口后，
-  `test -p luna --test prepared_invocations`，`/tmp/luna-tools-kz4q1p3a/result.json`
-  退出 0，7 项通过。验证默认参数异常重复传播、同号不同源隔离、原源码不变、低预算后
-  恢复、代码复用与 owner 最终释放；未改变生产预算或放宽既有语义断言。
-
-两次检查去重 744 项通过，覆盖 VM、driver、真实库协议、builder 和 CLI。
-四个修改的 Rust 文件通过 scoped rustfmt check，
-`/tmp/luna-tools-wt7_8ztt/result.json` 退出 0；`git diff --check` 通过。
-未执行全 workspace 测试或整体性能测量。
+runtime 构图仍以零参数函数身份为根，所以带默认参数的入口仍要复制包，追加一个
+包含该 Call 的包装函数。复制包和后续构图的预算边界仍待迁移。comptime VM 可以
+直接执行 Call。两条路径都由普通调用处理默认表达式对先前参数的读取。
+回归覆盖存储顺序打乱、默认槽位重复、准备额度耗尽和同一调用再次执行。
+[入口准备](../compiler/luna/src/invocation/entry.rs) · [跨阶段用例](../compiler/luna/tests/prepared_invocations.rs)
 
 带程序前提的独立 callable 转换仍遵循[函数值契约边界](../docs/functions/comptime_fn.md)：
 当前普通函数类型未携带该前提时拒绝转换。IIR 不提供擦除前提的许可，不能把这个拒绝

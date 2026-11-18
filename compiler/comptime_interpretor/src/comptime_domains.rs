@@ -149,6 +149,7 @@ mod tests {
         Package {
             functions: vec![nir::program::Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     declaration: DeclarationId {
                         package: 81,
                         local: 1,

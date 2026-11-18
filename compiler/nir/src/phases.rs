@@ -305,26 +305,26 @@ impl<'a> PhaseContext<'a> {
         )?;
         while let Some(node) = work.pop() {
             match node {
-                Work::Pattern(pattern, ct) => match pattern {
+                Work::Pattern(pattern, ct, source) => match pattern {
                     Pattern::NominalType { fields, .. } => {
                         if !ct {
                             return Err(fail(
-                                function.source,
+                                source,
                                 "nominal input decomposition requires comptime",
                             ));
                         }
                         work.extend(
-                            fields.iter().map(|field| Work::Pattern(field, ct)),
+                            fields.iter().map(|field| Work::Pattern(field, ct, source)),
                             inspection_fuel,
                         )?;
                     }
                     Pattern::Then { first, value, next } => {
-                        work.push(Work::Pattern(first, ct), inspection_fuel)?;
+                        work.push(Work::Pattern(first, ct, source), inspection_fuel)?;
                         work.push(Work::Expr(value, false, ct), inspection_fuel)?;
-                        work.push(Work::Pattern(next, ct), inspection_fuel)?;
+                        work.push(Work::Pattern(next, ct, source), inspection_fuel)?;
                     }
                     Pattern::Guard { pattern, condition } => {
-                        work.push(Work::Pattern(pattern, ct), inspection_fuel)?;
+                        work.push(Work::Pattern(pattern, ct, source), inspection_fuel)?;
                         work.push(Work::Expr(condition, false, ct), inspection_fuel)?;
                     }
                     Pattern::Remap { pattern, bindings } => {
@@ -332,9 +332,9 @@ impl<'a> PhaseContext<'a> {
                             .iter()
                             .any(|(_, destination)| frozen.contains(destination))
                         {
-                            return Err(fail(function.source, "entry snapshots are immutable"));
+                            return Err(fail(source, "entry snapshots are immutable"));
                         }
-                        work.push(Work::Pattern(pattern, ct), inspection_fuel)?;
+                        work.push(Work::Pattern(pattern, ct, source), inspection_fuel)?;
                     }
                     Pattern::Observe {
                         inner: pattern,
@@ -345,12 +345,12 @@ impl<'a> PhaseContext<'a> {
                         binding,
                     } => {
                         if frozen.contains(binding) {
-                            return Err(fail(function.source, "entry snapshots are immutable"));
+                            return Err(fail(source, "entry snapshots are immutable"));
                         }
-                        work.push(Work::Pattern(pattern, ct), inspection_fuel)?;
+                        work.push(Work::Pattern(pattern, ct, source), inspection_fuel)?;
                     }
                     Pattern::OptionalPresent(inner) | Pattern::ErrorResult { inner, .. } => {
-                        work.push(Work::Pattern(inner, ct), inspection_fuel)?
+                        work.push(Work::Pattern(inner, ct, source), inspection_fuel)?
                     }
                     Pattern::Record { fields, .. }
                     | Pattern::AnonymousRecord { fields, .. }
@@ -362,12 +362,14 @@ impl<'a> PhaseContext<'a> {
                     | Pattern::Tuple(fields)
                     | Pattern::Or(fields) => {
                         work.extend(
-                            fields.iter().map(|pattern| Work::Pattern(pattern, ct)),
+                            fields
+                                .iter()
+                                .map(|pattern| Work::Pattern(pattern, ct, source)),
                             inspection_fuel,
                         )?;
                     }
                     Pattern::CodeEvidence { .. } => {
-                        return Err(fail(function.source, "unresolved pattern-code evidence"));
+                        return Err(fail(source, "unresolved pattern-code evidence"));
                     }
                     Pattern::OptionalAbsent
                     | Pattern::Wild
@@ -544,7 +546,10 @@ impl<'a> PhaseContext<'a> {
                             work.push(Work::Expr(computation, false, ct), inspection_fuel)?;
                             for handler in handlers {
                                 for arm in &handler.arms {
-                                    work.push(Work::Pattern(&arm.pattern, ct), inspection_fuel)?;
+                                    work.push(
+                                        Work::Pattern(&arm.pattern, ct, expr.source),
+                                        inspection_fuel,
+                                    )?;
                                     if let Some(g) = &arm.guard {
                                         work.push(Work::Expr(g, false, ct), inspection_fuel)?;
                                     }
@@ -1002,7 +1007,7 @@ impl<'a> PhaseContext<'a> {
                                 arguments
                                     .iter()
                                     .flat_map(|a| a.patterns())
-                                    .map(|pattern| Work::Pattern(pattern, ct)),
+                                    .map(|pattern| Work::Pattern(pattern, ct, expr.source)),
                                 inspection_fuel,
                             )?;
                             if !ct {
@@ -1128,7 +1133,7 @@ impl<'a> PhaseContext<'a> {
                                 arguments
                                     .iter()
                                     .flat_map(|a| a.patterns())
-                                    .map(|p| Work::Pattern(p, ct)),
+                                    .map(|p| Work::Pattern(p, ct, expr.source)),
                                 inspection_fuel,
                             )?;
                         }
@@ -1147,7 +1152,7 @@ impl<'a> PhaseContext<'a> {
                                 arguments
                                     .iter()
                                     .flat_map(|a| a.patterns())
-                                    .map(|pattern| Work::Pattern(pattern, ct)),
+                                    .map(|pattern| Work::Pattern(pattern, ct, expr.source)),
                                 inspection_fuel,
                             )?;
                             if !ct {
@@ -1523,7 +1528,10 @@ impl<'a> PhaseContext<'a> {
                         K::Match { value, arms } => {
                             work.push(Work::Expr(value, false, ct), inspection_fuel)?;
                             for arm in arms {
-                                work.push(Work::Pattern(&arm.pattern, ct), inspection_fuel)?;
+                                work.push(
+                                    Work::Pattern(&arm.pattern, ct, expr.source),
+                                    inspection_fuel,
+                                )?;
                                 if let Some(g) = &arm.guard {
                                     work.push(Work::Expr(g, false, ct), inspection_fuel)?;
                                 }
@@ -1618,7 +1626,7 @@ impl<'a> PhaseContext<'a> {
                             guard,
                             otherwise,
                         } => {
-                            work.push(Work::Pattern(pattern, ct), inspection_fuel)?;
+                            work.push(Work::Pattern(pattern, ct, expr.source), inspection_fuel)?;
                             work.push(Work::Expr(value, false, ct), inspection_fuel)?;
                             if let Some(g) = guard {
                                 work.push(Work::Expr(g, false, ct), inspection_fuel)?;

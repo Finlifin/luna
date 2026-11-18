@@ -126,6 +126,7 @@ mod tests {
         };
         let package = n::Package {
             runtime_function_identities: vec![n::RuntimeFunctionIdentity {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 requirements: vec![],
                 capabilities: vec![],
                 declaration: id(1),

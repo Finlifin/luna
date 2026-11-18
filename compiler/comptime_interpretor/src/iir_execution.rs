@@ -276,7 +276,7 @@ impl<'a> Interpreter<'a> {
             self.iir_function_definition(id, arguments)
                 .map(|function| &function.interface)
         } else {
-            self.functions.interface(&id)
+            self.functions.declaration(&id)
         }
     }
 
@@ -520,6 +520,7 @@ mod callable_budget_tests {
                 },
                 function: nir::program::Function {
                     interface: nir::program::FunctionDeclaration {
+                        source: nir::program::SourceRange { start: 0, end: 0 },
                         declaration,
                         name,
                         phase: nir::program::FunctionPhase::Runtime,

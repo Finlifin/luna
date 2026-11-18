@@ -254,6 +254,7 @@ mod tests {
         (
             n::Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     declaration: DeclarationId {
                         package: 7,
                         local: 2,

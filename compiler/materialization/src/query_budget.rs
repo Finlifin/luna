@@ -87,6 +87,7 @@ mod tests {
         let binding = n::LocalId { owner: 1, index: 0 };
         let function = n::Function {
             interface: n::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration,
                 name: "consume".into(),
                 phase: n::FunctionPhase::Runtime,

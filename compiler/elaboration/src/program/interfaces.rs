@@ -202,6 +202,7 @@ impl Checker<'_, '_> {
         self.locals = saved_locals;
         let program = program?;
         Ok(n::MethodContract {
+            source: source(item.span),
             phase: self.member_phases.get(&owner).copied().unwrap_or_default(),
             is_quote: signature.modifiers.is_quote,
             pure: signature.modifiers.is_pure,

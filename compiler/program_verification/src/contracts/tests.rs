@@ -16,6 +16,7 @@ fn package() -> Package {
         result: Box::new(boolean(true).ty),
     };
     let method = |index| MethodContract {
+        source: nir::program::SourceRange { start: 0, end: 0 },
         phase: TraitPhase::Runtime,
         is_quote: false,
         pure: true,
@@ -52,6 +53,7 @@ fn package() -> Package {
         .iter()
         .map(|method| Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(method.declaration.local + 10),
                 name: method.name.clone(),
                 phase: FunctionPhase::Runtime,
@@ -251,16 +253,15 @@ fn implication_proof_needs_no_body_and_preserves_budget_failure() {
     let mut declaration = package().functions.remove(0).interface;
     declaration.preconditions = vec![boolean(true)];
     declaration.postconditions = vec![boolean(true)];
-    let source = boolean(true).source;
     let mut full = Limits::default();
     let initial = full.arithmetic.steps;
-    flow::prove_implication(&declaration, source, None, &mut full).unwrap();
+    flow::prove_implication(&declaration, None, &mut full).unwrap();
     let spent = initial - full.arithmetic.steps;
     assert!(spent > 0);
     for allowance in 0..spent {
         let mut limits = Limits::default();
         limits.arithmetic.steps = allowance;
-        let error = flow::prove_implication(&declaration, source, None, &mut limits)
+        let error = flow::prove_implication(&declaration, None, &mut limits)
             .err()
             .expect("implication must be rejected");
         assert!(
@@ -273,9 +274,9 @@ fn implication_proof_needs_no_body_and_preserves_budget_failure() {
             "allowance {allowance}: {error}"
         );
     }
-    flow::prove_implication(&declaration, source, None, &mut Limits::default()).unwrap();
+    flow::prove_implication(&declaration, None, &mut Limits::default()).unwrap();
     declaration.postconditions = vec![boolean(false)];
-    let error = flow::prove_implication(&declaration, source, None, &mut Limits::default())
+    let error = flow::prove_implication(&declaration, None, &mut Limits::default())
         .err()
         .expect("implication must be rejected");
     assert_eq!(error.reason, flow::Reason::MissingPostconditionProof);
@@ -295,10 +296,9 @@ fn implication_rejects_execution_only_bindings_and_defaults() {
             }),
             _ => invalid.defaults.push((0, boolean(true))),
         }
-        let error =
-            flow::prove_implication(&invalid, boolean(true).source, None, &mut Limits::default())
-                .err()
-                .expect("implication must be rejected");
+        let error = flow::prove_implication(&invalid, None, &mut Limits::default())
+            .err()
+            .expect("implication must be rejected");
         assert_eq!(error.reason, flow::Reason::InvalidSignature);
     }
 }

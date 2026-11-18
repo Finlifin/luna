@@ -102,6 +102,7 @@ fn package(reads: usize, mode: &str, query: Option<ObjectQueryKind>, reference: 
     let mut package = Package {
         functions: vec![Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(1),
                 name: "observe".into(),
                 phase: FunctionPhase::Comptime,

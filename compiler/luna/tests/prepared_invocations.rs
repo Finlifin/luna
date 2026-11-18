@@ -97,6 +97,26 @@ fn wide_default_selection_is_linear_and_rejects_malformed_slots() {
 }
 
 #[test]
+fn default_entries_bind_in_parameter_order_in_both_phases() {
+    let mut package = support::compile(
+        "fn native(.first:bool=true,.second:bool=not first)->bool {first and not second}
+         comptime fn staged(.first:bool=true,.second:bool=not first)->bool {first and not second}",
+    );
+    // The declaration associates each default with a slot. Its storage order
+    // can differ from the lexical order in which dependent defaults must run.
+    for function in &mut package.functions {
+        function.defaults.reverse();
+    }
+    assert_eq!(
+        luna::execution::interpret(&package, "native", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let mut staged = PreparedInvocation::new(Arc::new(package), "staged", None).unwrap();
+    assert_eq!(staged.invoke(100_000).unwrap(), Value::Bool(true));
+    assert_eq!(staged.invoke(100_000).unwrap(), Value::Bool(true));
+}
+
+#[test]
 fn prepared_calls_reuse_code_without_reusing_results_or_local_state() {
     let package = Arc::new(support::compile(
         "comptime fn run()->bool {

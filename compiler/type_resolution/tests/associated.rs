@@ -1248,6 +1248,7 @@ fn prepared_methods_preserve_default_binders_and_pending_contracts() {
     let make = |use_default| {
         let mut interface = contract();
         interface.methods.push(MethodContract {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             phase: Default::default(),
             is_quote: false,
             pure: false,

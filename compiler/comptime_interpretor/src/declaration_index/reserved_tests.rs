@@ -34,6 +34,7 @@ fn interface(base: u32) -> Trait {
             default: None,
         }],
         methods: vec![MethodContract {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: id(base + 2),
             name: "read".into(),
             phase: Default::default(),
@@ -77,6 +78,7 @@ fn source() -> Arc<Package> {
         }],
         quote_templates: vec![Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(3),
                 name: "quoted".into(),
                 phase: FunctionPhase::Runtime,
@@ -110,26 +112,20 @@ fn source_declaration_views_preserve_provenance_without_dumping_code() {
     package.functions = std::mem::take(&mut package.quote_templates);
     let function = &mut package.functions[0];
     function.interface.name = "quoted\"name\n".into();
-    function.body.source = SourceRange { start: 17, end: 29 };
+    function.source = SourceRange { start: 17, end: 29 };
+    function.body.source = SourceRange { start: 21, end: 26 };
     let id = function.declaration;
     let functions = nir::callable_source::Callables::new(&package, &mut 1000).unwrap();
     let view = functions.declaration(&id).unwrap();
-    assert!(std::ptr::eq(
-        view.interface,
-        &package.functions[0].interface
-    ));
+    assert!(std::ptr::eq(view, &package.functions[0].interface));
     assert_eq!(view.source, SourceRange { start: 17, end: 29 });
-    assert!(std::ptr::eq(
-        functions.interface(&id).unwrap(),
-        view.interface
-    ));
     assert!(std::ptr::eq(
         functions.body(&id).unwrap(),
         &package.functions[0].body
     ));
     let dump = view.to_string();
     assert!(
-        dump.starts_with("(source-declaration (source 17 29) (function-declaration "),
+        dump.starts_with("(function-declaration ") && dump.contains("(source 17 29)"),
         "{dump}"
     );
     assert!(dump.contains("quoted\\\"name\\n"), "{dump}");
@@ -140,7 +136,6 @@ fn source_declaration_views_preserve_provenance_without_dumping_code() {
         local: 9999,
     };
     assert!(functions.declaration(&absent).is_none());
-    assert!(functions.interface(&absent).is_none());
     assert!(functions.body(&absent).is_none());
 }
 fn structure(identity: DeclarationId) -> nir::program::Struct {

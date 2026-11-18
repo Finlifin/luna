@@ -4,7 +4,16 @@ use super::{Error, Expr, Pattern, SourceRange};
 
 pub(super) enum Work<'a> {
     Expr(&'a Expr, bool, bool), // direct callee, comptime execution context
-    Pattern(&'a Pattern, bool),
+    Pattern(&'a Pattern, bool, SourceRange),
+}
+
+impl Work<'_> {
+    fn source(&self) -> SourceRange {
+        match self {
+            Self::Expr(expr, ..) => expr.source,
+            Self::Pattern(_, _, source) => *source,
+        }
+    }
 }
 
 pub(super) struct Worklist<'a> {
@@ -30,11 +39,7 @@ impl<'a> Worklist<'a> {
     }
 
     pub(super) fn push(&mut self, node: Work<'a>, fuel: &mut usize) -> Result<(), Error> {
-        let source = match &node {
-            Work::Expr(expr, ..) => expr.source,
-            Work::Pattern(..) => self.owner,
-        };
-        Self::charge(fuel, 1, source)?;
+        Self::charge(fuel, 1, node.source())?;
         self.pending.push(node);
         Ok(())
     }
@@ -62,7 +67,9 @@ impl<'a> Worklist<'a> {
     }
 
     pub(super) fn pop(&mut self) -> Option<Work<'a>> {
-        self.pending.pop()
+        let node = self.pending.pop()?;
+        self.owner = node.source();
+        Some(node)
     }
 }
 
@@ -119,7 +126,7 @@ mod tests {
         let mut fuel = 2;
         let batch = [
             Work::Expr(&expr, true, false),
-            Work::Pattern(&pattern, true),
+            Work::Pattern(&pattern, true, owner),
             Work::Expr(&expr, false, true),
         ]
         .into_iter()
@@ -128,12 +135,12 @@ mod tests {
         assert_eq!(error.source, expr.source);
         assert_eq!(fuel, 0);
         assert!(
-            matches!(work.pop(), Some(Work::Pattern(value, true)) if std::ptr::eq(value, &pattern))
+            matches!(work.pop(), Some(Work::Pattern(value, true, _)) if std::ptr::eq(value, &pattern))
         );
         assert!(matches!(work.pop(), Some(Work::Expr(_, true, false))));
         assert!(work.pop().is_none());
         assert_eq!(
-            work.push(Work::Pattern(&pattern, false), &mut 0)
+            work.push(Work::Pattern(&pattern, false, owner), &mut 0)
                 .unwrap_err()
                 .source,
             owner

@@ -1045,14 +1045,14 @@ impl Parser<'_> {
     }
 
     pub fn try_block(&mut self) -> ParseResult {
-        self.scoped_with_expected_prefix(TokenKind::LBrace.as_ref(), |p| {
-            let nodes = p.try_multi_with_bracket(
-                &[Rule::semicolon("statement or definition", |p| {
-                    p.try_statement_or_definition()
-                })],
-                (TokenKind::LBrace, TokenKind::RBrace),
-            )?;
+        self.try_block_with_rules(&[Rule::semicolon("statement or definition", |p| {
+            p.try_statement_or_definition()
+        })])
+    }
 
+    pub(crate) fn try_block_with_rules(&mut self, rules: &[Rule]) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::LBrace.as_ref(), |p| {
+            let nodes = p.try_multi_with_bracket(rules, (TokenKind::LBrace, TokenKind::RBrace))?;
             Ok(NodeBuilder::new(NodeKind::Block, p.current_span())
                 .add_multiple_children(nodes)
                 .build(&mut p.ast))

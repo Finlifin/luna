@@ -550,6 +550,7 @@ fn runtime_identity_observes_associated_output_without_an_executable_body() {
     };
     let package = Package {
         runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+            source: SOURCE,
             requirements: vec![],
             capabilities: vec![],
             declaration: id(9),
@@ -722,6 +723,7 @@ fn selected_associated_body_observes_its_domain_once_before_execution() {
     let type_type = Term::Primitive(Primitive::Type);
     let function = nir::program::Function {
         interface: nir::program::FunctionDeclaration {
+            source: SOURCE,
             declaration: id(9),
             name: "Domain".into(),
             phase: nir::program::FunctionPhase::Comptime,

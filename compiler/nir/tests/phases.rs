@@ -14,6 +14,7 @@ fn flag(kind: K) -> Expr {
 fn function(local: u32, phase: Phase, inputs: &[Sort]) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: DeclarationId { package: 1, local },
             name: format!("function{local}"),
             phase,
@@ -1037,7 +1038,7 @@ fn retained_quote_contract_bindings_cannot_alias_inputs_or_each_other() {
             ),
             "{error:?}"
         );
-        assert_eq!(error.source, template.body.source);
+        assert_eq!(error.source, template.source);
         package.quote_templates[0] = template.clone();
         nir::phases::validate(&package).unwrap();
     }
@@ -1069,6 +1070,7 @@ fn retained_quote_templates_reject_identity_collisions_and_wrong_phase() {
     package
         .runtime_function_identities
         .push(nir::program::RuntimeFunctionIdentity {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             requirements: vec![],
             capabilities: vec![],
             declaration: template.declaration,
@@ -2129,6 +2131,7 @@ fn borrowed_method_contracts_keep_predicate_and_snapshot_admission() {
             parents: vec![],
             associated: vec![],
             methods: vec![MethodContract {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: DeclarationId {
                     package: 1,
                     local: 80,

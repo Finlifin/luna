@@ -19,6 +19,7 @@ fn local(index: u32) -> Expr {
 }
 fn declaration() -> FunctionDeclaration {
     FunctionDeclaration {
+        source: source(),
         declaration: DeclarationId {
             package: 1,
             local: 1,
@@ -53,7 +54,7 @@ fn declaration() -> FunctionDeclaration {
 #[test]
 fn declaration_frame_admission_requires_no_body_and_borrows_the_original_telescope() {
     let declaration = declaration();
-    let view = CallableProgram::declaration(&declaration, source());
+    let view = CallableProgram::declaration(&declaration);
     let parameters = view.validate_input_frame(&mut 1000).unwrap();
     let Term::Function {
         parameters: original,
@@ -76,7 +77,7 @@ fn declaration_defaults_observe_only_their_completed_prefix_and_local_bindings()
     let mut declaration = declaration();
     for unavailable in [1, 2, 99] {
         declaration.defaults[0].1 = local(unavailable);
-        let error = CallableProgram::declaration(&declaration, source())
+        let error = CallableProgram::declaration(&declaration)
             .validate_input_frame(&mut 1000)
             .unwrap_err();
         assert_eq!(error.kind, InputFrameErrorKind::UnavailableDefaultBinding);
@@ -97,7 +98,7 @@ fn declaration_defaults_observe_only_their_completed_prefix_and_local_bindings()
             result: Some(Box::new(local(99))),
         },
     };
-    CallableProgram::declaration(&declaration, source())
+    CallableProgram::declaration(&declaration)
         .validate_input_frame(&mut 1000)
         .unwrap();
 }
@@ -121,7 +122,7 @@ fn invalid_frames_do_not_collapse_into_budget_failures() {
             3 => declaration.defaults[1].0 = 1,
             _ => declaration.defaults[1].0 = 3,
         }
-        let view = CallableProgram::declaration(&declaration, source());
+        let view = CallableProgram::declaration(&declaration);
         let error = view.validate_input_frame(&mut 1000).unwrap_err();
         assert_eq!(error.kind, expected);
         assert!(!error.is_budget());
@@ -134,7 +135,7 @@ fn invalid_frames_do_not_collapse_into_budget_failures() {
 #[test]
 fn declaration_frame_budget_covers_defaults_and_retries_without_published_state() {
     let declaration = declaration();
-    let view = CallableProgram::declaration(&declaration, source());
+    let view = CallableProgram::declaration(&declaration);
     let mut remaining = 1000;
     view.validate_input_frame(&mut remaining).unwrap();
     let cost = 1000 - remaining;

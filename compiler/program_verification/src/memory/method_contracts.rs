@@ -152,6 +152,7 @@ pub fn prepare_method_invocation(
         .ok_or("composed memory frame budget exhausted")?;
     bound_type(selected.ty.callable_signature(), fuel)?;
     let mut composed = nir::program::FunctionDeclaration {
+        source: callee.source,
         phase: FunctionPhase::Runtime,
         inline: false,
         pure: contract.pure,

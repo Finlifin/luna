@@ -12,6 +12,7 @@ fn boolean() -> Term {
 fn function(local: u32, parameters: Vec<LocalId>, body: Expr) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             phase: FunctionPhase::Comptime,
             inline: false,
             pure: false,
@@ -419,6 +420,7 @@ fn frozen_callable_type_inputs_check_contracts_phase_and_safety() {
             package
                 .runtime_function_identities
                 .push(nir::program::RuntimeFunctionIdentity {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     requirements: vec![],
                     capabilities: vec![],
                     declaration: runtime.declaration,

@@ -2033,6 +2033,7 @@ fn function_specialization_covers_contracts_defaults_and_preserves_local_identit
     let template = Function {
         body: expression.clone(),
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             phase: FunctionPhase::Runtime,
             inline: false,
             pure: true,

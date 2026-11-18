@@ -6,6 +6,8 @@ use super::*;
 /// Owning this interface grants neither invocation nor phase authority.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FunctionDeclaration {
+    /// Location of the declaration or the expression that generated it.
+    pub source: SourceRange,
     pub phase: FunctionPhase,
     /// Source inlining intent; not mandatory expansion or a purity promise.
     pub inline: bool,
@@ -45,6 +47,7 @@ impl FunctionDeclaration {
     ) -> Result<Self, crate::TypeError> {
         Term::Tuple(Vec::new()).instantiate_parameters(parameters, arguments)?;
         Ok(Self {
+            source: self.source,
             phase: self.phase,
             inline: self.inline,
             pure: self.pure,
@@ -206,6 +209,7 @@ impl Function {
             };
             Ok(Self {
                 interface: FunctionDeclaration {
+                    source: self.source,
                     phase: self.phase,
                     inline: self.inline,
                     pure: self.pure,
@@ -278,8 +282,8 @@ impl FunctionDeclaration {
         string(f, &self.name)?;
         write!(
             f,
-            ") (phase {}) (inline {}) (pure {}) (unsafe {}) (capabilities",
-            self.phase, self.inline, self.pure, self.is_unsafe
+            ") {} (phase {}) (inline {}) (pure {}) (unsafe {}) (capabilities",
+            self.source, self.phase, self.inline, self.pure, self.is_unsafe
         )?;
         for requirement in &self.capabilities {
             write!(f, " {requirement}")?;

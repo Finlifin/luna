@@ -27,6 +27,7 @@ fn function(local: u32) -> Function {
     };
     Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: id(local),
             name: format!("f{local}"),
             phase: FunctionPhase::Comptime,
@@ -65,6 +66,7 @@ fn package(noise: u32) -> Package {
     Package {
         functions,
         runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             requirements: vec![],
             capabilities: vec![],
             declaration: id(2),
@@ -293,6 +295,7 @@ fn method_signature_queries_preserve_missing_invalid_and_budget_outcomes() {
         self_parameter: id(71),
         name: "Inspect".into(),
         methods: vec![MethodContract {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             phase: TraitPhase::Runtime,
             is_quote: false,
             pure: false,

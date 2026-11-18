@@ -64,6 +64,7 @@ fn base_package(element: Primitive) -> Package {
         }],
         functions: vec![Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id(1),
                 name: "run".into(),
                 phase: FunctionPhase::Comptime,

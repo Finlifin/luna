@@ -14,6 +14,7 @@ fn package() -> Arc<Package> {
         functions: (0..100)
             .map(|local| Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     declaration: DeclarationId { package: 8, local },
                     name: format!("function{local}"),
                     phase: if local == 99 {

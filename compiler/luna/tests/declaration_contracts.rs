@@ -135,3 +135,43 @@ fn inherited_program_contracts_keep_owner_and_method_declaration_domains() {
         assert!(error.contains("precondition"), "{error}");
     }
 }
+
+#[test]
+fn callable_origins_survive_body_separation_and_method_projection() {
+    let source = r#"trait Origin { fn declared(x: bool) -> bool; }
+fn authored(x: bool) -> bool { x }
+fn staged(comptime keep: bool, value: bool) -> bool {
+    inline if keep { value } else { false }
+}"#;
+    let package = sysroot::compile(source).unwrap();
+    let function = package
+        .functions
+        .iter()
+        .find(|f| f.name == "authored")
+        .unwrap();
+    let interface = package.traits.iter().find(|t| t.name == "Origin").unwrap();
+    let member = &interface.methods[0];
+    let at = |range: nir::program::SourceRange| &source[range.start as usize..range.end as usize];
+    assert!(at(function.source).contains("fn authored("));
+    assert_eq!(at(function.body.source), "{ x }");
+    assert!(
+        package
+            .runtime_function_identities
+            .iter()
+            .any(|f| f.declaration.package == function.declaration.package
+                && at(f.source).contains("fn staged("))
+    );
+    assert!(at(member.source).contains("fn declared("));
+    let summary = member
+        .program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000)
+        .unwrap();
+    assert_eq!(summary.source, member.source);
+    assert_eq!(
+        function
+            .interface
+            .instantiate_parameters(&[], &[])
+            .unwrap()
+            .source,
+        function.source
+    );
+}

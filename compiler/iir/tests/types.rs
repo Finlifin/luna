@@ -312,6 +312,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
             key,
             function: Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     declaration: id(3),
                     name: "elements".into(),
                     phase: FunctionPhase::Comptime,
@@ -450,6 +451,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
         },
         subject: primitive(Primitive::Bool),
         methods: vec![nir::program::MethodContract {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             phase: Default::default(),
             is_quote: false,
             pure: false,
@@ -727,6 +729,7 @@ fn captured_comptime_values_must_materialize_before_iir_validation() {
             key,
             function: Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     declaration: id,
                     name: "read".into(),
                     phase: FunctionPhase::Runtime,

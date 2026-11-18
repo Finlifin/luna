@@ -718,21 +718,14 @@ impl Parser<'_> {
                 ));
             }
 
-            let nodes = p.try_multi_with_bracket(
-                &[
-                    Rule::comma("configuration", |p| p.try_configuration()),
-                    Rule::comma("struct field", |p| p.try_struct_field()),
-                    Rule::comma("property", |p| p.try_property()),
-                    Rule::semicolon("statement or definition", |p| {
-                        p.try_statement_or_definition()
-                    }),
-                ],
-                (TokenKind::LBrace, TokenKind::RBrace),
-            )?;
-
-            let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                .add_multiple_children(nodes)
-                .build(&mut p.ast);
+            let block = p.try_block_with_rules(&[
+                Rule::comma("configuration", |p| p.try_configuration()),
+                Rule::comma("struct field", |p| p.try_struct_field()),
+                Rule::comma("property", |p| p.try_property()),
+                Rule::semicolon("statement or definition", |p| {
+                    p.try_statement_or_definition()
+                }),
+            ])?;
 
             Ok(NodeBuilder::new(NodeKind::StructDef, p.current_span())
                 .add_single_child(id)
@@ -801,21 +794,14 @@ impl Parser<'_> {
                 ));
             }
 
-            let nodes = p.try_multi_with_bracket(
-                &[
-                    Rule::comma("enum variant", |p| p.try_enum_variant()),
-                    Rule::comma("configuration", |p| p.try_configuration()),
-                    Rule::comma("property", |p| p.try_property()),
-                    Rule::semicolon("statement or definition", |p| {
-                        p.try_statement_or_definition()
-                    }),
-                ],
-                (TokenKind::LBrace, TokenKind::RBrace),
-            )?;
-
-            let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                .add_multiple_children(nodes)
-                .build(&mut p.ast);
+            let block = p.try_block_with_rules(&[
+                Rule::comma("enum variant", |p| p.try_enum_variant()),
+                Rule::comma("configuration", |p| p.try_configuration()),
+                Rule::comma("property", |p| p.try_property()),
+                Rule::semicolon("statement or definition", |p| {
+                    p.try_statement_or_definition()
+                }),
+            ])?;
 
             Ok(NodeBuilder::new(NodeKind::EnumDef, p.current_span())
                 .add_single_child(id)
@@ -1001,20 +987,13 @@ impl Parser<'_> {
                 ));
             }
 
-            let nodes = p.try_multi_with_bracket(
-                &[
-                    Rule::semicolon("associated declaration", |p| p.try_assoc_decl()),
-                    Rule::comma("property", |p| p.try_property()),
-                    Rule::semicolon("statement or definition", |p| {
-                        p.try_statement_or_definition()
-                    }),
-                ],
-                (TokenKind::LBrace, TokenKind::RBrace),
-            )?;
-
-            let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                .add_multiple_children(nodes)
-                .build(&mut p.ast);
+            let block = p.try_block_with_rules(&[
+                Rule::semicolon("associated declaration", |p| p.try_assoc_decl()),
+                Rule::comma("property", |p| p.try_property()),
+                Rule::semicolon("statement or definition", |p| {
+                    p.try_statement_or_definition()
+                }),
+            ])?;
 
             Ok(NodeBuilder::new(NodeKind::TraitDef, p.current_span())
                 .add_single_child(id)
@@ -1224,19 +1203,12 @@ impl Parser<'_> {
                     .add_single_child(expr)
                     .build(&mut p.ast))
             } else if p.peek(TokenKind::LBrace.as_ref()) {
-                let nodes = p.try_multi_with_bracket(
-                    &[
+                let block = p.try_block_with_rules(&[
                         Rule::comma("property", |p| p.try_property()),
                         Rule::semicolon("statement or definition", |p| {
                             p.try_statement_or_definition()
                         }),
-                    ],
-                    (TokenKind::LBrace, TokenKind::RBrace),
-                )?;
-
-                let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                    .add_multiple_children(nodes)
-                    .build(&mut p.ast);
+                    ])?;
 
                 Ok(NodeBuilder::new(NodeKind::Function, p.current_span())
                     .add_single_child(id)
@@ -1317,20 +1289,13 @@ impl Parser<'_> {
                 ));
             }
 
-            let nodes = p.try_multi_with_bracket(
-                &[
-                    Rule::comma("configuration", |p| p.try_configuration()),
-                    Rule::comma("property", |p| p.try_property()),
-                    Rule::semicolon("statement or definition", |p| {
-                        p.try_statement_or_definition()
-                    }),
-                ],
-                (TokenKind::LBrace, TokenKind::RBrace),
-            )?;
-
-            let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                .add_multiple_children(nodes)
-                .build(&mut p.ast);
+            let block = p.try_block_with_rules(&[
+                Rule::comma("configuration", |p| p.try_configuration()),
+                Rule::comma("property", |p| p.try_property()),
+                Rule::semicolon("statement or definition", |p| {
+                    p.try_statement_or_definition()
+                }),
+            ])?;
 
             Ok(NodeBuilder::new(NodeKind::ModuleDef, p.current_span())
                 .add_single_child(id)
@@ -1385,20 +1350,13 @@ impl Parser<'_> {
                     ));
                 }
 
-                let nodes = p.try_multi_with_bracket(
-                    &[
-                        Rule::semicolon("associated declaration", |p| p.try_assoc_decl()),
-                        Rule::comma("property", |p| p.try_property()),
-                        Rule::semicolon("statement or definition", |p| {
-                            p.try_statement_or_definition()
-                        }),
-                    ],
-                    (TokenKind::LBrace, TokenKind::RBrace),
-                )?;
-
-                let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                    .add_multiple_children(nodes)
-                    .build(&mut p.ast);
+                let block = p.try_block_with_rules(&[
+                    Rule::semicolon("associated declaration", |p| p.try_assoc_decl()),
+                    Rule::comma("property", |p| p.try_property()),
+                    Rule::semicolon("statement or definition", |p| {
+                        p.try_statement_or_definition()
+                    }),
+                ])?;
 
                 Ok(NodeBuilder::new(NodeKind::ImplTraitDef, p.current_span())
                     .add_single_child(expr)
@@ -1417,19 +1375,12 @@ impl Parser<'_> {
                     ));
                 }
 
-                let nodes = p.try_multi_with_bracket(
-                    &[
-                        Rule::comma("property", |p| p.try_property()),
-                        Rule::semicolon("statement or definition", |p| {
-                            p.try_statement_or_definition()
-                        }),
-                    ],
-                    (TokenKind::LBrace, TokenKind::RBrace),
-                )?;
-
-                let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                    .add_multiple_children(nodes)
-                    .build(&mut p.ast);
+                let block = p.try_block_with_rules(&[
+                    Rule::comma("property", |p| p.try_property()),
+                    Rule::semicolon("statement or definition", |p| {
+                        p.try_statement_or_definition()
+                    }),
+                ])?;
 
                 Ok(NodeBuilder::new(NodeKind::ImplDef, p.current_span())
                     .add_single_child(expr)
@@ -1487,20 +1438,13 @@ impl Parser<'_> {
                     ));
                 }
 
-                let nodes = p.try_multi_with_bracket(
-                    &[
-                        Rule::semicolon("associated declaration", |p| p.try_assoc_decl()),
-                        Rule::comma("property", |p| p.try_property()),
-                        Rule::semicolon("statement or definition", |p| {
-                            p.try_statement_or_definition()
-                        }),
-                    ],
-                    (TokenKind::LBrace, TokenKind::RBrace),
-                )?;
-
-                let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                    .add_multiple_children(nodes)
-                    .build(&mut p.ast);
+                let block = p.try_block_with_rules(&[
+                    Rule::semicolon("associated declaration", |p| p.try_assoc_decl()),
+                    Rule::comma("property", |p| p.try_property()),
+                    Rule::semicolon("statement or definition", |p| {
+                        p.try_statement_or_definition()
+                    }),
+                ])?;
 
                 Ok(NodeBuilder::new(NodeKind::ExtendTraitDef, p.current_span())
                     .add_single_child(expr)
@@ -1519,19 +1463,12 @@ impl Parser<'_> {
                     ));
                 }
 
-                let nodes = p.try_multi_with_bracket(
-                    &[
-                        Rule::comma("property", |p| p.try_property()),
-                        Rule::semicolon("statement or definition", |p| {
-                            p.try_statement_or_definition()
-                        }),
-                    ],
-                    (TokenKind::LBrace, TokenKind::RBrace),
-                )?;
-
-                let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                    .add_multiple_children(nodes)
-                    .build(&mut p.ast);
+                let block = p.try_block_with_rules(&[
+                    Rule::comma("property", |p| p.try_property()),
+                    Rule::semicolon("statement or definition", |p| {
+                        p.try_statement_or_definition()
+                    }),
+                ])?;
 
                 Ok(NodeBuilder::new(NodeKind::ExtendDef, p.current_span())
                     .add_single_child(expr)
@@ -1634,19 +1571,13 @@ impl Parser<'_> {
                 self.next_token_span(),
             ));
         }
-        let members = self.try_multi_with_bracket(
-            &[
-                Rule::semicolon("associated declaration", |p| p.try_assoc_decl()),
-                Rule::comma("property", |p| p.try_property()),
-                Rule::semicolon("statement or definition", |p| {
-                    p.try_statement_or_definition()
-                }),
-            ],
-            (TokenKind::LBrace, TokenKind::RBrace),
-        )?;
-        let body = NodeBuilder::new(NodeKind::Block, self.current_span())
-            .add_multiple_children(members)
-            .build(&mut self.ast);
+        let body = self.try_block_with_rules(&[
+            Rule::semicolon("associated declaration", |p| p.try_assoc_decl()),
+            Rule::comma("property", |p| p.try_property()),
+            Rule::semicolon("statement or definition", |p| {
+                p.try_statement_or_definition()
+            }),
+        ])?;
         Ok(NodeBuilder::new(NodeKind::DeriverDef, self.current_span())
             .add_single_child(id)
             .add_multiple_children(params)
@@ -1677,15 +1608,9 @@ impl Parser<'_> {
                         p.next_token_span(),
                     ));
                 }
-                let operations = p.try_multi_with_bracket(
-                    &[Rule::comma("effect operation", |p| {
-                        p.try_effect_operation(true)
-                    })],
-                    (TokenKind::LBrace, TokenKind::RBrace),
-                )?;
-                let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                    .add_multiple_children(operations)
-                    .build(&mut p.ast);
+                let block = p.try_block_with_rules(&[Rule::comma("effect operation", |p| {
+                    p.try_effect_operation(true)
+                })])?;
                 Ok(NodeBuilder::new(NodeKind::EffectEnumDef, p.current_span())
                     .add_single_child(id)
                     .add_multiple_children(clauses)
@@ -1790,20 +1715,13 @@ impl Parser<'_> {
                 ));
             }
 
-            let nodes = p.try_multi_with_bracket(
-                &[
-                    Rule::comma("union variant", |p| p.try_union_variant()),
-                    Rule::comma("property", |p| p.try_property()),
-                    Rule::semicolon("statement or definition", |p| {
-                        p.try_statement_or_definition()
-                    }),
-                ],
-                (TokenKind::LBrace, TokenKind::RBrace),
-            )?;
-
-            let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                .add_multiple_children(nodes)
-                .build(&mut p.ast);
+            let block = p.try_block_with_rules(&[
+                Rule::comma("union variant", |p| p.try_union_variant()),
+                Rule::comma("property", |p| p.try_property()),
+                Rule::semicolon("statement or definition", |p| {
+                    p.try_statement_or_definition()
+                }),
+            ])?;
 
             Ok(NodeBuilder::new(NodeKind::UnionDef, p.current_span())
                 .add_single_child(id)
@@ -2075,18 +1993,12 @@ impl Parser<'_> {
                     p.next_token_span(),
                 ));
             }
-            let nodes = p.try_multi_with_bracket(
-                &[
-                    Rule::comma("property", |p| p.try_property()),
-                    Rule::semicolon("statement or definition", |p| {
-                        p.try_statement_or_definition()
-                    }),
-                ],
-                (TokenKind::LBrace, TokenKind::RBrace),
-            )?;
-            let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                .add_multiple_children(nodes)
-                .build(&mut p.ast);
+            let block = p.try_block_with_rules(&[
+                Rule::comma("property", |p| p.try_property()),
+                Rule::semicolon("statement or definition", |p| {
+                    p.try_statement_or_definition()
+                }),
+            ])?;
             Ok(NodeBuilder::new(NodeKind::TestDef, p.current_span())
                 .add_single_child(id)
                 .add_single_child(block)
@@ -2140,19 +2052,12 @@ impl Parser<'_> {
                     .add_single_child(expr)
                     .build(&mut p.ast))
             } else if p.peek(TokenKind::LBrace.as_ref()) {
-                let nodes = p.try_multi_with_bracket(
-                    &[
-                        Rule::comma("property", |p| p.try_property()),
-                        Rule::semicolon("statement or definition", |p| {
-                            p.try_statement_or_definition()
-                        }),
-                    ],
-                    (TokenKind::LBrace, TokenKind::RBrace),
-                )?;
-
-                let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                    .add_multiple_children(nodes)
-                    .build(&mut p.ast);
+                let block = p.try_block_with_rules(&[
+                    Rule::comma("property", |p| p.try_property()),
+                    Rule::semicolon("statement or definition", |p| {
+                        p.try_statement_or_definition()
+                    }),
+                ])?;
 
                 Ok(NodeBuilder::new(NodeKind::CaseDef, p.current_span())
                     .add_single_child(id)

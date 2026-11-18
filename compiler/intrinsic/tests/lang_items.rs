@@ -361,6 +361,7 @@ fn a_function_named_tuple_does_not_supply_a_pure_normal_form_head() {
     };
     let function = Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: id,
             name: "Tuple".into(),
             phase: FunctionPhase::Runtime,

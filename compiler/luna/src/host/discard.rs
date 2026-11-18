@@ -1,6 +1,6 @@
 //! Source-level ownership adapter, checked before LLVM lowering.
 use super::*;
-use nir::program::{Expr, ExprKind as K, Function, SourceRange};
+use nir::program::{Expr, ExprKind as K, Function, FunctionPhase, SourceRange};
 use nir::{DeclarationId, Primitive, Term};
 
 /// Call an entry once and retire its delivered value through the ordinary
@@ -20,12 +20,8 @@ pub fn llvm_ir_discarding_result(
     } else {
         package
     };
-    let (prepared, selected) = crate::invocation::prepare_entry_in_package(
-        package,
-        entry,
-        FunctionPhase::Runtime,
-        identity,
-    )?;
+    let (prepared, selected) =
+        crate::invocation::prepare_runtime_entry(package, entry, identity, fuel)?;
     let mut owned = prepared.into_owned();
     let original = owned
         .functions
@@ -69,6 +65,7 @@ pub fn llvm_ir_discarding_result(
     };
     let wrapper = Function {
         interface: nir::program::FunctionDeclaration {
+            source,
             declaration,
             name: "<host-discard-result>".into(),
             phase: FunctionPhase::Runtime,

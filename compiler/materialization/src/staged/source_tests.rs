@@ -6,6 +6,7 @@ fn source() -> n::Package {
     n::Package {
         quote_templates: vec![n::Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: Id {
                     package: 1,
                     local: 1,

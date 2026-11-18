@@ -39,11 +39,11 @@ impl PreparedInvocation {
         identity: Option<u64>,
         fuel: &mut u64,
     ) -> Result<Self, String> {
-        let function = entry::select_in(&package, entry, FunctionPhase::Comptime, identity, fuel)?;
+        let invocation =
+            entry::select_in(&package, entry, FunctionPhase::Comptime, identity, fuel)?;
         *fuel = fuel
             .checked_sub(entry.len() as u64)
             .ok_or("entry name retention budget exhausted")?;
-        let invocation = entry::Entry::new(function);
         let code = comptime_interpretor::CodeSession::new(package.clone());
         Ok(Self {
             code,
@@ -118,8 +118,8 @@ fn with_selected_invocation<T>(
     if fuel == 0 {
         return Err("invocation fuel must be positive".into());
     }
-    let function = entry::select_in(package, entry, FunctionPhase::Comptime, identity, &mut fuel)?;
-    let mut invocation = entry::Entry::new(function);
+    let mut invocation =
+        entry::select_in(package, entry, FunctionPhase::Comptime, identity, &mut fuel)?;
     InvocationScope::with(DeclarationSource::Borrowed(package), fuel, |scope| {
         run(scope, &mut invocation)
     })
@@ -174,93 +174,58 @@ pub(crate) fn invoke_publishing(
 }
 
 /// Prepare the normal zero-supplied-argument call plan, preserving default scope.
-pub(crate) fn prepare_entry_in_package<'a>(
+pub(crate) fn prepare_runtime_entry<'a>(
     package: &'a Package,
     entry: &str,
-    phase: FunctionPhase,
     identity: Option<u64>,
+    mut fuel: u64,
 ) -> Result<(std::borrow::Cow<'a, Package>, nir::DeclarationId), String> {
-    let function = entry::select(package, entry, phase, identity)?;
-    // Defaults belong to the ordinary call plan and its parameter scope, not
-    // to the raw host invoke API. Reuse that plan for an optional-parameter entry.
-    let (package, declaration) = if function.parameters.is_empty() {
-        (std::borrow::Cow::Borrowed(package), function.declaration)
-    } else {
-        use nir::program::{CallArgument, Expr, ExprKind, Function, SourceRange};
-        let nir::Term::Function { result, .. } = &function.signature else {
-            return Err("invalid invocation signature".into());
-        };
-        let source = SourceRange { start: 0, end: 0 };
-        let mut declaration = nir::DeclarationId {
-            package: u64::MAX,
-            local: u32::MAX,
-        };
-        while package
-            .functions
-            .iter()
-            .any(|item| item.declaration == declaration)
-        {
-            declaration.local = declaration
-                .local
-                .checked_sub(1)
-                .ok_or("invocation declaration space exhausted")?;
-        }
-        let mut arguments = Vec::new();
-        for index in 0..function.parameters.len() {
-            let (_, value) = function
-                .defaults
-                .iter()
-                .find(|(slot, _)| *slot == index)
-                .unwrap();
-            arguments.push(CallArgument {
-                passing: Default::default(),
-                parameter: index,
-                is_default: true,
-                value: value.clone(),
-            });
-        }
-        let wrapper = Function {
-            interface: nir::program::FunctionDeclaration {
-                declaration,
-                name: "<command-line-invocation>".into(),
-                phase,
-                inline: false,
-                pure: false,
-                is_unsafe: false,
-                preconditions: vec![],
-                postconditions: vec![],
-                result_binding: None,
-                entry_snapshots: vec![],
-                type_parameters: vec![],
-                requirements: vec![],
-                capabilities: vec![],
-                parameters: vec![],
-                defaults: vec![],
-                signature: nir::Term::Function {
-                    parameters: vec![],
-                    result: result.clone(),
-                },
-            },
-            body: Expr {
-                source,
-                ty: (**result).clone(),
-                kind: ExprKind::Call {
-                    callee: Box::new(Expr {
-                        source,
-                        ty: function
-                            .signature
-                            .clone()
-                            .with_comptime_phase(phase == FunctionPhase::Comptime),
-                        kind: ExprKind::Function(function.declaration),
-                    }),
-                    parameter_bindings: function.parameters.clone(),
-                    arguments,
-                },
-            },
-        };
-        let mut owned = package.clone();
-        owned.functions.push(wrapper);
-        (std::borrow::Cow::Owned(owned), declaration)
+    let selected = entry::select_in(package, entry, FunctionPhase::Runtime, identity, &mut fuel)?;
+    if !selected.has_defaults() {
+        return Ok((std::borrow::Cow::Borrowed(package), selected.declaration));
+    }
+    use nir::program::Function;
+    let call = selected.default_call(package, &mut fuel)?;
+    let mut declaration = nir::DeclarationId {
+        package: u64::MAX,
+        local: u32::MAX,
     };
-    Ok((package, declaration))
+    while package
+        .functions
+        .iter()
+        .any(|item| item.declaration == declaration)
+    {
+        declaration.local = declaration
+            .local
+            .checked_sub(1)
+            .ok_or("invocation declaration space exhausted")?;
+    }
+    let wrapper = Function {
+        interface: nir::program::FunctionDeclaration {
+            source: call.source,
+            declaration,
+            name: "<command-line-invocation>".into(),
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            parameters: vec![],
+            defaults: vec![],
+            signature: nir::Term::Function {
+                parameters: vec![],
+                result: Box::new(call.ty.clone()),
+            },
+        },
+        body: call,
+    };
+    let mut owned = package.clone();
+    owned.functions.push(wrapper);
+    Ok((std::borrow::Cow::Owned(owned), declaration))
 }

@@ -41,6 +41,7 @@ fn nested_bindings(layers: u32) -> Function {
     }
     Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: DeclarationId {
                 package: 1,
                 local: 1,

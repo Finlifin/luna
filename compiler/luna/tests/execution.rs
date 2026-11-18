@@ -11795,6 +11795,7 @@ fn parameterized_interface_package() -> Package {
         name: "Echo".into(),
         parents: vec![],
         methods: vec![n::MethodContract {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             phase: Default::default(),
             is_quote: false,
             pure: false,
@@ -11815,6 +11816,7 @@ fn parameterized_interface_package() -> Package {
     });
     package.functions.push(n::Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             phase: n::FunctionPhase::Runtime,
             inline: false,
             pure: false,
@@ -11859,6 +11861,7 @@ fn parameterized_interface_package() -> Package {
         });
         package.functions.push(n::Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 phase: n::FunctionPhase::Runtime,
                 inline: false,
                 pure: false,
@@ -37721,7 +37724,7 @@ fn residual_complete_bodies_preserve_control_flow_local_state_and_single_executi
     );
     let saved = package.clone();
     let body = package.functions.iter().find(|f| f.name == "Body").unwrap();
-    let plan = Invocation::from_function(body, &mut 10_000).unwrap();
+    let plan = Invocation::from_declaration(&body.interface, &mut 10_000).unwrap();
     assert_eq!(plan.scope(), &[nir::Sort::ComptimeValue]);
     let mut context = InferenceContext::default();
     let flag = context.fresh(nir::Sort::ComptimeValue);
@@ -37791,7 +37794,7 @@ fn residual_complete_bodies_preserve_control_flow_local_state_and_single_executi
         .iter()
         .find(|f| f.name == "First")
         .unwrap();
-    let pass = Invocation::from_function(pass, &mut 10_000).unwrap();
+    let pass = Invocation::from_declaration(&pass.interface, &mut 10_000).unwrap();
     assert_eq!(pass.scope(), &[nir::Sort::Type]);
     let opaque = nir::Term::NormalForm {
         head: id(&package, "Head"),
@@ -37808,18 +37811,18 @@ fn residual_complete_bodies_preserve_control_flow_local_state_and_single_executi
     for name in ["runtime", "Head"] {
         let function = package.functions.iter().find(|f| f.name == name).unwrap();
         assert!(
-            Invocation::from_function(function, &mut 10_000).is_err(),
+            Invocation::from_declaration(&function.interface, &mut 10_000).is_err(),
             "{name}"
         );
     }
     let mut wrong_phase = body.clone();
     wrong_phase.phase = nir::program::FunctionPhase::Runtime;
-    assert!(Invocation::from_function(&wrong_phase, &mut 10_000).is_err());
+    assert!(Invocation::from_declaration(&wrong_phase.interface, &mut 10_000).is_err());
     let mut missing_binding = body.clone();
     missing_binding.parameters.clear();
-    assert!(Invocation::from_function(&missing_binding, &mut 10_000).is_err());
+    assert!(Invocation::from_declaration(&missing_binding.interface, &mut 10_000).is_err());
     assert!(matches!(
-        Invocation::from_function(body, &mut 0),
+        Invocation::from_declaration(&body.interface, &mut 0),
         Err(nir::type_computations::Error::Budget)
     ));
 }
@@ -37859,7 +37862,7 @@ fn checked_expression_entries_share_required_and_residual_invocation_representat
         &mut 10_000,
     )
     .unwrap();
-    let plan = Invocation::from_function(&entry, &mut 10_000).unwrap();
+    let plan = Invocation::from_declaration(&entry.interface, &mut 10_000).unwrap();
     package.functions.push(entry);
     nir::phases::validate(&package).unwrap();
     let original = package.clone();
@@ -37951,7 +37954,7 @@ fn compact_residual_entries_prune_unused_runtime_inputs_and_execute_captured_clo
     .unwrap();
     assert_eq!(entry.slots, vec![1]);
     assert_eq!(entry.function.parameters, vec![template.parameters[1]]);
-    let compact = Invocation::from_function(&entry.function, &mut 10_000).unwrap();
+    let compact = Invocation::from_declaration(&entry.function.interface, &mut 10_000).unwrap();
     assert_eq!(compact.scope(), &[nir::Sort::ComptimeValue]);
     let plan = entry.invocation(&mut 10_000).unwrap();
     assert_eq!(

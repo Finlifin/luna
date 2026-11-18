@@ -43,6 +43,7 @@ fn package() -> Package {
                     },
                 },
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     declaration: id(count),
                     name: format!("Factory{count}"),
                     phase: FunctionPhase::Comptime,

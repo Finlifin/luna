@@ -207,6 +207,7 @@ mod tests {
     }
     fn method() -> MethodContract {
         MethodContract {
+            source: crate::program::SourceRange { start: 0, end: 0 },
             phase: TraitPhase::Runtime,
             is_quote: false,
             pure: false,

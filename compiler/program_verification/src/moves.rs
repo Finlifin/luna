@@ -16436,6 +16436,7 @@ mod record_shape_tests {
         });
         package.functions.push(Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 phase: FunctionPhase::Runtime,
                 inline: false,
                 pure: false,

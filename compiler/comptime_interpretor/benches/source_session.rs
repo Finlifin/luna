@@ -64,6 +64,7 @@ fn world(count: u32, reads: usize) -> Arc<Package> {
         let implementation = id(index * 4 + 4);
         package.functions.push(Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: function,
                 name: format!("identity{index}"),
                 phase: FunctionPhase::Comptime,
@@ -102,6 +103,7 @@ fn world(count: u32, reads: usize) -> Arc<Package> {
             capabilities: vec![],
             associated: vec![],
             methods: vec![MethodContract {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 phase: TraitPhase::Comptime,
                 is_quote: false,
                 pure: true,

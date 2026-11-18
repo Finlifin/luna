@@ -217,6 +217,7 @@ pub fn select_metered(
             .saturating_add(member.capabilities.len()),
     )?;
     let contract = MethodContract {
+        source: member.source,
         phase: member.phase,
         is_quote: member.is_quote,
         pure: member.pure,

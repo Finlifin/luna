@@ -113,8 +113,9 @@ pub fn inherit_with_limits(
         let original = std::mem::replace(&mut overlay.package.functions[index].interface, draft);
         overlay.originals.push((index, original));
     }
-    for (source, obligation) in obligations {
-        flow::prove_implication(&obligation, source, Some(overlay.package), limits).map_err(|error| {
+    for obligation in obligations {
+        let source = obligation.source;
+        flow::prove_implication(&obligation, Some(overlay.package), limits).map_err(|error| {
             match error.reason {
                 flow::Reason::Unknown(_) | flow::Reason::DepthLimit => error,
                 _ => failure(source, "implementation strengthens trait program preconditions or their definedness is not proven"),
@@ -133,7 +134,7 @@ fn prepare(
 ) -> Result<
     (
         BTreeMap<usize, FunctionDeclaration>,
-        Vec<(SourceRange, FunctionDeclaration)>,
+        Vec<FunctionDeclaration>,
     ),
     flow::Error,
 > {
@@ -224,7 +225,7 @@ fn prepare(
                     "implementation contract body is missing",
                 ));
             };
-            let source = package.functions[index].body.source;
+            let source = package.functions[index].source;
             let mut actual = copy_declaration(
                 drafts
                     .get(&index)
@@ -326,7 +327,7 @@ fn prepare(
                 obligation.result_binding = None;
                 obligation.entry_snapshots.clear();
                 obligation.defaults.clear();
-                obligations.push((source, obligation));
+                obligations.push(obligation);
             }
             if let Some(binding) = contract.result_binding {
                 let destination = match actual.result_binding {

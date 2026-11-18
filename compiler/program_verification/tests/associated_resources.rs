@@ -21,6 +21,7 @@ fn projection(ty: Term) -> Expr {
 fn function(body: Expr) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             declaration: id(3),
             name: "read".into(),
             phase: FunctionPhase::Runtime,

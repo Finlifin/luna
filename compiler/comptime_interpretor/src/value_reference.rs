@@ -660,6 +660,7 @@ mod call_tests {
         let binding = LocalId { owner: 2, index: 0 };
         Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 phase: FunctionPhase::Comptime,
                 inline: false,
                 pure: false,

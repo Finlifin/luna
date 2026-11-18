@@ -24,6 +24,7 @@ fn local(index: u32) -> Expr {
 fn function() -> Function {
     Function {
         interface: FunctionDeclaration {
+            source: source(),
             declaration: id(1),
             name: "choose".into(),
             phase: FunctionPhase::Comptime,
@@ -134,6 +135,7 @@ fn bodyless_trait_contracts_cannot_alias_or_omit_input_bindings() {
             parents: vec![],
             associated: vec![],
             methods: vec![MethodContract {
+                source: source(),
                 declaration: id(4),
                 name: "read".into(),
                 phase: Default::default(),

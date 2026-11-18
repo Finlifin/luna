@@ -44,6 +44,7 @@ impl Checker<'_, '_> {
             output.tests.push(id);
             output.functions.push(n::Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: source(item.span),
                     phase: n::FunctionPhase::Runtime,
                     inline: false,
                     pure: false,

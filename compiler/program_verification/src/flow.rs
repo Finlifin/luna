@@ -781,7 +781,6 @@ pub fn validate_residual_contracts(
 /// Preconditions and conclusions must already be checked program predicates.
 pub fn prove_implication(
     declaration: &FunctionDeclaration,
-    source: SourceRange,
     package: Option<&nir::program::Package>,
     limits: &mut Limits,
 ) -> Result<Report, Error> {
@@ -790,12 +789,12 @@ pub fn prove_implication(
         || !declaration.defaults.is_empty()
     {
         return Err(Error {
-            source,
+            source: declaration.source,
             reason: Reason::InvalidSignature,
         });
     }
     analyze_impl(
-        CallableProgram::declaration(declaration, source),
+        CallableProgram::declaration(declaration),
         &declaration.requirements,
         package,
         limits,
@@ -6577,6 +6576,7 @@ mod memory_summary_cache_tests {
         let package = nir::program::Package {
             functions: vec![Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     phase: nir::program::FunctionPhase::Runtime,
                     inline: false,
                     pure: false,

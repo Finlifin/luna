@@ -205,6 +205,7 @@ mod tests {
         let parameter = LocalId { owner: 1, index: 0 };
         Function {
             interface: crate::program::FunctionDeclaration {
+                source: crate::program::SourceRange { start: 0, end: 0 },
                 declaration: DeclarationId {
                     package: 1,
                     local: 1,

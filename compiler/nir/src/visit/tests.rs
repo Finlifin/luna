@@ -148,6 +148,7 @@ fn metadata_scans_are_bounded_even_without_expression_children() {
 fn excluded_function_defaults_leave_the_root_budget_untouched() {
     let function = Function {
         interface: crate::program::FunctionDeclaration {
+            source: SOURCE,
             phase: FunctionPhase::Runtime,
             inline: false,
             pure: false,

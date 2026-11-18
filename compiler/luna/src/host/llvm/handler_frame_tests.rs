@@ -20,6 +20,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
     let byte = Term::Primitive(P::U8);
     let destructor = Function {
         interface: nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
             phase: FunctionPhase::Runtime,
             inline: false,
             pure: false,

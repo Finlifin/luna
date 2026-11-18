@@ -707,6 +707,7 @@ mod tests {
         predicate.source = SourceRange { start: 30, end: 40 };
         Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: nir::DeclarationId {
                     package: 0,
                     local: 1,

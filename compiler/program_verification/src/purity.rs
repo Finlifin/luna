@@ -230,6 +230,7 @@ mod behavior_code_snapshot_tests {
         };
         let function = |id, body: n::Expr| n::Function {
             interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
                 declaration: id,
                 name: format!("f{}", id.local),
                 phase: n::FunctionPhase::Runtime,
@@ -862,6 +863,7 @@ impl<'a> Analysis<'a> {
         }
         let function = n::Function {
             interface: nir::program::FunctionDeclaration {
+                source: value.source,
                 declaration,
                 name: "default-observation".into(),
                 phase: n::FunctionPhase::Runtime,
@@ -4550,6 +4552,7 @@ mod resource_world_tests {
         for local in 0..16 {
             package.functions.push(n::Function {
                 interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
                     phase: n::FunctionPhase::Runtime,
                     inline: false,
                     pure: true,
