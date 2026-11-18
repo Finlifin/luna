@@ -938,7 +938,7 @@ impl Checker<'_, '_> {
                 let value = self
                     .alias_substitution
                     .get(&id)
-                    .map(|value| (**value).clone())
+                    .cloned()
                     .unwrap_or(Term::Rigid {
                         declaration: id,
                         sort: Sort::ComptimeValue,
@@ -1413,16 +1413,11 @@ impl Checker<'_, '_> {
             // the callee's original binder no longer names the supplied Type.
             // Captured invocation values can carry these same opaque binders
             // inside callable instances or closure snapshot arguments.
-            for argument in self
-                .alias_substitution
-                .values()
-                .map(std::sync::Arc::as_ref)
-                .chain(
-                    inputs
-                        .iter()
-                        .flat_map(|(_, ty, value)| std::iter::once(ty).chain(value.iter())),
-                )
-            {
+            for argument in self.alias_substitution.values().chain(
+                inputs
+                    .iter()
+                    .flat_map(|(_, ty, value)| std::iter::once(ty).chain(value.iter())),
+            ) {
                 let observed =
                     input_observation::term_inputs(argument, &mut self.required_steps, expr.span)?;
                 for (id, sort) in observed.declarations {

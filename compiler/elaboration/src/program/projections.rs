@@ -463,14 +463,14 @@ impl Checker<'_, '_> {
     pub(super) fn instantiate_formation_environment(
         &self,
         predicate: &n::TypePredicate,
-        environment: &BTreeMap<DeclarationId, std::sync::Arc<Term>>,
+        environment: &DeclarationBindings<Term>,
         span: Span,
     ) -> Result<n::TypePredicate, Error> {
         if environment.is_empty() {
             return Ok(predicate.clone());
         }
         let parameters = self.input_binders(&environment.keys().copied().collect::<Vec<_>>());
-        let arguments: Vec<_> = environment.values().map(|ty| ty.as_ref().clone()).collect();
+        let arguments: Vec<_> = environment.values().cloned().collect();
         predicate
             .instantiate_parameters_in_scope(&parameters, &arguments, self.context.scope())
             .map_err(|e| error(span, e.to_string()))

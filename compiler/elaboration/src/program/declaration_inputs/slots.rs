@@ -299,7 +299,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
     ) -> Result<&'h Expr<'h>, Error> {
         self.progress.require_default_prefix(slot, self.span)?;
         if let Some(defaults) = &self.defaults {
-            defaults.install(checker, self.span)?;
+            defaults.install(checker);
         }
         // Only preceding declaration inputs enter a default. Their observations
         // never replace the executable producers retained in source order.

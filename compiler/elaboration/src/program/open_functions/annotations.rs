@@ -357,7 +357,7 @@ impl Checker<'_, '_> {
             for assumption in assumptions {
                 this.context.assume(assumption);
             }
-            this.default_input_scope = Some(parameters.to_vec());
+            this.default_input_scope = Some(parameters.into());
             this.default_input_owner = Some(owner);
             let mut graph = Vec::new();
             for (index, (parameter, (_, domain))) in sig.params.iter().zip(parameters).enumerate() {
@@ -430,7 +430,7 @@ impl Checker<'_, '_> {
                     for assumption in caller_assumptions {
                         this.context.assume(assumption);
                     }
-                    this.default_input_scope = Some(parameters.to_vec());
+                    this.default_input_scope = Some(parameters.into());
                     this.default_input_owner = Some(*owner);
                     for ((parameter, (sort, domain)), symbol) in
                         sig.params.iter().zip(parameters).zip(symbols)

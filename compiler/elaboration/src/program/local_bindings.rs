@@ -1,34 +1,54 @@
-//! Lexical versions retained by source regions. Forks share values and all
-//! untouched branches. The most significant differing bit orders LocalIds
-//! exactly as (owner, index); a path examines at most 64 discriminating bits.
-use super::n::LocalId;
+//! Persistent lexical bindings indexed by the full local or declaration ID.
+//! Each branch discriminates one bit. Forking shares a root; updating copies
+//! only the changed path and never copies the bound type or code.
+use super::{DeclarationId, n::LocalId};
 use std::{ops::Index, sync::Arc};
 
-pub(super) struct LocalBindings<T> {
-    root: Option<Node<T>>,
+pub(super) trait BindingKey: Copy + Eq {
+    fn bits(self) -> u128;
+}
+impl BindingKey for LocalId {
+    fn bits(self) -> u128 {
+        u128::from(self.owner) << 32 | u128::from(self.index)
+    }
+}
+impl BindingKey for DeclarationId {
+    fn bits(self) -> u128 {
+        u128::from(self.package) << 32 | u128::from(self.local)
+    }
+}
+
+pub(super) type LocalBindings<T> = Bindings<LocalId, T>;
+pub(super) type DeclarationBindings<T> = Bindings<DeclarationId, T>;
+
+pub(super) struct Bindings<K, T> {
+    root: Option<Node<K, T>>,
     len: usize,
 }
 
-enum Node<T> {
-    Binding(LocalId, Arc<T>),
-    Fork(Arc<Fork<T>>),
+enum Node<K, T> {
+    Binding(K, Arc<T>),
+    Fork(Arc<Fork<K, T>>),
 }
 
-struct Fork<T> {
-    prefix: u64,
-    bit: u64,
-    children: [Node<T>; 2],
+struct Fork<K, T> {
+    sample: K,
+    bit: u32,
+    children: [Node<K, T>; 2],
 }
 
-fn key(id: LocalId) -> u64 {
-    u64::from(id.owner) << 32 | u64::from(id.index)
+fn side(bits: u128, bit: u32) -> usize {
+    ((bits >> bit) & 1) as usize
 }
 
-fn side(key: u64, bit: u64) -> usize {
-    usize::from(key & bit != 0)
+impl<K: BindingKey, T> Fork<K, T> {
+    fn covers(&self, bits: u128) -> bool {
+        // Only bits above this fork must agree with its representative.
+        (bits ^ self.sample.bits()) >> self.bit <= 1
+    }
 }
 
-impl<T> Clone for Node<T> {
+impl<K: BindingKey, T> Clone for Node<K, T> {
     fn clone(&self) -> Self {
         match self {
             Self::Binding(id, value) => Self::Binding(*id, value.clone()),
@@ -37,7 +57,7 @@ impl<T> Clone for Node<T> {
     }
 }
 
-impl<T> Clone for Fork<T> {
+impl<K: BindingKey, T> Clone for Fork<K, T> {
     fn clone(&self) -> Self {
         Self {
             children: self.children.clone(),
@@ -46,7 +66,7 @@ impl<T> Clone for Fork<T> {
     }
 }
 
-impl<T> Clone for LocalBindings<T> {
+impl<K: BindingKey, T> Clone for Bindings<K, T> {
     fn clone(&self) -> Self {
         Self {
             root: self.root.clone(),
@@ -55,48 +75,54 @@ impl<T> Clone for LocalBindings<T> {
     }
 }
 
-impl<T> Default for LocalBindings<T> {
+impl<K: BindingKey + std::fmt::Debug, T: std::fmt::Debug> std::fmt::Debug for Bindings<K, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+impl<K: BindingKey, T> Default for Bindings<K, T> {
     fn default() -> Self {
         Self { root: None, len: 0 }
     }
 }
 
-impl<T> Node<T> {
-    fn insert(&mut self, id: LocalId, value: Arc<T>) -> Option<Arc<T>> {
-        let incoming = key(id);
+impl<K: BindingKey, T> Node<K, T> {
+    fn insert(&mut self, id: K, value: Arc<T>) -> Option<Arc<T>> {
+        let incoming = id.bits();
         let existing = match self {
             Self::Binding(previous, old) if *previous == id => {
                 return Some(std::mem::replace(old, value));
             }
-            Self::Binding(previous, _) => key(*previous),
-            Self::Fork(fork) if incoming & !(fork.bit | (fork.bit - 1)) == fork.prefix => {
+            Self::Binding(previous, _) => previous.bits(),
+            Self::Fork(fork) if fork.covers(incoming) => {
                 let index = side(incoming, fork.bit);
                 return Arc::make_mut(fork).children[index].insert(id, value);
             }
-            Self::Fork(fork) => fork.prefix,
+            Self::Fork(fork) => fork.sample.bits(),
         };
-        let bit = 1 << (63 - (incoming ^ existing).leading_zeros());
+        let bit = (incoming ^ existing).ilog2();
         let mut children = [self.clone(), Self::Binding(id, value)];
-        if incoming & bit == 0 {
+        if side(incoming, bit) == 0 {
             children.swap(0, 1);
         }
         *self = Self::Fork(Arc::new(Fork {
-            prefix: incoming & !(bit | (bit - 1)),
+            sample: id,
             bit,
             children,
         }));
         None
     }
 
-    fn representative(&self) -> u64 {
+    fn representative(&self) -> u128 {
         match self {
-            Self::Binding(id, _) => key(*id),
-            Self::Fork(fork) => fork.prefix,
+            Self::Binding(id, _) => id.bits(),
+            Self::Fork(fork) => fork.sample.bits(),
         }
     }
 
     // Walk only the intersection. Shared forks have exactly the same values.
-    fn changed_bindings(&self, inner: &Self, update: &mut impl FnMut(LocalId, &Arc<T>)) {
+    fn changed_bindings(&self, inner: &Self, update: &mut impl FnMut(K, &Arc<T>)) {
         match (self, inner) {
             (Self::Binding(a, before), Self::Binding(b, after)) => {
                 if a == b && !Arc::ptr_eq(before, after) {
@@ -104,14 +130,14 @@ impl<T> Node<T> {
                 }
             }
             (Self::Fork(a), Self::Fork(b)) if a.bit == b.bit => {
-                if a.prefix == b.prefix && !Arc::ptr_eq(a, b) {
+                if a.covers(b.sample.bits()) && !Arc::ptr_eq(a, b) {
                     for (outer, inner) in a.children.iter().zip(&b.children) {
                         outer.changed_bindings(inner, update);
                     }
                 }
             }
             (Self::Fork(a), Self::Fork(b)) if b.bit > a.bit => {
-                self.changed_bindings(&b.children[side(a.prefix, b.bit)], update);
+                self.changed_bindings(&b.children[side(a.sample.bits(), b.bit)], update);
             }
             (Self::Fork(a), inner) => {
                 a.children[side(inner.representative(), a.bit)].changed_bindings(inner, update);
@@ -124,11 +150,11 @@ impl<T> Node<T> {
 
     // Construct a new path only when removal succeeds. A fork with one
     // remaining child collapses directly to that child's existing handle.
-    fn removing(&self, id: LocalId) -> Option<(Option<Self>, Arc<T>)> {
+    fn removing(&self, id: K) -> Option<(Option<Self>, Arc<T>)> {
         match self {
             Self::Binding(found, value) => (*found == id).then(|| (None, value.clone())),
             Self::Fork(fork) => {
-                let index = side(key(id), fork.bit);
+                let index = side(id.bits(), fork.bit);
                 let (child, value) = fork.children[index].removing(id)?;
                 let replacement = match child {
                     Some(child) => {
@@ -144,7 +170,7 @@ impl<T> Node<T> {
     }
 }
 
-impl<T> LocalBindings<T> {
+impl<K: BindingKey, T> Bindings<K, T> {
     pub(super) fn len(&self) -> usize {
         self.len
     }
@@ -153,25 +179,25 @@ impl<T> LocalBindings<T> {
         *self = Self::default();
     }
 
-    pub(super) fn shared(&self, id: &LocalId) -> Option<&Arc<T>> {
+    pub(super) fn shared(&self, id: &K) -> Option<&Arc<T>> {
         let mut node = self.root.as_ref()?;
         loop {
             match node {
                 Node::Binding(found, value) => return (found == id).then_some(value),
-                Node::Fork(fork) => node = &fork.children[side(key(*id), fork.bit)],
+                Node::Fork(fork) => node = &fork.children[side(id.bits(), fork.bit)],
             }
         }
     }
 
-    pub(super) fn get(&self, id: &LocalId) -> Option<&T> {
+    pub(super) fn get(&self, id: &K) -> Option<&T> {
         self.shared(id).map(Arc::as_ref)
     }
 
-    pub(super) fn contains_key(&self, id: &LocalId) -> bool {
+    pub(super) fn contains_key(&self, id: &K) -> bool {
         self.shared(id).is_some()
     }
 
-    pub(super) fn insert(&mut self, id: LocalId, value: impl Into<Arc<T>>) -> Option<Arc<T>> {
+    pub(super) fn insert(&mut self, id: K, value: impl Into<Arc<T>>) -> Option<Arc<T>> {
         let value = value.into();
         if let Some(node) = &mut self.root {
             if let Some(old) = node.insert(id, value) {
@@ -194,31 +220,39 @@ impl<T> LocalBindings<T> {
         }
     }
 
-    pub(super) fn remove(&mut self, id: &LocalId) -> Option<Arc<T>> {
+    pub(super) fn remove(&mut self, id: &K) -> Option<Arc<T>> {
         let (root, value) = self.root.as_ref()?.removing(*id)?;
         self.root = root;
         self.len -= 1;
         Some(value)
     }
 
-    pub(super) fn iter(&self) -> Iter<'_, T> {
+    pub(super) fn iter(&self) -> Iter<'_, K, T> {
         self.into_iter()
     }
 
-    pub(super) fn keys(&self) -> impl Iterator<Item = &LocalId> {
+    pub(super) fn is_empty(&self) -> bool {
+        self.root.is_none()
+    }
+
+    pub(super) fn values(&self) -> impl Iterator<Item = &T> {
+        self.iter().map(|(_, value)| value)
+    }
+
+    pub(super) fn keys(&self) -> impl Iterator<Item = &K> {
         self.iter().map(|(id, _)| id)
     }
 }
 
-impl<T> Index<&LocalId> for LocalBindings<T> {
+impl<K: BindingKey, T> Index<&K> for Bindings<K, T> {
     type Output = T;
-    fn index(&self, id: &LocalId) -> &T {
+    fn index(&self, id: &K) -> &T {
         self.get(id).expect("missing lexical binding")
     }
 }
 
-impl<T, V: Into<Arc<T>>> Extend<(LocalId, V)> for LocalBindings<T> {
-    fn extend<I: IntoIterator<Item = (LocalId, V)>>(&mut self, values: I) {
+impl<K: BindingKey, T, V: Into<Arc<T>>> Extend<(K, V)> for Bindings<K, T> {
+    fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, values: I) {
         for (id, value) in values {
             self.insert(id, value);
         }
@@ -226,21 +260,21 @@ impl<T, V: Into<Arc<T>>> Extend<(LocalId, V)> for LocalBindings<T> {
 }
 
 #[cfg(test)]
-impl<T, const N: usize> From<[(LocalId, T); N]> for LocalBindings<T> {
-    fn from(values: [(LocalId, T); N]) -> Self {
+impl<K: BindingKey, T, const N: usize> From<[(K, T); N]> for Bindings<K, T> {
+    fn from(values: [(K, T); N]) -> Self {
         let mut bindings = Self::default();
         bindings.extend(values);
         bindings
     }
 }
 
-pub(super) struct Iter<'a, T> {
-    pending: Vec<&'a Node<T>>,
+pub(super) struct Iter<'a, K, T> {
+    pending: Vec<&'a Node<K, T>>,
 }
 
-impl<'a, T> IntoIterator for &'a LocalBindings<T> {
-    type Item = (&'a LocalId, &'a T);
-    type IntoIter = Iter<'a, T>;
+impl<'a, K: BindingKey, T> IntoIterator for &'a Bindings<K, T> {
+    type Item = (&'a K, &'a T);
+    type IntoIter = Iter<'a, K, T>;
     fn into_iter(self) -> Self::IntoIter {
         Iter {
             pending: self.root.iter().collect(),
@@ -248,8 +282,8 @@ impl<'a, T> IntoIterator for &'a LocalBindings<T> {
     }
 }
 
-impl<'a, T> Iterator for Iter<'a, T> {
-    type Item = (&'a LocalId, &'a T);
+impl<'a, K: BindingKey, T> Iterator for Iter<'a, K, T> {
+    type Item = (&'a K, &'a T);
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(node) = self.pending.pop() {
             match node {
@@ -295,7 +329,7 @@ mod tests {
         assert_eq!(original[&id(0)].0, 11);
         assert!(!original.contains_key(&id(17)));
         assert!(child.contains_key(&id(1)));
-        fn right_root(bindings: &LocalBindings<Value>) -> &Arc<Fork<Value>> {
+        fn right_root(bindings: &LocalBindings<Value>) -> &Arc<Fork<LocalId, Value>> {
             let Some(Node::Fork(root)) = &bindings.root else {
                 panic!()
             };
@@ -313,6 +347,34 @@ mod tests {
             original.shared(&id(0)).unwrap()
         ));
         assert_eq!(original.len(), 4);
+    }
+
+    #[test]
+    fn declaration_versions_preserve_high_package_bits_and_local_order() {
+        let mut parent = DeclarationBindings::default();
+        let mut expected = BTreeMap::new();
+        for package in [u64::MAX, 1 << 63, 1 << 32, 1, 0] {
+            for local in [u32::MAX, 0] {
+                let key = DeclarationId { package, local };
+                expected.insert(key, package);
+                parent.insert(key, package);
+            }
+        }
+        let mut inner = parent.clone();
+        let key = DeclarationId {
+            package: 1 << 63,
+            local: 0,
+        };
+        assert_eq!(inner.remove(&key).as_deref(), Some(&(1 << 63)));
+        assert_eq!(parent.get(&key), Some(&(1 << 63)));
+        expected.remove(&key);
+        assert!(inner.iter().eq(expected.iter()));
+        for id in expected.keys() {
+            assert!(Arc::ptr_eq(
+                parent.shared(id).unwrap(),
+                inner.shared(id).unwrap()
+            ));
+        }
     }
 
     #[test]

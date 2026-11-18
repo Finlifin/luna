@@ -314,7 +314,7 @@ impl<'h> Checker<'_, 'h> {
                         FormationInputs {
                             terms: terms.clone(),
                             deferred: deferred.clone(),
-                            environment: BTreeMap::new(),
+                            environment: DeclarationBindings::default(),
                         },
                         span,
                     )?;
@@ -803,12 +803,14 @@ impl<'h> Checker<'_, 'h> {
         let hir::clause::ClauseParamKind::Optional(_, ty, value) = clauses[slot].kind else {
             return Err(error(span, "type argument count mismatch"));
         };
-        if self.active_type_defaults.len() >= 64 || !self.active_type_defaults.insert((owner, slot))
+        if self.active_type_defaults.len() >= 64
+            || self.active_type_defaults.contains(&(owner, slot))
         {
             return Err(error(span, "cyclic or excessively deep type default"));
         }
         let caller_frames = self.call_input_frames();
-        let caller_scope = self.call_inference_domains();
+        let caller_scope = self.retain_input_domains(span)?;
+        self.active_type_defaults.insert((owner, slot));
         let caller_owner = self.default_input_owner.or(self.signature_owner);
         let saved_input_scope = self.default_input_scope.replace(caller_scope);
         let saved_input_owner = self.default_input_owner;

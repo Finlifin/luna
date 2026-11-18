@@ -23,8 +23,8 @@ pub(super) enum InputChecking {
 }
 
 pub(super) use completion::Completion;
-pub(super) use environment::Environment;
 pub(super) use environment::copy_term as copy_input_domain;
+pub(super) use environment::{Environment, copy_domains};
 
 type Parameters = Vec<(DeclarationId, Sort, Term)>;
 
@@ -414,9 +414,7 @@ impl Checker<'_, '_> {
         defaults: Option<&nominal::InputEnvironment<'_>>,
         completion: C,
     ) -> Result<C::Output, Error> {
-        let defaults = defaults
-            .map(|view| Environment::retain(view, &mut self.required_steps, span))
-            .transpose()?;
+        let defaults = defaults.map(Environment::retain);
         self.complete_declaration_inputs(owner, inputs, span, parameters, defaults, completion)
     }
 

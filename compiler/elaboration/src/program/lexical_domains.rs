@@ -2,7 +2,32 @@
 //! domain occupies a slot until a particular instance supplies its type.
 use super::*;
 use open_functions::Annotation;
-use std::slice::Iter;
+use std::{slice::Iter, sync::Arc};
+
+pub(super) type RetainedDomains = Arc<[(Sort, Option<Term>)]>;
+
+enum DomainSource<'a> {
+    Retained(&'a RetainedDomains),
+    Borrowed(InputDomains<'a>),
+}
+
+impl<'a> DomainSource<'a> {
+    fn domains(self) -> InputDomains<'a> {
+        match self {
+            Self::Retained(slots) => InputDomains::Checking(slots.iter()),
+            Self::Borrowed(view) => view,
+        }
+    }
+
+    fn retain(self, fuel: &mut u64, span: Span) -> Result<RetainedDomains, Error> {
+        match self {
+            Self::Retained(slots) => Ok(slots.clone()),
+            Self::Borrowed(view) => {
+                declaration_inputs::copy_domains(view, fuel, span).map(Into::into)
+            }
+        }
+    }
+}
 
 pub(super) enum InputDomains<'a> {
     Checking(Iter<'a, (Sort, Option<Term>)>),
@@ -29,13 +54,13 @@ impl<'a> Iterator for InputDomains<'a> {
 }
 
 impl Checker<'_, '_> {
-    pub(super) fn lexical_input_domains(&self) -> InputDomains<'_> {
+    fn lexical_domain_source(&self) -> DomainSource<'_> {
         let owner = self.signature_owner;
-        if let Some(slots) = owner
-            .and_then(|owner| self.signature_domains.get(&owner))
-            .or(self.default_input_scope.as_ref())
-        {
-            return InputDomains::Checking(slots.iter());
+        if let Some(slots) = owner.and_then(|owner| self.signature_domains.get(&owner)) {
+            return DomainSource::Borrowed(InputDomains::Checking(slots.iter()));
+        }
+        if let Some(slots) = &self.default_input_scope {
+            return DomainSource::Retained(slots);
         }
         if let Some(instance) = self
             .open_instance
@@ -45,21 +70,32 @@ impl Checker<'_, '_> {
             let Term::Function { parameters, .. } = &instance.signature else {
                 unreachable!("open instance has a function telescope")
             };
-            return InputDomains::Formed(parameters.iter());
+            return DomainSource::Borrowed(InputDomains::Formed(parameters.iter()));
         }
         if let Some(definition) = owner.and_then(|owner| self.open_functions.get(&owner)) {
-            return definition.input_domain_refs();
+            return DomainSource::Borrowed(definition.input_domain_refs());
         }
         let signature = owner.and_then(|owner| {
             self.signatures
                 .get(&owner)
                 .or_else(|| self.interface_signatures.get(&owner))
         });
-        match signature {
+        DomainSource::Borrowed(match signature {
             Some(Term::Function { parameters, .. }) => InputDomains::Formed(parameters.iter()),
             None => InputDomains::Formed([].iter()),
             Some(_) => unreachable!("declaration has a function telescope"),
-        }
+        })
+    }
+
+    pub(super) fn lexical_input_domains(&self) -> InputDomains<'_> {
+        self.lexical_domain_source().domains()
+    }
+
+    pub(super) fn retain_input_domains(&mut self, span: Span) -> Result<RetainedDomains, Error> {
+        let mut fuel = self.required_steps;
+        let retained = self.lexical_domain_source().retain(&mut fuel, span);
+        self.required_steps = fuel;
+        retained
     }
 
     pub(super) fn call_inference_domains(&self) -> Vec<(Sort, Option<Term>)> {
@@ -86,5 +122,26 @@ impl Checker<'_, '_> {
         } else {
             vec![sorts]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retaining_a_nested_default_scope_shares_the_original_telescope() {
+        let slots = [
+            (Sort::ComptimeValue, Some(Term::Tuple(vec![p(P::Str); 32]))),
+            (Sort::Type, None),
+        ];
+        let saved = DomainSource::Borrowed(InputDomains::Checking(slots.iter()))
+            .retain(&mut 1_000, Span::default())
+            .unwrap();
+        let nested = DomainSource::Retained(&saved)
+            .retain(&mut 0, Span::default())
+            .unwrap();
+        assert!(Arc::ptr_eq(&saved, &nested));
+        assert_eq!(nested.as_ref(), &slots);
     }
 }

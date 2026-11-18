@@ -32,9 +32,9 @@ pub(super) fn enum_leaves<'h>(
 
 /// Explicit member arguments resolve in the caller; defaults use the selected parent.
 pub(super) struct InputEnvironment<'a> {
-    pub substitution: &'a BTreeMap<DeclarationId, std::sync::Arc<Term>>,
-    pub bindings: &'a BTreeMap<DeclarationId, n::LocalId>,
-    pub normal_bindings: &'a BTreeMap<DeclarationId, (n::LocalId, Term)>,
+    pub substitution: &'a DeclarationBindings<Term>,
+    pub bindings: &'a DeclarationBindings<n::LocalId>,
+    pub normal_bindings: &'a DeclarationBindings<(n::LocalId, Term)>,
     pub context: &'a crate::ptc::Context,
 }
 
@@ -146,7 +146,7 @@ impl Checker<'_, '_> {
             }
             let value = self
                 .alias_substitution
-                .get(&parameter)
+                .shared(&parameter)
                 .cloned()
                 .ok_or_else(|| {
                     error(
@@ -166,7 +166,7 @@ impl Checker<'_, '_> {
         let kind = if let Some(binding) = self.alias_value_bindings.get(&parameter) {
             K::Local(*binding)
         } else {
-            let ty = if let Some(value) = self.alias_substitution.get(&parameter).cloned() {
+            let ty = if let Some(value) = self.alias_substitution.shared(&parameter).cloned() {
                 self.copy_alias_type(&value, span)?
             } else {
                 Term::Rigid {
@@ -197,7 +197,7 @@ impl Checker<'_, '_> {
                         "captured input is not yet available in this definition",
                     ));
                 }
-                if let Some(value) = self.alias_substitution.get(&parameter).cloned() {
+                if let Some(value) = self.alias_substitution.shared(&parameter).cloned() {
                     self.copy_alias_type(&value, span)
                 } else {
                     Ok(Term::Rigid {
@@ -262,7 +262,7 @@ impl Checker<'_, '_> {
         let mut capture_binders = Vec::new();
         let mut capture_values = Vec::new();
         for binder in self.input_binders(&captures) {
-            if let Some(value) = self.alias_substitution.get(&binder.declaration).cloned() {
+            if let Some(value) = self.alias_substitution.shared(&binder.declaration).cloned() {
                 capture_values.push(self.copy_alias_type(&value, span)?);
                 capture_binders.push(binder);
             }

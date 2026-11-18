@@ -52,7 +52,7 @@ mod interfaces;
 mod iteration;
 mod lexical_inputs;
 mod local_bindings;
-use local_bindings::LocalBindings;
+use local_bindings::{DeclarationBindings, LocalBindings};
 mod list_operations;
 mod list_patterns;
 mod literal_conversion;
@@ -545,9 +545,9 @@ fn elaborate_with_attributes(
         aliases: BTreeSet::new(),
         completed_aliases: std::collections::HashMap::new(),
         checked_alias_definitions: BTreeSet::new(),
-        alias_substitution: BTreeMap::new(),
-        alias_value_bindings: BTreeMap::new(),
-        normal_default_bindings: BTreeMap::new(),
+        alias_substitution: DeclarationBindings::default(),
+        alias_value_bindings: DeclarationBindings::default(),
+        normal_default_bindings: DeclarationBindings::default(),
         definition_inputs: BTreeMap::new(),
         prepared_template_applications: BTreeSet::new(),
         forbidden_default_inputs: BTreeSet::new(),
@@ -1478,14 +1478,14 @@ struct FormationInputs {
     terms: Vec<Term>,
     // Executable type constructors retain deferred contracts for invocation.
     deferred: BTreeSet<DeclarationId>,
-    environment: BTreeMap<DeclarationId, std::sync::Arc<Term>>,
+    environment: DeclarationBindings<Term>,
 }
 impl FormationInputs {
     fn ready(terms: &[Term]) -> Self {
         Self {
             terms: terms.to_vec(),
             deferred: BTreeSet::new(),
-            environment: BTreeMap::new(),
+            environment: DeclarationBindings::default(),
         }
     }
 }
@@ -1606,7 +1606,7 @@ struct Checker<'a, 'h> {
     // Pending member results, not Type identities or permission evidence.
     open_member_locals: BTreeSet<n::LocalId>,
     signature_domains: BTreeMap<OwnerId, Vec<(Sort, Option<Term>)>>,
-    default_input_scope: Option<Vec<(Sort, Option<Term>)>>,
+    default_input_scope: Option<lexical_domains::RetainedDomains>,
     default_input_owner: Option<OwnerId>,
     requirements: BTreeMap<OwnerId, Vec<n::TypePredicate>>,
     program_requirements: BTreeMap<OwnerId, Vec<&'h Expr<'h>>>,
@@ -1654,9 +1654,9 @@ struct Checker<'a, 'h> {
         std::collections::HashMap<aliases::Application, std::sync::Arc<CompletedType>>,
     checked_alias_definitions: BTreeSet<OwnerId>,
     alias_scopes: BTreeMap<OwnerId, Option<OwnerId>>,
-    alias_substitution: BTreeMap<DeclarationId, std::sync::Arc<Term>>,
-    alias_value_bindings: BTreeMap<DeclarationId, n::LocalId>,
-    normal_default_bindings: BTreeMap<DeclarationId, (n::LocalId, Term)>,
+    alias_substitution: DeclarationBindings<Term>,
+    alias_value_bindings: DeclarationBindings<n::LocalId>,
+    normal_default_bindings: DeclarationBindings<(n::LocalId, Term)>,
     definition_inputs: BTreeMap<DeclarationId, n::Expr>,
     prepared_template_applications: BTreeSet<OwnerId>,
     forbidden_default_inputs: BTreeSet<DeclarationId>,
@@ -3459,7 +3459,7 @@ impl Checker<'_, '_> {
                     ));
                 }
                 if let Term::Rigid { declaration, .. } = &ty {
-                    if let Some(value) = self.alias_substitution.get(declaration).cloned() {
+                    if let Some(value) = self.alias_substitution.shared(declaration).cloned() {
                         return self.copy_alias_type(&value, expr.span);
                     }
                 }
@@ -3467,11 +3467,7 @@ impl Checker<'_, '_> {
                     let parameters = self.input_binders(
                         &self.alias_substitution.keys().copied().collect::<Vec<_>>(),
                     );
-                    let arguments: Vec<_> = self
-                        .alias_substitution
-                        .values()
-                        .map(|ty| ty.as_ref().clone())
-                        .collect();
+                    let arguments: Vec<_> = self.alias_substitution.values().cloned().collect();
                     return ty
                         .instantiate_parameters(&parameters, &arguments)
                         .map_err(|e| error(expr.span, e.to_string()));
@@ -3546,7 +3542,7 @@ impl Checker<'_, '_> {
                             let context = self
                                 .alias_substitution
                                 .get(&declaration)
-                                .map(|value| (**value).clone())
+                                .cloned()
                                 .unwrap_or(Term::Rigid {
                                     declaration,
                                     sort: Sort::ComptimeValue,
@@ -3675,7 +3671,7 @@ impl Checker<'_, '_> {
                         "required comptime input is not yet available in this definition",
                     ));
                 }
-                if let Some(value) = self.alias_substitution.get(&declaration).cloned() {
+                if let Some(value) = self.alias_substitution.shared(&declaration).cloned() {
                     return self.copy_alias_type(&value, expr.span);
                 }
                 if self
@@ -4055,12 +4051,12 @@ impl Checker<'_, '_> {
         mut arguments: FormationInputs,
         span: Span,
     ) -> Result<(), Error> {
-        arguments.environment.extend(
-            self.alias_substitution
-                .iter()
-                .filter(|(id, _)| !self.type_parameters[&owner].contains(id))
-                .map(|(id, value)| (*id, value.clone())),
-        );
+        if !self.alias_substitution.is_empty() {
+            arguments.environment = self.alias_substitution.clone();
+            for parameter in &self.type_parameters[&owner] {
+                arguments.environment.remove(parameter);
+            }
+        }
         if let Some(pending) = &mut self.pending_type_uses {
             let scope = self.signature_owner.and_then(|owner| {
                 self.alias_scopes

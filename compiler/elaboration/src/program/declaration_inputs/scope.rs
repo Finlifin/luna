@@ -9,7 +9,7 @@ pub(super) struct Scope {
     environment: environment::Environment,
     owner: Option<OwnerId>,
     mode: bool,
-    input_scope: Option<Vec<(Sort, Option<Term>)>>,
+    input_scope: Option<lexical_domains::RetainedDomains>,
     input_owner: Option<OwnerId>,
 }
 
@@ -17,24 +17,13 @@ impl Scope {
     pub(super) fn enter(checker: &mut Checker<'_, '_>, span: Span) -> Result<Self, Error> {
         // No lexical state changes until every retained component is ready.
         // Failure still consumes its work budget, as ordinary checking does.
-        let mut fuel = checker.required_steps;
-        let retained = (|| {
-            let environment = environment::Environment::retain(
-                &nominal::InputEnvironment {
-                    substitution: &checker.alias_substitution,
-                    bindings: &checker.alias_value_bindings,
-                    normal_bindings: &checker.normal_default_bindings,
-                    context: &checker.context,
-                },
-                &mut fuel,
-                span,
-            )?;
-            let caller_scope =
-                environment::copy_domains(checker.lexical_input_domains(), &mut fuel, span)?;
-            Ok::<_, Error>((environment, caller_scope))
-        })();
-        checker.required_steps = fuel;
-        let (environment, caller_scope) = retained?;
+        let caller_scope = checker.retain_input_domains(span)?;
+        let environment = environment::Environment::retain(&nominal::InputEnvironment {
+            substitution: &checker.alias_substitution,
+            bindings: &checker.alias_value_bindings,
+            normal_bindings: &checker.normal_default_bindings,
+            context: &checker.context,
+        });
         let caller_owner = checker.default_input_owner.or(checker.signature_owner);
         let input_owner = std::mem::replace(&mut checker.default_input_owner, caller_owner);
         let input_scope = checker.default_input_scope.replace(caller_scope);
@@ -78,7 +67,7 @@ impl std::fmt::Display for Scope {
         }
         f.write_str(") (input-scope")?;
         if let Some(inputs) = &self.input_scope {
-            for (sort, ty) in inputs {
+            for (sort, ty) in inputs.iter() {
                 write!(f, " (input {sort}")?;
                 if let Some(ty) = ty {
                     write!(f, " {ty}")?;
@@ -102,30 +91,22 @@ mod tests {
             local: 3,
         };
         let local = n::LocalId { owner: 1, index: 4 };
-        let types = BTreeMap::from([(id, std::sync::Arc::new(Term::String("caller\"\n".into())))]);
-        let values = BTreeMap::from([(id, local)]);
-        let defaults = BTreeMap::from([(id, (local, p(P::Str)))]);
+        let types = DeclarationBindings::from([(id, Term::String("caller\"\n".into()))]);
+        let values = DeclarationBindings::from([(id, local)]);
+        let defaults = DeclarationBindings::from([(id, (local, p(P::Str)))]);
         let context = crate::ptc::Context::default();
-        let environment = environment::Environment::retain(
-            &nominal::InputEnvironment {
-                substitution: &types,
-                bindings: &values,
-                normal_bindings: &defaults,
-                context: &context,
-            },
-            &mut 100,
-            Span::default(),
-        )
-        .unwrap();
+        let environment = environment::Environment::retain(&nominal::InputEnvironment {
+            substitution: &types,
+            bindings: &values,
+            normal_bindings: &defaults,
+            context: &context,
+        });
         let scope = Scope {
             locals: LocalBindings::from([(local, p(P::Str))]),
             environment,
             owner: Some(owner),
             mode: true,
-            input_scope: Some(vec![
-                (Sort::Type, None),
-                (Sort::ComptimeValue, Some(p(P::Str))),
-            ]),
+            input_scope: Some([(Sort::Type, None), (Sort::ComptimeValue, Some(p(P::Str)))].into()),
             input_owner: Some(owner),
         };
         let dump = scope.to_string();

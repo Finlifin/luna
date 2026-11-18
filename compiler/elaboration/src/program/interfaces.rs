@@ -2592,7 +2592,7 @@ impl Checker<'_, '_> {
         self.check_capabilities_in_environment(
             owner,
             arguments,
-            &BTreeMap::new(),
+            &DeclarationBindings::default(),
             &BTreeSet::new(),
             span,
         )
@@ -2602,7 +2602,7 @@ impl Checker<'_, '_> {
         &self,
         owner: OwnerId,
         arguments: &[Term],
-        environment: &BTreeMap<DeclarationId, std::sync::Arc<Term>>,
+        environment: &DeclarationBindings<Term>,
         deferred: &BTreeSet<DeclarationId>,
         span: Span,
     ) -> Result<(), Error> {

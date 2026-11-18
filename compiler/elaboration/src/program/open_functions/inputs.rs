@@ -465,7 +465,7 @@ impl Checker<'_, '_> {
                     "missing default for an unsupplied open parameter",
                 ));
             };
-            this.default_input_scope = Some(parameters.to_vec());
+            this.default_input_scope = Some(parameters.into());
             this.default_input_owner = Some(owner);
             for (index, parameter) in sig.params.iter().enumerate().take(slot) {
                 let binding = local(parameter.hir_id);

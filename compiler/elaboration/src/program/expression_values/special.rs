@@ -191,7 +191,7 @@ impl Checker<'_, '_> {
             if let Some(domain) = self
                 .trait_input_domain(declaration)
                 .filter(|ty| *ty != p(P::Type))
-                && let Some(value) = self.alias_substitution.get(&declaration).cloned()
+                && let Some(value) = self.alias_substitution.shared(&declaration).cloned()
             {
                 let ty = self.substituted_trait_domain(&domain, expr.span)?;
                 let binding = self.spread_binding(expr.span)?;
@@ -398,7 +398,7 @@ impl Checker<'_, '_> {
                             FormationInputs {
                                 terms: terms.clone(),
                                 deferred,
-                                environment: BTreeMap::new(),
+                                environment: DeclarationBindings::default(),
                             },
                             expr.span,
                         )?;

@@ -1191,7 +1191,7 @@ impl Checker<'_, '_> {
                 // A later default cannot borrow evidence from an unrelated
                 // surrounding instantiation of the same declaration.
                 return Ok(None);
-            } else if let Some(value) = self.alias_substitution.get(&id).cloned() {
+            } else if let Some(value) = self.alias_substitution.shared(&id).cloned() {
                 self.copy_alias_type(&value, argument.span)?
             } else {
                 if self.input_binders(&[id])[0].sort != Sort::ComptimeValue {

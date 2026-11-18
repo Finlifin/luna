@@ -474,7 +474,7 @@ impl Checker<'_, '_> {
             FormationInputs {
                 terms: terms.clone(),
                 deferred,
-                environment: BTreeMap::new(),
+                environment: DeclarationBindings::default(),
             },
             span,
         )?;

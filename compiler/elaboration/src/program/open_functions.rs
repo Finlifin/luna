@@ -5792,7 +5792,7 @@ impl Checker<'_, '_> {
         for binder in self.declaration_binders(owner) {
             if let Some(value) = self.alias_substitution.get(&binder.declaration) {
                 binders.push(binder);
-                arguments.push((**value).clone());
+                arguments.push(value.clone());
             }
         }
         if binders.is_empty() {
@@ -6677,11 +6677,7 @@ impl Checker<'_, '_> {
             let fixed = self
                 .declaration_binders(owner)
                 .iter()
-                .map(|binder| {
-                    self.alias_substitution
-                        .get(&binder.declaration)
-                        .map(|ty| ty.as_ref().clone())
-                })
+                .map(|binder| self.alias_substitution.get(&binder.declaration).cloned())
                 .collect::<Option<Vec<_>>>();
             if let Some(fixed) = fixed {
                 if let Some(value) = self.ordinary_open_behavior_call(
@@ -7229,11 +7225,7 @@ impl Checker<'_, '_> {
             let clauses = self
                 .declaration_binders(owner)
                 .into_iter()
-                .filter_map(|binder| {
-                    self.alias_substitution
-                        .get(&binder.declaration)
-                        .map(Arc::as_ref)
-                });
+                .filter_map(|binder| self.alias_substitution.get(&binder.declaration));
             for value in clauses
                 .chain(symbols.iter().flatten())
                 .chain(std::iter::once(signature))
@@ -7340,7 +7332,6 @@ impl Checker<'_, '_> {
                 self.alias_substitution
                     .get(&binder.declaration)
                     .ok_or_else(|| error(span, "open instance is missing a declaration argument"))?
-                    .as_ref()
                     .clone(),
             );
         }

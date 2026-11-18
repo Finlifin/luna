@@ -142,7 +142,7 @@ impl Observations {
         FormationInputs {
             terms,
             deferred,
-            environment: BTreeMap::new(),
+            environment: DeclarationBindings::default(),
         }
     }
 

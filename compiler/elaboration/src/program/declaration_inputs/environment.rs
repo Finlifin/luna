@@ -1,12 +1,12 @@
-//! Owned lexical inputs for a selected default provider. Retention copies
-//! binding tables under the checking budget; immutable terms and PTC context
-//! remain shared. Installation publishes only a fully prepared copy.
+//! Lexical roots for a selected default provider. A child shares the caller's
+//! immutable bindings and proof context until it shadows an entry.
 use super::*;
 
+#[derive(Clone)]
 pub(in crate::program) struct Environment {
-    substitution: BTreeMap<DeclarationId, std::sync::Arc<Term>>,
-    bindings: BTreeMap<DeclarationId, n::LocalId>,
-    normal_bindings: BTreeMap<DeclarationId, (n::LocalId, Term)>,
+    substitution: DeclarationBindings<Term>,
+    bindings: DeclarationBindings<n::LocalId>,
+    normal_bindings: DeclarationBindings<(n::LocalId, Term)>,
     context: crate::ptc::Context,
 }
 
@@ -34,7 +34,7 @@ pub(in crate::program) fn copy_term(
     })
 }
 
-pub(super) fn copy_domains<'a>(
+pub(in crate::program) fn copy_domains<'a>(
     domains: impl IntoIterator<Item = (Sort, Option<&'a Term>)>,
     fuel: &mut u64,
     span: Span,
@@ -61,7 +61,7 @@ impl Environment {
         if prefix.len() > parameters.len() {
             return Err(error(span, "clause input prefix arity mismatch"));
         }
-        let mut retained = Self::retain(source, fuel, span)?;
+        let mut retained = Self::retain(source);
         for (parameter, value) in parameters.iter().zip(prefix) {
             charge(fuel, 1, span)?;
             let value = copy_term(value, fuel, span)?;
@@ -74,43 +74,17 @@ impl Environment {
         Ok(retained)
     }
 
-    pub(super) fn retain(
-        source: &nominal::InputEnvironment<'_>,
-        fuel: &mut u64,
-        span: Span,
-    ) -> Result<Self, Error> {
-        let count = source
-            .substitution
-            .len()
-            .saturating_add(source.bindings.len())
-            .saturating_add(source.normal_bindings.len());
-        charge(fuel, count, span)?;
-        let normal_bindings = source
-            .normal_bindings
-            .iter()
-            .map(|(id, (binding, ty))| Ok((*id, (*binding, copy_term(ty, fuel, span)?))))
-            .collect::<Result<_, Error>>()?;
-        Ok(Self {
+    pub(super) fn retain(source: &nominal::InputEnvironment<'_>) -> Self {
+        Self {
             substitution: source.substitution.clone(),
             bindings: source.bindings.clone(),
-            normal_bindings,
+            normal_bindings: source.normal_bindings.clone(),
             context: source.context.clone(),
-        })
-    }
-
-    fn view(&self) -> nominal::InputEnvironment<'_> {
-        nominal::InputEnvironment {
-            substitution: &self.substitution,
-            bindings: &self.bindings,
-            normal_bindings: &self.normal_bindings,
-            context: &self.context,
         }
     }
 
-    pub(super) fn install(&self, checker: &mut Checker<'_, '_>, span: Span) -> Result<(), Error> {
-        let copy = Self::retain(&self.view(), &mut checker.required_steps, span)?;
-        copy.restore(checker);
-        Ok(())
+    pub(super) fn install(&self, checker: &mut Checker<'_, '_>) {
+        self.clone().restore(checker);
     }
 
     pub(super) fn restore(self, checker: &mut Checker<'_, '_>) {
@@ -152,27 +126,26 @@ mod tests {
         };
         let local = n::LocalId { owner: 1, index: 3 };
         let original = Arc::new(Term::String("parent\"\n".into()));
-        let mut types = BTreeMap::from([(id, original.clone())]);
-        let mut values = BTreeMap::from([(id, local)]);
-        let mut defaults = BTreeMap::from([(id, (local, p(P::Str)))]);
+        let mut types = DeclarationBindings::default();
+        types.insert(id, original.clone());
+        let mut values = DeclarationBindings::from([(id, local)]);
+        let mut defaults = DeclarationBindings::from([(id, (local, p(P::Str)))]);
         let mut context = crate::ptc::Context::default();
-        let environment = Environment::retain(
-            &nominal::InputEnvironment {
-                substitution: &types,
-                bindings: &values,
-                normal_bindings: &defaults,
-                context: &context,
-            },
-            &mut 100,
-            Span::default(),
-        )
-        .unwrap();
+        let environment = Environment::retain(&nominal::InputEnvironment {
+            substitution: &types,
+            bindings: &values,
+            normal_bindings: &defaults,
+            context: &context,
+        });
 
         types.insert(id, Arc::new(Term::Bool(false)));
         values.clear();
         defaults.clear();
         context.assume(crate::ptc::Formula::equal(p(P::U8), p(P::Bool)));
-        assert!(Arc::ptr_eq(&environment.substitution[&id], &original));
+        assert!(Arc::ptr_eq(
+            environment.substitution.shared(&id).unwrap(),
+            &original
+        ));
         assert_eq!(environment.bindings[&id], local);
         assert_eq!(environment.normal_bindings[&id], (local, p(P::Str)));
         assert_eq!(environment.context, crate::ptc::Context::default());
@@ -192,9 +165,10 @@ mod tests {
             local: 3,
         };
         let local = n::LocalId { owner: 1, index: 4 };
-        let types = BTreeMap::from([(first, Arc::new(Term::Bool(false)))]);
-        let values = BTreeMap::from([(first, local), (next, local)]);
-        let defaults = BTreeMap::from([(first, (local, p(P::Bool))), (next, (local, p(P::Bool)))]);
+        let types = DeclarationBindings::from([(first, Term::Bool(false))]);
+        let values = DeclarationBindings::from([(first, local), (next, local)]);
+        let defaults =
+            DeclarationBindings::from([(first, (local, p(P::Bool))), (next, (local, p(P::Bool)))]);
         let context = crate::ptc::Context::default();
         let view = nominal::InputEnvironment {
             substitution: &types,
@@ -207,7 +181,7 @@ mod tests {
         let retained =
             Environment::retain_prefix(&view, &[first, next], &prefix, &mut fuel, Span::default())
                 .unwrap();
-        assert_eq!(*retained.substitution[&first], prefix[0]);
+        assert_eq!(retained.substitution[&first], prefix[0]);
         assert!(!retained.bindings.contains_key(&first));
         assert!(!retained.normal_bindings.contains_key(&first));
         assert_eq!(retained.bindings[&next], local);
@@ -223,7 +197,7 @@ mod tests {
                 Span::default(),
             );
             assert!(failure.is_err(), "budget {limit}");
-            assert_eq!(*types[&first], Term::Bool(false));
+            assert_eq!(types[&first], Term::Bool(false));
             assert_eq!(values[&first], local);
             assert_eq!(defaults[&first], (local, p(P::Bool)));
         }
@@ -244,39 +218,29 @@ mod tests {
     }
 
     #[test]
-    fn environment_retention_rejects_exhaustion_without_a_partial_snapshot() {
-        let id = DeclarationId {
-            package: 1,
-            local: 2,
+    fn snapshots_share_unrelated_default_domains_across_shadowing() {
+        let id = |local| DeclarationId {
+            package: u64::MAX,
+            local,
         };
         let local = n::LocalId { owner: 1, index: 3 };
-        let types = BTreeMap::new();
-        let values = BTreeMap::new();
-        let defaults = BTreeMap::from([(id, (local, Term::Tuple(vec![p(P::Str); 32])))]);
+        let mut defaults = DeclarationBindings::default();
+        for index in 0..128 {
+            defaults.insert(id(index), (local, Term::Tuple(vec![p(P::Str); 32])));
+        }
         let context = crate::ptc::Context::default();
-        let view = nominal::InputEnvironment {
-            substitution: &types,
-            bindings: &values,
+        let retained = Environment::retain(&nominal::InputEnvironment {
+            substitution: &Default::default(),
+            bindings: &Default::default(),
             normal_bindings: &defaults,
             context: &context,
-        };
-        let mut fuel = 1_000;
-        let completed = Environment::retain(&view, &mut fuel, Span::default()).unwrap();
-        let cost = 1_000 - fuel;
-        assert!(cost > 32);
-        for limit in 0..cost {
-            let mut remaining = limit;
-            let Err(failure) = Environment::retain(&view, &mut remaining, Span::default()) else {
-                panic!("retained an environment with insufficient budget {limit}");
-            };
-            assert!(!failure.needs_context);
-            assert!(remaining <= limit);
-            assert_eq!(view.normal_bindings, &completed.normal_bindings);
-        }
-        let mut fuel = cost;
-        let recovered = Environment::retain(&view, &mut fuel, Span::default()).unwrap();
-        assert_eq!(fuel, 0);
-        assert_eq!(completed.to_string(), recovered.to_string());
+        });
+        defaults.insert(id(0), (local, p(P::Bool)));
+        assert_ne!(defaults[&id(0)], retained.normal_bindings[&id(0)]);
+        assert!(Arc::ptr_eq(
+            defaults.shared(&id(127)).unwrap(),
+            retained.normal_bindings.shared(&id(127)).unwrap()
+        ));
     }
 
     #[test]

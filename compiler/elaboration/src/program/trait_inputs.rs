@@ -201,7 +201,7 @@ impl Checker<'_, '_> {
                 if !seen.insert(id) {
                     continue;
                 }
-                let Some(value) = self.alias_substitution.get(&id) else {
+                let Some(value) = self.alias_substitution.shared(&id) else {
                     continue;
                 };
                 if !domain.mentions_rigid(id) {

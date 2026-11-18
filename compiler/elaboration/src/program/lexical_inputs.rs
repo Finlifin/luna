@@ -369,7 +369,8 @@ impl Checker<'_, '_> {
         for input in plan.inputs {
             let value = match input.supply {
                 LexicalSupply::Declaration => {
-                    if let Some(value) = self.alias_substitution.get(&input.declaration).cloned() {
+                    if let Some(value) = self.alias_substitution.shared(&input.declaration).cloned()
+                    {
                         self.copy_alias_type(&value, span)?
                     } else {
                         Term::Rigid {
@@ -605,7 +606,7 @@ impl Checker<'_, '_> {
                     .cloned()
                     .ok_or_else(|| error(span, "lexical staged input domain is unavailable"))?;
                 let domain = self.substituted_trait_domain(&domain, span)?;
-                let symbol = if let Some(value) = self.alias_substitution.get(&id).cloned() {
+                let symbol = if let Some(value) = self.alias_substitution.shared(&id).cloned() {
                     self.copy_alias_type(&value, span)?
                 } else {
                     Term::Rigid {

@@ -425,7 +425,7 @@ impl Checker<'_, '_> {
         // Generator inputs use declaration identities, not a new de Bruijn
         // telescope. Retain the caller's type scope for quoted interfaces that
         // mention its already staged Type slots, without importing its locals.
-        let caller_scope = self.call_inference_domains();
+        let caller_scope = self.retain_input_domains(span)?;
         let outer = (
             self.context.clone(),
             std::mem::take(&mut self.input_facts.types),
