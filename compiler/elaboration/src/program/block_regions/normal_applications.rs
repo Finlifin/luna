@@ -66,10 +66,10 @@ impl std::fmt::Display for Complete {
     }
 }
 
-pub(super) type Frame<'h> = declaration_applications::Frame<'h, Complete>;
+pub(super) type Frame<'h> = preparation::Frame<'h, Complete>;
 
 impl<'h> Frame<'h> {
-    pub(super) fn new<'a: 'h, 'arena: 'h>(
+    pub(super) fn begin_normal_application<'a: 'h, 'arena: 'h>(
         checker: &mut Checker<'a, 'arena>,
         owner: OwnerId,
         inputs: &[Arg<'h>],
@@ -103,7 +103,7 @@ impl<'h> Frame<'h> {
             preserve_effect: own_effect_delivery
                 .then(|| std::mem::take(&mut checker.preserve_effect_value)),
         };
-        let preparation = preparation::Frame::begin(
+        preparation::Frame::begin(
             checker,
             owner,
             inputs,
@@ -112,7 +112,6 @@ impl<'h> Frame<'h> {
             declaration_inputs::KnownInputs::default(),
             None,
             completion,
-        )?;
-        Ok(Self::from_preparation(span, preparation))
+        )
     }
 }

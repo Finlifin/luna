@@ -234,15 +234,15 @@ impl Checker<'_, '_> {
         parameters: Vec<(DeclarationId, Sort, Term)>,
         collector: Option<usize>,
     ) -> Result<CheckedDeclarationInputs, Error> {
-        preparation::Frame::positional(
+        let preparation = preparation::Frame::positional(
             self,
             inputs,
             span,
             parameters,
             collector,
             completion::Typed,
-        )?
-        .drive(self)
+        )?;
+        self.check_declaration_inputs_region(preparation)
     }
 
     // Inspect the original callee domain before substitution. A supplied
@@ -419,7 +419,7 @@ impl Checker<'_, '_> {
         defaults: Option<Environment>,
         completion: C,
     ) -> Result<C::Output, Error> {
-        preparation::Frame::begin(
+        let preparation = preparation::Frame::begin(
             self,
             owner,
             inputs,
@@ -428,8 +428,8 @@ impl Checker<'_, '_> {
             KnownInputs::default(),
             defaults,
             completion,
-        )?
-        .drive(self)
+        )?;
+        self.check_declaration_inputs_region(preparation)
     }
 }
 

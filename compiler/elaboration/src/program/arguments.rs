@@ -134,22 +134,27 @@ impl<'h> RoutedArgument<'h> {
     pub(super) fn single_position(&self) -> Option<usize> {
         (!self.collected).then(|| self.positions[0])
     }
-    pub fn expression<'a>(&'a self, call: &Expr<'_>) -> Expr<'a> {
+    pub(super) fn expression_view<'a>(&'a self, call: &Expr<'_>) -> std::borrow::Cow<'a, Expr<'a>> {
+        use std::borrow::Cow;
         if self.collected {
-            Expr {
+            Cow::Owned(Expr {
                 hir_id: call.hir_id,
                 kind: H::Tuple(&self.values),
                 span: call.span,
-            }
+            })
         } else if self.lambda {
-            Expr {
+            Cow::Owned(Expr {
                 hir_id: self.values[0].hir_id,
                 span: self.values[0].span,
                 kind: H::TacticArgument(&self.values[0]),
-            }
+            })
         } else {
-            self.values[0].clone()
+            Cow::Borrowed(&self.values[0])
         }
+    }
+
+    pub fn expression<'a>(&'a self, call: &Expr<'_>) -> Expr<'a> {
+        self.expression_view(call).into_owned()
     }
 
     pub(super) fn local_collection_context(

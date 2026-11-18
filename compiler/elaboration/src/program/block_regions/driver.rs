@@ -3,7 +3,10 @@
 //! Other expression rules
 //! remain atomic adapters until their continuations can join the region.
 use super::*;
+mod children;
 mod region;
+mod root;
+pub(super) use root::Root;
 
 struct ExpressionBoundary {
     callee: Option<hir::HirId>,
@@ -104,6 +107,22 @@ pub(super) enum Request<'b, 'h> {
     Block(&'b hir::Block<'h>, Destination),
 }
 
+pub(super) enum Poll<Q, T> {
+    Continue,
+    Child(Q),
+    Complete(T),
+}
+
+impl<Q: std::fmt::Display, T: std::fmt::Display> std::fmt::Display for Poll<Q, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Continue => f.write_str("(checking-progress continue)"),
+            Self::Child(child) => write!(f, "(checking-progress {child})"),
+            Self::Complete(value) => write!(f, "(checking-progress (completed {value}))"),
+        }
+    }
+}
+
 pub(super) enum Step<'b, 'h> {
     Continue,
     Child(Request<'b, 'h>),
@@ -153,7 +172,7 @@ enum RegionFrame<'b, 'h> {
     Logical(logical::Frame<'b, 'h>),
     NormalApplication(normal_applications::Frame<'h>),
     CallableApplication(
-        declaration_applications::Frame<'h, dynamic_instances::InstanceCompletion<'h>>,
+        declaration_inputs::preparation::Frame<'h, dynamic_instances::InstanceCompletion<'h>>,
     ),
 }
 
@@ -166,8 +185,8 @@ impl RegionFrame<'_, '_> {
             Self::Match(frame) => frame.unwind(checker),
             Self::Comparison(_) | Self::Arithmetic(_) | Self::Unary(_) | Self::Aggregate(_) => {}
             Self::Logical(frame) => frame.unwind(checker),
-            Self::NormalApplication(frame) => frame.unwind(checker),
-            Self::CallableApplication(frame) => frame.unwind(checker),
+            Self::NormalApplication(mut frame) => frame.unwind(checker),
+            Self::CallableApplication(mut frame) => frame.unwind(checker),
         }
     }
 }
@@ -255,23 +274,6 @@ impl<'b, 'h> BlockFrame<'b, 'h> {
 }
 
 impl<'a, 'arena> Checker<'a, 'arena> {
-    pub(in crate::program) fn check_callable_application_region<'h>(
-        &mut self,
-        preparation: declaration_inputs::preparation::Frame<
-            'h,
-            dynamic_instances::InstanceCompletion<'h>,
-        >,
-        span: Span,
-    ) -> Result<n::Expr, Error>
-    where
-        'a: 'h,
-        'arena: 'h,
-    {
-        self.drive_check_region(RegionFrame::CallableApplication(
-            declaration_applications::Frame::from_preparation(span, preparation),
-        ))?
-        .ordinary(span)
-    }
     pub(in crate::program) fn logical_expression(
         &mut self,
         expr: &Expr<'_>,
@@ -417,7 +419,14 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             },
             span,
         )?;
-        let frame = normal_applications::Frame::new(self, owner, inputs, span, destination, false)?;
+        let frame = normal_applications::Frame::begin_normal_application(
+            self,
+            owner,
+            inputs,
+            span,
+            destination,
+            false,
+        )?;
         self.drive_check_region(RegionFrame::NormalApplication(frame))?
             .ordinary(span)
     }
@@ -581,16 +590,51 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         'a: 'h,
         'arena: 'h,
     {
-        let mut region = region::Region::new(root);
+        self.drive_region(region::Region::new(root))
+    }
+
+    pub(in crate::program) fn check_declaration_inputs_region<
+        'h,
+        C: declaration_inputs::Completion,
+    >(
+        &mut self,
+        preparation: declaration_inputs::preparation::Frame<'h, C>,
+    ) -> Result<C::Output, Error>
+    where
+        'a: 'h,
+        'arena: 'h,
+    {
+        self.drive_region(region::Region::with_consumer(preparation))
+    }
+
+    pub(in crate::program) fn check_call_dependencies_region<'b>(
+        &mut self,
+        frame: dependent_inputs::tasks::Frame<'b, '_>,
+    ) -> Result<dependent_inputs::PreparedInputs, Error>
+    where
+        'a: 'b,
+        'arena: 'b,
+    {
+        self.drive_region(region::Region::with_consumer(frame))
+    }
+
+    fn drive_region<'b, 'h, R: Root<'b, 'h>>(
+        &mut self,
+        mut region: region::Region<'b, 'h, R>,
+    ) -> Result<R::Output, Error>
+    where
+        'a: 'h,
+        'arena: 'h,
+    {
         loop {
             match region.poll(self)? {
-                region::Poll::Continue => {}
-                region::Poll::Child(child) => {
+                Poll::Continue => {}
+                Poll::Child(child) => {
                     let span = child.expr.span;
                     let result = child.destination.check_expression(self, child.expr);
                     region.accept(result, span)?;
                 }
-                region::Poll::Completed(value) => return Ok(value),
+                Poll::Complete(value) => return Ok(value),
             }
         }
     }
@@ -651,7 +695,7 @@ mod tests {
         let region = region::Region::new(RegionFrame::Block(frame));
         assert_eq!(
             region.to_string(),
-            format!("(checking-region (state ready) (frames {dump}))")
+            format!("(checking-region (state ready) (root (expression-result)) (frames {dump}))")
         );
         assert_eq!(
             tails::TailCheck::<n::Expr>::Child.to_string(),

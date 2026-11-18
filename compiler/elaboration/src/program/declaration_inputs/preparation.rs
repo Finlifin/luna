@@ -217,24 +217,6 @@ impl<'h, C: Completion> Frame<'h, C> {
             scope.leave(checker);
         }
     }
-
-    pub(in crate::program) fn drive(
-        mut self,
-        checker: &mut Checker<'_, '_>,
-    ) -> Result<C::Output, Error> {
-        let result = (|| loop {
-            match self.poll(checker)? {
-                Poll::Continue => {}
-                Poll::Child(request) => {
-                    let result = request.check(checker);
-                    self.accept(checker, result)?;
-                }
-                Poll::Complete(inputs) => break Ok(inputs),
-            }
-        })();
-        self.leave(checker);
-        result
-    }
 }
 
 impl<C: Completion> std::fmt::Display for Frame<'_, C> {

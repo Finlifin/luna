@@ -289,8 +289,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         else {
             return Ok(None);
         };
-        self.check_callable_application_region(preparation, expr.span)
-            .map(Some)
+        self.check_declaration_inputs_region(preparation).map(Some)
     }
 
     pub(super) fn begin_comptime_function_instance<'h>(
@@ -458,10 +457,10 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             &mut self.required_steps,
             expr.span,
         )?;
-        self.begin_callable_clause_packet(
+        let preparation = self.begin_callable_clause_packet(
             expr, owner, args, captured, parameters, domains, completion,
-        )?
-        .drive(self)
+        )?;
+        self.check_declaration_inputs_region(preparation)
     }
 
     fn begin_callable_clause_packet<'h, C: declaration_inputs::Completion>(

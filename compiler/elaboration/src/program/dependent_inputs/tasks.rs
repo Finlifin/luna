@@ -119,15 +119,49 @@ fn copy_evidence(value: &Term, steps: &mut u64, span: Span) -> Result<Term, Erro
     })
 }
 
+/// Borrow ordinary HIR directly. A collected tuple or tactic argument owns
+/// only its routing wrapper; its children still borrow the call's source.
+/// Key by declaration slot so a chain of demands does not rescan every route.
+struct InputSource<'a> {
+    route: &'a arguments::RoutedArgument<'a>,
+    expression: std::borrow::Cow<'a, Expr<'a>>,
+}
+
+pub(super) struct Sources<'a>(BTreeMap<usize, InputSource<'a>>);
+
+impl<'a> Sources<'a> {
+    pub(super) fn new(
+        routes: &'a [arguments::RoutedArgument<'a>],
+        offset: usize,
+        call: &Expr<'_>,
+        fuel: &mut u64,
+    ) -> Result<Self, Error> {
+        spend(fuel, routes.len(), call.span)?;
+        Ok(Self(
+            routes
+                .iter()
+                .map(|route| {
+                    (
+                        route.parameter + offset,
+                        InputSource {
+                            route,
+                            expression: route.expression_view(call),
+                        },
+                    )
+                })
+                .collect(),
+        ))
+    }
+}
+
 /// The parent owns checked inputs and default continuations across child checks.
 /// Source borrows still belong to the enclosing checking region, not a VM task.
 #[must_use = "drive the input frame to completion or discard its uncommitted results"]
-pub(super) struct Frame<'b, 'h> {
+pub(in crate::program) struct Frame<'b, 'h> {
     parameters: &'b [Parameter],
     callee: &'b n::Expr,
     owner: Option<OwnerId>,
-    routes: &'b [arguments::RoutedArgument<'h>],
-    offset: usize,
+    sources: &'b Sources<'h>,
     source: &'b Expr<'h>,
     prepared: PreparedInputs,
     progress: Progress,
@@ -137,30 +171,21 @@ pub(super) struct Frame<'b, 'h> {
 #[derive(Clone, Copy)]
 enum Phase {
     Ready,
-    Child(usize),
+    Child { slot: usize, caller_staged: bool },
     Failed,
     Complete,
 }
 
-pub(super) enum Poll<'b> {
+pub(in crate::program) enum Poll<'b> {
     Continue,
     Child(Request<'b>),
-    Complete,
+    Complete(PreparedInputs),
 }
 
-pub(super) struct Request<'b> {
+pub(in crate::program) struct Request<'b> {
     slot: usize,
-    input: Expr<'b>,
-    expected: Term,
-}
-
-impl Request<'_> {
-    pub(super) fn check(self, checker: &mut Checker<'_, '_>) -> (usize, Result<n::Expr, Error>) {
-        let checked = checker.with_staged_input(true, |checker| {
-            checker.expr(&self.input, Some(&self.expected))
-        });
-        (self.slot, checked)
-    }
+    pub(in crate::program) input: &'b Expr<'b>,
+    pub(in crate::program) expected: Term,
 }
 
 impl std::fmt::Display for Request<'_> {
@@ -183,8 +208,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         parameters: &'b [Parameter],
         callee: &'b n::Expr,
         owner: Option<OwnerId>,
-        routes: &'b [arguments::RoutedArgument<'h>],
-        offset: usize,
+        sources: &'b Sources<'h>,
         source: &'b Expr<'h>,
         prepared: PreparedInputs,
     ) -> Result<Self, Error> {
@@ -193,8 +217,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             parameters,
             callee,
             owner,
-            routes,
-            offset,
+            sources,
             source,
             prepared,
             progress: Progress {
@@ -206,10 +229,13 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         })
     }
 
-    pub(super) fn poll(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b>, Error> {
+    pub(in crate::program) fn poll(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+    ) -> Result<Poll<'b>, Error> {
         match self.phase {
             Phase::Ready => {}
-            Phase::Child(_) => {
+            Phase::Child { .. } => {
                 return Err(error(
                     self.source.span,
                     "dependent input frame awaits its child",
@@ -233,14 +259,13 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         let parameters = self.parameters;
         let callee = self.callee;
         let owner = self.owner;
-        let routes = self.routes;
-        let offset = self.offset;
+        let sources = self.sources;
         let source = self.source;
         let prepared = &mut self.prepared;
         let progress = &mut self.progress;
         let Some(task) = progress.next(&mut checker.required_steps, source.span)? else {
             self.phase = Phase::Complete;
-            return Ok(Poll::Complete);
+            return Ok(Poll::Complete(std::mem::take(prepared)));
         };
         match task {
             Task::Enter(slot) => {
@@ -272,24 +297,22 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     .substitute(&parameters[slot].ty)
                     .map_err(|e| error(source.span, e.to_string()))?;
                 let expected = checker.callable_input_view(&expected, source.span)?;
-                let route = routes.iter().find(|route| route.parameter + offset == slot);
-                let value = if let Some(value) = &prepared.values[slot] {
-                    nir::copy_budget::charge_expression(value, &mut checker.required_steps)
-                        .map_err(|failure| {
-                            error(
-                                source.span,
-                                format!(
-                                    "dependent input producer copy budget exhausted: {failure:?}"
-                                ),
-                            )
-                        })?;
-                    value.clone()
-                } else if let Some(route) = route {
-                    route.require_collection_type(checker, &expected, source.span)?;
-                    self.phase = Phase::Child(slot);
+                let route = sources.0.get(&slot);
+                // Completion returns the producer to its declaration slot.
+                // A failed observation terminates this preparation.
+                let value = if let Some(value) = prepared.values[slot].take() {
+                    value
+                } else if let Some(input) = route {
+                    input
+                        .route
+                        .require_collection_type(checker, &expected, source.span)?;
+                    self.phase = Phase::Child {
+                        slot,
+                        caller_staged: std::mem::replace(&mut checker.in_staged_input, true),
+                    };
                     return Ok(Poll::Child(Request {
                         slot,
-                        input: route.expression(source),
+                        input: &input.expression,
                         expected,
                     }));
                 } else {
@@ -406,14 +429,20 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         Ok(Poll::Continue)
     }
 
-    pub(super) fn accept(
+    pub(in crate::program) fn unwind(&mut self, checker: &mut Checker<'_, '_>) {
+        if let Phase::Child { caller_staged, .. } = self.phase {
+            checker.in_staged_input = caller_staged;
+            self.phase = Phase::Failed;
+        }
+    }
+
+    pub(in crate::program) fn accept(
         &mut self,
         checker: &mut Checker<'_, '_>,
-        slot: usize,
-        checked: Result<n::Expr, Error>,
+        value: n::Expr,
     ) -> Result<(), Error> {
-        self.begin_accept(slot)?;
-        let value = checked?;
+        let (slot, caller_staged) = self.take_child()?;
+        checker.in_staged_input = caller_staged;
         checker.complete_type_dependency(
             slot,
             self.owner,
@@ -430,27 +459,21 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         Ok(())
     }
 
-    fn begin_accept(&mut self, slot: usize) -> Result<(), Error> {
-        if !matches!(self.phase, Phase::Child(expected) if expected == slot) {
+    /// The returned expression belongs to the active region child. Its slot
+    /// and the phase to restore are both held by this continuation.
+    fn take_child(&mut self) -> Result<(usize, bool), Error> {
+        let Phase::Child {
+            slot,
+            caller_staged,
+        } = self.phase
+        else {
             return Err(error(
                 self.source.span,
-                "dependent input received an unsolicited child",
+                "dependent input has no requested child",
             ));
-        }
-        // Successful completion must explicitly reopen the frame. A child or
-        // identity-observation error cannot be retried as a fresh source check.
+        };
         self.phase = Phase::Failed;
-        Ok(())
-    }
-
-    pub(super) fn finish(self) -> Result<PreparedInputs, Error> {
-        if !matches!(self.phase, Phase::Complete) {
-            return Err(error(
-                self.source.span,
-                "dependent input frame is incomplete",
-            ));
-        }
-        Ok(self.prepared)
+        Ok((slot, caller_staged))
     }
 }
 
@@ -463,31 +486,36 @@ impl std::fmt::Display for Frame<'_, '_> {
         )?;
         match self.phase {
             Phase::Ready => f.write_str("ready")?,
-            Phase::Child(slot) => write!(f, "(child {slot})")?,
+            Phase::Child {
+                slot,
+                caller_staged,
+            } => write!(f, "(child {slot} (caller-staged {caller_staged}))")?,
             Phase::Failed => f.write_str("failed")?,
             Phase::Complete => f.write_str("complete")?,
         }
-        write!(f, ") {} (inputs", self.progress)?;
-        for (slot, value) in self.prepared.values.iter().enumerate() {
+        write!(f, ") {} {})", self.progress, self.prepared)
+    }
+}
+
+impl std::fmt::Display for PreparedInputs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(inputs")?;
+        for (slot, value) in self.values.iter().enumerate() {
             write!(f, " (slot {slot} (producer")?;
             if let Some(value) = value {
                 write!(f, " {value}")?;
             }
             f.write_str(") (identity")?;
-            if let Some(value) = &self.prepared.symbols[slot] {
+            if let Some(value) = &self.symbols[slot] {
                 write!(f, " {value}")?;
             }
-            write!(
-                f,
-                ") (live {}) (default",
-                self.prepared.live[slot].is_some()
-            )?;
-            if let Some(value) = &self.prepared.defaults[slot] {
+            write!(f, ") (live {}) (default", self.live[slot].is_some())?;
+            if let Some(value) = &self.defaults[slot] {
                 write!(f, " {value}")?;
             }
             f.write_str("))")?;
         }
-        f.write_str("))")
+        f.write_str(")")
     }
 }
 
@@ -649,17 +677,19 @@ mod tests {
             parameters: &[],
             callee: &value,
             owner: None,
-            routes: &[],
-            offset: 0,
+            sources: &Sources(BTreeMap::new()),
             source: &source_expr,
             prepared,
             progress: Progress::new(1),
-            phase: Phase::Child(1),
+            phase: Phase::Child {
+                slot: 1,
+                caller_staged: false,
+            },
         };
         let dump = frame.to_string();
         assert!(dump.starts_with("(dependent-input-frame "), "{dump}");
         for text in [
-            "(phase (child 1))",
+            "(phase (child 1 (caller-staged false)))",
             "(slot 0 (producer",
             "(slot 1 (producer)",
             "retained\\\"\\n",
@@ -667,21 +697,17 @@ mod tests {
             assert!(dump.contains(text), "missing {text}: {dump}");
         }
         assert!(!dump.contains('\n'), "{dump}");
-        assert!(frame.begin_accept(0).is_err());
-        assert_eq!(
-            frame.to_string(),
-            dump,
-            "a wrong child consumed the waiting parent"
-        );
-        frame.begin_accept(1).unwrap();
+        assert_eq!(frame.take_child().unwrap(), (1, false));
+        let consumed = frame.to_string();
         assert!(
-            frame.begin_accept(1).is_err(),
+            frame.take_child().is_err(),
             "a child result was accepted twice"
         );
-        assert!(frame.finish().is_err(), "an unfinished preparation escaped");
+        assert_eq!(frame.to_string(), consumed);
+        assert!(matches!(frame.phase, Phase::Failed));
         let request = Request {
             slot: 1,
-            input: source_expr,
+            input: &source_expr,
             expected: p(P::Str),
         }
         .to_string();

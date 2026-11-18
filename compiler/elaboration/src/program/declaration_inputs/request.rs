@@ -37,21 +37,6 @@ impl<'b, 'h> Request<'b, 'h> {
     pub(in crate::program) fn into_parts(self) -> (&'b Expr<'h>, Demand) {
         (self.input, self.demand)
     }
-
-    pub(super) fn check(
-        self,
-        checker: &mut Checker<'_, '_>,
-    ) -> Result<n::NormalFormArgument, Error> {
-        match self.demand {
-            Demand::Ordinary(expected) => checker
-                .expr(self.input, expected.as_ref())
-                .map(n::NormalFormArgument::Value),
-            Demand::Input(context) => checker
-                .input_context_expression(self.input, &context)
-                .map(n::NormalFormArgument::Value),
-            Demand::Contextual => checker.dependent_normal_argument(self.input, 0),
-        }
-    }
 }
 
 impl std::fmt::Display for Request<'_, '_> {

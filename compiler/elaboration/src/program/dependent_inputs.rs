@@ -1,8 +1,9 @@
 //! Prepare the compile-time dependencies of ordinary call input types.
 //! Checking order does not change the source-ordered runtime argument plan.
 use super::*;
-mod tasks;
+pub(super) mod tasks;
 
+#[derive(Default)]
 pub(super) struct PreparedInputs {
     pub values: Vec<Option<n::Expr>>,
     pub symbols: Vec<Option<Term>>,
@@ -601,19 +602,14 @@ impl Checker<'_, '_> {
             );
             prepared.defaults[parameter] = Some(value);
         }
-        let mut frame = tasks::Frame::new(
-            self, demanded, parameters, callee, direct, routes, offset, expr, prepared,
-        )?;
-        loop {
-            match frame.poll(self)? {
-                tasks::Poll::Continue => {}
-                tasks::Poll::Child(request) => {
-                    let (slot, checked) = request.check(self);
-                    frame.accept(self, slot, checked)?;
-                }
-                tasks::Poll::Complete => return frame.finish(),
-            }
+        if demanded.is_empty() {
+            return Ok(prepared);
         }
+        let sources = tasks::Sources::new(routes, offset, expr, &mut self.required_steps)?;
+        let frame = tasks::Frame::new(
+            self, demanded, parameters, callee, direct, &sources, expr, prepared,
+        )?;
+        self.check_call_dependencies_region(frame)
     }
 
     pub(super) fn call_default(
