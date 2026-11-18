@@ -1,21 +1,16 @@
 //! Linear definition preparation outside the suspended VM. A response carries
 //! an uncommitted receipt; only its originating frame may admit and install it.
+use super::host::HostLease;
 use super::*;
-use crate::request_identity::Ticket;
 
 pub struct DefinitionHostRequest<'a> {
-    pub(super) ticket: Ticket,
-    pub(super) world: &'a Package,
+    pub(super) lease: HostLease<'a>,
     pub(super) request: DefinitionBuildRequest,
     pub(super) resolver: definition_build::Resolver<'a>,
-    pub(super) granted: u64,
-    pub(super) remaining: u64,
 }
 pub struct DefinitionHostResponse<'a> {
-    pub(super) ticket: Ticket,
-    pub(super) world: &'a Package,
+    pub(super) lease: HostLease<'a>,
     pub(super) request: DefinitionBuildRequest,
-    pub(super) remaining: u64,
     pub(super) prepared: Result<PreparedDefinitionBuild<'a>, Error>,
 }
 pub struct RejectedDefinitionResponse<'a> {
@@ -27,30 +22,30 @@ impl<'a> DefinitionHostRequest<'a> {
         &self.request
     }
     pub fn source_world(&self) -> &'a Package {
-        self.world
+        self.lease.world
     }
     pub fn remaining_steps(&self) -> u64 {
-        self.remaining
+        self.lease.remaining
     }
     pub fn remaining_steps_mut(&mut self) -> &mut u64 {
-        &mut self.remaining
+        &mut self.lease.remaining
     }
     pub fn respond(
         self,
         prepared: Result<PreparedDefinitionBuild<'a>, Error>,
     ) -> DefinitionHostResponse<'a> {
         DefinitionHostResponse {
-            ticket: self.ticket,
-            world: self.world,
+            lease: self.lease,
             request: self.request,
-            remaining: self.remaining,
             prepared,
         }
     }
     /// Use the configured publisher, outside the VM driver. Callers may instead
     /// retain this request while preparing its receipt through other work.
     pub fn prepare(mut self) -> DefinitionHostResponse<'a> {
-        let prepared = self.resolver.prepare(&self.request, &mut self.remaining);
+        let prepared = self
+            .resolver
+            .prepare(&self.request, &mut self.lease.remaining);
         self.respond(prepared)
     }
 }
@@ -64,23 +59,6 @@ impl<'a> DefinitionHostResponse<'a> {
             response: self,
             error,
         }
-    }
-    pub(super) fn settle(
-        mut self,
-        granted: u64,
-    ) -> (
-        u64,
-        DefinitionBuildRequest,
-        Result<PreparedDefinitionBuild<'a>, Error>,
-    ) {
-        if self.remaining > granted {
-            self.remaining = 0;
-            self.prepared = Err(Error {
-                kind: ErrorKind::StepsExhausted,
-                source: Some(self.request.source()),
-            });
-        }
-        (self.remaining, self.request, self.prepared)
     }
 }
 impl<'a> RejectedDefinitionResponse<'a> {
@@ -96,7 +74,7 @@ impl fmt::Display for DefinitionHostRequest<'_> {
         write!(
             f,
             "(definition-host-request {} (granted {}) (remaining {}) {})",
-            self.ticket, self.granted, self.remaining, self.request
+            self.lease.ticket, self.lease.granted, self.lease.remaining, self.request
         )
     }
 }
@@ -105,7 +83,7 @@ impl fmt::Display for DefinitionHostResponse<'_> {
         write!(
             f,
             "(definition-host-response {} (remaining {}) {} ",
-            self.ticket, self.remaining, self.request
+            self.lease.ticket, self.lease.remaining, self.request
         )?;
         match &self.prepared {
             Ok(PreparedDefinitionBuild::Struct(p)) => write!(

@@ -183,21 +183,21 @@ fn external_selection_preserves_nested_activations_and_waits_without_spending() 
         assert_eq!(active.to_string(), state);
         assert_eq!(active.remaining_steps(), 0);
     }
-    let stale = first.ticket.clone();
+    let stale = first.lease.ticket.clone();
     active = Box::new(*active);
     active.resume(answer(first)).unwrap();
     let second = take(&mut active);
     assert!(second.to_string().contains("(generation 2)"));
     let mut response = answer(second);
-    let current = response.ticket.clone();
-    response.ticket = stale;
+    let current = response.lease.ticket.clone();
+    response.lease.ticket = stale;
     let state = active.to_string();
     let rejected = active.resume(response).unwrap_err();
     assert_eq!(rejected.error().kind, ErrorKind::InvalidControlFlow);
     assert_eq!(active.to_string(), state);
     assert_eq!(active.remaining_steps(), 0);
     let mut response = rejected.into_response();
-    response.ticket = current;
+    response.lease.ticket = current;
     active.resume(response).unwrap();
     assert_eq!(finish(&mut active).unwrap(), Value::Bool(true));
     assert_eq!(

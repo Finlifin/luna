@@ -1,21 +1,16 @@
 //! A method choice is a response to one checked call prefix, not permission to
 //! replay that prefix or a reusable callable value from another VM.
+use super::host::HostLease;
 use super::*;
-use crate::request_identity::Ticket;
 
 pub struct MethodHostRequest<'a> {
-    pub(super) ticket: Ticket,
-    pub(super) world: &'a Package,
+    pub(super) lease: HostLease<'a>,
     pub(super) request: trait_methods::Request,
     pub(super) resolver: Option<&'a MethodResolver<'a>>,
-    pub(super) granted: u64,
-    pub(super) remaining: u64,
 }
 pub struct MethodHostResponse<'a> {
-    pub(super) ticket: Ticket,
-    pub(super) world: &'a Package,
+    pub(super) lease: HostLease<'a>,
     pub(super) request: trait_methods::Request,
-    pub(super) remaining: u64,
     pub(super) selected: Result<nir::program::MethodInstance, Error>,
 }
 pub struct RejectedMethodResponse<'a> {
@@ -27,23 +22,21 @@ impl<'a> MethodHostRequest<'a> {
         self.request.access()
     }
     pub fn source_world(&self) -> &'a Package {
-        self.world
+        self.lease.world
     }
     pub fn remaining_steps(&self) -> u64 {
-        self.remaining
+        self.lease.remaining
     }
     pub fn remaining_steps_mut(&mut self) -> &mut u64 {
-        &mut self.remaining
+        &mut self.lease.remaining
     }
     pub fn respond(
         self,
         selected: Result<nir::program::MethodInstance, Error>,
     ) -> MethodHostResponse<'a> {
         MethodHostResponse {
-            ticket: self.ticket,
-            world: self.world,
+            lease: self.lease,
             request: self.request,
-            remaining: self.remaining,
             selected,
         }
     }
@@ -51,7 +44,7 @@ impl<'a> MethodHostRequest<'a> {
         mut self,
         resolver: impl FnOnce(&Expr, &mut u64) -> Result<nir::program::MethodInstance, Error>,
     ) -> MethodHostResponse<'a> {
-        let selected = resolver(self.request.access(), &mut self.remaining);
+        let selected = resolver(self.request.access(), &mut self.lease.remaining);
         self.respond(selected)
     }
     pub fn prepare(self) -> MethodHostResponse<'a> {
@@ -75,23 +68,6 @@ impl<'a> MethodHostResponse<'a> {
             error,
         }
     }
-    pub(super) fn settle(
-        mut self,
-        granted: u64,
-    ) -> (
-        u64,
-        trait_methods::Request,
-        Result<nir::program::MethodInstance, Error>,
-    ) {
-        if self.remaining > granted {
-            self.remaining = 0;
-            self.selected = Err(Error {
-                kind: ErrorKind::StepsExhausted,
-                source: Some(self.request.access().source),
-            });
-        }
-        (self.remaining, self.request, self.selected)
-    }
 }
 impl<'a> RejectedMethodResponse<'a> {
     pub fn error(&self) -> &Error {
@@ -106,7 +82,7 @@ impl fmt::Display for MethodHostRequest<'_> {
         write!(
             f,
             "(method-host-request {} (granted {}) (remaining {}) {})",
-            self.ticket, self.granted, self.remaining, self.request
+            self.lease.ticket, self.lease.granted, self.lease.remaining, self.request
         )
     }
 }
@@ -115,7 +91,7 @@ impl fmt::Display for MethodHostResponse<'_> {
         write!(
             f,
             "(method-host-response {} (remaining {}) {} ",
-            self.ticket, self.remaining, self.request
+            self.lease.ticket, self.lease.remaining, self.request
         )?;
         match &self.selected {
             Ok(selected) => write!(f, "{selected}")?,

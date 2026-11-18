@@ -1,8 +1,9 @@
 //! One owner for the complete driver continuation and its exclusively borrowed VM.
 //! Associated selection and definition preparation can leave as owned host requests.
-use super::host::{AssociatedHostRequest, AssociatedHostResponse, RejectedHostResponse};
+mod services;
 use super::*;
 use crate::request_identity::{Authority, Ticket};
+use services::{HostContinuation, Service};
 use std::task::Poll;
 
 enum Root<'r> {
@@ -40,59 +41,33 @@ impl Root<'_> {
 }
 
 enum Pending<'a> {
-    Method(bytecode::MethodWait),
+    Request(Service),
+    Waiting {
+        ticket: Ticket,
+        continuation: HostContinuation,
+    },
     MethodResponse {
         wait: bytecode::MethodWait,
         selected: Result<nir::program::MethodInstance, Error>,
-    },
-    MethodHost {
-        ticket: Ticket,
-        granted: u64,
-        continuation: bytecode::MethodContinuation,
-    },
-    Definition {
-        destination: usize,
-        request: DefinitionBuildRequest,
     },
     DefinitionResponse {
         destination: usize,
         request: DefinitionBuildRequest,
         prepared: Result<PreparedDefinitionBuild<'a>, Error>,
     },
-    DefinitionHost {
-        ticket: Ticket,
-        granted: u64,
-        destination: usize,
-    },
-    Associated(associated_execution::Request),
     AssociatedResponse(associated_execution::Response),
-    Host {
-        ticket: Ticket,
-        granted: u64,
-    },
     Bytecode(bytecode::Preparation),
 }
 
 impl fmt::Display for Pending<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Method(wait) => write!(f, "{wait}"),
-            Self::MethodResponse { wait, .. } => write!(f, "(method-response {wait})"),
-            Self::MethodHost {
+            Self::Request(request) => request.fmt(f),
+            Self::Waiting {
                 ticket,
-                granted,
                 continuation,
-            } => write!(
-                f,
-                "(awaiting-method {ticket} (granted {granted}) {continuation})"
-            ),
-            Self::Definition {
-                destination,
-                request,
-            } => write!(
-                f,
-                "(prepare-definition (destination {destination}) {request})"
-            ),
+            } => write!(f, "(awaiting-host {ticket} {continuation})"),
+            Self::MethodResponse { wait, .. } => write!(f, "(method-response {wait})"),
             Self::DefinitionResponse {
                 destination,
                 request,
@@ -101,19 +76,7 @@ impl fmt::Display for Pending<'_> {
                 f,
                 "(definition-response (destination {destination}) {request})"
             ),
-            Self::DefinitionHost {
-                ticket,
-                granted,
-                destination,
-            } => write!(
-                f,
-                "(awaiting-definition {ticket} (granted {granted}) (destination {destination}))"
-            ),
-            Self::Associated(request) => write!(f, "{request}"),
-            Self::AssociatedResponse(response) => write!(f, "{response}"),
-            Self::Host { ticket, granted } => {
-                write!(f, "(awaiting-host {ticket} (granted {granted}))")
-            }
+            Self::AssociatedResponse(response) => response.fmt(f),
             Self::Bytecode(request) => write!(f, "{request}"),
         }
     }
@@ -163,7 +126,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 });
             }
             associated_execution::Preparation::Request(request) => {
-                session.pending = Some(Pending::Associated(request));
+                session.pending = Some(Pending::Request(Service::Associated(request)));
             }
         }
         session
@@ -194,65 +157,16 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
     // Tree migration and synchronous preparation retain their existing budgets;
     // this is not a preemption or wall-clock latency guarantee.
     fn poll(&mut self) -> Result<Poll<Option<Flow>>, Error> {
-        self.poll_with_host(false)
+        if let Some(request) = self.take_service() {
+            self.pending = Some(request.resolve(self.vm));
+            return Ok(Poll::Pending);
+        }
+        self.advance(false)
     }
 
-    pub(super) fn poll_external(&mut self) -> Result<Poll<Option<Flow>>, Error> {
-        self.poll_with_host(true)
-    }
-
-    fn poll_with_host(&mut self, external: bool) -> Result<Poll<Option<Flow>>, Error> {
+    fn advance(&mut self, external: bool) -> Result<Poll<Option<Flow>>, Error> {
         if self.terminal {
             return Err(self.vm.failure(ErrorKind::InvalidControlFlow, None));
-        }
-        if self.waiting_for_host() {
-            return Ok(Poll::Pending);
-        }
-        if matches!(self.pending, Some(Pending::Associated(_))) {
-            if external {
-                return Ok(Poll::Pending);
-            }
-            let request = self.take_host_request()?.expect("associated request");
-            let response = request.prepare();
-            self.receive_host_response(response)
-                .map_err(|failure| failure.error().clone())?;
-            return Ok(Poll::Pending);
-        }
-        if matches!(self.pending, Some(Pending::Method(_))) {
-            if external {
-                return Ok(Poll::Pending);
-            }
-            let Some(Pending::Method(wait)) = self.pending.take() else {
-                unreachable!()
-            };
-            let selected = self.vm.resolve_method_request(&wait.request);
-            self.pending = Some(Pending::MethodResponse { wait, selected });
-            return Ok(Poll::Pending);
-        }
-        if matches!(self.pending, Some(Pending::Definition { .. })) {
-            if external {
-                return Ok(Poll::Pending);
-            }
-            // Reference/IIR execution has no source-world host envelope. It
-            // uses the same descriptor/receipt admission with its configured
-            // synchronous service, while source sessions may yield externally.
-            let Some(Pending::Definition {
-                destination,
-                request,
-            }) = self.pending.take()
-            else {
-                unreachable!()
-            };
-            let resolver = self.vm.definition_resolver(&request);
-            let prepared = host_budget::clamped(&mut self.vm.budget.steps, |fuel| {
-                resolver.prepare(&request, fuel)
-            });
-            self.pending = Some(Pending::DefinitionResponse {
-                destination,
-                request,
-                prepared,
-            });
-            return Ok(Poll::Pending);
         }
         let result = self.step(external);
         if !matches!(result, Ok(Poll::Pending)) {
@@ -270,214 +184,12 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         result
     }
 
-    pub(super) fn waiting_for_host(&self) -> bool {
-        matches!(
-            self.pending,
-            Some(
-                Pending::Host { .. } | Pending::DefinitionHost { .. } | Pending::MethodHost { .. }
-            )
-        )
-    }
-
     pub(super) fn charge_preparation(&mut self, steps: usize) -> Result<(), Error> {
         self.vm.charge_preparation(steps)
     }
 
     pub(super) fn remaining_steps(&self) -> u64 {
         self.vm.remaining_steps()
-    }
-
-    pub(super) fn take_host_request(&mut self) -> Result<Option<AssociatedHostRequest<'a>>, Error> {
-        if self.terminal || !matches!(self.pending, Some(Pending::Associated(_))) {
-            return Ok(None);
-        }
-        let Some(world) = self.vm.declaration_world else {
-            self.cancel();
-            return Err(self.vm.failure(ErrorKind::InvalidControlFlow, None));
-        };
-        let ticket = match self.requests.issue() {
-            Ok(ticket) => ticket,
-            Err(error) => {
-                self.cancel();
-                return Err(error);
-            }
-        };
-        let Some(Pending::Associated(request)) = self.pending.take() else {
-            unreachable!()
-        };
-        let granted = std::mem::take(&mut self.vm.budget.steps);
-        self.pending = Some(Pending::Host {
-            ticket: ticket.clone(),
-            granted,
-        });
-        Ok(Some(AssociatedHostRequest::new(
-            ticket,
-            world,
-            request,
-            self.vm.associated_resolver,
-            granted,
-        )))
-    }
-
-    pub(super) fn receive_host_response(
-        &mut self,
-        response: AssociatedHostResponse<'a>,
-    ) -> Result<(), RejectedHostResponse<'a>> {
-        let valid = !self.terminal
-            && self
-                .vm
-                .declaration_world
-                .is_some_and(|world| std::ptr::eq(world, response.world))
-            && matches!(&self.pending, Some(Pending::Host { ticket, .. }) if ticket.matches(&response.ticket));
-        if !valid {
-            return Err(RejectedHostResponse::new(response));
-        }
-        let Some(Pending::Host { granted, .. }) = self.pending.take() else {
-            unreachable!()
-        };
-        let (remaining, response) = response.settle(granted);
-        self.vm.budget.steps = remaining;
-        self.pending = Some(Pending::AssociatedResponse(response));
-        Ok(())
-    }
-
-    pub(super) fn take_definition_request(
-        &mut self,
-    ) -> Result<Option<DefinitionHostRequest<'a>>, Error> {
-        if self.terminal || !matches!(self.pending, Some(Pending::Definition { .. })) {
-            return Ok(None);
-        }
-        let Some(world) = self.vm.declaration_world else {
-            self.cancel();
-            return Err(self.vm.failure(ErrorKind::InvalidControlFlow, None));
-        };
-        let ticket = match self.requests.issue() {
-            Ok(ticket) => ticket,
-            Err(error) => {
-                self.cancel();
-                return Err(error);
-            }
-        };
-        let Some(Pending::Definition {
-            destination,
-            request,
-        }) = self.pending.take()
-        else {
-            unreachable!()
-        };
-        let resolver = self.vm.definition_resolver(&request);
-        let granted = std::mem::take(&mut self.vm.budget.steps);
-        self.pending = Some(Pending::DefinitionHost {
-            ticket: ticket.clone(),
-            granted,
-            destination,
-        });
-        Ok(Some(DefinitionHostRequest {
-            ticket,
-            world,
-            request,
-            resolver,
-            granted,
-            remaining: granted,
-        }))
-    }
-
-    pub(super) fn receive_definition_response(
-        &mut self,
-        response: DefinitionHostResponse<'a>,
-    ) -> Result<(), RejectedDefinitionResponse<'a>> {
-        let valid = !self.terminal
-            && self
-                .vm
-                .declaration_world
-                .is_some_and(|world| std::ptr::eq(world, response.world))
-            && matches!(&self.pending, Some(Pending::DefinitionHost {ticket,..}) if ticket.matches(&response.ticket));
-        if !valid {
-            return Err(response.reject());
-        }
-        let Some(Pending::DefinitionHost {
-            granted,
-            destination,
-            ..
-        }) = self.pending.take()
-        else {
-            unreachable!()
-        };
-        let (remaining, request, prepared) = response.settle(granted);
-        self.vm.budget.steps = remaining;
-        self.pending = Some(Pending::DefinitionResponse {
-            destination,
-            request,
-            prepared,
-        });
-        Ok(())
-    }
-
-    pub(super) fn take_method_request(&mut self) -> Result<Option<MethodHostRequest<'a>>, Error> {
-        if self.terminal || !matches!(self.pending, Some(Pending::Method(_))) {
-            return Ok(None);
-        }
-        let Some(world) = self.vm.declaration_world else {
-            self.cancel();
-            return Err(self.vm.failure(ErrorKind::InvalidControlFlow, None));
-        };
-        let ticket = match self.requests.issue() {
-            Ok(ticket) => ticket,
-            Err(error) => {
-                self.cancel();
-                return Err(error);
-            }
-        };
-        let Some(Pending::Method(wait)) = self.pending.take() else {
-            unreachable!()
-        };
-        let granted = std::mem::take(&mut self.vm.budget.steps);
-        self.pending = Some(Pending::MethodHost {
-            ticket: ticket.clone(),
-            granted,
-            continuation: wait.continuation,
-        });
-        Ok(Some(MethodHostRequest {
-            ticket,
-            world,
-            request: wait.request,
-            resolver: self.vm.method_resolver,
-            granted,
-            remaining: granted,
-        }))
-    }
-
-    pub(super) fn receive_method_response(
-        &mut self,
-        response: MethodHostResponse<'a>,
-    ) -> Result<(), RejectedMethodResponse<'a>> {
-        let valid = !self.terminal
-            && self
-                .vm
-                .declaration_world
-                .is_some_and(|world| std::ptr::eq(world, response.world))
-            && matches!(&self.pending,Some(Pending::MethodHost {ticket,..}) if ticket.matches(&response.ticket));
-        if !valid {
-            return Err(response.reject());
-        }
-        let Some(Pending::MethodHost {
-            granted,
-            continuation,
-            ..
-        }) = self.pending.take()
-        else {
-            unreachable!()
-        };
-        let (remaining, request, selected) = response.settle(granted);
-        self.vm.budget.steps = remaining;
-        self.pending = Some(Pending::MethodResponse {
-            wait: bytecode::MethodWait {
-                request,
-                continuation,
-            },
-            selected,
-        });
-        Ok(())
     }
 
     fn step(&mut self, external: bool) -> Result<Poll<Option<Flow>>, Error> {
@@ -501,17 +213,17 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                     let checked = if preparation.is_definition() {
                         vm.begin_bytecode_definition(parent, preparation).map(
                             |(destination, request)| {
-                                *pending = Some(Pending::Definition {
+                                *pending = Some(Pending::Request(Service::Definition {
                                     destination,
                                     request,
-                                });
+                                }));
                             },
                         )
                     } else if vm.graph.is_none() && preparation.is_method() {
                         vm.begin_bytecode_method(parent, preparation, external)
                             .map(|wait| {
                                 if let Some(wait) = wait {
-                                    *pending = Some(Pending::Method(wait));
+                                    *pending = Some(Pending::Request(Service::Method(wait)));
                                 }
                             })
                     } else {
@@ -562,12 +274,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                         });
                     }
                 }
-                Pending::Associated(_)
-                | Pending::Host { .. }
-                | Pending::Definition { .. }
-                | Pending::DefinitionHost { .. }
-                | Pending::Method(_)
-                | Pending::MethodHost { .. } => {
+                Pending::Request(_) | Pending::Waiting { .. } => {
                     unreachable!("host work is driven before execution")
                 }
                 Pending::AssociatedResponse(response) => {
@@ -776,7 +483,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                         })
                     }
                     Ok(associated_execution::Preparation::Request(selection)) => {
-                        *pending = Some(Pending::Associated(selection));
+                        *pending = Some(Pending::Request(Service::Associated(selection)));
                     }
                     Err(error) => {
                         *result = Some(Completion::Ordinary {
@@ -1195,7 +902,10 @@ mod tests {
                 }
                 session = Box::new(*session);
             }
-            if matches!(session.pending, Some(Pending::Associated(_))) {
+            if matches!(
+                session.pending,
+                Some(Pending::Request(Service::Associated(_)))
+            ) {
                 pending_cancellations += 1;
                 assert!(
                     session

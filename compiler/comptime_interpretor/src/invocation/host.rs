@@ -3,7 +3,44 @@
 //! not a general frontend-region suspension or a cross-process wire protocol.
 use super::*;
 use crate::request_identity::Ticket;
-use std::task::Poll;
+
+/// Sent and returned by value. Only the unspent allowance can be changed
+/// by the host. The waiting VM retains its ticket and execution continuation.
+pub(super) struct HostLease<'a> {
+    pub(super) ticket: Ticket,
+    pub(super) world: &'a Package,
+    pub(super) granted: u64,
+    pub(super) remaining: u64,
+}
+
+impl<'a> HostLease<'a> {
+    pub(super) fn reserve(ticket: Ticket, world: &'a Package, steps: &mut u64) -> Self {
+        let granted = std::mem::take(steps);
+        Self {
+            ticket,
+            world,
+            granted,
+            remaining: granted,
+        }
+    }
+
+    pub(super) fn settle<T>(
+        self,
+        steps: &mut u64,
+        source: SourceRange,
+        result: Result<T, Error>,
+    ) -> Result<T, Error> {
+        if self.remaining > self.granted {
+            *steps = 0;
+            return Err(Error {
+                kind: ErrorKind::StepsExhausted,
+                source: Some(source),
+            });
+        }
+        *steps = self.remaining;
+        result
+    }
+}
 
 /// A source comptime invocation. Dropping it cancels and restores its caller.
 pub struct InvocationSession<'vm, 'world> {
@@ -26,21 +63,16 @@ pub enum InvocationProgress<'world> {
 /// Dropping a request leaves its session waiting; cancel or drop that session
 /// rather than polling for a response that can no longer arrive.
 pub struct AssociatedHostRequest<'world> {
-    ticket: Ticket,
-    world: &'world Package,
-    request: associated_execution::Request,
-    resolver: Option<&'world AssociatedResolver<'world>>,
-    granted: u64,
-    remaining: u64,
+    pub(super) lease: HostLease<'world>,
+    pub(super) request: associated_execution::Request,
+    pub(super) resolver: Option<&'world AssociatedResolver<'world>>,
 }
 
 /// A linear answer, still subject to the originating session's admission.
 pub struct AssociatedHostResponse<'world> {
-    pub(super) ticket: Ticket,
-    pub(super) world: &'world Package,
-    request: associated_execution::Request,
-    remaining: u64,
-    selection: Result<AssociatedSelection, Error>,
+    pub(super) lease: HostLease<'world>,
+    pub(super) request: associated_execution::Request,
+    pub(super) selection: Result<AssociatedSelection, Error>,
 }
 
 /// Invalid delivery does not consume the current waiter or the other answer.
@@ -50,34 +82,17 @@ pub struct RejectedHostResponse<'world> {
 }
 
 impl<'world> AssociatedHostRequest<'world> {
-    pub(super) fn new(
-        ticket: Ticket,
-        world: &'world Package,
-        request: associated_execution::Request,
-        resolver: Option<&'world AssociatedResolver<'world>>,
-        granted: u64,
-    ) -> Self {
-        Self {
-            ticket,
-            world,
-            request,
-            resolver,
-            granted,
-            remaining: granted,
-        }
-    }
-
     pub fn access(&self) -> &Expr {
         self.request.access()
     }
     pub fn source_world(&self) -> &'world Package {
-        self.world
+        self.lease.world
     }
     pub fn remaining_steps(&self) -> u64 {
-        self.remaining
+        self.lease.remaining
     }
     pub fn remaining_steps_mut(&mut self) -> &mut u64 {
-        &mut self.remaining
+        &mut self.lease.remaining
     }
 
     pub fn respond(
@@ -85,10 +100,8 @@ impl<'world> AssociatedHostRequest<'world> {
         selection: Result<AssociatedSelection, Error>,
     ) -> AssociatedHostResponse<'world> {
         AssociatedHostResponse {
-            ticket: self.ticket,
-            world: self.world,
+            lease: self.lease,
             request: self.request,
-            remaining: self.remaining,
             selection,
         }
     }
@@ -97,7 +110,7 @@ impl<'world> AssociatedHostRequest<'world> {
         mut self,
         resolver: impl FnOnce(&Expr, &mut u64) -> Result<AssociatedSelection, Error>,
     ) -> AssociatedHostResponse<'world> {
-        let selection = resolver(self.request.access(), &mut self.remaining);
+        let selection = resolver(self.request.access(), &mut self.lease.remaining);
         self.respond(selection)
     }
 
@@ -118,21 +131,6 @@ impl<'world> AssociatedHostResponse<'world> {
     /// Return an undeliverable response intact without touching any VM waiter.
     pub fn reject(self) -> RejectedHostResponse<'world> {
         RejectedHostResponse::new(self)
-    }
-
-    pub(super) fn settle(self, granted: u64) -> (u64, associated_execution::Response) {
-        let (remaining, selection) = if self.remaining > granted {
-            (
-                0,
-                Err(Error {
-                    kind: ErrorKind::StepsExhausted,
-                    source: Some(self.request.access().source),
-                }),
-            )
-        } else {
-            (self.remaining, self.selection)
-        };
-        (remaining, self.request.respond(selection))
     }
 }
 
@@ -221,26 +219,7 @@ impl<'world> InvocationSession<'_, 'world> {
     /// host. Running may include synchronous services or tree execution; this
     /// boundary does not promise a wall-clock slice or preemption.
     pub fn poll(&mut self) -> Result<InvocationProgress<'world>, Error> {
-        match self.session.poll_external()? {
-            Poll::Ready(Some(Flow::Value(value))) => Ok(InvocationProgress::Complete(value)),
-            Poll::Ready(_) => Err(Error {
-                kind: ErrorKind::InvalidControlFlow,
-                source: None,
-            }),
-            Poll::Pending => {
-                if let Some(request) = self.session.take_host_request()? {
-                    Ok(InvocationProgress::Associated(request))
-                } else if let Some(request) = self.session.take_definition_request()? {
-                    Ok(InvocationProgress::Definition(request))
-                } else if let Some(request) = self.session.take_method_request()? {
-                    Ok(InvocationProgress::Method(request))
-                } else if self.session.waiting_for_host() {
-                    Ok(InvocationProgress::Waiting)
-                } else {
-                    Ok(InvocationProgress::Running)
-                }
-            }
-        }
+        self.session.poll_external()
     }
 
     /// Deliver an answer for later admission. A rejected answer is returned
@@ -285,7 +264,7 @@ impl fmt::Display for AssociatedHostRequest<'_> {
         write!(
             f,
             "(associated-host-request {} (granted {}) (remaining {}) {})",
-            self.ticket, self.granted, self.remaining, self.request
+            self.lease.ticket, self.lease.granted, self.lease.remaining, self.request
         )
     }
 }
@@ -294,7 +273,7 @@ impl fmt::Display for AssociatedHostResponse<'_> {
         write!(
             f,
             "(associated-host-response {} (remaining {}) ",
-            self.ticket, self.remaining
+            self.lease.ticket, self.lease.remaining
         )?;
         match &self.selection {
             Ok(selection) => write!(f, "{selection}")?,

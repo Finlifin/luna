@@ -1,10 +1,9 @@
 # Elaboration、VM 与发布的状态协议
 
-状态：目标协议设计，通用任务协议尚未落地；局部签名前提形成已有下述接线。
-初始源码核对基线为 `873af90f`。第 4 节区分源码检查、词法绑定版本与 invocation 的所有权。
-其余历史验证按各自注明的基线和范围阅读。
-本文件细化 [全链路架构](architecture.md) 中的所有权，不新增源语言操作或等待语法。
-依赖如何分类、稳定查询如何复用见 [依赖观察](dependency-observations.md)。
+同一次源调用可能先要从程序取得一个 Type，再用它检查后续源码。检查器持有域、
+前提和规则进度，VM 持有执行位置、存储和调用预算，发布接收者持有可见定义。
+下文区分当前生产入口与需要接通的所有权交接。
+[全链路架构](architecture.md) · [依赖观察](dependency-observations.md)
 
 ## 1. 先保留已有机制，而不是重新发明全部状态
 
@@ -43,34 +42,8 @@ Budget 与 Invalid 不获得此标记。成功形成 atom 只有增加新的前�
 没有改变候选世界或方法选择；通用事务、精确依赖登记与跨重试累计全部查询成本仍待
 按后文实施。该循环恢复的三类状态也不能代表整个 Checker 已实现事务回退。
 
-验证工作目录 `/home/fin/luna`，统一通过 `python3 -B development/check.py
---timeout 900 -- test ...`，result.json 保存完整命令与结果：
-
-- `/tmp/luna-tools-1osgorhz/result.json` 退出 101，诊断跟踪确认原顺序用例在
-  associated_projection → symbolic_interface_evidence → given 查询处返回
-  UnvalidatedModel，直接越过原有重试逻辑。临时跟踪已删除。
-- `/tmp/luna-tools-efr2exmj/result.json` 退出 0，原顺序用例通过；
-  `/tmp/luna-tools-ckil_t4v/result.json` 退出 0，7 项相关 execution 回归与新增
-  非法 atom 拒绝例通过。
-- `/tmp/luna-tools-an8c0yq1/result.json` 退出 101：associated_signatures 9 项、
-  trait_obligations 4 项和新增签名前提回归 2 项通过；首版非法 atom fixture 将整数
-  传给 bool 域，在数字字面量目标检查处被拒绝，未到预期的普通类型不匹配诊断。
-  已改为 Type 值传入 bool 域，拒绝预期不变，后一条记录确认通过。
-- `/tmp/luna-tools-no7ne8e8/result.json` 退出 101：cmtt_type_inputs 24 项、
-  deferred_associated_values 9 项、normal_input_plans 3 项与 open_normal_input_plans
-  2 项通过；后两组的另外 16 项在 VM 中报 StepsExhausted。
-- 将本次六个生产文件临时换为 HEAD `6bf6d3b4`，保留用户工作区修改，对照
-  `/tmp/luna-tools-e0tq_55u/result.json` 退出 101，后两组仍为 5 项通过、16 项失败。
-  逐项核对失败名称、位置与错误载荷相同，随后按字节及摘要恢复本次源码。
-
-本阶段去重 61 项通过，16 项基线预算失败；没有扩大默认 VM 额度、跳过准入或修改
-旧用例预期。新回归检查三层前提的六种排列、两种 Type 参数来源、缺失与自举前提、
-无正前提的析取以及非法 sibling 优先报错。七个修改／新增 Rust 文件通过 scoped
-rustfmt check，`/tmp/luna-tools-k40wbfcs/result.json` 退出 0；git diff --check 通过。
-后续已定位并移除 runtime 闭包存储检查反复构建整包域表的成本，上述 16 项中
-15 项恢复，剩余一项推进到实际执行阶段，见
-[阶段检查的域表复用](comptime-value-admission.md#预算与复用)。
-不得将该后续修复计入本节签名前提形成的验证结果。
+签名前提的回归覆盖三层前提的排列、缺失前提、自举、无正前提的析取及同层非法
+atom。查询预算和阶段目录复用另见[值准入与预算](comptime-value-admission.md#预算与复用)。
 
 ## 2. WorldRevision、可见范围与 coherence 分开
 
@@ -149,17 +122,8 @@ PTC 构造器权限；后一个描述超预算时，早先条目已可见，impl
 发布器读取同一源码快照的声明，另以全局构造器理论和空局部前提检查具体描述。
 因此某条分支独有的证据可以用于求值，却不能随发布的具体类型逃逸到包级作用域。
 
-局部回归跨多个 batch 和三种定义逐额度截断，检查已有条目、构造器权限、索引版本
-及完整布局保持原样，再以足额接收同一组不可变描述；空发布零额度可完成。抽出
-原逻辑但尚未调整顺序时，同一回归确实发现第一条 struct 泄漏：
-`/tmp/luna-tools-n5aymb7q/result.json` 退出 101。真实 sysroot 用例通过公开 builder
-组合生成三种相互引用的定义，required 调用后继续反射并经 trait 方法执行。
-
-最终验证目录 `/home/fin/luna`：
-`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test required_definition_publication --test builder_invocations --test required_input_scopes --no-fail-fast`，
-`/tmp/luna-tools-f1eem7h5/result.json` 退出 0，400 项通过。验证含已有资源分析工作区
-修改，未执行全 workspace。原布局索引同步仍可能复制整个布局集合；完整成本模型、
-一般 DefinitionTransaction 及待决 Type／源主体恢复没有因此完成。
+整批接收失败时保留原条目、构造器权限和索引版本。实际调用在同一包里消费刚生成的
+字段、变体与表示，可以检验后续检查获得的是完整目录。[发布验收](../compiler/luna/tests/required_definition_publication.rs)
 
 ### 已接入：晚生成描述交付给后续 IR
 
@@ -167,7 +131,6 @@ PTC 构造器权限；后一个描述超预算时，早先条目已可见，impl
 required invocation 仍可生成定义。原收尾只补收 struct 和内部 scalar packet enum，
 遗漏普通 enum 与 newtype；局部 `const Flag = Wrapper()` 后执行
 `true.as(Flag).as(bool)`，会在实例化阶段报 `IIR nominal type has no declaration`。
-修复前真实 sysroot 回归 `/tmp/luna-tools-f212gyj3/result.json` 退出 101。
 
 现在三类描述共用按声明身份去重的交付规则，保留包内先前条目，并在契约、纯度和
 quote 分析前补齐 checker 已接收的描述。内部 scalar packet 只另记传输角色，
@@ -180,34 +143,11 @@ quote 分析前补齐 checker 已接收的描述。内部 scalar packet 只另�
 域是 Type 也不代表身份已经完成：enum 仍先观察已知命名空间，真正选中成员后才走
 原 required 类型形成；分组不是值，载荷仍按普通构造契约求值和检查。
 
-旧路径的 `const Event = EventType(); Event.data(true)` 误入 struct 字段投影，
-证据为 `/tmp/luna-tools-y3aii0eo/result.json`。新增命名空间基线还显示，局部 enum
-别名的 `struct_fields(...)` 变体误入同名 Type 反射方法，报实参数量错误：
-`/tmp/luna-tools-vv1xy062/result.json` 退出 101。共享域判断修复这两种路由差异；
-带类型上下文的构造、显式成员构造与匹配均保留独立正例。quote 内待决 Type，
-以及一般候选探测的生成定义所有权仍须后续处理，不能据此推定完整回滚或活动源任务
-已经接通，也不能把“尚未观察到身份”当作已证明不是 enum。
-
-验证目录 `/home/fin/luna`：
-`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib -p luna --test required_definition_publication --test builder_invocations --test cmtt_storage_world --test cmtt_phase_boundaries --test test_templates --test quote_functions --test inline_pattern_observation --no-fail-fast`，
-`/tmp/luna-tools-wcicoi_g/result.json` 退出 0，639 项通过；新增用例经真实 sysroot
-检查 newtype 转换、enum 构造与匹配，以及已有／晚生成混合描述的身份、反射和执行。
-工作区保留已有资源分析修改，未执行全 workspace 或 LLVM 原生验收。
-
-接收者域共用后的检查，目录仍为 `/home/fin/luna`，命令前缀均为
-`python3 -B development/check.py --timeout 900 -- test`：
-
-- `-p elaboration --lib -p luna --test cmtt_methods --test normal_form_methods --test enum_groups --test required_definition_publication --no-fail-fast`：
-  487 项通过，`/tmp/luna-tools-3h9qge4c/result.json` 退出 0。
-- `-p luna --test enum_groups --test associated_signatures --test deferred_associated_values --no-fail-fast`：
-  28 项通过，`/tmp/luna-tools-11h79gqp/result.json` 退出 0；包括进一步区分载荷
-  求值顺序的正例。两组有重叠，不相加为独立用例数。
+例如 `const Event = EventType(); Event.data(true)`，晚生成 enum 的命名空间须保留声明身份
+和变体载荷。局部变体、显式成员构造与匹配都使用相同的接收者域判断。quote 内待决
+Type 与一般候选试探中的生成定义仍需各自的所有权交接。
 
 ## 4. Region 与 task 状态
-
-本节在 `6a564ae5` 上核对生产接线。表中的“已有”表示真实消费者已经使用；
-“目标”表示迁移必须满足的协议，不是可调用的 Rust API。历史迁移过程由 Git 保存，
-本节只保留当前职责、未完成接线及足以定位的证据。
 
 Region 的目标状态为 `Open → Closing → Complete | Failed | Cancelled`。
 Closing 不接收无关请求，但允许完成已有任务必需的子请求；必检结果与语言允许的
@@ -575,24 +515,6 @@ runtime 函数。声明观察读取接口和来源，执行另行取得主体。
 主体取得尚未实现。VM 构造成本不随主体语句数增加的测试，只证明该准入不扫描
 主体，不能推导完整编译成本或一般源码 continuation 已完成。
 
-验证基线 `a10c82c5`，工作目录 `/home/fin/luna`，统一经
-`python3 -B development/check.py --timeout 900 --`：
-
-- `test -p nir --lib -p comptime_interpretor --test callable_frame_admission
-  --no-fail-fast -- --test-threads=1`：首轮与显式证据查询接线后的最终复核均退出 0，
-  `/tmp/luna-tools-eecyeo_7/result.json`、`/tmp/luna-tools-7tao7ocd/result.json`。
-  包含无主体声明、错误帧在注册时拒绝、逐预算耗尽／恢复、quote 不获执行权，
-  以及已有 source owner、缓存权限和 VM 驱动回归。
-- `test -p nir -p comptime_interpretor -p luna --test phases
-  --test runtime_function_identities --test instance_budget --test default_calls
-  --test declaration_contracts --test staged_callable_freezing --test library_std_format
-  --no-fail-fast -- --test-threads=1`：退出 0，
-  `/tmp/luna-tools-pt2f9npd/result.json`，覆盖 phase、运行时身份、实例预算、源码
-  默认值和契约、冻结 callable 及真实 sysroot 格式扫描；随后仅将复用条件改为上述
-  显式同源证据查询，并完成前一项的最终复核。没有修改失败预期或解除 ignored。
-- 九个修改／新增 Rust 文件定向 rustfmt `--check` 退出 0，
-  `/tmp/luna-tools-fesekzri/result.json`；未运行全 workspace 检查。
-
 #### 程序契约使用声明，不制造可执行主体
 
 `MethodContract::program_summary_declaration_inputs` 交付独立 FunctionDeclaration，
@@ -616,42 +538,6 @@ Unknown，不能被包装成“实现加强了前置条件”。所有程序命�
 memory 方法组合确实需要执行实现调用，因此只在真实 Call 构造完成后组合
 Function；不先建立 Unit 占位再替换。源码检查与原 VM activation 的交接由调用区域负责。
 
-本阶段验证（工作目录均为 `/home/fin/luna`）：
-
-- 经 `python3 -B development/check.py --timeout 900 --` 运行
-  `test -p nir -p program_verification --lib --test calls --test code_interfaces --test copy_budget --no-fail-fast -- --test-threads=1`，
-  `/tmp/luna-tools-8hwye2qw/result.json` 退出 0，321 项通过。覆盖声明观察与复制预算、
-  10,000 条语句主体下不增加契约继承成本、失败回滚与重试、蕴含证明逐预算耗尽。
-  首次构建 `/tmp/luna-tools-841m65mx/result.json` 因新测试对无 Debug 的 Report 使用
-  unwrap_err 而失败；测试改为显式提取 Err 后得到上述结果，未修改生产类型迁就测试。
-- 同入口运行
-  `test -p luna --test method_memory_contracts --test cmtt_methods --test declaration_contracts --test prepared_invocations --no-fail-fast -- --test-threads=1`，
-  `/tmp/luna-tools-1vzwo67y/result.json` 退出 101：188 项通过、1 项失败。
-  失败为 `cmtt_methods::transported_runtime_methods_preserve_clause_domains_and_nested_storage`，
-  408..419 的方法选择报告 no-applicable-candidate。
-- 为区分回归，将本阶段七个生产文件临时还原为 `9bc7b5a2` 的内容，仅运行上述
-  失败测试（`test -p luna --test cmtt_methods -- transported_runtime_methods_preserve_clause_domains_and_nested_storage --exact --test-threads=1`）。
-  `/tmp/luna-tools-lviozzbq/result.json` 退出 101，复现相同位置与诊断；随后按保存内容
-  逐字节恢复本阶段生产文件。其他工作区修改未触碰。该既有失败仍未修复，不能将
-  集成组整体记为通过，也不改变测试预期。
-  后续[callable 字段核对](runtime-value-delivery.md#callable-字段的观察与调用)将
-  这一失败定位为缺少库 Splice，保留原正例为待实现验收；它与新发现的嵌套源接收者
-  过早交付、comptime callee 角色丢失分别处理。
-
-- 指针观察扩展检查：同入口运行 `test -p luna --test execution -- pointer_observations --test-threads=1`，
-  `/tmp/luna-tools-ac4abr98/result.json` 退出 101，10 项通过；
-  `external_pointer_observations_track_nested_field_paths` 在要求拒绝右字段写入时失败。
-  使用相同隔离与恢复方式，在 `9bc7b5a2` 上以该测试名加 `--exact` 复测，
-  `/tmp/luna-tools-ll9y52z_/result.json` 同样退出 101。该用例与已实现的同根不相交
-  字段观察保留存在预期冲突（见[标量存储更新](solvers-resources-and-lowering.md#64-标量存储更新与读取事实的有效期)），
-  本阶段未调整其断言；区分既有不一致与本次回归。
-  后续已按正式字段分离契约纠正该旧拒绝预期，并保留同字段覆盖及可能别名的拒绝；
-  11 项观察测试移入独立目标，见[核对与反例](solvers-resources-and-lowering.md#指针观察旧拒绝预期的纠正)。
-- `test -p luna --test execution -- bodyless_trait_contracts_preserve_pointer_reads_during_receiver_substitution --exact --test-threads=1`
-  在本阶段代码上退出 0，`/tmp/luna-tools-wvqtc1te/result.json`；确认接口摘要没有主体
-  时仍保留指针读取，并拒绝不成立的结果或范围契约。已修改 Rust 文件的定向 rustfmt
-  检查退出 0，`/tmp/luna-tools-x4i57saa/result.json`。未执行全 workspace 测试。
-
 #### 命名函数形成不再准备泛型主体
 
 源码 VM 中，命名泛型函数值现在使用 `Value::FunctionInstance`，只携带声明身份与
@@ -669,29 +555,9 @@ Function；不先建立 Unit 占位再替换。源码检查与原 VM activation 
 入口失败不会准备主体；热缓存的调用仍重新检查当前契约。内部缓存暂沿用空捕获的
 Closure 代码载体，与 IIR 共用已有存储，不把这个实现细节重新暴露为命名源码值。
 
-这一步解除“取得函数值就准备主体”的耦合，不等于源码可以不检查未调用定义。
-VM 注册表仍依赖完整受检 Function，初始化仍检查包；大主体的形成成本测试是在
-初始化完成后测量，不能据此宣称包准入成本与主体大小无关。源码检查 continuation、
-独立模板发布和原 activation 的 Type 响应仍未接通，`Parse(format)` 仍未完成。
-
-本阶段验证（工作目录 `/home/fin/luna`）：
-
-- `python3 -B development/check.py --timeout 900 -- test -p luna --test prepared_invocations --test normal_form_domains --test clause_packet_preparation --test comptime_bytecode_defaults --test scoped_comptime_callables --test library_comptime_comparison --test staged_invocation_reuse --no-fail-fast -- --test-threads=1`：
-  `/tmp/luna-tools-8q7lz18j/result.json` 退出 0，65 项通过。覆盖默认值与 producer
-  顺序、返回的 comptime 函数身份、普通 runtime 转交、跨次代码复用及当前契约拒绝。
-- clause packet 的首次单项复现 `/tmp/luna-tools-qm02jgz2/result.json` 退出 101，
-  在旧测试 helper 的 VM 初始化处报告 `UnmaterializedDispatch`，尚未进入调用。
-  该 helper 对真实 sysroot 使用 closed 构造入口，已改用现有 `with_comptime`，
-  同时提供当前包的类型、方法与关联项查询。采用 helper 既有的 sysroot 准备预算，
-  保留两种引擎及全部结果、顺序和次数断言，不删除依赖或假造选择结果。
-- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p elaboration --lib --test function_types --test instance_budget --test runtime_function_identities --test callable_reflection --test normal_values --test function_input_diagnostics --test type_computation_demands --no-fail-fast -- --test-threads=1`：
-  `/tmp/luna-tools-h2ac0sg3/result.json` 退出 0，939 项通过。包含 606 项 VM 单元、
-  241 项 elaboration 单元和 92 项接口用例。0/4096 语句主体在包初始化后的命名值
-  形成成本相同；入口拒绝不准备代码，恢复后正常执行，热缓存不免除契约。
-  首次 `/tmp/luna-tools-jdxmzj9d/result.json` 因外部测试误用私有 `invoke_value`
-  编译失败；改用既有公开 `invoke_instantiated`，没有扩大生产 API。
-
-未运行全 workspace 检查；这些证据不覆盖待实现的源码挂起和 Type 描述准入。
+源码中未调用的定义仍应接受定义端检查。VM 的可执行函数注册仍依赖完整受检主体。
+已知格式的 `std.fmt.Parse(format)` 通过普通的 Type 结果交付变参域；需要执行当前
+调用才能完成源码检查的域仍待交接。[公开格式接口](../library/std/fmt_impl/arguments.fl)
 
 #### 实际调用链与替换边界
 
@@ -848,8 +714,7 @@ VM 在形成具名 runtime 函数值和接收冻结值时，用当前声明环�
 
 #### 完整包检查凭证也是迁移边界
 
-在 `97918570` 上复核午报 D02／D03，阻塞链还包括下面这些实际消费者。
-本表补充前面的 owner 设计，说明实施时必须同时替换什么；不是新增已实现 API。
+完整包与活动源码区域之间的交接需要以下消费者同时识别声明可见性、代码需求和当前检查证据。
 
 | 位置 | 当前所需产物 | 迁移要求 |
 | --- | --- | --- |
@@ -878,7 +743,7 @@ phase 遍历成功后形成。`Inspection::check` 不是类型／资源安全证
 - 稳定代码缓存只存已检查产物及依赖，当前调用的入口契约、Type 观察、cell 与
   pending request 不进入缓存。完整包检查不能因命中某个片段而提前标记成功。
 
-现有 `DefinitionHostRequest` 的载荷只覆盖 Struct／Enum／Newtype builder，
+现有 `DefinitionHostRequest` 的载荷覆盖 Struct／Enum／Newtype builder，
 回答的是“准备哪些新定义及其 receipt”，不是“取得哪个源码主体”。不要把主体
 请求塞入 builder 协议：前者恢复已知声明的执行，后者安装新声明并更新可见范围。
 两者可共用 ticket／预算的实现原则，但完成条件、取消责任和世界变动不同。
@@ -887,25 +752,6 @@ phase 遍历成功后形成。`Inspection::check` 不是类型／资源安全证
 随后还需未调用定义的已知错误拒绝、入口契约失败不准备主体、等待期间不重放
 producer、同一模板的两次调用独立、片段算术／phase 违规拒绝，以及 builder
 在片段之间发布后的正确世界交付。仅证明函数表能存接口，不能算恢复功能完成。
-
-本次取证在 `/home/fin/luna`、`97918570` 加原有工作区改动上执行：
-
-```sh
-python3 -B development/check.py --timeout 900 -- test -p luna \
-  --test ordinary_callable_types --test ordinary_clause_collectors \
-  --no-fail-fast -- --ignored --test-threads=1 \
-  pending_clause_domains_can_wait_for_a_type_producer \
-  computed_type_inputs_can_complete_a_dependent_callable_signature
-```
-
-`/tmp/luna-tools-b79xm5lh/result.json` 退出 101；两个目标测试确实运行，未再
-跳过。`stdout.log` 的失败位置及原文如下：
-
-- `159..181`：`comptime callable signature still depends on an invocation-time clause input`。
-- `193..201`：`list literal requires an element type context`。
-
-这是当前缺口证据，测试源码及预期没有修改；本节未实现源码主体服务、未授予新
-执行权限，也未重跑其他测试组。
 
 ### 纵向交付与验证证据
 
@@ -952,7 +798,7 @@ callable 签名对实际 Type 的消费。只增加 owner、请求枚举或可�
 
 #### 声明默认代码与调用前缀的交接
 
-上述默认值失败揭示了两种环境不能互换。`Config<enabled>` 在默认值所属声明中
+`Config<enabled>` 在默认值所属声明中
 引用的是合法的抽象形参；在调用输入准备阶段，`enabled()` 的临时绑定只是已经
 检查的生产者，还不是已供应的值。把前者直接改为后者再调用 `type_expr`，会令
 required 捕获一个尚不存在的值。扩大捕获权限、提前执行生产者或给临时绑定塞入
@@ -970,72 +816,14 @@ VM 在执行该默认值前，使用已经准入的前缀实例化代码中的�
 也不能在两次展开间共享身份。这里不新建默认结果缓存，也不把已执行调用的值写回
 声明模板。当前准备仍重新检查声明侧源码；稳定模板查询的复用与失效属于后续工作。
 
-回归入口还须保留真实源码查询服务。`normal_input_plans` 的三个默认值用例原先
-使用不带 resolver 的 `Interpreter::for_comptime`；在 `c799dc9b` 原生产文件上复测
-`/tmp/luna-tools-2w26g_0a/result.json`，三项同样在 VM 构造时失败，错误为
-`UnmaterializedDispatch`。候选生产文件随后按字节恢复。现在这组及
-`open_normal_input_plans` 统一调用现有 `sysroot::with_comptime`，使用同一受检
-包的 Type、方法和关联项查询；两种引擎和全部行为断言保留。
-
-这些语义用例使用该支持入口统一的 `COMPTIME_BUDGET`，包含声明保留、前提建立、
-VM 准入和执行。旧的 100,000 步在接通查询后仍于 VM 准入耗尽，证据为
-`/tmp/luna-tools-_xo0_yen/result.json`；没有改生产 `Budget::default`，也没有为
-原 192 次 collection 调用成本用例提高其显式 200,000 步额度。预算内通过只证明
-对应用例可执行，不据此宣称整体 comptime 成本已达标。
-
-扩展验证 `/tmp/luna-tools-il07i1sw/result.json` 中，`normal_patterns` 42 项通过，
-`normal_input_plans` 23 项通过、上述成本用例失败；`open_normal_input_plans` 4 项
-通过，缺失必填参数的诊断回归一项失败。后者定位为把全部缺失槽都路由到默认代码，
-现已将该路径限定为 Optional 槽，保留必填参数的原有缺失诊断。
-
-成本失败已在 `c799dc9b` 的两个原生产文件、保留修正后的源码查询测试入口上单独
-对照：`/tmp/luna-tools-cebk7w_v/result.json` 同样退出 101，仍在调用阶段报
-`StepsExhausted`，source 为 `1095..3683`。已恢复候选文件并逐字节核对。
-这不是默认代码迁移引入的差异。随后定位为源码投影复制与 VM 准入重复遍历；借用
-声明视图后，原 200,000 步用例与 normal_input_plans 整组 24 项在
-`/tmp/luna-tools-ysz7n68a/result.json` 中通过。该次命令还有一个 builder harness
-失败，不能称整次命令通过。成本明细与后续修复验证见
-[源码声明视图](world-storage-and-lifetimes.md#110-源码声明视图与物理执行表分开)，
-没有通过提高该用例额度掩盖成本。
-
-最终针对性检查在 `/home/fin/luna` 执行：
-
-```text
-python3 -B development/check.py --timeout 900 -- test -p luna \
-  --test contextual_input_regions --test normal_patterns \
-  --test open_normal_input_plans --no-fail-fast -- --test-threads=1 \
-  declaration_default normal_record_defaults suspended_collection_routes
-```
-
-`/tmp/luna-tools-82o4tbxw/result.json` 退出 0：新增四项真实 sysroot 用例、原失败
-用例以及整项路由拒绝检查均通过。新增用例在两引擎检查不同前缀与闭包捕获、显式
-输入次序、覆盖跳过默认副作用、后续默认依赖、错误域的 `TypeContractRejected`、
-失败后下一次调用恢复，以及自身／后续参数和无依据泛型等式的拒绝。五个改动 Rust
-文件的 scoped rustfmt check 通过，报告 `/tmp/luna-tools-07fw1j0i/result.json`；
-`git diff --check` 通过。首轮新增 fixture 的块／尖括号词法边界和诊断断言已修正，
-原有回归的行为预期与成本额度未改。
+当默认表达式引用关联项或 trait 方法时，执行世界必须提供对应声明及查询服务。
+显式实参已占用的槽位不会启动默认代码，必填槽位缺失在路由时报告。
+[默认值执行](../compiler/luna/tests/normal_input_plans.rs) ·
+[开放域默认值](../compiler/luna/tests/open_normal_input_plans.rs)
 
 这只能处理已能在声明环境形成受检代码的默认值。依赖外部 Type 生产者才能继续
 检查的源码、普通调用中等待执行结果的参数域，仍需要源区域的挂起和恢复。
 公开 println 在 format 已知时的描述准入见[宿主演示](std-host-foundation.md)。
-
-另有 32 项 luna elaboration 集成失败在 Attempt 迁移时与 `53696cc6` 基线逐例对照
-一致，报告 `/tmp/luna-tools-o47vegep/result.json`；本轮未复测，仍待处理。不能把其中
-诊断断言失败都认作测试过时。当前源码域与调用恢复的边界见[生产复核](audit-reply.md#源码检查与原调用的交接)。
-这些历史验证包含当时工作区原有资源分析修改，不宣称为纯提交验收。
-
-此前在 `/home/fin/luna`、`6a564ae5` 加保留的已有修改上执行：
-
-```text
-python3 -B development/check.py --timeout 900 -- test -p luna \
-  --test ordinary_callable_types --test ordinary_clause_collectors \
-  --no-fail-fast -- --ignored
-```
-
-`/tmp/luna-tools-8_n2q3og/result.json` 退出 101，两项正例均失败，分别为
-`159..181: comptime callable signature still depends on an invocation-time clause input`
-及 `191..201: list literal requires an element type context`。未改预期或 ignore，未运行
-全 workspace。它们证明源接线仍缺失，不说明 VM 的既有宿主请求已经失效。
 
 ## 5. Observe、登记与发布
 
@@ -1086,43 +874,48 @@ preflight 失败不修改 parent。安装阶段不运行用户 comptime 代码�
 被放弃候选的内部诊断仅用于最终无解解释；明确源执行产生的编译诊断不能随候选丢弃。
 后者因此不能在未选定候选里投机运行。PTC 学习可保留，但须保留 world/activation guards。
 
-## 7. VM 请求：进度身份不等于结果缓存键
+## 7. 原 invocation 的宿主请求
 
-```text
-RequestId = (VmSessionId, ActivationId, ExecutionOrdinal)
-RequestRecord {
-  request_id, operation, semantic_view,
-  source_execution_owner, input_snapshot,
-  continuation, destination, budget_lease, status
-}
-```
+当关联项缺少选择、trait 方法需要实例或 builder 需要准备定义时，执行已经到达一个具体位置。
+同一循环的下一次迭代即使经过相同指令、取得相同输入，也有权再次执行。源调用的会话持有
+活动栈、参数存储和恢复位置。缓存可以复用该世界中的受检代码，请求的身份则只对签发它的
+会话和代次有效。[执行驱动](../compiler/comptime_interpretor/src/invocation/session.rs) ·
+[请求和交付](../compiler/comptime_interpretor/src/invocation/session/services.rs)
 
-ExecutionOrdinal 标识一次动态执行。循环重复经过同一个 PC 必须产生不同 request；
-同一次暂停重试则使用原 request。用 `(function,PC)` 去重会吞掉合法循环行为。
-相同实参的两个不纯调用也不是同一个 request。请求输入不能被存储别名在等待中改写。
+| 边界 | 宿主拥有 | VM 拥有 | 允许的下一步 |
+| --- | --- | --- | --- |
+| 请求就绪 | 无 | 已检查的请求、调用前缀、剩余额度 | 本地驱动调用配置的服务；外部驱动在本次 poll 交出请求 |
+| 请求已发出 | 源世界、请求描述、线性票据和预算 | 同代票据、执行栈和对应的恢复位置 | 再次 poll 返回 Waiting；宿主可独立准备响应 |
+| 响应送达 | 误投时仍持有完整响应 | 正确送达后持有待接纳结果和未花额度 | 下一次 poll 在原位置核验实际结果 |
+| 结果接纳 | 无 | 新的初始化 activation、已准备的方法调用或已安装的定义及目标槽 | 继续执行一次，或沿原调用链传播失败 |
 
-宿主 operation 类别区分：只读语义观察、纯 invocation、定义准备/发布、显式外部行为。
-每种操作声明接收域、输出域、依赖、取消方式与是否可在候选中执行；不是一个万能 callback。
-宿主需要另一次 invocation 时建立子 session/请求边，不递归借用同一 VM 的可变状态。
+发送时一次性转出全部剩余额度。请求到响应移动同一份凭证，宿主只能调整剩余额度。
+送达先核对源世界、会话代次和恢复位置的种类。误投时两边均保留原状态；超过初始额度的
+响应会在原调用中产生带请求来源的 StepsExhausted，返还额度为零。取消负责释放 VM
+拥有的调用前缀、丢弃尚未接纳的响应并恢复调用者。已经发生的外部动作及其花费仍归原执行。
 
-| 请求状态 | 含义 | 转移约束 |
+| 操作 | 停在 VM 内的状态 | 收到响应后的语义检查 |
 | --- | --- | --- |
-| Prepared | 输入已取得、源控制已允许，尚未发送 | 可安全取消，不能提前改变世界 |
-| InFlight | producer 正在处理 | 再次 poll 只读取状态，不重发 |
-| WaitingOnInput | 宿主有真实依赖生产者 | 子依赖变化后继续原请求，不重跑 VM 前缀 |
-| Completed | 结果及依赖已保存，尚未注入 frame | 验证目标 session/activation/destination 后交付 |
-| Delivered | frame 已取得结果，PC 已前进 | 重复响应不再写槽、不再执行 |
-| Failed | 执行或接收契约失败 | 传播失败及已消耗预算，不尝试另一执行载体 |
-| Cancelled / Indeterminate | 已取消，或外部行为完成情况未知 | 不能当成“未执行”自动重试 |
+| 关联值 | 原访问的调用位置 | 核对选择及声明，进入初始化器，以原结果域接收返回值 |
+| 方法值或方法调用 | 值的目标槽，或调用指令、默认供应和接口契约 | 验证公开 member、类型实参、实现和签名，再形成 callable；普通实参按原次序执行 |
+| 定义 builder | 已消费输入包的原指令和目标槽 | 核对请求描述、未提交 receipt 和目录准入，安装成功才写入目标槽 |
 
-语义失败响应不能恢复成普通 Value；预算原因保留原来源。响应校验失败不回退重跑代码。
-Completed→Delivered 对槽写入、进度前移和请求终态是一个局部原子动作。
-generation 不匹配的旧响应不触碰新 activation；其宿主资源仍按 request owner 回收。
+内部同步驱动还服务于具体 IIR。它可直接调用配置的 resolver，并将结果交给相同的
+下一步接纳逻辑。外部驱动允许把请求移出 VM，原调用的可变存储和方法准备状态始终归 VM。
+宿主若需等待另一项语义工作，目标调度器须保存本次请求及其子依赖。后续唤醒继续已有
+prepare；子依赖的预算耗尽、失败、未知外部行为分别报告。纯计算的缓存资格和候选试探
+的重放权限由各自的语义规则决定。
 
-输入传输采用冻结值或受检的草稿快照。可变 self 的 VM lens 留在本 session；宿主仅拿
-所需不可变描述，返回值由 session 在响应边界写入约定结果位置。不能把 lens 序列化成
-comptime 指针，也不能从另一 session 回写。这里的暂停位置保护不改变普通嵌套调用中
-已有的值引用更新和 RHS 求值规则。
+### 源码检查的下一条交接边界
+
+当前三种请求都始于已经检查的表达式。下一个需要恢复的位置在更早的阶段，例如前面的列表
+字面量仍缺元素域，而后面提供类型的表达式可能写变量或根本不会执行。检查任务须保留
+原 HIR 位置、已检查子结果、域的依赖和词法前提；执行任务须保留原 invocation 的存储、
+控制目标和已经产生的值。取得实际 Type 后，由该次检查的拥有者接纳它，生成可执行的
+后续片段。遇到提前 return，原执行直接返回，后续类型生产者没有执行机会。
+这条路径须通过普通源码入口、跨冷暖调用验证次数、次序和读取快照；单独构造一个宿主
+响应无法证明它已接入。[源检查与执行的交接目标](#源检查与执行的交接目标) ·
+[源码执行次序验收](../compiler/luna/tests/type_input_execution_order.rs)
 
 ### 普通函数契约的恢复边界
 
@@ -1153,26 +946,6 @@ VM 局部测试另覆盖前后置条件拒绝、提前 return、等待、过期�
 本项只接通普通程序契约的执行进度，尚非通用前端检查／发布宿主协议。参数准入、
 类型契约及某些准备服务仍同步；本阶段原有的编译拒绝回退已由下节清理。
 签名依赖实际 invocation 产物的两个普通调用正例仍未解锁。
-
-验证在 `/home/fin/luna` 通过 `development/check.py --timeout 900 -- test`：
-
-- 保留新回归，将两个生产文件临时还原到 `4ae19727`，精确运行
-  `-p comptime_interpretor --lib invocation::host::tests::contracts::entry_body_and_exit_share_a_suspendable_activation -- --exact`：
-  `/tmp/luna-tools-2u3witg2/result.json` 退出 101，start_invocation 提前报
-  UnmaterializedDispatch，尚未产生可回答的宿主请求。随后按摘要恢复改动。
-- `-p comptime_interpretor --lib --no-fail-fast`：
-  `/tmp/luna-tools-kbbm25fp/result.json` 退出 0，579 项通过。
-- `-p luna --test invocation_host_requests --no-fail-fast`：
-  `/tmp/luna-tools-uba4431g/result.json` 退出 0，五项源码回归通过。
-- 最终相关组使用
-  `-p luna --test invocation_host_requests --test integer_contracts --test snapshot_contracts --test predicate_calls --test effect_contracts --test prepared_invocations --test staged_invocation_reuse --test default_calls --test comptime_bytecode_defaults --test conditional_capture_cleanup --test library_protocols --test builder_invocations --no-fail-fast`：
-  `/tmp/luna-tools-m_ofiefj/result.json` 退出 0，216 项通过，一项原有 predicate
-  phase-aware stability 用例仍 ignored。先前新源码 fixture 缺少调用前提证明的拒绝
-  已通过改为直接调用带契约的公开 invocation 入口纠正，没有放宽源码程序验证。
-
-七个修改 Rust 文件的格式检查 `/tmp/luna-tools-hfak84ny/result.json` 退出 0，
-`git diff --check` 通过。未运行全 workspace、LLVM/native 或性能基准；工作区仍包含
-作者原有资源分析修改，未将其改写或纳入提交。正式 docs 与 formatter 开发保持独立。
 
 ### 编译拒绝与执行模式分开
 
@@ -1205,26 +978,9 @@ VM 局部测试另覆盖前后置条件拒绝、提前 return、等待、过期�
 本项没有声称 tree 求值完全退出生产路径。nested staged input 的 depth 门控、
 cleanup/effect 模式选择及同步准备服务尚在；通用前端 Region 恢复仍未完成。
 
-本阶段在 `/home/fin/luna` 的实际验证（`development/check.py --timeout 900 -- test`）：
-
-- `-p comptime_interpretor -p comptime_compiler --lib --no-fail-fast`：
-  `/tmp/luna-tools-ul7bbp65/result.json` 退出 0，分别 580、7 项通过。
-- `-p luna --test invocation_host_requests --test prepared_invocations --test staged_invocation_reuse --test default_calls --test comptime_bytecode_defaults --test conditional_capture_cleanup --test library_protocols --test builder_invocations --test cmtt --test cmtt_methods --test cmtt_type_inputs --test comptime_pointer_phase --test comptime_staged_values --test normal_form_domains --test comptime_bytecode --no-fail-fast`：
-  `/tmp/luna-tools-lxvqpcqr/result.json` 退出 101，982 项通过，一项失败，无 ignored。
-- 唯一失败是 `cmtt::generator_clause_domains_depend_on_prior_value_indices`，
-  在 `118..122` 捕获 `(local 4294967295 1)` 时拒绝 required 输入。临时将三个
-  生产文件恢复为 `59405db5` 后以 `-p luna --test cmtt generator_clause_domains_depend_on_prior_value_indices -- --exact`
-  单独复测，`/tmp/luna-tools-g42rqpk1/result.json` 退出 101，出现相同错误。
-  已恢复当前三个文件并按 `/tmp/luna-bytecode-rejection-baseline/restore.json`
-  核对内容摘要。此为已有前端依赖输入捕获失败，本阶段未修改用例、放宽预期或修复它。
-- 四个改动 Rust 文件的 scoped rustfmt 检查
-  `/tmp/luna-tools-r_tyye2_/result.json` 退出 0；`git diff --check` 通过。
-
-上述为工作区验证，仍含作者原有资源分析改动；没有执行全 workspace 或性能测量。
-
 ### required 输入证据的区域所有权
 
-上述 CMTT 失败的来源现已进一步定位。外层 required preparation 已为 `flag` 供应
+例如外层 required preparation 已为 `flag` 供应
 具体 bool，并建立普通局部绑定；默认值 `Flag<flag>{}` 的名义类型检查递归进入
 required preparation 时，只继承了 binding/domain，没有继承值。于是内层把一次
 已有身份观察变成另一次没有输入的 invocation。修复点在准备区域的输入交付，
@@ -1253,20 +1009,6 @@ pending producer、VM 可变存储或候选等待者，也不进入 RequiredWorl
 这项交付只涉及已供应且可只读观察的输入。它没有把有待执行的 Type 生产者变成
 已知值，没有重放副作用来取得证据，也没有接通通用前端 Region suspension。普通
 待定域两个 ignored 正例仍需要原计划中的检查／执行恢复协议。
-
-本项最终验证在 `/home/fin/luna`，使用 `development/check.py --timeout 900 -- test`：
-
-- `-p elaboration --lib --no-fail-fast`：`/tmp/luna-tools-3_d6iitq/result.json`
-  退出 0，193 项通过，包含输入遮蔽、live 阻断、预算失败、前缀扩展、失效和 dump。
-- `-p luna --test required_input_scopes --test cmtt --test cmtt_methods --test prepared_input_dependencies --test comptime_clause_inputs --test clause_staged_constants --test default_calls --test normal_form_domains --test invocation_host_requests --test builder_invocations --test library_protocols --test comptime_bytecode_defaults --test trait_domain_substitution --test trait_obligations --test ordinary_clause_collectors --test ordinary_callable_types --no-fail-fast`：
-  `/tmp/luna-tools-rgq9meba/result.json` 退出 0，1038 项通过，两个原有待定域正例仍 ignored。
-  原 CMTT 失败已通过；七项新增真实 sysroot 用例覆盖重复实例、helper 捕获、泛型转发、
-  普通函数、meta.List、错误域/后续参数/runtime 输入拒绝，以及带副作用实参恰好执行一次。
-- 七个改动 Rust 文件的 scoped rustfmt 检查：
-  `/tmp/luna-tools-9l1y0ao4/result.json` 退出 0；`git diff --check` 通过。
-
-这是含作者既有资源分析修改的工作区验收，没有执行全 workspace、LLVM/native 或
-性能基准；正式 docs、library 现有修改与另一开发者的 formatter 均未改写或纳入提交。
 
 ### Type 生产者的 invocation 与发布边界
 
@@ -1325,88 +1067,12 @@ capability 或稳定 receipt。`nir::type_computations` 的 scope／残余／预
 本节不再保留旧队列反复迁移的过程日志；历史实现和验证见 Git 中 `627ab804`、
 `889c500c` 及其前序提交。下一步不得继续扩展这个测试模型来冒充源执行恢复。
 
-输入齐备路径的既有证据：`/tmp/luna-tools-zsi3jlvj/result.json` 的 required
-局部检查、`/tmp/luna-tools-a3t96ejn/result.json` 的相关九组检查均退出 0，
-覆盖 opaque Type、调用方 scope、代码复用后重新核验权限、builder 及普通返回。
-这是相应历史工作区的结果，不是本节整理时重跑的全量证明。
-
-### 定义准备也能离开源 invocation 驱动
-
-字节码的 `BuildDefinition` 原本虽已发出 preparation，却在下一驱动步同步执行
-builder 回调。现已将 struct、enum、newtype 的处理拆成共同的三段：解码并检查
-源描述；宿主准备未提交的 receipt；原 VM 核对描述、完成目录准入后安装。
-源调用返回 `DefinitionHostRequest`，请求持有原描述、源世界、线性 ticket 和独占
-预算额度；宿主可以保存请求，待其依赖就绪后再交回 prepared receipt。
-
-暂停期间原字节码 frame 保留指令位置和目标槽，输入包已经消费，不再执行生产者。
-测试模型的外层 Type 输出仍未赋值；接收响应也不立即安装，下一次 poll 才进入描述核对与
-发布边界。错误类型、篡改字段／表示、无效定义及宿主虚增预算均不得发布。
-误投响应原样退回；取消销毁活动 receipt，迟到响应不能命中新 invocation。
-这里的取消不撤销宿主 prepare 已经发生的外部行为，也不会退款未知工作量。
-
-测试用 Type 队列与 luna 源 invocation 入口均处理这个请求，默认同步适配器在 VM 外
-调用已配置 publisher，再把 receipt 交回原执行。调用者也可自行调度请求后显式
-respond。参考树执行及 IIR 内部驱动仍同步使用原 publisher，但与源调用共用
-解码和接收方准入，不增加另一套描述检查。代码缓存不存请求、receipt 或完成 Type。
-
-这条边界服务已有的具体定义 builder，不等于任意 HIR 表达式检查已可恢复，也不等于
-publisher 内部的 Preparing 已拆成可恢复步骤。定义发布的统一版本根、一般源码
-Region 和两个普通 callable 待定域正例仍未完成；不能把公开请求接口当成这些接线。
-
-验证工作目录 `/home/fin/luna`：
-
-- `python3 -B development/check.py --timeout 900 -- check -p elaboration -p luna`：
-  `/tmp/luna-tools-t76z7lzt/result.json`，退出 0。
-- 最终 `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib -p luna --test invocation_host_requests --test type_invocation_sessions --test builder_invocations --no-fail-fast`：
-  `/tmp/luna-tools-adhqa3r1/result.json`，退出 0，775 项通过。覆盖暂停期间不消耗
-  VM 额度、接收后仍未发布、跨 owner 响应退回、取消、错误描述、虚增额度和宿主
-  拒绝不执行后继。真实 sysroot 验证三类 builder 依次使用刚生成的类型、每次调用
-  产生新身份，Type 队列在 receipt 安装前保持输出未赋值。
-- 既有 86 项 builder 集成检查包含声明期生成、正常调用、描述拒绝、回调失败及
-  具体 IIR／参考执行；没有用只拼 Rust 描述的测试代替公开库接口验收。
-- 本次 16 个 Rust 文件的 `rustfmt --check`：
-  `/tmp/luna-tools-549c9lek/result.json`，退出 0；`git diff --check` 通过。
-
-未运行全 workspace 或性能基准；原有资源检查修改仍保留在工作区，以上并非纯 HEAD
-验收。正式 docs 与另一位开发者的 formatter 未修改或纳入提交。
-
-### 方法选择保留调用准备进度
-
-trait 方法选择的宿主调用也已从字节码准备步中分离。请求产生前已经检查的接口
-形成条件、公开方法身份与签名、原默认值绑定和接口程序契约保留在同一次准备中。
-等待时不运行普通实参；响应后直接进入剩余选择准入，不重新调用整个准备函数。
-直接方法调用与取得方法值共用选择协议；调用 continuation 另外保留原指令位置、
-默认值及接口参数映射，完成后才建立原 `PendingCall`。
-
-宿主给出的 `MethodInstance` 仍是待核验的选择结果。接收 VM 检查 member、方法
-实参、实现参数、阶段和公开签名，再形成 callable 并保存已接纳的选择元数据。
-错误响应不进入缓存、不执行实现体；修复响应后，新 invocation 可重新请求。
-票据、源世界与预算随原 owner 交付，误投保留原响应供正确送达，取消不退款未知工作。
-S-expression 可显示原方法、实际访问、已保留的契约判断及调用／值 continuation。
-
-测试用 Type 队列与 luna 源调用均转发 `MethodHostRequest`；默认适配器在驱动外调用现有
-源码 resolver。参考执行和具体 IIR 仍沿各自合法入口运行，与源路径共用选择准入。
-接口条件中的类型观察、callable 具体化及调用准入仍可能同步执行；这不是任意方法
-准备步骤均可恢复，也尚未补齐普通 HIR 表达式的上下文检查请求。
-
-本阶段检查目录均为 `/home/fin/luna`，测试统一通过
-`python3 -B development/check.py --timeout 900 -- test` 执行：
-
-- `-p comptime_interpretor --lib -p luna --test method_host_requests --test invocation_host_requests --test type_invocation_sessions --test comptime_bytecode_traits --test dynamic_trait_clauses --test library_protocols --no-fail-fast`：
-  `/tmp/luna-tools-zjje1rz2/result.json`，退出 101。luna 的 154 项全部通过；
-  VM 584 项通过、1 项取消测试失败。旧断言把 resolver 返回等同于选择已接纳，
-  新协议在两者之间允许取消，故未接纳的响应必须丢弃并在重试时重新选择。
-- 取消测试增加响应待接纳状态的覆盖，验证该时刻缓存为空；在每个驱动边界取消后，
-  再次调用只复用已接纳的选择。局部 `-p comptime_interpretor --lib method_preparation --no-fail-fast`
-  退出 0、6 项通过，见 `/tmp/luna-tools-2u2f_17b/result.json`。
-- 最终 `-p comptime_interpretor --lib --no-fail-fast` 退出 0、585 项通过，见
-  `/tmp/luna-tools-9z_2ecmi/result.json`。真实源码的 4 项新增用例覆盖直接调用、方法值、
-  默认值与参数顺序、错误响应后重试、取消、预算膨胀及跨 invocation 误投后正确送达。
-- 修改的 14 个 Rust 文件定向 `rustfmt --check` 退出 0，见
-  `/tmp/luna-tools-h11n2oev/result.json`；未格式化另一位开发者的 formatter 文件。
-
-未运行全 workspace 或性能基准；检查仍包含工作区原有资源分析修改，不能称为纯 HEAD
-验收。正式 docs、formatter 和其他原有改动均未纳入本阶段提交。
+真实入口的宿主验收覆盖关联选择、方法值与直接调用、跨会话误投和取消后的重试。
+定义的验收从公开 builder 构造 struct、enum 和 newtype，再在同一执行中消费刚生成的
+类型。只有接纳成功的定义才对后续位置可见。
+[关联值与定义请求](../compiler/luna/tests/invocation_host_requests.rs) ·
+[方法请求](../compiler/luna/tests/method_host_requests.rs) ·
+[定义构造与消费](../compiler/luna/tests/builder_invocations.rs)
 
 ## 8. 宿主请求与候选、取消的组合
 
@@ -1490,8 +1156,8 @@ VM activation 7 reaches generation request ordinal 12
 request 12: Prepared → InFlight; frame pins PC/destination
 publication needs interface Q: WaitingOnInput(Q)
 Q resolves; same request resumes preparation; no new ordinal
-bundle installs at frontier B; response retains resulting Type and evidence
-request 12: Completed → Delivered; frame receives value and advances once
+host returns an uncommitted receipt; origin accepts delivery for request 12
+original VM validates and installs at frontier B, then fills the destination once
 next iteration at same PC uses ordinal 13, not 12
 ```
 
