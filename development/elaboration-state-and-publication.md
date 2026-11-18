@@ -2083,14 +2083,15 @@ Checker 在检查实现之前建立按身份查询的 trait 契约目录。同�
 一致性检查后的阶段完成。开放签名的验证片段仍有自己的 phase 与算术检查。
 
 当前仍须在 VM 启动前完成根表达式和所需的 comptime 主体。涉及方法分派时，
-准备端按接口保留候选实现的定义，VM 根据实际输入选择。未完成源码的按需交付、
-`refines { Itself :- Display } Any` 的值传送及逐实参准入仍待接通。
+准备端按接口保留候选实现的定义，VM 根据实际输入选择。未完成源码的按需交付仍待接通。
+格式参数使用的 `refines { Itself :- Display } Any` 已可随 Type 描述交付，
+并在调用处逐实参检查。
 
 真实 sysroot 的回归用例见 `compiler/luna/tests/required_input_scopes.rs`。
 其中一个 Type 计算依次调用 260 个小函数。另一个把 `Forward<Flag>` 和
 `Forward<Byte>` 交给同一个 `value: defer choose()`，两个调用分别得到
-`bool` 和 `u8`。格式化演示尚未通过，`host-println.fl` 的双字段调用在
-现有单参数库签名处报 `too many positional inputs`。
+`bool` 和 `u8`。[格式化演示](examples/host-println.fl) 使用同一条公开的
+`println` 签名，传入编译期产生的格式串，由它决定运行时字段的个数及约束。
 
 ### 开放签名片段的可调用声明
 

@@ -8,11 +8,11 @@
 python3 -B development/demo_println.py
 ```
 
-[host-println.fl](host-println.fl) 直接调用
-`println("answer = {}, ready = {}", answer, true)`。演示要求通过真实 sysroot、
-资源检查和 LLVM 构建，并在 stdout 输出 `answer = 42, ready = true`。
-当前 sysroot 的同名入口只接收一个文本参数，构建在变参调用处失败。
-脚本在构建失败时退出。
+[host-println.fl](host-println.fl) 用 comptime 函数 `status_format` 选择格式串。
+`println(status_format(false), answer)` 输出 `answer = 42`。
+`println(status_format(true), answer, true)` 输出 `answer = 42, ready = true`。
+两个调用各自在编译期由 `std.fmt.Parse(format)` 确定变参域。脚本使用仓库的 sysroot
+和 LLVM O3 构建，成功后运行 `/tmp/flurry-println`。
 
 [host-stdout.fl](host-stdout.fl) 保留单段文本与单值 Display 的宿主输出示例。
 文件、内存与平台接口的可用范围见 [std 说明](../../library/std/README.md)。

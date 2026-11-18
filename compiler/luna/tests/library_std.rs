@@ -99,7 +99,7 @@ fn println_and_display_preserve_bytes_and_external_effects() {
             println_value(large)!;
             println_value(least)!;
             println_value(true)!;
-            println("界{{{}}}\0{}", Label { value: 42 }, false)!;
+            println("界{{{}}}\0{}", .varargs = (Label { value: 42 }, false))!;
             var calls: u8 = 0;
             println("{}{}", mark(calls.ref), mark(calls.ref))!;
             assumes calls == 2;

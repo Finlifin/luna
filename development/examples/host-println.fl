@@ -1,9 +1,14 @@
 use std.prelude.*;
 
+pure comptime fn status_format(verbose: bool) -> str {
+    if verbose { "answer = {}, ready = {}" } else { "answer = {}" }
+}
+
 fn demo() -> !std.io.Error void {
     println("你好，Flurry！")!;
     let answer: u32 = 42;
-    println("answer = {}, ready = {}", answer, true)!;
+    println(status_format(false), answer)!;
+    println(status_format(true), answer, true)!;
 
     println("Linux pid = {}", std.os.unix.getpid())!;
 
