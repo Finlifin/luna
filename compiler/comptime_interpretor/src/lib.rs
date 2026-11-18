@@ -815,6 +815,7 @@ pub enum ErrorKind {
     ProgramContractRejected,
     TypeContractRejected,
     TypeContractUnresolved,
+    InvalidTypeContract(String),
     AbstractValueUnresolved,
     StepsExhausted,
     RepresentationSizeLimit,
@@ -855,6 +856,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
             ErrorKind::InvalidDefinition(reason) => write!(f, "interpretation {reason}")?,
+            ErrorKind::InvalidTypeContract(reason) => write!(f, "invalid type contract: {reason}")?,
             ErrorKind::InvalidPhase(reason) => {
                 write!(f, "interpretation phase: {}", reason.message)?
             }
@@ -956,6 +958,9 @@ pub enum ContractOutcome {
     Unknown,
 }
 
+/// A failed query produced no judgment about the proposition.
+pub type ContractQueryResult = Result<ContractOutcome, ErrorKind>;
+
 /// Compiler-owned selection service for the same immutable declaration world.
 /// Selection must discharge implementation and member formation obligations;
 /// the VM additionally validates inputs, phase and public signature before use.
@@ -983,7 +988,7 @@ pub type AssociatedResolver<'a> =
 
 enum TypeSolver<'a> {
     Unmetered(&'a dyn Fn(&nir::program::TypePredicate) -> ContractOutcome),
-    Budgeted(&'a dyn Fn(&nir::program::TypePredicate, &mut u64) -> ContractOutcome),
+    Budgeted(&'a BudgetedTypeSolver<'a>),
 }
 
 enum PointerCopyPermission<'a> {
@@ -2136,20 +2141,20 @@ impl<'a> Interpreter<'a> {
 
     /// Charge host proof work against this invocation, without granting the
     /// callback authority to replenish its execution budget.
-    pub fn with_budgeted_type_solver(
-        mut self,
-        solver: &'a dyn Fn(&nir::program::TypePredicate, &mut u64) -> ContractOutcome,
-    ) -> Self {
+    pub fn with_budgeted_type_solver(mut self, solver: &'a BudgetedTypeSolver<'a>) -> Self {
         self.type_solver = Some(TypeSolver::Budgeted(solver));
         self
     }
 
-    fn solve_type_predicate(&mut self, predicate: &nir::program::TypePredicate) -> ContractOutcome {
+    fn solve_type_predicate(
+        &mut self,
+        predicate: &nir::program::TypePredicate,
+    ) -> ContractQueryResult {
         match &self.type_solver {
-            Some(TypeSolver::Unmetered(solver)) => solver(predicate),
+            Some(TypeSolver::Unmetered(solver)) => Ok(solver(predicate)),
             Some(TypeSolver::Budgeted(solver)) => {
                 if self.budget.steps == 0 {
-                    return ContractOutcome::Unknown;
+                    return Err(ErrorKind::StepsExhausted);
                 }
                 host_budget::clamped(&mut self.budget.steps, |remaining| {
                     solver(predicate, remaining)
@@ -3764,7 +3769,9 @@ impl<'a> Interpreter<'a> {
         let outcome = match predicate.trivial_truth() {
             Some(true) => ContractOutcome::Satisfied,
             Some(false) => ContractOutcome::Rejected,
-            None => self.solve_type_predicate(predicate),
+            None => self
+                .solve_type_predicate(predicate)
+                .map_err(|kind| self.failure(kind, Some(source)))?,
         };
         match outcome {
             ContractOutcome::Satisfied => Ok(()),
@@ -7549,7 +7556,7 @@ mod metered_type_solver_tests {
         let solver = |_: &nir::program::TypePredicate, remaining: &mut u64| {
             calls.set(calls.get() + 1);
             *remaining = remaining.saturating_sub(7);
-            ContractOutcome::Unknown
+            Ok(ContractOutcome::Unknown)
         };
         let mut vm = Interpreter::for_comptime(
             &package,
@@ -7563,16 +7570,19 @@ mod metered_type_solver_tests {
         let available = vm.remaining_steps();
         assert_eq!(
             vm.solve_type_predicate(&predicate),
-            ContractOutcome::Unknown
+            Ok(ContractOutcome::Unknown)
         );
         assert_eq!(vm.remaining_steps(), available - 7);
-        vm.solve_type_predicate(&predicate);
+        vm.solve_type_predicate(&predicate).unwrap();
         assert_eq!(vm.remaining_steps(), 0);
-        vm.solve_type_predicate(&predicate);
+        assert_eq!(
+            vm.solve_type_predicate(&predicate),
+            Err(ErrorKind::StepsExhausted)
+        );
         assert_eq!(calls.get(), 2);
         let replenish = |_: &nir::program::TypePredicate, remaining: &mut u64| {
             *remaining = u64::MAX;
-            ContractOutcome::Satisfied
+            Ok(ContractOutcome::Satisfied)
         };
         let mut fresh = Interpreter::for_comptime(
             &package,
@@ -7586,7 +7596,7 @@ mod metered_type_solver_tests {
         let available = fresh.remaining_steps();
         assert_eq!(
             fresh.solve_type_predicate(&predicate),
-            ContractOutcome::Satisfied
+            Ok(ContractOutcome::Satisfied)
         );
         assert_eq!(fresh.remaining_steps(), available);
     }

@@ -100,7 +100,7 @@ impl<'a> SourceInvocationQueries<'a> {
         predicate: &n::TypePredicate,
         limits: Budget,
         remaining: &mut u64,
-    ) -> comptime_interpretor::ContractOutcome {
+    ) -> comptime_interpretor::ContractQueryResult {
         self.check_in_context(predicate, self.context, limits, remaining)
     }
 
@@ -112,8 +112,7 @@ impl<'a> SourceInvocationQueries<'a> {
         context: &Context,
         limits: Budget,
         remaining: &mut u64,
-    ) -> comptime_interpretor::ContractOutcome {
-        use comptime_interpretor::ContractOutcome;
+    ) -> comptime_interpretor::ContractQueryResult {
         let result = query_budget::invocation(remaining, limits, |budget| {
             capabilities::check_predicate_with(context, predicate, budget, |demand, budget| {
                 self.query(budget, |world, budget| {
@@ -121,10 +120,40 @@ impl<'a> SourceInvocationQueries<'a> {
                 })
             })
         });
-        match result {
-            Ok(ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,
-            Ok(ptc::Outcome::NotEntailed(_)) => ContractOutcome::Rejected,
-            _ => ContractOutcome::Unknown,
+        contract_result(result)
+    }
+}
+
+/// Use the same proof and accounting boundary for a driver-owned world.
+pub fn check_world_predicate(
+    world: &capabilities::World<'_>,
+    predicate: &n::TypePredicate,
+    limits: Budget,
+    remaining: &mut u64,
+) -> comptime_interpretor::ContractQueryResult {
+    contract_result(query_budget::invocation(remaining, limits, |budget| {
+        world.check_predicate_metered(predicate, budget)
+    }))
+}
+
+fn contract_result(
+    result: Result<ptc::Outcome, nir::NominalAdmissionError>,
+) -> comptime_interpretor::ContractQueryResult {
+    use comptime_interpretor::{ContractOutcome, ErrorKind};
+    use nir::NominalAdmissionError as Failure;
+    match result {
+        Ok(ptc::Outcome::Entailed(_)) => Ok(ContractOutcome::Satisfied),
+        Ok(ptc::Outcome::NotEntailed(_)) => Ok(ContractOutcome::Rejected),
+        Ok(ptc::Outcome::Unknown {
+            reason: ptc::UnknownReason::BudgetExhausted,
+            ..
+        })
+        | Err(Failure::Budget) => Err(ErrorKind::StepsExhausted),
+        Ok(ptc::Outcome::IllFormed(reason)) | Err(Failure::Invalid(reason)) => {
+            Err(ErrorKind::InvalidTypeContract(reason))
+        }
+        Ok(ptc::Outcome::Unknown { .. }) | Err(Failure::Unresolved(_)) => {
+            Ok(ContractOutcome::Unknown)
         }
     }
 }

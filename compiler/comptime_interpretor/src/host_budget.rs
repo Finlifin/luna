@@ -135,7 +135,7 @@ mod tests {
                 panic!("solver interrupted");
             }
             *fuel -= 1;
-            ContractOutcome::Satisfied
+            Ok(ContractOutcome::Satisfied)
         };
         let mut vm = Interpreter::for_comptime(&package, Budget::default())
             .unwrap()
@@ -144,13 +144,13 @@ mod tests {
         assert_eq!(vm.remaining_steps(), 0);
         assert_eq!(
             vm.solve_type_predicate(&predicate),
-            ContractOutcome::Unknown
+            Err(ErrorKind::StepsExhausted)
         );
         assert_eq!(calls.get(), 1);
         vm.budget.steps = 10;
         assert_eq!(
             vm.solve_type_predicate(&predicate),
-            ContractOutcome::Satisfied
+            Ok(ContractOutcome::Satisfied)
         );
         assert_eq!(vm.remaining_steps(), 9);
         assert_eq!(calls.get(), 2);

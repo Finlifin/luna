@@ -317,11 +317,11 @@ mod frame_tests {
             );
             calls.set(calls.get() + 1);
             *fuel = fuel.saturating_sub(11);
-            match mode.get() {
+            Ok(match mode.get() {
                 0 => ContractOutcome::Unknown,
                 1 => ContractOutcome::Rejected,
                 _ => ContractOutcome::Satisfied,
-            }
+            })
         };
         let mut vm = Interpreter::for_comptime(&package, Budget::default())
             .unwrap()

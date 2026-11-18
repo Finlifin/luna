@@ -275,11 +275,11 @@ fn direct_type_answers_leave_implementation_metadata_cold() {
     let mut fuel = 100_000;
     assert_eq!(
         queries.check(&different, Budget::default(), &mut fuel),
-        ContractOutcome::Rejected
+        Ok(ContractOutcome::Rejected)
     );
     assert_eq!(
         queries.check(&P::Not(Box::new(different)), Budget::default(), &mut fuel),
-        ContractOutcome::Satisfied
+        Ok(ContractOutcome::Satisfied)
     );
     assert!(fuel < 100_000);
     assert!(queries.world.borrow().is_none());
@@ -304,12 +304,12 @@ fn traits_in_restored_premises_can_decide_an_equality_goal() {
     );
     assert_eq!(
         queries.check_in_context(&equality, &restored, Budget::default(), &mut 100_000),
-        ContractOutcome::Satisfied
+        Ok(ContractOutcome::Satisfied)
     );
     assert!(queries.world.borrow().is_some());
     assert_ne!(
         queries.check(&equality, Budget::default(), &mut 100_000),
-        ContractOutcome::Satisfied
+        Ok(ContractOutcome::Satisfied)
     );
 }
 
@@ -321,7 +321,7 @@ fn all_three_services_share_one_construction_regardless_of_first_demand() {
     let demand = |queries: &SourceInvocationQueries<'_>, which, fuel: &mut u64| match which {
         0 => assert_eq!(
             queries.check(&predicate, Budget::default(), fuel),
-            ContractOutcome::Satisfied
+            Ok(ContractOutcome::Satisfied)
         ),
         1 => assert_eq!(queries.resolve(&method, fuel).unwrap().body, id(6)),
         2 => {
@@ -352,7 +352,7 @@ fn all_three_services_share_one_construction_regardless_of_first_demand() {
 }
 
 #[test]
-fn unknown_and_rejected_demands_do_not_poison_other_query_services() {
+fn exhausted_and_rejected_demands_do_not_poison_other_query_services() {
     use comptime_interpretor::ContractOutcome;
     let (package, method, access, predicate) = mixed_fixture();
     let context = Context::from_package(&package).unwrap();
@@ -372,7 +372,7 @@ fn unknown_and_rejected_demands_do_not_poison_other_query_services() {
                 },
                 &mut fuel
             ),
-            ContractOutcome::Unknown,
+            Err(comptime_interpretor::ErrorKind::StepsExhausted),
         );
         // A bulk preflight can reject before doing work. Once some metadata
         // has been examined, its work is retained without charging the whole
@@ -393,13 +393,13 @@ fn unknown_and_rejected_demands_do_not_poison_other_query_services() {
     );
     assert_eq!(
         queries.check(&predicate, Budget::default(), &mut 0),
-        ContractOutcome::Unknown
+        Err(comptime_interpretor::ErrorKind::StepsExhausted)
     );
     assert_eq!(queries.resolve(&method, &mut fuel).unwrap().body, id(6));
     let rejected = n::TypePredicate::Equal(ty(Primitive::Bool), ty(Primitive::Char));
     assert_eq!(
         queries.check(&rejected, Budget::default(), &mut fuel),
-        ContractOutcome::Rejected
+        Ok(ContractOutcome::Rejected)
     );
     let mut invalid = access.clone();
     let K::AssociatedValue { member, .. } = &mut invalid.kind else {
@@ -411,7 +411,7 @@ fn unknown_and_rejected_demands_do_not_poison_other_query_services() {
     assert_eq!(error.source, Some(invalid.source));
     assert_eq!(
         queries.check(&predicate, Budget::default(), &mut fuel),
-        ContractOutcome::Satisfied
+        Ok(ContractOutcome::Satisfied)
     );
     assert_eq!(queries.resolve(&method, &mut fuel).unwrap().body, id(6));
     assert!(queries.associated(&access, &mut fuel).is_ok());
@@ -429,9 +429,23 @@ fn restored_proof_context_is_local_to_the_demand() {
     };
     let scoped_predicate = n::TypePredicate::Equal(bound.clone(), ty(Primitive::Bool));
     let mut restored = context.theory_in_scope(vec![vec![nir::Sort::Type]]);
+    let open = restored.fork();
+    let n::TypePredicate::Trait(mut requirement) = predicate.clone() else {
+        unreachable!("fixture's implemented interface")
+    };
+    requirement.subject = bound.clone();
+    let scoped_trait = n::TypePredicate::Trait(requirement);
     restored.assume(ptc::Formula::equal(bound, ty(Primitive::Bool)));
     let queries = SourceInvocationQueries::new(&package, &context, &[]);
     for _ in 0..2 {
+        assert_eq!(
+            queries.check_in_context(&scoped_trait, &open, Budget::default(), &mut 100_000),
+            Ok(ContractOutcome::Unknown)
+        );
+        assert_eq!(
+            queries.check_in_context(&scoped_trait, &restored, Budget::default(), &mut 100_000),
+            Ok(ContractOutcome::Satisfied)
+        );
         assert_eq!(
             queries.check_in_context(
                 &scoped_predicate,
@@ -439,15 +453,15 @@ fn restored_proof_context_is_local_to_the_demand() {
                 Budget::default(),
                 &mut 100_000
             ),
-            ContractOutcome::Satisfied
+            Ok(ContractOutcome::Satisfied)
         );
-        assert_eq!(
+        assert!(matches!(
             queries.check(&scoped_predicate, Budget::default(), &mut 100_000),
-            ContractOutcome::Unknown
-        );
+            Err(comptime_interpretor::ErrorKind::InvalidTypeContract(_))
+        ));
         assert_eq!(
             queries.check(&predicate, Budget::default(), &mut 100_000),
-            ContractOutcome::Satisfied
+            Ok(ContractOutcome::Satisfied)
         );
         assert_eq!(queries.resolve(&method, &mut 100_000).unwrap().body, id(6));
         assert!(queries.associated(&access, &mut 100_000).is_ok());
@@ -467,11 +481,11 @@ fn identical_ids_in_changed_sources_do_not_share_associated_or_type_authority() 
     for _ in 0..2 {
         assert_eq!(
             original.check(&predicate, Budget::default(), &mut 100_000),
-            ContractOutcome::Satisfied
+            Ok(ContractOutcome::Satisfied)
         );
         assert_ne!(
             other.check(&predicate, Budget::default(), &mut 100_000),
-            ContractOutcome::Satisfied
+            Ok(ContractOutcome::Satisfied)
         );
         assert!(original.associated(&access, &mut 100_000).is_ok());
         assert_eq!(
@@ -545,14 +559,14 @@ fn retained_snapshots_share_metadata_across_fresh_invocation_scopes() {
     let mut cold = 100_000;
     assert_eq!(
         first.check(&predicate, Budget::default(), &mut cold),
-        ContractOutcome::Satisfied
+        Ok(ContractOutcome::Satisfied)
     );
     let next =
         SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&sibling), &context, &[]);
     let mut warm = 100_000;
     assert_eq!(
         next.check(&predicate, Budget::default(), &mut warm),
-        ContractOutcome::Satisfied
+        Ok(ContractOutcome::Satisfied)
     );
     assert!(cold < warm && warm < 100_000);
     {
@@ -648,7 +662,6 @@ fn retained_metadata_cannot_share_premises_or_changed_source_authority() {
 
 #[test]
 fn failed_retained_construction_is_retryable_without_publishing_partial_metadata() {
-    use comptime_interpretor::ContractOutcome;
     use std::sync::Arc;
     let (package, method, _, predicate) = mixed_fixture();
     let context = Context::from_package(&package).unwrap();
@@ -658,7 +671,7 @@ fn failed_retained_construction_is_retryable_without_publishing_partial_metadata
     for allowance in [0, 1, 128] {
         assert_eq!(
             queries.check(&predicate, Budget::default(), &mut { allowance }),
-            ContractOutcome::Unknown
+            Err(comptime_interpretor::ErrorKind::StepsExhausted)
         );
         assert!(queries.world.borrow().is_none());
     }

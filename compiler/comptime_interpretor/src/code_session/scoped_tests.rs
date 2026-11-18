@@ -101,7 +101,7 @@ fn check_source_forks(phase_checked: bool) {
         CodeSession::new(package.clone())
     };
     let mut sibling = parent.fork_for_source(package.clone());
-    let solver = |_: &nir::program::TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(ContractOutcome::Unknown);
     let services = || SourceResolvers {
         types: &solver,
         methods: &unavailable,
@@ -198,7 +198,7 @@ fn check_source_forks(phase_checked: bool) {
 fn direct_source_entries_check_closed_capabilities_without_a_formation_receipt() {
     let package = source();
     let mode = std::cell::Cell::new(ContractOutcome::Unknown);
-    let solver = |_: &nir::program::TypePredicate, _: &mut u64| mode.get();
+    let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(mode.get());
     let services = || SourceResolvers {
         types: &solver,
         methods: &unavailable,
@@ -263,7 +263,7 @@ fn warm_metadata_and_code_cannot_retain_premises_or_host_answers() {
         let calls = std::cell::Cell::new(0);
         let solver = |_: &nir::program::TypePredicate, _: &mut u64| {
             calls.set(calls.get() + 1);
-            ContractOutcome::Unknown
+            Ok(ContractOutcome::Unknown)
         };
         let assumptions = if supplied { vec![premise(2)] } else { vec![] };
         let mut budget = Budget::default();
@@ -317,7 +317,7 @@ fn warm_metadata_and_code_cannot_retain_premises_or_host_answers() {
 fn abstract_authority_is_fresh_and_failed_construction_cannot_publish_it() {
     let package = source();
     let mut session = CodeSession::new(package.clone());
-    let solver = |_: &nir::program::TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(ContractOutcome::Unknown);
     let services = || SourceResolvers {
         types: &solver,
         methods: &unavailable,
@@ -391,7 +391,7 @@ fn abstract_authority_is_fresh_and_failed_construction_cannot_publish_it() {
 fn scoped_session_rechecks_world_identity_invalid_premises_and_budget() {
     let package = source();
     let mut session = CodeSession::new(package.clone());
-    let solver = |_: &nir::program::TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(ContractOutcome::Unknown);
     let services = || SourceResolvers {
         types: &solver,
         methods: &unavailable,

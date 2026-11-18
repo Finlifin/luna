@@ -4,7 +4,7 @@ use super::*;
 fn associated_completion_rechecks_values_and_always_releases_initializer_state() {
     let (package, nominal, packet) = fixture();
     let outcome = Cell::new(ContractOutcome::Unknown);
-    let solver = |_: &nir::program::TypePredicate, _: &mut u64| outcome.get();
+    let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(outcome.get());
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
         .with_budgeted_type_solver(&solver);
@@ -61,7 +61,7 @@ fn associated_completion_rechecks_values_and_always_releases_initializer_state()
 fn dynamic_clause_packets_check_formation_before_freezing_values() {
     let (package, nominal, packet) = fixture();
     let outcome = Cell::new(ContractOutcome::Unknown);
-    let solver = |_: &nir::program::TypePredicate, _: &mut u64| outcome.get();
+    let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(outcome.get());
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
         .with_budgeted_type_solver(&solver);
@@ -132,7 +132,7 @@ fn enum_names_check_formation_on_both_execution_paths() {
     let code = Arc::new(comptime_compiler::compile(&body, &mut 10_000).unwrap());
     for compiled in [false, true] {
         let outcome = Cell::new(ContractOutcome::Unknown);
-        let solver = |_: &nir::program::TypePredicate, _: &mut u64| outcome.get();
+        let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(outcome.get());
         let mut vm = Interpreter::for_comptime(&package, Budget::default())
             .unwrap()
             .with_budgeted_type_solver(&solver);

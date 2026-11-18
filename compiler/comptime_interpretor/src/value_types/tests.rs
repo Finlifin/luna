@@ -51,7 +51,7 @@ fn active_value_checks_discharge_local_obligations_without_retaining_assumptions
     let solver = |_: &nir::program::TypePredicate, fuel: &mut u64| {
         calls.set(calls.get() + 1);
         *fuel = fuel.saturating_sub(7);
-        outcome.get()
+        Ok(outcome.get())
     };
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
@@ -102,7 +102,7 @@ fn nested_shapes_finish_before_queries_and_budget_failure_can_retry() {
     let calls = Cell::new(0);
     let solver = |_: &nir::program::TypePredicate, _: &mut u64| {
         calls.set(calls.get() + 1);
-        ContractOutcome::Satisfied
+        Ok(ContractOutcome::Satisfied)
     };
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
@@ -138,7 +138,7 @@ fn frozen_nominal_values_recheck_the_receiving_world() {
         fields: vec![Term::Bool(true)],
     };
     for result in [ContractOutcome::Satisfied, ContractOutcome::Rejected] {
-        let solver = |_: &nir::program::TypePredicate, _: &mut u64| result;
+        let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(result);
         let mut vm = Interpreter::for_comptime(&package, Budget::default())
             .unwrap()
             .with_budgeted_type_solver(&solver);
@@ -192,7 +192,7 @@ fn aggregate_formation_failure_precedes_field_effects_on_both_execution_paths() 
     let code = Arc::new(comptime_compiler::compile(&body, &mut 10_000).unwrap());
     for compiled in [false, true] {
         let outcome = Cell::new(ContractOutcome::Unknown);
-        let solver = |_: &nir::program::TypePredicate, _: &mut u64| outcome.get();
+        let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(outcome.get());
         let mut vm = Interpreter::for_comptime(&package, Budget::default())
             .unwrap()
             .with_budgeted_type_solver(&solver);
@@ -242,7 +242,7 @@ fn pending_nominal_domains_use_the_selected_associated_view() {
         declaration: id(1),
         arguments: vec![projection],
     };
-    let solver = |_: &nir::program::TypePredicate, _: &mut u64| ContractOutcome::Satisfied;
+    let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(ContractOutcome::Satisfied);
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
         .with_budgeted_type_solver(&solver);
@@ -303,7 +303,7 @@ fn optional_and_error_construction_admit_nominal_payloads_on_both_paths() {
             },
         ),
     ];
-    let solver = |_: &nir::program::TypePredicate, _: &mut u64| ContractOutcome::Satisfied;
+    let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(ContractOutcome::Satisfied);
     for (body, expected) in cases {
         let code = Arc::new(comptime_compiler::compile(&body, &mut 10_000).unwrap());
         for compiled in [false, true] {

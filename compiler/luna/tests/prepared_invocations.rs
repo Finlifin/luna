@@ -343,7 +343,7 @@ fn source_sessions_reuse_metadata_without_reusing_closed_dispatch_or_host_author
     let context = elaboration::ptc::Context::from_package(&package).unwrap();
     let allow = Cell::new(false);
     let demands = Cell::new(0);
-    let solver = |_: &nir::program::TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(ContractOutcome::Unknown);
     let methods = |callee: &nir::program::Expr, fuel: &mut u64| {
         demands.set(demands.get() + 1);
         if !allow.get() {

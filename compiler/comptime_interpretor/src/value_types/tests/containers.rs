@@ -46,7 +46,7 @@ fn capture_failure_does_not_publish_a_closure_and_retry_owns_fresh_storage() {
     let code = Arc::new(comptime_compiler::compile(&body, &mut 10_000).unwrap());
     for compiled in [false, true] {
         let outcome = Cell::new(ContractOutcome::Unknown);
-        let solver = |_: &nir::program::TypePredicate, _: &mut u64| outcome.get();
+        let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(outcome.get());
         let mut vm = Interpreter::for_comptime(&package, Budget::default())
             .unwrap()
             .with_budgeted_type_solver(&solver);
@@ -95,7 +95,7 @@ fn object_reads_and_edits_preserve_query_failures_and_old_snapshots() {
     let (package, nominal, packet) = fixture();
     let original = object(&nominal, packet.clone());
     let outcome = Cell::new(ContractOutcome::Unknown);
-    let solver = |_: &nir::program::TypePredicate, _: &mut u64| outcome.get();
+    let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(outcome.get());
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
         .with_budgeted_type_solver(&solver);
@@ -182,7 +182,7 @@ fn rejected_object_replacement_keeps_reference_storage_and_can_retry() {
     let mut target =
         Value::ComptimeReference(value_reference::ValueReference::root(storage.clone()));
     let outcome = Cell::new(ContractOutcome::Unknown);
-    let solver = |_: &nir::program::TypePredicate, _: &mut u64| outcome.get();
+    let solver = |_: &nir::program::TypePredicate, _: &mut u64| Ok(outcome.get());
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
         .with_budgeted_type_solver(&solver);

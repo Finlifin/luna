@@ -180,7 +180,7 @@ fn source_and_closed_sessions_do_not_share_selected_associated_evidence() {
     let source = Arc::new(package(false, 0, 1));
     let mut code = CodeSession::new(source.clone());
     let requests = Cell::new(0);
-    let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    let solver = |_: &TypePredicate, _: &mut u64| Ok(ContractOutcome::Unknown);
     let methods = |expr: &Expr, _: &mut u64| {
         Err(crate::Error {
             kind: ErrorKind::UnmaterializedDispatch,

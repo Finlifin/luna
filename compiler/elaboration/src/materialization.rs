@@ -4,8 +4,8 @@ use nir::program as n;
 use std::collections::BTreeSet;
 
 pub use ::materialization::{
-    DeclarationSnapshot, DeclarationSource, SourceInvocationQueries, dispatch_instances,
-    dispatch_instances_for_invocation, dispatch_instances_for_roots,
+    DeclarationSnapshot, DeclarationSource, SourceInvocationQueries, check_world_predicate,
+    dispatch_instances, dispatch_instances_for_invocation, dispatch_instances_for_roots,
     resolve_associated_value_for_invocation, resolve_method_for_invocation,
     resolve_method_identity_in_context, resolve_method_instance,
 };

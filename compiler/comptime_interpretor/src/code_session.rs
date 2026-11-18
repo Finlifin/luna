@@ -777,7 +777,7 @@ mod tests {
             }],
             ..Default::default()
         });
-        let types = |_: &nir::program::TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+        let types = |_: &nir::program::TypePredicate, _: &mut u64| Ok(ContractOutcome::Unknown);
         let methods = |_: &Expr, _: &mut u64| {
             Err(Error {
                 kind: ErrorKind::UnmaterializedDispatch,

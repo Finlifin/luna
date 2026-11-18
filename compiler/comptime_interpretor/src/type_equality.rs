@@ -43,11 +43,17 @@ impl Interpreter<'_> {
         // a proof of its negation separately; Unknown must not select a branch.
         if self.type_solver.is_some() {
             self.tick(Some(source))?;
-            if self.solve_type_predicate(&predicate) == ContractOutcome::Satisfied {
+            if self
+                .solve_type_predicate(&predicate)
+                .map_err(|kind| self.failure(kind, Some(source)))?
+                == ContractOutcome::Satisfied
+            {
                 return Ok(Value::Bool(true));
             }
             self.tick(Some(source))?;
-            if self.solve_type_predicate(&nir::program::TypePredicate::Not(Box::new(predicate)))
+            if self
+                .solve_type_predicate(&nir::program::TypePredicate::Not(Box::new(predicate)))
+                .map_err(|kind| self.failure(kind, Some(source)))?
                 == ContractOutcome::Satisfied
             {
                 return Ok(Value::Bool(false));

@@ -7,14 +7,18 @@ impl Interpreter<'_> {
         &mut self,
         predicate: &P,
         depth: usize,
-    ) -> ContractOutcome {
+    ) -> ContractQueryResult {
         use ContractOutcome::*;
         // A source declaration catalog is not a proof of applicability. Only
         // concrete dispatch selected by materialization supplies this evidence.
-        if self.graph.is_none() || depth >= 128 || self.tick(None).is_err() {
-            return Unknown;
+        if self.graph.is_none() {
+            return Ok(Unknown);
         }
-        match predicate {
+        if depth >= 128 {
+            return Err(ErrorKind::DepthExhausted);
+        }
+        self.tick(None).map_err(|error| error.kind)?;
+        Ok(match predicate {
             P::Bool(value) => {
                 if *value {
                     Satisfied
@@ -23,15 +27,13 @@ impl Interpreter<'_> {
                 }
             }
             P::Equal(left, right) => {
-                let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-                let mut fuel = before;
-                let charged = [left, right]
-                    .into_iter()
-                    .try_for_each(|ty| nir::type_computations::charge_term(ty, &mut fuel));
-                self.budget.steps -= (before - fuel) as u64;
-                if charged.is_err() {
-                    return Unknown;
-                }
+                self.charge_copy_work(None, |fuel| {
+                    for ty in [left, right] {
+                        nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel)?;
+                    }
+                    Ok(())
+                })
+                .map_err(|error| error.kind)?;
                 match predicate.trivial_truth() {
                     Some(true) => Satisfied,
                     Some(false) => Rejected,
@@ -39,15 +41,15 @@ impl Interpreter<'_> {
                 }
             }
             P::Trait(requirement) => {
-                let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-                let mut fuel = before;
-                let charged = std::iter::once(&requirement.subject)
-                    .chain(&requirement.interface_arguments)
-                    .try_for_each(|ty| nir::type_computations::charge_term(ty, &mut fuel));
-                self.budget.steps -= (before - fuel) as u64;
-                if charged.is_err() {
-                    return Unknown;
-                }
+                self.charge_copy_work(None, |fuel| {
+                    for ty in std::iter::once(&requirement.subject)
+                        .chain(&requirement.interface_arguments)
+                    {
+                        nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel)?;
+                    }
+                    Ok(())
+                })
+                .map_err(|error| error.kind)?;
                 let key = (
                     requirement.interface_instance(),
                     requirement.subject.clone(),
@@ -58,7 +60,7 @@ impl Interpreter<'_> {
                     Unknown
                 }
             }
-            P::Not(inner) => match self.retained_type_contract(inner, depth + 1) {
+            P::Not(inner) => match self.retained_type_contract(inner, depth + 1)? {
                 Satisfied => Rejected,
                 Rejected => Satisfied,
                 Unknown => Unknown,
@@ -67,9 +69,9 @@ impl Interpreter<'_> {
                 let conjunction = matches!(predicate, P::And(_));
                 let mut unknown = false;
                 for part in parts {
-                    match self.retained_type_contract(part, depth + 1) {
-                        Rejected if conjunction => return Rejected,
-                        Satisfied if !conjunction => return Satisfied,
+                    match self.retained_type_contract(part, depth + 1)? {
+                        Rejected if conjunction => return Ok(Rejected),
+                        Satisfied if !conjunction => return Ok(Satisfied),
                         Unknown => unknown = true,
                         _ => {}
                     }
@@ -82,7 +84,7 @@ impl Interpreter<'_> {
                     Rejected
                 }
             }
-        }
+        })
     }
 }
 
@@ -143,17 +145,20 @@ mod tests {
         ] {
             assert_eq!(
                 vm.solve_type_predicate(&predicate),
-                ContractOutcome::Unknown
+                Ok(ContractOutcome::Unknown)
             );
             assert_eq!(
                 vm.solve_type_predicate(&P::Not(Box::new(predicate))),
-                ContractOutcome::Unknown
+                Ok(ContractOutcome::Unknown)
             );
         }
-        assert_eq!(vm.solve_type_predicate(&known), ContractOutcome::Satisfied);
+        assert_eq!(
+            vm.solve_type_predicate(&known),
+            Ok(ContractOutcome::Satisfied)
+        );
         assert_eq!(
             vm.solve_type_predicate(&P::Not(Box::new(known.clone()))),
-            ContractOutcome::Rejected
+            Ok(ContractOutcome::Rejected)
         );
         for (predicate, expected) in [
             (
@@ -169,17 +174,23 @@ mod tests {
                 ContractOutcome::Rejected,
             ),
         ] {
-            assert_eq!(vm.solve_type_predicate(&predicate), expected);
+            assert_eq!(vm.solve_type_predicate(&predicate), Ok(expected));
         }
         vm.budget.steps = 0;
-        assert_eq!(vm.solve_type_predicate(&known), ContractOutcome::Unknown);
+        assert_eq!(
+            vm.solve_type_predicate(&known),
+            Err(ErrorKind::StepsExhausted)
+        );
         vm.budget.steps = 1000;
-        assert_eq!(vm.solve_type_predicate(&known), ContractOutcome::Satisfied);
+        assert_eq!(
+            vm.solve_type_predicate(&known),
+            Ok(ContractOutcome::Satisfied)
+        );
         let missing_graph = iir::Package::default();
         let mut missing_vm = Interpreter::from_iir(&missing_graph, Budget::default()).unwrap();
         assert_eq!(
             missing_vm.solve_type_predicate(&known),
-            ContractOutcome::Unknown
+            Ok(ContractOutcome::Unknown)
         );
     }
 
@@ -191,7 +202,7 @@ mod tests {
             .with_type_solver(&|_| ContractOutcome::Rejected);
         assert_eq!(
             vm.solve_type_predicate(&P::Trait(requirement(true))),
-            ContractOutcome::Rejected
+            Ok(ContractOutcome::Rejected)
         );
     }
 }

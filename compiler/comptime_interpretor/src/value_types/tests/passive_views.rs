@@ -76,7 +76,7 @@ fn retained_capability_limits_cannot_trigger_a_second_proof_attempt() {
     let calls = Cell::new(0);
     let solver = |_: &nir::program::TypePredicate, _: &mut u64| {
         calls.set(calls.get() + 1);
-        ContractOutcome::Satisfied
+        Ok(ContractOutcome::Satisfied)
     };
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()

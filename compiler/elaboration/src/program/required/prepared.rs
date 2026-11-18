@@ -109,7 +109,7 @@ impl RequiredWorld {
         context: &crate::ptc::Context,
         predicate: &n::TypePredicate,
         remaining: &mut u64,
-    ) -> comptime_interpretor::ContractOutcome {
+    ) -> comptime_interpretor::ContractQueryResult {
         crate::materialization::SourceInvocationQueries::in_source(
             DeclarationSource::Snapshot(&self.source),
             context,
@@ -371,19 +371,31 @@ impl PreparedRequired {
             &invocation_assumptions,
         );
         let type_solver = |predicate: &n::TypePredicate, remaining: &mut u64| {
-            use comptime_interpretor::ContractOutcome;
+            use comptime_interpretor::ErrorKind;
             let restored;
             let (predicate, proof_context) = if scoped_parameters.is_empty() {
                 (predicate, invocation_type_context)
             } else {
-                let Ok(value) = predicate.instantiate_parameters_in_scope(
+                let before = usize::try_from(*remaining).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let charged = nir::copy_budget::charge_predicate_substitution(
+                    predicate,
                     &scoped_parameters,
                     &scoped_arguments,
-                    &input_frames,
-                ) else {
-                    return ContractOutcome::Unknown;
-                };
-                restored = value;
+                    &mut fuel,
+                );
+                *remaining -= (before - fuel) as u64;
+                charged.map_err(|failure| match failure {
+                    nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
+                    nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
+                })?;
+                restored = predicate
+                    .instantiate_parameters_in_scope(
+                        &scoped_parameters,
+                        &scoped_arguments,
+                        &input_frames,
+                    )
+                    .map_err(|error| ErrorKind::InvalidTypeContract(error.to_string()))?;
                 (&restored, scoped_context.as_ref().unwrap())
             };
             source_queries.check_in_context(
@@ -703,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn first_query_spends_its_budget_and_retries_without_partial_publication() {
+    fn direct_proof_retries_without_publishing_a_declaration_directory() {
         use comptime_interpretor::ContractOutcome;
         let prepared = literal_preparation(false);
         let predicate = n::TypePredicate::Equal(p(P::Bool), p(P::Bool));
@@ -712,7 +724,7 @@ mod tests {
             prepared
                 .world
                 .solve(&[], &prepared.context, &predicate, &mut tiny),
-            ContractOutcome::Unknown
+            Err(comptime_interpretor::ErrorKind::StepsExhausted)
         );
         assert_eq!(tiny, 0);
         let mut empty = crate::ptc::Budget {
@@ -725,9 +737,20 @@ mod tests {
             prepared
                 .world
                 .solve(&[], &prepared.context, &predicate, &mut remaining),
-            ContractOutcome::Satisfied
+            Ok(ContractOutcome::Satisfied)
         );
         assert!(remaining < 100_000);
+        // Equality consumed only PTC work. Only a separate successful
+        // declaration demand can make a zero-cost directory read succeed.
+        assert!(matches!(
+            prepared.world.source.prepare(&mut empty),
+            Err(nir::NominalAdmissionError::Budget)
+        ));
+        prepared
+            .world
+            .source
+            .prepare(&mut crate::ptc::Budget::default())
+            .unwrap();
         prepared.world.source.prepare(&mut empty).unwrap();
         assert_eq!(empty.steps, 0);
         assert!(prepared.world.code.lock().unwrap().is_none());
@@ -1081,12 +1104,12 @@ mod tests {
                     prepared
                         .world
                         .solve(&[], &with_premise, &predicate, &mut 100_000),
-                    ContractOutcome::Satisfied
+                    Ok(ContractOutcome::Satisfied)
                 );
-                assert_eq!(
+                assert!(matches!(
                     queries.check(&predicate, crate::ptc::Budget::default(), &mut 100_000),
-                    ContractOutcome::Unknown
-                );
+                    Err(comptime_interpretor::ErrorKind::InvalidTypeContract(_))
+                ));
             }
             drop(queries);
             drop(scope);

@@ -68,7 +68,7 @@ fn completed_phase_receipt_reaches_cold_sessions_without_granting_body_authority
     let copy = std::sync::Arc::new(source.as_ref().clone());
     assert!(CodeSession::with_phase_checked_source(copy.clone(), &phase).is_err());
     let seed = CodeSession::with_phase_checked_source(source.clone(), &phase).unwrap();
-    let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    let solver = |_: &TypePredicate, _: &mut u64| Ok(ContractOutcome::Unknown);
     for resolving in [false, true] {
         let mut session = seed.fork_for_source(source.clone());
         let mut budget = Budget {
@@ -153,7 +153,7 @@ fn completed_phase_receipt_consumes_budget_and_requires_exact_source() {
 }
 
 fn construct(route: u8, source: &Package, budget: &mut Budget) -> Result<(), Error> {
-    let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    let solver = |_: &TypePredicate, _: &mut u64| Ok(ContractOutcome::Unknown);
     match route {
         0 => Interpreter::for_comptime_in_budget(source, &[], budget).map(|_| ()),
         1 => {
@@ -193,7 +193,7 @@ fn source_constructors_reuse_phase_domains_without_reusing_body_authority() {
             domains: vec![Term::Primitive(Primitive::Type)],
         })
         .collect();
-    let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    let solver = |_: &TypePredicate, _: &mut u64| Ok(ContractOutcome::Unknown);
     for resolving in [false, true] {
         let mut budget = Budget::default();
         let mut vm = if resolving {
@@ -294,7 +294,7 @@ fn failed_phase_preparation_cannot_publish_session_evidence() {
     let mut remaining = Budget::default();
     prepare_phase_inspection(&source, &mut remaining).unwrap();
     let phase_cost = Budget::default().steps - remaining.steps;
-    let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    let solver = |_: &TypePredicate, _: &mut u64| Ok(ContractOutcome::Unknown);
     for resolving in [false, true] {
         let mut session = CodeSession::new(source.clone());
         let mut cold = None;
@@ -355,7 +355,7 @@ fn resolving_view_excludes_physical_dispatch_without_weakening_closed_admission(
         associated_initializers: vec![],
     });
     for source in [&clean, &polluted] {
-        let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+        let solver = |_: &TypePredicate, _: &mut u64| Ok(ContractOutcome::Unknown);
         let mut budget = Budget::default();
         let mut vm = Interpreter::for_comptime_resolving_in_budget(
             source,
@@ -420,7 +420,7 @@ fn source_definition_admission_demands_proof_and_recovers_without_publication() 
         assert_eq!(predicate, &obligation);
         calls.set(calls.get() + 1);
         *steps = steps.checked_sub(1).unwrap();
-        result.get()
+        Ok(result.get())
     };
     let mut session =
         DefinitionAdmissionSession::new_with_type_solver(&source, &solver, &mut Budget::default())

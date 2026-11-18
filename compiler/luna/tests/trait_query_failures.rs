@@ -32,7 +32,7 @@ fn source_publication_checks_field_formation_in_the_declared_world() {
 
 #[test]
 fn source_selection_is_demanded_and_concrete_methods_cannot_bypass_the_host() {
-    use comptime_interpretor::{Budget, ContractOutcome, ErrorKind, Interpreter, SourceResolvers};
+    use comptime_interpretor::{Budget, ErrorKind, Interpreter, SourceResolvers};
     use std::cell::Cell;
     use type_resolution::{capabilities::World, dispatch::DeclarationWorld, ptc};
 
@@ -73,18 +73,12 @@ fn source_selection_is_demanded_and_concrete_methods_cannot_bypass_the_host() {
     let allow = Cell::new(false);
     let solver = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {
         type_calls.set(type_calls.get() + 1);
-        let before = usize::try_from(*fuel).unwrap_or(usize::MAX);
-        let mut budget = ptc::Budget {
-            steps: before,
-            ..Default::default()
-        };
-        let result = world.check_predicate_metered(predicate, &mut budget);
-        *fuel -= (before - budget.steps) as u64;
-        match result {
-            Ok(ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,
-            Ok(ptc::Outcome::NotEntailed(_)) => ContractOutcome::Rejected,
-            _ => ContractOutcome::Unknown,
-        }
+        elaboration::materialization::check_world_predicate(
+            &world,
+            predicate,
+            ptc::Budget::default(),
+            fuel,
+        )
     };
     let methods = |callee: &nir::program::Expr, fuel: &mut u64| {
         method_calls.set(method_calls.get() + 1);
@@ -448,6 +442,79 @@ fn invocation_contract_exhaustion_is_not_a_protocol_error_or_a_cached_result() {
         assert!(!value.reused);
         assert!(call.last_execution_stats().bytecode_invocations > 0);
         assert_eq!(call.cached_results(), 0);
+    }
+}
+
+#[test]
+fn equality_preserves_each_proof_limit_and_recovers_in_the_same_invocation_world() {
+    use comptime_interpretor::{ErrorKind, Interpreter};
+    use elaboration::{materialization::SourceInvocationQueries, ptc};
+    use std::cell::Cell;
+
+    let source = "comptime fn compare(left: Type, right: Type) -> bool { left == right }";
+    let package = sysroot::compile(source).unwrap();
+    let compare = package
+        .functions
+        .iter()
+        .find(|f| f.name == "compare")
+        .unwrap()
+        .declaration;
+    let context = ptc::Context::from_package(&package).unwrap();
+    let queries = SourceInvocationQueries::new(&package, &context, &[]);
+    for reference in [false, true] {
+        let calls = Cell::new(0);
+        let limited = Cell::new(None);
+        let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
+            calls.set(calls.get() + 1);
+            let mut limits = ptc::Budget::default();
+            if Some(calls.get()) == limited.get() {
+                limits.steps = 1;
+            }
+            queries.check(predicate, limits, remaining)
+        };
+        let methods = |expr: &nir::program::Expr, fuel: &mut u64| queries.resolve(expr, fuel);
+        let associated = |expr: &nir::program::Expr, fuel: &mut u64| queries.associated(expr, fuel);
+        let mut vm = Interpreter::for_comptime_resolving_in_budget(
+            &package,
+            &[],
+            &[],
+            &[],
+            comptime_interpretor::SourceResolvers {
+                types: &solver,
+                methods: &methods,
+                associated: &associated,
+            },
+            &mut { sysroot::COMPTIME_BUDGET },
+        )
+        .unwrap();
+        if reference {
+            vm = vm.with_reference_execution();
+        }
+        for cap in [Some(1), Some(2), None] {
+            limited.set(cap);
+            calls.set(0);
+            let result = vm.invoke(
+                compare,
+                vec![
+                    Value::Type(Term::Primitive(Primitive::Bool)),
+                    Value::Type(Term::Primitive(Primitive::Char)),
+                ],
+            );
+            if let Some(index) = cap {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                let span = error.source.unwrap();
+                assert_eq!(
+                    &source[span.start as usize..span.end as usize],
+                    "left == right"
+                );
+                assert_eq!(calls.get(), index);
+                assert!(vm.remaining_steps() > 0);
+            } else {
+                assert_eq!(result.unwrap(), Value::Bool(false));
+                assert_eq!(calls.get(), 2);
+            }
+        }
     }
 }
 

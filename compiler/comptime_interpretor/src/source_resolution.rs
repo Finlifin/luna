@@ -2,7 +2,7 @@
 use super::*;
 
 pub type BudgetedTypeSolver<'a> =
-    dyn Fn(&nir::program::TypePredicate, &mut u64) -> ContractOutcome + 'a;
+    dyn Fn(&nir::program::TypePredicate, &mut u64) -> ContractQueryResult + 'a;
 
 /// Services for one immutable source world. Supplying all three lets execution
 /// demand evidence and code without preselecting unrelated implementations.

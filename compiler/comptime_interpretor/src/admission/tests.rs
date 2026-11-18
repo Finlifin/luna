@@ -106,11 +106,11 @@ fn alias_capability_failure_prevents_body_effects_and_can_retry() {
     let solver = |predicate: &TypePredicate, fuel: &mut u64| {
         assert_eq!(predicate, &TypePredicate::Trait(capability.clone()));
         *fuel = fuel.saturating_sub(9);
-        match mode.get() {
+        Ok(match mode.get() {
             0 => ContractOutcome::Unknown,
             1 => ContractOutcome::Rejected,
             _ => ContractOutcome::Satisfied,
-        }
+        })
     };
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
@@ -262,7 +262,7 @@ fn callable_formation_keeps_inner_binders_out_of_closed_proof_queries() {
     let queried = Cell::new(0);
     let solver = |_: &TypePredicate, _: &mut u64| {
         queried.set(queried.get() + 1);
-        ContractOutcome::Rejected
+        Ok(ContractOutcome::Rejected)
     };
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()

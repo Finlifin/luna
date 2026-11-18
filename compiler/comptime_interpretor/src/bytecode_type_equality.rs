@@ -59,11 +59,11 @@ fn proofs_unknown_and_recovery_preserve_the_query_protocol() {
                 let solver = |predicate: &TypePredicate, budget: &mut u64| {
                     *budget = budget.saturating_sub(3);
                     queries.borrow_mut().push(predicate.clone());
-                    match predicate {
+                    Ok(match predicate {
                         TypePredicate::Equal(..) => outcome,
                         TypePredicate::Not(_) if prove_negation => ContractOutcome::Satisfied,
                         _ => ContractOutcome::Unknown,
-                    }
+                    })
                 };
                 let mut vm = Interpreter::for_comptime(&package, Budget::default())
                     .unwrap()
@@ -173,7 +173,7 @@ fn exhausted_proof_budget_stops_before_the_negation_query() {
         let solver = |_: &TypePredicate, remaining: &mut u64| {
             calls.set(calls.get() + 1);
             *remaining = 0;
-            ContractOutcome::Unknown
+            Ok(ContractOutcome::Unknown)
         };
         let mut vm = Interpreter::for_comptime(&package, Budget::default())
             .unwrap()

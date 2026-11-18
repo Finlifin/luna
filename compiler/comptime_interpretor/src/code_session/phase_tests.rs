@@ -54,7 +54,7 @@ fn unavailable<T>(_: &Expr, _: &mut u64) -> Result<T, Error> {
 #[test]
 fn fresh_session_vms_reuse_phase_declarations_and_recheck_each_expression() {
     let source = package();
-    let types = |_: &nir::program::TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+    let types = |_: &nir::program::TypePredicate, _: &mut u64| Ok(ContractOutcome::Unknown);
     for resolving in [false, true] {
         let mut session = CodeSession::new(source.clone());
         let mut cold_cost = 0;

@@ -12,7 +12,9 @@ mod mutable_callbacks;
 mod publication;
 mod query_budget;
 mod source_queries;
-pub use source_queries::{SourceInvocationQueries, resolve_method_for_invocation};
+pub use source_queries::{
+    SourceInvocationQueries, check_world_predicate, resolve_method_for_invocation,
+};
 mod recursive_factories;
 mod staged;
 mod template_factories;

@@ -82,7 +82,7 @@ pub fn interpret_effects_with_protocols(
     let mut usage_fuel = steps;
     elaboration::verification::effect_usage::check(&graph, &plan, &mut usage_fuel)?;
     let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
-        crate::implementation_world::solve_metered(
+        elaboration::materialization::check_world_predicate(
             &world,
             predicate,
             elaboration::ptc::Budget::default(),
@@ -182,7 +182,7 @@ impl ReferenceSession {
             )
             .expect("ReferenceSession constructor completed its declaration directory");
         let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
-            crate::implementation_world::solve_metered(
+            elaboration::materialization::check_world_predicate(
                 &world,
                 predicate,
                 elaboration::ptc::Budget::default(),
@@ -384,7 +384,7 @@ impl CheckedSession {
             })
             .map_err(|error| format!("cannot prepare effect value delivery: {error}"))?;
         let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
-            crate::implementation_world::solve_metered(
+            elaboration::materialization::check_world_predicate(
                 &world,
                 predicate,
                 elaboration::ptc::Budget::default(),

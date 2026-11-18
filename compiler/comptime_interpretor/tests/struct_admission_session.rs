@@ -70,7 +70,7 @@ fn source_admission_obtains_metered_formation_evidence_and_recovers() {
         assert_eq!(predicate, &requirement);
         calls.set(calls.get() + 1);
         *remaining = remaining.saturating_sub(7);
-        outcome.get()
+        Ok(outcome.get())
     };
     let mut fuel = budget();
     let mut session =

@@ -19,8 +19,6 @@ pub mod memoization;
 
 pub mod testing;
 
-mod implementation_world;
-
 pub mod compilation_cache;
 
 pub mod package_stream;
