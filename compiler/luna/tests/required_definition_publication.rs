@@ -4,6 +4,37 @@ use comptime_interpretor::Value;
 mod sysroot;
 
 #[test]
+fn explicit_and_required_builders_prove_fields_against_source_implementations() {
+    let source = r#"
+        trait Marker {}
+        impl Marker for bool {}
+        struct Checked where T :- Marker { value: T }
+        comptime fn Build() -> Type {
+            let field = Checked<bool>;
+            let wrapper = meta.NewtypeBuilder.new(field).Build();
+            let record = meta.StructBuilder.new();
+            record.add_field(.wrapped, wrapper);
+            record.add_field(.value, field);
+            let choice = meta.EnumBuilder.new();
+            choice.add_tuple(.some, [record.Build(), field]);
+            choice.Build()
+        }
+        comptime fn inspect() -> bool {
+            let fields = Build().enum_variant_field_types()[0];
+            let record = fields[0].struct_field_types();
+            record[0].NewtypeRepresentation() == Checked<bool> and
+                record[1] == Checked<bool> and fields[1] == Checked<bool>
+        }
+        fn run() -> bool { inspect() }
+    "#;
+    assert_eq!(
+        sysroot::invoke(source, "inspect").unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
 fn required_builders_deliver_cross_kind_layouts_to_reflection_and_dispatch() {
     assert_eq!(
         sysroot::run(

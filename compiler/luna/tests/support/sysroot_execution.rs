@@ -16,6 +16,21 @@ pub(crate) const COMPTIME_BUDGET: Budget = Budget {
 };
 
 pub(crate) fn compile(source: &str) -> Result<nir::program::Package, String> {
+    let result = with_options(source, frontend::compile);
+    match result {
+        Ok(Artifact::Nir(package)) => Ok(package),
+        Ok(_) => panic!("NIR artifact"),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+pub(crate) fn invoke(source: &str, entry: &str) -> Result<Value, String> {
+    with_options(source, |options| {
+        frontend::invoke_comptime(options, entry, 10_000_000, None, None)
+    })
+}
+
+fn with_options<T>(source: &str, action: impl FnOnce(&cli::Options) -> T) -> T {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "luna-template-locals-{}-{}.fl",
@@ -37,13 +52,9 @@ pub(crate) fn compile(source: &str) -> Result<nir::program::Package, String> {
     .unwrap() else {
         panic!("check command")
     };
-    let result = frontend::compile(&options);
+    let result = action(&options);
     std::fs::remove_file(path).unwrap();
-    match result {
-        Ok(Artifact::Nir(package)) => Ok(package),
-        Ok(_) => panic!("NIR artifact"),
-        Err(error) => Err(error.to_string()),
-    }
+    result
 }
 
 pub(crate) fn run(source: &str) -> Value {

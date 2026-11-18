@@ -102,21 +102,6 @@ impl RequiredWorld {
             .capabilities(context, assumptions, &mut crate::ptc::Budget::default())
             .unwrap()
     }
-
-    fn solve(
-        &self,
-        assumptions: &[n::TraitRequirement],
-        context: &crate::ptc::Context,
-        predicate: &n::TypePredicate,
-        remaining: &mut u64,
-    ) -> comptime_interpretor::ContractQueryResult {
-        crate::materialization::SourceInvocationQueries::in_source(
-            DeclarationSource::Snapshot(&self.source),
-            context,
-            assumptions,
-        )
-        .check(predicate, crate::ptc::Budget::default(), remaining)
-    }
 }
 
 pub(in crate::program) struct PreparedRequired {
@@ -283,10 +268,16 @@ impl PreparedRequired {
         next_identity: &mut u32,
     ) -> Result<((Value, Term), crate::definitions::PublishedDefinitions), Error> {
         let world = Arc::clone(&self.world);
-        let context = self.context.clone();
-        let assumptions = self.invocation_assumptions.clone();
+        // The receiver installs concrete descriptors into the package. Only the
+        // invocation itself may use its lexical premises and trait assumptions.
+        let context = self.context.theory_context();
+        let queries = crate::materialization::SourceInvocationQueries::in_source(
+            DeclarationSource::Snapshot(&world.source),
+            &context,
+            &[],
+        );
         let solver = |predicate: &n::TypePredicate, fuel: &mut u64| {
-            world.solve(&assumptions, &context, predicate, fuel)
+            queries.check(predicate, Default::default(), fuel)
         };
         let publisher = crate::definitions::AllocatedDefinitionPublisher::new_with_type_solver(
             world.package(),
@@ -715,15 +706,83 @@ mod tests {
     }
 
     #[test]
+    fn concrete_publication_cannot_export_a_caller_proof() {
+        let owner = DeclarationId {
+            package: 7,
+            local: 41,
+        };
+        let slot = DeclarationId {
+            package: 7,
+            local: 42,
+        };
+        for actual in [P::U8, P::Bool] {
+            let mut prepared = literal_preparation(true);
+            prepared.edit_package(|package| {
+                let source = package.functions[0].body.source;
+                let expr = |ty, kind| n::Expr { ty, kind, source };
+                package.structs.push(n::Struct {
+                    declaration: owner,
+                    name: "Checked".into(),
+                    type_parameters: vec![slot],
+                    parameter_types: vec![],
+                    requirements: vec![n::TypePredicate::Equal(
+                        Term::Rigid {
+                            declaration: slot,
+                            sort: Sort::Type,
+                        },
+                        p(P::Bool),
+                    )],
+                    capabilities: vec![],
+                    fields: vec![],
+                });
+                let representation = Term::Nominal {
+                    declaration: owner,
+                    arguments: vec![p(actual)],
+                };
+                package.functions[0].body.kind = K::BuildNewtype(Box::new(expr(
+                    Term::Tuple(vec![p(P::Symbol), p(P::Type)]),
+                    K::Tuple(vec![
+                        expr(
+                            p(P::Symbol),
+                            K::Literal(n::Literal::Symbol("Wrapped".into())),
+                        ),
+                        expr(p(P::Type), K::TypeValue(representation)),
+                    ]),
+                )));
+            });
+            // This local premise suffices while evaluating the operand. The
+            // global descriptor gets its own formation check after reservation.
+            prepared
+                .context
+                .assume(crate::ptc::Formula::equal(p(actual), p(P::Bool)));
+            let mut next = 60;
+            let result =
+                prepared.invoke_publishing(vec![], &mut 100_000, Span::default(), 7, &mut next);
+            assert_eq!(next, 61, "the request reached the publisher");
+            match (actual, result) {
+                (P::Bool, Ok((_, additions))) => assert_eq!(additions.newtypes.len(), 1),
+                (P::U8, Err(failure)) => assert!(
+                    failure.to_string().contains("TypeContractRejected"),
+                    "{failure}"
+                ),
+                _ => panic!("unexpected publication result for {actual:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn direct_proof_retries_without_publishing_a_declaration_directory() {
         use comptime_interpretor::ContractOutcome;
         let prepared = literal_preparation(false);
         let predicate = n::TypePredicate::Equal(p(P::Bool), p(P::Bool));
+        let queries = crate::materialization::SourceInvocationQueries::in_source(
+            DeclarationSource::Snapshot(&prepared.world.source),
+            &prepared.context,
+            &[],
+        );
         let mut tiny = 1;
         assert_eq!(
-            prepared
-                .world
-                .solve(&[], &prepared.context, &predicate, &mut tiny),
+            queries.check(&predicate, Default::default(), &mut tiny),
             Err(comptime_interpretor::ErrorKind::StepsExhausted)
         );
         assert_eq!(tiny, 0);
@@ -734,9 +793,7 @@ mod tests {
         assert!(prepared.world.source.prepare(&mut empty).is_err());
         let mut remaining = 100_000;
         assert_eq!(
-            prepared
-                .world
-                .solve(&[], &prepared.context, &predicate, &mut remaining),
+            queries.check(&predicate, Default::default(), &mut remaining),
             Ok(ContractOutcome::Satisfied)
         );
         assert!(remaining < 100_000);
@@ -1101,9 +1158,12 @@ mod tests {
                 crate::materialization::SourceInvocationQueries::in_source(source, context, &[]);
             for _ in 0..2 {
                 assert_eq!(
-                    prepared
-                        .world
-                        .solve(&[], &with_premise, &predicate, &mut 100_000),
+                    queries.check_in_context(
+                        &predicate,
+                        &with_premise,
+                        Default::default(),
+                        &mut 100_000
+                    ),
                     Ok(ContractOutcome::Satisfied)
                 );
                 assert!(matches!(

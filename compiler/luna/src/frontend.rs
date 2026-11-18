@@ -495,13 +495,10 @@ fn compile_bound_for_target_with_invocation(
         crate::protocols::type_constructors::validate(&program, &protocols)?;
         let program = if let Some(invocation) = invocation {
             invocation.execute(
-                package.arena(),
-                package.package(),
                 program,
-                0,
-                &std::collections::BTreeMap::from([(0, package_identity)]),
+                package_identity,
+                package.package().next_definition_index(),
                 &protocols,
-                target,
             )?
         } else {
             program

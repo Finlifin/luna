@@ -475,7 +475,7 @@ pub fn compile_with_definitions_and_preludes(
 
 /// Compile source packages, run one comptime entry with checked definition
 /// builders, and return the latest checked package together with its value.
-/// Required invocations during initial elaboration are not configured builders.
+/// Earlier required invocations have already advanced the source identity frontier.
 pub fn compile_and_invoke_with_struct_builders(
     packages: &[SourcePackage],
     dependencies: &[resolve::DependencyEdge],
@@ -536,36 +536,24 @@ pub(crate) struct BuilderInvocation<'a> {
 impl BuilderInvocation<'_> {
     pub(crate) fn execute(
         &mut self,
-        _arena: &hir::HirArena,
-        package: &hir::Package<'_>,
         mut nir: nir::program::Package,
-        primary: u32,
-        identities: &BTreeMap<u32, u64>,
+        identity: u64,
+        source_frontier: u32,
         protocols: &elaboration::program::Protocols,
-        _target: Option<nir::target::TargetData>,
     ) -> Result<nir::program::Package, String> {
         elaboration::verification::optimization::elide_proven_checks(
             &mut nir,
             &mut elaboration::verification::Limits::default(),
         );
-        let publisher = elaboration::definitions::AllocatedDefinitionPublisher::new(
-            &nir,
-            identities[&primary],
-            nir.definition_identity_cursor
-                .max(package.next_definition_index()),
-            *self.structural_fuel,
-        );
-        *self.structural_fuel = 0;
-        let value = crate::invocation::invoke_selected_with_publisher(
+        let (value, definitions, next_identity) = crate::invocation::invoke_publishing(
             &nir,
             self.entry,
-            Some(identities[&primary]),
+            identity,
+            nir.definition_identity_cursor.max(source_frontier),
+            self.structural_fuel,
             self.invocation_fuel,
-            Some(&publisher),
-        );
-        *self.structural_fuel = publisher.remaining_structural_fuel();
-        self.value = Some(value?);
-        let (definitions, next_identity) = publisher.finish();
+        )?;
+        self.value = Some(value);
         nir.definition_identity_cursor = next_identity;
         for batch in definitions.structs {
             nir.structs.extend(batch.iter().cloned());
@@ -928,13 +916,10 @@ fn compile_with_expansion(
     crate::protocols::type_constructors::validate(&nir, &protocols)?;
     let nir = if let Some(invocation) = builder_invocation {
         invocation.execute(
-            hir.arena(),
-            package,
             nir,
-            primary,
-            &identities,
+            identities[&primary],
+            package.next_definition_index(),
             &protocols,
-            target,
         )?
     } else {
         nir

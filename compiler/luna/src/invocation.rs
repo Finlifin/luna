@@ -1,10 +1,12 @@
 //! Explicit, bounded invocation of completed comptime declarations.
 mod entry;
+mod scope;
 pub use crate::memoization::Invocation as MemoizedInvocation;
-use comptime_interpretor::{Budget, Interpreter, Value};
+use comptime_interpretor::{Budget, Value};
 use elaboration::materialization::{DeclarationSnapshot, DeclarationSource};
 use nir::program::{FunctionPhase, Package};
 use nir::{DeclarationId, Term};
+use scope::InvocationScope;
 
 /// Reusable preparation for one entry in an immutable compilation snapshot.
 /// Code is shared; values, mutable storage and evidence are fresh on each call.
@@ -56,15 +58,15 @@ impl PreparedInvocation {
         if fuel == 0 {
             return Err("invocation fuel must be positive".into());
         }
-        execute_prepared(
-            DeclarationSource::Snapshot(&self.source),
-            &mut self.invocation,
-            &self.entry,
-            fuel,
-            None,
-            Some(&mut self.code),
-            &mut self.last_stats,
-        )
+        InvocationScope::with(DeclarationSource::Snapshot(&self.source), fuel, |scope| {
+            scope.execute(
+                &mut self.invocation,
+                &self.entry,
+                None,
+                Some(&mut self.code),
+                &mut self.last_stats,
+            )
+        })
     }
     pub fn last_stats(&self) -> InvocationStats {
         self.last_stats
@@ -106,129 +108,68 @@ pub(crate) fn invoke_selected(
     invoke_selected_with_publisher(package, entry, identity, fuel, None)
 }
 
-pub(crate) fn invoke_selected_with_publisher(
+fn with_selected_invocation<T>(
+    package: &Package,
+    entry: &str,
+    identity: Option<u64>,
+    mut fuel: u64,
+    run: impl FnOnce(InvocationScope<'_>, &mut entry::Entry) -> Result<T, String>,
+) -> Result<T, String> {
+    if fuel == 0 {
+        return Err("invocation fuel must be positive".into());
+    }
+    let function = entry::select_in(package, entry, FunctionPhase::Comptime, identity, &mut fuel)?;
+    let mut invocation = entry::Entry::new(function);
+    InvocationScope::with(DeclarationSource::Borrowed(package), fuel, |scope| {
+        run(scope, &mut invocation)
+    })
+}
+
+fn invoke_selected_with_publisher(
     package: &Package,
     entry: &str,
     identity: Option<u64>,
     fuel: u64,
     publisher: Option<&dyn elaboration::definitions::StructBuildService>,
 ) -> Result<Value, String> {
-    if fuel == 0 {
-        return Err("invocation fuel must be positive".into());
-    }
-    let mut fuel = fuel;
-    let function = entry::select_in(package, entry, FunctionPhase::Comptime, identity, &mut fuel)?;
-    let mut invocation = entry::Entry::new(function);
-    // Source resolvers select a declaration view of this exact package. The VM
-    // excludes preselected dispatch without copying unrelated bodies or inputs.
-    let source = DeclarationSource::Borrowed(package);
-    execute_prepared(
-        source,
-        &mut invocation,
-        entry,
-        fuel,
-        publisher,
-        None,
-        &mut InvocationStats::default(),
-    )
+    with_selected_invocation(package, entry, identity, fuel, |scope, invocation| {
+        scope.execute(
+            invocation,
+            entry,
+            publisher,
+            None,
+            &mut InvocationStats::default(),
+        )
+    })
 }
 
-fn execute_prepared(
-    source: DeclarationSource<'_>,
-    invocation: &mut entry::Entry,
+pub(crate) fn invoke_publishing(
+    package: &Package,
     entry: &str,
+    identity: u64,
+    next: u32,
+    structural_fuel: &mut usize,
     fuel: u64,
-    publisher: Option<&dyn elaboration::definitions::StructBuildService>,
-    mut session: Option<&mut comptime_interpretor::CodeSession>,
-    stats: &mut InvocationStats,
-) -> Result<Value, String> {
-    let package = source.package();
-    let preparation_budget = elaboration::ptc::Budget::default();
-    let mut preparation = elaboration::ptc::Budget {
-        steps: usize::try_from(fuel)
-            .map_err(|_| "invocation fuel does not fit the host counter")?,
-        ..preparation_budget
-    };
-    let context = elaboration::ptc::Context::from_package_metered(package, &mut preparation.steps)
-        .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
-    let source_queries =
-        elaboration::materialization::SourceInvocationQueries::in_source(source, &context, &[]);
-    let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
-        source_queries.check(predicate, preparation_budget, remaining)
-    };
-    let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
-        source_queries.associated(access, remaining)
-    };
-    let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
-        source_queries.resolve(callee, remaining)
-    };
-    let mut budget = Budget {
-        steps: preparation.steps as u64,
-        depth: 128,
-    };
-    let call = invocation.call(package, &mut budget.steps)?;
-    let resolvers = comptime_interpretor::SourceResolvers {
-        types: &solver,
-        methods: &method_resolver,
-        associated: &associated_resolver,
-    };
-    let interpreter = match session.as_deref_mut() {
-        Some(session) => {
-            Interpreter::for_comptime_resolving_in_session(package, session, resolvers, &mut budget)
-        }
-        None => Interpreter::for_comptime_resolving_in_budget(
-            package,
-            &[],
-            &[],
-            &[],
-            resolvers,
-            &mut budget,
-        ),
-    };
-    let mut interpreter =
-        interpreter.map_err(|error| format!("cannot prepare comptime invocation: {error}"))?;
-    let builder = |request: &comptime_interpretor::StructBuildRequest, remaining: &mut u64| {
-        publisher
-            .expect("builder installed only with publisher")
-            .prepare(request, remaining)
-    };
-    let newtype_builder = |request: &comptime_interpretor::NewtypeBuildRequest,
-                           remaining: &mut u64| {
-        publisher
-            .expect("builder installed only with publisher")
-            .prepare_newtype(request, remaining)
-    };
-    let enum_builder = |request: &comptime_interpretor::EnumBuildRequest, remaining: &mut u64| {
-        publisher
-            .expect("builder installed only with publisher")
-            .prepare_enum(request, remaining)
-    };
-    if publisher.is_some() {
-        interpreter = interpreter
-            .with_struct_builder(&builder)
-            .with_enum_builder(&enum_builder)
-            .with_newtype_builder(&newtype_builder);
-    }
-    let operation = |vm: &mut Interpreter<'_>| match call {
-        Some(call) => vm.invoke_comptime_expression_owned(call),
-        None => vm
-            .start_invocation(Value::Function(invocation.declaration), vec![])?
-            .run_to_completion(),
-    };
-    let result = match session {
-        Some(session) => interpreter.with_code_session(session, operation),
-        None => operation(&mut interpreter),
-    };
-    *stats = InvocationStats {
-        bytecode_compilations: interpreter.bytecode_compilations(),
-        bytecode_invocations: interpreter.bytecode_invocations(),
-    };
-    result.map_err(|error| {
-        let mut message = format!("comptime invocation of '{entry}' failed: {error}");
-        if let Some(reason) = publisher.and_then(|publisher| publisher.last_diagnostic()) {
-            message.push_str(&format!("; definition publication: {reason}"));
-        }
-        message
+) -> Result<(Value, elaboration::definitions::PublishedDefinitions, u32), String> {
+    with_selected_invocation(package, entry, Some(identity), fuel, |scope, invocation| {
+        let publisher =
+            elaboration::definitions::AllocatedDefinitionPublisher::new_with_type_solver(
+                package,
+                identity,
+                next,
+                std::mem::take(structural_fuel),
+                scope.resolvers.types,
+            );
+        let value = scope.execute(
+            invocation,
+            entry,
+            Some(&publisher),
+            None,
+            &mut InvocationStats::default(),
+        );
+        *structural_fuel = publisher.remaining_structural_fuel();
+        let (definitions, next) = publisher.finish();
+        Ok((value?, definitions, next))
     })
 }
 
