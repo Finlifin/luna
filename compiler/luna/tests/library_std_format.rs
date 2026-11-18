@@ -169,6 +169,20 @@ fn deferred_format_parameters_accept_complete_packs_and_check_each_field() {
 }
 
 #[test]
+fn println_requires_the_format_before_it_can_admit_runtime_fields() {
+    let error = support::compile(
+        r#"
+        use std.prelude.*;
+        fn show(format: str, value: u32) -> !std.io.Error void {
+            println(format, value)
+        }
+        "#,
+    )
+    .unwrap_err();
+    assert!(error.contains("comptime"), "{error}");
+}
+
+#[test]
 fn tuple_iteration_requires_evidence_from_all_producer_returns() {
     let template = r#"
         pure comptime fn Shape(flag: bool) -> Type {

@@ -8,11 +8,15 @@
 下方保留早期宿主底座的验收记录。当前演示已接通格式化变参、Display 和换行，详见
 [格式化变参边界](runtime-value-delivery.md#格式化变参边界不能把静态文本输出当作-println-交付)。
 
-## 历史宿主输出演示
+## 格式化变参演示
 
-以下命令与输出记录当时的文本和单值实现。原程序现保存在
-[host-stdout.fl](examples/host-stdout.fl)。当前 demo 脚本使用
-[host-println.fl](examples/host-println.fl) 验收格式化变参。
+[host-println.fl](examples/host-println.fl) 使用同一个 comptime 函数计算两种格式串。
+下面两次调用分别检查一个和两个字段，第二个字段使用 bool 的 Display。
+
+```flurry
+println(status_format(false), answer)!;
+println(status_format(true), answer, true)!;
+```
 
 在仓库根目录执行：
 
@@ -44,13 +48,12 @@ python3 -B development/demo_println.py
   读取已选定的 runtime residual 与其契约，不再误读带 comptime 洞的源码体。
   无效或重复的 residual 仍拒绝，不回退到源码模板。
 
-## 尚未交付
+## 当前范围
 
-println 当前接收 comptime 文本，花括号按原文输出。运行时整数、bool 与
-用户类型通过 Display 和 println_value 输出。动态 str/String、格式串展开、
-浮点格式化、allocator、buffered I/O、其它 Unix 平台均不在本次能力范围。
-Layout 仅负责布局计算，不分配内存。runtime str 的内存来源与调用边界接线
-仍需继续完成，不能仅把它标成 Copy 或擦除检查来开放这些接口。
+`{}` 按顺序消费一个实现 Display 的实参，`{{` 和 `}}` 各输出一个花括号。
+格式错误、实参数量错误和缺少 Display 的字段都会在编译时被拒绝。
+动态 str/String、浮点格式化、allocator、buffered I/O 与其它 Unix 平台仍待实现。
+Layout 仅负责布局计算。
 
 ## 验证入口
 
@@ -96,13 +99,15 @@ EINTR、零写入和部分写入后的 EIO，验证错误传播与已经输出�
 编译器仍报告既有 unused/unreachable warnings；本次未将这些警告当作失败或
 顺手清理他人改动，也没有执行全 workspace 测试。
 
+以下记录对应早期的[静态文本与单值演示](examples/host-stdout.fl)。
+
 最终演示：`python3 -B development/demo_println.py` 构建与运行均退出 0；
 构建日志 `/tmp/luna-tools-kzljx98k/result.json`。产物 `/tmp/flurry-println`
 输出中文、42、实际 Linux pid、i128 最小值和 done，没有 `(unit)` 尾行。
 
-## 当时的演示复验
+## 早期宿主演示的复验
 
-`python3 -B development/demo_println.py` 已在当前 dev 上重新构建并运行，
+`python3 -B development/demo_println.py` 在当时的 dev 上重新构建并运行，
 退出 0；构建报告为 `/tmp/luna-tools-0fwuk41k/result.json`。可直接运行
 `/tmp/flurry-println`，输出如下（pid 随进程变化）：
 
