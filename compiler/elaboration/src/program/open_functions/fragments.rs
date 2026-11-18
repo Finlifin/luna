@@ -232,7 +232,7 @@ impl Checker<'_, '_> {
             ..Default::default()
         };
         if arithmetic {
-            crate::verification::flow::validate_definition_region(&package, region).map_err(
+            crate::verification::flow::validate_definition_region(&package, &region).map_err(
                 |mut failure| {
                     failure.source = failure
                         .source

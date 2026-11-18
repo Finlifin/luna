@@ -92,6 +92,7 @@ impl FunctionDeclaration {
 
 /// A checked expression in the projected frame of an open definition.
 /// The owner identifies its lexical source. The region has no callable identity.
+#[derive(Clone)]
 pub struct DefinitionRegion {
     pub owner: DeclarationId,
     pub phase: FunctionPhase,

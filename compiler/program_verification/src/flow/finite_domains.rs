@@ -4,51 +4,144 @@ use super::*;
 use crate::ptc::{Budget, Context, Formula, Outcome};
 use nir::{DeclarationParameter, Primitive as P, Sort};
 
+/// Inputs shared by finite integer enumeration. Specialization preserves the
+/// source category, including which expressions execute in its lexical frame.
+pub(super) trait MachineBody: Clone {
+    fn program(&self) -> CallableProgram<'_>;
+    fn requirements(&self) -> &[nir::program::TypePredicate];
+    fn roots_mut(&mut self) -> impl Iterator<Item = &mut Expr>;
+    fn instantiate(
+        &self,
+        binders: &[DeclarationParameter],
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<Self, Error>;
+}
+
+fn exhausted(source: SourceRange) -> Error {
+    Error {
+        source,
+        reason: Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()),
+    }
+}
+
+impl MachineBody for Function {
+    fn program(&self) -> CallableProgram<'_> {
+        CallableProgram::function(self)
+    }
+    fn requirements(&self) -> &[nir::program::TypePredicate] {
+        &self.requirements
+    }
+    fn roots_mut(&mut self) -> impl Iterator<Item = &mut Expr> {
+        std::iter::once(&mut self.body)
+            .chain(&mut self.interface.preconditions)
+            .chain(&mut self.interface.postconditions)
+            .chain(self.interface.defaults.iter_mut().map(|(_, value)| value))
+    }
+    fn instantiate(
+        &self,
+        binders: &[DeclarationParameter],
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<Self, Error> {
+        let source = self.body.source;
+        nir::copy_budget::charge_function_substitution(self, binders, arguments, fuel)
+            .map_err(|_| exhausted(source))?;
+        let mut instance = self
+            .instantiate_parameters(binders, arguments)
+            .map_err(|_| Error {
+                source,
+                reason: Reason::InvalidSignature,
+            })?;
+        instance.type_parameters.clear();
+        Ok(instance)
+    }
+}
+
+impl MachineBody for nir::program::DefinitionRegion {
+    fn program(&self) -> CallableProgram<'_> {
+        CallableProgram::definition_region(self)
+    }
+    fn requirements(&self) -> &[nir::program::TypePredicate] {
+        &self.requirements
+    }
+    fn roots_mut(&mut self) -> impl Iterator<Item = &mut Expr> {
+        std::iter::once(&mut self.body)
+    }
+    fn instantiate(
+        &self,
+        binders: &[DeclarationParameter],
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<Self, Error> {
+        let source = self.body.source;
+        nir::copy_budget::charge_region_substitution(self, binders, arguments, fuel)
+            .map_err(|_| exhausted(source))?;
+        let invalid = |_| Error {
+            source,
+            reason: Reason::InvalidSignature,
+        };
+        Ok(Self {
+            owner: self.owner,
+            phase: self.phase,
+            parameters: self.parameters.clone(),
+            type_parameters: vec![],
+            signature: self
+                .signature
+                .instantiate_parameters(binders, arguments)
+                .map_err(invalid)?,
+            body: self
+                .body
+                .instantiate_parameters(binders, arguments)
+                .map_err(invalid)?,
+            requirements: self
+                .requirements
+                .iter()
+                .map(|p| p.instantiate_parameters(binders, arguments))
+                .collect::<Result<_, _>>()
+                .map_err(invalid)?,
+            capabilities: self
+                .capabilities
+                .iter()
+                .map(|r| r.instantiate_parameters(binders, arguments))
+                .collect::<Result<_, _>>()
+                .map_err(invalid)?,
+        })
+    }
+}
+
 pub(super) fn complete_literals(
-    instances: &mut [Function],
+    instance: &mut impl MachineBody,
     target: Option<nir::target::TargetData>,
     limits: &mut Limits,
 ) -> Result<(), Error> {
-    for function in instances {
-        for value in std::iter::once(&mut function.body)
-            .chain(&mut function.interface.preconditions)
-            .chain(&mut function.interface.postconditions)
-            .chain(
-                function
-                    .interface
-                    .defaults
-                    .iter_mut()
-                    .map(|(_, value)| value),
-            )
-        {
-            nir::integer_formation::complete(value, target, &mut limits.arithmetic.steps).map_err(
-                |message| Error {
-                    source: value.source,
-                    reason: Reason::IntegerFormation(message),
-                },
-            )?;
-        }
+    for value in instance.roots_mut() {
+        nir::integer_formation::complete(value, target, &mut limits.arithmetic.steps).map_err(
+            |message| Error {
+                source: value.source,
+                reason: Reason::IntegerFormation(message),
+            },
+        )?;
     }
     Ok(())
 }
 
-pub(super) fn integer_instances(
-    function: &Function,
+pub(super) fn integer_instances<B: MachineBody>(
+    body: &B,
     limits: &mut Limits,
-) -> Result<Option<Vec<Function>>, Error> {
+) -> Result<Option<Vec<B>>, Error> {
+    let program = body.program();
+    let function = program.parts();
     if function.type_parameters.is_empty() {
         return Ok(None);
     }
-    let fail = || Error {
-        source: function.body.source,
-        reason: Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()),
-    };
-    let Term::Function { parameters, .. } = function.signature.callable_signature() else {
+    let fail = || exhausted(function.source);
+    let Term::Function { parameters, .. } = program.signature().callable_signature() else {
         return Ok(None);
     };
     let mut context = Context::with_scope(vec![parameters.iter().map(|p| p.sort).collect()]);
     let mut fuel = 4096;
-    for requirement in &function.requirements {
+    for requirement in body.requirements() {
         let formula = Formula::from_predicate(requirement);
         let before = fuel;
         if !crate::ptc::within_limits(&formula, 128, &mut fuel) {
@@ -71,7 +164,7 @@ pub(super) fn integer_instances(
     };
     let mut choices = vec![Vec::new()];
     let mut binders = Vec::new();
-    for declaration in &function.type_parameters {
+    for declaration in function.type_parameters {
         let subject = Term::Rigid {
             declaration: *declaration,
             sort: Sort::Type,
@@ -96,10 +189,10 @@ pub(super) fn integer_instances(
         // prove that they cover the parameter. Occurrence alone is not evidence:
         // negations and disjunctions can mention types outside the true domain.
         let mut mentioned = Vec::new();
-        for requirement in &function.requirements {
+        for requirement in body.requirements() {
             mentioned_primitives(requirement, &subject, &mut mentioned, limits).map_err(
                 |reason| Error {
-                    source: function.body.source,
+                    source: function.source,
                     reason: Reason::Unknown(reason),
                 },
             )?;
@@ -173,25 +266,11 @@ pub(super) fn integer_instances(
         }
         choices = next;
     }
-    let mut output = Vec::new();
-    for arguments in choices {
-        nir::copy_budget::charge_function_substitution(
-            function,
-            &binders,
-            &arguments,
-            &mut limits.arithmetic.steps,
-        )
-        .map_err(|_| fail())?;
-        let mut instance = function
-            .instantiate_parameters(&binders, &arguments)
-            .map_err(|_| Error {
-                source: function.body.source,
-                reason: Reason::InvalidSignature,
-            })?;
-        instance.type_parameters.clear();
-        output.push(instance);
-    }
-    Ok(Some(output))
+    choices
+        .iter()
+        .map(|arguments| body.instantiate(&binders, arguments, &mut limits.arithmetic.steps))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 fn mentioned_primitives(

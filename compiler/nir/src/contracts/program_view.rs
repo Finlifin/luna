@@ -18,22 +18,48 @@ pub struct CallableProgram<'a> {
 /// Executable roots and their lexical owner, independently of the input ABI.
 /// Contextual method specifications have these parts without a callable Term.
 #[derive(Clone, Copy)]
-pub(crate) struct ProgramParts<'a> {
+#[non_exhaustive]
+pub struct ProgramParts<'a> {
     pub(crate) declaration: Option<DeclarationId>,
-    pub(crate) phase: FunctionPhase,
+    pub phase: FunctionPhase,
     pub(crate) is_unsafe: bool,
-    pub(crate) type_parameters: &'a [DeclarationId],
-    pub(crate) parameters: &'a [LocalId],
-    pub(crate) body: Option<&'a Expr>,
-    pub(crate) source: SourceRange,
+    pub type_parameters: &'a [DeclarationId],
+    pub parameters: &'a [LocalId],
+    pub body: Option<&'a Expr>,
+    pub source: SourceRange,
     pub(crate) defaults: &'a [(usize, Expr)],
-    pub(crate) preconditions: &'a [Expr],
-    pub(crate) postconditions: &'a [Expr],
-    pub(crate) result_binding: Option<LocalId>,
-    pub(crate) entry_snapshots: &'a [EntrySnapshot],
+    pub preconditions: &'a [Expr],
+    pub postconditions: &'a [Expr],
+    pub result_binding: Option<LocalId>,
+    pub entry_snapshots: &'a [EntrySnapshot],
 }
 
 impl<'a> CallableProgram<'a> {
+    pub fn signature(&self) -> &'a Term {
+        self.signature
+    }
+
+    pub fn parts(&self) -> &ProgramParts<'a> {
+        &self.parts
+    }
+
+    /// Inspect each default alone in its lexical frame, before the call's
+    /// preconditions hold. The enclosing body's roots and exit contracts
+    /// belong to a different execution.
+    pub fn default_bodies(self) -> impl Iterator<Item = Self> {
+        self.parts.defaults.iter().map(move |(_, body)| {
+            let mut program = Self::framed_body(
+                body,
+                self.signature,
+                self.parts.phase,
+                self.parts.parameters,
+                self.parts.type_parameters,
+            );
+            program.parts.is_unsafe = self.parts.is_unsafe;
+            program
+        })
+    }
+
     pub fn function(function: &'a Function) -> Self {
         let mut program = Self::declaration(&function.interface, function.body.source);
         program.parts.body = Some(&function.body);
@@ -80,7 +106,7 @@ impl<'a> CallableProgram<'a> {
         Self::framed_body(body, signature, FunctionPhase::Comptime, &[], &[])
     }
 
-    pub(crate) fn definition_region(region: &'a crate::program::DefinitionRegion) -> Self {
+    pub fn definition_region(region: &'a crate::program::DefinitionRegion) -> Self {
         Self::framed_body(
             &region.body,
             &region.signature,

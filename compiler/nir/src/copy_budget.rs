@@ -126,6 +126,16 @@ pub fn charge_function_substitution(
     charge_node_substitution(Node::Function(value), parameters, arguments, fuel)
 }
 
+/// Preflight a projected lexical frame and its body under one substitution.
+pub fn charge_region_substitution(
+    region: &n::DefinitionRegion,
+    parameters: &[crate::DeclarationParameter],
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<(), CopyBudgetExhausted> {
+    charge_node_substitution(Node::Region(region), parameters, arguments, fuel)
+}
+
 /// Copy declaration metadata after a complete preflight, without inspecting
 /// or copying executable bodies. This grants no invocation or proof authority.
 pub fn clone_function_declaration(
@@ -193,6 +203,7 @@ pub fn charge_argument_type_rewrite(
     charge_node(Node::Argument(value), steps, true, None)
 }
 enum Node<'a> {
+    Region(&'a n::DefinitionRegion),
     Function(&'a n::Function),
     FunctionDeclaration(&'a n::FunctionDeclaration),
     CallableBindings(&'a n::FunctionDeclaration),
@@ -451,6 +462,31 @@ fn charge_node_observed(
             Node::CallableBindings(function) => {
                 charge_width(steps, function.parameters.len())?;
                 work.push((Node::Type(&function.signature), depth));
+                0
+            }
+            Node::Region(region) => {
+                for width in [
+                    region.parameters.len(),
+                    region.type_parameters.len(),
+                    region.requirements.len(),
+                    region.capabilities.len(),
+                ] {
+                    charge_width(steps, width)?;
+                }
+                work.push((Node::Expr(&region.body), depth));
+                work.push((Node::Type(&region.signature), depth));
+                work.extend(
+                    region
+                        .requirements
+                        .iter()
+                        .map(|p| (Node::Predicate(p), depth)),
+                );
+                work.extend(
+                    region
+                        .capabilities
+                        .iter()
+                        .map(|r| (Node::Requirement(r), depth)),
+                );
                 0
             }
             Node::Function(function) => {

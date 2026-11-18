@@ -102,11 +102,120 @@ fn region_and_dependency_with_one_lexical_owner_require_separate_proofs() {
             capabilities: vec![],
             body: source.body,
         };
-        let checked = validate_definition_region(&dependencies, region);
+        let checked = validate_definition_region(&dependencies, &region);
         if valid {
             checked.unwrap();
         } else {
             assert_eq!(checked.unwrap_err().reason, Reason::MissingMachineProof);
         }
     }
+}
+
+#[test]
+fn projected_integer_domains_prove_every_admitted_width_before_execution() {
+    let package = Package::default();
+    let binder = DeclarationId {
+        package: 1,
+        local: 2,
+    };
+    let ty = Term::Rigid {
+        declaration: binder,
+        sort: Sort::Type,
+    };
+    let literal = |spelling: &str| Expr {
+        source: SourceRange { start: 8, end: 12 },
+        ty: ty.clone(),
+        kind: K::Literal(Literal::PendingInteger {
+            spelling: spelling.into(),
+            negative: false,
+        }),
+    };
+    let domain = |p| TypePredicate::Equal(ty.clone(), Term::Primitive(p));
+    let mut region = DefinitionRegion {
+        owner: DeclarationId {
+            package: 1,
+            local: 1,
+        },
+        type_parameters: vec![binder],
+        signature: Term::Function {
+            parameters: vec![],
+            result: Box::new(ty.clone()),
+        },
+        parameters: vec![],
+        phase: FunctionPhase::Comptime,
+        requirements: vec![domain(Primitive::U16)],
+        capabilities: vec![],
+        body: Expr {
+            source: SourceRange { start: 8, end: 16 },
+            ty: ty.clone(),
+            kind: K::IntegerBinary {
+                op: IntegerOp::Add,
+                left: Box::new(literal("255")),
+                right: Box::new(literal("1")),
+            },
+        },
+    };
+    validate_definition_region(&package, &region).unwrap();
+    region.requirements = vec![TypePredicate::Or(vec![
+        domain(Primitive::U16),
+        domain(Primitive::U8),
+    ])];
+    let failure = validate_definition_region(&package, &region).unwrap_err();
+    assert_eq!(failure.reason, Reason::MissingMachineProof);
+    assert_eq!(failure.source, region.body.source);
+
+    region.requirements = vec![domain(Primitive::Usize)];
+    assert_eq!(
+        validate_definition_region(&package, &region)
+            .unwrap_err()
+            .reason,
+        Reason::MissingMachineProof
+    );
+    let known = Package {
+        target: Some(nir::target::TargetData::new(16).unwrap()),
+        ..Package::default()
+    };
+    validate_definition_region(&known, &region).unwrap();
+    assert_eq!(region.body.ty, ty);
+}
+
+#[test]
+fn a_default_cannot_use_the_entry_assumption_that_proves_the_body() {
+    let mut package = package(0, true);
+    let function = &mut package.functions[0];
+    let input = Expr {
+        kind: K::Local(function.parameters[0]),
+        ..integer(0)
+    };
+    let successor = Expr {
+        kind: K::IntegerBinary {
+            op: IntegerOp::Add,
+            left: Box::new(input.clone()),
+            right: Box::new(integer(1)),
+        },
+        ..integer(0)
+    };
+    function.interface.defaults.clear();
+    function.body = successor.clone();
+    function.interface.preconditions.push(Expr {
+        source: input.source,
+        ty: Term::Primitive(Primitive::Bool),
+        kind: K::ScalarLess(Box::new(input), Box::new(integer(255))),
+    });
+    validate_machine_operations(&package).unwrap();
+
+    let function = &mut package.functions[0];
+    let Term::Function { parameters, .. } = &mut function.interface.signature else {
+        unreachable!()
+    };
+    parameters.push(parameters[0].clone());
+    function
+        .interface
+        .parameters
+        .push(LocalId { owner: 1, index: 1 });
+    function.interface.defaults.push((1, successor));
+    assert_eq!(
+        validate_machine_operations(&package).unwrap_err().reason,
+        Reason::MissingMachineProof
+    );
 }

@@ -21,6 +21,7 @@ use super::{
     Comparison as C, Condition, Facts, Interval, Limits, PlaceId, Polynomial, Unknown, ValueId,
 };
 use comptime_runtime::Integer;
+use nir::contracts::CallableProgram;
 use nir::{
     Term,
     program::{
@@ -685,14 +686,26 @@ fn bind_place(
 }
 
 pub fn analyze(function: &Function, limits: &mut Limits) -> Result<Report, Error> {
-    analyze_impl(Analysis::Body(function), None, limits, true)
+    analyze_impl(
+        CallableProgram::function(function),
+        &function.requirements,
+        None,
+        limits,
+        true,
+    )
 }
 pub fn analyze_in_package(
     package: &nir::program::Package,
     function: &Function,
     limits: &mut Limits,
 ) -> Result<Report, Error> {
-    analyze_impl(Analysis::Body(function), Some(package), limits, true)
+    analyze_impl(
+        CallableProgram::function(function),
+        &function.requirements,
+        Some(package),
+        limits,
+        true,
+    )
 }
 
 /// Recheck program contracts, machine arithmetic and bit endpoints after
@@ -753,7 +766,13 @@ pub fn validate_residual_contracts(
         },
     })?;
     if required {
-        analyze_impl(Analysis::Body(function), Some(package), limits, false)?;
+        analyze_impl(
+            CallableProgram::function(function),
+            &function.requirements,
+            Some(package),
+            limits,
+            false,
+        )?;
     }
     Ok(())
 }
@@ -776,68 +795,25 @@ pub fn prove_implication(
         });
     }
     analyze_impl(
-        Analysis::Implication {
-            declaration,
-            source,
-        },
+        CallableProgram::declaration(declaration, source),
+        &declaration.requirements,
         package,
         limits,
         true,
     )
 }
 
-enum Analysis<'a> {
-    Body(&'a Function),
-    Implication {
-        declaration: &'a FunctionDeclaration,
-        source: SourceRange,
-    },
-}
-impl<'a> Analysis<'a> {
-    fn declaration(&self) -> &'a FunctionDeclaration {
-        match self {
-            Self::Body(function) => &function.interface,
-            Self::Implication { declaration, .. } => declaration,
-        }
-    }
-    fn source(&self) -> SourceRange {
-        match self {
-            Self::Body(function) => function.body.source,
-            Self::Implication { source, .. } => *source,
-        }
-    }
-    fn program(&self) -> nir::contracts::CallableProgram<'a> {
-        match self {
-            Self::Body(function) => nir::contracts::CallableProgram::function(function),
-            Self::Implication {
-                declaration,
-                source,
-            } => nir::contracts::CallableProgram::declaration(declaration, *source),
-        }
-    }
-}
-impl fmt::Display for Analysis<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Body(function) => write!(f, "(analyze-body {function})"),
-            Self::Implication {
-                declaration,
-                source,
-            } => write!(f, "(prove-implication (source {source}) {declaration})"),
-        }
-    }
-}
-
 fn analyze_impl(
-    analysis: Analysis<'_>,
+    program: CallableProgram<'_>,
+    requirements: &[nir::program::TypePredicate],
     package: Option<&nir::program::Package>,
     limits: &mut Limits,
     collect_points: bool,
 ) -> Result<Report, Error> {
-    let source = analysis.source();
-    let function = analysis.declaration();
+    let function = program.parts();
+    let source = function.source;
     let error = |reason| Error { source, reason };
-    let Term::Function { parameters, result } = function.signature.callable_signature() else {
+    let Term::Function { parameters, result } = program.signature().callable_signature() else {
         return Err(error(Reason::InvalidSignature));
     };
     if parameters.len() != function.parameters.len() {
@@ -860,7 +836,7 @@ fn analyze_impl(
         parameters.iter().map(|parameter| parameter.sort).collect(),
     ]);
     let mut contract_budget = 4096;
-    for requirement in &function.requirements {
+    for requirement in requirements {
         let formula = crate::ptc::Formula::from_predicate(requirement);
         let before = contract_budget;
         let admitted = crate::ptc::within_limits(&formula, 128, &mut contract_budget);
@@ -910,34 +886,29 @@ fn analyze_impl(
     // contracts and defaults; future address-taking is conservatively included.
     let mut addressed_locals = BTreeSet::new();
     let mut written_locals = BTreeSet::new();
-    nir::visit::program_expressions(
-        analysis.program(),
-        &mut limits.arithmetic.steps,
-        |expr, fuel| {
-            if let K::Assign { place, .. }
-            | K::BitAssign { place, .. }
-            | K::BitUpdate { place, .. } = &expr.kind
-            {
-                written_locals.insert(place.root);
-            }
-            if let K::EffectHandle { handlers, .. } = &expr.kind {
-                for handler in handlers {
-                    for arm in &handler.arms {
-                        addressed_locals.extend(patterns::handler_arm_writes(arm, fuel)?);
-                    }
+    nir::visit::program_expressions(program, &mut limits.arithmetic.steps, |expr, fuel| {
+        if let K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. } =
+            &expr.kind
+        {
+            written_locals.insert(place.root);
+        }
+        if let K::EffectHandle { handlers, .. } = &expr.kind {
+            for handler in handlers {
+                for arm in &handler.arms {
+                    addressed_locals.extend(patterns::handler_arm_writes(arm, fuel)?);
                 }
             }
-            if let K::AddressOf(value) = &expr.kind {
-                iir::visit::expression(value, fuel, |operand, _| {
-                    if let K::Local(binding) = operand.kind {
-                        addressed_locals.insert(binding);
-                    }
-                    Ok(())
-                })?;
-            }
-            Ok(())
-        },
-    )
+        }
+        if let K::AddressOf(value) = &expr.kind {
+            iir::visit::expression(value, fuel, |operand, _| {
+                if let K::Local(binding) = operand.kind {
+                    addressed_locals.insert(binding);
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
+    })
     .map_err(|_| {
         error(Reason::Unknown(
             comptime_runtime::Error::BudgetExhausted.into(),
@@ -977,7 +948,7 @@ fn analyze_impl(
         assuming_postcondition: false,
         memory_summaries: std::collections::HashMap::new(),
         exit_contract: Some(ExitContract {
-            conditions: &function.postconditions,
+            conditions: function.postconditions,
             binding: function.result_binding,
             ty: if let Term::Computation { result, .. } = result.as_ref() {
                 result.as_ref()
@@ -994,7 +965,7 @@ fn analyze_impl(
             state.aggregates.insert(place(*binding), value);
         }
     }
-    for condition in &function.preconditions {
+    for condition in function.preconditions {
         let checked = walker.eval(condition, &mut state, 0)?;
         let Some(condition) = checked.condition else {
             return Err(error(Reason::Unsupported));
@@ -1004,7 +975,7 @@ fn analyze_impl(
             .assume(&condition, true, walker.limits)
             .map_err(|e| error(Reason::Unknown(e)))?;
     }
-    for snapshot in &function.entry_snapshots {
+    for snapshot in function.entry_snapshots {
         let index = function
             .parameters
             .iter()
@@ -1023,21 +994,19 @@ fn analyze_impl(
             .frozen
             .insert(place(snapshot.binding), parameters[index].ty.clone());
     }
-    match analysis {
-        Analysis::Body(function) if function.postconditions.is_empty() => {
-            walker.eval(&function.body, &mut state, 0)?;
+    match function.body {
+        Some(body) if function.postconditions.is_empty() => {
+            walker.eval(body, &mut state, 0)?;
         }
-        Analysis::Body(function) => {
-            walker
-                .tail(&function.body, &mut state, 0)
-                .map_err(|reason| Error {
-                    source: walker.failure_source.unwrap_or(source),
-                    reason,
-                })?;
+        Some(body) => {
+            walker.tail(body, &mut state, 0).map_err(|reason| Error {
+                source: walker.failure_source.unwrap_or(source),
+                reason,
+            })?;
         }
-        Analysis::Implication { .. } => {
+        None => {
             walker
-                .check_conclusions(&function.postconditions, &mut state, 0)
+                .check_conclusions(function.postconditions, &mut state, 0)
                 .map_err(|reason| Error {
                     source: walker.failure_source.unwrap_or(source),
                     reason,
@@ -5648,40 +5617,16 @@ pub fn validate_machine_operations(package: &nir::program::Package) -> Result<()
 /// Check a projected definition expression without installing it as a callable.
 pub fn validate_definition_region(
     package: &nir::program::Package,
-    region: nir::program::DefinitionRegion,
+    region: &nir::program::DefinitionRegion,
 ) -> Result<(), Error> {
     let (owners, arithmetic) =
-        nir::phases::inspect_definition_region(package, &region).map_err(|e| Error {
+        nir::phases::inspect_definition_region(package, region).map_err(|e| Error {
             source: e.source,
             reason: Reason::Phase(e.message),
         })?;
     validate_machine_owners(package, &owners)?;
     if arithmetic {
-        // Finite-domain specialization accepts a function-shaped proof subject.
-        // The projected frame is private to this proof, including when a
-        // recursive call resolves the owner's real interface in the package.
-        let proof = Function {
-            interface: FunctionDeclaration {
-                declaration: region.owner,
-                name: region.owner.to_string(),
-                phase: region.phase,
-                inline: false,
-                pure: false,
-                is_unsafe: false,
-                signature: region.signature,
-                parameters: region.parameters,
-                defaults: vec![],
-                type_parameters: region.type_parameters,
-                preconditions: vec![],
-                postconditions: vec![],
-                entry_snapshots: vec![],
-                result_binding: None,
-                requirements: region.requirements,
-                capabilities: region.capabilities,
-            },
-            body: region.body,
-        };
-        validate_machine_instances(package, &proof)?;
+        validate_machine_instances(package, region)?;
     }
     Ok(())
 }
@@ -5713,13 +5658,13 @@ fn validate_machine_owners(
     Ok(())
 }
 
-fn validate_machine_instances(
+fn validate_machine_instances<B: finite_domains::MachineBody>(
     package: &nir::program::Package,
-    function: &Function,
+    body: &B,
 ) -> Result<(), Error> {
     let mut limits = Limits::default();
-    let Some(instances) = finite_domains::integer_instances(function, &mut limits)? else {
-        return validate_machine_function(package, function);
+    let Some(instances) = finite_domains::integer_instances(body, &mut limits)? else {
+        return validate_machine_body(package, body);
     };
     for mut instance in instances {
         // An unspecified target is not the compiler host. A generic
@@ -5728,15 +5673,19 @@ fn validate_machine_instances(
         // copies; neither the source package target nor its literals change.
         let mut platform = false;
         if package.target.is_none() {
-            nir::visit::expressions(&instance, &mut limits.arithmetic.steps, |expr, _| {
-                platform |= matches!(
-                    expr.ty,
-                    Term::Primitive(nir::Primitive::Usize | nir::Primitive::Isize)
-                );
-                Ok(())
-            })
+            nir::visit::program_expressions(
+                instance.program(),
+                &mut limits.arithmetic.steps,
+                |expr, _| {
+                    platform |= matches!(
+                        expr.ty,
+                        Term::Primitive(nir::Primitive::Usize | nir::Primitive::Isize)
+                    );
+                    Ok(())
+                },
+            )
             .map_err(|_| Error {
-                source: instance.body.source,
+                source: instance.program().parts().source,
                 reason: Reason::Unsupported,
             })?;
         }
@@ -5745,20 +5694,12 @@ fn validate_machine_instances(
             for width in (8..=128).step_by(8) {
                 proof_package.target = Some(nir::target::TargetData::new(width).unwrap());
                 let mut proof = instance.clone();
-                finite_domains::complete_literals(
-                    std::slice::from_mut(&mut proof),
-                    proof_package.target,
-                    &mut limits,
-                )?;
-                validate_machine_function(&proof_package, &proof)?;
+                finite_domains::complete_literals(&mut proof, proof_package.target, &mut limits)?;
+                validate_machine_body(&proof_package, &proof)?;
             }
         } else {
-            finite_domains::complete_literals(
-                std::slice::from_mut(&mut instance),
-                package.target,
-                &mut limits,
-            )?;
-            validate_machine_function(package, &instance)?;
+            finite_domains::complete_literals(&mut instance, package.target, &mut limits)?;
+            validate_machine_body(package, &instance)?;
         }
     }
     Ok(())
@@ -5766,21 +5707,19 @@ fn validate_machine_instances(
 
 // Each universally checked body has the same bounded analysis budget as a
 // monomorphic declaration. Type/layout enumeration is separately finite.
-fn validate_machine_function(
+fn validate_machine_body(
     package: &nir::program::Package,
-    function: &Function,
+    body: &impl finite_domains::MachineBody,
 ) -> Result<(), Error> {
-    analyze_in_package(package, function, &mut Limits::default())?;
-    for (_, default) in &function.defaults {
-        let mut function = function.clone();
-        function.body = default.clone();
-        function.defaults.clear();
-        // Defaults execute before call preconditions have been discharged.
-        function.preconditions.clear();
-        function.postconditions.clear();
-        function.result_binding = None;
-        function.entry_snapshots.clear();
-        analyze_in_package(package, &function, &mut Limits::default())?;
+    let program = body.program();
+    for execution in std::iter::once(program).chain(program.default_bodies()) {
+        analyze_impl(
+            execution,
+            body.requirements(),
+            Some(package),
+            &mut Limits::default(),
+            false,
+        )?;
     }
     Ok(())
 }
