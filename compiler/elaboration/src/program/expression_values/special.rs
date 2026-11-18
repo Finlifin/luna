@@ -329,7 +329,7 @@ impl Checker<'_, '_> {
                         .dynamic_normal_form_application(expr, callee, arguments, expected)
                         .map(Some);
                 }
-                if self.method_instantiation_inputs(&callee).is_some() {
+                if self.method_instance_shape(&callee).is_some() {
                     return self
                         .explicit_method_instance(expr, callee, arguments, expected, false)
                         .map(Some);

@@ -3170,14 +3170,13 @@ impl Builder<'_> {
                 if values.len() != prefix_count + member.type_parameters.len() {
                     return Err("dynamic trait clause packet arity mismatch".into());
                 }
-                let prefix = values[..prefix_count]
-                    .iter()
-                    .map(|value| match &value.kind {
-                        K::TypeValue(value) | K::ComptimeValue(value) => Ok(value.clone()),
-                        _ => Err(
-                            "dynamic trait dispatch requires known Self and interface inputs"
-                                .to_owned(),
-                        ),
+                let prefix = (0..prefix_count)
+                    .map(|slot| {
+                        let identity = inputs.observed_argument(slot).ok_or(
+                            "dynamic trait dispatch requires known Self and interface inputs",
+                        )?;
+                        nir::copy_budget::clone_term(identity, &mut self.fuel)
+                            .map_err(|reason| format!("method input copy budget: {reason:?}"))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let interface_id = interface.declaration;

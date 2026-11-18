@@ -1256,6 +1256,7 @@ fn dynamic_trait_package() -> Package {
     };
     package.functions[0].parameters = vec![binding];
     let inputs = nir::program::ClauseOperands {
+        observations: Default::default(),
         statements: vec![],
         arguments: vec![
             Expr {
@@ -1300,6 +1301,34 @@ fn dynamic_trait_clauses_select_the_originating_contract_and_instance() {
                 .unwrap(),
             Value::Bool(true)
         );
+    }
+}
+
+#[test]
+fn dynamic_clause_observations_cannot_supply_an_executable_operand() {
+    let mut package = dynamic_trait_package();
+    let K::Call { callee, .. } = &mut package.functions[0].body.kind else {
+        unreachable!()
+    };
+    let K::ComptimeFunctionInstance { inputs, .. } = &mut callee.kind else {
+        unreachable!()
+    };
+    // The member input takes a Type. This stale source hint would reject both
+    // calls if it replaced the producer's actual result in the receiving VM.
+    inputs.observations.insert(1, Term::Bool(false));
+    for reference in [false, true] {
+        let mut vm = if reference {
+            Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+        } else {
+            Interpreter::for_comptime(&package, Budget::default()).unwrap()
+        };
+        for ty in [Primitive::Bool, Primitive::U8] {
+            assert_eq!(
+                vm.invoke(id(1), vec![Value::Type(Term::Primitive(ty))])
+                    .unwrap(),
+                Value::Bool(true)
+            );
+        }
     }
 }
 

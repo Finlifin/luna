@@ -3239,18 +3239,15 @@ impl Checker<'_, '_> {
                     }
                 }
                 K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                    // These are already resolved, uniquely identified locals.
-                    // Only these block-owned locals may be updated. Captured
-                    // caller storage remains outside staged input evaluation.
                     pending.extend(result.as_deref());
-                    for statement in statements.iter().rev() {
-                        if let K::Let { binding, value } = &statement.kind {
-                            block_bindings.insert(*binding);
-                            pending.push(value);
-                        } else {
-                            pending.push(statement);
-                        }
-                    }
+                    pending.extend(statements.iter().rev());
+                }
+                K::Let { binding, value } => {
+                    // The checked producer owns this fresh local in both a
+                    // lexical block and a clause packet. Inspect its initializer
+                    // before deciding whether the subsequent reads can freeze.
+                    block_bindings.insert(*binding);
+                    pending.push(value);
                 }
                 K::LetPattern {
                     pattern,

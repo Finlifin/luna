@@ -284,6 +284,7 @@ impl<'h> Checker<'_, 'h> {
             let n::ClauseOperands {
                 mut statements,
                 arguments,
+                ..
             } = prepared.operands;
             for argument in &arguments {
                 if let K::Local(binding) = &argument.kind {

@@ -586,7 +586,7 @@ impl<'a> DeclarationSubstitution<'a> {
 pub struct AdmittedArguments<'a, T = Term> {
     parameters: Binders,
     arguments: &'a [T],
-    frames: &'a [Vec<Sort>],
+    scope: DeclarationInputScope<'a>,
 }
 impl<T: Borrow<Term>> std::fmt::Display for AdmittedArguments<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -595,7 +595,7 @@ impl<T: Borrow<Term>> std::fmt::Display for AdmittedArguments<'_, T> {
             write!(f, " (input {parameter} {})", argument.borrow())?;
         }
         f.write_str(" ")?;
-        display_frames(f, self.frames)?;
+        write!(f, "{}", self.scope)?;
         f.write_str(")")
     }
 }
@@ -606,15 +606,29 @@ impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
         fuel: &mut usize,
     ) -> Result<Term, crate::type_computations::Error> {
         self.parameters
-            .instantiate_bounded(term, self.arguments, self.frames, fuel)
+            .instantiate_bounded(term, self.arguments, self.scope.template(), fuel)
+    }
+    /// A whole callable signature introduces its own ordinary telescope. A
+    /// requirement in that body instead inherits the template frames.
+    pub fn instantiate_in_input_scope(
+        &self,
+        term: &Term,
+        fuel: &mut usize,
+    ) -> Result<Term, crate::type_computations::Error> {
+        self.parameters
+            .instantiate_bounded(term, self.arguments, self.scope.input(), fuel)
     }
     pub(crate) fn instantiate_expression(
         &self,
         expression: &crate::program::Expr,
         fuel: &mut usize,
     ) -> Result<crate::program::Expr, ExpressionInstantiationError> {
-        self.parameters
-            .instantiate_expression(expression, self.arguments, self.frames, fuel)
+        self.parameters.instantiate_expression(
+            expression,
+            self.arguments,
+            self.scope.template(),
+            fuel,
+        )
     }
     pub fn instantiate_requirement(
         &self,
@@ -838,7 +852,7 @@ pub fn admit_in_order<'a, D: Borrow<Term>, T: Borrow<Term>>(
     Ok(AdmittedArguments {
         parameters,
         arguments,
-        frames: scope.template(),
+        scope,
     })
 }
 

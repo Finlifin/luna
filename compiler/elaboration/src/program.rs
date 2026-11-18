@@ -5975,7 +5975,7 @@ impl Checker<'_, '_> {
             // Trait entries carry Self, interface arguments and method arguments
             // separately. Contract checking needs their complete declaration substitution.
             let type_arguments = self
-                .method_instantiation_inputs(&callee)
+                .method_instantiation_inputs(&callee, expr.span)?
                 .map(|(_, arguments)| arguments)
                 .unwrap_or_default();
             self.check_ordinary_capabilities(owner, &type_arguments, &type_inputs, expr.span)?;

@@ -602,6 +602,7 @@ fn clause_operands_read_preparation_locals_without_exporting_them() {
             local: 9,
         },
         inputs: nir::program::ClauseOperands {
+            observations: Default::default(),
             statements: vec![expr(K::Let {
                 binding: id(2),
                 value: Box::new(local(1)),

@@ -588,6 +588,8 @@ impl<'a> Interpreter<'a> {
         arguments: Vec<Value>,
         origin: Option<DeclarationId>,
     ) -> Result<InvocationFrame<'a>, Error> {
+        let frames;
+        let mut instance_inputs = None;
         let (parameters, mut environment, source, signature) = match &function {
             Value::Function(id) => {
                 let view = self
@@ -623,8 +625,15 @@ impl<'a> Interpreter<'a> {
                     .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
                 let definition = view.interface;
                 let source = view.source;
-                let signature =
-                    self.specialize_function_signature(definition, arguments, source)?;
+                frames = [self.ordinary_input_frame(&definition.signature, source)?];
+                let inputs = self.admit_function_inputs(
+                    &definition.type_parameters,
+                    arguments,
+                    nir::DeclarationInputScope::ClosedInBody(&frames),
+                    source,
+                )?;
+                let signature = self.signature_from_admission(definition, &inputs, source)?;
+                instance_inputs = Some(inputs);
                 (
                     definition.parameters.as_slice(),
                     Environment::with_capacity(definition.parameters.len()),
@@ -660,42 +669,38 @@ impl<'a> Interpreter<'a> {
             &mut environment,
             source,
         )?;
-        if self.comptime_only
-            || matches!(
-                function,
-                Value::Function(_) | Value::FunctionInstance { .. }
-            )
+        if let Some(id) = origin
+            && (self.comptime_only
+                || matches!(
+                    function,
+                    Value::Function(_) | Value::FunctionInstance { .. }
+                ))
         {
-            if let Some(id) = origin {
-                let definition = self
-                    .invocation_declaration(id, &function)
-                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
+            let definition = self
+                .invocation_declaration(id, &function)
+                .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
+            if !definition.requirements.is_empty() || !definition.capabilities.is_empty() {
                 let generic_arguments = match &function {
                     _ if self.graph.is_some() => &[][..],
                     Value::Closure(closure) => closure.instance_arguments.as_deref().unwrap_or(&[]),
                     Value::FunctionInstance { arguments, .. } => arguments.as_slice(),
                     _ => &[],
                 };
-                for requirement in &definition.requirements {
-                    let requirement = self.specialize_function_predicate(
-                        definition,
-                        generic_arguments,
-                        requirement,
-                        source,
-                    )?;
-                    let requirement = self
-                        .bind_invocation_contract(&requirement, type_scope.as_ref(), source, 0)?
-                        .ok_or_else(|| {
-                            self.failure(ErrorKind::TypeContractUnresolved, Some(source))
-                        })?;
-                    self.check_type_contract(&requirement, source)?;
-                }
-                self.check_invocation_capabilities(
-                    definition,
-                    generic_arguments,
-                    type_scope.as_ref(),
-                    source,
-                )?;
+                let contract_frames;
+                let inputs = match instance_inputs {
+                    Some(inputs) if self.graph.is_none() => inputs,
+                    _ => {
+                        contract_frames =
+                            [self.ordinary_input_frame(&definition.signature, source)?];
+                        self.admit_function_inputs(
+                            &definition.type_parameters,
+                            generic_arguments,
+                            nir::DeclarationInputScope::ClosedInBody(&contract_frames),
+                            source,
+                        )?
+                    }
+                };
+                self.check_invocation_contracts(definition, &inputs, type_scope.as_ref(), source)?;
             }
         }
         let result_type = match &type_scope {

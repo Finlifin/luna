@@ -719,6 +719,13 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         parameter_bindings.len()
                     }
                     K::ComptimeFunctionInstance { inputs, .. } => {
+                        charge_width(steps, inputs.observations.len())?;
+                        work.extend(
+                            inputs
+                                .observations
+                                .values()
+                                .map(|term| (Node::Type(term), depth + 1)),
+                        );
                         charge_width(steps, inputs.statements.len())?;
                         charge_width(steps, inputs.arguments.len())?;
                         work.extend(

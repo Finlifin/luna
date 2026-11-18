@@ -261,11 +261,21 @@ impl Literal {
 /// operand for each declaration slot. Temporaries are private to this scope.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClauseOperands {
+    /// Source evidence conditional on reaching a slot's result. Executable
+    /// consumers always read the operand; this map cannot supply a VM value.
+    pub observations: std::collections::BTreeMap<usize, Term>,
     pub statements: Vec<Expr>,
     pub arguments: Vec<Expr>,
 }
 
 impl ClauseOperands {
+    pub fn observed_argument(&self, slot: usize) -> Option<&Term> {
+        match &self.arguments.get(slot)?.kind {
+            ExprKind::TypeValue(value) | ExprKind::ComptimeValue(value) => Some(value),
+            _ => self.observations.get(&slot),
+        }
+    }
+
     pub fn expressions(&self) -> impl DoubleEndedIterator<Item = &Expr> {
         self.statements.iter().chain(&self.arguments)
     }
@@ -284,6 +294,10 @@ impl fmt::Display for ClauseOperands {
         f.write_str(") (arguments")?;
         for argument in &self.arguments {
             write!(f, " {argument}")?;
+        }
+        f.write_str(") (observations")?;
+        for (slot, identity) in &self.observations {
+            write!(f, " (slot {slot} {identity})")?;
         }
         f.write_str("))")
     }
@@ -3749,6 +3763,9 @@ impl Expr {
                     work.push(Work::Expr(selector));
                 }
                 ExprKind::ComptimeFunctionInstance { inputs, .. } => {
+                    for identity in inputs.observations.values_mut() {
+                        rewriter.ty(identity)?;
+                    }
                     work.extend(inputs.expressions_mut().rev().map(Work::Expr));
                 }
                 ExprKind::Block { statements, result }
@@ -4171,6 +4188,9 @@ impl Expr {
                 }
             }
             ExprKind::ComptimeFunctionInstance { inputs, .. } => {
+                for identity in inputs.observations.values_mut() {
+                    rewriter.ty(identity)?;
+                }
                 for operand in inputs.expressions_mut() {
                     operand.rewrite_with(rewriter)?;
                 }

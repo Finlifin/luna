@@ -74,7 +74,7 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         span: Span,
     ) -> Result<n::Expr, Error> {
-        if let Some((owner, _)) = self.method_instantiation_inputs(&value) {
+        if let Some((owner, _)) = self.method_instance_shape(&value) {
             if let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
                 self.package.item(owner).map(|item| &item.kind)
             {
@@ -182,5 +182,142 @@ impl Checker<'_, '_> {
         }
         .associated_type_view_metered(signature, budget)
         .map(|value| value.value)
+    }
+}
+
+/// The source interface can inspect arity without copying identities or
+/// interpreting a producer. Public members include Self before either tuple.
+enum CallableClauseView<'v> {
+    Fixed(&'v [Term]),
+    Prepared(&'v n::ClauseOperands),
+    Member {
+        subject: &'v Term,
+        interface: &'v [Term],
+        method: &'v [Term],
+    },
+}
+
+impl CallableClauseView<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Fixed(values) => values.len(),
+            Self::Prepared(inputs) => inputs.arguments.len(),
+            Self::Member {
+                interface, method, ..
+            } => 1 + interface.len() + method.len(),
+        }
+    }
+
+    fn identity(&self, slot: usize) -> Option<&Term> {
+        match self {
+            Self::Fixed(values) => values.get(slot),
+            Self::Prepared(inputs) => inputs.observed_argument(slot),
+            Self::Member { subject, .. } if slot == 0 => Some(subject),
+            Self::Member {
+                interface, method, ..
+            } => {
+                let slot = slot - 1;
+                if slot < interface.len() {
+                    interface.get(slot)
+                } else {
+                    method.get(slot - interface.len())
+                }
+            }
+        }
+    }
+}
+
+impl Checker<'_, '_> {
+    fn method_input_view<'v>(
+        &self,
+        value: &'v n::Expr,
+    ) -> Option<(OwnerId, CallableClauseView<'v>)> {
+        let (id, view) = match &value.kind {
+            K::ComptimeFunctionInstance {
+                declaration,
+                inputs,
+            } => (*declaration, CallableClauseView::Prepared(inputs)),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => (*declaration, CallableClauseView::Fixed(arguments)),
+            K::TraitMethod {
+                member,
+                subject,
+                interface_arguments,
+                method_arguments,
+                ..
+            } => (
+                *member,
+                CallableClauseView::Member {
+                    subject,
+                    interface: interface_arguments,
+                    method: method_arguments,
+                },
+            ),
+            _ => return None,
+        };
+        Some((self.source_declarations.owner(id)?, view))
+    }
+
+    pub(in crate::program) fn method_instance_shape(
+        &self,
+        value: &n::Expr,
+    ) -> Option<(OwnerId, usize)> {
+        self.method_input_view(value)
+            .map(|(owner, view)| (owner, view.len()))
+    }
+
+    pub(in crate::program) fn method_instantiation_inputs(
+        &mut self,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<Option<(OwnerId, Vec<Term>)>, Error> {
+        let Some((owner, view)) = self.method_input_view(value) else {
+            return Ok(None);
+        };
+        let width = view.len();
+        if matches!(view, CallableClauseView::Prepared(_))
+            && self.type_parameters[&owner].len() != width
+        {
+            return Err(error(span, "invalid comptime clause input packet"));
+        }
+        self.required_steps = self
+            .required_steps
+            .checked_sub(width as u64)
+            .ok_or_else(|| error(span, "callable clause evidence budget exhausted"))?;
+        let mut values = Vec::with_capacity(width);
+        for slot in 0..width {
+            let value = if let Some(identity) = view.identity(slot) {
+                self.copy_alias_type(identity, span)?
+            } else {
+                let id = self.type_parameters[&owner][slot];
+                let mut steps = self.required_steps;
+                let domain = self
+                    .observe_input_domain(id, || {
+                        steps = steps
+                            .checked_sub(1)
+                            .ok_or(nir::type_computations::Error::Budget)?;
+                        Ok(())
+                    })
+                    .map(|domain| domain.map_or(Sort::Type, Sort::of_comptime_domain));
+                self.required_steps = steps;
+                Term::Rigid {
+                    declaration: id,
+                    sort: domain.map_err(|reason| error(span, reason.to_string()))?,
+                }
+            };
+            values.push(value);
+        }
+        Ok(Some((owner, values)))
+    }
+
+    pub(in crate::program) fn incomplete_method_instance(&self, value: &n::Expr) -> bool {
+        self.method_instance_shape(value)
+            .is_some_and(|(owner, width)| {
+                self.type_parameters
+                    .get(&owner)
+                    .is_some_and(|parameters| width < parameters.len())
+            })
     }
 }

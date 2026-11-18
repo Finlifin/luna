@@ -40,20 +40,26 @@ impl Interpreter<'_> {
     }
 
     #[inline(never)]
-    pub(super) fn check_invocation_capabilities(
+    pub(super) fn check_invocation_contracts(
         &mut self,
         definition: &nir::program::FunctionDeclaration,
-        arguments: &[Term],
+        inputs: &nir::AdmittedArguments<'_>,
         scope: Option<&nir::FunctionInputBinding>,
         source: SourceRange,
     ) -> Result<(), Error> {
+        for requirement in &definition.requirements {
+            let predicate = self.query_admission(Some(source), |_, fuel| {
+                Ok(inputs.instantiate_predicate(requirement, fuel)?)
+            })?;
+            let bound = self
+                .bind_invocation_contract(&predicate, scope, source, 0)?
+                .ok_or_else(|| self.failure(ErrorKind::TypeContractUnresolved, Some(source)))?;
+            self.check_type_contract(&bound, source)?;
+        }
         for capability in &definition.capabilities {
-            let predicate = self.specialize_function_predicate(
-                definition,
-                arguments,
-                &P::Trait(capability.clone()),
-                source,
-            )?;
+            let predicate = P::Trait(self.query_admission(Some(source), |_, fuel| {
+                Ok(inputs.instantiate_requirement(capability, fuel)?)
+            })?);
             match self.bind_invocation_contract(&predicate, None, source, 0)? {
                 Some(P::Trait(bound)) if self.comptime_only && self.graph.is_none() => {
                     // Direct source entry has no prior formation receipt, and

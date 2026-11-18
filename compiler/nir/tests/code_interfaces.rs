@@ -432,6 +432,7 @@ fn contextual_declaration_frames_preserve_slots_and_cannot_be_invoked_as_functio
         kind: ExprKind::ComptimeFunctionInstance {
             declaration: member.declaration,
             inputs: nir::program::ClauseOperands {
+                observations: Default::default(),
                 statements: vec![],
                 arguments: vec![subject],
             },

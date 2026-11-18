@@ -529,3 +529,44 @@ fn dependency_checks_preserve_source_effects_and_skip_unreached_type_producers()
         ",
     );
 }
+
+#[test]
+fn value_indexed_signatures_keep_clause_effects_and_the_selected_identity() {
+    let source = "
+        struct Flag where tag: bool { value: bool }
+        comptime fn read(value: Flag<tag>) -> bool where tag: bool { value.value }
+        comptime fn check() -> bool {
+            var visits: Integer = 0;
+            let get = read<do { visits = visits + 1; true }>;
+            let value = Flag<true> { value: true };
+            get(value) and get(value) and visits == 1
+        }
+    ";
+    check_both(source);
+    assert!(
+        sysroot::compile(&source.replace("let value = Flag<true>", "let value = Flag<false>"))
+            .is_err()
+    );
+}
+
+#[test]
+fn default_parameters_receive_value_indices_from_their_callable() {
+    let source = "
+        struct Flag where tag: bool { value: bool }
+        comptime fn read(comptime .T: Type = Flag<tag>, value: T) -> bool
+        where tag: bool
+        {
+            true
+        }
+        comptime fn check() -> bool {
+            var visits: Integer = 0;
+            let first = read<do { visits = visits + 1; true }>(Flag<true> { value: true });
+            first and read<do { visits = visits + 1; false }>(Flag<false> { value: true })
+                and visits == 2
+        }
+    ";
+    check_both(source);
+    let mismatch = source.replace("Flag<false> { value: true }", "Flag<true> { value: true }");
+    let failure = sysroot::compile(&mismatch).unwrap_err();
+    assert!(failure.contains("type mismatch"), "{failure}");
+}

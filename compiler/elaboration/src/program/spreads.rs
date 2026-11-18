@@ -932,8 +932,8 @@ impl Checker<'_, '_> {
                     _ => None,
                 });
             let generics = self
-                .method_instantiation_inputs(callee)
-                .map(|(owner, arguments)| self.type_parameters[&owner][arguments.len()..].to_vec())
+                .method_instance_shape(callee)
+                .map(|(owner, width)| self.type_parameters[&owner][width..].to_vec())
                 .unwrap_or_default();
             let types =
                 if let Some(hints) = Self::dependent_spread_hints(signature, &generics, span)? {
@@ -943,8 +943,8 @@ impl Checker<'_, '_> {
                         .map(|ty| ty.map_or(Input::Unknown, Input::Known))
                         .collect()
                 } else if self.incomplete_method_instance(callee) {
-                    let (owner, arguments) = self.method_instantiation_inputs(callee).unwrap();
-                    let remaining = &self.type_parameters[&owner][arguments.len()..];
+                    let (owner, width) = self.method_instance_shape(callee).unwrap();
+                    let remaining = &self.type_parameters[&owner][width..];
                     let scheme = crate::calls::Scheme {
                         parameter_sorts: self
                             .input_binders(remaining)

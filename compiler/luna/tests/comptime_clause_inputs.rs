@@ -713,7 +713,7 @@ fn type_valued_dependent_clause_inputs_form_callable_instances() {
     );
     for tree in [false, true] {
         let mut vm = if tree {
-            Interpreter::new(&package, Default::default()).unwrap()
+            Interpreter::for_comptime_tree(&package, Default::default()).unwrap()
         } else {
             Interpreter::for_comptime(&package, Default::default()).unwrap()
         };

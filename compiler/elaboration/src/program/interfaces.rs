@@ -2821,53 +2821,6 @@ impl Checker<'_, '_> {
 }
 
 impl Checker<'_, '_> {
-    pub(super) fn method_instantiation_inputs(
-        &self,
-        value: &n::Expr,
-    ) -> Option<(OwnerId, Vec<Term>)> {
-        if let K::ComptimeFunctionInstance {
-            declaration: id,
-            inputs,
-        } = &value.kind
-        {
-            let owner = self.source_declarations.owner(*id)?;
-            return Some((
-                owner,
-                self.comptime_instance_clause_evidence(owner, inputs)?,
-            ));
-        }
-        let (id, arguments) = match &value.kind {
-            K::FunctionInstance {
-                declaration,
-                arguments,
-            } => (*declaration, arguments.clone()),
-            K::TraitMethod {
-                member,
-                subject,
-                interface_arguments,
-                method_arguments,
-                ..
-            } => (
-                *member,
-                std::iter::once(subject.clone())
-                    .chain(interface_arguments.iter().cloned())
-                    .chain(method_arguments.iter().cloned())
-                    .collect(),
-            ),
-            _ => return None,
-        };
-        self.source_declarations
-            .owner(id)
-            .map(|owner| (owner, arguments))
-    }
-    pub(super) fn incomplete_method_instance(&self, value: &n::Expr) -> bool {
-        self.method_instantiation_inputs(value)
-            .is_some_and(|(owner, arguments)| {
-                self.type_parameters
-                    .get(&owner)
-                    .is_some_and(|parameters| arguments.len() < parameters.len())
-            })
-    }
     fn retain_method_origin(&self, method: n::Expr, mut value: n::Expr) -> n::Expr {
         if let K::TraitMethod {
             interface,
@@ -2899,7 +2852,7 @@ impl Checker<'_, '_> {
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
         let (owner, fixed) = self
-            .method_instantiation_inputs(&method)
+            .method_instantiation_inputs(&method, expr.span)?
             .ok_or_else(|| error(expr.span, "method has no generic declaration"))?;
         let value = self.contextual_function_instance_with_fixed_view(
             expr,
@@ -3041,12 +2994,14 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         allow_optional: bool,
     ) -> Result<n::Expr, Error> {
-        let (owner, mut fixed) = self.method_instantiation_inputs(&method).ok_or_else(|| {
-            error(
-                expr.span,
-                "explicit instantiation requires a generic method",
-            )
-        })?;
+        let (owner, mut fixed) = self
+            .method_instantiation_inputs(&method, expr.span)?
+            .ok_or_else(|| {
+                error(
+                    expr.span,
+                    "explicit instantiation requires a generic method",
+                )
+            })?;
         // Dynamic trait packets retain the member declaration, not its body.
         if matches!(
             method.kind,

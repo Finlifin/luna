@@ -456,6 +456,19 @@ fn closed_clause_inputs_and_ordinary_contract_binders_have_distinct_scopes() {
         &mut queries,
     )
     .unwrap();
+    // The same admitted values specialize the whole signature outside the
+    // ordinary parameter frame and the declaration contracts within it.
+    assert!(
+        admitted
+            .instantiate_in_input_scope(&bound, &mut fuel)
+            .is_err()
+    );
+    assert_eq!(
+        admitted
+            .instantiate_in_input_scope(&rigid(12, Sort::ComptimeValue), &mut fuel)
+            .unwrap(),
+        p(Primitive::Bool)
+    );
     let template = Term::Tuple(vec![bound.clone(), rigid(12, Sort::ComptimeValue)]);
     assert_eq!(
         admitted.instantiate(&template, &mut fuel).unwrap(),

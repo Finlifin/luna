@@ -111,13 +111,7 @@ impl PreparedDeclarationInputs {
                 });
                 n::Expr {
                     source: location,
-                    kind: if ty == p(P::Type)
-                        && let Some(identity) = self.observations.identity(slot)
-                    {
-                        K::TypeValue(copy_input_domain(identity, fuel, span)?)
-                    } else {
-                        K::Local(binding)
-                    },
+                    kind: K::Local(binding),
                     ty,
                 }
             };
@@ -125,6 +119,7 @@ impl PreparedDeclarationInputs {
         }
         Ok(CheckedDeclarationInputs {
             operands: n::ClauseOperands {
+                observations: Default::default(),
                 arguments: outputs.into_iter().map(Option::unwrap).collect(),
                 statements,
             },

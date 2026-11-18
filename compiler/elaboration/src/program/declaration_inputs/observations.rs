@@ -118,6 +118,7 @@ impl Observations {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn identity(&self, slot: usize) -> Option<&Term> {
         self.0[slot].1.as_ref()
     }
@@ -236,6 +237,29 @@ impl CallableBindings {
         let result = self.substitution.instantiate_bounded(template, &mut fuel);
         *steps -= (before - fuel) as u64;
         result.map_err(|failure| error(span, failure.to_string()))
+    }
+
+    /// After signature specialization the packet owns these terms. Move only
+    /// the nonliteral observations; literal operands already expose an identity.
+    pub(in crate::program) fn move_observations(
+        self,
+        parameters: &[DeclarationId],
+        operands: &mut n::ClauseOperands,
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<(), Error> {
+        environment::charge(steps, parameters.len(), span)?;
+        let observed_slots = parameters
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| !self.pending.contains(id));
+        let values = self.substitution.into_arguments().into_owned();
+        for ((slot, _), identity) in observed_slots.zip(values) {
+            if matches!(operands.arguments[slot].kind, K::Local(_)) {
+                operands.observations.insert(slot, identity);
+            }
+        }
+        Ok(())
     }
 
     pub(in crate::program) fn into_identities(self) -> Option<Vec<Term>> {

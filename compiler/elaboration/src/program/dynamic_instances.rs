@@ -183,33 +183,6 @@ impl std::fmt::Display for InstanceCompletion<'_> {
 }
 
 impl<'a, 'arena> Checker<'a, 'arena> {
-    /// Definition-side evidence only: pending values retain declaration rigids.
-    /// The invocation packet remains the authority for their actual snapshots.
-    pub(super) fn comptime_instance_clause_evidence(
-        &self,
-        owner: OwnerId,
-        inputs: &n::ClauseOperands,
-    ) -> Option<Vec<Term>> {
-        let inputs = &inputs.arguments;
-        let parameters = self.type_parameters.get(&owner)?;
-        if inputs.len() != parameters.len() {
-            return None;
-        }
-        Some(
-            self.input_binders(parameters)
-                .into_iter()
-                .zip(inputs)
-                .map(|(parameter, input)| match &input.kind {
-                    K::TypeValue(ty) | K::ComptimeValue(ty) => ty.clone(),
-                    _ => Term::Rigid {
-                        declaration: parameter.declaration,
-                        sort: parameter.sort,
-                    },
-                })
-                .collect(),
-        )
-    }
-
     pub(super) fn prepared_callable_instance(
         &mut self,
         expr: &Expr<'_>,
@@ -284,9 +257,9 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         {
             return Ok(None);
         }
-        // Dependencies inside the clause telescope are checked while preparing
-        // its packet. Only a value-dependent callable signature itself requires
-        // a separate invocation plan before the callable type can be formed.
+        // Only the prepared inputs can say whether the result interface is
+        // known. A value binder in its declaration may already have an identity
+        // in this call, even when its producer has effects before returning.
         let parameters = self
             .type_parameters
             .get(&owner)
@@ -304,7 +277,6 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         let Some(signature) = self.known_callable_signature(owner) else {
             return Ok(None);
         };
-        let declared_inputs = self.term_declaration_inputs(&signature, expr.span)?;
         let (captured, local_domains) = declaration_inputs::KnownInputs::partition(
             &parameters,
             domains,
@@ -312,29 +284,6 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             &mut self.required_steps,
             expr.span,
         )?;
-        let mut dependent = parameters[prefix.len()..]
-            .iter()
-            .zip(&local_domains)
-            .filter(|(id, domain)| declared_inputs.contains(id) && **domain != p(P::Type))
-            .map(|(_, domain)| domain)
-            .peekable();
-        if dependent.peek().is_some() {
-            if prefix.is_empty() {
-                return Ok(None);
-            }
-            let type_domains =
-                captured.with_substitution(self, expr.span, |substitution, fuel| {
-                    for domain in dependent {
-                        if substitution.instantiate_bounded(domain, fuel)? != p(P::Type) {
-                            return Ok(false);
-                        }
-                    }
-                    Ok(true)
-                })?;
-            if !type_domains {
-                return Ok(None);
-            }
-        }
         if !allow_optional {
             arguments::require_function_value_parameters(sig.params, expr.span)?;
         }
@@ -403,12 +352,19 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         if let Some(expected) = expected {
             self.require(&ty, expected, expr.span)?;
         }
+        let mut inputs = packet.inputs;
+        packet.bindings.move_observations(
+            &packet.declaration.parameters,
+            &mut inputs,
+            &mut self.required_steps,
+            expr.span,
+        )?;
         Ok(n::Expr {
             source: source(expr.span),
             ty,
             kind: K::ComptimeFunctionInstance {
                 declaration: declaration(self.package, &self.package_identities, owner),
-                inputs: packet.inputs,
+                inputs,
             },
         })
     }
@@ -537,6 +493,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
                 let n::ClauseOperands {
                     statements,
                     arguments,
+                    ..
                 } = packet.inputs;
                 let ty = Term::Tuple(
                     arguments
@@ -654,6 +611,7 @@ mod packet_tests {
                 domains: vec![p(P::Type), p(P::Type)],
             },
             inputs: n::ClauseOperands {
+                observations: Default::default(),
                 statements: vec![],
                 arguments: vec![expression],
             },

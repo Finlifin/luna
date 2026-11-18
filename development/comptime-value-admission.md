@@ -65,6 +65,10 @@ comptime fn check() -> bool {
 
 这里有两个不同的绑定范围。在外层 callable 签名中查询函数值时，其实参可以合法引用调用者的 binder。在执行已选方法时，传入的声明实参已经取得，不能指向该方法尚未建立的普通参数。随后实例化默认代码或程序契约时，代码自身却可以引用那些参数。树解释和字节码都按这两个范围代入；字节码保留的默认代码还区分声明、原始域、实参及普通参数的 sort。程序条件仍在规定的调用位置执行。[作用域与替换](../compiler/nir/src/nominal_parameters.rs) · [两种 VM 的默认值和契约用例](../compiler/comptime_interpretor/tests/runtime_function_identities.rs)
 
+有值索引的普通函数也从这套调用准备过程取得签名。例如 `read(value: Flag<tag>)` 的子句声明 `tag: bool`。调用 `read<do { visits = visits + 1; true }>` 时，源码知道只要这个块正常返回，值就是 true，因而可以检查普通实参必须具有 `Flag<true>` 类型。形成函数值时仍然执行这个块并读取实际结果，随后多次调用该值也只增加一次 visits。默认参数需要同一索引时，从子句槽位读取已观察的身份。NIR 将这份证据与可执行输入分开表示，两种 VM 均从生产者取得值。若值索引只能由本次调用中尚未执行的代码产生，源码签名检查仍需原调用的恢复点。[声明子句准备](../compiler/elaboration/src/program/dynamic_instances.rs) · [签名与默认参数用例](../compiler/luna/tests/ordinary_callable_types.rs)
+
+接收方形成普通函数值时检查整组子句实参，再用同一份已检查替换解释完整签名、类型约束和 capability 要求。开始一次具名函数调用时重新检查该次调用的证据。完整签名自带普通参数的绑定层，签名内部的约束直接使用这一层；给完整签名额外套一层会错误接受原本悬空的参数引用。[接收域与模板域](../compiler/nir/src/nominal_parameters.rs) · [作用域回归](../compiler/nir/tests/dependent_admission.rs)
+
 签名中的标注也需要区分两种工作。定义检查使用词法绑定身份判断标注依赖的输入，按已有参数域检查完整表达式及其分支前提。实例形成仍由原调用提供具体值。对 `u8` 参数计算 `n + 1` 时，定义检查必须看到保护加法的条件；调用时恰好得到小整数不能替定义证明算术安全。[词法依赖](../compiler/elaboration/src/program/lexical_inputs.rs) · [标注行为用例](../compiler/luna/tests/open_annotation_behavior.rs)
 
 ## 值引用与快照

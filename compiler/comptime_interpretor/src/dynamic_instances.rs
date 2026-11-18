@@ -62,24 +62,26 @@ impl Interpreter<'_> {
             .functions
             .interface(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        self.admit_function_inputs(
+        let frames = [self.ordinary_input_frame(&definition.signature, source)?];
+        let inputs = self.admit_function_inputs(
             &definition.type_parameters,
             arguments,
-            nir::DeclarationInputScope::Caller(&[]),
+            nir::DeclarationInputScope::ClosedInBody(&frames),
             source,
         )?;
-        self.check_callable_requirements(definition, arguments, source)
+        self.check_callable_requirements(definition, &inputs, source)
     }
 
     pub(super) fn check_callable_requirements(
         &mut self,
         definition: &nir::program::FunctionDeclaration,
-        arguments: &[Term],
+        inputs: &nir::AdmittedArguments<'_>,
         source: SourceRange,
     ) -> Result<(), Error> {
         for requirement in &definition.requirements {
-            let requirement =
-                self.specialize_function_predicate(definition, arguments, requirement, source)?;
+            let requirement = self.query_admission(Some(source), |_, fuel| {
+                Ok(inputs.instantiate_predicate(requirement, fuel)?)
+            })?;
             if let Some(requirement) =
                 self.bind_invocation_contract(&requirement, None, source, 0)?
             {
@@ -87,8 +89,9 @@ impl Interpreter<'_> {
             }
         }
         for capability in &definition.capabilities {
-            let bound =
-                self.specialize_function_requirement(definition, arguments, capability, source)?;
+            let bound = self.query_admission(Some(source), |_, fuel| {
+                Ok(inputs.instantiate_requirement(capability, fuel)?)
+            })?;
             let open = bound.subject.check_scope(&[]).is_err()
                 || bound
                     .interface_arguments
@@ -149,71 +152,6 @@ impl Interpreter<'_> {
             });
         self.budget.steps -= (before - fuel) as u64;
         result.map_err(|kind| self.failure(kind, Some(expression.source)))
-    }
-
-    pub(super) fn specialize_function_predicate(
-        &mut self,
-        definition: &nir::program::FunctionDeclaration,
-        arguments: &[Term],
-        predicate: &nir::program::TypePredicate,
-        source: SourceRange,
-    ) -> Result<nir::program::TypePredicate, Error> {
-        self.with_function_contract_scope(definition, arguments, source, |substitution, fuel| {
-            substitution.instantiate_predicate_bounded(predicate, fuel)
-        })
-    }
-
-    pub(super) fn specialize_function_requirement(
-        &mut self,
-        definition: &nir::program::FunctionDeclaration,
-        arguments: &[Term],
-        requirement: &nir::program::TraitRequirement,
-        source: SourceRange,
-    ) -> Result<nir::program::TraitRequirement, Error> {
-        self.with_function_contract_scope(definition, arguments, source, |substitution, fuel| {
-            substitution.instantiate_requirement_bounded(requirement, fuel)
-        })
-    }
-
-    fn with_function_contract_scope<T>(
-        &mut self,
-        definition: &nir::program::FunctionDeclaration,
-        arguments: &[Term],
-        source: SourceRange,
-        observe: impl FnOnce(
-            &nir::DeclarationSubstitution<'_>,
-            &mut usize,
-        ) -> Result<T, nir::type_computations::Error>,
-    ) -> Result<T, Error> {
-        let Term::Function { parameters, .. } = definition.signature.callable_signature() else {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        };
-        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let result = (|| {
-            fuel = fuel
-                .checked_sub(parameters.len())
-                .ok_or(nir::type_computations::Error::Budget)?;
-            let frames = vec![parameters.iter().map(|p| p.sort).collect()];
-            let substitution = self.function_substitution_bounded(
-                &definition.type_parameters,
-                arguments,
-                &frames,
-                &mut fuel,
-            )?;
-            observe(&substitution, &mut fuel)
-        })();
-        self.budget.steps -= (before - fuel) as u64;
-        result.map_err(|error| {
-            self.failure(
-                if matches!(error, nir::type_computations::Error::Budget) {
-                    ErrorKind::StepsExhausted
-                } else {
-                    ErrorKind::Type
-                },
-                Some(source),
-            )
-        })
     }
 
     pub(super) fn evaluate_instance_default(
@@ -596,6 +534,7 @@ mod tests {
             kind: K::ComptimeFunctionInstance {
                 declaration: package.functions[0].declaration,
                 inputs: nir::program::ClauseOperands {
+                    observations: Default::default(),
                     statements: vec![],
                     arguments: vec![field],
                 },

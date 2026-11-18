@@ -391,7 +391,9 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 value
                     .rewrite_types(&mut |ty| binding.substitute(ty))
                     .map_err(|e| error(source.span, e.to_string()))?;
-                value.rewrite_types(&mut |ty| checker.callable_input_view(ty, source.span))?;
+                value.rewrite_types(&mut |term| {
+                    checker.callable_argument_term_view(term, source.span)
+                })?;
                 checker.complete_type_dependency(
                     slot, owner, callee, source, false, value, references, prepared,
                 )?;

@@ -130,8 +130,15 @@ impl Interpreter<'_> {
             .functions
             .interface(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        let signature = self.specialize_function_signature(definition, arguments, source)?;
-        self.check_callable_requirements(definition, arguments, source)?;
+        let frames = [self.ordinary_input_frame(&definition.signature, source)?];
+        let inputs = self.admit_function_inputs(
+            &definition.type_parameters,
+            arguments,
+            nir::DeclarationInputScope::ClosedInBody(&frames),
+            source,
+        )?;
+        let signature = self.signature_from_admission(definition, &inputs, source)?;
+        self.check_callable_requirements(definition, &inputs, source)?;
         if !self.observe_same_type(&signature, output, source)? {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
@@ -149,13 +156,25 @@ impl Interpreter<'_> {
         arguments: &[Term],
         source: SourceRange,
     ) -> Result<Term, Error> {
-        Ok(self
-            .signature_from_inputs(
-                &declaration.type_parameters,
-                arguments,
-                &declaration.signature,
-                source,
-            )?
+        let inputs = self.admit_function_inputs(
+            &declaration.type_parameters,
+            arguments,
+            nir::DeclarationInputScope::Caller(&[]),
+            source,
+        )?;
+        self.signature_from_admission(declaration, &inputs, source)
+    }
+
+    pub(super) fn signature_from_admission(
+        &mut self,
+        declaration: &nir::program::FunctionDeclaration,
+        inputs: &nir::AdmittedArguments<'_>,
+        source: SourceRange,
+    ) -> Result<Term, Error> {
+        let signature = self.query_admission(Some(source), |_, fuel| {
+            Ok(inputs.instantiate_in_input_scope(&declaration.signature, fuel)?)
+        })?;
+        Ok(signature
             .with_comptime_phase(declaration.phase == nir::program::FunctionPhase::Comptime)
             .with_unsafe_call_requirement(declaration.is_unsafe))
     }

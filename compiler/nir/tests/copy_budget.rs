@@ -491,8 +491,20 @@ fn dynamic_instance_copy_accounts_for_clause_operands() {
             local: 1,
         },
         inputs: nir::program::ClauseOperands {
+            observations: Default::default(),
             statements: vec![],
             arguments: vec![large()],
+        },
+    }));
+    check(&expr(K::ComptimeFunctionInstance {
+        declaration: nir::DeclarationId {
+            package: 1,
+            local: 1,
+        },
+        inputs: nir::program::ClauseOperands {
+            observations: [(0, Term::TupleValue(vec![Term::Bool(true); 1024]))].into(),
+            statements: vec![],
+            arguments: vec![expr(K::Local(nir::program::LocalId { owner: 1, index: 1 }))],
         },
     }));
 }
