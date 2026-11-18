@@ -137,3 +137,116 @@ fn a_computed_layout_consumer_reports_a_description_at_the_use() {
             .unwrap_err();
     assert!(error.contains("requires a type identity"), "{error}");
 }
+
+#[test]
+fn runtime_inputs_admit_completed_descriptions_at_each_call() {
+    let source = r#"
+        typealias Field = Any;
+        comptime fn Select(flag: bool) -> Type { if flag { Field } else { u8 } }
+        fn observe(value: Field) -> bool { true }
+        fn selected(comptime flag: bool, value: defer Select(flag)) -> bool { observe(value) }
+        fn count(calls: *u8) -> bool {
+            let before = calls.*;
+            if before < 255 { calls.* = before + 1; }
+            true
+        }
+        fn run() -> bool {
+            var calls: u8 = 0;
+            let byte: u8 = 3;
+            selected(true, count(calls.ref)) and selected(true, byte) and
+                selected(false, byte) and calls == 1
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+}
+
+#[test]
+fn a_description_does_not_grant_unchecked_body_operations() {
+    let failure = support::compile("fn bad(value: Any) -> bool { value.missing }").unwrap_err();
+    assert!(
+        failure.contains("missing") || failure.contains("projection"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn a_gradual_result_checks_its_body_against_each_delivery_domain() {
+    let source = r#"
+        fn pass(value: Any) -> Any { value }
+        fn run() -> bool {
+            let integer: u32 = 42;
+            let result: u32 = pass(integer);
+            let flag: bool = pass(true);
+            result == integer and flag
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    let incompatible = source.replace("pass(true)", "pass(integer)");
+    let error = support::compile(&incompatible).unwrap_err();
+    assert!(error.contains("bool") && error.contains("u32"), "{error}");
+}
+
+#[test]
+fn an_identity_produced_by_a_deferred_domain_still_checks_the_actual() {
+    let failure = support::compile(
+        r#"
+        comptime fn Select(flag: bool) -> Type { if flag { Any } else { u8 } }
+        fn consume(comptime flag: bool, value: defer Select(flag)) {}
+        fn run() { consume(false, true); }
+    "#,
+    )
+    .unwrap_err();
+    assert!(
+        failure.contains("bool") && failure.contains("u8"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn distinct_gradual_inputs_preserve_named_order_defaults_and_inferred_clauses() {
+    let source = r#"
+        comptime fn Domain(flag: bool) -> Type { if flag { Any } else { u8 } }
+        fn pick(comptime flag: bool, witness: T, .first: defer Domain(flag) = false,
+                .second: Any = true) -> T where T { witness }
+        fn record(state: *bool, next: bool) -> bool { state.* = next; next }
+        fn run() -> bool {
+            var state = false;
+            let byte: u8 = 12;
+            let result = pick(true, byte,
+                .second = record(state.ref, false), .first = record(state.ref, true));
+            result == byte and state and pick(true, true)
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+}
+
+#[test]
+fn a_callable_target_instantiates_the_gradual_input_and_result_by_slot() {
+    let source = r#"
+        fn pass(value: Any) -> Any { value }
+        fn call(f: fn(bool) -> bool) -> bool { f(true) }
+        fn run() -> bool {
+            let byte: fn(u8) -> u8 = pass;
+            call(pass) and byte(7) == 7
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+}
+
+#[test]
+fn an_annotation_completed_for_an_earlier_source_argument_runs_once() {
+    let source = r#"
+        typealias Selector = %{used: bool} comptime fn() -> Type;
+        comptime fn make() -> Selector {
+            var used = false;
+            || { used = not used; if used { Any } else { bool } }
+        }
+        comptime fn consume(select: Selector, comptime .gate: bool = true,
+                            .field: defer select() = false) -> bool {
+            select() == bool
+        }
+        const result = consume(make(), .field = true, .gate = true);
+        fn run() -> bool { result }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+}

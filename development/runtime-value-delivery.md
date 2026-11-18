@@ -511,15 +511,11 @@ fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format))
    各求值一次；重复检查、格式展开、O3 优化不能重放 producer 或省略资源清理。
    writer 的短写、失败前已输出前缀与清理规则继续适用。
 
-当前通用缺口并不只在 std：普通定义检查使用私有 `TypeObservation` 的
-Unknown/Known 观察，旧 `FrozenDescription` 只在测试模型中保留；VM／冻结层仍以
-具体 Term 承载 Type 数据；`type_expr` 的
-refinement 先要求具体 base，再证明要求并返回 base。它们不能直接承担可计算、
-可嵌套、带约束的未知描述。required Type 结果已走普通值返回，旧推断输出队列
-只存在于 test_support；不能继续把其 `State::Complete` 或 `execution::publish`
-当作 Parse 的生产接线位置。应扩展共同描述数据及其 VM 交付与参数准入边界，
-分别保留“描述已计算完成”与“runtime 类型已具体化”两个事实。
-具体函数类型和 runtime IR 的发布仍要求所需布局与义务完整。
+普通 Type 返回和别名现在能传递显式 Any。调用点可以用实参的类型具体化单个
+Any 参数；有目标类型时也能检查 Any 结果的交付。定义端仍只拥有声明提供的
+操作证据。格式化需要进一步保留每个字段的 refinement，支持带描述实参的构造
+应用，再按实际字段类型检查 Display。具体函数类型和 runtime IR 的发布仍要求
+所需布局与义务完整。
 
 完整的状态和数据分工见[可计算类型描述与调用准入](type-descriptions-and-admission.md)。
 尤其不能将 TypeObservation::Unknown 当作已经求值的 Any 数据；Parse 只声明返回

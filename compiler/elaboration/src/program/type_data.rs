@@ -4,6 +4,7 @@ use comptime_interpretor::Value;
 
 /// A completed Type-valued computation at the elaboration boundary.
 /// An identity consumer must explicitly request the identity.
+#[derive(Clone)]
 pub(super) enum CompletedType {
     Identity(Term),
     Description(n::DescriptionLiteral),
@@ -24,6 +25,19 @@ impl CompletedType {
             Value::Type(ty) => Ok(Self::Identity(ty)),
             Value::Description(leaf) => Ok(Self::Description(leaf)),
             _ => Err(error(span, "expected a completed Type value")),
+        }
+    }
+
+    /// An already concrete annotation supplies its own checking direction.
+    /// An explicit description admits a domain supplied by this consumer.
+    /// The supplier can elaborate an operand, so only execute it when needed.
+    pub(super) fn admit_with(
+        self,
+        actual: impl FnOnce() -> Result<Term, Error>,
+    ) -> Result<Term, Error> {
+        match self {
+            Self::Identity(ty) => Ok(ty),
+            Self::Description(n::DescriptionLiteral::Any) => actual(),
         }
     }
 

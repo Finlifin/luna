@@ -20,7 +20,7 @@ Any 与 bool、u8 分别相容，不产生 bool == u8，也不产生二者间的
 | 当前载体或入口 | 已有职责 | 尚缺的能力 |
 | --- | --- | --- |
 | `open_functions::observations::TypeObservation::{Known, Unknown}` | 定义侧的有限域观察；待定注解观察为 Unknown | 不持有生产状态，也不是已经求值的 Type 数据 |
-| `open_functions::Annotation` | 已知域、待执行计算、前置 Type 输入、待恢复源码 | 没有已完成但仍含 Any/refinement 的参数描述状态 |
+| `open_functions::Annotation` | 分别保存具体身份、已完成的显式 Any、待执行计算、前置 Type 输入和待恢复源码。调用者可用自己的实参域具体化 Any | 带 binder 的 refinement 与描述构造还没有可传送的结果表示 |
 | `Value::Type`、`TypeParameter`、`Description` | 传递完整或受作用域授权的身份，以及显式 Any 描述叶 | 复合描述、带 binder 的要求、NF 参数传送尚待接通 |
 | `PreparedRequired::invoke_in_world` / `restore_required_packet` | 普通 VM 调用可交付具体身份或显式 Any，回到调用方 scope 后继续使用 | 复合描述和未完成源码区域的恢复仍待接通 |
 | `Checker::completed_type` / `type_expr` | 前者完成 Type 值；后者在具体类型使用点索取身份。闭合别名可以发布两种结果 | 有描述实参的别名目前只接通必选 Type 槽位；默认值和混合值域仍走 Term 路径 |
@@ -72,6 +72,39 @@ typealias Forward = Second<...packet()>;
 base 的具体身份。下一步需要保留受当前 subject binder 约束的谓词，在调用方取得实际类型
 时分别检查。普通 VM 数据传送尚不能把含描述的参数发布为 NF 应用或 Term metadata。
 `std.fmt.Parse` 和格式化变参输出仍待接通。
+
+### 已接通的调用点准入
+
+```flurry
+comptime fn Select(flag: bool) -> Type { if flag { Any } else { u8 } }
+fn consume(comptime flag: bool, value: defer Select(flag)) -> bool { true }
+fn pass(value: Any) -> Any { value }
+
+fn run() -> bool {
+    let byte: u8 = 7;
+    let copy: u8 = pass(byte);
+    let keep: fn(bool) -> bool = pass;
+    consume(true, keep(true)) and consume(false, copy)
+}
+```
+
+`consume(true, true)` 和 `consume(true, byte)` 各自采用实参已有的类型。
+`consume(false, true)` 在同一条调用路径上收到具体的 `u8` 要求，因而拒绝。
+检查实参域时保留已检查的实参表达式，调用仍按源码顺序求值。若具名实参使
+comptime 调用提前完成后面槽位的注解，同一次调用会向后续步骤交付已完成的域。
+用闭包交替返回 Any 和 bool 的回归覆盖了这个顺序。
+
+`copy` 的注解给出了返回值要交付的类型，`keep` 则同时给出了参数和结果的类型。
+两次均须检查 `pass` 的具体函数体。例如 `let bad: bool = pass(byte);` 会在检查
+交付时失败。没有目标类型的 Any 返回值目前仍缺从实例主体取得结果域的路径。
+定义端对未知成员的访问、实际存储类型和具体参数的资源检查继续生效。
+源码、调用副作用顺序与拒绝例见[真实 sysroot 回归](../compiler/luna/tests/gradual_type_data.rs)。
+
+这里交付的是单个显式 Any。要使 `Select` 返回 `refines { Itself :- Display } Any`，
+需要在 Type 数据中保留要求的 subject binder 及其声明来源，在接收世界对实际域
+检查要求。当前形成 refinement 时就对 base 调用 `type_expr`，仍会索取身份。
+再往下，`std.fmt.Parse` 要把这种描述作为普通值装入保留头的构造应用中，交给
+变参槽位按字段取得实际域。这两步都超出了单个 Any 的准入能力。
 
 ### 已接通的函数类型值传送
 
@@ -421,6 +454,16 @@ refinement 的 Itself 是要求自己的 subject binder。外围参数替换进�
 跨过这一层，不能把 Itself 与同号外部参数混淆。要求保存受检表达式、自由依赖及
 适用的阶段；构造时检查它能够合法保存，准入时才把 subject 绑定到当前实际输入。
 PTC 只接收其中可提取的类型命题；程序谓词由程序验证／规定的执行检查处理。
+
+把这层 binder 接入现有源码时，有三个相互依赖的改动。首先，
+`completed_type` 对具体 base 可以继续检查现有要求；对描述 base 要在新的
+subject 作用域内形成要求，然后连同 base 返回。既有 `extracted_refinement`
+已经决定哪些要求可以表示为类型命题。可执行要求要保有它自己的代码及词法输入。
+其次，VM 的 `has_type_at` 目前允许闭合的 Any 叶进入 comptime 的 Type 域。
+带要求的描述必须在此检查捕获是否合法，例如一个 trait 引用在接收世界的声明
+归属；这里还没有实参，无法选择该实参的 Display 实现。最后，开放调用在
+取得实参域、默认供应域或返回目标时才有 subject，此时才能在接收方作用域
+代入并检查所保存的要求。这个检查须发生在发布带具体签名的函数实例之前。
 
 共享描述数据不共享准入状态。图中两个元素可指向同一份显式 Any 数据，接受它们
 的两个槽位仍分别检查实际类型；刚性类型 binder 的重复引用则继续保留同一个

@@ -7,7 +7,12 @@ use super::*;
 use observations::TypeObservation as D;
 use std::sync::Arc;
 
+pub(super) use annotations::Annotation;
+use annotations::annotation_source;
+
+mod annotations;
 mod fragments;
+mod inputs;
 mod observations;
 mod scalar_descriptions;
 
@@ -135,62 +140,9 @@ fn subject_pattern_bindings(
     Ok(values.pop().unwrap_or_default())
 }
 
-fn annotation_source<'h>(sig: &hir::item::FnSig<'h>, slot: usize) -> Option<&'h Expr<'h>> {
-    if slot == sig.params.len() {
-        return sig.return_ty;
-    }
-    match sig.params.get(slot)?.ty.kind {
-        TyParamKind::Optional(_, ty, _)
-        | TyParamKind::Positional(ty)
-        | TyParamKind::PositionalDependencyCatched(_, ty)
-        | TyParamKind::Varadic(_, ty) => Some(ty),
-        TyParamKind::Itself { .. } => None,
-    }
-}
-
-#[derive(Clone)]
-pub(super) enum Annotation {
-    Known(Term),
-    Pending(Arc<PreparedRequired>),
-    /// The earlier input must deliver a Type. Its domain is pending, or it is
-    /// an ordinary comptime parameter without a Type-sort ABI binder.
-    InputType {
-        slot: usize,
-    },
-    /// Ordinary-checked source awaiting completed input domains, not frozen NIR.
-    Suspended {
-        owner: OwnerId,
-        slot: usize,
-    },
-}
-impl Annotation {
-    pub(super) fn is_pending(&self) -> bool {
-        !matches!(self, Self::Known(_))
-    }
-    fn description(&self) -> D {
-        match self {
-            Self::Known(ty) => D::Known(ty.clone()),
-            Self::Pending(_) | Self::InputType { .. } | Self::Suspended { .. } => D::Unknown,
-        }
-    }
-}
-impl std::fmt::Display for Annotation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Known(ty) => write!(f, "(known {ty})"),
-            Self::Pending(code) => write!(f, "(deferred {code})"),
-            Self::InputType { slot } => write!(f, "(deferred-input-type (slot {slot}))"),
-            Self::Suspended { owner, slot } => write!(
-                f,
-                "(suspended-annotation (owner {}) (slot {slot}))",
-                owner.def_id.raw()
-            ),
-        }
-    }
-}
 // A pending ordinary description is not a frozen inference candidate or IR.
 enum OpenClauseInference {
-    Ready(Vec<Term>, PreparedInputs, BTreeMap<usize, Term>),
+    Ready(Vec<Term>, PreparedInputs, BTreeMap<usize, CompletedType>),
     Pending(D),
 }
 
@@ -209,7 +161,8 @@ impl Definition {
                 *sort,
                 match annotation {
                     Annotation::Known(ty) => Some(ty),
-                    Annotation::Pending(_)
+                    Annotation::Description(_)
+                    | Annotation::Pending(_)
                     | Annotation::InputType { .. }
                     | Annotation::Suspended { .. } => None,
                 },
@@ -239,7 +192,8 @@ impl Definition {
                     sort: *sort,
                     ty: ty.clone(),
                 }),
-                Annotation::Pending(_)
+                Annotation::Description(_)
+                | Annotation::Pending(_)
                 | Annotation::InputType { .. }
                 | Annotation::Suspended { .. } => None,
             })
@@ -433,7 +387,7 @@ impl Checker<'_, '_> {
             Some(D::Known(ty)) => Some(ty),
             _ => None,
         };
-        let value = self.function_instance(expr, owner, arguments, None, false)?;
+        let value = self.function_instance(expr, owner, arguments, expected, false)?;
         let value = self.callable_value_view(value, expected, expr.span)?;
         self.check_open_fragment(&value, expr.span, false)?;
         Ok(Some(D::Known(value.ty)))
@@ -547,15 +501,35 @@ impl Checker<'_, '_> {
                     Annotation::Pending(_) => Annotation::Suspended { owner, slot },
                     other => other.clone(),
                 };
-                let ty = self.instantiate_open_annotation(
-                    owner,
-                    slot,
-                    &annotation,
-                    sig,
-                    &symbols,
-                    &parameters,
-                    expr.span,
-                )?;
+                let ty = self
+                    .instantiate_open_annotation(
+                        owner,
+                        slot,
+                        &annotation,
+                        sig,
+                        &symbols,
+                        &parameters,
+                        expr.span,
+                    )?
+                    .admit_with(|| {
+                        let Some(Term::Function { parameters, result }) =
+                            expected.map(Term::callable_signature)
+                        else {
+                            return Err(context_error(
+                                expr.span,
+                                "gradual function value needs a concrete callable target",
+                            ));
+                        };
+                        if parameters.len() != sig.params.len() {
+                            return Err(error(
+                                expr.span,
+                                "callable target parameter count mismatch",
+                            ));
+                        }
+                        Ok(parameters
+                            .get(slot)
+                            .map_or_else(|| (**result).clone(), |p| p.ty.clone()))
+                    })?;
                 if slot == sig.params.len() {
                     result = Some(Box::new(ty));
                 } else {
@@ -570,9 +544,6 @@ impl Checker<'_, '_> {
                 result: result.unwrap(),
             };
             let ty = self.callable_type(owner, signature.clone());
-            if let Some(expected) = expected {
-                self.require(&ty, expected, expr.span)?;
-            }
             let captures = self.open_instance_captures(owner, &symbols, &signature, expr.span)?;
             let id = self.instantiate_open_function(owner, &symbols, signature, expr.span)?;
             Ok(n::Expr {
@@ -1747,168 +1718,6 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    fn check_suspended_annotation(
-        &mut self,
-        annotation: &Annotation,
-        sig: &hir::item::FnSig<'_>,
-        locals: &mut BTreeMap<n::LocalId, D>,
-    ) -> Result<(), Error> {
-        let Annotation::Suspended { slot, .. } = annotation else {
-            return Ok(());
-        };
-        let source = annotation_source(sig, *slot)
-            .ok_or_else(|| error(sig.span, "missing suspended annotation"))?;
-        let H::Defer(value) = source.kind else {
-            return Err(error(source.span, "suspended annotation must use defer"));
-        };
-        self.required_steps = self
-            .required_steps
-            .checked_sub(locals.len() as u64)
-            .ok_or_else(|| error(source.span, "annotation input observation budget exhausted"))?;
-        let pending_inputs = locals
-            .iter()
-            .filter_map(|(binding, domain)| matches!(domain, D::Unknown).then_some(*binding))
-            .collect();
-        let pending_domain = self.annotation_may_use_pending_inputs(value, &pending_inputs)?;
-        self.with_staged_input(true, |this| {
-            if pending_domain {
-                return this
-                    .describe_open_expression(
-                        value,
-                        &mut locals.clone(),
-                        None,
-                        Some(&D::Known(p(P::Type))),
-                        0,
-                    )
-                    .map(|_| ());
-            }
-            let value = this.elaborate_known_region(value, Some(&D::Known(p(P::Type))))?;
-            this.check_open_fragment(&value, source.span, true)
-        })
-    }
-
-    pub(super) fn signature_annotation(&mut self, expr: &Expr<'_>) -> Result<Annotation, Error> {
-        let H::Defer(value) = &expr.kind else {
-            return self.type_expr(expr).map(Annotation::Known);
-        };
-        if let H::ResolvedFnParam(_, binding) = value.kind {
-            if let Some(owner) = self.signature_owner {
-                if let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
-                    self.package.item(owner).map(|item| &item.kind)
-                {
-                    if let Some(slot) = sig.params.iter().position(|p| p.hir_id == binding) {
-                        let domain = self
-                            .signature_domains
-                            .get(&owner)
-                            .and_then(|domains| domains.get(slot));
-                        if domain == Some(&(Sort::ComptimeValue, None))
-                            || (sig.modifiers.is_comptime
-                                && domain.is_some_and(|(sort, ty)| {
-                                    *sort == Sort::Runtime
-                                        && (ty.is_none() || ty.as_ref() == Some(&p(P::Type)))
-                                }))
-                        {
-                            // An ordinary comptime Type input has no Type-sort
-                            // ABI binder. Keep its value dependency explicit
-                            // until the invocation supplies a concrete type.
-                            return Ok(Annotation::InputType { slot });
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(owner) = self.signature_owner {
-            if let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
-                self.package.item(owner).map(|item| &item.kind)
-            {
-                // Use the same complete dependency observation as definition
-                // checking. An unsupported node in a partial readiness scan
-                // must not silently erase inputs captured inside its body.
-                self.required_steps = self
-                    .required_steps
-                    .checked_sub(sig.params.len() as u64)
-                    .ok_or_else(|| {
-                        error(expr.span, "signature input observation budget exhausted")
-                    })?;
-                let pending_inputs = sig
-                    .params
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(slot, parameter)| {
-                        let (sort, domain) = self.signature_domains.get(&owner)?.get(slot)?;
-                        // Ordinary inputs of a comptime function remain value
-                        // dependencies even when their domains are established.
-                        // Source shape does not decide whether they are supplied.
-                        let missing = if *sort == Sort::Runtime {
-                            sig.modifiers.is_comptime
-                        } else {
-                            domain.is_none()
-                        };
-                        missing.then_some(local(parameter.hir_id))
-                    })
-                    .collect();
-                if self.annotation_may_use_pending_inputs(value, &pending_inputs)? {
-                    let slot = (0..=sig.params.len())
-                        .find(|slot| {
-                            annotation_source(sig, *slot).is_some_and(|ty| ty.hir_id == expr.hir_id)
-                        })
-                        .ok_or_else(|| error(expr.span, "missing suspended annotation source"))?;
-                    return Ok(Annotation::Suspended { owner, slot });
-                }
-            }
-        }
-        // A direct Type input already has a stable symbolic identity. Explicit
-        // structural constructors can contain computations (including BitVec
-        // widths), so retain their prepared invocation until inputs are ready.
-        if !matches!(
-            value.kind,
-            H::Application(..)
-                | H::ExtendedApplication(..)
-                | H::Index(..)
-                | H::If(..)
-                | H::When(_)
-                | H::Match(..)
-                | H::Block(_)
-                | H::TyPtr(_)
-                | H::TyOptional(_)
-                | H::TyFn(_)
-                | H::TyComptimeFn(_)
-                | H::TyFnArrow(..)
-        ) && !matches!(&value.kind, H::NFApplication(head, _)
-            if matches!(&head.kind, H::Builtin(name) if name.as_str() == "BitVec"))
-        {
-            return self.type_expr(value).map(Annotation::Known);
-        }
-        let prepared =
-            self.prepare_required_expression(value, Some(&p(P::Type)), None, vec![], true)?;
-        let abstract_values = self
-            .visible_comptime_parameters(expr.span)?
-            .into_iter()
-            .filter(|declaration| {
-                self.trait_input_domain(*declaration)
-                    .is_some_and(|ty| ty != p(P::Type))
-            })
-            .collect::<Vec<_>>();
-        if prepared.inputs.iter().any(|(_, _, value)| value.is_none())
-            || (!abstract_values.is_empty()
-                && self.open_computation_uses_clauses(&prepared, &abstract_values, expr.span)?)
-        {
-            // A value-clause identity authorizes symbolic transport, not
-            // inspection of its contents. Keep explicit defer annotations
-            // prepared until clause specialization supplies those values.
-            Ok(Annotation::Pending(Arc::new(prepared)))
-        } else {
-            let (value, _) = self.invoke_required_publishing(
-                prepared,
-                Vec::new(),
-                expr.hir_id.owner,
-                expr.span,
-            )?;
-            let ty = CompletedType::from_value(value, expr.span)?.identity(expr.span)?;
-            Ok(Annotation::Known(ty))
-        }
-    }
-
     pub(super) fn register_open_function(
         &mut self,
         owner: OwnerId,
@@ -1929,8 +1738,8 @@ impl Checker<'_, '_> {
         if self.package.function_template_bodies.contains_key(&owner)
             && (parameters
                 .iter()
-                .any(|(_, annotation)| annotation.is_pending())
-                || result.is_pending())
+                .any(|(_, annotation)| annotation.needs_instance())
+                || result.needs_instance())
         {
             return Err(error(
                 span,
@@ -2225,7 +2034,7 @@ impl Checker<'_, '_> {
             }
             let result_evidence = match &definition.result {
                 Annotation::Known(ty) => sig.return_binding.map(|binding| (local(binding), ty)),
-                Annotation::Pending(_)
+                Annotation::Description(_) | Annotation::Pending(_)
                 | Annotation::InputType { .. }
                 | Annotation::Suspended { .. } => None,
             };
@@ -6031,246 +5840,6 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    fn instantiate_open_annotation(
-        &mut self,
-        owner: OwnerId,
-        slot: usize,
-        annotation: &Annotation,
-        sig: &hir::item::FnSig<'_>,
-        symbols: &[Option<Term>],
-        parameters: &[Parameter],
-        span: Span,
-    ) -> Result<Term, Error> {
-        let domains = parameters
-            .iter()
-            .map(|p| (p.sort, Some(p.ty.clone())))
-            .collect::<Vec<_>>();
-        if !annotation.is_pending() {
-            return self
-                .instantiate_open_annotation_in_scope(annotation, sig, symbols, &domains, span);
-        }
-        self.instantiate_open_annotation_with_live_in_scope(
-            owner,
-            slot,
-            annotation,
-            sig,
-            symbols,
-            &domains,
-            &vec![None; sig.params.len()],
-            span,
-        )
-    }
-
-    fn instantiate_open_annotation_with_live(
-        &mut self,
-        owner: OwnerId,
-        slot: usize,
-        annotation: &Annotation,
-        sig: &hir::item::FnSig<'_>,
-        symbols: &[Option<Term>],
-        parameters: &[Parameter],
-        live: &[Option<comptime_interpretor::Value>],
-        span: Span,
-    ) -> Result<Term, Error> {
-        let domains = parameters
-            .iter()
-            .map(|p| (p.sort, Some(p.ty.clone())))
-            .collect::<Vec<_>>();
-        self.instantiate_open_annotation_with_live_in_scope(
-            owner, slot, annotation, sig, symbols, &domains, live, span,
-        )
-    }
-
-    fn instantiate_open_annotation_with_live_in_scope(
-        &mut self,
-        owner: OwnerId,
-        slot: usize,
-        annotation: &Annotation,
-        sig: &hir::item::FnSig<'_>,
-        symbols: &[Option<Term>],
-        parameters: &[(Sort, Option<Term>)],
-        live: &[Option<comptime_interpretor::Value>],
-        span: Span,
-    ) -> Result<Term, Error> {
-        // A definition-side snapshot cannot contain a callable declaration
-        // supplied only at this call site. Rebuild its dependency closure with
-        // the completed inputs, just as for an active closure environment.
-        let callable_input = annotation.is_pending()
-            && !required::frozen_references(
-                symbols.iter().flatten(),
-                &mut self.required_steps,
-                span,
-            )?
-            .is_empty();
-        // A generated Type supplied by this caller may postdate the frozen
-        // declaration snapshot. Reprepare completed source with these inputs;
-        // never graft current inference state into a saved computation.
-        let late_definitions = matches!(annotation, Annotation::Pending(computation)
-            if computation.definition_identity_cursor() != self.next_definition_identity);
-        if !annotation.is_pending()
-            || (live.iter().all(Option::is_none) && !callable_input && !late_definitions)
-        {
-            return self
-                .instantiate_open_annotation_in_scope(annotation, sig, symbols, parameters, span);
-        }
-        let source =
-            annotation_source(sig, slot).ok_or_else(|| error(span, "missing live annotation"))?;
-        let H::Defer(value) = source.kind else {
-            return Err(error(span, "live annotation must use defer"));
-        };
-        let assumptions = self.context.assumptions().to_vec();
-        let ty = self.in_open_function(owner, |this| {
-            for assumption in assumptions {
-                this.context.assume(assumption);
-            }
-            this.default_input_scope = Some(parameters.to_vec());
-            this.default_input_owner = Some(owner);
-            let mut graph = Vec::new();
-            for (index, (parameter, (_, domain))) in sig.params.iter().zip(parameters).enumerate() {
-                let Some(domain) = domain else {
-                    continue;
-                };
-                let binding = local(parameter.hir_id);
-                this.locals.insert(binding, domain.clone());
-                if let Some(value) = &live[index] {
-                    graph.push((binding, domain.clone(), value.clone()));
-                } else if let Some(symbol) = &symbols[index] {
-                    this.input_facts
-                        .specialized
-                        .push((binding, domain.clone(), symbol.clone()));
-                    if *domain == p(P::Type) {
-                        this.input_facts.types.insert(binding, symbol.clone());
-                    } else {
-                        this.input_facts
-                            .values
-                            .insert(binding, (symbol.clone(), domain.clone()));
-                    }
-                }
-            }
-            let (value, _) =
-                this.required_expression_with_live_inputs(value, Some(&p(P::Type)), graph)?;
-            match value {
-                comptime_interpretor::Value::Type(ty) => Ok(ty),
-                _ => Err(error(span, "deferred annotation did not produce a Type")),
-            }
-        })?;
-        let ty = ty
-            .substitute_partial(symbols)
-            .map_err(|failure| error(span, failure.to_string()))?;
-        self.callable_input_view(&ty, span)
-    }
-
-    fn instantiate_open_annotation_in_scope(
-        &mut self,
-        annotation: &Annotation,
-        sig: &hir::item::FnSig<'_>,
-        symbols: &[Option<Term>],
-        parameters: &[(Sort, Option<Term>)],
-        span: Span,
-    ) -> Result<Term, Error> {
-        let ty = match annotation {
-            Annotation::Known(ty) => ty.clone(),
-            Annotation::Suspended { owner, slot } => {
-                let source = annotation_source(sig, *slot)
-                    .ok_or_else(|| error(span, "missing suspended annotation"))?;
-                let H::Defer(value) = source.kind else {
-                    return Err(error(span, "suspended annotation must use defer"));
-                };
-                // Invocation inputs can retain the caller's opaque Type
-                // identities. Their established premises remain available
-                // while evaluating this resumed annotation, without changing
-                // the definition-side check of the open function body.
-                let caller_assumptions = self.context.assumptions().to_vec();
-                self.in_open_function(*owner, |this| {
-                    for assumption in caller_assumptions {
-                        this.context.assume(assumption);
-                    }
-                    this.default_input_scope = Some(parameters.to_vec());
-                    this.default_input_owner = Some(*owner);
-                    for ((parameter, (sort, domain)), symbol) in
-                        sig.params.iter().zip(parameters).zip(symbols)
-                    {
-                        let Some(domain) = domain else {
-                            continue;
-                        };
-                        let binding = local(parameter.hir_id);
-                        this.locals.insert(binding, domain.clone());
-                        if let Some(symbol) = symbol {
-                            this.input_facts.specialized.push((
-                                binding,
-                                domain.clone(),
-                                symbol.clone(),
-                            ));
-                            if *sort == Sort::Type
-                                || (sig.modifiers.is_comptime && *domain == p(P::Type))
-                            {
-                                this.input_facts.types.insert(binding, symbol.clone());
-                            } else if *sort != Sort::Runtime || sig.modifiers.is_comptime {
-                                this.input_facts
-                                    .values
-                                    .insert(binding, (symbol.clone(), domain.clone()));
-                            }
-                        }
-                    }
-                    this.type_expr(value)
-                })?
-            }
-            Annotation::InputType { slot } => {
-                let ty = symbols.get(*slot).and_then(Option::as_ref).ok_or_else(|| {
-                    error(span, "deferred type awaits its earlier comptime input")
-                })?;
-                if ty.sort() != Sort::Type {
-                    return Err(error(span, "deferred type input did not produce a Type"));
-                }
-                ty.clone()
-            }
-            Annotation::Pending(computation) => {
-                let mut values = Vec::new();
-                for (binding, _, value) in &computation.inputs {
-                    if value.is_some() {
-                        continue;
-                    }
-                    let slot = sig
-                        .params
-                        .iter()
-                        .position(|parameter| local(parameter.hir_id) == *binding)
-                        .ok_or_else(|| {
-                            error(span, "deferred annotation has an unknown source input")
-                        })?;
-                    let value = symbols.get(slot).and_then(Option::as_ref).ok_or_else(|| {
-                        error(
-                            span,
-                            "deferred annotation needs a completed comptime argument",
-                        )
-                    })?;
-                    values.push((*binding, value.clone()));
-                }
-                let mut invocation = computation.fork();
-                for (_, ty, _) in &mut invocation.inputs {
-                    *ty = ty
-                        .substitute_partial(symbols)
-                        .map_err(|failure| error(span, failure.to_string()))?;
-                }
-                invocation.bind_inputs(values, span)?;
-                let owner = sig
-                    .params
-                    .first()
-                    .map(|parameter| parameter.hir_id.owner)
-                    .or_else(|| sig.return_ty.map(|value| value.hir_id.owner))
-                    .ok_or_else(|| error(span, "deferred annotation has no source owner"))?;
-                let (value, _) =
-                    self.invoke_required_publishing(invocation, Vec::new(), owner, span)?;
-                CompletedType::from_value(value, span)?.identity(span)?
-            }
-        };
-        let ty = ty
-            .substitute_partial(symbols)
-            .map_err(|failure| error(span, failure.to_string()))?;
-        // Staged inputs can make an associated projection concrete. Resolve
-        // that checked view before using the annotation as a call expectation.
-        self.callable_input_view(&ty, span)
-    }
-
     pub(super) fn specialize_open_clause_type(
         &self,
         owner: OwnerId,
@@ -6392,7 +5961,7 @@ impl Checker<'_, '_> {
                         .get(slot)
                         .map(|(_, ty)| ty)
                         .unwrap_or(&definition.result);
-                    if !annotation.is_pending() {
+                    if !annotation.awaits_inputs() {
                         continue;
                     }
                     if let Some(source) = annotation_source(sig, slot) {
@@ -6444,7 +6013,7 @@ impl Checker<'_, '_> {
                     .map(|(_, ty)| ty)
                     .unwrap_or(&definition.result)
                     .clone();
-                if annotation.is_pending()
+                if annotation.awaits_inputs()
                     && self.open_annotation_requirements_ready(
                         owner,
                         &all,
@@ -6477,7 +6046,7 @@ impl Checker<'_, '_> {
                             .all(|index| {
                                 checked.symbols[*index].is_some() || checked.live[*index].is_some()
                             }),
-                        Annotation::Known(_) => false,
+                        Annotation::Known(_) | Annotation::Description(_) => false,
                     };
                     if ready {
                         let mut prefix = Vec::new();
@@ -6510,10 +6079,11 @@ impl Checker<'_, '_> {
                             expr.span,
                         )?;
                         formed.insert(slot, ty.clone());
+                        let ty = Annotation::from(ty);
                         if slot == sig.params.len() {
-                            definition.result = Annotation::Known(ty);
+                            definition.result = ty;
                         } else {
-                            definition.parameters[slot].1 = Annotation::Known(ty);
+                            definition.parameters[slot].1 = ty;
                         }
                     }
                 }
@@ -6599,7 +6169,7 @@ impl Checker<'_, '_> {
                         // against which to freeze an explicit input.
                         continue;
                     }
-                    self.prepare_open_comptime_prefix(
+                    let early_domains = self.prepare_open_comptime_prefix(
                         expr,
                         owner,
                         sig,
@@ -6609,8 +6179,12 @@ impl Checker<'_, '_> {
                         &prefix,
                         &mut checked.values,
                         &mut checked.symbols,
-                        Some(&mut checked.live),
+                        &mut checked.live,
                     )?;
+                    for (slot, ty) in early_domains {
+                        definition.parameters[slot].1 = Annotation::Known(ty.clone());
+                        formed.insert(slot, CompletedType::Identity(ty));
+                    }
                     if checked.symbols[slot].is_some() || checked.live[slot].is_some() {
                         continue;
                     }
@@ -7335,15 +6909,16 @@ impl Checker<'_, '_> {
         args: &[Arg<'_>],
         expected: Option<&Term>,
         checked: PreparedInputs,
-        formed: BTreeMap<usize, Term>,
+        formed: BTreeMap<usize, CompletedType>,
     ) -> Result<n::Expr, Error> {
         self.check_open_definition(owner)?;
         let mut definition = self.open_functions[&owner].clone();
-        for (slot, ty) in formed {
+        for (slot, data) in formed {
+            let ty = Annotation::from(data);
             if slot == definition.parameters.len() {
-                definition.result = Annotation::Known(ty);
+                definition.result = ty;
             } else {
-                definition.parameters[slot].1 = Annotation::Known(ty);
+                definition.parameters[slot].1 = ty;
             }
         }
         if self
@@ -7429,8 +7004,9 @@ impl Checker<'_, '_> {
         let mut parameters = Vec::new();
         // Type formation is declaration ordered. Runtime evaluation remains in
         // source order in the emitted call argument plan below.
-        for (slot, (sort, annotation)) in definition.parameters.iter().enumerate() {
-            if annotation.is_pending() {
+        for slot in 0..definition.parameters.len() {
+            let (sort, annotation) = &definition.parameters[slot];
+            if annotation.needs_instance() {
                 self.admit_open_type_requirements(owner, &symbols, true, expr.span)?;
             }
             let ty = self.instantiate_open_annotation_with_live(
@@ -7443,6 +7019,27 @@ impl Checker<'_, '_> {
                 &live,
                 expr.span,
             )?;
+            let ty = if let Some(route) = routes.iter().find(|route| route.parameter == slot) {
+                self.admit_supplied_annotation(
+                    ty,
+                    route,
+                    expr,
+                    &mut values[slot],
+                    *sort != Sort::Runtime || sig.modifiers.is_comptime,
+                )?
+            } else {
+                ty.admit_with(|| {
+                    let default = definition.default_types.get(&slot).ok_or_else(|| {
+                        error(
+                            expr.span,
+                            "gradual parameter needs a concrete domain from its default",
+                        )
+                    })?;
+                    self.specialize_open_clause_type(owner, default, expr.span)?
+                        .substitute_partial(&symbols)
+                        .map_err(|failure| error(expr.span, failure.to_string()))
+                })?
+            };
             parameters.push(Parameter {
                 sort: if *sort != Sort::Runtime && ty == p(P::Type) {
                     Sort::Type
@@ -7453,7 +7050,7 @@ impl Checker<'_, '_> {
             });
             if *sort != Sort::Runtime || ordinary_dependencies.contains(&slot) {
                 if sig.modifiers.is_comptime {
-                    self.prepare_open_comptime_prefix(
+                    let early_domains = self.prepare_open_comptime_prefix(
                         expr,
                         owner,
                         sig,
@@ -7463,8 +7060,11 @@ impl Checker<'_, '_> {
                         &parameters,
                         &mut values,
                         &mut symbols,
-                        Some(&mut live),
+                        &mut live,
                     )?;
+                    for (slot, ty) in early_domains {
+                        definition.parameters[slot].1 = Annotation::Known(ty);
+                    }
                 }
                 if live[slot].is_some() {
                     self.require_expression(&values[slot].as_ref().unwrap().ty, &ty, expr.span)?;
@@ -7540,16 +7140,20 @@ impl Checker<'_, '_> {
             }
         }
         self.admit_open_type_requirements(owner, &symbols, false, expr.span)?;
-        let result = self.instantiate_open_annotation_with_live(
-            owner,
-            sig.params.len(),
-            &definition.result,
-            sig,
-            &symbols,
-            &parameters,
-            &live,
-            expr.span,
-        )?;
+        let result = self
+            .instantiate_open_annotation_with_live(
+                owner,
+                sig.params.len(),
+                &definition.result,
+                sig,
+                &symbols,
+                &parameters,
+                &live,
+                expr.span,
+            )?
+            .admit_with(|| expected.cloned().ok_or_else(|| context_error(
+                expr.span, "gradual result requires a concrete delivery domain; no result context was supplied",
+            )))?;
         let signature = Term::Function {
             parameters: parameters.clone(),
             result: Box::new(result.clone()),
@@ -7710,513 +7314,6 @@ impl Checker<'_, '_> {
                 statements: live_bindings,
                 result: Some(Box::new(call)),
             },
-        })
-    }
-
-    fn open_comptime_prefix_end(routes: &[arguments::RoutedArgument<'_>], target: usize) -> usize {
-        let mut end = routes
-            .iter()
-            .find(|route| route.parameter == target)
-            .and_then(|route| route.source_inputs().map(|(position, _)| position).max())
-            .unwrap_or(usize::MAX);
-        // Complete every collection touched by this prefix. A collection can
-        // straddle named inputs; extending the prefix must include their
-        // producers too, rather than evaluating an aggregate ahead of them.
-        loop {
-            let previous = end;
-            for route in routes {
-                let mut positions = route.source_inputs().map(|(position, _)| position);
-                if let Some(first) = positions.next() {
-                    if first <= end {
-                        end = end.max(positions.last().unwrap_or(first));
-                    }
-                }
-            }
-            if previous == end {
-                break;
-            }
-        }
-        end
-    }
-
-    // Signature dependencies may demand ordinary comptime inputs. Complete
-    // their source prefix first, so no producer is replayed or overtaken.
-    fn prepare_open_comptime_prefix(
-        &mut self,
-        call: &Expr<'_>,
-        owner: OwnerId,
-        sig: &hir::item::FnSig<'_>,
-        definition: &Definition,
-        routes: &[arguments::RoutedArgument<'_>],
-        target: usize,
-        parameters: &[Parameter],
-        values: &mut [Option<n::Expr>],
-        symbols: &mut [Option<Term>],
-        mut live: Option<&mut [Option<comptime_interpretor::Value>]>,
-    ) -> Result<(), Error> {
-        let end = Self::open_comptime_prefix_end(routes, target);
-        let mut inputs = Vec::new();
-        for (route_index, route) in routes.iter().enumerate() {
-            if values[route.parameter].is_some()
-                && (symbols[route.parameter].is_some()
-                    || live
-                        .as_ref()
-                        .is_some_and(|slots| slots[route.parameter].is_some()))
-            {
-                continue;
-            }
-            for (field, (position, _)) in route.source_inputs().enumerate() {
-                if position <= end {
-                    inputs.push((position, route_index, field));
-                }
-            }
-        }
-        inputs.sort_unstable_by_key(|(position, _, _)| *position);
-        let mut collections: BTreeMap<usize, (Term, Vec<n::Expr>, Vec<Option<Term>>)> =
-            BTreeMap::new();
-        let mut collection_graphs: BTreeMap<usize, Vec<comptime_interpretor::Value>> =
-            BTreeMap::new();
-        for (_, route_index, field) in inputs {
-            let route = &routes[route_index];
-            let slot = route.parameter;
-            let ty = if let Some((ty, _, _)) = collections.get(&slot) {
-                ty.clone()
-            } else if let Some(parameter) = parameters.get(slot) {
-                // This domain was already formed in declaration order. Live
-                // annotation effects must not run again during input staging.
-                parameter.ty.clone()
-            } else {
-                if let Some(slots) = live.as_deref() {
-                    self.instantiate_open_annotation_with_live(
-                        owner,
-                        slot,
-                        &definition.parameters[slot].1,
-                        sig,
-                        symbols,
-                        parameters,
-                        slots,
-                        call.span,
-                    )?
-                } else {
-                    self.instantiate_open_annotation(
-                        owner,
-                        slot,
-                        &definition.parameters[slot].1,
-                        sig,
-                        symbols,
-                        parameters,
-                        call.span,
-                    )?
-                }
-            };
-            route.require_collection_type(self, &ty, call.span)?;
-            let aggregate = route.expression(call);
-            let input = if route.is_collected() {
-                route.source_inputs().nth(field).unwrap().1
-            } else {
-                &aggregate
-            };
-            let expected = if route.is_collected() {
-                let Term::Tuple(fields) = self.structural_type(&ty, call.span)? else {
-                    unreachable!("collection type checked above")
-                };
-                if fields.len() != route.source_inputs().count() {
-                    return Err(error(
-                        call.span,
-                        "variadic collection argument count mismatch",
-                    ));
-                }
-                fields[field].clone()
-            } else {
-                ty.clone()
-            };
-            let prepared = if route.is_collected() {
-                match values[slot].as_ref().map(|value| &value.kind) {
-                    Some(K::Tuple(fields)) => fields.get(field).cloned(),
-                    Some(_) => {
-                        return Err(error(
-                            call.span,
-                            "prepared collection requires a tuple value",
-                        ));
-                    }
-                    None => None,
-                }
-            } else {
-                values[slot].take()
-            };
-            let value = if let Some(value) = prepared {
-                self.require_expression(&value.ty, &expected, call.span)?;
-                value
-            } else {
-                self.with_staged_input(true, |this| this.expr(input, Some(&expected)))?
-            };
-            if route.is_collected() && live.is_some() {
-                let packet = if let K::Local(binding) = value.kind {
-                    self.spread_input_value(binding, input)?
-                } else {
-                    None
-                };
-                let domain = value.ty.clone();
-                let (value, completed) = if let Some(completed) = packet {
-                    (value, completed)
-                } else {
-                    let (completed, _) = self.required_normal_input(input, value, vec![])?;
-                    (
-                        self.materialize_local_constant(completed.clone(), domain, input.span)?,
-                        completed,
-                    )
-                };
-                let symbol = self.optional_normal_term(completed.clone(), input.span)?;
-                collection_graphs.entry(slot).or_default().push(completed);
-                let (_, fields, field_symbols) = collections
-                    .entry(slot)
-                    .or_insert_with(|| (ty.clone(), Vec::new(), Vec::new()));
-                fields.push(value);
-                field_symbols.push(symbol);
-                if fields.len() == route.source_inputs().count() {
-                    let (ty, fields, field_symbols) = collections.remove(&slot).unwrap();
-                    values[slot] = Some(n::Expr {
-                        source: source(call.span),
-                        ty,
-                        kind: K::Tuple(fields),
-                    });
-                    symbols[slot] = field_symbols
-                        .into_iter()
-                        .collect::<Option<Vec<_>>>()
-                        .map(Term::TupleValue);
-                    live.as_deref_mut().unwrap()[slot] = Some(comptime_interpretor::Value::Tuple(
-                        collection_graphs.remove(&slot).unwrap(),
-                    ));
-                }
-                continue;
-            }
-            if !route.is_collected()
-                && live.is_some()
-                && matches!(value.ty.callable_signature(), Term::Function { .. })
-                && value.ty.is_comptime_callable()
-            {
-                let packet = if let K::Local(binding) = value.kind {
-                    self.spread_input_value(binding, input)?
-                } else {
-                    None
-                };
-                let packet_expression = packet.as_ref().map(|_| value.clone());
-                let ty = value.ty.clone();
-                let completed = if let Some(completed) = packet {
-                    completed
-                } else {
-                    self.required_normal_input(input, value, vec![])?.0
-                };
-                if matches!(&completed, comptime_interpretor::Value::Closure(closure) if closure.declaration_instance().is_none())
-                {
-                    values[slot] = Some(if let Some(value) = packet_expression {
-                        value
-                    } else {
-                        self.materialize_local_constant(completed.clone(), ty, input.span)?
-                    });
-                    symbols[slot] = None;
-                    live.as_deref_mut().unwrap()[slot] = Some(completed);
-                    continue;
-                }
-                let (value, symbol) =
-                    self.freeze_completed_dependency(completed, ty, input.span)?;
-                values[slot] = Some(value);
-                symbols[slot] = Some(symbol);
-                continue;
-            }
-            let (value, symbol) = if slot != target
-                && matches!(value.kind, K::Function(_) | K::FunctionInstance { .. })
-            {
-                // Declaration references need no producer evaluation and can
-                // be delivered without a normal-form function-value symbol.
-                (value, None)
-            } else if slot != target
-                && matches!(value.ty.callable_signature(), Term::Function { .. })
-            {
-                if let K::Local(binding) = value.kind {
-                    if self.prepare_spread_input(binding, input)?.is_some() {
-                        // Keep the original local: the shared packet preparation
-                        // owns materialization and preserves field identity.
-                        (value, None)
-                    } else {
-                        let (completed, ty) = self.required_normal_input(input, value, vec![])?;
-                        (
-                            self.materialize_local_constant(completed, ty, input.span)?,
-                            None,
-                        )
-                    }
-                } else {
-                    let (completed, ty) = self.required_normal_input(input, value, vec![])?;
-                    (
-                        self.materialize_local_constant(completed, ty, input.span)?,
-                        None,
-                    )
-                }
-            } else if slot != target
-                && matches!(
-                    self.structural_type(&value.ty, input.span)?,
-                    Term::Tuple(_) | Term::Record(_) | Term::Nominal { .. }
-                )
-            {
-                // Packet locals belong to the shared packet materialization.
-                // Rebuilding an individual aggregate here would split captures
-                // shared with sibling fields, and evaluating the local alone
-                // would omit its packet preparation scope.
-                let packet = if let K::Local(binding) = value.kind {
-                    self.spread_input_value(binding, input)?
-                } else {
-                    None
-                };
-                let (value, symbol) = if let Some(completed) = packet {
-                    let symbol = self.optional_normal_term(completed, input.span)?;
-                    (value, symbol)
-                } else {
-                    let (completed, ty) = self.required_normal_input(input, value, vec![])?;
-                    let symbol = self.optional_normal_term(completed.clone(), input.span)?;
-                    let value = self.materialize_local_constant(completed, ty, input.span)?;
-                    (value, symbol)
-                };
-                if let Some(symbol) = &symbol {
-                    symbol
-                        .check_scope(&[])
-                        .map_err(|cause| error(call.span, cause.to_string()))?;
-                }
-                (value, symbol)
-            } else {
-                let (value, symbol) = self.freeze_open_call_input(input, value)?;
-                symbol
-                    .check_scope(&[])
-                    .map_err(|cause| error(call.span, cause.to_string()))?;
-                (value, Some(symbol))
-            };
-            if route.is_collected() {
-                let (_, fields, field_symbols) = collections
-                    .entry(slot)
-                    .or_insert_with(|| (ty.clone(), Vec::new(), Vec::new()));
-                fields.push(value);
-                field_symbols.push(symbol);
-                if fields.len() == route.source_inputs().count() {
-                    let (ty, fields, field_symbols) = collections.remove(&slot).unwrap();
-                    values[slot] = Some(n::Expr {
-                        source: source(call.span),
-                        ty,
-                        kind: K::Tuple(fields),
-                    });
-                    // A delivery-only collection need not have a symbolic
-                    // representation. Never fabricate missing function symbols.
-                    symbols[slot] = field_symbols
-                        .into_iter()
-                        .collect::<Option<Vec<_>>>()
-                        .map(Term::TupleValue);
-                }
-            } else {
-                values[slot] = Some(value);
-                symbols[slot] = symbol;
-            }
-        }
-        // An empty collection has no producer to schedule, but remains an
-        // assigned argument and can itself be a signature dependency.
-        for route in routes
-            .iter()
-            .filter(|route| route.is_collected() && route.source_inputs().next().is_none())
-        {
-            let slot = route.parameter;
-            if values[slot].is_some() && symbols[slot].is_some() {
-                continue;
-            }
-            if parameters.get(slot).is_none() && definition.parameters[slot].1.is_pending() {
-                // An empty source prefix must not execute a later annotation
-                // before declaration-ordered domain formation reaches it.
-                continue;
-            }
-            let ty = if let Some(parameter) = parameters.get(slot) {
-                parameter.ty.clone()
-            } else {
-                self.instantiate_open_annotation(
-                    owner,
-                    slot,
-                    &definition.parameters[slot].1,
-                    sig,
-                    symbols,
-                    parameters,
-                    call.span,
-                )?
-            };
-            route.require_collection_type(self, &ty, call.span)?;
-            if !matches!(self.structural_type(&ty, call.span)?, Term::Tuple(fields) if fields.is_empty())
-            {
-                return Err(error(
-                    call.span,
-                    "variadic collection argument count mismatch",
-                ));
-            }
-            values[slot] = Some(n::Expr {
-                source: source(call.span),
-                ty,
-                kind: K::Tuple(Vec::new()),
-            });
-            symbols[slot] = Some(Term::TupleValue(Vec::new()));
-        }
-        Ok(())
-    }
-
-    fn prepare_open_live_default(
-        &mut self,
-        owner: OwnerId,
-        slot: usize,
-        parameters: &[Parameter],
-        symbols: &[Option<Term>],
-        live: &[Option<comptime_interpretor::Value>],
-        span: Span,
-        unresolved: &[DeclarationId],
-    ) -> Result<Option<(comptime_interpretor::Value, Term)>, Error> {
-        let assumptions = self.context.assumptions().to_vec();
-        self.in_open_function(owner, |this| {
-            for assumption in assumptions {
-                this.context.assume(assumption);
-            }
-            let ItemKind::Fn(sig, _) = &this.package.item(owner).unwrap().kind else {
-                unreachable!()
-            };
-            let TyParamKind::Optional(_, _, default) = sig.params[slot].ty.kind else {
-                return Err(error(
-                    span,
-                    "missing default for an unsupplied open parameter",
-                ));
-            };
-            this.default_input_scope = Some(
-                parameters
-                    .iter()
-                    .map(|p| (p.sort, Some(p.ty.clone())))
-                    .collect(),
-            );
-            this.default_input_owner = Some(owner);
-            this.in_staged_input = true;
-            let mut graph = Vec::new();
-            for (index, parameter) in sig.params.iter().enumerate().take(slot) {
-                let binding = local(parameter.hir_id);
-                let domain = &parameters[index];
-                this.locals.insert(binding, domain.ty.clone());
-                if let Some(value) = &live[index] {
-                    graph.push((binding, domain.ty.clone(), value.clone()));
-                } else if let Some(value) = &symbols[index] {
-                    this.input_facts
-                        .specialized
-                        .push((binding, domain.ty.clone(), value.clone()));
-                    if domain.ty == p(P::Type) {
-                        this.input_facts.types.insert(binding, value.clone());
-                    } else {
-                        this.input_facts
-                            .values
-                            .insert(binding, (value.clone(), domain.ty.clone()));
-                    }
-                }
-            }
-            let prepared = this.prepare_required_expression_with_live_inputs(
-                default,
-                Some(&parameters[slot].ty),
-                None,
-                Vec::new(),
-                false,
-                &graph,
-            )?;
-            if !unresolved.is_empty()
-                && this.open_computation_uses_clauses(&prepared, unresolved, default.span)?
-            {
-                return Ok(None);
-            }
-            let selected: BTreeSet<_> = prepared
-                .inputs
-                .iter()
-                .map(|(binding, _, _)| *binding)
-                .collect();
-            this.invoke_required_publishing(
-                prepared,
-                graph
-                    .into_iter()
-                    .filter(|(binding, _, _)| selected.contains(binding))
-                    .map(|(binding, _, value)| (binding, value))
-                    .collect(),
-                default.hir_id.owner,
-                default.span,
-            )
-            .map(Some)
-        })
-    }
-
-    fn prepare_open_default(
-        &mut self,
-        owner: OwnerId,
-        slot: usize,
-        parameters: &[Parameter],
-        symbols: &[Option<Term>],
-        force_staged: bool,
-        span: Span,
-    ) -> Result<(n::Expr, Option<Term>), Error> {
-        let domains = parameters
-            .iter()
-            .map(|p| (p.sort, Some(p.ty.clone())))
-            .collect::<Vec<_>>();
-        self.prepare_open_default_in_scope(owner, slot, &domains, symbols, force_staged, span)
-    }
-
-    fn prepare_open_default_in_scope(
-        &mut self,
-        owner: OwnerId,
-        slot: usize,
-        parameters: &[(Sort, Option<Term>)],
-        symbols: &[Option<Term>],
-        force_staged: bool,
-        span: Span,
-    ) -> Result<(n::Expr, Option<Term>), Error> {
-        let expected = parameters
-            .get(slot)
-            .and_then(|(_, ty)| ty.as_ref())
-            .ok_or_else(|| error(span, "default input domain has not formed"))?;
-        self.in_open_function(owner, |this| {
-            let ItemKind::Fn(sig, _) = &this.package.item(owner).unwrap().kind else {
-                unreachable!()
-            };
-            let TyParamKind::Optional(_, _, default) = sig.params[slot].ty.kind else {
-                return Err(error(
-                    span,
-                    "missing default for an unsupplied open parameter",
-                ));
-            };
-            this.default_input_scope = Some(parameters.to_vec());
-            this.default_input_owner = Some(owner);
-            for (index, parameter) in sig.params.iter().enumerate().take(slot) {
-                let binding = local(parameter.hir_id);
-                let (sort, domain) = &parameters[index];
-                let Some(domain) = domain else {
-                    continue;
-                };
-                this.locals.insert(binding, domain.clone());
-                if let Some(value) = &symbols[index] {
-                    this.input_facts
-                        .specialized
-                        .push((binding, domain.clone(), value.clone()));
-                    if *sort == Sort::Type {
-                        this.input_facts.types.insert(binding, value.clone());
-                    } else {
-                        this.input_facts
-                            .values
-                            .insert(binding, (value.clone(), domain.clone()));
-                    }
-                }
-            }
-            let staged = force_staged || parameters[slot].0 != Sort::Runtime;
-            this.in_staged_input = staged;
-            let value = this.expr(default, Some(expected))?;
-            if staged {
-                let (value, symbol) = this.freeze_dependency_input(default, value, vec![])?;
-                Ok((value, Some(symbol)))
-            } else {
-                if !sig.modifiers.is_comptime {
-                    this.require_stable_default(&value, default.span)?;
-                }
-                Ok((value, None))
-            }
         })
     }
 

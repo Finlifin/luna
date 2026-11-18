@@ -273,6 +273,10 @@ impl Checker<'_, '_> {
                 {
                     return self.contextual_function_instance(expr, owner, expected, partial);
                 }
+                if self.open_value_needs_instance(owner) {
+                    let value = self.open_function_value(expr, owner, &[], expected)?;
+                    return self.callable_value_view(value, expected, expr.span);
+                }
                 if let Some(item) = self.package.item(owner) {
                     if let ItemKind::Fn(signature, _) = &item.kind {
                         arguments::require_function_value_parameters(signature.params, expr.span)?;

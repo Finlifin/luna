@@ -2105,7 +2105,7 @@ impl Checker<'_, '_> {
                     | TyParamKind::Varadic(_, ty) => self.signature_annotation(ty)?,
                 };
                 self.check_template_parameter_annotation(parameter, &annotation)?;
-                if annotation.is_pending() {
+                if annotation.needs_instance() {
                     // This records staging only. A pending comptime domain is
                     // not yet known to be Type; invocation determines that sort
                     // before publishing a concrete function signature.
@@ -2162,7 +2162,7 @@ impl Checker<'_, '_> {
                     .push((parameter_type.sort, Some(parameter_type.ty.clone())));
                 let pending = annotations
                     .iter()
-                    .any(|(_, annotation)| annotation.is_pending());
+                    .any(|(_, annotation)| annotation.needs_instance());
                 let index = if pending {
                     parameter_index
                 } else {
@@ -2209,10 +2209,10 @@ impl Checker<'_, '_> {
             // free functions also receive inputs through declaration clauses.
             // Comptime bodies already execute local constants per invocation;
             // receiver definitions retain their separate checking path.
-            if result_annotation.is_pending()
+            if result_annotation.needs_instance()
                 || annotations
                     .iter()
-                    .any(|(_, annotation)| annotation.is_pending())
+                    .any(|(_, annotation)| annotation.needs_instance())
                 || (!sig.modifiers.is_normal_form_head
                     && (parameters
                         .iter()
@@ -4455,7 +4455,7 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         owner: OwnerId,
         arguments: Vec<Term>,
-        expected: Option<&Term>,
+        callable_target: Option<&Term>,
         allow_optional: bool,
     ) -> Result<n::Expr, Error> {
         self.ensure_signature(owner, expr.span)?;
@@ -4479,7 +4479,7 @@ impl Checker<'_, '_> {
             }
         }
         if !allow_optional && self.open_value_needs_instance(owner) {
-            return self.open_function_value(expr, owner, &arguments, expected);
+            return self.open_function_value(expr, owner, &arguments, callable_target);
         }
         let scope = self.call_inference_domains();
         let frames = if scope.is_empty() {
@@ -4505,9 +4505,6 @@ impl Checker<'_, '_> {
         )?;
         let ty = self.callable_type(owner, ty);
         self.check_type_application(owner, &arguments, expr.span)?;
-        if let Some(expected) = expected {
-            self.require(&ty, expected, expr.span)?;
-        }
         Ok(n::Expr {
             ty,
             source: source(expr.span),
@@ -4563,7 +4560,7 @@ impl Checker<'_, '_> {
         if !lexical.is_empty() {
             let arguments =
                 self.type_clause_arguments_with_prefix(owner, args, None, expr.span, lexical)?;
-            let value = self.function_instance(expr, owner, arguments, None, allow_optional)?;
+            let value = self.function_instance(expr, owner, arguments, expected, allow_optional)?;
             return if allow_optional {
                 Ok(value)
             } else {
@@ -4577,7 +4574,7 @@ impl Checker<'_, '_> {
                 .any(|domain| *domain != p(P::Type))
         {
             let arguments = self.type_clause_arguments(owner, args, None, expr.span)?;
-            let value = self.function_instance(expr, owner, arguments, None, allow_optional)?;
+            let value = self.function_instance(expr, owner, arguments, expected, allow_optional)?;
             return if allow_optional {
                 Ok(value)
             } else {
@@ -4598,7 +4595,7 @@ impl Checker<'_, '_> {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let value = self.function_instance(expr, owner, arguments, None, allow_optional)?;
+        let value = self.function_instance(expr, owner, arguments, expected, allow_optional)?;
         if allow_optional {
             Ok(value)
         } else {
@@ -4641,7 +4638,7 @@ impl Checker<'_, '_> {
             self.function_type_plan(owner, &fixed, expr.span)?;
         if generic_parameters.is_empty() {
             let pending_open = self.open_value_needs_instance(owner);
-            let value = self.function_instance(expr, owner, template, None, !pending_open)?;
+            let value = self.function_instance(expr, owner, template, expected, !pending_open)?;
             return self.callable_value_view(value, expected, expr.span);
         }
         let (original, known_parameters, known_result) = match self
@@ -4776,7 +4773,7 @@ impl Checker<'_, '_> {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let value = self.function_instance(expr, owner, arguments, None, false)?;
+        let value = self.function_instance(expr, owner, arguments, expected, false)?;
         if view.is_some() {
             Ok(value)
         } else {
