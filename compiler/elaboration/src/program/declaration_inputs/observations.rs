@@ -12,24 +12,58 @@ pub(in crate::program) struct KnownInputs {
 }
 
 impl KnownInputs {
-    pub(in crate::program) fn prefix(
+    /// Split the selected declaration once. Only the captured values originate
+    /// outside this call; both portions retain their original domain templates.
+    pub(in crate::program) fn partition(
         ids: &[DeclarationId],
-        domains: &[Term],
+        mut domains: Vec<Term>,
         prefix: &[Term],
         steps: &mut u64,
         span: Span,
-    ) -> Result<Self, Error> {
-        let mut known = Self::default();
-        for ((id, domain), value) in ids.iter().zip(domains).zip(prefix) {
-            known.ids.push(*id);
-            known
-                .domains
-                .push(environment::copy_term(domain, steps, span)?);
-            known
-                .values
-                .push(environment::copy_term(value, steps, span)?);
+    ) -> Result<(Self, Vec<Term>), Error> {
+        if ids.len() != domains.len() || prefix.len() > ids.len() {
+            return Err(error(span, "clause input prefix arity mismatch"));
         }
-        Ok(known)
+        environment::charge(steps, ids.len(), span)?;
+        let local = if prefix.is_empty() {
+            std::mem::take(&mut domains)
+        } else {
+            domains.split_off(prefix.len())
+        };
+        let values = prefix
+            .iter()
+            .map(|value| environment::copy_term(value, steps, span))
+            .collect::<Result<_, _>>()?;
+        Ok((
+            Self {
+                ids: ids[..prefix.len()].to_vec(),
+                domains,
+                values,
+            },
+            local,
+        ))
+    }
+
+    pub(super) fn fmt_prefix(
+        &self,
+        count: usize,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        f.write_str("(captured")?;
+        for ((id, domain), value) in self
+            .ids
+            .iter()
+            .zip(&self.domains)
+            .zip(&self.values)
+            .take(count)
+        {
+            write!(f, " (input {id} {domain} {value})")?;
+        }
+        f.write_str(")")
+    }
+
+    pub(in crate::program) fn into_parts(self) -> (Vec<DeclarationId>, Vec<Term>, Vec<Term>) {
+        (self.ids, self.domains, self.values)
     }
 
     pub(in crate::program) fn values(&self) -> &[Term] {

@@ -20,7 +20,6 @@ pub(in crate::program) struct Frame<'h, C: Completion> {
     span: Span,
     interface: Option<interface::Interface<'h>>,
     defaults: Option<environment::Environment>,
-    parameters: Parameters,
     completion: Option<C>,
     scope: Option<scope::Scope>,
     phase: Phase<'h>,
@@ -47,7 +46,7 @@ impl<'h, C: Completion> Frame<'h, C> {
             checker,
             inputs,
             span,
-            parameters.into(),
+            parameters,
             prefix,
             interface::Interface::declaration(owner, &clauses),
             defaults,
@@ -69,7 +68,7 @@ impl<'h, C: Completion> Frame<'h, C> {
             checker,
             inputs,
             span,
-            parameters.into(),
+            parameters,
             KnownInputs::default(),
             interface,
             None,
@@ -92,7 +91,7 @@ impl<'h, C: Completion> Frame<'h, C> {
             checker,
             inputs,
             span,
-            parameters.clone(),
+            parameters,
             prefix,
             interface.entries().to_vec(),
         ) {
@@ -106,7 +105,6 @@ impl<'h, C: Completion> Frame<'h, C> {
             span,
             interface: Some(interface),
             defaults,
-            parameters,
             completion: Some(completion),
             scope: Some(scope),
             phase: Phase::Routing(Box::new(routing)),
@@ -153,7 +151,7 @@ impl<'h, C: Completion> Frame<'h, C> {
                         unreachable!()
                     };
                     frame.unwind(checker);
-                    let inputs = (*frame).finish()?;
+                    let (telescope, inputs) = (*frame).finish()?;
                     // Formation and result conversion belong to the caller,
                     // never to the last default provider or input observation.
                     self.leave(checker);
@@ -161,7 +159,7 @@ impl<'h, C: Completion> Frame<'h, C> {
                         .completion
                         .take()
                         .expect("input completion is consumed once")
-                        .finish(checker, &self.parameters, inputs, self.span)
+                        .finish(checker, telescope, inputs, self.span)
                         .map(Poll::Complete);
                 }
             },

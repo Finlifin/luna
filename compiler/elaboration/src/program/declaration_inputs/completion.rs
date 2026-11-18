@@ -9,7 +9,7 @@ pub(in crate::program) trait Completion: std::fmt::Display {
     fn finish(
         self,
         checker: &mut Checker<'_, '_>,
-        parameters: &[(DeclarationId, Sort, Term)],
+        telescope: PreparedTelescope,
         inputs: PreparedDeclarationInputs,
         span: Span,
     ) -> Result<Self::Output, Error>;
@@ -25,7 +25,7 @@ impl Completion for Contextual {
     fn finish(
         self,
         _: &mut Checker<'_, '_>,
-        _: &[(DeclarationId, Sort, Term)],
+        _: PreparedTelescope,
         inputs: PreparedDeclarationInputs,
         _: Span,
     ) -> Result<Self::Output, Error> {
@@ -40,7 +40,7 @@ impl Completion for Typed {
     fn finish(
         self,
         checker: &mut Checker<'_, '_>,
-        _: &[(DeclarationId, Sort, Term)],
+        _: PreparedTelescope,
         inputs: PreparedDeclarationInputs,
         span: Span,
     ) -> Result<Self::Output, Error> {

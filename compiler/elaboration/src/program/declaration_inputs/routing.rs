@@ -453,6 +453,12 @@ impl std::fmt::Display for Frame<'_> {
                 f.write_str(")")?;
             }
         }
+        f.write_str(") ")?;
+        self.prefix.fmt_prefix(self.prefix.values.len(), f)?;
+        f.write_str(" (domains")?;
+        for (id, sort, domain) in &self.telescope.parameters {
+            write!(f, " (input {id} {sort} {domain})")?;
+        }
         f.write_str(") (order")?;
         for slot in &self.order {
             write!(f, " {slot}")?;
@@ -501,7 +507,7 @@ mod tests {
         let frame = Frame {
             prefix: KnownInputs::default(),
             span,
-            telescope: domain::Telescope::new(Vec::new().into(), &mut 100, span).unwrap(),
+            telescope: domain::Telescope::new(Vec::new(), &mut 100, span).unwrap(),
             inputs: vec![Arg::Expand(&input), Arg::Expand(&input)],
             packet_slots: vec![None, Some(vec![])],
             list_spreads: BTreeSet::new(),

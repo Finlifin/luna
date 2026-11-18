@@ -855,22 +855,26 @@ impl Checker<'_, '_> {
                 checked
                     .map(Ok)
                     .unwrap_or_else(|| checker.expr(expr, expected))
+                    .map(|root| (root, ()))
             },
         )
+        .map(|(prepared, ())| prepared)
     }
 
     /// Construct a required root inside the same isolated checking context as
     /// source expressions. Callers must not precheck staged producers in the
     /// runtime caller's return, loop, or capture context.
-    pub(super) fn prepare_required_root_with_live_inputs(
+    /// The consumer travels with the checked root until its world is prepared.
+    /// It belongs to the caller and does not enter the frozen invocation world.
+    pub(super) fn prepare_required_root_with_live_inputs<C>(
         &mut self,
         expr: &Expr<'_>,
         kind: RootKind,
         inputs: Vec<(n::LocalId, Term, Term)>,
         defer_inputs: bool,
         live: &[(n::LocalId, Term, Value)],
-        build: impl FnOnce(&mut Self) -> Result<n::Expr, Error>,
-    ) -> Result<PreparedRequired, Error> {
+        build: impl FnOnce(&mut Self) -> Result<(n::Expr, C), Error>,
+    ) -> Result<(PreparedRequired, C), Error> {
         let mut supplied: BTreeSet<_> = inputs.iter().map(|(binding, _, _)| *binding).collect();
         for (binding, _, _) in live {
             if !supplied.insert(*binding) {
@@ -966,7 +970,7 @@ impl Checker<'_, '_> {
                 supplied.insert(binding);
                 inputs.push((binding, domain, value));
             }
-            let mut root = build(self).map_err(|mut e| {
+            let (mut root, consumer) = build(self).map_err(|mut e| {
                 if e.message == "local binding is unavailable in this scope" {
                     e.message =
                         "required comptime input is not yet available in this definition".into();
@@ -1470,7 +1474,7 @@ impl Checker<'_, '_> {
                     .signature_owner
                     .is_some_and(|owner| self.active_signatures.contains(&owner)),
             };
-            Ok(prepared)
+            Ok((prepared, consumer))
         })();
         let pending = std::mem::replace(&mut self.pending_type_uses, saved_pending).unwrap();
         if let Some(uses) = &mut self.pending_type_uses {

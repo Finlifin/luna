@@ -16,7 +16,7 @@ impl Completion for Complete {
     fn finish(
         self,
         checker: &mut Checker<'_, '_>,
-        _: &[(DeclarationId, Sort, Term)],
+        _: declaration_inputs::PreparedTelescope,
         inputs: PreparedDeclarationInputs,
         span: Span,
     ) -> Result<n::Expr, Error> {

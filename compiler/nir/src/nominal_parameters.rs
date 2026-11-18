@@ -128,14 +128,7 @@ pub fn binders(
                 });
             }
             domain.check_scope(&[])?;
-            Ok(DeclarationParameter {
-                declaration: *declaration,
-                sort: if *domain == Term::Primitive(Primitive::Type) {
-                    Sort::Type
-                } else {
-                    Sort::ComptimeValue
-                },
-            })
+            Ok(DeclarationParameter::comptime(*declaration, domain))
         })
         .collect()
 }
@@ -342,11 +335,7 @@ impl<'a> DeclarationSubstitution<'a> {
                     arguments,
                     frames,
                 )?;
-                if domain == Term::Primitive(Primitive::Type) {
-                    Sort::Type
-                } else {
-                    Sort::ComptimeValue
-                }
+                Sort::of_comptime_domain(&domain)
             };
             if expected != argument.sort() {
                 return Err(TypeError::WrongSort {
@@ -787,11 +776,7 @@ pub fn admit_in_scope<'a>(
                 )
                 .map_err(|e| e.to_string())?;
             let argument = &arguments[index];
-            let expected = if domain == Term::Primitive(Primitive::Type) {
-                Sort::Type
-            } else {
-                Sort::ComptimeValue
-            };
+            let expected = Sort::of_comptime_domain(&domain);
             if argument.sort() != expected {
                 return Err("nominal argument sort mismatch".into());
             }

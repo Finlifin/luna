@@ -7,6 +7,7 @@ mod domain_checks;
 /// Pending inputs can be supplied during invocation only when the consumer does
 /// not publish a callable signature that still depends on those identities.
 pub(super) struct CallableClausePacket {
+    declaration: domain_checks::Declaration,
     inputs: n::ClauseOperands,
     bindings: declaration_inputs::CallableBindings,
     formation_deferred: bool,
@@ -16,8 +17,8 @@ impl std::fmt::Display for CallableClausePacket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(callable-clause-packet {} {} (formation-deferred {}))",
-            self.inputs, self.bindings, self.formation_deferred
+            "(callable-clause-packet {} {} {} (formation-deferred {}))",
+            self.inputs, self.bindings, self.declaration, self.formation_deferred
         )
     }
 }
@@ -26,42 +27,6 @@ impl std::fmt::Display for CallableClausePacket {
 /// must run in the restored caller scope before a callable packet can escape.
 struct CallableCompletion {
     owner: OwnerId,
-    parameters: Vec<DeclarationId>,
-    domains: Vec<Term>,
-    prefix: Vec<Term>,
-}
-
-impl CallableCompletion {
-    fn retain(
-        checker: &mut Checker<'_, '_>,
-        owner: OwnerId,
-        parameters: &[DeclarationId],
-        domains: &[Term],
-        prefix: &[Term],
-        span: Span,
-    ) -> Result<Self, Error> {
-        if parameters.len() != domains.len() || prefix.len() > parameters.len() {
-            return Err(error(span, "clause input prefix arity mismatch"));
-        }
-        checker.required_steps = checker
-            .required_steps
-            .checked_sub(parameters.len() as u64)
-            .ok_or_else(|| error(span, "callable input retention budget exhausted"))?;
-        let mut retained_domains = Vec::new();
-        for domain in domains {
-            retained_domains.push(checker.copy_alias_type(domain, span)?);
-        }
-        let mut retained_prefix = Vec::new();
-        for value in prefix {
-            retained_prefix.push(checker.copy_alias_type(value, span)?);
-        }
-        Ok(Self {
-            owner,
-            parameters: parameters.to_vec(),
-            domains: retained_domains,
-            prefix: retained_prefix,
-        })
-    }
 }
 
 impl declaration_inputs::Completion for CallableCompletion {
@@ -69,26 +34,35 @@ impl declaration_inputs::Completion for CallableCompletion {
     type Output = CallableClausePacket;
 
     fn finish(
-        mut self,
+        self,
         checker: &mut Checker<'_, '_>,
-        _: &[(DeclarationId, Sort, Term)],
+        telescope: declaration_inputs::PreparedTelescope,
         inputs: declaration_inputs::PreparedDeclarationInputs,
         span: Span,
     ) -> Result<Self::Output, Error> {
-        let prefix = std::mem::take(&mut self.prefix);
-        let parameters = &self.parameters;
-        let domains = &self.domains;
-        let prepared = inputs.into_typed(&mut checker.required_steps, span)?;
+        let (declaration, prefix) =
+            domain_checks::Declaration::from_telescope(self.owner, telescope);
         let prefix_count = prefix.len();
-        let prefix_binders = checker.input_binders(&parameters[..prefix_count]);
-        let observations = prepared
-            .observations
-            .with_prefix(prefix_binders.into_iter().zip(prefix));
+        let parent_inputs = declaration
+            .parameters
+            .iter()
+            .zip(&declaration.domains)
+            .zip(prefix)
+            .map(|((&id, domain), value)| (nir::DeclarationParameter::comptime(id, domain), value));
+        let prepared = inputs.into_typed(&mut checker.required_steps, span)?;
+        let observations = prepared.observations.with_prefix(parent_inputs);
         let frames = checker.call_input_frames();
-        let (bindings, mut formation) =
-            observations.bind(domains, frames, &mut checker.required_steps, span)?;
+        let (bindings, mut formation) = observations.bind(
+            &declaration.domains,
+            frames,
+            &mut checker.required_steps,
+            span,
+        )?;
         let mut prefix_operands = Vec::with_capacity(prefix_count);
-        for (domain, value) in domains[..prefix_count].iter().zip(&formation.terms) {
+        for (domain, value) in declaration.domains[..prefix_count]
+            .iter()
+            .zip(&formation.terms)
+        {
             let ty = bindings.instantiate(domain, &mut checker.required_steps, span)?;
             let value = checker.copy_alias_type(value, span)?;
             prefix_operands.push(n::Expr {
@@ -104,7 +78,7 @@ impl declaration_inputs::Completion for CallableCompletion {
         let mut inputs = prepared.operands;
         inputs.arguments.splice(..0, prefix_operands);
         let mut steps = checker.required_steps;
-        let checked = self.check_domains(
+        let checked = declaration.check_domains(
             checker,
             &bindings,
             &formation,
@@ -115,14 +89,16 @@ impl declaration_inputs::Completion for CallableCompletion {
         checker.required_steps = steps;
         checked?;
         formation.deferred.extend(
-            parameters
+            declaration
+                .parameters
                 .iter()
-                .zip(domains)
+                .zip(&declaration.domains)
                 .filter_map(|(id, domain)| (*domain != p(P::Type)).then_some(*id)),
         );
         let formation_deferred = !formation.deferred.is_empty();
         checker.check_formation_application(self.owner, formation, span)?;
         Ok(CallableClausePacket {
+            declaration,
             inputs,
             bindings,
             formation_deferred,
@@ -132,19 +108,7 @@ impl declaration_inputs::Completion for CallableCompletion {
 
 impl std::fmt::Display for CallableCompletion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "(callable-input-completion (owner {}) (parameters",
-            self.owner
-        )?;
-        for (parameter, domain) in self.parameters.iter().zip(&self.domains) {
-            write!(f, " (input {parameter} {domain})")?;
-        }
-        f.write_str(") (prefix")?;
-        for value in &self.prefix {
-            write!(f, " {value}")?;
-        }
-        f.write_str("))")
+        write!(f, "(callable-input-completion (owner {}))", self.owner)
     }
 }
 
@@ -166,7 +130,7 @@ impl declaration_inputs::Completion for InstanceCompletion<'_> {
     fn finish(
         self,
         checker: &mut Checker<'_, '_>,
-        telescope: &[(DeclarationId, Sort, Term)],
+        telescope: declaration_inputs::PreparedTelescope,
         inputs: declaration_inputs::PreparedDeclarationInputs,
         span: Span,
     ) -> Result<n::Expr, Error> {
@@ -341,17 +305,16 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             return Ok(None);
         };
         let declared_inputs = self.term_declaration_inputs(&signature, expr.span)?;
-        let captured = declaration_inputs::KnownInputs::prefix(
+        let (captured, local_domains) = declaration_inputs::KnownInputs::partition(
             &parameters,
-            &domains,
+            domains,
             prefix,
             &mut self.required_steps,
             expr.span,
         )?;
-        let mut dependent = parameters
+        let mut dependent = parameters[prefix.len()..]
             .iter()
-            .zip(&domains)
-            .skip(prefix.len())
+            .zip(&local_domains)
             .filter(|(id, domain)| declared_inputs.contains(id) && **domain != p(P::Type))
             .map(|(_, domain)| domain)
             .peekable();
@@ -375,8 +338,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         if !allow_optional {
             arguments::require_function_value_parameters(sig.params, expr.span)?;
         }
-        let packet =
-            CallableCompletion::retain(self, owner, &parameters, &domains, prefix, expr.span)?;
+        let packet = CallableCompletion { owner };
         let expected = expected
             .map(|ty| self.copy_alias_type(ty, expr.span))
             .transpose()?;
@@ -394,7 +356,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             args,
             captured,
             &parameters,
-            &domains,
+            local_domains,
             completion,
         )
         .map(Some)
@@ -454,18 +416,17 @@ impl<'a, 'arena> Checker<'a, 'arena> {
     /// Prepare ordinary clause values without choosing their execution time or
     /// the phase of the eventual callable. The packet is an internal carrier;
     /// every operand retains its declaration domain and source-order producer.
-    pub(super) fn prepare_callable_clause_packet(
+    fn prepare_callable_clause_packet(
         &mut self,
         expr: &Expr<'_>,
         owner: OwnerId,
         args: &[Arg<'_>],
         prefix: &[Term],
         parameters: &[DeclarationId],
-        domains: &[Term],
+        domains: Vec<Term>,
     ) -> Result<CallableClausePacket, Error> {
-        let completion =
-            CallableCompletion::retain(self, owner, parameters, domains, prefix, expr.span)?;
-        let captured = declaration_inputs::KnownInputs::prefix(
+        let completion = CallableCompletion { owner };
+        let (captured, local_domains) = declaration_inputs::KnownInputs::partition(
             parameters,
             domains,
             prefix,
@@ -473,7 +434,13 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             expr.span,
         )?;
         let preparation = self.begin_callable_clause_packet(
-            expr, owner, args, captured, parameters, domains, completion,
+            expr,
+            owner,
+            args,
+            captured,
+            parameters,
+            local_domains,
+            completion,
         )?;
         self.check_declaration_inputs_region(preparation)
     }
@@ -485,7 +452,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         args: &[Arg<'h>],
         captured: declaration_inputs::KnownInputs,
         parameters: &[DeclarationId],
-        domains: &[Term],
+        local_domains: Vec<Term>,
         completion: C,
     ) -> Result<declaration_inputs::preparation::Frame<'h, C>, Error>
     where
@@ -493,11 +460,6 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         'arena: 'h,
     {
         let prefix = captured.values();
-        if parameters.len() != domains.len()
-            || prefix.len() + self.type_clause_params(owner).len() != parameters.len()
-        {
-            return Err(error(expr.span, "clause input prefix arity mismatch"));
-        }
         // Prefix identities specialize declaration defaults, never explicit
         // caller sources. Keep one budgeted owned environment, not a temporary
         // unbounded clone followed by another retention inside preparation.
@@ -513,18 +475,11 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             &mut self.required_steps,
             expr.span,
         )?;
-        let mut telescope = Vec::new();
-        for (binder, domain) in self
-            .input_binders(&parameters[prefix.len()..])
-            .into_iter()
-            .zip(&domains[prefix.len()..])
-        {
-            telescope.push((
-                binder.declaration,
-                binder.sort,
-                self.copy_alias_type(domain, expr.span)?,
-            ));
-        }
+        let telescope = parameters[prefix.len()..]
+            .iter()
+            .zip(local_domains)
+            .map(|(&id, domain)| (id, Sort::of_comptime_domain(&domain), domain))
+            .collect();
         declaration_inputs::preparation::Frame::begin(
             self,
             owner,
@@ -563,20 +518,20 @@ impl<'a, 'arena> Checker<'a, 'arena> {
     ) -> Result<Vec<Term>, Error> {
         let parameters = self.type_parameters[&owner].clone();
         let domains = self.trait_domains(owner)?;
-        let prepared = self.prepare_required_root_with_live_inputs(
+        let (prepared, declaration) = self.prepare_required_root_with_live_inputs(
             expr,
             required::RootKind::CallableInputs,
             Vec::new(),
             false,
             &[],
-            |checker| {
+            move |checker| {
                 let packet = checker.prepare_callable_clause_packet(
                     expr,
                     owner,
                     args,
                     prefix,
                     &parameters,
-                    &domains,
+                    domains,
                 )?;
                 // A required invocation returns one value to the host.
                 let n::ClauseOperands {
@@ -589,18 +544,21 @@ impl<'a, 'arena> Checker<'a, 'arena> {
                         .map(|arg| checker.copy_alias_type(&arg.ty, expr.span))
                         .collect::<Result<_, _>>()?,
                 );
-                Ok(n::Expr {
-                    source: source(expr.span),
-                    ty: checker.copy_alias_type(&ty, expr.span)?,
-                    kind: K::Block {
-                        statements,
-                        result: Some(Box::new(n::Expr {
-                            source: source(expr.span),
-                            ty,
-                            kind: K::Tuple(arguments),
-                        })),
+                Ok((
+                    n::Expr {
+                        source: source(expr.span),
+                        ty: checker.copy_alias_type(&ty, expr.span)?,
+                        kind: K::Block {
+                            statements,
+                            result: Some(Box::new(n::Expr {
+                                source: source(expr.span),
+                                ty,
+                                kind: K::Tuple(arguments),
+                            })),
+                        },
                     },
-                })
+                    packet.declaration,
+                ))
             },
         )?;
         let (value, packet_type) =
@@ -611,7 +569,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
                 "clause input packet did not produce a tuple",
             ));
         };
-        if values.len() != parameters.len() {
+        if values.len() != declaration.parameters.len() {
             return Err(error(expr.span, "clause input packet arity mismatch"));
         }
         let arguments = values
@@ -630,20 +588,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
                 "clause input packet has no checked domains",
             ));
         };
-        if actual_domains.len() != domains.len() {
-            return Err(error(
-                expr.span,
-                "clause input packet domain arity mismatch",
-            ));
-        }
-        // Required input execution returns the original checked packet's types.
-        // Its completed values now substitute every declaration input at once;
-        // no producer is inspected again or rerun to recover this evidence.
-        for (actual, domain) in actual_domains.iter().zip(&domains) {
-            let expected =
-                self.instantiate_input_types(domain, &parameters, &arguments, expr.span)?;
-            self.require(actual, &expected, expr.span)?;
-        }
+        declaration.check_completed(self, &actual_domains, &arguments, expr.span)?;
         Ok(arguments)
     }
 }
@@ -653,28 +598,10 @@ mod packet_tests {
     use super::*;
 
     #[test]
-    fn callable_completion_dump_keeps_parent_prefix_and_full_domains() {
-        let parameter = DeclarationId {
-            package: 1,
-            local: 2,
-        };
+    fn callable_completion_dump_identifies_the_consumer_and_signature() {
         let completion = CallableCompletion {
             owner: hir::OwnerId::new(hir::LocalDefId::new(3)),
-            parameters: vec![parameter],
-            domains: vec![p(P::Str)],
-            prefix: vec![Term::String("parent\"\n".into())],
         };
-        let dump = completion.to_string();
-        assert!(
-            dump.starts_with("(callable-input-completion (owner "),
-            "{dump}"
-        );
-        assert!(
-            dump.contains(&format!("(input {parameter} {})", p(P::Str))),
-            "{dump}"
-        );
-        assert!(dump.contains("parent\\\"\\n"), "{dump}");
-        assert!(!dump.contains('\n'), "{dump}");
         let instance = InstanceCompletion {
             expr: Expr {
                 hir_id: hir::HirId::new(completion.owner, hir::ItemLocalId::new(0)),
@@ -697,7 +624,10 @@ mod packet_tests {
             dump.contains("(allow-optional false) (delivery preserve)"),
             "{dump}"
         );
-        assert!(dump.contains("parent\\\"\\n"), "{dump}");
+        assert!(
+            dump.contains("(callable-input-completion (owner "),
+            "{dump}"
+        );
         assert!(!dump.contains('\n'), "{dump}");
     }
 
@@ -718,6 +648,11 @@ mod packet_tests {
         };
         let producer = expression.to_string();
         let packet = CallableClausePacket {
+            declaration: domain_checks::Declaration {
+                owner: hir::OwnerId::new(hir::LocalDefId::new(3)),
+                parameters: vec![last, first],
+                domains: vec![p(P::Type), p(P::Type)],
+            },
             inputs: n::ClauseOperands {
                 statements: vec![],
                 arguments: vec![expression],

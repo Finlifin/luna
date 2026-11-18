@@ -242,6 +242,21 @@ fn pending_type_inputs_do_not_hide_known_domain_conflicts_in_unused_code() {
 }
 
 #[test]
+fn known_value_indices_can_contradict_a_later_domain_before_type_delivery() {
+    let source = "
+        struct Ticket where T, flag: T {}
+        comptime fn Domain() -> Type { bool }
+        comptime fn consume() -> bool where T, flag: T, ticket: Ticket<T, flag> { true }
+        comptime fn unused(ticket: Ticket<bool, false>) -> bool {
+            consume<Domain(), true, ticket>()
+        }
+    ";
+    let failure = sysroot::compile(source).unwrap_err();
+    assert!(failure.contains("type mismatch"), "{failure}");
+    sysroot::compile(&source.replace("Ticket<bool, false>", "Ticket<bool, true>")).unwrap();
+}
+
+#[test]
 fn required_runtime_callable_checks_completed_input_domains() {
     for type_body in ["u8", "bool"] {
         let source = format!(
@@ -258,6 +273,28 @@ fn required_runtime_callable_checks_completed_input_domains() {
             assert!(sysroot::compile(&source).is_err(), "{source}");
         }
     }
+}
+
+#[test]
+fn required_callable_packet_uses_computed_type_as_a_dependent_field_domain() {
+    let source = "
+        comptime fn Domain() -> Type { Type }
+        comptime fn fields() -> meta.List<Type> { [u8, bool] }
+        fn accepted() -> bool
+        where T, field: T, ...values: meta.List<T>
+        { true }
+        fn run() -> bool { accepted<.values = fields(), Domain(), bool>() }
+    ";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let failure = sysroot::compile(&source.replace("{ Type }", "{ bool }")).unwrap_err();
+    assert!(
+        failure.contains("clause input type mismatch: expected comptime-value, got type"),
+        "{failure}"
+    );
+    let staged = source
+        .replace("fn accepted()", "comptime fn accepted()")
+        .replace("fn run()", "comptime fn check()");
+    check_twice(&staged, &["check", "fields", "Domain", "accepted"]);
 }
 
 #[test]

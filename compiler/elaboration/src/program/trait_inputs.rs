@@ -3,8 +3,18 @@ use super::*;
 
 impl Checker<'_, '_> {
     pub(super) fn trait_domains(&mut self, owner: OwnerId) -> Result<Vec<Term>, Error> {
+        let span = self
+            .package
+            .item(owner)
+            .map(|item| item.span)
+            .unwrap_or_default();
         if let Some(domains) = self.trait_parameter_types.get(&owner) {
-            return Ok(domains.clone());
+            return domains
+                .iter()
+                .map(|domain| {
+                    declaration_inputs::copy_input_domain(domain, &mut self.required_steps, span)
+                })
+                .collect();
         }
         if !matches!(
             self.package.item(owner).map(|i| &i.kind),
@@ -28,6 +38,12 @@ impl Checker<'_, '_> {
                 _ => p(P::Type),
             });
         }
+        let retained = domains
+            .iter()
+            .map(|domain| {
+                declaration_inputs::copy_input_domain(domain, &mut self.required_steps, span)
+            })
+            .collect::<Result<_, _>>()?;
         for (id, domain) in self.type_parameters[&owner].iter().zip(&domains) {
             self.implementation_index
                 .register_parameter_domain(*id, domain.clone())
@@ -36,7 +52,7 @@ impl Checker<'_, '_> {
                 .register_parameter_domain(*id, domain.clone())
                 .map_err(|message| error(self.package.item(owner).unwrap().span, message))?;
         }
-        self.trait_parameter_types.insert(owner, domains.clone());
+        self.trait_parameter_types.insert(owner, retained);
         // Self skeletons may be registered before explicit value domains are
         // known. Refresh all nominal members when their telescope is complete.
         if matches!(

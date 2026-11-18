@@ -20,6 +20,18 @@ pub enum Sort {
     Runtime,
 }
 
+impl Sort {
+    /// Read the sort at this stage of substitution. A dependent domain
+    /// can become Type when the call supplies its earlier arguments.
+    pub fn of_comptime_domain(domain: &Term) -> Self {
+        if matches!(domain, Term::Primitive(Primitive::Type)) {
+            Self::Type
+        } else {
+            Self::ComptimeValue
+        }
+    }
+}
+
 /// Package identity must include the package's build identity at the driver
 /// boundary. These numeric handles are session-local, not persistent cache IDs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -138,6 +150,16 @@ pub struct DeclarationParameter {
     pub declaration: DeclarationId,
     pub sort: Sort,
 }
+impl DeclarationParameter {
+    /// The binder's declared sort precedes any substitution at a call site.
+    pub fn comptime(declaration: DeclarationId, domain: &Term) -> Self {
+        Self {
+            declaration,
+            sort: Sort::of_comptime_domain(domain),
+        }
+    }
+}
+
 impl fmt::Display for DeclarationParameter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

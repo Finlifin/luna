@@ -1306,10 +1306,15 @@ VM invocation session 保留活动帧、输入、契约及宿主请求；Require
 接收也不等于选择已准入或 builder 已安装；原 ticket、世界和预算必须分别核对。
 普通 required 驱动仍同步完成这些交接，不是一个可挂起的源码 Checker。
 
-完整 Type 描述必须沿普通 packet 和 scope 恢复传送。身份消费者另持其赋值权限；
-未形成的源输入需要原区域继续检查，不能另起一个已完成根的 invocation 代替。
-Any/refinement 的共同数据载体、普通参数检查的 Type 响应及源码主体请求仍未接通。
-`library_std_format` 只覆盖 FormatPlan 扫描，不能证明目标 println 完成。
+闭合的 Any、refinement 和应用描述已经可以作为普通 Type 结果交付。
+`std.fmt.Parse(format)` 利用这条路径为 `println` 的每个字段建立 Display 约束；
+真实 sysroot 的调用检查和 Linux 宿主输出分别有[格式测试](../compiler/luna/tests/library_std_format.rs)
+与[原生演示](examples/host-println.fl)覆盖。
+
+required 子句调用把选中声明的域模板留在调用者一侧，执行世界接收已检查的
+操作数。返回的字段类型和值在恢复后的作用域中一起检查，形成义务仍由实例
+消费者负责。普通调用若还需要活动 VM 的返回值来检查一段 HIR，则原源码区域
+和原 invocation 之间仍缺恢复通道。两种情形的交付顺序见[迁移计划](refactoring-plan.md#下一条纵向交付待定域的普通调用)。
 
 #### 已退役队列与仍保留的赋值权限
 

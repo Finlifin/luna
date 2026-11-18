@@ -26,9 +26,14 @@ pub(super) use completion::Completion;
 pub(super) use environment::Environment;
 pub(super) use environment::copy_term as copy_input_domain;
 
-// Shared only within this preparation and its result consumer. Domain
-// values move out of the caller's temporary telescope instead of borrowing it.
-type Parameters = std::sync::Arc<[(DeclarationId, Sort, Term)]>;
+type Parameters = Vec<(DeclarationId, Sort, Term)>;
+
+/// Moved from routing to slot checking and finally to the result consumer.
+/// Captured parent values precede the local declaration slots.
+pub(super) struct PreparedTelescope {
+    pub captured: KnownInputs,
+    pub local: Parameters,
+}
 
 pub(super) struct PreparedDeclarationInputs {
     pub arguments: Vec<n::NormalFormArgument>,

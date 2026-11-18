@@ -384,6 +384,13 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 None => None,
             },
         };
+        // A known identity can specialize subsequent fields while its own
+        // domain check remains pending. If using it would change the binder's
+        // sort, only completion of that domain can authorize the replacement.
+        let identity = identity.filter(|observed| {
+            pending.domain.pending.is_empty()
+                || observed.sort() == Sort::of_comptime_domain(&pending.domain.ty)
+        });
         let ty = value
             .expression()
             .map(|expr| expr.ty.clone())
@@ -425,7 +432,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         }
     }
 
-    pub(super) fn finish(self) -> Result<PreparedDeclarationInputs, Error> {
+    pub(super) fn finish(self) -> Result<(PreparedTelescope, PreparedDeclarationInputs), Error> {
         if !self.complete || self.pending.is_some() {
             return Err(error(
                 self.span,

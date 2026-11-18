@@ -3,7 +3,80 @@
 use super::*;
 use declaration_inputs::CallableBindings;
 
-impl CallableCompletion {
+pub(super) struct Declaration {
+    pub(super) owner: OwnerId,
+    pub(super) parameters: Vec<DeclarationId>,
+    pub(super) domains: Vec<Term>,
+}
+
+impl std::fmt::Display for Declaration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(clause-declaration (owner {}) (parameters", self.owner)?;
+        for (id, domain) in self.parameters.iter().zip(&self.domains) {
+            write!(f, " (input {id} {domain})")?;
+        }
+        f.write_str("))")
+    }
+}
+
+impl Declaration {
+    pub(super) fn from_telescope(
+        owner: OwnerId,
+        telescope: declaration_inputs::PreparedTelescope,
+    ) -> (Self, Vec<Term>) {
+        let (mut parameters, mut domains, prefix) = telescope.captured.into_parts();
+        for (id, _, domain) in telescope.local {
+            parameters.push(id);
+            domains.push(domain);
+        }
+        (
+            Self {
+                owner,
+                parameters,
+                domains,
+            },
+            prefix,
+        )
+    }
+
+    /// Validate one completed packet in the restored caller scope, including
+    /// dependent binder sorts. Every result slot uses this same substitution.
+    pub(super) fn check_completed(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        actual: &[Term],
+        values: &[Term],
+        span: Span,
+    ) -> Result<(), Error> {
+        if actual.len() != self.domains.len() {
+            return Err(error(span, "clause input packet domain arity mismatch"));
+        }
+        let frames = checker.call_input_frames();
+        let substitution = nominal_fields::metered(&mut checker.required_steps, |fuel| {
+            nir::DeclarationSubstitution::bounded(
+                &self.parameters,
+                &self.domains,
+                values,
+                &frames,
+                fuel,
+            )
+        })
+        .map_err(|failure| match failure {
+            nir::type_computations::Error::Scope(reason @ nir::TypeError::WrongSort { .. }) => {
+                error(span, format!("clause input type mismatch: {reason}"))
+            }
+            reason => error(span, reason.to_string()),
+        })?;
+        for (actual, template) in actual.iter().zip(&self.domains) {
+            let expected = nominal_fields::metered(&mut checker.required_steps, |fuel| {
+                substitution.instantiate_bounded(template, fuel)
+            })
+            .map_err(|failure| error(span, failure.to_string()))?;
+            checker.require(actual, &expected, span)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn check_domains(
         &self,
         checker: &Checker<'_, '_>,
@@ -61,11 +134,7 @@ impl CallableCompletion {
         {
             let subject = if formation.deferred.contains(id) {
                 let domain = bindings.instantiate(domain, steps, span)?;
-                let sort = if domain == p(P::Type) {
-                    Sort::Type
-                } else {
-                    Sort::ComptimeValue
-                };
+                let sort = Sort::of_comptime_domain(&domain);
                 let declaration = DeclarationId {
                     package,
                     local: next,
