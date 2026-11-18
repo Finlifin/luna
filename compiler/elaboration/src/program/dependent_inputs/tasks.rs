@@ -119,39 +119,6 @@ fn copy_evidence(value: &Term, steps: &mut u64, span: Span) -> Result<Term, Erro
     })
 }
 
-/// Borrow ordinary HIR directly. A collected tuple or tactic argument owns
-/// only its routing wrapper; its children still borrow the call's source.
-/// Key by declaration slot so a chain of demands does not rescan every route.
-pub(in crate::program) struct InputSource<'a> {
-    pub(in crate::program) route: &'a arguments::RoutedArgument<'a>,
-    pub(in crate::program) expression: std::borrow::Cow<'a, Expr<'a>>,
-}
-
-#[derive(Default)]
-pub(in crate::program) struct Sources<'a> {
-    pub(in crate::program) ordered: Vec<InputSource<'a>>,
-    offset: usize,
-}
-
-impl<'a> Sources<'a> {
-    pub(in crate::program) fn new(
-        routes: &'a [arguments::RoutedArgument<'a>],
-        offset: usize,
-        call: &Expr<'_>,
-        fuel: &mut u64,
-    ) -> Result<Self, Error> {
-        spend(fuel, routes.len(), call.span)?;
-        let ordered = routes
-            .iter()
-            .map(|route| InputSource {
-                route,
-                expression: route.expression_view(call),
-            })
-            .collect();
-        Ok(Self { ordered, offset })
-    }
-}
-
 /// The parent owns checked inputs and default continuations across child checks.
 /// Source borrows still belong to the enclosing checking region, not a VM task.
 #[must_use = "drive the input frame to completion or discard its uncommitted results"]
@@ -159,7 +126,7 @@ pub(in crate::program) struct Frame<'b, 'h> {
     signature: CallSignature<'b>,
     callee: &'b n::Expr,
     owner: Option<OwnerId>,
-    sources: &'b Sources<'h>,
+    routes: &'b [arguments::RoutedArgument<'h>],
     source: &'b Expr<'h>,
     prepared: PreparedInputs,
     by_slot: BTreeMap<usize, usize>,
@@ -183,7 +150,7 @@ pub(in crate::program) enum Poll<'b> {
 
 pub(in crate::program) struct Request<'b> {
     slot: usize,
-    pub(in crate::program) input: &'b Expr<'b>,
+    pub(in crate::program) input: std::borrow::Cow<'b, Expr<'b>>,
     pub(in crate::program) expected: Term,
 }
 
@@ -207,7 +174,8 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         signature: CallSignature<'b>,
         callee: &'b n::Expr,
         owner: Option<OwnerId>,
-        sources: &'b Sources<'h>,
+        routes: &'b [arguments::RoutedArgument<'h>],
+        offset: usize,
         source: &'b Expr<'h>,
         prepared: PreparedInputs,
     ) -> Result<Self, Error> {
@@ -215,11 +183,11 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         let by_slot = if demanded.is_empty() {
             BTreeMap::new()
         } else {
-            sources
-                .ordered
+            spend(&mut checker.required_steps, routes.len(), source.span)?;
+            routes
                 .iter()
                 .enumerate()
-                .map(|(index, input)| (sources.offset + input.route.parameter, index))
+                .map(|(index, input)| (offset + input.parameter, index))
                 .collect()
         };
         Ok(Self {
@@ -227,7 +195,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             signature,
             callee,
             owner,
-            sources,
+            routes,
             source,
             prepared,
             progress: Progress {
@@ -269,7 +237,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         let parameters = self.signature.parameters;
         let callee = self.callee;
         let owner = self.owner;
-        let sources = self.sources;
+        let routes = self.routes;
         let source = self.source;
         let prepared = &mut self.prepared;
         let progress = &mut self.progress;
@@ -310,25 +278,20 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     .substitute(&parameters[slot].ty)
                     .map_err(|e| error(source.span, e.to_string()))?;
                 let expected = checker.callable_input_view(&expected, source.span)?;
-                let route = self
-                    .by_slot
-                    .get(&slot)
-                    .map(|&index| &sources.ordered[index]);
+                let route = self.by_slot.get(&slot).map(|&index| &routes[index]);
                 // Completion returns the producer to its declaration slot.
                 // A failed observation terminates this preparation.
                 let value = if let Some(value) = prepared.values[slot].take() {
                     value
                 } else if let Some(input) = route {
-                    input
-                        .route
-                        .require_collection_type(checker, &expected, source.span)?;
+                    input.require_collection_type(checker, &expected, source.span)?;
                     self.phase = Phase::Child {
                         slot,
                         caller_staged: std::mem::replace(&mut checker.in_staged_input, true),
                     };
                     return Ok(Poll::Child(Request {
                         slot,
-                        input: &input.expression,
+                        input: input.expression_view(source),
                         expected,
                     }));
                 } else {
@@ -707,7 +670,7 @@ mod tests {
             signature: CallSignature::of(&signature).unwrap(),
             callee: &value,
             owner: None,
-            sources: &Sources::default(),
+            routes: &[],
             by_slot: BTreeMap::new(),
             source: &source_expr,
             prepared,
@@ -738,7 +701,7 @@ mod tests {
         assert!(matches!(frame.phase, Phase::Failed));
         let request = Request {
             slot: 1,
-            input: &source_expr,
+            input: std::borrow::Cow::Borrowed(&source_expr),
             expected: p(P::Str),
         }
         .to_string();

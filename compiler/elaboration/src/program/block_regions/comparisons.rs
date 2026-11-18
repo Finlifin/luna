@@ -14,18 +14,18 @@ pub(super) fn is_comparison(expr: &Expr<'_>) -> bool {
     )
 }
 
-pub(super) struct Frame<'b, 'h> {
-    source: &'b Expr<'h>,
+pub(super) struct Frame<'h> {
+    source: Expr<'h>,
     destination: Destination,
-    progress: Option<peers::Progress<'b, 'h>>,
+    progress: Option<peers::Progress<'h, 'h>>,
     attempt: Option<checking_attempts::Attempt>,
     preserve_effect: Option<bool>,
 }
 
-impl<'b, 'h> Frame<'b, 'h> {
+impl<'h> Frame<'h> {
     pub(super) fn new(
         checker: &mut Checker<'_, '_>,
-        source: &'b Expr<'h>,
+        source: &Expr<'h>,
         destination: Destination,
         own_effect_delivery: bool,
     ) -> Result<Self, Error> {
@@ -47,7 +47,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         .then(|| p(P::Integer));
         let progress = peers::Progress::new(checker, [left, right], None, fallback.as_ref(), None)?;
         Ok(Self {
-            source,
+            source: source.clone(),
             destination,
             progress: Some(progress),
             attempt: None,
@@ -60,7 +60,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         let progress = self
             .progress
             .as_mut()
@@ -93,11 +93,11 @@ impl<'b, 'h> Frame<'b, 'h> {
                     CheckingDisposition::Commit,
                 )?);
             }
-            return Ok(Step::Child(Request::Expression(request.input, destination)));
+            return Ok(Step::Child(Request::expression(request.input, destination)));
         }
         let (left, right) = self.progress.take().unwrap().finish()?;
         let mut value = checker.finish_comparison_expression(
-            self.source,
+            &self.source,
             self.destination.expected(),
             left,
             right,
@@ -125,7 +125,7 @@ impl<'b, 'h> Frame<'b, 'h> {
     }
 }
 
-impl std::fmt::Display for Frame<'_, '_> {
+impl std::fmt::Display for Frame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,

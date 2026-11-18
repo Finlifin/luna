@@ -21,9 +21,9 @@ enum Phase {
     Finished,
 }
 
-pub(super) struct Frame<'b, 'h> {
-    source: &'b Expr<'h>,
-    operand: &'b Expr<'h>,
+pub(super) struct Frame<'h> {
+    source: Expr<'h>,
+    operand: &'h Expr<'h>,
     operator: crate::arithmetic::Operator,
     destination: Destination,
     protocol: Option<DeclarationId>,
@@ -34,10 +34,10 @@ pub(super) struct Frame<'b, 'h> {
     preserve_effect: Option<bool>,
 }
 
-impl<'b, 'h> Frame<'b, 'h> {
+impl<'h> Frame<'h> {
     pub(super) fn new(
         checker: &mut Checker<'_, '_>,
-        source: &'b Expr<'h>,
+        source: &Expr<'h>,
         destination: Destination,
         own_effect_delivery: bool,
     ) -> Result<Self, Error> {
@@ -53,7 +53,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             ));
         }
         Ok(Self {
-            source,
+            source: source.clone(),
             operand,
             operator,
             destination,
@@ -67,11 +67,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         })
     }
 
-    fn request(
-        &mut self,
-        checker: &mut Checker<'_, '_>,
-        probe: bool,
-    ) -> Result<Step<'b, 'h>, Error> {
+    fn request(&mut self, checker: &mut Checker<'_, '_>, probe: bool) -> Result<Step<'h>, Error> {
         let destination = Destination::ordinary(
             checker,
             OrdinaryTail {
@@ -94,7 +90,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             )?);
         }
         self.pending = true;
-        Ok(Step::Child(Request::Expression(self.operand, destination)))
+        Ok(Step::Child(Request::expression(self.operand, destination)))
     }
 
     fn accept(&mut self, checked: Option<n::Expr>) -> Result<(), Error> {
@@ -110,7 +106,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         if let Some(value) = returned {
             let value = value.ordinary(self.source.span)?;
             let value = match self.attempt.take() {
@@ -152,7 +148,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                     .is_some_and(|value| !is_never(&value.ty))
                 {
                     if let Some(value) = checker.unary_protocol_result(
-                        self.source,
+                        &self.source,
                         self.destination.expected(),
                         self.operator,
                         self.protocol.expect("protocol probe"),
@@ -181,7 +177,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             }
             Phase::Complete => {
                 let value = checker.native_unary_expression(
-                    self.source,
+                    &self.source,
                     self.destination.expected(),
                     self.checked.take(),
                 )?;
@@ -198,7 +194,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         mut value: n::Expr,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         self.phase = Phase::Finished;
         if self.preserve_effect == Some(false) {
             value =
@@ -220,7 +216,7 @@ impl<'b, 'h> Frame<'b, 'h> {
     }
 }
 
-impl std::fmt::Display for Frame<'_, '_> {
+impl std::fmt::Display for Frame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -267,7 +263,7 @@ mod tests {
             kind: H::Unit,
         };
         let mut frame = Frame {
-            source: &operand,
+            source: operand.clone(),
             operand: &operand,
             operator: crate::arithmetic::Operator::Invert,
             destination: Destination::statement(),

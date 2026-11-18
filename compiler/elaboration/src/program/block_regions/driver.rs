@@ -52,12 +52,12 @@ impl std::fmt::Display for ExpressionBoundary {
     }
 }
 
-struct BlockFrame<'b, 'h> {
-    progress: Progress<'b, 'h, Destination>,
+struct BlockFrame<'h> {
+    progress: Progress<'h, Destination>,
     scope: LexicalScope,
     boundary: Option<ExpressionBoundary>,
 }
-impl std::fmt::Display for BlockFrame<'_, '_> {
+impl std::fmt::Display for BlockFrame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(block-frame {} {} (delivery", self.progress, self.scope)?;
         if let Some(boundary) = &self.boundary {
@@ -66,7 +66,7 @@ impl std::fmt::Display for BlockFrame<'_, '_> {
         f.write_str("))")
     }
 }
-impl BlockFrame<'_, '_> {
+impl BlockFrame<'_> {
     fn finish(
         self,
         checker: &mut Checker<'_, '_>,
@@ -102,9 +102,15 @@ impl BlockFrame<'_, '_> {
 
 /// Requests distinguish a source block rule from an expression whose delivery
 /// protocol still has to run. A then-branch is a block, not a synthetic expr.
-pub(super) enum Request<'b, 'h> {
-    Expression(&'b Expr<'h>, Destination),
-    Block(&'b hir::Block<'h>, Destination),
+pub(super) enum Request<'h> {
+    Expression(std::borrow::Cow<'h, Expr<'h>>, Destination),
+    Block(&'h hir::Block<'h>, Destination),
+}
+
+impl<'h> Request<'h> {
+    pub(super) fn expression(input: &'h Expr<'h>, destination: Destination) -> Self {
+        Self::Expression(std::borrow::Cow::Borrowed(input), destination)
+    }
 }
 
 pub(super) enum Poll<Q, T> {
@@ -123,14 +129,14 @@ impl<Q: std::fmt::Display, T: std::fmt::Display> std::fmt::Display for Poll<Q, T
     }
 }
 
-pub(super) enum Step<'b, 'h> {
+pub(super) enum Step<'h> {
     Continue,
-    Child(Request<'b, 'h>),
+    Child(Request<'h>),
     Tail(destinations::CheckedTail),
     Completed(CheckedBlock),
 }
 
-impl std::fmt::Display for Request<'_, '_> {
+impl std::fmt::Display for Request<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Expression(expr, destination) => write!(
@@ -149,7 +155,7 @@ impl std::fmt::Display for Request<'_, '_> {
     }
 }
 
-impl std::fmt::Display for Step<'_, '_> {
+impl std::fmt::Display for Step<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Continue => f.write_str("(check-step continue)"),
@@ -160,23 +166,23 @@ impl std::fmt::Display for Step<'_, '_> {
     }
 }
 
-enum RegionFrame<'b, 'h> {
-    Aggregate(aggregates::Frame<'b, 'h>),
-    Block(BlockFrame<'b, 'h>),
-    Conditional(conditionals::Frame<'b, 'h>),
-    When(when::Frame<'b, 'h>),
-    Match(matches::Frame<'b, 'h>),
-    Unary(unary::Frame<'b, 'h>),
-    Arithmetic(arithmetic::Frame<'b, 'h>),
-    Comparison(comparisons::Frame<'b, 'h>),
-    Logical(logical::Frame<'b, 'h>),
+enum RegionFrame<'h> {
+    Aggregate(aggregates::Frame<'h>),
+    Block(BlockFrame<'h>),
+    Conditional(conditionals::Frame<'h>),
+    When(when::Frame<'h>),
+    Match(matches::Frame<'h>),
+    Unary(unary::Frame<'h>),
+    Arithmetic(arithmetic::Frame<'h>),
+    Comparison(comparisons::Frame<'h>),
+    Logical(logical::Frame<'h>),
     NormalApplication(normal_applications::Frame<'h>),
     CallableApplication(
         declaration_inputs::preparation::Frame<'h, dynamic_instances::InstanceCompletion<'h>>,
     ),
 }
 
-impl RegionFrame<'_, '_> {
+impl RegionFrame<'_> {
     fn unwind(self, checker: &mut Checker<'_, '_>) {
         match self {
             Self::Block(frame) => frame.unwind(checker),
@@ -191,7 +197,7 @@ impl RegionFrame<'_, '_> {
     }
 }
 
-impl std::fmt::Display for RegionFrame<'_, '_> {
+impl std::fmt::Display for RegionFrame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Block(frame) => frame.fmt(f),
@@ -209,13 +215,13 @@ impl std::fmt::Display for RegionFrame<'_, '_> {
     }
 }
 
-impl<'b, 'h> BlockFrame<'b, 'h> {
+impl<'h> BlockFrame<'h> {
     fn step(
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
         statement_destination: &Destination,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         if let Some(value) = returned {
             return match self.progress.phase {
                 Phase::Child => {
@@ -228,7 +234,7 @@ impl<'b, 'h> BlockFrame<'b, 'h> {
                     .tail
                     .complete(
                         checker,
-                        self.progress.block,
+                        &self.progress.block,
                         self.progress.diverges,
                         Some(value),
                     )
@@ -246,7 +252,7 @@ impl<'b, 'h> BlockFrame<'b, 'h> {
                         .required_steps
                         .checked_sub(1)
                         .ok_or_else(|| error(statement.span, "block checking budget exhausted"))?;
-                    Ok(Step::Child(Request::Expression(
+                    Ok(Step::Child(Request::expression(
                         statement,
                         statement_destination.clone(),
                     )))
@@ -255,11 +261,11 @@ impl<'b, 'h> BlockFrame<'b, 'h> {
             },
             Phase::Tail => {
                 let tail = self.progress.request_tail()?.clone();
-                match tail.prepare(checker, self.progress.block, self.progress.diverges)? {
+                match tail.prepare(checker, &self.progress.block, self.progress.diverges)? {
                     tails::TailCheck::Checked(value) => tail
-                        .complete(checker, self.progress.block, self.progress.diverges, value)
+                        .complete(checker, &self.progress.block, self.progress.diverges, value)
                         .map(Step::Tail),
-                    tails::TailCheck::Child => Ok(Step::Child(Request::Expression(
+                    tails::TailCheck::Child => Ok(Step::Child(Request::expression(
                         self.progress.block.expr.unwrap(),
                         tail,
                     ))),
@@ -582,10 +588,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         }))
     }
 
-    fn drive_check_region<'b, 'h>(
-        &mut self,
-        root: RegionFrame<'b, 'h>,
-    ) -> Result<CheckedBlock, Error>
+    fn drive_check_region<'h>(&mut self, root: RegionFrame<'h>) -> Result<CheckedBlock, Error>
     where
         'a: 'h,
         'arena: 'h,
@@ -607,7 +610,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         self.drive_region(region::Region::with_consumer(preparation))
     }
 
-    pub(super) fn drive_input_consumer<'b, R: Root<'b, 'b>>(
+    pub(super) fn drive_input_consumer<'b, R: Root<'b>>(
         &mut self,
         root: R,
     ) -> Result<R::Output, Error>
@@ -629,23 +632,18 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         self.drive_region(region::Region::with_consumer(frame))
     }
 
-    fn drive_region<'b, 'h, R: Root<'b, 'h>>(
+    fn drive_region<'h, R: Root<'h>>(
         &mut self,
-        mut region: region::Region<'b, 'h, R>,
+        mut region: region::Region<'h, R>,
     ) -> Result<R::Output, Error>
     where
         'a: 'h,
         'arena: 'h,
     {
         loop {
-            match region.poll(self)? {
-                Poll::Continue => {}
-                Poll::Child(child) => {
-                    let span = child.expr.span;
-                    let result = child.destination.check_expression(self, child.expr);
-                    region.accept(result, span)?;
-                }
-                Poll::Complete(value) => return Ok(value),
+            match region.advance(self)? {
+                region::Handoff::Child(pending) => region = pending.check(self),
+                region::Handoff::Complete(value) => return Ok(value),
             }
         }
     }

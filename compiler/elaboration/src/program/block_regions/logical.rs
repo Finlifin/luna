@@ -9,31 +9,31 @@ pub(super) fn is_logical(expr: &Expr<'_>) -> bool {
     matches!(expr.kind, H::Binary(BinOp::And | BinOp::Or, _, _))
 }
 
-enum State<'b, 'h> {
+enum State<'h> {
     Start,
     Left,
     HaveLeft(n::Expr),
     DivergingRight(n::Expr),
-    Peers(peers::Progress<'b, 'h>),
+    Peers(peers::Progress<'h, 'h>),
     Pair(n::Expr, n::Expr),
     Right { left: n::Expr, domain: Term },
     Finished(n::Expr),
     Complete,
 }
 
-pub(super) struct Frame<'b, 'h> {
-    source: &'b Expr<'h>,
+pub(super) struct Frame<'h> {
+    source: Expr<'h>,
     destination: Destination,
-    state: State<'b, 'h>,
+    state: State<'h>,
     attempt: Option<checking_attempts::Attempt>,
     premise: Option<TypeConditionScope>,
     preserve_effect: Option<bool>,
 }
 
-impl<'b, 'h> Frame<'b, 'h> {
+impl<'h> Frame<'h> {
     pub(super) fn new(
         checker: &mut Checker<'_, '_>,
-        source: &'b Expr<'h>,
+        source: &Expr<'h>,
         destination: Destination,
         own_effect_delivery: bool,
     ) -> Result<Self, Error> {
@@ -48,7 +48,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             .checked_sub(1)
             .ok_or_else(|| error(source.span, "logical checking budget exhausted"))?;
         Ok(Self {
-            source,
+            source: source.clone(),
             destination,
             state: State::Start,
             attempt: None,
@@ -58,7 +58,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         })
     }
 
-    fn operands(&self) -> [&'b Expr<'h>; 2] {
+    fn operands(&self) -> [&'h Expr<'h>; 2] {
         let H::Binary(_, left, right) = self.source.kind else {
             unreachable!("validated logical expression")
         };
@@ -103,7 +103,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                 let right =
                     value.ok_or_else(|| error(self.source.span, "logical RHS is missing"))?;
                 self.state = State::Finished(checker.finish_logical_expression(
-                    self.source,
+                    &self.source,
                     self.destination.expected(),
                     left,
                     right,
@@ -119,7 +119,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         if let Some(value) = returned {
             let value = value.ordinary(self.source.span)?;
             let value = match self.attempt.take() {
@@ -147,7 +147,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                         CheckingDisposition::Commit,
                     )?);
                 }
-                return Ok(Step::Child(Request::Expression(request.input, destination)));
+                return Ok(Step::Child(Request::expression(request.input, destination)));
             }
             let State::Peers(progress) = std::mem::replace(&mut self.state, State::Complete) else {
                 unreachable!()
@@ -174,7 +174,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                     CheckingDisposition::Commit,
                 )?);
                 self.state = State::Left;
-                Ok(Step::Child(Request::Expression(left, destination)))
+                Ok(Step::Child(Request::expression(left, destination)))
             }
             State::HaveLeft(left) if is_never(&left.ty) => {
                 // A nonreturning prefix cannot constrain an already typed RHS.
@@ -188,7 +188,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                     CheckingDisposition::Commit,
                 )?);
                 self.state = State::DivergingRight(left);
-                Ok(Step::Child(Request::Expression(right, destination)))
+                Ok(Step::Child(Request::expression(right, destination)))
             }
             State::HaveLeft(left) => self.check_right(checker, left),
             State::Pair(left, right) => {
@@ -202,7 +202,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                 )?;
                 self.validate_domain(&domain)?;
                 self.state = State::Finished(checker.finish_logical_expression(
-                    self.source,
+                    &self.source,
                     self.destination.expected(),
                     left,
                     right,
@@ -239,7 +239,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         left: n::Expr,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         let domain = checker.structural_type(&left.ty, self.source.span)?;
         self.validate_domain(&domain)?;
         let right = self.operands()[1];
@@ -260,7 +260,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                 Some(checker.enter_type_condition(&left, op == BinOp::And, self.source.span)?);
         }
         self.state = State::Right { left, domain };
-        Ok(Step::Child(Request::Expression(right, destination)))
+        Ok(Step::Child(Request::expression(right, destination)))
     }
 
     pub(super) fn recover(
@@ -286,7 +286,7 @@ impl<'b, 'h> Frame<'b, 'h> {
     }
 }
 
-impl std::fmt::Display for Frame<'_, '_> {
+impl std::fmt::Display for Frame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -337,7 +337,7 @@ mod tests {
             kind: H::Unit,
         };
         let frame = Frame {
-            source: &source_expr,
+            source: source_expr,
             destination: Destination::statement(),
             state: State::Right {
                 left: n::Expr {

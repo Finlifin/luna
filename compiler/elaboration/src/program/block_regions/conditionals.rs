@@ -46,8 +46,8 @@ enum State {
     Complete,
 }
 
-pub(super) struct Frame<'b, 'h> {
-    source: &'b Expr<'h>,
+pub(super) struct Frame<'h> {
+    source: Expr<'h>,
     destination: Destination,
     state: State,
     branch: Option<TypeConditionScope>,
@@ -60,10 +60,10 @@ pub(super) struct Frame<'b, 'h> {
     probe: Option<branch_probes::Probe>,
 }
 
-impl<'b, 'h> Frame<'b, 'h> {
+impl<'h> Frame<'h> {
     pub(super) fn new(
         checker: &mut Checker<'_, '_>,
-        source: &'b Expr<'h>,
+        source: &Expr<'h>,
         depth: usize,
     ) -> Result<Self, Error> {
         if depth >= 128 {
@@ -88,7 +88,7 @@ impl<'b, 'h> Frame<'b, 'h> {
 
     pub(super) fn ordinary(
         checker: &mut Checker<'_, '_>,
-        source: &'b Expr<'h>,
+        source: &Expr<'h>,
         destination: Destination,
         own_effect_delivery: bool,
     ) -> Result<Self, Error> {
@@ -103,7 +103,7 @@ impl<'b, 'h> Frame<'b, 'h> {
 
     pub(super) fn partial(
         checker: &mut Checker<'_, '_>,
-        source: &'b Expr<'h>,
+        source: &Expr<'h>,
         destination: Destination,
         own_input_delivery: bool,
     ) -> Result<Self, Error> {
@@ -124,7 +124,7 @@ impl<'b, 'h> Frame<'b, 'h> {
 
     fn create(
         checker: &mut Checker<'_, '_>,
-        source: &'b Expr<'h>,
+        source: &Expr<'h>,
         destination: Destination,
         own_effect_delivery: bool,
     ) -> Result<Self, Error> {
@@ -134,7 +134,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             .ok_or_else(|| error(source.span, "conditional checking budget exhausted"))?;
         let ordinary = matches!(destination, Destination::Ordinary(_));
         Ok(Self {
-            source,
+            source: source.clone(),
             destination,
             state: State::Ready,
             branch: None,
@@ -159,7 +159,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         let H::If(condition, yes, no) = self.source.kind else {
             unreachable!("validated conditional")
         };
@@ -184,7 +184,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                     checker.in_required_comptime |= self.selection.is_some();
                 }
                 self.state = State::Condition;
-                Ok(Step::Child(Request::Expression(condition, destination)))
+                Ok(Step::Child(Request::expression(condition, destination)))
             }
             (State::Condition, Some(value)) => {
                 let condition = value.ordinary(self.source.span)?;
@@ -241,7 +241,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                 };
                 self.enter_branch(checker, &condition, false, Some(no.hir_id))?;
                 self.state = State::Else(condition, value, destination.clone());
-                Ok(Step::Child(Request::Expression(no, destination)))
+                Ok(Step::Child(Request::expression(no, destination)))
             }
             (State::Else(condition, yes, destination), Some(no)) => {
                 self.leave_branch(checker);
@@ -282,7 +282,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         if let Some(probe) = self.probe.take() {
             self.leave_branch(checker);
             let value = returned
@@ -328,7 +328,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             Ok(Step::Child(if positive {
                 Request::Block(yes, self.destination.clone())
             } else {
-                Request::Expression(no, self.destination.clone())
+                Request::expression(no, self.destination.clone())
             }))
         } else {
             let inferred = search.result();
@@ -362,7 +362,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         condition: n::Expr,
         yes: n::Expr,
         no: n::Expr,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         let ty = if is_never(&condition.ty) {
             p(P::Never)
         } else if is_never(&yes.ty) {
@@ -426,7 +426,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         yes: n::Expr,
         no: Option<n::Expr>,
         branch_destination: &Destination,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         let other = no
             .as_ref()
             .map(|value| value.ty.clone())
@@ -447,7 +447,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             yes.ty.clone()
         };
         let value = checker.finish_value_expression(
-            self.source,
+            &self.source,
             self.destination.expected(),
             ty,
             K::If {
@@ -482,7 +482,7 @@ impl<'b, 'h> Frame<'b, 'h> {
     }
 }
 
-impl std::fmt::Display for Frame<'_, '_> {
+impl std::fmt::Display for Frame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -564,7 +564,7 @@ mod tests {
             kind: K::Literal(n::Literal::String("branch\"\n".into())),
         });
         let frame = Frame {
-            source: &expr,
+            source: expr,
             destination: Destination::Contextual(ContextualTail { depth: 7 }),
             ambient: None,
             selection: None,

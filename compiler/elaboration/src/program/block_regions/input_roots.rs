@@ -4,14 +4,14 @@ use super::*;
 use declaration_inputs::{Completion, preparation};
 use driver::{Poll, Request, Root, Step};
 
-impl<'h, C: Completion> Root<'h, 'h> for preparation::Frame<'h, C> {
+impl<'h, C: Completion> Root<'h> for preparation::Frame<'h, C> {
     type Output = C::Output;
 
     fn advance(
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Poll<Request<'h, 'h>, C::Output>, Error> {
+    ) -> Result<Poll<Request<'h>, C::Output>, Error> {
         if let Some(value) = returned {
             let value = match value {
                 CheckedBlock::Ordinary(value) => n::NormalFormArgument::Value(value),
@@ -30,7 +30,7 @@ impl<'h, C: Completion> Root<'h, 'h> for preparation::Frame<'h, C> {
                     Demand::Input(context) => Destination::from_input(context),
                     Demand::Contextual => Destination::ContextualInput,
                 };
-                Ok(Poll::Child(Request::Expression(input, destination)))
+                Ok(Poll::Child(Request::expression(input, destination)))
             }
         }
     }
@@ -50,7 +50,7 @@ impl<'h, C: Completion<Output = n::Expr>> preparation::Frame<'h, C> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Step<'h, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         Ok(match self.advance(checker, returned)? {
             Poll::Continue => Step::Continue,
             Poll::Child(request) => Step::Child(request),
@@ -59,14 +59,14 @@ impl<'h, C: Completion<Output = n::Expr>> preparation::Frame<'h, C> {
     }
 }
 
-impl<'b, 'h: 'b> Root<'b, 'b> for dependent_inputs::tasks::Frame<'b, 'h> {
+impl<'b, 'h: 'b> Root<'b> for dependent_inputs::tasks::Frame<'b, 'h> {
     type Output = dependent_inputs::PreparedInputs;
 
     fn advance(
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Poll<Request<'b, 'b>, Self::Output>, Error> {
+    ) -> Result<Poll<Request<'b>, Self::Output>, Error> {
         if let Some(returned) = returned {
             let CheckedBlock::Ordinary(value) = returned else {
                 unreachable!("dependent input requested an ordinary expression")

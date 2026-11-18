@@ -106,8 +106,8 @@ enum Phase {
 
 /// Owned statement results survive between child checks. Source references
 /// borrow this HIR snapshot; they are never published in stable code or worlds.
-struct Progress<'b, 'h, T> {
-    block: &'b hir::Block<'h>,
+struct Progress<'h, T> {
+    block: hir::Block<'h>,
     phase: Phase,
     statements: Vec<n::Expr>,
     staged_patterns: BTreeMap<usize, StagedPatternSnapshot>,
@@ -115,10 +115,10 @@ struct Progress<'b, 'h, T> {
     tail: T,
 }
 
-impl<'b, 'h, T: Tail> Progress<'b, 'h, T> {
-    fn new(block: &'b hir::Block<'h>, tail: T) -> Self {
+impl<'h, T: Tail> Progress<'h, T> {
+    fn new(block: &hir::Block<'h>, tail: T) -> Self {
         Self {
-            block,
+            block: block.clone(),
             phase: Phase::Statements,
             statements: Vec::new(),
             staged_patterns: BTreeMap::new(),
@@ -208,14 +208,14 @@ impl<'b, 'h, T: Tail> Progress<'b, 'h, T> {
         checker.finish_block_bindings(
             &mut statements,
             &references,
-            self.block,
+            &self.block,
             &self.staged_patterns,
         )?;
         Ok(T::finish(checked, statements, self.block.span))
     }
 }
 
-impl<T: Tail> std::fmt::Display for Progress<'_, '_, T> {
+impl<T: Tail> std::fmt::Display for Progress<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let phase = match self.phase {
             Phase::Statements => "statements",

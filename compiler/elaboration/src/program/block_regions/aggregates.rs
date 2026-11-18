@@ -26,14 +26,14 @@ enum Domains {
     PartialTuple(Destination),
 }
 
-pub(super) struct Frame<'b, 'h> {
-    expr: &'b Expr<'h>,
+pub(super) struct Frame<'h> {
+    expr: Expr<'h>,
     items: &'h [Expr<'h>],
     fields: Fields,
 }
 
-impl<'b, 'h> Frame<'b, 'h> {
-    pub(super) fn contextual(expr: &'b Expr<'h>, depth: usize) -> Result<Self, Error> {
+impl<'h> Frame<'h> {
+    pub(super) fn contextual(expr: &Expr<'h>, depth: usize) -> Result<Self, Error> {
         if depth >= 128 {
             return Err(error(expr.span, "contextual input nesting limit exceeded"));
         }
@@ -41,7 +41,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             unreachable!("contextual aggregate")
         };
         Ok(Self {
-            expr,
+            expr: expr.clone(),
             items,
             fields: Fields::Contextual {
                 depth,
@@ -51,7 +51,7 @@ impl<'b, 'h> Frame<'b, 'h> {
     }
 
     pub(super) fn partial_tuple(
-        expr: &'b Expr<'h>,
+        expr: &Expr<'h>,
         items: &'h [Expr<'h>],
         destination: Destination,
     ) -> Result<Self, Error> {
@@ -66,7 +66,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             return Err(error(expr.span, "tuple argument arity mismatch"));
         }
         Ok(Self {
-            expr,
+            expr: expr.clone(),
             items,
             fields: Fields::Ordinary {
                 domains: Domains::PartialTuple(destination),
@@ -77,7 +77,7 @@ impl<'b, 'h> Frame<'b, 'h> {
 
     pub(super) fn tuple(
         checker: &mut Checker<'_, '_>,
-        expr: &'b Expr<'h>,
+        expr: &Expr<'h>,
         items: &'h [Expr<'h>],
         expected: Option<&Term>,
     ) -> Result<Self, Error> {
@@ -90,7 +90,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             .map(|ty| checker.copy_alias_type(ty, expr.span))
             .transpose()?;
         Ok(Self {
-            expr,
+            expr: expr.clone(),
             items,
             fields: Fields::Ordinary {
                 domains: Domains::Tuple {
@@ -108,7 +108,7 @@ impl<'b, 'h> Frame<'b, 'h> {
 
     pub(super) fn list(
         checker: &mut Checker<'_, '_>,
-        expr: &'b Expr<'h>,
+        expr: &Expr<'h>,
         items: &'h [Expr<'h>],
         expected: &Term,
         element: &Term,
@@ -128,7 +128,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         )?;
         let result = checker.copy_alias_type(expected, expr.span)?;
         Ok(Self {
-            expr,
+            expr: expr.clone(),
             items,
             fields: Fields::Ordinary {
                 domains: Domains::List { element, result },
@@ -141,7 +141,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         child: Option<CheckedBlock>,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         let span = self.expr.span;
         match &mut self.fields {
             Fields::Contextual { depth, values } => {
@@ -149,7 +149,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                     values.push(child.contextual(span)?);
                 }
                 if let Some(item) = self.items.get(values.len()) {
-                    return Ok(Step::Child(Request::Expression(
+                    return Ok(Step::Child(Request::expression(
                         item,
                         Destination::Contextual(ContextualTail { depth: *depth }),
                     )));
@@ -169,7 +169,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                 }
                 if let Some(item) = self.items.get(values.len()) {
                     let destination = domains.element(checker, values.len(), item.span)?;
-                    return Ok(Step::Child(Request::Expression(item, destination)));
+                    return Ok(Step::Child(Request::expression(item, destination)));
                 }
                 let values = std::mem::take(values);
                 let diverges = values.iter().any(|value| is_never(&value.ty));
@@ -200,7 +200,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                     }
                 };
                 Ok(Step::Completed(CheckedBlock::Ordinary(
-                    checker.finish_value_expression(self.expr, expected, ty, kind)?,
+                    checker.finish_value_expression(&self.expr, expected, ty, kind)?,
                 )))
             }
         }
@@ -239,7 +239,7 @@ impl Domains {
     }
 }
 
-impl std::fmt::Display for Frame<'_, '_> {
+impl std::fmt::Display for Frame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,

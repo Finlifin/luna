@@ -440,9 +440,8 @@ impl Checker<'_, '_> {
         if demanded.is_empty() {
             return Ok(prepared);
         }
-        let sources = tasks::Sources::new(routes, offset, expr, &mut self.required_steps)?;
         let frame = tasks::Frame::new(
-            self, demanded, signature, callee, direct, &sources, expr, prepared,
+            self, demanded, signature, callee, direct, routes, offset, expr, prepared,
         )?;
         self.check_call_dependencies_region(frame)
     }

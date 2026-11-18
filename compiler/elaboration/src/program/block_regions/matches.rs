@@ -15,8 +15,8 @@ enum State {
     Complete,
 }
 
-pub(super) struct Frame<'b, 'h> {
-    source: &'b Expr<'h>,
+pub(super) struct Frame<'h> {
+    source: Expr<'h>,
     destination: Destination,
     ordinary: Option<Ordinary>,
     probe: Option<branch_probes::Probe>,
@@ -27,10 +27,10 @@ pub(super) struct Frame<'b, 'h> {
     premise: Option<refinements::TypeConditionScope>,
 }
 
-impl<'b, 'h> Frame<'b, 'h> {
+impl<'h> Frame<'h> {
     pub(super) fn new(
         checker: &mut Checker<'_, '_>,
-        source: &'b Expr<'h>,
+        source: &Expr<'h>,
         depth: usize,
     ) -> Result<Self, Error> {
         if !matches!(source.kind, H::Match(..)) {
@@ -47,7 +47,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             .checked_sub(1)
             .ok_or_else(|| error(source.span, "match checking budget exhausted"))?;
         Ok(Self {
-            source,
+            source: source.clone(),
             destination: Destination::Contextual(ContextualTail { depth }),
             ordinary: None,
             probe: None,
@@ -61,7 +61,7 @@ impl<'b, 'h> Frame<'b, 'h> {
 
     pub(super) fn ordinary(
         checker: &mut Checker<'_, '_>,
-        source: &'b Expr<'h>,
+        source: &Expr<'h>,
         destination: Destination,
         own_effect_delivery: bool,
     ) -> Result<Self, Error> {
@@ -83,7 +83,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             own_effect_delivery && input_delivery.is_none(),
         )?;
         Ok(Self {
-            source,
+            source: source.clone(),
             destination,
             ordinary: Some(ordinary),
             probe: None,
@@ -118,7 +118,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         let H::Match(selector, arms) = self.source.kind else {
             unreachable!("validated match frame")
         };
@@ -137,7 +137,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                     return Ok(Step::Continue);
                 }
                 self.state = State::Selector;
-                Ok(Step::Child(Request::Expression(
+                Ok(Step::Child(Request::expression(
                     selector,
                     Destination::statement(),
                 )))
@@ -172,7 +172,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                 let destination = if let Some(ordinary) = &mut self.ordinary {
                     ordinary.body_destination(
                         checker,
-                        self.source,
+                        &self.source,
                         &self.destination,
                         arm,
                         self.arms.len(),
@@ -188,7 +188,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                     arm.body.span,
                 )?);
                 self.state = State::Body(value, pattern);
-                Ok(Step::Child(Request::Expression(arm.body, destination)))
+                Ok(Step::Child(Request::expression(arm.body, destination)))
             }
             (State::Body(value, pattern), Some(body)) => {
                 // Join outside matched premises, with bindings still available
@@ -227,7 +227,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         if let Some(probe) = self.probe.take() {
             // Type facts leave before the checkpoint restores the candidate.
             if let Some(premise) = self.premise.take() {
@@ -263,7 +263,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             let pattern = checker.match_arm_pattern(arm, value)?;
             self.premise =
                 Some(checker.enter_matched_pattern_type_facts(&pattern, value, arm.body.span)?);
-            Ok(Step::Child(Request::Expression(
+            Ok(Step::Child(Request::expression(
                 arm.body,
                 self.destination.clone(),
             )))
@@ -298,11 +298,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         Ok(())
     }
 
-    fn finish(
-        &mut self,
-        checker: &mut Checker<'_, '_>,
-        value: n::Expr,
-    ) -> Result<Step<'b, 'h>, Error> {
+    fn finish(&mut self, checker: &mut Checker<'_, '_>, value: n::Expr) -> Result<Step<'h>, Error> {
         let result = if let Some(ordinary) = &mut self.ordinary {
             let arms = std::mem::take(&mut self.arms)
                 .into_iter()
@@ -316,7 +312,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                 .collect::<Result<Vec<_>, Error>>()?;
             CheckedBlock::Ordinary(ordinary.finish(
                 checker,
-                self.source,
+                &self.source,
                 &self.destination,
                 value,
                 arms,
@@ -383,7 +379,7 @@ impl<'b, 'h> Frame<'b, 'h> {
     }
 }
 
-impl std::fmt::Display for Frame<'_, '_> {
+impl std::fmt::Display for Frame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -454,7 +450,7 @@ mod tests {
             kind: K::Literal(n::Literal::String("selector\"\n".into())),
         };
         let frame = Frame {
-            source: &expr,
+            source: expr,
             destination: Destination::Contextual(ContextualTail { depth: 5 }),
             ordinary: None,
             probe: None,

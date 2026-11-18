@@ -39,9 +39,9 @@ enum Child {
     Peer,
 }
 
-pub(super) struct Frame<'b, 'h> {
-    source: &'b Expr<'h>,
-    inputs: [&'b Expr<'h>; 2],
+pub(super) struct Frame<'h> {
+    source: Expr<'h>,
+    inputs: [&'h Expr<'h>; 2],
     destination: Destination,
     protocol: Option<DeclarationId>,
     phase: Phase,
@@ -51,14 +51,14 @@ pub(super) struct Frame<'b, 'h> {
     native_failure: Option<Error>,
     left_probed: bool,
     values: [Option<n::Expr>; 2],
-    peers: Option<peers::Progress<'b, 'h>>,
+    peers: Option<peers::Progress<'h, 'h>>,
     preserve_effect: Option<bool>,
 }
 
-impl<'b, 'h> Frame<'b, 'h> {
+impl<'h> Frame<'h> {
     pub(super) fn new(
         checker: &mut Checker<'_, '_>,
-        source: &'b Expr<'h>,
+        source: &Expr<'h>,
         destination: Destination,
         own_effect_delivery: bool,
     ) -> Result<Self, Error> {
@@ -74,7 +74,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             ));
         }
         Ok(Self {
-            source,
+            source: source.clone(),
             inputs: [left, right],
             destination,
             protocol: checker.protocols.arithmetic[op as usize],
@@ -98,7 +98,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         slot: usize,
         expected: Option<&Term>,
         attempt: bool,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         let input = self.inputs[slot];
         let destination = Destination::ordinary(
             checker,
@@ -118,7 +118,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             )?);
         }
         self.pending = Some(child);
-        Ok(Step::Child(Request::Expression(input, destination)))
+        Ok(Step::Child(Request::expression(input, destination)))
     }
 
     fn accept(&mut self, value: Option<n::Expr>) -> Result<(), Error> {
@@ -142,7 +142,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         if let Some(value) = returned {
             let value = value.ordinary(self.source.span)?;
             let value = match self.attempt.take() {
@@ -261,9 +261,9 @@ impl<'b, 'h> Frame<'b, 'h> {
             }
             Phase::Protocol => {
                 let value = checker.finish_binary_protocol_call(
-                    self.source,
+                    &self.source,
                     self.protocol.unwrap(),
-                    operator(self.source).unwrap().method(),
+                    operator(&self.source).unwrap().method(),
                     self.values[0].take().unwrap(),
                     self.values[1].take().unwrap(),
                     self.destination.expected(),
@@ -290,11 +290,11 @@ impl<'b, 'h> Frame<'b, 'h> {
                         )?);
                     }
                     self.pending = Some(Child::Peer);
-                    return Ok(Step::Child(Request::Expression(request.input, destination)));
+                    return Ok(Step::Child(Request::expression(request.input, destination)));
                 }
                 let (left, right) = self.peers.take().unwrap().finish()?;
                 let value = checker.finish_arithmetic_expression(
-                    self.source,
+                    &self.source,
                     left,
                     right,
                     self.destination.expected(),
@@ -327,7 +327,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         mut value: n::Expr,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         self.phase = Phase::Finished;
         if self.preserve_effect == Some(false) {
             value =
@@ -360,7 +360,7 @@ impl<'b, 'h> Frame<'b, 'h> {
     }
 }
 
-impl std::fmt::Display for Frame<'_, '_> {
+impl std::fmt::Display for Frame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -432,7 +432,7 @@ mod tests {
             kind: H::Unit,
         };
         let mut frame = Frame {
-            source: &input,
+            source: input.clone(),
             inputs: [&input, &input],
             destination: Destination::statement(),
             protocol: Some(DeclarationId {

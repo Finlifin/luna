@@ -3,7 +3,7 @@ use super::*;
 
 /// Expression children always return CheckedBlock. The root owns the consumer
 /// that can turn those children into a different result in the original scope.
-pub(in crate::program::block_regions) trait Root<'b, 'h>:
+pub(in crate::program::block_regions) trait Root<'h>:
     std::fmt::Display
 {
     type Output;
@@ -11,7 +11,7 @@ pub(in crate::program::block_regions) trait Root<'b, 'h>:
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Poll<Request<'b, 'h>, Self::Output>, Error>;
+    ) -> Result<Poll<Request<'h>, Self::Output>, Error>;
     fn recover(&mut self, _: &mut Checker<'_, '_>, failure: Error) -> Result<(), Error> {
         Err(failure)
     }
@@ -26,13 +26,13 @@ impl std::fmt::Display for ExpressionResult {
     }
 }
 
-impl<'b, 'h> Root<'b, 'h> for ExpressionResult {
+impl<'h> Root<'h> for ExpressionResult {
     type Output = CheckedBlock;
     fn advance(
         &mut self,
         _: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Poll<Request<'b, 'h>, CheckedBlock>, Error> {
+    ) -> Result<Poll<Request<'h>, CheckedBlock>, Error> {
         Ok(Poll::Complete(returned.expect("completed root expression")))
     }
     fn unwind(&mut self, _: &mut Checker<'_, '_>) {}

@@ -3,14 +3,15 @@
 use super::*;
 use region::Child;
 
-pub(super) fn enter<'b, 'h, 'a: 'h, 'arena: 'h>(
-    frames: &mut Vec<RegionFrame<'b, 'h>>,
+pub(super) fn enter<'h, 'a: 'h, 'arena: 'h>(
+    frames: &mut Vec<RegionFrame<'h>>,
     checker: &mut Checker<'a, 'arena>,
-    request: Request<'b, 'h>,
-) -> Result<Option<Child<'b, 'h>>, Error> {
+    request: Request<'h>,
+) -> Result<Option<Child<'h>>, Error> {
     let (block, destination, boundary) = match request {
         Request::Block(block, destination) => (block, destination, None),
-        Request::Expression(expr, destination) => {
+        Request::Expression(input, destination) => {
+            let expr = input.as_ref();
             if matches!(expr.kind, H::Tuple(_) | H::List(_))
                 && let Some(depth) = destination.contextual_depth()
             {
@@ -262,7 +263,10 @@ pub(super) fn enter<'b, 'h, 'a: 'h, 'arena: 'h>(
                 });
                 (block, nested, boundary)
             } else {
-                return Ok(Some(Child { expr, destination }));
+                return Ok(Some(Child {
+                    expr: input,
+                    destination,
+                }));
             }
         }
     };

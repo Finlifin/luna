@@ -22,8 +22,8 @@ struct Ordinary {
     preserve_effect: Option<bool>,
 }
 
-pub(super) struct Frame<'b, 'h> {
-    source: &'b Expr<'h>,
+pub(super) struct Frame<'h> {
+    source: Expr<'h>,
     arms: &'h [hir::expr::CondictionArm<'h>],
     destination: Destination,
     ordinary: Option<Ordinary>,
@@ -37,10 +37,10 @@ pub(super) struct Frame<'b, 'h> {
     premise: Option<refinements::TypeConditionScope>,
 }
 
-impl<'b, 'h> Frame<'b, 'h> {
+impl<'h> Frame<'h> {
     pub(super) fn new(
         checker: &mut Checker<'_, '_>,
-        source: &'b Expr<'h>,
+        source: &Expr<'h>,
         depth: usize,
     ) -> Result<Self, Error> {
         let H::When(arms) = source.kind else {
@@ -67,7 +67,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             .checked_sub(1)
             .ok_or_else(|| error(source.span, "when checking budget exhausted"))?;
         Ok(Self {
-            source,
+            source: source.clone(),
             arms,
             destination: Destination::Contextual(ContextualTail { depth }),
             ordinary: None,
@@ -84,7 +84,7 @@ impl<'b, 'h> Frame<'b, 'h> {
 
     pub(super) fn ordinary(
         checker: &mut Checker<'_, '_>,
-        source: &'b Expr<'h>,
+        source: &Expr<'h>,
         destination: Destination,
         own_effect_delivery: bool,
     ) -> Result<Self, Error> {
@@ -128,7 +128,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                 .then(|| std::mem::take(&mut checker.preserve_effect_value)),
         };
         Ok(Self {
-            source,
+            source: source.clone(),
             arms,
             destination,
             ordinary: Some(ordinary),
@@ -151,7 +151,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         let state = std::mem::replace(&mut self.state, State::Complete);
         match (state, returned) {
             (State::Probing, None) => self.advance_search(checker),
@@ -201,7 +201,7 @@ impl<'b, 'h> Frame<'b, 'h> {
                         condition.span,
                     )?;
                     self.state = State::Condition;
-                    Ok(Step::Child(Request::Expression(condition, destination)))
+                    Ok(Step::Child(Request::expression(condition, destination)))
                 } else {
                     self.body(checker, None)
                 }
@@ -245,7 +245,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         }
     }
 
-    fn advance_search(&mut self, checker: &mut Checker<'_, '_>) -> Result<Step<'b, 'h>, Error> {
+    fn advance_search(&mut self, checker: &mut Checker<'_, '_>) -> Result<Step<'h>, Error> {
         let search = self.search.as_mut().expect("when search");
         if let Some(request) = search.next(checker)? {
             self.probe = Some(branch_probes::Probe::begin(
@@ -272,7 +272,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         checker: &mut Checker<'_, '_>,
         arm: usize,
         start: usize,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         // Each candidate sees preceding negative premises and its own positive
         // premise. They belong to the probe checkpoint, not the final arms.
         for index in start..=arm {
@@ -299,11 +299,11 @@ impl<'b, 'h> Frame<'b, 'h> {
                     arm,
                     condition: index,
                 };
-                return Ok(Step::Child(Request::Expression(condition, destination)));
+                return Ok(Step::Child(Request::expression(condition, destination)));
             }
         }
         self.state = State::ProbeBody;
-        Ok(Step::Child(Request::Expression(
+        Ok(Step::Child(Request::expression(
             self.arms[arm].body,
             self.destination.clone(),
         )))
@@ -326,7 +326,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         condition: Option<n::Expr>,
-    ) -> Result<Step<'b, 'h>, Error> {
+    ) -> Result<Step<'h>, Error> {
         let arm = &self.arms[self.branches.len()];
         if self
             .ordinary
@@ -368,10 +368,10 @@ impl<'b, 'h> Frame<'b, 'h> {
             self.destination.clone()
         };
         self.state = State::Body(condition);
-        Ok(Step::Child(Request::Expression(arm.body, destination)))
+        Ok(Step::Child(Request::expression(arm.body, destination)))
     }
 
-    fn finish(&mut self, checker: &mut Checker<'_, '_>) -> Result<Step<'b, 'h>, Error> {
+    fn finish(&mut self, checker: &mut Checker<'_, '_>) -> Result<Step<'h>, Error> {
         if self.ordinary.is_some() {
             return self.finish_ordinary(checker);
         }
@@ -391,7 +391,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         Ok(Step::Completed(CheckedBlock::Contextual(tail)))
     }
 
-    fn finish_ordinary(&mut self, checker: &mut Checker<'_, '_>) -> Result<Step<'b, 'h>, Error> {
+    fn finish_ordinary(&mut self, checker: &mut Checker<'_, '_>) -> Result<Step<'h>, Error> {
         let ordinary = self.ordinary.as_ref().unwrap();
         // Branch-local premises justify their own deliveries, not the join.
         checker.context = self.scope.context.clone();
@@ -508,7 +508,7 @@ impl std::fmt::Display for Ordinary {
     }
 }
 
-impl std::fmt::Display for Frame<'_, '_> {
+impl std::fmt::Display for Frame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -604,7 +604,7 @@ mod tests {
             kind: K::Literal(n::Literal::Bool(false)),
         };
         let frame = Frame {
-            source: &source_expr,
+            source: source_expr.clone(),
             arms: &[],
             destination: Destination::Contextual(ContextualTail { depth: 3 }),
             ordinary: None,

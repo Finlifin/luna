@@ -17,9 +17,9 @@ struct CallInputs<'b, 'h> {
     signature: CallSignature<'b>,
     callee: &'b n::Expr,
     owner: Option<OwnerId>,
-    sources: &'b tasks::Sources<'h>,
+    routes: &'b [arguments::RoutedArgument<'h>],
+    source: &'b Expr<'h>,
     assigned: &'b [bool],
-    span: Span,
     offset: usize,
     next: usize,
     waiting: Option<(usize, bool)>,
@@ -38,38 +38,41 @@ impl CallInputs<'_, '_> {
     }
 }
 
-impl<'b, 'h: 'b> Root<'b, 'b> for CallInputs<'b, 'h> {
+impl<'b, 'h: 'b> Root<'b> for CallInputs<'b, 'h> {
     type Output = Inputs;
 
     fn advance(
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Poll<Request<'b, 'b>, Inputs>, Error> {
+    ) -> Result<Poll<Request<'b>, Inputs>, Error> {
         if let Phase::Observe(dependencies) = &mut self.phase {
             let mut prepared = match dependencies.advance(checker, returned)? {
                 Poll::Continue => return Ok(Poll::Continue),
                 Poll::Child(request) => return Ok(Poll::Child(request)),
                 Poll::Complete(prepared) => prepared,
             };
-            let binding =
-                checker.prepare_call_binding(self.signature.term, &prepared.symbols, self.span)?;
+            let binding = checker.prepare_call_binding(
+                self.signature.term,
+                &prepared.symbols,
+                self.source.span,
+            )?;
             if let Some(owner) = self.owner {
                 let type_arguments = checker
-                    .method_instantiation_inputs(self.callee, self.span)?
+                    .method_instantiation_inputs(self.callee, self.source.span)?
                     .map(|(_, arguments)| arguments)
                     .unwrap_or_default();
                 checker.check_ordinary_capabilities(
                     owner,
                     &type_arguments,
                     &prepared.symbols,
-                    self.span,
+                    self.source.span,
                 )?;
                 checker.check_ordinary_type_requirements(
                     owner,
                     &type_arguments,
                     &prepared.symbols,
-                    self.span,
+                    self.source.span,
                 )?;
             }
             for slot in 0..self.offset {
@@ -80,26 +83,24 @@ impl<'b, 'h: 'b> Root<'b, 'b> for CallInputs<'b, 'h> {
         } else if let Some(returned) = returned {
             let (slot, caller_staged) = self.waiting.take().expect("requested call input");
             checker.in_staged_input = caller_staged;
-            self.supply(slot, returned.ordinary(self.span)?, false);
+            self.supply(slot, returned.ordinary(self.source.span)?, false);
         }
 
         let Phase::Supply(prepared, binding) = &mut self.phase else {
             unreachable!()
         };
-        while let Some(input) = self.sources.ordered.get(self.next) {
+        while let Some(input) = self.routes.get(self.next) {
             self.next += 1;
-            let slot = self.offset + input.route.parameter;
+            let slot = self.offset + input.parameter;
             let parameter = &self.signature.parameters[slot];
             let domain = binding.substitute(&parameter.ty).map_err(|failure| {
                 error(
-                    self.span,
+                    self.source.span,
                     format!("dependent call input is not available: {failure}"),
                 )
             })?;
-            let domain = checker.callable_input_view(&domain, self.span)?;
-            input
-                .route
-                .require_collection_type(checker, &domain, self.span)?;
+            let domain = checker.callable_input_view(&domain, self.source.span)?;
+            input.require_collection_type(checker, &domain, self.source.span)?;
             if let Some(value) = prepared.values[slot].take() {
                 self.arguments.push(n::CallArgument {
                     passing: Default::default(),
@@ -112,7 +113,7 @@ impl<'b, 'h: 'b> Root<'b, 'b> for CallInputs<'b, 'h> {
             self.waiting = Some((slot, checker.in_staged_input));
             checker.in_staged_input |= parameter.sort != Sort::Runtime;
             return Ok(Poll::Child(Request::Expression(
-                &input.expression,
+                input.expression_view(self.source),
                 Destination::from_expected(Some(domain)),
             )));
         }
@@ -129,9 +130,10 @@ impl<'b, 'h: 'b> Root<'b, 'b> for CallInputs<'b, 'h> {
                     .expect("prepared default");
                 value
                     .rewrite_types(&mut |ty| binding.substitute(ty))
-                    .map_err(|failure| error(self.span, failure.to_string()))?;
-                value
-                    .rewrite_types(&mut |ty| checker.callable_argument_term_view(ty, self.span))?;
+                    .map_err(|failure| error(self.source.span, failure.to_string()))?;
+                value.rewrite_types(&mut |ty| {
+                    checker.callable_argument_term_view(ty, self.source.span)
+                })?;
                 value
             };
             self.arguments.push(n::CallArgument {
@@ -165,7 +167,7 @@ impl std::fmt::Display for CallInputs<'_, '_> {
         write!(
             f,
             "(ordinary-call-inputs (source {}) (next {})",
-            source(self.span),
+            source(self.source.span),
             self.next
         )?;
         match &self.phase {
@@ -213,17 +215,16 @@ impl Checker<'_, '_> {
             expr,
             &mut prepared.defaults,
         )?;
-        let sources = tasks::Sources::new(routes, offset, expr, &mut self.required_steps)?;
         let dependencies = tasks::Frame::new(
-            self, demanded, signature, callee, owner, &sources, expr, prepared,
+            self, demanded, signature, callee, owner, routes, offset, expr, prepared,
         )?;
         self.drive_input_consumer(CallInputs {
             signature,
             callee,
             owner,
-            sources: &sources,
+            routes,
             assigned,
-            span: expr.span,
+            source: expr,
             offset,
             next: 0,
             waiting: None,
