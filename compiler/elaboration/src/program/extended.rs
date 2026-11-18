@@ -375,19 +375,13 @@ impl Checker<'_, '_> {
             self.call(expr, callee, &inputs, expected, partial)?
         };
         if matches!(call.kind, K::CallPreparation { .. }) {
-            return self.merge_property_preparation(
-                expr,
-                args,
-                call,
-                parameter_index,
-                receiver_count,
-            );
+            return self.merge_property_preparation(expr, args, call, parameter_index);
         }
-        let anchor = n::SourceRange {
-            start: expr.span.lo().0,
-            end: expr.span.lo().0,
-        };
-        let K::Call { arguments, .. } = &mut call.kind else {
+        let anchor = arguments::preparation_anchor(expr.span);
+        let K::Call {
+            callee, arguments, ..
+        } = &mut call.kind
+        else {
             return Err(error(
                 expr.span,
                 "property preparation requires a direct normalized call",
@@ -413,8 +407,9 @@ impl Checker<'_, '_> {
             ));
         };
         let mut statements = Vec::new();
+        statements.extend(self.prepare_call_callee(callee, expr.span)?);
         for receiver in arguments.iter_mut().take(receiver_count) {
-            self.stage_property_input(&mut receiver.value, &mut statements, expr.span)?;
+            statements.push(self.prepare_call_operand(&mut receiver.value, expr.span)?);
         }
         let positional_slots: Vec<_> = arguments
             .iter()
@@ -437,7 +432,7 @@ impl Checker<'_, '_> {
                 }
                 _ => unreachable!(),
             };
-            self.stage_property_input(value, &mut statements, expr.span)?;
+            statements.push(self.prepare_call_operand(value, expr.span)?);
         }
         statements.push(n::Expr {
             ty: p(P::Void),
@@ -603,7 +598,6 @@ impl Checker<'_, '_> {
         args: &[Arg<'_>],
         call: n::Expr,
         parameter: usize,
-        receiver_count: usize,
     ) -> Result<n::Expr, Error> {
         let K::CallPreparation {
             mut statements,
@@ -650,15 +644,24 @@ impl Checker<'_, '_> {
                 "property collection did not produce a record packet",
             ));
         };
-        let mut remaining = statements.into_iter();
-        let mut prepared: Vec<_> = remaining.by_ref().take(receiver_count).collect();
+        // Preserve the callee and any staged receiver before interleaving
+        // positional producers with the original property expressions.
+        let positionals = args
+            .iter()
+            .filter(|arg| matches!(arg, Arg::Positional(_) | Arg::PostLambda(_)))
+            .count();
+        let prefix = statements
+            .len()
+            .checked_sub(positionals)
+            .ok_or_else(|| error(expr.span, "positional collection preparation is missing"))?;
+        let mut remaining = statements.split_off(prefix).into_iter();
+        let mut prepared = statements;
         for argument in args {
             match argument {
-                Arg::Named(name, _) => self.stage_property_input(
+                Arg::Named(name, _) => prepared.push(self.prepare_call_operand(
                     &mut fields[field_positions[name.name.as_str()]],
-                    &mut prepared,
                     expr.span,
-                )?,
+                )?),
                 Arg::Positional(_) | Arg::PostLambda(_) => {
                     prepared.push(remaining.next().ok_or_else(|| {
                         error(expr.span, "positional collection preparation is missing")
@@ -687,38 +690,6 @@ impl Checker<'_, '_> {
                 result: Some(result),
             },
         })
-    }
-
-    fn stage_property_input(
-        &mut self,
-        value: &mut n::Expr,
-        statements: &mut Vec<n::Expr>,
-        span: Span,
-    ) -> Result<(), Error> {
-        let binding = self.spread_binding(span)?;
-        let anchor = n::SourceRange {
-            start: span.lo().0,
-            end: span.lo().0,
-        };
-        let local = n::Expr {
-            ty: value.ty.clone(),
-            source: anchor,
-            kind: K::Local(binding),
-        };
-        let value = std::mem::replace(value, local);
-        statements.push(n::Expr {
-            ty: if is_never(&value.ty) {
-                p(P::Never)
-            } else {
-                p(P::Void)
-            },
-            source: anchor,
-            kind: K::Let {
-                binding,
-                value: Box::new(value),
-            },
-        });
-        Ok(())
     }
 
     pub(super) fn property_packet(

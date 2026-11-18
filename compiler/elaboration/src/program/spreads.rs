@@ -533,10 +533,6 @@ impl Checker<'_, '_> {
         trailing: usize,
         build: impl FnOnce(&mut Self, &[Arg<'_>], bool) -> Result<n::Expr, Error>,
     ) -> Result<n::Expr, Error> {
-        let anchor = n::SourceRange {
-            start: expr.span.lo().0,
-            end: expr.span.lo().0,
-        };
         self.with_prepared_spreads(
             expr,
             args,
@@ -579,9 +575,7 @@ impl Checker<'_, '_> {
                     if spreads.is_empty() {
                         return Ok(call);
                     }
-                    this.insert_spread_preparation(
-                        call, spreads, flat_count, trailing, anchor, expr.span,
-                    )
+                    this.insert_spread_preparation(call, spreads, flat_count, trailing, expr.span)
                 })
             },
         )
@@ -602,10 +596,7 @@ impl Checker<'_, '_> {
         mut packets: BTreeMap<usize, n::Expr>,
         build: impl FnOnce(&mut Self, &[Arg<'_>], Vec<(usize, n::Expr)>, usize) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let anchor = n::SourceRange {
-            start: expr.span.lo().0,
-            end: expr.span.lo().0,
-        };
+        let anchor = arguments::preparation_anchor(expr.span);
         let mut introduced = Vec::new();
         let outcome = (|| {
             let mut flat = Vec::new();
@@ -1292,7 +1283,6 @@ impl Checker<'_, '_> {
         spreads: Vec<(usize, n::Expr)>,
         flat_count: usize,
         trailing: usize,
-        anchor: n::SourceRange,
         span: Span,
     ) -> Result<n::Expr, Error> {
         let source = call.source;
@@ -1304,8 +1294,8 @@ impl Checker<'_, '_> {
             result: Some(result),
         } = call.kind
         {
-            let result = self
-                .insert_spread_preparation(*result, spreads, flat_count, trailing, anchor, span)?;
+            let result =
+                self.insert_spread_preparation(*result, spreads, flat_count, trailing, span)?;
             return Ok(n::Expr {
                 source,
                 ty: result.ty.clone(),
@@ -1326,36 +1316,15 @@ impl Checker<'_, '_> {
             _ => return Err(error(span, "spread application requires an ordinary call")),
         };
         let mut leading = Vec::new();
-        let stage = |this: &mut Self, value: &mut n::Expr| -> Result<n::Expr, Error> {
-            let binding = this.spread_binding(span)?;
-            let local = n::Expr {
-                ty: value.ty.clone(),
-                source: anchor,
-                kind: K::Local(binding),
-            };
-            let value = std::mem::replace(value, local);
-            Ok(n::Expr {
-                ty: if is_never(&value.ty) {
-                    p(P::Never)
-                } else {
-                    p(P::Void)
-                },
-                source: anchor,
-                kind: K::Let {
-                    binding,
-                    value: Box::new(value),
-                },
-            })
-        };
         if let K::Variant { fields, .. } = &mut call.kind {
             for field in fields {
-                statements.push(stage(self, field)?);
+                statements.push(self.prepare_call_operand(field, span)?);
             }
         } else if let K::EffectRequest { arguments, .. } = &mut call.kind {
             // An operation label has no runtime callee evaluation. Its inputs
             // use the same source-order preparation as ordinary calls.
             for argument in arguments {
-                statements.push(stage(self, argument)?);
+                statements.push(self.prepare_call_operand(argument, span)?);
             }
         } else if !prepared {
             let K::Call {
@@ -1364,18 +1333,9 @@ impl Checker<'_, '_> {
             else {
                 unreachable!()
             };
-            // An arbitrary callee is evaluated before any explicit input. Keep
-            // direct declarations intact so their protocol metadata survives.
-            if !matches!(
-                callee.kind,
-                K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
-            ) {
-                leading.push(stage(self, callee)?);
-            } else {
-                callee.source = anchor;
-            }
+            leading.extend(self.prepare_call_callee(callee, span)?);
             for argument in arguments.iter_mut().filter(|arg| !arg.is_default) {
-                statements.push(stage(self, &mut argument.value)?);
+                statements.push(self.prepare_call_operand(&mut argument.value, span)?);
             }
         }
         // Collection construction follows every source producer. It is not a

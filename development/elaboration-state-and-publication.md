@@ -287,6 +287,8 @@ Commit、Probe、RetainCode 分别遵守各自对构造副作用的交付规则�
 
 已确定签名的调用在绑定输入时借用所选签名，参数域和结果域按同一组绑定检查作用域。普通源码准备持有受检表达式、观察到的身份和待供应的默认值。开放签名求值单独持有执行产生的值，用它继续形成参数或结果类型。[输入绑定](../compiler/elaboration/src/program/dependent_inputs.rs) · [开放签名的输入](../compiler/elaboration/src/program/open_functions/inputs.rs)
 
+普通调用一旦需要临时绑定，先保留 callee 的求值位置。比如 `collect<do { step = 1; select() }>(...packet())`，先执行子句并选定实例，再执行一次 `packet()`。子句从调用者提前返回时，参数包和目标函数都不会运行。元组收集、参数展开和属性收集复用同一条规则。属性字段与位置实参按源码顺序交错求值，最后才按目标布局构造记录。[调用准备](../compiler/elaboration/src/program/arguments.rs) · [双执行器回归用例](../compiler/luna/tests/type_input_execution_order.rs)
+
 公开参数名与默认供应跟随目标调用接口。固定参数包的宽度由已检查布局确定，位置路由保留完整具名供应与逐项收集的区别。高阶调用的公开名字及默认供应的传送边界见[可调用输入接口](callable-input-interfaces.md)。
 
 #### required 世界与绑定交接

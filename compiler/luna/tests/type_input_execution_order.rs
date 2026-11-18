@@ -378,3 +378,80 @@ fn exits_from_packet_preparation_and_staged_fields_skip_their_successors() {
         &["check", "mark", "Byte", "mark", "mark", "Byte"],
     );
 }
+
+#[test]
+fn computed_clause_callee_precedes_collection_fields_in_the_original_invocation() {
+    check_twice(
+        "comptime fn select() -> bool { true }
+         comptime fn collect(...items: Tuple<bool, bool>) -> bool
+         where flag: bool
+         {
+             let (first, second) = items;
+             flag and first and second
+         }
+         comptime fn check() -> bool {
+             var step: u8 = 0;
+             let result = collect<do { step = 1; select() }>(
+                 do { let ready = step == 1; step = 2; ready },
+                 do { let ready = step == 2; step = 3; ready }
+             );
+             result and step == 3
+         }",
+        &["check", "select", "collect"],
+    );
+}
+
+#[test]
+fn computed_callee_precedes_packets_and_interleaved_properties() {
+    for (parameters, result, arguments, calls) in [
+        (
+            "...items: Tuple<bool, bool>",
+            "let (a,b) = items; a and b",
+            "(...do { let ready = step == 1; step = 2; (ready, true) })",
+            vec!["check", "select", "collect"],
+        ),
+        (
+            "...fields: Config",
+            "fields.left and fields.right",
+            "{ right: tick(), left: do { let ready = step == 1; step = 2; ready } }",
+            vec!["check", "select", "tick", "collect"],
+        ),
+        (
+            "...items: Tuple<bool, bool>, ...fields: Config",
+            "let (a,b) = items; a and b and fields.left and fields.right",
+            "{ right: do { let ready = step == 1; step = 2; ready }, tick(),
+               left: do { let ready = step == 2; step = 3; ready }, step == 3 }",
+            vec!["check", "select", "tick", "collect"],
+        ),
+    ] {
+        let source = format!(
+            "comptime fn schema(...fields: T) -> T where T {{ fields }}
+             const model = schema {{ left: true, right: true }};
+             typealias Config = model'type;
+             comptime fn select() -> bool {{ true }}
+             comptime fn tick() -> bool {{ true }}
+             comptime fn collect({parameters}) -> bool where flag: bool {{
+                 if not flag {{ return false; }};
+                 {result}
+             }}
+             comptime fn check() -> bool {{
+                 var step: u8 = 0;
+                 collect<do {{ step = 1; select() }}>{arguments}
+             }}"
+        );
+        check_twice(&source, &calls);
+    }
+}
+
+#[test]
+fn exit_during_callee_selection_skips_variadic_fields() {
+    check_twice(
+        "comptime fn stop() -> bool { true }
+         comptime fn field() -> bool { false }
+         comptime fn collect(...items: Tuple<bool, bool>) -> bool where flag: bool { flag }
+         comptime fn check() -> bool {
+             collect<do { if stop() { return true; }; false }>(field(), field())
+         }",
+        &["check", "stop"],
+    );
+}

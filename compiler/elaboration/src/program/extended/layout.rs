@@ -49,7 +49,7 @@ impl Checker<'_, '_> {
         let mut statements = Vec::new();
         if reordered {
             for field in &mut fields {
-                self.stage_property_input(field, &mut statements, span)?;
+                statements.push(self.prepare_call_operand(field, span)?);
             }
         }
         let mut types: Vec<_> = types.into_iter().map(Some).collect();

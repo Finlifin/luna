@@ -9,12 +9,24 @@ const HEADER: &str = "comptime fn schema(...fields:T)->T where T {fields} const 
 #[test]
 fn reordered_properties_preserve_producer_order_at_runtime_and_comptime() {
     for phase in ["", "comptime "] {
+        let (producers, fields) = if phase.is_empty() {
+            (
+                "fn first(p:*bool)->bool {let old=p.*;p.* = not old;not old}
+                 fn second(p:*bool)->bool {p.*}",
+                "marker(), right:first(state.ref), marker(), left:second(state.ref)",
+            )
+        } else {
+            (
+                "comptime fn first(value:bool)->bool {not value}
+                 comptime fn second(value:bool)->bool {value}",
+                "marker(), right:do { state = first(state); state }, marker(), left:second(state)",
+            )
+        };
         let source = format!("{HEADER}
-            {phase}fn first(p:*bool)->bool {{let old=p.*;p.* = not old;not old}}
-            {phase}fn second(p:*bool)->bool {{p.*}}
+            {producers}
             {phase}fn marker()->bool {{true}}
             {phase}fn inspect(head:bool,...fields:Config,tail:bool)->bool {{head and tail and fields.left and fields.right}}
-            {phase}fn run()->bool {{let state=false;inspect {{marker(),right:first(state.ref),marker(),left:second(state.ref)}}}}");
+            {phase}fn run()->bool {{var state=false;inspect {{{fields}}}}}");
         let package = support::compile(&source);
         let mut vm = if phase.is_empty() {
             Interpreter::new(&package, Budget::default())

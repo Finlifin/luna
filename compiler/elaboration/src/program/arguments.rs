@@ -22,6 +22,14 @@ pub(super) fn inference_type(mut value: &n::Expr) -> Option<&Term> {
     None
 }
 
+// Generated locals have no user cleanup boundary of their own.
+pub(super) fn preparation_anchor(span: Span) -> n::SourceRange {
+    n::SourceRange {
+        start: span.lo().0,
+        end: span.lo().0,
+    }
+}
+
 pub(super) struct RoutedArgument<'h> {
     pub parameter: usize,
     values: Vec<Expr<'h>>,
@@ -490,6 +498,51 @@ impl Checker<'_, '_> {
         ))
     }
 
+    // Keep declaration identities on the final call for protocol lookup. A
+    // computed callee, including a declaration with executable clause inputs,
+    // must finish before the receiver or the first explicit argument runs.
+    pub(super) fn prepare_call_callee(
+        &mut self,
+        callee: &mut n::Expr,
+        span: Span,
+    ) -> Result<Option<n::Expr>, Error> {
+        if matches!(
+            callee.kind,
+            K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
+        ) {
+            callee.source = preparation_anchor(span);
+            return Ok(None);
+        }
+        self.prepare_call_operand(callee, span).map(Some)
+    }
+
+    pub(super) fn prepare_call_operand(
+        &mut self,
+        value: &mut n::Expr,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let anchor = preparation_anchor(span);
+        let binding = self.spread_binding(span)?;
+        let local = n::Expr {
+            ty: value.ty.clone(),
+            source: anchor,
+            kind: K::Local(binding),
+        };
+        let value = std::mem::replace(value, local);
+        Ok(n::Expr {
+            ty: if is_never(&value.ty) {
+                p(P::Never)
+            } else {
+                p(P::Void)
+            },
+            source: anchor,
+            kind: K::Let {
+                binding,
+                value: Box::new(value),
+            },
+        })
+    }
+
     pub(super) fn stage_collected_call(
         &mut self,
         mut call: n::Expr,
@@ -511,19 +564,8 @@ impl Checker<'_, '_> {
         else {
             unreachable!()
         };
-        // Only declarations carry collection protocols. These callee forms
-        // have no runtime evaluation effects; the receiver is a prefix input.
-        debug_assert!(matches!(
-            callee.kind,
-            K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
-        ));
-        // Generated bookkeeping has an empty source anchor. It must not share
-        // a complete user expression's cleanup boundary with that expression.
-        let anchor = n::SourceRange {
-            start: call.source.start,
-            end: call.source.start,
-        };
-        callee.source = anchor;
+        let anchor = preparation_anchor(span);
+        let selected = self.prepare_call_callee(callee, span)?;
         let mut argument_slots = vec![0; arguments.len()];
         for (slot, argument) in arguments.iter().enumerate() {
             argument_slots[argument.parameter] = slot;
@@ -546,32 +588,7 @@ impl Checker<'_, '_> {
             if passing != n::ArgumentPassing::Value && matches!(value.kind, K::Local(_)) {
                 return Ok(());
             }
-            let index = self.next_temporary_binding;
-            self.next_temporary_binding = index
-                .checked_add(1)
-                .ok_or_else(|| error(span, "call temporary binding space exhausted"))?;
-            let binding = n::LocalId {
-                owner: u32::MAX,
-                index,
-            };
-            let local = n::Expr {
-                ty: value.ty.clone(),
-                source: anchor,
-                kind: K::Local(binding),
-            };
-            let input = std::mem::replace(value, local);
-            statements[position] = Some(n::Expr {
-                ty: if is_never(&input.ty) {
-                    p(P::Never)
-                } else {
-                    p(P::Void)
-                },
-                source: anchor,
-                kind: K::Let {
-                    binding,
-                    value: Box::new(input),
-                },
-            });
+            statements[position] = Some(self.prepare_call_operand(value, span)?);
             Ok(())
         };
         for argument in arguments.iter_mut().take(offset) {
@@ -603,7 +620,10 @@ impl Checker<'_, '_> {
             ty: call.ty.clone(),
             source: call.source,
             kind: K::CallPreparation {
-                statements: statements.into_iter().flatten().collect(),
+                statements: selected
+                    .into_iter()
+                    .chain(statements.into_iter().flatten())
+                    .collect(),
                 result: Some(Box::new(call)),
             },
         };
