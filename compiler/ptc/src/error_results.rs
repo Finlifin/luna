@@ -208,7 +208,7 @@ mod tests {
             };
             context.verify_proof(&proof, Budget::default()).unwrap();
             let mut opaque = context.fork();
-            std::sync::Arc::make_mut(&mut opaque.tuple_heads).clear();
+            std::sync::Arc::make_mut(&mut opaque.theory.constructors.tuple_heads).clear();
             assert!(opaque.verify_proof(&proof, Budget::default()).is_err());
             assert!(!matches!(
                 opaque.prove(goal, Budget::default()),

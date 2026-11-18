@@ -62,7 +62,7 @@ fn retained_source_shares_ownership_without_promoting_templates() {
 }
 
 #[test]
-fn borrowed_and_closed_sources_capture_separate_declaration_worlds() {
+fn capture_copies_borrowed_declarations_and_reuses_an_owned_world() {
     let mut package = source();
     let before = package.clone();
     let retained = Snapshot::capture(DeclarationSource::Borrowed(&package), &mut 10_000).unwrap();
@@ -87,16 +87,18 @@ fn borrowed_and_closed_sources_capture_separate_declaration_worlds() {
         associated_initializers: vec![],
     });
     let owner = DeclarationSnapshot::new(Arc::new(package));
-    assert!(Snapshot::capture(DeclarationSource::Snapshot(&owner), &mut 1).is_err());
-    let projected = Snapshot::capture(DeclarationSource::Snapshot(&owner), &mut 10_000).unwrap();
-    assert!(!Arc::ptr_eq(projected.source.package(), owner.package()));
-    assert!(projected.source.package().dispatch_instances.is_empty());
+    let mut fuel = 1;
+    let captured = Snapshot::capture(DeclarationSource::Snapshot(&owner), &mut fuel).unwrap();
+    assert_eq!(fuel, 0);
+    assert!(Arc::ptr_eq(captured.source.package(), owner.package()));
     assert_eq!(owner.package().dispatch_instances.len(), 1);
+    let copied =
+        Snapshot::capture(DeclarationSource::Borrowed(owner.package()), &mut 10_000).unwrap();
+    assert!(copied.source.package().dispatch_instances.is_empty());
     assert_eq!(
-        projected.source.package().quote_templates,
-        owner.package().quote_templates
+        captured.source.package().quote_templates,
+        copied.source.package().quote_templates
     );
-    assert!(projected.source.package().functions.is_empty());
 }
 
 #[test]

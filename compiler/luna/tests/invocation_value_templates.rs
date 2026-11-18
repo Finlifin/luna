@@ -85,7 +85,7 @@ fn memoized_preparation_bounds_source_capture_and_can_share_an_owned_source() {
             associated: vec![],
             associated_initializers: vec![],
         });
-    let error = Invocation::prepare_in_source(
+    let mut call = Invocation::prepare_in_source(
         DeclarationSnapshot::new(std::sync::Arc::new(dirty)),
         &Default::default(),
         entry,
@@ -93,12 +93,12 @@ fn memoized_preparation_bounds_source_capture_and_can_share_an_owned_source() {
         8,
         Default::default(),
     )
-    .err()
     .unwrap();
-    assert!(
-        error.contains("must not contain preselected dispatch"),
-        "{error}"
-    );
+    let outcome = call
+        .invoke(vec![Value::Bool(true)], &mut Context::new(1_000_000))
+        .unwrap();
+    assert_eq!(*outcome.value, Value::Bool(true));
+    assert!(!outcome.reused);
 }
 
 const SOURCE: &str = "

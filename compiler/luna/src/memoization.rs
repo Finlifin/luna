@@ -125,7 +125,7 @@ impl Invocation {
         )
     }
 
-    /// Reuse a declaration-only owner across callers. Preparation proves this
+    /// Reuse the exact source owner across callers. Preparation proves this
     /// invocation's requirements; sharing a source grants no cache admission.
     pub fn prepare_in_source(
         source: DeclarationSnapshot,
@@ -164,12 +164,6 @@ impl Invocation {
         let before = work.steps;
         let prepared = (|| {
             let package = source.package();
-            if !package.dispatch_instances.is_empty() {
-                return Err(
-                    "memoization source snapshot must not contain preselected dispatch instances"
-                        .into(),
-                );
-            }
             work.steps = work
                 .steps
                 .checked_sub(package.functions.len())
@@ -207,7 +201,8 @@ impl Invocation {
                 .map(|p| &p.ty)
                 .chain(std::iter::once(result.as_ref()))
                 .all(|ty| ty.check_scope(&[]).is_ok());
-            let context = ptc::Context::from_package_metered(package, &mut work.steps)
+            let context = source
+                .package_context(&mut work.steps)
                 .map_err(|error| format!("memoized type context: {error}"))?;
             let world = source
                 .capabilities(&context, &[], &mut work)

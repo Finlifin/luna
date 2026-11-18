@@ -42,23 +42,27 @@ fn key_preparation_returns_work_and_does_not_refill_after_context_construction()
     let source = source(&package);
     source.prepare(&mut Budget::default()).unwrap();
     let mut counter = 1_000_000;
-    elaboration::ptc::Context::from_package_metered(source.package(), &mut counter).unwrap();
+    // Measure a cold read without warming the source under test.
+    DeclarationSnapshot::new(source.package().clone())
+        .package_context(&mut counter)
+        .unwrap();
     let context_cost = 1_000_000 - counter;
     let subject = Term::Primitive(Primitive::Bool);
-    for _ in 0..2 {
-        let mut remaining = context_cost;
-        let failure = Protocol::prepare_in_source_metered(
-            source.clone(),
-            &items,
-            &subject,
-            Budget::default(),
-            &mut remaining,
-        )
-        .err()
-        .unwrap();
-        assert!(failure.contains("budget exhausted"), "{failure}");
-        assert_eq!(remaining, 0);
-    }
+    let mut remaining = context_cost;
+    let failure = Protocol::prepare_in_source_metered(
+        source.clone(),
+        &items,
+        &subject,
+        Budget::default(),
+        &mut remaining,
+    )
+    .err()
+    .unwrap();
+    assert!(failure.contains("budget exhausted"), "{failure}");
+    assert_eq!(remaining, 0);
+
+    // The theory was completed before selection failed. A sibling still pays
+    // for selection and binding, and gets its own value admission token.
     let mut remaining = 1_000_000;
     let mut protocol = Protocol::prepare_in_source_metered(
         source.clone(),
@@ -68,13 +72,33 @@ fn key_preparation_returns_work_and_does_not_refill_after_context_construction()
         &mut remaining,
     )
     .unwrap();
-    assert!(1_000_000 - remaining > context_cost);
+    let warm_cost = 1_000_000 - remaining;
+    assert!(warm_cost > 1);
+    let mut insufficient = warm_cost - 1;
+    assert!(
+        Protocol::prepare_in_source_metered(
+            source.clone(),
+            &items,
+            &subject,
+            Budget::default(),
+            &mut insufficient,
+        )
+        .is_err()
+    );
+    let mut exact = warm_cost;
+    let mut other = Protocol::prepare_in_source_metered(
+        source,
+        &items,
+        &subject,
+        Budget::default(),
+        &mut exact,
+    )
+    .unwrap();
+    assert_eq!(exact, 0);
     let input = protocol
         .admit(Value::Bool(true), &mut Context::new(1_000_000))
         .unwrap();
     assert!(protocol.hash(&input, &mut Context::new(1_000_000)).is_ok());
-    let mut other =
-        Protocol::prepare_in_source(source, &items, &subject, Budget::default()).unwrap();
     assert!(other.hash(&input, &mut Context::new(1_000_000)).is_err());
 }
 
@@ -241,8 +265,9 @@ fn failed_dynamic_key_preparation_spends_the_invocations_own_allowance() {
         .unwrap()
         .declaration;
     let subject = Term::Primitive(Primitive::Type);
-    // Warm metadata, then observe the real failing protocol preparation cost.
+    // Compare failed selections against the same already prepared declarations.
     source.prepare(&mut Budget::default()).unwrap();
+    source.package_context(&mut 1_000_000).unwrap();
     let mut remaining = 1_000_000;
     let error = Protocol::prepare_in_source_metered(
         source.clone(),

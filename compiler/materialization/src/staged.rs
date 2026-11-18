@@ -12,7 +12,7 @@ pub(super) struct Snapshot {
 impl Snapshot {
     fn capture(source: DeclarationSource<'_>, fuel: &mut usize) -> Result<Self, String> {
         let source = source
-            .retain_declarations(fuel)
+            .retain_for_invocation(fuel)
             .map_err(|error| format!("staged source retention budget exhausted: {error:?}"))?;
         let code = CodeSession::new(source.package().clone());
         Ok(Self { source, code })

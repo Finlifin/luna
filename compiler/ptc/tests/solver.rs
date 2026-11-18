@@ -577,7 +577,7 @@ fn declared_nominal_constructor_evidence_is_required_and_replayed() {
     assert!(admitted.verify_proof(&proof, Budget::default()).is_ok());
     assert!(base.verify_proof(&proof, Budget::default()).is_err());
     let mut forged = proof.clone();
-    forged.nominal_constructors.clear();
+    std::sync::Arc::make_mut(&mut forged.constructors.nominal_constructors).clear();
     assert!(base.verify_proof(&forged, Budget::default()).is_err());
     proved(
         &admitted,

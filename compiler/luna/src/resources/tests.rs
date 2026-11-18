@@ -90,13 +90,10 @@ fn bound_resource_source_retains_its_directory_and_releases_the_last_owner() {
     )
     .unwrap();
     let warm_cost = Budget::default().steps - warm_budget.steps;
-    assert!(
-        warm_cost > 0,
-        "selection and fresh type context still require work"
-    );
+    assert!(warm_cost > 0, "selection and binding still require work");
     assert!(
         warm_cost < cold_cost,
-        "only the immutable directory is shared"
+        "immutable theory and directory should be reused"
     );
     assert!(
         bind(
@@ -190,7 +187,7 @@ fn resource_preparation_uses_one_allowance_and_retries_without_partial_bindings(
     assert!(error.contains("budget exhausted"), "{error}");
     assert!(too_small.steps < cold_cost - 1);
     // A complete directory can remain after a later binding failure. The next
-    // preparation must still perform selection, context and identity checks.
+    // preparation must still perform selection and identity checks.
     let mut retry = Budget::default();
     let binding = ProtocolContext::selected_in_source_metered(
         fresh.clone(),

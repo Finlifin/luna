@@ -283,17 +283,77 @@ fn warm_protocols_charge_execution_and_recover_after_budget_exhaustion() {
 }
 
 #[test]
+fn a_retained_dispatch_entry_cannot_supply_a_missing_key_implementation() {
+    use elaboration::materialization::DeclarationSnapshot;
+    let mut package = sysroot::compile("").unwrap();
+    let items = bindings(&package);
+    let subject = Term::Primitive(Primitive::Bool);
+    let interface = package
+        .traits
+        .iter()
+        .find(|item| item.name == "ComptimeHash")
+        .unwrap();
+    let member = interface
+        .methods
+        .iter()
+        .find(|item| item.name == "hash")
+        .unwrap()
+        .declaration;
+    let position = package
+        .implementations
+        .iter()
+        .position(|item| item.interface == Some(interface.declaration) && item.subject == subject)
+        .unwrap();
+    let removed = package.implementations.remove(position);
+    let body = removed
+        .methods
+        .iter()
+        .find(|(name, _)| name == "hash")
+        .unwrap()
+        .1;
+    package
+        .dispatch_instances
+        .push(nir::program::DispatchInstance {
+            interface: interface.declaration,
+            subject: subject.clone(),
+            interface_arguments: vec![],
+            implementation: removed.declaration,
+            arguments: vec![],
+            methods: vec![nir::program::MethodInstance {
+                member,
+                body,
+                arguments: vec![],
+                method_arguments: vec![],
+            }],
+            associated: vec![],
+            associated_initializers: vec![],
+        });
+    let source = DeclarationSnapshot::new(std::sync::Arc::new(package));
+    let error = Protocol::prepare_in_source(source, &items, &subject, Default::default())
+        .err()
+        .unwrap();
+    assert!(
+        error.contains("key implementation is not concrete"),
+        "{error}"
+    );
+}
+
+#[test]
 fn shared_declaration_sources_do_not_merge_protocol_value_authority() {
     use elaboration::materialization::DeclarationSnapshot;
     use std::sync::Arc;
     let mut package = sysroot::compile("").unwrap();
     let items = bindings(&package);
     let subject = Term::Primitive(Primitive::Bool);
-    let closed = DeclarationSnapshot::new(Arc::new(package.clone()));
-    assert!(Protocol::prepare_in_source(closed, &items, &subject, Default::default()).is_err());
-    // Convert once before sharing the exact source with several bindings.
-    // A closed dispatch table cannot supply authority to resolving execution.
-    package.dispatch_instances.clear();
+    // A stale executable choice must have no say in key selection or execution.
+    let stale = package
+        .dispatch_instances
+        .first_mut()
+        .expect("sysroot dispatch");
+    stale.implementation = nir::DeclarationId {
+        package: u64::MAX,
+        local: u32::MAX,
+    };
     let package = Arc::new(package);
     let weak = Arc::downgrade(&package);
     let source = DeclarationSnapshot::new(package);

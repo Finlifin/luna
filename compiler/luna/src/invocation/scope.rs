@@ -19,7 +19,8 @@ impl InvocationScope<'_> {
         let package = source.package();
         let mut steps =
             usize::try_from(fuel).map_err(|_| "invocation fuel does not fit the host counter")?;
-        let context = elaboration::ptc::Context::from_package_metered(package, &mut steps)
+        let context = source
+            .package_context(&mut steps)
             .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
         let queries = SourceInvocationQueries::in_source(source, &context, &[]);
         let types = |predicate: &nir::program::TypePredicate, fuel: &mut u64| {

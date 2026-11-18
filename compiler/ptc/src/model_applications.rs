@@ -22,8 +22,8 @@ pub(super) type Applications = HashMap<(DeclarationId, Vec<Term>), Term>;
 
 pub(super) fn admitted(term: &Term, context: &Context) -> bool {
     matches!(term, Term::NormalForm { head, sort: Sort::Type, arguments }
-        if context.congruence_heads.contains(head)
-            && !context.tuple_heads.contains(head)
+        if context.theory.constructors.congruence_heads.contains(head)
+            && !context.theory.constructors.tuple_heads.contains(head)
             && arguments.iter().all(|arg| argument_with_types(arg, &|_| true)))
 }
 
@@ -129,8 +129,16 @@ pub(super) fn index(
     let mut result = HashMap::new();
     for entry in entries {
         *fuel = fuel.checked_sub(1).ok_or(ProofError::BudgetExhausted)?;
-        if !context.congruence_heads.contains(&entry.head)
-            || context.tuple_heads.contains(&entry.head)
+        if !context
+            .theory
+            .constructors
+            .congruence_heads
+            .contains(&entry.head)
+            || context
+                .theory
+                .constructors
+                .tuple_heads
+                .contains(&entry.head)
         {
             return Err(ProofError::Invalid);
         }
@@ -143,8 +151,9 @@ pub(super) fn index(
             if !within_input_limits(Input::Term(value), depth, fuel) {
                 return Err(ProofError::BudgetExhausted);
             }
-            if !(closed_type(value, &context.nominal_constructors)
-                || (is_argument && closed_argument(value, &context.nominal_constructors)))
+            if !(closed_type(value, &context.theory.constructors.nominal_constructors)
+                || (is_argument
+                    && closed_argument(value, &context.theory.constructors.nominal_constructors)))
             {
                 return Err(ProofError::Invalid);
             }

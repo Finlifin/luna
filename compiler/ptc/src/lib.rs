@@ -22,6 +22,8 @@ mod type_inputs;
 mod value_indices;
 pub use model_applications::TypeApplication;
 pub use type_inputs::{TypeInputOutcome, TypeInputSolution};
+mod declaration_theory;
+pub use declaration_theory::{ConstructorContracts, DeclarationTheory};
 mod theory_state;
 use theory_state::Classes;
 mod traits;
@@ -92,12 +94,7 @@ pub struct Context {
     // component; no candidate may add authority or premises to another branch.
     scope: Arc<Vec<Vec<Sort>>>,
     assumptions: Arc<Vec<Formula>>,
-    congruence_heads: Arc<BTreeSet<DeclarationId>>,
-    nominal_constructors: Arc<BTreeSet<DeclarationId>>,
-    /// Trusted Tuple classification/layout contracts; never body equations.
-    tuple_heads: Arc<BTreeSet<DeclarationId>>,
-    /// Trusted List domain and candidate metadata; never a solver injectivity rule.
-    list_inference_heads: Arc<BTreeSet<DeclarationId>>,
+    theory: DeclarationTheory,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Budget {
@@ -153,9 +150,7 @@ pub struct Proof {
     // Proofs own their support. There is no cross-context learned fact cache.
     pub assumptions: Vec<Formula>,
     pub goal: Formula,
-    pub congruence_heads: BTreeSet<DeclarationId>,
-    pub nominal_constructors: BTreeSet<DeclarationId>,
-    pub tuple_heads: BTreeSet<DeclarationId>,
+    pub constructors: ConstructorContracts,
     pub tree: ProofTree,
 }
 /// Immutable proof DAG payloads. Cloning a root shares its subproofs and terms;
@@ -208,10 +203,8 @@ impl fmt::Display for TypeBinder {
 #[derive(Clone, Debug)]
 pub struct Witness {
     pub applications: Vec<TypeApplication>,
-    pub tuple_heads: BTreeSet<DeclarationId>,
     pub scope: Vec<Vec<Sort>>,
-    pub nominal_constructors: BTreeSet<DeclarationId>,
-    pub congruence_heads: BTreeSet<DeclarationId>,
+    pub constructors: ConstructorContracts,
     pub types: BTreeMap<DeclarationId, Term>,
     pub bound_types: BTreeMap<TypeBinder, Term>,
     pub integers: BTreeMap<DeclarationId, i128>,
@@ -240,23 +233,20 @@ impl Context {
         Self {
             scope: Arc::new(scope),
             assumptions: Arc::default(),
-            congruence_heads: self.congruence_heads.clone(),
-            nominal_constructors: self.nominal_constructors.clone(),
-            tuple_heads: self.tuple_heads.clone(),
-            list_inference_heads: self.list_inference_heads.clone(),
+            theory: self.theory.clone(),
         }
     }
     pub fn scope(&self) -> &[Vec<Sort>] {
         &self.scope
     }
     pub fn admit_tuple_head(&mut self, head: DeclarationId) {
-        Arc::make_mut(&mut self.tuple_heads).insert(head);
+        Arc::make_mut(&mut self.theory.constructors.tuple_heads).insert(head);
     }
     pub fn admit_list_inference_head(&mut self, head: DeclarationId) {
-        Arc::make_mut(&mut self.list_inference_heads).insert(head);
+        Arc::make_mut(&mut self.theory.list_inference_heads).insert(head);
     }
     pub fn is_list_inference_head(&self, head: DeclarationId) -> bool {
-        self.list_inference_heads.contains(&head)
+        self.theory.list_inference_heads.contains(&head)
     }
     /// Recognize the compiler-bound List domain without unfolding its head.
     pub fn is_list_type(&self, ty: &Term) -> bool {
@@ -265,14 +255,19 @@ impl Context {
                 && arguments[0].sort() == Sort::Type)
     }
     pub fn is_tuple_head(&self, head: DeclarationId) -> bool {
-        self.tuple_heads.contains(&head)
+        self.theory.constructors.tuple_heads.contains(&head)
     }
     pub fn is_tuple_type(&self, ty: &Term) -> bool {
         matches!(ty, Term::NormalForm { head, sort: Sort::Type, arguments }
             if self.is_tuple_head(*head) && arguments.len() == 1 && arguments[0].sort() == Sort::ComptimeValue)
     }
     fn evaluate_kind(&self, kind: TypeKind, ty: &Term) -> Option<bool> {
-        evaluate_kind_with_heads(kind, ty, &self.nominal_constructors, &self.tuple_heads)
+        evaluate_kind_with_heads(
+            kind,
+            ty,
+            &self.theory.constructors.nominal_constructors,
+            &self.theory.constructors.tuple_heads,
+        )
     }
     pub fn assumptions(&self) -> &[Formula] {
         &self.assumptions
@@ -290,33 +285,7 @@ impl Context {
         package: &nir::program::Package,
         fuel: &mut usize,
     ) -> Result<Self, nir::normal_forms::ValidationError> {
-        nir::normal_forms::validate_in(package, fuel)?;
-        let mut context = Self::default();
-        for declaration in package
-            .structs
-            .iter()
-            .map(|s| s.declaration)
-            .chain(package.enums.iter().map(|e| e.declaration))
-            .chain(package.newtypes.iter().map(|n| n.declaration))
-        {
-            *fuel = fuel
-                .checked_sub(1)
-                .ok_or(nir::normal_forms::ValidationError::Budget)?;
-            context.admit_nominal_constructor(declaration);
-        }
-        for head in &package.normal_forms {
-            *fuel = fuel
-                .checked_sub(1)
-                .ok_or(nir::normal_forms::ValidationError::Budget)?;
-            context.admit_congruence(head.declaration);
-            if head.role == nir::normal_forms::Role::TypeList {
-                context.admit_list_inference_head(head.declaration);
-            }
-            if head.role == nir::normal_forms::Role::Tuple {
-                context.admit_tuple_head(head.declaration);
-            }
-        }
-        Ok(context)
+        DeclarationTheory::from_package_metered(package, fuel).map(DeclarationTheory::into_context)
     }
     /// Replay a refutation against this exact scope and its admitted contracts.
     /// This checks the tree, not merely whether a fresh search proves the goal.
@@ -344,14 +313,12 @@ impl Context {
                     return Err(ProofError::BudgetExhausted);
                 }
             }
-            if proof.scope != *self.scope
-                || proof.assumptions != *self.assumptions
-                || proof.congruence_heads != *self.congruence_heads
-                || proof.nominal_constructors != *self.nominal_constructors
-                || proof.tuple_heads != *self.tuple_heads
-            {
+            if proof.scope != *self.scope || proof.assumptions != *self.assumptions {
                 return Err(ProofError::Invalid);
             }
+            self.theory
+                .constructors
+                .verify(&proof.constructors, &mut steps)?;
             let mut formulas = (*self.assumptions).clone();
             formulas.push(proof.goal.clone().negate());
             let formula = Formula::And(formulas);
@@ -418,7 +385,7 @@ impl Context {
             if !within_input_limits(Input::Term(ty), limit, fuel) {
                 return Err(ProofError::BudgetExhausted);
             }
-            if !closed_type(ty, &self.nominal_constructors) {
+            if !closed_type(ty, &self.theory.constructors.nominal_constructors) {
                 return Err(ProofError::Invalid);
             }
         }
@@ -426,14 +393,12 @@ impl Context {
             return Err(ProofError::BudgetExhausted);
         }
         *fuel -= witness.integers.len();
-        if witness.scope != *self.scope
-            || witness.assumptions != *self.assumptions
-            || witness.nominal_constructors != *self.nominal_constructors
-            || witness.congruence_heads != *self.congruence_heads
-            || witness.tuple_heads != *self.tuple_heads
-        {
+        if witness.scope != *self.scope || witness.assumptions != *self.assumptions {
             return Err(ProofError::Invalid);
         }
+        self.theory
+            .constructors
+            .verify(&witness.constructors, fuel)?;
         let applications = model_applications::index(&witness.applications, self, fuel, limit)?;
         let mut atoms = Vec::new();
         let mut terms = Terms::default();
@@ -455,8 +420,8 @@ impl Context {
                     &applications,
                     &evaluation_fuel,
                     &witness.integers,
-                    &self.nominal_constructors,
-                    &self.tuple_heads,
+                    &self.theory.constructors.nominal_constructors,
+                    &self.theory.constructors.tuple_heads,
                 )
                 .is_none()
             }) {
@@ -474,8 +439,8 @@ impl Context {
                     &applications,
                     &evaluation_fuel,
                     &witness.integers,
-                    &self.nominal_constructors,
-                    &self.tuple_heads,
+                    &self.theory.constructors.nominal_constructors,
+                    &self.theory.constructors.tuple_heads,
                 )
             };
             if self
@@ -607,15 +572,18 @@ impl Context {
     }
     /// The caller supplies the audited head contract, never just a purity flag.
     pub fn admit_congruence(&mut self, head: DeclarationId) {
-        Arc::make_mut(&mut self.congruence_heads).insert(head);
+        Arc::make_mut(&mut self.theory.constructors.congruence_heads).insert(head);
     }
     /// Register a generative nominal declaration whose semantic arguments are
     /// part of its identity. This does not admit any normal-form inverse.
     pub fn admit_nominal_constructor(&mut self, declaration: DeclarationId) {
-        Arc::make_mut(&mut self.nominal_constructors).insert(declaration);
+        Arc::make_mut(&mut self.theory.constructors.nominal_constructors).insert(declaration);
     }
     pub fn is_nominal_constructor(&self, declaration: DeclarationId) -> bool {
-        self.nominal_constructors.contains(&declaration)
+        self.theory
+            .constructors
+            .nominal_constructors
+            .contains(&declaration)
     }
     /// Branch facts are isolated by copy-on-write ownership. Read-only forks
     /// do not copy formulas or declaration sets. Dropping a fork cannot leave
@@ -626,14 +594,7 @@ impl Context {
     /// Global declaration checks retain admitted theory identities but may not
     /// rely on a particular caller's local premises (even a false premise).
     pub fn theory_context(&self) -> Self {
-        Self {
-            scope: Arc::default(),
-            assumptions: Arc::default(),
-            congruence_heads: self.congruence_heads.clone(),
-            nominal_constructors: self.nominal_constructors.clone(),
-            tuple_heads: self.tuple_heads.clone(),
-            list_inference_heads: self.list_inference_heads.clone(),
-        }
+        self.theory.clone().into_context()
     }
     pub fn prove(&self, goal: Formula, mut budget: Budget) -> Outcome {
         self.prove_metered(goal, &mut budget)
@@ -731,17 +692,13 @@ impl Context {
                 scope: (*self.scope).clone(),
                 assumptions: (*self.assumptions).clone(),
                 goal,
-                congruence_heads: (*self.congruence_heads).clone(),
-                nominal_constructors: (*self.nominal_constructors).clone(),
-                tuple_heads: (*self.tuple_heads).clone(),
+                constructors: self.theory.constructors.clone(),
                 tree: conflict.tree,
             }),
             SearchResult::Model(model) => Outcome::NotEntailed(Witness {
                 applications: model.applications,
-                tuple_heads: (*self.tuple_heads).clone(),
                 scope: (*self.scope).clone(),
-                nominal_constructors: (*self.nominal_constructors).clone(),
-                congruence_heads: (*self.congruence_heads).clone(),
+                constructors: self.theory.constructors.clone(),
                 types: model.types,
                 bound_types: model.bound_types,
                 integers: model.integers,
@@ -1325,7 +1282,7 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
     if let (Some(a), Some(b)) = (constructor(a), constructor(b)) {
         return a == b;
     }
-    matches!((a, b), (Term::NormalForm { head: a, sort: sa, arguments: aa }, Term::NormalForm { head: b, sort: sb, arguments: ab }) if a == b && sa == sb && aa.len() == ab.len() && context.congruence_heads.contains(a))
+    matches!((a, b), (Term::NormalForm { head: a, sort: sa, arguments: aa }, Term::NormalForm { head: b, sort: sb, arguments: ab }) if a == b && sa == sb && aa.len() == ab.len() && context.theory.constructors.congruence_heads.contains(a))
 }
 struct Search<'a> {
     boolean: Option<boolean::Circuit>,
@@ -2148,19 +2105,7 @@ impl fmt::Display for Outcome {
                 for application in &witness.applications {
                     write!(f, " {application}")?;
                 }
-                write!(f, ") (goal {}) (nominal-constructors", witness.goal)?;
-                for head in &witness.nominal_constructors {
-                    write!(f, " {head}")?;
-                }
-                f.write_str(") (congruence-heads")?;
-                for head in &witness.congruence_heads {
-                    write!(f, " {head}")?;
-                }
-                f.write_str(") (tuple-heads")?;
-                for head in &witness.tuple_heads {
-                    write!(f, " {head}")?;
-                }
-                f.write_str(")")?;
+                write!(f, ") (goal {}) {}", witness.goal, witness.constructors)?;
                 display_scope(f, &witness.scope)?;
                 f.write_str(")")
             }
@@ -2192,19 +2137,7 @@ impl fmt::Display for Context {
         for assumption in self.assumptions.iter() {
             write!(f, " {assumption}")?;
         }
-        f.write_str(") (congruence-heads")?;
-        for declaration in self.congruence_heads.iter() {
-            write!(f, " {declaration}")?;
-        }
-        f.write_str(") (nominal-constructors")?;
-        for declaration in self.nominal_constructors.iter() {
-            write!(f, " {declaration}")?;
-        }
-        f.write_str(") (tuple-heads")?;
-        for declaration in self.tuple_heads.iter() {
-            write!(f, " {declaration}")?;
-        }
-        f.write_str("))")
+        write!(f, ") {})", self.theory)
     }
 }
 
@@ -2216,19 +2149,7 @@ impl fmt::Display for Proof {
         for fact in &proof.assumptions {
             write!(f, " {fact}")?;
         }
-        write!(f, ") (goal {}) (congruence-heads", proof.goal)?;
-        for head in &proof.congruence_heads {
-            write!(f, " {head}")?;
-        }
-        f.write_str(") (nominal-constructors")?;
-        for head in &proof.nominal_constructors {
-            write!(f, " {head}")?;
-        }
-        f.write_str(") (tuple-heads")?;
-        for head in &proof.tuple_heads {
-            write!(f, " {head}")?;
-        }
-        f.write_str(")")?;
+        write!(f, ") (goal {}) {}", proof.goal, proof.constructors)?;
         display_scope(f, &proof.scope)?;
         write!(f, " (proof {}))", proof.tree)
     }
@@ -2327,7 +2248,7 @@ mod context_snapshot_tests {
         assert!(!Arc::ptr_eq(&parent.assumptions, &child.assumptions));
         assert!(Arc::ptr_eq(&parent.scope, &child.scope));
         assert_eq!(parent.assumptions.len(), 1);
-        assert!(!parent.congruence_heads.contains(&head));
+        assert!(!parent.theory.constructors.congruence_heads.contains(&head));
         assert!(!parent.is_nominal_constructor(head));
         assert!(!parent.is_tuple_head(head));
         assert!(matches!(
@@ -2339,12 +2260,15 @@ mod context_snapshot_tests {
             Outcome::Entailed(_)
         ));
 
-        let theory = child.theory_in_scope(vec![vec![Sort::ComptimeValue]]);
-        assert!(theory.assumptions().is_empty());
-        assert!(Arc::ptr_eq(&theory.tuple_heads, &child.tuple_heads));
+        let scoped = child.theory_in_scope(vec![vec![Sort::ComptimeValue]]);
+        assert!(scoped.assumptions().is_empty());
         assert!(Arc::ptr_eq(
-            &theory.nominal_constructors,
-            &child.nominal_constructors
+            &scoped.theory.constructors.tuple_heads,
+            &child.theory.constructors.tuple_heads
+        ));
+        assert!(Arc::ptr_eq(
+            &scoped.theory.constructors.nominal_constructors,
+            &child.theory.constructors.nominal_constructors
         ));
     }
 
@@ -2450,7 +2374,7 @@ mod tuple_classification_tests {
             context.verify_witness(witness, Budget::default()).unwrap();
             assert!(outcome.to_string().contains("(tuple-heads"));
             let mut removed = context.fork();
-            Arc::make_mut(&mut removed.tuple_heads).clear();
+            Arc::make_mut(&mut removed.theory.constructors.tuple_heads).clear();
             assert!(removed.verify_witness(witness, Budget::default()).is_err());
             let mut altered = witness.clone();
             altered.goal = Formula::kind(tuple.clone(), TypeKind::Tuple);

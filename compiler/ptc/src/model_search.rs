@@ -74,7 +74,10 @@ impl Search<'_> {
             // structures. Even a large problem may already have a simple model.
             for candidate in seeds.iter().chain(self.terms.nodes.iter()) {
                 nir::type_computations::charge_term(candidate, &mut self.steps).ok()?;
-                if !closed_type(candidate, &self.context.nominal_constructors) {
+                if !closed_type(
+                    candidate,
+                    &self.context.theory.constructors.nominal_constructors,
+                ) {
                     continue;
                 }
                 let mut accepts = true;
@@ -209,7 +212,7 @@ impl Search<'_> {
                     &representatives,
                     &mut free,
                     &mut BTreeSet::new(),
-                    &self.context.nominal_constructors,
+                    &self.context.theory.constructors.nominal_constructors,
                     &mut self.steps,
                 )?;
                 match term {
@@ -256,7 +259,7 @@ impl Search<'_> {
                     &representatives,
                     &mut free,
                     &mut BTreeSet::new(),
-                    &self.context.nominal_constructors,
+                    &self.context.theory.constructors.nominal_constructors,
                     &mut self.steps,
                 )?);
             }
@@ -267,7 +270,7 @@ impl Search<'_> {
                 &representatives,
                 &mut free,
                 &mut BTreeSet::new(),
-                &self.context.nominal_constructors,
+                &self.context.theory.constructors.nominal_constructors,
                 &mut self.steps,
             )?;
             for value in concrete.iter().chain(std::iter::once(&result)) {
@@ -306,8 +309,8 @@ impl Search<'_> {
                 &application_index,
                 &evaluation_fuel,
                 &theory.integers,
-                &self.context.nominal_constructors,
-                &self.context.tuple_heads,
+                &self.context.theory.constructors.nominal_constructors,
+                &self.context.theory.constructors.tuple_heads,
             );
             self.steps = evaluation_fuel.get();
             atom_values.push(value?);

@@ -26,7 +26,8 @@ pub(super) fn candidates(
         // A closed opaque application still denotes a symbolic Type: its
         // finite model interpretation is not its source-language identity.
         // Only actual closed model values can be skipped as already tried.
-        if (references.is_empty() && closed_type(term, &problem.nominal_constructors))
+        if (references.is_empty()
+            && closed_type(term, &problem.theory.constructors.nominal_constructors))
             || references
                 .keys()
                 .any(|id| requested.contains(id) && !bindings.contains_key(id))

@@ -58,7 +58,7 @@ impl<'a> DeclarationWorld<'a> {
             .unwrap_or_default();
         let context = match context {
             Some((context, _)) => context.clone(),
-            None => Context::from_package_metered(package, &mut budget.steps).map_err(|error| {
+            None => source.package_context(&mut budget.steps).map_err(|error| {
                 use nir::normal_forms::ValidationError as E;
                 match error {
                     E::Budget | E::Newtype(nir::newtypes::ValidationError::Budget) => {

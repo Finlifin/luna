@@ -79,8 +79,7 @@ impl Protocol {
 
     /// Reuse the owning source directory across protocol bindings. Each binding
     /// still owns a distinct value-admission token and fresh execution state.
-    /// The snapshot must contain source declarations, without a preselected
-    /// dispatch table, as required by demand-driven interpreter construction.
+    /// Selection and execution use the declaration view of that exact snapshot.
     pub fn prepare_in_source(
         source: DeclarationSnapshot,
         items: &LangItems,
@@ -122,13 +121,8 @@ impl Protocol {
         let before = work.steps;
         let prepared = (|| {
             let package = source.package();
-            if !package.dispatch_instances.is_empty() {
-                return Err(
-                    "key source snapshot must not contain preselected dispatch instances".into(),
-                );
-            }
-
-            let context = ptc::Context::from_package_metered(package, &mut work.steps)
+            let context = source
+                .package_context(&mut work.steps)
                 .map_err(|error| format!("key type context: {error}"))?;
             let world = source
                 .capabilities(&context, &[], &mut work)

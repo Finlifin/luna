@@ -1,15 +1,16 @@
 //! Immutable declaration metadata is owned by the exact source snapshot.
 use super::*;
+use crate::ptc::DeclarationTheory;
 use std::sync::{Arc, OnceLock};
 
-/// A retained source and its lazily completed declaration directory. The
-/// directory contains no query answers, premise contexts or VM state; source
-/// bodies and executable contracts remain opaque to directory construction.
+/// An exact immutable source owner. Declaration theory and the implementation
+/// directory are prepared independently. Neither can retain a caller's premises.
 #[derive(Clone)]
 pub struct DeclarationSnapshot(Arc<SnapshotData>);
 
 struct SnapshotData {
     package: Arc<n::Package>,
+    theory: OnceLock<DeclarationTheory>,
     metadata: OnceLock<Arc<DeclarationMetadata>>,
 }
 
@@ -17,12 +18,32 @@ impl DeclarationSnapshot {
     pub fn new(package: Arc<n::Package>) -> Self {
         Self(Arc::new(SnapshotData {
             package,
+            theory: OnceLock::new(),
             metadata: OnceLock::new(),
         }))
     }
 
     pub fn package(&self) -> &Arc<n::Package> {
         &self.0.package
+    }
+
+    /// Fork a closed proof context from this source's validated theory. Only
+    /// completed theory is installed, even if several readers prepare it.
+    pub fn package_context(
+        &self,
+        steps: &mut usize,
+    ) -> Result<Context, nir::normal_forms::ValidationError> {
+        *steps = steps
+            .checked_sub(1)
+            .ok_or(nir::normal_forms::ValidationError::Budget)?;
+        let theory = match self.0.theory.get() {
+            Some(theory) => theory,
+            None => {
+                let completed = DeclarationTheory::from_package_metered(self.package(), steps)?;
+                self.0.theory.get_or_init(|| completed)
+            }
+        };
+        Ok(theory.clone().into_context())
     }
 
     /// Complete the immutable directory before publishing a prepared owner.
@@ -83,6 +104,34 @@ impl<'a> DeclarationSource<'a> {
         match self {
             Self::Borrowed(package) => package,
             Self::Snapshot(snapshot) => snapshot.package(),
+        }
+    }
+
+    pub fn package_context(
+        self,
+        steps: &mut usize,
+    ) -> Result<Context, nir::normal_forms::ValidationError> {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.package_context(steps),
+            Self::Borrowed(package) => Context::from_package_metered(package, steps),
+        }
+    }
+
+    /// A source VM selects its declaration view when it opens the package.
+    /// Keep an existing owner, including its completed theory and directory.
+    /// A borrowed source needs a bounded owned copy of the declarations.
+    pub fn retain_for_invocation(
+        self,
+        fuel: &mut usize,
+    ) -> Result<DeclarationSnapshot, nir::copy_budget::CopyBudgetExhausted> {
+        match self {
+            Self::Snapshot(snapshot) => {
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or(nir::copy_budget::CopyBudgetExhausted::Steps)?;
+                Ok(snapshot.clone())
+            }
+            Self::Borrowed(_) => self.retain_declarations(fuel),
         }
     }
 
@@ -197,9 +246,14 @@ impl std::fmt::Display for DeclarationSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(declaration-snapshot (source {}) (metadata",
+            "(declaration-snapshot (source {}) (theory ",
             self.0.package
         )?;
+        match self.0.theory.get() {
+            Some(theory) => theory.fmt(f)?,
+            None => f.write_str("pending")?,
+        }
+        f.write_str(") (metadata")?;
         match self.0.metadata.get() {
             Some(metadata) => write!(f, " {}", metadata.index)?,
             None => f.write_str(" pending")?,
@@ -233,6 +287,55 @@ mod tests {
         assert!(weak.upgrade().is_some());
         drop(retained);
         assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn theory_publication_is_exact_to_source_and_independent_of_lexical_scopes() {
+        let id = Id {
+            package: 1,
+            local: 7,
+        };
+        let definition = n::Struct {
+            declaration: id,
+            name: "Item".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            fields: vec![],
+        };
+        let package = Arc::new(n::Package {
+            structs: vec![definition],
+            ..Default::default()
+        });
+        let snapshot = DeclarationSnapshot::new(package.clone());
+        let sibling = snapshot.clone();
+        assert!(snapshot.package_context(&mut 1).is_err());
+        assert!(sibling.0.theory.get().is_none());
+        let mut cold = 100;
+        let mut local = sibling.package_context(&mut cold).unwrap();
+        assert!(cold < 99);
+        assert!(snapshot.0.metadata.get().is_none());
+        assert!(local.is_nominal_constructor(id));
+        let extra = Id { local: 8, ..id };
+        local.admit_nominal_constructor(extra);
+        local.assume(crate::ptc::Formula::False);
+
+        assert!(snapshot.package_context(&mut 0).is_err());
+        let mut warm = 1;
+        let closed = snapshot.package_context(&mut warm).unwrap();
+        assert_eq!(warm, 0);
+        assert!(closed.scope().is_empty() && closed.assumptions().is_empty());
+        assert!(closed.is_nominal_constructor(id));
+        assert!(!closed.is_nominal_constructor(extra));
+        assert!(!snapshot.to_string().contains("(theory pending)"));
+        let fresh = DeclarationSnapshot::new(package);
+        assert!(fresh.package_context(&mut 1).is_err());
+        assert!(fresh.0.theory.get().is_none());
+        let empty = DeclarationSource::Borrowed(&n::Package::default())
+            .package_context(&mut 100)
+            .unwrap();
+        assert!(!empty.is_nominal_constructor(id));
     }
 
     #[test]

@@ -244,7 +244,8 @@ impl ProtocolContext {
                     .map(|definition| definition.declaration)
             })
             .transpose()?;
-        let context = Context::from_package_metered(package, &mut budget.steps)
+        let context = source
+            .package_context(&mut budget.steps)
             .map_err(|e| format!("resource type context: {e}"))?;
         source
             .prepare(budget)
