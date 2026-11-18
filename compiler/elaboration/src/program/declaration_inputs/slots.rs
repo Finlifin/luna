@@ -376,9 +376,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             _ => match value.expression() {
                 Some(value) => checker.preserved_input_identity(
                     value,
-                    self.bindings
-                        .iter()
-                        .map(|(binding, term)| (*binding, term.as_ref())),
+                    |id, _| Ok(self.bindings.get(&id).cloned()),
                     self.span,
                 )?,
                 None => None,

@@ -139,13 +139,15 @@ impl PartialStagedValue {
         meta_list: Option<DeclarationId>,
     ) -> Option<(PartialStagedShape, Vec<Arc<Self>>)> {
         let known_fields = |fields: &[Term]| fields.iter().cloned().map(Self::known).collect();
-        Some(match &self.data {
-            PartialStagedData::Aggregate(shape, fields) => (shape.clone(), fields.clone()),
-            PartialStagedData::Known(Term::NominalValue {
+        if let PartialStagedData::Aggregate(shape, fields) = &self.data {
+            return Some((shape.clone(), fields.clone()));
+        }
+        Some(match self.known_term()? {
+            Term::NominalValue {
                 ty,
                 variant: None,
                 fields,
-            }) if matches!(ty.as_ref(), Term::NormalForm { head, sort: Sort::Type, arguments }
+            } if matches!(ty.as_ref(), Term::NormalForm { head, sort: Sort::Type, arguments }
                 if Some(*head) == meta_list && matches!(arguments.as_slice(), [element] if element.sort() == Sort::Type)) =>
             {
                 (
@@ -156,10 +158,8 @@ impl PartialStagedValue {
                     known_fields(fields),
                 )
             }
-            PartialStagedData::Known(Term::TupleValue(fields)) => {
-                (PartialStagedShape::Tuple, known_fields(fields))
-            }
-            PartialStagedData::Known(Term::RecordValue(fields)) => (
+            Term::TupleValue(fields) => (PartialStagedShape::Tuple, known_fields(fields)),
+            Term::RecordValue(fields) => (
                 PartialStagedShape::AnonymousRecord(
                     fields.iter().map(|(name, _)| name.clone()).collect(),
                 ),
@@ -168,11 +168,11 @@ impl PartialStagedValue {
                     .map(|(_, value)| Self::known(value.clone()))
                     .collect(),
             ),
-            PartialStagedData::Known(Term::NominalValue {
+            Term::NominalValue {
                 ty,
                 variant,
                 fields,
-            }) => {
+            } => {
                 let Term::Nominal { declaration, .. } = ty.as_ref() else {
                     return None;
                 };
@@ -214,8 +214,7 @@ impl ObservationScope {
             .checked_sub(1)
             .ok_or("partial block observation budget exhausted")?;
         if let PartialStagedData::Known(term) = &value.data {
-            nir::type_computations::charge_term(term, fuel).map_err(|e| e.to_string())?;
-            self.known.insert(binding, Arc::new(term.clone()));
+            self.known.insert(binding, term.clone());
         } else {
             self.known.remove(&binding);
         }
@@ -300,7 +299,7 @@ impl Checker<'_, '_> {
             }
             let value = self.partial_staged_value_in(&argument.value, depth + 1, fuel, caller)?;
             if parameters[index].sort != Sort::Runtime {
-                let PartialStagedData::Known(term) = &value.data else {
+                let Some(term) = value.known_term() else {
                     return Ok(None);
                 };
                 nir::type_computations::charge_term(term, fuel)
@@ -445,7 +444,7 @@ mod tests {
                 .unwrap();
             if exact {
                 assert!(
-                    matches!(&length.data,PartialStagedData::Known(Term::Integer(value)) if *value == comptime_runtime::Integer::from_u128(0))
+                    matches!(length.known_term(),Some(Term::Integer(value)) if *value == comptime_runtime::Integer::from_u128(0))
                 );
             } else {
                 assert!(matches!(&length.data, PartialStagedData::Unknown));

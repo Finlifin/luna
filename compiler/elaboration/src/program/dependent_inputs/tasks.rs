@@ -8,7 +8,7 @@ enum Task {
     Default {
         slot: usize,
         value: n::Expr,
-        references: Vec<(n::LocalId, usize)>,
+        references: BTreeMap<n::LocalId, usize>,
     },
 }
 impl std::fmt::Display for Task {
@@ -342,21 +342,21 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                         .collect();
                     let before = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);
                     let mut fuel = before;
-                    let references = nir::preparation::references(&value, &mut fuel);
+                    let references = nir::free_bindings::collect(&value, &mut fuel);
                     checker.required_steps -= (before - fuel) as u64;
-                    let references = references.map_err(|e| error(source.span, e))?;
+                    let references = references.map_err(|e| error(source.span, e.to_string()))?;
                     spend(
                         &mut checker.required_steps,
                         references.len().saturating_mul(2),
                         source.span,
                     )?;
-                    let references: Vec<_> = references
+                    let references: BTreeMap<_, _> = references
                         .into_iter()
                         .filter_map(|binding| ids.get(&binding).map(|slot| (binding, *slot)))
                         .collect();
                     // Own the checked default while its referenced inputs are
                     // prepared. Resuming does not rebuild or invoke the default.
-                    let dependencies: Vec<_> = references.iter().map(|(_, slot)| *slot).collect();
+                    let dependencies: Vec<_> = references.values().copied().collect();
                     progress.after(
                         dependencies.into_iter(),
                         Task::Default {
@@ -376,8 +376,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     source,
                     route.is_some(),
                     value,
-                    vec![],
-                    None,
+                    BTreeMap::new(),
                     prepared,
                 )?;
                 progress.complete(slot, source.span)?;
@@ -387,40 +386,14 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 mut value,
                 references,
             } => {
-                let mut bindings = Vec::new();
-                for (binding, dependency) in &references {
-                    let value = prepared.values[*dependency].as_ref().ok_or_else(|| {
-                        error(source.span, "dependent default producer is incomplete")
-                    })?;
-                    let symbol = prepared.symbols[*dependency].as_ref().ok_or_else(|| {
-                        error(source.span, "dependent default identity is incomplete")
-                    })?;
-                    bindings.push((
-                        *binding,
-                        copy_evidence(&value.ty, &mut checker.required_steps, source.span)?,
-                        copy_evidence(symbol, &mut checker.required_steps, source.span)?,
-                    ));
-                }
                 let binding =
                     checker.prepare_call_binding(parameters, &prepared.symbols, source.span)?;
                 value
                     .rewrite_types(&mut |ty| binding.substitute(ty))
                     .map_err(|e| error(source.span, e.to_string()))?;
                 value.rewrite_types(&mut |ty| checker.callable_input_view(ty, source.span))?;
-                let forwarded = if let K::Local(binding) = value.kind {
-                    references
-                        .iter()
-                        .find(|(id, _)| *id == binding)
-                        .and_then(|(_, dependency)| prepared.symbols[*dependency].as_ref())
-                        .map(|symbol| {
-                            copy_evidence(symbol, &mut checker.required_steps, source.span)
-                        })
-                        .transpose()?
-                } else {
-                    None
-                };
                 checker.complete_type_dependency(
-                    slot, owner, callee, source, false, value, bindings, forwarded, prepared,
+                    slot, owner, callee, source, false, value, references, prepared,
                 )?;
                 progress.complete(slot, source.span)?;
             }
@@ -450,8 +423,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             self.source,
             true,
             value,
-            vec![],
-            None,
+            BTreeMap::new(),
             &mut self.prepared,
         )?;
         self.progress.complete(slot, self.source.span)?;
@@ -528,8 +500,7 @@ impl Checker<'_, '_> {
         source: &Expr<'_>,
         has_source: bool,
         value: n::Expr,
-        bindings: Vec<(n::LocalId, Term, Term)>,
-        forwarded_default: Option<Term>,
+        references: BTreeMap<n::LocalId, usize>,
         prepared: &mut PreparedInputs,
     ) -> Result<(), Error> {
         let observed = if matches!(value.kind, K::TypeValue(_)) {
@@ -537,9 +508,19 @@ impl Checker<'_, '_> {
         } else {
             self.preserved_input_identity(
                 &value,
-                bindings
-                    .iter()
-                    .map(|(binding, _, identity)| (*binding, identity)),
+                |id, fuel| {
+                    let Some(slot) = references.get(&id) else {
+                        return Ok(None);
+                    };
+                    let symbol = prepared.symbols[*slot].as_ref().ok_or_else(|| {
+                        error(source.span, "dependent default identity is incomplete")
+                    })?;
+                    Ok(Some(std::sync::Arc::new(copy_evidence(
+                        symbol,
+                        fuel,
+                        source.span,
+                    )?)))
+                },
                 source.span,
             )?
         };
@@ -560,9 +541,7 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        let (value, symbol) = if let Some(identity) = forwarded_default {
-            (value, identity)
-        } else if let Some(identity) = observed {
+        let (value, symbol) = if let Some(identity) = observed {
             // Identity evidence does not complete the producer. Its writes,
             // calls and control transfers remain at the source input slot.
             (value, identity)
@@ -611,12 +590,23 @@ impl Checker<'_, '_> {
                     } else {
                         match self.spread_input_symbol(*binding, &value.ty, source)? {
                             Some(symbol) => (value, symbol),
-                            None => self
-                                .complete_unobserved_call_input(callee, source, value, bindings)?,
+                            None => self.complete_unobserved_call_input(
+                                callee,
+                                source,
+                                value,
+                                &references,
+                                prepared,
+                            )?,
                         }
                     }
                 }
-                _ => self.complete_unobserved_call_input(callee, source, value, bindings)?,
+                _ => self.complete_unobserved_call_input(
+                    callee,
+                    source,
+                    value,
+                    &references,
+                    prepared,
+                )?,
             }
         };
         prepared.values[slot] = Some(value);
@@ -629,7 +619,8 @@ impl Checker<'_, '_> {
         callee: &n::Expr,
         source: &Expr<'_>,
         value: n::Expr,
-        bindings: Vec<(n::LocalId, Term, Term)>,
+        references: &BTreeMap<n::LocalId, usize>,
+        prepared: &PreparedInputs,
     ) -> Result<(n::Expr, Term), Error> {
         let callable = self.structural_type(&callee.ty, source.span)?;
         let callable = self.callable_input_view(&callable, source.span)?;
@@ -643,6 +634,20 @@ impl Checker<'_, '_> {
             return Err(context_error(
                 source.span,
                 "dependent call input needs its original comptime invocation; source execution continuation is not yet implemented",
+            ));
+        }
+        let mut bindings = Vec::new();
+        for (&binding, &slot) in references {
+            let producer = prepared.values[slot]
+                .as_ref()
+                .ok_or_else(|| error(source.span, "dependent default producer is incomplete"))?;
+            let symbol = prepared.symbols[slot]
+                .as_ref()
+                .ok_or_else(|| error(source.span, "dependent default identity is incomplete"))?;
+            bindings.push((
+                binding,
+                copy_evidence(&producer.ty, &mut self.required_steps, source.span)?,
+                copy_evidence(symbol, &mut self.required_steps, source.span)?,
             ));
         }
         self.freeze_dependency_input(source, value, bindings)
@@ -774,7 +779,7 @@ mod tests {
         let task = Task::Default {
             slot: 3,
             value,
-            references: vec![(n::LocalId { owner: 4, index: 2 }, 1)],
+            references: BTreeMap::from([(n::LocalId { owner: 4, index: 2 }, 1)]),
         };
         let mut progress = Progress::new(3);
         progress.tasks.clear();

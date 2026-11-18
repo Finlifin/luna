@@ -264,9 +264,7 @@ impl Checker<'_, '_> {
         let binding = self.spread_binding(span)?;
         let known = self.preserved_input_identity(
             &value,
-            known_bindings
-                .iter()
-                .map(|(binding, term)| (*binding, term.as_ref())),
+            |id, _| Ok(known_bindings.get(&id).cloned()),
             span,
         )?;
         if let Some(known) = known {

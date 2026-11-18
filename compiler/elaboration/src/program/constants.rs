@@ -54,7 +54,7 @@ pub(super) struct PartialStagedValue {
 #[derive(Debug, PartialEq)]
 enum PartialStagedData {
     Unknown,
-    Known(Term),
+    Known(std::sync::Arc<Term>),
     Aggregate(PartialStagedShape, Vec<std::sync::Arc<PartialStagedValue>>),
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -73,11 +73,17 @@ impl PartialStagedValue {
             data: PartialStagedData::Unknown,
         })
     }
-    fn known(value: Term) -> std::sync::Arc<Self> {
+    fn known(value: impl Into<std::sync::Arc<Term>>) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             depth: 0,
-            data: PartialStagedData::Known(value),
+            data: PartialStagedData::Known(value.into()),
         })
+    }
+    fn known_term(&self) -> Option<&Term> {
+        match &self.data {
+            PartialStagedData::Known(term) => Some(term.as_ref()),
+            _ => None,
+        }
     }
     fn charge(&self, fuel: &mut usize) -> Result<(), String> {
         let mut pending = vec![self];
@@ -1430,7 +1436,7 @@ impl Checker<'_, '_> {
             }
             let sequence = self.partial_staged_value_in(values, depth + 1, fuel, scope)?;
             let index = self.partial_staged_value_in(index, depth + 1, fuel, scope)?;
-            let PartialStagedData::Known(Term::Integer(index)) = &index.data else {
+            let Some(Term::Integer(index)) = index.known_term() else {
                 return Ok(PartialStagedValue::unknown());
             };
             *fuel = fuel
@@ -1443,8 +1449,8 @@ impl Checker<'_, '_> {
             else {
                 return Ok(PartialStagedValue::unknown());
             };
-            let known = match &sequence.data {
-                PartialStagedData::Aggregate(PartialStagedShape::List { ty, .. }, fields) => {
+            let known = match (&sequence.data, sequence.known_term()) {
+                (PartialStagedData::Aggregate(PartialStagedShape::List { ty, .. }, fields), _) => {
                     nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
                     return Ok(if *ty == values.ty {
                         fields
@@ -1455,11 +1461,14 @@ impl Checker<'_, '_> {
                         PartialStagedValue::unknown()
                     });
                 }
-                PartialStagedData::Known(Term::NominalValue {
-                    ty,
-                    variant: None,
-                    fields,
-                }) => {
+                (
+                    _,
+                    Some(Term::NominalValue {
+                        ty,
+                        variant: None,
+                        fields,
+                    }),
+                ) => {
                     nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
                     if **ty == values.ty {
                         fields.get(index)
@@ -1481,12 +1490,13 @@ impl Checker<'_, '_> {
         // never a pointer or a replay of the initializer that produced it.
         if let K::Field { value: base, .. } | K::AnonymousField { value: base, .. } = &value.kind {
             let base = self.partial_staged_value_in(base, depth + 1, fuel, scope)?;
-            let known = match (&value.kind, &base.data) {
+            let known = match (&value.kind, &base.data, base.known_term()) {
                 (
                     K::Field {
                         declaration, index, ..
                     },
                     PartialStagedData::Aggregate(PartialStagedShape::Record(actual), fields),
+                    _,
                 ) if declaration == actual => {
                     return Ok(fields
                         .get(*index)
@@ -1499,6 +1509,7 @@ impl Checker<'_, '_> {
                         PartialStagedShape::AnonymousRecord(names),
                         fields,
                     ),
+                    _,
                 ) => {
                     if let Some(actual) = names.get(*index) {
                         *fuel = fuel
@@ -1517,7 +1528,8 @@ impl Checker<'_, '_> {
                     K::Field {
                         declaration, index, ..
                     },
-                    PartialStagedData::Known(Term::NominalValue {
+                    _,
+                    Some(Term::NominalValue {
                         ty,
                         variant: None,
                         fields,
@@ -1525,10 +1537,7 @@ impl Checker<'_, '_> {
                 ) if matches!(ty.as_ref(), Term::Nominal { declaration: actual, .. } if declaration == actual) => {
                     fields.get(*index)
                 }
-                (
-                    K::AnonymousField { name, index, .. },
-                    PartialStagedData::Known(Term::RecordValue(fields)),
-                ) => {
+                (K::AnonymousField { name, index, .. }, _, Some(Term::RecordValue(fields))) => {
                     if let Some((actual, value)) = fields.get(*index) {
                         *fuel = fuel
                             .checked_sub(name.len().saturating_add(actual.len()))
@@ -1850,8 +1859,8 @@ impl Checker<'_, '_> {
         let before = fuel;
         let result = (|| {
             let value = self.partial_staged_value(value, 0, &mut fuel)?;
-            match &value.data {
-                PartialStagedData::Known(Term::TupleValue(fields)) if fields.len() == count => {
+            match (&value.data, value.known_term()) {
+                (_, Some(Term::TupleValue(fields))) if fields.len() == count => {
                     let mut result = Vec::new();
                     for field in fields {
                         nir::type_computations::charge_term(field, &mut fuel)
@@ -1860,7 +1869,7 @@ impl Checker<'_, '_> {
                     }
                     Ok(Some(result))
                 }
-                PartialStagedData::Aggregate(PartialStagedShape::Tuple, fields)
+                (PartialStagedData::Aggregate(PartialStagedShape::Tuple, fields), _)
                     if fields.len() == count =>
                 {
                     fuel = fuel
@@ -1950,7 +1959,7 @@ impl Checker<'_, '_> {
         let before = fuel;
         let result = (|| {
             let value = self.partial_staged_value(value, 0, &mut fuel)?;
-            let PartialStagedData::Known(ty) = &value.data else {
+            let Some(ty) = value.known_term() else {
                 return Ok(None);
             };
             if ty.sort() != Sort::Type {
@@ -1978,56 +1987,29 @@ impl Checker<'_, '_> {
         result
     }
 
-    /// Supply existing immutable facts to a structural observation. This does
-    /// not promote ordinary locals to staged inputs or replace their producers.
-    pub(super) fn observed_expression_bindings(
+    pub(super) fn observed_lexical_identity(
         &mut self,
-        expression: &n::Expr,
+        binding: n::LocalId,
         span: Span,
-    ) -> Result<BTreeMap<n::LocalId, std::sync::Arc<Term>>, Error> {
-        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let before = fuel;
-        let mut referenced = BTreeSet::new();
-        let result = (|| {
-            iir::visit::expression(expression, &mut fuel, |value, _| {
-                if let K::Local(binding) = value.kind {
-                    referenced.insert(binding);
-                }
-                Ok(())
-            })?;
-            let mut bindings = BTreeMap::new();
-            for binding in referenced {
-                if !self.locals.contains_key(&binding) || !self.immutable.contains(&binding) {
-                    continue;
-                }
-                let mut remaining = fuel as u64;
-                let supplied = self
-                    .input_facts
-                    .supplied
-                    .lookup(binding, &mut remaining, span);
-                fuel = remaining as usize;
-                if let Some((_, value)) = supplied.map_err(|failure| failure.message)? {
-                    let Some(value) = value else {
-                        continue;
-                    };
-                    let value = nir::copy_budget::clone_term(value, &mut fuel)
-                        .map_err(|failure| format!("required identity copy failed: {failure:?}"))?;
-                    bindings.insert(binding, std::sync::Arc::new(value));
-                    continue;
-                }
-                let Some(value) = self.input_facts.partial.get(&binding) else {
-                    continue;
-                };
-                if let PartialStagedData::Known(value) = &value.data {
-                    let value = nir::copy_budget::clone_term(value, &mut fuel)
-                        .map_err(|failure| format!("local identity copy failed: {failure:?}"))?;
-                    bindings.insert(binding, std::sync::Arc::new(value));
-                }
-            }
-            Ok(bindings)
-        })();
-        self.required_steps -= (before - fuel) as u64;
-        result.map_err(|message: String| error(span, message))
+    ) -> Result<Option<std::sync::Arc<Term>>, Error> {
+        if !self.locals.contains_key(&binding) || !self.immutable.contains(&binding) {
+            return Ok(None);
+        }
+        if let Some((_, supplied)) =
+            self.input_facts
+                .supplied
+                .shared(binding, &mut self.required_steps, span)?
+        {
+            return Ok(supplied.cloned());
+        }
+        Ok(self
+            .input_facts
+            .partial
+            .get(&binding)
+            .and_then(|value| match &value.data {
+                PartialStagedData::Known(term) => Some(term.clone()),
+                _ => None,
+            }))
     }
 
     /// Completed construction data may supply a nested required invocation,
@@ -2054,7 +2036,7 @@ impl Checker<'_, '_> {
         let Some(value) = self.input_facts.partial.get(&binding) else {
             return Ok(None);
         };
-        let PartialStagedData::Known(ty) = &value.data else {
+        let Some(ty) = value.known_term() else {
             return Ok(None);
         };
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
@@ -2082,7 +2064,7 @@ impl Checker<'_, '_> {
         self.required_steps -= (before - fuel) as u64;
         for (binding, value) in bindings.map_err(|e| error(span, e))?.1 {
             self.input_facts.partial.insert(binding, value.clone());
-            let PartialStagedData::Known(symbol) = &value.data else {
+            let Some(symbol) = value.known_term() else {
                 continue;
             };
             let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);

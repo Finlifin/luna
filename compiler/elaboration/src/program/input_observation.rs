@@ -125,25 +125,29 @@ impl Checker<'_, '_> {
     /// Observe identity while retaining the whole producer for execution.
     /// Facts describe earlier bound default inputs and new immutable locals.
     /// Unknown work invalidates facts; it never invokes code to recover them.
-    pub(super) fn preserved_input_identity<'value>(
+    pub(super) fn preserved_input_identity(
         &mut self,
         producer: &n::Expr,
-        initial: impl IntoIterator<Item = (n::LocalId, &'value Term)>,
+        mut prepared: impl FnMut(n::LocalId, &mut u64) -> Result<Option<std::sync::Arc<Term>>, Error>,
         span: Span,
     ) -> Result<Option<Term>, Error> {
         // Each new observation may use completed immutable caller bindings.
         // The owned query below invalidates them across unknown effects; never
         // reload these facts after beginning to walk the producer.
-        let mut facts = self.observed_expression_bindings(producer, span)?;
         let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let copied = initial.into_iter().try_for_each(|(binding, identity)| {
-            nir::type_computations::charge_term(identity, &mut fuel)?;
-            facts.insert(binding, std::sync::Arc::new(identity.clone()));
-            Ok::<_, nir::type_computations::Error>(())
-        });
+        let free = nir::free_bindings::collect(producer, &mut fuel);
         self.required_steps -= (before - fuel) as u64;
-        copied.map_err(|failure| error(span, failure.to_string()))?;
+        let mut facts = BTreeMap::new();
+        for binding in free.map_err(|failure| error(span, failure.to_string()))? {
+            let fact = match prepared(binding, &mut self.required_steps)? {
+                Some(identity) => Some(identity),
+                None => self.observed_lexical_identity(binding, span)?,
+            };
+            if let Some(identity) = fact {
+                facts.insert(binding, identity);
+            }
+        }
         let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut budget = comptime_runtime::Budget {
             steps: before,

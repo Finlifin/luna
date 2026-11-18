@@ -290,7 +290,9 @@ impl Checker<'_, '_> {
             // expressions. Observing a checked identifier preserves its scope;
             // it does not require a concrete invocation-time value.
             let checked = self.expr(value, Some(ty))?;
-            if let Some(identity) = self.preserved_input_identity(&checked, [], value.span)? {
+            if let Some(identity) =
+                self.preserved_input_identity(&checked, |_, _| Ok(None), value.span)?
+            {
                 return Ok(identity);
             }
             let (result, _) = self.required_normal_input(value, checked, Vec::new())?;

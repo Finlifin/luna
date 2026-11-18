@@ -69,6 +69,8 @@ comptime fn check() -> bool {
 
 ## 值引用与快照
 
+检查一个实参时，观察器先按表达式的词法作用域收集自由绑定，再从本次调用已准备的实参及调用者的可见绑定中取得证据。块内新建的绑定由块自身提供。已知值的不可变快照可以在子检查之间共享。写入会在当前作用域遮蔽旧值，观察器经过未知副作用后丢弃的事实也不能在同一次观察中重新加载。复制完整值时才按其结构计费。所观察的表达式仍在原调用中求值。[源码侧观察](../compiler/elaboration/src/program/input_observation.rs) · [调用作用域快照](../compiler/elaboration/src/program/required/inputs.rs)
+
 comptime 方法的 `self` 使用值引用。VM 在当前会话内保存 owner、投影路径与根重绑定权限。转交两个指向同一位置的引用必须保留别名；写入后再次读取，得到同一位置的新内容。已经独立取得的数据快照则保留旧内容。右值可能替换容器或执行回调，所以写回要在右值执行后重新定位路径，核对权限和域。写回失败不能造成半更新，也不能重放右值已产生的行为。[值引用实现](../compiler/comptime_interpretor/src/value_reference.rs) · [容器更新](../compiler/comptime_interpretor/src/immutable_storage.rs)
 
 Comptime 调用、缓存键协议和 Type 计算均无需 runtime 指针 Copy 或 Drop 授权。runtime 参考执行仍负责指针权限。一个 comptime Type 可描述 runtime 指针，quoted code 也可包含合法的 runtime 指针操作。[阶段与资源权限的公开用例](../compiler/luna/tests/comptime_resource_independence.rs)

@@ -29,32 +29,18 @@ impl PreparedObservations {
         facts: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
         span: Span,
     ) -> Result<Self, Error> {
-        let mut scope = Self { saved: Vec::new() };
-        let result = (|| {
-            for (binding, identity) in facts {
-                let mut fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
-                let before = fuel;
-                let copied = nir::copy_budget::clone_term(identity, &mut fuel);
-                *steps -= (before - fuel) as u64;
-                let copied = copied.map_err(|failure| {
-                    error(
-                        span,
-                        format!("prepared input observation failed: {failure:?}"),
-                    )
-                })?;
-                let previous = partial.insert(*binding, PartialStagedValue::known(copied));
-                let newly_immutable = immutable.insert(*binding);
-                scope.saved.push((*binding, previous, newly_immutable));
-            }
-            Ok(())
-        })();
-        match result {
-            Ok(()) => Ok(scope),
-            Err(failure) => {
-                scope.leave_in(partial, immutable);
-                Err(failure)
-            }
+        let Some(remaining) = steps.checked_sub(facts.len() as u64) else {
+            *steps = 0;
+            return Err(error(span, "prepared input observation budget exhausted"));
+        };
+        *steps = remaining;
+        let mut saved = Vec::with_capacity(facts.len());
+        for (binding, identity) in facts {
+            let previous = partial.insert(*binding, PartialStagedValue::known(identity.clone()));
+            let newly_immutable = immutable.insert(*binding);
+            saved.push((*binding, previous, newly_immutable));
         }
+        Ok(Self { saved })
     }
 
     pub(in crate::program) fn leave(self, checker: &mut Checker<'_, '_>) {
@@ -87,7 +73,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn prepared_observations_restore_partial_installation_without_refunding_work() {
+    fn prepared_observations_charge_before_publishing_a_scope() {
         let ids = [1, 2, 3].map(|index| n::LocalId { owner: 1, index });
         let original = PartialStagedValue::known(Term::Bool(false));
         let facts = BTreeMap::from([
@@ -124,6 +110,29 @@ mod tests {
             assert!(Arc::ptr_eq(&partial[&ids[0]], &original));
             assert_eq!(partial.len(), 1);
         }
+    }
+
+    #[test]
+    fn a_child_check_shares_prepared_payloads_before_it_reads_them() {
+        let id = n::LocalId { owner: 3, index: 4 };
+        let large = Arc::new(Term::TupleValue(vec![Term::Bool(true); 2048]));
+        let facts = BTreeMap::from([(id, large.clone())]);
+        let mut partial = BTreeMap::new();
+        let mut immutable = BTreeSet::new();
+        let scope = PreparedObservations::enter_in(
+            &mut partial,
+            &mut immutable,
+            &mut 1,
+            &facts,
+            Span::default(),
+        )
+        .unwrap();
+        assert!(std::ptr::eq(
+            partial[&id].known_term().unwrap(),
+            large.as_ref()
+        ));
+        scope.leave_in(&mut partial, &mut immutable);
+        assert!(partial.is_empty() && immutable.is_empty());
     }
 
     #[test]

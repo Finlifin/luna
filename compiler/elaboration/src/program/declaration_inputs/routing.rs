@@ -316,9 +316,7 @@ impl<'h> Frame<'h> {
         let fields = self.packet_fields(checker, &value, input_index, packet.span)?;
         let observed = checker.preserved_input_identity(
             &value,
-            self.prepared_bindings
-                .iter()
-                .map(|(binding, term)| (*binding, term.as_ref())),
+            |id, _| Ok(self.prepared_bindings.get(&id).cloned()),
             packet.span,
         )?;
         let mut observed_fields = match observed {
