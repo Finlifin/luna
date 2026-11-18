@@ -39,3 +39,26 @@ fn borrowed_children_keep_telescope_order_and_stop_on_failure() {
     );
     assert_eq!(visits, 2);
 }
+
+#[test]
+fn runtime_environment_observation_handles_deep_types_on_a_small_stack() {
+    use nir::RuntimeId;
+    std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            let object = RuntimeId {
+                instance: 11,
+                local: 4,
+            };
+            let mut term = Term::Runtime(object);
+            for _ in 0..10_000 {
+                term = Term::Pointer(Box::new(term));
+            }
+            let dependencies = term.runtime_dependencies();
+            term.drop_iteratively();
+            assert_eq!(dependencies, [object].into());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

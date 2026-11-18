@@ -2,7 +2,10 @@
 //! nominal type identity; a check merely guards evaluation of an alias body.
 use crate::program::{TraitRequirement, TypePredicate};
 use crate::{DeclarationId, DeclarationParameter, Term, TypeError};
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Contract {
@@ -72,13 +75,27 @@ pub fn validate(contracts: &[Contract]) -> Result<(), &'static str> {
 
 /// Validate formation evidence using the caller's allowance, including failure.
 pub fn validate_in(contracts: &[Contract], fuel: &mut usize) -> Result<(), ValidationError> {
+    admit_in(contracts, fuel).map(drop)
+}
+
+/// Positions refer to the declaration snapshot that admitted these contracts.
+/// A dependent slot still needs substitution and admission at the use site.
+pub(crate) struct AdmittedContract {
+    pub position: usize,
+    pub dependent_slots: BTreeSet<usize>,
+}
+
+pub(crate) fn admit_in(
+    contracts: &[Contract],
+    fuel: &mut usize,
+) -> Result<BTreeMap<DeclarationId, AdmittedContract>, ValidationError> {
     use ValidationError::Invalid;
     charge(fuel, contracts.len())?;
-    let mut identities = BTreeSet::new();
-    for contract in contracts {
+    let mut admitted = BTreeMap::new();
+    for (position, contract) in contracts.iter().enumerate() {
         charge(fuel, contract.parameters.len())?;
         charge(fuel, contract.parameter_types.len())?;
-        if !identities.insert(contract.declaration) {
+        if admitted.contains_key(&contract.declaration) {
             return Err(Invalid("duplicate alias contract identity"));
         }
         let parameters: BTreeSet<_> = contract.parameters.iter().copied().collect();
@@ -97,17 +114,19 @@ pub fn validate_in(contracts: &[Contract], fuel: &mut usize) -> Result<(), Valid
             .map(|(index, binder)| (binder.declaration, (binder.sort, index)))
             .collect();
         // Domains form a telescope: only earlier binders are in scope.
+        let mut dependent_slots = BTreeSet::new();
         for (index, domain) in contract.parameter_types.iter().enumerate() {
-            if domain
+            let references = domain
                 .rigid_parameters()
-                .map_err(|_| Invalid("invalid alias contract parameter sorts"))?
-                .into_iter()
-                .any(|(id, sort)| {
-                    !positions
-                        .get(&id)
-                        .is_some_and(|(expected, position)| *expected == sort && *position < index)
-                })
-            {
+                .map_err(|_| Invalid("invalid alias contract parameter sorts"))?;
+            if !references.is_empty() {
+                dependent_slots.insert(index);
+            }
+            if references.into_iter().any(|(id, sort)| {
+                !positions
+                    .get(&id)
+                    .is_some_and(|(expected, position)| *expected == sort && *position < index)
+            }) {
                 return Err(Invalid(
                     "alias contract domain has an unavailable parameter",
                 ));
@@ -171,8 +190,15 @@ pub fn validate_in(contracts: &[Contract], fuel: &mut usize) -> Result<(), Valid
                 },
             }
         }
+        admitted.insert(
+            contract.declaration,
+            AdmittedContract {
+                position,
+                dependent_slots,
+            },
+        );
     }
-    Ok(())
+    Ok(admitted)
 }
 
 fn charge(fuel: &mut usize, amount: usize) -> Result<(), ValidationError> {

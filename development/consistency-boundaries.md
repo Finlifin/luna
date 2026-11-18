@@ -11,7 +11,7 @@
 | C02 | NF 头永不因主体展开消失 | 应用形成 → substitution/freeze → PTC/IIR | Identity 的主体返回 T，应用仍不能当 T |
 | C03 | Type 列表为普通值 | 参数计划 → VM/freeze → NF/反射 | 用户工厂接受 List<Type> 与 Tuple 一样；错元素域仍拒绝 |
 | C04 | 显式输入与可解元变量分开 | 调用绑定 → candidate/CDCL → commit | 不为匹配候选改写显式类型或定义端参数 |
-| C05 | scope/binder 随替换保留 | HIR/代码值 → 共用重绑定 → 实例/控制 | 嵌套同名变量、依赖域、return 目标不能被文本替换捕获 |
+| C05 | scope/binder 随替换保留 | HIR/代码值 → 共用重绑定 → 实例/控制 | 绑定改名及代入实参时，函数实例、闭包快照和方法值里的自由声明都保留原身份；嵌套控制流另行保留 return 目标。[结构依赖与捕获](dependency-observations.md#47-受检结构中的输入依赖) |
 | C06 | Any 相容不产生相等或代码 | 描述形成 → observation → code admission | q:Any 实为 pattern，expr splice 必须拒绝；any 不是程序 |
 | C07 | 检查顺序与执行顺序分开 | ArgumentPlan → staging/inline → VM/native | 后实参推导前 lambda，仍按源规则执行；显式值不重算 |
 | C08 | 默认值按各自阶段/覆盖规则执行 | 签名默认 → 参数准备 → invocation | 显式覆盖不运行默认；子句默认不静默 defer |

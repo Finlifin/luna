@@ -254,6 +254,7 @@ impl<'a> PhaseContext<'a> {
             storage_queries,
         } = self;
         let declarations::Declarations {
+            aliases,
             parameter_domains,
             trait_index,
             ..
@@ -1050,11 +1051,10 @@ impl<'a> PhaseContext<'a> {
                                     "alias formation guard requires comptime execution",
                                 ));
                             }
-                            let contract = package
-                                .alias_contracts
-                                .iter()
-                                .find(|contract| contract.declaration == *declaration)
+                            let admitted = aliases
+                                .get(declaration)
                                 .ok_or_else(|| error("missing alias formation contract"))?;
+                            let contract = &package.alias_contracts[admitted.position];
                             let diverges = arguments
                                 .iter()
                                 .any(crate::program::NormalFormArgument::is_diverging)
@@ -1082,10 +1082,7 @@ impl<'a> PhaseContext<'a> {
                                         .parameter_types
                                         .get(index)
                                         .unwrap_or(&Term::Primitive(Primitive::Type));
-                                    !contract
-                                        .parameters
-                                        .iter()
-                                        .any(|id| domain.mentions_rigid(*id))
+                                    !admitted.dependent_slots.contains(&index)
                                         && argument.expression().is_some_and(|argument| {
                                             &argument.ty != domain
                                                 && argument.ty != Term::Primitive(Primitive::Never)

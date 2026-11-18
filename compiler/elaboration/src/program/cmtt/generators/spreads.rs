@@ -270,7 +270,12 @@ impl Checker<'_, '_> {
             let Input::Data(ty) = &definition.inputs[route.parameter].1 else {
                 continue;
             };
-            if unresolved.iter().any(|id| ty.mentions_rigid(*id)) {
+            if input_observation::uses_any(
+                ty,
+                unresolved.iter().copied(),
+                &mut self.required_steps,
+                span,
+            )? {
                 continue;
             }
             let collection = if route.is_collected() {

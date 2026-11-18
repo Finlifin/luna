@@ -334,138 +334,30 @@ capability 形成递归的修复前错误见 `/tmp/luna-tools-0nmp1s3o/result.js
 该阶段未运行全 workspace、整个 CMTT 组、native 或性能基准；当时 runtime staged
 捕获闭包的既有 ignored 尚未接通，后续修复见 §4.8。签名捕获与调用实参准备是两个独立问题。
 
-### 4.7 已接通：检查后结构的依赖观察不改写代码
+### 4.7 受检结构中的输入依赖
 
-源码自由输入与检查后结构中的输入是不同的观察。前者保存词法捕获和声明关系；
-后者读取 NIR 中已经形成的类型、值与元数据。两者都不授权执行 producer，
-也不能单独证明某个输入在当前阶段已经可用。
+局部源码按词法作用域取得自由输入。表达式检查完成后，可以直接借用 NIR 观察其中的
+类型、值、pattern、闭包主体和契约。普通默认实参、开放函数和 CMTT 候选用这一步判断
+还需哪些声明输入。读取候选所需的证据时，实参生产者仍在原来的调用位置等待执行。
+[源码观察入口](../compiler/elaboration/src/program/input_observation.rs)
 
-`nir::copy_budget::expression_declaration_inputs` 复用现有完整的借用遍历，
-收集嵌入 Term 中的 rigid 声明身份。范围包括表达式类型、值载荷、pattern、
-调用实参身份、效应操作及签名、pending intrinsic 和共享闭包主体；
-不追进被引用的全局声明，也不展开 opaque normal-form 头。
-这个接口不调用 `rewrite_types`，不重分类 StagedValue，不用 `Arc::make_mut`
-复制共享主体。默认值检查需要的是依赖集合，不是一个仅用于观察的改写副本。
+**一个可调用值同时携带声明身份和实例实参。** 假设一个类型域使用函数值
+`f<T>` 作索引，域依赖 T。判断是否引用 f 对应的形参时，只计入实际的刚性引用；
+函数身份上的同号声明无须供应。闭包快照使用同一规则处理 factory 和实参。方法值还
+要读取接收者、trait 实参和方法实参。三者在 NIR 中都通过同一张直接子项表遍历。
+收集 runtime 对象依赖时也沿这些边寻找 RuntimeId；检查 TypeRef 时要观察引用端
+的完整替换，包括仅出现在参数契约中的输入。[NIR 子项](../compiler/nir/src/type_children.rs)
 
-类型默认值的自引用／后向引用检查、普通函数默认值的 typed 后备观察和 CMTT
-子句计划／恢复均使用该接口。CMTT 候选每次迭代分别观察声明签名的输入域与结果域，
-将是否等待未完成子句的判断用于实参证据和上下文约束；同一迭代不再对每个未完成
-绑定重复扫描同一类型，后续迭代仍重新判断，不跨候选缓存活动状态。
+| 消费者 | 观察的输入 | 成功后可以作的判断 |
+| --- | --- | --- |
+| 默认值、开放函数及普通调用 | 已检查表达式中的刚性声明，以及最外层 substitution frame 的槽和 sort | 决定当前域还缺哪些输入。嵌套函数的参数和结果跨入一层 binder；阶段包装与闭包环境保持原层数。 |
+| required 调用准备 | 所携快照的输入域和值、结果域、调用前提、选入函数的主体与契约 | 判断原准备结果是否使用某声明。抽象值传送许可本身不产生依赖；活动候选有自己的观察和预算。 |
+| CMTT 生成器与方法 | 表达式代码的输入和结果、pattern 的 subject 和输出、普通数据以及里面的实例实参 | 子句域先于普通输入；随后按槽位检查，每个普通输入在自己的域检查后才引入绑定。传入值和签名改名都要避免捕获调用者的自由声明。 |
+| 透明别名的阶段检查 | 声明世界接纳别名时，在验证有序参数域的同时记录含依赖的槽 | 闭合槽可以在阶段检查中比较实参标注。依赖槽交给实际调用执行代换与值域准入。声明世界更换后重新产生该索引。 |
 
-开放函数的 `open_computation_uses_clauses` 也不再复制主体或调用改写器。
-观察由 `PreparedRequired::uses_declaration_inputs` 在准备结果自身完成，只依赖
-所携带的快照与调用方预算，不读取当前 Checker 世界。检查范围包括输入域与已供应值、
-结果域、scope 实参、invocation 前提，以及准备时选入的函数代码与契约。
-函数观察复用同一结构遍历，覆盖默认值、前后条件、类型谓词和 capability，
-修正旧扫描仅覆盖签名和主体的缺口。它仍是准备包内的保守结构观察，不模拟控制流。
-
-`abstract_parameters`、`abstract_value_parameters` 和 binder 声明列表表示环境允许
-传送哪些身份，不凭这些列表产生输入需求。只比较名字或 interface 身份也不构成
-rigid 输入使用。周围未被选入的源码声明和全局实现世界不参与此项扫描；
-这是 invocation 就绪的一个必要检查，不取代后续的作用域、域、证明与执行准入。
-共享的预算与错误映射收在 `program/input_observation.rs`，普通默认值、CMTT 和
-准备结果复用它，避免让只读观察依赖名义类型默认值模块或活动 Checker 状态。
-
-普通调用的 substitution 输入现在也通过只读结构观察取得。共同 Term 遍历携带
-相对当前 Term 根跨越的函数 binder 数量；`Bound.depth` 与该数量相等时才属于
-外层调用 telescope。函数的参数域和结果共同跨入一层，callable 阶段包装与 closure
-环境不额外建立 binder。内部参数和更远的环境不会被误记为当前调用槽；显式 NF
-实参继续被观察，opaque 头本身不展开。
-
-`expression_substitution_parameters` 与 `term_substitution_parameters` 返回带 sort
-的槽映射，嵌入 Term 对同一槽给出矛盾 sort 时拒绝。它们沿用上述完整结构遍历，
-不调用 `Term::rewrite`，不复制共享 closure body，也不改变 StagedValue 的分类。
-已替换开放函数默认值的 typed 依赖收集，以及 `dependent_inputs` 中独立实参选择、
-参数／结果／契约的需求收集、默认值内部注解和递归输入供应；开放注解契约就绪判断
-也改用有界 declaration/slot 观察。dependent 实参中尚未完成子句的检查改为共同
-rigid 观察，删除剩余的“改写后返回原 Term”扫描。
-
-开放函数模块现已删除全部旧 `mentions_rigid`、`rigid_parameters` 和
-`substitution_parameters` 查询。`TermInputs` 在一次结构遍历中分别收集 declaration
-身份与当前 substitution frame 的带 sort 输入；相同身份的矛盾 sort 拒绝，两个映射
-不会在失败时部分返回，dump 使用稳定 S-expression。函数值的独立域、未完成值输入、
-注解契约就绪和实例捕获使用这一结果；只需要一种输入时继续使用对应的单项观察。
-实例捕获沿域递归取得必要声明，仍验证 scope、sort 与 comptime 域证据，不把观察
-本身当作捕获授权。先计费后再次改写扫描的路径也随之删除。
-
-普通泛型描述与开放子句推断的 unknown 支持集，改为每个未知实参域只观察一次，
-再对各泛型输入做集合查询。原来每个泛型输入都会重复遍历同一批域；现在遍历工作量
-随被选域的结构总量增长，另加集合维护和查询成本。支持集只在当前描述／候选判断中
-保存，不跨活动候选缓存，也不改变默认值依赖闭包、Phantom 拒绝或未检查操作的责任。
-
-普通参数的类型契约选择不再通过 `is_ok_and` 将槽观察失败吞成无依赖；预算、深度
-或 sort 矛盾都会返回失败，不能因此跳过契约。这里观察的是已形成 NIR 中各 Term
-的当前外层 substitution frame，不是整个语言的 scope 验证，也不是 runtime 输入
-可在 comptime 读取的授权。实际代换与 callable view 形成仍使用改写器。
-
-表达式观察沿用 copy preflight 的保守结构成本与深度界限，包括集合和字符串宽度；
-这不是专门优化过的轻量成本模型。独立 Term 的 declaration 观察使用有界声明收集器，
-组合观察与 substitution 槽观察复用带 binder 深度的有界结构遍历。
-两者在失败时仍扣除已消耗预算，不公布部分依赖集，不把耗尽转成空集或 ready。
-上述消费者已迁移，其他模块中的 `mentions_rigid` 与旧槽查询仍需逐项清理；
-本阶段也没有把它升级成跨 world 的依赖缓存或发布协议。
-
-验证工作目录为 `/home/fin/luna`，入口为
-`python3 -B development/check.py --timeout 900 -- test`：
-
-| 范围 | 本阶段实际结果与证据 |
-| --- | --- |
-| NIR 观察、复制预算、改写与类型项遍历 | `-p nir --test declaration_input_observation --test copy_budget --test type_rewrite --test type_computations`，53 项通过、退出 0；`/tmp/luna-tools-3fw8cpyc/result.json`。验证共享主体身份、残余值节点、隐藏元数据、opaque 头、耗尽与重试。 |
-| pending intrinsic 私有元数据 | `-p nir --lib pending_dependency_tests`，1 项通过、退出 0；`/tmp/luna-tools-78z0d_h6/result.json`。 |
-| 默认值、子句、预算恢复与 trait 域 | `-p luna --test inline_pattern_observation --test default_calls --test comptime_clause_inputs --test trait_domain_substitution`，99 项通过、退出 0；`/tmp/luna-tools-p0_nbrx9/result.json`。新增用例在同一 HIR 上耗尽检查后依赖观察预算，再用充足预算完成检查与执行。 |
-| 捕获默认值与 CMTT | `clause_source_dependencies` 3 项通过；`cmtt` 588 项通过、6 项既有失败，整轮退出 101；`/tmp/luna-tools-dpd2n9sx/result.json`。6 项诊断及 span 与 §4.6 基线完全一致。该轮在 CMTT 失败后未执行的组已由上一行单独运行。 |
-
-六个修改的 Rust 文件通过 rustfmt check，退出 0，证据
-`/tmp/luna-tools-39ju6tdp/result.json`。清单、源码哈希与基线比较保存于
-`/tmp/luna-typed-input-observation-6n7s0z2x`。未运行全 workspace、native 或性能基准，
-不能据此宣称整体编译耗时的改善幅度。
-
-准备结果接线的验证同样从 `/home/fin/luna` 经上述入口执行：
-
-- `-p elaboration --lib program::required::prepared::tests`，13 项通过，退出 0；
-  `/tmp/luna-tools-22t1fap2/result.json`。逐项检查携带的域、值与契约，确认环境授权
-  不自动产生依赖，观察不改变共享主体或残余节点，失败后可以重新观察并继续既有调用协议。
-- `-p luna --test prepared_input_dependencies --test inline_pattern_observation --test open_functions --test clause_source_dependencies --test function_type_dependencies --test function_type_parameters --no-fail-fast`，
-  502 项通过，退出 0；`/tmp/luna-tools-7fau4z7c/result.json`。新的真实 sysroot 用例
-  通过泛型转发保留捕获闭包的延迟类型计算，分别实例化 bool/u8 并拒绝错误域；
-  预算用例在同一 HIR 上验证准备依赖观察耗尽及新尝试恢复。
-- 六个修改的常规排版 Rust 文件通过 rustfmt check，退出 0；
-  `/tmp/luna-tools-va19wd79/result.json`。大型 `program.rs` 与 `open_functions.rs`
-  仅修改模块登记和对应方法，没有全文件重排；`git diff --check` 通过。
-
-本次清单、源码哈希与完整命令结果在 `/tmp/luna-prepared-input-observation-w14blcpa`。
-未重跑整个 CMTT 组，不将上一阶段的结果当作本阶段运行证据；没有运行全 workspace、
-native 或性能基准。其余 typed 依赖判断、生命周期和查询失效迁移仍未完成。
-
-作用域槽观察迁移的验证仍在 `/home/fin/luna` 经同一入口执行：
-
-| 范围 | 实际结果与证据 |
-| --- | --- |
-| NIR 只读观察、预算、残余与改写 | `-p nir --test substitution_input_observation --test declaration_input_observation --test copy_budget --test type_computations --test type_rewrite`，57 项通过，退出 0；`/tmp/luna-tools-82j9n8ip/result.json`。新增检查内外层槽区分、矛盾 sort 拒绝、共享主体不复制、残余节点不重分类和耗尽后恢复。 |
-| 开放函数、函数类型与源码预算恢复 | `-p luna --test scoped_input_observation --test inline_pattern_observation --test function_type_dependencies --test function_type_parameters --test open_functions --no-fail-fast`，501 项通过，退出 0；`/tmp/luna-tools-vpgethza/result.json`。 |
-| 默认调用、子句、局部定义与捕获 | `-p luna --test default_calls --test comptime_clause_inputs --test function_template_local_definitions --test clause_source_dependencies --test source_input_dependencies --test signature_source_readiness --no-fail-fast`，121 项通过、1 项既有 ignored，退出 0；`/tmp/luna-tools-ajhroyea/result.json`。ignored 仍为泛型默认值的 P3／Copy 表示证据缺口。 |
-| 真实 sysroot 最终源码用例 | `-p luna --test scoped_input_observation`，2 项通过，退出 0；`/tmp/luna-tools-rtsl17r_/result.json`。默认值中的嵌套 callable 与外层 T 注解分别检查，reference/IIR 执行成功。 |
-
-最终源码用例在上一轮基础上补入显式的 `comptime fn(value: T) -> T` 内部注解；
-生产代码仅调整相关片段排版，没有后续语义修改。完整清单、源码哈希、检查命令与
-受保护文件核对在 `/tmp/luna-scoped-input-observation-cit91oum`。未运行全 workspace、
-整个 CMTT 组或性能基准，不据此宣称整体编译耗时改善。
-七个常规排版 Rust 文件的 rustfmt check 退出 0，证据
-`/tmp/luna-tools-chyjyto1/result.json`；大型 `open_functions.rs` 只调整修改片段，
-`git diff --check` 通过。
-
-开放函数查询退役后的最终验证仍使用上述工作目录与入口：
-
-| 范围 | 实际结果与证据 |
-| --- | --- |
-| 合并输入观察、scope/sort 与结构预算 | `-p nir --test substitution_input_observation --test declaration_input_observation --test copy_budget`，29 项通过，退出 0；`/tmp/luna-tools-9va3xg_w/result.json`。组合映射与单独槽观察消耗相同结构预算，覆盖冲突后不返回部分结果、重试及 S-expression。 |
-| 开放函数、未知域支持与函数类型 | `-p luna --test open_input_observation --test open_functions --test inline_pattern_observation --test function_type_dependencies --test function_type_parameters --no-fail-fast`，502 项通过，退出 0；`/tmp/luna-tools-wy5j3veb/result.json`。真实 sysroot 覆盖 runtime/comptime 两种默认链、多实例、Phantom 拒绝和 pending 实参的非法操作；正例执行 reference 与 IIR。 |
-| 注解行为、NF 参数计划、子句及 callable | `-p luna --test open_annotation_behavior --test open_normal_input_plans --test normal_form_domains --test normal_form_inference --test scoped_comptime_callables --test comptime_clause_inputs --test ordinary_clause_collectors --test default_calls --no-fail-fast`，163 项通过、1 项既有 ignored，退出 0；`/tmp/luna-tools-ge8ugekp/result.json`。ignored 为变参域等待 Type producer 的既有缺口。 |
-
-四个常规排版 Rust 文件通过 rustfmt check，证据 `/tmp/luna-tools-v6kh39k7/result.json`；
-大型 `open_functions.rs` 仅排版修改片段，`git diff --check` 通过。该模块内三个旧查询
-名称已无调用；其他模块仍有待迁移消费者。清单、检查命令、源码哈希和原有修改核对在
-`/tmp/luna-open-input-observation-26cpowfm`。未运行全 workspace、整个 CMTT 组或性能基准。
+有界的观察保留步数、深度和作用域失败；观察失败时不能把该域当作已就绪。
+同一最外层槽的不同 sort 在需要带 sort 的观察中会被拒绝。源码签名中仍有使用重写器
+的作用域与替换操作；这里的结构引用关系只回答依赖问题。[表达式观察](../compiler/nir/src/copy_budget.rs) · [CMTT 接口](../compiler/nir/src/code_interfaces.rs) · [别名声明接纳](../compiler/nir/src/type_aliases.rs)
 
 ### 4.8 已接通：staged 实参保留 invocation 输入
 

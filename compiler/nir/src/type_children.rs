@@ -2,6 +2,28 @@
 use crate::Term;
 
 impl Term {
+    /// Borrow stored terms for unordered dependency queries. Declaration heads
+    /// are identities; their supplied arguments are structural children.
+    pub(crate) fn structural_terms(&self) -> impl Iterator<Item = &Term> {
+        let mut root = Some(self);
+        let mut pending = Vec::new();
+        std::iter::from_fn(move || {
+            let term = root.take().or_else(|| pending.pop())?;
+            term.visit_children(|child| {
+                pending.push(child);
+                Ok::<_, std::convert::Infallible>(())
+            })
+            .unwrap_or_else(|never| match never {});
+            Some(term)
+        })
+    }
+
+    /// Whether an argument or domain contains this definition-side parameter.
+    pub fn mentions_rigid(&self, declaration: crate::DeclarationId) -> bool {
+        self.structural_terms()
+            .any(|term| matches!(term, Self::Rigid { declaration: id, .. } if *id == declaration))
+    }
+
     /// Visit immediate children without cloning terms or allocating a worklist.
     /// Order is stable: product fields and arguments keep their stored order;
     /// function parameter types precede the result. Error/effect results precede

@@ -1249,3 +1249,94 @@ fn bounded_contextual_method_substitution_charges_ports_and_keeps_code_category(
     );
     assert_eq!(arguments, vec![Term::Primitive(Primitive::U8)]);
 }
+
+#[test]
+fn callable_instance_inputs_participate_in_telescope_and_capture_checks() {
+    use nir::{
+        DeclarationParameter, TraitMethodIdentity, code_interfaces::CodeInput,
+        program::InterfaceInstance,
+    };
+    let signature = dependent_signature();
+    let local = signature.input_binders[&0].declaration;
+    let free = DeclarationId {
+        package: 8,
+        local: 7,
+    };
+    let carrier = |kind, origin, argument| Term::Nominal {
+        declaration: DeclarationId {
+            package: 8,
+            local: 9,
+        },
+        arguments: vec![match kind {
+            0 => Term::FunctionValue {
+                declaration: origin,
+                arguments: vec![argument],
+            },
+            1 => Term::ClosureSnapshot {
+                factory: origin,
+                arguments: vec![argument],
+            },
+            _ => Term::MethodValue(Box::new(TraitMethodIdentity {
+                interface: InterfaceInstance {
+                    declaration: origin,
+                    arguments: vec![],
+                },
+                subject: Term::Primitive(Primitive::Bool),
+                member: origin,
+                method_arguments: vec![argument],
+            })),
+        }],
+    };
+    let rigid = |declaration| Term::Rigid {
+        declaration,
+        sort: Sort::Type,
+    };
+    for kind in 0..3 {
+        let mut actual = signature.clone();
+        actual
+            .clause_domains
+            .push(carrier(kind, free, rigid(local)));
+        assert!(
+            matches!(actual.charge(&mut 10_000), Err(Error::Structure(message)) if message.contains("before its binding"))
+        );
+        actual.clause_domains.clear();
+        // Matching the origin alone introduces no free input.
+        actual
+            .clause_domains
+            .push(carrier(kind, local, Term::Primitive(Primitive::Bool)));
+        actual.charge(&mut 10_000).unwrap();
+        let supplied = carrier(kind, local, rigid(free));
+        assert!(supplied.mentions_rigid(free));
+        assert!(!supplied.mentions_rigid(local));
+        actual.output.result = supplied.clone();
+        let mut reference = signature.clone();
+        reference.input_binders.get_mut(&0).unwrap().declaration = free;
+        assert!(
+            matches!(actual.align_input_binders(&reference, &[], &mut 10_000),
+            Err(Error::Structure(message)) if message.contains("capture a free declaration"))
+        );
+        actual.inputs.push((
+            LocalId { owner: 3, index: 2 },
+            CodeInput::Data(Term::Primitive(Primitive::Type)),
+        ));
+        actual.input_binders.insert(
+            2,
+            DeclarationParameter {
+                declaration: free,
+                sort: Sort::Type,
+            },
+        );
+        assert!(
+            matches!(actual.specialize_input(0, &supplied, &[], &mut 10_000),
+            Err(Error::Structure(message)) if message.contains("capture a caller declaration"))
+        );
+        actual
+            .specialize_input(
+                0,
+                &carrier(kind, free, Term::Primitive(Primitive::Bool)),
+                &[],
+                &mut 10_000,
+            )
+            .unwrap();
+    }
+}

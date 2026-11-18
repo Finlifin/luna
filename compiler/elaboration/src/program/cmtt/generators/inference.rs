@@ -81,10 +81,12 @@ impl Checker<'_, '_> {
             // Reading a closed result is safe evidence. Do not instantiate
             // clause defaults or execute contextual arguments during probing.
             if output.check_scope(&[]).is_err()
-                || definition
-                    .types
-                    .iter()
-                    .any(|(id, _)| output.mentions_rigid(*id))
+                || input_observation::uses_any(
+                    output,
+                    definition.types.iter().map(|(id, _)| *id),
+                    &mut self.required_steps,
+                    value.span,
+                )?
             {
                 return Ok(None);
             }
@@ -241,7 +243,14 @@ impl Checker<'_, '_> {
                 if result.check_scope(&[]).is_err() {
                     return Ok(None);
                 }
-                if generic.is_some_and(|ids| ids.iter().any(|id| result.mentions_rigid(*id))) {
+                if let Some(ids) = generic
+                    && input_observation::uses_any(
+                        result,
+                        ids.iter().copied(),
+                        &mut self.required_steps,
+                        value.span,
+                    )?
+                {
                     return self.generator_inferred_result_hint(
                         definition.unwrap(),
                         arguments,
@@ -329,10 +338,12 @@ impl Checker<'_, '_> {
         if result.check_scope(&[]).is_err() {
             return Ok(None);
         }
-        if parameters[arguments.len()..]
-            .iter()
-            .any(|parameter| result.mentions_rigid(*parameter))
-        {
+        if input_observation::uses_any(
+            result,
+            parameters[arguments.len()..].iter().copied(),
+            &mut self.required_steps,
+            span,
+        )? {
             let mut supplied = Vec::with_capacity(inputs.len() + 1);
             supplied.push(Arg::Positional(base));
             supplied.extend(inputs.iter().cloned());

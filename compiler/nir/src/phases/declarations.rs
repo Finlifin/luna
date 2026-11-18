@@ -3,6 +3,7 @@
 use super::*;
 
 pub(super) struct Declarations {
+    pub(super) aliases: BTreeMap<crate::DeclarationId, crate::type_aliases::AdmittedContract>,
     pub(super) parameter_domains: std::sync::Arc<BTreeMap<crate::DeclarationId, Term>>,
     pub(super) trait_index: trait_index::Index,
     pub(super) callables: std::sync::Arc<crate::callable_source::Positions>,
@@ -22,6 +23,18 @@ impl Declarations {
             })?;
         let parameter_domains = parameters::domains(package, declaration_fuel)
             .map_err(parameters::Failure::into_diagnostic)?;
+        let aliases = crate::type_aliases::admit_in(&package.alias_contracts, declaration_fuel)
+            .map_err(|failure| {
+                let source = SourceRange { start: 0, end: 0 };
+                match failure {
+                    crate::type_aliases::ValidationError::Budget => {
+                        Error::budget(source, failure.message())
+                    }
+                    crate::type_aliases::ValidationError::Invalid(message) => {
+                        Error::invalid(source, message)
+                    }
+                }
+            })?;
         for definition in &package.enums {
             definition
                 .validate_encoding_in(package.target)
@@ -46,6 +59,7 @@ impl Declarations {
         })?;
         let callables = crate::callable_source::Positions::build(package, declaration_fuel)?;
         Ok(Self {
+            aliases,
             parameter_domains: std::sync::Arc::new(parameter_domains),
             trait_index,
             callables,

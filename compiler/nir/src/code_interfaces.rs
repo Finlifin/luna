@@ -5,7 +5,10 @@
 //! these maps beside the result prevents method contracts from erasing the
 //! distinction between fixed dependencies and supplied context ports.
 use crate::{Sort, Term, program::LocalId, type_computations};
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpressionCodeInterface {
@@ -317,7 +320,10 @@ impl<O: SignatureOutput> CodeFunctionSignature<O> {
     /// domains are outside this telescope; code values themselves are not Terms.
     fn validate_input_binders(&self, fuel: &mut usize) -> Result<(), type_computations::Error> {
         use type_computations::Error;
-        let mut seen = std::collections::BTreeSet::new();
+        let Some((&last, _)) = self.input_binders.last_key_value() else {
+            return Ok(());
+        };
+        let mut unbound = BTreeSet::new();
         for (slot, binder) in &self.input_binders {
             *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
             let Some((_, CodeInput::Data(domain))) = self.inputs.get(*slot) else {
@@ -330,22 +336,32 @@ impl<O: SignatureOutput> CodeFunctionSignature<O> {
             } else {
                 Sort::ComptimeValue
             };
-            if binder.sort != sort || !seen.insert(binder.declaration) {
+            if binder.sort != sort || !unbound.insert(binder.declaration) {
                 return Err(Error::Structure(
                     "duplicate or incorrectly sorted dependent input binder".into(),
                 ));
             }
-            for term in self.clause_domains.iter().chain(
-                self.inputs[..=*slot]
-                    .iter()
-                    .flat_map(|(_, input)| input.type_terms()),
-            ) {
-                type_computations::charge_term(term, fuel)?;
-                if term.mentions_rigid(binder.declaration) {
-                    return Err(Error::Structure(
-                        "dependent input is used before its binding".into(),
-                    ));
-                }
+        }
+        // Clause domains precede all ordinary inputs. A data input introduces
+        // its binder only after checking every term in its own domain.
+        let check = |term: &Term, unbound: &BTreeSet<_>, fuel: &mut usize| {
+            if type_computations::mentions_rigid_bounded(term, fuel, |id| unbound.contains(&id))? {
+                Err(Error::Structure(
+                    "dependent input is used before its binding".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        for domain in &self.clause_domains {
+            check(domain, &unbound, fuel)?;
+        }
+        for (slot, (_, input)) in self.inputs[..=last].iter().enumerate() {
+            for domain in input.type_terms() {
+                check(domain, &unbound, fuel)?;
+            }
+            if let Some(binder) = self.input_binders.get(&slot) {
+                unbound.remove(&binder.declaration);
             }
         }
         Ok(())
@@ -367,7 +383,8 @@ impl<O: SignatureOutput> CodeFunctionSignature<O> {
             .input_binders
             .get(&slot)
             .ok_or_else(|| Error::Structure("input has no dependent binder".into()))?;
-        type_computations::charge_term(value, fuel)?;
+        let mut referenced = BTreeSet::new();
+        type_computations::rigid_declarations_bounded(value, fuel, &mut referenced)?;
         value.check_scope(frames).map_err(Error::Scope)?;
         if value.sort() != binder.sort {
             return Err(Error::Structure(
@@ -376,15 +393,12 @@ impl<O: SignatureOutput> CodeFunctionSignature<O> {
         }
         // The supplied value belongs to the caller. Never reinterpret one of
         // its free declarations as a remaining callee-local input binder.
-        for (other_slot, other) in &self.input_binders {
-            if *other_slot != slot {
-                type_computations::charge_term(value, fuel)?;
-                if value.mentions_rigid(other.declaration) {
-                    return Err(Error::Structure(
-                        "input substitution would capture a caller declaration".into(),
-                    ));
-                }
-            }
+        if self.input_binders.iter().any(|(other_slot, other)| {
+            *other_slot != slot && referenced.contains(&other.declaration)
+        }) {
+            return Err(Error::Structure(
+                "input substitution would capture a caller declaration".into(),
+            ));
         }
         let parameters = std::slice::from_ref(binder);
         let arguments = std::slice::from_ref(value);
@@ -424,11 +438,12 @@ impl<O: SignatureOutput> CodeFunctionSignature<O> {
         *fuel = fuel
             .checked_sub(self.input_binders.len())
             .ok_or(Error::Budget)?;
-        let local_declarations: std::collections::BTreeSet<_> = self
+        let local_declarations: BTreeSet<_> = self
             .input_binders
             .values()
             .map(|binder| binder.declaration)
             .collect();
+        let mut introduced = BTreeSet::new();
         let mut parameters = Vec::new();
         let mut arguments = Vec::new();
         for ((slot, binder), (other_slot, other)) in
@@ -442,20 +457,24 @@ impl<O: SignatureOutput> CodeFunctionSignature<O> {
             // Reference-side names can already denote free declarations here.
             // Renaming a local binder onto one would manufacture type equality.
             if !local_declarations.contains(&other.declaration) {
-                for term in self.type_terms() {
-                    type_computations::charge_term(term, fuel)?;
-                    if term.mentions_rigid(other.declaration) {
-                        return Err(Error::Structure(
-                            "input binder alignment would capture a free declaration".into(),
-                        ));
-                    }
-                }
+                introduced.insert(other.declaration);
             }
             parameters.push(binder.clone());
             arguments.push(Term::Rigid {
                 declaration: other.declaration,
                 sort: other.sort,
             });
+        }
+        if !introduced.is_empty() {
+            for term in self.type_terms() {
+                if type_computations::mentions_rigid_bounded(term, fuel, |id| {
+                    introduced.contains(&id)
+                })? {
+                    return Err(Error::Structure(
+                        "input binder alignment would capture a free declaration".into(),
+                    ));
+                }
+            }
         }
         let mut aligned = self.try_map_types(|ty| {
             crate::copy_budget::charge_type_substitution(ty, &parameters, &arguments, fuel)

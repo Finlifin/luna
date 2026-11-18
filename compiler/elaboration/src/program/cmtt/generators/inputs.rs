@@ -63,6 +63,9 @@ impl Checker<'_, '_> {
                 .values()
                 .map(|binder| binder.declaration),
         );
+        let depends_on_input = |ty: &Term, steps: &mut u64, span| {
+            input_observation::uses_any(ty, parameters.iter().copied(), steps, span)
+        };
         let planned = self.instantiate_code_generator(&template, &type_plan, site.span)?;
         // Previously completed argument interfaces are safe inference evidence:
         // reading their types neither runs a generator nor reads runtime storage.
@@ -171,7 +174,7 @@ impl Checker<'_, '_> {
             let Input::Data(ty) = &planned.inputs[route.parameter].1 else {
                 continue;
             };
-            if !parameters.iter().any(|id| ty.mentions_rigid(*id)) {
+            if !depends_on_input(ty, &mut self.required_steps, site.span)? {
                 continue;
             }
             let expression = route.expression(site);
@@ -343,7 +346,7 @@ impl Checker<'_, '_> {
                         "code collection requires code-container evidence",
                     ));
                 };
-                if !parameters.iter().any(|id| ty.mentions_rigid(*id)) {
+                if !depends_on_input(ty, &mut self.required_steps, site.span)? {
                     route.require_collection_type(self, ty, site.span)?;
                     let Term::Tuple(fields) = self.structural_type(ty, site.span)? else {
                         unreachable!()
@@ -373,7 +376,7 @@ impl Checker<'_, '_> {
             let (_, input) = &hinted.as_ref().unwrap_or(&planned).inputs[route.parameter];
             if route.is_collected() && collection_types[route_index].is_none() {
                 if let Input::Data(ty) = input {
-                    if !parameters.iter().any(|id| ty.mentions_rigid(*id)) {
+                    if !depends_on_input(ty, &mut self.required_steps, argument.span)? {
                         route.require_collection_type(self, ty, site.span)?;
                         let Term::Tuple(fields) = self.structural_type(ty, site.span)? else {
                             unreachable!()
@@ -390,9 +393,11 @@ impl Checker<'_, '_> {
                             "data packet cannot supply pattern code evidence",
                         ));
                     }
-                    let subject = (!parameters
-                        .iter()
-                        .any(|id| interface.subject.mentions_rigid(*id)))
+                    let subject = (!depends_on_input(
+                        &interface.subject,
+                        &mut self.required_steps,
+                        argument.span,
+                    )?)
                     .then_some(&interface.subject);
                     let partial = match &input_contexts[route.parameter] {
                         context @ (crate::calls::InputContext::Tuple(_)
@@ -414,9 +419,11 @@ impl Checker<'_, '_> {
                             "data packet cannot supply code evidence",
                         ));
                     }
-                    let known = !parameters
-                        .iter()
-                        .any(|id| interface.result.mentions_rigid(*id));
+                    let known = !depends_on_input(
+                        &interface.result,
+                        &mut self.required_steps,
+                        argument.span,
+                    )?;
                     let mut expected = interface.clone();
                     expected.infer_context = true;
                     let partial_result = match &input_contexts[route.parameter] {
@@ -455,7 +462,8 @@ impl Checker<'_, '_> {
                             .as_ref()
                             .and_then(|fields| fields.get(element))
                     } else {
-                        (!parameters.iter().any(|id| ty.mentions_rigid(*id))).then_some(ty)
+                        (!depends_on_input(ty, &mut self.required_steps, argument.span)?)
+                            .then_some(ty)
                     };
                     let context = if expected.is_some() {
                         None

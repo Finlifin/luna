@@ -38,20 +38,6 @@ pub(super) fn domains(
                 message: "invalid declaration parameter domains",
             }),
         })?;
-    crate::type_aliases::validate_in(&package.alias_contracts, fuel).map_err(|error| {
-        let diagnostic = super::Error {
-            kind: match error {
-                crate::type_aliases::ValidationError::Budget => super::ErrorKind::Budget,
-                _ => super::ErrorKind::Invalid,
-            },
-            source,
-            message: error.message(),
-        };
-        match error {
-            crate::type_aliases::ValidationError::Budget => Failure::Budget(diagnostic),
-            crate::type_aliases::ValidationError::Invalid(_) => Failure::Invalid(diagnostic),
-        }
-    })?;
     Ok(domains)
 }
 

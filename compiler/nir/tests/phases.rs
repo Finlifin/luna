@@ -2237,3 +2237,73 @@ fn constructor_schedules_cannot_repeat_or_omit_a_source_operand() {
         }
     }
 }
+
+#[test]
+fn alias_guard_uses_admitted_dependencies_inside_callable_instances() {
+    use nir::program::NormalFormArgument;
+    let id = |local| DeclarationId { package: 1, local };
+    let domain = |argument| Term::Nominal {
+        declaration: id(80),
+        arguments: vec![Term::FunctionValue {
+            declaration: id(81),
+            arguments: vec![argument],
+        }],
+    };
+    let ty = Term::Primitive(Primitive::Type);
+    let concrete = Term::Primitive(Primitive::Bool);
+    let mut entry = function(1, Phase::Comptime, &[Sort::ComptimeValue]);
+    let source = entry.body.source;
+    entry.signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::ComptimeValue,
+            ty: domain(concrete.clone()),
+        }],
+        result: Box::new(Term::Primitive(Primitive::Void)),
+    };
+    entry.body = Expr {
+        source,
+        ty: Term::Primitive(Primitive::Void),
+        kind: K::CheckTypeAlias {
+            preparations: vec![],
+            bindings: None,
+            order: None,
+            declaration: id(20),
+            body: None,
+            arguments: vec![
+                NormalFormArgument::Value(Expr {
+                    source,
+                    ty: ty.clone(),
+                    kind: K::TypeValue(concrete.clone()),
+                }),
+                NormalFormArgument::Value(Expr {
+                    source,
+                    ty: domain(concrete),
+                    kind: K::Local(entry.parameters[0]),
+                }),
+            ],
+        },
+    };
+    let mut package = Package {
+        functions: vec![entry],
+        alias_contracts: vec![nir::type_aliases::Contract {
+            declaration: id(20),
+            parameters: vec![id(21), id(22)],
+            parameter_types: vec![
+                ty,
+                domain(Term::Rigid {
+                    declaration: id(21),
+                    sort: Sort::Type,
+                }),
+            ],
+            requirements: vec![],
+            capabilities: vec![],
+        }],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    package.alias_contracts[0].parameter_types[1] = domain(Term::Primitive(Primitive::U32));
+    assert_eq!(
+        nir::phases::validate(&package).unwrap_err().message,
+        "invalid alias formation guard inputs"
+    );
+}

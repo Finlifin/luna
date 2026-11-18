@@ -543,9 +543,21 @@ pub(crate) fn charge_expanded_term(
 
 /// Inspect open declaration inputs without cloning the type or unfolding heads.
 pub fn has_rigid_parameters_bounded(root: &Term, fuel: &mut usize) -> Result<bool, Error> {
+    mentions_rigid_bounded(root, fuel, |_| true)
+}
+
+/// Inspect the whole term under the caller's traversal and payload budget.
+/// Only rigid references participate, including those inside callable values.
+pub fn mentions_rigid_bounded(
+    root: &Term,
+    fuel: &mut usize,
+    mut matches_id: impl FnMut(DeclarationId) -> bool,
+) -> Result<bool, Error> {
     let mut found = false;
     visit_expanded_term(root, fuel, 128, &BTreeMap::new(), &mut |term| {
-        found |= matches!(term, Term::Rigid { .. });
+        if let Term::Rigid { declaration, .. } = term {
+            found |= matches_id(*declaration);
+        }
     })?;
     Ok(found)
 }

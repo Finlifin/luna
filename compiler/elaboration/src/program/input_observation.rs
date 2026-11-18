@@ -79,6 +79,26 @@ pub(super) fn term(
     Ok(inputs)
 }
 
+/// Whether a checked domain still needs any of these declaration inputs.
+pub(super) fn uses_any(
+    domain: &Term,
+    mut candidates: impl ExactSizeIterator<Item = DeclarationId>,
+    steps: &mut u64,
+    span: Span,
+) -> Result<bool, Error> {
+    if candidates.len() == 0 {
+        return Ok(false);
+    }
+    let used = term(domain, steps, span)?;
+    if used.is_empty() {
+        return Ok(false);
+    }
+    *steps = steps
+        .checked_sub(candidates.len() as u64)
+        .ok_or_else(|| error(span, "input domain dependency budget exhausted"))?;
+    Ok(candidates.any(|id| used.contains(&id)))
+}
+
 /// Dependencies are measured in the original callee domain. After substitution,
 /// equally numbered caller binders no longer identify unsupplied callee inputs.
 /// The result is an input dependency set, not permission to execute a producer.
@@ -277,6 +297,23 @@ mod tests {
                 sort: Sort::ComptimeValue,
             })),
         }
+    }
+
+    #[test]
+    fn callable_instance_observation_requires_budget_before_reporting_independence() {
+        let span = rustc_span::DUMMY_SP;
+        let callable = Term::FunctionValue {
+            declaration: id(3),
+            arguments: vec![domain()],
+        };
+        for (candidate, expected) in [(id(1), true), (id(3), false)] {
+            assert!(uses_any(&callable, [candidate].into_iter(), &mut 1, span).is_err());
+            assert_eq!(
+                uses_any(&callable, [candidate].into_iter(), &mut 1000, span).unwrap(),
+                expected
+            );
+        }
+        assert!(!uses_any(&callable, [].into_iter(), &mut 0, span).unwrap());
     }
 
     #[test]
