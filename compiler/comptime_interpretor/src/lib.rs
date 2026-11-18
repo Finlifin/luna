@@ -1081,19 +1081,6 @@ pub struct Interpreter<'a> {
     events: Vec<Event>,
 }
 impl<'a> Interpreter<'a> {
-    fn input_binders(&self, parameters: &[DeclarationId]) -> Vec<nir::DeclarationParameter> {
-        parameters
-            .iter()
-            .map(|id| nir::DeclarationParameter {
-                declaration: *id,
-                sort: self
-                    .declaration_parameter_sorts
-                    .get(id)
-                    .copied()
-                    .unwrap_or(nir::Sort::Type),
-            })
-            .collect()
-    }
     pub fn target(&self) -> Option<nir::target::TargetData> {
         self.target
     }
@@ -1935,12 +1922,15 @@ impl<'a> Interpreter<'a> {
                         .entry(member.declaration)
                         .and_modify(|origin| *origin = None)
                         .or_insert(Some(contract.declaration));
-                    let mut binders = parameters.clone();
-                    binders.extend(input_binders(&member.type_parameters));
+                    let ids = parameters
+                        .iter()
+                        .map(|p| p.declaration)
+                        .chain(member.type_parameters.iter().copied())
+                        .collect();
                     method_contracts.insert(
                         (contract.declaration, member.declaration),
                         method_catalog::Entry {
-                            binders,
+                            parameters: ids,
                             interface: interface_index,
                             member: member_index,
                         },
@@ -2531,31 +2521,10 @@ impl<'a> Interpreter<'a> {
             .declaration(&function)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
         let definition = view.interface;
-        let binders = self.input_binders(&definition.type_parameters);
-        if binders.len() != types.len() {
-            return Err(self.failure(ErrorKind::Type, None));
-        }
-        // An empty declaration interface has no specialization to perform.
-        // Keep its stable package identity and the ordinary invocation checks.
-        if binders.is_empty() {
+        if definition.type_parameters.is_empty() && types.is_empty() {
             return self.invoke_value(Value::Function(function), arguments);
         }
-        self.charge_copy_work(None, |fuel| {
-            nir::copy_budget::charge_type_substitution(
-                &definition.signature,
-                &binders,
-                &types,
-                fuel,
-            )
-        })?;
-        self.admit_function_inputs(&definition.type_parameters, &types, view.source)?;
-        let substitution =
-            self.function_substitution(&definition.type_parameters, &types, view.source)?;
-        let signature = substitution
-            .instantiate(&definition.signature)
-            .map_err(|_| self.failure(ErrorKind::Type, None))?
-            .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime)
-            .with_unsafe_call_requirement(definition.is_unsafe);
+        let signature = self.specialize_function_signature(definition, &types, view.source)?;
         let expression = Expr {
             source: view.source,
             ty: signature,
@@ -4835,27 +4804,6 @@ impl<'a> Interpreter<'a> {
         Ok(Flow::Value(result))
     }
 
-    fn copy_interface_program(
-        &mut self,
-        program: &nir::contracts::ProgramContract,
-        parameters: &[nir::DeclarationParameter],
-        arguments: &[Term],
-        source: SourceRange,
-    ) -> Result<nir::contracts::ProgramContract, Error> {
-        self.charge_copy_work(Some(source), |fuel| {
-            *fuel = fuel
-                .checked_sub(program.entry_snapshots.len().saturating_add(1))
-                .ok_or(nir::copy_budget::CopyBudgetExhausted::Steps)?;
-            for condition in program.preconditions.iter().chain(&program.postconditions) {
-                nir::copy_budget::charge_substitution(condition, parameters, arguments, fuel)?;
-            }
-            Ok(())
-        })?;
-        program
-            .instantiate_parameters(parameters, arguments)
-            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))
-    }
-
     #[inline(never)]
     fn call_parameters(&self, callee: &Value, source: SourceRange) -> Result<Vec<LocalId>, Error> {
         match callee {
@@ -4898,52 +4846,53 @@ impl<'a> Interpreter<'a> {
             method_arguments,
             ..
         } = method;
-        let interface_program = {
-            if let Some(method) = self.iir_method(
-                interface,
-                interface_arguments,
-                subject,
-                member,
-                method_arguments,
-            )? {
-                self.copy_interface_program(&method.program, &[], &[], source)?
-            } else {
-                let (parameters, contract) = self
-                    .method_contracts
-                    .get(&(interface, member))
-                    .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
-                self.budget.steps = self
-                    .budget
-                    .steps
-                    .checked_sub(parameters.len() as u64)
-                    .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
-                let parameters = parameters.clone();
-                let arguments: Vec<_> = std::iter::once(subject.clone())
-                    .chain(interface_arguments.iter().cloned())
-                    .chain(method_arguments.iter().cloned())
-                    .collect();
-                self.copy_interface_program(&contract.program, &parameters, &arguments, source)?
-            }
+        let (program, bindings) = if let Some(contract) = self.iir_method(
+            interface,
+            interface_arguments,
+            subject,
+            member,
+            method_arguments,
+        )? {
+            // The concrete graph already specialized all declaration inputs.
+            self.charge_copy_work(Some(source), |fuel| {
+                *fuel = fuel
+                    .checked_sub(contract.program.entry_snapshots.len() + 1)
+                    .ok_or(nir::copy_budget::CopyBudgetExhausted::Steps)?;
+                for condition in contract
+                    .program
+                    .preconditions
+                    .iter()
+                    .chain(&contract.program.postconditions)
+                {
+                    nir::copy_budget::charge_substitution(condition, &[], &[], fuel)?;
+                }
+                Ok(())
+            })?;
+            (contract.program.clone(), &contract.parameter_bindings)
+        } else {
+            let (inputs, contract) = self.method_inputs(method)?;
+            let frames = [inputs.frame];
+            let admitted = self.admit_function_inputs(
+                &inputs.parameters,
+                &inputs.arguments,
+                nir::DeclarationInputScope::ClosedInBody(&frames),
+                source,
+            )?;
+            let program = self.query_admission(Some(source), |_, fuel| {
+                Ok(contract.program.instantiate_admitted(&admitted, fuel)?)
+            })?;
+            let bindings = self
+                .method_parameters
+                .get(&(interface, member))
+                .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+            (program, bindings)
         };
-        let interface_parameters = {
-            if let Some(method) = self.iir_method(
-                interface,
-                interface_arguments,
-                subject,
-                member,
-                method_arguments,
-            )? {
-                Some(method.parameter_bindings.clone())
-            } else {
-                Some(
-                    self.method_parameters
-                        .get(&(interface, member))
-                        .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?
-                        .clone(),
-                )
-            }
-        };
-        Ok((interface_program, interface_parameters))
+        self.budget.steps = self
+            .budget
+            .steps
+            .checked_sub(bindings.len() as u64)
+            .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+        Ok((program, Some(bindings.clone())))
     }
 
     #[inline(never)]
@@ -5040,11 +4989,10 @@ impl<'a> Interpreter<'a> {
                 return Err(this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
             }
             let value = if argument.is_default {
-                if let Some((binders, inputs)) = &trait_default_inputs {
+                if let Some(inputs) = &trait_default_inputs {
                     prepared_value!(this.evaluate_bound_default(
                         expr.source,
                         argument,
-                        binders,
                         inputs,
                         &mut default_scope,
                         environment
@@ -6607,7 +6555,13 @@ mod normal_input_data_tests {
             fields,
         };
         let check = |input: Term, frames: &[Vec<nir::Sort>], fuel: &mut usize| {
-            vm.validate_function_inputs_in_scope(&[parameter], &[input], frames, fuel)
+            vm.admitted_function_inputs(
+                &[parameter],
+                &[input],
+                nir::DeclarationInputScope::Caller(frames),
+                fuel,
+            )
+            .map(|_| ())
         };
         let assert_value_rejection = |result: Result<(), ErrorKind>| {
             let Err(ErrorKind::FunctionInputRejected(reason)) = result else {

@@ -39,30 +39,6 @@ impl Interpreter<'_> {
         self.check_type_contract(&P::Trait(requirement.clone()), source)
     }
 
-    pub(super) fn check_capability_parameters(
-        &mut self,
-        requirements: &[nir::program::TraitRequirement],
-        parameters: &[nir::DeclarationParameter],
-        arguments: &[Term],
-        source: SourceRange,
-    ) -> Result<(), Error> {
-        for requirement in requirements {
-            self.charge_copy_work(Some(source), |fuel| {
-                for term in
-                    std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
-                {
-                    nir::copy_budget::charge_type_substitution(term, parameters, arguments, fuel)?;
-                }
-                Ok(())
-            })?;
-            let bound = requirement
-                .instantiate_parameters(parameters, arguments)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-            self.check_capability_contract(&bound, source)?;
-        }
-        Ok(())
-    }
-
     #[inline(never)]
     pub(super) fn check_invocation_capabilities(
         &mut self,

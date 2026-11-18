@@ -112,49 +112,34 @@ impl Interpreter<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         let arguments = observed_arguments.as_slice();
         if let Some(identity) = self.functions.runtime_identity(&declaration) {
-            self.admit_function_inputs(&identity.type_parameters, arguments, source)?;
-            let binders = self.input_binders(&identity.type_parameters);
-            self.charge_copy_work(Some(source), |fuel| {
-                nir::copy_budget::charge_type_substitution(
-                    &identity.signature,
-                    &binders,
-                    arguments,
-                    fuel,
-                )
-            })?;
-            let substitution =
-                self.function_substitution(&identity.type_parameters, arguments, source)?;
-            let signature = substitution
-                .instantiate(&identity.signature)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+            let signature = self.signature_from_inputs(
+                &identity.type_parameters,
+                arguments,
+                &identity.signature,
+                source,
+            )?;
             if !self.observe_same_type(&signature, output, source)? {
                 return Err(self.failure(ErrorKind::Type, Some(source)));
             }
             return Ok(Value::FunctionInstance {
                 declaration,
-                arguments: arguments.to_vec(),
+                arguments: observed_arguments,
             });
         }
-        self.admit_callable_identity(declaration, arguments, source)?;
         let definition = self
             .functions
             .interface(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
         let signature = self.specialize_function_signature(definition, arguments, source)?;
+        self.check_callable_requirements(definition, arguments, source)?;
         if !self.observe_same_type(&signature, output, source)? {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         // A named value carries identity and checked inputs, never executable
         // code. Its receiving world rechecks formation when it is invoked.
-        self.charge_copy_work(Some(source), |fuel| {
-            for argument in arguments {
-                nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;
-            }
-            Ok(())
-        })?;
         Ok(Value::FunctionInstance {
             declaration,
-            arguments: arguments.to_vec(),
+            arguments: observed_arguments,
         })
     }
 
@@ -164,20 +149,13 @@ impl Interpreter<'_> {
         arguments: &[Term],
         source: SourceRange,
     ) -> Result<Term, Error> {
-        let binders = self.input_binders(&declaration.type_parameters);
-        self.charge_copy_work(Some(source), |fuel| {
-            nir::copy_budget::charge_type_substitution(
-                &declaration.signature,
-                &binders,
+        Ok(self
+            .signature_from_inputs(
+                &declaration.type_parameters,
                 arguments,
-                fuel,
-            )
-        })?;
-        let substitution =
-            self.function_substitution(&declaration.type_parameters, arguments, source)?;
-        Ok(substitution
-            .instantiate(&declaration.signature)
-            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?
+                &declaration.signature,
+                source,
+            )?
             .with_comptime_phase(declaration.phase == nir::program::FunctionPhase::Comptime)
             .with_unsafe_call_requirement(declaration.is_unsafe))
     }
@@ -221,10 +199,12 @@ impl Interpreter<'_> {
             .functions
             .interface(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        let signature = self.specialize_function_signature(definition, arguments, source)?;
-        let Term::Function { parameters, .. } = signature.callable_signature() else {
+        // Input admission and entry contracts have completed. Body scope needs
+        // the declaration's binder sorts; substituting their types cannot change them.
+        let Term::Function { parameters, .. } = definition.signature.callable_signature() else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };
+        self.integer_operation(Some(source), |budget| budget.consume(parameters.len()))?;
         let frames = vec![parameters.iter().map(|parameter| parameter.sort).collect()];
         let code = self
             .functions

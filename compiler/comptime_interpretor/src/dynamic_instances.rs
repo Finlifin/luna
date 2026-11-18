@@ -49,13 +49,34 @@ impl Interpreter<'_> {
         if let Some(identity) = self.functions.runtime_identity(&declaration) {
             // Transport-only metadata is published after producer-side
             // formation checks. It cannot authorize a runtime invocation.
-            return self.admit_function_inputs(&identity.type_parameters, arguments, source);
+            return self
+                .admit_function_inputs(
+                    &identity.type_parameters,
+                    arguments,
+                    nir::DeclarationInputScope::Caller(&[]),
+                    source,
+                )
+                .map(|_| ());
         }
         let definition = self
             .functions
             .interface(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        self.admit_function_inputs(&definition.type_parameters, arguments, source)?;
+        self.admit_function_inputs(
+            &definition.type_parameters,
+            arguments,
+            nir::DeclarationInputScope::Caller(&[]),
+            source,
+        )?;
+        self.check_callable_requirements(definition, arguments, source)
+    }
+
+    pub(super) fn check_callable_requirements(
+        &mut self,
+        definition: &nir::program::FunctionDeclaration,
+        arguments: &[Term],
+        source: SourceRange,
+    ) -> Result<(), Error> {
         for requirement in &definition.requirements {
             let requirement =
                 self.specialize_function_predicate(definition, arguments, requirement, source)?;
@@ -88,41 +109,14 @@ impl Interpreter<'_> {
         frames: &'inputs [Vec<nir::Sort>],
         fuel: &mut usize,
     ) -> Result<nir::DeclarationSubstitution<'inputs>, nir::type_computations::Error> {
-        *fuel = fuel
-            .checked_sub(parameters.len())
-            .ok_or(nir::type_computations::Error::Budget)?;
-        let mut domains = Vec::with_capacity(parameters.len());
-        for parameter in parameters {
-            let domain = self
-                .declaration_parameter_domains
-                .get(parameter)
-                .unwrap_or(&Term::Primitive(Primitive::Type));
-            nir::type_computations::charge_term(domain, fuel)?;
-            domains.push(domain.clone());
-        }
-        nir::DeclarationSubstitution::bounded(parameters, &domains, arguments, frames, fuel)
-    }
-
-    pub(super) fn function_substitution<'inputs>(
-        &mut self,
-        parameters: &[DeclarationId],
-        arguments: &'inputs [Term],
-        source: SourceRange,
-    ) -> Result<nir::DeclarationSubstitution<'inputs>, Error> {
-        let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let before = fuel;
-        let result = self.function_substitution_bounded(parameters, arguments, &[], &mut fuel);
-        self.budget.steps -= (before - fuel) as u64;
-        result.map_err(|failure| {
-            self.failure(
-                if matches!(failure, nir::type_computations::Error::Budget) {
-                    ErrorKind::StepsExhausted
-                } else {
-                    ErrorKind::Type
-                },
-                Some(source),
-            )
-        })
+        let domains = self.function_input_domains(parameters, fuel)?;
+        nir::DeclarationSubstitution::bounded_domains(
+            parameters,
+            &domains,
+            arguments,
+            nir::DeclarationInputScope::ClosedInBody(frames),
+            fuel,
+        )
     }
 
     pub(super) fn specialize_function_expression(
@@ -253,33 +247,41 @@ impl Interpreter<'_> {
             .functions
             .interface(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(construction)))?;
-        self.specialize_function_expression(expression, &definition.type_parameters, arguments, &[])
+        let frame = self.ordinary_input_frame(&definition.signature, construction)?;
+        self.specialize_function_expression(
+            expression,
+            &definition.type_parameters,
+            arguments,
+            &[frame],
+        )
     }
 
-    pub(super) fn bound_default_expression(
+    pub(super) fn ordinary_input_frame(
         &mut self,
-        expression: &Expr,
-        binders: &[nir::DeclarationParameter],
-        arguments: &[Term],
-    ) -> Result<Expr, Error> {
-        self.charge_copy_work(Some(expression.source), |fuel| {
-            nir::copy_budget::charge_substitution(expression, binders, arguments, fuel)
-        })?;
-        expression
-            .instantiate_parameters(binders, arguments)
-            .map_err(|_| self.failure(ErrorKind::Type, Some(expression.source)))
+        signature: &Term,
+        source: SourceRange,
+    ) -> Result<Vec<nir::Sort>, Error> {
+        let Term::Function { parameters, .. } = signature.callable_signature() else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        self.integer_operation(Some(source), |budget| budget.consume(parameters.len()))?;
+        Ok(parameters.iter().map(|p| p.sort).collect())
     }
 
     pub(super) fn evaluate_bound_default(
         &mut self,
         construction: SourceRange,
         argument: &nir::program::CallArgument,
-        binders: &[nir::DeclarationParameter],
-        arguments: &[Term],
+        inputs: &method_catalog::Inputs<Term>,
         defaults: &mut Environment,
         caller: &mut Environment,
     ) -> Result<Flow, Error> {
-        let value = self.bound_default_expression(&argument.value, binders, arguments)?;
+        let value = self.specialize_function_expression(
+            &argument.value,
+            &inputs.parameters,
+            &inputs.arguments,
+            std::slice::from_ref(&inputs.frame),
+        )?;
         let prepared = nir::program::CallArgument {
             passing: argument.passing,
             parameter: argument.parameter,
@@ -292,7 +294,7 @@ impl Interpreter<'_> {
     pub(super) fn trait_default_inputs(
         &mut self,
         method: &Expr,
-    ) -> Result<(Vec<nir::DeclarationParameter>, Vec<Term>), Error> {
+    ) -> Result<method_catalog::Inputs<Term>, Error> {
         let view = comptime_compiler::methods::View::expression(method)
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(method.source)))?;
         self.trait_method_default_inputs(view)
@@ -300,30 +302,20 @@ impl Interpreter<'_> {
     pub(super) fn trait_method_default_inputs(
         &mut self,
         method: comptime_compiler::methods::View<'_>,
-    ) -> Result<(Vec<nir::DeclarationParameter>, Vec<Term>), Error> {
-        let comptime_compiler::methods::View {
-            interface,
-            member,
-            subject,
-            interface_arguments,
-            method_arguments,
-            ..
-        } = method;
-        let (binders, _) = self
-            .method_contracts
-            .get(&(interface, member))
-            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(method.source)))?;
-        let count = binders.len();
-        if count != 1 + interface_arguments.len() + method_arguments.len() {
-            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(method.source)));
-        }
-        let binders = binders.clone();
-        self.integer_operation(Some(method.source), |budget| budget.consume(count))?;
-        let arguments = std::iter::once(subject.clone())
-            .chain(interface_arguments.iter().cloned())
-            .chain(method_arguments.iter().cloned())
-            .collect();
-        Ok((binders, arguments))
+    ) -> Result<method_catalog::Inputs<Term>, Error> {
+        let (inputs, _) = self.method_inputs(method)?;
+        self.charge_copy_work(Some(method.source), |fuel| {
+            for term in &inputs.arguments {
+                nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+            }
+            Ok(())
+        })?;
+        Ok(method_catalog::Inputs {
+            parameters: inputs.parameters,
+            member: inputs.member,
+            arguments: inputs.arguments.into_iter().cloned().collect(),
+            frame: inputs.frame,
+        })
     }
 
     pub(super) fn admit_dynamic_trait_instance(

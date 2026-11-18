@@ -2,19 +2,8 @@
 //! Reject before body preparation or cache lookup; exhaustion is not rejection.
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InputAdmissionStage {
-    Domain,
-    Value,
-}
-impl fmt::Display for InputAdmissionStage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Domain => "domain",
-            Self::Value => "value",
-        })
-    }
-}
+pub use nir::InputAdmissionStage;
+use std::borrow::Borrow;
 
 /// One rejected slot in the complete declaration telescope, including implicit
 /// lexical inputs. The identity is retained for frontend source-name lookup.
@@ -50,85 +39,79 @@ fn rejection(
 }
 
 impl Interpreter<'_> {
-    pub(super) fn validate_function_inputs(
+    /// Borrow the selected declaration's domains. Compact all-Type metadata
+    /// has the same domain here as it does in the NIR telescope.
+    pub(super) fn function_input_domains(
         &self,
         parameters: &[DeclarationId],
-        arguments: &[Term],
         fuel: &mut usize,
-    ) -> Result<(), ErrorKind> {
-        self.validate_function_inputs_in_scope(parameters, arguments, &[], fuel)
-    }
-
-    pub(super) fn validate_function_inputs_in_scope(
-        &self,
-        parameters: &[DeclarationId],
-        arguments: &[Term],
-        frames: &[Vec<nir::Sort>],
-        fuel: &mut usize,
-    ) -> Result<(), ErrorKind> {
+    ) -> Result<Vec<&Term>, nir::type_computations::Error> {
         *fuel = fuel
             .checked_sub(parameters.len())
-            .ok_or(ErrorKind::StepsExhausted)?;
-        if parameters.len() != arguments.len() {
-            return Err(ErrorKind::Type);
-        }
-        let substitution = self
-            .function_substitution_bounded(parameters, arguments, frames, fuel)
-            .map_err(|error| {
-                if matches!(error, nir::type_computations::Error::Budget) {
-                    ErrorKind::StepsExhausted
-                } else {
-                    ErrorKind::Type
-                }
-            })?;
-        let binders = self.input_binders(parameters);
-        for (index, (binder, argument)) in binders.iter().zip(arguments).enumerate() {
-            let raw = self
-                .declaration_parameter_domains
-                .get(&binder.declaration)
-                .unwrap_or(&Term::Primitive(Primitive::Type));
-            let domain = substitution
-                .instantiate_bounded(raw, fuel)
-                .map_err(|error| {
-                    if matches!(error, nir::type_computations::Error::Budget) {
-                        ErrorKind::StepsExhausted
-                    } else {
-                        rejection(
-                            index,
-                            binder.declaration,
-                            InputAdmissionStage::Domain,
-                            error,
-                        )
-                    }
-                })?;
-            self.with_admission_queries(|queries| {
-                nir::value_admission::validate(argument, &domain, frames, fuel, queries)
+            .ok_or(nir::type_computations::Error::Budget)?;
+        Ok(parameters
+            .iter()
+            .map(|id| {
+                self.declaration_parameter_domains
+                    .get(id)
+                    .unwrap_or(&Term::Primitive(Primitive::Type))
             })
-            .map_err(|failure| {
-                if matches!(failure, nir::value_admission::Error::Budget) {
-                    ErrorKind::StepsExhausted
-                } else {
-                    rejection(
-                        index,
-                        binder.declaration,
-                        InputAdmissionStage::Value,
-                        failure,
-                    )
-                }
-            })?;
-        }
-        Ok(())
+            .collect())
     }
 
-    pub(super) fn admit_function_inputs(
+    pub(super) fn admitted_function_inputs<'v, T: Borrow<Term>>(
+        &self,
+        parameters: &[DeclarationId],
+        arguments: &'v [T],
+        scope: nir::DeclarationInputScope<'v>,
+        fuel: &mut usize,
+    ) -> Result<nir::AdmittedArguments<'v, T>, ErrorKind> {
+        let domains = self
+            .function_input_domains(parameters, fuel)
+            .map_err(|_| ErrorKind::StepsExhausted)?;
+        self.with_admission_queries(|queries| {
+            nir::admit_declaration_inputs(parameters, &domains, arguments, scope, 0, fuel, queries)
+        })
+        .map_err(|failure| match (failure.reason, failure.slot) {
+            (nir::NominalAdmissionError::Budget, _) => ErrorKind::StepsExhausted,
+            (nir::NominalAdmissionError::Unresolved(_), _) => ErrorKind::TypeContractUnresolved,
+            (nir::NominalAdmissionError::Invalid(reason), Some((slot, stage))) => {
+                rejection(slot, parameters[slot], stage, reason)
+            }
+            (nir::NominalAdmissionError::Invalid(_), None) => ErrorKind::Type,
+        })
+    }
+
+    /// The receiving world reads the signature using the same checked inputs.
+    /// No executable body or dispatch authorization is acquired by this query.
+    pub(super) fn signature_from_inputs(
         &mut self,
         parameters: &[DeclarationId],
         arguments: &[Term],
+        signature: &Term,
         source: SourceRange,
-    ) -> Result<(), Error> {
+    ) -> Result<Term, Error> {
+        let admitted = self.admit_function_inputs(
+            parameters,
+            arguments,
+            nir::DeclarationInputScope::Caller(&[]),
+            source,
+        )?;
+        self.query_admission(Some(source), |_, fuel| {
+            Ok(admitted.instantiate(signature, fuel)?)
+        })
+    }
+
+    pub(super) fn admit_function_inputs<'v, T: Borrow<Term>>(
+        &mut self,
+        parameters: &[DeclarationId],
+        arguments: &'v [T],
+        scope: nir::DeclarationInputScope<'v>,
+        source: SourceRange,
+    ) -> Result<nir::AdmittedArguments<'v, T>, Error> {
         let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let before = fuel;
-        let checked = self.validate_function_inputs(parameters, arguments, &mut fuel);
+        let checked = self.admitted_function_inputs(parameters, arguments, scope, &mut fuel);
         self.budget.steps -= (before - fuel) as u64;
         checked.map_err(|kind| self.failure(kind, Some(source)))
     }

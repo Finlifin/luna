@@ -103,6 +103,42 @@ mod owned_substitution_tests {
 
 pub use crate::value_admission::Error as AdmissionError;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputAdmissionStage {
+    Domain,
+    Value,
+}
+impl std::fmt::Display for InputAdmissionStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Domain => "domain",
+            Self::Value => "value",
+        })
+    }
+}
+
+/// The slot belongs to the declaration, even when its domain was delivered
+/// out of order. Whole-telescope failures have no individual consumer.
+#[derive(Debug)]
+pub struct DeclarationAdmissionFailure {
+    pub slot: Option<(usize, InputAdmissionStage)>,
+    pub reason: AdmissionError,
+}
+impl From<AdmissionError> for DeclarationAdmissionFailure {
+    fn from(reason: AdmissionError) -> Self {
+        Self { slot: None, reason }
+    }
+}
+impl std::fmt::Display for DeclarationAdmissionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(declaration-admission-failure")?;
+        if let Some((slot, stage)) = self.slot {
+            write!(f, " (slot {slot}) (stage {stage})")?;
+        }
+        write!(f, " (reason {:?}))", self.reason.to_string())
+    }
+}
+
 pub fn binders(
     parameters: &[DeclarationId],
     domains: &[Term],
@@ -286,13 +322,18 @@ impl<'a> DeclarationSubstitution<'a> {
         arguments: &'a [Term],
         frames: &'a [Vec<Sort>],
     ) -> Result<Self, TypeError> {
-        Self::from_parameters(Binders::new(ids, domains)?, domains, arguments, frames)
+        Self::from_parameters(
+            Binders::new(ids, domains)?,
+            domains,
+            arguments,
+            DeclarationInputScope::Caller(frames),
+        )
     }
-    fn from_parameters(
+    fn from_parameters<D: Borrow<Term>>(
         parameters: Binders,
-        domains: &[Term],
+        domains: &[D],
         arguments: &'a [Term],
-        frames: &'a [Vec<Sort>],
+        scope: DeclarationInputScope<'a>,
     ) -> Result<Self, TypeError> {
         if parameters.ordered.len() != arguments.len() {
             return Err(TypeError::ArgumentCount {
@@ -301,13 +342,14 @@ impl<'a> DeclarationSubstitution<'a> {
             });
         }
         for argument in arguments {
-            argument.check_scope(frames)?;
+            argument.check_scope(scope.input())?;
         }
         for (index, (parameter, argument)) in parameters.ordered.iter().zip(arguments).enumerate() {
             let expected = if parameter.sort == Sort::Type {
                 Sort::Type
             } else {
-                let domain = parameters.instantiate(&domains[index], arguments, frames)?;
+                let domain =
+                    parameters.instantiate(domains[index].borrow(), arguments, scope.input())?;
                 Sort::of_comptime_domain(&domain)
             };
             if expected != argument.sort() {
@@ -320,7 +362,7 @@ impl<'a> DeclarationSubstitution<'a> {
         Ok(Self {
             parameters,
             arguments: Cow::Borrowed(arguments),
-            frames: Cow::Borrowed(frames),
+            frames: Cow::Borrowed(scope.template()),
         })
     }
     pub fn bounded(
@@ -330,12 +372,28 @@ impl<'a> DeclarationSubstitution<'a> {
         frames: &'a [Vec<Sort>],
         fuel: &mut usize,
     ) -> Result<Self, crate::type_computations::Error> {
+        Self::bounded_domains(
+            ids,
+            domains,
+            arguments,
+            DeclarationInputScope::Caller(frames),
+            fuel,
+        )
+    }
+
+    pub fn bounded_domains<D: Borrow<Term>>(
+        ids: &[DeclarationId],
+        domains: &[D],
+        arguments: &'a [Term],
+        scope: DeclarationInputScope<'a>,
+        fuel: &mut usize,
+    ) -> Result<Self, crate::type_computations::Error> {
         use crate::type_computations::{Error, charge_term};
         // Scope checks borrow the caller's frames and look up referenced slots.
         // Retaining an owned copy is charged by into_owned.
         *fuel = fuel.checked_sub(ids.len()).ok_or(Error::Budget)?;
         for domain in domains {
-            charge_term(domain, fuel)?;
+            charge_term(domain.borrow(), fuel)?;
         }
         for argument in arguments {
             charge_term(argument, fuel)?;
@@ -349,10 +407,10 @@ impl<'a> DeclarationSubstitution<'a> {
         }
         for (parameter, domain) in parameters.ordered.iter().zip(domains) {
             if parameter.sort == Sort::ComptimeValue {
-                parameters.charge_expansion(domain, arguments, fuel)?;
+                parameters.charge_expansion(domain.borrow(), arguments, fuel)?;
             }
         }
-        Self::from_parameters(parameters, domains, arguments, frames).map_err(Error::Scope)
+        Self::from_parameters(parameters, domains, arguments, scope).map_err(Error::Scope)
     }
     /// Check and take ownership of the caller's existing buffers. Unlike
     /// retaining a borrowed substitution, this does not copy any terms.
@@ -465,14 +523,12 @@ impl<'a> DeclarationSubstitution<'a> {
         expression: &crate::program::Expr,
         fuel: &mut usize,
     ) -> Result<crate::program::Expr, ExpressionInstantiationError> {
-        use ExpressionInstantiationError as Error;
-        self.charge_template(crate::copy_budget::Node::Expr(expression), fuel)
-            .map_err(Error::Copy)?;
-        let mut value = expression.clone();
-        value
-            .rewrite_types(&mut |ty| self.instantiate(ty))
-            .map_err(Error::Scope)?;
-        Ok(value)
+        self.parameters.instantiate_expression(
+            expression,
+            self.arguments.as_ref(),
+            &self.frames,
+            fuel,
+        )
     }
 
     pub fn instantiate_predicate_bounded(
@@ -551,6 +607,14 @@ impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
     ) -> Result<Term, crate::type_computations::Error> {
         self.parameters
             .instantiate_bounded(term, self.arguments, self.frames, fuel)
+    }
+    pub(crate) fn instantiate_expression(
+        &self,
+        expression: &crate::program::Expr,
+        fuel: &mut usize,
+    ) -> Result<crate::program::Expr, ExpressionInstantiationError> {
+        self.parameters
+            .instantiate_expression(expression, self.arguments, self.frames, fuel)
     }
     pub fn instantiate_requirement(
         &self,
@@ -677,7 +741,16 @@ pub fn admit_in_scope<'a>(
     fuel: &mut usize,
     queries: &mut crate::value_admission::DomainQueries<'_, '_>,
 ) -> Result<AdmittedArguments<'a>, AdmissionError> {
-    admit_in_order(parameters, domains, arguments, frames, 0, fuel, queries)
+    admit_in_order(
+        parameters,
+        domains,
+        arguments,
+        DeclarationInputScope::Caller(frames),
+        0,
+        fuel,
+        queries,
+    )
+    .map_err(|failure| failure.reason)
 }
 
 /// Admit a declaration-ordered projection of invocation storage. The
@@ -690,38 +763,82 @@ pub fn admit_projected_in_scope<'a, 'value>(
     fuel: &mut usize,
     queries: &mut crate::value_admission::DomainQueries<'_, '_>,
 ) -> Result<AdmittedArguments<'a, &'value Term>, AdmissionError> {
-    admit_in_order(parameters, domains, arguments, frames, 0, fuel, queries)
+    admit_in_order(
+        parameters,
+        domains,
+        arguments,
+        DeclarationInputScope::Caller(frames),
+        0,
+        fuel,
+        queries,
+    )
+    .map_err(|failure| failure.reason)
 }
 
-pub(crate) fn admit_in_order<'a, D: Borrow<Term>, T: Borrow<Term>>(
+/// A queried callable may live under an outer binder. At a source call, its
+/// declaration inputs instead arrive closed, even when the contract template
+/// mentions ordinary parameters of the callable being formed.
+#[derive(Clone, Copy)]
+pub enum DeclarationInputScope<'a> {
+    Caller(&'a [Vec<Sort>]),
+    ClosedInBody(&'a [Vec<Sort>]),
+}
+impl<'a> DeclarationInputScope<'a> {
+    fn input(self) -> &'a [Vec<Sort>] {
+        match self {
+            Self::Caller(frames) => frames,
+            Self::ClosedInBody(_) => &[],
+        }
+    }
+    fn template(self) -> &'a [Vec<Sort>] {
+        match self {
+            Self::Caller(frames) | Self::ClosedInBody(frames) => frames,
+        }
+    }
+}
+impl std::fmt::Display for DeclarationInputScope<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(declaration-input-scope (caller ")?;
+        display_frames(f, self.input())?;
+        write!(f, ") (template ")?;
+        display_frames(f, self.template())?;
+        f.write_str("))")
+    }
+}
+
+pub fn admit_in_order<'a, D: Borrow<Term>, T: Borrow<Term>>(
     parameters: &[DeclarationId],
     domains: &[D],
     arguments: &'a [T],
-    frames: &'a [Vec<Sort>],
+    scope: DeclarationInputScope<'a>,
     first: usize,
     fuel: &mut usize,
     queries: &mut crate::value_admission::DomainQueries<'_, '_>,
-) -> Result<AdmittedArguments<'a, T>, AdmissionError> {
+) -> Result<AdmittedArguments<'a, T>, DeclarationAdmissionFailure> {
     *fuel = fuel
         .checked_sub(parameters.len())
         .ok_or(AdmissionError::Budget)?;
     for domain in domains {
-        crate::type_computations::charge_term(domain.borrow(), fuel)?;
+        crate::type_computations::charge_term(domain.borrow(), fuel)
+            .map_err(AdmissionError::from)?;
     }
-    let parameters = Binders::new(parameters, domains).map_err(|e| e.to_string())?;
+    let parameters =
+        Binders::new(parameters, domains).map_err(|e| AdmissionError::from(e.to_string()))?;
     if parameters.ordered.len() != arguments.len() {
-        return Err("nominal argument count mismatch".into());
+        return Err(AdmissionError::from("declaration argument count mismatch").into());
     }
     for argument in arguments {
         let argument = argument.borrow();
-        crate::type_computations::charge_term(argument, fuel)?;
-        argument.check_scope(frames).map_err(|e| e.to_string())?;
+        crate::type_computations::charge_term(argument, fuel).map_err(AdmissionError::from)?;
+        argument
+            .check_scope(scope.input())
+            .map_err(|e| AdmissionError::from(e.to_string()))?;
     }
-    parameters.admit(domains, arguments, frames, first, fuel, queries)?;
+    parameters.admit(domains, arguments, scope.input(), first, fuel, queries)?;
     Ok(AdmittedArguments {
         parameters,
         arguments,
-        frames,
+        frames: scope.template(),
     })
 }
 

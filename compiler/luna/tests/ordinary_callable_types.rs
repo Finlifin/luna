@@ -23,6 +23,33 @@ fn check_both(source: &str) {
 }
 
 #[test]
+fn selected_runtime_method_keeps_a_type_valued_member_input() {
+    let source = "
+        trait Probe { fn read() -> bool where D, field: D; }
+        impl Probe for bool { fn read() -> bool where D, field: D { true } }
+        comptime fn select() -> fn() -> bool { bool.read<Type, u8> }
+    ";
+    let package = sysroot::compile(source).unwrap();
+    let select = package
+        .functions
+        .iter()
+        .find(|f| f.name == "select")
+        .unwrap()
+        .declaration;
+    for tree in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            let Value::RuntimeTraitMethod(method) = vm.invoke(select, vec![]).unwrap() else {
+                panic!("expected the public method identity");
+            };
+            assert_eq!(
+                method.method_arguments,
+                [nir::Primitive::Type, nir::Primitive::U8].map(nir::Term::Primitive)
+            );
+        });
+    }
+}
+
+#[test]
 fn recursive_clause_calls_keep_caller_identities_out_of_callee_dependencies() {
     let source = "
         comptime fn Byte() -> Type { u8 }

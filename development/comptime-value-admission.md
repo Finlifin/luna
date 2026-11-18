@@ -61,6 +61,10 @@ comptime fn check() -> bool {
 
 例如一个名义类型的输入同时含有列表、函数和 `field: T`。若 `T` 返回 `Type`，后续域可以使用作为类型传入的 `field`。VM 按声明顺序借用先前取得的值，由当前世界提供集合元素域、函数签名、名义布局和词法绑定证据。接收方仍检查整个输入包，包括后续域未引用的实参。通过后，字段和契约复用本次替换的索引。复制预检计算模板自身及每次实际展开的载荷，同一实参出现两次就按两次展开计费。此证据的有效范围是当前接收世界和调用者作用域。[VM 接收查询](../compiler/comptime_interpretor/src/admission.rs) · [源码到两种 VM 的用例](../compiler/luna/tests/declaration_input_plans.rs)
 
+普通函数与 trait 方法现在也用这套域检查来接收完整实参。例如 `fn read() -> bool where D, field: D` 的签名始终返回 bool，但 `read<Type, u8>` 的第二个实参是类型值。即使方法体未使用 field，接收方仍须用第一个实参完成它的域检查。公开方法的参数包按 Self、trait 实参、成员实参排列。公开签名、默认实参、前后置条件和被选中的实现各使用所属声明的绑定身份。方法作为值交付后，接收世界用同一份已检查的参数解释它的签名，保留公开成员身份。域证据尚不能确定、工作预算耗尽和已证明的输入错误分别传播；后者能指出声明槽位与检查阶段。[方法接收与分派](../compiler/comptime_interpretor/src/trait_methods.rs) · [真实 sysroot 方法用例](../compiler/luna/tests/ordinary_callable_types.rs)
+
+这里有两个不同的绑定范围。在外层 callable 签名中查询函数值时，其实参可以合法引用调用者的 binder。在执行已选方法时，传入的声明实参已经取得，不能指向该方法尚未建立的普通参数。随后实例化默认代码或程序契约时，代码自身却可以引用那些参数。树解释和字节码都按这两个范围代入；字节码保留的默认代码还区分声明、原始域、实参及普通参数的 sort。程序条件仍在规定的调用位置执行。[作用域与替换](../compiler/nir/src/nominal_parameters.rs) · [两种 VM 的默认值和契约用例](../compiler/comptime_interpretor/tests/runtime_function_identities.rs)
+
 签名中的标注也需要区分两种工作。定义检查使用词法绑定身份判断标注依赖的输入，按已有参数域检查完整表达式及其分支前提。实例形成仍由原调用提供具体值。对 `u8` 参数计算 `n + 1` 时，定义检查必须看到保护加法的条件；调用时恰好得到小整数不能替定义证明算术安全。[词法依赖](../compiler/elaboration/src/program/lexical_inputs.rs) · [标注行为用例](../compiler/luna/tests/open_annotation_behavior.rs)
 
 ## 值引用与快照

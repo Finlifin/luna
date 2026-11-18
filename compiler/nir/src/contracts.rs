@@ -70,7 +70,21 @@ impl ProgramContract {
             &self.postconditions,
             self.result_binding,
             &self.entry_snapshots,
-            &substitution,
+            |value, fuel| substitution.instantiate_expression_bounded(value, fuel),
+            fuel,
+        )
+    }
+    pub fn instantiate_admitted<T: std::borrow::Borrow<Term>>(
+        &self,
+        inputs: &crate::AdmittedArguments<'_, T>,
+        fuel: &mut usize,
+    ) -> Result<Self, crate::type_computations::Error> {
+        instantiate_program_parts(
+            &self.preconditions,
+            &self.postconditions,
+            self.result_binding,
+            &self.entry_snapshots,
+            |value, fuel| inputs.instantiate_expression(value, fuel),
             fuel,
         )
     }
@@ -84,15 +98,11 @@ fn instantiate_program_parts(
     postconditions: &[Expr],
     result_binding: Option<LocalId>,
     entry_snapshots: &[EntrySnapshot],
-    substitution: &crate::DeclarationSubstitution<'_>,
+    mut instantiate: impl FnMut(&Expr, &mut usize) -> Result<Expr, crate::ExpressionInstantiationError>,
     fuel: &mut usize,
 ) -> Result<ProgramContract, crate::type_computations::Error> {
     use crate::type_computations::Error;
-    let mut expression = |value: &Expr| {
-        substitution
-            .instantiate_expression_bounded(value, fuel)
-            .map_err(Error::from)
-    };
+    let mut expression = |value: &Expr| instantiate(value, fuel).map_err(Error::from);
     let preconditions = preconditions
         .iter()
         .map(&mut expression)

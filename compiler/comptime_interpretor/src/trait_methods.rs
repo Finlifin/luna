@@ -63,42 +63,16 @@ impl Interpreter<'_> {
             for requirement in &contract.requirements {
                 self.check_type_contract(requirement, source)?;
             }
-            self.check_capability_parameters(&contract.capabilities, &[], &[], source)?;
+            for capability in &contract.capabilities {
+                self.check_capability_contract(capability, source)?;
+            }
             return Ok(());
         }
-        let (parameters, contract) = self
-            .method_contracts
-            .get(&(identity.interface.declaration, identity.member))
-            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
-        self.budget.steps = self
-            .budget
-            .steps
-            .checked_sub(parameters.len() as u64 + 1)
-            .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
-        let parameters = parameters.clone();
-        self.charge_copy_work(Some(source), |fuel| {
-            for argument in std::iter::once(&identity.subject)
-                .chain(identity.interface.arguments.iter())
-                .chain(&identity.method_arguments)
-            {
-                nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;
-            }
-            Ok(())
+        let output = self.query_admission(Some(source), |vm, fuel| {
+            vm.admitted_callable_signature(nir::CallableValueRef::Method(identity), &[], fuel)?
+                .map(std::borrow::Cow::into_owned)
+                .ok_or_else(|| nir::NominalAdmissionError::from("missing runtime method signature"))
         })?;
-        let arguments: Vec<_> = std::iter::once(identity.subject.clone())
-            .chain(identity.interface.arguments.iter().cloned())
-            .chain(identity.method_arguments.iter().cloned())
-            .collect();
-        let signature = contract
-            .signature
-            .ordinary()
-            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-        self.charge_copy_work(Some(source), |fuel| {
-            nir::copy_budget::charge_type_substitution(signature, &parameters, &arguments, fuel)
-        })?;
-        let output = signature
-            .instantiate_parameters(&parameters, &arguments)
-            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
         self.select_trait_method(
             View {
                 interface: identity.interface.declaration,
@@ -143,11 +117,7 @@ impl Interpreter<'_> {
             output,
             source,
         } = method;
-        let (parameters, contract) = self
-            .method_contracts
-            .get(&(interface, member))
-            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
-        let parameters = parameters.clone();
+        let (method_inputs, contract) = self.method_inputs(method)?;
         // Raw NIR can check an immediate interface call, but cannot
         // erase its program domain into an implementation function
         // value. IIR transports the identity and specializes the call.
@@ -158,24 +128,24 @@ impl Interpreter<'_> {
         if !direct_callee && !contract.program.preconditions.is_empty() && !retained_template {
             return Err(self.failure(ErrorKind::Unsupported, Some(source)));
         }
-        if method_arguments.len() != contract.type_parameters.len() {
-            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-        }
-        let contract_arguments: Vec<_> = std::iter::once(subject.clone())
-            .chain(interface_arguments.iter().cloned())
-            .chain(method_arguments.iter().cloned())
-            .collect();
-        self.check_capability_parameters(
-            &contract.capabilities,
-            &parameters,
-            &contract_arguments,
+        let frames = [method_inputs.frame];
+        let inputs = self.admit_function_inputs(
+            &method_inputs.parameters,
+            &method_inputs.arguments,
+            nir::DeclarationInputScope::ClosedInBody(&frames),
             source,
         )?;
+        for capability in &contract.capabilities {
+            let bound = self.query_admission(Some(source), |_, fuel| {
+                Ok(inputs.instantiate_requirement(capability, fuel)?)
+            })?;
+            self.check_capability_contract(&bound, source)?;
+        }
         for requirement in &contract.requirements {
-            let requirement = requirement
-                .instantiate_parameters(&parameters, &contract_arguments)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-            self.check_type_contract(&requirement, source)?;
+            let predicate = self.query_admission(Some(source), |_, fuel| {
+                Ok(inputs.instantiate_predicate(requirement, fuel)?)
+            })?;
+            self.check_type_contract(&predicate, source)?;
         }
         let selected_subject = self.selected_type_view(subject, Some(source))?;
         let selected_arguments = interface_arguments
@@ -328,11 +298,12 @@ impl Interpreter<'_> {
         let (body, mut arguments) = binding.clone();
         arguments.extend(method_arguments.iter().cloned());
         if let Some(identity) = self.functions.runtime_identity(&body) {
-            self.admit_function_inputs(&identity.type_parameters, &arguments, source)?;
-            let signature = identity
-                .signature
-                .instantiate_parameters(&self.input_binders(&identity.type_parameters), &arguments)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+            let signature = self.signature_from_inputs(
+                &identity.type_parameters,
+                &arguments,
+                &identity.signature,
+                source,
+            )?;
             if !self.observe_same_type(&signature, output, source)?
                 || (has_preconditions && !retained_template)
             {
@@ -358,23 +329,14 @@ impl Interpreter<'_> {
             .functions
             .interface(&body)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        if pending {
-            if definition.phase == nir::program::FunctionPhase::NormalForm {
-                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-            }
-            self.admit_function_inputs(&definition.type_parameters, &arguments, source)?;
+        if pending && definition.phase == nir::program::FunctionPhase::NormalForm {
+            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
         }
-        let ty = definition
-            .signature
-            .instantiate_parameters(&self.input_binders(&definition.type_parameters), &arguments)
-            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?
-            .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime)
-            .with_unsafe_call_requirement(definition.is_unsafe);
+        let ty = self.specialize_function_signature(definition, &arguments, source)?;
         if !self.observe_same_type(&ty, output, source)? {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         if self.comptime_only && definition.phase == nir::program::FunctionPhase::Runtime {
-            self.admit_function_inputs(&definition.type_parameters, &arguments, source)?;
             if has_preconditions && !retained_template {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
             }

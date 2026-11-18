@@ -81,7 +81,7 @@ pub(crate) enum MethodContinuation {
     },
 }
 pub(crate) struct CallSetup {
-    defaults: Option<(Vec<nir::DeclarationParameter>, Vec<Term>)>,
+    defaults: Option<method_catalog::Inputs<Term>>,
     program: nir::contracts::ProgramContract,
     parameters: Option<Vec<LocalId>>,
 }

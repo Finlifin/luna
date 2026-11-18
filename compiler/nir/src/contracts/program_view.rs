@@ -155,7 +155,7 @@ impl<'a> CallableProgram<'a> {
             self.parts.postconditions,
             self.parts.result_binding,
             self.parts.entry_snapshots,
-            substitution,
+            |value, fuel| substitution.instantiate_expression_bounded(value, fuel),
             fuel,
         )
     }

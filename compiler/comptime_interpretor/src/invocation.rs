@@ -623,7 +623,6 @@ impl<'a> Interpreter<'a> {
                     .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
                 let definition = view.interface;
                 let source = view.source;
-                self.admit_function_inputs(&definition.type_parameters, arguments, source)?;
                 let signature =
                     self.specialize_function_signature(definition, arguments, source)?;
                 (

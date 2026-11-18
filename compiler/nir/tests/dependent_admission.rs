@@ -390,3 +390,92 @@ fn newtype_captures_query_before_independent_own_slots_without_reordering_identi
         );
     }
 }
+
+#[test]
+fn closed_clause_inputs_and_ordinary_contract_binders_have_distinct_scopes() {
+    use nir::{
+        DeclarationInputScope as Scope, InputAdmissionStage, value_admission::DomainQueries,
+    };
+    let frames = [vec![Sort::Type]];
+    let bound = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let ids = [id(11), id(12)];
+    let domains = [p(Primitive::Type), rigid(11, Sort::Type)];
+    let mut queries = DomainQueries {
+        layout: &mut |_, _, _| Err("unexpected layout".into()),
+        declared: &mut |_, _, _| {
+            Err(NominalAdmissionError::Unresolved(
+                "waiting for binder".into(),
+            ))
+        },
+        callable: &mut |_, _, _| Ok(None),
+        collection: &mut |_, _| Ok(None),
+        target: None,
+    };
+    let inputs = [p(Primitive::Type), bound.clone()];
+    let mut fuel = 100_000;
+    assert!(
+        nir::admit_declaration_inputs(
+            &ids,
+            &domains,
+            &inputs,
+            Scope::ClosedInBody(&frames),
+            0,
+            &mut fuel,
+            &mut queries
+        )
+        .is_err()
+    );
+    let admitted = nir::admit_declaration_inputs(
+        &ids,
+        &domains,
+        &inputs,
+        Scope::Caller(&frames),
+        0,
+        &mut fuel,
+        &mut queries,
+    )
+    .unwrap();
+    assert_eq!(
+        admitted
+            .instantiate(&rigid(12, Sort::ComptimeValue), &mut fuel)
+            .unwrap(),
+        bound
+    );
+    let inputs = [p(Primitive::Type), p(Primitive::Bool)];
+    let admitted = nir::admit_declaration_inputs(
+        &ids,
+        &domains,
+        &inputs,
+        Scope::ClosedInBody(&frames),
+        0,
+        &mut fuel,
+        &mut queries,
+    )
+    .unwrap();
+    let template = Term::Tuple(vec![bound.clone(), rigid(12, Sort::ComptimeValue)]);
+    assert_eq!(
+        admitted.instantiate(&template, &mut fuel).unwrap(),
+        Term::Tuple(vec![bound, p(Primitive::Bool)])
+    );
+
+    let failure = nir::admit_declaration_inputs(
+        &ids,
+        &domains,
+        &[p(Primitive::Bool), rigid(13, Sort::ComptimeValue)],
+        Scope::Caller(&[]),
+        0,
+        &mut fuel,
+        &mut queries,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(failure.slot, Some((1, InputAdmissionStage::Value)));
+    assert_eq!(
+        failure.reason,
+        NominalAdmissionError::Unresolved("waiting for binder".into())
+    );
+}

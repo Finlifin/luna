@@ -93,6 +93,26 @@ impl Binders {
             .map_err(QueryError::Scope)
     }
 
+    pub(super) fn instantiate_expression<T: Borrow<Term>>(
+        &self,
+        template: &crate::program::Expr,
+        arguments: &[T],
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<crate::program::Expr, ExpressionInstantiationError> {
+        crate::copy_budget::charge_projected(
+            crate::copy_budget::Node::Expr(template),
+            fuel,
+            &|id| self.replacement(id, arguments),
+        )
+        .map_err(ExpressionInstantiationError::Copy)?;
+        let mut value = template.clone();
+        value
+            .rewrite_types(&mut |ty| self.instantiate(ty, arguments, frames))
+            .map_err(ExpressionInstantiationError::Scope)?;
+        Ok(value)
+    }
+
     /// Admit each value only after all local binders mentioned in its original
     /// domain have passed. External rigids belong to the caller's world.
     pub(super) fn admit<D: Borrow<Term>, T: Borrow<Term>>(
@@ -103,7 +123,7 @@ impl Binders {
         first: usize,
         fuel: &mut usize,
         queries: &mut crate::value_admission::DomainQueries<'_, '_>,
-    ) -> Result<(), AdmissionError> {
+    ) -> Result<(), DeclarationAdmissionFailure> {
         let count = self.ordered.len();
         *fuel = fuel.checked_sub(count).ok_or(AdmissionError::Budget)?;
         let mut dependents = vec![Vec::new(); count];
@@ -145,14 +165,30 @@ impl Binders {
                 .get(slot)
                 .map(Borrow::borrow)
                 .unwrap_or(&Term::Primitive(Primitive::Type));
-            let domain = self.instantiate_bounded(template, arguments, frames, fuel)?;
+            let at = |stage, reason| DeclarationAdmissionFailure {
+                slot: Some((slot, stage)),
+                reason,
+            };
+            let domain = self
+                .instantiate_bounded(template, arguments, frames, fuel)
+                .map_err(|error| at(InputAdmissionStage::Domain, error.into()))?;
             let expected = Sort::of_comptime_domain(&domain);
             let argument = arguments[slot].borrow();
             if argument.sort() != expected {
-                return Err("nominal argument sort mismatch".into());
+                return Err(at(
+                    InputAdmissionStage::Value,
+                    AdmissionError::Invalid(
+                        TypeError::WrongSort {
+                            expected,
+                            actual: argument.sort(),
+                        }
+                        .to_string(),
+                    ),
+                ));
             }
             if expected != Sort::Type {
-                crate::value_admission::validate(argument, &domain, frames, fuel, queries)?;
+                crate::value_admission::validate(argument, &domain, frames, fuel, queries)
+                    .map_err(|error| at(InputAdmissionStage::Value, error))?;
             }
             admitted += 1;
             *fuel = fuel
@@ -166,7 +202,9 @@ impl Binders {
             }
         }
         if admitted != count {
-            return Err("nominal input domains have a cyclic dependency".into());
+            return Err(
+                AdmissionError::from("declaration input domains have a cyclic dependency").into(),
+            );
         }
         Ok(())
     }

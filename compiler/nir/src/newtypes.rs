@@ -162,11 +162,12 @@ impl Newtype {
             &self.type_parameters,
             &self.parameter_types,
             arguments,
-            frames,
+            crate::DeclarationInputScope::Caller(frames),
             first,
             fuel,
             queries,
         )
+        .map_err(|failure| failure.reason)
     }
 
     pub fn instantiate_representation(&self, arguments: &[Term]) -> Result<Term, TypeError> {

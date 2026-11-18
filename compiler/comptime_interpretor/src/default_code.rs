@@ -3,9 +3,11 @@ use super::*;
 use std::sync::Weak;
 
 #[derive(PartialEq)]
-enum Key {
-    Interface(Vec<nir::DeclarationParameter>, Vec<Term>),
-    Function(DeclarationId, Vec<(DeclarationId, Term)>, Vec<Term>),
+struct Key {
+    declaration: DeclarationId,
+    domains: Vec<(DeclarationId, Term)>,
+    arguments: Vec<Term>,
+    frame: Vec<nir::Sort>,
 }
 struct Entry {
     source: Weak<Expr>,
@@ -99,7 +101,7 @@ impl Interpreter<'_> {
     pub(super) fn specialized_default_code(
         &mut self,
         source: &Arc<Expr>,
-        interface: Option<&(Vec<nir::DeclarationParameter>, Vec<Term>)>,
+        interface: Option<&method_catalog::Inputs<Term>>,
         dynamic: bool,
         callee: &Value,
         construction: SourceRange,
@@ -111,50 +113,45 @@ impl Interpreter<'_> {
             },
             source: Some(source.source),
         };
-        let (key, key_work) = if let Some((binders, arguments)) = interface {
-            let work = charge_key(
-                arguments.iter(),
-                binders.len() + arguments.len(),
-                &mut self.budget.steps,
+        let function_frame;
+        let (declaration, parameters, arguments, frame) = if let Some(method) = interface {
+            (
+                method.member,
+                method.parameters.as_ref(),
+                method.arguments.as_slice(),
+                &method.frame,
             )
-            .map_err(key_error)?;
-            (Key::Interface(binders.clone(), arguments.clone()), work)
         } else if dynamic && let Some((declaration, arguments)) = callee.declaration_instance() {
             let definition = self
                 .functions
                 .interface(&declaration)
                 .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(construction)))?;
-            let type_domain = Term::Primitive(Primitive::Type);
-            let domains = definition.type_parameters.iter().map(|parameter| {
-                self.declaration_parameter_domains
-                    .get(parameter)
-                    .unwrap_or(&type_domain)
-            });
-            let work = charge_key(
-                domains.chain(arguments.iter()),
-                definition.type_parameters.len() + arguments.len(),
-                &mut self.budget.steps,
-            )
-            .map_err(key_error)?;
-            let domains = definition
-                .type_parameters
-                .iter()
-                .map(|parameter| {
-                    (
-                        *parameter,
-                        self.declaration_parameter_domains
-                            .get(parameter)
-                            .unwrap_or(&type_domain)
-                            .clone(),
-                    )
-                })
-                .collect();
+            function_frame = self.ordinary_input_frame(&definition.signature, construction)?;
             (
-                Key::Function(declaration, domains, arguments.to_vec()),
-                work,
+                declaration,
+                definition.type_parameters.as_slice(),
+                arguments,
+                &function_frame,
             )
         } else {
             return Ok(source.clone());
+        };
+        let domains = parameters.iter().map(|parameter| {
+            self.declaration_parameter_domains
+                .get(parameter)
+                .unwrap_or(&Term::Primitive(Primitive::Type))
+        });
+        let key_work = charge_key(
+            domains.clone().chain(arguments),
+            parameters.len() + arguments.len() + frame.len(),
+            &mut self.budget.steps,
+        )
+        .map_err(key_error)?;
+        let key = Key {
+            declaration,
+            domains: parameters.iter().copied().zip(domains.cloned()).collect(),
+            arguments: arguments.to_vec(),
+            frame: frame.clone(),
         };
         if let Some(expression) = self
             .default_code_cache
@@ -167,11 +164,12 @@ impl Interpreter<'_> {
             return Ok(expression);
         }
         let before = self.budget.steps;
-        let expression = Arc::new(if let Some((binders, arguments)) = interface {
-            self.bound_default_expression(source, binders, arguments)?
-        } else {
-            self.instance_default_expression(construction, source, callee)?
-        });
+        let expression = Arc::new(self.specialize_function_expression(
+            source,
+            parameters,
+            arguments,
+            std::slice::from_ref(frame),
+        )?);
         let work = before - self.budget.steps;
         self.default_code_cache
             .insert(source, key, key_work, expression.clone(), work);
@@ -195,17 +193,19 @@ mod tests {
             }),
         })
     }
-    fn inputs(ty: Primitive) -> (Vec<nir::DeclarationParameter>, Vec<Term>) {
-        (
-            vec![nir::DeclarationParameter {
-                declaration: DeclarationId {
-                    package: 1,
-                    local: 1,
-                },
-                sort: nir::Sort::Type,
-            }],
-            vec![Term::Primitive(ty)],
-        )
+    fn inputs(ty: Primitive) -> method_catalog::Inputs<Term> {
+        method_catalog::Inputs {
+            member: DeclarationId {
+                package: 1,
+                local: 2,
+            },
+            parameters: Arc::from([DeclarationId {
+                package: 1,
+                local: 1,
+            }]),
+            arguments: vec![Term::Primitive(ty)],
+            frame: vec![],
+        }
     }
     #[test]
     fn specialization_reuses_code_but_separates_templates_and_inputs() {
@@ -257,7 +257,7 @@ mod tests {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let source = template();
         let mut wrong = inputs(Primitive::Bool);
-        wrong.1.clear();
+        wrong.arguments.clear();
         assert!(
             vm.specialized_default_code(&source, Some(&wrong), false, &Value::Unit, source.source)
                 .is_err()
@@ -308,7 +308,15 @@ mod tests {
         for index in 0..200 {
             cache.insert(
                 &source,
-                Key::Interface(vec![], vec![Term::Bool(index % 2 == 0)]),
+                Key {
+                    declaration: DeclarationId {
+                        package: 1,
+                        local: 2,
+                    },
+                    domains: vec![],
+                    arguments: vec![Term::Bool(index % 2 == 0)],
+                    frame: vec![],
+                },
                 2,
                 template(),
                 2000,
@@ -319,7 +327,15 @@ mod tests {
         let count = cache.entries.len();
         cache.insert(
             &source,
-            Key::Interface(vec![], vec![]),
+            Key {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 2,
+                },
+                domains: vec![],
+                arguments: vec![],
+                frame: vec![],
+            },
             2,
             template(),
             100001,

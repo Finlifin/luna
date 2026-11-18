@@ -46,21 +46,12 @@ impl Interpreter<'_> {
                 for argument in arguments {
                     self.check_type_description(argument, None)?;
                 }
-                self.admit_function_inputs(&function.type_parameters, arguments, view.source)?;
-                let binders = self.input_binders(&function.type_parameters);
-                self.charge_copy_work(Some(view.source), |fuel| {
-                    nir::copy_budget::charge_type_substitution(
-                        &function.signature,
-                        &binders,
-                        arguments,
-                        fuel,
-                    )
-                })?;
-                let substitution =
-                    self.function_substitution(&function.type_parameters, arguments, view.source)?;
-                let signature = substitution
-                    .instantiate(&function.signature)
-                    .map_err(|_| self.failure(ErrorKind::Type, None))?;
+                let signature = self.signature_from_inputs(
+                    &function.type_parameters,
+                    arguments,
+                    &function.signature,
+                    view.source,
+                )?;
                 if !matches!(signature.callable_signature(), Term::Function { parameters, result }
                         if parameters.is_empty() && result.as_ref() == ty)
                 {

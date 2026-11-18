@@ -157,7 +157,7 @@ enum Waiting {
 struct PendingCall {
     callee: Value,
     normal_head: Option<DeclarationId>,
-    trait_defaults: Option<(Vec<nir::DeclarationParameter>, Vec<Term>)>,
+    trait_defaults: Option<method_catalog::Inputs<Term>>,
     interface: Option<(nir::contracts::ProgramContract, Vec<LocalId>)>,
     arguments: Vec<Option<PreparedArgument>>,
     parameter_bindings: Vec<LocalId>,
@@ -314,12 +314,8 @@ impl fmt::Display for Frame {
             if let Some(head) = call.normal_head {
                 write!(f, " (normal-head {head})")?;
             }
-            if let Some((binders, arguments)) = &call.trait_defaults {
-                write!(f, " (trait-defaults")?;
-                for (binder, argument) in binders.iter().zip(arguments) {
-                    write!(f, " ({} {argument})", binder.declaration)?;
-                }
-                write!(f, ")")?;
+            if let Some(inputs) = &call.trait_defaults {
+                write!(f, " {inputs}")?;
             }
             write!(f, " (arguments")?;
             for value in &call.arguments {

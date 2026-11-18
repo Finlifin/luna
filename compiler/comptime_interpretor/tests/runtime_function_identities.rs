@@ -257,6 +257,69 @@ fn body_free_trait_method_retains_the_interface_origin() {
 }
 
 #[test]
+fn runtime_method_transport_uses_the_completed_member_domain() {
+    let mut package = trait_package();
+    let ty = Term::Primitive(Primitive::Type);
+    let boolean = Term::Primitive(Primitive::Bool);
+    let domain = Term::Rigid {
+        declaration: id(3),
+        sort: Sort::Type,
+    };
+    let params = vec![id(3), id(70)];
+    let method = &mut package.traits[0].methods[0];
+    method.type_parameters = params.clone();
+    method.signature = signature(boolean.clone()).into();
+    method.requirements.push(nir::program::TypePredicate::Equal(
+        domain.clone(),
+        ty.clone(),
+    ));
+    let identity = &mut package.runtime_function_identities[0];
+    identity.type_parameters = params.clone();
+    identity.signature = signature(boolean.clone());
+    package
+        .function_parameters
+        .push(nir::function_parameters::Declaration {
+            declaration: id(2),
+            parameters: params,
+            domains: vec![ty.clone(), domain],
+        });
+    let K::TraitMethod {
+        method_arguments, ..
+    } = &mut package.functions[0].body.kind
+    else {
+        unreachable!()
+    };
+    *method_arguments = vec![ty.clone(), boolean.clone()];
+    let expected = nir::TraitMethodIdentity {
+        interface: id(4).into(),
+        subject: boolean.clone(),
+        member: id(5),
+        method_arguments: method_arguments.clone(),
+    };
+    for engine in [Interpreter::for_comptime, Interpreter::for_comptime_tree] {
+        let mut vm = engine(&package, Budget::default()).unwrap();
+        let obtained = vm.invoke(id(1), vec![]).unwrap();
+        assert_eq!(
+            obtained,
+            Value::RuntimeTraitMethod(Box::new(expected.clone()))
+        );
+        vm.validate_immutable_input(&obtained, &signature(boolean.clone()))
+            .unwrap();
+        let mut invalid = expected.clone();
+        invalid.method_arguments[0] = boolean.clone();
+        assert!(
+            vm.validate_immutable_input(
+                &Value::RuntimeTraitMethod(Box::new(invalid)),
+                &signature(boolean.clone())
+            )
+            .is_err()
+        );
+        vm.validate_immutable_input(&obtained, &signature(boolean.clone()))
+            .unwrap();
+    }
+}
+
+#[test]
 fn body_free_trait_method_cannot_execute_or_erase_a_precondition() {
     let mut package = trait_package();
     let callee = package.functions[0].body.clone();
@@ -1466,6 +1529,104 @@ fn dynamic_trait_defaults_use_frozen_inputs_and_interface_parameter_bindings() {
             vm.invoke(id(1), vec![Value::Type(ty.clone())]).unwrap(),
             Value::Type(ty)
         );
+    }
+}
+
+#[test]
+fn dependent_method_defaults_and_program_contracts_use_the_public_inputs() {
+    let mut package = dynamic_trait_default_package();
+    let ty = Term::Primitive(Primitive::Type);
+    let boolean = Term::Primitive(Primitive::Bool);
+    let domain = Term::Rigid {
+        declaration: id(3),
+        sort: Sort::Type,
+    };
+    let guard = |owner| nir::program::LocalId { owner, index: 2 };
+    let source = SourceRange { start: 75, end: 82 };
+    let template = |term| Expr {
+        source,
+        ty: ty.clone(),
+        kind: K::TypeValue(term),
+    };
+    let add_guard = |signature: &mut Term| {
+        let Term::Function { parameters, .. } = signature else {
+            unreachable!()
+        };
+        parameters.push(nir::Parameter {
+            sort: Sort::Runtime,
+            ty: boolean.clone(),
+        });
+    };
+    add_guard(&mut package.functions[0].signature);
+    add_guard(&mut package.functions[1].signature);
+    package.functions[0].parameters.push(guard(1));
+    package.functions[1].parameters.push(guard(2));
+    package.functions[1].type_parameters.push(id(70));
+    let signature = package.functions[1]
+        .signature
+        .clone()
+        .with_comptime_phase(true);
+    let contract = &mut package.traits[0].methods[0];
+    contract.type_parameters.push(id(70));
+    contract.signature = signature.clone().into();
+    contract.parameter_bindings.push(guard(5));
+    contract.program.preconditions.push(Expr {
+        source,
+        ty: boolean.clone(),
+        kind: K::Local(guard(5)),
+    });
+    package
+        .function_parameters
+        .push(nir::function_parameters::Declaration {
+            declaration: id(2),
+            parameters: vec![id(3), id(70)],
+            domains: vec![ty.clone(), domain],
+        });
+    let K::Call {
+        callee,
+        arguments,
+        parameter_bindings,
+    } = &mut package.functions[0].body.kind
+    else {
+        unreachable!()
+    };
+    parameter_bindings.push(guard(5));
+    callee.ty = signature;
+    let K::ComptimeFunctionInstance { inputs, .. } = &mut callee.kind else {
+        unreachable!()
+    };
+    // D is Type; field comes from the caller and is admitted with Type sort.
+    inputs.arguments.insert(1, template(ty.clone()));
+    arguments.insert(
+        0,
+        nir::program::CallArgument {
+            parameter: 2,
+            is_default: false,
+            passing: Default::default(),
+            value: Expr {
+                source,
+                ty: boolean.clone(),
+                kind: K::Local(guard(1)),
+            },
+        },
+    );
+    for engine in [Interpreter::for_comptime, Interpreter::for_comptime_tree] {
+        let mut vm = engine(&package, Budget::default()).unwrap();
+        for (field, allowed) in [
+            (Primitive::U8, true),
+            (Primitive::Bool, false),
+            (Primitive::Char, true),
+        ] {
+            let result = vm.invoke(
+                id(1),
+                vec![Value::Type(Term::Primitive(field)), Value::Bool(allowed)],
+            );
+            if allowed {
+                assert_eq!(result.unwrap(), Value::Type(ty.clone()));
+            } else {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+            }
+        }
     }
 }
 

@@ -29,6 +29,7 @@ fn optional_view<T>(result: Result<Option<T>, AdmissionError>, fuel: &mut usize)
 }
 
 impl Interpreter<'_> {
+    #[cfg(test)]
     pub(super) fn normal_callable_signature(
         &self,
         declaration: DeclarationId,
@@ -40,6 +41,7 @@ impl Interpreter<'_> {
             .map(Cow::into_owned)
     }
 
+    #[cfg(test)]
     pub(super) fn normal_callable_signature_view(
         &self,
         declaration: DeclarationId,
@@ -79,10 +81,10 @@ impl Interpreter<'_> {
             return self.admitted_function_signature(declaration, arguments, frames, fuel);
         };
         *fuel = fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
-        for term in method.terms() {
-            nir::type_computations::charge_term(term, fuel)?;
-        }
         if self.graph.is_some() {
+            for term in method.terms() {
+                nir::type_computations::charge_term(term, fuel)?;
+            }
             let Some(contract) = self
                 .iir_method(
                     method.interface.declaration,
@@ -123,13 +125,16 @@ impl Interpreter<'_> {
         *fuel = fuel
             .checked_sub(parameters.len())
             .ok_or(AdmissionError::Budget)?;
-        let inputs: Vec<_> = method.terms().cloned().collect();
-        let parameters: Vec<_> = parameters.iter().map(|p| p.declaration).collect();
-        self.validate_function_inputs_in_scope(&parameters, &inputs, frames, fuel)
-            .map_err(input_failure)?;
+        let inputs: Vec<_> = method.terms().collect();
         let signature = self
-            .function_substitution_bounded(&parameters, &inputs, frames, fuel)?
-            .instantiate_bounded(
+            .admitted_function_inputs(
+                parameters,
+                &inputs,
+                nir::DeclarationInputScope::Caller(frames),
+                fuel,
+            )
+            .map_err(input_failure)?
+            .instantiate(
                 contract.signature.ordinary().map_err(|e| e.to_string())?,
                 fuel,
             )?;
@@ -187,11 +192,15 @@ impl Interpreter<'_> {
                     )),
                 )
             };
-        self.validate_function_inputs_in_scope(parameters, arguments, frames, fuel)
-            .map_err(input_failure)?;
         let signature = self
-            .function_substitution_bounded(parameters, arguments, frames, fuel)?
-            .instantiate_bounded(signature, fuel)?;
+            .admitted_function_inputs(
+                parameters,
+                arguments,
+                nir::DeclarationInputScope::Caller(frames),
+                fuel,
+            )
+            .map_err(input_failure)?
+            .instantiate(signature, fuel)?;
         Ok(Some(Cow::Owned(match qualifiers {
             Some((comptime, is_unsafe)) => signature
                 .with_comptime_phase(comptime)
