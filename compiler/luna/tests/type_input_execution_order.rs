@@ -259,3 +259,85 @@ fn required_runtime_callable_checks_completed_input_domains() {
         }
     }
 }
+
+#[test]
+fn type_inputs_transfer_control_to_the_enclosing_loop() {
+    check_twice(
+        "pure comptime fn Key<.first: Integer = 0, .last: Integer = 0> -> Type { bool }
+         comptime fn mark() -> Integer { 8 }
+         comptime fn check() -> bool {
+             var trace: Integer = 0;
+             while trace < 4 {
+                 let key = Key<
+                     .last = do {
+                         trace = trace + 1;
+                         if trace == 1 { continue; };
+                         if trace == 3 { break; };
+                         trace
+                     },
+                     .first = mark()
+                 >;
+             };
+             trace == 3
+         }",
+        &["check", "mark"],
+    );
+}
+
+#[test]
+fn nested_type_plans_resume_only_the_lexical_target() {
+    check_twice(
+        "struct Outer where item: Type {}
+         pure comptime fn Key<index: Integer> -> Type { bool }
+         comptime fn mark() -> Integer { 7 }
+         comptime fn check() -> bool {
+             var visits: Integer = 0;
+             var rounds: Integer = 0;
+             while rounds < 4 {
+                 let value = Outer<do {
+                     while true {
+                         let inner = Key<do { visits = visits + 1; break; 0 }>;
+                         mark();
+                     };
+                     let key = Key<do {
+                         rounds = rounds + 1;
+                         if rounds == 1 { continue; };
+                         if rounds == 3 { break; };
+                         rounds
+                     }>;
+                     mark();
+                     key
+                 }>;
+                 mark();
+             };
+             visits == 3 and rounds == 3
+         }",
+        &["check", "mark", "mark"],
+    );
+}
+
+#[test]
+fn exits_from_packet_preparation_and_staged_fields_skip_their_successors() {
+    check_twice(
+        "pure comptime fn Packet<T, tag: u8, ...items: meta.List<T>> -> Type { bool }
+         comptime fn Byte() -> Type { u8 }
+         comptime fn mark() -> u8 { 7 }
+         comptime fn check() -> bool {
+             var trace: Integer = 0;
+             while trace < 4 {
+                 let packet = Packet<...do {
+                     trace = trace + 1;
+                     if trace == 1 { continue; };
+                     let tag: u8 = 9;
+                     (u8, tag)
+                 }, mark()>;
+                 let staged = Packet<Byte(), 0, do {
+                     if trace == 3 { break; };
+                     255
+                 }, mark()>;
+             };
+             trace == 3
+         }",
+        &["check", "mark", "Byte", "mark", "mark", "Byte"],
+    );
+}

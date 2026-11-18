@@ -520,7 +520,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                     if let Err(error) = checked {
                         *result = Some(Completion::Ordinary {
                             flow: Err(error),
-                            defaults: None,
+                            bindings: ReturnedEnvironment::Private,
                         });
                     }
                     // Do not resume the terminal bytecode frame before the
@@ -538,7 +538,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                     if let Err(error) = vm.finish_bytecode_method(parent, wait, selected) {
                         *result = Some(Completion::Ordinary {
                             flow: Err(error),
-                            defaults: None,
+                            bindings: ReturnedEnvironment::Private,
                         });
                     }
                 }
@@ -558,7 +558,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                     if let Err(error) = checked {
                         *result = Some(Completion::Ordinary {
                             flow: Err(error),
-                            defaults: None,
+                            bindings: ReturnedEnvironment::Private,
                         });
                     }
                 }
@@ -581,7 +581,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                         Err(error) => {
                             *result = Some(Completion::Ordinary {
                                 flow: Err(error),
-                                defaults: None,
+                                bindings: ReturnedEnvironment::Private,
                             });
                         }
                     }
@@ -653,7 +653,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             };
         }
         if let Some(delivered) = result.take() {
-            let (flow, defaults) = match delivered {
+            let (flow, bindings) = match delivered {
                 Completion::Continue(active) => {
                     *execution = Some(Execution::Invocation(active));
                     return Ok(Poll::Pending);
@@ -677,7 +677,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                     }
                     return Ok(Poll::Pending);
                 }
-                Completion::Ordinary { flow, defaults } => (flow, defaults),
+                Completion::Ordinary { flow, bindings } => (flow, bindings),
             };
             let Some(parent) = stack
                 .last_mut()
@@ -686,7 +686,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             else {
                 return flow.map(|flow| Poll::Ready(Some(flow)));
             };
-            let propagation = match parent.receive(flow, defaults) {
+            let propagation = match parent.receive(flow, bindings) {
                 Ok(None) => None,
                 Ok(Some(flow)) => Some(Ok(flow)),
                 Err(error) => Some(Err(error)),
@@ -753,7 +753,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 Err(error) => {
                     *result = Some(Completion::Ordinary {
                         flow: Err(error),
-                        defaults: Some(environment),
+                        bindings: ReturnedEnvironment::Lexical(environment),
                     })
                 }
             },
@@ -778,7 +778,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                     Err(error) => {
                         *result = Some(Completion::Ordinary {
                             flow: Err(error),
-                            defaults: None,
+                            bindings: ReturnedEnvironment::Private,
                         })
                     }
                 }
@@ -808,7 +808,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                     Err(error) => {
                         *result = Some(Completion::Ordinary {
                             flow: Err(error),
-                            defaults: None,
+                            bindings: ReturnedEnvironment::Private,
                         })
                     }
                 }
@@ -845,9 +845,9 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 Completion::Continue(active) => self
                     .vm
                     .complete_execution(Execution::Invocation(active), Err(error)),
-                Completion::Ordinary { defaults, .. } => Completion::Ordinary {
+                Completion::Ordinary { bindings, .. } => Completion::Ordinary {
                     flow: Err(error),
-                    defaults,
+                    bindings,
                 },
                 Completion::Input(mut input) => {
                     input.flow = Err(error);
@@ -920,7 +920,11 @@ impl fmt::Display for Session<'_, '_, '_> {
                     " (continue {} {})",
                     active.frame.function, active.frame.progress
                 )?,
-                Completion::Ordinary { .. } => f.write_str(" ordinary")?,
+                Completion::Ordinary { bindings, .. } => f.write_str(match bindings {
+                    ReturnedEnvironment::Private => " ordinary",
+                    ReturnedEnvironment::Declaration(_) => " (ordinary declaration-bindings)",
+                    ReturnedEnvironment::Lexical(_) => " (ordinary lexical-bindings)",
+                })?,
                 Completion::Input(_) => f.write_str(" input")?,
             }
         }

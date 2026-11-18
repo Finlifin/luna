@@ -114,11 +114,19 @@ impl Execution<'_> {
     }
 }
 
+/// The stage that lent the bindings determines who may restore them and
+/// whether a lexical loop transfer can resume at the suspension site.
+pub(super) enum ReturnedEnvironment {
+    Private,
+    Declaration(Environment),
+    Lexical(Environment),
+}
+
 enum Completion<'a> {
     Continue(Box<Activation<'a>>),
     Ordinary {
         flow: Result<Flow, Error>,
-        defaults: Option<Environment>,
+        bindings: ReturnedEnvironment,
     },
     Input(bytecode::InputResult),
 }
@@ -137,7 +145,7 @@ impl<'a> PlanActivation<'a> {
         self.frame.cleanup(&mut self.environment);
         Completion::Ordinary {
             flow,
-            defaults: Some(self.environment),
+            bindings: ReturnedEnvironment::Lexical(self.environment),
         }
     }
 }
@@ -276,7 +284,7 @@ impl<'a> Interpreter<'a> {
         match execution {
             Execution::Associated { activation, .. } => Completion::Ordinary {
                 flow: activation.complete(self, flow),
-                defaults: None,
+                bindings: ReturnedEnvironment::Private,
             },
             Execution::Invocation(mut activation) => {
                 match flow.and_then(|flow| self.accept_invocation_step(&mut activation.frame, flow))
@@ -287,7 +295,7 @@ impl<'a> Interpreter<'a> {
                         Completion::Ordinary {
                             flow: result
                                 .map(|value| Flow::Value(value.expect("completed invocation"))),
-                            defaults: None,
+                            bindings: ReturnedEnvironment::Private,
                         }
                     }
                 }
@@ -295,7 +303,7 @@ impl<'a> Interpreter<'a> {
             Execution::Default { environment, .. } | Execution::Contract { environment, .. } => {
                 Completion::Ordinary {
                     flow,
-                    defaults: Some(environment),
+                    bindings: ReturnedEnvironment::Declaration(environment),
                 }
             }
         }

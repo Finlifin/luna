@@ -106,6 +106,19 @@ impl Frame {
         Ok(())
     }
 
+    fn unwind_to(&mut self, depth: usize, source: SourceRange) -> Result<(), Error> {
+        if depth > self.scopes.len() {
+            return Err(Error {
+                kind: ErrorKind::InvalidControlFlow,
+                source: Some(source),
+            });
+        }
+        while self.scopes.len() > depth {
+            self.leave_scope()?;
+        }
+        Ok(())
+    }
+
     fn commit_scope(&mut self) -> Result<(), Error> {
         let scope = self.scopes.pop().ok_or(Error {
             kind: ErrorKind::InvalidControlFlow,
@@ -431,11 +444,69 @@ impl Frame {
         Ok(())
     }
 
+    fn receive_plan(
+        &mut self,
+        result: Result<Flow, Error>,
+        environment: Environment,
+    ) -> Result<Option<Flow>, Error> {
+        let Some(Waiting::Plan {
+            destination,
+            borrowed,
+        }) = self.waiting.take()
+        else {
+            return Err(Error {
+                kind: ErrorKind::InvalidControlFlow,
+                source: None,
+            });
+        };
+        self.environment = environment;
+        let mut missing = false;
+        for (binding, slot) in borrowed {
+            self.slots[slot] = self.environment.remove(&binding);
+            missing |= self.slots[slot].is_none();
+        }
+        if missing {
+            return Err(Error {
+                kind: ErrorKind::MissingBinding,
+                source: None,
+            });
+        }
+
+        let flow = result?;
+        let target = match flow {
+            Flow::Value(value) => {
+                self.slots[destination] = Some(value);
+                return Ok(None);
+            }
+            Flow::Break(id) | Flow::Continue(id) => id,
+            flow => return Ok(Some(flow)),
+        };
+        // The saved PC points past the plan. An intermediate input frame
+        // propagates the transfer until its lexical owner restores the loop.
+        let at = self.pc - 1;
+        let Some(region) = self.code.enclosing_loop(target, at) else {
+            return Ok(Some(flow));
+        };
+        self.unwind_to(region.scope_depth, self.code.instructions()[at].source)?;
+        self.pc = if matches!(flow, Flow::Break(_)) {
+            region.end
+        } else {
+            region.start
+        };
+        Ok(None)
+    }
+
     pub(super) fn receive(
         &mut self,
         result: Result<Flow, Error>,
-        defaults: Option<Environment>,
+        bindings: invocation::ReturnedEnvironment,
     ) -> Result<Option<Flow>, Error> {
+        use invocation::ReturnedEnvironment;
+        let defaults = match bindings {
+            ReturnedEnvironment::Lexical(env) => return self.receive_plan(result, env),
+            ReturnedEnvironment::Private => None,
+            ReturnedEnvironment::Declaration(env) => Some(env),
+        };
         if matches!(self.waiting, Some(Waiting::Interface)) {
             let interface = self.interface.as_mut().ok_or(Error {
                 kind: ErrorKind::InvalidControlFlow,
@@ -446,41 +517,18 @@ impl Frame {
             return Ok(None);
         }
         if let Some(environment) = defaults {
-            if let Some(Waiting::Plan { .. }) = &self.waiting {
-                let Some(Waiting::Plan {
-                    destination,
-                    borrowed,
-                }) = self.waiting.take()
-                else {
-                    unreachable!()
-                };
-                self.environment = environment;
-                let mut missing = false;
-                for (binding, slot) in borrowed {
-                    self.slots[slot] = self.environment.remove(&binding);
-                    missing |= self.slots[slot].is_none();
-                }
-                self.waiting = Some(Waiting::Call(destination));
-                if missing {
-                    return Err(Error {
-                        kind: ErrorKind::MissingBinding,
-                        source: None,
-                    });
-                }
-            } else {
-                let Some(Waiting::Default { call, destination }) = self.waiting else {
-                    return Err(Error {
-                        kind: ErrorKind::InvalidControlFlow,
-                        source: None,
-                    });
-                };
-                let pending = self.calls.get_mut(&call).ok_or(Error {
+            let Some(Waiting::Default { call, destination }) = self.waiting else {
+                return Err(Error {
                     kind: ErrorKind::InvalidControlFlow,
                     source: None,
-                })?;
-                pending.defaults = environment;
-                self.waiting = Some(Waiting::Call(destination));
-            }
+                });
+            };
+            let pending = self.calls.get_mut(&call).ok_or(Error {
+                kind: ErrorKind::InvalidControlFlow,
+                source: None,
+            })?;
+            pending.defaults = environment;
+            self.waiting = Some(Waiting::Call(destination));
         }
         match result? {
             Flow::Value(value) => {
@@ -852,7 +900,7 @@ impl<'a> Interpreter<'a> {
         expression: &Expr,
         environment: &mut Environment,
     ) -> Result<Option<InputFrame>, Error> {
-        let Some(code) = self.invocation_code(expression, None)? else {
+        let Some(code) = self.lexical_expression_code(expression)? else {
             return Ok(None);
         };
         let code = self.start_frame(&code, environment)?;
@@ -895,6 +943,14 @@ impl<'a> Interpreter<'a> {
         self.bytecode_contextual_inputs
     }
 
+    fn lexical_expression_code(&mut self, body: &Expr) -> Result<Option<Arc<Program>>, Error> {
+        if !self.bytecode_invocation_available() {
+            return Ok(None);
+        }
+        self.compile_bytecode(|session, fuel| session.compile_lexical_expression(body, fuel))
+            .map(|code| Some(Arc::new(code)))
+    }
+
     pub(super) fn start_input_preparation(
         &mut self,
         preparation: &nir::program::NormalFormPreparation,
@@ -912,7 +968,7 @@ impl<'a> Interpreter<'a> {
             .local_bindings()
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         let exports = bindings::Exports::new(self, bindings, environment, source)?;
-        let Some(code) = self.invocation_code(&preparation.expression, None)? else {
+        let Some(code) = self.lexical_expression_code(&preparation.expression)? else {
             return Ok(None);
         };
         let code = self.start_frame_with_exports(&code, environment, exports)?;
@@ -2502,14 +2558,9 @@ impl<'a> Interpreter<'a> {
                 }
                 Op::EnterScope => frame.scopes.push(PatternScope::default()),
                 Op::LeaveScope => frame.leave_scope()?,
-                Op::Unwind(depth) => {
-                    if *depth > frame.scopes.len() {
-                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
-                    }
-                    while frame.scopes.len() > *depth {
-                        frame.leave_scope()?;
-                    }
-                }
+                Op::Unwind(depth) => frame.unwind_to(*depth, source)?,
+                Op::BreakEnclosing(id) => return Ok(Progress::Complete(Flow::Break(*id))),
+                Op::ContinueEnclosing(id) => return Ok(Progress::Complete(Flow::Continue(*id))),
                 Op::PrepareScalar(scalar) => {
                     self.prepare_scalar(scalar.descriptor(), source)?;
                 }

@@ -489,6 +489,8 @@ pub enum Op {
     EnterScope,
     LeaveScope,
     Unwind(usize),
+    BreakEnclosing(LocalId),
+    ContinueEnclosing(LocalId),
     Read {
         destination: Register,
         local: Register,
@@ -523,13 +525,29 @@ pub struct Instruction {
 pub struct Program {
     constants: Vec<Arc<constants::Constant>>,
     instructions: Vec<Instruction>,
+    // Only loops containing a suspension need an external entry point.
+    loop_regions: BTreeMap<(LocalId, usize), LoopRegion>,
     locals: Vec<(LocalId, Register)>,
     registers: usize,
     prepared_type_slots: Vec<usize>,
     prepared_type_count: usize,
     storage_work: usize,
 }
+#[derive(Debug, Clone, Copy)]
+pub struct LoopRegion {
+    pub start: usize,
+    pub end: usize,
+    pub scope_depth: usize,
+}
 impl Program {
+    /// Repeated lowerings may reuse an identity in disjoint instruction ranges.
+    pub fn enclosing_loop(&self, identity: LocalId, suspended_at: usize) -> Option<LoopRegion> {
+        self.loop_regions
+            .range((identity, 0)..=(identity, suspended_at))
+            .next_back()
+            .map(|(_, region)| *region)
+            .filter(|region| suspended_at < region.end)
+    }
     pub fn constants(&self) -> &[Arc<constants::Constant>] {
         &self.constants
     }
@@ -584,6 +602,16 @@ impl fmt::Display for Program {
         write!(f, ") (constants")?;
         for (index, value) in self.constants.iter().enumerate() {
             write!(f, " ({index} {value})")?;
+        }
+        if !self.loop_regions.is_empty() {
+            write!(f, ") (loop-regions")?;
+            for ((id, _), region) in &self.loop_regions {
+                write!(
+                    f,
+                    " ({id} (continue {}) (break {}) (scope-depth {}))",
+                    region.start, region.end, region.scope_depth
+                )?;
+            }
         }
         write!(f, ") (instructions")?;
         for (pc, instruction) in self.instructions.iter().enumerate() {
@@ -1256,6 +1284,8 @@ impl fmt::Display for Program {
                 Op::EnterScope => write!(f, "(enter-scope)")?,
                 Op::LeaveScope => write!(f, "(leave-scope)")?,
                 Op::Unwind(depth) => write!(f, "(unwind {depth})")?,
+                Op::BreakEnclosing(id) => write!(f, "(break-to-enclosing-loop {id})")?,
+                Op::ContinueEnclosing(id) => write!(f, "(continue-enclosing-loop {id})")?,
                 Op::PrepareScalar(scalar) => write!(f, "(prepare-scalar {scalar})")?,
                 Op::CheckScalarOperand { scalar, value } => {
                     write!(f, "(check-scalar-operand {value} {scalar})")?
@@ -1318,6 +1348,15 @@ impl CompilationSession {
     pub fn compile(&mut self, body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
         compile_root(Root::Expression(body), fuel, &mut self.constants).map(|(program, _)| program)
     }
+    /// A checked input expression executes in its source activation's lexical context.
+    pub fn compile_lexical_expression(
+        &mut self,
+        body: &Expr,
+        fuel: &mut usize,
+    ) -> Result<Program, Error> {
+        compile_root(Root::LexicalExpression(body), fuel, &mut self.constants)
+            .map(|(program, _)| program)
+    }
     pub fn compile_staged_input(
         &mut self,
         input: &nir::program::NormalFormArgument,
@@ -1364,6 +1403,7 @@ pub fn compile_contextual_input(
 
 enum Root<'a> {
     Expression(&'a Expr),
+    LexicalExpression(&'a Expr),
     Staged(&'a nir::program::NormalFormArgument),
     Contextual(&'a nir::program::NormalFormArgument, &'a Term),
 }
@@ -1372,8 +1412,9 @@ fn compile_root<'a>(
     fuel: &mut usize,
     constants: &mut constants::Pool,
 ) -> Result<(Program, Option<normal_types::Shape>), Error> {
+    let lexical_input = !matches!(root, Root::Expression(_));
     let source = match root {
-        Root::Expression(body) => body.source,
+        Root::Expression(body) | Root::LexicalExpression(body) => body.source,
         Root::Staged(input) | Root::Contextual(input, _) => input.source(),
     };
     let initial_fuel = *fuel;
@@ -1383,9 +1424,11 @@ fn compile_root<'a>(
     let mut registers = 1;
     let mut labels = Vec::new();
     let mut loops = BTreeMap::new();
+    let mut loop_regions = BTreeMap::new();
+    let mut last_suspension = None;
     let mut scope_depth = 0;
     let (mut work, shape) = match root {
-        Root::Expression(body) => (
+        Root::Expression(body) | Root::LexicalExpression(body) => (
             vec![
                 Work::Emit(
                     source,
@@ -1472,10 +1515,29 @@ fn compile_root<'a>(
         let direct_callee = matches!(&task, Work::DirectCallee(..));
         *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
         match task {
-            Work::Emit(source, op) => instructions.push(Instruction { source, op }),
+            Work::Emit(source, op) => {
+                if matches!(op, Op::TypeInputPlan { .. }) {
+                    last_suspension = Some(instructions.len());
+                }
+                instructions.push(Instruction { source, op });
+            }
             Work::Label(label) => labels[label] = Some(instructions.len()),
             Work::EndLoop(id) => {
-                loops.remove(&id);
+                let (start, end, scope_depth): (usize, usize, usize) =
+                    loops.remove(&id).expect("active lexical loop");
+                let start = labels[start].expect("emitted loop header");
+                if last_suspension.is_some_and(|pc| pc >= start) {
+                    *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
+                    let end = labels[end].expect("emitted loop exit");
+                    loop_regions.insert(
+                        (id, start),
+                        LoopRegion {
+                            start,
+                            end,
+                            scope_depth,
+                        },
+                    );
+                }
             }
             Work::BeginScope(source) => {
                 scope_depth += 1;
@@ -3156,8 +3218,18 @@ fn compile_root<'a>(
                         work.push(Work::Label(start));
                     }
                     K::Break(id) | K::Continue(id) => {
-                        let (start, done, depth) =
-                            loops.get(id).ok_or(Error::InvalidControl(source))?;
+                        let Some((start, done, depth)) = loops.get(id) else {
+                            if !lexical_input {
+                                return Err(Error::InvalidControl(source));
+                            }
+                            let transfer = if matches!(expr.kind, K::Break(_)) {
+                                Op::BreakEnclosing(*id)
+                            } else {
+                                Op::ContinueEnclosing(*id)
+                            };
+                            emit(&mut work, transfer);
+                            continue;
+                        };
                         emit(
                             &mut work,
                             Op::Jump(if matches!(expr.kind, K::Break(_)) {
@@ -3264,6 +3336,7 @@ fn compile_root<'a>(
         Program {
             constants: constant_table.finish(),
             instructions,
+            loop_regions,
             locals: locals.into_iter().collect(),
             registers,
             prepared_type_slots,
