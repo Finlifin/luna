@@ -97,15 +97,8 @@ impl<'a> InputSchedule<'a> {
                 return Ok(None);
             }
             previous = preparation.before;
-            let Some(fields) = preparation.binding_fields() else {
+            if !preparation.visit_bindings(&mut charge, |binding| locals.push(binding))? {
                 return Ok(None);
-            };
-            charge(fields.len())?;
-            for field in fields {
-                let Some(binding) = NormalFormPreparation::field_binding(field) else {
-                    return Ok(None);
-                };
-                locals.push(binding);
             }
         }
         let mut unique = BTreeSet::new();

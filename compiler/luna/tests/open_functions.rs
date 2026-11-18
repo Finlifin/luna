@@ -5865,7 +5865,7 @@ fn suspended_whole_type_lists_reject_mixed_supplies_and_wrong_domains() {
     for (application, diagnostic) in [
         (
             "Pack<T,T,.Es=types>",
-            "cannot combine a complete type-list argument",
+            "cannot append to a directly supplied collection",
         ),
         (
             "Pack<T,.Es=types,.Es=types>",

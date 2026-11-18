@@ -34524,9 +34524,18 @@ fn variadic_normal_heads_forward_named_whole_type_lists_once() {
         assert_eq!(calls(&package, &vm), vec!["ForwardTagged", "Pass"]);
     }
     for (replacement, diagnostic) in [
-        (".Es = Pass(es), bool", "combine a complete type-list"),
-        ("bool, .Es = Pass(es)", "combine a complete type-list"),
-        (".Es = Pass(es), .Es = Pass(es)", "duplicate type-list"),
+        (
+            ".Es = Pass(es), bool",
+            "cannot append to a directly supplied collection",
+        ),
+        (
+            "bool, .Es = Pass(es)",
+            "cannot append to a directly supplied collection",
+        ),
+        (
+            ".Es = Pass(es), .Es = Pass(es)",
+            "duplicate normal-form argument",
+        ),
         (".other = Pass(es)", "unknown named normal-form"),
     ] {
         let invalid = source.replace(".Es = Pass(es)", replacement);
@@ -34663,11 +34672,11 @@ fn normal_type_list_named_supply_preserves_order_around_positional_anchors() {
             (".Es = es, First()", "argument count mismatch"),
             (
                 ".Es = es, First(), Second(), bool",
-                "combine a complete type-list",
+                "cannot append to a directly supplied collection",
             ),
             (
                 ".Es = es, First(), .Es = es, Second()",
-                "duplicate type-list",
+                "duplicate normal-form argument",
             ),
             (
                 ".unknown = es, First(), Second()",

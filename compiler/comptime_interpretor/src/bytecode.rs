@@ -937,16 +937,13 @@ impl<'a> Interpreter<'a> {
         environment: &mut Environment,
     ) -> Result<Option<InputFrame>, Error> {
         let source = preparation.expression.source;
-        if let K::LetPattern {
-            pattern: nir::program::Pattern::Tuple(fields),
-            ..
-        } = &preparation.expression.kind
-        {
-            self.effect_charge(fields.len(), Some(source))?;
+        let mut bindings = Vec::new();
+        if !preparation.visit_bindings(
+            |count| self.effect_charge(count, Some(source)),
+            |binding| bindings.push(binding),
+        )? {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
         }
-        let bindings = preparation
-            .local_bindings()
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         let exports = bindings::Exports::new(self, bindings, environment, source)?;
         let Some(code) = self.lexical_expression_code(&preparation.expression)? else {
             return Ok(None);

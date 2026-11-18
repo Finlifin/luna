@@ -98,36 +98,9 @@ impl Checker<'_, '_> {
         span: Span,
         settled: &BTreeMap<usize, usize>,
     ) -> Result<Vec<Option<Vec<T>>>, Error> {
-        self.spread_packet_layout_filtered(args, types, span, settled, &BTreeSet::new())
-    }
-
-    /// A collector's sources retain their original indices but supply no
-    /// fixed packet slots. Exclusion is layout metadata, never a named supply.
-    pub(in crate::program) fn spread_packet_layout_excluding<T: Clone>(
-        &mut self,
-        args: &[Arg<'_>],
-        types: &[T],
-        span: Span,
-        excluded: &BTreeSet<usize>,
-    ) -> Result<Vec<Option<Vec<T>>>, Error> {
-        self.spread_packet_layout_filtered(args, types, span, &BTreeMap::new(), excluded)
-    }
-
-    fn spread_packet_layout_filtered<T: Clone>(
-        &mut self,
-        args: &[Arg<'_>],
-        types: &[T],
-        span: Span,
-        settled: &BTreeMap<usize, usize>,
-        excluded: &BTreeSet<usize>,
-    ) -> Result<Vec<Option<Vec<T>>>, Error> {
         let mut fuel = 10_000;
         let mut widths = Vec::with_capacity(args.len());
         for (index, argument) in args.iter().enumerate() {
-            if excluded.contains(&index) {
-                widths.push(Some(0));
-                continue;
-            }
             widths.push(match argument {
                 Arg::Positional(_) => Some(1),
                 Arg::Named(..) | Arg::Implicit(_) | Arg::PostLambda(_) => Some(0),
@@ -162,7 +135,7 @@ impl Checker<'_, '_> {
         for (index, width) in widths.iter().enumerate() {
             let Some(width) = width else { break };
             let end = start + width;
-            if matches!(args[index], Arg::Expand(_)) && !excluded.contains(&index) {
+            if matches!(args[index], Arg::Expand(_)) {
                 contexts[index] = Some(types[start..end].to_vec());
             }
             start = end;
@@ -171,10 +144,7 @@ impl Checker<'_, '_> {
         for (index, width) in widths.iter().enumerate().rev() {
             let Some(width) = width else { break };
             let start = end - width;
-            if contexts[index].is_none()
-                && matches!(args[index], Arg::Expand(_))
-                && !excluded.contains(&index)
-            {
+            if contexts[index].is_none() && matches!(args[index], Arg::Expand(_)) {
                 contexts[index] = Some(types[start..end].to_vec());
             }
             end = start;

@@ -96,6 +96,36 @@ fn spread_field_domains_follow_declaration_slots_across_named_defaults() {
     );
 }
 
+#[test]
+fn checked_packet_width_routes_subsequent_spreads_into_the_collector() {
+    let source = "
+        pure comptime fn Packet<a: u8, b: u8, .flag: bool = false, ...tail: meta.List<u8>> -> Type { bool }
+        comptime fn verify() -> bool
+        where a: u8, b: u8, .flag: bool = false, ...tail: meta.List<u8>
+        {
+            a == 1 and b == 2 and flag and tail.length() == 3
+                and tail[0] == 3 and tail[1] == 255 and tail[2] == 4
+        }
+        comptime fn pair() -> Tuple<u8, u8> { (1, 2) }
+        comptime fn field() -> u8 { 3 }
+        comptime fn flag() -> bool { true }
+        comptime fn last() -> meta.List<u8> { [4] }
+        comptime fn check() -> bool {
+            let head = Packet<INPUT>;
+            head == Packet<1, 2, .flag = true, .tail = [3, 255, 4]> and verify<INPUT>()
+        }
+    ".replace("INPUT", "
+        ...do { let local_pair = pair(); local_pair },
+        ...[field(), 255], .flag = flag(), ...last()
+    ");
+    check_both(
+        &source,
+        &[
+            "check", "pair", "field", "flag", "last", "pair", "field", "flag", "last", "verify",
+        ],
+    );
+}
+
 const CONSTRUCTORS: &[&str] = &[
     "pure comptime fn Packet<T, .values: meta.List<T> = []> -> Type { bool }",
     "struct Packet where T, .values: meta.List<T> = [] {}",

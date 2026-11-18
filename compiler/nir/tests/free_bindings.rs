@@ -58,47 +58,54 @@ fn local_scopes_do_not_hide_outer_or_sibling_reads() {
 #[test]
 fn normal_packet_bindings_enter_only_after_their_producer() {
     use nir::program::{NormalFormArgument, NormalFormInputPlan, NormalFormPreparation};
-    let preparation = expr(K::LetPattern {
-        pattern: P::Tuple(vec![P::Binding {
+    for preparation in [
+        expr(K::Let {
             binding: id(2),
-            inner: Box::new(P::Wild),
-        }]),
-        value: Box::new(local(1)),
-        guard: None,
-        otherwise: None,
-    });
-    let mut value = expr(K::NormalFormType {
-        head: nir::DeclarationId {
-            package: 1,
-            local: 8,
-        },
-        arguments: vec![NormalFormArgument::Value(local(2))],
-        plan: Some(NormalFormInputPlan {
-            order: vec![0],
-            bindings: vec![id(3)],
-            preparations: vec![NormalFormPreparation {
-                before: 0,
-                expression: preparation,
-            }],
+            value: Box::new(local(1)),
         }),
-    });
-    assert_eq!(result(&value), vec![id(1)]);
-    let K::NormalFormType {
-        plan: Some(plan), ..
-    } = &mut value.kind
-    else {
-        unreachable!()
-    };
-    plan.preparations[0].before = 1;
-    assert_eq!(result(&value), vec![id(1), id(2)]);
-    let K::NormalFormType {
-        plan: Some(plan), ..
-    } = &mut value.kind
-    else {
-        unreachable!()
-    };
-    plan.bindings[0] = id(2);
-    assert!(nir::free_bindings::collect(&value, &mut 1000).is_err());
+        expr(K::LetPattern {
+            pattern: P::Tuple(vec![P::Binding {
+                binding: id(2),
+                inner: Box::new(P::Wild),
+            }]),
+            value: Box::new(local(1)),
+            guard: None,
+            otherwise: None,
+        }),
+    ] {
+        let mut value = expr(K::NormalFormType {
+            head: nir::DeclarationId {
+                package: 1,
+                local: 8,
+            },
+            arguments: vec![NormalFormArgument::Value(local(2))],
+            plan: Some(NormalFormInputPlan {
+                order: vec![0],
+                bindings: vec![id(3)],
+                preparations: vec![NormalFormPreparation {
+                    before: 0,
+                    expression: preparation,
+                }],
+            }),
+        });
+        assert_eq!(result(&value), vec![id(1)]);
+        let K::NormalFormType {
+            plan: Some(plan), ..
+        } = &mut value.kind
+        else {
+            unreachable!()
+        };
+        plan.preparations[0].before = 1;
+        assert_eq!(result(&value), vec![id(1), id(2)]);
+        let K::NormalFormType {
+            plan: Some(plan), ..
+        } = &mut value.kind
+        else {
+            unreachable!()
+        };
+        plan.bindings[0] = id(2);
+        assert!(nir::free_bindings::collect(&value, &mut 1000).is_err());
+    }
 }
 #[test]
 fn closure_initializers_and_body_have_separate_scopes() {

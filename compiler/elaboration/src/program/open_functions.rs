@@ -2499,12 +2499,6 @@ impl Checker<'_, '_> {
                 }
                 self.ensure_signature(owner, expr.span)?;
                 let parameters = self.normal_parameters[&owner].clone();
-                let expanded = if self.clause_has_collector(owner) {
-                    self.clause_prefix_literal_spreads(owner, arguments)
-                } else {
-                    normal::literal_spreads(arguments)
-                };
-                let arguments = expanded.as_deref().unwrap_or(arguments);
                 let clauses = self.type_clause_params(owner);
                 let collector = self.clause_has_collector(owner).then(|| clauses.len() - 1);
                 let mut routing =
@@ -2512,7 +2506,7 @@ impl Checker<'_, '_> {
                 // Retain source order. The final marker distinguishes a single
                 // collected element from a whole input or collection spread.
                 let mut routed = Vec::new();
-                for argument in arguments {
+                for argument in *arguments {
                     match argument {
                         Arg::Positional(value) | Arg::Named(_, value) => {
                             let name = match argument {
@@ -2523,11 +2517,21 @@ impl Checker<'_, '_> {
                             let element = name.is_none() && collector == Some(slot);
                             routed.push((slot, Some(*value), None, value.span, element));
                         }
-                        Arg::Expand(value) if routing.at_collector() => {
-                            let slot = routing.slot(None, value.span)?;
-                            routed.push((slot, Some(*value), None, value.span, false));
-                        }
                         Arg::Expand(value) => {
+                            match routing.spread(value)? {
+                                clause_inputs::Spread::Collection(slot) => {
+                                    routed.push((slot, Some(*value), None, value.span, false));
+                                    continue;
+                                }
+                                clause_inputs::Spread::Fields(fields) => {
+                                    for field in fields {
+                                        let slot = routing.packet_slot(field.span)?;
+                                        routed.push((slot, Some(field), None, field.span, false));
+                                    }
+                                    continue;
+                                }
+                                clause_inputs::Spread::Packet => {}
+                            }
                             let packet = self.describe_open_expression(
                                 value,
                                 locals,

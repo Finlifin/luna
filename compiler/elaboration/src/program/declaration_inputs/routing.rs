@@ -9,21 +9,102 @@ pub(super) enum Poll<'h> {
     Complete,
 }
 
+/// A computed fixed packet can receive its destination types before its
+/// expression is checked. An open collector has no prescribed field count.
+struct WidthHint {
+    width: Option<usize>,
+    following: Option<usize>,
+}
+
+enum PacketWidths {
+    // Once a packet needs an inferred width, retain the rest in reverse
+    // source order. Earlier packets and ordinary calls allocate no table.
+    Fixed(Vec<WidthHint>),
+    OpenCollector { last_positional: Option<usize> },
+}
+
+impl PacketWidths {
+    fn new(inputs: &[Arg<'_>], open: bool) -> Self {
+        if open {
+            Self::OpenCollector {
+                last_positional: inputs
+                    .iter()
+                    .rposition(|arg| matches!(arg, Arg::Expand(_) | Arg::Positional(_))),
+            }
+        } else {
+            Self::Fixed(Vec::new())
+        }
+    }
+
+    fn at(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        inputs: &[Arg<'_>],
+        packet: &Expr<'_>,
+        index: usize,
+        remaining: usize,
+        fuel: &mut usize,
+    ) -> Result<Option<usize>, Error> {
+        let from_end = inputs.len() - index - 1;
+        if let Self::Fixed(hints) = self
+            && let Some(hint) = hints.get(from_end)
+        {
+            return Ok(hint
+                .width
+                .or_else(|| remaining.checked_sub(hint.following?)));
+        }
+        if let Some(width) = checker.spread_width(packet, fuel, 0)? {
+            return Ok(Some(width));
+        }
+        let hints = match self {
+            Self::Fixed(hints) => hints,
+            Self::OpenCollector { last_positional } => {
+                // With a collection tail, only the last positional source must
+                // fill all remaining fixed slots. Other partitions stay open.
+                return Ok((*last_positional == Some(index)).then_some(remaining));
+            }
+        };
+        let mut following = Some(0usize);
+        for input in inputs[index + 1..].iter().rev() {
+            let width = match input {
+                Arg::Expand(packet) => checker.spread_width(packet, fuel, 0)?,
+                Arg::Positional(_) => Some(1),
+                _ => Some(0),
+            };
+            hints.push(WidthHint { width, following });
+            following = match (width, following) {
+                (Some(a), Some(b)) => Some(
+                    a.checked_add(b)
+                        .ok_or_else(|| error(packet.span, "spread layout size exhausted"))?,
+                ),
+                _ => None,
+            };
+        }
+        Ok(following.and_then(|count| remaining.checked_sub(count)))
+    }
+}
+
+struct PendingPacket {
+    index: usize,
+    slots: Option<Vec<usize>>,
+}
+
 pub(super) struct Frame<'h> {
     span: Span,
     telescope: domain::Telescope,
     prefix: KnownInputs,
     inputs: Vec<Arg<'h>>,
-    packet_slots: Vec<Option<Vec<usize>>>,
-    list_spreads: BTreeSet<usize>,
+    widths: PacketWidths,
+    layout_fuel: usize,
     collector: Option<usize>,
     routing: clause_inputs::ClauseInputRouting,
     next: usize,
-    pending: Option<usize>,
+    pending: Option<PendingPacket>,
     complete: bool,
     routed: Vec<Option<RoutedDeclarationInput<'h, 'h>>>,
     order: Vec<usize>,
-    preparations: Vec<Vec<n::NormalFormPreparation>>,
+    tail_start: usize,
+    packets: Vec<PacketPreparation>,
     pending_collection: Vec<PendingDeclarationCollection<'h, 'h>>,
     prepared_bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
 }
@@ -40,106 +121,47 @@ impl<'h> Frame<'h> {
         if parameters.len() != entries.len() {
             return Err(error(span, "input routing interface arity mismatch"));
         }
-        let mut inputs = inputs.to_vec();
-        // Layout hints establish only positions. Actual packet checking
-        // still validates the tuple and its element types. Do not expose
-        // a head's unresolved Type binders as caller-side expectations.
-        let positional_slots: Vec<_> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| !entry.optional && !entry.variadic)
-            .map(|(slot, _)| slot)
-            .collect();
-        let telescope = domain::Telescope::new(parameters, &mut checker.required_steps, span)?;
+        environment::charge(&mut checker.required_steps, inputs.len(), span)?;
         let collector = entries.iter().position(|entry| entry.variadic);
-        loop {
-            let whole_collector = collector.is_some_and(|slot| {
-                inputs.iter().any(|input|
-                matches!(input, Arg::Named(name, _) if Some(name.name) == entries[slot].name))
-            });
-            let mut excluded = BTreeSet::new();
-            let mut list_spreads = BTreeSet::new();
-            let mut remaining = Some(positional_slots.len());
-            let mut layout_fuel = 10_000;
-            if collector.is_some() && !whole_collector {
-                for (index, input) in inputs.iter().enumerate() {
-                    match input {
-                        Arg::Positional(_) if remaining == Some(0) => {
-                            excluded.insert(index);
-                        }
-                        Arg::Expand(_) if remaining == Some(0) => {
-                            excluded.insert(index);
-                            list_spreads.insert(index);
-                        }
-                        Arg::Positional(_) => remaining = remaining.map(|n| n.saturating_sub(1)),
-                        Arg::Expand(value) => {
-                            remaining = match (
-                                remaining,
-                                checker.spread_width(value, &mut layout_fuel, 0)?,
-                            ) {
-                                (Some(left), Some(width)) if width <= left => Some(left - width),
-                                _ => None,
-                            };
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            // Flatten only literal list spreads already routed to the
-            // collector. Their elements then use the ordinary positional
-            // preparation path, preserving effects before later arguments.
-            if list_spreads.iter().any(|index| matches!(&inputs[*index], Arg::Expand(value) if matches!(value.kind, H::List(_)))) {
-                let mut expanded = Vec::new();
-                for (index, input) in inputs.iter().enumerate() {
-                    checker.required_steps = checker.required_steps.checked_sub(1)
-                        .ok_or_else(|| error(span, "normal-form collection routing budget exhausted"))?;
-                    if list_spreads.contains(&index)
-                        && let Arg::Expand(value) = input
-                        && let H::List(elements) = value.kind
-                    {
-                        checker.required_steps = checker.required_steps.checked_sub(elements.len() as u64)
-                            .ok_or_else(|| error(span, "normal-form collection routing budget exhausted"))?;
-                        expanded.extend(elements.iter().map(Arg::Positional));
-                    } else {
-                        expanded.push(input.clone());
-                    }
-                }
-                inputs = expanded;
-                continue;
-            }
-            let packet_slots = if inputs.iter().any(|input| matches!(input, Arg::Expand(_))) {
-                checker.spread_packet_layout_excluding(
-                    &inputs,
-                    &positional_slots,
-                    span,
-                    &excluded,
-                )?
-            } else {
-                vec![None; inputs.len()]
-            };
+        let routing = clause_inputs::ClauseInputRouting::from_entries(entries, inputs, span)?;
+        let telescope = domain::Telescope::new(parameters, &mut checker.required_steps, span)?;
+        let routed = (0..telescope.parameters.len()).map(|_| None).collect();
+        let widths = PacketWidths::new(inputs, routing.has_open_collector());
+        Ok(Self {
+            span,
+            telescope,
+            prefix,
+            inputs: inputs.to_vec(),
+            widths,
+            layout_fuel: 10_000,
+            collector,
+            routing,
+            next: 0,
+            pending: None,
+            complete: false,
+            routed,
+            order: Vec::new(),
+            tail_start: 0,
+            packets: Vec::new(),
+            pending_collection: Vec::new(),
+            prepared_bindings: BTreeMap::new(),
+        })
+    }
 
-            let routing = clause_inputs::ClauseInputRouting::from_entries(entries, &inputs, span)?;
-            let preparations = vec![Vec::new(); inputs.len()];
-            let routed = (0..telescope.parameters.len()).map(|_| None).collect();
-            return Ok(Self {
-                span,
-                telescope,
-                prefix,
-                inputs,
-                packet_slots,
-                list_spreads,
-                collector,
-                routing,
-                next: 0,
-                pending: None,
-                complete: false,
-                routed,
-                order: Vec::new(),
-                preparations,
-                pending_collection: Vec::new(),
-                prepared_bindings: BTreeMap::new(),
-            });
-        }
+    fn supply(&mut self, slot: usize, input: RoutedDeclarationInput<'h, 'h>) {
+        // Cursor selection has already checked reservations and duplicates.
+        self.tail_start = self.next + 1;
+        self.routed[slot] = Some(input);
+        self.order.push(slot);
+    }
+
+    fn collect(&mut self, input: &'h Expr<'h>, spread: bool) {
+        self.pending_collection.push(PendingDeclarationCollection {
+            source_index: self.next,
+            before: self.order.len(),
+            input,
+            spread,
+        });
     }
 
     pub(super) fn poll(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'h>, Error> {
@@ -153,50 +175,58 @@ impl<'h> Frame<'h> {
         let input_index = self.next;
         let span = self.span;
         if let Arg::Expand(packet) = input {
-            if self.list_spreads.contains(&input_index) {
-                self.routing.slot(None, packet.span)?;
-                self.pending_collection.push(PendingDeclarationCollection {
-                    source_index: input_index,
-                    before: self.order.len(),
-                    input: packet,
-                    spread: true,
-                });
-                self.next += 1;
-                return Ok(Poll::Continue);
-            }
-            let context = if let Some(slots) = &self.packet_slots[input_index] {
-                use crate::calls::InputContext as C;
-                let fields = self.packet_domains(checker, slots, span)?;
-                if slots
-                    .iter()
-                    .any(|&slot| !self.telescope.direct(slot).is_empty())
-                {
-                    let fields = slots
-                        .iter()
-                        .zip(fields)
-                        .map(|(&slot, ty)| {
-                            if self.telescope.direct(slot).is_empty() {
-                                C::Known(ty)
-                            } else {
-                                C::Unknown
-                            }
-                        })
-                        .collect();
-                    Some(match checker.bound_tuple_head(packet.span)? {
-                        Some(head) => C::NormalTuple {
-                            head,
-                            fields,
-                            list_domain: checker.bound_tuple_list_domain(),
-                        },
-                        None => C::Tuple(fields),
-                    })
-                } else {
-                    Some(C::Known(checker.tuple_value_type(fields, packet.span)?))
+            match self.routing.spread(packet)? {
+                clause_inputs::Spread::Collection(_) => {
+                    if let H::List(items) = packet.kind {
+                        environment::charge(&mut checker.required_steps, items.len(), packet.span)?;
+                        for item in items {
+                            self.collect(item, false);
+                        }
+                    } else {
+                        self.collect(packet, true);
+                    }
+                    self.next += 1;
+                    return Ok(Poll::Continue);
                 }
+                clause_inputs::Spread::Fields(items) => {
+                    environment::charge(&mut checker.required_steps, items.len(), packet.span)?;
+                    for item in items {
+                        let slot = self.routing.packet_slot(item.span)?;
+                        self.supply(slot, RoutedDeclarationInput::Source(item));
+                    }
+                    self.next += 1;
+                    return Ok(Poll::Continue);
+                }
+                clause_inputs::Spread::Packet => {}
+            }
+            let remaining = self.routing.remaining_anchors();
+            let width = self.widths.at(
+                checker,
+                &self.inputs,
+                packet,
+                input_index,
+                remaining,
+                &mut self.layout_fuel,
+            )?;
+            let slots = if let Some(width) = width.filter(|&width| width <= remaining) {
+                environment::charge(&mut checker.required_steps, width, packet.span)?;
+                Some(
+                    self.routing
+                        .fixed_packet_slots()
+                        .take(width)
+                        .collect::<Vec<_>>(),
+                )
             } else {
                 None
             };
-            self.pending = Some(input_index);
+            let context = slots
+                .as_deref()
+                .map(|slots| self.packet_context(checker, slots, packet.span))
+                .transpose()?;
+            self.pending = Some(PendingPacket {
+                index: input_index,
+                slots,
+            });
             return Ok(Poll::Child(match context {
                 Some(context) => Request::input(packet, context),
                 None => Request::ordinary(packet, None),
@@ -206,12 +236,7 @@ impl<'h> Frame<'h> {
             Arg::Positional(value) => {
                 let slot = self.routing.slot(None, span)?;
                 if self.collector == Some(slot) {
-                    self.pending_collection.push(PendingDeclarationCollection {
-                        source_index: input_index,
-                        before: self.order.len(),
-                        input: value,
-                        spread: false,
-                    });
+                    self.collect(value, false);
                     self.next += 1;
                     return Ok(Poll::Continue);
                 }
@@ -225,19 +250,44 @@ impl<'h> Frame<'h> {
                 ));
             }
         };
-        let cell = self
-            .routed
-            .get_mut(slot)
-            .ok_or_else(|| error(span, "normal-form argument count mismatch"))?;
-        if cell
-            .replace(RoutedDeclarationInput::Source(value))
-            .is_some()
-        {
-            return Err(error(span, "duplicate normal-form argument"));
-        }
-        self.order.push(slot);
+        self.supply(slot, RoutedDeclarationInput::Source(value));
         self.next += 1;
         Ok(Poll::Continue)
+    }
+
+    fn packet_context(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        slots: &[usize],
+        span: Span,
+    ) -> Result<crate::calls::InputContext, Error> {
+        use crate::calls::InputContext as C;
+        let fields = self.packet_domains(checker, slots, span)?;
+        if slots
+            .iter()
+            .all(|&slot| self.telescope.direct(slot).is_empty())
+        {
+            return Ok(C::Known(checker.tuple_value_type(fields, span)?));
+        }
+        let fields = slots
+            .iter()
+            .zip(fields)
+            .map(|(&slot, ty)| {
+                if self.telescope.direct(slot).is_empty() {
+                    C::Known(ty)
+                } else {
+                    C::Unknown
+                }
+            })
+            .collect();
+        Ok(match checker.bound_tuple_head(span)? {
+            Some(head) => C::NormalTuple {
+                head,
+                fields,
+                list_domain: checker.bound_tuple_list_domain(),
+            },
+            None => C::Tuple(fields),
+        })
     }
 
     fn packet_domains(
@@ -265,7 +315,7 @@ impl<'h> Frame<'h> {
         &self,
         checker: &mut Checker<'_, '_>,
         packet: &n::Expr,
-        input_index: usize,
+        slots: Option<&[usize]>,
         span: Span,
     ) -> Result<Vec<Term>, Error> {
         // Early exit does not erase the checked type of an unreachable tail.
@@ -282,7 +332,7 @@ impl<'h> Frame<'h> {
         if let Term::Tuple(fields) = checker.structural_type(&shape.ty, span)? {
             Ok(fields)
         } else if is_never(&shape.ty) {
-            let slots = self.packet_slots[input_index].as_deref().ok_or_else(|| {
+            let slots = slots.ok_or_else(|| {
                 error(
                     span,
                     "diverging type input spread has ambiguous packet width",
@@ -299,11 +349,11 @@ impl<'h> Frame<'h> {
         checker: &mut Checker<'_, '_>,
         result: Result<n::NormalFormArgument, Error>,
     ) -> Result<(), Error> {
-        let input_index = self
+        let pending = self
             .pending
             .take()
             .ok_or_else(|| error(self.span, "input routing has no pending packet"))?;
-        let Arg::Expand(packet) = self.inputs[input_index] else {
+        let Arg::Expand(packet) = self.inputs[pending.index] else {
             unreachable!("pending packet")
         };
         let n::NormalFormArgument::Value(value) = result? else {
@@ -313,7 +363,7 @@ impl<'h> Frame<'h> {
             ));
         };
         let span = self.span;
-        let fields = self.packet_fields(checker, &value, input_index, packet.span)?;
+        let fields = self.packet_fields(checker, &value, pending.slots.as_deref(), packet.span)?;
         let observed = checker.preserved_input_identity(
             &value,
             |id, _| Ok(self.prepared_bindings.get(&id).cloned()),
@@ -326,7 +376,8 @@ impl<'h> Frame<'h> {
             _ => None,
         };
         let before = self.order.len();
-        let mut pattern = Vec::new();
+        environment::charge(&mut checker.required_steps, fields.len(), packet.span)?;
+        let mut pattern = Vec::with_capacity(fields.len());
         for ty in fields {
             let slot = self.routing.packet_slot(packet.span)?;
             let binding = checker.spread_binding(packet.span)?;
@@ -334,7 +385,10 @@ impl<'h> Frame<'h> {
                 self.prepared_bindings
                     .insert(binding, std::sync::Arc::new(known));
             }
-            checker.locals.insert(binding, ty.clone());
+            checker.locals.insert(
+                binding,
+                copy_input_domain(&ty, &mut checker.required_steps, packet.span)?,
+            );
             pattern.push(n::Pattern::Binding {
                 binding,
                 inner: Box::new(n::Pattern::Wild),
@@ -344,35 +398,29 @@ impl<'h> Frame<'h> {
                 ty,
                 kind: K::Local(binding),
             };
-            let cell = self
-                .routed
-                .get_mut(slot)
-                .ok_or_else(|| error(span, "normal-form argument count mismatch"))?;
-            if cell
-                .replace(RoutedDeclarationInput::Prepared(input))
-                .is_some()
-            {
-                return Err(error(span, "duplicate normal-form argument"));
-            }
-            self.order.push(slot);
+            self.supply(slot, RoutedDeclarationInput::Prepared(input));
         }
-        self.preparations[input_index].push(n::NormalFormPreparation {
-            before,
-            expression: n::Expr {
-                source: n::SourceRange {
-                    start: value.source.end,
-                    end: value.source.end,
-                },
-                ty: if is_never(&value.ty) {
-                    p(P::Never)
-                } else {
-                    p(P::Void)
-                },
-                kind: K::LetPattern {
-                    pattern: n::Pattern::Tuple(pattern),
-                    value: Box::new(value),
-                    guard: None,
-                    otherwise: None,
+        self.tail_start = self.next + 1;
+        self.packets.push(PacketPreparation {
+            source_index: pending.index,
+            action: n::NormalFormPreparation {
+                before,
+                expression: n::Expr {
+                    source: n::SourceRange {
+                        start: value.source.end,
+                        end: value.source.end,
+                    },
+                    ty: if is_never(&value.ty) {
+                        p(P::Never)
+                    } else {
+                        p(P::Void)
+                    },
+                    kind: K::LetPattern {
+                        pattern: n::Pattern::Tuple(pattern),
+                        value: Box::new(value),
+                        guard: None,
+                        otherwise: None,
+                    },
                 },
             },
         });
@@ -411,9 +459,9 @@ impl<'h> Frame<'h> {
             self.span,
             checking,
             self.collector,
-            self.inputs.len(),
+            self.tail_start,
             self.pending_collection,
-            self.preparations,
+            self.packets,
         );
         Ok(slots::Frame::new(
             self.span,
@@ -438,12 +486,12 @@ impl std::fmt::Display for Frame<'_> {
             self.complete,
             self.routing
         )?;
-        if let Some(index) = self.pending {
+        if let Some(PendingPacket { index, slots }) = &self.pending {
             write!(f, " (source-index {index})")?;
-            if let Arg::Expand(input) = self.inputs[index] {
+            if let Arg::Expand(input) = self.inputs[*index] {
                 write!(f, " (child {} {})", input.hir_id, source(input.span))?;
             }
-            if let Some(slots) = &self.packet_slots[index] {
+            if let Some(slots) = slots {
                 f.write_str(" (declaration-slots")?;
                 for slot in slots {
                     write!(f, " {slot}")?;
@@ -476,14 +524,8 @@ impl std::fmt::Display for Frame<'_> {
             write!(f, " (binding {binding} {value})")?;
         }
         f.write_str(") (preparations")?;
-        for (index, preparations) in self.preparations.iter().enumerate() {
-            for preparation in preparations {
-                write!(
-                    f,
-                    " (source-index {index} (before {}) {})",
-                    preparation.before, preparation.expression
-                )?;
-            }
+        for packet in &self.packets {
+            write!(f, " {packet}")?;
         }
         f.write_str("))")
     }
@@ -507,23 +549,30 @@ mod tests {
             span,
             telescope: domain::Telescope::new(Vec::new(), &mut 100, span).unwrap(),
             inputs: vec![Arg::Expand(&input), Arg::Expand(&input)],
-            packet_slots: vec![None, Some(vec![])],
-            list_spreads: BTreeSet::new(),
+            widths: PacketWidths::Fixed(vec![]),
+            layout_fuel: 100,
             collector: None,
             routing: clause_inputs::ClauseInputRouting::new(&[], &[], span).unwrap(),
             next: 1,
-            pending: Some(1),
+            pending: Some(PendingPacket {
+                index: 1,
+                slots: Some(vec![]),
+            }),
             complete: false,
             routed: vec![],
             order: vec![],
-            preparations: vec![vec![n::NormalFormPreparation {
-                before: 0,
-                expression: n::Expr {
-                    source: source(span),
-                    ty: p(P::Str),
-                    kind: K::Literal(n::Literal::String("packet\"\n".into())),
+            tail_start: 1,
+            packets: vec![PacketPreparation {
+                source_index: 0,
+                action: n::NormalFormPreparation {
+                    before: 0,
+                    expression: n::Expr {
+                        source: source(span),
+                        ty: p(P::Str),
+                        kind: K::Literal(n::Literal::String("packet\"\n".into())),
+                    },
                 },
-            }]],
+            }],
             pending_collection: vec![],
             prepared_bindings: BTreeMap::new(),
         };

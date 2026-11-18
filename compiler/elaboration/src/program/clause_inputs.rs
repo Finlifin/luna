@@ -45,6 +45,14 @@ pub(super) struct ClauseInputRouting {
     cursor: input_routing::Cursor<hir::Symbol>,
 }
 
+/// The source cursor selects the destination before the checker interprets
+/// the spread. A literal tuple exposes its fields directly in fixed slots.
+pub(super) enum Spread<'h> {
+    Fields(&'h [Expr<'h>]),
+    Packet,
+    Collection(usize),
+}
+
 impl ClauseInputRouting {
     pub(super) fn new(
         clauses: &[hir::clause::ClauseParam<'_>],
@@ -71,9 +79,6 @@ impl ClauseInputRouting {
             match kind {
                 F::UnknownName => "unknown named normal-form argument".into(),
                 F::Duplicate => "duplicate normal-form argument".into(),
-                F::AppendToComplete => {
-                    "cannot combine a complete type-list argument with collected inputs".into()
-                }
                 F::TooMany | F::PacketTargetsCollection => {
                     "normal-form argument count mismatch".into()
                 }
@@ -82,8 +87,27 @@ impl ClauseInputRouting {
         )
     }
 
-    pub(super) fn at_collector(&self) -> bool {
-        self.cursor.at_collector()
+    pub(super) fn has_open_collector(&self) -> bool {
+        self.cursor.has_open_collector()
+    }
+
+    pub(super) fn spread<'h>(&mut self, input: &'h Expr<'h>) -> Result<Spread<'h>, Error> {
+        if self.cursor.at_collector() {
+            return self.slot(None, input.span).map(Spread::Collection);
+        }
+        Ok(match input.kind {
+            H::Tuple(fields) => Spread::Fields(fields),
+            H::Unit => Spread::Fields(&[]),
+            _ => Spread::Packet,
+        })
+    }
+
+    pub(super) fn fixed_packet_slots(&self) -> impl Iterator<Item = usize> + '_ {
+        self.cursor.fixed_packet_slots()
+    }
+
+    pub(super) fn remaining_anchors(&self) -> usize {
+        self.cursor.remaining_anchors()
     }
 
     pub(super) fn slot(
@@ -168,60 +192,6 @@ impl Checker<'_, '_> {
                 matches!(parameter.kind, hir::clause::ClauseParamKind::Varadic(..))
             })
     }
-    pub(super) fn clause_fixed_prefix_count(&self, owner: OwnerId) -> usize {
-        self.type_clause_params(owner)
-            .iter()
-            .filter(|clause| {
-                !matches!(
-                    clause.kind,
-                    hir::clause::ClauseParamKind::Optional(..)
-                        | hir::clause::ClauseParamKind::Varadic(..)
-                )
-            })
-            .count()
-    }
-
-    pub(super) fn clause_prefix_literal_spreads<'h>(
-        &self,
-        owner: OwnerId,
-        inputs: &[Arg<'h>],
-    ) -> Option<Vec<Arg<'h>>> {
-        let whole_collector = self.type_clause_params(owner).last().is_some_and(|clause| {
-            inputs
-                .iter()
-                .any(|input| matches!(input, Arg::Named(name, _) if name.name == clause.name.name))
-        });
-        let mut remaining = self.clause_fixed_prefix_count(owner);
-        let mut expanded = Vec::new();
-        let mut changed = false;
-        for input in inputs {
-            match input {
-                Arg::Expand(value) if remaining > 0 => match value.kind {
-                    H::Tuple(fields) if fields.len() <= remaining || whole_collector => {
-                        remaining = remaining.saturating_sub(fields.len());
-                        expanded.extend(fields.iter().map(Arg::Positional));
-                        changed = true;
-                    }
-                    H::Unit => {
-                        changed = true;
-                    }
-                    _ => {
-                        // A computed packet can determine the remaining prefix
-                        // later. Do not flatten subsequent tail list inputs.
-                        remaining = 0;
-                        expanded.push(input.clone());
-                    }
-                },
-                Arg::Positional(_) => {
-                    remaining = remaining.saturating_sub(1);
-                    expanded.push(input.clone());
-                }
-                _ => expanded.push(input.clone()),
-            }
-        }
-        changed.then_some(expanded)
-    }
-
     /// Assemble already checked inputs without moving their producers. Both
     /// ordinary clause packets and opaque head plans use this expression.
     pub(super) fn clause_collection_expression(

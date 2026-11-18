@@ -46,7 +46,8 @@ pub(super) struct Frame<'b, 'h> {
     state: State,
     attempt: Option<checking_attempts::Attempt>,
     collected: Vec<n::NormalFormArgument>,
-    preparations: Vec<Vec<n::NormalFormPreparation>>,
+    packets: std::collections::VecDeque<PacketPreparation>,
+    preparations: Vec<n::NormalFormPreparation>,
 }
 
 impl<'b, 'h> Frame<'b, 'h> {
@@ -54,19 +55,10 @@ impl<'b, 'h> Frame<'b, 'h> {
         span: Span,
         checking: InputChecking,
         slot: Option<usize>,
-        source_count: usize,
+        tail_start: usize,
         inputs: Vec<PendingDeclarationCollection<'b, 'h>>,
-        preparations: Vec<Vec<n::NormalFormPreparation>>,
+        packets: Vec<PacketPreparation>,
     ) -> Self {
-        // Only a contiguous source suffix executes inside the final collector.
-        // Earlier producers retain their positions among fixed/empty packets.
-        let mut tail_start = source_count;
-        for input in inputs.iter().rev() {
-            if input.source_index + 1 != tail_start {
-                break;
-            }
-            tail_start = input.source_index;
-        }
         Self {
             span,
             checking,
@@ -78,7 +70,8 @@ impl<'b, 'h> Frame<'b, 'h> {
             pending: None,
             state: State::Ready,
             attempt: None,
-            preparations,
+            packets: packets.into(),
+            preparations: Vec::new(),
         }
     }
 
@@ -218,10 +211,20 @@ impl<'b, 'h> Frame<'b, 'h> {
                 let value = if pending.source_index >= self.tail_start {
                     value
                 } else {
+                    // Packets and collection items both arrive in source order.
+                    // Flush only packets preceding this saved operand.
+                    while self
+                        .packets
+                        .front()
+                        .is_some_and(|p| p.source_index < pending.source_index)
+                    {
+                        self.preparations
+                            .push(self.packets.pop_front().unwrap().action);
+                    }
                     checker.prepare_declaration_collection_input(
                         value,
                         pending.before,
-                        &mut self.preparations[pending.source_index],
+                        &mut self.preparations,
                         bindings,
                         self.span,
                     )?
@@ -240,7 +243,7 @@ impl<'b, 'h> Frame<'b, 'h> {
     }
 
     pub(super) fn finish(
-        self,
+        mut self,
     ) -> Result<
         (
             Option<usize>,
@@ -252,11 +255,9 @@ impl<'b, 'h> Frame<'b, 'h> {
         if self.state != State::Complete || self.pending.is_some() || self.attempt.is_some() {
             return Err(error(self.span, "collection checking is incomplete"));
         }
-        Ok((
-            self.slot,
-            self.collected,
-            self.preparations.into_iter().flatten().collect(),
-        ))
+        self.preparations
+            .extend(self.packets.into_iter().map(|packet| packet.action));
+        Ok((self.slot, self.collected, self.preparations))
     }
 }
 
@@ -291,14 +292,16 @@ impl std::fmt::Display for Frame<'_, '_> {
             write!(f, " {value}")?;
         }
         f.write_str(") (preparations")?;
-        for (source_index, preparations) in self.preparations.iter().enumerate() {
-            for preparation in preparations {
-                write!(
-                    f,
-                    " (source-index {source_index} (before {}) {})",
-                    preparation.before, preparation.expression
-                )?;
-            }
+        for preparation in &self.preparations {
+            write!(
+                f,
+                " (before {} {})",
+                preparation.before, preparation.expression
+            )?;
+        }
+        f.write_str(") (packets")?;
+        for packet in &self.packets {
+            write!(f, " {packet}")?;
         }
         f.write_str("))")
     }
@@ -326,30 +329,25 @@ mod tests {
                 spread,
             })
             .collect();
-        let mut preparations = vec![vec![]; 6];
-        preparations[4].push(n::NormalFormPreparation {
-            before: 2,
-            expression: n::Expr {
-                source: source(span),
-                ty: p(P::Str),
-                kind: K::Literal(n::Literal::String("packet\"\n".into())),
+        let packets = vec![PacketPreparation {
+            source_index: 4,
+            action: n::NormalFormPreparation {
+                before: 2,
+                expression: n::Expr {
+                    source: source(span),
+                    ty: p(P::Str),
+                    kind: K::Literal(n::Literal::String("packet\"\n".into())),
+                },
             },
-        });
-        let frame = Frame::new(
-            span,
-            InputChecking::Contextual,
-            Some(2),
-            6,
-            inputs,
-            preparations,
-        );
+        }];
+        let frame = Frame::new(span, InputChecking::Contextual, Some(2), 5, inputs, packets);
         assert_eq!(frame.tail_start, 5);
         assert_eq!(frame.domain_slot(), Some(2));
         let dump = frame.to_string();
         for expected in [
             "(state ready)",
             "(source-index 3) (before 1) (spread true)",
-            "(preparations (source-index 4 (before 2)",
+            "(packets (source-index 4 (before 2)",
             "packet\\\"\\n",
         ] {
             assert!(dump.contains(expected), "missing {expected}: {dump}");

@@ -70,13 +70,31 @@ impl<Name: Clone + Eq + Hash> Cursor<Name> {
         })
     }
 
+    fn positional_entries(&self) -> impl Iterator<Item = usize> + '_ {
+        (self.positional..self.entries.len())
+            .filter(|index| !self.entries[*index].skipped() && self.post_target != Some(*index))
+    }
+
     /// The next declared positional entry, before complete-input reservations.
     /// Packet consumers use this to distinguish a fixed packet from a spread
     /// governed by the collection protocol, including conflicting supplies.
     pub fn at_collector(&self) -> bool {
-        (self.positional..self.entries.len())
-            .find(|index| !self.entries[*index].skipped() && self.post_target != Some(*index))
-            .is_some_and(|index| self.entries[index].variadic)
+        self.positional_entries()
+            .next()
+            .is_some_and(|slot| self.entries[slot].variadic)
+    }
+
+    pub fn has_open_collector(&self) -> bool {
+        self.variadic_suffix[0] != 0
+    }
+
+    pub fn fixed_packet_slots(&self) -> impl Iterator<Item = usize> + '_ {
+        self.positional_entries()
+            .take_while(|slot| !self.entries[*slot].variadic)
+    }
+
+    pub fn remaining_anchors(&self) -> usize {
+        self.anchored_suffix[self.positional]
     }
 
     pub fn select(&mut self, input: &Input<Name>) -> Result<Selection, FailureKind> {
@@ -84,8 +102,14 @@ impl<Name: Clone + Eq + Hash> Cursor<Name> {
     }
 
     pub fn packet_slot(&mut self) -> Result<Selection, FailureKind> {
-        if self.at_collector() {
-            return Err(FailureKind::PacketTargetsCollection);
+        if let Some(slot) = self.positional_entries().next()
+            && self.entries[slot].variadic
+        {
+            return Err(if self.complete[slot] {
+                FailureKind::AppendToComplete
+            } else {
+                FailureKind::PacketTargetsCollection
+            });
         }
         self.select_inner(&Input::Positional, true)
     }

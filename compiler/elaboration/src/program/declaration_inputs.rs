@@ -171,6 +171,22 @@ impl std::fmt::Display for RoutedDeclarationInput<'_, '_> {
     }
 }
 
+/// A computed packet occupies one original argument position, including
+/// when it exports no fields. Collectors merge these actions in source order.
+struct PacketPreparation {
+    source_index: usize,
+    action: n::NormalFormPreparation,
+}
+impl std::fmt::Display for PacketPreparation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(source-index {} (before {}) {})",
+            self.source_index, self.action.before, self.action.expression
+        )
+    }
+}
+
 /// Source references awaiting collection checking, not another expression IR.
 /// `before` records the number of fixed inputs preceding this source input.
 struct PendingDeclarationCollection<'a, 'h> {
@@ -245,9 +261,7 @@ impl Checker<'_, '_> {
         self.check_declaration_inputs_region(preparation)
     }
 
-    // Inspect the original callee domain before substitution. A supplied
-    // caller parameter may have the same declaration identity as another
-    // callee input in a recursive call; it is not another pending dependency.
+    /// Snapshot an interleaved collector operand at its lexical position.
     fn prepare_declaration_collection_input(
         &mut self,
         value: n::Expr,
@@ -266,32 +280,21 @@ impl Checker<'_, '_> {
             known_bindings.insert(binding, std::sync::Arc::new(known));
         }
 
-        let ty = value.ty.clone();
-        self.locals.insert(binding, ty.clone());
+        let ty = copy_input_domain(&value.ty, &mut self.required_steps, span)?;
+        self.locals.insert(
+            binding,
+            copy_input_domain(&ty, &mut self.required_steps, span)?,
+        );
         let location = value.source;
         let diverges = is_never(&ty);
-        let tuple_ty = if diverges {
-            p(P::Never)
-        } else {
-            self.tuple_value_type(vec![ty.clone()], span)?
-        };
         preparations.push(n::NormalFormPreparation {
             before,
             expression: n::Expr {
                 source: location,
                 ty: if diverges { p(P::Never) } else { p(P::Void) },
-                kind: K::LetPattern {
-                    pattern: n::Pattern::Tuple(vec![n::Pattern::Binding {
-                        binding,
-                        inner: Box::new(n::Pattern::Wild),
-                    }]),
-                    value: Box::new(n::Expr {
-                        source: location,
-                        ty: tuple_ty,
-                        kind: K::Tuple(vec![value]),
-                    }),
-                    guard: None,
-                    otherwise: None,
+                kind: K::Let {
+                    binding,
+                    value: Box::new(value),
                 },
             },
         });

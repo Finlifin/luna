@@ -1604,7 +1604,7 @@ fn named_type_list_prefix_packets_preserve_exits_and_reject_conflicting_supply()
     for (args, message) in [
         (
             "...(bool,true,bool),.Es=tail()",
-            "combine a complete type-list",
+            "cannot append to a directly supplied collection",
         ),
         ("...(bool,),.Es=tail()", "argument count mismatch"),
         (
@@ -1710,7 +1710,10 @@ fn computed_prefix_packets_keep_exit_order_and_dependent_checks() {
     assert!(vm.invoke(id(&package, "Build"), vec![]).is_err());
     assert_eq!(calls(&package, &vm), vec!["Build", "packet"]);
     for (arguments, diagnostic) in [
-        ("...packet(),bool,.Es=tail()", "argument count mismatch"),
+        (
+            "...packet(),bool,.Es=tail()",
+            "cannot append to a directly supplied collection",
+        ),
         (
             "...packet(),.Es=tail(),.Es=tail()",
             "duplicate normal-form argument",
@@ -1917,7 +1920,7 @@ fn defaulted_type_collection_preserves_early_exit_and_rejects_mixed_supply() {
     for args in ["bool,true,bool,.Es=[bool]", "bool,true,.Es=[bool],bool"] {
         let failure = compile(args).unwrap_err();
         assert!(
-            failure.contains("combine a complete type-list"),
+            failure.contains("cannot append to a directly supplied collection"),
             "{failure}"
         );
     }

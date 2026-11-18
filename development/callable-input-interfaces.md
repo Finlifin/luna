@@ -1,8 +1,7 @@
 # 函数值的参数入口、接口与传送
 
-状态：基于 `d6950e39` 的实现设计，接口身份和消费者核对至 `9e3509d7`。
-供应路由及动态 NF 的位置输入准备已合并，函数值的公开参数协议仍未接通。
-本文规定后续迁移应共同保存的信息和验收边界，不声明新的语言语法或已实现 API。
+声明调用、函数值的位置调用和动态 NF 调用共享槽位路由。当前 NF 函数类型保存
+参数 telescope 和收集器位置，公开参数名及默认提供者的高阶传送仍待实现。
 
 ## 1. 语义依据与不能混同的身份
 
@@ -107,13 +106,17 @@ typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
 推算而临时创造一个名字。默认供应的源码环境仍由后续槽位检查持有，这一步没有
 把整个准备器或默认提供者转换为可序列化接口。
 
-此前为避免收集器尾部参与固定参数包的宽度计算，路由器把这些输入临时改写成
-`Arg::Named`。现改为独立的源码位置排除集合：列表元素与列表展开贡献零个固定
-参数槽，但保留自己的原始供应类别、检查入口和执行位置。字面量列表的逐项收集
-仍沿共同路径；布局排除本身不执行展开或准入。展开包若提前退出，使用当次请求
-已保存的元素上下文检查不可达后继，不在子检查返回后重新扫描另一份改写 HIR。
+固定位置上的 `...(T, value)` 将两个字段分别交给对应声明槽位。检查后一个字段时，
+可以使用第一个槽位已经取得的类型。若该类型要由原 invocation 产生，NF 输入沿用
+延后检查的字面量表示。计算得到的包则只执行一次，通过外层 tuple pattern 导出字段。
+路由游标消费包的实际字段后才决定下一项展开进入固定前缀还是收集器。因此，即使
+前一个包的宽度要检查局部绑定后才知道，后一个列表展开仍能取得收集器的元素域。
+包宽提示只用于给计算包提供上下文。
 
-这消除了路由层对“收集器一定有一个源码名字”的依赖。`c127b11a` 后进一步将
+被具名供应隔开的收集元素在其源码位置用一个普通局部绑定保存，连续尾部的元素直接在收集器中执行。
+计算包的准备动作记录原实参位置，零字段的计算包也占一个执行位置。收集器按源码次序合并这些动作和需要保存的元素。VM 只导出最外层绑定，生产者内部的临时变量留在原词法作用域。[共享路由](../compiler/elaboration/src/program/declaration_inputs/routing.rs) · [输入计划用例](../compiler/luna/tests/declaration_input_plans.rs)
+
+`c127b11a` 后进一步将
 默认提供者的源码 owner、槽位和表达式从入口投影中分离：普通位置输入不需要
 源码 owner，只有真正进入默认供应时才安装提供者环境及递归 guard。活动投影
 保存源码引用，因此仍属于检查区域，不能当成完整 callable 接口冻结或发布。
@@ -141,42 +144,6 @@ typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
 保留明确的未实现诊断。这是当前实现范围，不是语言要求所有范式头只能返回 Type；
 后续普通值范式须同时接通结果域代入、值表示与准入，不能执行头主体代替。
 
-验证在 `/home/fin/luna` 使用 `python3 -B development/check.py --timeout 900 --
-test -p elaboration --lib -p luna --test normal_input_plans --test
-clause_packet_preparation --test declaration_input_plans --test
-ordinary_clause_collectors --no-fail-fast -- --test-threads=1`，退出 0，447 项通过，
-1 项既有待定 Type 正例保持 ignored。原检查在暂停期间完成，恢复后核实其终态；
-证据为 `/tmp/luna-tools-8v04w0hp/result.json`。新增用例通过真实 sysroot 在两个
-VM 路径比较 NF 身份及调用事件，覆盖固定前缀包、混合尾部、完整具名供应和提前
-返回。首轮用例误用了尚未绑定协议的数字后缀，改为显式类型绑定后通过，没有改变
-检查规则。所改 Rust 文件格式检查退出 0，
-`/tmp/luna-tools-urglu3rj/result.json`。此范围不包含公开 callable 接口传送。
-
-动态位置调用迁移的检查继续使用同一工作目录与 `development/check.py --timeout
-900 --`。筛选 `declaration_inputs`、`dynamic_normal_inputs`、
-`dynamic_type_factories`、`normal_form_callable`、`open_normal_` 和 `defaults`，
-运行 elaboration/luna 的 lib 及 `normal_input_plans`、`clause_packet_preparation`、
-`declaration_input_plans`、`open_normal_form_inputs`、`frontend_cli`、
-`comptime_bytecode_types`：66 项通过，2 项失败，1 项新增待定 Type 正例 ignored，
-总退出 101，`/tmp/luna-tools-tlrp32iu/result.json`。动态 NF 字节码用例确认形成
-约束仍拒绝不合法类型，失败后可再次调用，并且不会进入头函数体。
-
-两项失败分别是 `parameter_attributes_preserve_bindings_defaults_and_roles` 的
-连续属性解析，以及 `sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override`
-的 host intrinsic 枚举选择器缺失。临时恢复本次七个已跟踪生产文件到 `c127b11a`
-后，原两个测试仍以相同诊断失败，退出 101，
-`/tmp/luna-tools-f3jujdtj/result.json`；其余工作区改动未动，结束后七个文件均已
-逐字节恢复。本次不修改它们的断言或将其忽略，亦不把扩大检查表述为全通过。
-
-随后完整运行 `test -p luna --test normal_input_plans --test open_normal_form_inputs
---test ordinary_clause_collectors --no-fail-fast -- --test-threads=1`，退出 0，
-73 项通过、2 项待定 Type 正例 ignored；证据
-`/tmp/luna-tools-8e5gslxu/result.json`。新增动态调用在真实 sysroot 的字节码与
-参考 VM 中覆盖混合标量／列表展开、Type 列表、计算包、callee 的可变读取和提前
-退出；没有重跑两项已确认的无关基线失败。十个修改的 Rust 文件格式检查退出 0，
-证据 `/tmp/luna-tools-bry_acpz/result.json`。此后仅将非 Type NF 结果的诊断明确为
-“未实现”，避免将当前实现范围表述成语言规则；执行逻辑未变。
-
 ### 已接通：共同的声明 telescope 构造
 
 公开入口传送尚未实现；其下层的依赖绑定形成已从两个独立循环迁到
@@ -200,25 +167,7 @@ NIR 阶段检查及 materialization 已接入。阶段检查不再用 `.ok()` �
 及 2,000 个参数的有限构造。该宽度用例检查共享额度内可完成构造，不是计时基准，
 也不把整个类型检查过程宣称为线性复杂度。
 
-工作目录 `/home/fin/luna`，基线 `46b601f8` 加本阶段工作区改动；下列测试均通过
-`python3 -B development/check.py --timeout 900 -- test` 执行。作者已有的资源分析
-改动保留在工作区，不把这些结果表述为纯 HEAD 或完整语言验收。
-
-| 参数 | 结果与范围 | 本机证据 |
-| --- | --- | --- |
-| `-p nir -p elaboration --lib --test normal_inputs --test phases --no-fail-fast` | 总退出 101；elaboration 237、NIR 单元 67、NF 输入 26 项通过；phases 因旧深度用例栈溢出中断 | `/tmp/luna-tools-lbw9agsn/result.json` |
-| `-p nir --test phases -- --exact runtime_default_analysis_distinguishes_resource_limits_and_invalid_scope` | 对照临时恢复四个 NIR 实现文件为 HEAD 后仍栈溢出，退出 101；之后已完整恢复本次实现 | `/tmp/luna-tools-pllw6epi/result.json` |
-| `-p nir --test types --test type_rewrite --test normal_form_callables --test normal_callable_inputs --test unsafe_callable_types --test phases --no-fail-fast -- --skip runtime_default_analysis_distinguishes_resource_limits_and_invalid_scope` | 本次实现退出 0，135 项通过；仅在本条命令过滤已确认的基线崩溃，未修改测试或 ignore | `/tmp/luna-tools-1z2ojkvt/result.json` |
-| `-p luna --test scoped_comptime_callables --test normal_form_domains --test normal_value_arguments --test ordinary_callable_types --test metadata_wire --test sysroot_preludes --no-fail-fast` | 退出 0，65 项通过、1 项既有 ignored；含真实 sysroot 的工厂、Tuple/List、builder 与两阶段公开接口 | `/tmp/luna-tools-vamtaz76/result.json` |
-| `-p comptime_interpretor -p type_resolution --lib --test callable_world --no-fail-fast -- signature_limits_do_not_become_missing_declarations evidence_lookup_work_does_not_scale_with_unrelated_declarations receiver_world` | 退出 0；实际选中 VM 预算分类和 NF 查询各 1 项，`receiver_world` 未匹配用例 | `/tmp/luna-tools-ri0ahhjo/result.json` |
-| `-p type_resolution --test callable_world` | 退出 0，8 项通过，补全接收世界隔离、准入、失败与恢复检查 | `/tmp/luna-tools-7wipdexv/result.json` |
-
-所改 Rust 文件的 rustfmt 检查退出 0，见 `/tmp/luna-tools-pbd1y25p/result.json`。
-这次没有增加线程栈或预算来掩盖基线失败。后续已将遍历器回调与结构展开的栈帧
-分离，修复该默认参数深度用例；无过滤的完整阶段检查与真实 sysroot 回归见
-[词法分析回调栈边界](solvers-resources-and-lowering.md#83-词法分析回调与通用遍历器的栈边界)。
-本阶段没有运行全 workspace 或新增性能测量，不宣称解除了待定签名恢复与接口
-传送的限制。
+接收方作用域、额度与失败恢复可分别查阅 [NIR 输入用例](../compiler/nir/tests/normal_inputs.rs) 和 [接收世界查询](../compiler/type_resolution/tests/callable_world.rs)。
 
 ## 3. 稳定接口与活动计划
 
@@ -329,32 +278,11 @@ comptime fn Apply(factory: Factory, items: meta.List<Type>) -> Type {
 `factory<...items>`，得到其位置展开对照；两者的域、头、分支与参数生产均相同。
 具名版本仍是预期合法但尚未实现的程序，不把其失败改成规范拒绝。
 
-工作目录 `/home/fin/luna`，通过
-`python3 -B development/check.py --timeout 900 -- run -p luna --` 执行以下参数，
-两条命令均追加 `--sysroot library --build-target x86_64 linux 64`：
+在仓库根目录可以分别运行源码检查和真实 sysroot 的输入计划验证。
 
-| 参数 | 实际结果 | 本机证据 |
-| --- | --- | --- |
-| `check development/repros/dynamic-nf-interface-forwarding.fl` | 退出 1，`63494..63517: dynamic normal-form collection currently requires positional elements` | `/tmp/luna-tools-u_z7lyo0/result.json` |
-| `/tmp/luna-nf-interface-forwarding-control.fl --interpret run` | 退出 0，`(bool true)` | `/tmp/luna-tools-vjdmsg5i/result.json` |
+```sh
+python3 -B development/check.py --timeout 900 -- run -p luna -- check development/repros/dynamic-nf-interface-forwarding.fl --sysroot library --build-target x86_64 linux 64
+python3 -B development/check.py --timeout 900 -- test -p luna --test declaration_input_plans --test type_spreads
+```
 
-第二份源码仅执行上述唯一替换，未改其他参数或定义。命令读取真实 library sysroot；
-工作区保留 formatter 集成与原有资源分析等改动，不宣称为纯 HEAD 或 LLVM 验收。
-
-本次只交付接口设计和复现，没有增加新的编译器接口类型或改变准入判断。
-后续位置实参已接入共享输入计划，目标公开槽名的传送仍待实现。[当前接口边界](audit-reply.md#公开接口与值传送)
-
-在 `9e3509d7` 工作区重新核验入口身份与具名调用，仍使用真实 sysroot。
-工作目录 `/home/fin/luna`，命令前缀为
-`python3 -B development/check.py --timeout 900 -- run -p luna --`，每条均追加
-`--sysroot library --build-target x86_64 linux 64`：
-
-| 参数 | 实际结果 | 本机证据 |
-| --- | --- | --- |
-| `interpret development/repros/callable-interface-name-observation.fl --entry local_binder_identity` | 退出 0，`(bool true)` | `/tmp/luna-tools-gddp2qmz/result.json` |
-| `interpret development/repros/callable-interface-name-observation.fl --entry public_entry_identity` | 退出 0，`(bool true)`；实现观察，不是公开名字可互换的证明 | `/tmp/luna-tools-ogx48nno/result.json` |
-| `check development/repros/dynamic-nf-interface-forwarding.fl` | 退出 1，仍为 `dynamic normal-form collection currently requires positional elements` | `/tmp/luna-tools-3s4639a2/result.json` |
-
-先前尝试用 `reproduce.py` 运行既有 binary 时，该产物已被构建入口按配额回收，
-得到 unavailable，没有执行源码。随后上述三条都通过受控 Cargo 入口实际执行。
-本次未改编译器、库、测试预期或正式 docs；未运行全量测试和 LLVM 验收。
+当前真实 sysroot 在第一条命令的 `factory<.Items = items>` 处报 `unknown named normal-form argument`。仅将该处改为 `factory<...items>`，执行 `run` 得到 `(bool true)`。这个对照表明位置展开已经接通，高阶调用仍丢失公开入口名。第二条命令检查已有的位置路由、生产者顺序、依赖域及收集边界。

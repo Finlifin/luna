@@ -314,7 +314,7 @@ pub struct Expr {
 pub struct NormalFormInputPlan {
     pub order: Vec<usize>,
     pub bindings: Vec<LocalId>,
-    /// Tuple producers, before the indicated position in `order`. Position
+    /// Producers of saved operands before the indicated position in `order`. Position
     /// `order.len()` preserves trailing empty packets as well.
     pub preparations: Vec<NormalFormPreparation>,
 }
@@ -324,30 +324,38 @@ pub struct NormalFormPreparation {
     pub expression: Expr,
 }
 impl NormalFormPreparation {
-    /// The only bindings exported by a packet producer belong to its outer
-    /// tuple pattern. Producer-local temporaries never enter the input plan.
-    fn binding_fields(&self) -> Option<&[Pattern]> {
+    /// Export only the outer binding or the fields unpacked by its tuple
+    /// pattern. Callers discard the collected exports if the plan is invalid.
+    pub fn visit_bindings<E>(
+        &self,
+        charge: impl FnOnce(usize) -> Result<(), E>,
+        mut visit: impl FnMut(LocalId),
+    ) -> Result<bool, E> {
         match &self.expression.kind {
+            ExprKind::Let { binding, .. } => {
+                charge(1)?;
+                visit(*binding);
+            }
             ExprKind::LetPattern {
                 pattern: Pattern::Tuple(fields),
                 guard: None,
                 otherwise: None,
                 ..
-            } => Some(fields),
-            _ => None,
+            } => {
+                charge(fields.len())?;
+                for field in fields {
+                    let Pattern::Binding { binding, inner } = field else {
+                        return Ok(false);
+                    };
+                    if !matches!(inner.as_ref(), Pattern::Wild) {
+                        return Ok(false);
+                    }
+                    visit(*binding);
+                }
+            }
+            _ => return Ok(false),
         }
-    }
-    fn field_binding(field: &Pattern) -> Option<LocalId> {
-        let Pattern::Binding { binding, inner } = field else {
-            return None;
-        };
-        matches!(inner.as_ref(), Pattern::Wild).then_some(*binding)
-    }
-    pub fn local_bindings(&self) -> Option<Vec<LocalId>> {
-        self.binding_fields()?
-            .iter()
-            .map(Self::field_binding)
-            .collect()
+        Ok(true)
     }
 }
 impl fmt::Display for NormalFormInputPlan {
