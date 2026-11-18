@@ -14,6 +14,55 @@ struct SnapshotData {
     metadata: OnceLock<Arc<DeclarationMetadata>>,
 }
 
+/// A closed proof context and the complete directory of its exact source.
+pub struct ClosedDeclarations {
+    source: DeclarationSnapshot,
+    context: Context,
+    metadata: Arc<DeclarationMetadata>,
+}
+
+impl ClosedDeclarations {
+    pub fn source(&self) -> &DeclarationSnapshot {
+        &self.source
+    }
+
+    pub fn context(&self) -> &Context {
+        &self.context
+    }
+
+    pub fn capabilities(&self) -> crate::capabilities::World<'_> {
+        self.metadata
+            .capabilities(self.source.package(), &self.context, &[])
+    }
+
+    pub fn function(
+        &self,
+        declaration: Id,
+        fuel: &mut usize,
+    ) -> Result<Option<&n::Function>, AdmissionError> {
+        construction::spend(fuel, 1)?;
+        Ok(self.metadata.function(self.source.package(), declaration))
+    }
+
+    pub fn input_binders(
+        &self,
+        parameters: &[Id],
+        fuel: &mut usize,
+    ) -> Result<Vec<nir::DeclarationParameter>, AdmissionError> {
+        construction::spend(fuel, parameters.len())?;
+        Ok(nir::DeclarationParameter::from_domains(
+            parameters,
+            self.metadata.index.parameter_domains(),
+        ))
+    }
+}
+
+impl std::fmt::Display for ClosedDeclarations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(closed-declarations {} {})", self.source, self.context)
+    }
+}
+
 impl DeclarationSnapshot {
     pub fn new(package: Arc<n::Package>) -> Self {
         Self(Arc::new(SnapshotData {
@@ -52,29 +101,31 @@ impl DeclarationSnapshot {
         self.ensure_metadata(budget).map(|_| ())
     }
 
-    /// Borrow one source-bound implementation view. Premises stay with the
-    /// caller and never enter the retained directory.
+    /// Both services use one construction allowance. A failed preparation can
+    /// leave a completed independent index, but cannot deliver a closed scope.
+    pub fn closed(&self, budget: &mut Budget) -> Result<ClosedDeclarations, AdmissionError> {
+        let context = DeclarationSource::Snapshot(self).closed_context(&mut budget.steps)?;
+        Ok(ClosedDeclarations {
+            metadata: self.metadata(budget)?,
+            source: self.clone(),
+            context,
+        })
+    }
+
+    /// Borrow the directory in a caller's lexical proof scope.
     pub fn capabilities<'a>(
         &'a self,
         context: &'a Context,
         assumptions: &'a [n::TraitRequirement],
         budget: &mut Budget,
     ) -> Result<crate::capabilities::World<'a>, AdmissionError> {
-        self.ensure_metadata(budget)?;
-        Ok(crate::capabilities::World {
-            index: &self.0.metadata.get().unwrap().index,
-            implementations: &self.0.package.implementations,
-            traits: &self.0.package.traits,
-            assumptions,
-            context,
-        })
+        Ok(self
+            .ensure_metadata(budget)?
+            .capabilities(self.package(), context, assumptions))
     }
 
     fn metadata(&self, budget: &mut Budget) -> Result<Arc<DeclarationMetadata>, AdmissionError> {
-        if let Some(metadata) = self.0.metadata.get() {
-            construction::spend(&mut budget.steps, 1)?;
-            return Ok(Arc::clone(metadata));
-        }
+        construction::spend(&mut budget.steps, 1)?;
         Ok(Arc::clone(self.ensure_metadata(budget)?))
     }
 
@@ -82,13 +133,11 @@ impl DeclarationSnapshot {
         &self,
         budget: &mut Budget,
     ) -> Result<&Arc<DeclarationMetadata>, AdmissionError> {
-        if self.0.metadata.get().is_none() {
-            let metadata = DeclarationMetadata::build(&self.0.package, budget)?;
-            // Only completed metadata is installed. Concurrent constructors, if
-            // used, can retain either complete directory of this same source.
-            let _ = self.0.metadata.set(metadata);
+        if let Some(metadata) = self.0.metadata.get() {
+            return Ok(metadata);
         }
-        Ok(self.0.metadata.get().unwrap())
+        let completed = DeclarationMetadata::build(&self.0.package, budget)?;
+        Ok(self.0.metadata.get_or_init(|| completed))
     }
 }
 
@@ -115,6 +164,18 @@ impl<'a> DeclarationSource<'a> {
             Self::Snapshot(snapshot) => snapshot.package_context(steps),
             Self::Borrowed(package) => Context::from_package_metered(package, steps),
         }
+    }
+
+    pub(super) fn closed_context(self, steps: &mut usize) -> Result<Context, AdmissionError> {
+        self.package_context(steps).map_err(|error| {
+            use nir::normal_forms::ValidationError as E;
+            match error {
+                E::Budget | E::Newtype(nir::newtypes::ValidationError::Budget) => {
+                    AdmissionError::Budget
+                }
+                error => AdmissionError::Invalid(format!("dispatch type context: {error}")),
+            }
+        })
     }
 
     /// A source VM selects its declaration view when it opens the package.
@@ -177,12 +238,36 @@ impl<'a> DeclarationSource<'a> {
 
 pub(super) struct DeclarationMetadata {
     pub index: Index,
-    pub declaration_parameter_sorts: BTreeMap<Id, nir::Sort>,
     pub callable_functions: HashMap<Id, usize>,
     pub runtime_callables: HashMap<Id, usize>,
     pub normal_heads: HashMap<Id, usize>,
 }
 impl DeclarationMetadata {
+    pub(super) fn function<'a>(
+        &self,
+        package: &'a n::Package,
+        declaration: Id,
+    ) -> Option<&'a n::Function> {
+        self.callable_functions
+            .get(&declaration)
+            .map(|slot| &package.functions[*slot])
+    }
+
+    pub(super) fn capabilities<'a>(
+        &'a self,
+        package: &'a n::Package,
+        context: &'a Context,
+        assumptions: &'a [n::TraitRequirement],
+    ) -> crate::capabilities::World<'a> {
+        crate::capabilities::World {
+            index: &self.index,
+            implementations: &package.implementations,
+            traits: &package.traits,
+            assumptions,
+            context,
+        }
+    }
+
     fn build(package: &n::Package, budget: &mut Budget) -> Result<Arc<Self>, AdmissionError> {
         let index = Index::from_package_metered(package, budget)?;
         let input_fuel = &mut budget.steps;
@@ -216,25 +301,9 @@ impl DeclarationMetadata {
             }
         }
 
-        construction::spend(input_fuel, index.parameter_domains().len())?;
-        let declaration_parameter_sorts = index
-            .parameter_domains()
-            .iter()
-            .map(|(id, domain)| {
-                (
-                    *id,
-                    if *domain == Term::Primitive(nir::Primitive::Type) {
-                        nir::Sort::Type
-                    } else {
-                        nir::Sort::ComptimeValue
-                    },
-                )
-            })
-            .collect();
         construction::spend(&mut budget.steps, 1)?;
         Ok(Arc::new(Self {
             index,
-            declaration_parameter_sorts,
             callable_functions,
             runtime_callables,
             normal_heads,
@@ -244,21 +313,26 @@ impl DeclarationMetadata {
 
 impl std::fmt::Display for DeclarationSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "(declaration-snapshot (source {}) (theory ",
-            self.0.package
-        )?;
-        match self.0.theory.get() {
-            Some(theory) => theory.fmt(f)?,
-            None => f.write_str("pending")?,
-        }
-        f.write_str(") (metadata")?;
-        match self.0.metadata.get() {
-            Some(metadata) => write!(f, " {}", metadata.index)?,
-            None => f.write_str(" pending")?,
-        }
-        f.write_str("))")
+        write!(f, "(declaration-snapshot (source {}))", self.package())
+    }
+}
+
+impl DeclarationSnapshot {
+    /// Inspect lazy publication separately from the immutable source dump.
+    pub fn preparation(&self) -> impl std::fmt::Display + '_ {
+        std::fmt::from_fn(|f| {
+            f.write_str("(declaration-preparation (theory ")?;
+            match self.0.theory.get() {
+                Some(theory) => write!(f, "{theory}")?,
+                None => f.write_str("pending")?,
+            }
+            f.write_str(") (metadata")?;
+            match self.0.metadata.get() {
+                Some(metadata) => write!(f, " {}", metadata.index)?,
+                None => f.write_str(" pending")?,
+            }
+            f.write_str("))")
+        })
     }
 }
 
@@ -328,7 +402,7 @@ mod tests {
         assert!(closed.scope().is_empty() && closed.assumptions().is_empty());
         assert!(closed.is_nominal_constructor(id));
         assert!(!closed.is_nominal_constructor(extra));
-        assert!(!snapshot.to_string().contains("(theory pending)"));
+        assert!(snapshot.0.theory.get().is_some());
         let fresh = DeclarationSnapshot::new(package);
         assert!(fresh.package_context(&mut 1).is_err());
         assert!(fresh.0.theory.get().is_none());

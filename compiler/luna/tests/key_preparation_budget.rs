@@ -103,6 +103,49 @@ fn key_preparation_returns_work_and_does_not_refill_after_context_construction()
 }
 
 #[test]
+fn warm_generic_entry_preparation_depends_only_on_its_own_binders() {
+    fn prepare(width: usize) -> usize {
+        use luna::memoization::Invocation;
+
+        let mut program = String::from(
+            "pure comptime fn choose(value: T) -> bool where T, flag: bool { flag }\n",
+        );
+        for index in 0..width {
+            program.push_str(&format!(
+                "fn unrelated{index}(value: T) -> T where T {{ value }}\n"
+            ));
+        }
+        let package = sysroot::compile(&program).unwrap();
+        let declaration = package
+            .functions
+            .iter()
+            .find(|f| f.name == "choose")
+            .unwrap()
+            .declaration;
+        let source = source(&package);
+        source.closed(&mut Budget::default()).unwrap();
+        let mut remaining = Budget::default().steps;
+        let mut invocation = Invocation::prepare_in_source_metered(
+            source,
+            &LangItems::new(),
+            declaration,
+            vec![Term::Primitive(Primitive::Bool), Term::Bool(true)],
+            0,
+            Budget::default(),
+            &mut remaining,
+        )
+        .unwrap();
+        let result = invocation
+            .invoke(vec![Value::Bool(false)], &mut Context::new(1_000_000))
+            .unwrap();
+        assert_eq!(*result.value, Value::Bool(true));
+        Budget::default().steps - remaining
+    }
+
+    assert_eq!(prepare(0), prepare(128));
+}
+
+#[test]
 fn many_key_body_requirements_share_one_selection_allowance() {
     use elaboration::key_protocols::Operation;
     let mut package = sysroot::compile("").unwrap();

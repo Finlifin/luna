@@ -8,9 +8,9 @@ use crate::{
 };
 use nir::value_admission::Error as AdmissionError;
 use nir::{DeclarationId as Id, Term, program as n};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 mod catalog;
-pub use catalog::{DeclarationSnapshot, DeclarationSource};
+pub use catalog::{ClosedDeclarations, DeclarationSnapshot, DeclarationSource};
 mod inputs;
 mod methods;
 
@@ -58,15 +58,7 @@ impl<'a> DeclarationWorld<'a> {
             .unwrap_or_default();
         let context = match context {
             Some((context, _)) => context.clone(),
-            None => source.package_context(&mut budget.steps).map_err(|error| {
-                use nir::normal_forms::ValidationError as E;
-                match error {
-                    E::Budget | E::Newtype(nir::newtypes::ValidationError::Budget) => {
-                        AdmissionError::Budget
-                    }
-                    error => AdmissionError::Invalid(format!("dispatch type context: {error}")),
-                }
-            })?,
+            None => source.closed_context(&mut budget.steps)?,
         };
         let metadata = source.metadata(budget)?;
         Ok(Self {
@@ -79,10 +71,7 @@ impl<'a> DeclarationWorld<'a> {
     }
     /// Borrow checked metadata without scanning or copying executable bodies.
     pub fn function_declaration(&self, declaration: Id) -> Option<&'a n::Function> {
-        self.metadata
-            .callable_functions
-            .get(&declaration)
-            .map(|slot| &self.package.functions[*slot])
+        self.metadata.function(self.package, declaration)
     }
     pub fn runtime_function_identity(
         &self,
@@ -103,13 +92,8 @@ impl<'a> DeclarationWorld<'a> {
     /// A query view of this exact source, declaration index and premise scope.
     /// It carries no executable contracts or persistent proof authority.
     pub fn capabilities(&self) -> crate::capabilities::World<'_> {
-        crate::capabilities::World {
-            index: &self.metadata.index,
-            implementations: &self.package.implementations,
-            traits: &self.package.traits,
-            assumptions: &self.assumptions,
-            context: &self.context,
-        }
+        self.metadata
+            .capabilities(self.package, &self.context, &self.assumptions)
     }
 
     pub fn index(&self) -> &Index {
@@ -362,18 +346,7 @@ impl<'a> DeclarationWorld<'a> {
     }
 
     pub fn input_binders(&self, parameters: &[Id]) -> Vec<nir::DeclarationParameter> {
-        parameters
-            .iter()
-            .map(|id| nir::DeclarationParameter {
-                declaration: *id,
-                sort: self
-                    .metadata
-                    .declaration_parameter_sorts
-                    .get(id)
-                    .copied()
-                    .unwrap_or(nir::Sort::Type),
-            })
-            .collect()
+        nir::DeclarationParameter::from_domains(parameters, self.index().parameter_domains())
     }
     pub fn normalized_type(
         &mut self,
@@ -390,14 +363,11 @@ impl<'a> DeclarationWorld<'a> {
             steps: *fuel,
             ..budget
         };
-        let prepared = crate::capabilities::World {
-            index: &self.metadata.index,
-            implementations: &self.package.implementations,
-            traits: &self.package.traits,
-            assumptions: &self.assumptions,
-            context: &self.context,
-        }
-        .prepare_normalized_types(ty, &mut query_budget, &self.normalized_types);
+        let prepared = self.capabilities().prepare_normalized_types(
+            ty,
+            &mut query_budget,
+            &self.normalized_types,
+        );
         *fuel = query_budget.steps;
         let (normalized, completed) = prepared?;
         // Retaining the root is part of this transaction. Failed retention
@@ -436,15 +406,10 @@ impl DeclarationWorld<'_> {
         subject: &Term,
         budget: &mut Budget,
     ) -> Result<(Id, Vec<Term>), AdmissionError> {
-        let mut resolution = crate::capabilities::World {
-            index: &self.metadata.index,
-            implementations: &self.package.implementations,
-            traits: &self.package.traits,
-            assumptions: &self.assumptions,
-            context: &self.context,
-        }
-        .resolve_instance_metered(interface, subject, budget)?
-        .types;
+        let mut resolution = self
+            .capabilities()
+            .resolve_instance_metered(interface, subject, budget)?
+            .types;
         let Selection::Selected(id) = resolution.selection else {
             return Err(AdmissionError::Unresolved(format!(
                 "dispatch selection is unresolved for {subject}: {}; candidates: {}",

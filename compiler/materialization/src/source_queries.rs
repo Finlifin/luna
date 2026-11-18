@@ -25,6 +25,14 @@ impl<'a> SourceInvocationQueries<'a> {
         Self::in_source(DeclarationSource::Borrowed(package), context, assumptions)
     }
 
+    pub fn in_closed(declarations: &'a ClosedDeclarations) -> Self {
+        Self::in_source(
+            DeclarationSource::Snapshot(declarations.source()),
+            declarations.context(),
+            &[],
+        )
+    }
+
     pub fn in_source(
         source: DeclarationSource<'a>,
         context: &'a Context,

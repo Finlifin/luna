@@ -60,8 +60,7 @@ runtime 资源权限仍由 runtime 入口独立检查，详见
 
 共享声明不缓存计算结果。每次 invocation 仍按自己的输入、预算与 live graph 执行；
 输入赋值失败不会污染其他派生调用。原准备结果释放后，未完成的派生调用继续保活
-快照，最后一个 owner 释放后 package 与索引一起回收。S-expression dump 继续展开
-实际 package、index 和调用供应，输出不依赖 Arc 地址。
+快照，最后一个 owner 释放后 package 与索引一起回收。调用供应和源码快照的 S-expression 均不依赖 Arc 地址。
 
 回归覆盖相同 owner／索引共享、失败输入路由的原子性、派生调用不同输入的独立结果、
 不同快照中同号声明的不同结果，以及 Weak 观察的最后引用释放。原有 live closure
@@ -108,14 +107,10 @@ CodeSession，确认后续 VM 执行但零次字节码编译；预热后的零�
 与上下文仍会复制；没有完成分块存储、跨编辑增量索引、稳定句柄或通用发布事务。
 不以此宣称 M1 的完整 WorldSnapshot 已实现，也没有测量整体编译性能收益。
 
-本切片的共享、释放、输入隔离和实际执行回归继续保留；本轮检查证据集中列在
-第 1.2 节。本轮 builder 用例已通过，不再将
-历史失败当作当前状态。未执行全 workspace 或内存压力验证。
-
 ### 1.2 保活源码的共享声明目录
 
 `type_resolution::dispatch::DeclarationSnapshot` 同时保活不可变 `Arc<Package>` 与
-惰性建立的声明目录。目录包含 implementation Index、参数域对应的 sort，以及
+惰性建立的声明目录。目录包含 implementation Index 中的参数域，以及
 function／runtime callable／normal-form head 的 ID 到数组位置映射；不持有指向
 owner 内部的自引用。查询时从该 owner 的 package 取得借用，不能将目录另配一份
 同号但内容不同的源码，也不能通过公开 API 修改已登记的 package。
@@ -139,14 +134,18 @@ PTC 的证明与反例保留生成时的构造器契约。两者共享不可变�
 核对为常数成本；两个独立建立但可能相等的集合逐项核对，成本从重放预算扣除。
 List 推导提示只指导候选生成，不属于证明依据。契约核对成功后仍需重放证明树或验证反例。
 
-公开 PreparedInvocation、纯函数缓存 Invocation 和 Eq／Hash 的 Binding 已用这个
-owner 替代分别保管 package／index 的字段。CodeSession 从相同 owner 取得精确源码
-Arc，继续只复用代码；每次执行仍创建新 VM。缓存准入、资源协议查询视图和调用期的
-三个声明服务从各自的同一 source owner 取得索引，避免人工拼接不同来源的字段。
-同一个缓存调用为不同输入类型建立 Eq／Hash binding 时，也共享这个 owner，不再
-为每种协议复制 package 或另建目录。binding 的值接纳 token 仍分别建立：目录共享
-不允许协议 A 接受协议 B 的值快照，资源与用户契约也仍需各自检查。共享协议入口和按需执行入口都使用原快照的声明视图。
-方法选择按源码实现进行，包里的闭合执行表只供闭合执行使用。见第 1.10 节。
+需要在闭合环境中反复查询的消费者用 `DeclarationSnapshot::closed`。它从同一份准备额度
+取得包级理论、完整目录和空前提的 Context，三者随 `ClosedDeclarations` 一起交付。
+reference 执行、资源协议、缓存 invocation 和 Eq／Hash 都持有这个环境。
+`capabilities()` 只借用已经取得的索引，之后每次证明仍消耗查询自己的额度。
+有词法前提的检查继续通过 `DeclarationWorld` 或 `SourceInvocationQueries::in_source`
+传入作用域。构图和 VM 调用各自持有可变状态。
+
+缓存 invocation 按声明身份从目录取函数，再按签名顺序读取参数域，取得各 binder 的 sort。
+Eq／Hash binding 各自持有值接纳凭据。一个 binding 已经接纳的值，交给另一个 binding
+仍需重新接纳。普通显式 invocation
+可以只准备执行所需的声明服务。CodeSession 共享可执行代码，每次执行建立新 VM。
+源码中的方法按实现选择，闭合执行表的适用范围见第 1.10 节。
 
 带默认参数的 comptime 入口也保留原 source owner，不再为一次宿主调用复制整包、
 分配假声明 ID 并追加包装函数。入口持有独立的普通 Call 表达式，其默认实参和绑定
@@ -173,72 +172,21 @@ dispatch 复制整包、替换 source 或重建代码 session。原包的物理�
 相关接线与求解器内部仍有的限制见
 [缓存 invocation](values-staging-and-publication.md#当前缓存-invocation-迁移去掉-type-输入专门化世界)。
 
-最后一个 snapshot／CodeSession／源码 Arc 消费者释放后，目录和源码可分别回收；
-目录不含反向 owner 引用。S-expression dump 展开源码及 pending／完成的目录状态，
-不输出地址。回归检查首个请求构造、跨调用共享索引、不同前提重检、同号新源隔离、
-预算失败后的完整重建、Weak 所见的最后引用释放，以及 dump 的嵌套和字符串转义。
+快照的 S-expression 展开原始 package，读取声明不会改变这份输出。
+`snapshot.preparation()` 另外展示理论与目录各自的发布状态。冷构造失败后仍可查询
+已经独立完成的部分，取得闭合环境需要两者都成功。函数身份映射只保存数组位置，
+目录不反向持有源码。最后一个 owner 释放后，这些数据即可回收。
 
-required 准备、发布器证明和其资源权限 owner 也已采用该目录，见第 1.1 节。
-这仍是一份完整 Package 的共享目录，未实现分块或跨编辑的结构共享。luna driver
-资源 ProtocolContext 的后续接线见第 1.3 节；staged 入口独立于声明快照的迁移见第 1.5 节。
-显式 invocation 的入口选择、PTC Context 与资源准备现已接入调用剩余额度，见第 1.3 节。
-required 和其他 driver 的外围准备仍有独立成本；接受 `&Package` 的兼容入口仍可能复制
-所保留的源码。上述四条路径已采用有界声明捕获，不代表其他捕获入口或所有准备过程
-已经统一预算。未测整体编译性能收益。
-
-共同声明捕获的验证在 `/home/fin/luna` 执行，命令前缀为
-`python3 -B development/check.py --timeout 900 -- test`：
-
-| 范围 | 结果与证据 |
-| --- | --- |
-| `-p type_resolution -p materialization -p luna --lib --test prepared_invocations --test key_code_sessions --test invocation_value_templates --test staged_invocation_reuse --no-fail-fast` | `/tmp/luna-tools-g9ssogsl/result.json` 退出 101，166 通过、2 项诊断断言失败 |
-| `-p materialization -p luna --lib --test prepared_invocations --test builder_invocations --test library_protocols --test comptime_memory --test comptime_bytecode_defaults --no-fail-fast` | `/tmp/luna-tools-wluqjghs/result.json` 退出 101，264 通过、同一新增默认入口断言仍失败 |
-| `-p luna --test prepared_invocations` | `/tmp/luna-tools-wkdmmokv/result.json` 退出 0，8 项通过 |
-
-staged 捕获的预算失败诊断统一为 source retention，Steps 原因仍保留；既有测试同步
-检查该原因。新增精确额度用例原先预期 VM 的 StepsExhausted，实际先由默认调用准备
-报告额度耗尽；断言改为检查实际负责边界的拒绝，未增加额度或改变生产行为。第二轮
-构建仍使用修正该新增断言之前的版本，最后只重跑受影响的 prepared 组。
-本阶段去重 304 项通过。覆盖完整目录共享、私有投影不继承目录、失败重试、准确额度
-不能重复消费、丢弃的大型执行表、源 owner 回收，以及真实 sysroot 的 Type 结果缓存、
-Eq／Hash 独立值权限、默认参数、builder 与值引用行为。十个 Rust 文件格式检查通过，
-`/tmp/luna-tools-ae_y0vfx/result.json` 退出 0；`git diff --check` 通过。
-未执行全 workspace 或性能压测；工作区已有资源分析、正式 docs 和库说明未修改。
-
-required 目录迁移阶段的检查工作目录 `/home/fin/luna`，统一使用
-`python3 -B development/check.py --timeout 900 --`；result 文件保留完整命令及输出：
-
-- `test -p elaboration -p materialization --lib --no-fail-fast`：退出 0，181 + 29 项通过，
-  `/tmp/luna-tools-n2nyv2bd/result.json`。
-- `test -p luna --test builder_invocations --test library_protocols
-  --test clause_staged_constants --test comptime_staged_values --test trait_domain_substitution
-  --test trait_query_failures --test staged_invocation_reuse --no-fail-fast`：退出 0，
-  真实 sysroot builder、公开协议、staged 与类型查询共 131 项通过，
-  `/tmp/luna-tools-yro__7c9/result.json`。
-- 三个修改的 Rust 文件通过 scoped rustfmt check，
-  `/tmp/luna-tools-9rwofz81/result.json` 退出 0；`git diff --check` 通过。
-
-本轮去重 341 项通过。最初的新增预算用例遗漏了独立 VM 执行索引的初始化成本，
-`/tmp/luna-tools-wxvr5j9c/result.json` 为 209 通过、该 1 项失败；已改为先测无额外
-证明需求的调用成本，再检查新增证明额度不足以重建目录，未提高生产预算或绕过检查。
-未执行全量回归、Miri 或整体性能基准。
-
-先前可复用调用迁移的证据仍在 `/tmp/luna-tools-8saue3f2/result.json`、
-`/tmp/luna-tools-rez2nnq6/result.json` 和 `/tmp/luna-tools-55y018wp/result.json`，
-不计作本轮执行结果。`memoized_invocation_specializes_nested_type_forwarding`
-前端失败在该迁移阶段未重跑：此前 `/tmp/luna-tools-p1o2diml/result.json` 退出 101，在
-`1465..1484` 报 `Type domain equality: UnvalidatedModel`，与独立基线
-`/tmp/luna-tools-uq7f8i42/result.json` 一致。后续已移除普通实参 trait 义务之前的
-重复前提门槛并通过原用例，见[前提与独立证据](comptime-value-admission.md#接收世界中的值域)；
-该修复不归入源码所有权迁移的成绩。
+当前共享单位是完整 package。借用入口的所有权捕获、跨编辑的结构共享和按需取得
+函数主体仍是独立问题。回归入口为 `materialization` 的 `source_queries`、
+`expansion_boundary`，以及 `luna` 的 `key_preparation_budget`、`key_code_sessions`
+和 `source_tests`。
 
 ### 1.3 Driver 资源协议的源码所有权
 
-`luna::resources::ProtocolContext` 不再独立保存 implementation Index，然后由
-`world(package)` 接受另一份 package。它现在持有 DeclarationSnapshot、从同一源码
-建立的 Context 与显式绑定的 Copy／Drop 声明身份；只有完整目录和协议绑定都成功
-才交付上下文。`world()` 从该 owner 借用 implementations、traits、index 和 Context，
-调用者不能通过这个接口替换权限来源。`package()` 返回同一 owner 中的只读源码。
+`luna::resources::ProtocolContext` 持有闭合声明环境以及 Copy／Drop 的显式绑定。
+协议身份、源码和证明上下文在构造时确定。`world()` 直接借用环境中的 implementations、
+traits、index 和 Context。`package()` 返回同一 owner 中的只读源码。
 
 资源分析、Copy transfer、效应值传送、checked runtime session 和 native 清理计划
 已使用这个接口。CheckedSession 将优化后的源码移入 owner，不再另外保存一份 Cow；
@@ -273,42 +221,6 @@ required 目录迁移阶段的检查工作目录 `/home/fin/luna`，统一使用
 及进一步的实例化复用见第 1.4 节，staged 入口与 VM session 迁移见第 1.5–1.6 节。
 通用验证函数的其他 package／world 调用边界不在此声称全部关闭。
 
-入口与资源准备预算接线的检查工作目录为 `/home/fin/luna`，统一通过
-`python3 -B development/check.py --timeout 900 -- test` 执行，两组均退出 0：
-
-- `-p luna --lib --test prepared_invocations --test comptime_bytecode_defaults
-  --test key_code_sessions --test invocation_value_templates --test comptime_memory
-  --no-fail-fast`：130 项通过，`/tmp/luna-tools-7w7inmpe/result.json`。
-- `-p luna --test resources --test library_protocols --test builder_invocations
-  --test source_tests --test subcommands --no-fail-fast`：500 项通过，
-  `/tmp/luna-tools-gpblvsfi/result.json`。
-
-本阶段去重 630 项通过。新增检查包含 256 个默认参数在有界线性准备后实际调用、
-重复默认槽位拒绝、选名预算回传与恢复、资源冷／热准备的不同成本、准确额度的成功
-及差一步失败。原热目录用零额度重建资源 Context 的断言已改为检查重建实际成本，
-并继续要求相同目录和独立资源证明；原默认入口在捕获后耗尽额度的断言现在由更早
-接入的类型上下文准备负责拒绝。没有增加生产额度或绕过语义检查。五个修改的 Rust
-文件通过 scoped rustfmt check，`/tmp/luna-tools-_fmvb_7u/result.json` 退出 0；
-`git diff --check` 通过。未执行全 workspace 测试或整体性能基准。
-
-driver 资源 owner 迁移阶段在 `/home/fin/luna` 使用
-`python3 -B development/check.py --timeout 900 --` 检查，结果均退出 0：
-
-- `test -p luna --lib --test resources --test key_code_sessions --test library_protocols
-  --test trait_query_failures --no-fail-fast`：491 项通过，包含真实 sysroot 公开协议、
-  Copy／Drop 分析、host 方法清理和新的快照隔离回归；
-  `/tmp/luna-tools-6637mekl/result.json`。
-- `test -p luna --test execution --test host --no-fail-fast` 加 direct-passing、checked
-  pointer、资源入口、bound tuple、quote callable 和 splice cleanup 过滤，共 58 + 35
-  项通过；完整过滤列表在 `/tmp/luna-tools-_hj8kunv/result.json`。覆盖解释执行与
-  LLVM/native 消费者，不以仅构造 Context 证明端到端接线。
-- `test -p luna --test source_tests --no-fail-fast`：13 项通过，验证多测试入口共享准备
-  后的失败、预算、清理隔离和 native 恢复；`/tmp/luna-tools-e86jpo1_/result.json`。
-
-本轮去重 597 项通过；八个修改／新增 Rust 文件通过 scoped rustfmt check，
-`/tmp/luna-tools-j6s8usej/result.json` 退出 0，`git diff --check` 通过。
-未执行全量回归、Miri 或性能基准；第 1.2 节所述前端既有失败本轮没有重跑。
-
 ### 1.4 实例化与清理闭包复用源码目录
 
 `materialization::instantiate_in_source` 及带外部类型根的对应入口接受
@@ -321,9 +233,8 @@ Builder 从 source 取得精确 package 与 DeclarationWorld。Snapshot 复用�
 实例去重集合和待发布结果不进入共享目录。热目录不能跳过用户代码展开、缺失主体
 检查或最终图验证；失败只丢弃本次候选图，不把半成品保存在源码 owner。
 
-runtime ReferenceSession 现在拥有 DeclarationSnapshot；其执行期类型证明及每次
-实例化从同一个 owner 取得目录，原独立 package／index 字段和 driver index 构造
-helper 已删除。效应 reference execution 同样从 ProtocolContext.source 进入实例化。
+runtime ReferenceSession 在创建时按准备额度取得闭合声明环境。执行期类型证明和
+每次实例化共享同一源码、声明理论与目录。效应 reference execution 同样从 ProtocolContext.source 进入实例化。
 
 checked 清理的内部入口改为接收 ProtocolContext，集中取得 source、world 和协议
 绑定。清理闭包增长的每一轮构图复用此目录，仍重新处理当前根、临时生成布局和

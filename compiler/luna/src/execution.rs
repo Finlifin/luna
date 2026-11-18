@@ -1,6 +1,6 @@
 //! Bounded reference execution through the concrete instance graph.
 use comptime_interpretor::{Budget, Interpreter, Value};
-use elaboration::materialization::{DeclarationSnapshot, DeclarationSource};
+use elaboration::materialization::{ClosedDeclarations, DeclarationSnapshot, DeclarationSource};
 use nir::program::{FunctionPhase, Package};
 
 /// Fuel is a per-stage bound, like the existing instantiation CLI budget.
@@ -125,8 +125,7 @@ fn interpret_selected(
 /// A reusable immutable type world; each entry still owns its materialization
 /// and interpreter so no runtime values or spent budgets cross invocations.
 pub(crate) struct ReferenceSession {
-    source: DeclarationSnapshot,
-    context: elaboration::ptc::Context,
+    declarations: ClosedDeclarations,
     fuel: u64,
     budget: elaboration::ptc::Budget,
 }
@@ -140,15 +139,12 @@ impl ReferenceSession {
                 .map_err(|_| "execution fuel does not fit the host work counter")?,
             ..Default::default()
         };
-        let context = elaboration::ptc::Context::from_package(&package)
-            .map_err(|error| format!("cannot prepare runtime type context: {error}"))?;
         let source = DeclarationSnapshot::new(std::sync::Arc::new(package.into_owned()));
-        source
-            .prepare(&mut { budget })
-            .map_err(|error| format!("runtime declaration directory: {error}"))?;
+        let declarations = source
+            .closed(&mut { budget })
+            .map_err(|error| format!("runtime declaration preparation: {error}"))?;
         Ok(Self {
-            source,
-            context,
+            declarations,
             fuel,
             budget,
         })
@@ -159,7 +155,7 @@ impl ReferenceSession {
         declaration: nir::DeclarationId,
         entry: &str,
     ) -> Result<Value, String> {
-        let source = DeclarationSource::Snapshot(&self.source);
+        let source = DeclarationSource::Snapshot(self.declarations.source());
         let key = iir::InstanceKey {
             declaration,
             arguments: vec![].into(),
@@ -170,17 +166,7 @@ impl ReferenceSession {
             Default::default(),
             self.budget,
         )?;
-        let world = self
-            .source
-            .capabilities(
-                &self.context,
-                &[],
-                &mut elaboration::ptc::Budget {
-                    steps: 0,
-                    ..Default::default()
-                },
-            )
-            .expect("ReferenceSession constructor completed its declaration directory");
+        let world = self.declarations.capabilities();
         let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
             elaboration::materialization::check_world_predicate(
                 &world,

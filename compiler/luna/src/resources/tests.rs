@@ -1,4 +1,5 @@
 use super::*;
+use elaboration::ptc::Context;
 use elaboration::{
     materialization::DeclarationSource,
     verification::copy::{Classification, classify},
@@ -71,7 +72,12 @@ fn bound_resource_source_retains_its_directory_and_releases_the_last_owner() {
         )
         .is_err()
     );
-    assert!(source.to_string().ends_with("(metadata pending))"));
+    assert!(
+        source
+            .preparation()
+            .to_string()
+            .ends_with("(metadata pending))")
+    );
     let mut cold_budget = Budget::default();
     let binding = ProtocolContext::selected_in_source_metered(
         source.clone(),

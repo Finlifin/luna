@@ -908,6 +908,25 @@ pub fn validate_record_index_with_admission_in(
     Ok(())
 }
 
+impl DeclarationParameter {
+    /// Read the ordered binders from declaration domains. Historical declarations
+    /// without explicit domain metadata bind Type.
+    pub fn from_domains(
+        parameters: &[crate::DeclarationId],
+        domains: &BTreeMap<crate::DeclarationId, Term>,
+    ) -> Vec<Self> {
+        parameters
+            .iter()
+            .map(|id| {
+                Self::comptime(
+                    *id,
+                    domains.get(id).unwrap_or(&Term::Primitive(Primitive::Type)),
+                )
+            })
+            .collect()
+    }
+}
+
 impl crate::program::Package {
     /// Recover declaration sorts for substitution, including legacy Type-only
     /// binders without explicit domain metadata. Supplied values are not evidence.
@@ -922,14 +941,8 @@ impl crate::program::Package {
         if parameters.is_empty() {
             return Ok(vec![]);
         }
-        let sorts = self.declaration_parameter_sorts(fuel)?;
-        Ok(parameters
-            .iter()
-            .map(|id| DeclarationParameter {
-                declaration: *id,
-                sort: sorts.get(id).copied().unwrap_or(Sort::Type),
-            })
-            .collect())
+        let domains = self.declaration_parameter_domains(fuel)?;
+        Ok(DeclarationParameter::from_domains(parameters, &domains))
     }
 
     /// Sort evidence inherited from trait, nominal and impl declarations, keyed by stable binder
@@ -941,16 +954,7 @@ impl crate::program::Package {
         Ok(self
             .declaration_parameter_domains(fuel)?
             .into_iter()
-            .map(|(id, domain)| {
-                (
-                    id,
-                    if domain == Term::Primitive(Primitive::Type) {
-                        Sort::Type
-                    } else {
-                        Sort::ComptimeValue
-                    },
-                )
-            })
+            .map(|(id, domain)| (id, Sort::of_comptime_domain(&domain)))
             .collect())
     }
 

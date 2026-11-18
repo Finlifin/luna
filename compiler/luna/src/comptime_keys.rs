@@ -5,7 +5,7 @@ use comptime_executor::{Context, Error, KeyProtocol};
 use comptime_interpretor::{Budget, Interpreter, Value};
 use elaboration::{
     key_protocols::{Operation, Selected},
-    materialization::{DeclarationSnapshot, DeclarationSource},
+    materialization::{ClosedDeclarations, DeclarationSnapshot, DeclarationSource},
     ptc,
 };
 use intrinsic::LangItems;
@@ -53,8 +53,7 @@ struct Execution {
 struct Binding {
     owner: Arc<()>,
     subject: Arc<Term>,
-    source: DeclarationSnapshot,
-    context: ptc::Context,
+    declarations: ClosedDeclarations,
     eq: Selected,
     hash: Selected,
     budget: ptc::Budget,
@@ -121,12 +120,10 @@ impl Protocol {
         let before = work.steps;
         let prepared = (|| {
             let package = source.package();
-            let context = source
-                .package_context(&mut work.steps)
-                .map_err(|error| format!("key type context: {error}"))?;
-            let world = source
-                .capabilities(&context, &[], &mut work)
-                .map_err(|error| format!("key declaration index: {error}"))?;
+            let declarations = source
+                .closed(&mut work)
+                .map_err(|error| format!("key declaration preparation: {error}"))?;
+            let world = declarations.capabilities();
             let eq = crate::protocols::select_comptime_key_metered(
                 package,
                 &world,
@@ -174,8 +171,7 @@ impl Protocol {
                 binding: Binding {
                     owner: Arc::new(()),
                     subject: Arc::new(subject),
-                    source,
-                    context,
+                    declarations,
                     eq,
                     hash,
                     budget,
@@ -237,11 +233,8 @@ impl Binding {
         context: &mut Context,
         action: impl FnOnce(&mut Interpreter<'_>) -> Result<R, comptime_interpretor::Error>,
     ) -> Result<R, Error<String>> {
-        let source_queries = elaboration::materialization::SourceInvocationQueries::in_source(
-            DeclarationSource::Snapshot(&self.source),
-            &self.context,
-            &[],
-        );
+        let source_queries =
+            elaboration::materialization::SourceInvocationQueries::in_closed(&self.declarations);
         let solver = |predicate: &TypePredicate, remaining: &mut u64| {
             source_queries.check(predicate, self.budget, remaining)
         };
@@ -257,7 +250,7 @@ impl Binding {
         let mut allowance = Budget { steps, depth: 128 };
         execution.stats = Default::default();
         let prepared = Interpreter::for_comptime_resolving_in_session(
-            self.source.package(),
+            self.declarations.source().package(),
             &mut execution.code,
             comptime_interpretor::SourceResolvers {
                 types: &solver,

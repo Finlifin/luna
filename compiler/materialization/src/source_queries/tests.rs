@@ -515,7 +515,12 @@ fn explicit_directory_preparation_is_atomic_and_shared_with_invocation_queries()
             snapshot.prepare(&mut budget),
             Err(nir::NominalAdmissionError::Budget)
         ));
-        assert!(snapshot.to_string().ends_with("(metadata pending))"));
+        assert!(
+            snapshot
+                .preparation()
+                .to_string()
+                .ends_with("(metadata pending))")
+        );
     }
     let mut budget = Budget::default();
     snapshot.prepare(&mut budget).unwrap();
@@ -540,6 +545,51 @@ fn explicit_directory_preparation_is_atomic_and_shared_with_invocation_queries()
 }
 
 #[test]
+fn closed_declarations_charge_both_services_before_serving_vm_queries() {
+    use std::sync::Arc;
+    let (package, method, _, predicate) = mixed_fixture();
+    let package = Arc::new(package);
+    let source = DeclarationSnapshot::new(package.clone());
+    let mut measure = Budget::default();
+    DeclarationSnapshot::new(package)
+        .package_context(&mut measure.steps)
+        .unwrap();
+    let mut theory_only = Budget {
+        steps: Budget::default().steps - measure.steps,
+        ..Budget::default()
+    };
+    assert!(matches!(
+        source.closed(&mut theory_only),
+        Err(nir::NominalAdmissionError::Budget)
+    ));
+    assert_eq!(theory_only.steps, 0);
+    assert!(source.package_context(&mut 1).is_ok());
+
+    let closed = source.closed(&mut Budget::default()).unwrap();
+    let queries = SourceInvocationQueries::in_closed(&closed);
+    assert_eq!(
+        queries.check(&predicate, Budget::default(), &mut 100_000),
+        Ok(comptime_interpretor::ContractOutcome::Satisfied)
+    );
+    assert_eq!(queries.resolve(&method, &mut 100_000).unwrap().body, id(6));
+    assert!(std::ptr::eq(
+        closed.capabilities().index,
+        queries.world.borrow().as_ref().unwrap().index()
+    ));
+    let sibling = source
+        .closed(&mut Budget {
+            steps: 2,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(std::ptr::eq(
+        closed.capabilities().index,
+        sibling.capabilities().index
+    ));
+    assert!(sibling.context().assumptions().is_empty());
+}
+
+#[test]
 fn retained_snapshots_share_metadata_across_fresh_invocation_scopes() {
     use comptime_interpretor::ContractOutcome;
     use std::sync::Arc;
@@ -552,7 +602,12 @@ fn retained_snapshots_share_metadata_across_fresh_invocation_scopes() {
     let pending_dump = snapshot.to_string();
     assert!(pending_dump.starts_with("(declaration-snapshot (source ("));
     assert!(pending_dump.contains(r#"retained\n\"source\""#));
-    assert!(pending_dump.ends_with("(metadata pending))"));
+    assert!(
+        snapshot
+            .preparation()
+            .to_string()
+            .ends_with("(metadata pending))")
+    );
     let sibling = snapshot.clone();
     let first =
         SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&snapshot), &context, &[]);
@@ -579,9 +634,10 @@ fn retained_snapshots_share_metadata_across_fresh_invocation_scopes() {
     }
     assert_eq!(next.resolve(&method, &mut warm).unwrap().body, id(6));
     assert!(next.associated(&access, &mut warm).is_ok());
-    let completed_dump = snapshot.to_string();
+    assert_eq!(snapshot.to_string(), pending_dump);
+    let completed_dump = snapshot.preparation().to_string();
     assert!(completed_dump.contains("(metadata (implementation-index"));
-    assert_eq!(completed_dump, sibling.to_string());
+    assert_eq!(completed_dump, sibling.preparation().to_string());
     drop(first);
     drop(next);
     drop(snapshot);

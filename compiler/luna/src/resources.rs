@@ -2,8 +2,8 @@
 //! Successful analysis does not lower Drop or certify complete program safety.
 use elaboration::{
     capabilities::World,
-    materialization::DeclarationSnapshot,
-    ptc::{Budget, Context},
+    materialization::{ClosedDeclarations, DeclarationSnapshot},
+    ptc::Budget,
     verification::moves::Report,
 };
 use intrinsic::{LangItem, LangItems};
@@ -180,8 +180,7 @@ pub(crate) struct ProtocolContext {
     pub items: LangItems,
     pub copy: DeclarationId,
     pub drop: Option<DeclarationId>,
-    context: Context,
-    source: DeclarationSnapshot,
+    declarations: ClosedDeclarations,
 }
 impl ProtocolContext {
     #[cfg(test)]
@@ -244,12 +243,9 @@ impl ProtocolContext {
                     .map(|definition| definition.declaration)
             })
             .transpose()?;
-        let context = source
-            .package_context(&mut budget.steps)
-            .map_err(|e| format!("resource type context: {e}"))?;
-        source
-            .prepare(budget)
-            .map_err(|error| format!("resource declaration directory: {error}"))?;
+        let declarations = source
+            .closed(budget)
+            .map_err(|error| format!("resource declaration preparation: {error}"))?;
         let mut items = LangItems::new();
         spend_binding(&items, package, &mut budget.steps)?;
         items
@@ -265,34 +261,20 @@ impl ProtocolContext {
             items,
             copy: protocol,
             drop: drop_protocol,
-            context,
-            source,
+            declarations,
         })
     }
 
     pub(crate) fn package(&self) -> &Package {
-        self.source.package()
-    }
-
-    pub(crate) fn context(&self) -> &Context {
-        &self.context
+        self.declarations.source().package()
     }
 
     pub(crate) fn source(&self) -> elaboration::materialization::DeclarationSource<'_> {
-        elaboration::materialization::DeclarationSource::Snapshot(&self.source)
+        elaboration::materialization::DeclarationSource::Snapshot(self.declarations.source())
     }
 
     pub fn world(&self) -> World<'_> {
-        self.source
-            .capabilities(
-                &self.context,
-                &[],
-                &mut Budget {
-                    steps: 0,
-                    ..Default::default()
-                },
-            )
-            .expect("ProtocolContext construction completed its declaration directory")
+        self.declarations.capabilities()
     }
 }
 
@@ -348,7 +330,9 @@ impl fmt::Display for ProtocolContext {
         write!(
             f,
             ") (bindings {}) (context {}) (source {}))",
-            self.items, self.context, self.source
+            self.items,
+            self.declarations.context(),
+            self.declarations.source()
         )
     }
 }

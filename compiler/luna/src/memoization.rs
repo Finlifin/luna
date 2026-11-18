@@ -8,7 +8,7 @@ use crate::comptime_keys::{Protocol, Snapshot};
 use comptime_executor::{Cache, Context, Error, KeyProtocol, Outcome, QueryId, Scope};
 use comptime_interpretor::{Budget, Interpreter, Value};
 use elaboration::{
-    materialization::{DeclarationSnapshot, DeclarationSource},
+    materialization::{ClosedDeclarations, DeclarationSnapshot, DeclarationSource},
     ptc,
 };
 use intrinsic::LangItems;
@@ -18,7 +18,7 @@ use nir::{
 };
 
 pub struct Invocation {
-    source: DeclarationSnapshot,
+    declarations: ClosedDeclarations,
     code_session: comptime_interpretor::CodeSession,
     stats: crate::invocation::InvocationStats,
     declaration: DeclarationId,
@@ -28,7 +28,6 @@ pub struct Invocation {
     schemas: Vec<Schema>,
     requirements: Vec<TypePredicate>,
     capacity: usize,
-    context: ptc::Context,
     protocols: ExactInputs,
     cache: Cache<Snapshot, Value>,
     budget: ptc::Budget,
@@ -163,24 +162,16 @@ impl Invocation {
         };
         let before = work.steps;
         let prepared = (|| {
-            let package = source.package();
-            work.steps = work
-                .steps
-                .checked_sub(package.functions.len())
-                .ok_or("memoized entry lookup budget exhausted")?;
-            let mut matches = package
-                .functions
-                .iter()
-                .filter(|f| f.declaration == declaration);
-            let function = matches.next().ok_or("memoized function is missing")?;
-            if matches.next().is_some()
-                || function.phase != FunctionPhase::Comptime
-                || !function.pure
-            {
+            let declarations = source
+                .closed(&mut work)
+                .map_err(|error| format!("memoization declaration preparation: {error}"))?;
+            let function = declarations
+                .function(declaration, &mut work.steps)?
+                .ok_or("memoized function is missing")?;
+            if function.phase != FunctionPhase::Comptime || !function.pure {
                 return Err("memoization requires one ordinary pure comptime function".into());
             }
-            let binders =
-                package.declaration_binders(&function.type_parameters, &mut work.steps)?;
+            let binders = declarations.input_binders(&function.type_parameters, &mut work.steps)?;
             nir::copy_budget::charge_type_substitution(
                 &function.signature,
                 &binders,
@@ -201,12 +192,7 @@ impl Invocation {
                 .map(|p| &p.ty)
                 .chain(std::iter::once(result.as_ref()))
                 .all(|ty| ty.check_scope(&[]).is_ok());
-            let context = source
-                .package_context(&mut work.steps)
-                .map_err(|error| format!("memoized type context: {error}"))?;
-            let world = source
-                .capabilities(&context, &[], &mut work)
-                .map_err(|error| format!("memoization declaration index: {error}"))?;
+            let world = declarations.capabilities();
             work.steps = work
                 .steps
                 .checked_sub(
@@ -345,7 +331,7 @@ impl Invocation {
                 .checked_sub(items.len())
                 .ok_or("memoized language bindings budget exhausted")?;
             Ok(Self {
-                source,
+                declarations,
                 code_session,
                 stats: Default::default(),
                 declaration,
@@ -355,7 +341,6 @@ impl Invocation {
                 schemas,
                 requirements: deferred,
                 capacity,
-                context,
                 protocols: ExactInputs(protocols),
                 cache: Cache::new(
                     Scope {
@@ -388,10 +373,9 @@ impl Invocation {
         // result is classified only after binding this invocation's inputs.
         if result_type != Term::Primitive(nir::Primitive::Type) {
             let (value, _) = evaluate(
-                &self.source,
+                &self.declarations,
                 &mut self.code_session,
                 &mut self.stats,
-                &self.context,
                 self.budget,
                 self.declaration,
                 &self.arguments,
@@ -426,7 +410,7 @@ impl Invocation {
                 .iter()
                 .map(|ty| {
                     Protocol::prepare_in_source_with_session_metered(
-                        self.source.clone(),
+                        self.declarations.source().clone(),
                         &self.items,
                         ty,
                         self.budget,
@@ -468,10 +452,9 @@ impl Invocation {
                 0,
             );
             execute(
-                &self.source,
+                &self.declarations,
                 &mut self.code_session,
                 &mut self.stats,
-                &self.context,
                 self.budget,
                 self.declaration,
                 &self.arguments,
@@ -484,10 +467,9 @@ impl Invocation {
             )
         } else {
             execute(
-                &self.source,
+                &self.declarations,
                 &mut self.code_session,
                 &mut self.stats,
-                &self.context,
                 self.budget,
                 self.declaration,
                 &self.arguments,
@@ -556,10 +538,7 @@ impl Invocation {
         result.check_scope(&[]).map_err(|_| {
             Error::Protocol("memoized result still needs value-dependent binding".into())
         })?;
-        let world = self
-            .source
-            .capabilities(&self.context, &[], &mut { self.budget })
-            .map_err(|error| Error::Protocol(error.to_string()))?;
+        let world = self.declarations.capabilities();
         for requirement in &self.requirements {
             let predicate = map_requirement(
                 requirement,
@@ -633,10 +612,9 @@ impl std::fmt::Display for Invocation {
 }
 
 fn execute(
-    source: &DeclarationSnapshot,
+    declarations: &ClosedDeclarations,
     code_session: &mut comptime_interpretor::CodeSession,
     stats: &mut crate::invocation::InvocationStats,
-    type_context: &ptc::Context,
     budget: ptc::Budget,
     declaration: DeclarationId,
     arguments: &[Term],
@@ -666,10 +644,9 @@ fn execute(
             }
             let values = inputs.iter().map(|input| input.value().clone()).collect();
             evaluate(
-                source,
+                declarations,
                 code_session,
                 stats,
-                type_context,
                 budget,
                 declaration,
                 arguments,
@@ -683,10 +660,9 @@ fn execute(
 }
 
 fn evaluate(
-    source: &DeclarationSnapshot,
+    declarations: &ClosedDeclarations,
     code_session: &mut comptime_interpretor::CodeSession,
     stats: &mut crate::invocation::InvocationStats,
-    type_context: &ptc::Context,
     budget: ptc::Budget,
     declaration: DeclarationId,
     arguments: &[Term],
@@ -695,12 +671,9 @@ fn evaluate(
     context: &mut Context,
     cache_result: bool,
 ) -> Result<(Value, bool), Error<String>> {
-    let package = source.package();
-    let source_queries = elaboration::materialization::SourceInvocationQueries::in_source(
-        DeclarationSource::Snapshot(source),
-        type_context,
-        &[],
-    );
+    let package = declarations.source().package();
+    let source_queries =
+        elaboration::materialization::SourceInvocationQueries::in_closed(declarations);
     let solver = |predicate: &TypePredicate, remaining: &mut u64| {
         source_queries.check(predicate, budget, remaining)
     };
