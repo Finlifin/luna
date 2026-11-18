@@ -109,9 +109,8 @@ impl Checker<'_, '_> {
                 bindings.push(local(parameter.hir_id));
             }
         }
-        // Locally computed staged values are abstract inputs only to this
-        // validation fragment. The suspended source, not this synthetic NIR,
-        // is used to resume checking and execution with real bindings.
+        // Locally computed staged values supply domains for definition checks.
+        // Their actual values belong to the invocation that executes the source.
         for (binding, ty) in staged_locals {
             bindings.push(binding);
             parameters.push(Parameter {
@@ -195,44 +194,30 @@ impl Checker<'_, '_> {
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let (mut functions, runtime_function_identities) = self.fragment_callables(&value, span)?;
-        functions.push(n::Function {
-            interface: nir::program::FunctionDeclaration {
-                declaration: DeclarationId {
-                    package: u64::MAX,
-                    local: u32::MAX,
-                },
-                name: "<ordinary-deferred-region>".into(),
-                phase: if self.in_staged_input || sig.modifiers.is_comptime {
-                    n::FunctionPhase::Comptime
-                } else {
-                    n::FunctionPhase::Runtime
-                },
-                inline: false,
-                pure: false,
-                is_unsafe: false,
-                signature: Term::Function {
-                    parameters,
-                    result: Box::new(value.ty.clone()),
-                },
-                parameters: bindings,
-                defaults: vec![],
-                type_parameters: self
-                    .definition_refinements
-                    .subjects
-                    .values()
-                    .map(|b| b.declaration)
-                    .chain(self.definition_refinements.tuple_elements.iter().copied())
-                    .collect(),
-                preconditions: vec![],
-                postconditions: vec![],
-                entry_snapshots: vec![],
-                result_binding: None,
-                requirements,
-                capabilities,
+        let (functions, runtime_function_identities) = self.fragment_callables(&value, span)?;
+        let region = n::DefinitionRegion {
+            owner: declaration(self.package, &self.package_identities, owner),
+            phase: if self.in_staged_input || sig.modifiers.is_comptime {
+                n::FunctionPhase::Comptime
+            } else {
+                n::FunctionPhase::Runtime
             },
+            signature: Term::Function {
+                parameters,
+                result: Box::new(value.ty.clone()),
+            },
+            parameters: bindings,
+            type_parameters: self
+                .definition_refinements
+                .subjects
+                .values()
+                .map(|binder| binder.declaration)
+                .chain(self.definition_refinements.tuple_elements.iter().copied())
+                .collect(),
+            requirements,
+            capabilities,
             body: value,
-        });
+        };
         let package = n::Package {
             target: self.target,
             functions,
@@ -247,7 +232,7 @@ impl Checker<'_, '_> {
             ..Default::default()
         };
         if arithmetic {
-            crate::verification::flow::validate_machine_operations(&package).map_err(
+            crate::verification::flow::validate_definition_region(&package, region).map_err(
                 |mut failure| {
                     failure.source = failure
                         .source
@@ -257,7 +242,9 @@ impl Checker<'_, '_> {
                 },
             )
         } else {
-            nir::phases::validate(&package).map_err(|failure| error(span, failure.message))
+            nir::phases::inspect_definition_region(&package, &region)
+                .map(|_| ())
+                .map_err(|failure| error(span, failure.message))
         }
     }
 

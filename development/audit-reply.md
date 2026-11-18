@@ -1,6 +1,6 @@
 # 源码检查与执行的架构复核
 
-11 月 18 日晚报以 `2797e5f6` 为基线。以下按可定位的生产入口区分已经接通的能力与下一处必须改变的接口。复核到 `296ff6b2`。早期逐次检查的日志随各自提交保存，初始 R01–R20 的语境见[架构审计](architecture-audit.md)。
+11 月 18 日晚报以 `2797e5f6` 为基线。以下按可定位的生产入口区分已经接通的能力与下一处必须改变的接口。报告后的修正分别标在对应入口。早期逐次检查的日志随各自提交保存，初始 R01–R20 的语境见[架构审计](architecture-audit.md)。
 
 ## 源码检查与原调用的交接
 
@@ -21,7 +21,9 @@ let size = count<
 | [实参依赖任务](../compiler/elaboration/src/program/dependent_inputs/tasks.rs) | 调度声明输入与默认值的检查。未观察的普通 comptime 调用实参无法在此独立执行。 | 此队列只知道依赖哪个槽，缺少原实参的执行位置、活动绑定和控制出口。 |
 | [required 入口](../compiler/elaboration/src/program/required.rs) | 为已有受检根准备运行所需的声明和可用输入。 | 尚待元素域的源码表达式无法作为受检根交付。重新准备一个根也无法恢复原调用栈。 |
 | [调用会话](../compiler/comptime_interpretor/src/invocation/session.rs)与[宿主接口](../compiler/comptime_interpretor/src/invocation/host.rs) | VM 可以在原调用中运行已检查的实参片段、传递循环控制，请求选择或定义。 | 收到 Type 后仍缺将它送到原源码检查位置，并以检查结果继续该调用的路径。 |
-| [定义端片段检查](../compiler/elaboration/src/program/open_functions/fragments.rs) | 将可见输入投影到紧凑参数帧，重绑定片段中的引用，按用途检查 phase 或机器算术。 | 投影参数只有声明端的域与前提。将这份合成函数当作调用者执行会丢失实际存储、已执行前缀和外层控制目标。 |
+| [定义端片段检查](../compiler/elaboration/src/program/open_functions/fragments.rs) | 将可见输入投影到紧凑参数帧，重绑定片段中的引用，NIR 的 `DefinitionRegion` 在真实依赖目录旁独立接受阶段和算术检查。 | 投影参数只有定义端的域与前提，实际存储、已执行前缀和外层控制目标仍归原调用持有。 |
+
+定义片段记录词法所有者、重绑定后的参数与类型前提，以及被检查的表达式。阶段检查验证这份参数帧，调用引用仍在真实声明目录中解析。即使片段与目录中的某个声明来自同一所有者，它们各自的算术义务也须分别证明。程序验证目前会为需要机器算术证明的片段构造私有的函数形状输入，以便复用有限整数域实例化；这份输入仅用于证明。依赖声明和方法契约仍随临时依赖包检查。[阶段遍历](../compiler/nir/src/phases.rs) · [程序验证](../compiler/program_verification/src/flow.rs)
 
 ### 一次调用内的恢复
 

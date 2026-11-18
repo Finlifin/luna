@@ -90,6 +90,45 @@ impl FunctionDeclaration {
     }
 }
 
+/// A checked expression in the projected frame of an open definition.
+/// The owner identifies its lexical source. The region has no callable identity.
+pub struct DefinitionRegion {
+    pub owner: DeclarationId,
+    pub phase: FunctionPhase,
+    pub signature: Term,
+    pub parameters: Vec<LocalId>,
+    pub type_parameters: Vec<DeclarationId>,
+    pub requirements: Vec<TypePredicate>,
+    pub capabilities: Vec<TraitRequirement>,
+    pub body: Expr,
+}
+
+impl fmt::Display for DefinitionRegion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(definition-region (owner {}) (phase {}) (signature {}) (parameters",
+            self.owner, self.phase, self.signature
+        )?;
+        for binding in &self.parameters {
+            write!(f, " {binding}")?;
+        }
+        f.write_str(") (type-parameters")?;
+        for binder in &self.type_parameters {
+            write!(f, " {binder}")?;
+        }
+        f.write_str(") (requires")?;
+        for requirement in &self.requirements {
+            write!(f, " {requirement}")?;
+        }
+        f.write_str(") (capabilities")?;
+        for requirement in &self.capabilities {
+            write!(f, " {requirement}")?;
+        }
+        write!(f, ") (body {}))", self.body)
+    }
+}
+
 /// A fully checked function. Incomplete source bodies belong to the source
 /// checker and cannot be represented by an empty or placeholder expression.
 #[derive(Clone, Debug, PartialEq)]

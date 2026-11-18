@@ -334,3 +334,42 @@ fn narrow_expression_chains_cannot_bypass_worklist_charges() {
     assert_eq!(fuel, 0);
     run(&package, &mut 1000).unwrap();
 }
+
+#[test]
+fn a_definition_region_borrows_its_frame_without_publishing_the_owner() {
+    let owner = function(7, Phase::Comptime);
+    let mut region = crate::program::DefinitionRegion {
+        owner: owner.declaration,
+        phase: Phase::Comptime,
+        signature: owner.signature.clone(),
+        parameters: vec![],
+        type_parameters: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        body: Expr {
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    ty: owner.callable_type(),
+                    kind: K::Function(owner.declaration),
+                    ..flag()
+                }),
+                arguments: vec![],
+                parameter_bindings: vec![],
+            },
+            ..flag()
+        },
+    };
+    let failure = inspect_definition_region(&Package::default(), &region).unwrap_err();
+    assert_eq!(failure.message, "function phase declaration is missing");
+    let package = Package {
+        functions: vec![owner],
+        ..Default::default()
+    };
+    inspect_definition_region(&package, &region).unwrap();
+    region
+        .parameters
+        .push(crate::program::LocalId { owner: 7, index: 0 });
+    let invalid_frame = inspect_definition_region(&package, &region).unwrap_err();
+    assert_eq!(invalid_frame.kind, ErrorKind::Invalid);
+    assert_eq!(invalid_frame.source, region.body.source);
+}

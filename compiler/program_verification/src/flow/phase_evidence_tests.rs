@@ -84,3 +84,29 @@ fn phase_success_still_requires_body_and_default_arithmetic_proofs() {
         }
     }
 }
+
+#[test]
+fn region_and_dependency_with_one_lexical_owner_require_separate_proofs() {
+    for (dependency_left, region_left, valid) in
+        [(254, 254, true), (254, 255, false), (255, 254, false)]
+    {
+        let dependencies = package(dependency_left, true);
+        let source = package(region_left, false).functions.pop().unwrap();
+        let region = DefinitionRegion {
+            owner: dependencies.functions[0].declaration,
+            signature: source.interface.signature,
+            phase: FunctionPhase::Comptime,
+            type_parameters: vec![],
+            parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            body: source.body,
+        };
+        let checked = validate_definition_region(&dependencies, region);
+        if valid {
+            checked.unwrap();
+        } else {
+            assert_eq!(checked.unwrap_err().reason, Reason::MissingMachineProof);
+        }
+    }
+}

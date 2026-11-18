@@ -6,7 +6,7 @@ use crate::{DeclarationId, Term};
 use std::fmt;
 use std::sync::Arc;
 mod function;
-pub use function::{Function, FunctionDeclaration};
+pub use function::{DefinitionRegion, Function, FunctionDeclaration};
 mod predicate_shape;
 pub use predicate_shape::{PredicateShapeError, checkable_predicate, predicate_call_candidate};
 

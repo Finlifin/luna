@@ -114,6 +114,24 @@ fn machine_arithmetic_functions_with_budgets(
     PhaseContext::new(package, &declarations).check_package(inspection_fuel)
 }
 
+/// Inspect the dependency package and a lexical region in the same declaration
+/// world. Only registered functions can be referenced from the region. Report
+/// its arithmetic obligations separately even if its owner is also a dependency.
+pub fn inspect_definition_region(
+    package: &Package,
+    region: &crate::program::DefinitionRegion,
+) -> Result<(BTreeSet<crate::DeclarationId>, bool), Error> {
+    let mut declaration_fuel = 1_000_000;
+    let mut inspection_fuel = 1_000_000;
+    let declarations = declarations::Declarations::new(package, &mut declaration_fuel)?;
+    let program = CallableProgram::definition_region(region);
+    crate::callable_source::validate_frame(program, false, &mut declaration_fuel)?;
+    let mut context = PhaseContext::new(package, &declarations);
+    let owners = context.check_package(&mut inspection_fuel)?;
+    let arithmetic = context.inspect(program, &mut inspection_fuel)?;
+    Ok((owners, arithmetic))
+}
+
 /// Check a closed invocation body against an already checked source world.
 /// This checks its phase and unsafe-call boundary, not typing or resource safety.
 /// The body has no declaration identity and is never registered in the package.
@@ -154,11 +172,9 @@ impl<'a> PhaseContext<'a> {
             .iter()
             .chain(&self.package.quote_templates)
         {
-            self.inspect(
-                CallableProgram::function(function),
-                fuel,
-                &mut machine_owners,
-            )?;
+            if self.inspect(CallableProgram::function(function), fuel)? {
+                machine_owners.insert(function.declaration);
+            }
         }
         for method in self
             .package
@@ -169,11 +185,9 @@ impl<'a> PhaseContext<'a> {
             use crate::code_interfaces::MethodSignature::*;
             match &method.signature {
                 Callable(ty) => {
-                    self.inspect(
-                        CallableProgram::ordinary_method(method, ty),
-                        fuel,
-                        &mut machine_owners,
-                    )?;
+                    if self.inspect(CallableProgram::ordinary_method(method, ty), fuel)? {
+                        machine_owners.insert(method.declaration);
+                    }
                     continue;
                 }
                 Generator(sig) => {
@@ -189,7 +203,9 @@ impl<'a> PhaseContext<'a> {
             let parts = crate::contracts::ProgramParts::method(method);
             let frame = parameters::InspectionFrame::for_parts(parts, None, fuel)
                 .map_err(parameters::Failure::into_diagnostic)?;
-            self.inspect_parts(parts, frame, fuel, &mut machine_owners)?;
+            if self.inspect_parts(parts, frame, fuel)? {
+                machine_owners.insert(method.declaration);
+            }
             crate::call_safety::validate_parts(parts, fuel)
                 .map_err(|failure| Error::call_safety(parts.source, failure))?;
         }
@@ -203,19 +219,15 @@ impl<'a> PhaseContext<'a> {
             parameters: vec![],
             result: Box::new(body.ty.clone()),
         };
-        self.inspect(
-            CallableProgram::comptime_body(body, &signature),
-            fuel,
-            &mut BTreeSet::new(),
-        )
+        self.inspect(CallableProgram::comptime_body(body, &signature), fuel)
+            .map(|_| ())
     }
 
     fn inspect(
         &mut self,
         function: CallableProgram<'_>,
         inspection_fuel: &mut usize,
-        machine_owners: &mut BTreeSet<crate::DeclarationId>,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         if function.parts.phase == Phase::Runtime {
             self.storage_queries
                 .check_runtime(function.signature, &[], inspection_fuel)
@@ -223,9 +235,10 @@ impl<'a> PhaseContext<'a> {
         }
         let inspection = parameters::InspectionFrame::new(function, inspection_fuel)
             .map_err(parameters::Failure::into_diagnostic)?;
-        self.inspect_parts(function.parts, inspection, inspection_fuel, machine_owners)?;
+        let arithmetic = self.inspect_parts(function.parts, inspection, inspection_fuel)?;
         crate::call_safety::validate_program(function, inspection_fuel)
-            .map_err(|failure| Error::call_safety(function.parts.source, failure))
+            .map_err(|failure| Error::call_safety(function.parts.source, failure))?;
+        Ok(arithmetic)
     }
 
     fn inspect_parts(
@@ -233,8 +246,7 @@ impl<'a> PhaseContext<'a> {
         function: crate::contracts::ProgramParts<'_>,
         inspection: parameters::InspectionFrame<'_>,
         inspection_fuel: &mut usize,
-        machine_owners: &mut BTreeSet<crate::DeclarationId>,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let Self {
             package,
             declarations,
@@ -246,6 +258,7 @@ impl<'a> PhaseContext<'a> {
             trait_index,
             ..
         } = *declarations;
+        let mut arithmetic = false;
         let ct = function.phase != Phase::Runtime;
         let caller_frames = &inspection.frames;
         let frozen = &inspection.frozen;
@@ -259,7 +272,7 @@ impl<'a> PhaseContext<'a> {
             inspection_fuel,
         )?;
         if !function.preconditions.is_empty() || !function.postconditions.is_empty() {
-            machine_owners.extend(function.declaration);
+            arithmetic = true;
             if function.phase == Phase::NormalForm {
                 return Err(fail(
                     function.source,
@@ -421,7 +434,7 @@ impl<'a> PhaseContext<'a> {
                                     | K::BitWritePointer { .. }
                             ))
                     {
-                        machine_owners.extend(function.declaration);
+                        arithmetic = true;
                     }
                     if !ct {
                         storage_queries
@@ -603,7 +616,7 @@ impl<'a> PhaseContext<'a> {
                                 ));
                             }
                             if target.1 {
-                                machine_owners.extend(function.declaration);
+                                arithmetic = true;
                                 // Runtime staged identities are specialized back
                                 // to their declaration before executable calls;
                                 // specialization retains the declaration contract.
@@ -697,7 +710,7 @@ impl<'a> PhaseContext<'a> {
                                 ));
                             }
                             if !method.program.is_empty() {
-                                machine_owners.extend(function.declaration);
+                                arithmetic = true;
                                 let retained_template = !method.signature.is_comptime_callable()
                                     && matches!(method.signature.callable_signature(), Ok(Term::Function { parameters, .. })
                                         if parameters.iter().any(|p| p.sort != Sort::Runtime));
@@ -1217,7 +1230,7 @@ impl<'a> PhaseContext<'a> {
                         | K::EnsurePredicate(condition)
                         | K::CheckPredicate(condition) => {
                             if matches!(expr.kind, K::RequirePredicate(_) | K::EnsurePredicate(_)) {
-                                machine_owners.extend(function.declaration);
+                                arithmetic = true;
                             }
                             if expr.ty != Term::Primitive(Primitive::Void)
                                 || !crate::program::checkable_predicate(condition, inspection_fuel)
@@ -1271,7 +1284,7 @@ impl<'a> PhaseContext<'a> {
                                 ));
                             }
                             if target.1 {
-                                machine_owners.extend(function.declaration);
+                                arithmetic = true;
                                 if !_callee {
                                     return Err(error(
                                         "function value would erase program preconditions; callable program contracts are not implemented",
@@ -1687,7 +1700,7 @@ impl<'a> PhaseContext<'a> {
                     .map_err(|error| Error::storage(function.source, error))?;
             }
         }
-        Ok(())
+        Ok(arithmetic)
     }
 }
 

@@ -5645,6 +5645,47 @@ pub fn validate_machine_operations(package: &nir::program::Package) -> Result<()
     validate_machine_owners(package, &owners)
 }
 
+/// Check a projected definition expression without installing it as a callable.
+pub fn validate_definition_region(
+    package: &nir::program::Package,
+    region: nir::program::DefinitionRegion,
+) -> Result<(), Error> {
+    let (owners, arithmetic) =
+        nir::phases::inspect_definition_region(package, &region).map_err(|e| Error {
+            source: e.source,
+            reason: Reason::Phase(e.message),
+        })?;
+    validate_machine_owners(package, &owners)?;
+    if arithmetic {
+        // Finite-domain specialization accepts a function-shaped proof subject.
+        // The projected frame is private to this proof, including when a
+        // recursive call resolves the owner's real interface in the package.
+        let proof = Function {
+            interface: FunctionDeclaration {
+                declaration: region.owner,
+                name: region.owner.to_string(),
+                phase: region.phase,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: region.signature,
+                parameters: region.parameters,
+                defaults: vec![],
+                type_parameters: region.type_parameters,
+                preconditions: vec![],
+                postconditions: vec![],
+                entry_snapshots: vec![],
+                result_binding: None,
+                requirements: region.requirements,
+                capabilities: region.capabilities,
+            },
+            body: region.body,
+        };
+        validate_machine_instances(package, &proof)?;
+    }
+    Ok(())
+}
+
 /// Arithmetic obligations remain separate from the completed phase traversal.
 /// The receipt owns the source association; callers cannot supply another
 /// package or an incomplete set of arithmetic owners.
@@ -5667,53 +5708,57 @@ fn validate_machine_owners(
         if !owners.contains(&function.declaration) {
             continue;
         }
-        let mut limits = Limits::default();
-        let instances = finite_domains::integer_instances(function, &mut limits)?;
-        for instance in instances
-            .as_deref()
-            .unwrap_or(std::slice::from_ref(function))
-        {
-            // An unspecified target is not the compiler host. A generic
-            // platform case is portable only if its program obligations hold
-            // at EVERY layout admitted by TargetData. These are private proof
-            // copies; neither the source package target nor its literals change.
-            let mut platform = false;
-            if instances.is_some() && package.target.is_none() {
-                nir::visit::expressions(instance, &mut limits.arithmetic.steps, |expr, _| {
-                    platform |= matches!(
-                        expr.ty,
-                        Term::Primitive(nir::Primitive::Usize | nir::Primitive::Isize)
-                    );
-                    Ok(())
-                })
-                .map_err(|_| Error {
-                    source: instance.body.source,
-                    reason: Reason::Unsupported,
-                })?;
-            }
-            if platform {
-                let mut proof_package = package.clone();
-                for width in (8..=128).step_by(8) {
-                    proof_package.target = Some(nir::target::TargetData::new(width).unwrap());
-                    let mut proof = instance.clone();
-                    finite_domains::complete_literals(
-                        std::slice::from_mut(&mut proof),
-                        proof_package.target,
-                        &mut limits,
-                    )?;
-                    validate_machine_function(&proof_package, &proof)?;
-                }
-            } else {
+        validate_machine_instances(package, function)?;
+    }
+    Ok(())
+}
+
+fn validate_machine_instances(
+    package: &nir::program::Package,
+    function: &Function,
+) -> Result<(), Error> {
+    let mut limits = Limits::default();
+    let Some(instances) = finite_domains::integer_instances(function, &mut limits)? else {
+        return validate_machine_function(package, function);
+    };
+    for mut instance in instances {
+        // An unspecified target is not the compiler host. A generic
+        // platform case is portable only if its program obligations hold
+        // at EVERY layout admitted by TargetData. These are private proof
+        // copies; neither the source package target nor its literals change.
+        let mut platform = false;
+        if package.target.is_none() {
+            nir::visit::expressions(&instance, &mut limits.arithmetic.steps, |expr, _| {
+                platform |= matches!(
+                    expr.ty,
+                    Term::Primitive(nir::Primitive::Usize | nir::Primitive::Isize)
+                );
+                Ok(())
+            })
+            .map_err(|_| Error {
+                source: instance.body.source,
+                reason: Reason::Unsupported,
+            })?;
+        }
+        if platform {
+            let mut proof_package = package.clone();
+            for width in (8..=128).step_by(8) {
+                proof_package.target = Some(nir::target::TargetData::new(width).unwrap());
                 let mut proof = instance.clone();
-                if instances.is_some() {
-                    finite_domains::complete_literals(
-                        std::slice::from_mut(&mut proof),
-                        package.target,
-                        &mut limits,
-                    )?;
-                }
-                validate_machine_function(package, &proof)?;
+                finite_domains::complete_literals(
+                    std::slice::from_mut(&mut proof),
+                    proof_package.target,
+                    &mut limits,
+                )?;
+                validate_machine_function(&proof_package, &proof)?;
             }
+        } else {
+            finite_domains::complete_literals(
+                std::slice::from_mut(&mut instance),
+                package.target,
+                &mut limits,
+            )?;
+            validate_machine_function(package, &instance)?;
         }
     }
     Ok(())

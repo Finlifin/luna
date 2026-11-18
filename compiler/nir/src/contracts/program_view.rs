@@ -77,14 +77,34 @@ impl<'a> CallableProgram<'a> {
     /// A detached, closed comptime body has no global declaration identity.
     /// Its caller supplies a zero-argument signature for ordinary result checks.
     pub(crate) fn comptime_body(body: &'a Expr, signature: &'a Term) -> Self {
+        Self::framed_body(body, signature, FunctionPhase::Comptime, &[], &[])
+    }
+
+    pub(crate) fn definition_region(region: &'a crate::program::DefinitionRegion) -> Self {
+        Self::framed_body(
+            &region.body,
+            &region.signature,
+            region.phase,
+            &region.parameters,
+            &region.type_parameters,
+        )
+    }
+
+    fn framed_body(
+        body: &'a Expr,
+        signature: &'a Term,
+        phase: FunctionPhase,
+        parameters: &'a [LocalId],
+        type_parameters: &'a [DeclarationId],
+    ) -> Self {
         Self {
             signature,
             parts: ProgramParts {
                 declaration: None,
-                phase: FunctionPhase::Comptime,
+                phase,
                 is_unsafe: false,
-                type_parameters: &[],
-                parameters: &[],
+                type_parameters,
+                parameters,
                 body: Some(body),
                 source: body.source,
                 defaults: &[],
