@@ -189,7 +189,7 @@ impl Interpreter<'_> {
         // Comparing the nominal List<T> identity can itself inspect a
         // large T. Meter that description without walking list elements.
         self.check_type_description(ty, Some(value_source))?;
-        let length = match value {
+        let length = match Self::concrete_value(value, value_source)? {
             Value::List { ty: stored, values }
                 if stored == ty && self.list_element(stored).is_some() =>
             {
@@ -215,7 +215,7 @@ impl Interpreter<'_> {
         value: &Value,
         source: SourceRange,
     ) -> Result<usize, Error> {
-        match value {
+        match Self::concrete_value(value, source)? {
             Value::List { values, .. } => Ok(values.len()),
             _ => Err(self.failure(ErrorKind::Type, Some(source))),
         }

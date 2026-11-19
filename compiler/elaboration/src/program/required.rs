@@ -1087,7 +1087,7 @@ impl Checker<'_, '_> {
             }
             let result_type = root.ty.clone();
             // The root is structurally stable after initializer substitution.
-            // Later Type-slot rebinding changes Bound terms to rigid identities,
+            // Later staged-slot rebinding changes Bound terms to rigid identities,
             // not lexical LocalIds. These reads locate outer bindings. The entry
             // telescope below additionally closes over their dependent domains.
             let mut capture_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
@@ -1150,22 +1150,18 @@ impl Checker<'_, '_> {
             let mut scoped_parameters = Vec::new();
             let mut scoped_arguments = Vec::new();
             let input_frames = self.call_input_frames();
-            // A Type input can be transported without knowing its concrete
-            // description. Use invocation-local rigid identities, then restore
-            // the original telescope slots before returning to normalization.
-            if !defer_inputs
-                && self.signature_owner.is_some()
-                && input_frames
-                    .last()
-                    .is_some_and(|frame| frame.contains(&Sort::Type))
+            let mut caller_mapping = None;
+            // Reify the caller's staged slots for this invocation. Their
+            // identities can occur in a type without computing their values.
+            if let Some(owner) = self.default_input_owner.or(self.signature_owner)
+                && !defer_inputs
+                && let Some(frame) = input_frames.last()
+                && frame.iter().any(|sort| *sort != Sort::Runtime)
             {
-                let frame = input_frames.last().cloned().unwrap_or_default();
                 self.required_steps = self
                     .required_steps
                     .checked_sub(frame.len() as u64)
-                    .ok_or_else(|| {
-                        error(expr.span, "scoped Type input preparation budget exhausted")
-                    })?;
+                    .ok_or_else(|| error(expr.span, "scoped input preparation budget exhausted"))?;
                 let mut mapping = frame
                     .iter()
                     .enumerate()
@@ -1175,74 +1171,90 @@ impl Checker<'_, '_> {
                         sort: *sort,
                     })
                     .collect::<Vec<_>>();
-                let owner = self.default_input_owner.or(self.signature_owner).unwrap();
-                for (binding, symbol) in &self.input_facts.types {
-                    if binding.owner != owner.def_id.raw() {
-                        continue;
-                    }
+                let type_domain = p(P::Type);
+                let owner = owner.def_id.raw();
+                let bindings = n::LocalId { owner, index: 0 }..=n::LocalId {
+                    owner,
+                    index: u32::MAX,
+                };
+                let staged = self
+                    .input_facts
+                    .types
+                    .range(bindings.clone())
+                    .map(|(binding, symbol)| (binding, symbol, &type_domain))
+                    .chain(
+                        self.input_facts
+                            .values
+                            .range(bindings)
+                            .map(|(binding, (symbol, domain))| (binding, symbol, domain)),
+                    );
+                for (binding, symbol, domain) in staged {
+                    self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
+                        error(expr.span, "scoped input preparation budget exhausted")
+                    })?;
                     let Term::Bound {
                         depth: 0,
                         index,
-                        sort: Sort::Type,
+                        sort,
                     } = symbol
                     else {
                         continue;
                     };
-                    if frame.get(*index) != Some(&Sort::Type) {
+                    if frame.get(*index) != Some(sort) {
                         continue;
                     }
                     let local = u32::try_from(*index)
                         .ok()
-                        .filter(|index| *index != u32::MAX)
-                        .ok_or_else(|| error(expr.span, "too many scoped Type inputs"))?;
+                        .filter(|i| *i != u32::MAX)
+                        .ok_or_else(|| error(expr.span, "too many scoped inputs"))?;
                     let declaration = DeclarationId {
                         package: u64::MAX,
                         local,
                     };
-                    // Several prefix bindings can name the same caller slot.
-                    // Restore each slot once while retaining every local input.
                     if matches!(mapping[*index], Term::Bound { .. }) {
                         mapping[*index] = Term::Rigid {
                             declaration,
-                            sort: Sort::Type,
+                            sort: *sort,
                         };
                         scoped_parameters.push(nir::DeclarationParameter {
                             declaration,
-                            sort: Sort::Type,
+                            sort: *sort,
                         });
                         scoped_arguments.push(symbol.clone());
+                        if *sort == Sort::ComptimeValue {
+                            abstract_value_parameters.push((
+                                declaration,
+                                inputs::copy(domain, &mut self.required_steps, expr.span)?,
+                            ));
+                        }
                     }
                     if free.contains(binding) && supplied.insert(*binding) {
-                        inputs.push((*binding, p(P::Type), mapping[*index].clone()));
+                        inputs.push((
+                            *binding,
+                            inputs::copy(domain, &mut self.required_steps, expr.span)?,
+                            mapping[*index].clone(),
+                        ));
                     }
                 }
                 if !scoped_parameters.is_empty() {
                     let mut rebind = |ty: &Term| {
-                        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                        let before = fuel;
-                        let bounded = nir::type_computations::charge_term(ty, &mut fuel);
-                        self.required_steps -= (before - fuel) as u64;
-                        bounded.map_err(|e| error(expr.span, e.to_string()))?;
-                        ty.rebind_scope(&mapping)
-                            .map_err(|e| error(expr.span, e.to_string()))
+                        scope::rebind_input(ty, &mapping, &mut self.required_steps, expr.span)
                     };
                     root.rewrite_types(&mut rebind)?;
-                    // Supplied environment values belong to the caller's frame
-                    // too. Local-value binding and Type-slot binding are distinct:
-                    // a supplied value must not replace the caller's Type identity.
                     for (_, ty, value) in &mut inputs {
                         *ty = rebind(ty)?;
                         *value = rebind(value)?;
                     }
+                    caller_mapping = Some(mapping);
                 }
             }
             let capture = self.capture_required_entry(root, inputs, live, expr.span)?;
-            let observed = capture.observe(&mut self.required_steps, expr.span)?;
+            let mut observed = capture.observe(&mut self.required_steps, expr.span)?;
             let source_closure::SourceClosure {
                 mut functions,
                 runtime_function_identities,
                 retained,
-            } = self.required_source_closure(observed.code, expr.span)?;
+            } = self.required_source_closure(std::mem::take(&mut observed.code), expr.span)?;
             let capture::Entry {
                 function, inputs, ..
             } = capture;
@@ -1430,14 +1442,6 @@ impl Checker<'_, '_> {
                 })?;
             let world = prepared::RequiredWorld::with_phase(package.clone(), &phase)
                 .map_err(|failure| error(expr.span, failure.to_string()))?;
-            scope::retain_abstract_values(
-                &mut abstract_value_parameters,
-                &world,
-                &inputs,
-                &observed.values,
-                &mut self.required_steps,
-                expr.span,
-            )?;
             let invocation_assumptions =
                 if let Some(implementation) = self.initializer_implementation() {
                     crate::capabilities::capability_sources(
@@ -1474,42 +1478,64 @@ impl Checker<'_, '_> {
             abstract_parameters.extend(
                 scoped_parameters
                     .iter()
-                    .map(|parameter| parameter.declaration),
+                    .filter(|p| p.sort == Sort::Type)
+                    .map(|p| p.declaration),
             );
-            // A specialized declaration can receive an opaque Type from its
-            // generic caller. Retain that caller binder during invocation;
-            // the callee's original binder no longer names the supplied Type.
-            // Captured invocation values can carry these same opaque binders
-            // inside callable instances or closure snapshot arguments.
-            for argument in self.alias_substitution.values().chain(
+            // Substitutions and frozen captures can introduce binders owned by
+            // the caller. Resolve those against declarations before selecting
+            // the dependent prefix for the VM.
+            let mut forwarded = BTreeSet::new();
+            for term in self.alias_substitution.values().chain(
                 inputs
                     .iter()
-                    .flat_map(|(_, ty, value)| std::iter::once(ty).chain(value.iter())),
+                    .flat_map(|(_, domain, value)| std::iter::once(domain).chain(value)),
             ) {
-                let observed =
-                    input_observation::term_inputs(argument, &mut self.required_steps, expr.span)?;
-                for (id, sort) in observed.declarations {
-                    if sort == Sort::Type && !abstract_parameters.contains(&id) {
-                        abstract_parameters.push(id);
-                    } else if sort == Sort::ComptimeValue
-                        && !abstract_value_parameters
-                            .iter()
-                            .any(|(known, _)| *known == id)
-                    {
-                        // Substitution can forward a caller's value binder
-                        // under a different callee declaration. Its domain
-                        // evidence belongs to that caller, not to the replaced
-                        // binder. Keep it opaque during required invocation.
-                        let domain = self.trait_input_domain(id).ok_or_else(|| {
-                            error(
-                                expr.span,
-                                "forwarded value input lacks declaration domain evidence",
-                            )
-                        })?;
-                        abstract_value_parameters.push((id, domain));
+                let uses =
+                    input_observation::term_inputs(term, &mut self.required_steps, expr.span)?;
+                for (id, sort) in uses.declarations {
+                    match sort {
+                        Sort::Type => {
+                            observed.types.insert(id);
+                        }
+                        Sort::ComptimeValue => {
+                            forwarded.insert(id);
+                        }
+                        Sort::Runtime => {}
                     }
                 }
             }
+            if !forwarded.is_empty() {
+                let local: BTreeSet<_> = abstract_value_parameters
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .chain(
+                        self.callable_type_inputs
+                            .values()
+                            .flatten()
+                            .map(|slot| slot.declaration),
+                    )
+                    .collect();
+                for &id in forwarded.difference(&local) {
+                    let domain = self.trait_input_domain(id).ok_or_else(|| {
+                        error(
+                            expr.span,
+                            "forwarded value input lacks declaration domain evidence",
+                        )
+                    })?;
+                    abstract_value_parameters.push((id, domain));
+                }
+                observed.values.extend(forwarded);
+            }
+            let (lexical_types, abstract_value_parameters) = scope::select_abstract_inputs(
+                &abstract_value_parameters,
+                &self.callable_type_inputs,
+                caller_mapping.as_deref(),
+                &world,
+                &observed,
+                &mut self.required_steps,
+                expr.span,
+            )?;
+            observed.types.extend(lexical_types);
             let existing: BTreeSet<_> = abstract_parameters.iter().copied().collect();
             abstract_parameters.extend(observed.types.difference(&existing).copied());
             // This is checked source for an invocation, not a concrete dispatch

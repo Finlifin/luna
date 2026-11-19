@@ -228,6 +228,58 @@ fn abstract_domain_authority_rejects_conflicts_and_type_value_confusion() {
 }
 
 #[test]
+fn scoped_export_checks_the_domain_sort_and_keeps_value_binders_local() {
+    let domain = Term::Bool(true);
+    let malformed = Value::AbstractValue {
+        declaration: id(11),
+        ty: domain.clone(),
+    };
+    let error = malformed
+        .into_abstract_invocation_term(
+            &mut Default::default(),
+            &Default::default(),
+            &[(id(11), domain)].into(),
+        )
+        .unwrap_err();
+    assert_eq!(error, ErrorKind::Type);
+
+    let binder = nir::DeclarationParameter {
+        declaration: id(10),
+        sort: Sort::ComptimeValue,
+    };
+    let slot = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::ComptimeValue,
+    };
+    let error = opaque()
+        .restore_scoped_types(&[binder], &[slot], &[vec![Sort::ComptimeValue]], &mut 1000)
+        .unwrap_err();
+    assert_eq!(error, ErrorKind::AbstractValueUnresolved);
+}
+
+#[test]
+fn failed_value_telescope_admission_rolls_back_only_its_new_prefix() {
+    let package = package(input());
+    let mut vm = scoped(&package);
+    let invalid = [
+        (id(10), bool_ty()),
+        (id(11), bool_ty()),
+        (id(12), Term::Primitive(P::Type)),
+    ];
+    assert_eq!(
+        vm.authorize_abstract_value_parameters(&invalid)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Type
+    );
+    assert_eq!(vm.invoke(id(0), vec![opaque()]).unwrap(), opaque());
+    // A different domain for the rolled-back binder is admissible on retry.
+    vm.authorize_abstract_value_parameters(&[(id(11), Term::Primitive(P::Char))])
+        .unwrap();
+}
+
+#[test]
 fn prepared_normal_inputs_use_the_same_scoped_domain_authority() {
     let package = package(input());
     let term = Term::Rigid {

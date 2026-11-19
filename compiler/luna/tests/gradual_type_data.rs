@@ -355,6 +355,33 @@ fn a_parameter_refinement_supplies_body_evidence_without_proving_the_caller() {
 }
 
 #[test]
+fn normal_annotations_keep_callable_binders_and_computed_field_descriptions() {
+    let source = r#"
+        trait Flag {}
+        impl Flag for bool {}
+        typealias Callback = fn(comptime T: Type, value: T) -> T;
+        pure comptime fn Pair<A, B> -> Type { A }
+        comptime fn Field() -> Type { refines { Itself :- Flag } Any }
+        typealias Payload = Pair<Callback, Field()>;
+        fn accept(value: Payload) -> bool { true }
+        fn forward(value: Pair<Callback, bool>) -> bool { accept(value) }
+    "#;
+    support::compile(source).unwrap();
+    let wrong_callback = source.replace("Pair<Callback, bool>", "Pair<fn(bool) -> bool, bool>");
+    let error = support::compile(&wrong_callback).unwrap_err();
+    assert!(
+        error.contains("concrete normal-form input does not match"),
+        "{error}"
+    );
+    let wrong_field = source.replace("Pair<Callback, bool>", "Pair<Callback, u8>");
+    let error = support::compile(&wrong_field).unwrap_err();
+    assert!(
+        error.contains("refinement requirement is not established"),
+        "{error}"
+    );
+}
+
+#[test]
 fn constructed_descriptions_keep_the_head_formation_requirements() {
     let source = r#"
         pure comptime fn Checked<T, Gate> -> Type where requires Gate == bool { bool }

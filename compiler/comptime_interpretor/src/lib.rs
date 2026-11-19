@@ -2249,24 +2249,35 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
         self.integer_operation(None, |budget| budget.consume(parameters.len()))?;
-        let mut additions = BTreeMap::new();
-        for (declaration, ty) in parameters {
-            self.check_type_description(ty, None)?;
-            if self.abstract_type_parameters.contains(declaration)
-                || *ty == Term::Primitive(Primitive::Type)
-                || self
-                    .abstract_value_parameters
-                    .get(declaration)
-                    .is_some_and(|old| old != ty)
-                || additions.get(declaration).is_some_and(|old| *old != ty)
-            {
-                return Err(self.failure(ErrorKind::Type, None));
+        // A later domain can mention an earlier value in this telescope.
+        // Validate against the completed prefix and roll it back as a unit.
+        let mut inserted = Vec::new();
+        let result = (|| {
+            for (declaration, ty) in parameters {
+                self.check_type_description(ty, None)?;
+                if self.abstract_type_parameters.contains(declaration)
+                    || *ty == Term::Primitive(Primitive::Type)
+                {
+                    return Err(self.failure(ErrorKind::Type, None));
+                }
+                if let Some(previous) = self.abstract_value_parameters.get(declaration) {
+                    if previous != ty {
+                        return Err(self.failure(ErrorKind::Type, None));
+                    }
+                } else {
+                    self.abstract_value_parameters
+                        .insert(*declaration, ty.clone());
+                    inserted.push(*declaration);
+                }
             }
-            additions.insert(*declaration, ty);
+            Ok(())
+        })();
+        if result.is_err() {
+            for id in inserted {
+                self.abstract_value_parameters.remove(&id);
+            }
         }
-        self.abstract_value_parameters
-            .extend(additions.into_iter().map(|(id, ty)| (id, ty.clone())));
-        Ok(())
+        result
     }
     // Optional observers retain their historical exhausted-fuel convention.
     // Admission consumes the typed query directly and never infers its error.
@@ -2553,8 +2564,11 @@ impl<'a> Interpreter<'a> {
         self.invoke_value(value, arguments)
     }
 
-    fn concrete_value(value: Value, source: SourceRange) -> Result<Value, Error> {
-        if matches!(value, Value::AbstractValue { .. }) {
+    fn concrete_value<V: std::borrow::Borrow<Value>>(
+        value: V,
+        source: SourceRange,
+    ) -> Result<V, Error> {
+        if matches!(value.borrow(), Value::AbstractValue { .. }) {
             Err(Error {
                 kind: ErrorKind::AbstractValueUnresolved,
                 source: Some(source),

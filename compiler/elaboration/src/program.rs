@@ -499,7 +499,6 @@ fn elaborate_with_attributes(
         lexical_source_protocols: lexical_inputs::SourceProtocolIndex::new(package),
         lexical_dependency_steps: 1_000_000,
         callable_type_inputs: BTreeMap::new(),
-        callable_value_inputs: BTreeMap::new(),
         open_staged_locals: BTreeSet::new(),
         open_member_locals: BTreeSet::new(),
         signature_domains: BTreeMap::new(),
@@ -1599,8 +1598,7 @@ struct Checker<'a, 'h> {
     lexical_input_plans: BTreeMap<OwnerId, lexical_inputs::LexicalInputPlan>,
     lexical_source_protocols: lexical_inputs::SourceProtocolIndex<'a, 'h>,
     lexical_dependency_steps: usize,
-    callable_type_inputs: BTreeMap<n::LocalId, Option<Term>>,
-    callable_value_inputs: BTreeMap<n::LocalId, (Term, Term)>,
+    callable_type_inputs: BTreeMap<n::LocalId, Option<function_types::StagedParameter>>,
     // Description-only provenance; never authorizes executable code capture.
     open_staged_locals: BTreeSet<n::LocalId>,
     // Pending member results, not Type identities or permission evidence.

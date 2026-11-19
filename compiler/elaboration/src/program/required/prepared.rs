@@ -474,12 +474,17 @@ impl PreparedRequired {
                 .run_to_completion()
         });
         *steps = interpreter.remaining_steps();
-        let value=value.map_err(|e| {
-            if e.kind == comptime_interpretor::ErrorKind::MissingBinding
-                && *in_signature {
-                return error(span,"type computation depends on an unavailable function input; invocation-time type elaboration is not yet implemented");
+        let value = value.map_err(|failure| {
+            use comptime_interpretor::ErrorKind;
+            if *in_signature && (failure.kind == ErrorKind::MissingBinding
+                || (failure.kind == ErrorKind::AbstractValueUnresolved
+                    && scoped_parameters.iter().any(|p| p.sort == Sort::ComptimeValue)))
+            {
+                return error(span, format!(
+                    "type computation depends on an unavailable function input; invocation-time type elaboration is not yet implemented ({failure})"
+                ));
             }
-            error(span,format!("required comptime evaluation failed: {e}"))
+            error(span, format!("required comptime evaluation failed: {failure}"))
         })?;
         let value = restore_required_packet(
             steps,

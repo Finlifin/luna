@@ -38,7 +38,7 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<usize, Error> {
         self.check_type_description(ty, Some(source))?;
-        match value {
+        match Self::concrete_value(value, source)? {
             Value::List { ty: stored, values }
                 if stored == ty && self.list_element(ty).is_some() =>
             {
@@ -53,7 +53,7 @@ impl Interpreter<'_> {
         length: usize,
         source: SourceRange,
     ) -> Result<usize, Error> {
-        let Value::Integer(position) = value else {
+        let Value::Integer(position) = Self::concrete_value(value, source)? else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };
         position

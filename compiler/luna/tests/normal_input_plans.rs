@@ -965,6 +965,50 @@ fn type_annotations_share_named_defaults_packets_and_collections_with_values() {
 }
 
 #[test]
+fn computed_normal_annotations_transport_the_checked_staged_prefix() {
+    let package = sysroot::compile(
+        "
+        pure comptime fn Tag<n: usize> -> Type { bool }
+        pure comptime fn Entry<n: usize, key: Tag<n>, Flag> -> Type { Flag }
+        comptime fn Gate() -> Type { bool }
+        fn literal(comptime n: usize, comptime key: Tag<n>, data: Entry<n, key, bool>) -> bool { true }
+        fn computed(comptime n: usize, comptime key: Tag<n>, data: Entry<n, key, Gate()>) -> bool { true }
+
+        typealias Expected = fn(comptime n: usize, comptime key: Tag<n>, data: Entry<n, key, bool>) -> bool;
+        typealias Tested = fn(comptime n: usize, comptime key: Tag<n>, data: Entry<n, key, Gate()>) -> bool;
+        fn forward(value: Tested) -> Expected { value }
+
+        pure comptime fn Item<T, x: T, Flag> -> Type { Flag }
+        typealias Relative = fn(comptime T: Type, comptime x: T, data: Item<T, x, Gate()>) -> bool;
+        fn same(value: Relative) -> fn(comptime T: Type, comptime x: T, data: Item<T, x, bool>) -> bool { value }
+
+        pure comptime fn Key<T> -> Type { bool }
+        pure comptime fn Nested<T, key: Key<T>, Flag> -> Type { Flag }
+        fn nested(comptime T: Type, cb: fn(comptime key: Key<T>, data: Nested<T, key, Gate()>) -> bool) {}
+        fn direct(comptime T: Type, cb: fn(comptime key: Key<T>, data: Nested<T, key, bool>) -> bool) {}
+
+        ",
+    ).unwrap();
+    let signature = |name| {
+        &package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .signature
+    };
+    let computed = signature("computed");
+    computed.check_scope(&[]).unwrap();
+    assert_eq!(computed, signature("literal"));
+    assert_eq!(signature("nested"), signature("direct"));
+    let nir::Term::Function { parameters, result } = signature("forward") else {
+        panic!()
+    };
+    assert_eq!(&parameters[0].ty, result.as_ref());
+    assert_eq!(&parameters[0].ty, computed);
+}
+
+#[test]
 fn annotated_and_computed_callbacks_keep_outer_and_named_binders() {
     let package = sysroot::compile(
         "

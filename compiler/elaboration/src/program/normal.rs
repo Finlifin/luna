@@ -500,33 +500,15 @@ impl Checker<'_, '_> {
         let checked = self.with_staged_input(true, |this| {
             this.normal_type_expression(expr, owner, inputs, Some(&p(P::Type)))
         })?;
-        let known = self.checked_normal_input_in(&checked, &BTreeMap::new(), expr.span)?;
-        let known = match known {
-            Some(known) => Some(known),
-            None if nir::copy_budget::expression_has_contextual_types(
-                &checked,
-                &mut self.required_steps,
-            )
-            .map_err(|e| {
-                error(
-                    expr.span,
-                    format!("normal input scope inspection failed: {e:?}"),
-                )
-            })? =>
-            {
-                self.required_normal_type_plan(expr, &checked)?
-            }
-            None => None,
-        };
-        if let Some(ty @ Term::NormalForm { .. }) = known {
-            let Term::NormalForm { arguments, .. } = &ty else {
-                unreachable!()
-            };
+        if let Some(ty) = self.checked_normal_input_in(&checked, &BTreeMap::new(), expr.span)?
+            && let Term::NormalForm { arguments, .. } = &ty
+        {
             self.check_type_application(owner, arguments, expr.span)?;
             return Ok(CompletedType::Identity(ty));
         }
-        let (value, _) = self.required_normal_input(expr, checked, Vec::new())?;
-        CompletedType::from_value(value, expr.span)
+        // The input plan owns its lexical prefix. Its fields may be gradual
+        // descriptions even when a sibling contains a bound function input.
+        self.complete_checked_type(expr, checked)
     }
 
     pub(super) fn normal_type_expression(
@@ -2480,79 +2462,6 @@ impl Checker<'_, '_> {
         self.alias_value_bindings = saved_values;
         self.normal_default_bindings = saved_bindings;
         result
-    }
-}
-
-impl Checker<'_, '_> {
-    /// Normalize independent concrete computations while retaining unrelated
-    /// symbolic Type inputs. Preflight before invoking anything: contextual
-    /// inputs must keep their complete runtime conversion plan.
-    pub(super) fn required_normal_type_plan(
-        &mut self,
-        source: &Expr<'_>,
-        checked: &n::Expr,
-    ) -> Result<Option<Term>, Error> {
-        let K::NormalFormType {
-            head,
-            arguments,
-            plan: Some(plan),
-        } = &checked.kind
-        else {
-            return Ok(None);
-        };
-        if self
-            .checked_input_schedule(plan, arguments.len(), source.span)?
-            .is_none()
-            || arguments.iter().any(|a| a.expression().is_none())
-        {
-            return Ok(None);
-        }
-        let mut scoped: BTreeMap<n::LocalId, std::sync::Arc<Term>> = BTreeMap::new();
-        let mut binding_types: BTreeMap<n::LocalId, Term> = BTreeMap::new();
-        let mut values = vec![None; arguments.len()];
-        if !plan.preparations.is_empty() {
-            return Ok(None);
-        }
-        for &slot in &plan.order {
-            let input = arguments[slot].expression().unwrap();
-            let known = self.checked_normal_input_in(input, &scoped, source.span)?;
-            let term = if let Some(known) = known {
-                known
-            } else {
-                let mut referenced = BTreeSet::new();
-                let mut fuel = self.required_steps as usize;
-                let before = fuel;
-                let visited = iir::visit::expression(input, &mut fuel, |value, _| {
-                    if let K::Local(binding) = value.kind {
-                        if scoped.contains_key(&binding) {
-                            referenced.insert(binding);
-                        }
-                    }
-                    Ok(())
-                });
-                self.required_steps -= (before - fuel) as u64;
-                visited.map_err(|message| error(source.span, message))?;
-                let mut inputs = Vec::new();
-                for binding in referenced {
-                    let value = self.copy_alias_type(&scoped[&binding], source.span)?;
-                    inputs.push((binding, binding_types[&binding].clone(), value));
-                }
-                let (value, _) = self.required_normal_input(source, input.clone(), inputs)?;
-                self.required_normal_term(value, source.span)?
-            };
-            let bound = self.copy_alias_type(&term, source.span)?;
-            scoped.insert(plan.bindings[slot], std::sync::Arc::new(bound));
-            binding_types.insert(plan.bindings[slot], input.ty.clone());
-            values[slot] = Some(term);
-        }
-        Ok(Some(Term::NormalForm {
-            head: *head,
-            sort: Sort::Type,
-            arguments: values
-                .into_iter()
-                .collect::<Option<Vec<_>>>()
-                .ok_or_else(|| error(source.span, "incomplete normal-form input plan"))?,
-        }))
     }
 }
 

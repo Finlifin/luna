@@ -725,9 +725,22 @@ impl Value {
                     {
                         return Err(ErrorKind::AbstractValueUnresolved);
                     }
-                    let work = scoped_type_value_work(ty, &BTreeMap::new(), parameters)
-                        .ok_or(ErrorKind::Type)?;
-                    charge(budget, work)?;
+                    // The binder's domain can depend on earlier opaque
+                    // values. Check its structural scope in the same prefix.
+                    if ty.sort() != nir::Sort::Type {
+                        return Err(ErrorKind::Type);
+                    }
+                    type_descriptions::inspect(
+                        ty,
+                        &[],
+                        &BTreeMap::new(),
+                        parameters,
+                        value_parameters,
+                        |_, _, _| Err("nominal layout unavailable during structural export".into()),
+                        |_, _, _| Ok(None),
+                        None,
+                        &mut budget.steps,
+                    )?;
                     Term::Rigid {
                         declaration: *declaration,
                         sort: nir::Sort::ComptimeValue,

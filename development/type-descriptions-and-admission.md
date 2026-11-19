@@ -139,6 +139,42 @@ VM 在检查参数域后才把这个参数加入当前签名的可见前缀；�
 这个规则用于被传送签名中的普通名义声明、NF 应用和效应操作实参。作用域检查借用
 外层参数，NIR 准入结果携带同一作用域供后续替换使用。
 
+类型注解也可以把这样的函数类型与计算出的字段描述放进同一个 NF 应用。
+
+```flurry
+trait Flag {}
+impl Flag for bool {}
+typealias Callback = fn(comptime T: Type, value: T) -> T;
+pure comptime fn Pair<A, B> -> Type { A }
+comptime fn Field() -> Type { refines { Itself :- Flag } Any }
+typealias Payload = Pair<Callback, Field()>;
+```
+
+完成 `Payload` 时，VM 在一次 invocation 中接收整个应用的输入计划。第一个槽位
+保留 `Callback` 的内部绑定，第二个槽位接收 `Field()` 返回的描述。用
+`Pair<Callback, bool>` 调用接收 `Payload` 的函数可以通过。把第一个槽位换成
+单态函数会失去要求的函数类型身份，把第二个槽位换成 `u8` 则缺少 `Flag`
+证据。原先逐项启动 invocation 并将中间结果冻结为 `Term`，会在第二个槽位
+提前报错。[类型注解入口](../compiler/elaboration/src/program/normal.rs) · [真实 sysroot 回归](../compiler/luna/tests/gradual_type_data.rs)
+
+如果计算遇到的是外层参数，VM 还需要该参数在声明处受检的域。例如：
+
+```flurry
+pure comptime fn Tag<n: usize> -> Type { bool }
+pure comptime fn Entry<n: usize, key: Tag<n>, Flag> -> Type { Flag }
+comptime fn Gate() -> Type { bool }
+typealias Reader = fn(comptime n: usize, comptime key: Tag<n>,
+    value: Entry<n, key, Gate()>) -> bool;
+```
+
+形成第三个参数时，VM 可以执行 `Gate()`，同时将 `n` 和 `key` 作为不透明实参
+传给 `Entry`。它先接收 `n: usize`，再检查依赖于 `n` 的 `key: Tag<n>`；
+完成后的函数类型与直接写 `Entry<n, key, bool>` 的身份相同。具名函数类型和
+普通函数声明都遵守这个顺序。嵌套函数类型的参数域还可以引用外层函数的槽位，
+返回时要按各自的绑定深度还原。若代码要根据未知布尔值选择分支，或读取未知列表
+的元素，仍需要具体实参。普通函数声明中需要延后到调用点的源码检查尚待接通。
+[作用域选择](../compiler/elaboration/src/program/required/scope.rs) · [依赖签名用例](../compiler/luna/tests/normal_input_plans.rs)
+
 类型形成本身仍须检查声明的要求。依赖签名局部参数、无法在本地判定的命题，
 目前返回 `TypeContractUnresolved`。现有证明回调只能接收当前 invocation 的命题，
 传入一个属于内层签名的自由槽位会造成变量捕获。具体调用完成绑定后可以检查闭合要求。

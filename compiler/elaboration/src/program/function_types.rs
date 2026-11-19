@@ -4,6 +4,11 @@ use super::*;
 
 pub(super) const INPUT_NAMESPACE: u64 = u64::MAX - 8;
 
+pub(super) struct StagedParameter {
+    pub(super) declaration: DeclarationId,
+    pub(super) domain: Term,
+}
+
 pub(super) fn normal_form_inputs<'a, 'h>(
     expr: &'a Expr<'h>,
 ) -> Option<&'h [hir::common::TyParam<'h>]> {
@@ -90,11 +95,11 @@ impl Checker<'_, '_> {
             return Ok(None);
         };
         let type_domain = p(P::Type);
-        let (symbol, domain) = if let Some(symbol) = type_input {
-            (symbol, &type_domain)
-        } else if let Some((symbol, domain)) = self.callable_value_inputs.get(&binding) {
-            (symbol, domain)
-        } else {
+        let Some(StagedParameter {
+            declaration,
+            domain,
+        }) = type_input
+        else {
             return Err(error(
                 expr.span,
                 if expected == Some(&type_domain) {
@@ -110,27 +115,16 @@ impl Checker<'_, '_> {
                 "function type dependency requires an earlier explicit comptime Type parameter",
             ));
         }
-        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let before = fuel;
-        let copied = (|| {
-            let symbol = nir::copy_budget::clone_term(symbol, &mut fuel)?;
-            let domain = nir::copy_budget::clone_term(domain, &mut fuel)?;
-            Ok::<_, nir::copy_budget::CopyBudgetExhausted>((symbol, domain))
-        })();
-        self.required_steps -= (before - fuel) as u64;
-        let (symbol, ty) = copied.map_err(|failure| {
-            error(
-                expr.span,
-                match failure {
-                    nir::copy_budget::CopyBudgetExhausted::Steps => {
-                        "callable input copy budget exhausted"
-                    }
-                    nir::copy_budget::CopyBudgetExhausted::Depth => {
-                        "callable input copy depth exhausted"
-                    }
-                },
-            )
-        })?;
+        let ty =
+            declaration_inputs::copy_input_domain(domain, &mut self.required_steps, expr.span)?;
+        let symbol = Term::Rigid {
+            declaration: *declaration,
+            sort: if ty == type_domain {
+                Sort::Type
+            } else {
+                Sort::ComptimeValue
+            },
+        };
         if let Some(expected) = expected {
             self.require_expression(&ty, expected, expr.span)?;
         }
@@ -225,7 +219,6 @@ impl Checker<'_, '_> {
             ));
         }
         let mut previous_types = Vec::new();
-        let mut previous_values = Vec::new();
         let result = (|| {
             let mut telescope = nir::callable_types::DeclarationTelescope::default();
             for input in inputs {
@@ -270,15 +263,12 @@ impl Checker<'_, '_> {
                     .ok_or_else(|| error(input.span, "callable input identity space exhausted"))?;
                 if matches!(input.kind, TyParamKind::PositionalDependencyCatched(..)) {
                     let id = local(input.hir_id);
-                    if sort == Sort::ComptimeValue {
-                        let previous = self
-                            .callable_value_inputs
-                            .insert(id, (Term::Rigid { declaration, sort }, ty));
-                        previous_values.push((id, previous));
-                    }
                     let previous = self.callable_type_inputs.insert(
                         id,
-                        (sort == Sort::Type).then_some(Term::Rigid { declaration, sort }),
+                        (sort != Sort::Runtime).then_some(StagedParameter {
+                            declaration,
+                            domain: ty,
+                        }),
                     );
                     previous_types.push((id, previous));
                 }
@@ -300,13 +290,6 @@ impl Checker<'_, '_> {
                 self.callable_type_inputs.insert(id, value);
             } else {
                 self.callable_type_inputs.remove(&id);
-            }
-        }
-        for (id, previous) in previous_values.into_iter().rev() {
-            if let Some(value) = previous {
-                self.callable_value_inputs.insert(id, value);
-            } else {
-                self.callable_value_inputs.remove(&id);
             }
         }
         result

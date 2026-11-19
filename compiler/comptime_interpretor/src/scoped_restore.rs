@@ -219,10 +219,22 @@ impl Restore<'_> {
                 sort: nir::Sort::Type,
             })?),
             Value::Type(ty) => Value::Type(self.ty(ty)?),
-            Value::AbstractValue { declaration, ty } => Value::AbstractValue {
-                declaration: *declaration,
-                ty: self.ty(ty)?,
-            },
+            Value::AbstractValue { declaration, ty } => {
+                let symbol = self.ty(&Term::Rigid {
+                    declaration: *declaration,
+                    sort: nir::Sort::ComptimeValue,
+                })?;
+                let Term::Rigid { declaration, .. } = symbol else {
+                    // An outer telescope slot has no standalone invocation
+                    // value before application. Its use inside a Type is
+                    // restored structurally by the Type case above.
+                    return Err(ErrorKind::AbstractValueUnresolved);
+                };
+                Value::AbstractValue {
+                    declaration,
+                    ty: self.ty(ty)?,
+                }
+            }
             Value::List { ty, values } => Value::List {
                 ty: self.ty(ty)?,
                 values: self.values(values, depth)?.into(),
