@@ -23,7 +23,7 @@ pub struct Inspection<'a> {
 #[derive(Clone)]
 pub struct PhaseCheckedPackage<'a> {
     inspection: Inspection<'a>,
-    machine_owners: Arc<std::collections::BTreeSet<crate::DeclarationId>>,
+    machine_owners: Arc<super::ArithmeticObligations>,
 }
 
 impl<'a> PhaseCheckedPackage<'a> {
@@ -36,17 +36,16 @@ impl<'a> PhaseCheckedPackage<'a> {
     pub fn parameter_domains(
         &self,
     ) -> &std::collections::BTreeMap<crate::DeclarationId, crate::Term> {
-        &self
-            .inspection
-            .declarations
-            .get()
-            .expect("phase-checked declaration directory")
-            .parameter_domains
+        self.machine_owners.parameter_domains()
     }
 
     pub fn machine_arithmetic_functions(
         &self,
     ) -> &std::collections::BTreeSet<crate::DeclarationId> {
+        self.machine_owners.functions()
+    }
+
+    pub fn arithmetic_obligations(&self) -> &super::ArithmeticObligations {
         &self.machine_owners
     }
 
@@ -64,11 +63,11 @@ impl<'a> PhaseCheckedPackage<'a> {
 
 impl std::fmt::Display for PhaseCheckedPackage<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(phase-checked-package (machine-arithmetic")?;
-        for owner in self.machine_owners.iter() {
-            write!(f, " {owner}")?;
-        }
-        write!(f, ") {})", self.inspection)
+        write!(
+            f,
+            "(phase-checked-package {} {})",
+            self.machine_owners, self.inspection
+        )
     }
 }
 
@@ -126,7 +125,9 @@ impl<'a> Inspection<'a> {
 
     pub fn check(&self, body: &Expr, fuel: &mut usize) -> Result<(), Error> {
         let declarations = self.declarations(body.source, fuel)?;
-        PhaseContext::new(self.package(), declarations).check_comptime(body, fuel)
+        PhaseContext::new(self.package(), declarations)
+            .inspect_comptime_body(body, &[], fuel)
+            .map(|_| ())
     }
 
     /// Inspect all declaration bodies, defaults and contracts using the same
@@ -136,6 +137,10 @@ impl<'a> Inspection<'a> {
         &self,
         fuel: &mut usize,
     ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
+        Ok(self.package_obligations(fuel)?.functions)
+    }
+
+    fn package_obligations(&self, fuel: &mut usize) -> Result<super::ArithmeticObligations, Error> {
         let declarations = self.declarations(super::SourceRange { start: 0, end: 0 }, fuel)?;
         PhaseContext::new(self.package(), declarations).check_package(fuel)
     }
@@ -145,7 +150,7 @@ impl<'a> Inspection<'a> {
         &self,
         fuel: &mut usize,
     ) -> Result<PhaseCheckedPackage<'a>, Error> {
-        let machine_owners = self.check_package(fuel)?;
+        let machine_owners = self.package_obligations(fuel)?;
         Ok(PhaseCheckedPackage {
             inspection: self.clone(),
             machine_owners: Arc::new(machine_owners),

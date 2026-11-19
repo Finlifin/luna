@@ -1047,3 +1047,27 @@ fn source_vm_observes_only_the_selected_rows_supply() {
         });
     }
 }
+
+#[test]
+fn generic_member_initializers_own_their_machine_arithmetic_obligations() {
+    let source = "struct Holder where N: u8 {}
+        trait Bound { assoc value: u8; }
+        impl Bound for Holder<N> where N: u8 {
+            assoc value: u8 = N + OFFSET;
+        }
+        const answer: u8 = Holder<255>.as(Bound).value;
+        fn run() -> u8 { answer }";
+    let unsafe_source = source.replace("OFFSET", "1");
+    // Even without a use site the generic implementation must be valid for
+    // every admitted N. The program verifier owns the overflow obligation.
+    let unused = unsafe_source.split("const answer:").next().unwrap();
+    let error = sysroot::compile(unused).unwrap_err();
+    assert!(
+        error.contains("machine arithmetic range is not proven"),
+        "{error}"
+    );
+    assert_eq!(
+        sysroot::run(&source.replace("OFFSET", "0")),
+        Value::UnsignedInteger(255)
+    );
+}

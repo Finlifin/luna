@@ -235,7 +235,7 @@ fn owned_associated_selection_checks_type_phase_and_budget_before_publication() 
 
 #[test]
 fn owned_associated_cycles_and_budget_failures_release_active_keys() {
-    let package = Package::default();
+    let package = crate::execution_test_support::boolean_member_contracts(id(1), 2..=34);
     let resolver = |access: &Expr, fuel: &mut u64| {
         *fuel -= 1;
         let K::AssociatedValue { member, .. } = &access.kind else {

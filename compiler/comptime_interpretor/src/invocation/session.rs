@@ -843,7 +843,7 @@ mod tests {
     #[test]
     fn associated_requests_cancel_without_resolving_or_replaying_initializers() {
         use std::cell::RefCell;
-        let package = Package::default();
+        let package = crate::execution_test_support::boolean_member_contracts(id(1), 2..=5);
         let access = |member| {
             expr(
                 ty(Primitive::Bool),
@@ -985,7 +985,7 @@ mod tests {
     #[test]
     fn associated_roots_own_pending_requests_and_already_admitted_keys() {
         use std::cell::RefCell;
-        let package = Package::default();
+        let package = crate::execution_test_support::boolean_member_contracts(id(1), 2..=5);
         let interface = InterfaceInstance {
             declaration: id(1),
             arguments: vec![],

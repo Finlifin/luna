@@ -5624,7 +5624,7 @@ fn compare_values(
 /// Mandatory source gate before interpreting or delivering machine arithmetic.
 /// Reuses phase traversal so nested/default operations cannot escape detection.
 pub fn validate_machine_operations(package: &nir::program::Package) -> Result<(), Error> {
-    let owners = nir::phases::machine_arithmetic_functions(package).map_err(|e| Error {
+    let owners = nir::phases::machine_arithmetic_obligations(package).map_err(|e| Error {
         source: e.source,
         reason: Reason::Phase(e.message),
     })?;
@@ -5644,15 +5644,22 @@ pub fn validate_definition_region_with_declarations(
     imports: &RegionDeclarations,
     region: &nir::program::DefinitionRegion,
 ) -> Result<(), Error> {
-    let (owners, arithmetic) =
-        nir::phases::inspect_definition_region_with_declarations(package, imports, region)
-            .map_err(|e| Error {
-                source: e.source,
-                reason: Reason::Phase(e.message),
-            })?;
+    let (owners, arithmetic) = nir::phases::inspect_definition_region_obligations(
+        package, imports, region,
+    )
+    .map_err(|e| Error {
+        source: e.source,
+        reason: Reason::Phase(e.message),
+    })?;
     validate_machine_owners(package, &owners, Some(imports))?;
     if arithmetic {
-        validate_machine_instances(package, region, Some(imports))?;
+        validate_machine_instances(
+            package,
+            region,
+            owners.parameter_domains(),
+            Some(imports),
+            &mut Limits::default(),
+        )?;
     }
     Ok(())
 }
@@ -5663,7 +5670,7 @@ pub fn validate_definition_region_with_declarations(
 pub fn validate_machine_operations_checked(
     phase: &nir::phases::PhaseCheckedPackage<'_>,
 ) -> Result<(), Error> {
-    validate_machine_owners(phase.package(), phase.machine_arithmetic_functions(), None)
+    validate_machine_owners(phase.package(), phase.arithmetic_obligations(), None)
 }
 
 #[cfg(test)]
@@ -5673,14 +5680,41 @@ mod scalar_observation_tests;
 
 fn validate_machine_owners(
     package: &nir::program::Package,
-    owners: &std::collections::BTreeSet<nir::DeclarationId>,
+    owners: &nir::phases::ArithmeticObligations,
     imports: Option<&RegionDeclarations>,
 ) -> Result<(), Error> {
     for function in package.functions.iter().chain(&package.quote_templates) {
-        if !owners.contains(&function.declaration) {
+        if !owners.functions().contains(&function.declaration) {
             continue;
         }
-        validate_machine_instances(package, function, imports)?;
+        validate_machine_instances(
+            package,
+            function,
+            owners.parameter_domains(),
+            imports,
+            &mut Limits::default(),
+        )?;
+    }
+    if !owners.initializers().is_empty() {
+        for row in &package.implementations {
+            for (member, initializer) in &row.associated_initializers {
+                if owners.initializers().contains(&(row.declaration, *member)) {
+                    let mut limits = Limits::default();
+                    let body = finite_domains::Initializer::new(
+                        row,
+                        initializer.expression(),
+                        &mut limits,
+                    )?;
+                    validate_machine_instances(
+                        package,
+                        &body,
+                        owners.parameter_domains(),
+                        imports,
+                        &mut limits,
+                    )?;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -5688,10 +5722,11 @@ fn validate_machine_owners(
 fn validate_machine_instances<B: finite_domains::MachineBody>(
     package: &nir::program::Package,
     body: &B,
+    domains: &std::collections::BTreeMap<nir::DeclarationId, Term>,
     imports: Option<&RegionDeclarations>,
+    limits: &mut Limits,
 ) -> Result<(), Error> {
-    let mut limits = Limits::default();
-    let Some(instances) = finite_domains::integer_instances(body, &mut limits)? else {
+    let Some(instances) = finite_domains::integer_instances(body, domains, limits)? else {
         return validate_machine_body(package, body, imports);
     };
     for mut instance in instances {
@@ -5722,11 +5757,11 @@ fn validate_machine_instances<B: finite_domains::MachineBody>(
             for width in (8..=128).step_by(8) {
                 proof_package.target = Some(nir::target::TargetData::new(width).unwrap());
                 let mut proof = instance.clone();
-                finite_domains::complete_literals(&mut proof, proof_package.target, &mut limits)?;
+                finite_domains::complete_literals(&mut proof, proof_package.target, limits)?;
                 validate_machine_body(&proof_package, &proof, imports)?;
             }
         } else {
-            finite_domains::complete_literals(&mut instance, package.target, &mut limits)?;
+            finite_domains::complete_literals(&mut instance, package.target, limits)?;
             validate_machine_body(package, &instance, imports)?;
         }
     }

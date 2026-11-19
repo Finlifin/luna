@@ -92,24 +92,61 @@ impl Error {
     }
 }
 
+/// Machine operations found during phase traversal. Associated programs are
+/// identified by the implementation and the interface member together.
+#[derive(Clone, Debug)]
+pub struct ArithmeticObligations {
+    domains: std::sync::Arc<BTreeMap<crate::DeclarationId, Term>>,
+    functions: BTreeSet<crate::DeclarationId>,
+    initializers: BTreeSet<(crate::DeclarationId, crate::DeclarationId)>,
+}
+
+impl ArithmeticObligations {
+    pub fn parameter_domains(&self) -> &BTreeMap<crate::DeclarationId, Term> {
+        &self.domains
+    }
+
+    pub fn functions(&self) -> &BTreeSet<crate::DeclarationId> {
+        &self.functions
+    }
+    pub fn initializers(&self) -> &BTreeSet<(crate::DeclarationId, crate::DeclarationId)> {
+        &self.initializers
+    }
+}
+
+impl std::fmt::Display for ArithmeticObligations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(machine-arithmetic")?;
+        for function in &self.functions {
+            write!(f, " {function}")?;
+        }
+        for (implementation, member) in &self.initializers {
+            write!(f, " (associated {implementation} {member})")?;
+        }
+        f.write_str(")")
+    }
+}
+
 pub fn validate(package: &Package) -> Result<(), Error> {
-    machine_arithmetic_functions(package).map(|_| ())
+    machine_arithmetic_obligations(package).map(|_| ())
 }
 /// Full phase traversal, also collecting owners whose bodies/defaults contain
 /// machine arithmetic (including nested closures and patterns).
 pub fn machine_arithmetic_functions(
     package: &Package,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
-    machine_arithmetic_functions_with_budgets(package, &mut 1_000_000, &mut 1_000_000)
+    Ok(machine_arithmetic_obligations(package)?.functions)
 }
 
-// Declaration admission and expression inspection own separate allowances.
-// This is not yet the VM budget: some metadata and shape checks remain local.
-fn machine_arithmetic_functions_with_budgets(
+pub fn machine_arithmetic_obligations(package: &Package) -> Result<ArithmeticObligations, Error> {
+    arithmetic_obligations_with_budgets(package, &mut 1_000_000, &mut 1_000_000)
+}
+
+fn arithmetic_obligations_with_budgets(
     package: &Package,
     declaration_fuel: &mut usize,
     inspection_fuel: &mut usize,
-) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
+) -> Result<ArithmeticObligations, Error> {
     let declarations = declarations::Declarations::new(package, declaration_fuel)?;
     PhaseContext::new(package, &declarations).check_package(inspection_fuel)
 }
@@ -125,13 +162,21 @@ pub fn inspect_definition_region(
 }
 
 /// Inspect imported interfaces and their references without registering a
-/// callable body. Only the lexical region and complete package functions can
-/// contribute executable obligations.
+/// callable body. This view reports function owners and the lexical region.
 pub fn inspect_definition_region_with_declarations(
     package: &Package,
     imports: &crate::callable_source::RegionDeclarations,
     region: &crate::program::DefinitionRegion,
 ) -> Result<(BTreeSet<crate::DeclarationId>, bool), Error> {
+    let (owners, region) = inspect_definition_region_obligations(package, imports, region)?;
+    Ok((owners.functions, region))
+}
+
+pub fn inspect_definition_region_obligations(
+    package: &Package,
+    imports: &crate::callable_source::RegionDeclarations,
+    region: &crate::program::DefinitionRegion,
+) -> Result<(ArithmeticObligations, bool), Error> {
     let mut declaration_fuel = 1_000_000;
     let mut inspection_fuel = 1_000_000;
     let declarations = declarations::Declarations::new(package, &mut declaration_fuel)?;
@@ -184,8 +229,12 @@ impl<'a> PhaseContext<'a> {
         }
     }
 
-    fn check_package(&mut self, fuel: &mut usize) -> Result<BTreeSet<crate::DeclarationId>, Error> {
-        let mut machine_owners = BTreeSet::new();
+    fn check_package(&mut self, fuel: &mut usize) -> Result<ArithmeticObligations, Error> {
+        let mut machine_owners = ArithmeticObligations {
+            domains: self.declarations.parameter_domains.clone(),
+            functions: BTreeSet::new(),
+            initializers: BTreeSet::new(),
+        };
         // Method contracts remain borrowed; inspection grants no specialization
         // or execution authority and never persists a body-validation receipt.
         for function in self
@@ -195,7 +244,7 @@ impl<'a> PhaseContext<'a> {
             .chain(&self.package.quote_templates)
         {
             if self.inspect(CallableProgram::function(function), fuel)? {
-                machine_owners.insert(function.declaration);
+                machine_owners.functions.insert(function.declaration);
             }
         }
         for method in self
@@ -208,7 +257,7 @@ impl<'a> PhaseContext<'a> {
             match &method.signature {
                 Callable(ty) => {
                     if self.inspect(CallableProgram::ordinary_method(method, ty), fuel)? {
-                        machine_owners.insert(method.declaration);
+                        machine_owners.functions.insert(method.declaration);
                     }
                     continue;
                 }
@@ -226,23 +275,48 @@ impl<'a> PhaseContext<'a> {
             let frame = parameters::InspectionFrame::for_parts(parts, None, fuel)
                 .map_err(parameters::Failure::into_diagnostic)?;
             if self.inspect_parts(parts, frame, fuel)? {
-                machine_owners.insert(method.declaration);
+                machine_owners.functions.insert(method.declaration);
             }
             crate::call_safety::validate_parts(parts, fuel)
                 .map_err(|failure| Error::call_safety(parts.source, failure))?;
         }
+        *fuel = fuel
+            .checked_sub(self.package.implementations.len())
+            .ok_or_else(|| {
+                Error::budget(
+                    SourceRange { start: 0, end: 0 },
+                    "associated initializer inspection budget exhausted",
+                )
+            })?;
+        for row in &self.package.implementations {
+            for (member, initializer) in &row.associated_initializers {
+                let expr = initializer.expression();
+                if self.inspect_comptime_body(expr, &row.type_parameters, fuel)? {
+                    machine_owners
+                        .initializers
+                        .insert((row.declaration, *member));
+                }
+            }
+        }
         Ok(machine_owners)
     }
 
-    fn check_comptime(&mut self, body: &Expr, fuel: &mut usize) -> Result<(), Error> {
+    fn inspect_comptime_body(
+        &mut self,
+        body: &Expr,
+        parameters: &[crate::DeclarationId],
+        fuel: &mut usize,
+    ) -> Result<bool, Error> {
         crate::type_computations::charge_term(&body.ty, fuel)
             .map_err(|_| Error::budget(body.source, "expression signature budget exhausted"))?;
         let signature = Term::Function {
             parameters: vec![],
             result: Box::new(body.ty.clone()),
         };
-        self.inspect(CallableProgram::comptime_body(body, &signature), fuel)
-            .map(|_| ())
+        self.inspect(
+            CallableProgram::comptime_body(body, &signature, parameters),
+            fuel,
+        )
     }
 
     fn inspect(

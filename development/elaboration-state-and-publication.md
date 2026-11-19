@@ -488,6 +488,20 @@ VM 边界。接下来需要源码区域持有原请求并交付受检的代码�
 这给后续接线划定了边界：补充代码的可见性与新的类型证明权限要分别管理。
 [宿主请求](../compiler/comptime_interpretor/src/invocation/host.rs) · [函数目录](../compiler/nir/src/callable_source.rs) · [代码会话](../compiler/comptime_interpretor/src/code_session.rs)
 
+泛型关联初始化器本身就是待检查的程序。例如，`Holder<N>` 的 `N: u8`，
+成员声明为 `assoc value: u8 = N + 1;`。即使程序从未读取这个成员，`N = 255`
+也足以使其通用定义缺少机器整数范围证明。包级阶段检查现在记录具体的
+`(实现声明, 接口成员)`，程序验证在该实现的类型参数和约束下检查主体。
+把加数改为零即可通过，并能在 `Holder<255>` 中读到 255。有限整数类型枚举只
+代入声明域为 `Type` 的绑定，余下的值绑定仍归原声明所有。
+
+接收 VM 在将宿主返回的值或初始化器加入调用目录以前，用自己的声明目录检查
+其中的代码及词法 `unsafe` 权限。缺少辅助函数声明、越阶段调用或无权限的
+unsafe 调用都不能留下一个已经接收的条目。这个检查只授予阶段与调用权限；
+机器整数证明由形成初始化器的来源负责。把新代码带入尚在运行的 VM 时，来源还须
+交付它的依赖与程序证明。
+[包级检查](../compiler/nir/src/phases.rs) · [算术证明](../compiler/program_verification/src/flow.rs) · [响应接收](../compiler/comptime_interpretor/src/associated_execution.rs)
+
 源码检查具体成员读取时，先用接收者和接口实参代入成员声明域。普通数据和函数值
 在 NIR 中保留 `AssociatedValue` 及其成员身份。同一大字符串被四十个函数引用时，
 四十处只保存读取节点。Type 投影用于后续类型形成时仍需取得对应的 Type 身份。

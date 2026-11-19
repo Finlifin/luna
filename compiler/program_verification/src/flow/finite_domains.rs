@@ -14,6 +14,7 @@ pub(super) trait MachineBody: Clone {
         &self,
         binders: &[DeclarationParameter],
         arguments: &[Term],
+        remaining: &[nir::DeclarationId],
         fuel: &mut usize,
     ) -> Result<Self, Error>;
 }
@@ -42,6 +43,7 @@ impl MachineBody for Function {
         &self,
         binders: &[DeclarationParameter],
         arguments: &[Term],
+        remaining: &[nir::DeclarationId],
         fuel: &mut usize,
     ) -> Result<Self, Error> {
         let source = self.source;
@@ -53,7 +55,7 @@ impl MachineBody for Function {
                 source,
                 reason: Reason::InvalidSignature,
             })?;
-        instance.type_parameters.clear();
+        instance.type_parameters = remaining.to_vec();
         Ok(instance)
     }
 }
@@ -72,6 +74,7 @@ impl MachineBody for nir::program::DefinitionRegion {
         &self,
         binders: &[DeclarationParameter],
         arguments: &[Term],
+        remaining: &[nir::DeclarationId],
         fuel: &mut usize,
     ) -> Result<Self, Error> {
         let source = self.body.source;
@@ -85,7 +88,7 @@ impl MachineBody for nir::program::DefinitionRegion {
             owner: self.owner,
             phase: self.phase,
             parameters: self.parameters.clone(),
-            type_parameters: vec![],
+            type_parameters: remaining.to_vec(),
             signature: self
                 .signature
                 .instantiate_parameters(binders, arguments)
@@ -110,6 +113,97 @@ impl MachineBody for nir::program::DefinitionRegion {
     }
 }
 
+/// A selected member's code has a lexical implementation telescope and no
+/// callable declaration of its own. Borrow the original body until a finite
+/// proof actually needs a specialized instance.
+#[derive(Clone)]
+pub(super) struct Initializer<'a> {
+    body: std::borrow::Cow<'a, Expr>,
+    signature: Term,
+    parameters: std::borrow::Cow<'a, [nir::DeclarationId]>,
+    requirements: std::borrow::Cow<'a, [nir::program::TypePredicate]>,
+}
+
+impl<'a> Initializer<'a> {
+    pub(super) fn new(
+        row: &'a nir::program::Implementation,
+        body: &'a Expr,
+        limits: &mut Limits,
+    ) -> Result<Self, Error> {
+        nir::type_computations::charge_term(&body.ty, &mut limits.arithmetic.steps)
+            .map_err(|_| exhausted(body.source))?;
+        Ok(Self {
+            body: std::borrow::Cow::Borrowed(body),
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(body.ty.clone()),
+            },
+            parameters: std::borrow::Cow::Borrowed(&row.type_parameters),
+            requirements: std::borrow::Cow::Borrowed(&row.requirements),
+        })
+    }
+}
+
+impl MachineBody for Initializer<'_> {
+    fn program(&self) -> CallableProgram<'_> {
+        CallableProgram::comptime_body(&self.body, &self.signature, &self.parameters)
+    }
+
+    fn requirements(&self) -> &[nir::program::TypePredicate] {
+        &self.requirements
+    }
+
+    fn roots_mut(&mut self) -> impl Iterator<Item = &mut Expr> {
+        std::iter::once(self.body.to_mut())
+    }
+
+    fn instantiate(
+        &self,
+        binders: &[DeclarationParameter],
+        arguments: &[Term],
+        remaining: &[nir::DeclarationId],
+        fuel: &mut usize,
+    ) -> Result<Self, Error> {
+        let source = self.body.source;
+        let invalid = |_| Error {
+            source,
+            reason: Reason::InvalidSignature,
+        };
+        nir::copy_budget::charge_substitution(&self.body, binders, arguments, fuel)
+            .map_err(|_| exhausted(source))?;
+        let body = self
+            .body
+            .instantiate_parameters(binders, arguments)
+            .map_err(invalid)?;
+        *fuel = fuel
+            .checked_sub(remaining.len().saturating_add(self.requirements.len()))
+            .ok_or_else(|| exhausted(source))?;
+        let requirements = self
+            .requirements
+            .iter()
+            .map(|predicate| {
+                nir::copy_budget::charge_predicate_substitution(
+                    predicate, binders, arguments, fuel,
+                )
+                .map_err(|_| exhausted(source))?;
+                predicate
+                    .instantiate_parameters(binders, arguments)
+                    .map_err(invalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        nir::type_computations::charge_term(&body.ty, fuel).map_err(|_| exhausted(source))?;
+        Ok(Self {
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(body.ty.clone()),
+            },
+            body: std::borrow::Cow::Owned(body),
+            parameters: std::borrow::Cow::Owned(remaining.to_vec()),
+            requirements: std::borrow::Cow::Owned(requirements),
+        })
+    }
+}
+
 pub(super) fn complete_literals(
     instance: &mut impl MachineBody,
     target: Option<nir::target::TargetData>,
@@ -128,6 +222,7 @@ pub(super) fn complete_literals(
 
 pub(super) fn integer_instances<B: MachineBody>(
     body: &B,
+    domains: &std::collections::BTreeMap<nir::DeclarationId, Term>,
     limits: &mut Limits,
 ) -> Result<Option<Vec<B>>, Error> {
     let program = body.program();
@@ -139,6 +234,20 @@ pub(super) fn integer_instances<B: MachineBody>(
     let Term::Function { parameters, .. } = program.signature().callable_signature() else {
         return Ok(None);
     };
+    limits
+        .step(function.type_parameters.len())
+        .map_err(|_| fail())?;
+    let (binders, residual): (Vec<_>, Vec<_>) =
+        DeclarationParameter::from_domains(function.type_parameters, domains)
+            .into_iter()
+            .partition(|p| p.sort == Sort::Type);
+    if binders.is_empty() {
+        return Ok(None);
+    }
+    let remaining = residual
+        .into_iter()
+        .map(|p| p.declaration)
+        .collect::<Vec<_>>();
     let mut context = Context::with_scope(vec![parameters.iter().map(|p| p.sort).collect()]);
     let mut fuel = 4096;
     for requirement in body.requirements() {
@@ -163,8 +272,8 @@ pub(super) fn integer_instances<B: MachineBody>(
         Ok(matches!(outcome, Outcome::Entailed(_)))
     };
     let mut choices = vec![Vec::new()];
-    let mut binders = Vec::new();
-    for declaration in function.type_parameters {
+    for binder in &binders {
+        let declaration = &binder.declaration;
         let subject = Term::Rigid {
             declaration: *declaration,
             sort: Sort::Type,
@@ -226,10 +335,6 @@ pub(super) fn integer_instances<B: MachineBody>(
                 possible.push(Term::Primitive(primitive));
             }
         }
-        binders.push(DeclarationParameter {
-            declaration: *declaration,
-            sort: Sort::Type,
-        });
         let mut next = Vec::new();
         for prefix in choices {
             for ty in &possible {
@@ -268,7 +373,14 @@ pub(super) fn integer_instances<B: MachineBody>(
     }
     choices
         .iter()
-        .map(|arguments| body.instantiate(&binders, arguments, &mut limits.arithmetic.steps))
+        .map(|arguments| {
+            body.instantiate(
+                &binders,
+                arguments,
+                &remaining,
+                &mut limits.arithmetic.steps,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
 }
@@ -375,10 +487,41 @@ mod tests {
     }
 
     #[test]
+    fn finite_integer_substitution_retains_value_binders_in_their_source_order() {
+        let mut body = template(1);
+        let first = DeclarationId {
+            package: 1,
+            local: 200,
+        };
+        let second = DeclarationId {
+            local: 201,
+            ..first
+        };
+        body.type_parameters.insert(0, first);
+        body.type_parameters.push(second);
+        let domains = [
+            (first, Term::Primitive(P::U8)),
+            (second, Term::Primitive(P::Bool)),
+        ]
+        .into();
+        let instances = integer_instances(&body, &domains, &mut Limits::default())
+            .unwrap()
+            .unwrap();
+        assert!(!instances.is_empty());
+        for instance in instances {
+            assert_eq!(instance.type_parameters, [first, second]);
+            let Term::Function { parameters, .. } = &instance.signature else {
+                unreachable!()
+            };
+            assert!(matches!(parameters[0].ty, Term::Primitive(_)));
+        }
+    }
+
+    #[test]
     fn finite_domains_preserve_correlations_and_recover_after_budget_failure() {
         let mut f = template(2);
         assert_eq!(
-            integer_instances(&f, &mut Limits::default())
+            integer_instances(&f, &Default::default(), &mut Limits::default())
                 .unwrap()
                 .unwrap()
                 .len(),
@@ -390,7 +533,7 @@ mod tests {
         f.interface
             .requirements
             .push(Q::Equal(parameters[0].ty.clone(), parameters[1].ty.clone()));
-        let instances = integer_instances(&f, &mut Limits::default())
+        let instances = integer_instances(&f, &Default::default(), &mut Limits::default())
             .unwrap()
             .unwrap();
         assert_eq!(instances.len(), 2);
@@ -404,16 +547,18 @@ mod tests {
         }
         let mut exhausted = Limits::default();
         exhausted.arithmetic.steps = 0;
-        assert!(integer_instances(&f, &mut exhausted).is_err());
+        assert!(integer_instances(&f, &Default::default(), &mut exhausted).is_err());
         assert!(
-            integer_instances(&f, &mut Limits::default())
+            integer_instances(&f, &Default::default(), &mut Limits::default())
                 .unwrap()
                 .is_some()
         );
-        assert!(integer_instances(&template(7), &mut Limits::default()).is_err());
+        assert!(
+            integer_instances(&template(7), &Default::default(), &mut Limits::default()).is_err()
+        );
         f.interface.requirements.clear();
         assert!(
-            integer_instances(&f, &mut Limits::default())
+            integer_instances(&f, &Default::default(), &mut Limits::default())
                 .unwrap()
                 .is_none()
         );
@@ -432,7 +577,7 @@ mod tests {
                 .map(|primitive| Q::Equal(parameters[0].ty.clone(), Term::Primitive(*primitive)))
                 .collect(),
         )];
-        let instances = integer_instances(&function, &mut Limits::default())
+        let instances = integer_instances(&function, &Default::default(), &mut Limits::default())
             .unwrap()
             .unwrap();
         assert_eq!(instances.len(), domain.len());
@@ -466,7 +611,7 @@ mod tests {
                 .map(|primitive| Q::Equal(parameters[0].ty.clone(), Term::Primitive(*primitive)))
                 .collect(),
         )];
-        let instances = integer_instances(&function, &mut Limits::default())
+        let instances = integer_instances(&function, &Default::default(), &mut Limits::default())
             .unwrap()
             .unwrap();
         assert_eq!(instances.len(), domain.len());
@@ -498,7 +643,7 @@ mod tests {
             Term::Primitive(P::I8),
         )))];
         assert!(
-            integer_instances(&f, &mut Limits::default())
+            integer_instances(&f, &Default::default(), &mut Limits::default())
                 .unwrap()
                 .is_none()
         );
@@ -511,7 +656,7 @@ mod tests {
             Q::Equal(parameters[0].ty.clone(), parameters[1].ty.clone()),
             Q::Equal(parameters[1].ty.clone(), Term::Primitive(P::I8)),
         ];
-        let instances = integer_instances(&f, &mut Limits::default())
+        let instances = integer_instances(&f, &Default::default(), &mut Limits::default())
             .unwrap()
             .unwrap();
         assert_eq!(instances.len(), 1);
@@ -532,7 +677,7 @@ mod tests {
                 .requirements
                 .push(Q::Equal(parameters[0].ty.clone(), parameter.ty.clone()));
         }
-        let instances = integer_instances(&f, &mut Limits::default())
+        let instances = integer_instances(&f, &Default::default(), &mut Limits::default())
             .unwrap()
             .unwrap();
         assert_eq!(instances.len(), 2);

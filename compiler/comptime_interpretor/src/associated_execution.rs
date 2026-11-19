@@ -235,6 +235,10 @@ impl<'a> Interpreter<'a> {
         } = request;
         let source = access.source;
         let selected = selection?;
+        // A returned body may have been formed outside this VM. Resolve its
+        // callable identities and lexical unsafe permissions in the receiving
+        // source before admitting or publishing either form of supply.
+        self.check_comptime_expression(selected.expression())?;
         let (expression, initializing) = match selected {
             AssociatedSelection::Completed(value) => (value.into_expression(), false),
             AssociatedSelection::Initializer(initializer) => (initializer.into_expression(), true),

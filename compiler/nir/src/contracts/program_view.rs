@@ -100,10 +100,20 @@ impl<'a> CallableProgram<'a> {
         }
     }
 
-    /// A detached, closed comptime body has no global declaration identity.
-    /// Its caller supplies a zero-argument signature for ordinary result checks.
-    pub(crate) fn comptime_body(body: &'a Expr, signature: &'a Term) -> Self {
-        Self::framed_body(body, signature, FunctionPhase::Comptime, &[], &[])
+    /// A comptime expression has no callable declaration or local arguments.
+    /// An implementation template retains its lexical declaration parameters.
+    pub fn comptime_body(
+        body: &'a Expr,
+        signature: &'a Term,
+        type_parameters: &'a [DeclarationId],
+    ) -> Self {
+        Self::framed_body(
+            body,
+            signature,
+            FunctionPhase::Comptime,
+            &[],
+            type_parameters,
+        )
     }
 
     pub fn definition_region(region: &'a crate::program::DefinitionRegion) -> Self {
@@ -374,7 +384,7 @@ mod tests {
             parameters: vec![],
             result: Box::new(body.ty.clone()),
         };
-        let view = CallableProgram::comptime_body(&body, &signature);
+        let view = CallableProgram::comptime_body(&body, &signature, &[]);
         assert_eq!(view.parts.declaration, None);
         assert_eq!(view.parts.phase, FunctionPhase::Comptime);
         assert!(!view.parts.is_unsafe);

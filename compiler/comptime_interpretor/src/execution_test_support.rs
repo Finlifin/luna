@@ -76,3 +76,38 @@ impl Interpreter<'_> {
         result.flow
     }
 }
+
+/// Contracts used by resolver-driven fixtures whose initializer reads the next
+/// member. The host supplies implementations; phase inspection uses this trait.
+pub(super) fn boolean_member_contracts(
+    interface: DeclarationId,
+    members: std::ops::RangeInclusive<u32>,
+) -> Package {
+    Package {
+        traits: vec![nir::program::Trait {
+            declaration: interface,
+            self_parameter: DeclarationId {
+                local: 0,
+                ..interface
+            },
+            name: "Flags".into(),
+            comptime_only: true,
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            parents: vec![],
+            methods: vec![],
+            associated: members
+                .map(|local| nir::program::AssociatedContract {
+                    declaration: DeclarationId { local, ..interface },
+                    name: format!("flag{local}"),
+                    phase: nir::program::TraitPhase::Comptime,
+                    ty: Term::Primitive(Primitive::Bool),
+                    default: None,
+                })
+                .collect(),
+        }],
+        ..Default::default()
+    }
+}

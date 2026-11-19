@@ -419,7 +419,7 @@ mod tests {
             ..Default::default()
         };
         let run = |package, fuel: &mut usize| {
-            super::super::machine_arithmetic_functions_with_budgets(package, fuel, &mut 1_000_000)
+            super::super::arithmetic_obligations_with_budgets(package, fuel, &mut 1_000_000)
         };
         let mut fuel = 1000;
         run(&package, &mut fuel).unwrap();

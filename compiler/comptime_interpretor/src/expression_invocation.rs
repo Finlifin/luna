@@ -26,7 +26,7 @@ impl Interpreter<'_> {
         self.invoke_checked_expression(body)
     }
 
-    fn check_comptime_expression(&mut self, body: &Expr) -> Result<(), Error> {
+    pub(super) fn check_comptime_expression(&mut self, body: &Expr) -> Result<(), Error> {
         if !self.comptime_only || self.graph.is_some() {
             return Err(self.failure(ErrorKind::PhaseMismatch, Some(body.source)));
         }
@@ -232,6 +232,69 @@ mod tests {
             assert_eq!(vm.bytecode_invocations() > 0, compiled);
         }
         assert!(package.functions.is_empty());
+    }
+
+    #[test]
+    fn selected_initializers_acquire_unsafe_permission_only_from_their_own_body() {
+        use std::cell::Cell;
+        let interface = DeclarationId {
+            package: 2,
+            local: 1,
+        };
+        let mut package = crate::execution_test_support::boolean_member_contracts(interface, 2..=2);
+        package
+            .functions
+            .push(function(1, FunctionPhase::Comptime, true));
+        let member = DeclarationId {
+            local: 2,
+            ..interface
+        };
+        let access = Expr {
+            kind: K::AssociatedValue {
+                interface: interface.into(),
+                subject: flag(true).ty,
+                member,
+            },
+            ..flag(true)
+        };
+        for reference in [false, true] {
+            let allow = Cell::new(false);
+            let calls = Cell::new(0);
+            let resolver = |_: &Expr, steps: &mut u64| {
+                calls.set(calls.get() + 1);
+                let mut body = call(&package.functions[0]);
+                if allow.get() {
+                    body = Expr {
+                        kind: K::UnsafeScope(Box::new(body)),
+                        ..flag(true)
+                    };
+                }
+                let mut fuel = *steps as usize;
+                let initializer =
+                    nir::associated_initializers::AssociatedInitializer::new(body, &mut fuel)
+                        .unwrap();
+                *steps = fuel as u64;
+                Ok(AssociatedSelection::Initializer(initializer))
+            };
+            let mut vm = Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .with_associated_resolver(&resolver);
+            if reference {
+                vm = vm.with_reference_execution();
+            }
+            let failure = vm.eval_associated_value(&access).unwrap_err();
+            assert!(
+                matches!(failure.kind, ErrorKind::InvalidPhase(_)),
+                "{failure}"
+            );
+            assert!(vm.active_associated_initializers.is_empty());
+            allow.set(true);
+            assert!(matches!(
+                vm.eval_associated_value(&access).unwrap(),
+                Flow::Value(Value::Bool(true))
+            ));
+            assert_eq!(calls.get(), 2);
+        }
     }
 
     #[test]

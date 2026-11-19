@@ -37,7 +37,8 @@ fn function(local: u32, phase: Phase) -> Function {
     }
 }
 fn run(package: &Package, fuel: &mut usize) -> Result<BTreeSet<crate::DeclarationId>, Error> {
-    machine_arithmetic_functions_with_budgets(package, &mut 1_000_000, fuel)
+    arithmetic_obligations_with_budgets(package, &mut 1_000_000, fuel)
+        .map(|obligations| obligations.functions)
 }
 
 #[test]
@@ -162,15 +163,15 @@ fn opaque_metadata_consumes_the_phase_declaration_allowance() {
         ..Default::default()
     };
     let mut fuel = 1000;
-    machine_arithmetic_functions_with_budgets(&package, &mut fuel, &mut 1000).unwrap();
+    arithmetic_obligations_with_budgets(&package, &mut fuel, &mut 1000).unwrap();
     let cost = 1000 - fuel;
-    let error = machine_arithmetic_functions_with_budgets(&package, &mut (cost - 1), &mut 1000)
-        .unwrap_err();
+    let error =
+        arithmetic_obligations_with_budgets(&package, &mut (cost - 1), &mut 1000).unwrap_err();
     assert_eq!(
         error.message,
         "normal-form metadata validation budget exhausted"
     );
-    machine_arithmetic_functions_with_budgets(&package, &mut cost.clone(), &mut 1000).unwrap();
+    arithmetic_obligations_with_budgets(&package, &mut cost.clone(), &mut 1000).unwrap();
 }
 
 #[test]
