@@ -161,7 +161,7 @@ async function activate(context) {
 
   // Watch external `.fl` and manifest changes on disk.
   const watcher = vscode.workspace.createFileSystemWatcher(
-    "**/{*.fl,flurry.toml,flurryfmt.toml,.flurryfmt.toml}"
+    "**/{*.fl,flurry.toml,flurryfmt.fl}"
   );
   const notifyWatched = (uri, type) => {
     if (activeClient && activeClient.isRunning()) {

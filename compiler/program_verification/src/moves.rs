@@ -14742,18 +14742,6 @@ fn prepared_memory_inputs(
     Ok(result)
 }
 
-/// Bridge resource-checked callback premises into the memory worklist. Import
-/// validation checks each environment before the memory layer borrows its code.
-pub fn infer_callable_memory(
-    package: &Package,
-    declaration: nir::DeclarationId,
-    arguments: &[Term],
-    inputs: &[CallableParameter],
-    fuel: &mut usize,
-    source: SourceRange,
-) -> Result<super::memory::Summary, String> {
-    infer_callable_memory_with_effects(package, declaration, arguments, inputs, &[], fuel, source)
-}
 /// Preserve the installer's checked effect premises when publishing a
 /// call-specific cleanup footprint for a borrowed helper.
 pub fn infer_callable_memory_with_effect_context(

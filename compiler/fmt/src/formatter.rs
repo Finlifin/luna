@@ -570,7 +570,6 @@ impl<'a> Formatter<'a> {
             }
             let end_line = self.parsed.line_of_byte(sep_end_byte.saturating_sub(1));
             elem_infos.push(ElemInfo {
-                index: idx,
                 node,
                 slot: full_slot,
                 lo,
@@ -999,8 +998,6 @@ impl<'a> Formatter<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ElemInfo {
-    #[allow(dead_code)]
-    pub index: usize,
     pub node: NodeIndex,
     pub slot: TokenSlot,
     pub lo: usize,

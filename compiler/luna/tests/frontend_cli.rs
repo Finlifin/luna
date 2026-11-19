@@ -1,4 +1,4 @@
-//! Black-box checks for development/runs/001-frontend-entry/contract.md.
+//! Black-box CLI frontend contract checks (ast/hir dumps, diagnostics, and error paths).
 //! The fixtures use grammar/syntax function, block, literal, use and if forms.
 //! No fixture requires a standard-library API or completed type checking.
 

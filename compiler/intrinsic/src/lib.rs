@@ -4,7 +4,6 @@
 //! bindings are resolved separately through their declaration identities.
 
 pub mod lang_item;
-pub mod symbols;
 pub mod sysroot;
 
 pub use lang_item::{LangItem, LangItemDef, LangItems, SourceBindingError};

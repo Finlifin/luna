@@ -23,8 +23,7 @@
   "activationEvents": [
     "onLanguage:flurry",
     "workspaceContains:**/flurry.toml",
-    "workspaceContains:**/flurryfmt.toml",
-    "workspaceContains:**/.flurryfmt.toml"
+    "workspaceContains:**/flurryfmt.fl"
   ],
   "main": "./src/extension.js",
   "scripts": {

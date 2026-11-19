@@ -110,8 +110,9 @@ fixture、tests 或 examples，源码也未声明 `#[test]`。26 个活动成员
 据此已将四个目录及根 manifest 的对应停用注释作为独立单元删除，提交 `c5f4481d`。
 删除前保留基线与文件清单，删除后核对 26 个活动成员的本地依赖闭包，并通过
 `check -p luna`（`/tmp/luna-tools-dxcnvqmt/result.json`）。历史由 Git 恢复，不另建平行实现。
-根 COMPILER_PROGRESS_REPORT.md 的旧后端断层描述是历史快照，不能用来判断当前
-luna/host 不存在。本阶段仍只修改 development，未改写该报告或正式 docs。
+历史的 `COMPILER_PROGRESS_REPORT.md` 曾记录旧后端断层快照，不能用来判断当前
+luna/host 不存在；该报告已退休删除，需要对照时可从 Git 历史读取。
+本阶段仍只修改 development，未改写正式 docs。
 
 ### 4.1 middle 的旧类型子系统须另作一个完整退役单元
 

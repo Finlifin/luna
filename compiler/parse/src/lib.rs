@@ -5,7 +5,6 @@ pub mod error;
 pub mod expressions;
 pub mod items;
 mod operators;
-mod others;
 pub mod parser;
 pub mod patterns;
 pub mod statements;

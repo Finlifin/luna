@@ -3148,10 +3148,6 @@ pub fn bind_inputs(
     bind_inputs_with_layouts(&[], template, inputs, fuel)
 }
 
-pub fn forward_closed_locals(function: &mut Function, fuel: &mut usize) -> Result<(), String> {
-    forward_closed_locals_with_layouts(&[], function, fuel)
-}
-
 pub fn bind_call(
     template: &Function,
     declaration_arguments: &[Term],
@@ -3171,37 +3167,8 @@ pub fn bind_call_with(
     bind_call_with_layouts_and_evaluator(&[], template, declaration_arguments, call, fuel, evaluate)
 }
 
-pub fn bind_call_with_type_views<C>(
-    template: &Function,
-    declaration_arguments: &[Term],
-    call: &Expr,
-    fuel: &mut usize,
-    context: &mut C,
-    evaluate: impl FnMut(&mut C, &Expr, &mut usize) -> Result<Expr, String>,
-    type_view: impl FnMut(&mut C, &Term, &mut usize) -> Result<Term, String>,
-) -> Result<(crate::FunctionInstance, Expr), String> {
-    bind_call_with_layouts_and_type_views(
-        &[],
-        template,
-        declaration_arguments,
-        call,
-        fuel,
-        context,
-        evaluate,
-        type_view,
-    )
-}
-
 pub fn fold_value(expr: &Expr, fuel: &mut usize) -> Result<Expr, String> {
     fold_value_with_layouts(&[], expr, fuel)
-}
-
-pub fn prepare_input(
-    expr: &Expr,
-    locals: &std::collections::BTreeMap<LocalId, Expr>,
-    fuel: &mut usize,
-) -> Result<Expr, String> {
-    prepare_input_with_layouts(&[], expr, locals, fuel)
 }
 #[cfg(test)]
 mod tests {

@@ -1331,61 +1331,60 @@ mod tests {
     }
 }
 
-/// 使用示例和文档
-///
-/// 这个 visitor pattern 的设计允许你：
-///
-/// 1. 实现自定义的 AST 遍历逻辑
-/// 2. 在遍历过程中收集信息或进行转换
-/// 3. 以类型安全的方式处理不同类型的 AST 节点
-///
-/// ## 示例用法：
-///
-/// ```ignore
-/// use crate::parse::ast_visitor::{SExpressionVisitor, visit_ast, count_ast_nodes};
-/// use rustc_span::SourceMap;
-///
-/// // 使用 S-表达式 visitor
-/// let mut visitor = SExpressionVisitor;
-/// let s_expr = visit_ast(&mut visitor, &ast, root_index, &source_map);
-/// println!("AST as S-expression: {}", s_expr);
-///
-/// // 统计节点数量
-/// let node_count = count_ast_nodes(&ast, root_index, &source_map);
-/// println!("Total nodes: {}", node_count);
-/// ```
-///
-/// ## 自定义 Visitor 示例：
-///
-/// ```ignore
-/// struct MyCustomVisitor {
-///     depth: usize,
-/// }
-///
-/// impl AstVisitor for MyCustomVisitor {
-///     type Output = ();
-///
-///     fn visit_node(&mut self, ast: &Ast, node_index: NodeIndex, source_map: &SourceMap) -> Self::Output {
-///         if node_index == 0 {
-///             return;
-///         }
-///         
-///         // 自定义逻辑：打印节点信息
-///         let kind = ast.get_node_kind(node_index).unwrap();
-///         println!("{}{:?}", "  ".repeat(self.depth), kind);
-///         
-///         // 增加深度并继续遍历
-///         self.depth += 1;
-///         self.default_visit_node(ast, node_index, source_map);
-///         self.depth -= 1;
-///     }
-///     
-///     // 实现其他必需的方法...
-///     fn visit_no_child(&mut self, _ast: &Ast, _node_index: NodeIndex, _kind: NodeKind, _source_map: &SourceMap) -> Self::Output {
-///         // 叶子节点处理
-///     }
-///     
-///     // ... 其他方法的实现
-/// }
-/// ```
-pub struct _DocumentationPlaceholder;
+// 使用示例和文档
+//
+// 这个 visitor pattern 的设计允许你：
+//
+// 1. 实现自定义的 AST 遍历逻辑
+// 2. 在遍历过程中收集信息或进行转换
+// 3. 以类型安全的方式处理不同类型的 AST 节点
+//
+// ## 示例用法：
+//
+// ```ignore
+// use ast::ast_visitor::{SExpressionVisitor, visit_ast, count_ast_nodes};
+// use rustc_span::SourceMap;
+//
+// // 使用 S-表达式 visitor
+// let mut visitor = SExpressionVisitor;
+// let s_expr = visit_ast(&mut visitor, &ast, root_index, &source_map);
+// println!("AST as S-expression: {}", s_expr);
+//
+// // 统计节点数量
+// let node_count = count_ast_nodes(&ast, root_index, &source_map);
+// println!("Total nodes: {}", node_count);
+// ```
+//
+// ## 自定义 Visitor 示例：
+//
+// ```ignore
+// struct MyCustomVisitor {
+//     depth: usize,
+// }
+//
+// impl AstVisitor for MyCustomVisitor {
+//     type Output = ();
+//
+//     fn visit_node(&mut self, ast: &Ast, node_index: NodeIndex, source_map: &SourceMap) -> Self::Output {
+//         if node_index == 0 {
+//             return;
+//         }
+//
+//         // 自定义逻辑：打印节点信息
+//         let kind = ast.get_node_kind(node_index).unwrap();
+//         println!("{}{:?}", "  ".repeat(self.depth), kind);
+//
+//         // 增加深度并继续遍历
+//         self.depth += 1;
+//         self.default_visit_node(ast, node_index, source_map);
+//         self.depth -= 1;
+//     }
+//
+//     // 实现其他必需的方法...
+//     fn visit_no_child(&mut self, _ast: &Ast, _node_index: NodeIndex, _kind: NodeKind, _source_map: &SourceMap) -> Self::Output {
+//         // 叶子节点处理
+//     }
+//
+//     // ... 其他方法的实现
+// }
+// ```

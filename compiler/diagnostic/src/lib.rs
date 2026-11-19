@@ -1,5 +1,3 @@
-pub mod emitter;
-
 use ariadne::{Color, ColorGenerator, Label, Report, ReportKind, Source};
 use rustc_span::{FileNameDisplayPreference, SourceMap, Span};
 use std::{
@@ -39,6 +37,15 @@ impl Level {
             Level::Warning => Color::Yellow,
             Level::Note => Color::Blue,
             Level::Help => Color::Cyan,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Level::Error => "error",
+            Level::Warning => "warning",
+            Level::Note => "note",
+            Level::Help => "help",
         }
     }
 }
@@ -433,47 +440,6 @@ impl<'a> fmt::Debug for DiagnosticContext<'a> {
             )
             .finish()
     }
-}
-
-/// Convenience macros for creating diagnostics
-#[macro_export]
-macro_rules! diag_error {
-    ($ctx:expr, $msg:expr) => {
-        $ctx.error($msg.to_string())
-    };
-    ($ctx:expr, $msg:expr, $($arg:tt)*) => {
-        $ctx.error(format!($msg, $($arg)*))
-    };
-}
-
-#[macro_export]
-macro_rules! diag_warning {
-    ($ctx:expr, $msg:expr) => {
-        $ctx.warning($msg.to_string())
-    };
-    ($ctx:expr, $msg:expr, $($arg:tt)*) => {
-        $ctx.warning(format!($msg, $($arg)*))
-    };
-}
-
-#[macro_export]
-macro_rules! diag_note {
-    ($ctx:expr, $msg:expr) => {
-        $ctx.note($msg.to_string())
-    };
-    ($ctx:expr, $msg:expr, $($arg:tt)*) => {
-        $ctx.note(format!($msg, $($arg)*))
-    };
-}
-
-#[macro_export]
-macro_rules! diag_help {
-    ($ctx:expr, $msg:expr) => {
-        $ctx.help($msg.to_string())
-    };
-    ($ctx:expr, $msg:expr, $($arg:tt)*) => {
-        $ctx.help(format!($msg, $($arg)*))
-    };
 }
 
 #[cfg(test)]

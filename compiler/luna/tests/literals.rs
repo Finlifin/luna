@@ -1,4 +1,4 @@
-//! Black-box acceptance for development/runs/002-literal-foundations/contract.md.
+//! Black-box acceptance tests for Flurry literal parsing, lowering, and representation.
 //! Source semantics come from docs/basics/literals.md and docs/grammar/{syntax,index.md}.
 //! These fixtures require neither a standard library nor literal-conversion elaboration.
 

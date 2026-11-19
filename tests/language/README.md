@@ -5,7 +5,7 @@ Run the 26 source tests (20 ordinary tests and 6 template instances) with explic
 ```sh
 python3 -B development/check.py --timeout 240 -- run -p luna -- \
   tests/language/main.fl --test \
-  --copy-protocol input::Duplicate --drop-protocol input::Retire
+  --copy-protocol input.Duplicate --drop-protocol input.Retire
 ```
 
 Add `--test-filter generic` to run the two generic-call tests only.

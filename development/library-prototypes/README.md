@@ -8,7 +8,6 @@ even when the user only needed builtin iteration or arithmetic.
 | Draft | Missing work before reintroduction |
 | --- | --- |
 | builtin/option_unwrap.fl, builtin/result_unwrap.fl | Define and implement panic/control-transfer behavior, including resource cleanup. Total optional/error-result operations remain in builtin. |
-| std/collections.fl | Real allocation/storage and resource contracts, language optional/error semantics, and source Iterator integration. The legacy intrinsic names and Some/None forms are not implementations. |
 
 The public `println` uses a comptime format string. At each call,
 `std.fmt.Parse(format)` supplies the variadic domain and every field must

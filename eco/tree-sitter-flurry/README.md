@@ -18,7 +18,7 @@ Tree-sitter grammar and editor queries for the Flurry programming language.
 
 - `grammar.js` — Tree-sitter grammar specification.
 - `src/scanner.c` — Zero-state C external scanner for nested `{- -}` comments, whitespace-sensitive operators, `'view` / char / quote disambiguation, string interpolation boundaries, and raw blocks.
-- `src/parser.c`, `src/grammar.json`, `src/node-types.json` — Generated parser artifacts (`tree-sitter generate`).
+- `src/parser.c`, `src/grammar.json`, `src/node-types.json`, `src/tree_sitter/` — Generated parser artifacts (`tree-sitter generate`), excluded from git tracking.
 - `queries/highlights.scm` — Syntax highlighting captures.
 - `queries/locals.scm` — Lexical scope, local definitions, and reference captures.
 - `queries/indents.scm` — Indentation queries.
