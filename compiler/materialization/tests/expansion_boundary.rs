@@ -622,6 +622,191 @@ fn graph_session_retains_phase_evidence_but_rebuilds_outputs_and_recovers() {
     assert!(changed.to_string().contains("(phase pending)"));
 }
 
+fn retained_template() -> (n::Package, iir::InstanceKey) {
+    let (mut package, root) = fixture();
+    let function = &mut package.functions[0];
+    function.signature = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: nir::Sort::Type,
+            ty: Term::Primitive(Primitive::Type),
+        }],
+        result: Box::new(Term::Primitive(Primitive::Str)),
+    };
+    function.parameters.push(n::LocalId { owner: 1, index: 0 });
+    function.body.ty = Term::Primitive(Primitive::Str);
+    function.body.kind = n::ExprKind::Literal(n::Literal::String("hello".into()));
+    (package, root)
+}
+
+#[test]
+fn retained_code_inspects_annotations_without_copying_literal_storage() {
+    let (mut package, root) = retained_template();
+    let body = &mut package.functions[0].body;
+    body.kind = n::ExprKind::Literal(n::Literal::String("x".repeat(200_000)));
+    for _ in 0..200 {
+        let inner = std::mem::replace(&mut body.kind, n::ExprKind::Unit);
+        body.kind = n::ExprKind::Block {
+            statements: vec![],
+            result: Some(Box::new(n::Expr {
+                source: body.source,
+                ty: body.ty.clone(),
+                kind: inner,
+            })),
+        };
+    }
+    let inspect = |steps| {
+        materialization::dispatch_instances_for_invocation(
+            &package,
+            std::slice::from_ref(&root),
+            Budget {
+                steps,
+                ..Default::default()
+            },
+        )
+    };
+    assert!(inspect(100).is_err());
+    assert!(inspect(5000).unwrap().is_empty());
+    let failure = dispatch_instances_for_roots(&package, &[root], Budget::default()).unwrap_err();
+    assert!(
+        failure.contains("requires ordinary invocation input staging"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn retained_body_and_suppliers_check_their_ordinary_frame_and_shared_code() {
+    let (mut package, root) = retained_template();
+    let inspect = |package: &n::Package| {
+        materialization::dispatch_instances_for_invocation(
+            package,
+            std::slice::from_ref(&root),
+            Budget::default(),
+        )
+    };
+    let outer = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: nir::Sort::Type,
+    };
+    let boolean = Term::Primitive(Primitive::Bool);
+    let ty = Term::Primitive(Primitive::Type);
+    let source = package.functions[0].body.source;
+    let predicate = |inner| n::Expr {
+        source,
+        ty: boolean.clone(),
+        kind: n::ExprKind::TypeEqual(
+            Box::new(n::Expr {
+                source,
+                ty: ty.clone(),
+                kind: n::ExprKind::TypeValue(inner),
+            }),
+            Box::new(n::Expr {
+                source,
+                ty: ty.clone(),
+                kind: n::ExprKind::TypeValue(boolean.clone()),
+            }),
+        ),
+    };
+    package.functions[0].preconditions.push(predicate(outer));
+    inspect(&package).unwrap();
+
+    let invalid = Term::Bound {
+        depth: 0,
+        index: 1,
+        sort: nir::Sort::Type,
+    };
+    let supplier = n::Expr {
+        source,
+        ty: ty.clone(),
+        kind: n::ExprKind::TypeValue(invalid.clone()),
+    };
+    package.functions[0].defaults.push((0, supplier));
+    let error = inspect(&package).unwrap_err();
+    assert!(error.contains("invalid binder reference 0:1"), "{error}");
+    package.functions[0].defaults.clear();
+
+    let original = package.functions[0].body.clone();
+    let closure = n::Expr {
+        source,
+        ty: Term::Closure {
+            environment: vec![],
+            signature: Box::new(Term::Function {
+                parameters: vec![],
+                result: Box::new(boolean.clone()),
+            }),
+        },
+        kind: n::ExprKind::Closure {
+            parameters: vec![],
+            captures: vec![],
+            body: std::sync::Arc::new(predicate(invalid)),
+        },
+    };
+    package.functions[0].body.kind = n::ExprKind::Block {
+        statements: vec![n::Expr {
+            source,
+            ty: Term::Primitive(Primitive::Void),
+            kind: n::ExprKind::Discard(Box::new(closure)),
+        }],
+        result: Some(Box::new(original.clone())),
+    };
+    let error = inspect(&package).unwrap_err();
+    assert!(error.contains("invalid binder reference 0:1"), "{error}");
+    package.functions[0].body = original;
+    inspect(&package).unwrap();
+
+    // The whole signature introduces its own frame. Validating it as a body
+    // operand would accidentally make this extra outer reference available.
+    let Term::Function { result, .. } = &mut package.functions[0].signature else {
+        unreachable!()
+    };
+    **result = Term::Bound {
+        depth: 1,
+        index: 0,
+        sort: nir::Sort::Type,
+    };
+    let error = inspect(&package).unwrap_err();
+    assert!(error.contains("invalid binder reference 1:0"), "{error}");
+}
+
+#[test]
+fn retained_template_checks_declaration_arguments_in_its_contracts() {
+    let (mut package, mut root) = retained_template();
+    let parameter = id(2);
+    package.functions[0].type_parameters = vec![parameter];
+    let string = Term::Primitive(Primitive::Str);
+    let symbol = |sort| Term::Rigid {
+        declaration: parameter,
+        sort,
+    };
+    let Term::Function { result, .. } = &mut package.functions[0].signature else {
+        unreachable!()
+    };
+    **result = symbol(nir::Sort::Type);
+    package.functions[0].body.ty = symbol(nir::Sort::Type);
+    root.arguments = vec![string.clone()].into();
+    let inspect = |package: &n::Package| {
+        materialization::dispatch_instances_for_invocation(
+            package,
+            std::slice::from_ref(&root),
+            Budget::default(),
+        )
+    };
+    inspect(&package).unwrap();
+    package.functions[0]
+        .requirements
+        .push(n::TypePredicate::Equal(
+            symbol(nir::Sort::ComptimeValue),
+            string.clone(),
+        ));
+    let failure = inspect(&package).unwrap_err();
+    assert!(
+        failure.contains("expected") && failure.contains("got"),
+        "{failure}"
+    );
+    package.functions[0].requirements[0] = n::TypePredicate::Equal(symbol(nir::Sort::Type), string);
+    inspect(&package).unwrap();
+}
+
 #[test]
 fn dispatch_closes_transitive_calls_without_a_source_provider() {
     let (mut package, root) = fixture();

@@ -489,6 +489,26 @@ impl<'a> DeclarationSubstitution<'a> {
         self.parameters.instantiate(signature, &self.arguments, &[])
     }
 
+    /// Project the complete signature outside the ordinary frame it introduces.
+    pub fn instantiate_closed_signature_bounded(
+        &self,
+        signature: &Term,
+        fuel: &mut usize,
+    ) -> Result<Term, crate::type_computations::Error> {
+        self.parameters
+            .instantiate_bounded(signature, &self.arguments, &[], fuel)
+    }
+
+    /// Validate a template's body, defaults and contracts without constructing
+    /// executable syntax. The receiver supplies the ordinary parameter frame.
+    pub fn check_retained_body(
+        &self,
+        function: &crate::program::Function,
+        fuel: &mut usize,
+    ) -> Result<(), crate::type_computations::Error> {
+        crate::copy_budget::check_retained_body(function, self, fuel)
+    }
+
     pub(crate) fn instantiate_requirement(
         &self,
         requirement: &crate::program::TraitRequirement,

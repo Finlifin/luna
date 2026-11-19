@@ -427,15 +427,20 @@ fn charge_node_observed<'a>(
     replacements: Option<&dyn Fn(crate::DeclarationId) -> Option<&'a Term>>,
     observe: &mut dyn FnMut(&Term, u32),
 ) -> Result<(), CopyBudgetExhausted> {
-    walk_node_terms(root, steps, rewrite, |ty, depth, fuel| {
-        crate::type_computations::visit_expansion(
-            ty,
-            fuel,
-            depth,
-            replacements.unwrap_or(&|_| None),
-            observe,
-        )
-    })
+    walk_node_terms(
+        root,
+        steps,
+        if rewrite { Walk::Rewrite } else { Walk::Copy },
+        |ty, depth, fuel| {
+            crate::type_computations::visit_expansion(
+                ty,
+                fuel,
+                depth,
+                replacements.unwrap_or(&|_| None),
+                observe,
+            )
+        },
+    )
 }
 
 /// Inspect every stored term in its original frame before projecting the
@@ -449,7 +454,7 @@ fn capture_slots(
     let mut slots = std::collections::BTreeSet::new();
     let mut steps = *fuel as u64;
     let empty = std::collections::BTreeMap::new();
-    let result = walk_node_terms(root, &mut steps, true, |ty, depth, remaining| {
+    let result = walk_node_terms(root, &mut steps, Walk::Rewrite, |ty, depth, remaining| {
         crate::type_computations::visit_expanded_term_scoped_for_copy(
             ty,
             remaining,
@@ -495,10 +500,44 @@ pub(crate) fn domain_capture_slots(
     capture_slots(Node::Type(value), frames, fuel)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Walk {
+    Copy,
+    Rewrite,
+    Inspect,
+}
+
+/// Check terms that live inside the declaration's ordinary frame. The signature
+/// itself introduces that frame and is projected separately in the closed world.
+pub(crate) fn check_retained_body(
+    function: &n::Function,
+    substitution: &crate::DeclarationSubstitution<'_>,
+    fuel: &mut usize,
+) -> Result<(), crate::type_computations::Error> {
+    let expressions = std::iter::once(&function.body)
+        .chain(&function.preconditions)
+        .chain(&function.postconditions)
+        .chain(function.defaults.iter().map(|(_, value)| value));
+    let mut roots = function
+        .requirements
+        .iter()
+        .map(Node::Predicate)
+        .chain(function.capabilities.iter().map(Node::Requirement))
+        .chain(expressions.map(Node::Expr));
+    let mut steps = *fuel as u64;
+    let checked = roots.try_for_each(|root| {
+        walk_node_terms(root, &mut steps, Walk::Inspect, |ty, _, fuel| {
+            substitution.instantiate_bounded(ty, fuel).map(drop)
+        })
+    });
+    *fuel = steps as usize;
+    checked
+}
+
 fn walk_node_terms<E: From<CopyBudgetExhausted>>(
     root: Node<'_>,
     steps: &mut u64,
-    rewrite: bool,
+    walk: Walk,
     mut term: impl FnMut(&Term, usize, &mut usize) -> Result<(), E>,
 ) -> Result<(), E> {
     fn charge_width(steps: &mut u64, width: usize) -> Result<(), CopyBudgetExhausted> {
@@ -521,16 +560,20 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
     }
     let mut work = vec![(root, 0usize)];
     while let Some((node, depth)) = work.pop() {
-        if depth >= MAX_COPY_DEPTH {
-            return Err(CopyBudgetExhausted::Depth.into());
-        }
+        // Inspection iterates borrowed syntax. Its term consumer bounds each
+        // projected term independently, without cloning the enclosing tree.
+        let term_depth = match walk {
+            Walk::Inspect => 128,
+            _ if depth >= MAX_COPY_DEPTH => return Err(CopyBudgetExhausted::Depth.into()),
+            _ => (MAX_COPY_DEPTH - depth).min(128),
+        };
         if *steps == 0 {
             return Err(CopyBudgetExhausted::Steps.into());
         }
         if let Node::Type(ty) = node {
             let before = usize::try_from(*steps).unwrap_or(usize::MAX);
             let mut fuel = before;
-            let inspected = term(ty, (MAX_COPY_DEPTH - depth).min(128), &mut fuel);
+            let inspected = term(ty, term_depth, &mut fuel);
             *steps -= (before - fuel) as u64;
             inspected?;
             continue;
@@ -677,19 +720,16 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                                 .iter()
                                 .map(|p| (Node::Expr(&p.expression), depth + 1)),
                         );
-                        charge_width(
-                            steps,
-                            arguments
-                                .len()
-                                .saturating_add(order.as_ref().map_or(0, Vec::len))
-                                .saturating_add(bindings.as_ref().map_or(0, Vec::len)),
-                        )?;
+                        charge_width(steps, arguments.len())?;
                         work.extend(
                             arguments
                                 .iter()
                                 .map(|argument| (Node::Argument(argument), depth + 1)),
                         );
-                        0
+                        order
+                            .as_ref()
+                            .map_or(0, Vec::len)
+                            .saturating_add(bindings.as_ref().map_or(0, Vec::len))
                     }
                     K::NormalFormType {
                         arguments, plan, ..
@@ -704,13 +744,13 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                                 .map(|argument| (Node::Argument(argument), depth + 1)),
                         );
                         if let Some(plan) = plan {
-                            charge_width(
-                                steps,
-                                plan.order
-                                    .len()
-                                    .saturating_add(plan.bindings.len())
-                                    .saturating_add(plan.preparations.len()),
-                            )?;
+                            charge_width(steps, plan.preparations.len())?;
+                            if walk != Walk::Inspect {
+                                charge_width(
+                                    steps,
+                                    plan.order.len().saturating_add(plan.bindings.len()),
+                                )?;
+                            }
                             work.extend(
                                 plan.preparations
                                     .iter()
@@ -721,8 +761,10 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                             callee, input_ids, ..
                         } = &expr.kind
                         {
-                            charge_width(steps, input_ids.len())?;
-                            if rewrite {
+                            if walk != Walk::Inspect {
+                                charge_width(steps, input_ids.len())?;
+                            }
+                            if walk != Walk::Copy {
                                 work.push((Node::Expr(callee), depth + 1));
                             }
                         }
@@ -776,7 +818,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         captures,
                         body,
                     } => {
-                        if rewrite {
+                        if walk != Walk::Copy {
                             work.push((Node::Expr(body), depth + 1));
                         }
                         charge_width(steps, captures.len().saturating_mul(2))?;
@@ -822,7 +864,9 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         charge_width(steps, entries.len())?;
                         work.push((Node::Expr(selector), depth + 1));
                         for (alias, _, value) in entries {
-                            charge_width(steps, alias.len())?;
+                            if walk != Walk::Inspect {
+                                charge_width(steps, alias.len())?;
+                            }
                             if let Some(value) = value {
                                 work.push((Node::Type(value), depth + 1));
                             }
@@ -834,9 +878,12 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         0
                     }
                     K::Object { names, fields } => {
-                        charge_width(steps, names.len().saturating_add(fields.len()))?;
-                        for name in names.iter().flatten() {
-                            charge_width(steps, name.len())?;
+                        charge_width(steps, fields.len())?;
+                        if walk != Walk::Inspect {
+                            charge_width(steps, names.len())?;
+                            for name in names.iter().flatten() {
+                                charge_width(steps, name.len())?;
+                            }
                         }
                         work.extend(fields.iter().map(|field| (Node::Expr(field), depth + 1)));
                         0
@@ -849,14 +896,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         order,
                         ..
                     } => {
-                        charge_width(
-                            steps,
-                            arguments
-                                .len()
-                                .saturating_add(preparations.len())
-                                .saturating_add(bindings.as_ref().map_or(0, Vec::len))
-                                .saturating_add(order.as_ref().map_or(0, Vec::len)),
-                        )?;
+                        charge_width(steps, arguments.len().saturating_add(preparations.len()))?;
                         work.extend(arguments.iter().map(|e| (Node::Argument(e), depth + 1)));
                         work.extend(
                             preparations
@@ -866,7 +906,10 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         if let Some(body) = body {
                             work.push((Node::Expr(body), depth + 1));
                         }
-                        0
+                        order
+                            .as_ref()
+                            .map_or(0, Vec::len)
+                            .saturating_add(bindings.as_ref().map_or(0, Vec::len))
                     }
                     K::FunctionType {
                         parameters,
@@ -874,9 +917,8 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         ..
                     } => {
                         charge_width(steps, parameters.len())?;
-                        charge_width(steps, comptime_parameters.len())?;
                         work.extend(parameters.iter().map(|e| (Node::Expr(e), depth + 1)));
-                        0
+                        comptime_parameters.len()
                     }
                     K::TypeList(items)
                     | K::Intrinsic { inputs: items, .. }
@@ -1218,11 +1260,15 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         bindings.len()
                     }
                     P::AnonymousRecord { names, fields } => {
-                        charge_width(steps, fields.len().saturating_add(names.len()))?;
+                        charge_width(steps, fields.len())?;
+                        if walk != Walk::Inspect {
+                            charge_width(steps, names.len())?;
+                            for name in names {
+                                charge_width(steps, name.len())?;
+                            }
+                        }
                         work.extend(fields.iter().map(|value| (Node::Pattern(value), depth + 1)));
-                        names
-                            .iter()
-                            .fold(0usize, |size, name| size.saturating_add(name.len()))
+                        0
                     }
                     P::NominalType { fields, .. }
                     | P::Record { fields, .. }
@@ -1266,9 +1312,9 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                 0
             }
         };
-        *steps = steps
-            .checked_sub(size as u64)
-            .ok_or_else(|| CopyBudgetExhausted::Steps)?;
+        if walk != Walk::Inspect {
+            charge_width(steps, size)?;
+        }
         if work.len() as u64 > *steps {
             return Err(CopyBudgetExhausted::Steps.into());
         }

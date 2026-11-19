@@ -21,6 +21,7 @@ mod staged;
 mod template_factories;
 use crate::ptc::{Budget, Context};
 use type_resolution::{associated, capabilities, ptc};
+mod dispatch_function;
 mod expansion;
 pub use expansion::Expansion;
 use nir::program::{self as n, ExprKind as K, Pattern as P};
@@ -872,23 +873,26 @@ impl Builder<'_> {
         if !self.functions.insert((id, arguments.clone())) {
             return Ok(());
         }
+        if self.instances.is_none() {
+            let function = self
+                .world
+                .function_declaration(id)
+                .ok_or("missing dispatch function")?;
+            return self.dispatch_function(function, &arguments);
+        }
         let f = self
             .world
             .function_declaration(id)
             .or_else(|| self.generated_functions.get(&id))
             .ok_or("missing dispatch function")?;
-        if self.instances.is_some() && f.phase == n::FunctionPhase::NormalForm {
+        if f.phase == n::FunctionPhase::NormalForm {
             return Err(
                 "normal-form heads are type identities, not executable IIR functions".into(),
             );
         }
-        if self.instances.is_some() {
-            for argument in &arguments {
-                iir::completed_type(argument, &self.runtime_bindings, &mut self.fuel)?;
-                // An instance key retains its arguments even when projection
-                // resolution erases their occurrence from the final signature.
-                self.queue.push_back(Task::Type(argument.clone()));
-            }
+        for argument in &arguments {
+            iir::completed_type(argument, &self.runtime_bindings, &mut self.fuel)?;
+            self.queue.push_back(Task::Type(argument.clone()));
         }
         // Already-staged functions only need a bounded copy; ordinary templates
         // own their complete expansion preflight inside declaration substitution.
@@ -898,75 +902,40 @@ impl Builder<'_> {
                 .map_err(|reason| format!("dispatch template copy budget exhausted: {reason:?}"))?;
             staged.clone()
         } else {
-            if self.instances.is_some()
-                && f.phase == n::FunctionPhase::Runtime
+            if f.phase == n::FunctionPhase::Runtime
                 && matches!(f.signature.callable_signature(),Term::Function {parameters,..} if parameters.iter().any(|p|p.sort!=nir::Sort::Runtime))
             {
                 return Err("staged runtime function requires a specialized direct call".into());
             }
-            if self.instances.is_some() {
-                self.world
-                    .instantiate_function(f, &arguments, &mut self.fuel)?
-            } else {
-                let domains = self
-                    .world
-                    .input_domains(&f.type_parameters, &mut self.fuel)?;
-                f.instantiate_declaration_parameters(&domains, &arguments, &mut self.fuel)
-                    .map_err(|e| e.to_string())?
-            }
+            self.world
+                .instantiate_function(f, &arguments, &mut self.fuel)?
         };
-        if self.instances.is_some() {
-            if function.phase == n::FunctionPhase::Comptime
-                && matches!(function.signature.callable_signature(), Term::Function { parameters, .. }
-                    if parameters.iter().any(|parameter| parameter.sort != nir::Sort::Runtime))
-            {
+        if function.phase == n::FunctionPhase::Comptime
+            && matches!(function.signature.callable_signature(), Term::Function { parameters, .. }
+                if parameters.iter().any(|parameter| parameter.sort != nir::Sort::Runtime))
+        {
+            return Err(format!(
+                "comptime function `{}` requires invocation input staging before IIR materialization",
+                function.name
+            ));
+        }
+        function.signature = self.normalized_type(&function.signature)?;
+        iir::completed_type(&function.signature, &self.runtime_bindings, &mut self.fuel)?;
+        self.queue.push_back(Task::Type(function.signature.clone()));
+        for requirement in &mut function.requirements {
+            *requirement = self.normalized_predicate(requirement, 0)?;
+            self.tick(0)?;
+            if !matches!(
+                self.prove_requirement(requirement)?,
+                crate::ptc::Outcome::Entailed(_)
+            ) {
                 return Err(format!(
-                    "comptime function `{}` requires invocation input staging before IIR materialization",
-                    function.name
+                    "IIR function type requirement is not established: {requirement}"
                 ));
             }
-            function.signature = self.normalized_type(&function.signature)?;
-            iir::completed_type(&function.signature, &self.runtime_bindings, &mut self.fuel)?;
         }
-        self.queue.push_back(Task::Type(function.signature.clone()));
-        if self.instances.is_none()
-            && matches!(function.signature.callable_signature(),Term::Function {parameters,..}
-                if parameters.iter().any(|parameter|parameter.sort!=nir::Sort::Runtime))
-        {
-            if !self.retain_templates {
-                return Err(
-                    "requested dispatch function still requires ordinary invocation input staging"
-                        .into(),
-                );
-            }
-            // An ordinary staged input is an invocation binder, not a closed
-            // dispatch identity. Keep the template and its contracts in NIR;
-            // input staging checks/materializes them after binding arguments.
-            return Ok(());
-        }
-        if self.instances.is_none() {
-            for requirement in &function.requirements {
-                self.predicate_dependencies(requirement, 0)?;
-            }
-        }
-        if self.instances.is_some() {
-            for requirement in &mut function.requirements {
-                *requirement = self.normalized_predicate(requirement, 0)?;
-                self.tick(0)?;
-                if !matches!(
-                    self.prove_requirement(requirement)?,
-                    crate::ptc::Outcome::Entailed(_)
-                ) {
-                    return Err(format!(
-                        "IIR function type requirement is not established: {requirement}"
-                    ));
-                }
-            }
-        }
-        if self.instances.is_some() {
-            for capability in &mut function.capabilities {
-                *capability = self.normalized_capability(capability)?;
-            }
+        for capability in &mut function.capabilities {
+            *capability = self.normalized_capability(capability)?;
         }
         for capability in &function.capabilities {
             self.queue.push_back(Task::Interface(
@@ -974,64 +943,60 @@ impl Builder<'_> {
                 capability.subject.clone(),
             ));
         }
-        if self.instances.is_some() {
-            iir::staging::forward_closed_locals_with_layouts(
-                self.package,
-                &mut function,
-                &mut self.fuel,
-            )?;
-            self.normalize_expression(&mut function.body)?;
-            for expression in function
-                .interface
-                .preconditions
-                .iter_mut()
-                .chain(&mut function.interface.postconditions)
-                .chain(
-                    function
-                        .interface
-                        .defaults
-                        .iter_mut()
-                        .map(|(_, expression)| expression),
-                )
-            {
-                self.normalize_expression(expression)?;
-            }
+        iir::staging::forward_closed_locals_with_layouts(
+            self.package,
+            &mut function,
+            &mut self.fuel,
+        )?;
+        self.normalize_expression(&mut function.body)?;
+        for expression in function
+            .interface
+            .preconditions
+            .iter_mut()
+            .chain(&mut function.interface.postconditions)
+            .chain(
+                function
+                    .interface
+                    .defaults
+                    .iter_mut()
+                    .map(|(_, expression)| expression),
+            )
+        {
+            self.normalize_expression(expression)?;
         }
         function.type_parameters.clear();
-        if self.instances.is_some() {
-            // Interface and body predicates may substitute the same staged
-            // input expression. Each predicate executes at a distinct boundary,
-            // even when those copies retain the same original source range.
-            for predicate in function
-                .interface
-                .preconditions
-                .iter_mut()
-                .chain(&mut function.interface.postconditions)
-            {
-                nir::error_results::specialize::anchor_expression_copy(
-                    predicate,
-                    function.body.source,
-                    &mut self.quote_sources,
-                    &mut self.fuel,
-                )?;
-            }
-            for expression in std::iter::once(&mut function.body)
-                .chain(&mut function.interface.preconditions)
-                .chain(&mut function.interface.postconditions)
-                .chain(
-                    function
-                        .interface
-                        .defaults
-                        .iter_mut()
-                        .map(|(_, expression)| expression),
-                )
-            {
-                nir::error_results::specialize::anchor_completed_projections(
-                    expression,
-                    &mut self.quote_sources,
-                    &mut self.fuel,
-                )?;
-            }
+        // Interface and body predicates may substitute the same staged
+        // input expression. Each predicate executes at a distinct boundary,
+        // even when those copies retain the same original source range.
+        for predicate in function
+            .interface
+            .preconditions
+            .iter_mut()
+            .chain(&mut function.interface.postconditions)
+        {
+            nir::error_results::specialize::anchor_expression_copy(
+                predicate,
+                function.body.source,
+                &mut self.quote_sources,
+                &mut self.fuel,
+            )?;
+        }
+        for expression in std::iter::once(&mut function.body)
+            .chain(&mut function.interface.preconditions)
+            .chain(&mut function.interface.postconditions)
+            .chain(
+                function
+                    .interface
+                    .defaults
+                    .iter_mut()
+                    .map(|(_, expression)| expression),
+            )
+        {
+            nir::error_results::specialize::anchor_completed_projections(
+                expression,
+                &mut self.quote_sources,
+                &mut self.fuel,
+            )?;
         }
         let comptime = function.phase == n::FunctionPhase::Comptime;
         self.expr(&function.body, 0, comptime)?;
@@ -1044,15 +1009,16 @@ impl Builder<'_> {
         {
             self.expr(expression, 0, comptime)?;
         }
-        if let Some(instances) = &mut self.instances {
-            instances.push(iir::FunctionInstance {
+        self.instances
+            .as_mut()
+            .expect("IIR function collection")
+            .push(iir::FunctionInstance {
                 key: iir::InstanceKey {
                     declaration: id,
                     arguments: arguments.into(),
                 },
                 function,
             });
-        }
         Ok(())
     }
 

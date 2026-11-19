@@ -160,8 +160,14 @@ where T, flag: bool
 用例连续传入 `u8` 和 `bool`，各检查 512 对默认值与依赖参数。NIR 的 storage
 检查在进入 callable 时核验并索引整个 sort 环境，域检查在同一作用域内按 Type 和
 阶段查询。不同的槽位顺序即使出现在同一包里也会得到不同的缓存键。
-768 对参数的纯声明已通过默认配置。带两次调用的版本在独立的整包 dispatch
-预算为 150000 时返回 `true`，默认的 100000 步仍耗尽。
+源码 dispatch 查询为每个声明建立一次受检替换，投影签名。在仍需普通 comptime
+输入时，查询借用模板，逐一检查函数体、默认值、契约以及闭包内嵌的类型。
+调用选定实参后才可为这样的入口生成可执行 IIR。对可直接遍历的函数，
+查询分别投影各项契约及表达式以发现传递依赖。实际生成 IIR 仍须特化完整函数。
+512 对参数的两次调用在默认 dispatch 预算下返回 `true`。扩大到 768 对时，
+默认 100000 步在值准入阶段耗尽，150000 步返回 `true`。
+[源码 dispatch](../compiler/materialization/src/dispatch_function.rs) ·
+[模板作用域回归](../compiler/materialization/tests/expansion_boundary.rs)
 
 把 1000 个固定实参直接写在无子句入口中，前端也能完成实参检查。当前整包
 dispatch 从这样的入口遍历调用体及 sysroot 的声明，超过其默认 100000 步；
