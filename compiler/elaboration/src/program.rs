@@ -5081,7 +5081,10 @@ impl Checker<'_, '_> {
         };
         let prepared_signature = dependent_inputs::CallSignature::of(&prepared_signature)
             .expect("instantiated generic function signature");
-        let mut prepared = self.prepare_call_types(
+        let dependent_inputs::PreparedInputs {
+            producers: mut prepared,
+            binding: call_binding,
+        } = self.prepare_call_types(
             prepared_signature,
             &preview,
             Some(owner),
@@ -5092,8 +5095,6 @@ impl Checker<'_, '_> {
             expr,
             seed,
         )?;
-        let call_binding =
-            self.prepare_call_binding(prepared_signature.term, &prepared.symbols, expr.span)?;
         // Ordinary Type inputs are values in the function frame, whereas the
         // clause parameters below become inference variables in an outer frame.
         let inference_signature = Term::Function {
@@ -5472,11 +5473,16 @@ impl Checker<'_, '_> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.check_type_application(owner, &full_arguments, expr.span)?;
-        self.check_ordinary_capabilities(owner, &full_arguments, &prepared.symbols, expr.span)?;
+        self.check_ordinary_capabilities(
+            owner,
+            &full_arguments,
+            call_binding.observations(),
+            expr.span,
+        )?;
         self.check_ordinary_type_requirements(
             owner,
             &full_arguments,
-            &prepared.symbols,
+            call_binding.observations(),
             expr.span,
         )?;
         // Elaboration may visit delayed inputs later, but runtime evaluation

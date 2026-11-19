@@ -10,7 +10,9 @@ use std::fmt;
 use std::sync::Arc;
 
 mod input_binding;
-pub use input_binding::{FunctionCallBinding, FunctionInputBinding, FunctionInputBuilder};
+pub use input_binding::{
+    FunctionCallBinding, FunctionCallPreparation, FunctionInputBinding, FunctionInputBuilder,
+};
 
 /// Semantic domain of an argument, not a source-language type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1551,6 +1553,8 @@ pub enum TypeError {
     ContextualCodeNotCallable,
     WrongSort { expected: Sort, actual: Sort },
     MissingArgument(usize),
+    DuplicateCallInput(usize),
+    UnpreparedCallInput(usize),
     ArgumentCount { expected: usize, actual: usize },
     InvalidHole(usize),
     InvalidBound { depth: u32, index: usize },
@@ -1582,6 +1586,8 @@ impl fmt::Display for TypeError {
                 f.write_str("list concatenation requires list operands")
             }
             Self::WrongSort { expected, actual } => write!(f, "expected {expected}, got {actual}"),
+            Self::DuplicateCallInput(i) => write!(f, "call input {i} was requested twice"),
+            Self::UnpreparedCallInput(i) => write!(f, "call input {i} has no pending domain"),
             Self::MissingArgument(i) => write!(f, "missing substitution argument {i}"),
             Self::ArgumentCount { expected, actual } => {
                 write!(f, "expected {expected} arguments, got {actual}")

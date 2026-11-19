@@ -128,8 +128,10 @@ pub(in crate::program) struct Frame<'b, 'h> {
     owner: Option<OwnerId>,
     routes: &'b [arguments::RoutedArgument<'h>],
     source: &'b Expr<'h>,
-    prepared: PreparedInputs,
+    prepared: InputProducers,
+    call: Option<nir::FunctionCallPreparation<'b>>,
     by_slot: BTreeMap<usize, usize>,
+    default_slots: Option<BTreeMap<n::LocalId, usize>>,
     progress: Progress,
     phase: Phase,
 }
@@ -183,7 +185,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         routes: &'b [arguments::RoutedArgument<'h>],
         offset: usize,
         source: &'b Expr<'h>,
-        prepared: PreparedInputs,
+        prepared: InputProducers,
     ) -> Result<Self, Error> {
         spend(&mut checker.required_steps, demanded.len(), source.span)?;
         let by_slot = if demanded.is_empty() {
@@ -196,8 +198,12 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 .map(|(index, input)| (offset + input.parameter, index))
                 .collect()
         };
+        let call = nir::FunctionCallPreparation::new(signature.term, checker.call_input_frames())
+            .map_err(|failure| error(source.span, failure.to_string()))?;
         Ok(Self {
+            call: Some(call),
             by_slot,
+            default_slots: None,
             signature,
             callee,
             owner,
@@ -249,11 +255,25 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         let progress = &mut self.progress;
         let Some(task) = progress.next(&mut checker.required_steps, source.span)? else {
             self.phase = Phase::Complete;
-            return Ok(Poll::Complete(std::mem::take(prepared)));
+            return Ok(Poll::Complete(PreparedInputs {
+                producers: std::mem::take(prepared),
+                binding: self
+                    .call
+                    .take()
+                    .expect("active input frame")
+                    .finish()
+                    .map_err(|e| error(source.span, e.to_string()))?,
+            }));
         };
+        let call = self.call.as_mut().expect("active input frame");
         match task {
             Task::Enter(slot) => {
-                if prepared.symbols.get(slot).is_some_and(Option::is_some) {
+                if call
+                    .binding()
+                    .observations()
+                    .get(slot)
+                    .is_some_and(Option::is_some)
+                {
                     return Ok(Poll::Continue);
                 }
                 let parameter = parameters
@@ -275,15 +295,12 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 )?;
             }
             Task::Check(slot) => {
-                let binding = checker.prepare_call_binding(
-                    self.signature.term,
-                    &prepared.symbols,
-                    source.span,
-                )?;
-                let expected = binding
-                    .substitute(&parameters[slot].ty)
-                    .map_err(|e| error(source.span, e.to_string()))?;
-                let expected = checker.callable_input_view(&expected, source.span)?;
+                let expected = call
+                    .prepare(slot, |ty| checker.callable_input_view(ty, source.span))
+                    .map_err(|failure| match failure {
+                        nir::CallError::Contract { error, .. } => error,
+                        other => error(source.span, other.to_string()),
+                    })?;
                 let route = self.by_slot.get(&slot).map(|&index| &routes[index]);
                 // Completion returns the producer to its declaration slot.
                 // A failed observation terminates this preparation.
@@ -311,20 +328,27 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                         Some(value) => value,
                         None => checker.call_default(owner, slot, callee, source.span)?,
                     };
-                    let item = checker.package.item(owner).unwrap();
-                    let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
-                        return Err(error(
-                            source.span,
-                            "dependent default needs function parameter metadata",
-                        ));
+                    let ids = match &mut self.default_slots {
+                        Some(slots) => slots,
+                        vacant @ None => {
+                            let item = checker.package.item(owner).unwrap();
+                            let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind
+                            else {
+                                return Err(error(
+                                    source.span,
+                                    "dependent default needs function parameter metadata",
+                                ));
+                            };
+                            spend(&mut checker.required_steps, sig.params.len(), source.span)?;
+                            vacant.insert(
+                                sig.params
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(slot, parameter)| (local(parameter.hir_id), slot))
+                                    .collect(),
+                            )
+                        }
                     };
-                    spend(&mut checker.required_steps, sig.params.len(), source.span)?;
-                    let ids: BTreeMap<_, _> = sig
-                        .params
-                        .iter()
-                        .enumerate()
-                        .map(|(slot, parameter)| (local(parameter.hir_id), slot))
-                        .collect();
                     let before = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);
                     let mut fuel = before;
                     let references = nir::free_bindings::collect(&value, &mut fuel);
@@ -362,6 +386,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     value,
                     BTreeMap::new(),
                     prepared,
+                    call.binding().observations(),
                 )?;
                 return self.resolved(slot, resolution);
             }
@@ -370,19 +395,21 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 mut value,
                 references,
             } => {
-                let binding = checker.prepare_call_binding(
-                    self.signature.term,
-                    &prepared.symbols,
-                    source.span,
-                )?;
                 value
-                    .rewrite_types(&mut |ty| binding.substitute(ty))
+                    .rewrite_types(&mut |ty| call.binding().substitute(ty))
                     .map_err(|e| error(source.span, e.to_string()))?;
                 value.rewrite_types(&mut |term| {
                     checker.callable_argument_term_view(term, source.span)
                 })?;
                 let resolution = checker.resolve_type_dependency(
-                    owner, callee, source, false, value, references, prepared,
+                    owner,
+                    callee,
+                    source,
+                    false,
+                    value,
+                    references,
+                    prepared,
+                    call.binding().observations(),
                 )?;
                 return self.resolved(slot, resolution);
             }
@@ -413,6 +440,11 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             value,
             BTreeMap::new(),
             &self.prepared,
+            self.call
+                .as_ref()
+                .expect("active input frame")
+                .binding()
+                .observations(),
         )?;
         self.resolved(slot, resolution)
     }
@@ -431,9 +463,14 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
     }
 
     fn deliver(&mut self, slot: usize, value: n::Expr, identity: Term) -> Result<(), Error> {
-        self.progress.complete(slot, self.source.span)?;
+        let span = self.source.span;
+        self.call
+            .as_mut()
+            .expect("active input frame")
+            .supply(slot, identity)
+            .map_err(|failure| error(span, failure.to_string()))?;
+        self.progress.complete(slot, span)?;
         self.prepared.values[slot] = Some(value);
-        self.prepared.symbols[slot] = Some(identity);
         self.phase = Phase::Ready;
         Ok(())
     }
@@ -489,20 +526,20 @@ impl std::fmt::Display for Frame<'_, '_> {
             Phase::Failed => f.write_str("failed")?,
             Phase::Complete => f.write_str("complete")?,
         }
-        write!(f, ") {} {})", self.progress, self.prepared)
+        write!(f, ") {} {}", self.progress, self.prepared)?;
+        if let Some(call) = &self.call {
+            write!(f, " {call}")?;
+        }
+        f.write_str(")")
     }
 }
 
-impl std::fmt::Display for PreparedInputs {
+impl std::fmt::Display for InputProducers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(inputs")?;
         for (slot, value) in self.values.iter().enumerate() {
             write!(f, " (slot {slot} (producer")?;
             if let Some(value) = value {
-                write!(f, " {value}")?;
-            }
-            f.write_str(") (identity")?;
-            if let Some(value) = &self.symbols[slot] {
                 write!(f, " {value}")?;
             }
             f.write_str(") (default")?;
@@ -524,7 +561,8 @@ impl Checker<'_, '_> {
         has_source: bool,
         value: n::Expr,
         references: BTreeMap<n::LocalId, usize>,
-        prepared: &PreparedInputs,
+        prepared: &InputProducers,
+        symbols: &[Option<Term>],
     ) -> Result<Resolution, Error> {
         let identity = match &value.kind {
             K::TypeValue(ty) => Some(copy_evidence(ty, &mut self.required_steps, source.span)?),
@@ -534,7 +572,7 @@ impl Checker<'_, '_> {
                     let Some(slot) = references.get(&id) else {
                         return Ok(None);
                     };
-                    let symbol = prepared.symbols[*slot].as_ref().ok_or_else(|| {
+                    let symbol = symbols[*slot].as_ref().ok_or_else(|| {
                         error(source.span, "dependent default identity is incomplete")
                     })?;
                     Ok(Some(std::sync::Arc::new(copy_evidence(
@@ -596,7 +634,7 @@ impl Checker<'_, '_> {
                 ));
             }
         }
-        self.prepare_unobserved_call_input(callee, source, value, &references, prepared)
+        self.prepare_unobserved_call_input(callee, source, value, &references, prepared, symbols)
     }
 
     fn prepare_unobserved_call_input(
@@ -605,7 +643,8 @@ impl Checker<'_, '_> {
         source: &Expr<'_>,
         value: n::Expr,
         references: &BTreeMap<n::LocalId, usize>,
-        prepared: &PreparedInputs,
+        prepared: &InputProducers,
+        symbols: &[Option<Term>],
     ) -> Result<Resolution, Error> {
         let callable = self.structural_type(&callee.ty, source.span)?;
         let callable = self.callable_input_view(&callable, source.span)?;
@@ -626,7 +665,7 @@ impl Checker<'_, '_> {
             let producer = prepared.values[slot]
                 .as_ref()
                 .ok_or_else(|| error(source.span, "dependent default producer is incomplete"))?;
-            let symbol = prepared.symbols[slot]
+            let symbol = symbols[slot]
                 .as_ref()
                 .ok_or_else(|| error(source.span, "dependent default identity is incomplete"))?;
             bindings.push((
@@ -666,20 +705,33 @@ mod tests {
             ty: p(P::Str),
             kind: K::Literal(n::Literal::String("retained\"\n".into())),
         };
-        let mut prepared = PreparedInputs::new(2);
+        let mut prepared = InputProducers::new(2);
         prepared.values[0] = Some(value.clone());
-        prepared.symbols[0] = Some(Term::String("retained\"\n".into()));
         prepared.defaults[1] = Some(value.clone());
         let signature = Term::Function {
-            parameters: vec![],
+            parameters: vec![
+                Parameter {
+                    sort: Sort::ComptimeValue,
+                    ty: p(P::Str)
+                };
+                2
+            ],
             result: Box::new(p(P::Void)),
         };
+        let mut call = nir::FunctionCallPreparation::new(&signature, vec![]).unwrap();
+        call.prepare(0, |domain| Ok::<_, nir::TypeError>(domain.clone()))
+            .unwrap();
+        call.supply(0, Term::String("retained\"\n".into())).unwrap();
+        call.prepare(1, |domain| Ok::<_, nir::TypeError>(domain.clone()))
+            .unwrap();
         let mut frame = Frame {
+            call: Some(call),
             signature: CallSignature::of(&signature).unwrap(),
             callee: &value,
             owner: None,
             routes: &[],
             by_slot: BTreeMap::new(),
+            default_slots: None,
             source: &source_expr,
             prepared,
             progress: Progress::new(1),

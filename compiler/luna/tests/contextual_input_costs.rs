@@ -189,3 +189,29 @@ fn wide_call_operands_keep_the_caller_and_default_provider_scopes() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn wide_ordinary_defaults_keep_the_domain_of_each_call() {
+    const WIDTH: usize = 384;
+    let parameters = (0..WIDTH)
+        .map(|slot| format!("comptime .T{slot}: Type = root, v{slot}: T{slot}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let arguments = |prefix, last| {
+        std::iter::repeat_n(prefix, WIDTH - 1)
+            .chain(std::iter::once(last))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let last = WIDTH - 1;
+    let bytes = arguments("0", "255");
+    let flags = arguments("false", "true");
+    let source = format!(
+        "comptime fn pick(comptime root: Type, {parameters}) -> T{last} {{ v{last} }}
+         comptime fn check() -> bool {{ pick(u8, {bytes}) == 255 and pick(bool, {flags}) }}"
+    );
+    assert_eq!(
+        sysroot::invoke(&source, "check").unwrap(),
+        Value::Bool(true)
+    );
+}

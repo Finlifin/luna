@@ -27,20 +27,23 @@ impl<'a> CallSignature<'a> {
 }
 
 #[derive(Default)]
-pub(super) struct PreparedInputs {
+pub(super) struct InputProducers {
     pub values: Vec<Option<n::Expr>>,
-    pub symbols: Vec<Option<Term>>,
     pub defaults: Vec<Option<n::Expr>>,
 }
 
-impl PreparedInputs {
+impl InputProducers {
     pub fn new(count: usize) -> Self {
         Self {
             values: vec![None; count],
-            symbols: vec![None; count],
             defaults: vec![None; count],
         }
     }
+}
+
+pub(super) struct PreparedInputs {
+    pub producers: InputProducers,
+    pub binding: nir::FunctionCallBinding,
 }
 
 impl Checker<'_, '_> {
@@ -421,7 +424,7 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         seed: Vec<Option<n::Expr>>,
     ) -> Result<PreparedInputs, Error> {
-        let mut prepared = PreparedInputs::new(signature.parameters.len());
+        let mut prepared = InputProducers::new(signature.parameters.len());
         if !seed.is_empty() {
             prepared.values = seed;
         }
@@ -437,9 +440,6 @@ impl Checker<'_, '_> {
             expr,
             &mut prepared.defaults,
         )?;
-        if demanded.is_empty() {
-            return Ok(prepared);
-        }
         let frame = tasks::Frame::new(
             self, demanded, signature, callee, direct, routes, offset, expr, prepared,
         )?;

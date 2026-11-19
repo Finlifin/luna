@@ -295,6 +295,22 @@ Commit、Probe、RetainCode 分别遵守各自对构造副作用的交付规则�
 
 收集器保留各元素的源码位置、已检查字段和非连续元素的准备语句。缺上下文的探测由发起探测的帧恢复；已知类型冲突、形成失败和预算耗尽须继续报告。失败从最内层词法帧退出，恢复默认值或 staged 输入的环境，不回滚已消费的预算，也不撤销其他已提交的存储事实。[收集规则](../compiler/elaboration/src/program/declaration_inputs/collections.rs) · [子帧分派](../compiler/elaboration/src/program/block_regions/driver/children.rs) · [恢复与交付](../compiler/elaboration/src/program/block_regions/driver/region.rs)
 
+普通调用的依赖帧为选中的签名建立一次从被调参数到调用者作用域的替换。
+检查某个槽位时，帧先用已知身份实例化参数域，再保存这个域要求的 sort。比如
+`comptime T: Type, comptime x: T` 收到 `T = Type` 后，第二槽等待的也是类型值。
+在等待子检查、默认参数或 VM 时，替换里仍然看不到 `x`。结果通过作用域和 sort
+检查才填入。重试错误的值可沿用已经检查过的域。各槽位就绪后，实参组装和结果类型
+检查接过同一份替换。泛型调用在预览签名中也这样准备输入；最终声明的类型和能力
+义务仍在实际特化签名中检查。
+
+一个调用中的默认参数共享从声明绑定到槽位的索引。真实 sysroot 的宽度用例有
+384 个默认类型参数，各自引用 `root`，还有 384 个值参数依次使用这些类型。
+两次调用分别传入 `u8` 和 `bool`，验证各次替换归自己的调用所有。
+扩大到 768 组后，只保留函数声明和返回 `true` 的入口也会在前端耗尽预算。
+首次报告耗尽的位置是词法作用域快照。定位这项成本需要检查声明侧，即使程序中
+完全没有调用也可复现。
+[调用替换](../compiler/nir/src/types/input_binding.rs) · [宽度用例](../compiler/luna/tests/contextual_input_costs.rs)
+
 普通参数的默认值可引用较早完成的输入。检查器保留原 Local 读取，只有再次进入本次活动路径才报告依赖环。对于 `do { mark(); U }`，即使最后的 U 能提供类型信息，也必须在调用时执行前面的 `mark()`。如果依赖检查不能静态观察其身份，普通 comptime callable 仍需原调用授予执行许可。提前执行默认值会改变副作用次序。[普通调用域依赖](../compiler/elaboration/src/program/dependent_inputs/tasks.rs) · [默认值用例](../compiler/luna/tests/ordinary_input_identity.rs)
 
 对于 runtime 函数的 comptime 参数，依赖帧可以请求必需计算。例如 `fn choose(comptime .flag: bool = true, comptime .T: Type = Select(flag), value: T) -> T` 需要先知道 `T` 才能检查 `value`。检查器收集默认值实际读取的绑定，准备执行世界，然后在 `T` 槽位挂起。驱动将剩余预算和定义编号分配权交给 VM。VM 返回值、类型和新生成的定义，由原帧在调用者作用域登记这些定义，再冻结值并填入该槽位。这样当默认值用 builder 产生枚举类型时，下一个实参可以用 `.data(true)` 构造它。执行或冻结失败沿原区域退出，后继输入不会收到部分结果。显式供应 `.T` 时直接使用显式实参。[区域驱动](../compiler/elaboration/src/program/block_regions/driver/region.rs) · [必需计算与默认值](../compiler/luna/tests/ordinary_input_identity.rs)

@@ -2414,6 +2414,83 @@ fn scoped_call_binding_refines_domains_without_capturing_caller_inputs() {
 }
 
 #[test]
+fn call_observations_resume_in_dependency_order_and_leave_failed_slots_open() {
+    let signature = Term::Function {
+        parameters: vec![
+            Parameter {
+                sort: Sort::Type,
+                ty: primitive(Primitive::Type),
+            },
+            Parameter {
+                sort: Sort::ComptimeValue,
+                ty: bound(0, 0, Sort::Type),
+            },
+            Parameter {
+                sort: Sort::ComptimeValue,
+                ty: primitive(Primitive::Bool),
+            },
+        ],
+        result: Box::new(primitive(Primitive::Bool)),
+    };
+    let caller = bound(0, 0, Sort::Type);
+    let mut call = FunctionCallPreparation::new(&signature, vec![vec![Sort::Type]]).unwrap();
+    let visits = std::cell::Cell::new(0);
+    let view = |domain: &Term| {
+        visits.set(visits.get() + 1);
+        Ok::<_, TypeError>(domain.clone())
+    };
+    assert!(matches!(
+        call.supply(2, Term::Bool(true)),
+        Err(TypeError::UnpreparedCallInput(2))
+    ));
+    call.prepare(2, view).unwrap();
+    // Another default can complete while this producer is still suspended.
+    assert_eq!(call.binding().observations()[2], None);
+    assert!(matches!(
+        call.prepare(1, view),
+        Err(CallError::Shape(TypeError::MissingArgument(0)))
+    ));
+    assert_eq!(visits.get(), 1);
+    call.prepare(0, view).unwrap();
+    call.supply(0, primitive(Primitive::Type)).unwrap();
+    assert_eq!(call.prepare(1, view).unwrap(), primitive(Primitive::Type));
+    let before = call.binding().clone();
+    assert!(matches!(
+        call.supply(1, Term::Bool(true)),
+        Err(TypeError::WrongSort { .. })
+    ));
+    assert_eq!(call.binding(), &before);
+    call.supply(2, Term::Bool(true)).unwrap();
+    call.supply(1, caller.clone()).unwrap();
+    assert!(matches!(
+        call.prepare(2, view),
+        Err(CallError::Shape(TypeError::DuplicateCallInput(2)))
+    ));
+    let binding = call.finish().unwrap();
+    assert_eq!(
+        binding
+            .substitute(&bound(0, 1, Sort::ComptimeValue))
+            .unwrap(),
+        caller
+    );
+    assert_eq!(binding.observations()[2], Some(Term::Bool(true)));
+    assert_eq!(visits.get(), 3);
+    assert_eq!(
+        binding,
+        FunctionCallBinding::new(
+            &signature,
+            binding.observations(),
+            &[vec![Sort::Type]],
+            view
+        )
+        .unwrap()
+    );
+    let mut unfinished = FunctionCallPreparation::new(&signature, vec![]).unwrap();
+    unfinished.prepare(2, view).unwrap();
+    assert_eq!(unfinished.finish(), Err(TypeError::MissingArgument(2)));
+}
+
+#[test]
 fn scoped_call_binding_checks_view_results_and_does_not_unfold_opaque_domains() {
     let opaque = Term::NormalForm {
         head: IDENTITY,

@@ -302,8 +302,101 @@ fn check_input_count(signature: &Term, count: usize) -> Result<(), TypeError> {
 pub struct FunctionCallBinding {
     arguments: Vec<Option<Term>>,
     type_slots: BTreeSet<usize>,
-    caller_frames: Vec<Vec<Sort>>,
-    callee_sorts: Vec<Sort>,
+    // The last frame belongs to the callee. Earlier frames belong to the caller.
+    frames: Vec<Vec<Sort>>,
+}
+
+/// A call keeps one checked telescope while producers complete in dependency
+/// order. Only admitted observations enter substitution; a failed delivery
+/// leaves the slot open for the original consumer.
+pub struct FunctionCallPreparation<'s> {
+    parameters: &'s [Parameter],
+    pending: std::collections::BTreeMap<usize, Sort>,
+    binding: FunctionCallBinding,
+}
+
+impl<'s> FunctionCallPreparation<'s> {
+    pub fn new(signature: &'s Term, mut caller_frames: Vec<Vec<Sort>>) -> Result<Self, TypeError> {
+        let Term::Function { parameters, .. } = signature.callable_signature() else {
+            return Err(TypeError::InvalidFunctionSignature);
+        };
+        signature.check_scope(&caller_frames)?;
+        caller_frames.push(parameters.iter().map(|p| p.sort).collect());
+        Ok(Self {
+            parameters,
+            pending: Default::default(),
+            binding: FunctionCallBinding {
+                frames: caller_frames,
+                arguments: vec![None; parameters.len()],
+                type_slots: BTreeSet::new(),
+            },
+        })
+    }
+
+    pub fn binding(&self) -> &FunctionCallBinding {
+        &self.binding
+    }
+
+    pub fn finish(self) -> Result<FunctionCallBinding, TypeError> {
+        if let Some((&slot, _)) = self.pending.first_key_value() {
+            return Err(TypeError::MissingArgument(slot));
+        }
+        Ok(self.binding)
+    }
+
+    /// Return the domain to check the source in. The call retains its proven
+    /// sort until this particular producer returns, including across defaults.
+    pub fn prepare<E>(
+        &mut self,
+        index: usize,
+        view: impl FnOnce(&Term) -> Result<Term, E>,
+    ) -> Result<Term, CallError<E>> {
+        let parameter = self
+            .parameters
+            .get(index)
+            .ok_or(CallError::Shape(TypeError::MissingArgument(index)))?;
+        if self.binding.arguments[index].is_some() || self.pending.contains_key(&index) {
+            return Err(CallError::Shape(TypeError::DuplicateCallInput(index)));
+        }
+        let caller = self.binding.caller_frames();
+        let domain = self
+            .binding
+            .substitute(&parameter.ty)
+            .map_err(CallError::Shape)?;
+        let domain = view(&domain).map_err(|error| CallError::Contract {
+            parameter: index,
+            error,
+        })?;
+        require_sort(&domain, Sort::Type).map_err(CallError::Shape)?;
+        domain.check_scope(caller).map_err(CallError::Shape)?;
+        self.pending.insert(index, input_sort(parameter, &domain));
+        Ok(domain)
+    }
+
+    pub fn supply(&mut self, index: usize, input: Term) -> Result<(), TypeError> {
+        let sort = *self
+            .pending
+            .get(&index)
+            .ok_or(TypeError::UnpreparedCallInput(index))?;
+        input.check_scope(self.binding.caller_frames())?;
+        require_sort(&input, sort)?;
+        self.pending.remove(&index);
+        if sort != self.parameters[index].sort {
+            self.binding.type_slots.insert(index);
+        }
+        self.binding.arguments[index] = Some(input);
+        Ok(())
+    }
+}
+
+impl fmt::Display for FunctionCallPreparation<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(function-call-preparation {} (pending", self.binding)?;
+        for (slot, sort) in &self.pending {
+            write!(f, " (input {slot} {sort})")?;
+        }
+        f.write_str("))")
+    }
 }
 
 impl FunctionCallBinding {
@@ -322,42 +415,28 @@ impl FunctionCallBinding {
                 actual: inputs.len(),
             }));
         }
-        signature
-            .check_scope(caller_frames)
+        let mut call = FunctionCallPreparation::new(signature, caller_frames.to_vec())
             .map_err(CallError::Shape)?;
-        let mut binding = Self {
-            arguments: inputs.to_vec(),
-            type_slots: BTreeSet::new(),
-            caller_frames: caller_frames.to_vec(),
-            callee_sorts: parameters.iter().map(|p| p.sort).collect(),
-        };
-        for (index, (parameter, input)) in parameters.iter().zip(inputs).enumerate() {
-            let Some(input) = input else { continue };
-            input.check_scope(caller_frames).map_err(CallError::Shape)?;
-            let domain = binding
-                .substitute(&parameter.ty)
-                .map_err(CallError::Shape)?;
-            let domain = view(&domain).map_err(|error| CallError::Contract {
-                parameter: index,
-                error,
-            })?;
-            require_sort(&domain, Sort::Type).map_err(CallError::Shape)?;
-            domain
-                .check_scope(caller_frames)
-                .map_err(CallError::Shape)?;
-            let sort = input_sort(parameter, &domain);
-            require_sort(input, sort).map_err(CallError::Shape)?;
-            if sort != parameter.sort {
-                binding.type_slots.insert(index);
+        for (index, input) in inputs.iter().enumerate() {
+            if let Some(input) = input {
+                call.prepare(index, &mut view)?;
+                call.supply(index, input.clone())
+                    .map_err(CallError::Shape)?;
             }
         }
-        Ok(binding)
+        call.finish().map_err(CallError::Shape)
+    }
+
+    fn caller_frames(&self) -> &[Vec<Sort>] {
+        &self.frames[..self.frames.len() - 1]
+    }
+
+    pub fn observations(&self) -> &[Option<Term>] {
+        &self.arguments
     }
 
     pub fn substitute(&self, term: &Term) -> Result<Term, TypeError> {
-        let mut source_frames = self.caller_frames.clone();
-        source_frames.push(self.callee_sorts.clone());
-        term.check_scope(&source_frames)?;
+        term.check_scope(&self.frames)?;
         let result = term.rewrite(0, &mut |term, nesting| match term {
             Term::Bound { depth, index, sort } if *depth == nesting => {
                 let argument = self
@@ -380,7 +459,7 @@ impl FunctionCallBinding {
             }),
             _ => Ok(term.clone()),
         })?;
-        result.check_scope(&self.caller_frames)?;
+        result.check_scope(self.caller_frames())?;
         Ok(result)
     }
 }
@@ -395,7 +474,7 @@ impl fmt::Display for FunctionCallBinding {
             }
         }
         f.write_str(") (caller-frames")?;
-        for frame in &self.caller_frames {
+        for frame in self.caller_frames() {
             f.write_str(" (frame")?;
             for sort in frame {
                 write!(f, " {sort}")?;
@@ -403,7 +482,7 @@ impl fmt::Display for FunctionCallBinding {
             f.write_str(")")?;
         }
         f.write_str(") (callee-sorts")?;
-        for sort in &self.callee_sorts {
+        for sort in self.frames.last().unwrap() {
             write!(f, " {sort}")?;
         }
         f.write_str(") (type-slots")?;

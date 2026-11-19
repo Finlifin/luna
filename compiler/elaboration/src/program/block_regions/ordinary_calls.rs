@@ -2,14 +2,14 @@
 //! Dependencies select which producers to inspect. The source routes determine
 //! where those producers run, independently of the order of type observations.
 use super::*;
-use dependent_inputs::{CallSignature, PreparedInputs, tasks};
+use dependent_inputs::{CallSignature, InputProducers, PreparedInputs, tasks};
 use driver::{Poll, Request, Root};
 
 type Inputs = (Vec<n::CallArgument>, nir::FunctionCallBinding);
 
 enum Phase<'b, 'h> {
     Observe(tasks::Frame<'b, 'h>),
-    Supply(PreparedInputs, nir::FunctionCallBinding),
+    Supply(PreparedInputs),
     Finished,
 }
 
@@ -65,11 +65,6 @@ impl<'b, 'h: 'b> Root<'b> for CallInputs<'b, 'h> {
                 Poll::Child(request) => return Ok(Poll::Child(request)),
                 Poll::Complete(prepared) => prepared,
             };
-            let binding = checker.prepare_call_binding(
-                self.signature.term,
-                &prepared.symbols,
-                self.source.span,
-            )?;
             if let Some(owner) = self.owner {
                 let type_arguments = checker
                     .method_instantiation_inputs(self.callee, self.source.span)?
@@ -78,28 +73,34 @@ impl<'b, 'h: 'b> Root<'b> for CallInputs<'b, 'h> {
                 checker.check_ordinary_capabilities(
                     owner,
                     &type_arguments,
-                    &prepared.symbols,
+                    prepared.binding.observations(),
                     self.source.span,
                 )?;
                 checker.check_ordinary_type_requirements(
                     owner,
                     &type_arguments,
-                    &prepared.symbols,
+                    prepared.binding.observations(),
                     self.source.span,
                 )?;
             }
             for slot in 0..self.offset {
-                let receiver = prepared.values[slot].take().expect("prepared receiver");
+                let receiver = prepared.producers.values[slot]
+                    .take()
+                    .expect("prepared receiver");
                 self.supply(slot, receiver, false);
             }
-            self.phase = Phase::Supply(prepared, binding);
+            self.phase = Phase::Supply(prepared);
         } else if let Some(returned) = returned {
             let (slot, caller_staged) = self.waiting.take().expect("requested call input");
             checker.in_staged_input = caller_staged;
             self.supply(slot, returned.ordinary(self.source.span)?, false);
         }
 
-        let Phase::Supply(prepared, binding) = &mut self.phase else {
+        let Phase::Supply(PreparedInputs {
+            producers: prepared,
+            binding,
+        }) = &mut self.phase
+        else {
             unreachable!()
         };
         while let Some(input) = self.routes.get(self.next) {
@@ -156,7 +157,9 @@ impl<'b, 'h: 'b> Root<'b> for CallInputs<'b, 'h> {
                 is_default: true,
             });
         }
-        let Phase::Supply(_, binding) = std::mem::replace(&mut self.phase, Phase::Finished) else {
+        let Phase::Supply(PreparedInputs { binding, .. }) =
+            std::mem::replace(&mut self.phase, Phase::Finished)
+        else {
             unreachable!()
         };
         Ok(Poll::Complete((
@@ -185,7 +188,10 @@ impl std::fmt::Display for CallInputs<'_, '_> {
         )?;
         match &self.phase {
             Phase::Observe(frame) => write!(f, " (observe {frame})")?,
-            Phase::Supply(prepared, binding) => write!(f, " (supply {binding} {prepared})")?,
+            Phase::Supply(PreparedInputs {
+                producers: prepared,
+                binding,
+            }) => write!(f, " (supply {binding} {prepared})")?,
             Phase::Finished => f.write_str(" (complete)")?,
         }
         if let Some((slot, caller_staged)) = self.waiting {
@@ -215,7 +221,7 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
     ) -> Result<Inputs, Error> {
         let offset = prefix.len();
-        let mut prepared = PreparedInputs::new(signature.parameters.len());
+        let mut prepared = InputProducers::new(signature.parameters.len());
         for (slot, value) in prefix.into_iter().enumerate() {
             prepared.values[slot] = Some(value);
         }
