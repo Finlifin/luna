@@ -514,6 +514,31 @@ fn forward_edges_and_failed_roots_do_not_poison_completed_roots() {
 }
 
 #[test]
+fn a_long_finite_layout_chain_can_be_retried_with_enough_fuel() {
+    let structs = (0..1024)
+        .map(|index| {
+            let field = if index == 0 {
+                Term::Primitive(Primitive::Bool)
+            } else {
+                nominal(index - 1)
+            };
+            (id(index), definition(index, field))
+        })
+        .collect();
+    let enums = BTreeMap::new();
+    let newtypes = BTreeMap::new();
+    let mut checker = Checker::new(None, &structs, &enums, &newtypes);
+    let root = nominal(1023);
+    assert_eq!(
+        checker.check(&root, &mut 100).unwrap_err().kind,
+        elaboration::representations::FailureKind::Budget
+    );
+    checker.check(&root, &mut 100_000).unwrap();
+    // Postorder completion also published the proof for the middle of the chain.
+    checker.check(&nominal(511), &mut 10).unwrap();
+}
+
+#[test]
 fn expanding_generic_recursion_is_bounded_before_materialization() {
     let parameter = id(8);
     let mut def = definition(

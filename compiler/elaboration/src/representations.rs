@@ -121,155 +121,161 @@ impl<'a> Checker<'a> {
     }
 
     pub fn check(&mut self, ty: &Term, fuel: &mut usize) -> Result<(), Failure> {
-        self.visit(ty, &mut HashSet::new(), fuel, 0)
+        use std::borrow::Cow;
+
+        enum Work<'t> {
+            Visit(Cow<'t, Term>),
+            Finish(Term),
+        }
+
+        let mut pending = vec![Work::Visit(Cow::Borrowed(ty))];
+        let mut active = HashSet::new();
+        while let Some(work) = pending.pop() {
+            let ty = match work {
+                Work::Visit(ty) => ty,
+                Work::Finish(ty) => {
+                    active.remove(&ty);
+                    self.done.insert(ty);
+                    continue;
+                }
+            };
+            *fuel = fuel.checked_sub(1).ok_or(EXPANSION_BUDGET)?;
+            // Charge the complete term before hashing or retaining it. Each
+            // instantiated field enters this same worklist with the caller's fuel.
+            nir::type_computations::charge_term(&ty, fuel).map_err(|_| EXPANSION_BUDGET)?;
+            let mut visit = |child| pending.push(Work::Visit(Cow::Owned(child)));
+            match ty.as_ref() {
+                Term::Nominal {
+                    declaration,
+                    arguments,
+                } => {
+                    if self.done.contains(ty.as_ref())
+                        || self
+                            .prior_done
+                            .is_some_and(|done| done.contains(ty.as_ref()))
+                    {
+                        continue;
+                    }
+                    if !active.insert(ty.as_ref().clone()) {
+                        return Err(Failure::invalid(
+                            "recursive by-value struct representation or enum payload",
+                        ));
+                    }
+                    let fields = self.nominal_fields(*declaration, arguments, fuel)?;
+                    pending.push(Work::Finish(ty.into_owned()));
+                    pending.extend(
+                        fields
+                            .into_iter()
+                            .rev()
+                            .map(|field| Work::Visit(Cow::Owned(field))),
+                    );
+                }
+                Term::NormalForm { .. } => {
+                    if let Some(items) = self.tuple.and_then(|head| head.tuple_elements(&ty)) {
+                        items.iter().rev().cloned().for_each(visit);
+                    }
+                }
+                Term::Tuple(_)
+                | Term::Closure { .. }
+                | Term::Record(_)
+                | Term::Optional(_)
+                | Term::ErrorResult { .. } => match ty.into_owned() {
+                    Term::Tuple(items)
+                    | Term::Closure {
+                        environment: items, ..
+                    } => {
+                        items.into_iter().rev().for_each(visit);
+                    }
+                    Term::Record(fields) => {
+                        fields.into_iter().rev().for_each(|(_, field)| visit(field));
+                    }
+                    Term::Optional(inner) => visit(*inner),
+                    Term::ErrorResult { errors, result } => {
+                        errors.into_iter().rev().for_each(&mut visit);
+                        visit(*result);
+                    }
+                    _ => unreachable!("inline representation"),
+                },
+                // Pointers and functions do not store their referents or
+                // signatures inline; opaque heads have no exposed children.
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
-    fn visit(
-        &mut self,
-        ty: &Term,
-        active: &mut HashSet<Term>,
+    fn nominal_fields(
+        &self,
+        declaration: DeclarationId,
+        arguments: &[Term],
         fuel: &mut usize,
-        depth: usize,
-    ) -> Result<(), Failure> {
-        const BUDGET: Failure = Failure::budget("struct representation expansion budget exhausted");
-        *fuel = fuel.checked_sub(1).ok_or(BUDGET)?;
-        if depth >= 128 {
-            return Err(BUDGET);
-        }
-        // Account for hashing/cloning a growing generic application before it
-        // reaches the active/done tables. This is the caller's shared budget.
-        nir::type_computations::charge_term(ty, fuel).map_err(|_| BUDGET)?;
-        match ty {
-            Term::Nominal {
-                declaration,
+    ) -> Result<Vec<Term>, Failure> {
+        if let Some(def) = self.structs.get(&declaration) {
+            return instantiate_fields(
+                &def.type_parameters,
+                &def.parameter_types,
                 arguments,
-            } if !self.done.contains(ty)
-                && !self.prior_done.is_some_and(|done| done.contains(ty)) =>
-            {
-                if !active.insert(ty.clone()) {
-                    return Err(Failure::invalid(
-                        "recursive by-value struct representation or enum payload",
-                    ));
-                }
-                if let Some(def) = self.structs.get(declaration) {
-                    let substitution = nir::DeclarationSubstitution::bounded(
-                        &def.type_parameters,
-                        &def.parameter_types,
-                        arguments,
-                        &[],
-                        fuel,
-                    )
-                    .map_err(|failure| match failure {
-                        nir::type_computations::Error::Scope(_) => {
-                            Failure::invalid("invalid struct type arguments in representation")
-                        }
-                        _ => BUDGET,
-                    })?;
-                    let fields = def
-                        .fields
-                        .iter()
-                        .map(|(_, field)| {
-                            substitution
-                                .instantiate_bounded(field, fuel)
-                                .map_err(|failure| match failure {
-                                    nir::type_computations::Error::Scope(_) => {
-                                        Failure::invalid("invalid struct field in representation")
-                                    }
-                                    _ => BUDGET,
-                                })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    for field in fields {
-                        self.visit(&field, active, fuel, depth + 1)?;
-                    }
-                } else if let Some(def) = self.enums.get(declaration) {
-                    let substitution = nir::DeclarationSubstitution::bounded(
-                        &def.type_parameters,
-                        &def.parameter_types,
-                        arguments,
-                        &[],
-                        fuel,
-                    )
-                    .map_err(|failure| match failure {
-                        nir::type_computations::Error::Scope(_) => {
-                            Failure::invalid("invalid enum type arguments in representation")
-                        }
-                        _ => BUDGET,
-                    })?;
-                    let fields = def
-                        .variants
-                        .iter()
-                        .flat_map(|v| &v.fields)
-                        .map(|field| {
-                            substitution
-                                .instantiate_bounded(field, fuel)
-                                .map_err(|failure| match failure {
-                                    nir::type_computations::Error::Scope(_) => {
-                                        Failure::invalid("invalid enum payload in representation")
-                                    }
-                                    _ => BUDGET,
-                                })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    for field in fields {
-                        self.visit(&field, active, fuel, depth + 1)?;
-                    }
-                } else if let Some(def) = self.newtypes.get(declaration) {
-                    let representation = def
-                        .representation_budgeted(arguments, &[], fuel)
-                        .map_err(|failure| match failure {
-                            nir::newtypes::ConversionError::Budget => BUDGET,
-                            nir::newtypes::ConversionError::Type(_)
-                            | nir::newtypes::ConversionError::DuplicateIdentity(_) => {
-                                Failure::invalid("invalid newtype representation")
-                            }
-                        })?;
-                    self.visit(&representation, active, fuel, depth + 1)?;
-                } else {
-                    return Err(Failure::invalid(
-                        "nominal declaration is missing from representation world",
-                    ));
-                }
-                active.remove(ty);
-                self.done.insert(ty.clone());
-                Ok(())
-            }
-            Term::NormalForm { .. } => {
-                if let Some(items) = self.tuple.and_then(|head| head.tuple_elements(ty)) {
-                    for item in items {
-                        self.visit(item, active, fuel, depth + 1)?;
-                    }
-                }
-                Ok(())
-            }
-            Term::Tuple(items)
-            | Term::Closure {
-                environment: items, ..
-            } => {
-                for item in items {
-                    self.visit(item, active, fuel, depth + 1)?;
-                }
-                Ok(())
-            }
-            Term::Record(fields) => {
-                for (_, field) in fields {
-                    self.visit(field, active, fuel, depth + 1)?;
-                }
-                Ok(())
-            }
-            Term::Optional(inner) => self.visit(inner, active, fuel, depth + 1),
-            Term::ErrorResult { errors, result } => {
-                self.visit(result, active, fuel, depth + 1)?;
-                for label in errors {
-                    self.visit(label, active, fuel, depth + 1)?;
-                }
-                Ok(())
-            }
-            // Pointer and function signatures do not embed their referents or
-            // parameter/result values. Other normal-form heads are not unfolded.
-            _ => Ok(()),
+                def.fields.iter().map(|(_, field)| field),
+                fuel,
+                "invalid struct type arguments in representation",
+                "invalid struct field in representation",
+            );
         }
+        if let Some(def) = self.enums.get(&declaration) {
+            return instantiate_fields(
+                &def.type_parameters,
+                &def.parameter_types,
+                arguments,
+                def.variants.iter().flat_map(|variant| &variant.fields),
+                fuel,
+                "invalid enum type arguments in representation",
+                "invalid enum payload in representation",
+            );
+        }
+        if let Some(def) = self.newtypes.get(&declaration) {
+            return def
+                .representation_budgeted(arguments, &[], fuel)
+                .map(|ty| vec![ty])
+                .map_err(|failure| match failure {
+                    nir::newtypes::ConversionError::Budget => EXPANSION_BUDGET,
+                    nir::newtypes::ConversionError::Type(_)
+                    | nir::newtypes::ConversionError::DuplicateIdentity(_) => {
+                        Failure::invalid("invalid newtype representation")
+                    }
+                });
+        }
+        Err(Failure::invalid(
+            "nominal declaration is missing from representation world",
+        ))
     }
+}
+
+const EXPANSION_BUDGET: Failure =
+    Failure::budget("struct representation expansion budget exhausted");
+
+fn instantiate_fields<'a>(
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &[Term],
+    fields: impl Iterator<Item = &'a Term>,
+    fuel: &mut usize,
+    argument_error: &'static str,
+    field_error: &'static str,
+) -> Result<Vec<Term>, Failure> {
+    let failure = |error, message| match error {
+        nir::type_computations::Error::Scope(_) => Failure::invalid(message),
+        _ => EXPANSION_BUDGET,
+    };
+    let substitution =
+        nir::DeclarationSubstitution::bounded(parameters, domains, arguments, &[], fuel)
+            .map_err(|error| failure(error, argument_error))?;
+    fields
+        .map(|field| {
+            substitution
+                .instantiate_bounded(field, fuel)
+                .map_err(|error| failure(error, field_error))
+        })
+        .collect()
 }
 
 /// Append-only representation world for checked, concrete builder results.
