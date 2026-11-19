@@ -255,6 +255,8 @@ mod frame_tests {
                 requirements: vec![],
                 capabilities: vec![requirement.clone()],
                 result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
                 entry_snapshots: vec![],
             },
             body: Expr {
@@ -431,6 +433,8 @@ mod frame_tests {
                 requirements: vec![],
                 capabilities: vec![],
                 result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
                 entry_snapshots: vec![],
             },
             body: Expr {
@@ -596,6 +600,8 @@ mod frame_tests {
                     }],
                     postconditions: vec![],
                     result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
                     entry_snapshots: vec![],
                     defaults: vec![],
                     requirements: vec![],

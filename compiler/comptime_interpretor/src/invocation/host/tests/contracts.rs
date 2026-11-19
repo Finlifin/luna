@@ -39,6 +39,8 @@ fn package(returned: bool) -> Package {
                 preconditions: vec![read(2)],
                 postconditions: vec![read(4), expr(ty(Primitive::Bool), K::Local(local(8)))],
                 result_binding: Some(local(8)),
+                result_type_binder: None,
+                result_guarantees: vec![],
                 entry_snapshots: vec![],
                 capabilities: vec![],
                 requirements: vec![],

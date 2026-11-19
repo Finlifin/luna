@@ -9,6 +9,8 @@ use text_impl.bindings;
 pub pure comptime trait ComptimeTextBytes {
     pure comptime fn byte_length(self) -> u64;
     pure comptime fn byte(self, index: u64) -> ?u8;
+    pure comptime fn slice(self, start: u64, end: u64) -> ?str;
+    pure comptime fn concat(self, other: str) -> str;
     pure comptime fn starts_with(self, prefix: str) -> bool;
     pure comptime fn ends_with(self, suffix: str) -> bool;
     pure comptime fn find(self, needle: str) -> ?u64;
@@ -22,6 +24,14 @@ comptime impl ComptimeTextBytes for str {
 
     pure comptime fn byte(self, index: u64) -> ?u8 {
         bindings.byte(self, index)
+    }
+
+    pure comptime fn slice(self, start: u64, end: u64) -> ?str {
+        bindings.slice(self, start, end)
+    }
+
+    pure comptime fn concat(self, other: str) -> str {
+        bindings.concat(self, other)
     }
 
     pure comptime fn starts_with(self, prefix: str) -> bool {

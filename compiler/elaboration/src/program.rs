@@ -302,18 +302,22 @@ pub fn elaborate_packages_with_protocols(
 }
 
 /// Target facts are invocation input and remain attached to the resulting NIR.
+const DEFAULT_PACKAGE_ELABORATION_BUDGET: u64 = 2_000_000;
+
 pub fn elaborate_packages_for_target(
     package: &hir::Package<'_>,
     package_identities: &BTreeMap<u32, u64>,
     protocols: &Protocols,
     target: Option<nir::target::TargetData>,
 ) -> Result<n::Package, Error> {
+    let mut invocation_steps =
+        DEFAULT_PACKAGE_ELABORATION_BUDGET.saturating_mul((package_identities.len() as u64).max(1));
     elaborate_packages_with_invocation_budget(
         package,
         package_identities,
         protocols,
         target,
-        &mut 1_000_000,
+        &mut invocation_steps,
     )
 }
 
@@ -509,6 +513,7 @@ fn elaborate_with_attributes(
         default_input_scope: None,
         default_input_owner: None,
         requirements: BTreeMap::new(),
+        result_guarantees: BTreeMap::new(),
         program_requirements: BTreeMap::new(),
         program_postconditions: BTreeMap::new(),
         old_scope: None,
@@ -1613,6 +1618,7 @@ struct Checker<'a, 'h> {
     default_input_scope: Option<lexical_domains::RetainedDomains>,
     default_input_owner: Option<OwnerId>,
     requirements: BTreeMap<OwnerId, Vec<n::TypePredicate>>,
+    result_guarantees: BTreeMap<OwnerId, (DeclarationId, Vec<n::TypePredicate>)>,
     program_requirements: BTreeMap<OwnerId, Vec<&'h Expr<'h>>>,
     program_postconditions: BTreeMap<OwnerId, Vec<&'h Expr<'h>>>,
     old_scope: Option<OldScope>,
@@ -3234,6 +3240,31 @@ impl Checker<'_, '_> {
                 charged.map_err(|e| error(expr.span, e.to_string()))?;
                 Ok(ty.clone())
             }
+            H::ResolvedLocal(_, id)
+                if !self.callable_type_inputs.contains_key(&local(*id))
+                    && matches!(
+                        self.generator_data.get(&local(*id)),
+                        Some(Some(n::Expr {
+                            kind: K::TypeValue(_),
+                            ..
+                        }))
+                    ) =>
+            {
+                let Some(Some(n::Expr {
+                    kind: K::TypeValue(ty),
+                    ..
+                })) = self.generator_data.get(&local(*id))
+                else {
+                    unreachable!()
+                };
+                let ty = ty.clone();
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let charged = nir::type_computations::charge_term(&ty, &mut fuel);
+                self.required_steps -= (before - fuel) as u64;
+                charged.map_err(|e| error(expr.span, e.to_string()))?;
+                Ok(ty)
+            }
             H::ResolvedFnParam(_, id) => {
                 if let Some((symbol, domain)) = self.captured_staged_input(*id, expr.span)? {
                     if domain != p(P::Type) {
@@ -3338,6 +3369,35 @@ impl Checker<'_, '_> {
                     ) {
                         return Ok(p(P::Float));
                     }
+                }
+                if let H::ResolvedFnParam(_, id) = &value.kind
+                    && (self.checking_open_behavior || self.signature_owner == Some(id.owner))
+                    && self.locals.get(&local(*id)).is_none()
+                    && self
+                        .package
+                        .item(id.owner)
+                        .is_some_and(|item| match &item.kind {
+                            ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => {
+                                sig.params.iter().any(|p| p.hir_id == *id)
+                            }
+                            _ => false,
+                        })
+                    && (self.open_functions.contains_key(&id.owner)
+                        || self.signature_domains.contains_key(&id.owner))
+                {
+                    let key = local(*id);
+                    let binder =
+                        if let Some(binder) = self.definition_refinements.subjects.get(&key) {
+                            *binder
+                        } else {
+                            let binder = self.fresh_type_binder(id.owner, expr.span)?;
+                            self.definition_refinements.subjects.insert(key, binder);
+                            binder
+                        };
+                    return Ok(Term::Rigid {
+                        declaration: binder.declaration,
+                        sort: binder.sort,
+                    });
                 }
                 // Observing a type does not evaluate/capture the operand in
                 // surrounding runtime closures. Closures inside the operand
@@ -3607,6 +3667,10 @@ impl Checker<'_, '_> {
     }
 
     fn type_predicate_atom(&mut self, expr: &Expr<'_>) -> Result<n::TypePredicate, Error> {
+        if let Some((kind, arg)) = self.type_predicate_kind_call(expr)? {
+            let operand = self.type_expr(arg)?;
+            return Ok(n::TypePredicate::Kind(operand, kind));
+        }
         match &expr.kind {
             H::TraitBound(subject, bound) => {
                 let subject = self.type_expr(subject)?;
@@ -3915,6 +3979,7 @@ impl Checker<'_, '_> {
                 self.callable_input_view(a, span)?,
                 self.callable_input_view(b, span)?,
             ),
+            Q::Kind(ty, kind) => Q::Kind(self.callable_input_view(ty, span)?, *kind),
             Q::Not(inner) => Q::Not(Box::new(self.requirement_type_view(
                 inner,
                 span,
@@ -6638,28 +6703,48 @@ impl Checker<'_, '_> {
                         kind: K::IntegerRepresentation(Box::new(value)),
                     })
                 }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "str_byte_length" | "str_byte" | "symbol_byte_length" | "symbol_byte")) => {
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "str_byte_length" | "str_byte" | "str_slice" | "str_concat" | "symbol_byte_length" | "symbol_byte")) => {
                     self.text_builtin(expr, callee, args, expected)
                 }
                 H::Application(callee, args) => {
-                    let quote_head = if let H::NFApplication(head, _) = callee.kind {
-                        head
-                    } else {
-                        callee
-                    };
-                    if let H::ResolvedDef { def_id, .. } = quote_head.kind {
-                        if self
-                            .package
-                            .definition_owner(def_id)
-                            .is_some_and(|owner| self.is_quote_function(owner))
-                        {
-                            self.record_quote_application(expr.span)?;
+                    if let Some((kind, arg)) = self.type_predicate_kind_call(expr)? {
+                        let operand = self.expr(arg, Some(&p(P::Type)))?;
+                        let ty = p(if is_never(&operand.ty) {
+                            P::Never
+                        } else {
+                            P::Bool
+                        });
+                        if let Some(expected) = expected {
+                            self.require_expression(&ty, expected, expr.span)?;
                         }
-                    }
-                    if let Some((ty, index)) = self.variant_target(callee, expected)? {
-                        self.construct_variant(expr, ty, index, args, expected)
+                        Ok(n::Expr {
+                            source: source(expr.span),
+                            ty,
+                            kind: K::TypeKind {
+                                kind,
+                                operand: Box::new(operand),
+                            },
+                        })
                     } else {
-                        self.call(expr, callee, args, expected, partial)
+                        let quote_head = if let H::NFApplication(head, _) = callee.kind {
+                            head
+                        } else {
+                            callee
+                        };
+                        if let H::ResolvedDef { def_id, .. } = quote_head.kind {
+                            if self
+                                .package
+                                .definition_owner(def_id)
+                                .is_some_and(|owner| self.is_quote_function(owner))
+                            {
+                                self.record_quote_application(expr.span)?;
+                            }
+                        }
+                        if let Some((ty, index)) = self.variant_target(callee, expected)? {
+                            self.construct_variant(expr, ty, index, args, expected)
+                        } else {
+                            self.call(expr, callee, args, expected, partial)
+                        }
                     }
                 }
                 H::ExtendedApplication(callee, args) => {

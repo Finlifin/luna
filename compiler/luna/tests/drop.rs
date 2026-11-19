@@ -27010,7 +27010,7 @@ fn tuple_enumeration_preserves_iteration_and_unvisited_resource_cleanup() {
         ),
         (
             "",
-            "let held=element;visit();inline if index==0 {break;}",
+            "let held=element;visit();inline if element'type == First {break;}",
             vec![
                 "run",
                 "source",
@@ -27049,7 +27049,7 @@ fn tuple_enumeration_preserves_iteration_and_unvisited_resource_cleanup() {
             ],
         ),
         (
-            "if index!=1",
+            "if element'type != Second",
             "let held=element;visit();",
             vec![
                 "run",
@@ -27064,14 +27064,21 @@ fn tuple_enumeration_preserves_iteration_and_unvisited_resource_cleanup() {
         ),
     ] {
         for element_pattern in ["element", "_"] {
-            let patterns = if guard == "if index!=1" {
-                vec![("index", guard), ("(0 or 2) as index", "")]
+            let patterns = if guard == "if element'type != Second" {
+                vec![
+                    ("element", guard),
+                    ("(element if element'type != Second)", ""),
+                ]
             } else {
-                vec![("index", guard)]
+                vec![(element_pattern, guard)]
             };
-            for (index_pattern, guard) in patterns {
-                let body = if element_pattern == "_" {
+            for (pattern, guard) in patterns {
+                if element_pattern == "_" && guard.contains("element") {
+                    continue;
+                }
+                let body = if pattern == "_" {
                     body.replace("let held=element;", "")
+                        .replace("inline if element'type == First {break;}", "break;")
                 } else {
                     body.to_owned()
                 };
@@ -27082,7 +27089,7 @@ fn tuple_enumeration_preserves_iteration_and_unvisited_resource_cleanup() {
             impl Retire for Third {{fn drop(*self) {{}}}}
             fn source()->Tuple<First,Second,Third> {{(First {{}},Second {{}},Third {{}})}}
             fn visit() {{}} fn after() {{}}
-            fn run()->bool {{inline for ({index_pattern},{element_pattern}) {guard} in source()'tuple_enumerate {{{body}}}after();true}}");
+            fn run()->bool {{inline for {pattern} {guard} in source()'tuple_enumerate {{{body}}}after();true}}");
                 let package = finite_default_support::compile_with_tuple_selectors(
                     &source,
                     &Default::default(),
@@ -27116,14 +27123,15 @@ fn tuple_enumeration_preserves_iteration_and_unvisited_resource_cleanup() {
 fn tuple_enumeration_nested_label_exits_preserve_remaining_owners() {
     use comptime_interpretor::{Interpreter, Value};
     let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct FirstTag {} struct SecondTag {}
         struct Outer {} struct Inner {}
         impl Retire for Outer {fn drop(*self) {}}
         impl Retire for Inner {fn drop(*self) {}}
         fn outer()->Outer {Outer {}} fn inner()->Inner {Inner {}}
         fn run()->bool {
-            inline for:all (i,a) in (outer(),outer())'tuple_enumerate {
-                inline for (j,b) in (inner(),inner())'tuple_enumerate {
-                    inline if i==0 {continue all;}
+            inline for:all (tag,a) in ((FirstTag {},outer()),(SecondTag {},outer()))'tuple_enumerate {
+                inline for b in (inner(),inner())'tuple_enumerate {
+                    inline if tag'type == FirstTag {continue all;}
                     break all;
                 }
             }true
@@ -27222,7 +27230,7 @@ fn generic_tuple_iteration_specializes_transferred_and_remaining_cleanup() {
         impl Retire for Second {fn drop(*self) {}}
         fn consume(value:T) where T {}
         fn walk(values:Tuple<A,B>) where A,B {
-            inline for (index,element) in values'tuple_enumerate {
+            inline for element in values'tuple_enumerate {
                 consume(element);
                 break;
             }
@@ -30809,7 +30817,7 @@ fn tuple_runtime_element_filter_preserves_failure_cleanup_order() {
         }
         fn visit() {} fn after() {}
         fn run()->bool {
-            inline for (_, ((.first(_) or .third(_)) as element)) in source()'tuple_enumerate {let held=element;visit();}
+            inline for ((.first(_) or .third(_)) as element) in source()'tuple_enumerate {let held=element;visit();}
             after();true
         }";
     let package = finite_default_support::compile_with_tuple_selectors(

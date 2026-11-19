@@ -3,5 +3,7 @@ use builtin.{Symbol, str, u64, u8}
 -- Each binding has an explicit comptime phase; aliases preserve its identity.
 pub const byte_length: comptime fn(str) -> u64 = .str_byte_length'builtin;
 pub const byte: comptime fn(str, u64) -> ?u8 = .str_byte'builtin;
+pub const slice: comptime fn(str, u64, u64) -> ?str = .str_slice'builtin;
+pub const concat: comptime fn(str, str) -> str = .str_concat'builtin;
 pub const symbol_byte_length: comptime fn(Symbol) -> u64 = .symbol_byte_length'builtin;
 pub const symbol_byte: comptime fn(Symbol, u64) -> ?u8 = .symbol_byte'builtin;

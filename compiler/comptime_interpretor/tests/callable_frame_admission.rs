@@ -47,6 +47,8 @@ fn function() -> Function {
             postconditions: vec![],
             entry_snapshots: vec![],
             result_binding: None,
+            result_type_binder: None,
+            result_guarantees: vec![],
             type_parameters: vec![],
             requirements: vec![],
             capabilities: vec![],

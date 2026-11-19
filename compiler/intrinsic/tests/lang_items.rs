@@ -376,6 +376,8 @@ fn a_function_named_tuple_does_not_supply_a_pure_normal_form_head() {
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,
+            result_type_binder: None,
+            result_guarantees: vec![],
             entry_snapshots: vec![],
             signature: Term::Function {
                 parameters: vec![],

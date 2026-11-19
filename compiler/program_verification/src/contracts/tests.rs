@@ -69,6 +69,8 @@ fn package() -> Package {
                 postconditions: vec![],
                 entry_snapshots: vec![],
                 result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
                 signature: signature.clone(),
             },
             body: boolean(true),

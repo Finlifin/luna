@@ -215,6 +215,7 @@ fn separation_goal(
                     terms.push(a);
                     terms.push(b);
                 }
+                TypePredicate::Kind(ty, _) => terms.push(ty),
                 TypePredicate::Not(p) => predicates.push(p),
                 TypePredicate::And(items) | TypePredicate::Or(items) => predicates.extend(items),
                 TypePredicate::Bool(_) => {}

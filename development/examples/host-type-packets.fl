@@ -85,7 +85,7 @@ comptime fn from_variant(flag: bool) -> bool {
 comptime fn from_enumeration(flag: bool) -> bool {
     const input = ((bool, flag), (.str'builtin, "value"));
     const saved_input = input;
-    inline for (index, (T, value)) in saved_input'tuple_enumerate {
+    inline for (T, value) in saved_input'tuple_enumerate {
         const packet = (T, flag);
         const saved = packet;
         const (Selected, unused) = saved;

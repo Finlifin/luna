@@ -90,9 +90,53 @@ impl FormatPlan {
         }
         domains
     }
+
+    pub pure comptime fn literal_segments(self, format: str) -> meta.List<str> {
+        var segments: meta.List<str> = [];
+        var current = "";
+        var index: Integer = 0;
+        let piece_count = self.pieces.length();
+        while index < piece_count {
+            let piece = self.pieces.get(index) match {
+                value? => value,
+                null => {
+                    assumes false;
+                    return segments;
+                },
+            }
+            piece match {
+                FormatPiece.text(start, end) => {
+                    let chunk = format.slice(start, end) match {
+                        value? => value,
+                        null => "",
+                    }
+                    current = current.concat(chunk);
+                },
+                FormatPiece.argument(_) => {
+                    segments = segments.concat([current]);
+                    current = "";
+                },
+            }
+            index = index + 1;
+        }
+        segments.concat([current])
+    }
+
+    pub pure comptime fn literal_segments_for(format: str) -> meta.List<str> {
+        FormatPlan.parse(format) match {
+            plan! => plan.literal_segments(format),
+            error _ => {
+                assumes false;
+                []
+            },
+        }
+    }
 }
 
-pub pure comptime fn Parse(format: str) -> Type {
+pub pure comptime fn Parse(format: str) -> R: Type
+where
+    ensures Type.predicates.is_tuple(R),
+{
     let parsed = FormatPlan.parse(format);
     let domains: meta.List<Type> = parsed match {
         plan! => plan.argument_domains(),

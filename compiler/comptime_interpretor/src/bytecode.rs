@@ -1865,6 +1865,20 @@ impl<'a> Interpreter<'a> {
                     frame.slots[*destination] =
                         Some(self.complete_type_equal(left, right, source)?);
                 }
+                Op::PrepareTypeKind { ty, operand } => {
+                    self.prepare_type_kind(ty, operand, source)?
+                }
+                Op::TypeKind {
+                    destination,
+                    kind,
+                    operand,
+                } => {
+                    let Some(Value::Type(operand)) = frame.slots[*operand].take() else {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    };
+                    frame.slots[*destination] =
+                        Some(self.complete_type_kind(*kind, operand, source)?);
+                }
                 Op::PrepareObjectAccess(access) => {
                     use comptime_compiler::objects::ObjectOperation;
                     match access.operation {

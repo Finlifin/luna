@@ -97,6 +97,7 @@ impl Checker<'_, '_> {
             };
             this.in_code_body = sig.modifiers.is_quote;
             let body = this.function_body(owner, body.value, result)?;
+            this.verify_returned_type_guarantees(&body, span)?;
             Ok(n::Function { interface, body })
         })
     }
@@ -135,6 +136,15 @@ impl Checker<'_, '_> {
         let result_binding = sig.return_binding.map(local);
         let (postconditions, entry_snapshots) =
             self.program_postconditions(owner, result_binding, result)?;
+        let (result_type_binder, result_guarantees) = self
+            .result_guarantees
+            .get(&owner)
+            .map_or((None, Vec::new()), |(binder, guarantees)| {
+                (Some(*binder), guarantees.clone())
+            });
+        self.control.result_guarantees = result_type_binder
+            .filter(|_| !result_guarantees.is_empty())
+            .map(|binder| (binder, result_guarantees.clone()));
         Ok(n::FunctionDeclaration {
             source: source(item.span),
             declaration: declaration(self.package, &self.package_identities, owner),
@@ -147,6 +157,8 @@ impl Checker<'_, '_> {
             postconditions,
             entry_snapshots,
             result_binding,
+            result_type_binder,
+            result_guarantees,
             requirements: self.definition_requirements(owner),
             capabilities: self.capabilities.get(&owner).cloned().unwrap_or_default(),
             type_parameters: self.type_parameters[&owner].clone(),

@@ -9,6 +9,7 @@ pub(super) struct DefinitionRefinements {
     pub(super) requirements: Vec<n::TypePredicate>,
     pub(super) checked_tuple_loops: BTreeSet<n::LocalId>,
     pub(super) tuple_elements: Vec<DeclarationId>,
+    pub(super) staged_values: Vec<(DeclarationId, Term)>,
 }
 
 impl Checker<'_, '_> {
@@ -138,6 +139,10 @@ impl Checker<'_, '_> {
             sort: binder.sort,
         };
         let registry = self.refinements.clone();
+        let is_tuple = registry
+            .structure(description)
+            .map_err(|message| error(span, message))?
+            .is_some_and(|app| self.protocols.tuple == Some(app.head()));
         let view = registry
             .subject(description, &mut self.required_steps)
             .map_err(|message| error(span, message))?;
@@ -151,10 +156,72 @@ impl Checker<'_, '_> {
             self.context.assume(fact);
             self.definition_refinements.requirements.push(predicate);
         }
+        if is_tuple {
+            let predicate = n::TypePredicate::Kind(subject.clone(), nir::TypeKind::Tuple);
+            let fact = crate::ptc::Formula::from_predicate(&predicate);
+            self.context
+                .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                .map_err(|e| error(span, e.to_string()))?;
+            self.context.assume(fact);
+            self.definition_refinements.requirements.push(predicate);
+        }
         self.definition_refinements
             .subjects
             .insert(local(parameter), binder);
         Ok(subject)
+    }
+
+    pub(super) fn assume_deferred_result_guarantees(
+        &mut self,
+        parameter: hir::HirId,
+        binder: DeclarationId,
+        guarantees: &[n::TypePredicate],
+        span: Span,
+    ) -> Result<Term, Error> {
+        let subject_binder = self.fresh_type_binder(parameter.owner, span)?;
+        let subject = Term::Rigid {
+            declaration: subject_binder.declaration,
+            sort: subject_binder.sort,
+        };
+        let formal = [nir::DeclarationParameter {
+            declaration: binder,
+            sort: Sort::Type,
+        }];
+        let actual = [subject.clone()];
+        for guarantee in guarantees {
+            let predicate = super::required::map_requirement(
+                guarantee,
+                &mut |ty| {
+                    ty.instantiate_parameters(&formal, &actual)
+                        .map_err(|e| error(span, e.to_string()))
+                },
+                span,
+                0,
+            )?;
+            let fact = crate::ptc::Formula::from_predicate(&predicate);
+            self.context
+                .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                .map_err(|e| error(span, e.to_string()))?;
+            self.context.assume(fact);
+            self.definition_refinements.requirements.push(predicate);
+        }
+        self.definition_refinements
+            .subjects
+            .insert(local(parameter), subject_binder);
+        Ok(subject)
+    }
+
+    pub(super) fn is_proven_tuple_type(&mut self, ty: &Term, span: Span) -> Result<bool, Error> {
+        if matches!(self.structural_type(ty, span)?, Term::Tuple(_)) {
+            return Ok(true);
+        }
+        Ok(matches!(
+            self.context.prove(
+                crate::ptc::Formula::kind(ty.clone(), nir::TypeKind::Tuple),
+                crate::ptc::Budget::default(),
+            ),
+            crate::ptc::Outcome::Entailed(_)
+        ))
     }
 
     fn instantiate_refinement(
@@ -219,8 +286,9 @@ fn has_trait(predicate: &n::TypePredicate) -> bool {
 // proposition actually observes a type. Classification must not change domains
 // merely because a type atom is buried under a long Boolean prefix.
 fn classify_refinement<'a>(
-    expr: &Expr<'a>,
-    mut type_operand: impl FnMut(&Expr<'a>) -> bool,
+    expr: &'a Expr<'a>,
+    mut type_operand: impl FnMut(&'a Expr<'a>) -> bool,
+    is_metatype: impl Fn(&Expr<'_>) -> bool,
 ) -> Option<bool> {
     let mut observed = false;
     let mut pending = vec![expr];
@@ -238,6 +306,11 @@ fn classify_refinement<'a>(
             }
             H::Binary(BinOp::Eq | BinOp::Ne, left, right)
                 if type_operand(left) && type_operand(right) =>
+            {
+                observed = true
+            }
+            _ if Checker::syntactic_type_predicate_kind_with(expr, &is_metatype)
+                .is_some_and(|(_, arg)| type_operand(arg)) =>
             {
                 observed = true
             }
@@ -617,6 +690,13 @@ impl Checker<'_, '_> {
                 }
                 _ => None,
             },
+            K::TypeKind { kind, operand } => match &operand.kind {
+                K::TypeValue(ty) => {
+                    nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
+                    Some(F::kind(ty.clone(), *kind))
+                }
+                _ => None,
+            },
             K::Not(value) => return Self::condition_type_fact(value, !positive, fuel, depth + 1),
             // Normal completion delivers the tail's Boolean. Prefix statements
             // remain in the program; immutable TypeValue facts do not depend on
@@ -671,7 +751,19 @@ impl Checker<'_, '_> {
         positive: bool,
         span: Span,
     ) -> Result<TypeConditionScope, Error> {
-        let Some(fact) = self.checked_type_condition(condition, positive, span)? else {
+        self.enter_source_type_condition(None, condition, positive, span)
+    }
+
+    pub(super) fn enter_source_type_condition(
+        &mut self,
+        source_expr: Option<&Expr<'_>>,
+        condition: &n::Expr,
+        positive: bool,
+        span: Span,
+    ) -> Result<TypeConditionScope, Error> {
+        let Some(fact) =
+            self.checked_source_type_condition(source_expr, condition, positive, span)?
+        else {
             return Ok(TypeConditionScope { parent: None });
         };
         let parent = self.context.clone();
@@ -681,26 +773,37 @@ impl Checker<'_, '_> {
         })
     }
 
-    pub(super) fn assume_type_condition(
+    pub(super) fn assume_source_type_condition(
         &mut self,
+        source_expr: Option<&Expr<'_>>,
         condition: &n::Expr,
         positive: bool,
         span: Span,
     ) -> Result<(), Error> {
-        if let Some(fact) = self.checked_type_condition(condition, positive, span)? {
+        if let Some(fact) =
+            self.checked_source_type_condition(source_expr, condition, positive, span)?
+        {
             self.context.assume(fact);
         }
         Ok(())
     }
-    fn checked_type_condition(
-        &self,
+
+    fn checked_source_type_condition(
+        &mut self,
+        source_expr: Option<&Expr<'_>>,
         condition: &n::Expr,
         positive: bool,
         span: Span,
     ) -> Result<Option<crate::ptc::Formula>, Error> {
         let mut budget = crate::ptc::Budget::default();
-        let fact = Self::condition_type_fact(condition, positive, &mut budget.steps, 0)
-            .map_err(|message| error(span, message))?;
+        let fact = self.condition_source_type_fact(
+            source_expr,
+            condition,
+            positive,
+            &mut budget.steps,
+            0,
+            span,
+        )?;
         let Some(fact) = fact else {
             return Ok(None);
         };
@@ -710,9 +813,103 @@ impl Checker<'_, '_> {
         Ok(Some(fact))
     }
 
+    fn condition_source_type_fact(
+        &mut self,
+        source_expr: Option<&Expr<'_>>,
+        checked: &n::Expr,
+        positive: bool,
+        fuel: &mut usize,
+        depth: usize,
+        span: Span,
+    ) -> Result<Option<crate::ptc::Formula>, Error> {
+        use crate::ptc::Formula as F;
+        if depth >= 128 {
+            return Err(error(span, "type condition depth exhausted"));
+        }
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "type condition budget exhausted"))?;
+        if let Some(source_expr) = source_expr {
+            if matches!(source_expr.kind, H::TraitBound(..)) || self.is_type_assumption(source_expr)
+            {
+                let predicate = self.type_predicate(source_expr)?;
+                let fact = F::from_predicate(&predicate);
+                let mut budget = crate::ptc::Budget {
+                    steps: *fuel,
+                    max_depth: 128,
+                };
+                self.context
+                    .validate_formula(&fact, &mut budget)
+                    .map_err(|e| error(source_expr.span, e.to_string()))?;
+                *fuel = budget.steps;
+                return Ok(Some(if positive { fact } else { fact.negate() }));
+            }
+            match (&source_expr.kind, &checked.kind) {
+                (H::Unary(UnOp::Not, inner), K::Not(c_inner)) => {
+                    return self.condition_source_type_fact(
+                        Some(inner),
+                        c_inner,
+                        !positive,
+                        fuel,
+                        depth + 1,
+                        span,
+                    );
+                }
+                (H::Binary(BinOp::And, l, r), K::And(cl, cr))
+                | (H::Binary(BinOp::Or, l, r), K::Or(cl, cr))
+                    if checked.ty == p(P::Bool) =>
+                {
+                    let and = matches!(checked.kind, K::And(..));
+                    let left = self.condition_source_type_fact(
+                        Some(l),
+                        cl,
+                        positive,
+                        fuel,
+                        depth + 1,
+                        span,
+                    )?;
+                    let right = self.condition_source_type_fact(
+                        Some(r),
+                        cr,
+                        positive,
+                        fuel,
+                        depth + 1,
+                        span,
+                    )?;
+                    return Ok(if and == positive {
+                        match (left, right) {
+                            (Some(left), Some(right)) => Some(F::And(vec![left, right])),
+                            (known, None) | (None, known) => known,
+                        }
+                    } else {
+                        match (left, right) {
+                            (Some(left), Some(right)) => Some(F::Or(vec![left, right])),
+                            _ => None,
+                        }
+                    });
+                }
+                _ => {}
+            }
+        }
+        Self::condition_type_fact(checked, positive, fuel, depth).map_err(|m| error(span, m))
+    }
+
     fn refinement_type_operand(&self, expr: &Expr<'_>) -> bool {
         match &expr.kind {
             H::ResolvedFnParam(_, id) => self.input_facts.type_identity(&local(*id)).is_some(),
+            H::ResolvedLocal(_, id) => {
+                let id = local(*id);
+                (self.input_facts.derived.contains(&id)
+                    && self.locals.get(&id) == Some(&p(P::Type))
+                    && self.input_facts.type_identity(&id).is_some())
+                    || matches!(
+                        self.generator_data.get(&id),
+                        Some(Some(n::Expr {
+                            kind: K::TypeValue(_),
+                            ..
+                        }))
+                    )
+            }
             H::ResolvedClauseParam(_, id) => {
                 let declaration = DeclarationId {
                     package: semantic_package(&self.package_identities, id.pkg),
@@ -729,10 +926,19 @@ impl Checker<'_, '_> {
     // arbitrary code under another meaning. Calls/control flow are executable
     // predicates and remain outside PTC's type-proposition language.
     pub(super) fn extracted_refinement(&self, expr: &Expr<'_>) -> bool {
-        classify_refinement(expr, |value| self.refinement_type_operand(value)).is_some()
+        classify_refinement(
+            expr,
+            |value| self.refinement_type_operand(value),
+            |base| self.is_metatype_base(base),
+        )
+        .is_some()
     }
     pub(super) fn is_type_assumption(&self, expr: &Expr<'_>) -> bool {
-        classify_refinement(expr, |value| self.refinement_type_operand(value)) == Some(true)
+        classify_refinement(
+            expr,
+            |value| self.refinement_type_operand(value),
+            |base| self.is_metatype_base(base),
+        ) == Some(true)
     }
 
     pub(super) fn check_refinement_expression(&mut self, expr: &Expr<'_>) -> Result<(), Error> {
@@ -879,6 +1085,413 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
+
+    pub(super) fn verify_returned_type_guarantees(
+        &mut self,
+        expr: &n::Expr,
+        span: Span,
+    ) -> Result<(), Error> {
+        let Some((binder, guarantees)) = self.control.result_guarantees.clone() else {
+            return Ok(());
+        };
+        if guarantees.is_empty() {
+            return Ok(());
+        }
+        let context = self.context.clone();
+        let bindings = BTreeMap::new();
+        self.verify_type_guarantees_expr(expr, binder, &guarantees, &context, &bindings, span, 0)
+    }
+
+    fn verify_type_guarantees_expr<'e>(
+        &mut self,
+        expr: &'e n::Expr,
+        binder: DeclarationId,
+        guarantees: &[n::TypePredicate],
+        context: &crate::ptc::Context,
+        bindings: &BTreeMap<n::LocalId, &'e n::Expr>,
+        span: Span,
+        depth: usize,
+    ) -> Result<(), Error> {
+        if depth >= 128 {
+            return Err(error(span, "result guarantee verification depth exhausted"));
+        }
+        if is_never(&expr.ty) {
+            return Ok(());
+        }
+        match &expr.kind {
+            K::Block { statements, result } | K::CallPreparation { statements, result } => {
+                let mut local_context = context.fork();
+                let mut local_bindings = bindings.clone();
+                let frames = self.call_input_frames();
+                for stmt in statements {
+                    if let K::Let { binding, value } = &stmt.kind
+                        && !is_never(&value.ty)
+                    {
+                        local_bindings.insert(*binding, value);
+                    }
+                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                    let before = fuel;
+                    let fact = Self::continuation_type_fact(stmt, &mut fuel, 0)
+                        .map_err(|message| error(span, message))?;
+                    self.required_steps -= (before - fuel) as u64;
+                    if let Some(fact) = fact {
+                        local_context
+                            .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                            .map_err(|failure| error(span, failure.to_string()))?;
+                        local_context.assume(fact);
+                    }
+                    if is_never(&stmt.ty) {
+                        return Ok(());
+                    }
+                }
+                let _ = frames;
+                if let Some(result) = result {
+                    self.verify_type_guarantees_expr(
+                        result,
+                        binder,
+                        guarantees,
+                        &local_context,
+                        &local_bindings,
+                        span,
+                        depth + 1,
+                    )
+                } else {
+                    Ok(())
+                }
+            }
+            K::UnsafeScope(inner)
+            | K::EffectComputation { body: inner, .. }
+            | K::CheckTypeAlias {
+                body: Some(inner), ..
+            } => self.verify_type_guarantees_expr(
+                inner,
+                binder,
+                guarantees,
+                context,
+                bindings,
+                span,
+                depth + 1,
+            ),
+            K::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let then_fact = Self::condition_type_fact(condition, true, &mut fuel, 0)
+                    .map_err(|message| error(span, message))?;
+                let else_fact = Self::condition_type_fact(condition, false, &mut fuel, 0)
+                    .map_err(|message| error(span, message))?;
+                self.required_steps -= (before - fuel) as u64;
+                let mut then_context = context.fork();
+                if let Some(fact) = then_fact {
+                    then_context
+                        .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                        .map_err(|failure| error(span, failure.to_string()))?;
+                    then_context.assume(fact);
+                }
+                self.verify_type_guarantees_expr(
+                    then_branch,
+                    binder,
+                    guarantees,
+                    &then_context,
+                    bindings,
+                    span,
+                    depth + 1,
+                )?;
+                if let Some(else_branch) = else_branch {
+                    let mut else_context = context.fork();
+                    if let Some(fact) = else_fact {
+                        else_context
+                            .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                            .map_err(|failure| error(span, failure.to_string()))?;
+                        else_context.assume(fact);
+                    }
+                    self.verify_type_guarantees_expr(
+                        else_branch,
+                        binder,
+                        guarantees,
+                        &else_context,
+                        bindings,
+                        span,
+                        depth + 1,
+                    )?;
+                }
+                Ok(())
+            }
+            K::Match { arms, .. } => {
+                for arm in arms {
+                    self.verify_type_guarantees_expr(
+                        &arm.body,
+                        binder,
+                        guarantees,
+                        context,
+                        bindings,
+                        span,
+                        depth + 1,
+                    )?;
+                }
+                Ok(())
+            }
+            K::Closure { .. } => Ok(()),
+            K::Local(id) => {
+                if let Some(rhs) = bindings.get(id).copied() {
+                    return self.verify_type_guarantees_expr(
+                        rhs,
+                        binder,
+                        guarantees,
+                        context,
+                        bindings,
+                        span,
+                        depth + 1,
+                    );
+                }
+                let target = self
+                    .input_facts
+                    .type_identity(id)
+                    .cloned()
+                    .unwrap_or(Term::Rigid {
+                        declaration: binder,
+                        sort: Sort::Type,
+                    });
+                self.prove_guarantees_for_term(context, &target, binder, guarantees, span)
+            }
+            K::TypeValue(ty) => {
+                let mut local_context = context.fork();
+                if let Term::NormalForm {
+                    head, arguments, ..
+                } = ty
+                    && let Some(contract) = self.alias_contracts.get(head).cloned()
+                    && contract.parameters.len() == arguments.len()
+                {
+                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                    let before = fuel;
+                    let frames = self.call_input_frames();
+                    let sub = nir::DeclarationSubstitution::bounded(
+                        &contract.parameters,
+                        &contract.parameter_types,
+                        arguments,
+                        &frames,
+                        &mut fuel,
+                    )
+                    .map_err(|e| error(span, e.to_string()))?;
+                    for req in &contract.requirements {
+                        let pred = sub
+                            .instantiate_predicate_bounded(req, &mut fuel)
+                            .map_err(|e| error(span, e.to_string()))?;
+                        let fact = crate::ptc::Formula::from_predicate(&pred);
+                        local_context
+                            .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                            .map_err(|failure| error(span, failure.to_string()))?;
+                        local_context.assume(fact);
+                    }
+                    self.required_steps -= (before - fuel) as u64;
+                }
+                self.prove_guarantees_for_term(&local_context, ty, binder, guarantees, span)
+            }
+            K::Literal(n::Literal::Description(desc)) => {
+                let mut local_context = context.fork();
+                let subject_term = Term::Rigid {
+                    declaration: binder,
+                    sort: Sort::Type,
+                };
+                let subject = self
+                    .refinements
+                    .subject(desc, &mut self.required_steps)
+                    .map_err(|message| error(span, message))?;
+                if subject
+                    .application
+                    .is_some_and(|app| Some(app.head()) == self.protocols.tuple)
+                {
+                    let fact =
+                        crate::ptc::Formula::kind(subject_term.clone(), nir::TypeKind::Tuple);
+                    local_context
+                        .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                        .map_err(|failure| error(span, failure.to_string()))?;
+                    local_context.assume(fact);
+                }
+                let frames = self.call_input_frames();
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                for req in subject.requirements() {
+                    let pred = req
+                        .instantiate(&subject_term, &frames, &mut fuel)
+                        .map_err(|e| error(span, e.to_string()))?;
+                    let fact = crate::ptc::Formula::from_predicate(&pred);
+                    local_context
+                        .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                        .map_err(|failure| error(span, failure.to_string()))?;
+                    local_context.assume(fact);
+                }
+                self.required_steps -= (before - fuel) as u64;
+                self.prove_guarantees_for_term(
+                    &local_context,
+                    &subject_term,
+                    binder,
+                    guarantees,
+                    span,
+                )
+            }
+            K::NormalFormType { head, .. } => {
+                let mut local_context = context.fork();
+                let subject_term = Term::Rigid {
+                    declaration: binder,
+                    sort: Sort::Type,
+                };
+                if Some(*head) == self.protocols.tuple {
+                    let fact =
+                        crate::ptc::Formula::kind(subject_term.clone(), nir::TypeKind::Tuple);
+                    local_context
+                        .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                        .map_err(|failure| error(span, failure.to_string()))?;
+                    local_context.assume(fact);
+                }
+                self.prove_guarantees_for_term(
+                    &local_context,
+                    &subject_term,
+                    binder,
+                    guarantees,
+                    span,
+                )
+            }
+            K::Call { callee, .. } => {
+                let mut local_context = context.fork();
+                let subject_term = Term::Rigid {
+                    declaration: binder,
+                    sort: Sort::Type,
+                };
+                let (callee_id, type_args) = match &callee.kind {
+                    K::Function(id) => (Some(*id), None),
+                    K::FunctionInstance {
+                        declaration,
+                        arguments,
+                        ..
+                    } => (Some(*declaration), Some(arguments.as_slice())),
+                    _ => (None, None),
+                };
+                if let Some(callee_owner) =
+                    callee_id.and_then(|id| self.source_declarations.owner(id))
+                    && let Some((callee_binder, callee_guarantees)) =
+                        self.result_guarantees.get(&callee_owner).cloned()
+                {
+                    let frames = self.call_input_frames();
+                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                    let before = fuel;
+                    let owner_params = self.type_parameters.get(&callee_owner).cloned();
+                    for guarantee in &callee_guarantees {
+                        let mut pred = guarantee.clone();
+                        if let (Some(params), Some(args)) = (&owner_params, type_args)
+                            && params.len() == args.len()
+                            && !params.is_empty()
+                        {
+                            let domains: Vec<_> = params
+                                .iter()
+                                .map(|id| {
+                                    self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type))
+                                })
+                                .collect();
+                            let sub = nir::DeclarationSubstitution::bounded(
+                                params, &domains, args, &frames, &mut fuel,
+                            )
+                            .map_err(|e| error(span, e.to_string()))?;
+                            pred = sub
+                                .instantiate_predicate_bounded(&pred, &mut fuel)
+                                .map_err(|e| error(span, e.to_string()))?;
+                        }
+                        if callee_binder != binder {
+                            let sub = nir::DeclarationSubstitution::bounded(
+                                &[callee_binder],
+                                &[p(P::Type)],
+                                std::slice::from_ref(&subject_term),
+                                &frames,
+                                &mut fuel,
+                            )
+                            .map_err(|e| error(span, e.to_string()))?;
+                            pred = sub
+                                .instantiate_predicate_bounded(&pred, &mut fuel)
+                                .map_err(|e| error(span, e.to_string()))?;
+                        }
+                        let fact = crate::ptc::Formula::from_predicate(&pred);
+                        local_context
+                            .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                            .map_err(|failure| error(span, failure.to_string()))?;
+                        local_context.assume(fact);
+                    }
+                    self.required_steps -= (before - fuel) as u64;
+                }
+                self.prove_guarantees_for_term(
+                    &local_context,
+                    &subject_term,
+                    binder,
+                    guarantees,
+                    span,
+                )
+            }
+            _ => {
+                let subject_term = Term::Rigid {
+                    declaration: binder,
+                    sort: Sort::Type,
+                };
+                self.prove_guarantees_for_term(context, &subject_term, binder, guarantees, span)
+            }
+        }
+    }
+
+    fn prove_guarantees_for_term(
+        &self,
+        context: &crate::ptc::Context,
+        target: &Term,
+        binder: DeclarationId,
+        guarantees: &[n::TypePredicate],
+        span: Span,
+    ) -> Result<(), Error> {
+        let frames = self.call_input_frames();
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        for guarantee in guarantees {
+            let instantiated = if *target
+                == (Term::Rigid {
+                    declaration: binder,
+                    sort: Sort::Type,
+                }) {
+                guarantee.clone()
+            } else {
+                let sub = nir::DeclarationSubstitution::bounded(
+                    &[binder],
+                    &[p(P::Type)],
+                    std::slice::from_ref(target),
+                    &frames,
+                    &mut fuel,
+                )
+                .map_err(|e| error(span, e.to_string()))?;
+                sub.instantiate_predicate_bounded(guarantee, &mut fuel)
+                    .map_err(|e| error(span, e.to_string()))?
+            };
+            if matches!(
+                context.prove(
+                    crate::ptc::Formula::from_predicate(&instantiated),
+                    crate::ptc::Budget::default(),
+                ),
+                crate::ptc::Outcome::Entailed(_)
+            ) {
+                continue;
+            }
+            if has_trait(&instantiated) || matches!(instantiated, n::TypePredicate::Equal(..)) {
+                let assumptions = self.capability_assumptions();
+                if self
+                    .prove_source_refinement(&instantiated, context, &assumptions, span)
+                    .is_ok()
+                {
+                    continue;
+                }
+            }
+            return Err(error(
+                span,
+                format!("result guarantee contract is not established: {instantiated}"),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -908,8 +1521,13 @@ mod classification_tests {
                 literal,
             ));
         }
-        let classify =
-            |value| classify_refinement(value, |operand| matches!(operand.kind, H::TyType));
+        let classify = |value| {
+            classify_refinement(
+                value,
+                |operand| matches!(operand.kind, H::TyType),
+                |base| matches!(base.kind, H::TyType),
+            )
+        };
         assert_eq!(classify(value), Some(true));
         assert_eq!(classify(literal), Some(false));
         // A runtime operand remains program syntax even behind a known type

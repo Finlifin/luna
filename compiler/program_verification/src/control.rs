@@ -376,6 +376,10 @@ fn loop_may_transfer(
                     }
                     return Ok(false);
                 }
+                K::TypeKind { operand, .. } => {
+                    pending.push(operand);
+                    return Ok(false);
+                }
                 K::And(left, right) | K::Or(left, right) => {
                     pending.push(left);
                     let skip = if matches!(expr.kind, K::And(..)) {

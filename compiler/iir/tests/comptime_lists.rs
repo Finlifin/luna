@@ -514,6 +514,8 @@ fn graph_for_list(body: Expr) -> iir::Package {
                     preconditions: vec![],
                     postconditions: vec![],
                     result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
                     entry_snapshots: vec![],
                 },
                 body,

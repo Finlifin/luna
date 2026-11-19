@@ -140,6 +140,8 @@ fn entry_with_bound_locals(
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,
+            result_type_binder: None,
+            result_guarantees: vec![],
             entry_snapshots: vec![],
             type_parameters: vec![],
             requirements: vec![],

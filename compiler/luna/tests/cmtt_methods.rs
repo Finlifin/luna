@@ -2370,7 +2370,7 @@ fn generator_tuple_iteration_preserves_shared_owned_callbacks() {
         comptime fn build()-><|-bool> {
             let first=toggle();let second=toggle();
             let actions=(first,second,first);
-            inline for (index,action) in actions'tuple_enumerate {action();}
+            inline for action in actions'tuple_enumerate {action();}
             let result=first() and not second();'(result)
         }
         fn run()->bool {~<build()>}";
@@ -2385,9 +2385,9 @@ fn generator_tuple_iteration_preserves_guard_continue_and_break_effects() {
         }
         comptime fn build()-><|-bool> {
             let first=cell(false);let second=cell(false);let third=cell(false);let fourth=cell(false);
-            inline for (index,action) if do {action(true);index != 0}
-                in (first,second,third,fourth)'tuple_enumerate {
-                if index == 1 {action(false);continue;}
+            inline for (run_body, do_continue, action) if do {action(true); run_body}
+                in ((false,false,first),(true,true,second),(true,false,third),(true,false,fourth))'tuple_enumerate {
+                inline if do_continue {action(false);continue;}
                 break;
             }
             let result=first(false) and not second(false) and third(false) and not fourth(false);
@@ -2407,7 +2407,7 @@ fn generator_tuple_iteration_preserves_nominal_callback_fields() {
         comptime fn build()-><|-bool> {
             let first=cell(false);let second=cell(true);
             let items=(Action {update:first,value:true},Action {update:second,value:false});
-            inline for (index,item) in items'tuple_enumerate {item.update(item.value);}
+            inline for item in items'tuple_enumerate {item.update(item.value);}
             let result=first(false) and not second(false);'(result)
         }
         fn run()->bool {~<build()>}";
@@ -2422,7 +2422,7 @@ fn generator_tuple_callback_elements_keep_binding_and_stage_restrictions() {
         "{prefix}
         comptime fn build()-><|-bool> {{
             let action=toggle();
-            inline for (index,next) in (action,action)'tuple_enumerate {{next=action;}}
+            inline for next in (action,action)'tuple_enumerate {{next=action;}}
             '(true)
         }}
         fn run()->bool {{~<build()>}}"
@@ -2433,7 +2433,7 @@ fn generator_tuple_callback_elements_keep_binding_and_stage_restrictions() {
         "{prefix}
         comptime fn build()-><|-Toggle> {{
             let action=toggle();
-            inline for (index,next) in (action,action)'tuple_enumerate {{return '(next);}}
+            inline for next in (action,action)'tuple_enumerate {{return '(next);}}
         }}
         fn run()->Toggle {{~<build()>}}"
     );
@@ -2608,7 +2608,7 @@ fn generator_refutable_tuple_filters_preserve_callback_state_and_failed_writes()
         comptime fn cell()->Cell {{var flag=false;|value:bool| {{let before=flag;flag=value;before}}}}
         comptime fn build()-><|-bool> {{
             let first=cell();let second=cell();
-            inline for {pattern} {guard} in (first,second,first)'tuple_enumerate {{ {body} }}
+            inline for {pattern} {guard} in ((0,first),(1,second),(0,first))'tuple_enumerate {{ {body} }}
             let result={expected};'(result)
         }} fn run()->bool {{~<build()>}}");
         assert_eq!(
@@ -2779,7 +2779,7 @@ fn generator_irrefutable_tuple_patterns_export_shared_callbacks() {
         comptime fn counter()->Counter {{var visits:Count=0;|| {{visits+=1;visits}}}}
         comptime fn build()-><|-bool> {{
             let next=counter();
-            inline for {pattern} in (true,false,true)'tuple_enumerate {{{body}}}
+            inline for {pattern} in ((0,true),(1,false),(2,true))'tuple_enumerate {{{body}}}
             let result=next() == {count};'(result)
         }} fn run()->bool {{~<build()>}}"
         );

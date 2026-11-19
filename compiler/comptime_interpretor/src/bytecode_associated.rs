@@ -725,6 +725,8 @@ fn selected_associated_body_observes_its_domain_once_before_execution() {
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,
+            result_type_binder: None,
+            result_guarantees: vec![],
             entry_snapshots: vec![],
             parameters: vec![],
             defaults: vec![],

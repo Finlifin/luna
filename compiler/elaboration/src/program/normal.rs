@@ -252,6 +252,17 @@ impl Checker<'_, '_> {
                 _ => unreachable!("callable telescope supplies abstract values"),
             };
         }
+        if let H::ResolvedLocal(_, id) = value.kind
+            && let Some((symbol, actual)) = self
+                .input_facts
+                .value_identity(&local(id))
+                .filter(|_| self.locals.contains_key(&local(id)))
+        {
+            let symbol = symbol.clone();
+            let actual = actual.clone();
+            self.require(&actual, ty, value.span)?;
+            return Ok(symbol);
+        }
         if let H::ResolvedFnParam(_, id) = value.kind {
             let binding = local(id);
             let in_signature = self.signature_owner.is_some_and(|owner| {
@@ -296,6 +307,70 @@ impl Checker<'_, '_> {
                 self.preserved_input_identity(&checked, |_, _| Ok(None), value.span)?
             {
                 return Ok(identity);
+            }
+            let (result, _) = self.required_normal_input(value, checked, Vec::new())?;
+            return self.required_normal_term(result, value.span);
+        }
+        if !self.in_required_comptime
+            && (self.describing_open_call
+                || self.checking_open_behavior
+                || self.in_unselected_inline)
+        {
+            let checked = self.with_staged_input(true, |this| this.expr(value, Some(ty)))?;
+            if self
+                .signature_owner
+                .is_some_and(|owner| self.open_functions.contains_key(&owner))
+            {
+                self.with_staged_input(true, |this| {
+                    this.check_open_fragment(&checked, value.span, false)
+                })?;
+            }
+            if let Some(identity) =
+                self.preserved_input_identity(&checked, |_, _| Ok(None), value.span)?
+            {
+                return Ok(identity);
+            }
+            let mut staged_bindings: std::collections::BTreeSet<_> = self
+                .signature_owner
+                .and_then(|owner| self.package.item(owner))
+                .map(|item| match &item.kind {
+                    ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => sig
+                        .params
+                        .iter()
+                        .filter(|parameter| parameter.ty.is_comptime())
+                        .map(|parameter| local(parameter.hir_id))
+                        .collect(),
+                    _ => std::collections::BTreeSet::new(),
+                })
+                .unwrap_or_default();
+            staged_bindings.extend(self.open_staged_locals.iter().copied());
+            staged_bindings.extend(self.ordinary_behavior_inputs.keys().copied());
+            let declaration_inputs = self.visible_comptime_parameters(value.span)?;
+            if self.staged_input_can_defer(
+                &checked,
+                false,
+                &std::collections::BTreeSet::new(),
+                &staged_bindings,
+                &declaration_inputs,
+                value.span,
+            )? {
+                let binder = self.fresh_value_binder(value.hir_id.owner, value.span)?;
+                let symbol = Term::Rigid {
+                    declaration: binder.declaration,
+                    sort: Sort::ComptimeValue,
+                };
+                self.definition_refinements
+                    .staged_values
+                    .push((binder.declaration, checked.ty.clone()));
+                if let H::ResolvedLocal(_, id) = value.kind {
+                    let binding = local(id);
+                    if self.locals.contains_key(&binding) {
+                        self.input_facts
+                            .values
+                            .insert(binding, (symbol.clone(), checked.ty.clone()));
+                    }
+                }
+                return Ok(symbol);
             }
             let (result, _) = self.required_normal_input(value, checked, Vec::new())?;
             return self.required_normal_term(result, value.span);
@@ -1274,6 +1349,10 @@ impl Checker<'_, '_> {
                 let right = self.observe_normal_input_in(right, depth + 1, budget, bindings)?;
                 known_type_equality(&self.context, &left, &right, budget).map(Term::Bool)
             }
+            K::TypeKind { kind, operand } => {
+                let operand = self.observe_normal_input_in(operand, depth + 1, budget, bindings)?;
+                known_type_kind(&self.context, *kind, &operand, budget).map(Term::Bool)
+            }
             K::ScalarEqual(left, right)
             | K::ScalarLess(left, right)
             | K::ScalarLessEqual(left, right)
@@ -1630,33 +1709,19 @@ fn freeze_known_list(
         .map_err(Failure::from)
 }
 
-/// A type relation needs a proof in either direction. A failed equality query
-/// is not a disequality fact, and an opaque head is never reduced to its body.
-fn known_type_equality(
+fn known_type_formula(
     context: &crate::ptc::Context,
-    left: &Term,
-    right: &Term,
+    positive: crate::ptc::Formula,
+    negative: crate::ptc::Formula,
     budget: &mut comptime_runtime::Budget,
 ) -> Result<bool, Failure> {
-    use crate::ptc::{Formula, Outcome, UnknownReason};
-    if left.sort() != Sort::Type || right.sort() != Sort::Type {
-        return Err(Failure::Unavailable);
-    }
-    let equality = Formula::equal(
-        copy_observed_term(left, budget)?,
-        copy_observed_term(right, budget)?,
-    );
-    let inequality = Formula::equal(
-        copy_observed_term(left, budget)?,
-        copy_observed_term(right, budget)?,
-    )
-    .negate();
+    use crate::ptc::{Outcome, UnknownReason};
     let mut proof_budget = crate::ptc::Budget {
         steps: budget.steps,
         max_depth: 128,
     };
     let result = (|| {
-        for (proposition, value) in [(equality, true), (inequality, false)] {
+        for (proposition, value) in [(positive, true), (negative, false)] {
             match context.prove_metered(proposition, &mut proof_budget) {
                 Outcome::Entailed(_) => return Ok(value),
                 Outcome::Unknown {
@@ -1671,6 +1736,45 @@ fn known_type_equality(
     })();
     budget.steps = proof_budget.steps;
     result
+}
+
+/// A type relation needs a proof in either direction. A failed equality query
+/// is not a disequality fact, and an opaque head is never reduced to its body.
+fn known_type_equality(
+    context: &crate::ptc::Context,
+    left: &Term,
+    right: &Term,
+    budget: &mut comptime_runtime::Budget,
+) -> Result<bool, Failure> {
+    use crate::ptc::Formula;
+    if left.sort() != Sort::Type || right.sort() != Sort::Type {
+        return Err(Failure::Unavailable);
+    }
+    let equality = Formula::equal(
+        copy_observed_term(left, budget)?,
+        copy_observed_term(right, budget)?,
+    );
+    let inequality = Formula::equal(
+        copy_observed_term(left, budget)?,
+        copy_observed_term(right, budget)?,
+    )
+    .negate();
+    known_type_formula(context, equality, inequality, budget)
+}
+
+fn known_type_kind(
+    context: &crate::ptc::Context,
+    kind: nir::TypeKind,
+    operand: &Term,
+    budget: &mut comptime_runtime::Budget,
+) -> Result<bool, Failure> {
+    use crate::ptc::Formula;
+    if operand.sort() != Sort::Type {
+        return Err(Failure::Unavailable);
+    }
+    let positive = Formula::kind(copy_observed_term(operand, budget)?, kind);
+    let negative = Formula::kind(copy_observed_term(operand, budget)?, kind).negate();
+    known_type_formula(context, positive, negative, budget)
 }
 
 fn copy_observed_term(term: &Term, budget: &mut comptime_runtime::Budget) -> Result<Term, Failure> {

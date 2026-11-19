@@ -115,19 +115,21 @@ normal-form 头模式自身只比较保留的声明身份。因此它遇到明�
 
 同样，inline 模式绑定取得的精确 Integer／Float 字面量保持为编译期常量，可以供主体中嵌套的 inline 判断继续计算；即便绑定未被使用，也不要求为它分配 runtime 存储。此规则不改变精确数值的阶段属性：直接把 Integer 或 Float 作为普通 runtime 函数的结果仍被拒绝，聚合值与指针的重建和资源检查也仍保留。
 
-`inline for` 已接通有界 `Integer` 范围（开区间末端 `..`、闭区间末端 `..=`），支持经现有覆盖分析证明不可反驳的模式，包括简单绑定、通配、`_ as index` 和绑定一致的 `or` 模式；边界可来自函数的 comptime 参数。每次展开仅保留 runtime 主体，索引作为编译期常量替换，支持普通条件、状态更新、嵌套循环、带标签的 break/continue 和 return。展开后的迭代包装作用域与源码主体分别保留清理边界；实际取得的局部资源在正常退出、continue、break 和 return 时按作用域次序清理，过滤掉的迭代不构造或析构资源。空范围仍检查主体，但不调用其中嵌套 inline 控制的条件或边界；未选分支中的范围同样不调用边界。展开受编译预算限制。这些不可反驳模式可附带 guard（`inline for i if keep(i) in 0..count { ... }`）：每个索引绑定后在 comptime 判断 guard，仅保留成功迭代的 runtime 主体。空范围不调用 guard；过滤掉的主体仍检查普通操作，但不调用嵌套 inline 条件。pure 定义端检查保留抽象主体，恒假 guard 不能隐藏副作用。开放函数也支持上述不可反驳模式及 `and ... is ...` 的索引计算：定义端检查模式类型、覆盖与计算阶段，不调用计算；每次实际展开才绑定索引并求值，空范围不调用模式中的计算。模式的计算结果可用于迭代 guard 和 inline 条件，不能读取普通 runtime 参数。`tuple_enumerate` 已在 AST lowering 中形成专用 HIR 节点，保留操作数并输出 `(take-tuple-enumerate (value ...))`；操作数检查只取得结构类型证据，识别已绑定的 Tuple normal-form 头并保留原始类型身份；不会展开其它返回 Type 的函数头。非 tuple 值给出类型诊断。已接通结构类型已建立的非空 tuple 遍历，模式目前使用 `(index, element)`，两部分均须不可反驳。索引是 comptime Integer，元素按各字段自己的类型留在 runtime；异构元素不合并为一个统一 runtime 类型。主语只求值一次，原 Tuple normal-form 头保持不变。独立保存该 view、空 tuple 主体检查和一般迭代协议仍未接通，保留明确诊断。
+`inline for` 已接通有界 `Integer` 范围（开区间末端 `..`、闭区间末端 `..=`），支持经现有覆盖分析证明不可反驳的模式，包括简单绑定、通配、`_ as index` 和绑定一致的 `or` 模式；边界可来自函数的 comptime 参数。每次展开仅保留 runtime 主体，索引作为编译期常量替换，支持普通条件、状态更新、嵌套循环、带标签的 break/continue 和 return。展开后的迭代包装作用域与源码主体分别保留清理边界；实际取得的局部资源在正常退出、continue、break 和 return 时按作用域次序清理，过滤掉的迭代不构造或析构资源。空范围仍检查主体，但不调用其中嵌套 inline 控制的条件或边界；未选分支中的范围同样不调用边界。展开受编译预算限制。这些不可反驳模式可附带 guard（`inline for i if keep(i) in 0..count { ... }`）：每个索引绑定后在 comptime 判断 guard，仅保留成功迭代的 runtime 主体。空范围不调用 guard；过滤掉的主体仍检查普通操作，但不调用嵌套 inline 条件。pure 定义端检查保留抽象主体，恒假 guard 不能隐藏副作用。开放函数也支持上述不可反驳模式及 `and ... is ...` 的索引计算：定义端检查模式类型、覆盖与计算阶段，不调用计算；每次实际展开才绑定索引并求值，空范围不调用模式中的计算。
+
+`tuple_enumerate` 已在 AST lowering 中形成专用 HIR 节点，保留操作数并输出 `(take-tuple-enumerate (value ...))`（各 view kind 完整说明见 [docs/others/view-taking.md](../others/view-taking.md)）。操作数需要结构上已知的元组类型，或由 PTC 证明 `Type.predicates.is_tuple(T)`（例如来自声明了 `where ensures Type.predicates.is_tuple(R)` 的类型生产者、`requires`、`refines` 或 `assumes`）；不会通过窥探类型生产函数体来推测返回头，非 tuple 值给出明确诊断。已接通具体及抽象已证明元组的遍历（含空元组 `()`），迭代模式直接绑定当前元素 `element`（不包装为 `(index, element)`）：
 
 ```flurry
 fn last(values: Tuple<bool, bool>) -> bool {
     var result = false;
-    inline for (index, value) in values'tuple_enumerate {
+    inline for value in values'tuple_enumerate {
         result = value;
     }
     result
 }
 ```
 
-`index` 可用于 inline 条件与迭代守卫；不能因为遍历在编译期展开，就把 `value` 提升为 comptime 输入。开放定义按每个元素的已知类型检查主体，未调用定义中的阶段错误也会被拒绝。守卫为 false 的主体仍检查类型和纯度，但不执行其 runtime 操作或嵌套 inline 计算。
+每次展开按各字段自己的静态类型检查并留在 runtime；异构元素不合并为一个统一类型。主语只求值一次，原 Tuple normal-form 头保持不变。开放定义按每个已知元素类型（或空元组 / 已证明元组参数分配的严谨抽象元素类型）检查模式、守卫与主体，未调用定义中的阶段错误也会被拒绝。守卫为 false 的主体仍检查类型和纯度，但不执行其 runtime 操作或嵌套 inline 计算。空元组执行零次迭代，仍按抽象元素类型完成一次主体检查。
 
 结构已知不要求字段类型已经是具体机器类型。`Tuple<A, B>` 可以逐字段展开，元素调用分别使用 A、B 的类型参数和 trait 约束；调用者实例化后各自选择实现。例如：
 
@@ -136,38 +138,34 @@ trait Ready { fn ready(self) -> bool; }
 
 fn last_ready(values: Tuple<A, B>) -> bool where A:-Ready, B:-Ready {
     var answer = false;
-    inline for (index, element) in values'tuple_enumerate {
+    inline for element in values'tuple_enumerate {
         answer = element.ready();
     }
     answer
 }
 ```
 
-通过 `requires T == Tuple<A, B>` 建立的结构证据也可用于遍历 T。这不会展开返回 Type 的函数头，亦不意味着尚未确定长度的类型列表已经支持遍历。泛型实例中的资源交付仍按各实际字段类型检查：提前 break 时，已经交付给被调函数的元素由接收者清理，未访问字段由原迭代作用域清理。
-
-两个子模式分别保留自己的计算阶段：索引子模式的 `and ... is ...` 在 comptime 完成，元素子模式的观察在 runtime 执行。元素子模式可以引用前面索引子模式建立的绑定，例如先计算 bool `first`，再交给普通观察函数；不因此允许未展开的 Integer 运算进入 runtime。
+通过 `requires T == Tuple<A, B>` 或 `requires Type.predicates.is_tuple(T)` 建立的结构／类型证据也可用于遍历 `T`。泛型实例中的资源交付仍按各实际字段类型检查：提前 break 时，已经交付给被调函数的元素由接收者清理，未访问字段由原迭代作用域清理。
 
 ```flurry
-fn choose(first: bool, value: bool) -> bool {
-    if first { value } else { not value }
+fn choose(value: bool) -> bool {
+    if value { true } else { false }
 }
 
 fn visit(values: Tuple<bool, bool>) {
-    inline for ((index and index == 0 is first),
-                (value and choose(first, value) is selected))
-        in values'tuple_enumerate {
+    inline for (value and choose(value) is selected) in values'tuple_enumerate {
         let result = selected;
     }
 }
 ```
 
-主语取得后的每个元素分别保留所有权。正常迭代、过滤和 `continue` 在本轮结束时清理本轮尚未交付的资源；`break`、`return` 或跨层退出同时清理剩余未访问元素。循环体中的移动仍遵循普通规则，不能通过展开重复使用仿射元素。索引与元素的作用域仅覆盖本轮，展开不会让不同轮的绑定相互覆盖。
+主语取得后的每个元素分别保留所有权。正常迭代、过滤和 `continue` 在本轮结束时清理本轮尚未交付的资源；`break`、`return` 或跨层退出同时清理剩余未访问元素。元素的作用域仅覆盖本轮，展开不会让不同轮的绑定相互覆盖。
 
-开放定义中的非空、无过滤 tuple 迭代会保留主体的完成性：若各元素的主体均不正常完成，且没有可能到达的本轮 break／continue，整个迭代也不正常完成。例如下面无需在循环后另加一个 bool：
+开放定义中的非空、无过滤且已具体建立字段数的 tuple 迭代会保留主体的完成性：若各元素的主体均不正常完成，且没有可能到达的本轮 break／continue，整个迭代也不正常完成。空元组与仅通过 `Type.predicates.is_tuple` 证明的元素数目未知元组可能执行零次迭代，仍要求循环之后路径覆盖返回。例如下面无需在循环后另加一个 bool：
 
 ```flurry
 fn first(comptime checked: bool, values: Tuple<bool, bool>) -> bool {
-    inline for (index, element) in values'tuple_enumerate {
+    inline for element in values'tuple_enumerate {
         return element;
     }
 }

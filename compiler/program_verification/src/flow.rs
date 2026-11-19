@@ -2946,6 +2946,9 @@ impl Walker<'_> {
             let mut fuel = self.limits.arithmetic.steps;
             let scanned = iir::visit::expression(body, &mut fuel, |expression, fuel| {
                 self.limits.arithmetic.steps = *fuel;
+                if unknown_write {
+                    return Ok(());
+                }
                 let scanned = (|| -> Result<(), String> {
                     match &expression.kind {
                         K::EffectHandle { .. } | K::EffectRequest { .. } | K::EffectRun { .. } => {
@@ -2968,7 +2971,14 @@ impl Walker<'_> {
                             arguments,
                             parameter_bindings,
                         } => {
-                            if !self.call_preserves_memory(callee, arguments, parameter_bindings) {
+                            if self.call_summary(callee).is_none() {
+                                invalidates_external_reads = true;
+                                unknown_write = true;
+                            } else if !self.call_preserves_memory(
+                                callee,
+                                arguments,
+                                parameter_bindings,
+                            ) {
                                 invalidates_external_reads = true;
                                 let mut origins = BTreeMap::new();
                                 for argument in
@@ -4678,6 +4688,17 @@ impl Walker<'_> {
                     result: Some(result),
                     ..
                 } => tail = result,
+                K::Block {
+                    statements,
+                    result: None,
+                }
+                | K::CallPreparation {
+                    statements,
+                    result: None,
+                } => match statements.last() {
+                    Some(last) => tail = last,
+                    None => break,
+                },
                 _ => break,
             }
         }
@@ -5522,7 +5543,8 @@ impl Walker<'_> {
             | K::BitVecType(_)
             | K::FunctionResultType { .. }
             | K::ClosureType { .. }
-            | K::TypeEqual(..) => self.formation_expression(expr, state, depth),
+            | K::TypeEqual(..)
+            | K::TypeKind { .. } => self.formation_expression(expr, state, depth),
             K::ErrorConvert { .. }
             | K::OptionalAbsent
             | K::OptionalPresent(_)
@@ -6649,6 +6671,8 @@ mod memory_summary_cache_tests {
                     preconditions: vec![],
                     postconditions: vec![],
                     result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
                     entry_snapshots: vec![],
                     capabilities: vec![],
                     requirements: vec![],
@@ -7558,6 +7582,161 @@ mod tuple_storage_tests {
                 &Integer::from_u128(9)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod single_pass_loop_tests {
+    use super::*;
+    use nir::{DeclarationId, Parameter, Primitive as P, Sort, program::FunctionPhase};
+
+    fn expr(kind: K, primitive: P) -> Expr {
+        Expr {
+            source: SourceRange { start: 10, end: 20 },
+            ty: Term::Primitive(primitive),
+            kind,
+        }
+    }
+
+    #[test]
+    fn single_pass_statement_block_loop_preserves_scalar_facts() {
+        let param = LocalId { owner: 1, index: 0 };
+        let outer = LocalId {
+            owner: u32::MAX,
+            index: 1,
+        };
+        let inner = LocalId {
+            owner: u32::MAX,
+            index: 2,
+        };
+        let u8_lit = |v: u128| expr(K::Literal(Literal::UnsignedInteger(v)), P::U8);
+        let x_expr = || expr(K::Local(param), P::U8);
+        let assign_inc = expr(
+            K::Assign {
+                place: nir::program::Place {
+                    root: param,
+                    fields: vec![],
+                },
+                value: Box::new(expr(
+                    K::IntegerBinary {
+                        op: IntegerOp::Add,
+                        left: Box::new(x_expr()),
+                        right: Box::new(u8_lit(1)),
+                    },
+                    P::U8,
+                )),
+            },
+            P::Void,
+        );
+        let inner_loop = expr(
+            K::Loop {
+                identity: inner,
+                body: Box::new(expr(
+                    K::Block {
+                        statements: vec![assign_inc.clone(), expr(K::Break(inner), P::Never)],
+                        result: None,
+                    },
+                    P::Never,
+                )),
+            },
+            P::Void,
+        );
+        let outer_loop = expr(
+            K::Loop {
+                identity: outer,
+                body: Box::new(expr(
+                    K::Block {
+                        statements: vec![inner_loop, expr(K::Break(outer), P::Never)],
+                        result: None,
+                    },
+                    P::Never,
+                )),
+            },
+            P::Void,
+        );
+        let make_fn = |body: Expr| Function {
+            interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                name: "single_pass".into(),
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![Parameter {
+                        sort: Sort::Runtime,
+                        ty: Term::Primitive(P::U8),
+                    }],
+                    result: Box::new(Term::Primitive(P::Void)),
+                },
+                parameters: vec![param],
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![expr(
+                    K::ScalarEqual(Box::new(x_expr()), Box::new(u8_lit(1))),
+                    P::Bool,
+                )],
+                postconditions: vec![expr(
+                    K::ScalarEqual(Box::new(x_expr()), Box::new(u8_lit(2))),
+                    P::Bool,
+                )],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
+            body,
+        };
+        analyze(&make_fn(outer_loop), &mut Limits::default()).unwrap();
+
+        let multi_pass = expr(
+            K::Loop {
+                identity: outer,
+                body: Box::new(expr(
+                    K::Block {
+                        statements: vec![
+                            expr(
+                                K::If {
+                                    condition: Box::new(expr(
+                                        K::ScalarLess(Box::new(x_expr()), Box::new(u8_lit(2))),
+                                        P::Bool,
+                                    )),
+                                    then_branch: Box::new(expr(
+                                        K::Block {
+                                            statements: vec![
+                                                assign_inc,
+                                                expr(K::Continue(outer), P::Never),
+                                            ],
+                                            result: None,
+                                        },
+                                        P::Never,
+                                    )),
+                                    else_branch: None,
+                                },
+                                P::Void,
+                            ),
+                            expr(K::Break(outer), P::Never),
+                        ],
+                        result: None,
+                    },
+                    P::Never,
+                )),
+            },
+            P::Void,
+        );
+        assert_eq!(
+            analyze(&make_fn(multi_pass), &mut Limits::default())
+                .err()
+                .unwrap()
+                .reason,
+            Reason::MissingPostconditionProof
+        );
     }
 }
 

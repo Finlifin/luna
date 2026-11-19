@@ -175,6 +175,10 @@ pub(crate) fn admit_in(
                         charge(fuel, 2)?;
                         pending.extend([Work::Term(a), Work::Term(b)]);
                     }
+                    TypePredicate::Kind(ty, _) => {
+                        charge(fuel, 1)?;
+                        pending.push(Work::Term(ty));
+                    }
                     TypePredicate::Trait(capability) => {
                         charge(fuel, 1)?;
                         pending.push(Work::Capability(capability));

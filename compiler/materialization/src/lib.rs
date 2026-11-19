@@ -1314,6 +1314,10 @@ impl Builder<'_> {
                     self.queue.push_back(Task::Type(ty.clone()));
                 }
             }
+            n::TypePredicate::Kind(ty, _) => {
+                crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
+                self.queue.push_back(Task::Type(ty.clone()));
+            }
             n::TypePredicate::Not(inner) => self.predicate_dependencies(inner, depth + 1)?,
             n::TypePredicate::And(items) | n::TypePredicate::Or(items) => {
                 for item in items {
@@ -2240,6 +2244,7 @@ impl Builder<'_> {
             P::Bool(value) => P::Bool(*value),
             P::Trait(requirement) => P::Trait(self.normalized_capability(requirement)?),
             P::Equal(a, b) => P::Equal(self.normalized_type(a)?, self.normalized_type(b)?),
+            P::Kind(ty, kind) => P::Kind(self.normalized_type(ty)?, *kind),
             P::Not(inner) => P::Not(Box::new(self.normalized_predicate(inner, depth + 1)?)),
             P::And(items) | P::Or(items) => {
                 if items.len() > self.fuel {
@@ -2947,6 +2952,7 @@ impl Builder<'_> {
                 | K::ComptimeIntegerConvert(value)
                 | K::SymbolName(value)
                 | K::EnumName(value)
+                | K::TypeKind { operand: value, .. }
                 | K::Not(value)
                 | K::Loop { body: value, .. } => pending.push((value, depth + 1)),
                 K::WritePointer {
@@ -3417,6 +3423,7 @@ impl Builder<'_> {
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::EnumName(value)
+            | K::TypeKind { operand: value, .. }
             | K::Not(value)
             | K::Loop { body: value, .. } => self.expr(value, depth + 1, comptime)?,
             K::BitWindow { value, start, end } => {

@@ -56,6 +56,9 @@ fn primitive_truth(
             (Some(a), Some(b)) => Some(a == b),
             _ => None,
         },
+        n::TypePredicate::Kind(ty, kind) => {
+            primitive(ty, fuel)?.and_then(|primitive| kind.evaluate(&Term::Primitive(primitive)))
+        }
         n::TypePredicate::Not(inner) => {
             primitive_truth(inner, parameters, inputs, fuel, depth + 1)?.map(|value| !value)
         }
@@ -276,6 +279,8 @@ mod tests {
                     postconditions: vec![],
                     entry_snapshots: vec![],
                     result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
                     signature: Term::Function {
                         parameters: vec![],
                         result: Box::new(p(P::Bool)),

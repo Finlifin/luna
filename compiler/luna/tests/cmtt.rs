@@ -5217,7 +5217,7 @@ fn generator_range_flow_does_not_invoke_endpoints_and_preserves_outer_exits() {
 fn generator_tuple_enumeration_builds_code_from_completed_fields() {
     let source = "pure comptime fn build(values:Tuple<bool,bool,bool>)-><|-bool> {
         var code='(true);
-        inline for (index,element) in values'tuple_enumerate {
+        inline for element in values'tuple_enumerate {
             if element {code='(not ~<code>);}
         }
         code
@@ -5234,7 +5234,7 @@ fn generator_tuple_enumeration_preserves_each_element_type() {
     let source = "typealias Word=.u32'builtin;
         pure comptime fn build(values:Tuple<bool,Word>)-><|-bool> {
             var code='(false);
-            inline for (index,element) in values'tuple_enumerate {
+            inline for element in values'tuple_enumerate {
                 if element'type == Word {code='(true);}
             }
             code
@@ -5250,7 +5250,8 @@ fn generator_tuple_enumeration_preserves_each_element_type() {
 fn generator_tuple_enumeration_filters_and_transfers_control() {
     let source = "pure comptime fn build(values:Tuple<bool,bool,bool>)-><|-bool> {
         var code='(false);
-        inline for (index,element) if index != 0 in values'tuple_enumerate {
+        var first=true;
+        inline for element if do {let skip=first;first=false;not skip} in values'tuple_enumerate {
             if not element {continue;}
             code='(not ~<code>);
             break;
@@ -5262,7 +5263,7 @@ fn generator_tuple_enumeration_filters_and_transfers_control() {
         Value::Bool(true)
     );
     let source = "pure comptime fn build(values:Tuple<bool,bool>)-><|-bool> {
-        inline for (index,element) in values'tuple_enumerate {return '(true);}
+        inline for element in values'tuple_enumerate {return '(true);}
     } fn run()->bool {~<build((false,false))>}";
     assert_eq!(
         support::run_iir_with_tuple(source, "run", vec![]),
@@ -5270,7 +5271,7 @@ fn generator_tuple_enumeration_filters_and_transfers_control() {
     );
     let source = "pure comptime fn build(values:Tuple<bool,bool>)-><|-bool> {
         inline for:outer i in 0..2 {
-            inline for (index,element) in values'tuple_enumerate {break outer;}
+            inline for element in values'tuple_enumerate {break outer;}
             return '(false);
         }
         '(true)
@@ -5284,12 +5285,12 @@ fn generator_tuple_enumeration_filters_and_transfers_control() {
 #[test]
 fn generator_tuple_enumeration_checks_filtered_and_unreachable_elements() {
     for body in [
-        "inline for (index,element) if false in values'tuple_enumerate {let invalid=not element;}",
-        "inline for (index,element) in values'tuple_enumerate {return '(true); let invalid=not element;}",
-        "inline for (index,element) in values'tuple_enumerate {index=1;}",
-        "inline for (index,element) in values'tuple_enumerate {element=element;}",
-        "inline for element in values'tuple_enumerate {}",
-        "inline for (index,element) if false in values'tuple_enumerate {runtime();}",
+        "inline for element if false in values'tuple_enumerate {let invalid=not element;}",
+        "inline for element in values'tuple_enumerate {return '(true); let invalid=not element;}",
+        "inline for (element as alias) in values'tuple_enumerate {alias=element;}",
+        "inline for element in values'tuple_enumerate {element=element;}",
+        "inline for (index,element) in values'tuple_enumerate {}",
+        "inline for element if false in values'tuple_enumerate {runtime();}",
     ] {
         let source = format!(
             "typealias Word=.u32'builtin;
@@ -5301,9 +5302,9 @@ fn generator_tuple_enumeration_checks_filtered_and_unreachable_elements() {
         assert!(error.contains("elaboration failed"), "{body}: {error}");
     }
     for body in [
-        "inline for (index,element) in values'tuple_enumerate {break;}",
-        "inline for (index,element) in values'tuple_enumerate {continue;}",
-        "inline for (index,element) if flag in values'tuple_enumerate {return '(true);}",
+        "inline for element in values'tuple_enumerate {break;}",
+        "inline for element in values'tuple_enumerate {continue;}",
+        "inline for element if flag in values'tuple_enumerate {return '(true);}",
     ] {
         let source = format!(
             "pure comptime fn unused(flag:bool,values:Tuple<bool,bool>)-><|-bool> {{{body}}}"
@@ -5488,7 +5489,7 @@ fn local_code_construction_is_recognized_through_loop_returns() {
     for body in [
         "do {while true {return '(true);}}",
         "do {inline for index in 0..1 {return '(true);}}",
-        "do {inline for (index,element) in (true,false)'tuple_enumerate {return '(element);}}",
+        "do {inline for element in (true,false)'tuple_enumerate {return '(element);}}",
     ] {
         let source = format!(
             "pure comptime fn build()-><|-bool> {{let code={body};code}} fn run()->bool {{~<build()>}}"
@@ -9820,7 +9821,7 @@ fn generator_tuple_filters_refutable_index_and_element_patterns() {
         let source = format!(
             "pure comptime fn build()-><|-bool> {{
             var code='(false);
-            inline for {pattern} in (false,true,false)'tuple_enumerate {{code='(true);}}
+            inline for {pattern} in ((0,false),(1,true),(2,false))'tuple_enumerate {{code='(true);}}
             code
         }} fn run()->bool {{~<build()>}}"
         );
@@ -9832,13 +9833,14 @@ fn generator_tuple_filters_refutable_index_and_element_patterns() {
 fn generator_refutable_tuples_skip_guards_but_check_all_bodies() {
     let source = "pure comptime fn never()->bool {never()}
         pure comptime fn build()-><|-bool> {
-            inline for (9,value) if never() in (true,false)'tuple_enumerate {return '(false);}
+            inline for (9,value) if never() in ((0,true),(1,false))'tuple_enumerate {return '(false);}
             '(true)
         } fn run()->bool {~<build()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
     for body in [
-        "inline for (9,value) in (true,false)'tuple_enumerate {return '(true);}",
-        "inline for (9,value) in (true,false)'tuple_enumerate {let wrong:bool=0;}'(true)",
+        "inline for true if never() in (false,)'tuple_enumerate {return '(false);}",
+        "inline for false in (true,)'tuple_enumerate {return '(true);}",
+        "inline for false in (true,)'tuple_enumerate {let wrong:bool=0;}'(true)",
     ] {
         let source = format!("pure comptime fn unused()-><|-bool> {{{body}}}");
         assert!(
@@ -9852,7 +9854,7 @@ fn generator_refutable_tuples_skip_guards_but_check_all_bodies() {
 fn generator_refutable_tuples_preserve_type_values_and_heterogeneous_fields() {
     let source = "pure comptime fn build()-><|-bool> {
         var code='(false);
-        inline for (1,T) in (bool,.u32'builtin)'tuple_enumerate {
+        inline for T in (bool,.u32'builtin)'tuple_enumerate {
             if T == .u32'builtin {code='(true);}
         }
         code
@@ -9860,7 +9862,7 @@ fn generator_refutable_tuples_preserve_type_values_and_heterogeneous_fields() {
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
     let source = "pure comptime fn build()-><|-bool> {
         var code='(false);
-        inline for (1,element) in (false,9)'tuple_enumerate {
+        inline for element in (false,9)'tuple_enumerate {
             if element'type == .Integer'builtin {code='(true);}
         }
         code
@@ -9879,7 +9881,7 @@ fn pattern_generators_filter_tuple_elements_and_preserve_outer_transfers() {
             "comptime fn build()-><bool -| value:bool> {{
             var expected=false;
             inline for:outer pass in 0..2 {{
-                inline for (index,true) in (false,true,false)'tuple_enumerate {{ {action} }}
+                inline for true in (false,true,false)'tuple_enumerate {{ {action} }}
                 expected=false;
             }}
             '<value if value == expected>
@@ -9892,10 +9894,10 @@ fn pattern_generators_filter_tuple_elements_and_preserve_outer_transfers() {
 #[test]
 fn generator_tuple_filters_check_phase_and_immutability_without_invocation() {
     for body in [
-        "inline for (9,value) if runtime() in (true,false)'tuple_enumerate {}",
-        "inline for (9,value if runtime()) in (true,false)'tuple_enumerate {}",
-        "inline for (9,value) in (true,false)'tuple_enumerate {value=false;}",
-        "inline for ((0 or 1) as index,value) in (true,false)'tuple_enumerate {index=2;}",
+        "inline for false if runtime() in (true,false)'tuple_enumerate {}",
+        "inline for (false if runtime()) in (true,false)'tuple_enumerate {}",
+        "inline for value in (true,false)'tuple_enumerate {value=false;}",
+        "inline for ((true or false) as flag) in (true,false)'tuple_enumerate {flag=true;}",
     ] {
         let source = format!(
             "fn runtime()->bool {{true}}
@@ -9914,12 +9916,12 @@ fn generator_range_pattern_bindings_are_immutable_during_pattern_computation() {
         ("(index if do {index=1;true})", "0..3"),
         ("(index and do {index=1;true} is true)", "0..3"),
         (
-            "(index,(element and do {element=false;true} is true))",
+            "(element and do {element=false;true} is true)",
             "(true,false)'tuple_enumerate",
         ),
         (
             "(9,(element and do {element=false;true} is true))",
-            "(true,false)'tuple_enumerate",
+            "((0,true),(1,false))'tuple_enumerate",
         ),
     ] {
         let source = format!(

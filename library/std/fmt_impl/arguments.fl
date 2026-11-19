@@ -1,4 +1,5 @@
 use builtin.fmt.{ByteWriter, Display}
+use fmt_impl.parse.{FormatPlan, Parse}
 use io_impl.errors.Error;
 use io_impl.writer.{stderr, stdout, write_all}
 
@@ -6,46 +7,56 @@ pub fn print(comptime text: str) -> !Error void {
     write_all<text>(1)
 }
 
-{- Parse has checked the syntax. Stream literal bytes up to the next field.
-   A doubled brace writes one byte and {} leaves the cursor after the field. -}
-fn write_literal(output: *std.io.Writer, cursor: *u64) -> !Error void where format: str {
-    let length = builtin.compiler.str_byte_length(format);
-    while cursor.* < length {
-        let offset = cursor.*;
-        let byte = builtin.compiler.str_byte(format, offset) match {
-            value? => value,
-            null => break,
-        }
-        cursor.* = offset + 1;
-        if byte == 123 or byte == 125 {
-            let next = cursor.*;
-            if next >= length {
-                break;
+{- Emit one unescaped literal segment selected by field position. -}
+fn write_segment(
+    output: *std.io.Writer,
+    index: usize,
+) -> !Error void where segments: meta.List<str> {
+    inline for i in 0..segments.length() {
+        const segment_index: usize = i.to_usize();
+        if index == segment_index {
+            const segment = segments.get(i) match {
+                value? => value,
+                null => "",
             }
-            let following = builtin.compiler.str_byte(format, next);
-            cursor.* = next + 1;
-            if byte == 123 and following matches 125? {
-                break;
-            }
+            let writer = output.*;
+            return writer.write_all<segment>();
         }
-        output.write_byte(byte)!;
     }
 }
 
-pub fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format)) -> !Error void {
-    var output = stdout();
-    inline if not format.contains("{") and not format.contains("}") {
-        write_all<format>(1)!;
-        return output.write_byte(10);
-    }
-    var cursor: u64 = 0;
-    inline for (_, value) in varargs'tuple_enumerate {
-        write_literal<format>(output.ref, cursor.ref)!;
-        inline if value'type :- Display {
-            value.write(output.ref)!;
+fn write_fmt_tuple(
+    output: *std.io.Writer,
+    comptime format: str,
+    values: defer Parse(format),
+) -> !Error void {
+    const segments = FormatPlan.literal_segments_for(format);
+    const segment_count: usize = segments.length().to_usize();
+    var index: usize = 0;
+    inline for value in values'tuple_enumerate {
+        write_segment<segments>(output, index)!;
+        const T = value'type;
+        inline if T :- Display {
+            value.write(output)!;
+        }
+        if index < segment_count {
+            index = index + 1;
         }
     }
-    write_literal<format>(output.ref, cursor.ref)!;
+    write_segment<segments>(output, index)
+}
+
+pub fn write_fmt(
+    output: *std.io.Writer,
+    comptime format: str,
+    ...varargs: defer Parse(format),
+) -> !Error void {
+    write_fmt_tuple(output, format, varargs)
+}
+
+pub fn println(comptime format: str, ...varargs: defer Parse(format)) -> !Error void {
+    var output = stdout();
+    write_fmt_tuple(output.ref, format, varargs)!;
     output.write_byte(10)
 }
 
@@ -53,9 +64,9 @@ pub fn eprint(comptime text: str) -> !Error void {
     write_all<text>(2)
 }
 
-pub fn eprintln(comptime text: str) -> !Error void {
-    write_all<text>(2)!;
+pub fn eprintln(comptime format: str, ...varargs: defer Parse(format)) -> !Error void {
     var output = stderr();
+    write_fmt_tuple(output.ref, format, varargs)!;
     output.write_byte(10)
 }
 

@@ -292,3 +292,68 @@ fn runtime_symbol_operation_bindings_keep_alias_identity_and_argument_order() {
         );
     }
 }
+
+#[test]
+fn comptime_text_slice_and_concat_enforce_utf8_boundaries_and_phase() {
+    use nir::{Primitive as P, Term, program::TextQueryKind as Q};
+    let ty = |p| Term::Primitive(p);
+    assert!(Q::Slice.validate(
+        &Term::Tuple(vec![ty(P::Str), ty(P::U64), ty(P::U64)]),
+        &Term::Optional(Box::new(ty(P::Str))),
+    ));
+    assert!(Q::Concat.validate(&Term::Tuple(vec![ty(P::Str), ty(P::Str)]), &ty(P::Str)));
+    assert!(!Q::Concat.validate(&Term::Tuple(vec![ty(P::Str), ty(P::U64)]), &ty(P::Str)));
+
+    let package = compile_text(&source(
+        r#"
+        comptime fn run() -> bool {
+            let sample = "a🦀界";
+            let full = sample.slice(0, 8) match {
+                s? => s.byte_length() == 8 and s.starts_with("a🦀") and s.ends_with("界"),
+                null => false,
+            };
+            let middle = sample.slice(1, 5) match {
+                s? => s.byte_length() == 4 and s.starts_with("🦀"),
+                null => false,
+            };
+            let empty_mid = sample.slice(1, 1) match {
+                s? => s.byte_length() == 0,
+                null => false,
+            };
+            let empty_end = sample.slice(8, 8) match {
+                s? => s.byte_length() == 0,
+                null => false,
+            };
+            let joined = "a".concat("🦀").concat("界");
+            let empty_join = "".concat("界").concat("");
+            let inverted = sample.slice(5, 1) match { _? => false, null => true };
+            let past_end = sample.slice(0, 9) match { _? => false, null => true };
+            let start_past = sample.slice(9, 9) match { _? => false, null => true };
+            let mid_start = sample.slice(2, 5) match { _? => false, null => true };
+            let mid_end = sample.slice(1, 4) match { _? => false, null => true };
+            let mid_cjk = sample.slice(6, 8) match { _? => false, null => true };
+            full and middle and empty_mid and empty_end
+                and joined.byte_length() == 8 and joined.starts_with("a🦀") and joined.ends_with("界")
+                and empty_join.byte_length() == 3 and empty_join.starts_with("界")
+                and inverted and past_end and start_past and mid_start and mid_end and mid_cjk
+        }
+        "#,
+    ));
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+
+    for invalid in [
+        "fn bad(s: str) -> ?str { s.as(meta.ComptimeTextBytes).slice(0, 1) }",
+        "fn bad(a: str, b: str) -> str { a.as(meta.ComptimeTextBytes).concat(b) }",
+    ] {
+        let error =
+            support::compile_with_protocols(&source(invalid), &support::meta_fixture_protocols())
+                .unwrap_err();
+        assert!(
+            error.contains("runtime") || error.contains("phase") || error.contains("comptime"),
+            "{invalid}: {error}"
+        );
+    }
+}

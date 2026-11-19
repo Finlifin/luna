@@ -9,11 +9,6 @@ impl Interpreter<'_> {
         depth: usize,
     ) -> ContractQueryResult {
         use ContractOutcome::*;
-        // A source declaration catalog is not a proof of applicability. Only
-        // concrete dispatch selected by materialization supplies this evidence.
-        if self.graph.is_none() {
-            return Ok(Unknown);
-        }
         if depth >= 128 {
             return Err(ErrorKind::DepthExhausted);
         }
@@ -40,7 +35,32 @@ impl Interpreter<'_> {
                     None => Unknown,
                 }
             }
+            P::Kind(ty, kind) => {
+                self.charge_copy_work(None, |fuel| {
+                    nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel)
+                })
+                .map_err(|error| error.kind)?;
+                if matches!(ty, Term::NormalForm { head, .. } if self.normal_forms.get(head).is_some_and(|m| m.role == nir::normal_forms::Role::Tuple))
+                {
+                    match kind.evaluate(&Term::Tuple(vec![])) {
+                        Some(true) => Satisfied,
+                        Some(false) => Rejected,
+                        None => Unknown,
+                    }
+                } else {
+                    match kind.evaluate(ty) {
+                        Some(true) => Satisfied,
+                        Some(false) => Rejected,
+                        None => Unknown,
+                    }
+                }
+            }
             P::Trait(requirement) => {
+                // A source declaration catalog is not a proof of applicability. Only
+                // concrete dispatch selected by materialization supplies this evidence.
+                if self.graph.is_none() {
+                    return Ok(Unknown);
+                }
                 self.charge_copy_work(None, |fuel| {
                     for ty in std::iter::once(&requirement.subject)
                         .chain(&requirement.interface_arguments)

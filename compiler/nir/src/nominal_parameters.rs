@@ -681,6 +681,7 @@ impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
             P::Bool(value) => P::Bool(*value),
             P::Trait(requirement) => P::Trait(self.instantiate_requirement(requirement, fuel)?),
             P::Equal(a, b) => P::Equal(self.instantiate(a, fuel)?, self.instantiate(b, fuel)?),
+            P::Kind(ty, kind) => P::Kind(self.instantiate(ty, fuel)?, *kind),
             P::Not(inner) => P::Not(Box::new(self.predicate(inner, fuel, depth + 1)?)),
             P::And(parts) | P::Or(parts) => {
                 let parts = parts

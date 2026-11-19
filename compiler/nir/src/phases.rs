@@ -1042,6 +1042,9 @@ impl<'a> PhaseContext<'a> {
                             work.push(Work::Expr(left, false, true), inspection_fuel)?;
                             work.push(Work::Expr(right, false, true), inspection_fuel)?;
                         }
+                        K::TypeKind { operand, .. } if matches!(operand.kind, K::TypeValue(_)) => {
+                            work.push(Work::Expr(operand, false, true), inspection_fuel)?;
+                        }
                         K::Closure {
                             captures,
                             parameters,
@@ -1475,6 +1478,7 @@ impl<'a> PhaseContext<'a> {
                         | K::TakeBits(value)
                         | K::SymbolName(value)
                         | K::EnumName(value)
+                        | K::TypeKind { operand: value, .. }
                         | K::Not(value)
                         | K::Loop { body: value, .. } => {
                             work.push(Work::Expr(value, false, ct), inspection_fuel)?
@@ -1502,6 +1506,12 @@ impl<'a> PhaseContext<'a> {
                             work.push(Work::Expr(value, false, ct), inspection_fuel)?;
                         }
                         K::TextQuery { subject, query } => {
+                            if query.is_comptime_only() && !ct {
+                                return Err(fail(
+                                    expr.source,
+                                    "comptime text operation is unavailable in runtime execution",
+                                ));
+                            }
                             if !query.validate(&subject.ty, &expr.ty) {
                                 return Err(fail(expr.source, "text query domain mismatch"));
                             }

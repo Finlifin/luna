@@ -2,7 +2,7 @@
 use super::*;
 
 impl Checker<'_, '_> {
-    pub(super) fn check_open_fragment(
+    pub(in crate::program) fn check_open_fragment(
         &mut self,
         value: &n::Expr,
         span: Span,
@@ -223,15 +223,43 @@ impl Checker<'_, '_> {
                 .values()
                 .map(|binder| binder.declaration)
                 .chain(self.definition_refinements.tuple_elements.iter().copied())
+                .chain(
+                    self.definition_refinements
+                        .staged_values
+                        .iter()
+                        .map(|(id, _)| *id),
+                )
                 .collect(),
             requirements,
             capabilities,
             body: value,
         };
+        let mut function_parameters = self.function_parameter_metadata();
+        if !self.definition_refinements.staged_values.is_empty() {
+            let entry = if let Some(entry) = function_parameters
+                .iter_mut()
+                .find(|entry| entry.declaration == region.owner)
+            {
+                entry
+            } else {
+                function_parameters.push(nir::function_parameters::Declaration {
+                    declaration: region.owner,
+                    parameters: Vec::new(),
+                    domains: Vec::new(),
+                });
+                function_parameters.last_mut().unwrap()
+            };
+            for (id, domain) in &self.definition_refinements.staged_values {
+                if !entry.parameters.contains(id) {
+                    entry.parameters.push(*id);
+                    entry.domains.push(domain.clone());
+                }
+            }
+        }
         let package = n::Package {
             target: self.target,
             normal_forms: self.normal_form_metadata(),
-            function_parameters: self.function_parameter_metadata(),
+            function_parameters,
             structs: self.structs.values().cloned().collect(),
             newtypes: self.newtypes.values().cloned().collect(),
             alias_contracts: self.alias_contracts.values().cloned().collect(),

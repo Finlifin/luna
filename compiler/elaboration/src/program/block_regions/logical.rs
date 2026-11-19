@@ -253,11 +253,15 @@ impl<'h> Frame<'h> {
             right.span,
         )?;
         if domain == p(P::Bool) {
-            let H::Binary(op, _, _) = self.source.kind else {
+            let H::Binary(op, hir_left, _) = self.source.kind else {
                 unreachable!()
             };
-            self.premise =
-                Some(checker.enter_type_condition(&left, op == BinOp::And, self.source.span)?);
+            self.premise = Some(checker.enter_source_type_condition(
+                Some(hir_left),
+                &left,
+                op == BinOp::And,
+                self.source.span,
+            )?);
         }
         self.state = State::Right { left, domain };
         Ok(Step::Child(Request::expression(right, destination)))

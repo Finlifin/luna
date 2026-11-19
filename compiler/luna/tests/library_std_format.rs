@@ -185,17 +185,30 @@ fn println_requires_the_format_before_it_can_admit_runtime_fields() {
 #[test]
 fn tuple_iteration_requires_evidence_from_all_producer_returns() {
     let template = r#"
-        pure comptime fn Shape(flag: bool) -> Type {
+        pure comptime fn Shape(flag: bool) -> R: Type
+        where ensures Type.predicates.is_tuple(R)
+        {
             if flag { return OTHER; };
             Tuple<bool, bool>
         }
         fn consume(comptime flag: bool, ...values: defer Shape(flag)) {
-            inline for (_, value) in values'tuple_enumerate { };
+            inline for value in values'tuple_enumerate { };
         }
     "#;
     // The early return can deliver a scalar while the tail constructs a tuple.
     assert!(support::compile(&template.replace("OTHER", "bool")).is_err());
     support::compile(&template.replace("OTHER", "Tuple<u8>")).unwrap();
+    // An unannotated producer must NOT authorize tuple_enumerate via body-peeking.
+    let unannotated = r#"
+        pure comptime fn Shape(flag: bool) -> Type {
+            if flag { return Tuple<u8>; };
+            Tuple<bool, bool>
+        }
+        fn consume(comptime flag: bool, ...values: defer Shape(flag)) {
+            inline for value in values'tuple_enumerate { };
+        }
+    "#;
+    assert!(support::compile(unannotated).is_err());
 }
 
 #[test]
@@ -203,10 +216,162 @@ fn a_tuple_head_guarantee_does_not_supply_a_field_trait() {
     let source = r#"
         trait Mark { fn mark(self) -> bool; }
         impl Mark for bool { fn mark(self) -> bool { self } }
-        pure comptime fn Shape(flag: bool) -> Type { Tuple<Any> }
+        pure comptime fn Shape(flag: bool) -> R: Type
+        where ensures Type.predicates.is_tuple(R)
+        { Tuple<Any> }
         fn consume(comptime flag: bool, ...values: defer Shape(flag)) {
-            inline for (_, value) in values'tuple_enumerate { value.mark(); };
+            inline for value in values'tuple_enumerate { value.mark(); };
         }
     "#;
     assert!(support::compile(source).is_err());
+}
+
+#[test]
+fn type_predicates_is_tuple_works_across_propositions_and_comptime() {
+    let source = r#"
+        comptime fn executable_checks() -> bool {
+            Type.predicates.is_tuple(Tuple<u8, bool>)
+                and Type.predicates.is_tuple(Tuple<>)
+                and not Type.predicates.is_tuple(bool)
+        }
+        fn requires_tuple(value: T) -> bool
+        where T, requires Type.predicates.is_tuple(T)
+        {
+            true
+        }
+        fn iterate_assumed(...args: T) -> bool where T {
+            assumes Type.predicates.is_tuple(args'type);
+            var seen: u8 = 0;
+            inline for _ in args'tuple_enumerate {
+                assumes seen < 255;
+                seen = seen + 1;
+            }
+            seen == 2
+        }
+        typealias TupleOnly = refines { Type.predicates.is_tuple(Itself) } Any;
+        fn refined_tuple(value: TupleOnly) -> bool { true }
+        fn run() -> bool {
+            let one: u8 = 1;
+            let pair: Tuple<u8, bool> = (1, true);
+            executable_checks()
+                and requires_tuple(pair)
+                and iterate_assumed(one, true)
+                and refined_tuple(pair)
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+
+    assert!(
+        support::compile(
+            r#"
+            fn requires_tuple(value: T) -> bool where T, requires Type.predicates.is_tuple(T) { true }
+            fn run() -> bool { requires_tuple(true) }
+            "#,
+        )
+        .is_err()
+    );
+    assert!(
+        support::compile(
+            r#"
+            typealias TupleOnly = refines { Type.predicates.is_tuple(Itself) } Any;
+            fn refined_tuple(value: TupleOnly) -> bool { true }
+            fn run() -> bool { let x: u8 = 1; refined_tuple(x) }
+            "#,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn type_producer_ensures_is_tuple_contract_enforced_and_authorizes_iteration() {
+    let source = r#"
+        pure comptime fn PairOf(T: Type) -> R: Type
+        where ensures Type.predicates.is_tuple(R)
+        {
+            Tuple<T, T>
+        }
+        fn consume(comptime T: Type, ...args: defer PairOf(T)) -> bool {
+            var count: u8 = 0;
+            inline for _ in args'tuple_enumerate {
+                assumes count < 255;
+                count = count + 1;
+            }
+            count == 2
+        }
+        fn run() -> bool {
+            let one: u8 = 1;
+            let two: u8 = 2;
+            consume(bool, true, false) and consume(u8, one, two)
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+
+    // A Type-producing function declaring ensures is_tuple(R) must fail if it returns bool.
+    assert!(
+        support::compile(
+            r#"
+            pure comptime fn BadProducer(T: Type) -> R: Type
+            where ensures Type.predicates.is_tuple(R)
+            {
+                bool
+            }
+            fn run() {}
+            "#,
+        )
+        .is_err()
+    );
+
+    // Without ensures Type.predicates.is_tuple(R), 'tuple_enumerate must remain rejected.
+    assert!(
+        support::compile(
+            r#"
+            pure comptime fn UnannotatedPair(T: Type) -> Type { Tuple<T, T> }
+            fn bad(comptime T: Type, ...args: defer UnannotatedPair(T)) {
+                inline for _ in args'tuple_enumerate {}
+            }
+            "#,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn std_fmt_write_fmt_println_and_eprintln_cover_zero_single_escaped_and_heterogeneous_args() {
+    let ok = support::compile(
+        r#"
+        use std.prelude.*;
+        use std.fmt.write_fmt;
+        fn exercise() -> !std.io.Error void {
+            var out = std.io.stdout();
+            write_fmt(out.ref, "empty")!;
+            write_fmt(out.ref, "{{escaped}}")!;
+            write_fmt(out.ref, "{}", true)!;
+            let byte: u8 = 7;
+            let num: i32 = -12;
+            write_fmt(out.ref, "{} {} {}", false, byte, num)!;
+            println("")!;
+            println("{{}}")!;
+            println("{}", byte)!;
+            println("{} {} {}", true, byte, num)!;
+            eprintln("")!;
+            eprintln("{{err}}")!;
+            eprintln("{}", byte)!;
+            eprintln("{} {} {}", false, byte, num)
+        }
+        fn run() -> bool { true }
+        "#,
+    );
+    assert!(ok.is_ok(), "{ok:?}");
+
+    for call in [
+        r#"std.fmt.eprintln("{}:{}", true)"#,
+        r#"std.fmt.eprintln("{}", Unknown {})"#,
+        r#"std.fmt.write_fmt(w.ref, "{}:{}", true)"#,
+        r#"std.fmt.write_fmt(w.ref, "{}", Unknown {})"#,
+    ] {
+        let invalid = format!(
+            "use std.prelude.*; struct Unknown {{}} fn run() -> !std.io.Error void {{ var w = std.io.stdout(); {call} }}"
+        );
+        assert!(support::compile(&invalid).is_err(), "{call}");
+    }
 }

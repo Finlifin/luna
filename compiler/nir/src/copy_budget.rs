@@ -521,6 +521,7 @@ pub(crate) fn check_retained_body(
     let mut roots = function
         .requirements
         .iter()
+        .chain(&function.result_guarantees)
         .map(Node::Predicate)
         .chain(function.capabilities.iter().map(Node::Requirement))
         .chain(expressions.map(Node::Expr));
@@ -639,6 +640,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     function.postconditions.len(),
                     function.defaults.len(),
                     function.requirements.len(),
+                    function.result_guarantees.len(),
                     function.capabilities.len(),
                 ] {
                     charge_width(steps, width)?;
@@ -656,6 +658,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     function
                         .requirements
                         .iter()
+                        .chain(&function.result_guarantees)
                         .map(|p| (Node::Predicate(p), depth)),
                 );
                 work.extend(
@@ -674,6 +677,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         work.push((Node::Type(a), depth + 1));
                         work.push((Node::Type(b), depth + 1));
                     }
+                    P::Kind(ty, _) => work.push((Node::Type(ty), depth + 1)),
                     P::Trait(requirement) => work.push((Node::Requirement(requirement), depth + 1)),
                     P::Not(inner) => work.push((Node::Predicate(inner), depth + 1)),
                     P::And(items) | P::Or(items) => {
@@ -1011,6 +1015,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     | K::ComptimeIntegerConvert(value)
                     | K::SymbolName(value)
                     | K::EnumName(value)
+                    | K::TypeKind { operand: value, .. }
                     | K::Not(value)
                     | K::Loop { body: value, .. }
                     | K::Field { value, .. }

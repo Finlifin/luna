@@ -167,6 +167,8 @@ impl Checker<'_, '_> {
                     postconditions: vec![],
                     entry_snapshots: vec![],
                     result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
                     type_parameters: type_scope.iter().copied().collect(),
                     requirements: vec![],
                     capabilities: vec![],

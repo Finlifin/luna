@@ -33,13 +33,13 @@ pub mod mem {
 }
 
 pub mod fmt {
-    pub use arguments.{eprint, eprintln, print, print_value, println, println_value}
+    pub use arguments.{eprint, eprintln, print, print_value, println, println_value, write_fmt}
     pub use builtin.fmt.Display;
     pub use parse.{FormatError, FormatPiece, FormatPlan, Parse}
 }
 
 pub mod prelude {
-    pub use arguments.{eprint, eprintln, print, print_value, println, println_value}
+    pub use arguments.{eprint, eprintln, print, print_value, println, println_value, write_fmt}
     pub use builtin.fmt.Display;
     pub use builtin.prelude.*;
 }

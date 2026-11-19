@@ -1007,6 +1007,8 @@ pub enum TextQueryKind {
     Byte,
     SymbolByteLength,
     SymbolByte,
+    Slice,
+    Concat,
 }
 impl fmt::Display for TextQueryKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1015,6 +1017,8 @@ impl fmt::Display for TextQueryKind {
             Self::Byte => "byte",
             Self::SymbolByteLength => "symbol-byte-length",
             Self::SymbolByte => "symbol-byte",
+            Self::Slice => "slice",
+            Self::Concat => "concat",
         })
     }
 }
@@ -1025,29 +1029,38 @@ impl TextQueryKind {
     pub fn is_symbol(self) -> bool {
         matches!(self, Self::SymbolByteLength | Self::SymbolByte)
     }
+    pub fn is_comptime_only(self) -> bool {
+        matches!(self, Self::Slice | Self::Concat)
+    }
     pub fn validate(self, packet: &Term, result: &Term) -> bool {
         use crate::Primitive as P;
         let Term::Tuple(inputs) = packet else {
             return false;
         };
-        let count = if self.is_length() { 1 } else { 2 };
-        if inputs.len() != count
-            || inputs.iter().enumerate().any(|(i, ty)| {
-                *ty != Term::Primitive(if i == 0 {
-                    if self.is_symbol() { P::Symbol } else { P::Str }
-                } else {
-                    P::U64
-                }) && *ty != Term::Primitive(P::Never)
+        let expected_inputs: &[P] = match self {
+            Self::ByteLength => &[P::Str],
+            Self::Byte => &[P::Str, P::U64],
+            Self::SymbolByteLength => &[P::Symbol],
+            Self::SymbolByte => &[P::Symbol, P::U64],
+            Self::Slice => &[P::Str, P::U64, P::U64],
+            Self::Concat => &[P::Str, P::Str],
+        };
+        if inputs.len() != expected_inputs.len()
+            || inputs.iter().zip(expected_inputs).any(|(ty, expected)| {
+                *ty != Term::Primitive(*expected) && *ty != Term::Primitive(P::Never)
             })
         {
             return false;
         }
         let expected = if inputs.contains(&Term::Primitive(P::Never)) {
             Term::Primitive(P::Never)
-        } else if self.is_length() {
-            Term::Primitive(P::U64)
         } else {
-            Term::Optional(Box::new(Term::Primitive(P::U8)))
+            match self {
+                Self::ByteLength | Self::SymbolByteLength => Term::Primitive(P::U64),
+                Self::Byte | Self::SymbolByte => Term::Optional(Box::new(Term::Primitive(P::U8))),
+                Self::Slice => Term::Optional(Box::new(Term::Primitive(P::Str))),
+                Self::Concat => Term::Primitive(P::Str),
+            }
         };
         *result == expected
     }
@@ -1229,6 +1242,11 @@ pub enum ExprKind {
     BitVecType(Box<Expr>),
     /// Decide type equality only with positive equality/disequality evidence.
     TypeEqual(Box<Expr>, Box<Expr>),
+    /// Decide closed or assumed type kind classification only with positive or negative proof.
+    TypeKind {
+        kind: crate::TypeKind,
+        operand: Box<Expr>,
+    },
     /// Builtin scalar equality, including IEEE floats; never type equality.
     ScalarEqual(Box<Expr>, Box<Expr>),
     /// Internal runtime dispatch comparison of validated staged callable
@@ -3426,6 +3444,9 @@ impl fmt::Display for ExprKind {
                 write!(f, "(type-list-index (values {values}) (index {index}))")
             }
             Self::TypeEqual(left, right) => write!(f, "(type-equal (left {left}) (right {right}))"),
+            Self::TypeKind { kind, operand } => {
+                write!(f, "(type-kind {kind} (operand {operand}))")
+            }
             Self::AddressOf(place) => write!(f, "(address-of (place {place}))"),
             Self::ReadPointer(pointer) => write!(f, "(read-pointer (pointer {pointer}))"),
             Self::PointerAnonymousField {
@@ -3797,6 +3818,7 @@ impl Expr {
                     | ExprKind::ComptimeIntegerConvert(_)
                     | ExprKind::SymbolName(_)
                     | ExprKind::EnumName(_)
+                    | ExprKind::TypeKind { .. }
                     | ExprKind::Not(_)
                     | ExprKind::Loop { .. }
                     | ExprKind::WritePointer { .. }
@@ -3903,6 +3925,7 @@ impl Expr {
                 | ExprKind::ComptimeIntegerConvert(value)
                 | ExprKind::SymbolName(value)
                 | ExprKind::EnumName(value)
+                | ExprKind::TypeKind { operand: value, .. }
                 | ExprKind::Not(value)
                 | ExprKind::Loop { body: value, .. } => work.push(Work::Expr(value)),
                 ExprKind::WritePointer {
@@ -4337,6 +4360,7 @@ impl Expr {
             | ExprKind::ComptimeIntegerConvert(value)
             | ExprKind::SymbolName(value)
             | ExprKind::EnumName(value)
+            | ExprKind::TypeKind { operand: value, .. }
             | ExprKind::Not(value)
             | ExprKind::Loop { body: value, .. } => (value).rewrite_with(rewriter)?,
             ExprKind::WritePointer {
@@ -4486,6 +4510,7 @@ pub enum TypePredicate {
     Bool(bool),
     Trait(TraitRequirement),
     Equal(Term, Term),
+    Kind(Term, crate::TypeKind),
     Not(Box<TypePredicate>),
     And(Vec<TypePredicate>),
     Or(Vec<TypePredicate>),
@@ -4499,6 +4524,7 @@ impl TypePredicate {
             Self::Bool(value) => Self::Bool(*value),
             Self::Trait(requirement) => Self::Trait(requirement.try_map_types(transform)?),
             Self::Equal(left, right) => Self::Equal(transform(left)?, transform(right)?),
+            Self::Kind(ty, kind) => Self::Kind(transform(ty)?, *kind),
             Self::Not(inner) => Self::Not(Box::new(inner.try_map_types(transform)?)),
             Self::And(parts) => Self::And(
                 parts
@@ -4539,6 +4565,7 @@ impl TypePredicate {
             match predicate {
                 TypePredicate::Bool(value) => Some(*value),
                 TypePredicate::Trait(_) => None,
+                TypePredicate::Kind(..) => None,
                 TypePredicate::Equal(left, right) => (left == right).then_some(true),
                 TypePredicate::Not(value) => visit(value, depth + 1, fuel).map(|v| !v),
                 TypePredicate::And(values) | TypePredicate::Or(values) => {
@@ -4571,6 +4598,7 @@ impl TypePredicate {
                     terms.push(a);
                     terms.push(b);
                 }
+                Self::Kind(ty, _) => terms.push(ty),
                 Self::Not(p) => predicates.push(p),
                 Self::And(ps) | Self::Or(ps) => predicates.extend(ps),
                 Self::Bool(_) => {}
@@ -4620,6 +4648,7 @@ impl fmt::Display for TypePredicate {
             Self::Bool(value) => write!(f, "(type-proposition {value})"),
             Self::Trait(requirement) => write!(f, "(trait-proposition {requirement})"),
             Self::Equal(a, b) => write!(f, "(type-equal {a} {b})"),
+            Self::Kind(ty, kind) => write!(f, "(kind {kind} {ty})"),
             Self::Not(p) => write!(f, "(not {p})"),
             Self::And(ps) | Self::Or(ps) => {
                 f.write_str(if matches!(self, Self::And(_)) {

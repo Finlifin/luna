@@ -211,19 +211,133 @@ impl PreparedRequired {
         self.world.package().definition_identity_cursor
     }
 
-    /// Inspect normal return paths in the checked computation. A call whose
-    /// result has sort Type alone grants no structural evidence.
-    pub(in crate::program) fn returns_head(
+    /// Read the declared result binder and PTC guarantees of a directly
+    /// called Type-producing entry function without peeking into its body.
+    pub(in crate::program) fn direct_call_result_guarantees(
         &self,
-        expected: DeclarationId,
         steps: &mut u64,
         span: Span,
-    ) -> Result<bool, Error> {
+    ) -> Result<Option<(DeclarationId, Vec<n::TypePredicate>)>, Error> {
+        let package = self.world.package();
+        let Some(entry) = package
+            .functions
+            .iter()
+            .find(|f| f.declaration == self.entry)
+        else {
+            return Ok(None);
+        };
+        let mut expr = &entry.body;
+        loop {
+            match &expr.kind {
+                K::Return(Some(inner)) => expr = inner,
+                K::Block {
+                    statements,
+                    result: Some(inner),
+                }
+                | K::CallPreparation {
+                    statements,
+                    result: Some(inner),
+                } if statements.is_empty() => {
+                    expr = inner;
+                }
+                _ => break,
+            }
+        }
+        let K::Call { callee, .. } = &expr.kind else {
+            return Ok(None);
+        };
+        let (target_id, type_args): (DeclarationId, &[Term]) = match &callee.kind {
+            K::Function(id) => (*id, &[]),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => (*declaration, arguments),
+            _ => return Ok(None),
+        };
+        let Some(target) = package
+            .functions
+            .iter()
+            .find(|f| f.declaration == target_id)
+        else {
+            return Ok(None);
+        };
+        let Some(binder) = target.result_type_binder else {
+            return Ok(None);
+        };
+        if target.result_guarantees.is_empty() {
+            return Ok(None);
+        }
+        if target.type_parameters.len() != type_args.len()
+            || type_args.iter().any(|arg| arg.check_scope(&[]).is_err())
+        {
+            return Ok(None);
+        }
         let before = usize::try_from(*steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let answer = result_head::guarantees(&self.world, self.entry, expected, &mut fuel);
+        let guarantees = (|| -> Result<Vec<n::TypePredicate>, String> {
+            let mut result = if target.type_parameters.is_empty() {
+                target.result_guarantees.clone()
+            } else {
+                let domains = vec![p(P::Type); target.type_parameters.len()];
+                let substitution = nir::DeclarationSubstitution::bounded(
+                    &target.type_parameters,
+                    &domains,
+                    type_args,
+                    &[],
+                    &mut fuel,
+                )
+                .map_err(|e| e.to_string())?;
+                target
+                    .result_guarantees
+                    .iter()
+                    .map(|g| {
+                        substitution
+                            .instantiate_predicate_bounded(g, &mut fuel)
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            if !self.scope.scoped_parameters.is_empty() {
+                for g in &mut result {
+                    nir::copy_budget::charge_predicate_substitution(
+                        g,
+                        &self.scope.scoped_parameters,
+                        &self.scope.scoped_arguments,
+                        &mut fuel,
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                    *g = g
+                        .instantiate_parameters_in_scope(
+                            &self.scope.scoped_parameters,
+                            &self.scope.scoped_arguments,
+                            &self.scope.input_frames,
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            if result.iter().any(|g| {
+                super::map_requirement(
+                    g,
+                    &mut |ty| {
+                        ty.check_scope(&[])
+                            .map_err(|e| error(span, e.to_string()))?;
+                        Ok(ty.clone())
+                    },
+                    span,
+                    0,
+                )
+                .is_err()
+            }) {
+                return Ok(Vec::new());
+            }
+            Ok(result)
+        })();
         *steps -= (before - fuel) as u64;
-        answer.map_err(|reason| error(span, reason))
+        let guarantees = guarantees.map_err(|reason| error(span, reason))?;
+        if guarantees.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((binder, guarantees)))
     }
 
     /// Observe the carried invocation inputs and code without consulting a
@@ -710,6 +824,8 @@ mod tests {
                     preconditions: vec![],
                     postconditions: vec![],
                     result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
                     entry_snapshots: vec![],
                     capabilities: vec![],
                     requirements: vec![],
@@ -806,64 +922,6 @@ mod tests {
             assert!(prepared.inputs[2].2.is_none());
         }
         assert!(prepared.to_string().contains("(capture 2 (parameter 4))"));
-    }
-
-    #[test]
-    fn result_head_observation_follows_deep_forwarding_with_one_budget() {
-        let mut prepared = literal_preparation(true);
-        let entry = prepared.entry;
-        let head = DeclarationId {
-            package: entry.package,
-            local: 9999,
-        };
-        let call = |id, source| n::Expr {
-            source,
-            ty: p(P::Type),
-            kind: K::Call {
-                callee: Box::new(n::Expr {
-                    source,
-                    ty: Term::Function {
-                        parameters: vec![],
-                        result: Box::new(p(P::Type)),
-                    },
-                    kind: K::Function(id),
-                }),
-                arguments: vec![],
-                parameter_bindings: vec![],
-            },
-        };
-        prepared.edit_package(|package| {
-            let template = package.functions[0].clone();
-            for offset in 1..256 {
-                let id = DeclarationId {
-                    local: entry.local + offset,
-                    ..entry
-                };
-                let next = n::Function {
-                    interface: n::FunctionDeclaration {
-                        declaration: id,
-                        ..template.interface.clone()
-                    },
-                    body: template.body.clone(),
-                };
-                package.functions.last_mut().unwrap().body = call(id, template.body.source);
-                package.functions.push(next);
-            }
-            package.functions.last_mut().unwrap().body.kind = K::TypeValue(Term::NormalForm {
-                head,
-                sort: Sort::Type,
-                arguments: vec![],
-            });
-        });
-        let span = Span::default();
-        assert!(prepared.returns_head(head, &mut 10, span).is_err());
-        assert!(prepared.returns_head(head, &mut 100_000, span).unwrap());
-        assert!(!prepared.returns_head(entry, &mut 100_000, span).unwrap());
-        prepared.edit_package(|package| {
-            let tail = package.functions.last_mut().unwrap();
-            tail.body = call(entry, tail.body.source);
-        });
-        assert!(!prepared.returns_head(head, &mut 100_000, span).unwrap());
     }
 
     #[test]
@@ -2498,5 +2556,3 @@ mod tests {
         assert!(!quoted && !escaped);
     }
 }
-
-mod result_head;

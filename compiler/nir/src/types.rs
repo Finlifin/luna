@@ -141,6 +141,111 @@ impl Primitive {
     }
 }
 
+/// Closed type classification axes evaluated conservatively over structural terms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TypeKind {
+    Boolean,
+    Symbol,
+    Integer,
+    SignedInteger,
+    UnsignedInteger,
+    FloatingPoint,
+    Tuple,
+    Pointer,
+    Function,
+}
+
+impl TypeKind {
+    pub fn implies(self, other: Self) -> bool {
+        self == other
+            || matches!(
+                (self, other),
+                (Self::SignedInteger | Self::UnsignedInteger, Self::Integer)
+            )
+    }
+
+    pub fn disjoint(self, other: Self) -> bool {
+        // Integer overlaps both signedness classes; these do not exhaust all
+        // possible integer descriptions (e.g. mathematical Integer).
+        !self.implies(other) && !other.implies(self)
+    }
+
+    pub fn consequence(self, truth: bool, query: Self) -> Option<bool> {
+        if truth && self.implies(query) {
+            Some(true)
+        } else if (truth && self.disjoint(query)) || (!truth && query.implies(self)) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    pub fn evaluate(self, ty: &Term) -> Option<bool> {
+        let actual = match ty {
+            Term::Primitive(Primitive::Bool) => Self::Boolean,
+            Term::Primitive(Primitive::Symbol) => Self::Symbol,
+            Term::Primitive(
+                Primitive::I8
+                | Primitive::I16
+                | Primitive::I32
+                | Primitive::I64
+                | Primitive::I128
+                | Primitive::Isize,
+            ) => Self::SignedInteger,
+            Term::Primitive(
+                Primitive::U8
+                | Primitive::U16
+                | Primitive::U32
+                | Primitive::U64
+                | Primitive::U128
+                | Primitive::Usize,
+            ) => Self::UnsignedInteger,
+            Term::Primitive(Primitive::Integer) => {
+                if matches!(self, Self::SignedInteger | Self::UnsignedInteger) {
+                    return None;
+                }
+                Self::Integer
+            }
+            Term::Primitive(
+                Primitive::Float
+                | Primitive::F16
+                | Primitive::Bf16
+                | Primitive::F32
+                | Primitive::F64,
+            ) => Self::FloatingPoint,
+            Term::Primitive(Primitive::Unit) => return None, // legacy representation
+            Term::Primitive(_) => return Some(false),
+            Term::Tuple(_) => Self::Tuple,
+            Term::Optional(_) => return Some(false),
+            Term::Pointer(_) => Self::Pointer,
+            Term::Function { .. }
+            | Term::ComptimeFunction(_)
+            | Term::NormalFormFunction(..)
+            | Term::UnsafeFunction(_) => Self::Function,
+            // Closure qualification and nominal/newtype descriptors are not
+            // inferred by peeking through an environment or representation.
+            _ => return None,
+        };
+        Some(actual.implies(self))
+    }
+}
+
+impl fmt::Display for TypeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Boolean => "boolean",
+            Self::Symbol => "symbol",
+            Self::Integer => "integer",
+            Self::SignedInteger => "signed-integer",
+            Self::UnsignedInteger => "unsigned-integer",
+            Self::FloatingPoint => "floating-point",
+            Self::Tuple => "tuple",
+            Self::Pointer => "pointer",
+            Self::Function => "function",
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Parameter {
     pub sort: Sort,

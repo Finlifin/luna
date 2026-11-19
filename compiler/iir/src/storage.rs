@@ -69,6 +69,11 @@ pub(super) fn validate(
                     // not runtime locals. Their terms are checked by IIR typing.
                     Ok(false)
                 }
+                K::TypeKind { operand, .. } if matches!(operand.kind, K::TypeValue(_)) => {
+                    // Immutable descriptions are operands of type observation,
+                    // not runtime locals. Their terms are checked by IIR typing.
+                    Ok(false)
+                }
                 _ => Ok(true),
             }
         })?;

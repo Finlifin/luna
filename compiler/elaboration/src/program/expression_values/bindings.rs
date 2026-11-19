@@ -104,7 +104,10 @@ impl Checker<'_, '_> {
                         "quoted code cannot be delivered as a runtime value; use a code splice",
                     ));
                 }
-                if self.in_required_comptime && self.required_runtime_parameter(id) {
+                if !self.observing_type
+                    && self.in_required_comptime
+                    && self.required_runtime_parameter(id)
+                {
                     return Err(error(
                         expr.span,
                         "required comptime computation cannot read a runtime parameter; defer does not change the parameter's phase",

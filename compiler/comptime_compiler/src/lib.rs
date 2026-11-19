@@ -304,6 +304,15 @@ pub enum Op {
         left: Register,
         right: Register,
     },
+    PrepareTypeKind {
+        ty: Arc<Term>,
+        operand: Arc<Term>,
+    },
+    TypeKind {
+        destination: Register,
+        kind: nir::TypeKind,
+        operand: Register,
+    },
     PrepareObjectAccess(Arc<objects::ObjectAccess>),
     ObjectAccess {
         destination: Register,
@@ -958,6 +967,14 @@ impl fmt::Display for Program {
                     left,
                     right,
                 } => write!(f, "(type-equal %{destination} %{left} %{right})")?,
+                Op::PrepareTypeKind { ty, operand } => {
+                    write!(f, "(prepare-type-kind (type {ty}) (operand {operand}))")?
+                }
+                Op::TypeKind {
+                    destination,
+                    kind,
+                    operand,
+                } => write!(f, "(type-kind %{destination} {kind} %{operand})")?,
                 Op::PrepareObjectAccess(access) => write!(f, "(prepare-object-access {access})")?,
                 Op::ObjectAccess {
                     destination,
@@ -2466,6 +2483,26 @@ fn compile_root<'a>(
                                     Arc::new(copy_term(&left.ty, fuel, source)?),
                                     Arc::new(copy_term(&right.ty, fuel, source)?),
                                 ],
+                            },
+                        );
+                    }
+                    K::TypeKind { kind, operand } => {
+                        let slot = fresh();
+                        emit(
+                            &mut work,
+                            Op::TypeKind {
+                                destination: dst,
+                                kind: *kind,
+                                operand: slot,
+                            },
+                        );
+                        emit(&mut work, Op::TypeIdentity(slot));
+                        work.push(Work::Expression(operand, slot));
+                        emit(
+                            &mut work,
+                            Op::PrepareTypeKind {
+                                ty: Arc::new(copy_term(&expr.ty, fuel, source)?),
+                                operand: Arc::new(copy_term(&operand.ty, fuel, source)?),
                             },
                         );
                     }

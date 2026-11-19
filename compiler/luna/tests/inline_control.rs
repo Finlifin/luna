@@ -1500,7 +1500,7 @@ fn inline_range_guards_filter_each_index_at_comptime() {
 fn tuple_enumeration_checks_shape_without_unfolding_type_heads() {
     for source in [
         "fn bad(value:bool) {let view=value'tuple_enumerate;}",
-        "fn bad(value:bool) {inline for (i,element) in value'tuple_enumerate {}}",
+        "fn bad(value:bool) {inline for element in value'tuple_enumerate {}}",
         "fn bad() {let view=bool'tuple_enumerate;}",
     ] {
         let failure = compile_tuple(source).unwrap_err();
@@ -4569,8 +4569,9 @@ fn tuple_enumeration_evaluates_input_once_and_keeps_runtime_elements() {
         fn first() {} fn rest() {}
         fn run()->bool {
             var result=true;
-            inline for (index,element) in source()'tuple_enumerate {
-                inline if index==0 {first();} else {rest();}
+            var first_step=true;
+            inline for element in source()'tuple_enumerate {
+                if first_step {first_step=false;first();} else {rest();}
                 result=observe(element);
             }
             result
@@ -4594,7 +4595,7 @@ fn tuple_enumeration_handles_heterogeneous_elements_and_open_guards() {
     let package = compile_tuple(
         "fn visit() {}
         fn run(comptime enabled:bool,values:Tuple<bool,.u8'builtin>)->bool {
-            inline for (index,element) if enabled and index==1 in values'tuple_enumerate {
+            inline for element if enabled and element'type == .u8'builtin in values'tuple_enumerate {
                 let held=element;visit();
             }
             true
@@ -4623,9 +4624,8 @@ fn tuple_enumeration_rejects_runtime_element_in_comptime_guard() {
         "fn run(values:Tuple<bool,bool>)",
         "fn run(comptime enabled:bool,values:Tuple<bool,bool>)",
     ] {
-        let source = format!(
-            "{header} {{inline for (index,element) if element in values'tuple_enumerate {{}}}}"
-        );
+        let source =
+            format!("{header} {{inline for element if element in values'tuple_enumerate {{}}}}");
         let failure = compile_tuple(&source).unwrap_err();
         assert!(
             failure.contains("comptime") || failure.contains("staged"),
@@ -4641,7 +4641,7 @@ fn tuple_enumeration_executes_with_the_bound_tuple_head() {
         pure comptime fn List<T>->Type {T}
         pure comptime fn Tuple<...Es:List<Type>>->Type {bool}
         fn visit() {}
-        fn walk(value:Tuple<bool,.u8'builtin>) {inline for (index,element) in value'tuple_enumerate {let held=element;visit();}}
+        fn walk(value:Tuple<bool,.u8'builtin>) {inline for element in value'tuple_enumerate {let held=element;visit();}}
         fn run()->bool {walk((true,7));true}",
         &Default::default(),
         luna::protocols::type_constructors::Selectors {meta_list:Some("input.List"),tuple:Some("input.Tuple"),..Default::default()}
@@ -4663,7 +4663,7 @@ fn tuple_enumeration_keeps_purity_checks_for_filtered_bodies() {
     let package = compile_tuple(
         "pure fn walk(comptime enabled:bool,values:Tuple<bool,bool>)->bool {
         var result=false;
-        inline for (index,element) if enabled in values'tuple_enumerate {result=element;}
+        inline for element if enabled in values'tuple_enumerate {result=element;}
         result
     }
     fn yes()->bool {walk(true,(false,true))}
@@ -4678,8 +4678,8 @@ fn tuple_enumeration_keeps_purity_checks_for_filtered_bodies() {
         );
     }
     for source in [
-        "pure fn bad(comptime enabled:bool,values:Tuple<bool,bool>,pointer:*bool)->bool {inline for (index,element) if enabled in values'tuple_enumerate {pointer.* = element;}true} fn run(pointer:*bool)->bool {bad(false,(true,false),pointer)}",
-        "fn take(value:bool) {} fn bad(values:Tuple<bool,bool>) {inline for (index,element) if false in values'tuple_enumerate {take(7);}}",
+        "pure fn bad(comptime enabled:bool,values:Tuple<bool,bool>,pointer:*bool)->bool {inline for element if enabled in values'tuple_enumerate {pointer.* = element;}true} fn run(pointer:*bool)->bool {bad(false,(true,false),pointer)}",
+        "fn take(value:bool) {} fn bad(values:Tuple<bool,bool>) {inline for element if false in values'tuple_enumerate {take(7);}}",
     ] {
         assert!(compile_tuple(source).is_err(), "{source}");
     }
@@ -4688,8 +4688,8 @@ fn tuple_enumeration_keeps_purity_checks_for_filtered_bodies() {
 #[test]
 fn tuple_enumeration_checks_unused_pattern_computation_phases() {
     for source in [
-        "comptime fn ct(value:bool)->bool {value} fn unused(comptime enabled:bool,values:Tuple<bool,bool>) {inline for (index,(element and ct(element) is result)) in values'tuple_enumerate {}}",
-        "fn runtime(value:bool)->bool {value} fn unused(comptime enabled:bool,values:Tuple<bool,bool>) {inline for (index and runtime(index==0) is next,element) in values'tuple_enumerate {}}",
+        "comptime fn ct(value:bool)->bool {value} fn unused(comptime enabled:bool,values:Tuple<bool,bool>) {inline for (element and ct(element) is result) in values'tuple_enumerate {}}",
+        "fn runtime(value:bool)->bool {value} fn unused(comptime enabled:bool) {inline for (index and runtime(index==0) is next) in 0..2 {}}",
     ] {
         assert!(compile_tuple(source).is_err(), "{source}");
     }
@@ -4701,8 +4701,8 @@ fn tuple_iteration_keeps_index_and_element_computations_in_their_stages() {
         "fn select(value:bool)->bool {not value}
          fn walk(comptime enabled:bool, values:Tuple<bool,bool>)->bool {
              var answer=false;
-             inline for ((index and index==0 is first),(element and select(element) is selected)) if enabled in values'tuple_enumerate {
-                 inline if first {answer=false;} else {answer=selected;}
+             inline for (element and select(element) is selected) if enabled in values'tuple_enumerate {
+                 answer=selected;
              }
              answer
          }
@@ -4726,10 +4726,10 @@ fn tuple_iteration_keeps_index_and_element_computations_in_their_stages() {
 #[test]
 fn tuple_element_pattern_computation_can_use_completed_index() {
     let package = compile_tuple(
-        "pure fn select(first:bool, value:bool)->bool {if first {value} else {not value}}
+        "pure fn select(flipped:bool, value:bool)->bool {if flipped {not value} else {value}}
          pure fn walk(comptime enabled:bool, values:Tuple<bool,bool>)->bool {
              var answer=false;
-             inline for ((index and index==0 is first),(element and select(first,element) is selected)) if enabled in values'tuple_enumerate {
+             inline for ((element and (not element) is flipped) and select(flipped,element) is selected) if enabled in values'tuple_enumerate {
                  answer=selected;
              }
              answer
@@ -4756,14 +4756,15 @@ fn tuple_iteration_abstract_index_inputs_preserve_pure_body_checks() {
     let package = compile_tuple(
         "pure fn walk(comptime enabled:bool, values:Tuple<bool,bool>)->bool {
              var answer=false;
-             inline for ((index and index==0 is first),element) if enabled in values'tuple_enumerate {
+             inline for (element and element is first) if enabled in values'tuple_enumerate {
                  if first {answer=element;}
              }
              answer
          }
          fn yes()->bool {walk(true,(true,false))}
          fn no()->bool {walk(false,(true,false))}",
-    ).unwrap();
+    )
+    .unwrap();
     for (entry, expected) in [("yes", true), ("no", false)] {
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
@@ -4772,14 +4773,15 @@ fn tuple_iteration_abstract_index_inputs_preserve_pure_body_checks() {
         );
         luna::instantiation::instantiate(&package, entry, 200_000).unwrap();
     }
-    let failure=compile_tuple(
+    let failure = compile_tuple(
         "pure fn bad(comptime enabled:bool,values:Tuple<bool,bool>,pointer:*bool) {
-             inline for ((index and index==0 is first),element) if enabled in values'tuple_enumerate {
+             inline for (element and element is first) if enabled in values'tuple_enumerate {
                  if first {pointer.* = element;}
              }
          }
          fn run(pointer:*bool) {bad(false,(true,false),pointer);}",
-    ).unwrap_err();
+    )
+    .unwrap_err();
     assert!(
         failure.contains("P4") || failure.contains("pure"),
         "{failure}"
@@ -4791,7 +4793,7 @@ fn tuple_iteration_specializes_generic_element_calls_independently() {
     let package=compile_tuple(
         "fn identity(value:T)->T where T {value}
          fn walk(values:Tuple<A,B>) where A,B {
-             inline for (index,element) in values'tuple_enumerate {
+             inline for element in values'tuple_enumerate {
                  let held=identity(element);
              }
          }
@@ -4819,7 +4821,7 @@ fn tuple_iteration_resolves_each_generic_elements_trait_evidence() {
          impl Ready for .u8'builtin {fn ready(self)->bool {self==7}}
          fn walk(values:Tuple<A,B>)->bool where A:-Ready,B:-Ready {
              var answer=false;
-             inline for (index,element) in values'tuple_enumerate {answer=element.ready();}
+             inline for element in values'tuple_enumerate {answer=element.ready();}
              answer
          }
          fn run()->bool {let number:.u8'builtin=7;walk((false,number))}
@@ -4841,7 +4843,7 @@ fn tuple_iteration_uses_generic_shape_evidence_without_unfolding_heads() {
     let package = compile_tuple(
         "fn identity(value:T)->T where T {value}
          fn walk(value:T) where T,A,B,requires T==Tuple<A,B> {
-             inline for (index,element) in value'tuple_enumerate {let held=identity(element);}
+             inline for element in value'tuple_enumerate {let held=identity(element);}
          }
          fn run()->bool {walk<Tuple<bool,.u8'builtin>,bool,.u8'builtin>((true,7));true}",
     )
@@ -4941,7 +4943,7 @@ fn open_inline_range_pattern_descriptions_do_not_invoke_computations() {
 fn nonempty_tuple_iteration_can_return_without_a_trailing_value() {
     let package = compile_tuple(
         "fn first(comptime flag:bool, values:Tuple<bool,bool>)->bool {
-             inline for (index,element) in values'tuple_enumerate {return element;}
+             inline for element in values'tuple_enumerate {return element;}
          }
          fn yes()->bool {first(true,(true,false))}
          fn no()->bool {first(false,(false,true))}",
@@ -4961,7 +4963,7 @@ fn nonempty_tuple_iteration_can_return_without_a_trailing_value() {
 fn tuple_iteration_completion_distinguishes_inner_and_outer_loop_exits() {
     let package = compile_tuple(
         "pure fn first(comptime staged:bool, values:Tuple<bool,bool>,choose:bool)->bool {
-             inline for (index,element) in values'tuple_enumerate {
+             inline for element in values'tuple_enumerate {
                  while true {break;}
                  if choose {return element;} else {return not element;}
              }
@@ -4990,13 +4992,13 @@ fn tuple_iteration_completion_distinguishes_inner_and_outer_loop_exits() {
     ] {
         let source = format!(
             "fn bad(comptime staged:bool,values:Tuple<bool,bool>,choose:bool)->bool {{
-            inline for:all (index,element) in values'tuple_enumerate {{{body}}}
+            inline for:all element in values'tuple_enumerate {{{body}}}
         }}"
         );
         let failure = compile_tuple(&source).unwrap_err();
         assert!(failure.contains("type mismatch"), "{source}: {failure}");
     }
-    assert!(compile_tuple("fn bad(comptime enabled:bool,values:Tuple<bool,bool>)->bool {inline for (index,element) if enabled in values'tuple_enumerate {return element;}}").is_err());
+    assert!(compile_tuple("fn bad(comptime enabled:bool,values:Tuple<bool,bool>)->bool {inline for element if enabled in values'tuple_enumerate {return element;}}").is_err());
 }
 
 #[test]
@@ -5006,8 +5008,8 @@ fn open_definition_preserves_nonreturning_initializers_and_conditions() {
         "let ignored:bool = do {return value;};",
         "var ignored:bool = do {return value;};",
         "if do {return value;} {unreachable_call();};",
-        "inline for (index,element) in (value,false)'tuple_enumerate {let ignored:bool=do {return element;};}",
-        "inline for (index,element) in (value,false)'tuple_enumerate {if do {return element;} {unreachable_call();};}",
+        "inline for element in (value,false)'tuple_enumerate {let ignored:bool=do {return element;};}",
+        "inline for element in (value,false)'tuple_enumerate {if do {return element;} {unreachable_call();};}",
     ] {
         let source = format!(
             "fn unreachable_call() {{}}
@@ -5049,9 +5051,9 @@ fn open_literal_boolean_control_preserves_definite_returns() {
         "let ignored:bool=if false {false} else {return value;};",
         "(not false) and do {return value;};",
         "(not true) or do {return value;};",
-        "inline for (index,element) in (value,false)'tuple_enumerate {if true {return element;} else {break;}}",
-        "inline for (index,element) in (value,false)'tuple_enumerate {false and do {break;true};return element;}",
-        "inline for (index,element) in (value,false)'tuple_enumerate {when {false=>{break;},true=>{return element;},}}",
+        "inline for element in (value,false)'tuple_enumerate {if true {return element;} else {break;}}",
+        "inline for element in (value,false)'tuple_enumerate {false and do {break;true};return element;}",
+        "inline for element in (value,false)'tuple_enumerate {when {false=>{break;},true=>{return element;},}}",
     ] {
         let source = format!(
             "fn choose(comptime enabled:bool,value:bool)->bool {{inline if enabled {{}} {body}}}
@@ -5077,8 +5079,8 @@ fn open_boolean_completion_does_not_guess_runtime_conditions() {
         "(not condition) and do {return value;};",
         "false and do {return value;};",
         "true or do {return value;};",
-        "inline for (index,element) in (value,false)'tuple_enumerate {if true {break;} else {return element;}}",
-        "inline for (index,element) in (value,false)'tuple_enumerate {condition and do {break;true};return element;}",
+        "inline for element in (value,false)'tuple_enumerate {if true {break;} else {return element;}}",
+        "inline for element in (value,false)'tuple_enumerate {condition and do {break;true};return element;}",
     ] {
         let source = format!(
             "fn runtime_condition()->bool {{true}} fn bad(comptime enabled:bool,condition:bool,value:bool)->bool {{inline if enabled {{}} {body}}}"
@@ -5758,8 +5760,8 @@ fn computed_spread_forwarding_propagates_through_closed_signatures() {
 #[test]
 fn expanded_tuple_index_storage_error_points_into_user_source() {
     for source in [
-        "fn run(values:Tuple<bool,bool>) {inline for (index,element) in values'tuple_enumerate {let invalid=index;}}",
-        "fn run() {select(true,(true,false))} fn select(comptime flag:bool,values:Tuple<bool,bool>) {inline if flag {inline for (index,element) in values'tuple_enumerate {let invalid=index;}}}",
+        "fn run() {inline for index in 0..2 {let invalid=index;}}",
+        "fn run() {select(true)} fn select(comptime flag:bool) {inline if flag {inline for index in 0..2 {let invalid=index;}}}",
     ] {
         let error = compile_tuple(source).unwrap_err();
         assert!(
@@ -5917,11 +5919,11 @@ fn tuple_enumeration_filters_refutable_comptime_indices() {
         fn visit(value:bool)->bool {value}
         fn run()->bool {
             var answer=false;
-            inline for (1,value) in (false,true,false)'tuple_enumerate {answer=visit(value);}
+            inline for 1 in 0..3 {answer=visit(true);}
             answer
         }
         fn skipped()->bool {
-            inline for (9,value) if never() in (false,true)'tuple_enumerate {visit(value);}
+            inline for 9 if never() in 0..2 {visit(true);}
             true
         }",
     )
@@ -5944,14 +5946,14 @@ fn tuple_enumeration_filters_refutable_comptime_indices() {
 
 #[test]
 fn open_tuple_index_filters_preserve_phases_and_completion() {
-    let package = compile_tuple("pure fn select(comptime enabled:bool,values:Tuple<bool,bool,bool>)->bool {
+    let package = compile_tuple("pure fn select(comptime enabled:bool, comptime target:.Integer'builtin)->bool {
             var answer=false;
-            inline for ((0 or 2) as index,value) if enabled in values'tuple_enumerate {answer=answer or value;}
+            inline for ((0 or 2) as index) if enabled in 0..3 {inline if index==target {answer=true;}}
             answer
         }
-        fn yes()->bool {select(true,(false,false,true))}
-        fn no()->bool {select(true,(false,true,false))}
-        fn disabled()->bool {select(false,(true,true,true))}").unwrap();
+        fn yes()->bool {select(true,2)}
+        fn no()->bool {select(true,1)}
+        fn disabled()->bool {select(false,2)}").unwrap();
     for (entry, expected) in [("yes", true), ("no", false), ("disabled", false)] {
         assert_eq!(
             luna::execution::interpret(&package, entry, 1_000_000).unwrap(),
@@ -5959,11 +5961,11 @@ fn open_tuple_index_filters_preserve_phases_and_completion() {
         );
     }
     for source in [
-        "fn run(flag:bool){inline for (9,value) if flag in (true,false)'tuple_enumerate {}}",
-        "fn run(){inline for (9,value) if value in (true,false)'tuple_enumerate {}}",
-        "fn run(){inline for (9,value) in (true,false)'tuple_enumerate {let wrong:bool=3;}}",
-        "fn missing(comptime enabled:bool,values:Tuple<bool,bool>)->bool {inline for (9,value) in values'tuple_enumerate {return value;}}",
-        "pure fn bad(comptime enabled:bool,p:*bool){inline for (9,value) in (true,false)'tuple_enumerate {p.* = value;}}",
+        "fn run(flag:bool){inline for 9 if flag in 0..2 {}}",
+        "fn run(){inline for value if value in (true,false)'tuple_enumerate {}}",
+        "fn run(){inline for 9 in 0..2 {let wrong:bool=3;}}",
+        "fn missing(comptime enabled:bool)->bool {inline for 9 in 0..2 {return true;}}",
+        "pure fn bad(comptime enabled:bool,p:*bool){inline for 9 in 0..2 {p.* = true;}}",
     ] {
         assert!(compile_tuple(source).is_err(), "{source}");
     }
@@ -5974,7 +5976,7 @@ fn tuple_enumeration_filters_runtime_elements() {
     let package = compile_tuple(
         "fn visit() {}
         fn select(values:Tuple<bool,bool,bool>)->bool {
-            inline for (_,true) in values'tuple_enumerate {visit();}
+            inline for true in values'tuple_enumerate {visit();}
             true
         }
         fn run()->bool {select((false,true,true))}",
@@ -5998,7 +6000,7 @@ fn tuple_enumeration_filters_runtime_elements() {
 fn tuple_runtime_pattern_observations_execute_once_per_reached_element() {
     let package = compile_tuple("fn visit() {} fn observe(value:bool)->bool {value}
         fn select(comptime enabled:bool,values:Tuple<bool,bool,bool>)->bool {
-            inline for (_, (value and observe(value) is true)) if enabled in values'tuple_enumerate {visit();}
+            inline for (value and observe(value) is true) if enabled in values'tuple_enumerate {visit();}
             true
         }
         fn run()->bool {select(true,(false,true,true))}
@@ -6017,9 +6019,9 @@ fn tuple_runtime_pattern_observations_execute_once_per_reached_element() {
         assert_eq!(calls.iter().filter(|name| *name == "visit").count(), visits);
     }
     for source in [
-        "fn missing(comptime enabled:bool,values:Tuple<bool,bool>)->bool {inline for (_,true) in values'tuple_enumerate {return true;}}",
-        "fn missing(values:Tuple<bool,bool>)->bool {inline for (_,true) in values'tuple_enumerate {return true;}}",
-        "pure fn bad(comptime enabled:bool,p:*bool){inline for (_,true) in (false,false)'tuple_enumerate {p.* = true;}}",
+        "fn missing(comptime enabled:bool,values:Tuple<bool,bool>)->bool {inline for true in values'tuple_enumerate {return true;}}",
+        "fn missing(values:Tuple<bool,bool>)->bool {inline for true in values'tuple_enumerate {return true;}}",
+        "pure fn bad(comptime enabled:bool,p:*bool){inline for true in (false,false)'tuple_enumerate {p.* = true;}}",
     ] {
         assert!(compile_tuple(source).is_err(), "{source}");
     }
@@ -6029,8 +6031,7 @@ fn tuple_runtime_pattern_observations_execute_once_per_reached_element() {
 fn iteration_bindings_cannot_be_assigned_inside_sequential_patterns() {
     for iteration in [
         "inline for (index and do {index=1;true} is true) in 0..2 {}",
-        "inline for ((index and do {index=1;true} is true),element) in (true,false)'tuple_enumerate {}",
-        "inline for (index,(element and do {element=false;true} is true)) in (true,false)'tuple_enumerate {}",
+        "inline for (element and do {element=false;true} is true) in (true,false)'tuple_enumerate {}",
     ] {
         for signature in ["fn unused()", "fn unused(comptime enabled:bool)"] {
             let source = format!("{signature} {{{iteration}}}");
@@ -6161,6 +6162,7 @@ fn inline_pattern_observations_keep_branch_local_or_bindings() {
 #[test]
 fn inline_range_and_tuple_indices_keep_branch_local_guard_bindings() {
     let source="comptime fn accepts(index:.Integer'builtin)->bool {index>=0}
+        fn accepts_bool(value:bool)->bool {value}
         fn range()->bool {
             var found=false;
             inline for ((index if false) or (index if accepts(index))) in 0..2 {found=true;}
@@ -6168,7 +6170,7 @@ fn inline_range_and_tuple_indices_keep_branch_local_guard_bindings() {
         }
         fn tuple()->bool {
             var last=false;
-            inline for (((index if false) or (index if accepts(index))),value) in (false,true)'tuple_enumerate {last=value;}
+            inline for ((value if false) or (value if accepts_bool(value))) in (false,true)'tuple_enumerate {last=value;}
             last
         }";
     let package = compile(source).unwrap();
@@ -6203,4 +6205,99 @@ fn inline_if_constant_selector_does_not_require_runtime_splice() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn empty_tuple_enumeration_runs_zero_times_and_still_checks_body() {
+    let package = compile_tuple(
+        "fn visit() {}
+        fn run()->bool {
+            inline for element in ()'tuple_enumerate { visit(); }
+            true
+        }",
+    )
+    .unwrap();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(support::calls(&package, &vm), vec!["run"]);
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+
+    assert!(
+        compile_tuple(
+            "fn take(value:bool) {}
+            fn bad() { inline for element in ()'tuple_enumerate { take(7); } }",
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn inline_if_and_inline_when_occurrence_typing_covers_traits_equality_kinds_const_and_scope() {
+    let package = compile_tuple(
+        "typealias Type=.Type'builtin;
+        trait Ready { fn ready(self)->bool; }
+        trait Flag { fn flag(self)->bool; }
+        impl Ready for bool { fn ready(self)->bool { self } }
+        struct Tagged { ok: bool }
+        impl Flag for Tagged { fn flag(self)->bool { self.ok } }
+        struct Plain {}
+
+        fn check_bound(arg:T)->bool where T {
+            inline if T :- Ready { arg.ready() } else { false }
+        }
+        fn check_const(arg:T)->bool where T {
+            const U = arg'type;
+            inline if U :- Ready { arg.ready() } else { false }
+        }
+        fn check_eq(arg:T)->bool where T {
+            inline if T == bool { arg } else { false }
+        }
+        fn check_kind(arg:T)->bool where T {
+            inline if Type.predicates.is_tuple(T) {
+                var ok = true;
+                inline for _ in arg'tuple_enumerate { ok = ok; }
+                ok
+            } else {
+                false
+            }
+        }
+        fn check_when(arg:T)->bool where T {
+            inline when {
+                T :- Flag => arg.flag(),
+                T == bool => arg,
+                else => false,
+            }
+        }
+        fn run()->bool {
+            check_bound(true) and not check_bound(Plain {})
+                and check_const(true) and not check_const(Plain {})
+                and check_eq(true) and not check_eq(Plain {})
+                and check_kind((true, false)) and not check_kind(Plain {})
+                and check_when(Tagged { ok: true })
+                and check_when(true)
+                and not check_when(Plain {})
+        }",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 200_000).unwrap(),
+        Value::Bool(true)
+    );
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+
+    // Positive assumption must not leak into else branch or after the inline if,
+    // and unguarded invalid tuple_enumerate must still be rejected even inside
+    // an unselected inline branch.
+    for invalid in [
+        "trait Ready { fn ready(self)->bool; }
+         fn bad(arg:T)->bool where T { inline if T :- Ready { true } else { arg.ready() } }",
+        "trait Ready { fn ready(self)->bool; }
+         fn bad(arg:T)->bool where T { inline if T :- Ready { arg.ready(); }; arg.ready() }",
+        "fn bad()->bool { inline if false { inline for _ in 7'tuple_enumerate {} }; true }",
+    ] {
+        assert!(compile_tuple(invalid).is_err(), "{invalid}");
+    }
 }

@@ -64,6 +64,7 @@ impl Formula {
         use nir::program::TypePredicate as P;
         match predicate {
             P::Trait(requirement) => Self::Trait(requirement.into()),
+            P::Kind(ty, kind) => Self::kind(ty.clone(), *kind),
             P::Bool(true) => Self::True,
             P::Bool(false) => Self::False,
             P::Equal(a, b) => Self::equal(a.clone(), b.clone()),
@@ -748,6 +749,7 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
             Input::Formula(Formula::Kind(query)) => {
                 pending.push((Input::Term(&query.ty), depth + 1))
             }
+            Input::Predicate(P::Kind(ty, _)) => pending.push((Input::Term(ty), depth + 1)),
             Input::Formula(Formula::Trait(query)) => {
                 if query.arguments.len().saturating_add(1) > room {
                     return false;

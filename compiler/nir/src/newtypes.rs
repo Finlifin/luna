@@ -326,6 +326,9 @@ pub fn validate_in(
                     validate_contract_capture(left, &parameters, fuel)?;
                     validate_contract_capture(right, &parameters, fuel)?;
                 }
+                TypePredicate::Kind(ty, _) => {
+                    validate_contract_capture(ty, &parameters, fuel)?;
+                }
                 TypePredicate::Trait(capability) => {
                     validate_contract_capture(&capability.subject, &parameters, fuel)?;
                     metadata_spend(fuel, capability.interface_arguments.len())?;

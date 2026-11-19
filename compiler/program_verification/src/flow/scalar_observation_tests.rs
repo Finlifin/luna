@@ -54,6 +54,8 @@ fn function(preconditions: Vec<Expr>, postconditions: Vec<Expr>) -> Function {
             preconditions,
             postconditions,
             result_binding: None,
+            result_type_binder: None,
+            result_guarantees: vec![],
             entry_snapshots: vec![],
             requirements: vec![],
             capabilities: vec![],

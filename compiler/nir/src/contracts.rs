@@ -236,6 +236,8 @@ impl MethodContract {
             preconditions: program.preconditions,
             postconditions: program.postconditions,
             result_binding: program.result_binding,
+            result_type_binder: None,
+            result_guarantees: vec![],
             entry_snapshots: program.entry_snapshots,
             capabilities,
             requirements,

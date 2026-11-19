@@ -14,6 +14,8 @@ fn operation(name: &str) -> bool {
             | "integer_representation"
             | "str_byte_length"
             | "str_byte"
+            | "str_slice"
+            | "str_concat"
             | "symbol_byte_length"
             | "symbol_byte"
             | "object_length"

@@ -131,6 +131,7 @@ impl Interpreter<'_> {
                 rebind(a)?;
                 rebind(b)
             }
+            P::Kind(ty, _) => rebind(ty),
             P::Trait(requirement) => {
                 rebind(&mut requirement.subject)?;
                 requirement
@@ -158,6 +159,7 @@ pub(super) fn formation_predicate_is_closed(predicate: &nir::program::TypePredic
         P::Bool(_) => true,
         P::Trait(requirement) => formation_capability_is_closed(requirement),
         P::Equal(left, right) => left.check_scope(&[]).is_ok() && right.check_scope(&[]).is_ok(),
+        P::Kind(ty, _) => ty.check_scope(&[]).is_ok(),
         P::Not(inner) => formation_predicate_is_closed(inner),
         P::And(parts) | P::Or(parts) => parts.iter().all(formation_predicate_is_closed),
     }

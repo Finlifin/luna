@@ -8,6 +8,9 @@ impl Emitter<'_> {
         query: nir::program::TextQueryKind,
         depth: usize,
     ) -> Result<Value, String> {
+        if query.is_comptime_only() {
+            return Err("comptime text operation is unavailable at runtime".into());
+        }
         if !query.validate(&subject.ty, &expr.ty) {
             return Err("host text query domain mismatch".into());
         }

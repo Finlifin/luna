@@ -722,6 +722,7 @@ fn walk_mut(
                     | K::ComptimeIntegerConvert(value)
                     | K::SymbolName(value)
                     | K::EnumName(value)
+                    | K::TypeKind { operand: value, .. }
                     | K::Not(value)
                     | K::Loop { body: value, .. } => push!(work, fuel, Node::Expr(value)),
                     K::BitWritePointer {

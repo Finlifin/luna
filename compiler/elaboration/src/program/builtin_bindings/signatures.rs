@@ -7,24 +7,59 @@ pub(super) fn callable(
     list_head: Option<DeclarationId>,
 ) -> Result<Option<Term>, &'static str> {
     if let Some(query) = text_query(name) {
-        let mut parameters = vec![Parameter {
-            sort: Sort::Runtime,
-            ty: p(if query.is_symbol() { P::Symbol } else { P::Str }),
-        }];
-        if !query.is_length() {
-            parameters.push(Parameter {
-                sort: Sort::Runtime,
-                ty: p(P::U64),
-            });
-        }
-        return Ok(Some(Term::Function {
-            parameters,
-            result: Box::new(if query.is_length() {
-                p(P::U64)
-            } else {
-                Term::Optional(Box::new(p(P::U8)))
-            }),
-        }));
+        let signature = match query {
+            n::TextQueryKind::Slice => Term::ComptimeFunction(Box::new(Term::Function {
+                parameters: vec![
+                    Parameter {
+                        sort: Sort::Runtime,
+                        ty: p(P::Str),
+                    },
+                    Parameter {
+                        sort: Sort::Runtime,
+                        ty: p(P::U64),
+                    },
+                    Parameter {
+                        sort: Sort::Runtime,
+                        ty: p(P::U64),
+                    },
+                ],
+                result: Box::new(Term::Optional(Box::new(p(P::Str)))),
+            })),
+            n::TextQueryKind::Concat => Term::ComptimeFunction(Box::new(Term::Function {
+                parameters: vec![
+                    Parameter {
+                        sort: Sort::Runtime,
+                        ty: p(P::Str),
+                    },
+                    Parameter {
+                        sort: Sort::Runtime,
+                        ty: p(P::Str),
+                    },
+                ],
+                result: Box::new(p(P::Str)),
+            })),
+            _ => {
+                let mut parameters = vec![Parameter {
+                    sort: Sort::Runtime,
+                    ty: p(if query.is_symbol() { P::Symbol } else { P::Str }),
+                }];
+                if !query.is_length() {
+                    parameters.push(Parameter {
+                        sort: Sort::Runtime,
+                        ty: p(P::U64),
+                    });
+                }
+                Term::Function {
+                    parameters,
+                    result: Box::new(if query.is_length() {
+                        p(P::U64)
+                    } else {
+                        Term::Optional(Box::new(p(P::U8)))
+                    }),
+                }
+            }
+        };
+        return Ok(Some(signature));
     }
     if matches!(name, "object_append" | "object_replace") {
         return Ok(Some(Term::ComptimeFunction(Box::new(Term::Function {
@@ -201,6 +236,8 @@ pub(super) fn text_query(name: &str) -> Option<n::TextQueryKind> {
     Some(match name {
         "str_byte_length" => n::TextQueryKind::ByteLength,
         "str_byte" => n::TextQueryKind::Byte,
+        "str_slice" => n::TextQueryKind::Slice,
+        "str_concat" => n::TextQueryKind::Concat,
         "symbol_byte_length" => n::TextQueryKind::SymbolByteLength,
         "symbol_byte" => n::TextQueryKind::SymbolByte,
         _ => return None,

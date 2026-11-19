@@ -537,6 +537,9 @@ impl Walker<'_> {
                 // This layer tracks the evaluation, not type-theory equality.
                 // Its Bool result remains unknown without program evidence.
             }
+            K::TypeKind { operand, .. } => {
+                self.child(operand, state, depth)?;
+            }
             _ => return Err(Reason::Unsupported),
         }
         Ok(result)
@@ -769,6 +772,8 @@ mod tests {
                 postconditions: vec![],
                 entry_snapshots: vec![],
                 result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
                 signature: Term::Function {
                     parameters: vec![],
                     result: Box::new(void.clone()),

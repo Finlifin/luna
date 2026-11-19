@@ -216,7 +216,12 @@ fn bind_inputs_with_type_view<'layout>(
     for requirement in &mut result.capabilities {
         rebind_requirement(requirement, &scope, fuel)?;
     }
-    let mut predicates = result.requirements.iter_mut().collect::<Vec<_>>();
+    let mut predicates = result
+        .interface
+        .requirements
+        .iter_mut()
+        .chain(&mut result.interface.result_guarantees)
+        .collect::<Vec<_>>();
     while let Some(predicate) = predicates.pop() {
         charge(fuel, 1)?;
         use nir::program::TypePredicate as P;
@@ -226,6 +231,9 @@ fn bind_inputs_with_type_view<'layout>(
             P::Equal(left, right) => {
                 *left = scope.rebind(left).map_err(|e| e.to_string())?;
                 *right = scope.rebind(right).map_err(|e| e.to_string())?;
+            }
+            P::Kind(ty, _) => {
+                *ty = scope.rebind(ty).map_err(|e| e.to_string())?;
             }
             P::Not(value) => predicates.push(value),
             P::And(values) | P::Or(values) => predicates.extend(values),

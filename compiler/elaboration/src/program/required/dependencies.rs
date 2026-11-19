@@ -457,6 +457,8 @@ mod tests {
                     subject: p(P::Bool),
                 })],
                 result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
                 entry_snapshots: vec![],
                 requirements: vec![],
                 capabilities: vec![],

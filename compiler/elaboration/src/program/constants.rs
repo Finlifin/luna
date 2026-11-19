@@ -2113,7 +2113,7 @@ impl Checker<'_, '_> {
         Ok(call)
     }
 
-    fn staged_input_can_defer(
+    pub(super) fn staged_input_can_defer(
         &mut self,
         value: &n::Expr,
         is_default: bool,
@@ -2259,6 +2259,7 @@ impl Checker<'_, '_> {
                 | K::ComptimeIntegerConvert(value)
                 | K::SymbolName(value)
                 | K::EnumName(value)
+                | K::TypeKind { operand: value, .. }
                 | K::BitConvert(value)
                 | K::ErrorConvert { value: value, .. }
                 | K::NewtypeConvert(value)

@@ -469,9 +469,16 @@ impl Checker<'_, '_> {
             H::TraitBound(..)
                 if self.in_required_comptime
                     || self.in_staged_input
+                    || self.in_unselected_inline
+                    || self.checking_open_behavior
                     || self.executable_refinement_owner == Some(expr.hir_id.owner) =>
             {
-                let value = self.refinement_trait_value(expr)?;
+                let value = if self.in_unselected_inline || self.checking_open_behavior {
+                    let _ = self.type_predicate(expr)?;
+                    false
+                } else {
+                    self.refinement_trait_value(expr)?
+                };
                 let ty = p(P::Bool);
                 if let Some(expected) = expected {
                     self.require_expression(&ty, expected, expr.span)?;

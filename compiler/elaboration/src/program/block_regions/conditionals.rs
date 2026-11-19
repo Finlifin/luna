@@ -408,7 +408,15 @@ impl<'h> Frame<'h> {
             checker.in_unselected_inline =
                 ambient.suppressed || self.selection == Some(usize::from(positive));
         }
-        self.branch = Some(checker.enter_type_condition(condition, positive, self.source.span)?);
+        let H::If(source_condition, _, _) = self.source.kind else {
+            unreachable!("validated conditional")
+        };
+        self.branch = Some(checker.enter_source_type_condition(
+            Some(source_condition),
+            condition,
+            positive,
+            self.source.span,
+        )?);
         if self
             .ambient
             .as_ref()

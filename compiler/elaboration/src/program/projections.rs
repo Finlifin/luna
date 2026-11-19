@@ -100,6 +100,120 @@ impl Checker<'_, '_> {
         Ok(matches!(value, comptime_interpretor::Value::Type(ty) if ty == p(P::Type)))
     }
 
+    pub(super) fn is_metatype_base(&self, expr: &Expr<'_>) -> bool {
+        fn inner(checker: &Checker<'_, '_>, expr: &Expr<'_>, depth: usize) -> bool {
+            if depth >= 16 {
+                return false;
+            }
+            match &expr.kind {
+                H::TyType => true,
+                H::Builtin(name) => name.as_str() == "Type",
+                H::ResolvedDef { def_id, .. } => checker
+                    .package
+                    .definition_owner(*def_id)
+                    .is_some_and(|owner| {
+                        if matches!(
+                            checker.constants.get(&owner).map(|value| &value.kind),
+                            Some(K::TypeValue(ty)) if *ty == p(P::Type)
+                        ) {
+                            return true;
+                        }
+                        checker
+                            .package
+                            .item(owner)
+                            .is_some_and(|item| match &item.kind {
+                                ItemKind::TypeAlias(rhs, clause_params, _)
+                                    if clause_params.is_empty() =>
+                                {
+                                    inner(checker, rhs, depth + 1)
+                                }
+                                ItemKind::Const(_, rhs) => inner(checker, rhs, depth + 1),
+                                _ => false,
+                            })
+                    }),
+                _ => false,
+            }
+        }
+        inner(self, expr, 0)
+    }
+
+    pub(super) fn syntactic_type_predicate_kind_with<'h>(
+        expr: &Expr<'h>,
+        is_metatype: &impl Fn(&Expr<'_>) -> bool,
+    ) -> Option<(nir::TypeKind, &'h Expr<'h>)> {
+        let H::Application(callee, args) = &expr.kind else {
+            return None;
+        };
+        let H::Projection(namespace_expr, pred_name) = &callee.kind else {
+            return None;
+        };
+        let H::Projection(base, namespace) = &namespace_expr.kind else {
+            return None;
+        };
+        if namespace.name.as_str() != "predicates" || !is_metatype(base) {
+            return None;
+        }
+        let [Arg::Positional(arg)] = *args else {
+            return None;
+        };
+        let kind = match pred_name.name.as_str() {
+            "is_tuple" => nir::TypeKind::Tuple,
+            _ => return None,
+        };
+        Some((kind, *arg))
+    }
+
+    pub(super) fn type_predicate_kind_call<'h>(
+        &mut self,
+        expr: &'h Expr<'h>,
+    ) -> Result<Option<(nir::TypeKind, &'h Expr<'h>)>, Error> {
+        let H::Application(callee, args) = &expr.kind else {
+            return Ok(None);
+        };
+        let H::Projection(namespace_expr, pred_name) = &callee.kind else {
+            return Ok(None);
+        };
+        let H::Projection(base, namespace) = &namespace_expr.kind else {
+            return Ok(None);
+        };
+        if namespace.name.as_str() != "predicates" {
+            return Ok(None);
+        }
+        let is_metatype = if self.is_metatype_base(base) {
+            true
+        } else if let Some(domain) = self.local_field_domain(base)? {
+            domain == p(P::Type) && self.type_expr(base)? == p(P::Type)
+        } else if self.is_type_head(base) {
+            self.type_expr(base)? == p(P::Type)
+        } else if self.runtime_value_context() && !matches!(base.kind, H::ResolvedDef { .. }) {
+            false
+        } else {
+            self.metatype_namespace_receiver(base)?
+        };
+        if !is_metatype {
+            return Ok(None);
+        }
+        let kind = match pred_name.name.as_str() {
+            "is_tuple" => nir::TypeKind::Tuple,
+            other => {
+                return Err(error(
+                    pred_name.span,
+                    format!("unsupported Type.predicates predicate `{other}`"),
+                ));
+            }
+        };
+        let [Arg::Positional(arg)] = *args else {
+            return Err(error(
+                expr.span,
+                format!(
+                    "Type.predicates.{} requires exactly one positional Type argument",
+                    pred_name.name
+                ),
+            ));
+        };
+        Ok(Some((kind, *arg)))
+    }
+
     /// Classify a data-field path by local or comptime call result domains,
     /// without interpreting its values. This only disambiguates builtin namespace
     /// syntax; ordinary projection still performs the actual field checks.

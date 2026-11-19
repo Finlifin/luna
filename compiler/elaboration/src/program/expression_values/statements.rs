@@ -169,13 +169,23 @@ impl Checker<'_, '_> {
             H::Defer(_) => {
                 return Err(error(expr.span, "deferred value computation requires instantiation support, which is not yet implemented"));
             }
-            H::Assumes(condition) if self.is_type_assumption(condition)
-                && self.signature_owner.is_some_and(|owner| self.open_functions.contains_key(&owner)) => {
+            H::Assumes(condition)
+                if self.is_type_assumption(condition)
+                    && self
+                        .signature_owner
+                        .is_some_and(|owner| self.open_functions.contains_key(&owner)) =>
+            {
                 // Open bodies are emitted only after concrete input preparation.
                 // Discharge the type assumption now, before publishing the instance.
                 let predicate = self.type_predicate(condition)?;
-                self.check_source_refinement(predicate.clone(), condition.span)?;
-                self.context.assume(crate::ptc::Formula::from_predicate(&predicate));
+                if !self.in_unselected_inline {
+                    self.check_source_refinement(predicate.clone(), condition.span)?;
+                }
+                let fact = crate::ptc::Formula::from_predicate(&predicate);
+                self.context
+                    .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                    .map_err(|failure| error(condition.span, failure.to_string()))?;
+                self.context.assume(fact);
                 (p(P::Void), K::Unit)
             }
             H::Assumes(condition) => {
@@ -260,6 +270,9 @@ impl Checker<'_, '_> {
                     .unwrap_or_else(|| p(P::Void));
                 if let Some(expected) = &expected_return {
                     self.require_expression(&ty, expected, expr.span)?;
+                }
+                if let Some(returned) = &value {
+                    self.verify_returned_type_guarantees(returned, expr.span)?;
                 }
                 if let Some(observations) = &mut self.control.return_observations {
                     observations.push(ty);

@@ -331,6 +331,8 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
                     preconditions: vec![],
                     postconditions: vec![],
                     result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
                     entry_snapshots: vec![],
                 },
                 body: Expr {
@@ -748,6 +750,8 @@ fn captured_comptime_values_must_materialize_before_iir_validation() {
                     preconditions: vec![],
                     postconditions: vec![],
                     result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
                     entry_snapshots: vec![],
                 },
                 body: Expr {

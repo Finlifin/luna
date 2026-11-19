@@ -18625,12 +18625,12 @@ fn tuple_enumeration_preserves_observed_type_fields() {
         base.to_owned(),
         base.replace("let checked: Selected = value", "let checked: T = seed"),
         base.replace(
-            "inline for (index, (T, seed)) in ((bool, true), (.str'builtin, \"value\"))'tuple_enumerate",
-            "const input=((bool,flag),(.str'builtin,\"value\"));const saved_input=input;inline for (index,(T,seed)) in saved_input'tuple_enumerate",
+            "inline for (T, seed) in ((bool, true), (.str'builtin, \"value\"))'tuple_enumerate",
+            "const input=((bool,flag),(.str'builtin,\"value\"));const saved_input=input;inline for (T,seed) in saved_input'tuple_enumerate",
         ),
         base.replace(
-            "inline for (index, (T, seed)) in ((bool, true), (.str'builtin, \"value\"))'tuple_enumerate",
-            "const action=do {var ready=false;|| {ready=not ready;ready}};const input=((bool,action()),(.str'builtin,\"value\"));const saved_input=input;inline for (index,(T,seed)) in saved_input'tuple_enumerate",
+            "inline for (T, seed) in ((bool, true), (.str'builtin, \"value\"))'tuple_enumerate",
+            "const action=do {var ready=false;|| {ready=not ready;ready}};const input=((bool,action()),(.str'builtin,\"value\"));const saved_input=input;inline for (T,seed) in saved_input'tuple_enumerate",
         )
         .replace("    checked\n", "    checked and not action()\n"),
     ] {

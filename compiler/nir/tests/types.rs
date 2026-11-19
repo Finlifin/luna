@@ -2053,6 +2053,8 @@ fn function_specialization_covers_contracts_defaults_and_preserves_local_identit
             preconditions: vec![predicate.clone()],
             postconditions: vec![predicate],
             result_binding: Some(LocalId { owner: 3, index: 2 }),
+            result_type_binder: None,
+            result_guarantees: vec![],
             entry_snapshots: vec![EntrySnapshot {
                 parameter: local,
                 binding: LocalId { owner: 3, index: 3 },

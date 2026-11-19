@@ -176,6 +176,7 @@ pub(super) fn predicate(
             normalize(a, values, fuel, depth + 1)?,
             normalize(b, values, fuel, depth + 1)?,
         ),
+        P::Kind(ty, kind) => P::Kind(normalize(ty, values, fuel, depth + 1)?, *kind),
         P::Not(inner) => P::Not(Box::new(predicate(inner, values, fuel, depth + 1)?)),
         P::And(items) | P::Or(items) => {
             if items.len() > *fuel {

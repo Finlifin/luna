@@ -196,7 +196,9 @@ impl Checker<'_, '_> {
 
     fn contract_parameter_is_type(&self, value: &Expr<'_>) -> bool {
         match value.kind {
-            H::ResolvedFnParam(_, id) => self.input_facts.type_identity(&local(id)).is_some(),
+            H::ResolvedFnParam(_, id) | H::ResolvedLocal(_, id) => {
+                self.input_facts.type_identity(&local(id)).is_some()
+            }
             H::ResolvedClauseParam(_, id) => self
                 .trait_input_domain(DeclarationId {
                     package: semantic_package(&self.package_identities, id.pkg),
@@ -243,6 +245,7 @@ impl Checker<'_, '_> {
                 H::Binary(BinOp::And | BinOp::Or, left, right) => {
                     type_shape(checker, left, depth + 1)? && type_shape(checker, right, depth + 1)?
                 }
+                _ if checker.type_predicate_kind_call(value)?.is_some() => true,
                 _ => false,
             })
         }
@@ -369,35 +372,96 @@ impl Checker<'_, '_> {
                 }
             }
             self.ready_signature_capabilities(owner, &mut pending_capabilities, true)?;
+            let type_result_binding = match &self.package.item(owner).unwrap().kind {
+                ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                    if !sig.modifiers.is_normal_form_head =>
+                {
+                    sig.return_binding.and_then(|binding| {
+                        let returns_type = match self.signatures.get(&owner) {
+                            Some(signature) => matches!(
+                                signature.callable_signature(),
+                                Term::Function { result, .. } if **result == p(P::Type)
+                            ),
+                            None => match sig.return_ty {
+                                Some(ret_ty) if !matches!(ret_ty.kind, H::Defer(_)) => {
+                                    self.completed_type(ret_ty)
+                                        .ok()
+                                        .and_then(|ct| ct.identity(ret_ty.span).ok())
+                                        == Some(p(P::Type))
+                                }
+                                _ => false,
+                            },
+                        };
+                        returns_type.then_some((binding, sig.span))
+                    })
+                }
+                _ => None,
+            };
             let mut program_requirements = Vec::new();
             let mut postconditions = Vec::new();
-            for clause in clauses {
-                if let hir::clause::ClauseConstraintKind::Ensures(value) = &clause.kind {
-                    if matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if !sig.modifiers.is_normal_form_head)
-                    {
-                        postconditions.push(*value);
-                        continue;
+            let mut result_binder: Option<(n::LocalId, DeclarationId)> = None;
+            let mut result_guarantees = Vec::new();
+            let clause_result = (|| -> Result<(), Error> {
+                for clause in clauses {
+                    if let hir::clause::ClauseConstraintKind::Ensures(value) = &clause.kind {
+                        if matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if !sig.modifiers.is_normal_form_head)
+                        {
+                            if let Some((ret_hir, ret_span)) = type_result_binding {
+                                let ret_local = local(ret_hir);
+                                if result_binder.is_none() {
+                                    let binder = self.fresh_type_binder(owner, ret_span)?;
+                                    self.input_facts.types.insert(
+                                        ret_local,
+                                        Term::Rigid {
+                                            declaration: binder.declaration,
+                                            sort: binder.sort,
+                                        },
+                                    );
+                                    self.input_facts.derived.insert(ret_local);
+                                    self.locals.insert(ret_local, p(P::Type));
+                                    result_binder = Some((ret_local, binder.declaration));
+                                }
+                                if !self.program_requirement(value)? {
+                                    let predicate = self.type_predicate(value)?;
+                                    result_guarantees.push(predicate);
+                                    continue;
+                                }
+                            }
+                            postconditions.push(*value);
+                            continue;
+                        }
                     }
-                }
-                let hir::clause::ClauseConstraintKind::Requires(value) = &clause.kind else {
-                    return Err(error(
-                        clause.span,
-                        "program specification elaboration is not implemented",
-                    ));
-                };
-                if self.program_requirement(value)? {
-                    if !matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if !sig.modifiers.is_normal_form_head)
-                    {
+                    let hir::clause::ClauseConstraintKind::Requires(value) = &clause.kind else {
                         return Err(error(
                             clause.span,
-                            "program specifications are not handled by PTC; this declaration cannot yet carry program preconditions",
+                            "program specification elaboration is not implemented",
                         ));
+                    };
+                    if self.program_requirement(value)? {
+                        if !matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if !sig.modifiers.is_normal_form_head)
+                        {
+                            return Err(error(
+                                clause.span,
+                                "program specifications are not handled by PTC; this declaration cannot yet carry program preconditions",
+                            ));
+                        }
+                        program_requirements.push(*value);
+                    } else {
+                        self.positive_type_requirements(owner, value, &mut requirements, 0)?;
                     }
-                    program_requirements.push(*value);
-                } else {
-                    self.positive_type_requirements(owner, value, &mut requirements, 0)?;
+                }
+                Ok(())
+            })();
+            if let Some((ret_local, binder_decl)) = result_binder {
+                self.input_facts.types.remove(&ret_local);
+                self.input_facts.derived.remove(&ret_local);
+                self.locals.remove(&ret_local);
+                if clause_result.is_ok() && !result_guarantees.is_empty() {
+                    self.result_guarantees
+                        .insert(owner, (binder_decl, result_guarantees));
                 }
             }
+            clause_result?;
             self.program_requirements
                 .insert(owner, program_requirements);
             self.program_postconditions.insert(owner, postconditions);
@@ -1890,6 +1954,7 @@ pub(super) fn requirement_terms<'a>(
                 terms.push(a);
                 terms.push(b);
             }
+            n::TypePredicate::Kind(ty, _) => terms.push(ty),
             n::TypePredicate::Not(p) => pending.push((p, depth + 1)),
             n::TypePredicate::And(ps) | n::TypePredicate::Or(ps) => {
                 pending.extend(ps.iter().map(|p| (p, depth + 1)))
@@ -1921,6 +1986,7 @@ pub(super) fn map_requirement(
                 .collect::<Result<_, _>>()?,
         }),
         Q::Equal(a, b) => Q::Equal(map(a)?, map(b)?),
+        Q::Kind(ty, kind) => Q::Kind(map(ty)?, *kind),
         Q::Not(p) => Q::Not(Box::new(map_requirement(p, map, span, depth + 1)?)),
         Q::And(ps) | Q::Or(ps) => {
             let parts = ps

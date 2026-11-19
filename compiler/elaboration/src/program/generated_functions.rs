@@ -152,6 +152,8 @@ mod tests {
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,
+            result_type_binder: None,
+            result_guarantees: vec![],
             entry_snapshots: vec![],
         }
     }

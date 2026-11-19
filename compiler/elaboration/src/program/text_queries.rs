@@ -14,33 +14,46 @@ impl Checker<'_, '_> {
         let query = match name.as_str() {
             "str_byte_length" => n::TextQueryKind::ByteLength,
             "str_byte" => n::TextQueryKind::Byte,
+            "str_slice" => n::TextQueryKind::Slice,
+            "str_concat" => n::TextQueryKind::Concat,
             "symbol_byte_length" => n::TextQueryKind::SymbolByteLength,
             "symbol_byte" => n::TextQueryKind::SymbolByte,
             _ => unreachable!(),
         };
-        let length = query.is_length();
-        let input = if query.is_symbol() { P::Symbol } else { P::Str };
-        if args.len() != if length { 1 } else { 2 }
+        let expected_inputs: &[P] = match query {
+            n::TextQueryKind::ByteLength => &[P::Str],
+            n::TextQueryKind::Byte => &[P::Str, P::U64],
+            n::TextQueryKind::SymbolByteLength => &[P::Symbol],
+            n::TextQueryKind::SymbolByte => &[P::Symbol, P::U64],
+            n::TextQueryKind::Slice => &[P::Str, P::U64, P::U64],
+            n::TextQueryKind::Concat => &[P::Str, P::Str],
+        };
+        if args.len() != expected_inputs.len()
             || args.iter().any(|arg| !matches!(arg, Arg::Positional(_)))
         {
             return Err(error(
                 expr.span,
-                "byte observation requires a positional subject and optional u64 index",
+                "text operation arguments do not match expected positional signature",
             ));
         }
         let mut values = Vec::new();
-        for (index, arg) in args.iter().enumerate() {
+        for (arg, input) in args.iter().zip(expected_inputs) {
             let Arg::Positional(arg) = arg else {
                 unreachable!()
             };
-            values.push(self.expr(arg, Some(&p(if index == 0 { input } else { P::U64 })))?);
+            values.push(self.expr(arg, Some(&p(*input)))?);
         }
         let ty = if values.iter().any(|value| is_never(&value.ty)) {
             p(P::Never)
-        } else if length {
-            p(P::U64)
         } else {
-            Term::Optional(Box::new(p(P::U8)))
+            match query {
+                n::TextQueryKind::ByteLength | n::TextQueryKind::SymbolByteLength => p(P::U64),
+                n::TextQueryKind::Byte | n::TextQueryKind::SymbolByte => {
+                    Term::Optional(Box::new(p(P::U8)))
+                }
+                n::TextQueryKind::Slice => Term::Optional(Box::new(p(P::Str))),
+                n::TextQueryKind::Concat => p(P::Str),
+            }
         };
         if let Some(expected) = expected {
             self.require_expression(&ty, expected, expr.span)?;

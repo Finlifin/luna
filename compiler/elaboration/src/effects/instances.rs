@@ -72,6 +72,7 @@ fn predicate_cost(value: &TypePredicate, fuel: &mut usize, depth: usize) -> Resu
             charge(left, fuel, depth - 1)?;
             charge(right, fuel, depth - 1)
         }
+        TypePredicate::Kind(ty, _) => charge(ty, fuel, depth - 1),
         TypePredicate::Trait(requirement) => {
             charge(&requirement.subject, fuel, depth - 1)?;
             if requirement.interface_arguments.len() > *fuel {

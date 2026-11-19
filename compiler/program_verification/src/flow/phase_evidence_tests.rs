@@ -51,6 +51,8 @@ fn package(left: u128, in_default: bool) -> Package {
                 preconditions: vec![],
                 postconditions: vec![],
                 result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
                 entry_snapshots: vec![],
                 requirements: vec![],
                 capabilities: vec![],

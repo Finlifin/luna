@@ -7,6 +7,7 @@ use super::*;
 #[derive(Clone, Default)]
 pub(super) struct Context {
     pub(super) result: Option<Term>,
+    pub(super) result_guarantees: Option<(DeclarationId, Vec<n::TypePredicate>)>,
     pub(super) partial_return_context: Option<crate::calls::InputContext>,
     // Missing returns completed before exporting the enclosing callback.
     pub(super) pending_optional_returns: BTreeMap<(u32, u32), n::SourceRange>,

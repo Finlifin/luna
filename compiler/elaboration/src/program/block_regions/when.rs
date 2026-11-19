@@ -18,6 +18,7 @@ struct Ordinary {
     fallback: bool,
     selection: Option<usize>,
     suppressed: bool,
+    comptime: bool,
     callee: Option<hir::HirId>,
     preserve_effect: Option<bool>,
 }
@@ -123,6 +124,7 @@ impl<'h> Frame<'h> {
                 .filter(|(id, _)| *id == source.hir_id)
                 .map(|(_, index)| index),
             suppressed: checker.in_unselected_inline,
+            comptime: checker.in_required_comptime,
             callee: checker.comptime_callee_result,
             preserve_effect: (own_effect_delivery && input_delivery.is_none())
                 .then(|| std::mem::take(&mut checker.preserve_effect_value)),
@@ -157,7 +159,8 @@ impl<'h> Frame<'h> {
             (State::Probing, None) => self.advance_search(checker),
             (State::ProbeCondition { arm, condition }, Some(value)) => {
                 let value = value.ordinary(self.source.span)?;
-                checker.assume_type_condition(
+                checker.assume_source_type_condition(
+                    self.arms[condition].cond,
                     &value,
                     condition == arm,
                     self.arms[condition].body.span,
@@ -191,6 +194,9 @@ impl<'h> Frame<'h> {
                             .is_some_and(|selected| selected != self.branches.len());
                 }
                 if let Some(condition) = arm.cond {
+                    if let Some(ordinary) = &self.ordinary {
+                        checker.in_required_comptime |= ordinary.selection.is_some();
+                    }
                     let destination = Destination::ordinary(
                         checker,
                         OrdinaryTail {
@@ -207,6 +213,9 @@ impl<'h> Frame<'h> {
                 }
             }
             (State::Condition, Some(value)) => {
+                if let Some(ordinary) = &self.ordinary {
+                    checker.in_required_comptime = ordinary.comptime;
+                }
                 let condition = value.ordinary(self.source.span)?;
                 self.body(checker, Some(condition))
             }
@@ -232,7 +241,12 @@ impl<'h> Frame<'h> {
                 if let Some(condition) = &condition {
                     // Later conditions see the failure of every earlier arm,
                     // but never the positive premise used to check its body.
-                    checker.assume_type_condition(condition, false, arm.body.span)?;
+                    checker.assume_source_type_condition(
+                        arm.cond,
+                        condition,
+                        false,
+                        arm.body.span,
+                    )?;
                 }
                 self.branches.push((condition, body));
                 self.state = State::Ready;
@@ -338,7 +352,12 @@ impl<'h> Frame<'h> {
             checker.check_inline_input_availability(condition, &BTreeSet::new(), arm.body.span)?;
         }
         if let Some(condition) = &condition {
-            self.premise = Some(checker.enter_type_condition(condition, true, arm.body.span)?);
+            self.premise = Some(checker.enter_source_type_condition(
+                arm.cond,
+                condition,
+                true,
+                arm.body.span,
+            )?);
         }
         // Install each exit before any subsequent fallible step. Error unwinding
         // leaves the lexical child first, then the positive type premise.
@@ -463,6 +482,7 @@ impl<'h> Frame<'h> {
         if let Some(ordinary) = &self.ordinary {
             checker.comptime_callee_result = ordinary.callee;
             checker.in_unselected_inline = ordinary.suppressed;
+            checker.in_required_comptime = ordinary.comptime;
         }
         if let Some(scope) = self.branch.take() {
             scope.leave(checker);
@@ -582,6 +602,7 @@ mod tests {
             fallback: true,
             selection: Some(2),
             suppressed: false,
+            comptime: false,
             callee: None,
             preserve_effect: Some(true),
         };

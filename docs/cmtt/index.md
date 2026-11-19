@@ -923,19 +923,19 @@ pure comptime fn invert_times(count: Integer) -> <|- bool> {
 fn run() -> bool { ~<invert_times(3)> }
 ```
 
-范围端点先取得完成的 comptime Integer 值，按升序迭代；支持 `..=`，空范围和反向范围执行零次。循环索引及不可反驳模式产生的绑定在每次迭代中独立建立，不能被赋值，离开迭代后不泄漏。可以用 `inline for index if index != 1 in 0..count` 过滤，也支持嵌套循环、带标签的 break/continue 和提前返回代码。空范围仍检查模式、守卫和循环体，包括模式内部 `and … is …` 调用的执行阶段；即使生成器未被调用，其中的 runtime 调用也会被拒绝。实际构造不执行空范围的模式计算、守卫或循环体，合法但不终止的 comptime 模式计算因此不会在空范围被调用。定义侧只从已检查的整数常量边界取得非空证据，不调用端点函数，也不为抽象索引选取样本值。范围确定非空、守卫确定为真且循环体所有路径都返回代码时，可以省略尾返回，例如 `inline for index in 0..1 {return '(true);}`。空范围、未知边界、可能不命中的守卫，以及 body 中正常完成、break 或 continue 的路径，仍要求相应的后续代码返回；指向外层循环的转移按原目标传播。展开次数、端点算术、模式选择和代码复制共享构造预算；当前每个范围最多展开 100,000 次。生成器也支持非空 tuple 的 `tuple_enumerate`，见下例。
+范围端点先取得完成的 comptime Integer 值，按升序迭代；支持 `..=`，空范围和反向范围执行零次。循环索引及不可反驳模式产生的绑定在每次迭代中独立建立，不能被赋值，离开迭代后不泄漏。可以用 `inline for index if index != 1 in 0..count` 过滤，也支持嵌套循环、带标签的 break/continue 和提前返回代码。空范围仍检查模式、守卫和循环体，包括模式内部 `and … is …` 调用的执行阶段；即使生成器未被调用，其中的 runtime 调用也会被拒绝。实际构造不执行空范围的模式计算、守卫或循环体，合法但不终止的 comptime 模式计算因此不会在空范围被调用。定义侧只从已检查的整数常量边界取得非空证据，不调用端点函数，也不为抽象索引选取样本值。范围确定非空、守卫确定为真且循环体所有路径都返回代码时，可以省略尾返回，例如 `inline for index in 0..1 {return '(true);}`。空范围、未知边界、可能不命中的守卫，以及 body 中正常完成、break 或 continue 的路径，仍要求相应的后续代码返回；指向外层循环的转移按原目标传播。展开次数、端点算术、模式选择和代码复制共享构造预算；当前每个范围最多展开 100,000 次。生成器也支持 tuple 的 `tuple_enumerate`（直接产出元素本身），见下例。
 
 ```flurry
 pure comptime fn toggleSelected(values: Tuple<bool, bool, bool>) -> <|-bool> {
     var code = '(false);
-    inline for (index, element) if index != 0 in values'tuple_enumerate {
+    inline for element in values'tuple_enumerate {
         if element { code = '(not ~<code>); }
     }
     code
 }
 ```
 
-输入 tuple 在实际构造时求值一次，每个元素按照自己的类型检查循环体，索引与元素绑定不可赋值；异构 tuple 不被收窄为共同元素类型。定义检查不为元素编造值，也不会为了验证生成器而调用输入函数。过滤、continue、break、外层标签转移和提前返回沿用范围遍历规则；被过滤或先前返回遮蔽的元素仍检查类型与执行阶段。无过滤的非空 tuple 若必然返回代码，可以省略尾返回。输入与展开工作计入共享构造预算。空 tuple 的循环体检查规则仍待确定，当前明确拒绝。
+输入 tuple 在实际构造时求值一次，每个元素按照自己的类型检查循环体，元素绑定不可赋值；异构 tuple 不被收窄为共同元素类型。定义检查不为元素编造值，也不会为了验证生成器而调用输入函数。过滤、continue、break、外层标签转移和提前返回沿用范围遍历规则；被过滤、空元组或先前返回遮蔽的元素仍检查类型与执行阶段。无过滤的非空 tuple 若必然返回代码，可以省略尾返回；空 tuple 仍检查一次抽象元素类型的模式、守卫与主体但不产生展开迭代。输入与展开工作计入共享构造预算。
 
 
 生成器支持按顺序选择的 `when`，既可选择代码值，也可执行赋值、返回和循环转移：
@@ -1886,14 +1886,14 @@ fn run() -> bool { ~<build(false)> }
 活动数据的读取、间接写入后的所有者刷新和 trait 方法转发也消耗 invocation 预算。转发保留共享存储与回调身份，不等同于语言级 Copy；预算耗尽或存储责任无效时拒绝本次生成，不发布部分刷新的快照。
 
 
-生成器的 `tuple_enumerate` 也可遍历指针或含指针的数据。每次迭代的元素绑定保留原目标，过滤 guard 和 continue 前的修改按执行顺序写回；索引和元素绑定本身仍不可重新赋值。
+生成器的 `tuple_enumerate` 也可遍历指针或含指针的数据。每次迭代的元素绑定保留原目标，过滤 guard 和 continue 前的修改按执行顺序写回；元素绑定本身仍不可重新赋值。
 
 ```flurry
 comptime fn toggle() -> <|-bool> {
     var first = false;
     var second = false;
     let pointers = (first.ref, second.ref, first.ref);
-    inline for (index, pointer) in pointers'tuple_enumerate {
+    inline for pointer in pointers'tuple_enumerate {
         pointer.* = not pointer.*;
     }
     let result = not first and second;

@@ -32,6 +32,8 @@ fn function(local: u32, body: Expr) -> Function {
             postconditions: vec![],
             entry_snapshots: vec![],
             result_binding: None,
+            result_type_binder: None,
+            result_guarantees: vec![],
             signature: Term::Function {
                 parameters: vec![],
                 result: Box::new(body.ty.clone()),

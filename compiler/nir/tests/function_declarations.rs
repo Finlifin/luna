@@ -41,6 +41,8 @@ fn declaration() -> FunctionDeclaration {
         preconditions: vec![condition.clone()],
         postconditions: vec![condition],
         result_binding: Some(binding(1)),
+        result_type_binder: None,
+        result_guarantees: vec![],
         entry_snapshots: vec![EntrySnapshot {
             parameter: binding(0),
             binding: binding(2),

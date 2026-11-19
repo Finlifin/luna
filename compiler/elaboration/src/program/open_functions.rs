@@ -329,7 +329,10 @@ impl Checker<'_, '_> {
                 return Ok(Some(D::Unknown));
             }
         }
-        let arguments = self.function_clause_arguments(expr, owner, clauses)?;
+        let saved_open_call = std::mem::replace(&mut self.describing_open_call, true);
+        let arguments = self.function_clause_arguments(expr, owner, clauses);
+        self.describing_open_call = saved_open_call;
+        let arguments = arguments?;
         self.check_type_application(owner, &arguments, expr.span)?;
         let mut unresolved = Vec::new();
         for (binder, argument) in self.declaration_binders(owner).iter().zip(&arguments) {
@@ -1905,10 +1908,58 @@ impl Checker<'_, '_> {
             // Defaults are suppliers. Their checks must not borrow a premise
             // that only holds after binding the parameter at function entry.
             for (parameter, (_, annotation)) in sig.params.iter().zip(&definition.parameters) {
-                if let Annotation::Description(description @ n::DescriptionLiteral::Refined(_)) = annotation {
-                    let subject = this.assume_parameter_refinement(parameter.hir_id, description, parameter.span)?;
-                    this.locals.insert(local(parameter.hir_id), subject.clone());
-                    locals.insert(local(parameter.hir_id), D::Known(subject));
+                match annotation {
+                    Annotation::Description(description @ n::DescriptionLiteral::Refined(_)) => {
+                        let subject = this.assume_parameter_refinement(
+                            parameter.hir_id,
+                            description,
+                            parameter.span,
+                        )?;
+                        this.locals.insert(local(parameter.hir_id), subject.clone());
+                        locals.insert(local(parameter.hir_id), D::Known(subject));
+                    }
+                    Annotation::Pending(prepared) => {
+                        if let Some((binder, guarantees)) = prepared
+                            .direct_call_result_guarantees(&mut this.required_steps, parameter.span)?
+                        {
+                            let subject = this.assume_deferred_result_guarantees(
+                                parameter.hir_id,
+                                binder,
+                                &guarantees,
+                                parameter.span,
+                            )?;
+                            this.locals.insert(local(parameter.hir_id), subject.clone());
+                            locals.insert(local(parameter.hir_id), D::Known(subject));
+                        }
+                    }
+                    Annotation::Suspended { owner: sig_owner, slot } => {
+                        if let Some(source_ty) = annotations::annotation_source(sig, *slot)
+                            && let H::Defer(inner) = &source_ty.kind
+                            && let H::Application(callee, _) = &inner.kind
+                            && let H::ResolvedDef { def_id, .. } = &callee.kind
+                            && let Some(callee_owner) = this.package.definition_owner(*def_id)
+                            && callee_owner != *sig_owner
+                        {
+                            this.ensure_contract(callee_owner, parameter.span)?;
+                            if this
+                                .type_parameters
+                                .get(&callee_owner)
+                                .is_none_or(Vec::is_empty)
+                                && let Some((binder, guarantees)) =
+                                    this.result_guarantees.get(&callee_owner).cloned()
+                            {
+                                let subject = this.assume_deferred_result_guarantees(
+                                    parameter.hir_id,
+                                    binder,
+                                    &guarantees,
+                                    parameter.span,
+                                )?;
+                                this.locals.insert(local(parameter.hir_id), subject.clone());
+                                locals.insert(local(parameter.hir_id), D::Known(subject));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             this.check_suspended_annotation(&definition.result, sig, &mut locals)?;
@@ -2030,6 +2081,8 @@ impl Checker<'_, '_> {
                             postconditions,
                             entry_snapshots,
                             result_binding: sig.return_binding.map(local),
+                            result_type_binder: None,
+                            result_guarantees: vec![],
                             requirements: this.definition_requirements(owner),
                             capabilities: this
                                 .capabilities
@@ -2070,6 +2123,45 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<(), Error> {
         if let (D::Known(actual), Some(D::Known(expected))) = (actual, expected) {
+            if !is_never(actual) && matches!(expected, Term::ErrorResult { .. }) {
+                let mut unwrapped = actual;
+                if self.active_effect_environment().is_some()
+                    && let Term::Computation { effects, result } = actual
+                {
+                    crate::effects::embed_row(
+                        effects,
+                        self.active_effect_environment().unwrap(),
+                        &self.context,
+                        crate::ptc::Budget::default(),
+                    )
+                    .map_err(|failure| error(span, failure.to_string()))?;
+                    unwrapped = result;
+                }
+                if !is_never(unwrapped) {
+                    let conversion = if matches!(unwrapped, Term::ErrorResult { .. }) {
+                        nir::error_results::Conversion::Embed
+                    } else {
+                        nir::error_results::Conversion::Success
+                    };
+                    let frames = self.context.scope().to_vec();
+                    return nir::error_results::validate_conversion_in_scope(
+                        conversion,
+                        unwrapped,
+                        expected,
+                        &frames,
+                        &mut 100_000,
+                        &mut |a, b| self.require(a, b, span).is_ok(),
+                    )
+                    .map_err(|e| {
+                        error(
+                            span,
+                            format!(
+                                "error result conversion: {e}; input {unwrapped}; output {expected}"
+                            ),
+                        )
+                    });
+                }
+            }
             self.require_expression(actual, expected, span)?;
         }
         Ok(())
@@ -2182,6 +2274,8 @@ impl Checker<'_, '_> {
         let saved_staged_locals = self.open_staged_locals.clone();
         let saved_staged_locals_members = self.open_member_locals.clone();
         let saved_context = self.context.clone();
+        let saved_req_len = self.definition_refinements.requirements.len();
+        let saved_generator_data = self.generator_data.clone();
         let result = (|| {
             let mut completing = true;
             for statement in block.stmts {
@@ -2211,6 +2305,10 @@ impl Checker<'_, '_> {
         self.open_staged_locals = saved_staged_locals;
         self.open_member_locals = saved_staged_locals_members;
         self.context = saved_context;
+        self.definition_refinements
+            .requirements
+            .truncate(saved_req_len);
+        self.generator_data = saved_generator_data;
         result
     }
 
@@ -2236,7 +2334,7 @@ impl Checker<'_, '_> {
         })?;
         if let H::InlineControl(inner) = expr.kind
             && let H::If(condition, yes, no) = inner.kind
-            && matches!(condition.kind, H::TraitBound(..))
+            && self.is_type_assumption(condition)
         {
             return self.describe_inline_trait_guard(
                 expr, condition, yes, no, locals, returns, expected, depth,
@@ -2668,7 +2766,15 @@ impl Checker<'_, '_> {
                     }
                 };
                 for condition in conditions {
-                    self.with_staged_input(true, |this| {
+                    if self.is_type_assumption(condition) {
+                        continue;
+                    }
+                    let saved_unselected = if self.open_condition_has_type_evidence(condition, 0) {
+                        Some(std::mem::replace(&mut self.in_unselected_inline, true))
+                    } else {
+                        None
+                    };
+                    let checked = self.with_staged_input(true, |this| {
                         this.describe_open_expression(
                             condition,
                             &mut locals.clone(),
@@ -2676,7 +2782,11 @@ impl Checker<'_, '_> {
                             Some(&D::Known(p(P::Bool))),
                             depth + 1,
                         )
-                    })?;
+                    });
+                    if let Some(prev) = saved_unselected {
+                        self.in_unselected_inline = prev;
+                    }
+                    checked?;
                 }
                 let saved_selection = self.inline_selection.replace((value.hir_id, usize::MAX));
                 let result =
@@ -2759,7 +2869,26 @@ impl Checker<'_, '_> {
                 })
             }
             H::Application(callee, args) => {
-                self.describe_open_call(expr, callee, args, locals, returns, expected, depth + 1)?
+                if let Some((_, arg)) = self.type_predicate_kind_call(expr)? {
+                    self.describe_open_expression(
+                        arg,
+                        locals,
+                        returns,
+                        Some(&D::Known(p(P::Type))),
+                        depth + 1,
+                    )?;
+                    D::Known(p(P::Bool))
+                } else {
+                    self.describe_open_call(
+                        expr,
+                        callee,
+                        args,
+                        locals,
+                        returns,
+                        expected,
+                        depth + 1,
+                    )?
+                }
             }
             H::ExtendedApplication(callee, args) => self.describe_open_extended_call(
                 expr,
@@ -2800,6 +2929,7 @@ impl Checker<'_, '_> {
                     .validate_formula(&fact, &mut crate::ptc::Budget::default())
                     .map_err(|failure| error(condition.span, failure.to_string()))?;
                 self.context.assume(fact);
+                self.definition_refinements.requirements.push(predicate);
                 D::Known(p(P::Void))
             }
             H::Loop(body) => {
@@ -3108,6 +3238,119 @@ impl Checker<'_, '_> {
                     };
                     this.describe_known_region(&probe, expected)
                 })?
+            }
+            H::ErrorPropagate(value) => {
+                let description =
+                    self.describe_open_expression(value, locals, returns, None, depth + 1)?;
+                match description {
+                    D::Unknown => {
+                        if returns.is_none() {
+                            return Err(context_error(
+                                expr.span,
+                                "error propagation requires a function result context",
+                            ));
+                        }
+                        D::Unknown
+                    }
+                    D::Known(ty) if is_never(&ty) => D::Known(ty),
+                    D::Known(ty) if self.control.result.is_some() => {
+                        self.with_open_operand(ty, value.span, |this, placeholder| {
+                            let probe = Expr {
+                                hir_id: expr.hir_id,
+                                span: expr.span,
+                                kind: H::ErrorPropagate(placeholder),
+                            };
+                            this.describe_known_region(&probe, expected)
+                        })?
+                    }
+                    D::Known(Term::ErrorResult { result, .. })
+                        if matches!(returns, Some(D::Unknown)) =>
+                    {
+                        D::Known((*result).clone())
+                    }
+                    D::Known(_) if returns.is_none() => {
+                        return Err(context_error(
+                            expr.span,
+                            "error propagation requires a function result context",
+                        ));
+                    }
+                    D::Known(_) => {
+                        return Err(error(
+                            expr.span,
+                            "error propagation requires an error-qualified operand",
+                        ));
+                    }
+                }
+            }
+            H::OptionPropagate(value) => {
+                let description =
+                    self.describe_open_expression(value, locals, returns, None, depth + 1)?;
+                match description {
+                    D::Unknown => {
+                        if returns.is_none() {
+                            return Err(context_error(
+                                expr.span,
+                                "optional propagation requires a function result context",
+                            ));
+                        }
+                        D::Unknown
+                    }
+                    D::Known(ty) if is_never(&ty) => D::Known(ty),
+                    D::Known(ty) if self.control.result.is_some() => {
+                        self.with_open_operand(ty, value.span, |this, placeholder| {
+                            let probe = Expr {
+                                hir_id: expr.hir_id,
+                                span: expr.span,
+                                kind: H::OptionPropagate(placeholder),
+                            };
+                            this.describe_known_region(&probe, expected)
+                        })?
+                    }
+                    D::Known(Term::Optional(inner)) if matches!(returns, Some(D::Unknown)) => {
+                        D::Known((*inner).clone())
+                    }
+                    D::Known(_) if returns.is_none() => {
+                        return Err(context_error(
+                            expr.span,
+                            "optional propagation requires a function result context",
+                        ));
+                    }
+                    D::Known(_) => {
+                        return Err(error(
+                            expr.span,
+                            "optional propagation requires an optional operand",
+                        ));
+                    }
+                }
+            }
+            H::ErrorNew(value) => {
+                let hint = match expected {
+                    Some(D::Known(Term::ErrorResult { errors, .. })) if errors.len() == 1 => {
+                        Some(D::Known(errors[0].clone()))
+                    }
+                    _ => None,
+                };
+                let description = self.describe_open_expression(
+                    value,
+                    locals,
+                    returns,
+                    hint.as_ref(),
+                    depth + 1,
+                )?;
+                match description {
+                    D::Unknown => D::Unknown,
+                    D::Known(ty) if is_never(&ty) => D::Known(ty),
+                    D::Known(ty) => {
+                        self.with_open_operand(ty, value.span, |this, placeholder| {
+                            let probe = Expr {
+                                hir_id: expr.hir_id,
+                                span: expr.span,
+                                kind: H::ErrorNew(placeholder),
+                            };
+                            this.describe_known_region(&probe, expected)
+                        })?
+                    }
+                }
             }
             H::Cast(value, target) => {
                 let description =
@@ -3639,6 +3882,7 @@ impl Checker<'_, '_> {
         }
         let saved_context = self.context.clone();
         let saved_locals = self.locals.clone();
+        let saved_req_len = self.definition_refinements.requirements.len();
         let outcome = (|| {
             let mut branch_type = if fallback.is_some() {
                 expected.cloned()
@@ -3647,6 +3891,9 @@ impl Checker<'_, '_> {
             };
             let mut branches = Vec::new();
             let mut reachable = true;
+            let inline_when = self
+                .inline_selection
+                .is_some_and(|(id, _)| id == expr.hir_id);
             for arm in arms {
                 self.locals = saved_locals.clone();
                 self.required_steps = self
@@ -3656,39 +3903,77 @@ impl Checker<'_, '_> {
                         error(arm.span, "loop completion description budget exhausted")
                     })?;
                 let transfers_before = self.open_loop_transfers.clone();
-                let condition = arm
-                    .cond
-                    .map(|condition| {
+                let mut arm_predicate: Option<(n::TypePredicate, crate::ptc::Formula)> = None;
+                let condition = match arm.cond {
+                    Some(hir_cond) => {
                         // Only the selector inherits the inline stage. Its
                         // runtime body must still accept runtime inputs.
-                        let staged = self.in_staged_input
-                            || self
-                                .inline_selection
-                                .is_some_and(|(id, _)| id == expr.hir_id);
-                        self.with_staged_input(staged, |this| {
-                            let checked = this.expr(condition, Some(&p(P::Bool)))?;
-                            this.check_open_fragment(&checked, condition.span, false)?;
-                            Ok::<_, Error>(checked)
-                        })
-                    })
-                    .transpose()?;
+                        let staged = self.in_staged_input || inline_when;
+                        if staged && self.is_type_assumption(hir_cond) {
+                            let predicate = self.type_predicate(hir_cond)?;
+                            let fact = crate::ptc::Formula::from_predicate(&predicate);
+                            self.context
+                                .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                                .map_err(|e| error(hir_cond.span, e.to_string()))?;
+                            arm_predicate = Some((predicate, fact));
+                            Some(n::Expr {
+                                source: source(hir_cond.span),
+                                ty: p(P::Bool),
+                                kind: K::Local(local(hir_cond.hir_id)),
+                            })
+                        } else {
+                            let checked = self.with_staged_input(staged, |this| {
+                                let saved_unselected = if staged
+                                    && this.open_condition_has_type_evidence(hir_cond, 0)
+                                {
+                                    Some(std::mem::replace(&mut this.in_unselected_inline, true))
+                                } else {
+                                    None
+                                };
+                                let checked = this.expr(hir_cond, Some(&p(P::Bool)));
+                                if let Some(prev) = saved_unselected {
+                                    this.in_unselected_inline = prev;
+                                }
+                                let checked = checked?;
+                                this.check_open_fragment(&checked, hir_cond.span, false)?;
+                                Ok::<_, Error>(checked)
+                            })?;
+                            Some(checked)
+                        }
+                    }
+                    None => None,
+                };
                 let condition_transfers = self.open_loop_transfers.clone();
                 let mut branch_locals = locals.clone();
-                let mut check = |this: &mut Self| {
-                    this.describe_open_expression(
+                let saved_arm_context = self.context.clone();
+                let saved_arm_req_len = self.definition_refinements.requirements.len();
+                let body_result = (|| -> Result<D, Error> {
+                    if let Some((predicate, fact)) = &arm_predicate {
+                        self.context.assume(fact.clone());
+                        self.definition_refinements
+                            .requirements
+                            .push(predicate.clone());
+                    } else if let Some(checked_cond) = &condition {
+                        self.assume_source_type_condition(
+                            arm.cond,
+                            checked_cond,
+                            true,
+                            arm.body.span,
+                        )?;
+                    }
+                    self.describe_open_expression(
                         arm.body,
                         &mut branch_locals,
                         returns,
                         branch_type.as_ref(),
                         depth + 1,
                     )
-                };
-                let body = match &condition {
-                    Some(condition) => {
-                        self.under_type_condition(condition, true, arm.body.span, check)?
-                    }
-                    None => check(self)?,
-                };
+                })();
+                self.context = saved_arm_context;
+                self.definition_refinements
+                    .requirements
+                    .truncate(saved_arm_req_len);
+                let body = body_result?;
                 if !reachable {
                     self.open_loop_transfers = transfers_before;
                 } else {
@@ -3710,8 +3995,18 @@ impl Checker<'_, '_> {
                 if branch_type.is_none() && !matches!(&body, D::Known(ty) if is_never(ty)) {
                     branch_type = Some(body.clone());
                 }
-                if let Some(condition) = &condition {
-                    self.assume_type_condition(condition, false, arm.body.span)?;
+                if let Some((predicate, fact)) = arm_predicate {
+                    self.context.assume(fact.negate());
+                    self.definition_refinements
+                        .requirements
+                        .push(n::TypePredicate::Not(Box::new(predicate)));
+                } else if let Some(checked_cond) = &condition {
+                    self.assume_source_type_condition(
+                        arm.cond,
+                        checked_cond,
+                        false,
+                        arm.body.span,
+                    )?;
                 }
                 let body = if fallback.is_none() && !matches!(&body, D::Known(ty) if is_never(ty)) {
                     D::Known(p(P::Void))
@@ -3758,6 +4053,9 @@ impl Checker<'_, '_> {
         })();
         self.context = saved_context;
         self.locals = saved_locals;
+        self.definition_refinements
+            .requirements
+            .truncate(saved_req_len);
         outcome
     }
 
@@ -3998,27 +4296,39 @@ impl Checker<'_, '_> {
         else {
             unreachable!()
         };
-        let (index_source, element_source) = self.tuple_iteration_patterns(pat)?;
         let computed = self.computed_tuple_input(input)?;
-        let elements = if computed {
+        let mut empty_tuple = false;
+        let (elements, added_rigid) = if computed {
             let binder = self.fresh_type_binder(expr.hir_id.owner, expr.span)?;
             self.definition_refinements
                 .tuple_elements
                 .push(binder.declaration);
-            vec![Term::Rigid {
-                declaration: binder.declaration,
-                sort: Sort::Type,
-            }]
+            (
+                vec![Term::Rigid {
+                    declaration: binder.declaration,
+                    sort: Sort::Type,
+                }],
+                true,
+            )
         } else {
             let (checked, elements) = self.tuple_enumeration_input(input)?;
             self.check_open_fragment(&checked, expr.span, false)?;
             if elements.is_empty() {
-                return Err(error(
-                    expr.span,
-                    "empty tuple_enumerate body checking is not yet implemented",
-                ));
+                empty_tuple = true;
+                let binder = self.fresh_type_binder(expr.hir_id.owner, expr.span)?;
+                self.definition_refinements
+                    .tuple_elements
+                    .push(binder.declaration);
+                (
+                    vec![Term::Rigid {
+                        declaration: binder.declaration,
+                        sort: Sort::Type,
+                    }],
+                    true,
+                )
+            } else {
+                (elements, false)
             }
-            elements
         };
         let saved = self.locals.clone();
         let staged = self.open_staged_locals.clone();
@@ -4043,24 +4353,14 @@ impl Checker<'_, '_> {
                 self.immutable = immutable.clone();
                 self.context = context.clone();
                 self.immutable.extend(pattern_binding_ids(pat));
-                let index = self
-                    .with_staged_input(true, |this| this.pattern(index_source, &p(P::Integer)))?;
-                patterns_irrefutable &= self.pattern_exhaustive(&index, &p(P::Integer));
-                for id in self.locals.keys().filter(|id| !saved.contains_key(id)) {
-                    self.open_staged_locals.insert(*id);
-                }
-                let element = self.pattern(element_source, &ty)?;
+                let element = self.pattern(pat, &ty)?;
                 patterns_irrefutable &= self.pattern_exhaustive(&element, &ty);
-                for (pattern, is_staged) in [(&index, true), (&element, false)] {
-                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                    let before = fuel;
-                    let observations = nir::visit::pattern_observations(pattern, &mut fuel);
-                    self.required_steps -= (before - fuel) as u64;
-                    for observation in observations.map_err(|e| error(pat.span, e))? {
-                        self.with_staged_input(is_staged, |this| {
-                            this.check_open_fragment(observation, pat.span, false)
-                        })?;
-                    }
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let observations = nir::visit::pattern_observations(&element, &mut fuel);
+                self.required_steps -= (before - fuel) as u64;
+                for observation in observations.map_err(|e| error(pat.span, e))? {
+                    self.check_open_fragment(observation, pat.span, false)?;
                 }
                 let mut branch_locals = locals.clone();
                 branch_locals.extend(
@@ -4088,6 +4388,7 @@ impl Checker<'_, '_> {
             // Transfers to enclosing loops remain visible to their own probe.
             let result = D::Known(p(
                 if !computed
+                    && !empty_tuple
                     && patterns_irrefutable
                     && guard.is_none()
                     && bodies_diverge
@@ -4101,9 +4402,9 @@ impl Checker<'_, '_> {
             self.require_description(&result, expected, expr.span)?;
             Ok(result)
         })();
-        if computed {
+        if added_rigid {
             self.definition_refinements.tuple_elements.pop();
-            if checked.is_ok() {
+            if computed && checked.is_ok() {
                 self.definition_refinements
                     .checked_tuple_loops
                     .insert(local(expr.hir_id));
@@ -4579,7 +4880,10 @@ impl Checker<'_, '_> {
                         "explicit instantiation requires a generic function",
                     ));
                 }
-                let arguments = self.function_clause_arguments(expr, owner, clauses)?;
+                let saved_open_call = std::mem::replace(&mut self.describing_open_call, true);
+                let arguments = self.function_clause_arguments(expr, owner, clauses);
+                self.describing_open_call = saved_open_call;
+                let arguments = arguments?;
                 self.check_type_application(owner, &arguments, expr.span)?;
                 let saved = self.alias_substitution.clone();
                 for (binder, argument) in self.declaration_binders(owner).into_iter().zip(arguments)
@@ -4614,7 +4918,10 @@ impl Checker<'_, '_> {
         }
         if self.open_functions.contains_key(&owner) && !self.type_parameters[&owner].is_empty() {
             let arguments = if let Some(explicit) = explicit {
-                self.function_clause_arguments(expr, owner, explicit)?
+                let saved_open_call = std::mem::replace(&mut self.describing_open_call, true);
+                let arguments = self.function_clause_arguments(expr, owner, explicit);
+                self.describing_open_call = saved_open_call;
+                arguments?
             } else {
                 let target = match expected {
                     Some(D::Known(ty)) => Some(ty),
@@ -5247,7 +5554,12 @@ impl Checker<'_, '_> {
         let signature = signature.clone();
         let all_generic = self.type_parameters[&owner].clone();
         let fixed = match explicit {
-            Some(types) => self.function_clause_arguments(expr, owner, types)?,
+            Some(types) => {
+                let saved_open_call = std::mem::replace(&mut self.describing_open_call, true);
+                let arguments = self.function_clause_arguments(expr, owner, types);
+                self.describing_open_call = saved_open_call;
+                arguments?
+            }
             None => self.lexical_function_arguments(owner, expr.span)?,
         };
         let (generic, template, pending_defaults) =
@@ -5689,26 +6001,58 @@ impl Checker<'_, '_> {
             .collect()
     }
 
-    fn specialized_open_requirements(
+    fn specialized_open_predicates(
         &self,
         owner: OwnerId,
+        predicates: &[n::TypePredicate],
         symbols: &[Option<Term>],
         span: Span,
     ) -> Result<Vec<n::TypePredicate>, Error> {
-        self.definition_requirements(owner)
+        predicates
             .iter()
-            .map(|requirement| {
+            .map(|predicate| {
                 required::map_requirement(
-                    requirement,
+                    predicate,
                     &mut |ty| {
-                        self.specialize_open_clause_type(owner, ty, span)?.substitute_partial(symbols).map_err(|failure| error(span,
-                    format!("open type contract requires available comptime inputs: {failure}")))
+                        self.specialize_open_clause_type(owner, ty, span)?
+                            .substitute_partial(symbols)
+                            .map_err(|failure| {
+                                error(
+                                    span,
+                                    format!(
+                                        "open type contract requires available comptime inputs: {failure}"
+                                    ),
+                                )
+                            })
                     },
                     span,
                     0,
                 )
             })
             .collect()
+    }
+
+    fn specialized_open_requirements(
+        &self,
+        owner: OwnerId,
+        symbols: &[Option<Term>],
+        span: Span,
+    ) -> Result<Vec<n::TypePredicate>, Error> {
+        let requirements = self.definition_requirements(owner);
+        self.specialized_open_predicates(owner, &requirements, symbols, span)
+    }
+
+    fn specialized_open_result_guarantees(
+        &self,
+        owner: OwnerId,
+        symbols: &[Option<Term>],
+        span: Span,
+    ) -> Result<(Option<DeclarationId>, Vec<n::TypePredicate>), Error> {
+        let Some((binder, guarantees)) = self.result_guarantees.get(&owner) else {
+            return Ok((None, Vec::new()));
+        };
+        let guarantees = self.specialized_open_predicates(owner, guarantees, symbols, span)?;
+        Ok((Some(*binder), guarantees))
     }
 
     fn admit_open_type_requirements(
@@ -7391,6 +7735,8 @@ impl Checker<'_, '_> {
             let result_binding = sig.return_binding.map(local);
             let (postconditions, entry_snapshots) =
                 this.program_postconditions(owner, result_binding, result)?;
+            let (result_type_binder, result_guarantees) =
+                this.specialized_open_result_guarantees(owner, symbols, span)?;
             let interface = n::FunctionDeclaration {
                 source: source(item.span),
                 declaration: id,
@@ -7413,6 +7759,8 @@ impl Checker<'_, '_> {
                 postconditions,
                 entry_snapshots,
                 result_binding,
+                result_type_binder,
+                result_guarantees,
                 type_parameters: captures
                     .iter()
                     .map(|(parameter, _)| parameter.declaration)

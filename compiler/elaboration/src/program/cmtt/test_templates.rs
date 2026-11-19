@@ -64,6 +64,8 @@ impl Checker<'_, '_> {
                     postconditions: contract.postconditions,
                     entry_snapshots: contract.entry_snapshots,
                     result_binding: contract.result_binding,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
                 },
                 body: value,
             });

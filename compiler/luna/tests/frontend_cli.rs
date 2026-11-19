@@ -6095,7 +6095,7 @@ fn tuple_enumeration_view_retains_operand_and_loop_structure_in_hir() {
     for (body, runtime_view) in [
         ("let view=values'tuple_enumerate;", true),
         (
-            "inline for (index,element) in values'tuple_enumerate {let used=element;}",
+            "inline for element in values'tuple_enumerate {let used=element;}",
             false,
         ),
     ] {
@@ -6131,7 +6131,7 @@ fn tuple_enumeration_view_retains_operand_and_loop_structure_in_hir() {
     }
     sandbox.write(
         "input.fl",
-        "fn run() {inline for (index,element) in (true,false)'tuple_enumerate {let used=element;}}",
+        "fn run() {inline for element in (true,false)'tuple_enumerate {let used=element;}}",
     );
     let output = sandbox.run(&["input.fl", "--emit", "nir"]);
     assert!(success(&output).starts_with("(nir-package"));

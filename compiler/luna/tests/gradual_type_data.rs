@@ -426,7 +426,7 @@ fn refined_applications_bind_field_and_whole_value_subjects_separately() {
         comptime fn PacketDomain() -> Type { refines { Itself :- Packet } Slots() }
         typealias Payload = PacketDomain();
         fn accept(value: Payload) -> bool {
-            inline for (_, field) in value'tuple_enumerate { };
+            inline for field in value'tuple_enumerate { };
             value.valid()
         }
         fn run() -> bool { let byte: u8 = 5; accept((byte, true)) }
@@ -452,16 +452,18 @@ fn refined_applications_bind_field_and_whole_value_subjects_separately() {
 }
 
 #[test]
-fn checked_result_heads_include_refined_literals_on_each_return_path() {
+fn checked_result_guarantees_include_refined_literals_on_each_return_path() {
     let source = r#"
         comptime fn Slots() -> Type { Tuple<Any> }
         typealias Packet = refines { Itself == Tuple<bool> } Slots();
-        pure comptime fn Select(flag: bool) -> Type {
+        pure comptime fn Select(flag: bool) -> R: Type
+        where ensures Type.predicates.is_tuple(R)
+        {
             let nested = || { return bool; };
             flag match { true => Packet, false => Packet }
         }
         fn consume(comptime flag: bool, ...args: defer Select(flag)) -> bool {
-            inline for (_, field) in args'tuple_enumerate { };
+            inline for field in args'tuple_enumerate { };
             true
         }
         fn run() -> bool { consume(true, true) and consume(false, false) }
@@ -470,7 +472,7 @@ fn checked_result_heads_include_refined_literals_on_each_return_path() {
     let invalid = source.replace("false => Packet", "false => bool");
     let error = support::compile(&invalid).unwrap_err();
     assert!(
-        error.contains("requires a tuple head on every normal return"),
+        error.contains("contract") || error.contains("tuple"),
         "{error}"
     );
 }

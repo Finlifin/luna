@@ -29,6 +29,8 @@ fn function(local: u32, phase: Phase) -> Function {
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,
+            result_type_binder: None,
+            result_guarantees: vec![],
             entry_snapshots: vec![],
             requirements: vec![],
             capabilities: vec![],

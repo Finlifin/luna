@@ -20,6 +20,8 @@ fn function(local: u32, parameters: Vec<LocalId>, body: Expr) -> Function {
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,
+            result_type_binder: None,
+            result_guarantees: vec![],
             entry_snapshots: vec![],
             capabilities: vec![],
             requirements: vec![],

@@ -73,6 +73,28 @@ impl Checker<'_, '_> {
         })
     }
 
+    pub(super) fn fresh_value_binder(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<nir::DeclarationParameter, Error> {
+        self.required_steps = self
+            .required_steps
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "ComptimeValue binder budget exhausted"))?;
+        let index = self
+            .definition_identities
+            .reserve()
+            .ok_or_else(|| error(span, "ComptimeValue binder identity space exhausted"))?;
+        Ok(nir::DeclarationParameter {
+            declaration: DeclarationId {
+                package: declaration(self.package, &self.package_identities, owner).package,
+                local: index,
+            },
+            sort: Sort::ComptimeValue,
+        })
+    }
+
     pub(super) fn type_expr(&mut self, expr: &Expr<'_>) -> Result<Term, Error> {
         self.completed_type(expr)?.identity(expr.span)
     }

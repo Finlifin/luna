@@ -19,6 +19,8 @@ pub struct FunctionDeclaration {
     pub preconditions: Vec<Expr>,
     pub postconditions: Vec<Expr>,
     pub result_binding: Option<LocalId>,
+    pub result_type_binder: Option<DeclarationId>,
+    pub result_guarantees: Vec<TypePredicate>,
     pub entry_snapshots: Vec<EntrySnapshot>,
     pub capabilities: Vec<TraitRequirement>,
     pub requirements: Vec<TypePredicate>,
@@ -67,6 +69,7 @@ impl FunctionDeclaration {
             pure: self.pure,
             is_unsafe: self.is_unsafe,
             result_binding: self.result_binding,
+            result_type_binder: self.result_type_binder,
             entry_snapshots: self.entry_snapshots.clone(),
             type_parameters: self.type_parameters.clone(),
             declaration: self.declaration,
@@ -75,6 +78,11 @@ impl FunctionDeclaration {
             signature: substitution.term(&self.signature)?,
             requirements: self
                 .requirements
+                .iter()
+                .map(|p| p.try_map_types(&mut |ty| substitution.term(ty)))
+                .collect::<Result<_, _>>()?,
+            result_guarantees: self
+                .result_guarantees
                 .iter()
                 .map(|p| p.try_map_types(&mut |ty| substitution.term(ty)))
                 .collect::<Result<_, _>>()?,
@@ -251,6 +259,7 @@ impl Function {
                     pure: self.pure,
                     is_unsafe: self.is_unsafe,
                     result_binding: self.result_binding,
+                    result_type_binder: self.result_type_binder,
                     entry_snapshots: self.entry_snapshots.clone(),
                     type_parameters: self.type_parameters.clone(),
                     declaration: self.declaration,
@@ -259,6 +268,11 @@ impl Function {
                     signature: scoped.instantiate_closed_signature(&self.signature)?,
                     requirements: self
                         .requirements
+                        .iter()
+                        .map(|p| scoped.instantiate_predicate(p))
+                        .collect::<Result<_, _>>()?,
+                    result_guarantees: self
+                        .result_guarantees
                         .iter()
                         .map(|p| scoped.instantiate_predicate(p))
                         .collect::<Result<_, _>>()?,
@@ -348,6 +362,13 @@ impl FunctionDeclaration {
         f.write_str(") (defaults")?;
         for (parameter, value) in &self.defaults {
             write!(f, " (default (parameter {parameter}) {value})")?;
+        }
+        f.write_str(") (result-guarantees")?;
+        if let Some(binder) = self.result_type_binder {
+            write!(f, " {binder}")?;
+        }
+        for guarantee in &self.result_guarantees {
+            write!(f, " {guarantee}")?;
         }
         f.write_str(")")
     }

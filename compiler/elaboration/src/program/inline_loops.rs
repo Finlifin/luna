@@ -83,7 +83,12 @@ impl Checker<'_, '_> {
         input: &Expr<'_>,
     ) -> Result<(n::Expr, Vec<Term>), Error> {
         let span = input.span;
-        let input = self.expr(input, None)?;
+        let expected = if matches!(input.kind, H::Unit) {
+            Some(self.tuple_value_type(Vec::new(), span)?)
+        } else {
+            None
+        };
+        let input = self.expr(input, expected.as_ref())?;
         let shape = self.structural_type(&input.ty, span)?;
         let Term::Tuple(elements) = shape else {
             return Err(error(
@@ -349,21 +354,6 @@ impl Checker<'_, '_> {
         self.in_unselected_inline = saved_suppressed;
         result
     }
-    pub(super) fn tuple_iteration_patterns<'h>(
-        &self,
-        pattern: &'h hir::pattern::Pattern<'h>,
-    ) -> Result<(&'h hir::pattern::Pattern<'h>, &'h hir::pattern::Pattern<'h>), Error> {
-        match pattern.kind {
-            hir::pattern::PatternKind::Tuple(fields) if fields.len() == 2 => {
-                Ok((&fields[0], &fields[1]))
-            }
-            _ => Err(error(
-                pattern.span,
-                "tuple_enumerate iteration requires an (index, element) pattern",
-            )),
-        }
-    }
-
     fn expand_inline_tuple(
         &mut self,
         expr: &Expr<'_>,
@@ -376,27 +366,44 @@ impl Checker<'_, '_> {
         else {
             unreachable!()
         };
-        let (index_source, element_source) = self.tuple_iteration_patterns(pat)?;
-        let (input, elements) = self.tuple_enumeration_input(input)?;
-        let observed_elements = self.observed_tuple_elements(&input, elements.len(), expr.span)?;
-        if elements.is_empty()
-            && !self
-                .open_functions
-                .get(&expr.hir_id.owner)
-                .is_some_and(|d| d.checked_empty_iteration(expr.hir_id))
-        {
-            return Err(error(
-                expr.span,
-                "empty tuple_enumerate body checking is not yet implemented",
-            ));
-        }
-        if elements.len() as u64 > self.required_steps {
+        let input_span = input.span;
+        let (input, elements, abstract_tuple) = {
+            let expected = if matches!(input.kind, H::Unit) {
+                Some(self.tuple_value_type(Vec::new(), input_span)?)
+            } else {
+                None
+            };
+            let checked_input = self.expr(input, expected.as_ref())?;
+            let shape = self.structural_type(&checked_input.ty, input_span)?;
+            match shape {
+                Term::Tuple(elements) => (checked_input, elements, false),
+                _ if (self.in_unselected_inline || self.checking_open_behavior)
+                    && self.is_proven_tuple_type(&checked_input.ty, input_span)? =>
+                {
+                    (checked_input, Vec::new(), true)
+                }
+                _ => {
+                    return Err(error(
+                        input_span,
+                        "tuple_enumerate requires a tuple value with established structural type evidence",
+                    ));
+                }
+            }
+        };
+        let observed_elements = if abstract_tuple {
+            None
+        } else {
+            self.observed_tuple_elements(&input, elements.len(), expr.span)?
+        };
+        let empty = elements.is_empty();
+        let charge = elements.len().max(1) as u64;
+        if charge > self.required_steps {
             return Err(error(
                 expr.span,
                 "tuple_enumerate expansion budget exhausted",
             ));
         }
-        self.required_steps -= elements.len() as u64;
+        self.required_steps -= charge;
         let saved_locals = self.locals.clone();
         let input_boundary = self.input_facts.lexical_boundary();
         let saved_data = self.generator_data.clone();
@@ -428,6 +435,50 @@ impl Checker<'_, '_> {
                 .map(|id| (*id, *id))
                 .collect();
             let mut iterations = Vec::new();
+            let already_checked_empty = empty
+                && self
+                    .open_functions
+                    .get(&expr.hir_id.owner)
+                    .is_some_and(|d| d.checked_empty_iteration(expr.hir_id));
+            if abstract_tuple || (empty && !already_checked_empty) {
+                let binder = self.fresh_type_binder(expr.hir_id.owner, expr.span)?;
+                let element_ty = Term::Rigid {
+                    declaration: binder.declaration,
+                    sort: Sort::Type,
+                };
+                if self.checking_open_behavior {
+                    self.definition_refinements
+                        .tuple_elements
+                        .push(binder.declaration);
+                }
+                self.locals = saved_locals.clone();
+                self.input_facts.leave_lexical(&input_boundary);
+                self.generator_data = saved_data.clone();
+                self.immutable = saved_immutable.clone();
+                self.context = saved_context.clone();
+                self.inline_selection = Some((expr.hir_id, usize::MAX));
+                self.in_unselected_inline = true;
+                self.immutable.extend(pattern_binding_ids(pat));
+                let _element_pattern = self.pattern(pat, &element_ty)?;
+                if self.checking_open_behavior {
+                    for (id, ty) in &self.locals {
+                        if !saved_locals.contains_key(id) {
+                            self.ordinary_behavior_inputs.insert(*id, ty.clone());
+                        }
+                    }
+                }
+                if let Some(guard) = guard
+                    && !self.checking_open_behavior
+                {
+                    let checked =
+                        self.with_staged_input(true, |this| this.expr(guard, Some(&p(P::Bool))))?;
+                    self.check_inline_input_availability(&checked, &BTreeSet::new(), guard.span)?;
+                }
+                let checked = discard_result(self.block(body, None)?);
+                if self.checking_open_behavior {
+                    iterations.push(checked);
+                }
+            }
             for (index, (ty, temporary)) in elements.iter().zip(&storage).enumerate() {
                 self.locals = saved_locals.clone();
                 self.input_facts.leave_lexical(&input_boundary);
@@ -437,61 +488,24 @@ impl Checker<'_, '_> {
                 self.inline_selection = saved_selection;
                 self.in_unselected_inline = saved_suppressed;
                 self.immutable.extend(pattern_binding_ids(pat));
-                let index_pattern = self.pattern(index_source, &p(P::Integer))?;
-                let index_bindings: Vec<_> = self
-                    .locals
-                    .iter()
-                    .filter(|(id, _)| !saved_locals.contains_key(id))
-                    .map(|(id, ty)| (*id, ty.clone()))
-                    .collect();
-                let source_body = Expr {
-                    hir_id: body.hir_id,
-                    span: body.span,
-                    kind: H::Block(body),
-                };
-                let staged: BTreeSet<_> = index_bindings.iter().map(|(id, _)| *id).collect();
-                if !self.checking_open_behavior {
-                    self.check_inline_pattern_availability(&index_pattern, index_source.span)?;
-                }
-                let index_matched = if suppressed {
-                    if self.checking_open_behavior {
-                        for (binding, ty) in &index_bindings {
-                            self.ordinary_behavior_inputs.insert(*binding, ty.clone());
-                        }
-                    }
-                    true
-                } else if let Some(bindings) = self.select_inline_pattern(
-                    &index_pattern,
-                    &Term::Integer(comptime_runtime::Integer::from_u128(index as u128)),
-                    &source_body,
-                )? {
-                    self.materialize_inline_bindings(&bindings, &source_body)?;
-                    true
-                } else {
-                    false
-                };
-                if !index_matched {
-                    self.inline_selection = Some((expr.hir_id, usize::MAX));
-                    self.in_unselected_inline = true;
-                }
-                let element_pattern = self.pattern(element_source, ty)?;
+                let element_pattern = self.pattern(pat, ty)?;
                 if let Some(observed) = &observed_elements {
-                    self.record_observed_pattern(
-                        &element_pattern,
-                        &observed[index],
-                        element_source.span,
-                    )?;
+                    self.record_observed_pattern(&element_pattern, &observed[index], pat.span)?;
                 }
                 let element_irrefutable = self.pattern_exhaustive(&element_pattern, ty);
                 let selected = if let Some(guard) = guard {
-                    if suppressed || !index_matched {
+                    if suppressed {
                         if !self.checking_open_behavior {
                             let checked = self.with_staged_input(true, |this| {
                                 this.expr(guard, Some(&p(P::Bool)))
                             })?;
-                            self.check_inline_input_availability(&checked, &staged, guard.span)?;
+                            self.check_inline_input_availability(
+                                &checked,
+                                &BTreeSet::new(),
+                                guard.span,
+                            )?;
                         }
-                        index_matched
+                        true
                     } else {
                         let comptime_interpretor::Value::Bool(selected) =
                             self.required_value(guard, P::Bool)?
@@ -504,7 +518,7 @@ impl Checker<'_, '_> {
                         selected
                     }
                 } else {
-                    index_matched
+                    true
                 };
                 if !selected {
                     self.inline_selection = Some((expr.hir_id, usize::MAX));
@@ -556,7 +570,7 @@ impl Checker<'_, '_> {
                         guard: None,
                         otherwise: if selected && !element_irrefutable {
                             Some(Box::new(n::Expr {
-                                source: source(element_source.span),
+                                source: source(pat.span),
                                 ty: p(P::Never),
                                 kind: K::Continue(identity),
                             }))
@@ -582,17 +596,6 @@ impl Checker<'_, '_> {
                     })?;
                 let mut iteration_connections = connections.clone();
                 iteration_connections.insert(*temporary, *temporary);
-                if suppressed && self.checking_open_behavior {
-                    // Abstract staged inputs belong to the definition witness,
-                    // not to this expansion's newly allocated runtime locals.
-                    self.required_steps = self
-                        .required_steps
-                        .checked_sub(index_bindings.len() as u64)
-                        .ok_or_else(|| {
-                            error(expr.span, "tuple iteration connection budget exhausted")
-                        })?;
-                    iteration_connections.extend(index_bindings.iter().map(|(id, _)| (*id, *id)));
-                }
                 iterations.push(self.wrap_inline_iteration(
                     checked,
                     vec![delivery, prefix],
@@ -626,15 +629,19 @@ impl Checker<'_, '_> {
                 source: source(pat.span),
                 ty: p(P::Void),
                 kind: K::LetPattern {
-                    pattern: n::Pattern::Tuple(
-                        storage
-                            .into_iter()
-                            .map(|binding| n::Pattern::Binding {
-                                binding,
-                                inner: Box::new(n::Pattern::Wild),
-                            })
-                            .collect(),
-                    ),
+                    pattern: if abstract_tuple {
+                        n::Pattern::Wild
+                    } else {
+                        n::Pattern::Tuple(
+                            storage
+                                .into_iter()
+                                .map(|binding| n::Pattern::Binding {
+                                    binding,
+                                    inner: Box::new(n::Pattern::Wild),
+                                })
+                                .collect(),
+                        )
+                    },
                     value: Box::new(input),
                     guard: None,
                     otherwise: None,

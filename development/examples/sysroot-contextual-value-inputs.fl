@@ -289,7 +289,7 @@ where
     B :- TupleReady,
 {
     var result = false;
-    inline for (index, element) in values'tuple_enumerate {
+    inline for element in values'tuple_enumerate {
         result = element.ready();
     }
     result
@@ -302,7 +302,7 @@ where
     B,
     requires T == Tuple<.Es = [A, B]>,
 {
-    inline for (index, element) in value'tuple_enumerate {
+    inline for element in value'tuple_enumerate {
         let held = element;
     }
 }

@@ -167,6 +167,7 @@ fn predicate_shape(
             | ExprKind::ComptimeIntegerConvert(value)
             | ExprKind::SymbolName(value)
             | ExprKind::EnumName(value)
+            | ExprKind::TypeKind { operand: value, .. }
             | ExprKind::UnsafeScope(value)
             | ExprKind::Discard(value)
             | ExprKind::AnonymousField { value, .. }

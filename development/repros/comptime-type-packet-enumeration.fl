@@ -13,7 +13,7 @@ struct Outer {
 }
 
 comptime fn configured(flag: bool) -> bool {
-    inline for (index, (T, seed)) in ((bool, true), (.str'builtin, "value"))'tuple_enumerate {
+    inline for (T, seed) in ((bool, true), (.str'builtin, "value"))'tuple_enumerate {
         const packet = ((T, seed), flag);
         const saved = packet;
         const ((Selected, value), unused) = saved;

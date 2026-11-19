@@ -155,6 +155,8 @@ impl Checker<'_, '_> {
                 preconditions,
                 postconditions: actual.program.preconditions.clone(),
                 result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
                 entry_snapshots: vec![],
                 capabilities: vec![],
                 requirements: vec![],

@@ -267,6 +267,7 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::NormalFormType { .. }
         | K::BitVecType(_)
         | K::TypeEqual(..)
+        | K::TypeKind { .. }
         | K::ListLength(_)
         | K::NewtypeRepresentation(_)
         | K::StructFieldTypes(_)

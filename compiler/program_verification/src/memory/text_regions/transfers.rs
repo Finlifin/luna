@@ -833,6 +833,32 @@ impl Query<'_, '_> {
                 .last_mut()
                 .unwrap()
                 .extend(origins.iter().cloned());
+        } else if *query == nir::program::TextQueryKind::Slice {
+            if let Some(origins) = value.get(&vec![0]) {
+                charge(self.fuel, origins.len())?;
+                self.reads
+                    .last_mut()
+                    .unwrap()
+                    .extend(origins.iter().cloned());
+            }
+            return Ok(Some(Regions::from(BTreeMap::from([(
+                vec![VARIANT_FIELD, 1, 0],
+                BTreeSet::from([TextRegionOrigin::Static]),
+            )]))));
+        } else if *query == nir::program::TextQueryKind::Concat {
+            for index in [0, 1] {
+                if let Some(origins) = value.get(&vec![index]) {
+                    charge(self.fuel, origins.len())?;
+                    self.reads
+                        .last_mut()
+                        .unwrap()
+                        .extend(origins.iter().cloned());
+                }
+            }
+            return Ok(Some(Regions::from(BTreeMap::from([(
+                vec![],
+                BTreeSet::from([TextRegionOrigin::Static]),
+            )]))));
         }
         Ok(empty)
     }

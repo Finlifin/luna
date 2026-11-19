@@ -315,6 +315,56 @@ impl Interpreter<'_> {
                                 .map(|byte| Box::new(Value::UnsignedInteger(u128::from(*byte)))),
                         })
                     }
+                    nir::program::TextQueryKind::Slice if values.len() == 3 => {
+                        let (Value::UnsignedInteger(start), Value::UnsignedInteger(end)) =
+                            (&values[1], &values[2])
+                        else {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        };
+                        if *start > u64::MAX as u128 || *end > u64::MAX as u128 {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        }
+                        let sliced = (|| {
+                            let start = usize::try_from(*start).ok()?;
+                            let end = usize::try_from(*end).ok()?;
+                            if start > end
+                                || end > text.len()
+                                || !text.is_char_boundary(start)
+                                || !text.is_char_boundary(end)
+                            {
+                                return None;
+                            }
+                            Some(&text[start..end])
+                        })();
+                        let sliced = match sliced {
+                            Some(slice) => {
+                                self.budget.steps = self
+                                    .budget
+                                    .steps
+                                    .checked_sub(slice.len() as u64)
+                                    .ok_or_else(|| {
+                                        self.failure(ErrorKind::StepsExhausted, Some(source))
+                                    })?;
+                                Some(Box::new(Value::String(slice.into())))
+                            }
+                            None => None,
+                        };
+                        Ok(Value::Optional {
+                            ty: output.clone(),
+                            value: sliced,
+                        })
+                    }
+                    nir::program::TextQueryKind::Concat if values.len() == 2 => {
+                        let Value::String(other) = &values[1] else {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        };
+                        let total_len = text.len().saturating_add(other.len()) as u64;
+                        self.budget.steps =
+                            self.budget.steps.checked_sub(total_len).ok_or_else(|| {
+                                self.failure(ErrorKind::StepsExhausted, Some(source))
+                            })?;
+                        Ok(Value::String(format!("{text}{other}").into()))
+                    }
                     _ => Err(self.failure(ErrorKind::Type, Some(source))),
                 }
             }
