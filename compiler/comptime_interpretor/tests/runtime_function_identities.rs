@@ -2466,7 +2466,7 @@ fn a_projected_method_slot_neither_forms_a_callable_nor_supplies_closed_dispatch
         Some((FunctionPhase::Comptime, false, &[id(6)][..]))
     );
     assert!(directory.formation(&target).is_none());
-    assert!(directory.body(&target).is_none());
+    assert!(directory.definition(&target).is_none());
     assert!(directory.quote(&target).is_none());
     assert!(Interpreter::for_comptime(&package, Budget::default()).is_err());
     package.functions[0].body.kind = K::Function(target);

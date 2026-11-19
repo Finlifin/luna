@@ -41,15 +41,13 @@ pub(super) fn guarantees(
                 if !active.insert(id) {
                     return Ok(false);
                 }
-                if !callables
-                    .declaration(&id)
-                    .is_some_and(|f| f.phase == n::FunctionPhase::Comptime)
-                {
+                let Some(producer) = callables
+                    .definition(&id)
+                    .filter(|f| f.phase == n::FunctionPhase::Comptime)
+                else {
                     return Ok(false);
-                }
-                let body = callables
-                    .body(&id)
-                    .expect("body from the same source callable slot");
+                };
+                let body = &producer.body;
                 work.push(Work::Finish(id));
                 work.push(Work::Result(body));
                 // Capture initializers can return from this function. The

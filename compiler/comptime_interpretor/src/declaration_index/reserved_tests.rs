@@ -120,8 +120,8 @@ fn source_declaration_views_preserve_provenance_without_dumping_code() {
     assert!(std::ptr::eq(view, &package.functions[0].interface));
     assert_eq!(view.source, SourceRange { start: 17, end: 29 });
     assert!(std::ptr::eq(
-        functions.body(&id).unwrap(),
-        &package.functions[0].body
+        functions.definition(&id).unwrap(),
+        &package.functions[0]
     ));
     let dump = view.to_string();
     assert!(
@@ -136,7 +136,7 @@ fn source_declaration_views_preserve_provenance_without_dumping_code() {
         local: 9999,
     };
     assert!(functions.declaration(&absent).is_none());
-    assert!(functions.body(&absent).is_none());
+    assert!(functions.definition(&absent).is_none());
 }
 fn structure(identity: DeclarationId) -> nir::program::Struct {
     nir::program::Struct {

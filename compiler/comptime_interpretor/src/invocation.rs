@@ -6,7 +6,9 @@ pub(super) mod definition_host;
 pub(super) mod host;
 pub(super) mod method_host;
 mod session;
+mod target;
 use session::Session;
+use target::Target;
 
 pub(super) enum Body<'a> {
     Package(&'a Expr),
@@ -30,13 +32,11 @@ impl fmt::Display for Body<'_> {
 }
 
 struct InvocationFrame<'a> {
-    function: Value,
+    target: Target<'a>,
     environment: Environment,
     source: SourceRange,
     result_type: Term,
     type_scope: Option<nir::FunctionInputBinding>,
-    declaration: Option<&'a nir::program::FunctionDeclaration>,
-    substitution: Option<nir::DeclarationSubstitution<'static>>,
     progress: contracts::Progress<'a>,
     condition: Option<Arc<Expr>>,
 }
@@ -312,15 +312,15 @@ impl<'a> Interpreter<'a> {
         arguments: Vec<Value>,
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<Box<Activation<'a>>, Error> {
-        let function = self.resolve_invocation_identity(function)?;
-        let declaration = self.admit_invocation(&function, context.as_ref())?;
-        let origin = match &function {
-            Value::Function(id) => Some(*id),
-            _ => function.declaration_instance().map(|(id, _)| id),
+        let target = self.admit_invocation(function, context.is_some())?;
+        let cleanup_frame = if self.cleanup_schedule.is_some() && context.is_none() {
+            target.cleanup_key()
+        } else {
+            None
         };
-        let saved = self.enter_invocation(&function, origin, context)?;
+        let saved = self.enter_invocation(cleanup_frame, context)?;
         let prepared = self
-            .prepare_invocation(function, arguments, declaration)
+            .prepare_invocation(target, arguments)
             .and_then(|mut frame| {
                 self.prepare_invocation_step(&mut frame)?;
                 Ok(frame)
@@ -336,24 +336,20 @@ impl<'a> Interpreter<'a> {
 
     /// A transported name has no executable environment. Resolve it against
     /// this VM's authority and specialize through the ordinary formation path.
-    pub(super) fn resolve_invocation_identity(&mut self, function: Value) -> Result<Value, Error> {
+    pub(super) fn check_transported_instance(&mut self, function: &Value) -> Result<(), Error> {
         if let Value::FunctionInstance {
             declaration,
             arguments,
-        } = &function
+        } = function
         {
             let definition = self
                 .functions
                 .declaration(declaration)
-                .filter(|definition| {
-                    definition.phase != nir::program::FunctionPhase::NormalForm
-                        && (!self.comptime_only
-                            || definition.phase == nir::program::FunctionPhase::Comptime)
-                })
                 .ok_or_else(|| self.failure(ErrorKind::PhaseMismatch, None))?;
-            self.admit_callable_identity(*declaration, arguments, definition.source)?;
+            self.check_instance_phase(definition)?;
+            self.check_source_formation(definition.into(), arguments, definition.source)?;
         }
-        Ok(function)
+        Ok(())
     }
 
     fn run_tree_invocation(&mut self, mut activation: Box<Activation<'a>>) -> Result<Value, Error> {
@@ -371,65 +367,9 @@ impl<'a> Interpreter<'a> {
         completed
     }
 
-    fn admit_invocation(
-        &mut self,
-        function: &Value,
-        context: Option<&(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
-    ) -> Result<Option<&'a nir::program::FunctionDeclaration>, Error> {
-        let declaration = match function {
-            Value::RuntimeTraitMethod(_) => {
-                return Err(self.failure(ErrorKind::PhaseMismatch, None));
-            }
-            Value::IirCallable(handle) => Some(&self.iir_target(handle)?.interface),
-            Value::Function(id)
-            | Value::FunctionInstance {
-                declaration: id, ..
-            } => {
-                if self.normal_forms.contains_key(id) {
-                    return Err(self.failure(ErrorKind::PhaseMismatch, None));
-                }
-                self.functions.declaration(id)
-            }
-            _ => None,
-        };
-        if self.comptime_only {
-            let authorized = match function {
-                Value::Closure(closure) => closure.ty.is_comptime_callable(),
-                _ => declaration.is_some_and(|d| d.phase == nir::program::FunctionPhase::Comptime),
-            };
-            if !authorized {
-                return Err(self.failure(ErrorKind::PhaseMismatch, None));
-            }
-        }
-        if self.cleanup_schedule.is_some() && context.is_none() {
-            let named_instance = match &function {
-                Value::Function(declaration) => Some((*declaration, &[][..])),
-                _ => function.declaration_instance(),
-            };
-            if let Some((declaration, arguments)) = named_instance {
-                for key in &self.cleanup_schedule.unwrap().borrowed_callable_functions {
-                    self.tick(None)?;
-                    if key.declaration == declaration && key.arguments.as_ref() == arguments {
-                        return Err(self.failure(ErrorKind::InvalidCallPlan, None));
-                    }
-                }
-            }
-            if named_instance.is_some() {
-                let definition =
-                    declaration.ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
-                if matches!(definition.signature.callable_signature(), Term::Function {parameters,..} if parameters.iter().any(|p|matches!(p.ty.callable_signature(),Term::Function {..})))
-                {
-                    return Err(self.failure(ErrorKind::InvalidCallPlan, None));
-                }
-            }
-        }
-        Ok(declaration)
-    }
-
     fn enter_invocation(
         &mut self,
-        function: &Value,
-        origin: Option<DeclarationId>,
+        cleanup_frame: Option<iir::InstanceKey>,
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<SavedInvocation, Error> {
         self.tick(None)?;
@@ -458,19 +398,7 @@ impl<'a> Interpreter<'a> {
         let previous_pattern_orders = std::mem::take(&mut self.pattern_binding_orders);
         let previous_prepared_frames = std::mem::take(&mut self.prepared_frames);
         let previous_cleanup_frame = self.cleanup_frame.take();
-        self.cleanup_frame = if self.cleanup_schedule.is_some() {
-            origin.map(|declaration| iir::InstanceKey {
-                declaration,
-                arguments: (match &function {
-                    Value::IirCallable(handle) => handle.key.arguments.clone(),
-                    Value::FunctionInstance { arguments, .. } => Arc::from(arguments.as_slice()),
-                    _ => Arc::from([]),
-                })
-                .into(),
-            })
-        } else {
-            None
-        };
+        self.cleanup_frame = cleanup_frame;
         if let Some((instance, context)) = context {
             self.cleanup_frame = Some(instance);
             self.cleanup_context = context;
@@ -509,35 +437,25 @@ impl<'a> Interpreter<'a> {
         &mut self,
         frame: &InvocationFrame<'a>,
     ) -> Result<(Body<'a>, Option<CodeOrigin>), Error> {
-        let (body, origin) = match &frame.function {
-            Value::Function(id) => {
-                let body = self
-                    .functions
-                    .body(id)
-                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(frame.source)))?;
-                (Body::Package(body), Some(CodeOrigin::Declaration(*id)))
-            }
-            Value::FunctionInstance {
-                declaration,
-                arguments,
+        let (body, origin) = match &frame.target {
+            Target::Named(f) => (
+                Body::Package(&f.body),
+                Some(CodeOrigin::Declaration(f.declaration)),
+            ),
+            Target::Instance {
+                function,
+                substitution,
+                ..
             } => {
-                let body = self.prepare_function_instance_body(
-                    *declaration,
-                    arguments,
-                    frame
-                        .substitution
-                        .as_ref()
-                        .expect("source instance admission"),
-                    frame.source,
-                )?;
+                let body =
+                    self.prepare_function_instance_body(function, substitution, frame.source)?;
                 (Body::Owned(body), None)
             }
-            Value::IirCallable(handle) => (
-                Body::Package(&self.iir_target(handle)?.body),
+            Target::Graph(f, handle) => (
+                Body::Package(&f.body),
                 Some(CodeOrigin::GraphInstance(handle.position)),
             ),
-            Value::Closure(closure) => (Body::Owned(closure.body.clone()), None),
-            _ => return Err(self.failure(ErrorKind::Type, Some(frame.source))),
+            Target::Closure(closure) => (Body::Owned(closure.body.clone()), None),
         };
         let Some(scope) = &frame.type_scope else {
             return Ok((body, origin));
@@ -553,16 +471,12 @@ impl<'a> Interpreter<'a> {
 
     fn prepare_invocation(
         &mut self,
-        function: Value,
+        target: Target<'a>,
         arguments: Vec<Value>,
-        declaration: Option<&'a nir::program::FunctionDeclaration>,
     ) -> Result<InvocationFrame<'a>, Error> {
-        let frames;
-        let mut instance_inputs = None;
-        let (parameters, mut environment, source, signature) = match &function {
-            Value::Function(id) => {
-                let definition =
-                    declaration.ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
+        let declaration = target.declaration();
+        let (parameters, mut environment, source, signature) = match &target {
+            Target::Named(definition) => {
                 if !definition.type_parameters.is_empty() {
                     return Err(self.failure(ErrorKind::Type, None));
                 }
@@ -572,46 +486,36 @@ impl<'a> Interpreter<'a> {
                 if !self.comptime_only
                     && (!definition.requirements.is_empty() || !definition.capabilities.is_empty())
                 {
-                    self.admit_callable_identity(*id, &[], definition.source)?;
+                    self.check_source_formation(
+                        (&definition.interface).into(),
+                        &[],
+                        definition.source,
+                    )?;
                 }
                 (
                     definition.parameters.as_slice(),
                     Environment::with_capacity(definition.parameters.len()),
                     definition.source,
-                    std::borrow::Cow::Borrowed(&definition.signature),
+                    &definition.signature,
                 )
             }
-            Value::FunctionInstance { arguments, .. } => {
-                let definition =
-                    declaration.ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
-                let source = definition.source;
-                frames = [self.ordinary_input_frame(&definition.signature, source)?];
-                let inputs = self.admit_function_inputs(
-                    &definition.type_parameters,
-                    arguments,
-                    nir::DeclarationInputScope::ClosedInBody(&frames),
-                    source,
-                )?;
-                let signature =
-                    self.signature_from_admission(definition.into(), &inputs, source)?;
-                instance_inputs = Some(inputs);
-                (
-                    definition.parameters.as_slice(),
-                    Environment::with_capacity(definition.parameters.len()),
-                    source,
-                    std::borrow::Cow::Owned(signature),
-                )
-            }
-            Value::IirCallable(handle) => {
-                let target = self.iir_target(handle)?;
-                (
-                    target.parameters.as_slice(),
-                    Environment::with_capacity(target.parameters.len()),
-                    target.body.source,
-                    std::borrow::Cow::Borrowed(&handle.ty),
-                )
-            }
-            Value::Closure(closure) => {
+            Target::Instance {
+                function,
+                signature,
+                ..
+            } => (
+                function.parameters.as_slice(),
+                Environment::with_capacity(function.parameters.len()),
+                function.source,
+                signature,
+            ),
+            Target::Graph(target, handle) => (
+                target.parameters.as_slice(),
+                Environment::with_capacity(target.parameters.len()),
+                target.body.source,
+                &handle.ty,
+            ),
+            Target::Closure(closure) => {
                 let signature = match &closure.ty {
                     Term::Closure { signature, .. } => signature.as_ref(),
                     ty => ty,
@@ -620,10 +524,9 @@ impl<'a> Interpreter<'a> {
                     closure.parameters.as_slice(),
                     self.clone_invocation_environment(&closure.environment, closure.body.source)?,
                     closure.body.source,
-                    std::borrow::Cow::Borrowed(signature),
+                    signature,
                 )
             }
-            _ => return Err(self.failure(ErrorKind::Type, None)),
         };
         let Term::Function {
             parameters: types,
@@ -635,53 +538,32 @@ impl<'a> Interpreter<'a> {
         let type_scope = self.bind_invocation_inputs(
             parameters,
             arguments,
-            &signature,
+            signature,
             &mut environment,
             source,
         )?;
-        let mut substitution = None;
-        if let Some(definition) = declaration {
-            let check_contracts = (self.comptime_only
-                || matches!(
-                    function,
-                    Value::Function(_) | Value::FunctionInstance { .. }
-                ))
-                && (!definition.requirements.is_empty() || !definition.capabilities.is_empty());
-            let source_instance = self.graph.is_none() && function.declaration_instance().is_some();
-            if check_contracts || source_instance {
-                let contract_frames;
-                let inputs = match instance_inputs {
-                    Some(inputs) if self.graph.is_none() => inputs,
-                    _ => {
-                        let arguments = match &function {
-                            _ if self.graph.is_some() => &[][..],
-                            Value::FunctionInstance { arguments, .. } => arguments.as_slice(),
-                            _ => &[],
-                        };
-                        contract_frames =
-                            [self.ordinary_input_frame(&definition.signature, source)?];
-                        self.admit_function_inputs(
+        if let Some(definition) = declaration
+            && (self.comptime_only || matches!(target, Target::Named(_) | Target::Instance { .. }))
+            && (!definition.requirements.is_empty() || !definition.capabilities.is_empty())
+        {
+            let frames;
+            let empty;
+            let substitution = match target.substitution() {
+                Some(inputs) => inputs,
+                None => {
+                    frames = [self.ordinary_input_frame(&definition.signature, source)?];
+                    empty = self
+                        .admit_function_inputs(
                             &definition.type_parameters,
-                            arguments,
-                            nir::DeclarationInputScope::ClosedInBody(&contract_frames),
+                            &[],
+                            nir::DeclarationInputScope::ClosedInBody(&frames),
                             source,
                         )?
-                    }
-                };
-                if check_contracts {
-                    self.check_invocation_contracts(
-                        definition,
-                        &inputs,
-                        type_scope.as_ref(),
-                        source,
-                    )?;
+                        .into_substitution();
+                    &empty
                 }
-                if source_instance {
-                    substitution = Some(self.query_admission(Some(source), |_, fuel| {
-                        Ok(inputs.into_substitution().into_owned(fuel)?)
-                    })?);
-                }
-            }
+            };
+            self.check_invocation_contracts(definition, substitution, type_scope.as_ref(), source)?;
         }
         let result_type = match &type_scope {
             Some(scope) => scope.rebind(result_type),
@@ -707,13 +589,11 @@ impl<'a> Interpreter<'a> {
         // Entry has no prepared execution body. The callable still retains its
         // source; Entry -> Body acquires execution code only after success.
         Ok(InvocationFrame {
-            function,
+            target,
             environment,
             source,
             result_type,
             type_scope,
-            declaration,
-            substitution,
             progress: contracts::Progress::Entry(0),
             condition: None,
         })
@@ -845,8 +725,7 @@ mod tests {
             source: SourceRange { start: 1, end: 2 },
             values: vec![],
         });
-        let callable = Value::Function(id);
-        let caller = vm.enter_invocation(&callable, Some(id), None).unwrap();
+        let caller = vm.enter_invocation(None, None).unwrap();
         assert_eq!(vm.depth, 2);
         assert_eq!(vm.effect_state.invocation, 11);
         assert_eq!(vm.effect_state.resume, None);
@@ -855,7 +734,7 @@ mod tests {
         assert!(vm.cleanup_frame.is_none());
         vm.effect_state.resume = Some(4);
         vm.pattern_binding_orders.insert((3, 4), vec![local]);
-        let nested = vm.enter_invocation(&callable, Some(id), None).unwrap();
+        let nested = vm.enter_invocation(None, None).unwrap();
         assert_eq!(vm.effect_state.invocation, 12);
         vm.leave_invocation(nested);
         assert_eq!(vm.depth, 2);
@@ -881,11 +760,33 @@ mod tests {
             package: 1,
             local: 0,
         };
+        let source = SourceRange { start: 1, end: 2 };
+        let callable = Value::Closure(Arc::new(Closure {
+            definition_source: None,
+            parameters: vec![],
+            environment: Environment::new(),
+            capture_order: vec![],
+            body: Arc::new(Expr {
+                source,
+                ty: Term::Primitive(Primitive::Bool),
+                kind: K::Literal(Literal::Bool(true)),
+            }),
+            ty: Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(Primitive::Bool)),
+            },
+        }));
         vm.effect_state.resume = Some(9);
         vm.effect_state.invocation = 5;
-        vm.effect_state.next_identity = u64::MAX;
+        vm.effect_state.next_identity = 10;
         let error = vm
             .invoke_value_scoped(Value::Function(id), vec![], None)
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::UnknownFunction);
+        assert_eq!(vm.effect_state.next_identity, 10);
+        vm.effect_state.next_identity = u64::MAX;
+        let error = vm
+            .invoke_value_scoped(callable.clone(), vec![], None)
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::StepsExhausted);
         assert_eq!(vm.depth, 0);
@@ -893,12 +794,10 @@ mod tests {
         assert_eq!(vm.effect_state.resume, Some(9));
         assert_eq!(vm.effect_state.invocation, 5);
         vm.effect_state.next_identity = 10;
-        // Admission accepts the runtime carrier, but preparation cannot resolve
-        // this declaration. The entered activation must still be unwound.
         let error = vm
-            .invoke_value_scoped(Value::Function(id), vec![], None)
+            .invoke_value_scoped(callable, vec![Value::Unit], None)
             .unwrap_err();
-        assert_eq!(error.kind, ErrorKind::UnknownFunction);
+        assert_eq!(error.kind, ErrorKind::Arity);
         assert_eq!(vm.depth, 0);
         assert_eq!(vm.invocation_depth, 0);
         assert_eq!(vm.effect_state.resume, Some(9));

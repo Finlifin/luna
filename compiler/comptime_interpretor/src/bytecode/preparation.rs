@@ -451,7 +451,7 @@ impl<'a> Interpreter<'a> {
             program: interface_program,
             parameters: interface_parameters,
         } = setup;
-        let callee = self.resolve_invocation_identity(callee)?;
+        self.check_transported_instance(&callee)?;
         let parameters = self.call_parameters(&callee, source)?;
         let count = parameters.len();
         let preparation_parameters = interface_parameters.as_ref().unwrap_or(&parameters);

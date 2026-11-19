@@ -200,7 +200,8 @@ impl<'a> Callables<'a> {
         Arc::ptr_eq(&self.positions, &other.positions)
     }
 
-    fn function(&self, id: &DeclarationId) -> Option<&'a Function> {
+    /// Pin the executable definition and its interface to the same source slot.
+    pub fn definition(&self, id: &DeclarationId) -> Option<&'a Function> {
         let Slot::Function(i) = *self.positions.0.get(id)? else {
             return None;
         };
@@ -213,12 +214,8 @@ impl<'a> Callables<'a> {
             .or_else(|| self.runtime_identity(id).map(Formation::from))
     }
 
-    pub fn body(&self, id: &DeclarationId) -> Option<&'a Expr> {
-        self.function(id).map(|f| &f.body)
-    }
-
     pub fn declaration(&self, id: &DeclarationId) -> Option<&'a FunctionDeclaration> {
-        self.function(id).map(|f| &f.interface)
+        self.definition(id).map(|f| &f.interface)
     }
 
     pub fn quote(&self, id: &DeclarationId) -> Option<&'a FunctionDeclaration> {

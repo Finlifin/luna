@@ -611,7 +611,7 @@ impl fmt::Display for Session<'_, '_, '_> {
                     write!(
                         f,
                         "(invocation {} {})",
-                        active.frame.function, active.frame.progress
+                        active.frame.target, active.frame.progress
                     )
                 }
                 Execution::Associated { activation, .. } => write!(f, "{activation}"),
@@ -642,7 +642,7 @@ impl fmt::Display for Session<'_, '_, '_> {
                 Completion::Continue(active) => write!(
                     f,
                     " (continue {} {})",
-                    active.frame.function, active.frame.progress
+                    active.frame.target, active.frame.progress
                 )?,
                 Completion::Ordinary { bindings, .. } => f.write_str(match bindings {
                     ReturnedEnvironment::Private => " ordinary",

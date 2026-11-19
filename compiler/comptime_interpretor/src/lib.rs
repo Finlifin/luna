@@ -4941,7 +4941,7 @@ impl<'a> Interpreter<'a> {
             K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
         );
         let callee = prepared_value!(this.eval_in_position(callee, environment, true));
-        let callee = this.resolve_invocation_identity(callee)?;
+        this.check_transported_instance(&callee)?;
         // Spread preparation can retain an already-created instance in a local.
         // Anonymous closure environments have no declaration substitution.
         let dynamic_defaults = dynamic_defaults && callee.declaration_instance().is_some();

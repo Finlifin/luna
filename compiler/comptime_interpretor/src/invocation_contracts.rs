@@ -43,13 +43,13 @@ impl Interpreter<'_> {
     pub(super) fn check_invocation_contracts(
         &mut self,
         definition: &nir::program::FunctionDeclaration,
-        inputs: &nir::AdmittedArguments<'_>,
+        inputs: &nir::DeclarationSubstitution<'_>,
         scope: Option<&nir::FunctionInputBinding>,
         source: SourceRange,
     ) -> Result<(), Error> {
         for requirement in &definition.requirements {
             let predicate = self.query_admission(Some(source), |_, fuel| {
-                Ok(inputs.instantiate_predicate(requirement, fuel)?)
+                Ok(inputs.instantiate_predicate_bounded(requirement, fuel)?)
             })?;
             let bound = self
                 .bind_invocation_contract(&predicate, scope, source, 0)?
@@ -58,7 +58,7 @@ impl Interpreter<'_> {
         }
         for capability in &definition.capabilities {
             let predicate = P::Trait(self.query_admission(Some(source), |_, fuel| {
-                Ok(inputs.instantiate_requirement(capability, fuel)?)
+                Ok(inputs.instantiate_requirement_bounded(capability, fuel)?)
             })?);
             match self.bind_invocation_contract(&predicate, None, source, 0)? {
                 Some(P::Trait(bound)) if self.comptime_only && self.graph.is_none() => {

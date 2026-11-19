@@ -25,7 +25,7 @@ fn world() -> Package {
         }],
         functions: vec![Function {
             interface: nir::program::FunctionDeclaration {
-                source: nir::program::SourceRange { start: 0, end: 0 },
+                source: SourceRange { start: 4, end: 20 },
                 declaration: id(1),
                 name: "accept".into(),
                 phase: FunctionPhase::Comptime,
@@ -72,7 +72,7 @@ fn dependent_domain_failure_keeps_the_slot_and_does_not_publish_an_instance() {
     let failure = vm
         .invoke_instantiated(id(1), vec![boolean(), Term::Char('x')], vec![])
         .unwrap_err();
-    assert_eq!(failure.source, Some(SourceRange { start: 10, end: 20 }));
+    assert_eq!(failure.source, Some(world.functions[0].interface.source));
     assert!(!rejected(failure.kind).reason.is_empty());
     assert!(!vm.events().iter().any(|event| matches!(
         event,

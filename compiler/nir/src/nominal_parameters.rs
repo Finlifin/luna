@@ -445,6 +445,10 @@ impl<'a> DeclarationSubstitution<'a> {
         })
     }
 
+    pub fn arguments(&self) -> &[Term] {
+        &self.arguments
+    }
+
     pub fn into_arguments(self) -> Cow<'a, [Term]> {
         self.arguments
     }

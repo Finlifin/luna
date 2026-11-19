@@ -459,11 +459,16 @@ capability 前提。所选实现、实现实参、成员和实例化结果域由
 收集阶段就会误报循环。把调用改为 `read(Second)` 才存在真正的依赖环。
 [源码复现](repros/required-selected-member.fl) · [依赖收集](../compiler/elaboration/src/program/required/source_closure.rs)
 
-下一步的交接发生在尚在 elaboration 的源码 owner。它需要在收到具体成员请求后形成
-模板，交付新发现的可调用声明、主体及其程序证明。原 activation 的选择、操作前缀、
-局部值和预算继续有效。代码位置属于提供它的不可变源码；执行新辅助函数时，调用帧
-需要保留该位置和它的所有者。通过声明编号在旧函数切片中解释新位置会执行错误的主体。
-[调用目录](../compiler/nir/src/callable_source.rs) · [代码会话](../compiler/comptime_interpretor/src/code_session.rs)
+VM 在准入命名调用时固定定义位置。源码函数借用其包内的具体定义，泛型实例另外保留
+声明实参。IIR 调用先核对句柄归本台 VM 所有，再固定图内的实例位置。同一个声明的
+三个实例可以有不同的主体和入口条件。契约、主体特化和出口条件都从选中的定义取得。
+只有通过入口条件后才准备执行代码。树解释与字节码共用这条路径。
+[调用目标准入](../compiler/comptime_interpretor/src/invocation/target.rs) · [同声明多实例用例](../compiler/comptime_interpretor/src/iir_execution.rs)
+
+尚在 elaboration 的 owner 仍需在收到具体成员请求后形成模板，交付新发现的可调用
+声明、主体和程序证明。当前调用帧借用 VM 启动时已经存在的不可变包。后续交付的代码
+需要有足够长的所有者寿命，其缓存也要绑定到供应世界。这个交接决定何时能删除
+上面的候选依赖收集。
 
 源码检查具体成员读取时，先用接收者和接口实参代入成员声明域。普通数据和函数值
 在 NIR 中保留 `AssociatedValue` 及其成员身份。同一大字符串被四十个函数引用时，
@@ -654,10 +659,9 @@ NIR Function 继续代表已检查产物；不能给 body 塞占位表达式或�
 的 B 时被拒绝。调用准备在实际省略槽位时接入前缀、选用默认供应者。动态函数值的
 公开入口与供应者归属另见[高阶调用接口](callable-input-interfaces.md)。
 
-VM 的 `invocation_declaration` 以及程序／类型契约的替换、能力检查只接收 `FunctionDeclaration`，
-主体在执行器推进 NeedBody 时取得。required 收集生成的 runtime 函数身份时只复制所需声明字段，
-需要执行的依赖仍保留完整代码。独立声明和完整函数的 S-expression dump 都包含声明
-来源；完整函数还显示主体和表达式各自的来源。
+程序契约和类型前提通过调用目标借用 `FunctionDeclaration`。直接调用的参数域错误
+使用声明位置，实际表达式中的错误保留表达式位置。required 收集 runtime 函数身份时
+只复制形成函数值所需的字段。完整函数的 S-expression 同时显示声明与主体的位置。
 
 required 世界按接收者和 trait 实参查 impl 索引。比如 `FLAG = First.as(Source).flag()`，
 `Second` 的同名方法可以读取 `FLAG`，两者之间没有执行依赖。快照仍保留两项 impl
@@ -961,12 +965,14 @@ fn choose(value: Any, .ok: bool = gate(true)) -> bool { ok }
 | `required.rs::required_function` | known callable signature，然后同步 `check_source_function` | 签名待决由父检查区域保存；尚未准入的 callee 不能建立 activation 来计算自己的参数域 |
 | `required.rs` 的 `check_package_with_evidence` 与 `validate_machine_operations_checked` | 整包 phase 完成证据及独立的算术安全检查 | 完整根保留现有快路径；源码片段交付须带与实际片段、binder 和世界匹配的检查证据 |
 | `RequiredWorld::with_phase`／`CodeSession::with_phase_checked_source` | 对同一个不可变 Package 的整包凭证 | 不把部分目录升级为 PhaseCheckedPackage；源码服务和活动任务使用独立 owner，不伪造完整包 |
-| `nir::callable_source::Callables` | 与源包绑定的不可变身份目录 | 声明观察与代码取得分别查询；待完成源码的独立发布仍需接线 |
-| `prepare_invocation` | 直接借用 FunctionDeclaration 取得接口和声明来源 | 独立发布源码接口，并在 Entry 成功后按需交付主体；源包注册仍依赖完整 Function |
-| VM 的 Entry → NeedBody → Body | 入口通过后，原调用帧保留参数、声明和本次替换。执行器下一步从当前包取得主体并安装代码 | 接入未完成源码的供应端后，响应须恢复同一帧，保留已求值实参、已经通过的入口契约以及执行预算 |
+| `nir::callable_source::Callables` | 与源包绑定的不可变身份目录 | 形成函数值可单独读取声明。执行调用时固定包内定义；待完成源码的独立发布仍需接线 |
+| `prepare_invocation` | 从已准入的目标取得接口、声明位置及参数 | 独立发布源码接口，并在 Entry 成功后按需交付主体；源包注册仍依赖完整 Function |
+| VM 的 Entry → NeedBody → Body | 入口通过后，原调用帧保留参数、声明和本次替换。执行器从该帧固定的定义准备主体并安装代码 | 接入未完成源码的供应端后，响应须恢复同一帧，保留已求值实参、已经通过的入口契约以及执行预算 |
 
 此处有两类输入。以带声明参数 `Marker`、普通参数 `comptime T: Type` 的函数为例，
-按声明输入特化契约时，`Marker` 已有值，契约里的 `T` 仍指向普通参数槽。
+源码实例准入一次声明实参，取得特化签名及带普通参数帧的声明替换。替换持有这一组
+实参，程序契约和主体特化缓存均可读取。按声明输入特化契约时，`Marker` 已有值，
+契约里的 `T` 仍指向普通参数槽。
 因此声明替换须保留普通参数的 binder，随后才能使用本次调用中 `T` 的值重绑定。
 从入口谓词、函数体到出口谓词都使用这同一份声明替换。没有前置条件的调用也先进入
 `NeedBody`；此时取消调用不会特化函数体或发出函数体入口事件。

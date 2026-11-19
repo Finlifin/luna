@@ -66,7 +66,7 @@ impl<'a> Interpreter<'a> {
             Progress::Exit { .. } => None,
         };
         if let Some((entry, index)) = condition
-            && let Some(definition) = frame.declaration
+            && let Some(definition) = frame.target.declaration()
         {
             let conditions = if entry {
                 &definition.preconditions
@@ -75,7 +75,7 @@ impl<'a> Interpreter<'a> {
             };
             if let Some(condition) = conditions.get(index) {
                 let mut condition =
-                    self.copy_invocation_condition(condition, frame.substitution.as_ref())?;
+                    self.copy_invocation_condition(condition, frame.target.substitution())?;
                 if let Some(scope) = &frame.type_scope {
                     self.specialize_input_types(&mut condition, scope)?;
                 }
@@ -114,7 +114,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<(), Error> {
         let (code, cache_key) = self.prepare_invocation_body(frame)?;
         frame.progress = Progress::Body { code, cache_key };
-        if let Some(definition) = frame.declaration {
+        if let Some(definition) = frame.target.declaration() {
             self.events
                 .push(Event::EnterFunction(definition.declaration));
         }
@@ -154,7 +154,7 @@ impl<'a> Interpreter<'a> {
                     if !returned {
                         self.check_scheduled_result(&value, source, &mut frame.environment)?;
                     }
-                } else if let Some(definition) = frame.declaration {
+                } else if let Some(definition) = frame.target.declaration() {
                     if !definition.postconditions.is_empty()
                         && let Some(binding) = definition.result_binding
                     {

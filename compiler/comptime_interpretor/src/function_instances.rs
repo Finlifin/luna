@@ -177,11 +177,12 @@ impl Interpreter<'_> {
     /// contain neither ordinary input values nor invocation results.
     pub(super) fn prepare_function_instance_body(
         &mut self,
-        declaration: DeclarationId,
-        arguments: &[Term],
+        definition: &nir::program::Function,
         substitution: &nir::DeclarationSubstitution<'_>,
         source: SourceRange,
     ) -> Result<Arc<Expr>, Error> {
+        let declaration = definition.declaration;
+        let arguments = substitution.arguments();
         let before_key = self.budget.steps;
         self.charge_copy_work(Some(source), |fuel| {
             for argument in arguments {
@@ -208,11 +209,7 @@ impl Interpreter<'_> {
             return Ok(body);
         }
         let before_preparation = self.budget.steps;
-        let code = self
-            .functions
-            .body(&declaration)
-            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
-        let body = Arc::new(self.instantiate_activation_code(code, substitution)?);
+        let body = Arc::new(self.instantiate_activation_code(&definition.body, substitution)?);
         let key = (declaration, Arc::from(arguments));
         if persistent && self.budget.steps >= key_work {
             self.budget.steps -= key_work;

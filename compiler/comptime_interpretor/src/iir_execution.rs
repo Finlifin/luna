@@ -734,6 +734,41 @@ mod callable_budget_tests {
     }
 
     #[test]
+    fn instance_contracts_and_code_keep_the_selected_graph_position() {
+        let mut graph = graph("selected".into());
+        graph.functions[0].function.phase = nir::program::FunctionPhase::Comptime;
+        let mut second = graph.functions[0].clone();
+        second.key.arguments = vec![Term::Primitive(Primitive::U8)].into();
+        second.function.body.kind = K::Literal(Literal::Bool(false));
+        let mut guarded = second.clone();
+        guarded.key.arguments = vec![Term::Primitive(Primitive::U16)].into();
+        guarded
+            .function
+            .interface
+            .preconditions
+            .push(guarded.function.body.clone());
+        graph.functions.extend([second, guarded]);
+        for tree in [false, true] {
+            let mut vm = if tree {
+                Interpreter::from_iir_for_comptime_tree(&graph, Budget::default())
+            } else {
+                Interpreter::from_iir_for_comptime(&graph, Budget::default())
+            }
+            .unwrap();
+            let run = |vm: &mut Interpreter<'_>, index: usize| {
+                vm.invoke_instance(&graph.functions[index].key, vec![])
+            };
+            assert_eq!(run(&mut vm, 1).unwrap(), Value::Bool(false));
+            assert_eq!(run(&mut vm, 0).unwrap(), Value::Bool(true));
+            assert_eq!(
+                run(&mut vm, 2).unwrap_err().kind,
+                ErrorKind::ProgramContractRejected
+            );
+            assert_eq!(run(&mut vm, 1).unwrap(), Value::Bool(false));
+        }
+    }
+
+    #[test]
     fn rejected_graph_entry_is_independent_of_body_width() {
         let mut costs = Vec::new();
         for width in [0, 2048] {

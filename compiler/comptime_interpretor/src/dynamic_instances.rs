@@ -63,6 +63,15 @@ impl Interpreter<'_> {
             .functions
             .formation(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
+        self.check_source_formation(formation, arguments, source)
+    }
+
+    pub(super) fn check_source_formation(
+        &mut self,
+        formation: nir::callable_source::Formation<'_>,
+        arguments: &[Term],
+        source: SourceRange,
+    ) -> Result<(), Error> {
         let frames = [self.ordinary_input_frame(formation.signature, source)?];
         let inputs = self.admit_function_inputs(
             formation.parameters,
