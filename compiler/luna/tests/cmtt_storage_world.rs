@@ -162,3 +162,38 @@ fn nested_contextual_retries_restore_storage_before_retaining_later_code() {
         assert_eq!(sysroot::run(&source), Value::Bool(true), "{input}");
     }
 }
+
+#[test]
+fn generator_callbacks_retain_shared_collection_state() {
+    let source = r#"
+        struct State { items: meta.List<bool>, entries: meta.Object }
+        typealias Append = %{state: State} comptime fn() -> Integer;
+        struct Pair { left: Append, right: Append }
+        comptime fn make() -> Append {
+            let state = State { items: [], entries: { initial: true } };
+            || {
+                state.items.append(true);
+                state.entries = state.entries.append(false);
+                let count = state.items.length();
+                if state.entries.length() == count + 1 { count } else { 0 }
+            }
+        }
+        comptime fn pair(shared: bool) -> Pair {
+            let next = make();
+            Pair { left: next, right: if shared { next } else { make() } }
+        }
+        comptime fn verify(callbacks: Pair, expected: Integer) -> <|-bool> {
+            let first = callbacks.left();
+            let second = callbacks.right();
+            let correct = first == 1 and second == expected;
+            '(correct)
+        }
+        fn run() -> bool {
+            const first = verify(pair(true), 2);
+            const second = verify(pair(true), 2);
+            const separate = verify(pair(false), 1);
+            ~<first> and ~<second> and ~<separate>
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}

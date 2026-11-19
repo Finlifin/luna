@@ -99,9 +99,13 @@ Comptime 调用、缓存键协议和 Type 计算均无需 runtime 指针 Copy �
 
 接收宿主不可变值和拼接列表共用一次带预算的表示检查。遍历过程中扣除实际检查成本，成功时交付两个尺寸：逐项比较所需的展开尺寸，以及宿主复制值时要复制的部分。共享文本的字节和持久列表的载荷都计入展开尺寸。已有列表摘要可直接提供载荷尺寸和高度；冷扫描中途耗尽预算时，已经检查的元素仍然计费，未扫完的载荷不会得到摘要。就地拼接与引用路径遍历使用同一余额，验证失败时撤销拼接。[表示检查](../compiler/comptime_interpretor/src/representation.rs) · [就地拼接](../compiler/comptime_interpretor/src/list_append.rs)
 
-缓存键经对应源码世界准入后，快照保存不可变值与它的展开尺寸。命中比较仍先运行源码 Eq，再用快照的展开尺寸支付逐字段依赖比较；从持久列表读取摘要不会让逐字段比较变便宜。归属、类型形成、是否允许缓存继续在各自的接收点检查。生成器实参可借用原值完成冻结，随后仍通过局部常量路径构建 NIR 表达式。[键准入](../compiler/luna/src/comptime_keys.rs) · [缓存比较](../compiler/luna/src/memoization.rs) · [生成器数据](../compiler/elaboration/src/program/constants.rs)
+缓存键经对应源码世界准入后，快照保存不可变值与它的展开尺寸。命中比较仍先运行源码 Eq，再用快照的展开尺寸支付逐字段依赖比较；从持久列表读取摘要不会让逐字段比较变便宜。归属、类型形成、是否允许缓存继续在各自的接收点检查。[键准入](../compiler/luna/src/comptime_keys.rs) · [缓存比较](../compiler/luna/src/memoization.rs)
 
-稳定快照的设计需要表达图中的共享。相同闭包出现在两个字段里，恢复后仍是同一闭包；两个环境内容相同的独立闭包则保留各自身份。当前局部常量路径可从已求值的捕获构造恢复函数。一般跨世界恢复还需私下重绑定声明、分配节点、检查域与捕获、连接边，最后才发布根。遍历时能识别环只解决终止问题，环的归属、逃逸与回收仍须有依据。包解码也没有执行任意用户工厂的权限。[局部常量重建](../compiler/elaboration/src/program/constants.rs) · [捕获图检查](../compiler/comptime_interpretor/src/comptime_graph.rs) · [包传输格式](build-input-protocol.md)
+生成器取得一个已求值的数据实参时，elaboration 按接收域直接重建带类型的 NIR。列表使用已登记的元素域，名义字段使用声明实例的布局，Object 条目携带各自的域。标量在生成字面量时核对其类型和目标整数宽度，Type 保留调用处可见的 binder。有状态闭包可以随聚合数据传递；同一次重建给相同的闭包身份分配一个局部绑定，所有引用指回该绑定。生成器在当前调用中转发活动环境时，VM 继续观察其更新。独立构造的环境各自持有状态。[常量重建](../compiler/elaboration/src/program/constants/materialization.rs) · [捕获检查](../compiler/elaboration/src/program/constants/materialization/captures.rs) · [真实 sysroot 用例](../compiler/luna/tests/cmtt_storage_world.rs)
+
+聚合字段遍历只交付直接子值和 Object 条目的域。访问闭包环境、读取拥有的存储、转发活动值引用各有接收点。把值发布为 NF 实参、模块产物或缓存结果仍需走相应的稳定导出检查。当前局部重建拒绝循环闭包环境和逃逸的活动引用；不同 VM 之间尚无通用捕获图交换格式。[VM 字段遍历](../compiler/comptime_interpretor/src/comptime_graph.rs) · [生成器活动环境](../compiler/elaboration/src/program/cmtt/generators/places.rs)
+
+跨世界恢复需要先重绑定声明并分配节点，检查域与捕获、连接共享引用，最后才发布根。包解码和调用权限分别由各自的接收点检查。[包传输格式](build-input-protocol.md)
 
 公开库的可观察行为也约束快照实现。向同一列表追加自身时，追加的输入应来自该次操作取得的序列。遍历过程中回调更新原容器，后续遍历仍须遵守本次取得的遍历范围。元素 Eq 的短路和 Hash 的调用次数也不能因更换内部存储而改变。[List](../library/meta/data/list.fl) · [列表 Eq](../library/meta/data/list_equality.fl) · [列表 Hash](../library/meta/data/list_hashing.fl)
 

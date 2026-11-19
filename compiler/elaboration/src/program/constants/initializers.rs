@@ -181,7 +181,7 @@ impl Checker<'_, '_> {
         };
         let (value, ty) = self.required_typed_expression(initializer, expected.as_ref())?;
         let mut snapshot = Materialization::default();
-        let result = self.constant_expression(value, ty, initializer.span, 0, &mut snapshot)?;
+        let result = self.constant_expression(&value, ty, initializer.span, 0, &mut snapshot)?;
         if snapshot.bindings.is_empty() {
             Ok(result)
         } else {

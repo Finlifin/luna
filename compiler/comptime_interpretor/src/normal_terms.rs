@@ -53,6 +53,81 @@ pub fn validate_snapshot_term(
 }
 
 impl Value {
+    /// Inspect a scalar for a capture or normal input without allocating its
+    /// exported representation. The receiving domain is checked separately.
+    pub fn check_scalar_snapshot(
+        &self,
+        budget: &mut comptime_runtime::Budget,
+    ) -> Result<(), ErrorKind> {
+        use comptime_runtime::Error as RuntimeError;
+        let runtime_error = |error| match error {
+            RuntimeError::SizeLimit => ErrorKind::RepresentationSizeLimit,
+            RuntimeError::BudgetExhausted => ErrorKind::StepsExhausted,
+            _ => ErrorKind::Type,
+        };
+        budget.consume(1).map_err(runtime_error)?;
+        let limbs = match self {
+            Self::Integer(value) => value.bit_len().div_ceil(32),
+            Self::UnsignedInteger(value) => {
+                (u128::BITS - value.leading_zeros()).div_ceil(32) as usize
+            }
+            Self::SignedInteger(value) => {
+                (u128::BITS - value.unsigned_abs().leading_zeros()).div_ceil(32) as usize
+            }
+            Self::BitVec(bits) => bits.words().len(),
+            Self::Float(value) => {
+                let exponent = value.exponent().bit_len().div_ceil(32);
+                if exponent > budget.max_limbs {
+                    return Err(ErrorKind::RepresentationSizeLimit);
+                }
+                budget
+                    .consume(value.digits().len().saturating_add(exponent))
+                    .map_err(runtime_error)?;
+                return value.check_representation(budget).map_err(runtime_error);
+            }
+            Self::String(value) | Self::Symbol(value) => {
+                return budget.consume(value.len()).map_err(runtime_error);
+            }
+            Self::Unit
+            | Self::Bool(_)
+            | Self::Char(_)
+            | Self::Float16(_)
+            | Self::BFloat16(_)
+            | Self::Float32(_)
+            | Self::Float64(_) => return Ok(()),
+            _ => return Err(ErrorKind::Unsupported),
+        };
+        if limbs > budget.max_limbs {
+            return Err(ErrorKind::RepresentationSizeLimit);
+        }
+        budget.consume(limbs).map_err(runtime_error)
+    }
+
+    fn freeze_scalar_term(&self, budget: &mut comptime_runtime::Budget) -> Result<Term, ErrorKind> {
+        self.check_scalar_snapshot(budget)?;
+        Ok(match self {
+            Self::Unit => Term::Unit,
+            Self::Bool(value) => Term::Bool(*value),
+            Self::Char(value) => Term::Char(*value),
+            Self::Float16(bits) => Term::Float16(*bits),
+            Self::BFloat16(bits) => Term::BFloat16(*bits),
+            Self::Float32(bits) => Term::Float32(*bits),
+            Self::Float64(bits) => Term::Float64(*bits),
+            Self::String(text) => Term::String(text.clone()),
+            Self::Symbol(text) => Term::Symbol(text.clone()),
+            Self::BitVec(bits) => Term::BitVec(bits.clone()),
+            Self::Float(value) => Term::Float(value.clone()),
+            Self::Integer(value) => Term::Integer(value.clone()),
+            Self::SignedInteger(value) => {
+                Term::Integer(comptime_runtime::Integer::from_i128(*value))
+            }
+            Self::UnsignedInteger(value) => {
+                Term::Integer(comptime_runtime::Integer::from_u128(*value))
+            }
+            _ => return Err(ErrorKind::Unsupported),
+        })
+    }
+
     pub(super) fn into_scoped_term(
         self,
         budget: &mut comptime_runtime::Budget,
@@ -154,17 +229,6 @@ impl Value {
     ) -> Result<Term, ErrorKind> {
         fn charge(budget: &mut comptime_runtime::Budget, work: usize) -> Result<(), ErrorKind> {
             budget.consume(work).map_err(|_| ErrorKind::StepsExhausted)
-        }
-        fn freeze_integer(
-            value: &comptime_runtime::Integer,
-            budget: &mut comptime_runtime::Budget,
-        ) -> Result<Term, ErrorKind> {
-            let limbs = value.bit_len().div_ceil(32);
-            if limbs > budget.max_limbs {
-                return Err(ErrorKind::RepresentationSizeLimit);
-            }
-            charge(budget, limbs)?;
-            Ok(Term::Integer(value.clone()))
         }
         // Keep unrelated scalar temporaries out of recursive aggregate frames.
         // The dispatch retains one shared depth boundary; each selected path
@@ -494,9 +558,9 @@ impl Value {
                     });
                 }
             }
-            charge(budget, 1)?;
             Ok(match value {
                 Value::AbstractValue { declaration, ty } => {
+                    charge(budget, 1)?;
                     if scope.type_parameters.contains(declaration)
                         || *ty == Term::Primitive(Primitive::Type)
                         || scope.value_parameters.get(declaration) != Some(ty)
@@ -514,64 +578,19 @@ impl Value {
                 Value::TypeParameter(declaration)
                     if scope.type_parameters.contains(declaration) =>
                 {
+                    charge(budget, 1)?;
                     Term::Rigid {
                         declaration: *declaration,
                         sort: nir::Sort::Type,
                     }
                 }
                 Value::Type(ty) => {
+                    charge(budget, 1)?;
                     scope.inspect_type(ty, budget)?;
                     ty.clone()
                 }
 
-                Value::Unit => Term::Unit,
-                Value::Bool(value) => Term::Bool(*value),
-                Value::Char(value) => Term::Char(*value),
-                Value::Float16(bits) => Term::Float16(*bits),
-                Value::BFloat16(bits) => Term::BFloat16(*bits),
-                Value::Float32(bits) => Term::Float32(*bits),
-                Value::Float64(bits) => Term::Float64(*bits),
-                Value::BitVec(value) => {
-                    if value.words().len() > budget.max_limbs {
-                        return Err(ErrorKind::RepresentationSizeLimit);
-                    }
-                    charge(budget, value.words().len())?;
-                    Term::BitVec(value.clone())
-                }
-                Value::Symbol(value) => {
-                    charge(budget, value.len())?;
-                    Term::Symbol(value.clone())
-                }
-                Value::String(value) => {
-                    charge(budget, value.len())?;
-                    Term::String(value.clone())
-                }
-                Value::UnsignedInteger(value) => {
-                    freeze_integer(&comptime_runtime::Integer::from_u128(*value), budget)?
-                }
-                Value::SignedInteger(value) => {
-                    freeze_integer(&comptime_runtime::Integer::from_i128(*value), budget)?
-                }
-                Value::Float(value) => {
-                    let exponent_limbs = value.exponent().bit_len().div_ceil(32);
-                    if exponent_limbs > budget.max_limbs {
-                        return Err(ErrorKind::RepresentationSizeLimit);
-                    }
-                    charge(budget, value.digits().len().saturating_add(exponent_limbs))?;
-                    value
-                        .check_representation(budget)
-                        .map_err(|error| match error {
-                            comptime_runtime::Error::SizeLimit => {
-                                ErrorKind::RepresentationSizeLimit
-                            }
-                            comptime_runtime::Error::BudgetExhausted => ErrorKind::StepsExhausted,
-                            _ => ErrorKind::Type,
-                        })?;
-                    Term::Float(value.clone())
-                }
-                Value::Integer(value) => freeze_integer(value, budget)?,
-
-                _ => return Err(ErrorKind::Unsupported),
+                scalar => return scalar.freeze_scalar_term(budget),
             })
         }
         let closed_values = BTreeMap::new();

@@ -109,34 +109,6 @@ impl Checker<'_, '_> {
                     ));
                 }
                 Value::ComptimeReference(_) => live = true,
-                Value::Tuple(fields)
-                | Value::Record { fields, .. }
-                | Value::Variant { fields, .. } => {
-                    self.required_steps = self
-                        .required_steps
-                        .checked_sub(fields.len() as u64)
-                        .ok_or_else(|| {
-                            error(span, "generator live data inspection budget exhausted")
-                        })?;
-                    pending.extend(fields.iter().map(|field| (field, depth + 1)));
-                }
-                Value::AnonymousRecord(fields) => {
-                    self.required_steps = self
-                        .required_steps
-                        .checked_sub(fields.len() as u64)
-                        .ok_or_else(|| {
-                            error(span, "generator live data inspection budget exhausted")
-                        })?;
-                    pending.extend(fields.iter().map(|(_, field)| (field, depth + 1)));
-                }
-                Value::Optional { value, .. } => {
-                    if let Some(value) = value {
-                        pending.push((value, depth + 1));
-                    }
-                }
-                Value::Newtype { value, .. } | Value::ErrorResult { value, .. } => {
-                    pending.push((value, depth + 1))
-                }
                 Value::Closure(closure) if closure.ty().is_comptime_callable() => {
                     // Within one invocation, forwarding an owned environment
                     // must preserve its identity and subsequent state updates.
@@ -153,6 +125,13 @@ impl Checker<'_, '_> {
                 Value::Closure(_) => runtime_callback = true,
                 _ => {}
             }
+            value.try_for_each_data_field(|_, field| {
+                self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
+                    error(span, "generator live data inspection budget exhausted")
+                })?;
+                pending.push((field, depth + 1));
+                Ok::<_, Error>(())
+            })?;
         }
         if live {
             if runtime_callback {
