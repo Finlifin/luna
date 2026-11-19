@@ -240,3 +240,49 @@ fn required_type_observation_checks_a_runtime_default_in_its_declaration() {
     "#;
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn type_observation_preserves_runtime_callbacks_in_aggregate_defaults() {
+    let source = r#"
+        typealias Selected = SelectedType();
+        typealias Case = CaseType();
+        comptime fn SelectedType() -> Type { (Actions {})'type }
+        comptime fn CaseType() -> Type { (Mode.direct {})'type }
+
+        struct Actions { apply: fn(bool) -> bool = |x: bool| not x }
+        enum Mode {
+            direct { apply: fn(bool) -> bool = |x: bool| x },
+            invert { apply: fn(bool) -> bool = |x: bool| not x },
+        }
+        fn invoke(mode: Case) -> bool {
+            mode match {
+                .direct { apply } => apply(true),
+                .invert { apply } => apply(true),
+            }
+        }
+        fn run() -> bool {
+            let actions: Selected = Actions {};
+            (actions.apply)(false) and invoke(Mode.direct {}) and not invoke(Mode.invert {})
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
+fn erasing_an_alias_argument_cannot_expose_later_default_inputs() {
+    let source = r#"
+        typealias Ignore<T> = bool;
+        typealias Example<.A: Type = bool, .B: Type = Ignore<A>> = B;
+        fn run() -> Example<> { true }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let uncalled = source.replace("fn run() -> Example<> { true }", "fn run() {}");
+    for unavailable in ["A", "B"] {
+        let invalid = uncalled.replace(
+            ".A: Type = bool",
+            &format!(".A: Type = Ignore<{unavailable}>"),
+        );
+        let error = sysroot::compile(&invalid).unwrap_err();
+        assert!(error.contains("itself or a later parameter"), "{error}");
+    }
+}

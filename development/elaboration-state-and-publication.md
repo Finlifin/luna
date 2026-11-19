@@ -570,6 +570,19 @@ NIR Function 继续代表已检查产物；不能给 body 塞占位表达式或�
 `fn(bool) -> bool`，其默认 lambda 就按 runtime 检查；回到 `AnswerType` 后继续
 原先的 comptime 计算。[作用域回归](../compiler/luna/tests/required_input_scopes.rs)
 
+结构体与枚举命名载荷的字段默认值也可能在 comptime 类型观察中被首次索取。
+例如 `(Actions {})'type` 需要检查字段的初始化来源；字段声明的 runtime 回调仍在它的
+声明环境中检查。字段的 HIR 身份标识这份受检表达式。试探调用保存字段表的持久化根，
+回滚时恢复原根，后续构造按自己的声明实参实例化并执行选中的表达式。两个变体中的
+同名字段各有独立的供应者。[默认表达式](../compiler/elaboration/src/program/defaults.rs) · [候选检查](../compiler/elaboration/src/program/checking_attempts.rs)
+
+检查普通形式参数、范式头或 trait 的默认源码时，调用者的类型替换、值绑定和默认
+参数绑定在声明边界外保存。声明提供自身的参数前缀和约束；成员需要的词法捕获由
+成员的声明引入。按声明顺序检查各槽，完成当前槽后才让后续默认表达式引用它。
+例如 `typealias Ignore<T> = bool` 会擦掉 T；`.A: Type = Ignore<B>` 仍在读取尚未声明
+的 B 时被拒绝。调用准备在实际省略槽位时接入前缀、选用默认供应者。动态函数值的
+公开入口与供应者归属另见[高阶调用接口](callable-input-interfaces.md)。
+
 VM 的 `invocation_declaration` 以及程序／类型契约的替换、能力检查只接收 `FunctionDeclaration`，
 主体在执行器推进 NeedBody 时取得。required 收集生成的 runtime 函数身份时只复制所需声明字段，
 需要执行的依赖仍保留完整代码。独立声明和完整函数的 S-expression dump 都包含声明

@@ -117,8 +117,7 @@ struct LexicalCheckpoint {
     captures: Vec<CaptureFrame>,
     immutable: BTreeSet<n::LocalId>,
     context: crate::ptc::Context,
-    field_defaults: BTreeMap<(OwnerId, Option<usize>, usize), n::Expr>,
-    active_defaults: BTreeSet<(OwnerId, Option<usize>, usize)>,
+    field_defaults: SourceBindings<n::Expr>,
     inputs: input_facts::State,
     pending_len: Option<usize>,
 }
@@ -135,7 +134,6 @@ impl LexicalCheckpoint {
             immutable: checker.immutable.clone(),
             context: checker.context.clone(),
             field_defaults: checker.field_defaults.clone(),
-            active_defaults: checker.active_defaults.clone(),
             inputs: checker.input_facts.clone(),
             pending_len: checker.pending_type_uses.as_ref().map(Vec::len),
         }
@@ -154,7 +152,6 @@ impl LexicalCheckpoint {
         checker.immutable = self.immutable;
         checker.context = self.context;
         checker.field_defaults = self.field_defaults;
-        checker.active_defaults = self.active_defaults;
         checker.input_facts = self.inputs;
     }
 }
@@ -254,20 +251,8 @@ impl std::fmt::Display for LexicalCheckpoint {
             write!(f, " {binding}")?;
         }
         f.write_str(") (field-defaults")?;
-        for ((owner, variant, index), value) in &self.field_defaults {
-            write!(f, " (field {owner} (variant")?;
-            if let Some(variant) = variant {
-                write!(f, " {variant}")?;
-            }
-            write!(f, ") (index {index}) {value})")?;
-        }
-        f.write_str(") (active-defaults")?;
-        for (owner, variant, index) in &self.active_defaults {
-            write!(f, " (field {owner} (variant")?;
-            if let Some(variant) = variant {
-                write!(f, " {variant}")?;
-            }
-            write!(f, ") (index {index}))")?;
+        for (field, value) in &self.field_defaults {
+            write!(f, " (field {field} {value})")?;
         }
         f.write_str(") (pending-type-uses")?;
         if let Some(len) = self.pending_len {
@@ -342,8 +327,7 @@ mod tests {
             captures: vec![],
             immutable: BTreeSet::from([id]),
             context: crate::ptc::Context::default(),
-            field_defaults: BTreeMap::new(),
-            active_defaults: BTreeSet::new(),
+            field_defaults: SourceBindings::default(),
             inputs: input_facts::State::default(),
             pending_len: Some(7),
         };

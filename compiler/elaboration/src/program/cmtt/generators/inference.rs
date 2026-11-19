@@ -1175,10 +1175,7 @@ impl Checker<'_, '_> {
             return self.generator_static_type_hint(argument, depth + 1, bindings);
         }
         if let H::ResolvedClauseParam(_, id) = argument.kind {
-            let id = DeclarationId {
-                package: semantic_package(&self.package_identities, id.pkg),
-                local: id.index,
-            };
+            let id = self.visible_clause_input(id, argument.span)?;
             let supplied = bindings.and_then(|(parameters, values)| {
                 parameters
                     .iter()
@@ -1448,10 +1445,7 @@ impl Checker<'_, '_> {
             }
             H::ResolvedClauseParam(_, id) => {
                 if let Some((parameters, assigned)) = bindings {
-                    let declaration = DeclarationId {
-                        package: semantic_package(&self.package_identities, id.pkg),
-                        local: id.index,
-                    };
+                    let declaration = self.visible_clause_input(*id, value.span)?;
                     let Some(index) = parameters
                         .iter()
                         .position(|parameter| *parameter == declaration)

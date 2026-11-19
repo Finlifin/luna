@@ -30,7 +30,7 @@ impl Checker<'_, '_> {
             return Ok(Vec::new());
         }
         let mut domains = Vec::new();
-        for clause in self.type_clause_params(owner) {
+        for clause in self.type_clause_params(owner).iter() {
             domains.push(match clause.kind {
                 hir::clause::ClauseParamKind::Positional(_, ty)
                 | hir::clause::ClauseParamKind::Optional(_, ty, _)
@@ -264,47 +264,39 @@ impl Checker<'_, '_> {
         domains: &[Term],
     ) -> Result<(), Error> {
         let clauses = self.type_clause_params(owner);
-        let all_parameters = self.type_parameters[&owner].clone();
-        let inherited = all_parameters.len().saturating_sub(clauses.len());
-        let parameters = all_parameters[inherited..].to_vec();
+        let inherited = self.type_parameters[&owner]
+            .len()
+            .saturating_sub(clauses.len());
+        let parameters = self.type_parameters[&owner][inherited..].to_vec();
         let domains = &domains[inherited..];
-        let saved_owner = self.signature_owner.replace(owner);
-        let saved_context = self.context.clone();
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_bindings = std::mem::take(&mut self.normal_default_bindings);
-        let saved_aliases = std::mem::take(&mut self.alias_substitution);
-        let saved_forbidden = self.forbidden_default_inputs.clone();
-        let saved_required_inputs = std::mem::take(&mut self.input_facts.supplied);
-        let saved_immutable = self.immutable.clone();
-        let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
-        self.context = self.definition_context(owner);
-        let result = (|| {
-            self.input_facts.supplied = self.input_facts.supplied.child(
+        self.in_default_declaration(owner, |this| {
+            this.in_required_comptime = true;
+            this.context = this.definition_context(owner);
+            this.input_facts.supplied = this.input_facts.supplied.child(
                 &[],
                 &[],
-                &mut self.required_steps,
-                self.package.item(owner).unwrap().span,
+                &mut this.required_steps,
+                this.package.item(owner).unwrap().span,
             )?;
             // Captured parent inputs are already in lexical scope before the
             // member's own telescope, including in its default expressions.
-            for parameter in self.nominal_captures(owner, self.package.item(owner).unwrap().span)? {
-                if let Some(domain) = self
+            for parameter in this.nominal_captures(owner, this.package.item(owner).unwrap().span)? {
+                if let Some(domain) = this
                     .trait_input_domain(parameter)
                     .filter(|ty| *ty != p(P::Type))
                 {
-                    self.install_abstract_clause_input(
+                    this.install_abstract_clause_input(
                         parameter,
                         &domain,
-                        self.package.item(owner).unwrap().span,
+                        this.package.item(owner).unwrap().span,
                     )?;
                 }
             }
+            this.forbidden_default_inputs.extend(&parameters);
             for (slot, clause) in clauses.iter().enumerate() {
                 if let hir::clause::ClauseParamKind::Optional(_, _, value) = clause.kind {
-                    self.forbidden_default_inputs
-                        .extend(parameters[slot..].iter().copied());
                     let contextual = if matches!(
-                        self.package.item(owner).map(|item| &item.kind),
+                        this.package.item(owner).map(|item| &item.kind),
                         Some(
                             ItemKind::Struct(_)
                                 | ItemKind::Enum(_)
@@ -312,13 +304,13 @@ impl Checker<'_, '_> {
                                 | ItemKind::TypeAlias(..)
                         )
                     ) {
-                        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                        let mut fuel = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
                         let before = fuel;
                         let result = nir::type_computations::has_rigid_parameters_bounded(
                             &domains[slot],
                             &mut fuel,
                         );
-                        self.required_steps -= (before - fuel) as u64;
+                        this.required_steps -= (before - fuel) as u64;
                         result.map_err(|error| {
                             super::error(
                                 value.span,
@@ -329,14 +321,14 @@ impl Checker<'_, '_> {
                         false
                     };
                     if contextual {
-                        self.dependent_normal_argument(value, 0)?;
+                        this.dependent_normal_argument(value, 0)?;
                     } else {
-                        self.expr(value, Some(&domains[slot]))?;
+                        this.expr(value, Some(&domains[slot]))?;
                     }
-                    self.forbidden_default_inputs = saved_forbidden.clone();
                 }
+                this.forbidden_default_inputs.remove(&parameters[slot]);
                 if domains[slot] != p(P::Type) {
-                    self.install_abstract_clause_input(
+                    this.install_abstract_clause_input(
                         parameters[slot],
                         &domains[slot],
                         clause.span,
@@ -344,17 +336,7 @@ impl Checker<'_, '_> {
                 }
             }
             Ok(())
-        })();
-        self.signature_owner = saved_owner;
-        self.context = saved_context;
-        self.locals = saved_locals;
-        self.normal_default_bindings = saved_bindings;
-        self.alias_substitution = saved_aliases;
-        self.forbidden_default_inputs = saved_forbidden;
-        self.in_required_comptime = saved_mode;
-        self.input_facts.supplied = saved_required_inputs;
-        self.immutable = saved_immutable;
-        result
+        })
     }
 
     fn install_abstract_clause_input(
@@ -670,10 +652,8 @@ impl Checker<'_, '_> {
                 // slot is supplied later (or by a default). The expression's
                 // own checked type is retained for the final domain check.
                 let symbolic_domain = if let H::ResolvedClauseParam(_, id) = value.kind {
-                    self.trait_input_domain(DeclarationId {
-                        package: semantic_package(&self.package_identities, id.pkg),
-                        local: id.index,
-                    })
+                    let input = self.visible_clause_input(id, value.span)?;
+                    self.trait_input_domain(input)
                 } else {
                     None
                 };

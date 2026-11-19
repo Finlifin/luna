@@ -281,6 +281,7 @@ impl Checker<'_, '_> {
             H::ResolvedClauseParam(_, id)
                 if self.template_code_values.contains_key(&(id.pkg, id.index)) =>
             {
+                self.visible_clause_input(*id, value.span)?;
                 self.ascribe_code(
                     self.template_code_values[&(id.pkg, id.index)].clone(),
                     interface,

@@ -2418,49 +2418,25 @@ impl Checker<'_, '_> {
         slot: usize,
     ) -> Result<n::Expr, Error> {
         let clauses = self.type_clause_params(owner);
-        let parameters = self.normal_parameters[&owner].clone();
         let hir::clause::ClauseParamKind::Optional(_, _, value) = clauses[slot].kind else {
             return Err(error(
                 clauses[slot].span,
                 "normal-form input has no default",
             ));
         };
-        // This is declaration checking, not a fragment of the caller's
-        // activation. In particular, supplied caller observations cannot give
-        // these formal inputs concrete values or a caller return target.
-        let saved_control = std::mem::take(&mut self.control);
-        let saved_captures = std::mem::take(&mut self.captures);
-        let saved_inputs = std::mem::take(&mut self.input_facts);
-        let saved_input_scope = self.default_input_scope.take();
-        let saved_input_owner = self.default_input_owner.take();
-        let saved_stage = std::mem::replace(&mut self.in_staged_input, false);
-        let saved_owner = self.signature_owner.replace(owner);
-        let saved_context = self.context.clone();
-        let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
-        let saved_forbidden = self.forbidden_default_inputs.clone();
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_types = std::mem::take(&mut self.alias_substitution);
-        let saved_values = std::mem::take(&mut self.alias_value_bindings);
-        let saved_bindings = std::mem::take(&mut self.normal_default_bindings);
-        self.context = self.binder_context(owner);
-        self.forbidden_default_inputs
-            .extend(parameters[slot..].iter().map(|p| p.0));
-        let result = self.expr(value, Some(&parameters[slot].2));
-        self.control = saved_control;
-        self.captures = saved_captures;
-        self.input_facts = saved_inputs;
-        self.default_input_scope = saved_input_scope;
-        self.default_input_owner = saved_input_owner;
-        self.in_staged_input = saved_stage;
-        self.signature_owner = saved_owner;
-        self.context = saved_context;
-        self.in_required_comptime = saved_mode;
-        self.forbidden_default_inputs = saved_forbidden;
-        self.locals = saved_locals;
-        self.alias_substitution = saved_types;
-        self.alias_value_bindings = saved_values;
-        self.normal_default_bindings = saved_bindings;
-        result
+        self.in_default_declaration(owner, |this| {
+            this.in_required_comptime = true;
+            this.context = this.binder_context(owner);
+            let parameters = &this.normal_parameters[&owner];
+            let domain = declaration_inputs::copy_input_domain(
+                &parameters[slot].2,
+                &mut this.required_steps,
+                value.span,
+            )?;
+            this.forbidden_default_inputs
+                .extend(parameters[slot..].iter().map(|p| p.0));
+            this.expr(value, Some(&domain))
+        })
     }
 }
 

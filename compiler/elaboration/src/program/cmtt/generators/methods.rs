@@ -50,22 +50,28 @@ impl Checker<'_, '_> {
                 .required_steps
                 .checked_sub(self.trait_parameter_types.len() as u64)
                 .ok_or_else(|| error(span, "generator capture lookup budget exhausted"))?;
-            let clause = self
+            let (hir_id, clause_span) = self
                 .trait_parameter_types
                 .keys()
                 .find_map(|owner| {
-                    self.type_clause_params(*owner).into_iter().find(|clause| {
-                        clause.definition.is_some_and(|definition| {
-                            DeclarationId {
-                                package: semantic_package(&self.package_identities, definition.pkg),
-                                local: definition.index,
-                            } == *id
+                    self.type_clause_params(*owner)
+                        .iter()
+                        .find(|clause| {
+                            clause.definition.is_some_and(|definition| {
+                                DeclarationId {
+                                    package: semantic_package(
+                                        &self.package_identities,
+                                        definition.pkg,
+                                    ),
+                                    local: definition.index,
+                                } == *id
+                            })
                         })
-                    })
+                        .map(|clause| (clause.hir_id, clause.span))
                 })
                 .ok_or_else(|| error(span, "captured value clause declaration is unavailable"))?;
             let domain = completed_domain;
-            let binding = local(clause.hir_id);
+            let binding = local(hir_id);
             self.locals.insert(binding, domain.clone());
             self.immutable.insert(binding);
             self.normal_default_bindings
@@ -74,8 +80,8 @@ impl Checker<'_, '_> {
                 None
             } else {
                 let site = Expr {
-                    hir_id: clause.hir_id,
-                    span: clause.span,
+                    hir_id,
+                    span: clause_span,
                     kind: H::Unit,
                 };
                 let input = n::Expr {

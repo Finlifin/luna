@@ -51,7 +51,7 @@ impl Checker<'_, '_> {
                     .required_steps
                     .checked_sub(1)
                     .ok_or_else(|| error(span, "code contract binding budget exhausted"))?;
-                for clause in self.type_clause_params(owner) {
+                for clause in self.type_clause_params(owner).iter() {
                     self.required_steps = self
                         .required_steps
                         .checked_sub(1)

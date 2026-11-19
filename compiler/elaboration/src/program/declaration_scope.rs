@@ -22,6 +22,27 @@ impl Checker<'_, '_> {
         })
     }
 
+    /// A stored default is checked against formal declaration inputs. A
+    /// consumer connects its actual prefix when it uses the checked code.
+    pub(super) fn in_default_declaration<R>(
+        &mut self,
+        owner: OwnerId,
+        check: impl FnOnce(&mut Self) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        self.in_declaration_scope(owner, |this| {
+            let types = std::mem::take(&mut this.alias_substitution);
+            let values = std::mem::take(&mut this.alias_value_bindings);
+            let bindings = std::mem::take(&mut this.normal_default_bindings);
+            let forbidden = std::mem::take(&mut this.forbidden_default_inputs);
+            let result = check(this);
+            this.forbidden_default_inputs = forbidden;
+            this.alias_substitution = types;
+            this.alias_value_bindings = values;
+            this.normal_default_bindings = bindings;
+            result
+        })
+    }
+
     pub(super) fn in_open_function_scope<T>(
         &mut self,
         owner: OwnerId,

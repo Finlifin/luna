@@ -54,7 +54,7 @@ mod interfaces;
 mod iteration;
 mod lexical_inputs;
 mod local_bindings;
-use local_bindings::{DeclarationBindings, LocalBindings};
+use local_bindings::{DeclarationBindings, LocalBindings, SourceBindings};
 mod list_operations;
 mod list_patterns;
 mod literal_conversion;
@@ -584,7 +584,7 @@ fn elaborate_with_attributes(
         alias_contracts: BTreeMap::new(),
         enums: BTreeMap::new(),
         enum_sources: BTreeMap::new(),
-        field_defaults: BTreeMap::new(),
+        field_defaults: SourceBindings::default(),
         active_defaults: BTreeSet::new(),
         immutable: BTreeSet::new(),
     };
@@ -1689,7 +1689,7 @@ struct Checker<'a, 'h> {
     alias_contracts: BTreeMap<DeclarationId, nir::type_aliases::Contract>,
     enums: BTreeMap<DeclarationId, n::Enum>,
     enum_sources: BTreeMap<DeclarationId, Vec<&'h hir::item::Variant<'h>>>,
-    field_defaults: BTreeMap<(OwnerId, Option<usize>, usize), n::Expr>,
+    field_defaults: SourceBindings<n::Expr>,
     active_defaults: BTreeSet<(OwnerId, Option<usize>, usize)>,
     immutable: BTreeSet<n::LocalId>,
 }
@@ -2935,77 +2935,6 @@ impl Checker<'_, '_> {
     fn pattern_exhaustive(&self, pattern: &n::Pattern, ty: &Term) -> bool {
         self.patterns_exhaustive(&[pattern], ty) == crate::coverage::Coverage::Exhaustive
     }
-    fn field_default(
-        &mut self,
-        owner: OwnerId,
-        variant: Option<usize>,
-        index: usize,
-    ) -> Result<n::Expr, Error> {
-        if let Some(value) = self.field_defaults.get(&(owner, variant, index)) {
-            let span = self.package.item(owner).unwrap().span;
-            constants::charge_copy(value, &mut self.required_steps, span)?;
-            return Ok(value.clone());
-        }
-        let item = self.package.item(owner).unwrap();
-        let (field, ty) = match (&item.kind, variant) {
-            (ItemKind::Struct(def), None) => (
-                &def.fields[index],
-                self.structs[&declaration(self.package, &self.package_identities, owner)].fields
-                    [index]
-                    .1
-                    .clone(),
-            ),
-            (ItemKind::Enum(_), Some(v)) => {
-                let id = declaration(self.package, &self.package_identities, owner);
-                let hir::item::VariantKind::Struct(fields) = &self.enum_sources[&id][v].kind else {
-                    return Err(error(item.span, "missing required enum payload field"));
-                };
-                (
-                    &fields[index],
-                    self.enums[&declaration(self.package, &self.package_identities, owner)]
-                        .variants[v]
-                        .fields[index]
-                        .clone(),
-                )
-            }
-            _ => unreachable!(),
-        };
-        let value = field.default.ok_or_else(|| {
-            error(
-                field.span,
-                format!(
-                    "missing required {} field {}",
-                    if variant.is_some() {
-                        "enum payload"
-                    } else {
-                        "struct"
-                    },
-                    field.ident.name
-                ),
-            )
-        })?;
-        if !self.active_defaults.insert((owner, variant, index)) {
-            return Err(error(field.span, "cyclic field default elaboration"));
-        }
-        let locals = std::mem::take(&mut self.locals);
-        let captures = std::mem::take(&mut self.captures);
-        let saved_control = std::mem::take(&mut self.control);
-        let base_context = self.definition_context(owner);
-        let context = std::mem::replace(&mut self.context, base_context);
-        let signature_owner = self.signature_owner.replace(owner);
-        let checked = self.expr(value, Some(&ty));
-        self.signature_owner = signature_owner;
-        self.context = context;
-        self.locals = locals;
-        self.captures = captures;
-        self.control = saved_control;
-        self.active_defaults.remove(&(owner, variant, index));
-        let checked = checked?;
-        constants::charge_copy(&checked, &mut self.required_steps, field.span)?;
-        self.field_defaults
-            .insert((owner, variant, index), checked.clone());
-        Ok(checked)
-    }
     fn construct(
         &mut self,
         expr: &Expr<'_>,
@@ -3421,10 +3350,7 @@ impl Checker<'_, '_> {
             H::TyClosure(context, body) => {
                 let H::TyClosureEnvironment(bindings) = &context.kind else {
                     if let H::ResolvedClauseParam(_, id) = &context.kind {
-                        let declaration = DeclarationId {
-                            package: semantic_package(&self.package_identities, id.pkg),
-                            local: id.index,
-                        };
+                        let declaration = self.visible_clause_input(*id, context.span)?;
                         if self.trait_input_domain(declaration) == Some(Term::ClosureContextType) {
                             let context = self
                                 .alias_substitution
@@ -3524,10 +3450,7 @@ impl Checker<'_, '_> {
                 self.computed_callable_result(input, output, expr.span)
             }
             H::ResolvedClauseParam(_, id) => {
-                let declaration = DeclarationId {
-                    package: semantic_package(&self.package_identities, id.pkg),
-                    local: id.index,
-                };
+                let declaration = self.visible_clause_input(*id, expr.span)?;
                 if let Some(value) = self.definition_input(declaration, expr.span)? {
                     let K::TypeValue(ty) = value.kind else {
                         return Err(error(
@@ -3545,12 +3468,6 @@ impl Checker<'_, '_> {
                             "trait value parameter cannot be used as a Type",
                         ));
                     }
-                }
-                if self.forbidden_default_inputs.contains(&declaration) {
-                    return Err(error(
-                        expr.span,
-                        "normal-form default references itself or a later parameter",
-                    ));
                 }
                 if self.alias_value_bindings.contains_key(&declaration) {
                     return Err(error(

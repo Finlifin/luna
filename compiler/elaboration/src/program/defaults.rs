@@ -16,6 +16,24 @@ impl Prefix {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn visible_clause_input(
+        &self,
+        id: hir::common::DefId,
+        span: Span,
+    ) -> Result<DeclarationId, Error> {
+        let input = DeclarationId {
+            package: semantic_package(&self.package_identities, id.pkg),
+            local: id.index,
+        };
+        if self.forbidden_default_inputs.contains(&input) {
+            return Err(error(
+                span,
+                "clause default references itself or a later parameter",
+            ));
+        }
+        Ok(input)
+    }
+
     pub(super) fn ensure_defaults(&mut self, owner: OwnerId, span: Span) -> Result<(), Error> {
         if self.open_functions.contains_key(&owner) {
             self.defaults.entry(owner).or_default();
@@ -100,7 +118,7 @@ impl Checker<'_, '_> {
             ));
         }
         let saved_pending = self.pending_type_uses.replace(Vec::new());
-        let result = self.in_declaration_scope(owner, |this| {
+        let result = self.in_default_declaration(owner, |this| {
             this.check_parameter_default(owner, index, span, prepared)
         });
         let uses = std::mem::replace(&mut self.pending_type_uses, saved_pending).unwrap();
@@ -197,6 +215,64 @@ impl Checker<'_, '_> {
             None
         };
         Ok((sig.params.len(), default))
+    }
+
+    pub(super) fn field_default(
+        &mut self,
+        owner: OwnerId,
+        variant: Option<usize>,
+        index: usize,
+    ) -> Result<std::sync::Arc<n::Expr>, Error> {
+        let item = self.package.item(owner).unwrap();
+        let field = match (&item.kind, variant) {
+            (ItemKind::Struct(def), None) => &def.fields[index],
+            (ItemKind::Enum(_), Some(v)) => {
+                let id = declaration(self.package, &self.package_identities, owner);
+                let hir::item::VariantKind::Struct(fields) = &self.enum_sources[&id][v].kind else {
+                    return Err(error(item.span, "missing required enum payload field"));
+                };
+                &fields[index]
+            }
+            _ => unreachable!(),
+        };
+        if let Some(checked) = self.field_defaults.shared(&field.hir_id) {
+            return Ok(checked.clone());
+        }
+        let value = field.default.ok_or_else(|| {
+            error(
+                field.span,
+                format!(
+                    "missing required {} field {}",
+                    if variant.is_some() {
+                        "enum payload"
+                    } else {
+                        "struct"
+                    },
+                    field.ident.name
+                ),
+            )
+        })?;
+        if !self.active_defaults.insert((owner, variant, index)) {
+            return Err(error(field.span, "cyclic field default elaboration"));
+        }
+        let checked = self.in_default_declaration(owner, |this| {
+            this.context = this.definition_context(owner);
+            let id = declaration(this.package, &this.package_identities, owner);
+            let domain = match variant {
+                None => &this.structs[&id].fields[index].1,
+                Some(variant) => &this.enums[&id].variants[variant].fields[index],
+            };
+            let domain = declaration_inputs::copy_input_domain(
+                domain,
+                &mut this.required_steps,
+                field.span,
+            )?;
+            this.expr(value, Some(&domain))
+        });
+        self.active_defaults.remove(&(owner, variant, index));
+        let checked = std::sync::Arc::new(checked?);
+        self.field_defaults.insert(field.hir_id, checked.clone());
+        Ok(checked)
     }
 
     pub(super) fn require_stable_default(

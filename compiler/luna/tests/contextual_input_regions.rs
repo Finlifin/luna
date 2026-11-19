@@ -1218,11 +1218,11 @@ fn declaration_defaults_still_reject_forward_references_and_invalid_domains() {
     for (default, message) in [
         (
             "first",
-            "normal-form default references itself or a later parameter",
+            "clause default references itself or a later parameter",
         ),
         (
             "second",
-            "normal-form default references itself or a later parameter",
+            "clause default references itself or a later parameter",
         ),
         ("Config<true> { flag: enabled }", "unresolved type equality"),
         ("Config<enabled> { flag: Type }", "type mismatch"),

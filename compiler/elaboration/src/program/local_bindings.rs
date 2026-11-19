@@ -1,4 +1,4 @@
-//! Persistent lexical bindings indexed by the full local or declaration ID.
+//! Persistent lexical bindings indexed by source, local or declaration identity.
 //! Each branch discriminates one bit. Forking shares a root; updating copies
 //! only the changed path and never copies the bound type or code.
 use super::{DeclarationId, n::LocalId};
@@ -6,6 +6,11 @@ use std::{ops::Index, sync::Arc};
 
 pub(super) trait BindingKey: Copy + Eq {
     fn bits(self) -> u128;
+}
+impl BindingKey for hir::HirId {
+    fn bits(self) -> u128 {
+        super::local(self).bits()
+    }
 }
 impl BindingKey for LocalId {
     fn bits(self) -> u128 {
@@ -18,6 +23,7 @@ impl BindingKey for DeclarationId {
     }
 }
 
+pub(super) type SourceBindings<T> = Bindings<hir::HirId, T>;
 pub(super) type LocalBindings<T> = Bindings<LocalId, T>;
 pub(super) type DeclarationBindings<T> = Bindings<DeclarationId, T>;
 

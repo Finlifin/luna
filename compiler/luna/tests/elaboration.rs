@@ -6674,7 +6674,7 @@ fn trait_type_defaults_reject_invalid_argument_routes_and_values() {
         ),
         (
             "trait Pick where .T:Type=T {} impl Pick for bool {}",
-            "type default references",
+            "clause default references itself or a later parameter",
         ),
         (
             "trait Pick where .T:Type=false {} impl Pick for bool {}",
@@ -6697,7 +6697,10 @@ fn trait_type_default_definitions_are_checked_even_when_unused_or_overridden() {
         "trait Pick where .T:.Type'builtin=T {}",
         "comptime fn Identity(value:.Type'builtin)->.Type'builtin {value} trait Pick where .T:.Type'builtin=Identity(T) {}",
     ] {
-        rejected(source, "type default references");
+        rejected(
+            source,
+            "clause default references itself or a later parameter",
+        );
     }
 }
 
@@ -6711,7 +6714,7 @@ fn nominal_type_defaults_reject_invalid_declarations_and_routes() {
         ("struct Holder where .T:.Type'builtin=false {}", "type"),
         (
             "enum Choice where .T:.Type'builtin=T {empty,}",
-            "type default references",
+            "clause default references itself or a later parameter",
         ),
         (
             "struct Holder where .T:.Type'builtin=bool {} typealias Bad=Holder<bool>;",
@@ -6752,7 +6755,7 @@ fn typealias_defaults_reject_invalid_unused_defaults_and_missing_parameters() {
         ("typealias Bad<.T:.Type'builtin=false> = T;", "type"),
         (
             "typealias Bad<.T:.Type'builtin=T> = T;",
-            "type default references",
+            "clause default references itself or a later parameter",
         ),
         (
             "typealias Pair<T,.U:.Type'builtin=T> = Tuple<T,U>;typealias Bad=Pair;",
@@ -6784,7 +6787,7 @@ fn function_type_defaults_are_not_replaced_by_call_inference() {
         ),
         (
             "fn keep(value:T)->T where .T:.Type'builtin=T {value}",
-            "type default references",
+            "clause default references itself or a later parameter",
         ),
         (
             "fn keep(value:T)->T where .T:.Type'builtin=bool {value} fn bad() {keep<bool>(true);}",

@@ -129,18 +129,22 @@ impl<'h> Checker<'_, 'h> {
         Ok(inputs)
     }
 
-    pub(super) fn type_clause_params(&self, owner: OwnerId) -> Vec<hir::clause::ClauseParam<'h>> {
+    pub(super) fn type_clause_params(
+        &self,
+        owner: OwnerId,
+    ) -> std::borrow::Cow<'h, [hir::clause::ClauseParam<'h>]> {
+        use std::borrow::Cow;
         match &self.package.item(owner).unwrap().kind {
-            ItemKind::Trait(def) => def.clause_params.to_vec(),
-            ItemKind::EffectGroup(group) => group.clause_params.to_vec(),
-            ItemKind::Struct(def) => def.clause_params.to_vec(),
-            ItemKind::Enum(def) => def.clause_params.to_vec(),
-            ItemKind::Impl(def) => def.clause_params.to_vec(),
+            ItemKind::Trait(def) => Cow::Borrowed(def.clause_params),
+            ItemKind::EffectGroup(group) => Cow::Borrowed(group.clause_params),
+            ItemKind::Struct(def) => Cow::Borrowed(def.clause_params),
+            ItemKind::Enum(def) => Cow::Borrowed(def.clause_params),
+            ItemKind::Impl(def) => Cow::Borrowed(def.clause_params),
             ItemKind::TypeAlias(_, clauses, _) | ItemKind::Newtype(_, clauses, _) => {
-                clauses.to_vec()
+                Cow::Borrowed(clauses)
             }
             ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) => {
-                sig.clause_params.to_vec()
+                Cow::Borrowed(sig.clause_params)
             }
             ItemKind::Const(annotation, _) => function_types::normal_form_inputs(annotation)
                 .into_iter()
@@ -171,7 +175,7 @@ impl<'h> Checker<'_, 'h> {
                     })
                 })
                 .collect(),
-            _ => Vec::new(),
+            _ => Cow::Borrowed(&[]),
         }
     }
 
@@ -738,9 +742,14 @@ impl<'h> Checker<'_, 'h> {
     /// Concrete normalization is performed separately when the slot is omitted.
     pub(super) fn check_type_defaults(&mut self, owner: OwnerId) -> Result<(), Error> {
         let domains = self.trait_domains(owner)?;
-        let own_start = domains
-            .len()
-            .saturating_sub(self.type_clause_params(owner).len());
+        let clauses = self.type_clause_params(owner);
+        if !clauses
+            .iter()
+            .any(|clause| matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
+        {
+            return Ok(());
+        }
+        let own_start = domains.len().saturating_sub(clauses.len());
         if domains[own_start..].iter().any(|ty| *ty != p(P::Type)) {
             return self.check_trait_defaults(owner, &domains);
         }
@@ -751,44 +760,28 @@ impl<'h> Checker<'_, 'h> {
         {
             return self.check_normal_defaults(owner);
         }
-        let clauses = self.type_clause_params(owner);
-        let saved_owner = self.signature_owner.replace(owner);
-        let saved_context = self.context.clone();
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
-        let saved_substitution = std::mem::take(&mut self.alias_substitution);
-        let saved_value_bindings = std::mem::take(&mut self.alias_value_bindings);
-        self.context = self.binder_context(owner);
-        let result = (|| {
+        self.in_default_declaration(owner, |this| {
+            this.in_required_comptime = true;
+            this.context = this.binder_context(owner);
+            let offset = this.type_parameters[&owner].len() - clauses.len();
+            this.forbidden_default_inputs
+                .extend(&this.type_parameters[&owner][offset..]);
             for (slot, clause) in clauses.iter().enumerate() {
-                let hir::clause::ClauseParamKind::Optional(_, _, value) = clause.kind else {
-                    continue;
-                };
-                let checked = self.expr(value, Some(&p(P::Type)))?;
-                let offset = self.type_parameters[&owner].len() - clauses.len();
-                let forbidden = self.type_parameters[&owner][offset + slot..]
-                    .iter()
-                    .copied()
-                    .collect::<BTreeSet<_>>();
-                if !self
-                    .checked_declaration_inputs(&checked, value.span)?
-                    .is_disjoint(&forbidden)
-                {
-                    return Err(error(
-                        value.span,
-                        "type default references itself or a later parameter",
-                    ));
+                if let hir::clause::ClauseParamKind::Optional(_, _, value) = clause.kind {
+                    let checked = this.expr(value, Some(&p(P::Type)))?;
+                    let reads = this.checked_declaration_inputs(&checked, value.span)?;
+                    if !reads.is_disjoint(&this.forbidden_default_inputs) {
+                        return Err(error(
+                            value.span,
+                            "clause default references itself or a later parameter",
+                        ));
+                    }
                 }
+                this.forbidden_default_inputs
+                    .remove(&this.type_parameters[&owner][offset + slot]);
             }
             Ok(())
-        })();
-        self.signature_owner = saved_owner;
-        self.context = saved_context;
-        self.locals = saved_locals;
-        self.in_required_comptime = saved_mode;
-        self.alias_substitution = saved_substitution;
-        self.alias_value_bindings = saved_value_bindings;
-        result
+        })
     }
 
     pub(super) fn type_clause_default(
@@ -854,7 +847,7 @@ impl<'h> Checker<'_, 'h> {
             {
                 return Err(error(
                     value.span,
-                    "type default references itself or a later parameter",
+                    "clause default references itself or a later parameter",
                 ));
             }
             self.instantiate_input_types_in_scope(

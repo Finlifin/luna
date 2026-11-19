@@ -126,16 +126,7 @@ impl Checker<'_, '_> {
             return self.effect_request(expr, call, expected).map(Some);
         }
         if let H::ResolvedClauseParam(_, id) = expr.kind {
-            let declaration = DeclarationId {
-                package: semantic_package(&self.package_identities, id.pkg),
-                local: id.index,
-            };
-            if self.forbidden_default_inputs.contains(&declaration) {
-                return Err(error(
-                    expr.span,
-                    "normal-form default references itself or a later parameter",
-                ));
-            }
+            let declaration = self.visible_clause_input(id, expr.span)?;
             if let Some(value) = self.definition_input(declaration, expr.span)? {
                 if let Some(expected) = expected {
                     self.require_expression(&value.ty, expected, expr.span)?;

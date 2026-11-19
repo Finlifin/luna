@@ -77,6 +77,21 @@ typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
 但函数返回、类型别名、列表／记录载荷、生成定义或 metadata 传送不携带它，
 就会再次出现“同一个值在不同入口具有不同调用能力”的偏差。
 
+常量标注还暴露了一个方向相反的错误。以下程序中 `Factory` 的调用者应能使用
+`.Public`。当前用它形成 `Selected` 会在输入路由时报未知参数名；把这一处改成
+`.Actual` 却通过检查。
+
+```flurry
+pure comptime fn Head<...Actual: meta.List<Type>> -> Type { bool }
+const Factory: pure comptime fn<...Public: meta.List<Type>> -> Type = Head;
+typealias Selected = Factory<.Public = [u8]>;
+```
+
+`normal_form_constant_target` 从完成的常量取得 `Head` 的声明身份。这个身份能确定
+构造出的 NF 头，输入路由却也用它读回了实现的槽名。迁移后的常量直调和经过函数
+参数转发的调用都需使用同一份目标接口；两条路径须同时覆盖“接受 Public”和“拒绝
+Actual”。[常量目标解析](../compiler/elaboration/src/program/normal.rs)
+
 ### 必须随载体迁移的消费者
 
 继续沿 `9e3509d7` 的实际消费链核对，载体变更还必须覆盖以下边界：
