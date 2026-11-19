@@ -453,6 +453,23 @@ capability 前提。所选实现、实现实参、成员和实例化结果域由
 移出实现行的程序也须通过同一套检查。VM 接收代入后的程序时还会检查当前源码可见的
 阶段、词法 unsafe 权限和结果域。[算术与阶段检查](../compiler/program_verification/src/flow.rs) · [VM 接收](../compiler/comptime_interpretor/src/associated_execution.rs)
 
+例如，`trait Choice where T, X: T` 的默认成员调用 `accept(T, X)`。
+当实现提供 `Choice<Type, E>` 时，第二项要传递类型值；当它提供
+`Choice<bool, true>` 时，第二项传递布尔值。源码检查、实现选择与 VM
+准入都必须先将前一项代入后一项的域，再特化默认成员。源码 VM 和代码会话现共用声明参数域目录；生成新定义时也从这份目录检查身份占用。只记住 `X` 声明时
+的 sort 会把第一种合法调用误拒为 `expected comptime-value, got type`。
+[真实 sysroot 用例](../compiler/luna/tests/trait_query_failures.rs) · [替换规则](../compiler/nir/src/nominal_parameters/telescope.rs)
+
+初始化程序由不可变引用持有。捕获源码快照只复制目录项；特化程序时才按
+声明实参产生新代码。若分派表已带有具体成员，VM 仍核对程序来自选中的
+实现行，并在接收方检查结果类型。共享程序不能把一次调用的权限带到另一次调用。
+[初始化程序](../compiler/nir/src/associated_initializers.rs) · [分派表准入](../compiler/comptime_interpretor/src/associated_dispatch.rs)
+
+预生成分派表的默认方法也有这层依赖。VM 分别按方法声明和实际函数的参数域
+重建签名，并核对实现行指定的函数及实参。被动检查名义值时，字段和 capability
+复用同一次实参准入；即使字段吻合，缺少该实例的 capability 证据也不能通过。
+[默认方法用例](../compiler/luna/tests/newtypes.rs) · [被动观察用例](../compiler/comptime_interpretor/src/value_types/tests/passive_views.rs)
+
 **仍有一处过早的源码依赖。** 形成 `required` 快照时，检查器依据接收者和接口实参
 排除结构不相容的实现，随后为其余候选收集程序及可调用依赖。若 `First`、`Second`
 都实现 `Flag<bool>`，而 `Second.enabled` 引用正在形成的 `saved = read(First)`，
@@ -469,6 +486,16 @@ VM 在准入命名调用时固定定义位置。源码函数借用其包内的�
 声明、主体和程序证明。当前调用帧借用 VM 启动时已经存在的不可变包。后续交付的代码
 需要有足够长的所有者寿命，其缓存也要绑定到供应世界。这个交接决定何时能删除
 上面的候选依赖收集。
+
+这要求改变两处接口。今天 region 将整个 `Invocation` 连同剩余预算交给
+`execute`，收到完成值后才重新进入检查器。下一步需要让驱动在成员请求处
+交回控制权，连同尚未恢复的调用和原选择凭据一起保存。检查器据此在实现声明的
+词法环境中形成对应成员。模板若引用辅助函数，响应还需带上已经通过阶段检查和
+程序验证的函数定义；原调用帧继续持有启动时固定的定义，新调用固定响应提供的
+定义。安装期间的失败应返回给原读取点，任何未完成的定义都不能进入代码缓存。
+验收时应分别观察 `read(First)` 顺利返回、`read(Second)` 在实际依赖处报告
+循环，以及读取前已执行的 comptime 副作用只出现一次。
+[region 交接](../compiler/elaboration/src/program/block_regions/driver/region.rs) · [当前 VM 驱动](../compiler/elaboration/src/program/required/prepared.rs)
 
 源码检查具体成员读取时，先用接收者和接口实参代入成员声明域。普通数据和函数值
 在 NIR 中保留 `AssociatedValue` 及其成员身份。同一大字符串被四十个函数引用时，

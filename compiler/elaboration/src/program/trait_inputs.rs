@@ -144,6 +144,32 @@ impl Checker<'_, '_> {
         Ok(None)
     }
 
+    pub(super) fn bounded_input_substitution<'a>(
+        &self,
+        parameters: &[DeclarationId],
+        arguments: &'a [Term],
+        frames: &'a [Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<nir::DeclarationSubstitution<'a>, nir::type_computations::Error> {
+        use nir::type_computations::Error::Budget;
+        *fuel = fuel.checked_sub(parameters.len()).ok_or(Budget)?;
+        let mut domains = Vec::with_capacity(parameters.len());
+        for id in parameters {
+            let domain = self.observe_input_domain(*id, || {
+                *fuel = fuel.checked_sub(1).ok_or(Budget)?;
+                Ok(())
+            })?;
+            domains.push(domain.unwrap_or(&Term::Primitive(P::Type)));
+        }
+        nir::DeclarationSubstitution::bounded_domains(
+            parameters,
+            &domains,
+            arguments,
+            nir::DeclarationInputScope::Caller(frames),
+            fuel,
+        )
+    }
+
     pub(super) fn substituted_trait_domain(
         &mut self,
         domain: &Term,

@@ -276,7 +276,6 @@ impl<'program> Interpreter<'program> {
                 method_parameters: self.method_parameters.clone(),
                 method_origins: self.method_origins.clone(),
                 parameter_domains: self.declaration_parameter_domains.clone(),
-                parameter_sorts: self.declaration_parameter_sorts.clone(),
                 effects: self.effect_declarations.positions.clone(),
                 traits: self.trait_declarations.positions.clone(),
             }));
@@ -696,7 +695,6 @@ mod tests {
         let newtypes = first.newtypes.source.positions.clone();
         let aliases = first.alias_contracts.positions.clone();
         let domains = first.declaration_parameter_domains.clone();
-        let sorts = first.declaration_parameter_sorts.clone();
         first.events.push(Event::EnterFunction(DeclarationId {
             package: 1,
             local: 1,
@@ -707,7 +705,6 @@ mod tests {
         assert!(index.shares_directory(&next.functions));
         assert!(Arc::ptr_eq(&effects, &next.effect_declarations.positions));
         assert!(Arc::ptr_eq(&domains, &next.declaration_parameter_domains));
-        assert!(Arc::ptr_eq(&sorts, &next.declaration_parameter_sorts));
         assert!(Arc::ptr_eq(&heads, &next.normal_forms.positions));
         assert!(std::ptr::eq(
             next.normal_forms
@@ -741,10 +738,6 @@ mod tests {
         assert_eq!(
             next.declaration_parameter_domains.get(&parameter),
             Some(&Term::Primitive(Primitive::Bool))
-        );
-        assert_eq!(
-            next.declaration_parameter_sorts.get(&parameter),
-            Some(&nir::Sort::ComptimeValue)
         );
         let mut changed = source.as_ref().clone();
         changed.function_parameters[0].domains[0] = Term::Primitive(Primitive::Char);

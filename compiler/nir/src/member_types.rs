@@ -8,7 +8,8 @@ use crate::{
     type_computations::{Error, charge_term},
 };
 
-fn arguments(
+/// Build the substitution vector in Self, interface, method order.
+pub fn arguments(
     subject: &Term,
     interface: &[Term],
     method: &[Term],

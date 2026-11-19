@@ -1,6 +1,6 @@
 use nir::associated_initializers::AssociatedInitializer;
 use nir::program::{Capture, Expr, ExprKind as K, LocalId, SourceRange};
-use nir::{DeclarationId, DeclarationParameter, Primitive, Sort, Term};
+use nir::{DeclarationId, DeclarationSubstitution, Primitive, Sort, Term};
 use std::sync::Arc;
 fn expr(ty: Term, kind: K) -> Expr {
     Expr {
@@ -17,6 +17,16 @@ fn signature() -> Term {
         parameters: vec![],
         result: Box::new(boolean()),
     }
+}
+fn specialize(
+    template: &AssociatedInitializer,
+    ids: &[DeclarationId],
+    domains: &[Term],
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<AssociatedInitializer, nir::NominalAdmissionError> {
+    let inputs = DeclarationSubstitution::bounded(ids, domains, arguments, &[], fuel)?;
+    template.instantiate(&inputs, fuel)
 }
 fn call(comptime: bool) -> Expr {
     let ty = if comptime {
@@ -116,28 +126,96 @@ fn substitution_keeps_programs_and_recovers_after_budget_failure() {
         &mut 1000,
     )
     .unwrap();
-    let binders = [DeclarationParameter {
-        declaration: id,
-        sort: Sort::ComptimeValue,
-    }];
-    assert!(
-        template
-            .instantiate(&binders, &[Term::Bool(true)], &mut 1)
-            .is_err()
-    );
-    let value = template
-        .instantiate(&binders, &[Term::Bool(true)], &mut 1000)
-        .unwrap();
+
+    assert!(specialize(&template, &[id], &[boolean()], &[Term::Bool(true)], &mut 1).is_err());
+    let value = specialize(
+        &template,
+        &[id],
+        &[boolean()],
+        &[Term::Bool(true)],
+        &mut 1000,
+    )
+    .unwrap();
     assert_eq!(value.expression().kind, K::ComptimeValue(Term::Bool(true)));
-    assert!(
-        template
-            .instantiate(&binders, &[boolean()], &mut 1000)
-            .is_err()
-    );
+    assert!(specialize(&template, &[id], &[boolean()], &[boolean()], &mut 1000).is_err());
     assert!(matches!(
         template.expression().kind,
         K::ComptimeValue(Term::Rigid { .. })
     ));
+}
+
+#[test]
+fn dependent_value_input_can_supply_type_data_without_changing_the_template() {
+    let domain = DeclarationId {
+        package: 4,
+        local: 1,
+    };
+    let value = DeclarationId {
+        package: 4,
+        local: 2,
+    };
+    let type_ty = Term::Primitive(Primitive::Type);
+    let variable = Term::Rigid {
+        declaration: domain,
+        sort: Sort::Type,
+    };
+    let template = AssociatedInitializer::new(
+        expr(
+            variable.clone(),
+            K::ComptimeValue(Term::Rigid {
+                declaration: value,
+                sort: Sort::ComptimeValue,
+            }),
+        ),
+        &mut 1000,
+    )
+    .unwrap();
+    let domains = [type_ty.clone(), variable.clone()];
+    for (actual, payload, expected) in [
+        (type_ty, boolean(), K::TypeValue(boolean())),
+        (
+            boolean(),
+            Term::Bool(true),
+            K::ComptimeValue(Term::Bool(true)),
+        ),
+    ] {
+        let result = specialize(
+            &template,
+            &[domain, value],
+            &domains,
+            &[actual.clone(), payload.clone()],
+            &mut 1000,
+        )
+        .unwrap();
+        assert_eq!(result.expression().ty, actual);
+        assert_eq!(result.expression().kind, expected);
+    }
+    assert_eq!(template.expression().ty, variable);
+}
+
+#[test]
+fn sharing_programs_preserves_code_and_only_detaching_a_shared_tree_needs_copy_work() {
+    let text = "wide".repeat(1024);
+    let program = AssociatedInitializer::new(
+        expr(
+            Term::Primitive(Primitive::Str),
+            K::Literal(nir::program::Literal::String(text)),
+        ),
+        &mut 100_000,
+    )
+    .unwrap();
+    let retained = program.clone();
+    assert!(std::ptr::eq(program.expression(), retained.expression()));
+    assert_eq!(
+        retained.into_expression(&mut 1),
+        Err(nir::NominalAdmissionError::Budget)
+    );
+    let shared = program.clone().into_shared_expression();
+    assert!(std::ptr::eq(program.expression(), shared.as_ref()));
+    let detached = program.clone().into_expression(&mut 100_000).unwrap();
+    assert_eq!(&detached, program.expression());
+    drop(shared);
+    assert_eq!(program.into_expression(&mut 0).unwrap(), detached);
 }
 
 #[test]
@@ -168,21 +246,13 @@ fn substitution_bounds_repeated_large_types_before_copying() {
         },
     );
     let template = AssociatedInitializer::new(closure, &mut 10000).unwrap();
-    let parameters = [DeclarationParameter {
-        declaration,
-        sort: Sort::Type,
-    }];
+    let domains = [Term::Primitive(Primitive::Type)];
     let arguments = [Term::Tuple(vec![boolean(); 64])];
     let mut fuel = 500;
-    assert!(
-        template
-            .instantiate(&parameters, &arguments, &mut fuel)
-            .is_err()
-    );
+    assert!(specialize(&template, &[declaration], &domains, &arguments, &mut fuel).is_err());
     assert!(fuel < 500, "failed preflight must retain consumed work");
-    let specialized = template
-        .instantiate(&parameters, &arguments, &mut 100000)
-        .unwrap();
+    let specialized =
+        specialize(&template, &[declaration], &domains, &arguments, &mut 100000).unwrap();
     let K::Closure { body, .. } = &specialized.expression().kind else {
         panic!("closure")
     };
@@ -201,13 +271,11 @@ fn substitution_bounds_repeated_large_types_before_copying() {
 
 #[test]
 fn substitution_charges_unused_inputs_once_instead_of_expanding_them() {
-    let parameter = DeclarationParameter {
-        declaration: DeclarationId {
-            package: 9,
-            local: 2,
-        },
-        sort: Sort::Type,
+    let parameter = DeclarationId {
+        package: 9,
+        local: 2,
     };
+    let domains = [Term::Primitive(Primitive::Type)];
     let body = expr(
         Term::Primitive(Primitive::Type),
         K::TypeValue(Term::Tuple(vec![boolean(); 32])),
@@ -215,17 +283,20 @@ fn substitution_charges_unused_inputs_once_instead_of_expanding_them() {
     let template = AssociatedInitializer::new(body, &mut 10000).unwrap();
     let argument = Term::Tuple(vec![boolean(); 64]);
     let mut fuel = 500;
-    let result = template
-        .instantiate(&[parameter], &[argument], &mut fuel)
-        .unwrap();
+    let result = specialize(&template, &[parameter], &domains, &[argument], &mut fuel).unwrap();
     assert_eq!(result, template);
     assert!(fuel < 500);
     assert!(fuel > 0);
     // Unused parameters still obey the declared input sort.
     assert!(
-        template
-            .instantiate(&[parameter], &[Term::Bool(true)], &mut 500)
-            .is_err()
+        specialize(
+            &template,
+            &[parameter],
+            &domains,
+            &[Term::Bool(true)],
+            &mut 500
+        )
+        .is_err()
     );
 }
 

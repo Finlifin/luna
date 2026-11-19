@@ -190,7 +190,6 @@ pub(super) struct SourceIndexes {
     pub(super) method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
     pub(super) method_origins: Arc<HashMap<DeclarationId, Option<DeclarationId>>>,
     pub(super) parameter_domains: Arc<BTreeMap<DeclarationId, Term>>,
-    pub(super) parameter_sorts: Arc<BTreeMap<DeclarationId, nir::Sort>>,
     pub(super) effects: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) traits: Arc<BTreeMap<DeclarationId, usize>>,
 }

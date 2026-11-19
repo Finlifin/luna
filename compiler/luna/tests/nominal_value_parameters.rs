@@ -3444,14 +3444,22 @@ fn cyclic_associated_initializer_dispatch_is_rejected_without_recursion() {
     };
     implementation.associated_initializers[0].1 =
         nir::associated_initializers::AssociatedInitializer::new(recursive, &mut 1000).unwrap();
-    let binders = implementation.parameter_binders().unwrap();
     for instance in &mut package.dispatch_instances {
         if instance.implementation == implementation.declaration {
+            let mut fuel = 1000;
+            let inputs = nir::DeclarationSubstitution::bounded(
+                &implementation.type_parameters,
+                &implementation.parameter_types,
+                &instance.arguments,
+                &[],
+                &mut fuel,
+            )
+            .unwrap();
             instance.associated_initializers = vec![(
                 member,
                 implementation.associated_initializers[0]
                     .1
-                    .instantiate(&binders, &instance.arguments, &mut 1000)
+                    .instantiate(&inputs, &mut fuel)
                     .unwrap(),
             )];
         }
@@ -3459,7 +3467,12 @@ fn cyclic_associated_initializer_dispatch_is_rejected_without_recursion() {
     let mut vm =
         comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
     for _ in 0..2 {
-        assert!(vm.invoke(support::id(&package, "run"), vec![]).is_err());
+        assert_eq!(
+            vm.invoke(support::id(&package, "run"), vec![])
+                .unwrap_err()
+                .kind,
+            comptime_interpretor::ErrorKind::CyclicAssociatedInitializer(member),
+        );
     }
 }
 

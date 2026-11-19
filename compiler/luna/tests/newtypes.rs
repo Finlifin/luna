@@ -6446,6 +6446,63 @@ fn associated_newtype_constants_keep_generic_representation_and_error_payloads()
 }
 
 #[test]
+fn closed_dispatch_checks_dependent_inputs_on_the_selected_default_method() {
+    use nir::program::{DispatchInstance, MethodInstance};
+    use nir::{Primitive, Term};
+    let source = "trait Choice where T, X: T { fn probe() -> bool { true } }
+        struct First {}
+        impl Choice<bool'type, bool> for First {}
+        impl Choice<bool, false> for bool {}";
+    let Artifact::Nir(mut package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("NIR")
+    };
+    let interface = package.traits.iter().find(|t| t.name == "Choice").unwrap();
+    let member = &interface.methods[0];
+    let body = member.default.unwrap();
+    let instances: Vec<_> = package
+        .implementations
+        .iter()
+        .filter(|row| row.interface == Some(interface.declaration))
+        .map(|row| {
+            let inputs = std::iter::once(row.subject.clone())
+                .chain(row.interface_arguments.clone())
+                .collect();
+            DispatchInstance {
+                interface_arguments: row.interface_arguments.clone(),
+                interface: interface.declaration,
+                subject: row.subject.clone(),
+                implementation: row.declaration,
+                arguments: vec![],
+                methods: vec![MethodInstance {
+                    method_arguments: vec![],
+                    member: member.declaration,
+                    body,
+                    arguments: inputs,
+                }],
+                associated: vec![],
+                associated_initializers: vec![],
+            }
+        })
+        .collect();
+    assert_eq!(instances.len(), 2);
+    package.dispatch_instances = instances;
+    comptime_interpretor::Interpreter::new(&package, Default::default()).unwrap();
+    let type_input = package
+        .dispatch_instances
+        .iter_mut()
+        .find(|row| row.interface_arguments[0] == Term::Primitive(Primitive::Type))
+        .unwrap();
+    type_input.methods[0].arguments[2] = Term::Bool(true);
+    assert!(matches!(
+        comptime_interpretor::Interpreter::new(&package, Default::default())
+            .err()
+            .unwrap()
+            .kind,
+        comptime_interpretor::ErrorKind::InvalidCallPlan
+    ));
+}
+
+#[test]
 fn interpreter_admission_rechecks_completed_newtype_dispatch_values() {
     let source = "newtype Flag=bool;trait Source {assoc flag:Flag;fn read()->bool;}impl Source for bool {assoc flag:Flag=true.as(Flag);fn read()->bool {Self.as(Source).flag.as(bool)}}fn run()->bool {bool.as(Source).read()}";
     let Artifact::Nir(mut package) = compile(source, Emit::Nir).unwrap() else {
@@ -6465,7 +6522,7 @@ fn interpreter_admission_rechecks_completed_newtype_dispatch_values() {
         value.clone()
     } else {
         let (member, initializer) = implementation.associated_initializers.remove(0);
-        (member, initializer.into_expression())
+        (member, initializer.into_expression(&mut 10000).unwrap())
     };
     nir::completed_values::validate_with_newtypes(&completed, package.newtypes.iter(), &mut 10000)
         .unwrap();
@@ -6571,7 +6628,7 @@ fn interpreter_admission_rejects_forged_nominal_completed_dispatch_payloads() {
             value.clone()
         } else {
             let (member, initializer) = implementation.associated_initializers.remove(0);
-            (member, initializer.into_expression())
+            (member, initializer.into_expression(&mut 10000).unwrap())
         };
         implementation.associated = vec![(member, completed.clone())];
         let interface = implementation.interface_instance().unwrap();

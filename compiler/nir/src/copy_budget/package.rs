@@ -71,7 +71,7 @@ pub fn charge_normal_form_payload<'a>(
 /// Copy a source's owned declaration payloads after a complete preflight. The
 /// selected dispatch table is neither traversed nor copied: it belongs to a
 /// different execution view. This grants no phase, type or resource authority.
-/// Immutable closure bodies retain their ordinary Arc-sharing behavior.
+/// Immutable closure bodies and associated programs retain their existing owners.
 pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Result<n::Package> {
     // Exhaustive destructuring makes a new package field require an explicit
     // ownership/accounting decision here, rather than inheriting a hidden clone.
@@ -378,8 +378,10 @@ impl Meter<'_> {
             self.node(Node::Expr(value))?;
         }
         self.width(associated_initializers.len())?;
-        for (_, initializer) in associated_initializers {
-            self.node(Node::Expr(initializer.expression()))?;
+        if self.follow_shared {
+            for (_, initializer) in associated_initializers {
+                self.node(Node::Expr(initializer.expression()))?;
+            }
         }
         self.width(methods.len())?;
         for (name, _) in methods {

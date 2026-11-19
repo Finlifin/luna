@@ -948,6 +948,7 @@ macro_rules! value {
 }
 
 mod associated_catalog;
+mod associated_dispatch;
 mod associated_execution;
 mod code_session;
 use code_session::CodeOrigin;
@@ -1055,7 +1056,6 @@ pub struct Interpreter<'a> {
     method_resolver: Option<&'a MethodResolver<'a>>,
     associated_resolver: Option<&'a AssociatedResolver<'a>>,
     pointer_copy: Option<PointerCopyPermission<'a>>,
-    declaration_parameter_sorts: Arc<BTreeMap<DeclarationId, nir::Sort>>,
     declaration_parameter_domains: Arc<BTreeMap<DeclarationId, Term>>,
     method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
     // None records an ambiguous member identity across different interfaces.
@@ -1273,62 +1273,16 @@ impl<'a> Interpreter<'a> {
         }
         let initial_trait_fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
         let mut trait_parameter_fuel = initial_trait_fuel;
-        let (declaration_parameter_domains, declaration_parameter_sorts) =
-            if let Some(index) = &positions {
-                (
-                    index.parameter_domains.clone(),
-                    index.parameter_sorts.clone(),
-                )
-            } else {
-                let declaration_parameter_domains = match admitted_domains {
-                    Some(domains) => domains,
-                    None => Arc::new(
-                        package
-                            .declaration_parameter_domains_checked(&mut trait_parameter_fuel)
-                            .map_err(|reason| match reason {
-                                nir::type_computations::Error::Budget => Error {
-                                    kind: ErrorKind::StepsExhausted,
-                                    source: None,
-                                },
-                                _ => invalid(),
-                            })?,
-                    ),
-                };
-                trait_parameter_fuel = trait_parameter_fuel
-                    .checked_sub(declaration_parameter_domains.len())
-                    .ok_or(Error {
-                        kind: ErrorKind::StepsExhausted,
-                        source: None,
-                    })?;
-                let declaration_parameter_sorts: BTreeMap<_, _> = declaration_parameter_domains
-                    .iter()
-                    .map(|(id, domain)| {
-                        (
-                            *id,
-                            if *domain == Term::Primitive(Primitive::Type) {
-                                nir::Sort::Type
-                            } else {
-                                nir::Sort::ComptimeValue
-                            },
-                        )
-                    })
-                    .collect();
-                (
-                    declaration_parameter_domains,
-                    Arc::new(declaration_parameter_sorts),
-                )
-            };
-        let input_binders = |parameters: &[DeclarationId]| {
-            parameters
-                .iter()
-                .map(|id| nir::DeclarationParameter {
-                    declaration: *id,
-                    sort: declaration_parameter_sorts
-                        .get(id)
-                        .copied()
-                        .unwrap_or(nir::Sort::Type),
-                })
-                .collect::<Vec<_>>()
+        let declaration_parameter_domains = if let Some(index) = &positions {
+            index.parameter_domains.clone()
+        } else if let Some(domains) = admitted_domains {
+            domains
+        } else {
+            Arc::new(
+                package
+                    .declaration_parameter_domains_checked(&mut trait_parameter_fuel)
+                    .map_err(constructor_premises::failure)?,
+            )
         };
         let assumed_interfaces =
             constructor_premises::expand(assumptions, &traits, &mut trait_parameter_fuel)?;
@@ -1339,6 +1293,16 @@ impl<'a> Interpreter<'a> {
                 .iter()
                 .any(|parent| !traits.contains_key(&parent.declaration))
             {
+                return Err(invalid());
+            }
+        }
+        // Explicit instances contain demanded members only. Index them before
+        // considering legacy concrete rows, so an omitted conditional method
+        // never enters the executable directory.
+        let mut explicit = HashMap::new();
+        for instance in dispatch_instances {
+            let key = (instance.interface_instance(), instance.subject.clone());
+            if explicit.insert(key, instance.implementation).is_some() {
                 return Err(invalid());
             }
         }
@@ -1390,17 +1354,16 @@ impl<'a> Interpreter<'a> {
                         nir::NominalAdmissionError::Invalid(_) => invalid(),
                     })?;
             }
-            if concrete
-                && closed_dispatch
-                && worlds
-                    .insert(
-                        (interface.clone(), implementation.subject.clone()),
-                        implementation.declaration,
-                    )
-                    .is_some()
-            {
-                return Err(invalid());
-            }
+            let implicit_methods = if concrete && closed_dispatch {
+                let key = (interface.clone(), implementation.subject.clone());
+                let implicit = !explicit.contains_key(&key);
+                if worlds.insert(key, implementation.declaration).is_some() {
+                    return Err(invalid());
+                }
+                implicit
+            } else {
+                false
+            };
             let mut supplied = BTreeMap::new();
             for (name, body) in &implementation.methods {
                 if supplied.insert(name, body).is_some() || functions.method_slot(body).is_none() {
@@ -1449,7 +1412,7 @@ impl<'a> Interpreter<'a> {
                 {
                     return Err(invalid());
                 }
-                if concrete && closed_dispatch && !member.is_quote {
+                if implicit_methods && !member.is_quote {
                     let arguments = if member.default == Some(body) {
                         std::iter::once(implementation.subject.clone())
                             .chain(interface.arguments.iter().cloned())
@@ -1516,190 +1479,54 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        // Associated payload admission shares the constructor's remaining
-        // allowance. A fresh per-member limit would hide already spent work.
-        let associated_failure = |failure: nir::value_admission::Error, source| Error {
-            kind: match failure {
-                nir::value_admission::Error::Budget => ErrorKind::StepsExhausted,
-                nir::value_admission::Error::Unresolved(_) => ErrorKind::TypeContractUnresolved,
-                nir::value_admission::Error::Invalid(_) => ErrorKind::InvalidCallPlan,
-            },
-            source: Some(source),
-        };
-        let mut instance_keys = HashSet::new();
-        for instance in dispatch_instances {
-            if !instance_keys.insert((instance.interface_instance(), instance.subject.clone())) {
+        // Index every selection before validating obligations: a required row
+        // may follow its consumer. The directory stays private until all
+        // selections, members and obligations have been admitted.
+        for (key, selected) in explicit {
+            if worlds
+                .insert(key, selected)
+                .is_some_and(|old| old != selected)
+            {
                 return Err(invalid());
             }
+        }
+        for instance in dispatch_instances {
             let implementation = implementations
                 .get(&instance.implementation)
                 .copied()
                 .ok_or_else(invalid)?;
-            if implementation
-                .interface_instance()
-                .ok_or_else(invalid)?
-                .instantiate_parameters(
-                    &input_binders(&implementation.type_parameters),
-                    &instance.arguments,
-                )
-                .map_err(|_| invalid())?
+            let implementation_inputs = nir::DeclarationSubstitution::bounded(
+                &implementation.type_parameters,
+                &implementation.parameter_types,
+                &instance.arguments,
+                &[],
+                &mut trait_parameter_fuel,
+            )
+            .map_err(constructor_premises::failure)?;
+            let interface = implementation.interface_instance().ok_or_else(invalid)?;
+            if implementation_inputs
+                .instantiate_interface_bounded(&interface, &mut trait_parameter_fuel)
+                .map_err(constructor_premises::failure)?
                 != instance.interface_instance()
-                || implementation
-                    .subject
-                    .instantiate_parameters(
-                        &input_binders(&implementation.type_parameters),
-                        &instance.arguments,
-                    )
-                    .map_err(|_| invalid())?
+                || implementation_inputs
+                    .instantiate_bounded(&implementation.subject, &mut trait_parameter_fuel)
+                    .map_err(constructor_premises::failure)?
                     != instance.subject
             {
                 return Err(invalid());
             }
             let contract = traits.get(&instance.interface).ok_or_else(invalid)?;
-            for (member, initializer) in &instance.associated_initializers {
-                let member_contract = contract
-                    .associated
-                    .iter()
-                    .find(|m| m.declaration == *member)
-                    .ok_or_else(invalid)?;
-                if member_contract.phase == nir::program::TraitPhase::Comptime
-                    && !implementation.phases.comptime
-                {
-                    return Err(invalid());
-                }
-                let inputs: Vec<_> = std::iter::once(instance.subject.clone())
-                    .chain(instance.interface_arguments.iter().cloned())
-                    .collect();
-                let expected = member_contract
-                    .ty
-                    .instantiate_parameters(
-                        &contract
-                            .binders_with_self_checked(&mut trait_parameter_fuel)
-                            .map_err(constructor_premises::failure)?,
-                        &inputs,
-                    )
-                    .map_err(|_| invalid())?;
-                if !selected_types::same(
-                    &initializer.expression().ty,
-                    &expected,
-                    &associated_values,
-                    &mut trait_parameter_fuel,
-                )
-                .map_err(|kind| Error {
-                    kind,
-                    source: Some(initializer.expression().source),
-                })? {
-                    return Err(invalid());
-                }
-                if implementation.associated.iter().any(|(id, _)| id == member) {
-                    return Err(invalid());
-                }
-                let mut originals = implementation
-                    .associated_initializers
-                    .iter()
-                    .filter(|(id, _)| id == member);
-                let (_, original) = originals.next().ok_or_else(invalid)?;
-                if originals.next().is_some() {
-                    return Err(invalid());
-                }
-                let specialized = original
-                    .instantiate(
-                        &input_binders(&implementation.type_parameters),
-                        &instance.arguments,
-                        &mut trait_parameter_fuel,
-                    )
-                    .map_err(|failure| {
-                        associated_failure(failure, initializer.expression().source)
-                    })?;
-                if specialized != *initializer {
-                    return Err(invalid());
-                }
-            }
-            for (member, value) in &instance.associated {
-                let member_contract = contract
-                    .associated
-                    .iter()
-                    .find(|m| m.declaration == *member)
-                    .ok_or_else(invalid)?;
-                if member_contract.phase == nir::program::TraitPhase::Comptime
-                    && !implementation.phases.comptime
-                {
-                    return Err(invalid());
-                }
-                let member_inputs: Vec<_> = std::iter::once(instance.subject.clone())
-                    .chain(instance.interface_arguments.iter().cloned())
-                    .collect();
-                let member_type = member_contract
-                    .ty
-                    .instantiate_parameters(
-                        &contract
-                            .binders_with_self_checked(&mut trait_parameter_fuel)
-                            .map_err(constructor_premises::failure)?,
-                        &member_inputs,
-                    )
-                    .map_err(|_| invalid())?;
-                if !selected_types::same(
-                    &value.ty,
-                    &member_type,
-                    &associated_values,
-                    &mut trait_parameter_fuel,
-                )
-                .map_err(|kind| Error {
-                    kind,
-                    source: Some(value.source),
-                })? {
-                    return Err(invalid());
-                }
-                let mut originals = implementation
-                    .associated
-                    .iter()
-                    .filter(|(id, _)| id == member);
-                let (_, original) = originals.next().ok_or_else(invalid)?;
-                // Payloads are completed values or closed snapshot graphs.
-                // Reconstruction cannot invoke arbitrary code or capture the
-                // invoking function's lexical environment.
-                for expression in [value, original] {
-                    nir::completed_values::validate_in_layouts(
-                        expression,
-                        package,
-                        &|id| normal_forms.get(&id),
-                        &mut trait_parameter_fuel,
-                    )
-                    .map_err(|failure| associated_failure(failure, value.source))?;
-                }
-                nir::copy_budget::charge_substitution(
-                    original,
-                    &input_binders(&implementation.type_parameters),
-                    &instance.arguments,
-                    &mut trait_parameter_fuel,
-                )
-                .map_err(|failure| Error {
-                    kind: match failure {
-                        nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
-                        nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
-                    },
-                    source: Some(value.source),
-                })?;
-                if originals.next().is_some()
-                    || original
-                        .instantiate_parameters(
-                            &input_binders(&implementation.type_parameters),
-                            &instance.arguments,
-                        )
-                        .map_err(|_| invalid())?
-                        != *value
-                {
-                    return Err(invalid());
-                }
-            }
+            associated_dispatch::validate(
+                instance,
+                implementation,
+                &implementation_inputs,
+                contract,
+                &associated_values,
+                package,
+                &|id| normal_forms.get(&id),
+                &mut trait_parameter_fuel,
+            )?;
 
-            // An explicit dispatch instance contains demanded members only.
-            // It supersedes the legacy concrete-implementation lookup, so an
-            // omitted conditional member cannot be recovered from that table.
-            let instance_interface = instance.interface_instance();
-            method_bodies.retain(|(interface, subject, _), _| {
-                interface != &instance_interface || subject != &instance.subject
-            });
             let mut method_keys = HashSet::new();
             for method in &instance.methods {
                 let member = contract
@@ -1728,58 +1555,48 @@ impl<'a> Interpreter<'a> {
                 } else {
                     instance.arguments.clone()
                 };
-                let expected_arguments: Vec<_> = prefix_arguments
-                    .iter()
-                    .cloned()
-                    .chain(method.method_arguments.iter().cloned())
-                    .collect();
-                if method.member != member.declaration
-                    || method.body != expected_body
-                    || method.arguments != expected_arguments
+                if method.body != expected_body
+                    || method
+                        .arguments
+                        .iter()
+                        .ne(prefix_arguments.iter().chain(&method.method_arguments))
                 {
                     return Err(invalid());
                 }
                 if member.is_quote || functions.quote(&method.body).is_some() {
                     return Err(invalid());
                 }
-                let ty = if let Some(function) = functions.declaration(&method.body) {
-                    function
-                        .signature
-                        .instantiate_parameters(
-                            &input_binders(&function.type_parameters),
-                            &method.arguments,
-                        )
-                        .map_err(|_| invalid())?
-                        .with_comptime_phase(
-                            function.phase == nir::program::FunctionPhase::Comptime,
-                        )
-                        .with_unsafe_call_requirement(function.is_unsafe)
-                } else if let Some(identity) = functions.runtime_identity(&method.body) {
-                    identity
-                        .signature
-                        .instantiate_parameters(
-                            &input_binders(&identity.type_parameters),
-                            &method.arguments,
-                        )
-                        .map_err(|_| invalid())?
-                } else {
-                    return Err(invalid());
-                };
-                let required = member
-                    .signature
-                    .instantiate_parameters(
-                        &contract
-                            .binders_with_self_checked(&mut trait_parameter_fuel)
-                            .map_err(constructor_premises::failure)?
-                            .into_iter()
-                            .chain(input_binders(&member.type_parameters))
-                            .collect::<Vec<_>>(),
-                        &std::iter::once(instance.subject.clone())
-                            .chain(instance.interface_arguments.iter().cloned())
-                            .chain(method.method_arguments.iter().cloned())
-                            .collect::<Vec<_>>(),
-                    )
-                    .map_err(|_| invalid())?;
+                let formation = functions.formation(&method.body).ok_or_else(invalid)?;
+                let domains = function_inputs::input_domains(
+                    &declaration_parameter_domains,
+                    formation.parameters,
+                    &mut trait_parameter_fuel,
+                )
+                .map_err(constructor_premises::failure)?;
+                let body_inputs = nir::DeclarationSubstitution::bounded_domains(
+                    formation.parameters,
+                    &domains,
+                    &method.arguments,
+                    nir::DeclarationInputScope::Caller(&[]),
+                    &mut trait_parameter_fuel,
+                )
+                .map_err(constructor_premises::failure)?;
+                let ty = formation.qualify(
+                    body_inputs
+                        .instantiate_bounded(formation.signature, &mut trait_parameter_fuel)
+                        .map_err(constructor_premises::failure)?,
+                );
+                let required = nir::member_types::method(
+                    contract,
+                    member,
+                    &instance.subject,
+                    &instance.interface_arguments,
+                    &method.method_arguments,
+                    |id, _| Ok(declaration_parameter_domains.get(&id)),
+                    &[],
+                    &mut trait_parameter_fuel,
+                )
+                .map_err(constructor_premises::failure)?;
                 if !selected_types::same(
                     &ty,
                     required.ordinary().map_err(|_| invalid())?,
@@ -1801,27 +1618,10 @@ impl<'a> Interpreter<'a> {
                 }
                 method_bodies.insert(key, value);
             }
-            let key = (instance.interface_instance(), instance.subject.clone());
-            if worlds
-                .get(&key)
-                .is_some_and(|old| *old != instance.implementation)
-            {
-                return Err(invalid());
-            }
-            worlds.insert(key, instance.implementation);
-        }
-        for instance in dispatch_instances {
-            let implementation = implementations
-                .get(&instance.implementation)
-                .copied()
-                .ok_or_else(invalid)?;
             for capability in &implementation.capabilities {
-                let capability = capability
-                    .instantiate_parameters(
-                        &input_binders(&implementation.type_parameters),
-                        &instance.arguments,
-                    )
-                    .map_err(|_| invalid())?;
+                let capability = implementation_inputs
+                    .instantiate_requirement_bounded(capability, &mut trait_parameter_fuel)
+                    .map_err(constructor_premises::failure)?;
                 if !worlds
                     .contains_key(&(capability.interface_instance(), capability.subject.clone()))
                     && !assumed_interfaces
@@ -1841,18 +1641,20 @@ impl<'a> Interpreter<'a> {
             let contract = traits
                 .get(&interface.declaration)
                 .expect("checked interface");
-            let parameters = contract
-                .binders_with_self_checked(&mut trait_parameter_fuel)
+            let arguments = nir::member_types::arguments(
+                subject,
+                &interface.arguments,
+                &[],
+                &mut trait_parameter_fuel,
+            )
+            .map_err(constructor_premises::failure)?;
+            let inputs = contract
+                .input_substitution(&arguments, &[], &mut trait_parameter_fuel)
                 .map_err(constructor_premises::failure)?;
             for capability in &contract.capabilities {
-                let capability = capability
-                    .instantiate_parameters(
-                        &parameters,
-                        &std::iter::once(subject.clone())
-                            .chain(interface.arguments.iter().cloned())
-                            .collect::<Vec<_>>(),
-                    )
-                    .map_err(|_| invalid())?;
+                let capability = inputs
+                    .instantiate_requirement_bounded(capability, &mut trait_parameter_fuel)
+                    .map_err(constructor_premises::failure)?;
                 if !worlds
                     .contains_key(&(capability.interface_instance(), capability.subject.clone()))
                     && !assumed_interfaces
@@ -1861,13 +1663,10 @@ impl<'a> Interpreter<'a> {
                     return Err(invalid());
                 }
             }
-            let arguments: Vec<_> = std::iter::once(subject.clone())
-                .chain(interface.arguments.iter().cloned())
-                .collect();
             for parent in &contract.parents {
-                let parent = parent
-                    .instantiate_parameters(&parameters, &arguments)
-                    .map_err(|_| invalid())?;
+                let parent = inputs
+                    .instantiate_interface_bounded(parent, &mut trait_parameter_fuel)
+                    .map_err(constructor_premises::failure)?;
                 if !worlds.contains_key(&(parent.clone(), subject.clone()))
                     && !assumed_interfaces.contains(&(parent, subject.clone()))
                 {
@@ -1941,7 +1740,6 @@ impl<'a> Interpreter<'a> {
                 trait_declarations: traits,
                 effect_declarations,
                 method_parameters,
-                declaration_parameter_sorts,
                 declaration_parameter_domains,
                 method_contracts,
                 method_origins,
@@ -3002,52 +2800,6 @@ impl<'a> Interpreter<'a> {
         }
         result
     }
-    /// Search retained evidence only. Missing selection can be delegated by an
-    /// active caller; it is not a disproved capability or permission to execute.
-    fn capabilities_hold_parameters(
-        &self,
-        requirements: &[nir::program::TraitRequirement],
-        parameters: &[nir::DeclarationParameter],
-        arguments: &[Term],
-        fuel: &mut usize,
-    ) -> Result<bool, ErrorKind> {
-        for requirement in requirements {
-            for term in
-                std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
-            {
-                nir::copy_budget::charge_type_substitution(term, parameters, arguments, fuel)
-                    .map_err(|reason| match reason {
-                        nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
-                        nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
-                    })?;
-            }
-            let mut requirement = requirement
-                .instantiate_parameters(parameters, arguments)
-                .map_err(|_| ErrorKind::Type)?;
-            if self.assumed_interfaces.contains(&(
-                requirement.interface_instance(),
-                requirement.subject.clone(),
-            )) {
-                continue;
-            }
-            requirement.subject =
-                selected_types::view(&requirement.subject, &self.associated_values, fuel)?;
-            for argument in &mut requirement.interface_arguments {
-                *argument = selected_types::view(argument, &self.associated_values, fuel)?;
-            }
-            if !self.implemented_interfaces.contains_key(&(
-                requirement.interface_instance(),
-                requirement.subject.clone(),
-            )) && !self
-                .assumed_interfaces
-                .contains(&(requirement.interface_instance(), requirement.subject))
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
     fn integer_operation<T>(
         &mut self,
         source: Option<SourceRange>,
@@ -6490,8 +6242,6 @@ mod normal_input_data_tests {
             arguments: vec![Term::Primitive(Primitive::Type)],
         };
         Arc::make_mut(&mut vm.declaration_parameter_domains).insert(parameter, domain.clone());
-        Arc::make_mut(&mut vm.declaration_parameter_sorts)
-            .insert(parameter, nir::Sort::ComptimeValue);
         let nominal = |fields| Term::NominalValue {
             ty: Box::new(domain.clone()),
             variant: None,

@@ -65,13 +65,9 @@ pub(super) fn expand(
         reserve(contract.parents.len(), fuel)?;
         // This second copy becomes the substitution input and remains distinct
         // from the owned key retained in the established-premise set.
-        charge_term(&premise.subject, fuel).map_err(failure)?;
-        for argument in &premise.interface_arguments {
-            charge_term(argument, fuel).map_err(failure)?;
-        }
-        let arguments: Vec<_> = std::iter::once(premise.subject.clone())
-            .chain(premise.interface_arguments.iter().cloned())
-            .collect();
+        let arguments =
+            nir::member_types::arguments(&premise.subject, &premise.interface_arguments, &[], fuel)
+                .map_err(failure)?;
         let substitution = contract
             .input_substitution(&arguments, &[], fuel)
             .map_err(failure)?;

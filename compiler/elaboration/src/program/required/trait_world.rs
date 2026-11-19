@@ -57,21 +57,20 @@ impl Checker<'_, '_> {
                 }
             }
             let mut associated_initializers = Vec::new();
+            self.required_steps = self
+                .required_steps
+                .checked_sub(row.associated_initializers.len() as u64)
+                .ok_or_else(|| {
+                    error(
+                        span,
+                        "required associated program directory budget exhausted",
+                    )
+                })?;
             for (member, program) in &row.associated_initializers {
                 if retained.contains(&Dependency::ImplementationMember {
                     implementation: row.declaration,
                     member: Member::Associated(*member),
                 }) {
-                    nir::copy_budget::charge_expression(
-                        program.expression(),
-                        &mut self.required_steps,
-                    )
-                    .map_err(|_| {
-                        error(
-                            span,
-                            "required associated program snapshot budget exhausted",
-                        )
-                    })?;
                     associated_initializers.push((*member, program.clone()));
                 }
             }

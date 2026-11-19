@@ -1,11 +1,11 @@
 //! Checked initialization programs, distinct from completed associated values.
 //! Formation, protocol evidence and full phase checking remain caller duties.
 use crate::{
-    DeclarationParameter, Term,
+    DeclarationSubstitution, Term,
     program::{Expr, ExprKind as K},
     value_admission::Error,
 };
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 /// Source-owned programs, indexed by implementation and member. Selecting a
 /// row grants no authority to execute a template from this directory.
@@ -61,8 +61,8 @@ pub enum MemberSource<'a> {
     Initializer(&'a AssociatedInitializer),
 }
 
-impl MemberSource<'_> {
-    pub fn expression(&self) -> &Expr {
+impl<'a> MemberSource<'a> {
+    pub fn expression(&self) -> &'a Expr {
         match self {
             Self::Value(value) => value,
             Self::Initializer(template) => template.expression(),
@@ -127,7 +127,7 @@ impl fmt::Display for AssociatedSelection {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AssociatedInitializer {
-    expression: Expr,
+    expression: Arc<Expr>,
 }
 impl AssociatedInitializer {
     pub fn new(expression: Expr, fuel: &mut usize) -> Result<Self, Error> {
@@ -135,29 +135,37 @@ impl AssociatedInitializer {
             return Err("associated initializer cannot capture caller locals".into());
         }
         check_calls(&expression, fuel, 0)?;
-        Ok(Self { expression })
+        Ok(Self {
+            expression: Arc::new(expression),
+        })
     }
     pub fn expression(&self) -> &Expr {
         &self.expression
     }
-    pub fn into_expression(self) -> Expr {
+    pub fn into_shared_expression(self) -> Arc<Expr> {
         self.expression
     }
 
-    /// Substitution preserves a program; it does not certify a completed value.
-    /// The caller must establish declaration argument domains before invocation.
+    /// Detach syntax for an owning IR field. A freshly specialized program can
+    /// move directly; copying a shared template requires the caller's budget.
+    pub fn into_expression(self, steps: &mut u64) -> Result<Expr, Error> {
+        match Arc::try_unwrap(self.expression) {
+            Ok(body) => Ok(body),
+            Err(shared) => {
+                crate::copy_budget::charge_expression(&shared, steps).map_err(|_| Error::Budget)?;
+                Ok((*shared).clone())
+            }
+        }
+    }
+
     pub fn instantiate(
         &self,
-        parameters: &[DeclarationParameter],
-        arguments: &[Term],
+        substitution: &DeclarationSubstitution<'_>,
         fuel: &mut usize,
     ) -> Result<Self, Error> {
-        crate::copy_budget::charge_substitution(&self.expression, parameters, arguments, fuel)
-            .map_err(|_| Error::Budget)?;
-        let expression = self
-            .expression
-            .instantiate_parameters(parameters, arguments)
-            .map_err(|e| e.to_string())?;
+        let expression = substitution
+            .instantiate_expression_bounded(&self.expression, fuel)
+            .map_err(crate::type_computations::Error::from)?;
         Self::new(expression, fuel)
     }
 }

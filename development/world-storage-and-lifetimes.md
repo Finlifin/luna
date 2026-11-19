@@ -568,7 +568,7 @@ phase 检查消费约 4,345 步，opaque 检查 72 步，后续声明建表约 4
 准备失败或另一份内容相同的源码都不提供表。VM 普通闭合构造、resolver-backed
 构造以及 definition admission 在完成 phase 检查后使用这项证据，去掉重复的
 opaque metadata 校验与参数域构造。没有 Inspection 的独立 runtime 构造仍执行
-原有检查。sort 索引的实际构造继续按条目数扣费。
+原有检查。VM 直接从域目录查询形参，也用它检查生成定义的身份占用。对于域依赖前项的形参，本次实参的 sort 由代入后的域决定。
 
 此共享只传递结构事实，不传递主体或调用的执行许可。`check_package` 仍检查全部
 函数体、默认值与合同；调用前提、scope、trait 实参及 implementation 方法校验

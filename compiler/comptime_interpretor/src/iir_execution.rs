@@ -191,7 +191,6 @@ impl<'a> Interpreter<'a> {
             method_resolver: None,
             associated_resolver: None,
             pointer_copy: None,
-            declaration_parameter_sorts: Default::default(),
             declaration_parameter_domains: Default::default(),
             method_parameters: Default::default(),
             method_contracts: Default::default(),

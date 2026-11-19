@@ -3,6 +3,42 @@ use super::*;
 use nir::program::TypePredicate as P;
 
 impl Interpreter<'_> {
+    /// Observe an already instantiated requirement using this VM's evidence.
+    /// A passive lookup cannot run a source query or initialize a Type member.
+    pub(super) fn retains_capability(
+        &self,
+        requirement: &nir::program::TraitRequirement,
+        fuel: &mut usize,
+    ) -> Result<bool, ErrorKind> {
+        for term in std::iter::once(&requirement.subject).chain(&requirement.interface_arguments) {
+            nir::type_computations::charge_term(term, fuel)
+                .map_err(|_| ErrorKind::StepsExhausted)?;
+        }
+        if self.assumed_interfaces.contains(&(
+            requirement.interface_instance(),
+            requirement.subject.clone(),
+        )) {
+            return Ok(true);
+        }
+        let subject = selected_types::view(&requirement.subject, &self.associated_values, fuel)?;
+        let arguments = requirement
+            .interface_arguments
+            .iter()
+            .map(|value| selected_types::view(value, &self.associated_values, fuel))
+            .collect::<Result<Vec<_>, _>>()?;
+        let key = (
+            InterfaceInstance {
+                declaration: requirement.interface,
+                arguments,
+            },
+            subject,
+        );
+        Ok(
+            self.implemented_interfaces.contains_key(&key)
+                || self.assumed_interfaces.contains(&key),
+        )
+    }
+
     /// A dispatch table is retained positive evidence, not a complete account
     /// of the source world's capabilities. Demand missing evidence through the
     /// existing bounded type-query service without installing method bodies.
@@ -22,12 +58,7 @@ impl Interpreter<'_> {
         })?;
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let retained = self.capabilities_hold_parameters(
-            std::slice::from_ref(requirement),
-            &[],
-            &[],
-            &mut fuel,
-        );
+        let retained = self.retains_capability(requirement, &mut fuel);
         self.budget.steps -= (before - fuel) as u64;
         match retained {
             Ok(true) => return Ok(()),

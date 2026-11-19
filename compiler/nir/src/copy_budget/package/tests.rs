@@ -215,15 +215,6 @@ fn packages() -> Vec<(&'static str, n::Package)> {
     package.traits.push(contract);
     cases.push(("associated defaults", package));
 
-    let mut package = n::Package::default();
-    let mut implementation = implementation();
-    implementation.associated_initializers.push((
-        id(12),
-        crate::associated_initializers::AssociatedInitializer::new(text(), &mut 100_000).unwrap(),
-    ));
-    package.implementations.push(implementation);
-    cases.push(("associated programs", package));
-
     for pattern in [false, true] {
         let mut package = n::Package::default();
         let mut contract = interface();
@@ -591,4 +582,28 @@ fn declaration_comparison_enters_shared_code_that_source_capture_only_retains() 
         charge_trait_metadata(&package.traits[0], &mut 100_000),
         Err(Error::Depth)
     );
+}
+
+#[test]
+fn capturing_an_initializer_shares_its_program_but_comparing_rows_observes_it() {
+    let initializer =
+        crate::associated_initializers::AssociatedInitializer::new(text(), &mut 100_000).unwrap();
+    let mut row = implementation();
+    row.associated_initializers.push((id(8), initializer));
+    let package = n::Package {
+        implementations: vec![row],
+        ..Default::default()
+    };
+    let captured = clone_declaration_source(&package, &mut 128).unwrap();
+    let original = &package.implementations[0];
+    let retained = &captured.implementations[0];
+    assert!(std::ptr::eq(
+        original.associated_initializers[0].1.expression(),
+        retained.associated_initializers[0].1.expression()
+    ));
+    assert_eq!(
+        charge_implementation_metadata(retained, &mut 128),
+        Err(Error::Steps)
+    );
+    charge_implementation_metadata(retained, &mut 100_000).unwrap();
 }

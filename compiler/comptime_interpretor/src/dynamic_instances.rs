@@ -122,7 +122,8 @@ impl Interpreter<'_> {
         frames: &'inputs [Vec<nir::Sort>],
         fuel: &mut usize,
     ) -> Result<nir::DeclarationSubstitution<'inputs>, nir::type_computations::Error> {
-        let domains = self.function_input_domains(parameters, fuel)?;
+        let domains =
+            function_inputs::input_domains(&self.declaration_parameter_domains, parameters, fuel)?;
         nir::DeclarationSubstitution::bounded_domains(
             parameters,
             &domains,

@@ -87,11 +87,11 @@ fn retained_capability_limits_cannot_trigger_a_second_proof_attempt() {
         interface_arguments: vec![],
     };
     assert_eq!(
-        vm.capabilities_hold_parameters(std::slice::from_ref(&requirement), &[], &[], &mut 0),
+        vm.retains_capability(&requirement, &mut 0),
         Err(ErrorKind::StepsExhausted)
     );
     assert_eq!(
-        vm.capabilities_hold_parameters(std::slice::from_ref(&requirement), &[], &[], &mut 1000),
+        vm.retains_capability(&requirement, &mut 1000),
         Err(ErrorKind::UnmaterializedDispatch)
     );
     assert_eq!(
@@ -124,4 +124,64 @@ fn read_only_scalar_shapes_do_not_invent_a_new_width_limit() {
     let values = Value::Tuple(vec![Value::Bool(true); 100_001]);
     let ty = Term::Tuple(vec![Term::Primitive(Primitive::Bool); 100_001]);
     assert!(vm.has_type(&values, &ty));
+}
+
+#[test]
+fn passive_nominal_checks_use_the_admitted_dependent_input_for_capabilities() {
+    // Packet<T, X: T> requires bool :- Choice<T, X>.
+    let (mut package, _, _) = fixture();
+    let type_domain = Term::Primitive(Primitive::Type);
+    let boolean = Term::Primitive(Primitive::Bool);
+    let type_parameter = |local| Term::Rigid {
+        declaration: id(local),
+        sort: nir::Sort::Type,
+    };
+    let record = &mut package.structs[0];
+    record.type_parameters = vec![id(3), id(4)];
+    record.parameter_types = vec![type_domain.clone(), type_parameter(3)];
+    record.capabilities[0].interface_arguments = vec![
+        type_parameter(3),
+        Term::Rigid {
+            declaration: id(4),
+            sort: nir::Sort::ComptimeValue,
+        },
+    ];
+    package.traits.push(nir::program::Trait {
+        declaration: id(2),
+        name: "Choice".into(),
+        self_parameter: id(5),
+        type_parameters: vec![id(6), id(7)],
+        parameter_types: vec![type_domain.clone(), type_parameter(6)],
+        comptime_only: false,
+        parents: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        associated: vec![],
+        methods: vec![],
+    });
+    for arguments in [
+        vec![type_domain, boolean.clone()],
+        vec![boolean.clone(), Term::Bool(false)],
+    ] {
+        let requirement = nir::program::TraitRequirement {
+            interface: id(2),
+            subject: boolean.clone(),
+            interface_arguments: arguments.clone(),
+        };
+        let value = Value::Record {
+            declaration: id(1),
+            arguments: arguments.clone(),
+            fields: vec![Value::Bool(true)],
+        };
+        let ty = Term::Nominal {
+            declaration: id(1),
+            arguments,
+        };
+        let absent = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert!(!absent.has_type(&value, &ty));
+        let vm =
+            Interpreter::for_comptime_with_assumptions(&package, &[requirement], Budget::default())
+                .unwrap();
+        assert!(vm.has_type(&value, &ty));
+    }
 }

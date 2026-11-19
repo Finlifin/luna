@@ -487,24 +487,13 @@ impl<'a, 'world> SelectedAssociatedMember<'a, 'world> {
         value: &nir::program::Expr,
         fuel: &mut usize,
     ) -> Result<nir::program::Expr, QueryError> {
-        let binders = self.row().parameter_binders().map_err(|e| e.to_string())?;
-        nir::copy_budget::charge_substitution(
-            value,
-            &binders,
-            &self.facts.evidence.type_arguments,
-            fuel,
-        )
-        .map_err(|_| QueryError::Budget)?;
-        let substitution = nir::DeclarationSubstitution::bounded(
+        Ok(value.instantiate_declaration_parameters_bounded(
             &self.row().type_parameters,
             &self.row().parameter_types,
             &self.facts.evidence.type_arguments,
             &[],
             fuel,
-        )?;
-        let mut value = value.clone();
-        value.rewrite_types(&mut |ty| substitution.instantiate_bounded(ty, fuel))?;
-        Ok(value)
+        )?)
     }
 
     // A type projection consumes a completed Type template without invoking code.

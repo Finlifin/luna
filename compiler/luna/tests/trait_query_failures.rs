@@ -7,6 +7,26 @@ use comptime_interpretor::Value;
 use nir::{Primitive, Term};
 
 #[test]
+fn member_default_specializes_a_value_input_after_its_domain_is_known() {
+    let source = r#"
+        comptime fn accept(comptime T: Type, comptime value: T) -> bool { true }
+        trait Choice where T, X: T {
+            assoc selected: bool = accept(T, X);
+        }
+        struct Holder where E {}
+        impl Choice<Type, E> for Holder<E> where E {}
+        comptime fn read(comptime E: Type) -> bool
+        where requires Holder<E> :- Choice<Type, E>
+        {
+            Holder<E>.as(Choice<Type, E>).selected
+        }
+        const saved: bool = read(bool);
+        fn run() -> bool { saved }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
 fn source_publication_checks_field_formation_in_the_declared_world() {
     let source = "trait Marker {}
         impl Marker for bool {}

@@ -254,7 +254,7 @@ impl<'world> Interpreter<'world> {
             || self.functions.method_slot(&id).is_some()
             || self.alias_contracts.contains_key(&id)
             || self.effect_declarations.contains_key(&id)
-            || self.declaration_parameter_sorts.contains_key(&id)
+            || self.declaration_parameter_domains.contains_key(&id)
         {
             return Ok(true);
         }

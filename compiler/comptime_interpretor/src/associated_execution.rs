@@ -240,12 +240,12 @@ impl<'a> Interpreter<'a> {
         // source before admitting or publishing either form of supply.
         self.check_comptime_expression(selected.expression())?;
         let (expression, initializing) = match selected {
-            AssociatedSelection::Completed(value) => (value.into_expression(), false),
-            AssociatedSelection::Initializer(initializer) => (initializer.into_expression(), true),
+            AssociatedSelection::Completed(value) => (Arc::new(value.into_expression()), false),
+            AssociatedSelection::Initializer(initializer) => {
+                (initializer.into_shared_expression(), true)
+            }
         };
-        nir::copy_budget::charge_expression(&expression, &mut self.budget.steps)
-            .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
-        let expression = Arc::new(expression);
+
         // Admit once before publication. Re-reading the catalogue and checking
         // again could execute result-domain Type programs a second time.
         let active = self.admit_associated_body(

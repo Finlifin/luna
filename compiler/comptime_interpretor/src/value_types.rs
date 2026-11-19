@@ -155,51 +155,50 @@ impl ValueChecks {
 }
 
 impl Interpreter<'_> {
-    fn shape_nominal_arguments(
-        &self,
-        parameters: &[DeclarationId],
-        domains: &[Term],
-        arguments: &[Term],
-        checks: &mut ValueChecks,
-    ) -> bool {
-        checks
-            .admit(|fuel| {
-                self.with_admission_queries(|queries| {
-                    nir::admit_declaration_arguments_with_queries_in(
-                        parameters, domains, arguments, fuel, queries,
-                    )
-                    .map(|_| ())
-                })
-            })
-            .is_some()
-    }
-
-    fn shape_nominal_capabilities(
+    fn shape_nominal_fields<'a>(
         &self,
         parameters: &[DeclarationId],
         domains: &[Term],
         arguments: &[Term],
         capabilities: &[nir::program::TraitRequirement],
+        fields: impl ExactSizeIterator<Item = &'a Term>,
+        values: &[Value],
+        depth: usize,
         checks: &mut ValueChecks,
     ) -> bool {
-        // Argument admission has already checked this telescope. Preparing its
-        // binder directory still consumes work even when obligations are deferred.
-        let Some(binders) = checks.observe(|fuel| {
-            *fuel = fuel
-                .checked_sub(parameters.len())
-                .ok_or(ErrorKind::StepsExhausted)?;
-            for domain in domains {
-                nir::type_computations::charge_term(domain, fuel)
-                    .map_err(|_| ErrorKind::StepsExhausted)?;
-            }
-            nir::declaration_parameters(parameters, domains).map_err(|_| ErrorKind::Type)
+        let Some(inputs) = checks.admit(|fuel| {
+            self.with_admission_queries(|queries| {
+                nir::admit_declaration_arguments_with_queries_in(
+                    parameters, domains, arguments, fuel, queries,
+                )
+            })
         }) else {
             return false;
         };
+        fields.len() == values.len()
+            && self.shape_nominal_capabilities(&inputs, capabilities, checks)
+            && fields.zip(values).all(|(field, value)| {
+                checks
+                    .admit(|fuel| Ok(inputs.instantiate(field, fuel)?))
+                    .is_some_and(|ty| self.has_type_at(value, &ty, depth + 1, checks))
+            })
+    }
+
+    fn shape_nominal_capabilities(
+        &self,
+        inputs: &nir::AdmittedArguments<'_>,
+        capabilities: &[nir::program::TraitRequirement],
+        checks: &mut ValueChecks,
+    ) -> bool {
+        // Active formation discharges the nominal recorded by the shape walk.
         checks.defers_contracts()
-            || checks.observe(|fuel| {
-                self.capabilities_hold_parameters(capabilities, &binders, arguments, fuel)
-            }) == Some(true)
+            || capabilities.iter().all(|capability| {
+                checks
+                    .admit(|fuel| Ok(inputs.instantiate_requirement(capability, fuel)?))
+                    .is_some_and(|bound| {
+                        checks.observe(|fuel| self.retains_capability(&bound, fuel)) == Some(true)
+                    })
+            })
     }
 
     /// Check a value at an active boundary. Pending domains are local to this
@@ -399,31 +398,17 @@ impl Interpreter<'_> {
                 });
             }
             return self.newtypes.get(declaration).is_some_and(|d| {
-                checks
-                    .admit(|fuel| {
-                        self.with_admission_queries(|queries| {
-                            d.admit_arguments_in_scope(arguments, &[], fuel, queries)
-                                .map(|_| ())
-                        })
+                let Some(inputs) = checks.admit(|fuel| {
+                    self.with_admission_queries(|queries| {
+                        d.admit_arguments_in_scope(arguments, &[], fuel, queries)
                     })
-                    .is_some()
-                    && self.shape_nominal_capabilities(
-                        &d.type_parameters,
-                        &d.parameter_types,
-                        arguments,
-                        &d.capabilities,
-                        checks,
-                    )
+                }) else {
+                    return false;
+                };
+                d.representation.sort() == nir::Sort::Type
+                    && self.shape_nominal_capabilities(&inputs, &d.capabilities, checks)
                     && checks
-                        .observe(|fuel| {
-                            d.representation_budgeted(arguments, &[], fuel)
-                                .map_err(|error| match error {
-                                    nir::newtypes::ConversionError::Budget => {
-                                        ErrorKind::StepsExhausted
-                                    }
-                                    _ => ErrorKind::Type,
-                                })
-                        })
+                        .admit(|fuel| Ok(inputs.instantiate(&d.representation, fuel)?))
                         .is_some_and(|representation| {
                             self.has_type_at(value, &representation, depth + 1, checks)
                         })
@@ -524,34 +509,16 @@ impl Interpreter<'_> {
                 let Some(variant) = definition.variants.get(*index) else {
                     return false;
                 };
-                self.shape_nominal_arguments(
-                    &definition.type_parameters,
-                    &definition.parameter_types,
-                    arguments,
-                    checks,
-                ) && self.shape_nominal_capabilities(
+                self.shape_nominal_fields(
                     &definition.type_parameters,
                     &definition.parameter_types,
                     arguments,
                     &definition.capabilities,
+                    variant.fields.iter(),
+                    fields,
+                    depth,
                     checks,
-                ) && checks
-                    .admit(|fuel| {
-                        nir::normal_forms::instantiate_value_fields_checked(
-                            &definition.type_parameters,
-                            &definition.parameter_types,
-                            arguments,
-                            variant.fields.iter(),
-                            fuel,
-                        )
-                    })
-                    .is_some_and(|types| {
-                        fields.len() == types.len()
-                            && fields
-                                .iter()
-                                .zip(&types)
-                                .all(|(value, ty)| self.has_type_at(value, ty, depth + 1, checks))
-                    })
+                )
             }
             (Value::BitVec(value), Term::Primitive(Primitive::BitVec(width))) => {
                 value.width() == *width
@@ -676,33 +643,16 @@ impl Interpreter<'_> {
                 },
             ) if declaration == expected && actual_arguments == arguments => {
                 self.structs.get(declaration).is_some_and(|definition| {
-                    self.shape_nominal_arguments(
-                        &definition.type_parameters,
-                        &definition.parameter_types,
-                        arguments,
-                        checks,
-                    ) && self.shape_nominal_capabilities(
+                    self.shape_nominal_fields(
                         &definition.type_parameters,
                         &definition.parameter_types,
                         arguments,
                         &definition.capabilities,
+                        definition.fields.iter().map(|(_, ty)| ty),
+                        fields,
+                        depth,
                         checks,
-                    ) && checks
-                        .admit(|fuel| {
-                            nir::normal_forms::instantiate_value_fields_checked(
-                                &definition.type_parameters,
-                                &definition.parameter_types,
-                                arguments,
-                                definition.fields.iter().map(|(_, ty)| ty),
-                                fuel,
-                            )
-                        })
-                        .is_some_and(|types| {
-                            fields.len() == types.len()
-                                && fields.iter().zip(&types).all(|(value, ty)| {
-                                    self.has_type_at(value, ty, depth + 1, checks)
-                                })
-                        })
+                    )
                 })
             }
             (Value::Function(id), ty @ Term::NormalFormFunction(..)) => checks

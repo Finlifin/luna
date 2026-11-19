@@ -38,27 +38,22 @@ fn rejection(
     }))
 }
 
-impl Interpreter<'_> {
-    /// Borrow the selected declaration's domains. Compact all-Type metadata
-    /// has the same domain here as it does in the NIR telescope.
-    pub(super) fn function_input_domains(
-        &self,
-        parameters: &[DeclarationId],
-        fuel: &mut usize,
-    ) -> Result<Vec<&Term>, nir::type_computations::Error> {
-        *fuel = fuel
-            .checked_sub(parameters.len())
-            .ok_or(nir::type_computations::Error::Budget)?;
-        Ok(parameters
-            .iter()
-            .map(|id| {
-                self.declaration_parameter_domains
-                    .get(id)
-                    .unwrap_or(&Term::Primitive(Primitive::Type))
-            })
-            .collect())
-    }
+/// Borrow domains in declaration order, including compact all-Type metadata.
+pub(super) fn input_domains<'a>(
+    domains: &'a BTreeMap<DeclarationId, Term>,
+    parameters: &[DeclarationId],
+    fuel: &mut usize,
+) -> Result<Vec<&'a Term>, nir::type_computations::Error> {
+    *fuel = fuel
+        .checked_sub(parameters.len())
+        .ok_or(nir::type_computations::Error::Budget)?;
+    Ok(parameters
+        .iter()
+        .map(|id| domains.get(id).unwrap_or(&Term::Primitive(Primitive::Type)))
+        .collect())
+}
 
+impl Interpreter<'_> {
     pub(super) fn admitted_function_inputs<'v, T: Borrow<Term>>(
         &self,
         parameters: &[DeclarationId],
@@ -66,8 +61,7 @@ impl Interpreter<'_> {
         scope: nir::DeclarationInputScope<'v>,
         fuel: &mut usize,
     ) -> Result<nir::AdmittedArguments<'v, T>, ErrorKind> {
-        let domains = self
-            .function_input_domains(parameters, fuel)
+        let domains = input_domains(&self.declaration_parameter_domains, parameters, fuel)
             .map_err(|_| ErrorKind::StepsExhausted)?;
         self.with_admission_queries(|queries| {
             nir::admit_declaration_inputs(parameters, &domains, arguments, scope, 0, fuel, queries)

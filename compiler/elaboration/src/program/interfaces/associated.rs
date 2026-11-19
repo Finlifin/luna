@@ -120,18 +120,9 @@ impl Checker<'_, '_> {
         // (or implementation-generic) Self and interface arguments.
         let mut steps = self.required_steps;
         if let Some((parameters, arguments)) = self.initializer_substitution() {
-            let domains = parameters
-                .iter()
-                .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
-                .collect::<Vec<_>>();
             let view = nominal_fields::metered(&mut steps, |fuel| {
-                let substitution = nir::DeclarationSubstitution::bounded(
-                    parameters,
-                    &domains,
-                    arguments,
-                    &[],
-                    fuel,
-                )?;
+                let substitution =
+                    self.bounded_input_substitution(parameters, arguments, &[], fuel)?;
                 Ok((
                     substitution.instantiate_interface_bounded(&requested, fuel)?,
                     substitution.instantiate_bounded(&subject, fuel)?,
@@ -460,22 +451,24 @@ impl Checker<'_, '_> {
         }
         let saved_selection = self.selected_associated_initializer.replace(key);
         let result = (|| {
+            let mut steps = self.required_steps;
+            let inputs = nominal_fields::metered(&mut steps, |fuel| {
+                self.bounded_input_substitution(&parameters, &arguments, &[], fuel)
+            });
+            self.required_steps = steps;
+            let inputs = inputs.map_err(|failure| error(span, failure.to_string()))?;
             if generic {
                 let contract = self.associated_contract(owner, false)?;
                 if contract.ty != p(P::Type) {
                     let template = self.associated_default_template(owner, &contract.ty)?;
-                    let mut fuel = self.required_steps.min(100_000) as usize;
-                    let before = fuel;
-                    let specialized = template.instantiate(
-                        &self.input_binders(&parameters),
-                        &arguments,
-                        &mut fuel,
-                    );
+                    let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                    let mut fuel = before;
+                    let specialized = template.instantiate(&inputs, &mut fuel);
                     self.required_steps -= (before - fuel) as u64;
-                    let template = specialized.map_err(|e| error(span, e))?.into_expression();
+                    let template = specialized.map_err(|failure| error(span, failure))?;
                     let before = fuel;
                     let completed = nir::completed_values::validate_with_collection_evidence_in(
-                        &template,
+                        template.expression(),
                         self.newtypes.values(),
                         &|ty| self.bound_tuple_elements(ty),
                         &|ty, fuel| {
@@ -505,42 +498,32 @@ impl Checker<'_, '_> {
                     );
                     self.required_steps -= (before - fuel) as u64;
                     match completed {
-                        Ok(()) => return Ok(Supply::Value(template)),
+                        Ok(()) => {
+                            return template
+                                .into_expression(&mut self.required_steps)
+                                .map(Supply::Value)
+                                .map_err(|failure| error(span, failure));
+                        }
                         Err(
                             failure @ (nir::NominalAdmissionError::Budget
                             | nir::NominalAdmissionError::Unresolved(_)),
                         ) => return Err(error(span, failure)),
-                        // A checked program may require invocation rather than
-                        // completed-value reconstruction. Its phase and closure
-                        // are checked below before publishing an initializer.
-                        Err(nir::NominalAdmissionError::Invalid(_)) => {}
+                        // Reconstruction cannot provide this value. Preserve the
+                        // checked, specialized program for selection and execution.
+                        Err(nir::NominalAdmissionError::Invalid(_)) => {
+                            return Ok(Supply::Initializer(template));
+                        }
                     }
-                    fuel = self.required_steps.min(100_000) as usize;
-                    let before = fuel;
-                    let initializer = nir::associated_initializers::AssociatedInitializer::new(
-                        template, &mut fuel,
-                    );
-                    self.required_steps -= (before - fuel) as u64;
-                    let initializer = initializer.map_err(|e| error(span, e))?;
-                    return Ok(Supply::Initializer(initializer));
                 }
             }
             let value = self
                 .associated_contract(owner, true)?
                 .default
                 .ok_or_else(|| error(span, "associated value initializer is missing"))?;
-            let domains = parameters
-                .iter()
-                .map(|id| self.trait_input_domain(*id).unwrap_or(p(P::Type)))
-                .collect::<Vec<_>>();
             nominal_fields::metered(&mut self.required_steps, |fuel| {
-                value.instantiate_declaration_parameters_bounded(
-                    &parameters,
-                    &domains,
-                    &arguments,
-                    &[],
-                    fuel,
-                )
+                inputs
+                    .instantiate_expression_bounded(&value, fuel)
+                    .map_err(Into::into)
             })
             .map(Supply::Value)
             .map_err(|e| error(span, e.to_string()))
@@ -598,30 +581,43 @@ impl Checker<'_, '_> {
             if contract.ty == p(P::Type) {
                 contract = self.associated_contract(owner, true)?;
             } else if self.associated_has_initializer(member) {
-                let mut template = self
-                    .associated_default_template(owner, &contract.ty)?
-                    .into_expression();
-                let mut dependent = false;
-                let binders = self
+                let template = self.associated_default_template(owner, &contract.ty)?;
+                let span = self.package.item(owner).unwrap().span;
+                let used = nir::copy_budget::expression_declaration_inputs(
+                    template.expression(),
+                    &mut self.required_steps,
+                )
+                .map_err(|failure| {
+                    error(
+                        span,
+                        format!("associated default input observation failed: {failure:?}"),
+                    )
+                })?;
+                let dependent = self
                     .checked_traits
                     .by_id(interface)
                     .unwrap()
-                    .parameters_with_self();
-                template
-                    .rewrite_types(&mut |ty| {
-                        dependent |= binders.iter().any(|binder| ty.mentions_rigid(*binder));
-                        Ok::<_, String>(ty.clone())
-                    })
-                    .map_err(|message| error(self.package.item(owner).unwrap().span, message))?;
-                iir::visit::expression(&template, &mut 100_000, |expr, _| {
-                    if matches!(expr.kind, K::AssociatedValue { .. }) {
-                        dependent = true;
-                    }
-                    Ok(())
-                })
-                .map_err(|message| error(self.package.item(owner).unwrap().span, message))?;
-                contract.default = if dependent {
-                    Some(template)
+                    .parameters_with_self()
+                    .iter()
+                    .any(|id| used.contains(id));
+                let mut member_read = false;
+                if !dependent {
+                    let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                    let mut fuel = before;
+                    let observed =
+                        iir::visit::expression(template.expression(), &mut fuel, |expr, _| {
+                            member_read |= matches!(expr.kind, K::AssociatedValue { .. });
+                            Ok(())
+                        });
+                    self.required_steps -= (before - fuel) as u64;
+                    observed.map_err(|failure| error(span, failure))?;
+                }
+                contract.default = if dependent || member_read {
+                    Some(
+                        template
+                            .into_expression(&mut self.required_steps)
+                            .map_err(|failure| error(span, failure))?,
+                    )
                 } else {
                     self.associated_contract(owner, true)?.default
                 };
