@@ -44,7 +44,9 @@ impl Checker<'_, '_> {
                 "non-Type normal-form results are not implemented",
             ));
         }
-        let ids = self.normal_input_ids(parameters.len(), expr.span)?;
+        let ids: Vec<_> = self
+            .fresh_callable_inputs(parameters.len(), expr.span)?
+            .collect();
         let parameters = nominal_fields::metered(&mut self.required_steps, |fuel| {
             nir::normal_forms::open_inputs(&callee.ty, &ids, fuel)
         })
@@ -68,28 +70,5 @@ impl Checker<'_, '_> {
                 plan: Some(inputs.plan),
             },
         })
-    }
-
-    /// Open only this invocation's binder frame. Fresh rigid slots are private
-    /// dependency keys; completed argument expressions retain caller identities.
-    fn normal_input_ids(&mut self, count: usize, span: Span) -> Result<Vec<DeclarationId>, Error> {
-        if self
-            .package_identities
-            .values()
-            .any(|id| *id == function_types::INPUT_NAMESPACE)
-        {
-            return Err(error(
-                span,
-                "package identity conflicts with callable input namespace",
-            ));
-        }
-        (0..count)
-            .map(|_| {
-                Ok(DeclarationId {
-                    package: function_types::INPUT_NAMESPACE,
-                    local: self.spread_binding(span)?.index,
-                })
-            })
-            .collect()
     }
 }

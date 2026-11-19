@@ -182,6 +182,19 @@ NIR 阶段检查及 materialization 已接入。阶段检查不再用 `.ok()` �
 及 2,000 个参数的有限构造。该宽度用例检查共享额度内可完成构造，不是计时基准，
 也不把整个类型检查过程宣称为线性复杂度。
 
+形成依赖函数签名时，已经读过的外层声明身份不能再分配给本层参数。例如第二个槽的域
+是 `fn() -> Tuple<T, Outer>`，第一个槽绑定 T，Outer 来自外围。打开这份签名只应重命名
+T。给任一槽分配 Outer 的身份都会把两种引用合并。源码签名一次预留本层身份，嵌套签名
+使用另外的范围。动态 NF 调用和 builtin 集中绑定使用同一个打开操作，在域的结构遍历中
+检查新身份与捕获是否互斥。形成、打开、再形成的往返用例检查嵌套引用及完整签名。
+[声明侧形成](../compiler/nir/src/callable_types/telescope.rs) · [嵌套作用域往返](../compiler/nir/tests/normal_form_callables.rs)
+
+方法跨阶段贡献时，两侧已有完整的声明参数组。比较器分别为它们建立一次“声明身份到槽位”
+的索引，再按各自的索引比较域。外部身份保持原义。elaboration 比较 capability 实参和 VM
+接收改名的方法前缀时共用这套抽象。512 个槽的检查以 10,000 步额度验证不会按每槽重复
+构建整张索引。这个比较消费声明参数的域，公开调用名和默认提供者的传送仍待接入。
+[完整参数组](../compiler/nir/src/function_parameters.rs) · [阶段贡献](../compiler/elaboration/src/program/interfaces/phase_contributions.rs)
+
 接收方作用域、额度与失败恢复可分别查阅 [NIR 输入用例](../compiler/nir/tests/normal_inputs.rs) 和 [接收世界查询](../compiler/type_resolution/tests/callable_world.rs)。
 
 ## 3. 稳定接口与活动计划

@@ -3414,17 +3414,10 @@ impl Checker<'_, '_> {
             H::TyModifiedFn(modifiers, params) => {
                 self.form_modified_callable_type(*modifiers, params, None, expr.span)
             }
-            H::TyNFFn(params) => self.form_normal_form_callable_type(params, None, expr.span),
-            H::TyFn(params) | H::TyComptimeFn(params) => self.form_callable_type(
-                params,
-                None,
-                matches!(expr.kind, H::TyComptimeFn(_)),
-                expr.span,
-            ),
+            H::TyNFFn(params) | H::TyFn(params) | H::TyComptimeFn(params) => {
+                self.form_callable_type(params, None, function_types::phase(&expr.kind), expr.span)
+            }
             H::TyFnArrow(input, output) => {
-                if let H::TyNFFn(params) = &input.kind {
-                    return self.form_normal_form_callable_type(params, Some(output), expr.span);
-                }
                 if let H::TyModifiedFn(modifiers, params) = &input.kind {
                     return self.form_modified_callable_type(
                         *modifiers,
@@ -3433,11 +3426,11 @@ impl Checker<'_, '_> {
                         expr.span,
                     );
                 }
-                if let H::TyFn(params) | H::TyComptimeFn(params) = &input.kind {
+                if let H::TyNFFn(params) | H::TyFn(params) | H::TyComptimeFn(params) = &input.kind {
                     return self.form_callable_type(
                         params,
                         Some(output),
-                        matches!(input.kind, H::TyComptimeFn(_)),
+                        function_types::phase(&input.kind),
                         expr.span,
                     );
                 }

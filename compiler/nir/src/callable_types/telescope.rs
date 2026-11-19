@@ -3,7 +3,10 @@
 //! here: the caller must preserve its public interface separately.
 use super::*;
 use crate::DeclarationId;
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 /// Each successful push adds one binder after abstracting its domain against
 /// the completed prefix. Failed inputs publish no binder or parameter. The
@@ -12,6 +15,7 @@ use std::{collections::BTreeMap, fmt};
 pub struct DeclarationTelescope {
     indices: BTreeMap<DeclarationId, (usize, Sort)>,
     parameters: Vec<Parameter>,
+    captures: BTreeSet<DeclarationId>,
 }
 
 impl DeclarationTelescope {
@@ -28,13 +32,32 @@ impl DeclarationTelescope {
                 declaration,
             )));
         }
-        check_type(domain, fuel)?;
+        if self.captures.contains(&declaration) {
+            return Err(Error::Scope(TypeError::CapturedDeclarationParameter(
+                declaration,
+            )));
+        }
+        // Unknown identities belong to an enclosing declaration. A future
+        // slot cannot claim them, even when their first occurrence is nested.
+        let mut captures = BTreeSet::new();
+        crate::type_computations::visit_rigid_declarations(domain, fuel, |id| {
+            if !self.indices.contains_key(&id) && !self.captures.contains(&id) {
+                captures.insert(id);
+            }
+        })?;
+        if captures.contains(&declaration) {
+            return Err(Error::Scope(TypeError::CapturedDeclarationParameter(
+                declaration,
+            )));
+        }
+        crate::types::require_sort(domain, Sort::Type).map_err(Error::Scope)?;
         let ty = domain
             .abstract_parameter_indices(&self.indices)
             .map_err(Error::Scope)?;
         self.indices
             .insert(declaration, (self.parameters.len(), sort));
         self.parameters.push(Parameter { sort, ty });
+        self.captures.extend(captures);
         Ok(())
     }
 
@@ -63,6 +86,10 @@ impl fmt::Display for DeclarationTelescope {
         f.write_str(") (declarations")?;
         for (declaration, (index, sort)) in &self.indices {
             write!(f, " (binding {declaration} (slot {index}) (sort {sort}))")?;
+        }
+        f.write_str(") (captures")?;
+        for declaration in &self.captures {
+            write!(f, " {declaration}")?;
         }
         f.write_str("))")
     }

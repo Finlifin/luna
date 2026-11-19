@@ -16,18 +16,18 @@ fn capabilities(
     fuel: &mut u64,
 ) -> Result<HashSet<CapabilityKey>, String> {
     spend(fuel, implementation.type_parameters.len())?;
-    let parameters = implementation
-        .parameter_binders()
-        .map_err(|e| e.to_string())?;
+    let frame = nominal_fields::metered(fuel, |steps| {
+        for domain in &implementation.parameter_types {
+            nir::type_computations::charge_term(domain, steps)?;
+        }
+        let binders = implementation
+            .parameter_binders()
+            .map_err(nir::type_computations::Error::Scope)?;
+        nir::function_parameters::DeclarationFrame::new(binders.into_iter(), steps)
+    })
+    .map_err(|e| e.to_string())?;
     let mut bind = |term: &Term| {
-        spend(fuel, parameters.len())?;
-        let mut remaining = usize::try_from(*fuel).unwrap_or(usize::MAX);
-        let before = remaining;
-        let checked = nir::type_computations::charge_term(term, &mut remaining);
-        *fuel = fuel.saturating_sub((before - remaining) as u64);
-        checked.map_err(|e| e.to_string())?;
-        term.check_scope(&[]).map_err(|e| e.to_string())?;
-        term.abstract_parameters(&parameters)
+        nominal_fields::metered(fuel, |steps| frame.abstract_term(term, steps))
             .map_err(|e| e.to_string())
     };
     implementation

@@ -171,11 +171,11 @@ impl fmt::Display for DeclarationParameter {
         )
     }
 }
-fn declaration_parameter_indices(
-    parameters: &[DeclarationParameter],
+pub(crate) fn declaration_parameter_indices(
+    parameters: impl IntoIterator<Item = DeclarationParameter>,
 ) -> Result<std::collections::BTreeMap<DeclarationId, (usize, Sort)>, TypeError> {
     let mut indices = std::collections::BTreeMap::new();
-    for (index, parameter) in parameters.iter().enumerate() {
+    for (index, parameter) in parameters.into_iter().enumerate() {
         if indices
             .insert(parameter.declaration, (index, parameter.sort))
             .is_some()
@@ -1153,7 +1153,7 @@ impl Term {
         &self,
         parameters: &[DeclarationParameter],
     ) -> Result<Term, TypeError> {
-        let indices = declaration_parameter_indices(parameters)?;
+        let indices = declaration_parameter_indices(parameters.iter().copied())?;
         self.abstract_parameter_indices(&indices)
     }
 
@@ -1206,7 +1206,7 @@ impl Term {
                 actual: arguments.len(),
             });
         }
-        let indices = declaration_parameter_indices(parameters)?;
+        let indices = declaration_parameter_indices(parameters.iter().copied())?;
         for (parameter, argument) in parameters.iter().zip(arguments) {
             argument.check_scope(&[])?;
             require_sort(argument, parameter.sort)?;
@@ -1576,6 +1576,7 @@ pub enum TypeError {
     RuntimeInCore(RuntimeId),
     DuplicateRuntime(RuntimeId),
     DuplicateDeclarationParameter(DeclarationId),
+    CapturedDeclarationParameter(DeclarationId),
     UnboundRuntime(RuntimeId),
     BinderDepthOverflow,
     InvalidClosureSignature,
@@ -1619,6 +1620,9 @@ impl fmt::Display for TypeError {
             Self::DuplicateDeclarationParameter(id) => {
                 write!(f, "duplicate declaration parameter {id}")
             }
+            Self::CapturedDeclarationParameter(id) => {
+                write!(f, "input identity {id} is already free in a parameter domain")
+            }
             Self::UnboundRuntime(id) => write!(
                 f,
                 "runtime identity {id} is unavailable in this environment"
@@ -1646,7 +1650,7 @@ impl fmt::Display for TypeError {
 }
 impl std::error::Error for TypeError {}
 
-fn require_sort(term: &Term, expected: Sort) -> Result<(), TypeError> {
+pub(crate) fn require_sort(term: &Term, expected: Sort) -> Result<(), TypeError> {
     let actual = term.sort();
     if actual == expected {
         Ok(())

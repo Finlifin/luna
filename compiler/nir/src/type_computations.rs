@@ -572,11 +572,7 @@ pub fn mentions_rigid_bounded(
     mut matches_id: impl FnMut(DeclarationId) -> bool,
 ) -> Result<bool, Error> {
     let mut found = false;
-    visit_expanded_term(root, fuel, 128, &BTreeMap::new(), &mut |term| {
-        if let Term::Rigid { declaration, .. } = term {
-            found |= matches_id(*declaration);
-        }
-    })?;
+    visit_rigid_declarations(root, fuel, |id| found |= matches_id(id))?;
     Ok(found)
 }
 
@@ -587,9 +583,21 @@ pub fn rigid_declarations_bounded(
     fuel: &mut usize,
     declarations: &mut BTreeSet<DeclarationId>,
 ) -> Result<(), Error> {
+    visit_rigid_declarations(root, fuel, |id| {
+        declarations.insert(id);
+    })
+}
+
+/// Inspect declaration references while charging the same structural and
+/// payload budget as a subsequent binder rewrite.
+pub(crate) fn visit_rigid_declarations(
+    root: &Term,
+    fuel: &mut usize,
+    mut visit: impl FnMut(DeclarationId),
+) -> Result<(), Error> {
     visit_expanded_term(root, fuel, 128, &BTreeMap::new(), &mut |term| {
         if let Term::Rigid { declaration, .. } = term {
-            declarations.insert(*declaration);
+            visit(*declaration);
         }
     })
 }

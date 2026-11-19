@@ -103,33 +103,16 @@ impl Checker<'_, '_> {
                         ),
                     ));
                 }
-                let Term::Function { parameters, .. } = ty.callable_signature() else {
-                    return Err(error(span, "builtin binding requires a callable signature"));
-                };
-                if inputs.len() != parameters.len() {
-                    return Err(error(span, "builtin callable parameter metadata mismatch"));
-                }
-                let mut descriptors = Vec::new();
-                let mut prior = Vec::new();
-                for (input, parameter) in inputs.iter().zip(parameters) {
-                    let id = DeclarationId {
-                        package: function_types::INPUT_NAMESPACE,
-                        local: self.next_temporary_binding,
-                    };
-                    self.next_temporary_binding =
-                        self.next_temporary_binding.checked_add(1).ok_or_else(|| {
-                            error(span, "builtin constructor input identity exhausted")
-                        })?;
-                    let domain = parameter
-                        .ty
-                        .substitute(&prior)
-                        .map_err(|reason| error(span, reason.to_string()))?;
-                    descriptors.push((id, local(input.hir_id), domain));
-                    prior.push(Term::Rigid {
-                        declaration: id,
-                        sort: parameter.sort,
-                    });
-                }
+                let ids: Vec<_> = self.fresh_callable_inputs(inputs.len(), span)?.collect();
+                let opened = nominal_fields::metered(&mut self.required_steps, |fuel| {
+                    nir::normal_forms::open_inputs(&ty, &ids, fuel)
+                })
+                .map_err(|reason| error(span, reason.to_string()))?;
+                let descriptors = opened
+                    .into_iter()
+                    .zip(inputs)
+                    .map(|((id, _, domain), input)| (id, local(input.hir_id), domain))
+                    .collect::<Vec<_>>();
                 Ok((ty, descriptors))
             })();
             self.active_signatures.remove(&owner);

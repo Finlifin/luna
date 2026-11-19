@@ -108,3 +108,90 @@ fn normal_form_callable_rejects_runtime_inputs_and_invalid_collectors() {
         Err(TypeError::InvalidNormalFormFunctionSignature)
     );
 }
+
+#[test]
+fn opening_a_callable_frame_keeps_its_captures_distinct_from_chosen_slots() {
+    use nir::DeclarationId;
+    use nir::normal_forms::{callable_type_from_declarations, open_inputs};
+    use nir::type_computations::Error;
+    let id = |local| DeclarationId { package: 17, local };
+    let rigid = |declaration| Term::Rigid {
+        declaration,
+        sort: Sort::Type,
+    };
+    let nested = |first, outer| Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Tuple(vec![first, outer])),
+    };
+    let ty = Term::Primitive(P::Type);
+    let domain = nested(rigid(id(1)), rigid(id(7)));
+    let head = callable_type_from_declarations(
+        [
+            (id(1), Sort::Type, &ty),
+            (id(2), Sort::ComptimeValue, &domain),
+        ],
+        None,
+        &mut 1000,
+    )
+    .unwrap();
+    // Neither an earlier nor a later fresh key can reuse the captured identity.
+    for ids in [[id(7), id(9)], [id(8), id(7)]] {
+        assert_eq!(
+            open_inputs(&head, &ids, &mut 1000),
+            Err(Error::Scope(TypeError::CapturedDeclarationParameter(id(7))))
+        );
+    }
+    let ids = [id(8), id(9)];
+    let opened = open_inputs(&head, &ids, &mut 1000).unwrap();
+    assert_eq!(opened[1].2, nested(rigid(id(8)), rigid(id(7))));
+    let closed = callable_type_from_declarations(
+        opened.iter().map(|(id, sort, domain)| (*id, *sort, domain)),
+        None,
+        &mut 1000,
+    )
+    .unwrap();
+    assert_eq!(head, closed);
+}
+
+#[test]
+fn forming_a_telescope_cannot_bind_a_declaration_already_read_as_free() {
+    use nir::DeclarationId;
+    use nir::callable_types::DeclarationTelescope;
+    let id = |local| DeclarationId { package: 19, local };
+    let rigid = |id| Term::Rigid {
+        declaration: id,
+        sort: Sort::Type,
+    };
+    let captured = |slot| {
+        Err(nir::type_computations::Error::Scope(
+            TypeError::CapturedDeclarationParameter(id(slot)),
+        ))
+    };
+    let mut form = DeclarationTelescope::default();
+    assert_eq!(
+        form.push(id(1), Sort::ComptimeValue, &rigid(id(1)), &mut 100),
+        captured(1)
+    );
+    form.push(id(1), Sort::ComptimeValue, &rigid(id(2)), &mut 100)
+        .unwrap();
+    assert_eq!(
+        form.push(id(2), Sort::Type, &Term::Primitive(P::Type), &mut 100),
+        captured(2)
+    );
+    form.push(id(3), Sort::Type, &Term::Primitive(P::Type), &mut 100)
+        .unwrap();
+    let signature = form.finish(&rigid(id(3)), &mut 100).unwrap();
+    let Term::Function { parameters, result } = signature else {
+        panic!()
+    };
+    assert_eq!(parameters.len(), 2);
+    assert_eq!(parameters[0].ty, rigid(id(2)));
+    assert_eq!(
+        *result,
+        Term::Bound {
+            depth: 0,
+            index: 1,
+            sort: Sort::Type
+        }
+    );
+}

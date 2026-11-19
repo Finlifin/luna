@@ -18,7 +18,7 @@ pub fn open_inputs(
 ) -> Result<Vec<(DeclarationId, Sort, Term)>, crate::type_computations::Error> {
     use crate::{
         TypeError,
-        type_computations::{Error, charge_term},
+        type_computations::{Error, visit_rigid_declarations},
     };
     let invalid = || Error::Scope(TypeError::InvalidNormalFormFunctionSignature);
     let Term::NormalFormFunction(signature, _) = callable else {
@@ -37,14 +37,26 @@ pub fn open_inputs(
         }));
     }
     *fuel = fuel.checked_sub(ids.len()).ok_or(Error::Budget)?;
-    let mut seen = BTreeSet::new();
+    let mut private_ids = BTreeSet::new();
+    for &id in ids {
+        if !private_ids.insert(id) {
+            return Err(Error::Scope(TypeError::DuplicateDeclarationParameter(id)));
+        }
+    }
     let mut replacements = Vec::with_capacity(ids.len());
     let mut opened = Vec::with_capacity(ids.len());
     for (parameter, &id) in parameters.iter().zip(ids) {
-        if !seen.insert(id) {
-            return Err(Error::Scope(TypeError::DuplicateDeclarationParameter(id)));
+        let mut collision = None;
+        visit_rigid_declarations(&parameter.ty, fuel, |capture| {
+            if private_ids.contains(&capture) {
+                collision = Some(capture);
+            }
+        })?;
+        if let Some(capture) = collision {
+            return Err(Error::Scope(TypeError::CapturedDeclarationParameter(
+                capture,
+            )));
         }
-        charge_term(&parameter.ty, fuel)?;
         let domain = parameter
             .ty
             .substitute(&replacements)

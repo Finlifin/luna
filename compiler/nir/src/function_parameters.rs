@@ -56,6 +56,49 @@ impl fmt::Display for Declaration {
     }
 }
 
+/// Bind the identities of an already-formed declaration group by slot. Method
+/// domains and capability arguments may refer to the same inherited prefix.
+pub struct DeclarationFrame {
+    indices: std::collections::BTreeMap<DeclarationId, (usize, crate::Sort)>,
+}
+
+impl DeclarationFrame {
+    pub fn new(
+        binders: impl ExactSizeIterator<Item = DeclarationParameter>,
+        fuel: &mut usize,
+    ) -> Result<Self, crate::type_computations::Error> {
+        use crate::type_computations::Error;
+        *fuel = fuel.checked_sub(binders.len()).ok_or(Error::Budget)?;
+        Ok(Self {
+            indices: crate::types::declaration_parameter_indices(binders).map_err(Error::Scope)?,
+        })
+    }
+
+    /// Terms here may have rigid captures but no surrounding positional frame.
+    /// Nested signatures bind their own inputs as usual.
+    pub fn abstract_term(
+        &self,
+        term: &Term,
+        fuel: &mut usize,
+    ) -> Result<Term, crate::type_computations::Error> {
+        use crate::type_computations::{Error, charge_term};
+        charge_term(term, fuel)?;
+        term.check_scope(&[]).map_err(Error::Scope)?;
+        term.abstract_parameter_indices(&self.indices)
+            .map_err(Error::Scope)
+    }
+}
+
+impl fmt::Display for DeclarationFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(declaration-frame")?;
+        for (id, (slot, sort)) in &self.indices {
+            write!(f, " (binding {id} (slot {slot}) (sort {sort}))")?;
+        }
+        f.write_str(")")
+    }
+}
+
 /// Check alpha-equivalence of implementation input domains before transporting
 /// positional arguments to a method declared in another phase contribution.
 /// This validates the input telescope only, not head or contract compatibility.
@@ -65,57 +108,37 @@ pub fn equivalent_prefix_domains(
     actual: &[DeclarationId],
     domains: &std::collections::BTreeMap<DeclarationId, Term>,
     fuel: &mut usize,
-) -> Result<bool, &'static str> {
+) -> Result<bool, crate::type_computations::Error> {
+    use crate::type_computations::Error;
     if expected.len() != actual.len() {
         return Ok(false);
     }
-    *fuel = fuel
-        .checked_sub(expected.len().saturating_mul(2))
-        .ok_or("method prefix budget exhausted")?;
-    let binders = |ids: &[DeclarationId]| {
-        ids.iter()
-            .map(|id| DeclarationParameter {
-                declaration: *id,
-                sort: if domains
-                    .get(id)
-                    .is_some_and(|domain| *domain != Term::Primitive(crate::Primitive::Type))
-                {
-                    crate::Sort::ComptimeValue
-                } else {
-                    crate::Sort::Type
-                },
-            })
-            .collect::<Vec<_>>()
-    };
-    let expected_binders = binders(expected);
-    let actual_binders = binders(actual);
     let default = Term::Primitive(crate::Primitive::Type);
-    for (left, right) in expected.iter().zip(actual) {
-        *fuel = fuel
-            .checked_sub(expected.len().saturating_mul(2))
-            .ok_or("method prefix budget exhausted")?;
-        let left = domains.get(left).unwrap_or(&default);
-        let right = domains.get(right).unwrap_or(&default);
-        crate::type_computations::charge_term(left, fuel)
-            .map_err(|_| "method prefix budget exhausted")?;
-        crate::type_computations::charge_term(right, fuel)
-            .map_err(|_| "method prefix budget exhausted")?;
-        if left.sort() != crate::Sort::Type
-            || right.sort() != crate::Sort::Type
-            || left.check_scope(&[]).is_err()
-            || right.check_scope(&[]).is_err()
-        {
-            return Ok(false);
-        }
-        let (Ok(left), Ok(right)) = (
-            left.abstract_parameters(&expected_binders),
-            right.abstract_parameters(&actual_binders),
-        ) else {
-            return Ok(false);
+    let mut compare = || {
+        let mut frame = |ids: &[DeclarationId]| {
+            DeclarationFrame::new(
+                ids.iter().map(|&id| {
+                    DeclarationParameter::comptime(id, domains.get(&id).unwrap_or(&default))
+                }),
+                fuel,
+            )
         };
-        if left != right {
-            return Ok(false);
+        let left = frame(expected)?;
+        let right = frame(actual)?;
+        for (a, b) in expected.iter().zip(actual) {
+            let a = domains.get(a).unwrap_or(&default);
+            let b = domains.get(b).unwrap_or(&default);
+            if a.sort() != crate::Sort::Type
+                || b.sort() != crate::Sort::Type
+                || left.abstract_term(a, fuel)? != right.abstract_term(b, fuel)?
+            {
+                return Ok(false);
+            }
         }
+        Ok(true)
+    };
+    match compare() {
+        Err(Error::Scope(_)) => Ok(false),
+        result => result,
     }
-    Ok(true)
 }

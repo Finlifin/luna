@@ -2,7 +2,16 @@
 //! publishing the type; names do not become part of callable type identity.
 use super::*;
 
-pub(super) const INPUT_NAMESPACE: u64 = u64::MAX - 8;
+const INPUT_NAMESPACE: u64 = u64::MAX - 8;
+
+pub(super) fn phase(kind: &H<'_>) -> n::FunctionPhase {
+    match kind {
+        H::TyNFFn(_) => n::FunctionPhase::NormalForm,
+        H::TyComptimeFn(_) => n::FunctionPhase::Comptime,
+        H::TyFn(_) => n::FunctionPhase::Runtime,
+        _ => unreachable!("plain callable type"),
+    }
+}
 
 pub(super) struct StagedParameter {
     pub(super) declaration: DeclarationId,
@@ -140,32 +149,37 @@ impl Checker<'_, '_> {
         }))
     }
 
-    pub(super) fn form_normal_form_callable_type<'hir>(
+    /// Reserve the private declaration frame before checking its domains.
+    /// Nested callable types allocate disjoint ranges from the same cursor.
+    pub(super) fn fresh_callable_inputs(
         &mut self,
-        inputs: &[hir::common::TyParam<'hir>],
-        output: Option<&Expr<'hir>>,
+        count: usize,
         span: Span,
-    ) -> Result<Term, Error> {
-        let mut collector = None;
-        let mut staged = inputs.to_vec();
-        for (index, input) in staged.iter_mut().enumerate() {
-            input.flags |= hir::common::TPARAM_COMPTIME;
-            if let TyParamKind::Varadic(name, ty) = input.kind {
-                if collector.is_some() || index + 1 != inputs.len() {
-                    return Err(error(
-                        input.span,
-                        "normal-form callable collector must be the final input",
-                    ));
-                }
-                collector = Some(index);
-                input.kind = TyParamKind::PositionalDependencyCatched(name, ty);
-            }
+    ) -> Result<impl ExactSizeIterator<Item = DeclarationId> + use<>, Error> {
+        if self
+            .package_identities
+            .values()
+            .any(|id| *id == INPUT_NAMESPACE)
+        {
+            return Err(error(
+                span,
+                "package identity conflicts with callable input namespace",
+            ));
         }
-        let signature = self.form_callable_type(&staged, output, false, span)?;
-        let ty = Term::NormalFormFunction(Box::new(signature), collector);
-        ty.check_scope(&[])
-            .map_err(|reason| error(span, reason.to_string()))?;
-        Ok(ty)
+        let first = self.next_temporary_binding;
+        let end = u32::try_from(count)
+            .ok()
+            .and_then(|width| first.checked_add(width))
+            .ok_or_else(|| error(span, "callable input identity space exhausted"))?;
+        self.required_steps = self
+            .required_steps
+            .checked_sub(u64::from(end - first))
+            .ok_or_else(|| error(span, "callable input formation budget exhausted"))?;
+        self.next_temporary_binding = end;
+        Ok((first..end).map(|local| DeclarationId {
+            package: INPUT_NAMESPACE,
+            local,
+        }))
     }
 
     pub(super) fn form_modified_callable_type<'hir>(
@@ -181,7 +195,12 @@ impl Checker<'_, '_> {
                 "modified function type admission and compatibility are not implemented",
             ));
         }
-        let signature = self.form_callable_type(inputs, output, modifiers.is_comptime, span)?;
+        let phase = if modifiers.is_comptime {
+            n::FunctionPhase::Comptime
+        } else {
+            n::FunctionPhase::Runtime
+        };
+        let signature = self.form_callable_type(inputs, output, phase, span)?;
         Ok(if modifiers.is_unsafe {
             Term::UnsafeFunction(Box::new(signature))
         } else {
@@ -193,35 +212,15 @@ impl Checker<'_, '_> {
         &mut self,
         inputs: &[hir::common::TyParam<'hir>],
         output: Option<&Expr<'hir>>,
-        comptime: bool,
+        phase: n::FunctionPhase,
         span: Span,
     ) -> Result<Term, Error> {
-        self.required_steps = self
-            .required_steps
-            .checked_sub(
-                u64::try_from(
-                    inputs
-                        .len()
-                        .saturating_add(self.callable_type_inputs.len())
-                        .saturating_add(1),
-                )
-                .map_err(|_| error(span, "callable type construction budget exhausted"))?,
-            )
-            .ok_or_else(|| error(span, "callable type construction budget exhausted"))?;
-        if self
-            .package_identities
-            .values()
-            .any(|identity| *identity == INPUT_NAMESPACE)
-        {
-            return Err(error(
-                span,
-                "package identity conflicts with callable input namespace",
-            ));
-        }
+        let declarations = self.fresh_callable_inputs(inputs.len(), span)?;
         let mut previous_types = Vec::new();
         let result = (|| {
             let mut telescope = nir::callable_types::DeclarationTelescope::default();
-            for input in inputs {
+            let mut collector = None;
+            for (slot, (input, declaration)) in inputs.iter().zip(declarations).enumerate() {
                 if input.flags & !hir::common::TPARAM_COMPTIME != 0 {
                     return Err(error(
                         input.span,
@@ -231,6 +230,16 @@ impl Checker<'_, '_> {
                 let annotation = match input.kind {
                     TyParamKind::Positional(ty)
                     | TyParamKind::PositionalDependencyCatched(_, ty) => ty,
+                    TyParamKind::Varadic(_, ty) if phase == n::FunctionPhase::NormalForm => {
+                        if slot + 1 != inputs.len() {
+                            return Err(error(
+                                input.span,
+                                "normal-form callable collector must be the final input",
+                            ));
+                        }
+                        collector = Some(slot);
+                        ty
+                    }
                     _ => {
                         return Err(error(
                             input.span,
@@ -239,29 +248,19 @@ impl Checker<'_, '_> {
                     }
                 };
                 let ty = self.type_expr(annotation)?;
-                let sort = if input.is_comptime() {
-                    if ty == p(P::Type) {
-                        Sort::Type
-                    } else {
-                        Sort::ComptimeValue
-                    }
+                let sort = if phase == n::FunctionPhase::NormalForm || input.is_comptime() {
+                    Sort::of_comptime_domain(&ty)
                 } else {
                     Sort::Runtime
                 };
-                let declaration = DeclarationId {
-                    package: INPUT_NAMESPACE,
-                    local: self.next_temporary_binding,
-                };
-                let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let mut fuel = before;
-                let prepared = telescope.push(declaration, sort, &ty, &mut fuel);
-                self.required_steps -= (before - fuel) as u64;
-                prepared.map_err(|reason| error(annotation.span, reason.to_string()))?;
-                self.next_temporary_binding = self
-                    .next_temporary_binding
-                    .checked_add(1)
-                    .ok_or_else(|| error(input.span, "callable input identity space exhausted"))?;
-                if matches!(input.kind, TyParamKind::PositionalDependencyCatched(..)) {
+                nominal_fields::metered(&mut self.required_steps, |fuel| {
+                    telescope.push(declaration, sort, &ty, fuel)
+                })
+                .map_err(|reason| error(annotation.span, reason.to_string()))?;
+                if matches!(
+                    input.kind,
+                    TyParamKind::PositionalDependencyCatched(..) | TyParamKind::Varadic(..)
+                ) {
                     let id = local(input.hir_id);
                     let previous = self.callable_type_inputs.insert(
                         id,
@@ -277,13 +276,18 @@ impl Checker<'_, '_> {
                 .map(|output| self.type_expr(output))
                 .transpose()?
                 .unwrap_or(p(P::Void));
-            let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-            let mut fuel = before;
-            let signature = telescope.finish(&result, &mut fuel);
-            self.required_steps -= (before - fuel) as u64;
-            Ok(signature
-                .map_err(|reason| error(span, reason.to_string()))?
-                .with_comptime_phase(comptime))
+            let signature = nominal_fields::metered(&mut self.required_steps, |fuel| {
+                telescope.finish(&result, fuel)
+            })
+            .map_err(|reason| error(span, reason.to_string()))?;
+            if phase == n::FunctionPhase::NormalForm {
+                let ty = Term::NormalFormFunction(Box::new(signature), collector);
+                ty.check_scope(&[])
+                    .map_err(|reason| error(span, reason.to_string()))?;
+                Ok(ty)
+            } else {
+                Ok(signature.with_comptime_phase(phase == n::FunctionPhase::Comptime))
+            }
         })();
         for (id, previous) in previous_types.into_iter().rev() {
             if let Some(value) = previous {

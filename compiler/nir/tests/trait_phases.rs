@@ -53,3 +53,21 @@ fn malformed_domains_and_exhausted_prefix_validation_are_rejected() {
     assert!(equivalent(&[id(1)], &[id(2)], &domains, &mut 0).is_err());
     assert!(equivalent(&[id(1)], &[id(2)], &domains, &mut 1000).unwrap());
 }
+
+#[test]
+fn method_transport_compares_completed_declaration_frames_with_inherited_inputs() {
+    let domains = BTreeMap::from([(id(1), var(2)), (id(3), var(4))]);
+    assert!(equivalent(&[id(1), id(2)], &[id(3), id(4)], &domains, &mut 1000).unwrap());
+}
+
+#[test]
+fn wide_renamed_method_prefixes_share_their_earlier_binders() {
+    let left: Vec<_> = (1..=512).map(id).collect();
+    let right: Vec<_> = (1001..=1512).map(id).collect();
+    let domains = left[1..]
+        .iter()
+        .map(|&slot| (slot, var(1)))
+        .chain(right[1..].iter().map(|&slot| (slot, var(1001))))
+        .collect();
+    assert!(equivalent(&left, &right, &domains, &mut 10_000).unwrap());
+}
