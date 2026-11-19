@@ -141,7 +141,7 @@ impl Checker<'_, '_> {
             if !inputs
                 .locals
                 .iter()
-                .all(|id| self.input_facts.types.contains_key(id))
+                .all(|id| self.input_facts.type_identity(id).is_some())
                 || self.program_requirement(&atom)?
             {
                 continue;
@@ -165,7 +165,7 @@ impl Checker<'_, '_> {
 
     fn contract_parameter_is_type(&self, value: &Expr<'_>) -> bool {
         match value.kind {
-            H::ResolvedFnParam(_, id) => self.input_facts.types.contains_key(&local(id)),
+            H::ResolvedFnParam(_, id) => self.input_facts.type_identity(&local(id)).is_some(),
             H::ResolvedClauseParam(_, id) => self
                 .trait_input_domain(DeclarationId {
                     package: semantic_package(&self.package_identities, id.pkg),
@@ -236,8 +236,7 @@ impl Checker<'_, '_> {
         let saved_checking = std::mem::replace(&mut self.checking_contract, true);
         let saved_pending = self.pending_type_uses.replace(Vec::new());
         let saved_capabilities = self.capabilities.get(&owner).cloned();
-        let saved_type_inputs = self.input_facts.types.clone();
-        let saved_value_inputs = self.input_facts.values.clone();
+        let inputs = lexical_domains::DeclarationScope::enter(self);
         // A required invocation can request this contract after a nested
         // signature check restored its caller's input environment. Rebuild
         // declaration inputs from checked domains, never from that caller.
@@ -267,18 +266,13 @@ impl Checker<'_, '_> {
                 for (index, (parameter, (sort, domain))) in
                     sig.params.iter().zip(domains).enumerate()
                 {
-                    let binding = local(parameter.hir_id);
-                    let symbol = Term::Bound {
-                        depth: 0,
-                        index,
-                        sort,
-                    };
-                    if sort == Sort::Type {
-                        self.input_facts.types.insert(binding, symbol);
-                    } else if sort == Sort::ComptimeValue {
-                        if let Some(domain) = domain {
-                            self.input_facts.values.insert(binding, (symbol, domain));
-                        }
+                    if let Some(domain) = domain {
+                        self.input_facts.parameters.bind(
+                            local(parameter.hir_id),
+                            index,
+                            sort,
+                            &domain,
+                        );
                     }
                 }
             }
@@ -377,8 +371,7 @@ impl Checker<'_, '_> {
             Ok(requirements)
         })();
         let uses = std::mem::replace(&mut self.pending_type_uses, saved_pending).unwrap();
-        self.input_facts.types = saved_type_inputs;
-        self.input_facts.values = saved_value_inputs;
+        inputs.restore(self);
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.checking_contract = saved_checking;
@@ -503,28 +496,29 @@ impl Checker<'_, '_> {
                     true
                 } else {
                     let inputs = self.source_expression_inputs(owner, &value)?;
-                    inputs.locals.iter().all(|id| {
-                        self.input_facts.types.contains_key(id)
-                            || self.input_facts.values.contains_key(id)
-                    }) && inputs.declarations.iter().all(|id| {
-                        !check_clauses
-                            || self.type_clause_params(owner).iter().any(|parameter| {
-                                parameter.definition.is_some_and(|definition| {
-                                    DeclarationId {
-                                        package: semantic_package(
-                                            &self.package_identities,
-                                            definition.pkg,
-                                        ),
-                                        local: definition.index,
-                                    } == *id
-                                }) && matches!(
-                                    parameter.kind,
-                                    hir::clause::ClauseParamKind::Type(_)
-                                        | hir::clause::ClauseParamKind::TraitBound(..)
-                                )
-                            })
-                            || self.trait_input_domain(*id).is_some()
-                    })
+                    inputs
+                        .locals
+                        .iter()
+                        .all(|id| self.input_facts.has_identity(id))
+                        && inputs.declarations.iter().all(|id| {
+                            !check_clauses
+                                || self.type_clause_params(owner).iter().any(|parameter| {
+                                    parameter.definition.is_some_and(|definition| {
+                                        DeclarationId {
+                                            package: semantic_package(
+                                                &self.package_identities,
+                                                definition.pkg,
+                                            ),
+                                            local: definition.index,
+                                        } == *id
+                                    }) && matches!(
+                                        parameter.kind,
+                                        hir::clause::ClauseParamKind::Type(_)
+                                            | hir::clause::ClauseParamKind::TraitBound(..)
+                                    )
+                                })
+                                || self.trait_input_domain(*id).is_some()
+                        })
                 };
                 if !ready {
                     pending.push(value);
@@ -1187,7 +1181,15 @@ impl Checker<'_, '_> {
                             .values
                             .range(bindings)
                             .map(|(binding, (symbol, domain))| (binding, symbol, domain)),
-                    );
+                    )
+                    .chain(self.input_facts.parameters.identities().filter_map(
+                        |(binding, (symbol, domain))| {
+                            (binding.owner == owner
+                                && !self.input_facts.types.contains_key(binding)
+                                && !self.input_facts.values.contains_key(binding))
+                            .then_some((binding, symbol, domain))
+                        },
+                    ));
                 for (binding, symbol, domain) in staged {
                     self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
                         error(expr.span, "scoped input preparation budget exhausted")

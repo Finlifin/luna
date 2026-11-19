@@ -1768,6 +1768,7 @@ impl Checker<'_, '_> {
             return Err(error(span, "cyclic function signature dependency"));
         }
         let saved_owner = self.signature_owner.replace(owner);
+        let inputs = lexical_domains::DeclarationScope::enter(self);
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_captures = std::mem::take(&mut self.captures);
         let saved_control = std::mem::take(&mut self.control);
@@ -2099,29 +2100,12 @@ impl Checker<'_, '_> {
                     .entry(owner)
                     .or_default()
                     .push((parameter_type.sort, Some(parameter_type.ty.clone())));
-                if parameter_type.sort == Sort::Type {
-                    self.input_facts.types.insert(
-                        local(parameter.hir_id),
-                        Term::Bound {
-                            depth: 0,
-                            index: parameter_index,
-                            sort: Sort::Type,
-                        },
-                    );
-                }
-                if parameter_type.sort == Sort::ComptimeValue {
-                    self.input_facts.values.insert(
-                        local(parameter.hir_id),
-                        (
-                            Term::Bound {
-                                depth: 0,
-                                index: parameter_index,
-                                sort: Sort::ComptimeValue,
-                            },
-                            parameter_type.ty.clone(),
-                        ),
-                    );
-                }
+                self.input_facts.parameters.bind(
+                    local(parameter.hir_id),
+                    parameter_index,
+                    parameter_type.sort,
+                    &parameter_type.ty,
+                );
                 if parameters.len() == parameter_index {
                     parameters.push(parameter_type);
                 }
@@ -2182,6 +2166,7 @@ impl Checker<'_, '_> {
             self.signature_type_uses.extend(signature_pending);
         }
         self.signature_owner = saved_owner;
+        inputs.restore(self);
         self.locals = saved_locals;
         self.captures = saved_captures;
         self.control = saved_control;
@@ -2196,15 +2181,6 @@ impl Checker<'_, '_> {
             self.lexical_input_plans.remove(&owner);
             self.pending_refinements
                 .retain(|pending| pending.owner != owner);
-            self.input_facts
-                .types
-                .retain(|binding, _| binding.owner != owner.def_id.raw());
-            self.input_facts
-                .partial
-                .retain(|binding, _| binding.owner != owner.def_id.raw());
-            self.input_facts
-                .values
-                .retain(|binding, _| binding.owner != owner.def_id.raw());
             match saved_capabilities {
                 Some(capabilities) => {
                     self.capabilities.insert(owner, capabilities);
@@ -3347,8 +3323,7 @@ impl Checker<'_, '_> {
                     owner == id.owner && self.active_signatures.contains(&owner)
                 });
                 self.input_facts
-                    .types
-                    .get(&binding)
+                    .type_identity(&binding)
                     .filter(|_| {
                         in_signature
                             || self.locals.contains_key(&binding)
@@ -6007,6 +5982,12 @@ impl Checker<'_, '_> {
             // Signature inputs can be read before a runtime locals frame exists.
             // Snapshot their binding identities for capture routing; the normal
             // expression path still checks their domain, phase and availability.
+            outer.extend(
+                self.input_facts
+                    .parameters
+                    .identities()
+                    .map(|(binding, _)| *binding),
+            );
             outer.extend(self.input_facts.types.keys().copied());
             outer.extend(self.input_facts.values.keys().copied());
         }

@@ -192,7 +192,7 @@ fn wide_call_operands_keep_the_caller_and_default_provider_scopes() {
 
 #[test]
 fn wide_ordinary_defaults_keep_the_domain_of_each_call() {
-    const WIDTH: usize = 384;
+    const WIDTH: usize = 512;
     let parameters = (0..WIDTH)
         .map(|slot| format!("comptime .T{slot}: Type = root, v{slot}: T{slot}"))
         .collect::<Vec<_>>()

@@ -169,20 +169,13 @@ impl Checker<'_, '_> {
         let Term::Function { parameters, result } = &signature else {
             return Err(error(span, "source function needs a callable signature"));
         };
-        let saved_types = self.input_facts.types.clone();
+        let inputs = lexical_domains::DeclarationScope::enter(self);
         for (index, (parameter, ty)) in sig.params.iter().zip(parameters).enumerate() {
             let binding = local(parameter.hir_id);
             self.locals.insert(binding, ty.ty.clone());
-            if ty.sort == Sort::Type {
-                self.input_facts.types.insert(
-                    binding,
-                    Term::Bound {
-                        depth: 0,
-                        index,
-                        sort: Sort::Type,
-                    },
-                );
-            }
+            self.input_facts
+                .parameters
+                .bind(binding, index, ty.sort, &ty.ty);
         }
         if let Some(parameters) = self.normal_parameters.get(&owner) {
             for (_, binding, ty) in parameters.iter().filter(|(_, _, ty)| *ty != p(P::Type)) {
@@ -245,7 +238,7 @@ impl Checker<'_, '_> {
             };
             use_declaration(self, interface)
         })();
-        self.input_facts.types = saved_types;
+        inputs.restore(self);
         checked
     }
 }

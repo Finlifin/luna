@@ -3,6 +3,23 @@
 #[allow(dead_code)]
 mod sysroot;
 
+fn check_run(package: &nir::program::Package) {
+    let entry = package
+        .functions
+        .iter()
+        .find(|f| f.name == "run")
+        .unwrap()
+        .declaration;
+    for reference in [false, true] {
+        sysroot::with_comptime(package, sysroot::COMPTIME_BUDGET, reference, |vm| {
+            assert_eq!(
+                vm.invoke(entry, vec![]).unwrap(),
+                comptime_interpretor::Value::Bool(true)
+            );
+        });
+    }
+}
+
 #[test]
 fn guarded_indices_keep_branch_facts_and_original_bindings() {
     let expressions = [
@@ -26,24 +43,7 @@ fn guarded_indices_keep_branch_facts_and_original_bindings() {
         "comptime fn run() -> bool { low_0 and high_0 and low_1 and high_1 and low_2 and high_2 }",
     );
     let package = sysroot::compile(&source).unwrap();
-    let run = package
-        .functions
-        .iter()
-        .find(|f| f.name == "run")
-        .unwrap()
-        .declaration;
-    for tree in [false, true] {
-        let mut vm = if tree {
-            comptime_interpretor::Interpreter::for_comptime_tree(&package, Default::default())
-                .unwrap()
-        } else {
-            comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap()
-        };
-        assert_eq!(
-            vm.invoke(run, vec![]).unwrap(),
-            comptime_interpretor::Value::Bool(true)
-        );
-    }
+    check_run(&package);
 }
 
 #[test]
@@ -112,24 +112,7 @@ fn guarded_annotation_is_checked_despite_unrelated_pending_inputs() {
         comptime fn run() -> bool { accept(true, bool, 9, low) and accept(true, bool, 255, high) }",
     )
     .unwrap();
-    let run = package
-        .functions
-        .iter()
-        .find(|f| f.name == "run")
-        .unwrap()
-        .declaration;
-    for tree in [false, true] {
-        let mut vm = if tree {
-            comptime_interpretor::Interpreter::for_comptime_tree(&package, Default::default())
-                .unwrap()
-        } else {
-            comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap()
-        };
-        assert_eq!(
-            vm.invoke(run, vec![]).unwrap(),
-            comptime_interpretor::Value::Bool(true)
-        );
-    }
+    check_run(&package);
 }
 
 #[test]
@@ -171,28 +154,7 @@ fn known_domain_closure_annotations_keep_their_lexical_inputs() {
             );
             let package = sysroot::compile(&source)
                 .unwrap_or_else(|failure| panic!("{annotation}: {failure}"));
-            let run = package
-                .functions
-                .iter()
-                .find(|f| f.name == "run")
-                .unwrap()
-                .declaration;
-            for tree in [false, true] {
-                let mut vm = if tree {
-                    comptime_interpretor::Interpreter::for_comptime_tree(
-                        &package,
-                        Default::default(),
-                    )
-                    .unwrap()
-                } else {
-                    comptime_interpretor::Interpreter::for_comptime(&package, Default::default())
-                        .unwrap()
-                };
-                assert_eq!(
-                    vm.invoke(run, vec![]).unwrap(),
-                    comptime_interpretor::Value::Bool(true)
-                );
-            }
+            check_run(&package);
         }
     }
 }
@@ -221,24 +183,7 @@ fn closure_annotation_defaults_retain_captured_input_dependencies() {
             .value: defer U = true) -> bool { true }
         comptime fn run() -> bool { accept(bool) }";
     let package = sysroot::compile(source).unwrap();
-    let run = package
-        .functions
-        .iter()
-        .find(|f| f.name == "run")
-        .unwrap()
-        .declaration;
-    for tree in [false, true] {
-        let mut vm = if tree {
-            comptime_interpretor::Interpreter::for_comptime_tree(&package, Default::default())
-                .unwrap()
-        } else {
-            comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap()
-        };
-        assert_eq!(
-            vm.invoke(run, vec![]).unwrap(),
-            comptime_interpretor::Value::Bool(true)
-        );
-    }
+    check_run(&package);
 }
 
 #[test]
@@ -250,24 +195,7 @@ fn guarded_closure_annotations_preserve_body_control_flow() {
             }) -> bool { value }
         comptime fn run() -> bool { accept(9, true) and accept(255, true) }";
     let package = sysroot::compile(source).unwrap();
-    let run = package
-        .functions
-        .iter()
-        .find(|f| f.name == "run")
-        .unwrap()
-        .declaration;
-    for tree in [false, true] {
-        let mut vm = if tree {
-            comptime_interpretor::Interpreter::for_comptime_tree(&package, Default::default())
-                .unwrap()
-        } else {
-            comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap()
-        };
-        assert_eq!(
-            vm.invoke(run, vec![]).unwrap(),
-            comptime_interpretor::Value::Bool(true)
-        );
-    }
+    check_run(&package);
 }
 
 #[test]
@@ -297,24 +225,7 @@ fn closure_nf_annotations_keep_guards_and_opaque_heads() {
             }) -> bool { true }
         comptime fn run() -> bool { accept(9, low) and accept(255, high) }";
     let package = sysroot::compile(source).unwrap();
-    let run = package
-        .functions
-        .iter()
-        .find(|f| f.name == "run")
-        .unwrap()
-        .declaration;
-    for tree in [false, true] {
-        let mut vm = if tree {
-            comptime_interpretor::Interpreter::for_comptime_tree(&package, Default::default())
-                .unwrap()
-        } else {
-            comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap()
-        };
-        assert_eq!(
-            vm.invoke(run, vec![]).unwrap(),
-            comptime_interpretor::Value::Bool(true)
-        );
-    }
+    check_run(&package);
     let wrong = source.replace("fn low(value: Index<10>)", "fn low(value: bool)");
     assert!(
         sysroot::compile(&wrong).is_err(),
@@ -326,24 +237,7 @@ fn closure_nf_annotations_keep_guards_and_opaque_heads() {
 fn computed_named_callable_annotation_repro_uses_ordinary_type_values() {
     let source = include_str!("../../../development/repros/computed-named-callable-annotation.fl");
     let package = sysroot::compile(source).unwrap();
-    let run = package
-        .functions
-        .iter()
-        .find(|f| f.name == "run")
-        .unwrap()
-        .declaration;
-    for tree in [false, true] {
-        let mut vm = if tree {
-            comptime_interpretor::Interpreter::for_comptime_tree(&package, Default::default())
-                .unwrap()
-        } else {
-            comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap()
-        };
-        assert_eq!(
-            vm.invoke(run, vec![]).unwrap(),
-            comptime_interpretor::Value::Bool(true)
-        );
-    }
+    check_run(&package);
 }
 
 #[test]
@@ -366,38 +260,34 @@ fn named_callable_type_values_execute_producers_once_and_recover() {
             .unwrap()
             .declaration
     };
-    for tree in [false, true] {
-        let mut vm = if tree {
-            comptime_interpretor::Interpreter::for_comptime_tree(&package, Default::default())
-                .unwrap()
-        } else {
-            comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap()
-        };
-        let expected = vm.invoke(id("Expected"), vec![]).unwrap();
-        let start = vm.events().len();
-        assert!(vm.invoke(id("Build"), vec![Value::Bool(false)]).is_err());
-        let calls = |events: &[Event]| {
-            events
-                .iter()
-                .filter_map(|event| {
-                    if let Event::EnterFunction(declaration) = event {
-                        package
-                            .functions
-                            .iter()
-                            .find(|f| f.declaration == *declaration)
-                            .map(|f| f.name.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(calls(&vm.events()[start..]), ["Build", "Input"]);
-        let start = vm.events().len();
-        assert_eq!(
-            vm.invoke(id("Build"), vec![Value::Bool(true)]).unwrap(),
-            expected
-        );
-        assert_eq!(calls(&vm.events()[start..]), ["Build", "Input", "Output"]);
+    for reference in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, reference, |vm| {
+            let expected = vm.invoke(id("Expected"), vec![]).unwrap();
+            let start = vm.events().len();
+            assert!(vm.invoke(id("Build"), vec![Value::Bool(false)]).is_err());
+            let calls = |events: &[Event]| {
+                events
+                    .iter()
+                    .filter_map(|event| {
+                        if let Event::EnterFunction(declaration) = event {
+                            package
+                                .functions
+                                .iter()
+                                .find(|f| f.declaration == *declaration)
+                                .map(|f| f.name.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(calls(&vm.events()[start..]), ["Build", "Input"]);
+            let start = vm.events().len();
+            assert_eq!(
+                vm.invoke(id("Build"), vec![Value::Bool(true)]).unwrap(),
+                expected
+            );
+            assert_eq!(calls(&vm.events()[start..]), ["Build", "Input", "Output"]);
+        });
     }
 }

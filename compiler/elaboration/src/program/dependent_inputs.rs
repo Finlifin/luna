@@ -79,10 +79,10 @@ impl Checker<'_, '_> {
         {
             return None;
         }
-        if let Some(symbol) = self.input_facts.types.get(&binding) {
+        if let Some(symbol) = self.input_facts.type_identity(&binding) {
             return Some((symbol.clone(), p(P::Type)));
         }
-        self.input_facts.values.get(&binding).cloned()
+        self.input_facts.value_identity(&binding).cloned()
     }
 
     /// Collect evidence from inputs whose types do not read the ordinary call

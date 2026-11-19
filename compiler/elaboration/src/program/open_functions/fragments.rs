@@ -55,9 +55,15 @@ impl Checker<'_, '_> {
                         "required comptime computation cannot read a runtime parameter",
                     ));
                 }
-                if !self.input_facts.types.contains_key(&binding)
-                    && !self.input_facts.values.contains_key(&binding)
-                {
+                if !self.input_facts.has_identity(&binding) {
+                    if self.input_facts.is_staged(&binding) {
+                        return Err(error(
+                            span,
+                            format!(
+                                "entry value of staged parameter {binding} is not available after a runtime write or capture"
+                            ),
+                        ));
+                    }
                     if self.open_staged_locals.contains(&binding) {
                         let ty = self
                             .locals

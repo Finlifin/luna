@@ -479,8 +479,7 @@ impl Checker<'_, '_> {
             })?;
             if *ty == p(P::Type)
                 || matches!(ty, Term::ComptimeFunction(_) | Term::NormalFormFunction(..))
-                || self.input_facts.types.contains_key(&id)
-                || self.input_facts.values.contains_key(&id)
+                || self.input_facts.has_identity(&id)
             {
                 return Err(error(
                     value.span,
@@ -618,8 +617,7 @@ impl Checker<'_, '_> {
                     "splice is missing a required runtime binding; names do not supply identity",
                 )
             })?;
-            if self.input_facts.types.contains_key(&to) || self.input_facts.values.contains_key(&to)
-            {
+            if self.input_facts.has_identity(&to) {
                 return Err(error(
                     site.span,
                     "a code context port requires a runtime binding",

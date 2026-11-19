@@ -592,9 +592,8 @@ impl Checker<'_, '_> {
             if has_source {
                 let fact = self
                     .input_facts
-                    .types
-                    .get(binding)
-                    .or_else(|| self.input_facts.values.get(binding).map(|(ty, _)| ty));
+                    .type_identity(binding)
+                    .or_else(|| self.input_facts.value_identity(binding).map(|(ty, _)| ty));
                 if let Some(fact) = fact {
                     let identity = copy_evidence(fact, &mut self.required_steps, source.span)?;
                     return Ok(Resolution::Known(value, identity));

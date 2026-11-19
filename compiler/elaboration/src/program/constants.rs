@@ -2108,9 +2108,7 @@ impl Checker<'_, '_> {
             dependencies
         };
         if dependencies.iter().any(|input| {
-            !self.input_facts.values.contains_key(input)
-                && !self.input_facts.types.contains_key(input)
-                && !self.input_facts.derived.contains(input)
+            !self.input_facts.is_staged(input) && !self.input_facts.derived.contains(input)
         }) {
             return Ok(());
         }
@@ -2784,7 +2782,9 @@ impl Checker<'_, '_> {
         let staged = self.in_required_comptime || self.in_staged_input;
         if self.input_facts.partial.is_empty()
             && self.input_facts.supplied.is_empty()
-            && (staged || self.input_facts.specialized.is_empty())
+            && (staged
+                || (self.input_facts.specialized.is_empty()
+                    && self.input_facts.parameters.is_empty()))
         {
             return Ok(());
         }

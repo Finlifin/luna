@@ -31,8 +31,7 @@ impl Checker<'_, '_> {
                 || staged.contains(&binding)
                 || self.open_staged_locals.contains(&binding)
                 || self.generator_data.contains_key(&binding)
-                || self.input_facts.types.contains_key(&binding)
-                || self.input_facts.values.contains_key(&binding)
+                || self.input_facts.has_identity(&binding)
             {
                 continue;
             }

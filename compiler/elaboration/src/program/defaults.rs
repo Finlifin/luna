@@ -1,6 +1,20 @@
 //! Definition-scoped, demand-driven preparation of ordinary parameter defaults.
 use super::*;
 
+#[derive(Default)]
+struct Prefix {
+    locals: LocalBindings<Term>,
+    parameters: input_facts::Parameters,
+}
+
+impl Prefix {
+    fn bind(&mut self, binding: n::LocalId, index: usize, parameter: &Parameter) {
+        self.locals.insert(binding, parameter.ty.clone());
+        self.parameters
+            .bind(binding, index, parameter.sort, &parameter.ty);
+    }
+}
+
 impl Checker<'_, '_> {
     pub(super) fn ensure_defaults(&mut self, owner: OwnerId, span: Span) -> Result<(), Error> {
         if self.open_functions.contains_key(&owner) {
@@ -14,11 +28,44 @@ impl Checker<'_, '_> {
                 "default preparation needs a function declaration",
             ));
         };
-        for index in 0..sig.params.len() {
-            self.ensure_parameter_default(owner, index, span)?;
+        self.defaults
+            .entry(owner)
+            .or_default()
+            .resize_with(sig.params.len(), || None);
+        let Some(last) = sig
+            .params
+            .iter()
+            .rposition(|param| matches!(param.ty.kind, TyParamKind::Optional(..)))
+        else {
+            return Ok(());
+        };
+        self.ensure_signature(owner, span)?;
+        self.ensure_contract(owner, span)?;
+        let signature = self
+            .declared_signature(owner)
+            .ok_or_else(|| {
+                error(
+                    span,
+                    "ordinary default requires a formed declaration signature",
+                )
+            })?
+            .into_owned();
+        let Term::Function { parameters, .. } = signature else {
+            unreachable!("declaration has a function telescope")
+        };
+        let mut prefix = Prefix::default();
+        for (index, (parameter, ty)) in sig
+            .params
+            .iter()
+            .zip(&parameters)
+            .take(last + 1)
+            .enumerate()
+        {
+            if matches!(parameter.ty.kind, TyParamKind::Optional(..)) {
+                self.prepare_parameter_default(owner, index, span, Some((&prefix, ty)))?;
+            }
+            prefix.bind(local(parameter.hir_id), index, ty);
         }
-        // Zero-parameter functions still publish a complete empty vector.
-        self.defaults.entry(owner).or_default();
         Ok(())
     }
 
@@ -27,6 +74,16 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         index: usize,
         span: Span,
+    ) -> Result<(), Error> {
+        self.prepare_parameter_default(owner, index, span, None)
+    }
+
+    fn prepare_parameter_default(
+        &mut self,
+        owner: OwnerId,
+        index: usize,
+        span: Span,
+        prepared: Option<(&Prefix, &Parameter)>,
     ) -> Result<(), Error> {
         let key = (owner, index);
         if self.default_uses.contains_key(&key) {
@@ -45,6 +102,7 @@ impl Checker<'_, '_> {
         let saved_stage = std::mem::replace(&mut self.in_staged_input, false);
         let saved_owner = self.signature_owner.replace(owner);
         let saved_locals = std::mem::take(&mut self.locals);
+        let inputs = lexical_domains::DeclarationScope::enter(self);
         let saved_captures = std::mem::take(&mut self.captures);
         let saved_control = std::mem::take(&mut self.control);
         let saved_immutable = std::mem::take(&mut self.immutable);
@@ -63,28 +121,40 @@ impl Checker<'_, '_> {
                     "default preparation needs a function declaration",
                 ));
             };
-            let signature = self
-                .declared_signature(owner)
-                .ok_or_else(|| {
-                    error(
-                        span,
-                        "ordinary default requires a formed declaration signature",
-                    )
-                })?
-                .into_owned();
-            let Term::Function { parameters, .. } = signature else {
-                unreachable!("declaration has a function telescope")
-            };
             let parameter = sig
                 .params
                 .get(index)
                 .ok_or_else(|| error(span, "unknown default parameter"))?;
-            // Earlier parameters are bindings in the declaration frame. Their
-            // default expressions are independent queries, not prerequisites.
-            for (parameter, ty) in sig.params.iter().zip(&parameters).take(index) {
-                self.locals.insert(local(parameter.hir_id), ty.ty.clone());
-            }
-            let ty = &parameters[index];
+            // A single demand builds just its prefix. Package checking advances
+            // the same persistent roots once for all defaults in source order.
+            let ty = match prepared {
+                Some((prefix, ty)) => {
+                    self.locals = prefix.locals.clone();
+                    self.input_facts.parameters = prefix.parameters.clone();
+                    ty.clone()
+                }
+                None => {
+                    let signature = self.declared_signature(owner).ok_or_else(|| {
+                        error(
+                            span,
+                            "ordinary default requires a formed declaration signature",
+                        )
+                    })?;
+                    let Term::Function { parameters, .. } = signature.as_ref() else {
+                        unreachable!("declaration has a function telescope")
+                    };
+                    let mut prefix = Prefix::default();
+                    for (slot, (earlier, ty)) in
+                        sig.params.iter().zip(parameters).take(index).enumerate()
+                    {
+                        prefix.bind(local(earlier.hir_id), slot, ty);
+                    }
+                    let ty = parameters[index].clone();
+                    self.locals = prefix.locals;
+                    self.input_facts.parameters = prefix.parameters;
+                    ty
+                }
+            };
             let default = if let TyParamKind::Optional(_, _, value) = parameter.ty.kind {
                 let value = self.with_staged_input(ty.sort != Sort::Runtime, |this| {
                     this.expr(value, Some(&ty.ty))
@@ -102,6 +172,7 @@ impl Checker<'_, '_> {
         self.in_staged_input = saved_stage;
         self.signature_owner = saved_owner;
         self.locals = saved_locals;
+        inputs.restore(self);
         self.captures = saved_captures;
         self.control = saved_control;
         self.immutable = saved_immutable;

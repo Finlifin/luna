@@ -257,8 +257,7 @@ impl Checker<'_, '_> {
             });
             if let Some((symbol, actual)) = self
                 .input_facts
-                .values
-                .get(&binding)
+                .value_identity(&binding)
                 .filter(|_| in_signature || self.locals.contains_key(&binding))
             {
                 self.require(actual, ty, value.span)?;
@@ -1355,10 +1354,10 @@ impl Checker<'_, '_> {
                     {
                         return copy_observed_term(value, budget);
                     }
-                    if let Some((symbol, _)) = self.input_facts.values.get(binding) {
+                    if let Some((symbol, _)) = self.input_facts.value_identity(binding) {
                         return copy_observed_term(symbol, budget);
                     }
-                    if let Some(symbol) = self.input_facts.types.get(binding) {
+                    if let Some(symbol) = self.input_facts.type_identity(binding) {
                         return copy_observed_term(symbol, budget);
                     }
                 }

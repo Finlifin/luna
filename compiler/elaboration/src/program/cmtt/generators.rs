@@ -161,6 +161,7 @@ impl Checker<'_, '_> {
             return Err(error(span, "cyclic code generator signature"));
         }
         let saved = std::mem::take(&mut self.locals);
+        let saved_parameters = std::mem::take(&mut self.input_facts.parameters);
         let saved_type_inputs = std::mem::take(&mut self.input_facts.types);
         let saved_owner = self.signature_owner.replace(owner);
         let saved_context = self.context.clone();
@@ -403,6 +404,7 @@ impl Checker<'_, '_> {
             })
         })();
         self.locals = saved;
+        self.input_facts.parameters = saved_parameters;
         self.input_facts.types = saved_type_inputs;
         self.signature_owner = saved_owner;
         self.context = saved_context;
@@ -428,6 +430,7 @@ impl Checker<'_, '_> {
         let caller_scope = self.retain_input_domains(span)?;
         let outer = (
             self.context.clone(),
+            std::mem::take(&mut self.input_facts.parameters),
             std::mem::take(&mut self.input_facts.types),
             std::mem::take(&mut self.input_facts.partial),
             std::mem::take(&mut self.input_facts.values),
@@ -480,6 +483,7 @@ impl Checker<'_, '_> {
         ) = saved;
         (
             self.context,
+            self.input_facts.parameters,
             self.input_facts.types,
             self.input_facts.partial,
             self.input_facts.values,

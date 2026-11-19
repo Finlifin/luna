@@ -6,6 +6,34 @@ use std::{slice::Iter, sync::Arc};
 
 pub(super) type RetainedDomains = Arc<[(Sort, Option<Term>)]>;
 
+/// A nested declaration query owns its ordinary telescope. Its symbolic
+/// identities and the domain source used to interpret their slots must change
+/// together, even when the query was requested while forming an open default.
+pub(super) struct DeclarationScope {
+    facts: input_facts::State,
+    default_scope: Option<RetainedDomains>,
+    default_owner: Option<OwnerId>,
+    instance: Option<Arc<generated_functions::InstanceKey>>,
+}
+
+impl DeclarationScope {
+    pub fn enter(checker: &mut Checker<'_, '_>) -> Self {
+        Self {
+            facts: std::mem::take(&mut checker.input_facts),
+            default_scope: checker.default_input_scope.take(),
+            default_owner: checker.default_input_owner.take(),
+            instance: checker.open_instance.take(),
+        }
+    }
+
+    pub fn restore(self, checker: &mut Checker<'_, '_>) {
+        checker.input_facts = self.facts;
+        checker.default_input_scope = self.default_scope;
+        checker.default_input_owner = self.default_owner;
+        checker.open_instance = self.instance;
+    }
+}
+
 enum DomainSource<'a> {
     Retained(&'a RetainedDomains),
     Borrowed(InputDomains<'a>),

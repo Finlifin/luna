@@ -3,11 +3,54 @@
 //! while retaining invalidation of outer evidence; those are different operations.
 use super::*;
 
+/// Symbolic ordinary inputs in the current declaration prefix. These bindings
+/// advance at parameter boundaries and are shared across its default queries.
+#[derive(Clone, Default)]
+pub(super) struct Parameters {
+    declared: LocalBindings<(Term, Term)>,
+    invalidated: BTreeSet<n::LocalId>,
+}
+
+impl Parameters {
+    pub fn bind(&mut self, binding: n::LocalId, index: usize, sort: Sort, domain: &Term) {
+        if sort != Sort::Runtime {
+            self.declared.insert(
+                binding,
+                (
+                    Term::Bound {
+                        depth: 0,
+                        index,
+                        sort,
+                    },
+                    domain.clone(),
+                ),
+            );
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.declared.is_empty()
+    }
+
+    fn entry_identity(&self, binding: &n::LocalId) -> Option<&(Term, Term)> {
+        if self.invalidated.contains(binding) {
+            return None;
+        }
+        self.declared.get(binding)
+    }
+
+    pub fn identities(&self) -> impl Iterator<Item = (&n::LocalId, &(Term, Term))> {
+        self.declared
+            .iter()
+            .filter(|(id, _)| !self.invalidated.contains(id))
+    }
+}
+
 #[derive(Clone, Default)]
 pub(super) struct State {
+    pub parameters: Parameters,
     pub specialized: Vec<(n::LocalId, Term, Term)>,
-    // Ordinary Type inputs belong to the function telescope, independently of
-    // declaration parameters and opaque normal-form identities.
+    // Completed Type observations can specialize a symbolic input.
     pub types: BTreeMap<n::LocalId, Term>,
     pub partial: BTreeMap<n::LocalId, std::sync::Arc<constants::PartialStagedValue>>,
     // Completed value identities retain their domains. Runtime inputs must not
@@ -46,8 +89,36 @@ impl std::fmt::Display for LexicalBoundary {
 }
 
 impl State {
+    pub fn type_identity(&self, binding: &n::LocalId) -> Option<&Term> {
+        self.types.get(binding).or_else(|| {
+            let (symbol, _) = self.parameters.entry_identity(binding)?;
+            (!self.values.contains_key(binding) && symbol.sort() == Sort::Type).then_some(symbol)
+        })
+    }
+
+    pub fn value_identity(&self, binding: &n::LocalId) -> Option<&(Term, Term)> {
+        self.values.get(binding).or_else(|| {
+            let parameter = self.parameters.entry_identity(binding)?;
+            (!self.types.contains_key(binding) && parameter.0.sort() == Sort::ComptimeValue)
+                .then_some(parameter)
+        })
+    }
+
+    pub fn has_identity(&self, binding: &n::LocalId) -> bool {
+        self.parameters.entry_identity(binding).is_some()
+            || self.types.contains_key(binding)
+            || self.values.contains_key(binding)
+    }
+
+    pub fn is_staged(&self, binding: &n::LocalId) -> bool {
+        self.parameters.declared.contains_key(binding)
+            || self.types.contains_key(binding)
+            || self.values.contains_key(binding)
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.specialized.is_empty()
+        self.parameters.is_empty()
+            && self.specialized.is_empty()
             && self.types.is_empty()
             && self.partial.is_empty()
             && self.values.is_empty()
@@ -98,10 +169,16 @@ impl State {
         roots.retain(|id| {
             self.specialized.iter().any(|(input, _, _)| input == id)
                 || self.partial.contains_key(id)
+                || (!staged && self.parameters.declared.contains_key(id))
         });
         self.partial.retain(|id, _| !roots.contains(id));
         if !staged {
             self.specialized.retain(|(id, _, _)| !roots.contains(id));
+            for binding in &roots {
+                if self.parameters.declared.contains_key(binding) {
+                    self.parameters.invalidated.insert(*binding);
+                }
+            }
             self.values.retain(|id, _| !roots.contains(id));
             self.types.retain(|id, _| !roots.contains(id));
         }
@@ -113,7 +190,15 @@ impl State {
 
 impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("(input-facts (specialized")?;
+        f.write_str("(input-facts (parameters")?;
+        for (binding, (symbol, domain)) in self.parameters.declared.iter() {
+            if self.parameters.invalidated.contains(binding) {
+                write!(f, " (invalidated {binding} {domain})")?;
+            } else {
+                write!(f, " (input {binding} {domain} {symbol})")?;
+            }
+        }
+        f.write_str(") (specialized")?;
         for (binding, domain, value) in &self.specialized {
             write!(f, " (input {binding} {domain} {value})")?;
         }

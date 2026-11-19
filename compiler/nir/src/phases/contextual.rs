@@ -66,6 +66,7 @@ pub(super) fn inspect_contract<O: SignatureOutput>(
 ) -> Result<(), Error> {
     let source = method.source;
     let storage_error = |failure| Error::storage(source, failure);
+    let mut scope = storage.scope(&[], fuel).map_err(storage_error)?;
     let mut code_bindings = BTreeSet::new();
     let domains = signature
         .clause_domains
@@ -80,15 +81,11 @@ pub(super) fn inspect_contract<O: SignatureOutput>(
         .chain(std::iter::once((None, signature.output.domain())));
     for (binding, domain) in domains {
         if let CodeDomain::Data(ty) = domain {
-            storage
-                .check_comptime(ty, &[], fuel)
-                .map_err(storage_error)?;
+            scope.check_comptime(ty, fuel).map_err(storage_error)?;
             continue;
         }
         for ty in domain.type_terms() {
-            storage
-                .check_runtime(ty, &[], fuel)
-                .map_err(storage_error)?;
+            scope.check_runtime(ty, fuel).map_err(storage_error)?;
         }
         if !method.program.preconditions.is_empty() || !method.program.postconditions.is_empty() {
             code_bindings.extend(binding);

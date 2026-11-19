@@ -149,7 +149,7 @@ impl Checker<'_, '_> {
                             .signature_owner
                             .is_some_and(|owner| self.open_functions.contains_key(&owner))))
                     && !self.old_scope.as_ref().is_some_and(|scope| scope.active)
-                    && let Some(symbol) = self.input_facts.types.get(&id)
+                    && let Some(symbol) = self.input_facts.type_identity(&id)
                 {
                     if let Some(expected) = expected {
                         self.require_expression(&ty, expected, expr.span)?;
@@ -162,7 +162,7 @@ impl Checker<'_, '_> {
                 }
                 if self.in_staged_input
                     && self.captures.last().is_some_and(|frame| !frame.comptime)
-                    && self.input_facts.values.contains_key(&id)
+                    && self.input_facts.value_identity(&id).is_some()
                     && !self.old_scope.as_ref().is_some_and(|scope| scope.active)
                 {
                     // This use disappears when the enclosing staged input is

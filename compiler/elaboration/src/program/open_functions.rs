@@ -905,8 +905,7 @@ impl Checker<'_, '_> {
         let staged_alias = !binding.mutable
             && matches!(root.kind,
                 H::ResolvedFnParam(_, id) | H::ResolvedLocal(_, id)
-                if self.input_facts.values.contains_key(&local(id))
-                    || self.input_facts.types.contains_key(&local(id))
+                if self.input_facts.is_staged(&local(id))
                     || self.open_staged_locals.contains(&local(id)));
         let actual = self.with_staged_input(self.in_staged_input || binding.comptime, |this| {
             this.describe_open_expression(init, locals, returns, annotation.as_ref(), depth + 1)
@@ -1897,17 +1896,9 @@ impl Checker<'_, '_> {
                     }
                 }
                 if let D::Known(ty) = &description {
-                    this.locals.insert(local(parameter.hir_id), ty.clone());
-                }
-                if *sort == Sort::Type {
-                    this.input_facts.types.insert(
-                        local(parameter.hir_id),
-                        Term::Bound {
-                            depth: 0,
-                            index: slot,
-                            sort: Sort::Type,
-                        },
-                    );
+                    let binding = local(parameter.hir_id);
+                    this.locals.insert(binding, ty.clone());
+                    this.input_facts.parameters.bind(binding, slot, *sort, ty);
                 }
                 locals.insert(local(parameter.hir_id), description);
             }
@@ -2703,8 +2694,7 @@ impl Checker<'_, '_> {
                 if self.in_staged_input
                     && matches!(expr.kind, H::ResolvedLocal(..))
                     && !self.open_staged_locals.contains(&local(*id))
-                    && !self.input_facts.types.contains_key(&local(*id))
-                    && !self.input_facts.values.contains_key(&local(*id))
+                    && !self.input_facts.is_staged(&local(*id))
                     && !self.signature_owner.and_then(|owner| self.package.item(owner)).is_some_and(|item|
                         matches!(&item.kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime))
                 {
@@ -3168,8 +3158,7 @@ impl Checker<'_, '_> {
                 let staged = self.in_staged_input
                     || matches!(root.kind,
                     H::ResolvedFnParam(_, id) | H::ResolvedLocal(_, id)
-                    if self.input_facts.values.contains_key(&local(id))
-                        || self.input_facts.types.contains_key(&local(id))
+                    if self.input_facts.is_staged(&local(id))
                         || self.open_staged_locals.contains(&local(id)));
                 let description =
                     self.describe_open_expression(receiver, locals, returns, None, depth + 1)?;
@@ -5621,9 +5610,13 @@ impl Checker<'_, '_> {
                 return Err(error(call.span, "missing open contract argument"));
             };
             this.in_staged_input = true;
-            for (parameter, (_, description)) in sig.params.iter().zip(parameters).take(slot) {
+            for (index, (parameter, (sort, description))) in
+                sig.params.iter().zip(parameters).take(slot).enumerate()
+            {
                 if let D::Known(ty) = description {
-                    this.locals.insert(local(parameter.hir_id), ty.clone());
+                    let binding = local(parameter.hir_id);
+                    this.locals.insert(binding, ty.clone());
+                    this.input_facts.parameters.bind(binding, index, *sort, ty);
                 }
             }
             this.normal_value_argument(default, domain)

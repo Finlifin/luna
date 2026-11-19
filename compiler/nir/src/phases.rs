@@ -252,7 +252,8 @@ impl<'a> PhaseContext<'a> {
     ) -> Result<bool, Error> {
         if function.parts.phase == Phase::Runtime {
             self.storage_queries
-                .check_runtime(function.signature, &[], inspection_fuel)
+                .scope(&[], inspection_fuel)
+                .and_then(|mut scope| scope.check_runtime(function.signature, inspection_fuel))
                 .map_err(|failure| Error::storage(function.parts.source, failure))?;
         }
         let inspection = parameters::InspectionFrame::new(function, inspection_fuel)
@@ -284,6 +285,9 @@ impl<'a> PhaseContext<'a> {
         let mut arithmetic = false;
         let ct = function.phase != Phase::Runtime;
         let caller_frames = &inspection.frames;
+        let mut storage_scope = storage_queries
+            .scope(caller_frames, inspection_fuel)
+            .map_err(|failure| Error::storage(function.source, failure))?;
         let frozen = &inspection.frozen;
         let fail = Error::invalid;
         let mut work = Worklist::new(function.source);
@@ -462,8 +466,8 @@ impl<'a> PhaseContext<'a> {
                         arithmetic = true;
                     }
                     if !ct {
-                        storage_queries
-                            .check_runtime(&expr.ty, caller_frames, inspection_fuel)
+                        storage_scope
+                            .check_runtime(&expr.ty, inspection_fuel)
                             .map_err(|failure| Error::storage(expr.source, failure))?;
                         if !machine
                             && matches!(expr.kind, K::IntegerNegate(_) | K::IntegerBinary { .. })
@@ -1748,8 +1752,8 @@ impl<'a> PhaseContext<'a> {
                 .map(|parameter| &parameter.ty)
                 .chain(ct.then_some(result.as_ref()))
             {
-                storage_queries
-                    .check_comptime(domain, caller_frames, inspection_fuel)
+                storage_scope
+                    .check_comptime(domain, inspection_fuel)
                     .map_err(|error| Error::storage(function.source, error))?;
             }
         }

@@ -31,6 +31,37 @@ fn facts() -> State {
 }
 
 #[test]
+fn declaration_inputs_stay_in_their_frame_and_writes_invalidate_entry_values() {
+    let mut state = State::default();
+    state.parameters.bind(id(1), 0, Sort::Type, &p(P::Type));
+    state
+        .parameters
+        .bind(id(2), 1, Sort::ComptimeValue, &p(P::Bool));
+    state.parameters.bind(id(3), 2, Sort::Runtime, &p(P::U8));
+    assert!(!state.is_staged(&id(3)));
+    assert!(state.for_open_body().is_empty());
+    let parent = state.clone();
+    let boundary = state.lexical_boundary();
+    state.values.insert(id(2), (Term::Bool(true), p(P::Bool)));
+    assert_eq!(state.value_identity(&id(2)).unwrap().0, Term::Bool(true));
+    state
+        .invalidate([id(2)].into(), false, &mut 100, DUMMY_SP)
+        .unwrap();
+    state.leave_lexical(&boundary);
+    assert!(state.is_staged(&id(2)));
+    assert!(!state.has_identity(&id(2)));
+    assert!(state.value_identity(&id(2)).is_none());
+    assert!(matches!(
+        parent.value_identity(&id(2)),
+        Some((Term::Bound { index: 1, .. }, _))
+    ));
+    assert!(matches!(
+        state.type_identity(&id(1)),
+        Some(Term::Bound { index: 0, .. })
+    ));
+}
+
+#[test]
 fn speculative_invalidation_does_not_change_the_saved_supplied_region() {
     let parent = facts();
     let mut attempt = parent.clone();

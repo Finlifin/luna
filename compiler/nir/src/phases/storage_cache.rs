@@ -6,7 +6,7 @@ use super::{
 };
 use std::collections::HashMap;
 
-type Entries = HashMap<Term, HashMap<Vec<Vec<Sort>>, Result<(), StorageError>>>;
+type Entries = HashMap<Term, HashMap<usize, Result<(), StorageError>>>;
 #[derive(Clone, Copy)]
 enum Phase {
     Runtime,
@@ -15,6 +15,7 @@ enum Phase {
 
 pub(super) struct StorageQueries<'a> {
     package: &'a Package,
+    frames: HashMap<Vec<Vec<Sort>>, usize>,
     runtime_entries: Entries,
     comptime_entries: Entries,
     domains: Domains<'a>,
@@ -25,6 +26,7 @@ impl<'a> StorageQueries<'a> {
     pub(super) fn new(package: &'a Package) -> Self {
         Self {
             package,
+            frames: HashMap::new(),
             runtime_entries: HashMap::new(),
             comptime_entries: HashMap::new(),
             domains: Domains::new(package),
@@ -37,19 +39,109 @@ impl<'a> StorageQueries<'a> {
     ) -> Self {
         Self {
             package,
+            frames: HashMap::new(),
             runtime_entries: HashMap::new(),
             comptime_entries: HashMap::new(),
             domains: Domains::admitted(package, declarations),
         }
     }
 
+    /// Intern a complete sort environment once at the callable boundary. The
+    /// query handle borrows the frames that were actually admitted for this ID.
+    pub(super) fn scope<'s>(
+        &'s mut self,
+        frames: &'s [Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<StorageScope<'s, 'a>, StorageError> {
+        *fuel = fuel
+            .checked_sub(frames.len().saturating_add(1))
+            .ok_or(StorageError::Budget)?;
+        for frame in frames {
+            *fuel = fuel.checked_sub(frame.len()).ok_or(StorageError::Budget)?;
+        }
+        let id = if let Some(id) = self.frames.get(frames) {
+            *id
+        } else {
+            let id = self.frames.len();
+            self.frames.insert(frames.to_vec(), id);
+            id
+        };
+        Ok(StorageScope {
+            queries: self,
+            frames,
+            id,
+        })
+    }
+}
+
+pub(super) struct StorageScope<'s, 'a> {
+    queries: &'s mut StorageQueries<'a>,
+    frames: &'s [Vec<Sort>],
+    id: usize,
+}
+
+impl StorageScope<'_, '_> {
+    pub(super) fn check_runtime(
+        &mut self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<(), StorageError> {
+        self.check(Phase::Runtime, ty, fuel)
+    }
+
+    pub(super) fn check_comptime(
+        &mut self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<(), StorageError> {
+        self.check(Phase::Comptime, ty, fuel)
+    }
+
+    fn check(&mut self, phase: Phase, ty: &Term, fuel: &mut usize) -> Result<(), StorageError> {
+        crate::type_computations::charge_term(ty, fuel)?;
+        let entries = match phase {
+            Phase::Runtime => &mut self.queries.runtime_entries,
+            Phase::Comptime => &mut self.queries.comptime_entries,
+        };
+        if let Some(result) = entries.get(ty).and_then(|scopes| scopes.get(&self.id)) {
+            return *result;
+        }
+        let result = match phase {
+            Phase::Runtime => validate_runtime_storage_with_domains(
+                ty,
+                self.queries.package,
+                self.frames,
+                None,
+                &self.queries.domains,
+                fuel,
+            ),
+            Phase::Comptime => super::comptime_storage::validate_resolved(
+                ty,
+                self.queries.package,
+                self.frames,
+                None,
+                fuel,
+            ),
+        };
+        if !matches!(result, Err(StorageError::Budget)) {
+            entries
+                .entry(ty.clone())
+                .or_default()
+                .insert(self.id, result);
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+impl StorageQueries<'_> {
     pub(super) fn check_runtime(
         &mut self,
         ty: &Term,
         frames: &[Vec<Sort>],
         fuel: &mut usize,
     ) -> Result<(), StorageError> {
-        self.check(Phase::Runtime, ty, frames, fuel)
+        self.scope(frames, fuel)?.check_runtime(ty, fuel)
     }
 
     pub(super) fn check_comptime(
@@ -58,52 +150,7 @@ impl<'a> StorageQueries<'a> {
         frames: &[Vec<Sort>],
         fuel: &mut usize,
     ) -> Result<(), StorageError> {
-        self.check(Phase::Comptime, ty, frames, fuel)
-    }
-
-    fn check(
-        &mut self,
-        phase: Phase,
-        ty: &Term,
-        frames: &[Vec<Sort>],
-        fuel: &mut usize,
-    ) -> Result<(), StorageError> {
-        // Pay for the key before hashing or retaining it, including warm hits.
-        // Borrowed lookup avoids allocating a candidate frame just to query it.
-        *fuel = fuel
-            .checked_sub(frames.len().saturating_add(1))
-            .ok_or(StorageError::Budget)?;
-        for frame in frames {
-            *fuel = fuel.checked_sub(frame.len()).ok_or(StorageError::Budget)?;
-        }
-        crate::type_computations::charge_term(ty, fuel)?;
-        let entries = match phase {
-            Phase::Runtime => &mut self.runtime_entries,
-            Phase::Comptime => &mut self.comptime_entries,
-        };
-        if let Some(result) = entries.get(ty).and_then(|scopes| scopes.get(frames)) {
-            return *result;
-        }
-        let result = match phase {
-            Phase::Runtime => validate_runtime_storage_with_domains(
-                ty,
-                self.package,
-                frames,
-                None,
-                &self.domains,
-                fuel,
-            ),
-            Phase::Comptime => {
-                super::comptime_storage::validate_resolved(ty, self.package, frames, None, fuel)
-            }
-        };
-        if !matches!(result, Err(StorageError::Budget)) {
-            entries
-                .entry(ty.clone())
-                .or_default()
-                .insert(frames.to_vec(), result);
-        }
-        result
+        self.scope(frames, fuel)?.check_comptime(ty, fuel)
     }
 }
 
@@ -111,6 +158,31 @@ impl<'a> StorageQueries<'a> {
 mod tests {
     use super::*;
     use crate::{DeclarationId, Primitive as P, program::Struct};
+
+    #[test]
+    fn a_callable_checks_many_domains_in_the_same_admitted_sort_frame() {
+        let package = Package::default();
+        let mut queries = StorageQueries::new(&package);
+        let mut slots = vec![Sort::Runtime; 512];
+        slots[511] = Sort::Type;
+        let frames = [slots];
+        let bound = Term::Bound {
+            depth: 0,
+            index: 511,
+            sort: Sort::Type,
+        };
+        let mut scope = queries.scope(&frames, &mut 1000).unwrap();
+        let mut fuel = 64;
+        for _ in 0..12 {
+            scope.check_runtime(&bound, &mut fuel).unwrap();
+        }
+        let wrong_sort = [vec![Sort::Runtime; 512]];
+        let mut other = queries.scope(&wrong_sort, &mut 1000).unwrap();
+        assert!(matches!(
+            other.check_runtime(&bound, &mut 64),
+            Err(StorageError::Invalid(_))
+        ));
+    }
 
     #[test]
     fn failed_expansions_are_not_cached_and_warm_keys_still_cost_work() {
